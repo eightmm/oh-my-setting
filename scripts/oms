@@ -127,7 +127,6 @@ agent-events
 agent-memory
 agent-plan
 agent-role
-agent-run
 agent-supervisor
 agent-task
 apply-project-template
@@ -170,7 +169,6 @@ project-doctor
 project-private
 provider-permissions
 remove-project-template
-research-runner
 run
 run-ledger
 run-reconcile

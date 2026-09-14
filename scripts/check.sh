@@ -101,6 +101,7 @@ FOCUSED_LANE_N=0
 FOCUSED_STAGE_INDEX=0
 LIST_STAGES=0
 PRINT_AFFECTED_MODE=0
+CI_OUTPUT=""
 usage() {
   cat <<'EOF'
 usage: check.sh [MODE] [OPTIONS]
@@ -108,8 +109,7 @@ usage: check.sh [MODE] [OPTIONS]
 Runs the repository gate: lint (shellcheck, Bash 3.2, Python syntax, skill
 manifest) then the test suites. With no arguments it runs both.
 
-  --no-lint             Skip lint in the complete or affected gate. CI uses
-                        this with --affected because lint is an independent job.
+  --no-lint             Skip lint only when equivalent checks ran separately.
   --lint-only           Run only lint stages.
   --parallel            Run the complete gate as concurrent CI partitions,
                         preserving signal handling and failure propagation.
@@ -126,10 +126,13 @@ manifest) then the test suites. With no arguments it runs both.
                         (The scripts-smoke shards run outside the stage list
                         and are not included.)
   --quick               Run a partial changed-file gate for protected pushes.
-  --affected            Use the Project Graph to run positively affected tests;
-                        uncertainty falls back to the complete test gate.
+  --affected            Check ordinary docs directly; otherwise use the Project
+                        Graph for affected tests. Critical or uncertain changes
+                        fall back to the complete gate, including lint.
   --print-affected-mode With --affected, print affected or full after planning
                         and exit without running test stages.
+  --ci-output FILE      With --affected, append mode=affected|full to FILE.
+                        Run affected checks here; defer full checks to CI lanes.
   --changed-from REF    Base tree for --quick or --affected.
   --changed-to REF      Target tree for --quick or --affected.
 EOF
@@ -165,6 +168,9 @@ while [ "$#" -gt 0 ]; do
     --quick) select_mode quick; shift ;;
     --affected) select_mode affected; shift ;;
     --print-affected-mode) PRINT_AFFECTED_MODE=1; shift ;;
+    --ci-output)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "error: --ci-output requires a file" >&2; exit 2; }
+      CI_OUTPUT="$2"; shift 2 ;;
     --changed-from)
       [ "$#" -ge 2 ] || { echo "error: --changed-from requires a ref" >&2; exit 2; }
       QUICK_FROM="$2"
@@ -186,6 +192,10 @@ if [ "$MODE" = lint ] && [ "$SKIP_LINT" = 1 ]; then
 fi
 if [ "$PRINT_AFFECTED_MODE" = 1 ] && { [ "$MODE" != affected ] || [ "$LIST_STAGES" = 1 ]; }; then
   echo "error: --print-affected-mode requires --affected and cannot combine with --list-stages" >&2
+  exit 2
+fi
+if [ -n "$CI_OUTPUT" ] && { [ "$MODE" != affected ] || [ "$LIST_STAGES" = 1 ] || [ "$PRINT_AFFECTED_MODE" = 1 ]; }; then
+  echo "error: --ci-output requires --affected without listing/print-only flags" >&2
   exit 2
 fi
 if [ "$SKIP_LINT" = 1 ] && [ "$MODE" != full ] && [ "$MODE" != lint ] && [ "$MODE" != affected ]; then
@@ -485,21 +495,65 @@ prepare_affected_gate() {
   local plan_rows="$CHECK_RUNTIME/affected-plan.rows"
   local graph_err="$CHECK_RUNTIME/affected-graph.err"
   local selector_changes="$CHECK_RUNTIME/affected-selector-changes"
-  local kind first second third path
+  local kind first second third path docs_only=1 scoped_only=1 models=0
 
-  git diff --name-only "$QUICK_FROM" "$QUICK_TO" -- > "$selector_changes"
+  # Include both sides of renames: moving executable code into docs is not a
+  # documentation-only change. Unknown/quoted paths take the conservative path.
+  git diff --name-only --no-renames "$QUICK_FROM" "$QUICK_TO" -- > "$selector_changes"
   while IFS= read -r path; do
+    case "$path" in
+      README.md|README.ko.md|docs/*.md) ;;
+      *) docs_only=0 ;;
+    esac
+    case "$path" in
+      README.md|README.ko.md|docs/*.md) ;;
+      custom-skills/*.md|templates/*.md) ;;
+      config/models.json) models=1 ;;
+      *) scoped_only=0 ;;
+    esac
     case "$path" in
       .github/workflows/*|scripts/check.sh|scripts/graph.sh|scripts/lib/oms_graph/*|tests/graph-smoke.sh|tests/run-smoke-shard.sh)
         AFFECTED_MODE=full
         AFFECTED_REASONS="selector-boundary:$path"
         break
         ;;
+      AGENTS.md|*/AGENTS.md|CLAUDE.md|*/CLAUDE.md|GEMINI.md|*/GEMINI.md|PROJECT.md|SECURITY.md)
+        AFFECTED_MODE=full
+        AFFECTED_REASONS="contract-boundary:$path"
+        break
+        ;;
+      custom-skills/*.md|templates/*.md|config/models.json) ;;
+      install.sh|scripts/install*|scripts/uninstall*|scripts/update*|scripts/doctor.sh|\
+      scripts/python-runtime.sh|scripts/land.sh|scripts/patch-admit.sh|scripts/pre-push-check.sh|\
+      scripts/lib/install*|scripts/lib/python-runtime.sh|scripts/lib/*lock*|scripts/lib/*state*|\
+      scripts/lib/*artifact*|scripts/lib/oms_runtime/common.py|scripts/lib/oms_runtime/child_policy.py|\
+      scripts/lib/durable-jsonl.py|rules/*|config/*|templates/*|custom-skills/*|plugins/*)
+        AFFECTED_MODE=full
+        AFFECTED_REASONS="contract-boundary:$path"
+        break
+        ;;
     esac
   done < "$selector_changes"
 
+  if ! git diff --quiet "$QUICK_TO" -- ||
+      [ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "$QUICK_TO^{tree}")" ] ||
+      [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    AFFECTED_MODE=full
+    AFFECTED_REASONS=workspace-differs-from-head
+  fi
   if [ "$AFFECTED_MODE" = full ]; then
     : # The selector cannot be the sole judge of changes to its own boundary.
+  elif [ "$docs_only" = 1 ] && [ -s "$selector_changes" ]; then
+    AFFECTED_MODE=affected
+    AFFECTED_REASONS=documentation-only
+  elif [ "$scoped_only" = 1 ] && [ -s "$selector_changes" ]; then
+    AFFECTED_MODE=affected
+    AFFECTED_REASONS=scoped-contracts
+    # Prose is checked directly by skill-manifest and documentation references.
+    # Runtime prompt/GC/lifecycle suites do not validate the changed guidance.
+    if [ "$models" = 1 ]; then
+      AFFECTED_TESTS+=(tests/model-routing-smoke.sh tests/provider-registry-smoke.sh tests/models-smoke.sh)
+    fi
   elif ! bash scripts/graph.sh project affected \
       --base "$QUICK_FROM" --head "$QUICK_TO" \
       --guard 'scripts/graph.sh' --guard 'scripts/lib/oms_graph/**' \
@@ -529,9 +583,10 @@ prepare_affected_gate() {
 
   if [ "$AFFECTED_MODE" = affected ]; then
     RUN_QUICK=1
-    echo "affected: selected ${#AFFECTED_TESTS[@]} existing test file(s) from positive graph evidence" >&2
+    echo "affected: ${AFFECTED_REASONS:-positive graph evidence}; ${#AFFECTED_TESTS[@]} selected test file(s)" >&2
   else
     AFFECTED_MODE=full
+    [ "$SKIP_LINT" = 1 ] || RUN_LINT=1
     RUN_FOCUSED=1
     RUN_SMOKE=1
     echo "affected: full test fallback (${AFFECTED_REASONS:-uncertain})" >&2
@@ -550,6 +605,13 @@ if [ "$RUN_QUICK" = 1 ] || [ "$RUN_AFFECTED" = 1 ]; then
 fi
 if [ "$RUN_AFFECTED" = 1 ]; then
   prepare_affected_gate
+  if [ -n "$CI_OUTPUT" ]; then
+    printf 'mode=%s\n' "$AFFECTED_MODE" >> "$CI_OUTPUT"
+    if [ "$AFFECTED_MODE" = full ]; then
+      verify_oms_state
+      exit 0
+    fi
+  fi
   if [ "$PRINT_AFFECTED_MODE" = 1 ]; then
     printf '%s\n' "$AFFECTED_MODE"
     verify_oms_state
@@ -577,14 +639,23 @@ fi
 
 if [ "$RUN_QUICK" = 1 ]; then
   changed_file="$CHECK_RUNTIME/changed-files"
-  git diff --name-only --diff-filter=ACMR "$QUICK_FROM" "$QUICK_TO" -- > "$changed_file"
+  git diff --name-only --no-renames "$QUICK_FROM" "$QUICK_TO" -- > "$changed_file"
   quick_harness=0
   quick_models=0
   quick_seats=0
   quick_skills=0
+  quick_python=0
+  quick_docs=1
   quick_shell_files=()
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    case "$path" in
+      README.md|README.ko.md|docs/*.md|custom-skills/*.md|templates/*.md) ;;
+      *) quick_docs=0 ;;
+    esac
+    case "$path" in
+      *.py) quick_python=1 ;;
+    esac
     case "$path" in
       *.sh|scripts/oms)
         [ ! -f "$path" ] || quick_shell_files[${#quick_shell_files[@]}]="$path"
@@ -606,7 +677,7 @@ if [ "$RUN_QUICK" = 1 ]; then
         ;;
     esac
     case "$path" in
-      custom-skills/*|plugins/*|skills.manifest.json|scripts/install-skills.sh|scripts/validate-skills.py)
+      custom-skills/*|templates/*.md|plugins/*|skills.manifest.json|scripts/install-skills.sh|scripts/validate-skills.py)
         quick_skills=1
         ;;
     esac
@@ -620,13 +691,17 @@ if [ "$RUN_QUICK" = 1 ]; then
     stage shellcheck-changed lint_shell "${quick_shell_files[@]}"
     stage bash-compat-changed bash scripts/check-bash32.sh "${quick_shell_files[@]}"
   fi
-  [ "$SKIP_LINT" = 1 ] || stage python-syntax bash scripts/check-python.sh
-  stage codex-hud-config bash tests/codex-hud-config-smoke.sh
+  [ "$SKIP_LINT" = 1 ] || [ "$quick_python" = 0 ] || stage python-syntax bash scripts/check-python.sh
   [ "$SKIP_LINT" = 1 ] || [ "$quick_skills" = 0 ] || stage skill-manifest bash scripts/install-skills.sh
-  stage source-distribution bash tests/source-distribution-smoke.sh
-  stage platform-portability bash tests/platform-portability-smoke.sh
-  stage bsd-portability bash tests/bsd-portability-smoke.sh
-  stage functional-evolution bash tests/functional-evolution-smoke.sh
+  if [ "$quick_docs" = 1 ]; then
+    stage source-distribution bash tests/source-distribution-smoke.sh --docs-only
+  else
+    stage source-distribution bash tests/source-distribution-smoke.sh
+  fi
+  [ "$quick_harness" = 0 ] || stage codex-hud-config bash tests/codex-hud-config-smoke.sh
+  [ "$quick_harness" = 0 ] || stage platform-portability bash tests/platform-portability-smoke.sh
+  [ "$quick_harness" = 0 ] || stage bsd-portability bash tests/bsd-portability-smoke.sh
+  [ "$quick_harness" = 0 ] || stage functional-evolution bash tests/functional-evolution-smoke.sh
   [ "$quick_harness" = 0 ] || stage harness-enhancements bash tests/harness-enhancements-smoke.sh
   [ "$quick_models" = 0 ] || stage model-routing bash tests/model-routing-smoke.sh
   [ "$quick_models" = 0 ] || stage provider-registry bash tests/provider-registry-smoke.sh
@@ -636,10 +711,9 @@ fi
 
 affected_test_was_run_by_quick() {  # affected_test_was_run_by_quick PATH
   case "$1" in
-    tests/codex-hud-config-smoke.sh|tests/source-distribution-smoke.sh|tests/platform-portability-smoke.sh|tests/bsd-portability-smoke.sh|tests/functional-evolution-smoke.sh)
-      return 0
-      ;;
-    tests/harness-enhancements-smoke.sh) [ "$quick_harness" = 1 ]; return ;;
+    tests/source-distribution-smoke.sh) return 0 ;;
+    tests/codex-hud-config-smoke.sh|tests/platform-portability-smoke.sh|tests/bsd-portability-smoke.sh|tests/functional-evolution-smoke.sh|tests/harness-enhancements-smoke.sh)
+      [ "$quick_harness" = 1 ]; return ;;
     tests/model-routing-smoke.sh|tests/provider-registry-smoke.sh|tests/models-smoke.sh)
       [ "$quick_models" = 1 ]; return
       ;;

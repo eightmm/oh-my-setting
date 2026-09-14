@@ -1,6 +1,6 @@
 # EVALUATION
 
-Evaluation protocol. Locked — changes invalidate prior numbers.
+Evaluation protocol. Record changes that affect comparison with prior numbers.
 
 ## Metrics
 
@@ -8,7 +8,7 @@ Evaluation protocol. Locked — changes invalidate prior numbers.
 |--------|------------|-----------|----------|
 |        |            | up/down   | yes/no   |
 
-- Implementation: `src/<pkg>/evaluation/`
+- Implementation:
 - Locked commit SHA:
 
 ## Test Split
@@ -28,9 +28,7 @@ Evaluation protocol. Locked — changes invalidate prior numbers.
 
 ## Eval Command
 
-```bash
-uv run python scripts/eval.py --config configs/eval.yaml --ckpt <path>
-```
+- Existing evaluation command and observed result:
 
 ## Reporting
 
@@ -44,9 +42,10 @@ uv run python scripts/eval.py --config configs/eval.yaml --ckpt <path>
 
 ## Regression Policy
 
-- Drop > X% on primary metric vs baseline -> block merge.
-- New baseline requires PR review + `EXPERIMENTS.md` entry.
+- Project-defined acceptance threshold and supporting evidence:
+- Approval and recording policy for a new baseline:
 
 ## Update Triggers
 
-Metric definition, test split, or eval code change -> bump eval version + re-baseline.
+Record metric, split or evaluation-code changes and assess comparability.
+Retain the provenance of prior numbers; re-baseline when the evidence requires it.

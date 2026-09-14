@@ -102,9 +102,9 @@ Options:
                        non-zero exit forces the gate to fail regardless of
                        reviewer verdicts (a GATE: pass self-report cannot
                        pass a diff that fails the project's own checks).
-                       Default when --gate is set and scripts/check.sh is
-                       executable: "bash scripts/check.sh fast" (ml-smoke
-                       with --ml when available).
+                       Defaults to a declared fast mode (ml-smoke with --ml).
+                       Otherwise pass --verify explicitly; review never
+                       silently starts the full release suite.
   --covers ID          Gate mode: acceptance criterion the gate verify run
                        proves (repeatable). Ids are validated against the
                        runtime envelope up front and ride the mechanical
@@ -647,7 +647,7 @@ if [ "$GATE" -eq 1 ] && [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" -eq 0 ] && [ -x "
   elif oms_check_sh_has_fast_mode "$REPO/scripts/check.sh"; then
     VERIFY_CMD="bash scripts/check.sh fast"
   else
-    VERIFY_CMD="bash scripts/check.sh"
+    fail "--gate needs --verify CMD: scripts/check.sh has no bounded fast mode; select affected checks explicitly"
   fi
   echo "gate auto-verify: $VERIFY_CMD (disable with --no-verify)"
 fi

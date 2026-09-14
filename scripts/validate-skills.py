@@ -120,10 +120,15 @@ def main() -> int:
     for source in sorted(actual_sources - local_sources):
         errors.append(f"unlisted custom skill: {source}")
 
-    for entry in entries:
+    template_entries = [
+        {"name": path.name, "source": path.relative_to(root).as_posix()}
+        for path in sorted((root / "templates/project-skills").glob("*"))
+        if path.is_dir()
+    ]
+    for entry in entries + template_entries:
         name = str(entry.get("name", "")).strip()
         source = str(entry.get("source", "")).strip()
-        if not source.startswith("custom-skills/"):
+        if not source.startswith(("custom-skills/", "templates/project-skills/")):
             continue
         skill_dir = root / source
         skill_path = skill_dir / "SKILL.md"

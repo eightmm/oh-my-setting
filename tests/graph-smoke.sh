@@ -636,32 +636,10 @@ PY
 run_graph_exec "$work/status-empty.out" exec status
 [ "$exec_rc" -eq 3 ] || fail "empty status exited $exec_rc, expected 3: $(cat "$work/status-empty.out")"
 
-run_graph_exec "$work/shadow.json" exec shadow --json
-[ "$exec_rc" -eq 0 ] || fail "shadow exited $exec_rc: $(cat "$work/shadow.json")"
-python3 - "$work/shadow.json" <<'PY'
-import json
-import sys
-row = json.load(open(sys.argv[1]))
-assert isinstance(row["agree"], bool), row
-assert row["kind"] == "graph-route-shadow", row
-assert set(row["control_plane"]) == {"action", "mapped"}, row["control_plane"]
-PY
-shadow_lines="$(wc -l < "$exec_repo/.oms/graph/shadow.jsonl" | tr -d ' ')"
-[ "$shadow_lines" = "1" ] || fail "shadow ledger holds $shadow_lines rows, expected 1"
-python3 - "$work/shadow.json" <<'PY'
-import json
-import sys
-row = json.load(open(sys.argv[1]))
-# Reconstruction against reality: the ready task is bound and the unproven
-# check is assumed failed, so the frontier is the effectful work, not the entry.
-assert row["route"]["primary"] == "implement", row["route"]
-assert row["reconstructed"]["assumed_failed"] == ["acceptance"], row["reconstructed"]
-assert row["reconstructed"]["bindings"] == {"work_item": "implement"}, row["reconstructed"]
-assert row["basis"] in ("", "frontier", "successor", "blocked"), row
-PY
-
-# Session start does not run an execution-graph shadow. The explicit command
-# above owns both the observation and its one ambient ledger row.
+# Historical comparison rows remain readable and ambient, but no command
+# or session hook appends new rows to this retired diagnostic.
+mkdir -p "$exec_repo/.oms/graph"
+printf '{"schema":1,"kind":"graph-route-shadow"}\n' > "$exec_repo/.oms/graph/shadow.jsonl"
 hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$exec_repo" |
   OMS_GRAPH_AUTOBUILD=0 OMS_LOCK_DIR="$work/locks" OMS_WORK_JOURNAL=0 "$ROOT/scripts/resume-hook.sh")" \
   || fail "the resume hook must exit 0 with a plan present"
@@ -676,7 +654,7 @@ import subprocess
 import sys
 listing = subprocess.run([sys.executable, sys.argv[1], sys.argv[2]], capture_output=True, text=True, check=True).stdout
 assert "graph/shadow.jsonl" not in listing, listing
-# The hook created `.oms/graph/` for that one file: the directory itself must
+# The historical fixture contains only that one file: the directory itself must
 # compare equal to its absence, or a session opening mid-gate fails the gate.
 assert not any(json.loads(line)[0].split("/")[0] == "graph" for line in listing.splitlines() if line.strip()), listing
 PY
@@ -710,13 +688,13 @@ OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" project coupling --limit 1 
   > "$work/child-coupling.out" 2>&1 || child_rc=$?
 [ "$child_rc" -eq 0 ] || fail "a child must be able to read coupling (exit $child_rc): $(cat "$work/child-coupling.out")"
 
-# A delegated child may evaluate a route but never record a comparison.
+# A delegated child may evaluate a route but never submit an execution decision.
 child_rc=0
 OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" exec route coding-change \
   > "$work/child-route.out" 2>&1 || child_rc=$?
 [ "$child_rc" -eq 0 ] || fail "child route exited $child_rc: $(cat "$work/child-route.out")"
 child_rc=0
-OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" exec shadow \
+OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" exec decide --run missing --node work --outcome pass \
   > "$work/child-shadow.out" 2>&1 || child_rc=$?
 [ "$child_rc" -eq 2 ] || fail "child shadow exited $child_rc, expected 2: $(cat "$work/child-shadow.out")"
 grep -Fq 'a harness child may only use read-only graph actions' "$work/child-shadow.out" \

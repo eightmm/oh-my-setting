@@ -42,8 +42,8 @@ additional evidence. Installation health and project integrity remain distinct.
 | Questions/changes for agents already working together | `oms thread append`, `updates`, `ack` on a scoped live thread | Messages neither spawn providers nor grant authority; see state-memory.md. |
 | Isolated clean-HEAD audit with a worker role | `oms peer-delegate --read-only` | Report only, never a patch. |
 
-`agent-call`/`agent-run` are compatibility primitives, not extra council seats.
-`agent-run` dispatches to read or write; select known authority explicitly.
+`agent-call` is a read primitive, not an extra council seat. Select read or
+write authority explicitly; the redundant `agent-run` wrapper was removed.
 All peer outputs use the same artifact section reader; review remains typed.
 
 ## Plan and autonomy depth
@@ -100,6 +100,7 @@ contracts. Do not merge them or treat one as another's authority source.
 Prefer `oms runtime profile`, `backend`, and `experiment`. `install-profile`
 shares the profile engine; `runtime backend` owns execution preflight and runs.
 Do not repeat probes.
-`research-runner` is a single-run wrapper, not a comparable multi-arm study.
+`runtime experiment launch` pre-registers one command through run-ledger;
+`register/run/summarize` handle comparable multi-arm studies.
 Experiment-board owns intent/claims, run-ledger records execution, and runtime
 experiment links study evidence. Keep their IDs linked, not their stores merged.

@@ -686,11 +686,10 @@ test_apply_ml_scaffolds_docs() {
 
   "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
 
-  for doc in DATA MODEL EVALUATION EXPERIMENTS REPRODUCIBILITY; do
-    [ -f "$project/docs/$doc.md" ] || fail "core ml doc not scaffolded: $doc.md"
+  for doc in MODEL EVALUATION EXPERIMENTS REPRODUCIBILITY TRAINING; do
+    [ ! -e "$project/docs/$doc.md" ] || fail "default ml scaffold should not generate optional docs: $doc"
   done
-  [ ! -e "$project/docs/TRAINING.md" ] || fail "default ml scaffold should omit optional docs"
-  [ -f "$project/docs/REPRODUCIBILITY.md" ] || fail "ml docs not scaffolded: REPRODUCIBILITY.md"
+  [ -f "$project/PROJECT.md" ] || fail "ml scaffold must retain the project contract"
   assert_file_contains "$project/docs/DATA.md" "user content"
   if grep -Fq '## Schema' "$project/docs/DATA.md"; then
     fail "existing docs/DATA.md should not be overwritten"
@@ -838,6 +837,7 @@ test_project_doctor_warns_unregistered_experiments() {
 
   # Ledger rows + PROJECT.md without the section (legacy project): warn.
   sed -i '/^## Experiment Pre-Registration/,/^## Slurm\|^## Notes/{/^## Slurm\|^## Notes/!d}' "$project/PROJECT.md"
+  mkdir -p "$project/docs"
   printf '{"ts":"2026-06-11T00:00:00Z","exit":0}\n' > "$project/docs/EXPERIMENTS.jsonl"
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "missing pre-reg should warn, not fail"
   printf '%s' "$out" | grep -q 'Experiment Pre-Registration' ||
@@ -1556,14 +1556,14 @@ test_run_ledger_no_check_records_gate_none() {
   assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"gate": "none"'
 }
 
-test_research_runner_no_gate_requires_reason() {
+test_experiment_launch_no_gate_requires_reason() {
   local project="$TMP/research-runner-gate"
   make_committed_repo "$project"
   mkdir -p "$project/scripts"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
   chmod +x "$project/scripts/check.sh"
 
-  if (cd "$project" && "$ROOT/scripts/research-runner.sh" \
+  if (cd "$project" && "$ROOT/scripts/runtime.sh" experiment launch \
     --question q --hypothesis h --prediction p --baseline b \
     --metric m --success s --change c --no-gate \
     -- bash -c 'exit 0' >/dev/null 2>"$project/e"); then
@@ -1670,11 +1670,11 @@ EOF
 
 
 
-test_research_runner_requires_registration() {
+test_experiment_launch_requires_registration() {
   local project="$TMP/research-runner-required"
 
   make_committed_repo "$project"
-  if (cd "$project" && "$ROOT/scripts/research-runner.sh" \
+  if (cd "$project" && "$ROOT/scripts/runtime.sh" experiment launch \
     --question "Does lr help?" \
     -- bash -c 'exit 0' >/dev/null 2>"$project/error"); then
     fail "research-runner should require full pre-registration"
@@ -1683,12 +1683,12 @@ test_research_runner_requires_registration() {
   assert_not_exists "$project/docs/EXPERIMENTS.jsonl"
 }
 
-test_research_runner_records_registered_run() {
+test_experiment_launch_records_registered_run() {
   local project="$TMP/research-runner-record"
 
   make_committed_repo "$project"
   printf '{"val_auc": 0.82, "split": "scaffold"}\n' > "$project/metrics.json"
-  (cd "$project" && "$ROOT/scripts/research-runner.sh" \
+  (cd "$project" && "$ROOT/scripts/runtime.sh" experiment launch \
     --question "Does warmup improve scaffold validation?" \
     --hypothesis "Warmup 10pct improves val_auc by at least 0.01" \
     --prediction "val_auc increases from 0.80 to 0.81 or higher" \
@@ -1700,16 +1700,16 @@ test_research_runner_records_registered_run() {
     -- bash -c 'exit 0' >/dev/null 2>"$project/error") ||
     fail "registered research run should launch"
 
-  assert_file_contains "$project/error" "research-runner: launching registered experiment"
+  assert_file_contains "$project/error" "experiment launch: launching registered experiment"
   assert_file_contains "$project/docs/EXPERIMENTS.jsonl" "Warmup 10pct improves"
   assert_file_contains "$project/docs/EXPERIMENTS.jsonl" '"val_auc": 0.82'
 }
 
-test_research_runner_dry_run_no_ledger() {
+test_experiment_launch_dry_run_no_ledger() {
   local project="$TMP/research-runner-dry"
 
   make_committed_repo "$project"
-  (cd "$project" && "$ROOT/scripts/research-runner.sh" \
+  (cd "$project" && "$ROOT/scripts/runtime.sh" experiment launch \
     --question "Does batch size help?" \
     --hypothesis "Batch size 64 improves val_loss" \
     --prediction "val_loss decreases by at least 0.02" \
@@ -1721,7 +1721,7 @@ test_research_runner_dry_run_no_ledger() {
     -- bash -c 'exit 0' >"$project/out") ||
     fail "research-runner dry-run should pass validation"
 
-  assert_file_contains "$project/out" "research-runner: dry-run"
+  assert_file_contains "$project/out" "experiment launch: dry-run"
   assert_file_contains "$project/out" "Batch size 64 improves val_loss"
   assert_not_exists "$project/docs/EXPERIMENTS.jsonl"
 }
@@ -2679,7 +2679,7 @@ test_prompt_takers_refuse_a_mistyped_option() {
   # said nothing. Every prompt-taking front door refuses it now.
   local script out rc
 
-  for script in advise agent-call agent-run consult peer-ask peer-review; do
+  for script in advise agent-call consult peer-ask peer-review; do
     rc=0
     out="$(PATH="/usr/bin:/bin" bash "$ROOT/scripts/$script.sh" \
       --bogus-flag --prompt probe 2>&1)" || rc=$?
@@ -5057,7 +5057,7 @@ test_agent_task_init_context_and_rejects_sensitive() {
     --done "agent-task context is available" \
     --verify "bash scripts/check.sh ml-smoke" \
     --decision "Use active task packet before larger task registry" \
-    --state "Memory and agent-run already exist" \
+    --state "Memory and delegation already exist" \
     --next "Wire task context into provider calls" >/dev/null
 
   [ -f "$project/.oms/task/current.md" ] || fail "task file missing"
@@ -5116,15 +5116,15 @@ test_agent_task_loop_state_and_warnings() {
   assert_file_contains "$project/.oms/task/current.md" "Result: guard still missing"
 
   printf 'line one\nline two\n' >> "$project/file.txt"
-  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+  HOME="$home_dir" "$ROOT/scripts/peer-delegate.sh" --dry-run \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --to codex \
     --prompt "Implement helper" >/dev/null 2>"$project/err"
 
-  assert_file_contains "$project/err" "warning: loop attempts exhausted: 3/3"
-  assert_file_contains "$project/err" "warning: repeated last failure detected (3x): bash scripts/check.sh fast exit=1"
-  assert_file_contains "$project/err" "warning: loop diff budget exceeded:"
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' "warning: loop attempts exhausted: 3/3"
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' "warning: repeated last failure detected (3x): bash scripts/check.sh fast exit=1"
+  assert_one_artifact_contains "$artifact_dir" 'codex-*.md' "warning: loop diff budget exceeded:"
 }
 
 test_agent_plan_dag_and_ready() {
@@ -7881,44 +7881,6 @@ test_import_call_result_indexes_call_import() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" "\"source\": \"$source_rel\""
 }
 
-test_agent_run_export_only_read_and_write_modes() {
-  local project="$TMP/agent-run-export"
-  local artifact_dir="$project/artifacts"
-  local home_dir="$project/home"
-  local artifact
-  local rc=0
-
-  make_committed_repo "$project"
-  mkdir -p "$home_dir"
-
-  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="/usr/bin:/bin" \
-    "$ROOT/scripts/agent-run.sh" \
-    --repo "$project" \
-    --artifact-dir "$artifact_dir" \
-    --to claude \
-    --mode read \
-    --export-only \
-    --prompt "Assess run export" >"$project/read-out" 2>"$project/read-err"
-
-  assert_file_contains "$project/read-err" "resolved=read"
-  assert_file_contains "$project/read-out" "exported: claude ->"
-  artifact="$(find "$artifact_dir" -type f -name 'claude-assess-run-export-*.export.md' | head -n 1)"
-  [ -n "$artifact" ] || fail "missing agent-run call export artifact"
-  assert_file_contains "$artifact" "EXPORTED: paste the Prompt section into claude"
-  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "call-export"'
-
-  HOME="$home_dir" "$ROOT/scripts/agent-run.sh" \
-    --repo "$project" \
-    --artifact-dir "$artifact_dir" \
-    --to codex \
-    --mode write \
-    --export-only \
-    --prompt "Implement run export" >"$project/write-out" 2>"$project/write-err" || rc=$?
-
-  [ "$rc" = "2" ] || fail "agent-run write export should exit 2, got $rc"
-  assert_file_contains "$project/write-err" "delegate work cannot be exported; a worktree worker is required"
-}
-
 test_delegate_missing_cli_writes_exit_and_index() {
   local project="$TMP/delegate-missing-cli"
   local artifact_dir="$project/artifacts"
@@ -7947,34 +7909,8 @@ test_delegate_missing_cli_writes_exit_and_index() {
 }
 
 
-test_agent_run_missing_cli_writes_exit_and_index() {
-  local project="$TMP/agent-run-missing-cli"
-  local artifact_dir="$project/artifacts"
-  local home_dir="$project/home"
-  local artifact
-  local rc=0
 
-  mkdir -p "$project" "$home_dir"
-  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="/usr/bin:/bin" \
-    "$ROOT/scripts/agent-run.sh" \
-    --repo "$project" \
-    --artifact-dir "$artifact_dir" \
-    --to claude \
-    --prompt "Assess missing provider routing" >"$project/out" 2>"$project/error" || rc=$?
-
-  [ "$rc" = "127" ] || fail "agent-run read missing provider should exit 127, got $rc"
-  assert_file_contains "$project/error" "resolved=read"
-  artifact="$(find "$artifact_dir" -type f -name 'claude-assess-missing-provider-routing-*.md' | head -n 1)"
-  [ -n "$artifact" ] || fail "agent-run missing provider should still write routed artifact"
-  assert_file_contains "$artifact" "SKIPPED: command not found: claude"
-  assert_file_contains "$artifact" "## Exit"
-  assert_file_contains "$artifact" "127"
-  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "call"'
-  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"exit": 127'
-}
-
-
-test_agent_run_prompt_file_routing() {
+test_peer_prompt_files_preserve_explicit_intent() {
   local project="$TMP/agent-run-prompt-file"
   local home_dir="$project/home"
   local artifact_dir="$project/artifacts"
@@ -7984,22 +7920,20 @@ test_agent_run_prompt_file_routing() {
   printf 'Assess this plan from a file\n' > "$project/read-prompt.txt"
   printf '파서 모듈을 수정해 주세요\n' > "$project/write-prompt.txt"
 
-  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+  HOME="$home_dir" "$ROOT/scripts/agent-call.sh" --dry-run \
     --repo "$project" --artifact-dir "$artifact_dir" --to claude \
     --prompt-file "$project/read-prompt.txt" >/dev/null 2>"$project/read-route"
-  assert_file_contains "$project/read-route" "resolved=read"
   assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-from-a-file-*.md' 'independent read-only pass'
 
-  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+  HOME="$home_dir" "$ROOT/scripts/peer-delegate.sh" --dry-run \
     --repo "$project" --artifact-dir "$artifact_dir" --to codex \
-    --prompt-file "$project/write-prompt.txt" >/dev/null 2>"$project/write-route"
-  assert_file_contains "$project/write-route" "resolved=write"
+    --brief-file "$project/write-prompt.txt" >/dev/null 2>"$project/write-route"
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' '파서 모듈을 수정해 주세요'
   assert_one_artifact_contains "$artifact_dir" 'codex-*.md' 'delegated worker agent'
 }
 
 
-test_agent_run_write_worker_failure_records_task_outcome() {
+test_delegate_worker_failure_records_task_outcome() {
   local project="$TMP/agent-run-worker-fails"
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
@@ -8022,14 +7956,14 @@ EOF
   chmod +x "$bin_dir/codex"
 
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
-    "$ROOT/scripts/agent-run.sh" \
+    "$ROOT/scripts/peer-delegate.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --to codex \
     --prompt "Implement failing helper" >"$project/out" 2>"$project/error" || rc=$?
 
   [ "$rc" = "1" ] || fail "agent-run write worker failure should exit 1, got $rc"
-  assert_file_contains "$project/.oms/task/current.md" "agent-run write codex exit=1"
+  assert_file_contains "$project/.oms/task/current.md" "peer-delegate codex exit=1"
   assert_file_contains "$project/.oms/task/current.md" "worker=codex exit 42"
   artifact="$(find "$artifact_dir" -type f -name 'codex-implement-failing-helper-*.md' | head -n 1)"
   [ -n "$artifact" ] || fail "failing worker should still write artifact"
@@ -8557,7 +8491,7 @@ EOF
   assert_file_contains "$project/.oms/artifacts/call/kept.md" "kept artifact"
 }
 
-test_agent_run_records_task_outcome() {
+test_delegate_records_task_outcome() {
   local project="$TMP/agent-run-task-outcome"
   local home_dir="$project/home"
   local artifact_dir="$project/artifacts"
@@ -8568,13 +8502,13 @@ test_agent_run_records_task_outcome() {
     --goal "Record delegated artifact" \
     --next "Inspect artifact index" >/dev/null
 
-  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
+  HOME="$home_dir" "$ROOT/scripts/peer-delegate.sh" --dry-run \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --to codex \
     --prompt "Implement helper" >/dev/null
 
-  assert_file_contains "$project/.oms/task/current.md" "agent-run write codex exit=0"
+  assert_file_contains "$project/.oms/task/current.md" "peer-delegate codex exit=0"
   assert_file_contains "$project/.oms/task/current.md" "artifact=artifacts/codex-implement-helper-"
   assert_file_contains "$project/.oms/task/current.md" "patch=artifacts/codex-implement-helper-"
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "delegate"'
@@ -8898,59 +8832,6 @@ test_peer_legacy_env_vars_are_simply_unknown() {
 }
 
 
-test_agent_run_auto_read_routes_to_call() {
-  local project="$TMP/agent-run-read"
-  local home_dir="$project/home"
-  local artifact_dir="$project/artifacts"
-
-  mkdir -p "$project" "$home_dir"
-  HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
-    --repo "$project" append --agent codex --text "Prefer narrow verification commands." >/dev/null
-
-  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
-    --repo "$project" \
-    --artifact-dir "$artifact_dir" \
-    --to claude \
-    --prompt "Assess this plan" >/dev/null
-
-  assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-*.md' 'independent read-only pass'
-  if grep -R -Fq 'Prefer narrow verification commands.' "$artifact_dir"; then
-    fail "agent-run read mode should omit shared memory by default"
-  fi
-
-  rm -rf "$artifact_dir"
-  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
-    --repo "$project" \
-    --artifact-dir "$artifact_dir" \
-    --to claude \
-    --memory \
-    --prompt "Assess this plan" >/dev/null
-  assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-*.md' 'Compact recent:'
-  assert_one_artifact_contains "$artifact_dir" 'claude-assess-this-plan-*.md' 'Prefer narrow verification commands.'
-}
-
-
-test_agent_run_auto_write_routes_to_delegate() {
-  local project="$TMP/agent-run-write"
-  local home_dir="$project/home"
-  local artifact_dir="$project/artifacts"
-  local patch
-
-  make_committed_repo "$project"
-  mkdir -p "$home_dir"
-
-  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
-    --repo "$project" \
-    --artifact-dir "$artifact_dir" \
-    --to codex \
-    --prompt "Implement a helper" >/dev/null
-
-  assert_one_artifact_contains "$artifact_dir" 'codex-implement-a-helper-*.md' 'delegated worker agent'
-  assert_one_artifact_contains "$artifact_dir" 'codex-implement-a-helper-*.md' 'DRY RUN: worker command skipped.'
-  patch="$(find "$artifact_dir" -type f -name 'codex-implement-a-helper-*.patch' | head -n 1)"
-  [ -n "$patch" ] || fail "agent-run write mode should create patch artifact"
-  [ ! -s "$patch" ] || fail "dry-run write patch should be empty"
-}
 
 test_scrubber_passes_harness_sources() {
   local dir="$TMP/scrubber-self"
@@ -9040,54 +8921,6 @@ test_scrubber_no_function_name_bypass() {
     fail "scrubber symbol on the same line must not bypass the block"
   fi
   assert_file_contains "$project/error" "outbound provider context contains sensitive-looking content"
-}
-
-test_agent_run_read_priority_routing() {
-  local project="$TMP/agent-run-read-priority"
-  local home_dir="$project/home"
-  local artifact_dir="$project/artifacts"
-
-  make_committed_repo "$project"
-  mkdir -p "$home_dir"
-
-  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
-    --repo "$project" --artifact-dir "$artifact_dir" --to claude \
-    --prompt "Review the latest fix and report findings" >/dev/null 2>"$project/route1"
-  assert_file_contains "$project/route1" "resolved=read"
-
-  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
-    --repo "$project" --artifact-dir "$artifact_dir" --to claude \
-    --prompt "Summarize committed changes in this update" >/dev/null 2>"$project/route2"
-  assert_file_contains "$project/route2" "resolved=read"
-
-  HOME="$home_dir" OH_MY_SETTING_AGENT_RUN_DRY_RUN=1 "$ROOT/scripts/agent-run.sh" \
-    --repo "$project" --artifact-dir "$artifact_dir" --to codex \
-    --prompt "Refactor the parser module" >/dev/null 2>"$project/route3"
-  assert_file_contains "$project/route3" "resolved=write"
-}
-
-test_shared_prompt_mode_classifier_table() {
-  local expected
-  local prompt
-  local got
-
-  while IFS='|' read -r expected prompt; do
-    [ -n "$expected" ] || continue
-    got="$(bash -c '. "$1"; oms_classify_prompt_mode "$2"' _ "$ROOT/scripts/lib/agent-memory-common.sh" "$prompt")"
-    [ "$got" = "$expected" ] || fail "prompt mode for [$prompt]: got $got, want $expected"
-  done <<'EOF'
-read|Review the latest fix and report findings
-write|Review and fix the parser
-write|Audit the repo and implement all necessary fixes
-read|Explain why the check failed
-write|Fix the failing parser test
-write|Refactor the parser module
-read|수정 사항을 검토해줘
-write|검토하고 수정해줘
-write|파서 모듈을 수정해줘
-read|review the fix
-read|Proceed when ready
-EOF
 }
 
 test_shared_ml_smoke_detection_table() {
@@ -10040,7 +9873,7 @@ test_command_help_surfaces_run() {
 
   "$ROOT/scripts/artifact-index.sh" --help >/dev/null
   "$ROOT/scripts/import-agent-result.sh" --help >/dev/null
-  "$ROOT/scripts/research-runner.sh" --help >/dev/null
+  "$ROOT/scripts/runtime.sh" experiment launch --help >/dev/null
   "$ROOT/scripts/auto-update.sh" --help >/dev/null
   "$ROOT/scripts/install-autoupdate.sh" --help >/dev/null
   "$ROOT/scripts/uninstall-autoupdate.sh" --help >/dev/null
@@ -11277,7 +11110,7 @@ test_install_hooks_writes_pre_push() {
     fail "install-hooks --quick failed"
   grep -Fq 'scripts/pre-push-check.sh' "$repo/.git/hooks/pre-push" ||
     fail "quick hook does not route through pre-push-check.sh"
-  grep -Fq 'full GitHub Actions gate' "$repo/.git/hooks/pre-push" ||
+  grep -Fq 'risk-based CI gate' "$repo/.git/hooks/pre-push" ||
     fail "quick hook must say that its local result is partial"
 
   git -C "$repo" add scripts
@@ -11353,6 +11186,29 @@ EOF
     fail "install-skills should fail on manifest/SKILL.md name mismatch"
   fi
   assert_file_contains "$repo/out" "name mismatch: expected-name"
+
+  # Project skill templates use the same validator without joining the catalog.
+  printf '{"skills":[]}\n' > "$repo/skills.manifest.json"
+  mkdir -p "$repo/templates/project-skills"
+  mv "$repo/custom-skills/demo" "$repo/templates/project-skills/demo"
+  if "$repo/scripts/install-skills.sh" > "$repo/out" 2>&1; then
+    fail "project template name mismatch must fail direct validation"
+  fi
+  assert_file_contains "$repo/out" 'name mismatch: demo -> templates/project-skills/demo/SKILL.md'
+  cat > "$repo/templates/project-skills/demo/SKILL.md" <<'EOF'
+---
+name: demo
+description: Inspect the demo project contract using the existing source and tests.
+---
+Read [details](references/missing.md).
+EOF
+  if "$repo/scripts/install-skills.sh" > "$repo/out" 2>&1; then
+    fail "project template broken reference must fail direct validation"
+  fi
+  assert_file_contains "$repo/out" 'missing local reference: templates/project-skills/demo/references/missing.md'
+  mkdir -p "$repo/templates/project-skills/demo/references"
+  printf '# Details\n' > "$repo/templates/project-skills/demo/references/missing.md"
+  "$repo/scripts/install-skills.sh" > "$repo/out" 2>&1 || fail "valid project template rejected"
 }
 
 test_install_skills_detects_unlisted_and_broken_resources() {
@@ -12720,6 +12576,14 @@ exit 1
 EOF
   chmod +x "$project/scripts/check.sh"
 
+  # No bounded default: stop before providers and ask the caller for a check.
+  rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" --gate --export-only --prompt "Select a bounded check" \
+    > "$project/no-default" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail "review silently selected the full release suite"
+  assert_file_contains "$project/no-default" '--gate needs --verify CMD'
+
   # All reviewers self-report pass, but the project's own check fails: the
   # mechanical backstop must force the gate to fail.
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
@@ -12727,12 +12591,10 @@ EOF
     --artifact-dir "$artifact_dir" \
     --providers claude,antigravity \
     --no-diff \
-    --gate \
+    --gate --verify "bash scripts/check.sh" \
     --prompt "Gate verify backstop" >"$project/out" 2>&1 || rc=$?
   [ "$rc" = "1" ] || fail "failing mechanical verify must force gate fail, got $rc"
-  # The fixture check.sh has no fast) arm, so the probe falls back to the
-  # plain contract instead of inventing an invalid `fast` invocation.
-  assert_file_contains "$project/out" "gate auto-verify: bash scripts/check.sh (disable"
+  # An explicit verifier stays authoritative even without a fast mode.
   assert_file_contains "$project/out" "gate verify: fail (exit 1)"
   assert_file_contains "$project/out" "claude: pass"
   assert_one_artifact_contains "$artifact_dir" '_verify-gate-verify-backstop-*.md' 'contract broken'
@@ -12756,7 +12618,7 @@ EOF
     --artifact-dir "$project/artifacts-pass" \
     --providers claude,antigravity \
     --no-diff \
-    --gate \
+    --gate --verify "bash scripts/check.sh" \
     --prompt "Gate verify backstop" >"$project/out-pass" 2>&1 || rc=$?
   [ "$rc" = "0" ] || fail "verify pass + reviewer pass should exit 0, got $rc"
   assert_file_contains "$project/out-pass" "gate verify: pass"
@@ -13199,7 +13061,6 @@ test_oms_dispatcher_lists_and_dispatches() {
   fi
   out="$("$bin/oms" list --all)" || fail "expanded catalog should succeed"
   printf '%s' "$out" | grep -Eq '^run-ledger ' || fail "oms list should include run-ledger"
-  printf '%s' "$out" | grep -Eq '^agent-run ' || fail "oms list should include agent-run"
   for public in agent-events agent-supervisor approval-inbox autopilot draft-pr \
     runtime open-in otel-export; do
     printf '%s\n' "$out" | grep -Eq "^${public} " ||
@@ -13207,7 +13068,7 @@ test_oms_dispatcher_lists_and_dispatches() {
     "$bin/oms" "$public" --help >/dev/null 2>&1 ||
       fail "oms should dispatch new public tool: $public"
   done
-  for retired in herdr-adapter a2a-bridge agent-card ops-cockpit; do
+  for retired in herdr-adapter a2a-bridge agent-card ops-cockpit agent-run research-runner; do
     if printf '%s\n' "$out" | grep -Eq "^${retired} "; then
       fail "retired adapter leaked into core catalog: $retired"
     fi
@@ -13259,7 +13120,7 @@ test_oms_dispatcher_lists_and_dispatches() {
 
 test_oms_frontdoor_routes_primary_subsystems() {
   local bin="$TMP/oms-frontdoor-bin"
-  local frontdoors all_tools help_text review_help primary compatibility duplicate
+  local frontdoors all_tools help_text review_help primary duplicate
 
   mkdir -p "$bin"
   ln -sfn "$ROOT/scripts/oms" "$bin/oms"
@@ -13281,13 +13142,11 @@ test_oms_frontdoor_routes_primary_subsystems() {
       fail "frontdoor catalog should route the canonical workflow: $primary"
   done
 
-  for compatibility in agent-call agent-run research-runner; do
-    if printf '%s\n' "$frontdoors" | grep -Eq "^${compatibility} "; then
-      fail "compatibility primitive should stay behind list --all: $compatibility"
-    fi
-    printf '%s\n' "$all_tools" | grep -Eq "^${compatibility} " ||
-      fail "list --all should retain compatibility primitive: $compatibility"
-  done
+  if printf '%s\n' "$frontdoors" | grep -Eq '^agent-call '; then
+    fail "read primitive should stay behind list --all: agent-call"
+  fi
+  printf '%s\n' "$all_tools" | grep -Eq '^agent-call ' ||
+    fail "list --all should retain the read primitive: agent-call"
 
   duplicate="$(printf '%s\n' "$frontdoors" | awk '{ seen[$1]++ } END { for (name in seen) if (seen[name] > 1) print name }')"
   [ -z "$duplicate" ] || fail "frontdoor catalog contains duplicate tools: $duplicate"
@@ -22721,11 +22580,6 @@ EOF
 
   assert_child_peer_refused agent-call "$ROOT/scripts/agent-call.sh" \
     --to codex --repo "$project" --prompt child
-  assert_child_peer_refused agent-run-read "$ROOT/scripts/agent-run.sh" \
-    --to codex --repo "$project" --prompt child --mode read --dry-run
-  assert_child_peer_refused agent-run-write "$ROOT/scripts/agent-run.sh" \
-    --to codex --repo "$project" --prompt child --mode write --no-verify \
-    --apply --dry-run
   assert_child_peer_refused peer-ask "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" --providers codex --prompt child --dry-run
   assert_child_peer_refused peer-review "$ROOT/scripts/peer-review.sh" \

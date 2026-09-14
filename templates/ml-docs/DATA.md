@@ -1,6 +1,6 @@
 # DATA
 
-Data contract. Changes here invalidate checkpoints and baselines.
+Data contract. Assess which results and checkpoints a changed contract affects.
 
 ## Source
 
@@ -50,12 +50,11 @@ Data contract. Changes here invalidate checkpoints and baselines.
 
 ## Verification
 
-```bash
-uv run python scripts/check_data.py
-```
+- Existing data validation command and observed result:
 
 - Check shapes, dtypes, NaN/Inf, label range, split disjointness, hash match.
 
 ## Update Triggers
 
-Source refresh, schema change, split policy change, preprocessing version bump -> update + bump checkpoint compatibility.
+For source, schema, split or preprocessing changes, record the affected claims
+and compatibility evidence. Preserve historical snapshots and results.

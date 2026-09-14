@@ -862,8 +862,13 @@ cleanup_delegated_worktree() {
 }
 
 cleanup() {
+  local status="${1:-0}"
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
+  if [ "$INCLUDE_TASK" = 1 ]; then
+    agent_task_record_outcome "$REPO" peer-delegate "$TO" "$status" "${artifact:-}" \
+      "${patch_file:-}" "worker=$TO exit ${worker_status:-unknown}; verify=exit ${verify_status:-unknown}" || true
+  fi
   if [ "$TERMINALIZE_RESUMED_REPAIR" = 1 ] &&
     [ "$plan_started" = 1 ] && [ "$plan_finalized" = 0 ]; then
     plan_failure_transition >/dev/null 2>&1 || true
@@ -882,10 +887,10 @@ cleanup_signal() {
   local code="$1"
   trap - EXIT HUP INT TERM
   ma_kill_jobs
-  cleanup
+  cleanup "$code"
   exit "$code"
 }
-trap cleanup EXIT
+trap 'cleanup "$?"' EXIT
 trap 'cleanup_signal 129' HUP
 trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM

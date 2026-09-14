@@ -28,7 +28,8 @@ Usage: apply-project-template.sh [auto|general|ml|slurm] [project_dir]
                                  [--full-docs] [--no-private] [files...]
 
 Apply oh-my-setting project rule blocks and scaffold PROJECT.md.
-ML projects create five core docs by default; --full-docs creates all templates.
+ML projects keep the scientific contract in PROJECT.md by default.
+--full-docs additionally creates optional documentation templates.
 The agent-facing files are hidden from git locally (see project-private.sh);
 --no-private, or OH_MY_SETTING_PRIVATE_AGENT_FILES=0, keeps them visible.
 EOF
@@ -365,7 +366,7 @@ fi
 
 if [ "$BASE_STYLE" = "ml" ]; then
   ML_DOCS_SRC="$ROOT/templates/ml-docs"
-  if [ -d "$ML_DOCS_SRC" ]; then
+  if [ "$ML_FULL_DOCS" = "1" ] && [ -d "$ML_DOCS_SRC" ]; then
     DOCS_DIR="$PROJECT_DIR/docs"
     if [ "$DRY_RUN" = "1" ]; then
       echo "would scaffold ML docs at $DOCS_DIR"
@@ -374,12 +375,6 @@ if [ "$BASE_STYLE" = "ml" ]; then
       for src in "$ML_DOCS_SRC"/*.md; do
         [ -e "$src" ] || continue
         base="$(basename "$src")"
-        if [ "$ML_FULL_DOCS" != "1" ]; then
-          case "$base" in
-            DATA.md|MODEL.md|EVALUATION.md|EXPERIMENTS.md|REPRODUCIBILITY.md) ;;
-            *) continue ;;
-          esac
-        fi
         dst="$DOCS_DIR/$base"
         if [ -e "$dst" ]; then
           echo "skip existing $dst"

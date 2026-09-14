@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -70,16 +71,24 @@ def repo_root(path: str) -> Path:
 
 
 def read_rows(path: Path, limit: int) -> List[Tuple[int, Dict[str, Any]]]:
-    rows: List[Tuple[int, Dict[str, Any]]] = []
+    # Preserve source line identities without retaining every decoded event.
+    rows = deque(maxlen=limit)
     try:
         handle = path.open(encoding="utf-8", errors="replace")
     except FileNotFoundError:
-        return rows
+        return []
     except OSError as exc:
         fail("cannot read telemetry source: %s" % exc)
     with handle:
-        for line_number, raw in enumerate(handle, 1):
+        line_number = 0
+        while True:
+            raw = handle.readline(1024 * 1024 + 1)
+            if not raw:
+                break
+            line_number += 1
             if len(raw) > 1024 * 1024:
+                while raw and not raw.endswith("\n"):
+                    raw = handle.readline(1024 * 1024 + 1)
                 continue
             raw = raw.strip()
             if not raw:
@@ -90,7 +99,7 @@ def read_rows(path: Path, limit: int) -> List[Tuple[int, Dict[str, Any]]]:
                 continue
             if isinstance(value, dict):
                 rows.append((line_number, value))
-    return rows[-limit:]
+    return list(rows)
 
 
 def digest(namespace: str, value: str, size: int) -> str:

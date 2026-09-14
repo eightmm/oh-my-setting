@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 1'
 
 # Least privilege: this workflow only reads the repo.
 permissions:
@@ -19,6 +22,8 @@ jobs:
   # running lint in the same job would let one shellcheck nit hide every test
   # result. Twenty seconds of runner time buys an independent red/green.
   lint:
+    needs: affected_plan
+    if: needs.affected_plan.outputs.mode == 'full'
     runs-on: ubuntu-latest
     # apt has hung this job for an hour before timing anything out (observed
     # 2026-08-18: "install shellcheck" stalled 60+ minutes and held a release
@@ -54,7 +59,7 @@ jobs:
   # repeated here as extra steps.
   focused:
     needs: affected_plan
-    if: always() && (github.event_name != 'pull_request' || needs.affected_plan.outputs.mode == 'full')
+    if: needs.affected_plan.outputs.mode == 'full'
     strategy:
       fail-fast: false
       matrix:
@@ -72,7 +77,7 @@ jobs:
   # evidence-driven.
   smoke_shard:
     needs: affected_plan
-    if: always() && (github.event_name != 'pull_request' || needs.affected_plan.outputs.mode == 'full')
+    if: needs.affected_plan.outputs.mode == 'full'
     strategy:
       fail-fast: false
       matrix:
@@ -86,11 +91,9 @@ jobs:
           OMS_SMOKE_TIMINGS: "1"
         run: bash scripts/check.sh --scripts-smoke-only --shard "${{ matrix.shard }}/4"
 
-  # Project the fail-open decision before scheduling the expensive jobs. A
-  # full result fans back out through the existing matrices instead of putting
-  # the complete gate on one runner.
+  # Select once and run narrow checks in this job. Full selections fan out to
+  # the existing lanes; no graph artifact/cache or second selection is needed.
   affected_plan:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
@@ -98,44 +101,48 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: project affected mode
-        id: plan
+      - name: install shellcheck
         timeout-minutes: 5
+        env:
+          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
-          mode="$(bash scripts/check.sh --affected --print-affected-mode \
-            --changed-from "${{ github.event.pull_request.base.sha }}" \
-            --changed-to HEAD)"
-          case "$mode" in affected|full) ;; *) exit 2 ;; esac
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
-
-  # Positive Project Graph evidence runs existing tests, never declares an
-  # untested change safe. Lint remains independent, so it is not repeated.
-  affected:
-    needs: affected_plan
-    if: needs.affected_plan.outputs.mode == 'affected'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: affected tests
+          # Full lanes install their own linter; docs/Python-only narrow runs
+          # do not need a shell linter download.
+          git rev-parse --verify "$DIFF_BASE^{tree}" >/dev/null 2>&1 || exit 0
+          if ! git diff --name-only "$DIFF_BASE" HEAD -- | grep -E '(\.sh$|^scripts/oms$)' >/dev/null; then
+            exit 0
+          fi
+          curl -fsSL -o /tmp/shellcheck.tar.xz \
+            https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+          echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install /tmp/shellcheck-v0.10.0/shellcheck /usr/local/bin/shellcheck
+      - name: select and verify affected changes
+        id: plan
         timeout-minutes: 35
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
-          bash scripts/check.sh --affected --no-lint \
-            --changed-from "${{ github.event.pull_request.base.sha }}" \
-            --changed-to HEAD
+          if { [ "$EVENT_NAME" = pull_request ] || [ "$EVENT_NAME" = push ]; } && \
+              git rev-parse --verify "$DIFF_BASE^{tree}" >/dev/null 2>&1; then
+            bash scripts/check.sh --affected --changed-from "$DIFF_BASE" --changed-to HEAD \
+              --ci-output "$GITHUB_OUTPUT"
+          else
+            echo 'mode=full' >> "$GITHUB_OUTPUT"
+          fi
 
   # Exercise the same install -> update -> uninstall contract on every
-  # supported host, and in both ownership modes. Windows selects copy mode on
-  # its own; the Ubuntu copy leg exists because copy mode would otherwise be
-  # provable only on the slowest runner in the matrix.
+  # supported host and ownership mode. Linux auto is already a focused stage;
+  # do not run the same fixture twice on a full gate. Keep Linux copy and the
+  # native macOS/Windows legs, which exercise different platform behavior.
   install_e2e:
+    needs: affected_plan
+    if: needs.affected_plan.outputs.mode == 'full'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            link_mode: auto
           - os: ubuntu-latest
             link_mode: copy
           - os: macos-latest
@@ -161,6 +168,8 @@ jobs:
   # Keep the durable state writers on their pathname branch under Git Bash,
   # where the harness actually runs for Windows users.
   windows_durable_writer:
+    needs: affected_plan
+    if: needs.affected_plan.outputs.mode == 'full'
     runs-on: windows-latest
     defaults:
       run:
@@ -183,6 +192,8 @@ jobs:
   # odd apostrophe, and the one userland where BSD sed/awk/date differ. Both
   # classes are invisible to a Linux-only gate, and both have shipped breakage.
   portability_macos:
+    needs: affected_plan
+    if: needs.affected_plan.outputs.mode == 'full'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -194,6 +205,8 @@ jobs:
   # README promises Python 3.9+. Newer parsers can emulate most of that
   # grammar, but only a real 3.9 interpreter proves the no-tomllib HUD path.
   python39:
+    needs: affected_plan
+    if: needs.affected_plan.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -207,60 +220,50 @@ jobs:
           bash tests/install-profile-smoke.sh
           bash tests/codex-hud-config-smoke.sh
 
-  # Branch protection targets only this fixed name. Matrix child check names
-  # can change as shards are rebalanced; this job fails closed on every failed,
-  # cancelled, or skipped dependency.
+  # Branch protection can target this fixed name. Only plan-authorized skips
+  # are accepted; missing, failed, and cancelled required jobs fail closed.
   gate:
     if: always()
-    needs: [lint, focused, smoke_shard, affected_plan, affected, install_e2e, windows_durable_writer, portability_macos, python39]
+    needs: [lint, focused, smoke_shard, affected_plan, install_e2e, windows_durable_writer, portability_macos, python39]
     runs-on: ubuntu-latest
     steps:
       - name: require every verification job
         env:
-          EVENT_NAME: ${{ github.event_name }}
           LINT_RESULT: ${{ needs.lint.result }}
           FOCUSED_RESULT: ${{ needs.focused.result }}
           SMOKE_SHARD_RESULT: ${{ needs.smoke_shard.result }}
           AFFECTED_PLAN_RESULT: ${{ needs.affected_plan.result }}
           AFFECTED_MODE: ${{ needs.affected_plan.outputs.mode }}
-          AFFECTED_RESULT: ${{ needs.affected.result }}
           INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
           WINDOWS_DURABLE_WRITER_RESULT: ${{ needs.windows_durable_writer.result }}
           PORTABILITY_MACOS_RESULT: ${{ needs.portability_macos.result }}
           PYTHON39_RESULT: ${{ needs.python39.result }}
         run: |
           status=0
+          [ "$AFFECTED_PLAN_RESULT" = success ] || status=1
+          case "$AFFECTED_MODE" in
+            affected)
+              expected=skipped
+              ;;
+            full)
+              expected=success
+              ;;
+            *) expected=invalid; status=1 ;;
+          esac
           for result in \
             "$LINT_RESULT" \
+            "$FOCUSED_RESULT" \
+            "$SMOKE_SHARD_RESULT" \
             "$INSTALL_E2E_RESULT" \
             "$WINDOWS_DURABLE_WRITER_RESULT" \
             "$PORTABILITY_MACOS_RESULT" \
             "$PYTHON39_RESULT"; do
-            if [ "$result" != success ]; then
-              echo "required job result: $result" >&2
+            if [ "$result" != "$expected" ]; then
+              echo "required job result: $result (expected $expected)" >&2
               status=1
             fi
           done
-          if [ "$EVENT_NAME" = pull_request ]; then
-            [ "$AFFECTED_PLAN_RESULT" = success ] || status=1
-            if [ "$AFFECTED_MODE" = affected ]; then
-              [ "$AFFECTED_RESULT" = success ] || status=1
-              [ "$FOCUSED_RESULT" = skipped ] || status=1
-              [ "$SMOKE_SHARD_RESULT" = skipped ] || status=1
-            elif [ "$AFFECTED_MODE" = full ]; then
-              [ "$AFFECTED_RESULT" = skipped ] || status=1
-              [ "$FOCUSED_RESULT" = success ] || status=1
-              [ "$SMOKE_SHARD_RESULT" = success ] || status=1
-            else
-              status=1
-            fi
-          else
-            [ "$AFFECTED_PLAN_RESULT" = skipped ] || status=1
-            [ "$AFFECTED_RESULT" = skipped ] || status=1
-            [ "$FOCUSED_RESULT" = success ] || status=1
-            [ "$SMOKE_SHARD_RESULT" = success ] || status=1
-          fi
           if [ "$status" -ne 0 ]; then
-            echo "event-specific results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE affected=$AFFECTED_RESULT focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT" >&2
+            echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT" >&2
           fi
           exit "$status"

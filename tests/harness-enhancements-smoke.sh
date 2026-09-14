@@ -635,7 +635,7 @@ EOF
 
 test_affected_gate_runs_positive_evidence_and_fails_open() {
   local gate="$TMP/check-affected-gate"
-  local base head boundary_base out log="$TMP/check-affected.log"
+  local base head boundary_base out policy_path log="$TMP/check-affected.log"
 
   mkdir -p "$gate/scripts/lib" "$gate/tests" "$gate/lib"
   cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
@@ -694,6 +694,7 @@ class LeafTest(unittest.TestCase):
             handle.write("python-unselected\n")
 EOF
   printf 'one\n' > "$gate/lib/leaf.py"
+  printf '__pycache__/\n' > "$gate/.gitignore"
   git -C "$gate" init -q
   git -C "$gate" config user.name test
   git -C "$gate" config user.email test@example.com
@@ -717,20 +718,28 @@ EOF
 
   : > "$log"
   (cd "$gate" && OMS_TEST_AFFECTED_LOG="$log" \
-    bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" >/dev/null) ||
+    bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" \
+      --ci-output "$TMP/ci-mode" >/dev/null) ||
     fail "affected gate rejected a positive graph plan"
+  grep -Fxq 'mode=affected' "$TMP/ci-mode" || fail "CI mode was not recorded"
   grep -Fxq shell-selected "$log" || fail "affected gate omitted the selected shell case"
   grep -Fxq python-selected "$log" || fail "affected gate omitted the selected Python case"
   grep -Fxq shell-file "$log" || fail "affected gate omitted the selected shell file"
   if grep -Fq unselected "$log"; then
     fail "affected gate ran a test case absent from the graph plan: $(cat "$log")"
   fi
+  (cd "$gate" && OMS_TEST_GRAPH_MODE=full bash scripts/check.sh --affected \
+    --changed-from "$base" --changed-to "$head" --ci-output "$TMP/ci-full") ||
+    fail "CI selector tried to execute full lanes inline"
+  grep -Fxq 'mode=full' "$TMP/ci-full" || fail "CI full mode was not recorded"
 
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=full \
     bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" --list-stages)" ||
     fail "affected gate rejected a fail-open graph plan"
   printf '%s\n' "$out" | grep -Fxq autonomy-hook ||
     fail "uncertain affected plan did not fall back to the full focused gate: $out"
+  printf '%s\n' "$out" | grep -Fxq shellcheck ||
+    fail "full affected fallback omitted lint: $out"
   printf '%s\n' "$out" | grep -Fxq artifact-supersession ||
     fail "fail-open affected stage listing stopped before the full focused gate: $out"
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=error \
@@ -749,6 +758,75 @@ EOF
     fail "affected gate rejected its own selector-boundary change"
   printf '%s\n' "$out" | grep -Fxq autonomy-hook ||
     fail "check.sh trusted the graph to validate its own selector change: $out"
+
+  # Prose changes need no graph or unrelated runtime suites. Agent policy is
+  # not prose-only, and the changed tree must still match what gets checked.
+  base="$head"
+  printf 'Documentation\n' > "$gate/README.md"
+  git -C "$gate" add README.md
+  git -C "$gate" commit -qm docs
+  head="$(git -C "$gate" rev-parse HEAD)"
+  out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=error bash scripts/check.sh --affected \
+    --changed-from "$base" --changed-to "$head" --list-stages 2>/dev/null)"
+  [ "$out" = source-distribution ] || fail "docs expanded into unrelated checks: $out"
+  printf 'dirty\n' >> "$gate/README.md"
+  out="$(cd "$gate" && bash scripts/check.sh --affected --print-affected-mode \
+    --changed-from "$base" --changed-to "$head" 2>/dev/null)"
+  [ "$out" = full ] || fail "docs shortcut trusted an uncommitted change"
+  git -C "$gate" add README.md
+  git -C "$gate" commit -qm docs-followup
+  head="$(git -C "$gate" rev-parse HEAD)"
+  printf 'untracked\n' > "$gate/lib/new.py"
+  out="$(cd "$gate" && bash scripts/check.sh --affected --print-affected-mode \
+    --changed-from "$base" --changed-to "$head" 2>/dev/null)"
+  [ "$out" = full ] || fail "docs shortcut ignored untracked code"
+  git -C "$gate" add lib/new.py
+  git -C "$gate" commit -qm new-code
+  mkdir -p "$gate/docs"
+  for policy_path in AGENTS.md docs/AGENTS.md scripts/update.sh scripts/lib/durable-jsonl.py; do
+    base="$(git -C "$gate" rev-parse HEAD)"
+    printf '# policy\n' > "$gate/$policy_path"
+    git -C "$gate" add "$policy_path"
+    git -C "$gate" commit -qm policy
+    head="$(git -C "$gate" rev-parse HEAD)"
+    out="$(cd "$gate" && bash scripts/check.sh --affected --print-affected-mode \
+      --changed-from "$base" --changed-to "$head" 2>/dev/null)"
+    [ "$out" = full ] || fail "critical boundary escaped full verification: $policy_path"
+  done
+  base="$head"
+  git -C "$gate" mv lib/new.py docs/code.md
+  git -C "$gate" commit -qm rename-code
+  head="$(git -C "$gate" rev-parse HEAD)"
+  out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=error bash scripts/check.sh --affected \
+    --print-affected-mode --changed-from "$base" --changed-to "$head" 2>/dev/null)"
+  [ "$out" = full ] || fail "renamed code was treated as ordinary docs"
+  for policy_path in custom-skills/example/SKILL.md templates/project-skills/example/SKILL.md templates/project-example.md config/models.json; do
+    base="$head"
+    mkdir -p "$(dirname "$gate/$policy_path")"
+    printf '{}\n' > "$gate/$policy_path"
+    git -C "$gate" add "$policy_path"
+    git -C "$gate" commit -qm scoped-contract
+    head="$(git -C "$gate" rev-parse HEAD)"
+    out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=error bash scripts/check.sh --affected \
+      --changed-from "$base" --changed-to "$head" --list-stages 2>/dev/null)"
+    case "$policy_path" in
+      config/*) grep -Fxq model-routing <<< "$out" || fail "model checks missing" ;;
+      *)
+        grep -Fxq skill-manifest <<< "$out" || fail "direct guidance checks missing: $out"
+        if grep -Eq 'prompt-budget|skill-lifecycle|functional-evolution' <<< "$out"; then
+          fail "guidance checks run unrelated execution suites: $out"
+        fi
+        ;;
+    esac
+    if grep -Fxq install-lifecycle <<< "$out"; then fail "scoped contract expanded to unrelated lifecycle tests"; fi
+  done
+  base="$head"
+  git -C "$gate" rm -q templates/project-skills/example/SKILL.md
+  git -C "$gate" commit -qm remove-template
+  head="$(git -C "$gate" rev-parse HEAD)"
+  out="$(cd "$gate" && bash scripts/check.sh --affected --changed-from "$base" \
+    --changed-to "$head" --list-stages 2>/dev/null)"
+  grep -Fxq skill-manifest <<< "$out" || fail "deleted guidance skipped resource validation"
 }
 
 test_uninstall_stops_before_unlink_on_removal_failure() {

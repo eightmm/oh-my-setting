@@ -208,18 +208,22 @@ export OMS_LIB_TMPDIR="$call_tmpdir"
 prompt_file="$(mktemp "$call_tmpdir/prompt.XXXXXX")" || fail "mktemp failed"
 cleanup_done=0
 cleanup() {
+  local status="${1:-0}"
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
+  if [ "$INCLUDE_TASK" = 1 ]; then
+    agent_task_record_outcome "$REPO" agent-call "$TO" "$status" "${artifact:-}" || true
+  fi
   rm -rf "$call_tmpdir"
 }
 cleanup_signal() {
   local code="$1"
   trap - EXIT HUP INT TERM
   ma_kill_jobs
-  cleanup
+  cleanup "$code"
   exit "$code"
 }
-trap cleanup EXIT
+trap 'cleanup "$?"' EXIT
 trap 'cleanup_signal 129' HUP
 trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM

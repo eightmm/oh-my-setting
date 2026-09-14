@@ -1159,7 +1159,7 @@ def event_resume(args: argparse.Namespace) -> int:
     attempt = create_attempt(
         repo,
         provider=spec.get("provider", "local"),
-        tool=spec.get("tool", "agent-run"),
+        tool=spec.get("tool", "agent-call"),
         task_id=spec.get("task_id", ""),
         run_id=spec.get("run_id", ""),
         parent_attempt_id=parent_id,

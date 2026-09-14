@@ -93,7 +93,7 @@ framework:
   fragment also exposes keyboard controls and an always-present text listing;
   a missing CDN renderer degrades to that listing rather than losing the graph.
 
-## Phase 0 — who owns what today
+## Ownership boundaries
 
 Audited on `main` at `3d1f5a1`. The graph layer calls these owners; it never
 re-implements them and never keeps a second copy of their state.
@@ -168,7 +168,6 @@ scripts/lib/oms_graph/
     events.py              run store: events.jsonl, projection, resume
     scheduler.py           eligibility + write-scope conflicts
     runner.py              `exec run` step loop, gates, tool nodes, caching
-    shadow.py              evaluator-vs-control-plane comparison ledger
     render.py              text / Mermaid / bounded interactive HTML renderers
     child_policy.py        harness-child allowlist
     cli.py                 argparse front door (`oms graph ...`)
@@ -921,7 +920,6 @@ oms graph exec resume    --run ID --worker PROVIDER
 oms graph exec decide    --run ID --node NODE --outcome OUTCOME [--note TEXT]
 oms graph exec status    [--run ID] [--json] [--mermaid|--html-fragment ABS]
 oms graph exec events    --run ID [--limit N]
-oms graph exec shadow    [--spec NAME]
 oms graph exec test      PATH   (route fixtures; a file or a directory)
 oms graph exec commit    --binding NAME [--run ID] [--message TEXT]   (parent-only exact commit of the bound task's landed patch)
 ```
@@ -961,49 +959,17 @@ parent's brief owns, and every `exec` writer stay parent-only and fail closed
 with exit 2.
 
 `SessionStart` intentionally does no graph work. Project-graph readers call
-`ensure` lazily, while `project ensure` and `exec shadow` remain explicit
-commands. This avoids putting a five-second freshness probe plus an
-eight-second shadow behind a ten-second session hook. The regenerable
-`.oms/project-graph/` cache and explicit `.oms/graph/shadow.jsonl` ledger stay
-ambient to the check gate (`scripts/lib/oms-state-inventory.py`); every other
+`ensure` lazily; `project ensure` is also available explicitly. Session hooks
+never run an execution-graph comparison. The regenerable `.oms/project-graph/`
+cache and historical `.oms/graph/shadow.jsonl` ledger stay ambient to the check
+gate (`scripts/lib/oms-state-inventory.py`); every other
 `.oms/graph/` entry (runs, events, projections) remains covered.
 
-## Shadow mode
+## Retired comparison diagnostic
 
-The evaluator never takes authority from `goal-drive`/`autopilot` in this
-round. `oms graph exec shadow` (parent-only) reconstructs where the bundled
-`goal-drive` spec would stand against current reality, maps the control
-plane's own canonical next action (`oms runtime next` → `actions[0]`, the
-deterministic transition `inbox`/`state`/`runtime` already share) onto a
-node, and appends one typed row to `.oms/graph/shadow.jsonl`:
-`{"schema":1,"kind":"graph-route-shadow","ts","spec_id","spec_digest","route":{"status","primary","reason"},"reconstructed":{"completed":[...],"assumed_failed":[...],"bindings":{"work_item":"t1"},"successors":[...],"stop"},"control_plane":{"action","mapped"},"agree":true|false,"basis":"frontier|successor|blocked|","reason"}`.
-
-Reconstruction (`shadow.reconstruct`, pure) exists because no run exists in a
-repository that never used `exec run`, and an empty run's primary is always
-the entry node, which compares nothing. Starting from the empty state, the
-evaluator's primary is settled and the route re-evaluated until reality can
-no longer confirm it: a primary whose proof holds under the facts is
-`completed`; an effect-free tool (a check such as `acceptance`) whose proof
-does not hold is assumed `failed`, so the route reaches the effectful work the
-check guards; any other unproven node, and a node without a proof, is the
-frontier. A `bind_task` selector binds the task reality names
-(`shadow.reality_task`: a task already `claimed`/`running`/`review`/`landing`,
-else `plan.actionable[0]`), recorded in `reconstructed.bindings`; a check whose
-failure path finds no task to bind is itself the frontier (`stop: check`).
-Nothing is executed and nothing is written but the row.
-
-Comparison (`shadow.compare`, pure): `frontier` when the mapped node is the
-frontier; `blocked` when the control plane names a blocker and the route
-refuses to advance; `successor` when the frontier is an effect-free tool and
-the mapped node is one of its immediate successors (both sides then name the
-same next effectful step). Mapping: `execute_ready_task`→`implement`,
-`review_or_land_patch`/`finish_landing`→`land`, `verify_active_task`→`acceptance`,
-`record_verified_completion`/`inspect_completed_plan_retirement`→`done`,
-`resolve_blocker`/`inspect_plan_contract`→`blocked`, `orient`→`inspect`.
-A blocker the control plane sees and the graph's facts do not (the failure
-ledger) is a recorded disagreement, which is the point: disagreements are
-evidence for the next round, never an action. Invoke `exec shadow` explicitly
-when that comparison is needed.
+`exec shadow` was removed: `oms runtime next` owns the control-plane next
+action, and `exec route/status` describe actual execution graphs. Historical
+comparison rows are preserved, not treated as authority or regenerated.
 
 ## MCP
 
@@ -1095,10 +1061,6 @@ a value may never start with `-`. Output stays under the server's
   focus, structural annotation from path pairs, and a real repository where
   config-to-code coupling is `structural: false` while an import is `true`,
   a bulk commit is skipped and counted, and a deleted path never appears.
-- `tests/test_oms_graph_shadow.py`: reconstruction against synthetic facts
-  (ready task → `implement` bound to it with `acceptance` assumed failed;
-  task in review → `land`; fresh passing acceptance → `done`; stale acceptance
-  with nothing to bind → the check itself) and every comparison basis.
 - `tests/graph-smoke.sh`: unittest discovery of `test_oms_graph_*.py`, CLI
   smoke through `scripts/oms`, dogfood build of this repository from a
   `git archive` copy (revision stable across two builds; `--include`/
@@ -1109,16 +1071,6 @@ a value may never start with `-`. Output stays under the server's
   Registered in `scripts/check.sh` as `stage graph`.
 - Every test uses a temporary repository; nothing writes into this
   checkout's `.oms`.
-
-## Work split
-
-| worker | files (disjoint) |
-|---|---|
-| W1 exec-IR | `oms_graph/{errors,predicates,spec,validate,facts,route,events}.py`, `config/graphs/{coding-change,goal-drive}.json`, `tests/test_oms_graph_exec.py` |
-| W2 project | `oms_graph/project/{model,extract,cache,build,query,blast,context}.py`, `oms_graph/project/parsers/*`, `tests/test_oms_graph_project.py` |
-| W-G analytics | `oms_graph/project/analytics.py`, `oms_graph/render.py`, `tests/fixtures/graph-routes/*.json`, `tests/test_oms_graph_analytics.py` |
-| W3 integration | `oms_graph/{cli,child_policy,scheduler,runner,shadow}.py`, `oms_graph/adapters/plan.py`, `scripts/graph.sh`, `scripts/lib/oms_graph_core.py`, `scripts/oms-mcp-server.py`, `scripts/check.sh`, `tests/graph-smoke.sh`, `tests/test_oms_graph_integration.py`, `tests/state-surfaces-smoke.sh`, docs |
-| Runtime v2 | `oms_graph/{binding,workspace,commit}.py`, binding-aware `spec/validate/events/route/scheduler/runner`, concrete-only `adapters/plan.py`, `plan-run --context-pack` + `peer-delegate --context-pack` (`oms_runtime/context_pack.py`), `tests/test_oms_graph_runtime.py`, `tests/test_oms_graph_workspace.py` |
 
 ## Non-goals (v1)
 

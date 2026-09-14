@@ -1,44 +1,13 @@
 # SETUP
 
-Environment lock for reproducibility. Pin everything that affects training output.
+Optional environment record; follow the project's existing environment manager.
+OMS's own private Python environment does not dictate a project's toolchain.
 
-## Tooling
+- Dependency manifest/lock and supported interpreter:
+- Verified install and smoke commands:
+- Relevant hardware, driver/runtime and library versions:
+- Required environment variables (names and purpose, never credentials):
+- Determinism settings and measured tradeoffs:
 
-- Package manager: `uv` (no pip/conda direct calls)
-- Python: see `pyproject.toml` `requires-python`
-- Install: `uv sync`
-- Run: `uv run <command>`
-
-## Hardware Targets
-
-- GPU model:
-- CUDA driver / runtime:
-- cuDNN:
-- RAM / VRAM minimum:
-
-## Env Vars
-
-```bash
-export CUDA_VISIBLE_DEVICES=0
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export HF_HOME=~/.cache/huggingface
-export TOKENIZERS_PARALLELISM=false
-export CUBLAS_WORKSPACE_CONFIG=:4096:8
-```
-
-## Determinism
-
-- Global seed:
-- `torch.use_deterministic_algorithms(True)`: yes/no (perf tradeoff)
-- `cudnn.benchmark`: false for repro, true for speed
-
-## First Run
-
-```bash
-uv sync
-uv run python scripts/smoke.py   # data + model + 1 step
-```
-
-## Update Triggers
-
-GPU/driver/CUDA, Python base, or core dep version change -> update this file + machine snapshot.
+Record only settings actually required or measured in this project.
+Do not copy generic CUDA overrides or invent unimplemented entrypoints.

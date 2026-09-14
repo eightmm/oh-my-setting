@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Focused regressions for the read-only operator cockpit, content-free OTLP
+# Focused regressions for content-free OTLP
 # JSONL export, explicit editor launch adapters, and retired semantic-eval
 # migration. Every fixture lives below TMP; no real provider or GUI is called.
 
@@ -283,6 +283,35 @@ after="$(git -C "$repo" status --porcelain=v1 --untracked-files=all)"
 # --- Content-free OTLP JSONL ----------------------------------------------
 
 otel="$TMP/traces.jsonl"
+python3 - "$ROOT/scripts/lib/otel-export.py" "$TMP/reader.jsonl" <<'PY' || fail "bounded telemetry reader lost source identities"
+import importlib.util
+import io
+import json
+import sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+spec = importlib.util.spec_from_file_location("otel_export", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+path = Path(sys.argv[2])
+with path.open('w', encoding='utf-8') as handle:
+    for number in range(1000):
+        handle.write(json.dumps({'n': number}) + '\n')
+    handle.write('x' * (2 * 1024 * 1024) + '\n')
+    handle.write('invalid\n[]\n\n{"n":1000}')
+assert module.read_rows(path, 2) == [(1000, {'n': 999}), (1005, {'n': 1000})]
+assert module.read_rows(path, 1) == [(1005, {'n': 1000})]
+assert module.read_rows(path.with_suffix('.missing'), 2) == []
+class BoundedReader(io.StringIO):
+    def __iter__(self):
+        raise AssertionError('unbounded line iteration')
+    def readline(self, size=-1):
+        assert 0 < size <= 1024 * 1024 + 1, size
+        return super().readline(size)
+with patch.object(Path, 'open', return_value=BoundedReader('x' * (3 * 1024 * 1024) + '\n{"n":1}')):
+    assert module.read_rows(path, 1) == [(2, {'n': 1})]
+PY
 XDG_STATE_HOME="$TMP/state" bash "$ROOT/scripts/otel-export.sh" \
   --repo "$repo" --limit 20 > "$otel"
 OMS_OTEL_FILE="$otel" OMS_OTEL_REPO="$repo" python3 - <<'PY' || fail "OTLP JSONL contract failed"

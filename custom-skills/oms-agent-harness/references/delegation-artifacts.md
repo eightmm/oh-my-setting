@@ -8,9 +8,9 @@ oms consult --to claude --repo . --prompt "Assess this plan."
 oms peer-delegate --to codex --repo . --prompt "Implement the bounded fix."
 ```
 
-`agent-call` and `agent-run` remain lower-level public compatibility primitives.
-When using the `agent-run` wrapper intentionally, pass `--mode read` or
-`--mode write` instead of asking its wording classifier to infer known authority.
+`agent-call` is the lower-level read primitive. Select read consultation or
+write delegation from the authorized request; no wording classifier selects
+write authority. Task-aware calls and delegates record their own outcomes.
 
 ## Allocate an ordinary request
 

@@ -116,6 +116,23 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('remainder', nargs='+')
     experiment = commands.add_parser('experiment', help='ExperimentContract v2 and invariant packs')
     experiment_sub = experiment.add_subparsers(dest='experiment_action', required=True)
+    launch_cmd = experiment_sub.add_parser(
+        'launch', help='pre-register one host command in the run ledger',
+        description='Provide all seven claim fields or --contract PATH, then -- COMMAND. '
+        'Uses run-ledger and its project verification gate; preserves command output/exit. '
+        'Paths resolve from --repo. Do not put secrets in recorded fields or command arguments.')
+    for field in ('question', 'hypothesis', 'prediction', 'baseline', 'metric', 'success', 'change'):
+        launch_cmd.add_argument('--' + field, default='')
+    for field, help_text in (
+        ('contract', 'validated ExperimentContract v2; conflicting field overrides are refused'),
+        ('metrics', 'metrics JSON emitted by the command'),
+        ('file', 'ledger path; default docs/EXPERIMENTS.jsonl'),
+        ('reason', 'recorded justification required with --no-gate'),
+    ):
+        launch_cmd.add_argument('--' + field, default='', help=help_text)
+    launch_cmd.add_argument('--no-gate', action='store_true', help='skip project verification; requires --reason')
+    launch_cmd.add_argument('--dry-run', action='store_true', help='validate without launching or writing the ledger')
+    launch_cmd.add_argument('remainder', nargs=argparse.REMAINDER)
     template_cmd = experiment_sub.add_parser('template')
     template_cmd.add_argument('--output', default='')
     validate_cmd = experiment_sub.add_parser('validate')

@@ -39,8 +39,9 @@ necessary; explain any additional worktree and its cleanup first.
 ## Release and record
 
 Only when commit/push is authorized, follow `oms-push-gate-discipline` and
-`oms land`: one full gate for the committed tree, push, installation update
-when applicable, and CI. Do not run `oms update` again after a successful
+the installed hook. For deployment, `oms land` owns one full gate for the
+committed tree, push of that SHA, successful CI, then installation update when applicable.
+Do not run `oms update` again after a successful
 landing update. A missing or failed update needs diagnosis, not an assumed pass.
 Keep a reviewed autopilot proposal's base and HEAD unchanged until execution;
 do not launch autopilot merely to demonstrate the product during unrelated work.

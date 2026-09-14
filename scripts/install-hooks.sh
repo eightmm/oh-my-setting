@@ -14,8 +14,8 @@ usage: install-hooks.sh [--full | --quick]
 Install this repository's pre-push hook.
 
   --full   Run scripts/check.sh before every push (default).
-  --quick  Run changed-file checks locally; requires the full GitHub Actions
-           gate to be a protected-branch requirement.
+  --quick  Run partial changed-file checks locally; requires the risk-based
+           GitHub Actions gate to be a protected-branch requirement.
 EOF
 }
 
@@ -41,7 +41,7 @@ if [ "$mode" = quick ]; then
   cat > "$hooks_dir/pre-push" <<'EOF'
 #!/usr/bin/env bash
 # Installed by scripts/install-hooks.sh --quick.
-# This is partial local feedback; the full GitHub Actions gate must protect the
+# This is partial local feedback; the risk-based CI gate must protect the
 # destination branch. Bypass once with: git push --no-verify
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"

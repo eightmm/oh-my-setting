@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from oms_graph import events, runner, shadow
+from oms_graph import events, runner
 from oms_graph.errors import GraphError
 from test_oms_graph_adapter import CHECK_SCRIPT, FAKE_CODEX, SCRUBBED, agent_node
 
@@ -399,19 +399,6 @@ class GraphRunTest(GraphRepoFixture, unittest.TestCase):
         self.assertEqual(downgraded["status"], "blocked", downgraded)
         self.assertEqual(self.outcomes(downgraded["run_id"])[0]["outcome"], "unverified")
         self.assertEqual(len(list(cache.glob("*.json"))), 1)
-
-    # -- 9 ------------------------------------------------------------------
-
-    def test_shadow_records_one_comparison_row(self) -> None:
-        ledger = self.repo / ".oms" / "graph" / "shadow.jsonl"
-        row = self.drive(shadow.shadow, self.repo)
-        self.assertIsInstance(row["agree"], bool)
-        self.assertEqual(row["kind"], "graph-route-shadow")
-        self.assertEqual(row["spec_id"], "goal-drive")
-        self.assertIn(row["control_plane"]["mapped"], set(shadow.ACTION_ROUTES.values()) | {""})
-        lines = [line for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
-        self.assertEqual(len(lines), 1)
-        self.assertEqual(json.loads(lines[0])["kind"], "graph-route-shadow")
 
 
 @unittest.skipUnless(HAVE_GIT, "git is required to drive plan-run")

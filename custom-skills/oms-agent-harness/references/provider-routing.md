@@ -41,7 +41,7 @@ oms consult --to grok --prompt 'Check this design assumption.'
 oms consult --to opencode:model=zai/glm-4.7 --prompt 'Review this plan.'
 oms consult --to deepseek --prompt 'Review the ownership boundary.'
 oms consult --to aider:model=deepseek/deepseek-chat --prompt 'Review this plan.'
-oms agent-run --to cursor --mode write --prompt 'Implement the reviewed change.'
+oms peer-delegate --to cursor --prompt 'Implement the reviewed change.'
 ```
 
 Use `--providers all` only for diagnostics that should also show absent

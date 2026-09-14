@@ -16,8 +16,7 @@ set -euo pipefail
 # Agreement is then reported by model family, because two answers from one
 # family are one opinion twice, not two independent opinions.
 #
-# Read-only by design: it never delegates writes. Use peer-delegate (or
-# agent-run --mode write) when the peer should produce a patch.
+# Read-only by design: use peer-delegate when the peer should produce a patch.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh

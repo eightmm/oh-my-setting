@@ -68,9 +68,13 @@ Default: concise, scoped, evidence-driven.
 ## Verification
 
 - Reuse coverage; test uncovered contracts, bugs, or safety boundaries.
-- Use affected native checks; graph uncertainty widens verification.
+- Scale verification to changed contracts: ordinary prose needs reference
+  checks, code needs affected native checks, and install/permission/state
+  changes need broader coverage. Agent instructions are behavioral contracts.
+- Graph uncertainty widens the affected scope; it is not proof of safety.
 - Run syntax, affected and required checks; repeat/broaden only for changes,
-  failures, or unresolved risk. Preserve required release gates.
+  failures, or unresolved risk. Do not impose full CI on every edit or add
+  duplicate local/CI gates. Preserve project-required release gates.
 - Report every skipped, failed, or impossible check. State evidence.
 
 ## Multi-Agent Work

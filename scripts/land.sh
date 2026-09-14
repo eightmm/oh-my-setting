@@ -2,14 +2,16 @@
 set -euo pipefail
 
 # Land a committed worktree on the shared branch as one detached job. It runs
-# the local gate, pushes without the pre-push hook, refreshes the install when
-# the repo is the harness checkout itself, waits for CI, and writes a receipt;
+# the local gate, pushes without the pre-push hook, waits for CI, refreshes the
+# install when the repo is the harness checkout itself, and writes a receipt;
 # an agent starts it and reads `oms land status` instead of babysitting the gate.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 # shellcheck source=scripts/lib/work-journal.sh
 . "$ROOT/scripts/lib/work-journal.sh"
+# shellcheck source=scripts/lib/file-lock.sh
+. "$ROOT/scripts/lib/file-lock.sh"
 
 usage() {
   cat <<'EOF'
@@ -22,20 +24,22 @@ Preconditions: a clean tracked tree, HEAD ahead of REMOTE/TARGET with the
 remote tip as an ancestor (rebase first otherwise), and a gate command
 (default: bash scripts/check.sh when the repo has one).
 Stages, each recorded beside its gate log under
-$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/<stamp>-<sha>-<pid>.json,
+$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/<sha>-<request-digest>.json,
 outside the repo:
   gate    the gate command; a failure is recorded in the fail ledger
-  push    git push --no-verify REMOTE HEAD:TARGET, only if HEAD and the tree
+  push    git push --no-verify REMOTE VERIFIED_SHA:TARGET, only if HEAD and the tree
           are unchanged since the gate started
-  update  the install checkout's update.sh, only when REMOTE is that
-          checkout's origin (so a push there is what the install pulls)
   ci      the GitHub run for the pushed commit, polled up to --ci-wait
           seconds (default 1500; 0 skips; needs gh)
+  update  only after CI success, the matching install checkout's update.sh;
+          its target must still be the verified SHA. Skipped CI never updates.
   sibling live autopilot runs (proposing, proposal-review, driving) in sibling
           worktrees are reported at intake and waited for before push, up to
           --sibling-wait seconds (default 1800; 0 checks once and blocks at
           once, it does not skip: --ignore-siblings skips)
 Without --wait the job detaches (setsid) and this prints the receipt path.
+Retrying the same commit/destination/gate reuses successful push evidence and
+resumes CI/install only. Concurrent jobs for this repository exit 75.
 EOF
 }
 
@@ -104,6 +108,8 @@ try:
     row = json.load(open(path, encoding="utf-8"))
 except Exception:
     row = {"schema": 1}
+if pairs and pairs[0] == "--reset":
+    row, pairs = {"schema": 1}, pairs[1:]
 for pair in pairs:
     key, _, value = pair.partition("=")
     if value.lstrip("-").isdigit():
@@ -258,73 +264,165 @@ finish() {  # finish STATE SUMMARY
   echo "land $SHORT: $1: $2" >> "$LOG"
 }
 
+receipt_value() {
+  python3 - "$RECEIPT" "$1" <<'PY' | tr -d '\r'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+    for key in sys.argv[2].split("."):
+        value = value[key]
+    print(value)
+except (OSError, ValueError, KeyError, TypeError):
+    pass
+PY
+}
+
+can_resume() {
+  [ -f "$RECEIPT" ] &&
+    [ "$(receipt_value sha)" = "$SHA" ] &&
+    [ "$(receipt_value request)" = "$STAMP" ] &&
+    [ "$(receipt_value gate.rc)" = 0 ] &&
+    [ "$(receipt_value push.rc)" = 0 ]
+}
+
+request_stamp() {
+  local destination
+  destination="$(git -C "$REPO" remote get-url --push "$REMOTE")" || return 1
+  # Hash instead of storing potentially credential-bearing URLs in receipts.
+  printf '%s' "$destination" | python3 -c '
+import hashlib, json, sys
+print(sys.argv[1] + "-" + hashlib.sha256(json.dumps(
+    [sys.stdin.read().strip(), *sys.argv[2:]], ensure_ascii=True
+).encode()).hexdigest()[:24])' "$1" "$REMOTE" "$TARGET" "$GATE" | tr -d '\r'
+}
+
+bounded_ci_query() {  # seconds, gh arguments
+  local seconds="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --kill-after=1 "$seconds" gh "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout --kill-after=1 "$seconds" gh "$@"
+  else
+    python3 "$ROOT/scripts/lib/run-bounded.py" "$seconds" 1 land-ci gh "$@"
+  fi
+}
+
 run_job() {
   cd "$REPO"
   mkdir -p "$LAND_DIR"
   RECEIPT="$LAND_DIR/$STAMP.json" LOG="$LOG_DIR/$STAMP.log"
   SHA="$(git rev-parse HEAD)" SHORT="${SHA:0:7}"
+  [ "$STAMP" = "$(request_stamp "$SHA")" ] || {
+    note "error: HEAD or destination changed before job started"; return 1;
+  }
+  local resume=0 remote_sha
+  if can_resume; then
+    remote_sha="$(git ls-remote --exit-code "$(git remote get-url --push "$REMOTE")" "refs/heads/$TARGET")" || return 1
+    remote_sha="${remote_sha%%[[:space:]]*}"
+    if [ "$remote_sha" != "$SHA" ] || ! clean_tree; then
+      note "error: cannot resume: remote tip or tracked tree differs from verified commit"
+      return 1
+    fi
+    resume=1
+  fi
+  [ "$resume" -eq 1 ] || rset --reset
   rset pid="$$" state=running started_at="$(now)" sha="$SHA" gate.command="$GATE" \
-    remote="$REMOTE" target="$TARGET" log="$LOG"
-  if [ "$IGNORE_SIBLINGS" -eq 1 ]; then
-    rset siblings.ignored=true
-  else
-    collect_live_siblings 1 || true
-    [ -z "$SIBLING_LIVE" ] || rset siblings.live="$SIBLING_LIVE"
-  fi
+    remote="$REMOTE" target="$TARGET" log="$LOG" request="$STAMP" resumed="$resume"
   local t0 rc=0
-  t0="$(date +%s)"
-  bash -c "$GATE" >> "$LOG" 2>&1 || rc=$?
-  rset gate.rc="$rc" gate.seconds="$(( $(date +%s) - t0 ))"
-  if [ "$rc" -ne 0 ]; then
-    "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" record --kind verify --cmd "$GATE" \
-      --exit "$rc" --summary "land: gate failed for $SHORT (see $LOG)" >/dev/null 2>&1 || true
-    finish failed "gate exit $rc"; return 1
-  fi
-  if [ "$(git rev-parse HEAD)" != "$SHA" ] || ! clean_tree; then
-    rset push.rc=-1
-    finish failed "HEAD or the tree changed while the gate ran; nothing pushed"; return 1
-  fi
-  if [ "$IGNORE_SIBLINGS" -eq 0 ]; then
-    wait_for_live_siblings || return 1
-  fi
-  rc=0
-  git push --no-verify "$REMOTE" "HEAD:refs/heads/$TARGET" >> "$LOG" 2>&1 || rc=$?
-  rset push.rc="$rc"
-  [ "$rc" -eq 0 ] || { finish failed "push exit $rc"; return 1; }
-  local install update_rc=0
-  if [ "$UPDATE" -eq 1 ] && install="$(install_root)"; then
+  if [ "$resume" -eq 0 ]; then
+    rset gate.rc=pending push.rc=pending ci.conclusion=skipped update.rc=skipped
+    if [ "$IGNORE_SIBLINGS" -eq 1 ]; then
+      rset siblings.ignored=true
+    else
+      collect_live_siblings 1 || true
+      [ -z "$SIBLING_LIVE" ] || rset siblings.live="$SIBLING_LIVE"
+    fi
+    t0="$(date +%s)"
+    bash -c "$GATE" >> "$LOG" 2>&1 || rc=$?
+    rset gate.rc="$rc" gate.seconds="$(( $(date +%s) - t0 ))"
+    if [ "$rc" -ne 0 ]; then
+      "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" record --kind verify --cmd "$GATE" \
+        --exit "$rc" --summary "land: gate failed for $SHORT (see $LOG)" >/dev/null 2>&1 || true
+      finish failed "gate exit $rc"; return 1
+    fi
+    if [ "$(git rev-parse HEAD)" != "$SHA" ] || ! clean_tree; then
+      rset push.rc=-1
+      finish failed "HEAD or the tree changed while the gate ran; nothing pushed"; return 1
+    fi
+    if [ "$IGNORE_SIBLINGS" -eq 0 ]; then
+      wait_for_live_siblings || return 1
+    fi
+    if [ "$(git rev-parse HEAD)" != "$SHA" ] || ! clean_tree ||
+        [ "$STAMP" != "$(request_stamp "$SHA")" ]; then
+      rset push.rc=-1
+      finish failed "HEAD, destination or tree changed before push; nothing pushed"; return 1
+    fi
     rc=0
-    "$install/scripts/update.sh" >> "$LOG" 2>&1 || rc=$?
-    rset update.rc="$rc"
-    update_rc="$rc"
-  else
-    rset update.rc=skipped
+    git push --no-verify "$REMOTE" "$SHA:refs/heads/$TARGET" >> "$LOG" 2>&1 || rc=$?
+    rset push.rc="$rc"
+    [ "$rc" -eq 0 ] || { finish failed "push exit $rc"; return 1; }
   fi
-  local conclusion=skipped run_id="" deadline
-  if [ "$CI_WAIT" -gt 0 ] && command -v gh >/dev/null 2>&1; then
+  local conclusion=skipped run_id="" deadline remaining query_result
+  if [ "$resume" -eq 1 ] && [ "$(receipt_value ci.conclusion)" = success ]; then
+    conclusion=success
+  elif [ "$CI_WAIT" -gt 0 ] && command -v gh >/dev/null 2>&1; then
     conclusion=timeout
     deadline="$(( $(date +%s) + CI_WAIT ))"
     while [ "$(date +%s)" -lt "$deadline" ]; do
-      read -r run_id conclusion < <(gh run list --commit "$SHA" --limit 1 \
+      local ci_args=(--repo "$(repo_slug "$(git remote get-url --push "$REMOTE")")"
+        --commit "$SHA" --branch "$TARGET" --event push --limit 1)
+      [ ! -f "$REPO/.github/workflows/test.yml" ] || ci_args+=(--workflow test.yml)
+      remaining="$(( deadline - $(date +%s) ))"
+      [ "$remaining" -gt 0 ] || break
+      [ "$remaining" -le 30 ] || remaining=30
+      rc=0
+      query_result="$(bounded_ci_query "$remaining" run list "${ci_args[@]}" \
         --json databaseId,status,conclusion \
         --jq '.[] | "\(.databaseId) \(if .status == "completed" then .conclusion else "pending" end)"' \
-        2>/dev/null || echo "")
+        2>> "$LOG")" || rc=$?
+      rset ci.query_rc="$rc"
+      if [ "$rc" -ne 0 ]; then
+        rset ci.conclusion=query-error
+        finish failed "pushed $SHORT but CI query exit $rc (see $LOG); retry to resume"
+        return 1
+      fi
+      query_result="$(oms_strip_cr "$query_result")"
+      read -r run_id conclusion <<< "$query_result"
       [ -n "$run_id" ] && [ "$conclusion" != pending ] && break
       conclusion=timeout
-      sleep 30
+      remaining="$(( deadline - $(date +%s) ))"
+      [ "$remaining" -gt 0 ] || break
+      [ "$remaining" -le 30 ] || remaining=30
+      sleep "$remaining"
     done
     rset ci.run_id="${run_id:-}" ci.conclusion="$conclusion"
   else
     rset ci.conclusion=skipped
   fi
-  if [ "$update_rc" -ne 0 ]; then
-    finish failed "pushed $SHORT but install update exit $update_rc; ci $conclusion"
-    return 1
-  fi
   case "$conclusion" in
-    success|skipped) finish passed "pushed $SHORT to $REMOTE/$TARGET; ci $conclusion" ;;
+    success|skipped) ;;
     *) finish failed "pushed $SHORT but ci $conclusion"; return 1 ;;
   esac
+  local install
+  if [ "$UPDATE" -eq 1 ] && install="$(install_root)"; then
+    if [ "$conclusion" != success ]; then
+      finish blocked "pushed $SHORT; install update requires successful CI (ci $conclusion)"
+      return 1
+    fi
+    if [ "$resume" -eq 1 ] && [ "$(receipt_value update.rc)" = 0 ] &&
+        [ "$(oms_strip_cr "$(receipt_value update.root)")" = "$install" ]; then
+      finish passed "already pushed and installed $SHORT; ci $conclusion"
+      return 0
+    fi
+    rc=0
+    OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$SHA" "$install/scripts/update.sh" >> "$LOG" 2>&1 || rc=$?
+    rset update.rc="$rc" update.expected_sha="$SHA" update.root="$install"
+    if [ "$rc" -ne 0 ]; then
+      finish failed "pushed $SHORT but install update exit $rc; ci $conclusion"
+      return 1
+    fi
+  fi
+  finish passed "pushed $SHORT to $REMOTE/$TARGET; ci $conclusion"
 }
 
 show_status() {  # show_status [RECEIPT]; default: the most recently written one
@@ -354,7 +452,12 @@ PY
 
 case "$MODE" in
   status) show_status; exit ;;
-  job) run_job || exit 1; exit 0 ;;
+  job)
+    rc=0
+    oms_try_file_lock "$LAND_DIR/active" run_job || rc=$?
+    [ "$rc" -ne 75 ] || echo "land already active for this repository; use land status" >&2
+    exit "$rc"
+    ;;
 esac
 
 clean_tree || { echo "error: commit or stash tracked changes first" >&2; exit 2; }
@@ -366,11 +469,16 @@ git -C "$REPO" fetch -q "$REMOTE" || { echo "error: fetch from $REMOTE failed" >
 if ! git -C "$REPO" merge-base --is-ancestor "$REMOTE/$TARGET" HEAD; then
   echo "error: $REMOTE/$TARGET is not an ancestor of HEAD; rebase first" >&2; exit 2
 fi
+SHA="$(git -C "$REPO" rev-parse HEAD)"
+# Retries/worktrees share a receipt; different destinations/gates never share proof.
+STAMP="$(request_stamp "$SHA")"
+RECEIPT="$LAND_DIR/$STAMP.json"
 if [ "$(git -C "$REPO" rev-parse HEAD)" = "$(git -C "$REPO" rev-parse "$REMOTE/$TARGET")" ]; then
-  echo "nothing to land: HEAD is already $REMOTE/$TARGET"; exit 0
+  if ! can_resume; then
+    echo "nothing to land: HEAD is already $REMOTE/$TARGET; no matching push receipt to resume"; exit 0
+  fi
 fi
 mkdir -p "$LAND_DIR"
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$REPO" rev-parse --short HEAD)-$$"
 job=("$ROOT/scripts/land.sh" --run-job "$STAMP" --repo "$REPO" --remote "$REMOTE" \
   --target "$TARGET" --gate "$GATE" --ci-wait "$CI_WAIT" --sibling-wait "$SIBLING_WAIT")
 [ "$UPDATE" -eq 1 ] || job+=(--no-update)
@@ -378,7 +486,7 @@ job=("$ROOT/scripts/land.sh" --run-job "$STAMP" --repo "$REPO" --remote "$REMOTE
 if [ "$WAIT" -eq 1 ]; then
   rc=0
   bash "${job[@]}" || rc=$?
-  JSON=0 show_status "$LAND_DIR/$STAMP.json"
+  [ ! -f "$LAND_DIR/$STAMP.json" ] || JSON=0 show_status "$LAND_DIR/$STAMP.json"
   exit "$rc"
 fi
 # Job control on for the launch: a plain `&` from a script leaves SIGINT and

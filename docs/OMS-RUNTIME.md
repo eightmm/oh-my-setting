@@ -418,6 +418,16 @@ CAS and never silently auto-applies stable changes.
 
 ## ExperimentContract v2
 
+`oms runtime experiment launch` replaces the standalone `research-runner` for
+one pre-registered host command. Pass `--contract PATH` or the seven fields
+`--question`, `--hypothesis`, `--prediction`, `--baseline`, `--metric`,
+`--success`, `--change`, then `-- COMMAND...`. It streams command output and
+returns the command's exit code. `--metrics` and `--file` select ledger inputs;
+relative paths resolve from `--repo`. The existing run-ledger pre-flight gate
+still applies; `--no-gate` requires a recorded `--reason`. `--dry-run` validates
+without launching or writing the ledger. Conflicting contract overrides are
+rejected. This is not a multi-arm study and does not infer compute permission.
+
 ```bash
 oms runtime experiment template --output experiment.json
 oms runtime experiment validate experiment.json

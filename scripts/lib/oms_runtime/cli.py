@@ -173,6 +173,9 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
             emit(value, args.pretty)
             return rc
         if args.command == 'experiment':
+            if args.experiment_action == 'launch':
+                from .experiment_launch import launch
+                return launch(repo, args)
             if args.experiment_action == 'template':
                 value = experiment_template()
                 if args.output:

@@ -8,6 +8,11 @@ fail() {
   exit 1
 }
 
+case "${1:-}" in
+  ''|--docs-only) ;;
+  *) fail "usage: source-distribution-smoke.sh [--docs-only]" ;;
+esac
+
 for path in \
   .github/workflows/release.yml \
   .github/workflows/agent-snapshot.yml \
@@ -44,6 +49,21 @@ grep -Fq 'raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh' "$ROO
 grep -Fq 'INSTALLER_DEFAULT_REF="edge"' "$ROOT/install.sh" ||
   fail "source installer must retain the edge channel default"
 
+if [ "${1:-}" = --docs-only ]; then
+  echo "source-distribution-smoke: ok (documentation references only)"
+  exit 0
+fi
+
+# The docs route must not start runtime probes, providers or downloads.
+(
+  bash() { return 97; }
+  python3() { return 97; }
+  curl() { return 97; }
+  gh() { return 97; }
+  export -f bash python3 curl gh
+  "$BASH" "$ROOT/tests/source-distribution-smoke.sh" --docs-only >/dev/null
+) || fail "documentation checks depend on executable probes"
+
 workflow="$ROOT/.github/workflows/test.yml"
 for host in ubuntu-latest macos-latest windows-latest; do
   grep -Fq "os: $host" "$workflow" ||
@@ -66,6 +86,8 @@ lane_union="$( (bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 1/4 
   bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 4/4 --list-stages) | sort)"
 [ "$full_stages" = "$lane_union" ] ||
   fail "focused lanes must partition the stage list exactly (no drop, no double)"
+printf '%s\n' "$full_stages" | grep -Fxq install-lifecycle ||
+  fail "Linux auto lifecycle must remain in the focused gate"
 # Exercise the local orchestrator without recursively running the full gate.
 (
   probe="$(mktemp -d "${TMPDIR:-/tmp}/oms-parallel-probe.XXXXXX")"
@@ -129,19 +151,17 @@ grep -Fq 'OMS_SMOKE_TIMINGS: "1"' "$workflow" ||
 # job; a fail-open result reuses the existing focused and smoke matrices rather
 # than serializing the complete gate on one runner.
 grep -Fq 'affected_plan:' "$workflow" || fail "workflow must expose an affected-plan job"
-grep -Fq 'affected:' "$workflow" || fail "workflow must expose an affected-test job"
-grep -Fq -- '--affected --no-lint' "$workflow" ||
-  fail "the PR affected job must avoid repeating the independent lint job"
-grep -Fq -- '--print-affected-mode' "$workflow" ||
-  fail "the PR plan job must project affected versus full before scheduling tests"
+if grep -q '^  affected:' "$workflow"; then fail "affected selection must not run twice"; fi
+grep -Fq -- '--affected --changed-from "$DIFF_BASE"' "$workflow" ||
+  fail "the affected job must include changed-file lint and use the planned base"
+grep -Fq -- '--ci-output "$GITHUB_OUTPUT"' "$workflow" ||
+  fail "the plan job must execute narrow checks or defer full checks in one pass"
 grep -Fq "needs.affected_plan.outputs.mode == 'full'" "$workflow" ||
   fail "full fallback must reuse the parallel focused and smoke matrices"
-grep -Fq "needs.affected_plan.outputs.mode == 'affected'" "$workflow" ||
-  fail "positive graph evidence must schedule the narrow affected job"
-grep -Fq "if: github.event_name == 'pull_request'" "$workflow" ||
-  fail "the affected plan must run only for pull requests"
-grep -Fq 'EVENT_NAME: ${{ github.event_name }}' "$workflow" ||
-  fail "the stable gate must distinguish intentional event-specific skips"
+grep -Fq 'github.event.pull_request.base.sha || github.event.before' "$workflow" ||
+  fail "PRs and pushes must both select the changed range"
+grep -Fq 'workflow_dispatch:' "$workflow" || fail "manual full verification is missing"
+grep -Fq 'cron:' "$workflow" || fail "periodic full verification is missing"
 
 # The public floor is Python 3.9, so syntax and the parser-less Codex HUD path
 # need a real 3.9 interpreter in CI rather than only a modern-parser promise.
@@ -216,6 +236,70 @@ body = "\n".join(gate_body)
 unread = sorted(name for name in required if "needs.%s.result" % name not in body)
 if unread:
     raise SystemExit("gate does not inspect the result of: %s" % ", ".join(unread))
+
+# Execute the gate's real shell, not a second implementation of its policy.
+import os
+import subprocess
+script = body.split("        run: |\n", 1)[1]
+script = "\n".join(line[10:] for line in script.splitlines())
+full_jobs = required - {"affected_plan"}
+for mode in ("full", "affected"):
+    env = dict(os.environ, AFFECTED_MODE=mode, AFFECTED_PLAN_RESULT="success")
+    env.update({name.upper() + "_RESULT": "success" if mode == "full" else "skipped"
+                for name in full_jobs})
+    def passes(values):
+        return subprocess.run(["bash", "-eu", "-c", script], env=values,
+                              capture_output=True).returncode == 0
+    assert passes(env), (mode, "valid planned skips rejected")
+    for name in required:
+        key = name.upper() + "_RESULT"
+        for result in ("success", "skipped", "failure", "cancelled", ""):
+            if result != env[key]:
+                assert not passes(dict(env, **{key: result})), (mode, name, result)
+    assert not passes(dict(env, AFFECTED_MODE="unknown"))
+
+# Every expensive job follows the same decision. Run the planner shell with
+# bounded Git/check stubs to verify events and absent-base fallback offline.
+import tempfile
+workflow_text = "\n".join(lines)
+for name in full_jobs:
+    job = workflow_text.split("\n  " + name + ":\n", 1)[1].split("\n  #", 1)[0]
+    job = re.split(r"\n  [A-Za-z0-9_-]+:\n", job, maxsplit=1)[0]
+    mode = "full"
+    assert "    needs: affected_plan\n" in job, name
+    assert "    if: needs.affected_plan.outputs.mode == '%s'\n" % mode in job, name
+plan_body = workflow_text.split("\n  affected_plan:\n", 1)[1].split("\n  install_e2e:\n", 1)[0]
+plan_script = plan_body.split("      - name: select and verify affected changes\n", 1)[1].split("        run: |\n", 1)[1]
+plan_script = "\n".join(line[10:] for line in plan_script.splitlines()
+                        if line.startswith("          "))
+with tempfile.TemporaryDirectory(prefix="oms-ci-plan-") as tmp:
+    root = pathlib.Path(tmp)
+    (root / "scripts").mkdir()
+    (root / "scripts/check.sh").write_text(
+        'echo invoked >> "$PROBE_LOG"\n[ "$PROBE_MODE" != invalid ] || exit 2\n'
+        'printf "mode=%s\\n" "$PROBE_MODE" >> "$GITHUB_OUTPUT"\n', encoding="utf-8")
+    for event, base, selected, expected, invoked in (
+        ("pull_request", "valid", "affected", "affected", True),
+        ("push", "valid", "affected", "affected", True),
+        ("push", "valid", "full", "full", True),
+        ("push", "missing", "affected", "full", False),
+        ("push", "0" * 40, "affected", "full", False),
+        ("schedule", "valid", "affected", "full", False),
+        ("workflow_dispatch", "valid", "affected", "full", False),
+        ("push", "valid", "invalid", None, True),
+    ):
+        output, log = root / "output", root / "invoked"
+        output.write_text("", encoding="utf-8")
+        log.write_text("", encoding="utf-8")
+        env = dict(os.environ, EVENT_NAME=event, DIFF_BASE=base, PROBE_MODE=selected,
+                   GITHUB_OUTPUT=str(output), PROBE_LOG=str(log))
+        result = subprocess.run(["bash", "-eu", "-c",
+                                 'git() { [ "$3" = "valid^{tree}" ]; };\n' + plan_script],
+                                cwd=tmp, env=env, capture_output=True)
+        assert (result.returncode == 0) == (expected is not None), (event, result.stderr)
+        if expected is not None:
+            assert "mode=" + expected in output.read_text(), (event, base)
+        assert log.read_text().splitlines() == (["invoked"] if invoked else []), (event, base, "repeated or missing selection")
 PY
 
 for mode in --focused-only --scripts-smoke-only --quick --affected; do
@@ -369,19 +453,16 @@ row = next(item for item in rows if item["name"] == "oms-spec-interview")
 assert "start this project" in [str(value).casefold() for value in row.get("triggers", [])]
 PY
 
-for command in agent-call agent-run peer-ask peer-review peer-delegate plan-run; do
+for command in agent-call peer-ask peer-review peer-delegate plan-run; do
   help="$(bash "$ROOT/scripts/$command.sh" --help 2>&1)" ||
     fail "$command --help failed"
-  printf '%s' "$help" | grep -Fq 'xhigh' || fail "$command help omits xhigh effort"
-  printf '%s' "$help" | grep -Fq 'max' || fail "$command help omits max effort"
-  printf '%s' "$help" | grep -Fq 'ultra' || fail "$command help omits ultra effort"
+  grep -Fq 'xhigh' <<< "$help" || fail "$command help omits xhigh effort"
+  grep -Fq 'max' <<< "$help" || fail "$command help omits max effort"
+  grep -Fq 'ultra' <<< "$help" || fail "$command help omits ultra effort"
 done
 
 if grep -Fq 'oms run-capsule' "$ROOT/scripts/init.sh"; then
   fail "oms init still recommends the removed run-capsule front door"
-fi
-if grep -Fq 'tier follows the work' "$ROOT/scripts/agent-run.sh"; then
-  fail "agent-run help still claims removed automatic model tiers"
 fi
 if grep -Fq -- '--effort' "$ROOT/custom-skills/oms-agent-harness/references/model-routing.md"; then
   fail "model routing skill still advertises the wrong public effort option"

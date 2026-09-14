@@ -4,14 +4,27 @@ For explicitly authorized peer review, use `oms peer-review` to judge an existin
 diff without writing to it. The parent owns fixes, landing, verification, commit,
 push, and release.
 
-For an authorized release, finish focused checks and local commits, then use
-`oms land` to run the full gate once, push the same unchanged HEAD, and follow
-CI. It already owns that sequence; do not precede it with another full gate or
+During development, run checks for the changed contract, not a full gate after
+every edit or commit. Prose needs reference checks; skill/template Markdown
+uses direct format/resource validation, not unrelated runtime suites.
+Executable templates and install/permission/state boundaries need behavioral checks.
+Reuse tests; do not add tests or invoke a review council for ceremony.
+
+For an authorized deployment, finish focused checks and local commits, then use
+`oms land` to run the full gate once, push the verified SHA, follow CI, and
+update the installation only after success. Skipped CI does not authorize an
+installation refresh. It owns that sequence; do not precede it with another full gate or
 add a separate verification-cache authority. A direct Git push retains the
 installed hook. `install-hooks.sh --quick` is only appropriate when required
-branch-protection checks enforce the full CI gate; mere workflow presence is
-not that guarantee. Hook installation resolves Git's hooks path, including
+branch-protection checks enforce the risk-based CI `gate`; mere workflow presence
+is not that guarantee. Hook installation resolves Git's hooks path, including
 linked worktrees and explicit `core.hooksPath` configuration.
+
+If push succeeded but CI/install failed, retry the same `oms land` request.
+Matching commit, destination and gate evidence resumes the remaining stages;
+successful stages are not rerun. One repository lock prevents concurrent gates
+(exit 75 means another landing is active). CI query failures stop with a logged
+error; each query and the polling loop have deadlines.
 
 In OMS itself, `bash scripts/check.sh --parallel` runs the same complete
 coverage through existing CI partitions. For an authorized landing, pass
@@ -38,6 +51,8 @@ oms peer-review --repo . --base origin/main --gate \
   --verify "bash scripts/check-bash32.sh"
 ```
 
+Without a declared fast mode, `peer-review --gate` requires an explicit
+`--verify` instead of automatically repeating the full release suite.
 Select the relevant project check for `--verify`; the example is OMS shell
 syntax coverage, not a full release gate. Leave the full gate to `oms land`.
 

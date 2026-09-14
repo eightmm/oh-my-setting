@@ -439,7 +439,7 @@ OMS_METRICS_JSON="$METRICS_JSON" OMS_GATE_STATUS="$GATE_STATUS" OMS_GATE_REASON=
   OMS_LEDGER_RUN_ID="$effective_run_id" \
   python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "${SLURM_JOB_ID:-}" \
   "$status" "$duration_s" "$NOTE" "$@" <<'EOF' > "$row_tmp"
-import json, os, sys, uuid
+import json, os, re, sys, uuid
 a = sys.argv[1:]
 row = {
     "schema": 1,
@@ -480,6 +480,9 @@ if research_file:
                     for key in allowed
                     if research.get(key) not in (None, "")
                 }
+                contract_digest = research.get("contract_digest", "")
+                if isinstance(contract_digest, str) and re.fullmatch(r"[0-9a-f]{64}", contract_digest):
+                    clean["contract_digest"] = contract_digest
                 if clean:
                     row["research"] = clean
     except (OSError, ValueError, TypeError):

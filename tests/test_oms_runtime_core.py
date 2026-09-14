@@ -73,6 +73,7 @@ class ChildRuntimePolicyTest(unittest.TestCase):
             ['backend', 'run', 'trusted-local', '--', 'true'],
             ['experiment', 'template', '--output', 'experiment.json'],
             ['experiment', 'register', '{}'],
+            ['experiment', 'launch', '--contract', 'experiment.json', '--', 'true'],
             ['experiment', 'run', '--id', 'experiment-id', '--arm', 'baseline', '--seed', '1', '--metrics', 'metrics.json', '--', 'true'],
             ['experiment', 'invariants', '{}'],
             ['benchmark', 'snapshot'],
@@ -1123,6 +1124,25 @@ class RuntimeFixture(RuntimeFixtureBase):
         ledger_by_op = {row['operation_id']: row['id'] for row in ledger_rows}
         for row in runtime_rows:
             self.assertEqual(row['ledger_id'], ledger_by_op[row['run_id']])
+
+        # Single-command registration uses the same validated contract and ledger.
+        contract_path = self.repo / 'experiment.json'
+        atomic_write_json(contract_path, contract)
+        command = [sys.executable, str(ROOT / 'scripts/lib/oms_core.py'),
+                   '--repo', str(self.repo), 'experiment', 'launch',
+                   '--contract', str(contract_path)]
+        launch_args = ['--', 'bash', '-c', 'exit 7']
+        launched = subprocess.run(command + launch_args, capture_output=True, text=True)
+        self.assertEqual(launched.returncode, 7, launched.stderr)
+        ledger = self.repo / 'docs/EXPERIMENTS.jsonl'
+        snapshot = ledger.read_bytes()
+        last = json.loads(snapshot.splitlines()[-1])
+        self.assertEqual(last['research']['contract_digest'], loaded['contract_digest'])
+        for options, expected in ((['--dry-run'], 0), (['--hypothesis', 'different claim'], 2),
+                                  (['--no-gate'], 2)):
+            probe = subprocess.run(command + options + launch_args, capture_output=True, text=True)
+            self.assertEqual(probe.returncode, expected, probe.stderr)
+            self.assertEqual(ledger.read_bytes(), snapshot)
 
     def test_release_failure_taxonomy_and_benchmark(self) -> None:
         stable = release.resolve(self.repo, 'stable')

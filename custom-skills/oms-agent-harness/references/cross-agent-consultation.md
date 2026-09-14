@@ -97,7 +97,7 @@ oms thread new --topic "..."        # start a separate conversation
 oms thread close --id ID --summary "decided X"
 ```
 
-`--thread ID` also works on `oms agent-call`, `oms agent-run`,
+`--thread ID` also works on `oms agent-call`,
 `oms peer-ask`, `oms peer-delegate`, and `oms advise`, so a council answer, a
 delegated patch outcome, and an advisor verdict all land in the same
 conversation instead of in three unrelated artifacts. Naming a thread that does
@@ -114,7 +114,7 @@ concern handled by per-worker sharding"
 ## Boundaries
 
 - Consults are read-only. For a write, use `oms peer-delegate` (isolated
-  worktree, reviewable patch) or `oms agent-run --mode write`.
+  worktree, reviewable patch).
 - Turns are replayed into other providers' prompts, so the same sensitive-content
   gate as shared memory applies: no secrets, private paths, or cluster details.
   A refused turn does not fail the call; the artifact still holds the full text.

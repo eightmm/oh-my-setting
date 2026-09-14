@@ -19,9 +19,9 @@ Agent guidance groups discovery into state, collaboration, implementation,
 verification/landing, continuity, and operations. Public commands remain
 compatible; these groups do not grant combined authority.
 
-- Cockpit collects state once and shares inbox's pure attention projector.
-  Detail-only lifecycle/approval reads remain separate because state summaries
-  truncate those lists. Reports are still non-atomic across underlying stores.
+- Inbox projects shared state; detail-only lifecycle/approval reads remain
+  separate because summaries truncate those lists. Reports are non-atomic
+  across underlying stores.
 - Recent log windows read backwards; MCP display reads at most 64 KiB before
   its existing output cap. Full artifact/thread references stream once so an
   early result is not lost. Peer and MCP share final Output/Exit interpretation.
@@ -34,12 +34,10 @@ compatible; these groups do not grant combined authority.
   remain behind the existing front doors. Already shared engines are reused,
   not replaced with another orchestration layer or a combined memory store.
 
-### Default-work audit (2026-09-05)
+### Surface boundaries
 
-The revised catalog has 13 front doors, 70 core commands, seven managed skills and five
-roles. It is a surface/caller audit, not exhaustive verification of every
-implementation. Remove redundant automatic work before removing interfaces
-that saved workflows still use.
+Use `oms list --all` for the current catalog. Keep distinct authority and
+provenance boundaries; remove duplicated routing and generated boilerplate.
 
 | Surface | Decision |
 |---|---|
@@ -287,11 +285,10 @@ and reason.
 
 ## Delegating writes
 
-For compatibility, `oms agent-run` sends read work to `agent-call` and write
-work to `peer-delegate`. New agent guidance uses the intent-specific front
-doors above. A caller that intentionally needs the wrapper should pass
-`--mode read` or `--mode write`; auto mode remains conservative wording
-classification.
+Choose `oms consult` (or the lower-level `agent-call`) for a read and
+`oms peer-delegate` for a patch. The `agent-run` wrapper and keyword mode
+classifier were removed. Task-aware calls/delegates record outcomes directly;
+existing artifact and task history is preserved.
 
 A write delegation:
 
@@ -592,10 +589,10 @@ selector serialize). The read-tool cache is keyed by a workspace fingerprint
 as well as HEAD and fails closed. `resume` reconciles a crashed node against
 the plan — a live lease waits, an expired one is `unverified`, a dead write
 tool is `blocked`. `exec commit --binding NAME` commits exactly the bound
-task's landed patch so the next landing finds a clean tree. `exec shadow`
-records how the evaluator's route compares with the control plane's
-canonical next action; the evaluator takes no authority from `goal-drive` or
-`autopilot`.
+task's landed patch so the next landing finds a clean tree. The retired
+`exec shadow` comparison is replaced by
+`runtime next` for control-plane actions and `exec route/status` for actual
+graph runs; existing comparison history is preserved.
 
 ## Durable operations and optional frontends
 
@@ -603,7 +600,7 @@ canonical next action; the evaluator takes no authority from `goal-drive` or
 |---|---|
 | `agent-events`, `agent-supervisor` | Append-only attempt lifecycle and bounded `trusted-local` execution. Resume creates a child attempt; reconcile closes stale supervisor-owned queues that lost their runtime record. The supervisor never lands, commits, or pushes. |
 | `approval-inbox` | Private, version-CAS approval outside `.oms`; a patch grant binds the exact base, bytes, attempt when present, lease, profile, verifier hash/mode, ML mode and admission exceptions, then is consumed once. `expire --apply` closes unused grants; stale reservations reconcile dry-run first to terminal `interrupted` with an unknown outcome. Patch landing defers to `patch-land --recover`. |
-| `land` | One detached job per landing: gate, `git push --no-verify`, `oms update` when the repo is the harness checkout, CI poll, receipt beside its gate log under `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/` read by `oms land status`. Refuses dirty or diverged trees and never pushes a HEAD that moved during the gate. Sibling worktrees of the same repository whose autopilot receipt is live (`proposing`, `proposal-review`, `driving`) are reported at intake and waited for before the push, up to `--sibling-wait` seconds (default 1800); at the deadline the landing ends `blocked` without moving shared refs, and `--ignore-siblings` records the override. |
+| `land` | One detached job per landing: gate, `git push --no-verify` of the verified SHA, CI success, then `oms update` guarded to that SHA when the repo is the harness checkout, receipt beside its gate log under `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/` read by `oms land status`. Refuses dirty or diverged trees and never pushes a HEAD that moved during the gate. Sibling worktrees of the same repository whose autopilot receipt is live (`proposing`, `proposal-review`, `driving`) are reported at intake and waited for before the push, up to `--sibling-wait` seconds (default 1800); at the deadline the landing ends `blocked` without moving shared refs, and `--ignore-siblings` records the override. |
 | `init` | Creates repo-local `.oms` state and its ignore guard, then registers the canonical repo root with `oms tick`. The non-fatal summary says `registered`, `already registered`, or `not registered`; an unavailable tick helper or unwritable registry never prevents local initialization. |
 | `tick` | Hourly unattended sweep of registered repos: `oms init` registers a newly initialized repo automatically, while `oms tick register` remains available for an adopted repo. The sweep performs journal sync, attempt reconcile, threads idle over 7d closed, active goal-less task packets closed after 7d, idle all-done plans retired after 14d, mechanically recovered or exactly superseded artifact failures resolved, and single stale failure-ledger rows retired after `OMS_TICK_FAILURE_STALE_DAYS` (14d). `OMS_TICK_RETIRE=0` opts out of task/plan/failure retirement but not artifact resolution; gc remains opt-in with `OMS_TICK_GC=1`. Each receipt and `swept` line reports `tasks_closed`, `plans_retired`, `artifacts_resolved`, `artifacts_superseded`, and `failures_retired`; a stale Codex plugin cache is refreshed. `install` wires a systemd user timer or a cron line this checkout owns. |
 | `open-in` | Probed VS Code/Stably Orca/Codex launch plans. The redundant `ops-cockpit` aggregate was retired; use `inbox`, then the relevant state, approval, or artifact telemetry query. Historical records are unchanged. |
@@ -683,13 +680,15 @@ raw `traceparent`, `tracestate`, baggage, prompts, or tool arguments. Existing
 
 ## ML and HPC
 
-The ML/Slurm template adds local-first experiment controls:
+The ML template records the scientific contract in PROJECT.md; optional
+reference docs require `--full-docs` and never overwrite existing files.
+ML/Slurm workflows use local-first experiment controls:
 
 - `oms run new/current/show/timeline` for the run spine.
 - `oms run capsule` for reproducibility capture and replay metadata.
 - `oms runtime experiment` for comparable seed-, metric-, and invariant-bound
-  studies; `oms research-runner` remains the compact single-run/run-ledger
-  compatibility path.
+  studies; `oms runtime experiment launch` pre-registers a single command
+  through the same run ledger (replacing `research-runner`).
 - `oms data-manifest` for fingerprints, split checks, and leakage evidence.
 - `oms experiment-board` for claims and collision avoidance.
 - `oms run-reconcile`, `oms job-digest`, and `oms tsp-queue` for Slurm or local
@@ -773,8 +772,32 @@ messages are emitted only after the corresponding CLI confirms removal.
 
 `bash scripts/check.sh` is the repository gate: shell lint, Bash 3.2 parsing,
 Python 3.9 grammar, skill validation, focused suites, and sharded smoke tests.
-CI additionally runs install/update/uninstall on Linux, macOS, and Windows Git
-Bash, BSD fixtures on macOS, and a real Python 3.9 compatibility job.
+Development uses affected tests and static checks, not this full gate per edit.
+For committed ranges, `--affected --changed-from BASE --changed-to HEAD` checks
+ordinary README/docs changes directly, otherwise selects existing tests from
+positive graph evidence. Skill/template Markdown uses the direct skill validator
+(including project skill templates and their local references), not runtime
+prompt/GC/lifecycle suites;
+`config/models.json` uses routing/registry suites. Install/permission/state,
+executable templates, selector changes, dirty trees, or uncertain graphs retain
+full coverage. `source-distribution-smoke.sh --docs-only` checks documentation
+references without its CI orchestration, installation or CLI-help probes.
+`--quick` is partial feedback, not a substitute for affected or release checks.
+
+CI selects once and runs affected tests plus changed-file lint in that same
+job for PRs and main pushes. Full selections and weekly/manual runs fan out to
+the existing lanes and additionally exercise
+install/update/uninstall on Linux, macOS, and Windows Git Bash, BSD fixtures on
+macOS, and real Python 3.9 compatibility. The stable `gate` accepts only planned
+skips. Require it in branch protection before enabling a local quick push hook;
+having a workflow alone does not protect the branch. Deployment via `oms land`
+still verifies the exact committed tree with one full gate, pushes its SHA,
+waits for CI success, then updates only to that SHA. Failed or skipped CI cannot
+refresh the installation. A moving update target is rejected by the updater.
+Retrying the same commit, destination and gate resumes CI/install from its
+successful push receipt; successful stages are reused. A repository-wide lock
+prevents concurrent landing gates. CI query errors are recorded immediately,
+and each query is bounded by the remaining polling deadline (at most 30 seconds).
 
 The gate fingerprints `.oms` file contents, entry modes, symlinks, and
 directories so a test cannot quietly mutate the live checkout. Live `hooks/` and

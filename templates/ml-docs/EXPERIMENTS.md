@@ -3,7 +3,8 @@
 Append-only narrative run log. One entry per experiment. Newest on top.
 Distinct from docs/EXPERIMENTS.jsonl, the machine ledger written by run-ledger.
 
-Each entry: ID, date, hypothesis, config diff, result, conclusion, wandb link.
+Record a narrative only when it adds interpretation beyond the existing ledger.
+Each entry links the run ID, hypothesis, config diff, result and conclusion.
 
 ---
 
@@ -13,7 +14,7 @@ Each entry: ID, date, hypothesis, config diff, result, conclusion, wandb link.
 - Branch / commit:
 - Hypothesis:
 - Config diff vs baseline:
-- Run ID / wandb:
+- Run ID / artifact:
 - Result (primary metric):
 - Result (secondary):
 - Conclusion: keep / discard / followup

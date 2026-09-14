@@ -210,9 +210,6 @@ def build_parser() -> argparse.ArgumentParser:
     events.add_argument("--run", required=True)
     events.add_argument("--limit", type=int, default=50)
     events.add_argument("--json", action="store_true")
-    shadow = exec_sub.add_parser("shadow")
-    shadow.add_argument("--spec", default="goal-drive")
-    shadow.add_argument("--json", action="store_true")
     test = exec_sub.add_parser("test")
     test.add_argument("path")
     test.add_argument("--json", action="store_true")
@@ -791,19 +788,6 @@ def _exec_events(args: argparse.Namespace) -> int:
     return 0
 
 
-def _exec_shadow(args: argparse.Namespace) -> int:
-    from . import shadow as exec_shadow
-    row = exec_shadow.shadow(repo_root(args.repo), spec_name=args.spec)
-    if args.json:
-        emit(row, args.pretty)
-        return 0
-    print("shadow: agree=%s basis=%s route=%s/%s settled=%s control=%s->%s"
-          % (row["agree"], row.get("basis") or "-", row["route"]["status"], row["route"]["primary"] or "-",
-             ",".join(row.get("reconstructed", {}).get("completed", [])) or "-",
-             row["control_plane"]["action"] or "-", row["control_plane"]["mapped"] or "-"))
-    return 0
-
-
 def _exec_test(args: argparse.Namespace) -> int:
     from . import route as exec_route
     path = Path(args.path)
@@ -838,7 +822,7 @@ def _exec_commit(args: argparse.Namespace) -> int:
 
 EXEC_ACTIONS = {"validate": _exec_validate, "render": _exec_render, "route": _exec_route, "run": _exec_run,
                 "resume": _exec_resume, "decide": _exec_decide, "status": _exec_status, "events": _exec_events,
-                "shadow": _exec_shadow, "test": _exec_test, "commit": _exec_commit}
+                "test": _exec_test, "commit": _exec_commit}
 
 
 def _auto_refresh(args: argparse.Namespace, repo: Path, state: Path) -> None:

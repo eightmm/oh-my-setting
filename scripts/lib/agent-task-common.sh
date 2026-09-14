@@ -772,3 +772,24 @@ agent_task_verify_command() {
     inside && NF { print }
   ' "$1"
 }
+
+agent_task_record_outcome() {
+  local repo="$1" kind="$2" provider="$3" status="$4" artifact="$5"
+  local patch="${6:-}" detail="${7:-}" task_file note_file
+  [ "${OMS_TASK_OUTCOME:-${OMS_AGENT_RUN_TASK_OUTCOME:-1}}" = 1 ] || return 0
+  [ -f "$artifact" ] || return 0
+  task_file="$(agent_task_project_file "$repo")" || return 0
+  [ -s "$task_file" ] || return 0
+  artifact="$(agent_task_relpath "$repo" "$artifact" 2>/dev/null || basename "$artifact")"
+  [ -z "$patch" ] || patch="$(agent_task_relpath "$repo" "$patch" 2>/dev/null || basename "$patch")"
+  note_file="$(agent_memory_mktemp)" || return 0
+  {
+    printf '%s %s exit=%s; artifact=%s' "$kind" "$provider" "$status" "$artifact"
+    [ -z "$patch" ] || printf '; patch=%s' "$patch"
+    [ -z "$detail" ] || printf '; %s' "$detail"
+    printf '\n'
+  } > "$note_file"
+  agent_task_append_bullet "$task_file" "## Current State" "$kind" "$note_file" >/dev/null 2>&1 ||
+    echo "warning: task outcome not recorded" >&2
+  rm -f "$note_file"
+}

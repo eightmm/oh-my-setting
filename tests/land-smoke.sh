@@ -132,7 +132,7 @@ for path in glob.glob(os.path.join(directory, "*.json")):
         continue
     assert row.get("siblings", {}).get("live") == sibling + " driving", row
     assert row.get("push", {}).get("sibling_wait_seconds") == 0, row
-    assert "rc" not in row.get("push", {}), row
+    assert row.get("push", {}).get("rc") == "pending", row
     break
 else:
     raise AssertionError("no blocked sibling receipt")
@@ -274,15 +274,45 @@ install="$TMP/install"
 git init -q "$install"
 git -C "$install" remote add origin "$TMP/remote.git"
 mkdir -p "$install/scripts"
-printf '#!/usr/bin/env bash\nexit 42\n' > "$install/scripts/update.sh"
+cat > "$install/scripts/update.sh" <<'EOF'
+#!/usr/bin/env bash
+echo update >> "$OMS_TEST_LAND_EVENTS"
+[ "$OH_MY_SETTING_UPDATE_EXPECTED_TARGET" = "$(git -C "$OMS_TEST_LAND_REPO" rev-parse HEAD)" ] || exit 43
+exit "${OMS_TEST_UPDATE_RC:-42}"
+EOF
 chmod +x "$install/scripts/update.sh"
 python3 - "$TMP/install.json" "$install" <<'PY'
 import json, sys
 with open(sys.argv[1], "w") as fh:
     json.dump({"source_root": sys.argv[2]}, fh)
 PY
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo ci >> "$OMS_TEST_LAND_EVENTS"
+[ "${OMS_TEST_CI_DELAY:-0}" = 0 ] || sleep "$OMS_TEST_CI_DELAY"
+if [ "${OMS_TEST_CI_RC:-0}" != 0 ]; then echo 'authentication required' >&2; exit "$OMS_TEST_CI_RC"; fi
+printf '1 %s\n' "$OMS_TEST_CI_RESULT"
+EOF
+chmod +x "$TMP/bin/gh"
+export PATH="$TMP/bin:$PATH" OMS_TEST_LAND_EVENTS="$TMP/events" OMS_TEST_LAND_REPO="$repo"
+for ci_result in failure skipped success; do
+  gate "echo CI $ci_result probe"
+  : > "$TMP/events"
+  ci_wait=1
+  [ "$ci_result" != skipped ] || ci_wait=0
+  if OMS_TEST_CI_RESULT="$ci_result" OMS_INSTALL_RECEIPT="$TMP/install.json" \
+      "$LAND" --repo "$repo" --wait --ci-wait "$ci_wait" > "$TMP/ci.out" 2>&1; then
+    fail "failed, absent CI or failed update was reported as successful"
+  fi
+  if [ "$ci_result" = success ]; then
+    [ "$(cat "$TMP/events")" = "$(printf 'ci\nupdate')" ] || fail "install ran before CI"
+  else
+    ! grep -q update "$TMP/events" || fail "install ran without successful CI"
+  fi
+done
 gate 'echo update failure probe'
-if OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wait 0 \
+if OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wait 1 \
   > "$TMP/update-failed.out" 2>&1; then
   fail "installation failure was reported as a successful landing"
 fi
@@ -296,5 +326,111 @@ assert len(matches) == 1, matches
 r = matches[0]
 assert r["state"] == "failed" and r["push"]["rc"] == 0 and r["update"]["rc"] == 42, r
 PY
+
+# Retry the already-pushed commit: neither its gate nor successful CI repeats.
+: > "$TMP/events"
+OMS_TEST_CI_RC=4 OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/resume.out" 2>&1 ||
+  fail "failed update could not resume: $(cat "$TMP/resume.out")"
+[ "$(cat "$TMP/events")" = update ] || fail "resume repeated successful CI"
+receipt="$("$LAND" status --repo "$repo" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["log"])')"
+[ "$(grep -c '^update failure probe$' "$receipt")" = 1 ] || fail "resume repeated the gate"
+: > "$TMP/events"
+OMS_TEST_CI_RC=4 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/resume-complete.out" 2>&1 ||
+  fail "completed landing retry failed"
+[ ! -s "$TMP/events" ] || fail "completed landing repeated CI/install"
+
+# A different gate or destination cannot borrow a prior successful receipt.
+OMS_TEST_CI_RC=4 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --wait --gate true --ci-wait 1 > "$TMP/other-gate.out" 2>&1 ||
+  fail "already-pushed commit with another gate should be a no-op"
+grep -q 'no matching push receipt' "$TMP/other-gate.out" || fail "different gate reused prior evidence"
+git clone -q --bare "$TMP/remote.git" "$TMP/other-remote.git"
+git -C "$repo" remote set-url origin "$TMP/other-remote.git"
+OMS_TEST_CI_RC=4 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/other-remote.out" 2>&1 ||
+  fail "already-pushed commit with another destination should be a no-op"
+git -C "$repo" remote set-url origin "$TMP/remote.git"
+grep -q 'no matching push receipt' "$TMP/other-remote.out" || fail "different destination reused prior evidence"
+[ ! -s "$TMP/events" ] || fail "mismatched evidence triggered CI/install"
+
+for ci_failure in auth timeout; do
+  gate "echo $ci_failure resume probe"
+  : > "$TMP/events"
+  ci_rc=4 ci_delay=0
+  [ "$ci_failure" != timeout ] || { ci_rc=0; ci_delay=10; }
+  started="$(date +%s)"
+  if OMS_TEST_CI_RESULT=pending OMS_TEST_CI_RC="$ci_rc" OMS_TEST_CI_DELAY="$ci_delay" \
+      "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 > "$TMP/query-fail.out" 2>&1; then
+    fail "CI $ci_failure should fail explicitly"
+  fi
+  [ "$(( $(date +%s) - started ))" -lt 8 ] || fail "CI query did not obey the deadline"
+  [ "$(cat "$TMP/events")" = ci ] || fail "CI query errors were polled repeatedly"
+  grep -q 'CI query exit' "$TMP/query-fail.out" || fail "CI error reason missing"
+  : > "$TMP/events"
+  OMS_TEST_CI_RESULT=success "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+    > "$TMP/query-resume.out" 2>&1 || fail "CI error could not resume"
+  [ "$(cat "$TMP/events")" = ci ] || fail "CI resume omitted its query"
+  receipt="$("$LAND" status --repo "$repo" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["log"])')"
+  [ "$(grep -c "^$ci_failure resume probe$" "$receipt")" = 1 ] || fail "CI resume repeated the gate"
+done
+
+# One active landing across worktrees, with flock and the portable mkdir lock.
+for lock_kind in 0 1; do
+  export OMS_TEST_LAND_COUNT="$TMP/count-$lock_kind" OMS_TEST_LAND_RELEASE="$TMP/release-$lock_kind"
+  # flock leaves a file; mkdir uses a directory at that path. Model separate hosts.
+  export OMS_LOCK_DIR="$TMP/locks-$lock_kind"
+  gate 'echo gate >> "$OMS_TEST_LAND_COUNT"; for ((i=0;i<200;i++)); do [ ! -f "$OMS_TEST_LAND_RELEASE" ] || exit 0; sleep 0.05; done; exit 1'" # lock $lock_kind"
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 > "$TMP/first.out" 2>&1 &
+  first_pid=$!
+  for _ in $(seq 1 100); do [ ! -f "$OMS_TEST_LAND_COUNT" ] || break; sleep 0.05; done
+  [ -f "$OMS_TEST_LAND_COUNT" ] || fail "first landing did not start: $(cat "$TMP/first.out")"
+  second_rc=0
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 \
+    > "$TMP/second.out" 2>&1 || second_rc=$?
+  touch "$OMS_TEST_LAND_RELEASE"
+  wait "$first_pid" || fail "first landing failed: $(cat "$TMP/first.out")"
+  [ "$second_rc" = 75 ] || fail "duplicate landing did not report lock contention: $(cat "$TMP/second.out")"
+  [ "$(wc -l < "$OMS_TEST_LAND_COUNT" | tr -d ' ')" = 1 ] || fail "duplicate landing repeated the gate"
+done
+
+gate 'echo successful CI and update probe'
+: > "$TMP/events"
+OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/update-pass.out" 2>&1 ||
+  fail "successful CI and update failed to land"
+[ "$(cat "$TMP/events")" = "$(printf 'ci\nupdate')" ] || fail "successful update did not follow CI"
+grep -q ': passed' "$TMP/update-pass.out" || fail "successful update receipt was not passed"
+
+# Probe the real job function with deterministic wait/push interleavings.
+# Git is stubbed: this cannot publish or mutate the caller's repository.
+(
+  export REPO="$repo" LAND_DIR="$TMP/race" LOG_DIR="$TMP/race" STAMP=verified-probe
+  export REMOTE=origin TARGET=main GATE=true IGNORE_SIBLINGS=0 UPDATE=0 CI_WAIT=0
+  probe_head=verified
+  now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+  rset() { :; }
+  can_resume() { return 1; }
+  request_stamp() { printf '%s\n' "$STAMP"; }
+  collect_live_siblings() { export SIBLING_LIVE=''; }
+  clean_tree() { return 0; }
+  finish() { printf '%s\n' "$1" > "$TMP/race-result"; }
+  wait_for_live_siblings() { probe_head=unverified; }
+  git() {
+    case "$1" in
+      rev-parse) printf '%s\n' "$probe_head" ;;
+      push) printf '%s\n' "$*" > "$TMP/race-push" ;;
+      *) return 99 ;;
+    esac
+  }
+  eval "$(sed -n '/^run_job() {/,/^}/p' "$LAND")"
+  if run_job; then fail "HEAD moving during sibling wait was accepted"; fi
+  [ ! -e "$TMP/race-push" ] || fail "unverified HEAD was pushed"
+  probe_head=verified
+  wait_for_live_siblings() { :; }
+  run_job || fail "stable HEAD failed to land"
+  grep -Fq 'verified:refs/heads/main' "$TMP/race-push" || fail "push uses mutable HEAD instead of verified SHA"
+) || exit 1
 
 echo "land-smoke: ok"

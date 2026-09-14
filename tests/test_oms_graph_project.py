@@ -174,7 +174,7 @@ class ProjectGraphTest(unittest.TestCase):
         subprocess.run([sys.executable, "-c",
                         "import sys; sys.path.insert(0, sys.argv[1]); import oms_graph.cli; "
                         "assert not any(n in sys.modules for n in "
-                        "('oms_graph.runner', 'oms_graph.commit', 'oms_graph.shadow'))",
+                        "('oms_graph.runner', 'oms_graph.commit'))",
                         str(ROOT / "scripts/lib")], check=True)
 
     def test_trace_is_a_bounded_projection_with_explicit_loss(self) -> None:

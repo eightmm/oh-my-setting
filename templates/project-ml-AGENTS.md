@@ -26,8 +26,8 @@
 - Keep commands, paths, data versions, seeds, configs, metrics, and required
   checks in `PROJECT.md`; keep data, outputs, checkpoints, and secrets out of git.
 
-Use `oms data-manifest` for registered split/leakage checks and `oms
-research-runner` for pre-registered claims; use the raw run ledger for
+Use `oms data-manifest` for registered split/leakage checks and
+`oms runtime experiment launch` for pre-registered claims; use the raw run ledger for
 mechanical runs. Queue workstation jobs with `oms tsp-queue` and digest long
 logs with `oms job-digest`. Cluster-specific guidance (snapshots, job
 reconciliation) lives in the Slurm overlay, applied only where Slurm exists.
