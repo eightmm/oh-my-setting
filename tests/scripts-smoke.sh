@@ -13874,8 +13874,9 @@ test_agent_role_and_delegate_injection() {
   [ ! -e "$ROOT/prompts/native-subagent-brief.md" ] ||
     fail "unused native subagent prompt template should stay removed"
   [ -f "$ROOT/prompts/executor-soul.md" ] || fail "executor soul prompt template missing"
-  grep -Fq 'one bounded strategy profile' "$ROOT/rules/global-AGENTS.md" ||
-    fail "global rules should route native subagents through one strategy profile"
+  grep -Fq 'one bounded strategy profile' \
+    "$ROOT/custom-skills/oms-agent-harness/references/delegation-artifacts.md" ||
+    fail "delegation guidance should route native subagents through one strategy profile"
 
   ( cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
     OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
