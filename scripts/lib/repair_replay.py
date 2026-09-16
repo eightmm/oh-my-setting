@@ -106,9 +106,9 @@ def select(rows: list[dict], cohort: str, budget: int) -> tuple[str, int]:
     split = len(episodes) * 2 // 3
     # Chronological held-out history; a non-regression is empirical, not a
     # guarantee on new tasks. Ties retain the incumbent, including sparse data.
-    for partition in (episodes[:split], episodes[split:]):
+    for cohort_slice in (episodes[:split], episodes[split:]):
         saved = 0
-        for steps in partition:
+        for steps in cohort_slice:
             _, base_calls = replay(steps, "budget")
             _, calls = replay(steps, "stop-repeat")
             saved += base_calls - calls
