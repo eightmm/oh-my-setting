@@ -503,6 +503,7 @@ test_detached_schema2_auto_update_check() {
 
   mkdir -p "$repo/scripts/lib" "$repo/local" "$home/.config/oh-my-setting"
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
+  printf 'import os; print("1 " + os.environ.get("OMS_TEST_CI_RESULT", "success"))\n' > "$repo/scripts/lib/ci-query.py"
   cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$repo/scripts/lib/install-contract.sh"
@@ -567,6 +568,7 @@ test_schema1_auto_update_reuses_update_transaction() {
 
   mkdir -p "$repo/scripts/lib" "$repo/local" "$(dirname "$receipt")"
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
+  printf 'import os; print("1 " + os.environ.get("OMS_TEST_CI_RESULT", "success"))\n' > "$repo/scripts/lib/ci-query.py"
   cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
   cat > "$repo/scripts/update.sh" <<'EOF'
@@ -616,6 +618,18 @@ PY
   grep -Fxq -- '--check' "$marker" ||
     fail "schema-1 auto-update check bypassed the canonical updater"
 
+  local ci_result
+  for ci_result in pending failure missing; do
+    : > "$marker"
+    HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+      OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto-update.log" \
+      OMS_TEST_CI_RESULT="$ci_result" OMS_TEST_UPDATE_MARKER="$marker" \
+      OMS_TEST_UPDATE_TARGET="$target" "$repo/scripts/auto-update.sh" apply >/dev/null
+    [ "$(git -C "$repo" rev-parse HEAD)" = "$base" ] || fail "unconfirmed CI moved schema-1 checkout"
+    [ "$(cat "$marker")" = --check ] || fail "unconfirmed CI invoked the mutating updater"
+    grep -Fq 'CI success not confirmed' "$state" || fail "CI deferral reason missing"
+  done
+
   : > "$marker"
   HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
     OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto-update.log" \
@@ -642,6 +656,7 @@ test_schema2_auto_update_apply_skips_dirty_and_diverged() {
 
   mkdir -p "$repo/scripts/lib" "$home/.config/oh-my-setting"
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
+  printf 'import os; print("1 " + os.environ.get("OMS_TEST_CI_RESULT", "success"))\n' > "$repo/scripts/lib/ci-query.py"
   cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
   cat > "$repo/scripts/update.sh" <<'EOF'
@@ -850,6 +865,7 @@ test_auto_update_failure_message_names_the_error() {
 
   mkdir -p "$repo/scripts/lib" "$repo/local" "$home/.config/oh-my-setting"
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
+  printf 'import os; print("1 " + os.environ.get("OMS_TEST_CI_RESULT", "success"))\n' > "$repo/scripts/lib/ci-query.py"
   cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
   cp "$ROOT/scripts/lib/install-contract.sh" "$repo/scripts/lib/install-contract.sh"

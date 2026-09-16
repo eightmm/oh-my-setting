@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stop finalizes the Work Journal. Answer-format and session-budget guards
-# run only with explicit positive caps. A blocked answer is not finalized
-# until its corrected Stop; a requested guard failure is reported fail-open.
+# Stop finalizes the Work Journal and enforces explicitly configured session
+# budgets. Answer wording never blocks delivery.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HELPER="$ROOT/scripts/lib/hook_state.py"
@@ -16,7 +15,6 @@ payload="$(cat)"
 guard_out=""
 guard_rc=0
 if [ "${OMS_TURN_GUARD_OFF:-0}" != "1" ] && {
-  [ "${OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN:-0}" != "0" ] ||
   [ "${OMS_SESSION_BUDGET_TURNS:-0}" != "0" ] ||
   [ "${OMS_SESSION_BUDGET_HOURS:-0}" != "0" ];
 }; then

@@ -145,11 +145,11 @@ def _python_import_candidates(repo: Path, target: Path) -> List[Tuple[Path, str,
     return [(path, reason, priority) for path, (reason, priority) in best.items()]
 
 
-def _fresh_graph(repo: Path) -> Optional[Tuple[Any, Path, bool]]:
+def _fresh_graph(repo: Path, *, state: Optional[Path] = None) -> Optional[Tuple[Any, Path, bool]]:
     from oms_graph.project import build
     from oms_graph.project.query import Graph
 
-    override = os.environ.get("OMS_PROJECT_GRAPH_STATE", "").strip()
+    override = str(state) if state is not None else os.environ.get("OMS_PROJECT_GRAPH_STATE", "").strip()
     if override and not Path(override).is_absolute():
         return None
     state = Path(override) if override else build.state_dir(repo)

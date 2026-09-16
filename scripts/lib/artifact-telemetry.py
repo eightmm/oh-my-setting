@@ -696,6 +696,20 @@ def telemetry(
     # Opt-in only: omitting the flag leaves the default report byte-identical.
     if uptake:
         report["review_uptake"] = review_uptake(repo, selected)
+    from repair_replay import repeated, valid_trace
+    delegates = [row for row in selected if row.get("kind") == "delegate"]
+    traces = [row["repair_replay"] for row in delegates if valid_trace(row.get("repair_replay"))]
+    if traces:
+        report["repair_replay"] = {
+            "recorded": len(traces),
+            "delegations_seen": len(delegates),
+            "selected": sum(trace["policy"] == "stop-repeat" for trace in traces),
+            "policy_counts": dict(Counter(trace["policy"] for trace in traces)),
+            "early_stops": sum(trace["policy"] == "stop-repeat" and repeated(trace["steps"])
+                               and len(trace["steps"]) < trace["budget"] + 1 for trace in traces),
+            "basis": "historical-prefix replay; not proof of future success",
+            "cost_basis": "worker attempts only; not measured token or wall-clock savings",
+        }
     return report
 
 
@@ -759,6 +773,10 @@ def emit_review_uptake(block: dict) -> None:
 
 
 def emit_human(report: dict) -> None:
+    if "repair_replay" in report:
+        block = report["repair_replay"]
+        print("repair replay: %d/%d delegations recorded, %d selected, %d early stops (token savings unmeasured)"
+              % (block["recorded"], block["delegations_seen"], block["selected"], block["early_stops"]))
     window = report["window"]
     operations = report["operations"]
     exits = report["recorded_exit"]

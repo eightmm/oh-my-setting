@@ -58,7 +58,8 @@ Options:
   --patch FILE   Patch file to admit (required).
   --repo PATH    Target git repo (default: current directory).
   --verify CMD   Verification command run in the worktree after applying.
-                 Default: scripts/check.sh <ml-smoke|fast> when present.
+                 Default: scripts/check.sh fast when implemented; otherwise
+                 an existing check.sh requires an explicit --verify CMD.
   --ml           Prefer the ml-smoke verification mode when auto-detecting.
   --report FILE  Write the admission report here (default: .oms/artifacts/admit/).
   --plan-task ID  Enforce this agent-plan task's allowed/forbidden paths.
@@ -218,7 +219,6 @@ rm -f "$secret_scan_file"
 changed_files=""
 verify_out=""
 floor_verify_out=""
-verify_mode=""
 if [ "$apply_ok" = 1 ]; then
   oms_harness_prune_stale_worktrees "$REPO" 0 >/dev/null 2>&1 || true
   worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-admit.XXXXXX")" || fail "mktemp failed"
@@ -236,14 +236,7 @@ if [ "$apply_ok" = 1 ]; then
     # admitted. Otherwise deleting or rewriting check.sh can also rewrite the
     # command that is supposed to judge that patch.
     if [ -z "$VERIFY" ] && [ -x "$worktree/scripts/check.sh" ]; then
-      verify_mode=""
-      if oms_check_sh_has_fast_mode "$worktree/scripts/check.sh"; then
-        verify_mode="fast"
-      fi
-      if [ "$ML" = 1 ] && oms_check_sh_has_ml_smoke "$worktree/scripts/check.sh"; then
-        verify_mode="ml-smoke"
-      fi
-      VERIFY="bash scripts/check.sh${verify_mode:+ $verify_mode}"
+      VERIFY="$(oms_default_verify_command "$worktree/scripts/check.sh" "$ML")" || exit 2
     fi
     # The apply into the worktree must succeed, otherwise the syntax/verify
     # gates below would run against the UNPATCHED tree and pass vacuously. Gate

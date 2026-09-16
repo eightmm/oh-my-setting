@@ -24,7 +24,7 @@ def _project_file(repo: Path) -> Dict[str, Any]:
     status = metadata.get('status', '') or first_nonempty(section_text(body, ['status', '상태']), 80)
     return {'present': True, 'source': source_descriptor(path, repo), 'metadata': metadata, 'status': status, 'goal': goal, 'criteria': bullet_items(criteria_text), 'constraints': [normalized_line(item) for item in scope_lines if normalized_line(item)], 'scope': parse_scope(scope_lines)}
 
-def _task_status(repo: Path) -> Dict[str, Any]:
+def _task_status(repo: Path, payload: Any = None) -> Dict[str, Any]:
     # The packet's status verb belongs to the installed harness, not to the
     # repository being projected. Resolved against the target repo it answered
     # {} for every project except this checkout: verification silently read
@@ -33,7 +33,8 @@ def _task_status(repo: Path) -> Dict[str, Any]:
     script = install_root() / 'scripts' / 'agent-task.sh'
     if not script.is_file() or script.is_symlink():
         raise CoreError('canonical task status command is unavailable')
-    payload = run_json(['bash', str(script), '--repo', str(repo), 'status', '--json'], cwd=repo, timeout=20)
+    if payload is None:
+        payload = run_json(['bash', str(script), '--repo', str(repo), 'status', '--json'], cwd=repo, timeout=20)
     if (not isinstance(payload, dict) or payload.get('schema') != 1 or
             payload.get('present') is not True or
             not isinstance(payload.get('status'), str) or
@@ -42,7 +43,7 @@ def _task_status(repo: Path) -> Dict[str, Any]:
         raise CoreError('canonical task status projection is unavailable or invalid')
     return payload
 
-def _task_packet(repo: Path) -> Dict[str, Any]:
+def _task_packet(repo: Path, status_snapshot: Any = None) -> Dict[str, Any]:
     path = repo / '.oms' / 'task' / 'current.md'
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise CoreError('task packet must be a regular file: %s' % path)
@@ -61,7 +62,7 @@ def _task_packet(repo: Path) -> Dict[str, Any]:
         if match:
             raw = match.group(2)
             budget[match.group(1)] = int(raw) if raw.isdigit() else bounded_line(raw, 160)
-    status = _task_status(repo)
+    status = _task_status(repo, status_snapshot)
     verification = status.get('verification') if isinstance(status, dict) else None
     if verification not in ('fresh', 'stale', 'none'):
         verification = 'unknown'
@@ -89,11 +90,12 @@ def _latest_plan_retirement(repo: Path) -> Tuple[Dict[str, Any], Any]:
         'task_landings_claimed') if row.get(key) not in (None, '')},
         source_descriptor(path, repo))
 
-def _plan_status(repo: Path) -> Dict[str, Any]:
+def _plan_status(repo: Path, payload: Any = None) -> Dict[str, Any]:
     script = install_root() / 'scripts' / 'agent-plan.sh'
     if not script.is_file() or script.is_symlink():
         raise CoreError('canonical plan status command is unavailable')
-    payload = run_json(['bash', str(script), '--repo', str(repo), 'status', '--json'], cwd=repo, timeout=20)
+    if payload is None:
+        payload = run_json(['bash', str(script), '--repo', str(repo), 'status', '--json'], cwd=repo, timeout=20)
     if (not isinstance(payload, dict) or payload.get('schema') != 1 or
             payload.get('present') is not True or
             isinstance(payload.get('task_count'), bool) or
@@ -117,7 +119,7 @@ def _plan_status(repo: Path) -> Dict[str, Any]:
         raise CoreError('canonical plan status projection is unavailable or invalid')
     return payload
 
-def _plan_state(repo: Path) -> Dict[str, Any]:
+def _plan_state(repo: Path, status_snapshot: Any = None) -> Dict[str, Any]:
     path = repo / '.oms' / 'plan' / 'tasks.json'
     raw = read_json(path, default=None)
     if raw is None:
@@ -138,7 +140,7 @@ def _plan_state(repo: Path) -> Dict[str, Any]:
         verify = str(row.get('verify', '') or '')
         tasks.append({'id': bounded_line(row.get('id', ''), 160), 'title': bounded_line(row.get('title', row.get('goal', '')), 300), 'state': bounded_line(row.get('state', 'ready'), 40).lower(), 'depends': [bounded_line(item, 160) for item in row.get('depends', row.get('dependencies', []))] if isinstance(row.get('depends', row.get('dependencies', [])), list) else [], 'scope': {'allowed': allowed, 'forbidden': forbidden}, 'verify_present': bool(verify), 'verify_digest': sha256_text(verify) if verify else '', 'provider': bounded_line(row.get('provider', ''), 80), 'lease_id_present': bool(row.get('lease_id')), 'artifact_present': bool(row.get('artifact')), 'patch_present': bool(row.get('patch'))})
     acceptance = str(raw.get('accept', raw.get('acceptance', '')) or '')
-    status = _plan_status(repo)
+    status = _plan_status(repo, status_snapshot)
     count = len(tasks)
     if status['task_count'] != count or status['nonempty'] != (count > 0):
         raise CoreError('canonical plan status disagrees with the physical plan task set')
@@ -146,21 +148,6 @@ def _plan_state(repo: Path) -> Dict[str, Any]:
     if any(item not in task_ids for item in status['actionable']):
         raise CoreError('canonical plan status names an unknown actionable task')
     return {'present': True, 'source': source_descriptor(path, repo), 'plan_id': plan_id, 'goal': bounded_line(raw.get('goal', ''), 1000), 'acceptance_present': bool(acceptance), 'acceptance_digest': sha256_text(acceptance) if acceptance else '', 'tasks': tasks, 'task_count': status['task_count'], 'nonempty': status['nonempty'], 'all_done': status['all_done'], 'has_unfinished': status['has_unfinished'], 'actionable': list(status['actionable']), 'contract': dict(status['contract']), 'counts': dict(sorted(collections.Counter(task['state'] for task in tasks).items())), 'scope': {'allowed': sorted(set(all_allowed)), 'forbidden': sorted(set(all_forbidden))}}
-
-def _legacy_executor(repo: Path) -> Dict[str, Any]:
-    candidates: List[Tuple[Path, Dict[str, Any]]] = []
-    for root in (repo / '.oms' / 'executors', repo / '.oms' / 'executor'):
-        if not root.is_dir() or root.is_symlink():
-            continue
-        for path in root.glob('*/meta.json'):
-            if path.is_file() and not path.is_symlink():
-                raw = read_json(path, default={})
-                if isinstance(raw, dict): candidates.append((path, dict(raw)))
-    if not candidates:
-        return {'present': False, 'active': False, 'retired': True, 'source': None}
-    path, raw = max(candidates, key=lambda item: item[0].stat().st_mtime)
-    verify = str(raw.get('verify', '') or ''); state = bounded_line(raw.get('state', ''), 40).lower()
-    return {'present': True, 'active': False, 'retired': True, 'source': source_descriptor(path, repo), 'id': bounded_line(raw.get('executor_id', raw.get('id', path.parent.name)), 160), 'state': state, 'provider': bounded_line(raw.get('provider', ''), 80), 'model': bounded_line(raw.get('selected_model', raw.get('model', '')), 120), 'reasoning_effort': bounded_line(raw.get('reasoning_effort', ''), 40), 'task_id': bounded_line(raw.get('plan_task', raw.get('task_id', '')), 160), 'base_sha': bounded_line(raw.get('base_sha', ''), 80), 'scope': {'allowed': parse_path_list(raw.get('allowed_paths', raw.get('allowed', []))), 'forbidden': parse_path_list(raw.get('forbidden_paths', raw.get('forbidden', [])))}, 'verify_present': bool(verify), 'verify_digest': sha256_text(verify) if verify else '', 'frozen': False}
 
 def _failure_paths(repo: Path) -> List[Path]:
     oms = repo / '.oms'; canonical = oms / 'failures.jsonl'; candidates = [oms / 'fail-ledger.jsonl']
@@ -317,16 +304,17 @@ def _actions(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping[
     if not result: add('orient', 10, 'read', 'No stronger deterministic transition is available.', 'oms inbox')
     return sorted(result, key=lambda item: (-int(item['priority']), str(item['id'])))
 
-def build_base_envelope(repo: Path) -> Dict[str, Any]:
-    project = _project_file(repo); task = _task_packet(repo); plan = _plan_state(repo); executor = _legacy_executor(repo); failures = failure_rows(repo)
+def build_base_envelope(repo: Path, *, status_snapshots: Any = None) -> Dict[str, Any]:
+    # Internal, single-query reuse only; no persisted cache or CLI override.
+    snapshots = status_snapshots if status_snapshots is not None else {}
+    project = _project_file(repo); task = _task_packet(repo, snapshots.get('task')); plan = _plan_state(repo, snapshots.get('plan')); executor = {'present': False, 'active': False, 'retired': True, 'frozen': False, 'inspected': False}; failures = failure_rows(repo)
     scope = _merge_scope(project.get('scope', {}), task.get('scope', {}), plan.get('scope', {}))
-    sources = [item for item in (project.get('source'), task.get('source'), plan.get('source'), executor.get('source')) if item]
+    sources = [item for item in (project.get('source'), task.get('source'), plan.get('source')) if item]
     head = git_head(repo); state_digest = sha256_bytes(canonical_json({'head': head, 'sources': sources, 'failures': failures})); warnings: List[str] = []; criteria = _criteria(project, task, plan)
     continuity = {'latest_import': latest_import(repo, local_head=head)}
     if not criteria: warnings.append('No explicit acceptance criteria were found; completion coverage cannot be proven.')
     if plan.get('present') and not plan.get('acceptance_present'): warnings.append('The active plan has no plan-level acceptance command.')
     if plan.get('present') and not plan.get('nonempty'): warnings.append('The active plan has no tasks; completion is gated until plan work is defined.')
-    if executor.get('present'): warnings.append('Retired Soul executor records are evidence only; create a fresh reviewed plan task to continue them.')
     if failures: warnings.append('%d unresolved failure record(s) require attention.' % len(failures))
     return {'schema': ENVELOPE_SCHEMA, 'generated_at': utc_now(), 'repo': {'head': head or None, 'branch': git_branch(repo) or None}, 'state_digest': state_digest, 'sources': sources, 'objective': _objective(project, task, plan), 'scope': scope, 'criteria': criteria, 'budget': task.get('budget', {}), 'task': {key: value for key, value in task.items() if key not in ('criteria', 'source', 'constraints')}, 'plan': {key: value for key, value in plan.items() if key != 'source'}, 'executor': {key: value for key, value in executor.items() if key != 'source'}, 'authority': {'repo_write': 'external_parent_decision', 'remote_create': 'external_parent_decision', 'authority_transferable_by_capsule': False}, 'continuity': continuity, 'failures': failures, 'warnings': warnings}
 

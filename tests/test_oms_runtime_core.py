@@ -192,6 +192,13 @@ class RuntimeFixture(RuntimeFixtureBase):
 
     def test_envelope_and_coverage_are_conservative(self) -> None:
         row = evidence.build_envelope(self.repo)
+        snapshots = {'task': projection._task_status(self.repo), 'plan': projection._plan_status(self.repo)}
+        with patch.object(projection, 'run_json', side_effect=AssertionError('duplicate status subprocess')):
+            reused = evidence.build_envelope(self.repo, status_snapshots=snapshots)
+        for key in ('task', 'plan', 'evidence', 'next_actions'):
+            self.assertEqual(reused[key], row[key])
+        with self.assertRaises(CoreError):
+            evidence.build_envelope(self.repo, status_snapshots=dict(snapshots, task={}))
         statuses = {item['id']: item['status'] for item in row['criteria']}
         self.assertEqual(statuses['project-api'], 'verified')
         self.assertEqual(statuses['project-safe'], 'missing')
@@ -212,7 +219,10 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertTrue(with_legacy['executor']['retired'])
         self.assertFalse(with_legacy['executor']['active'])
         self.assertFalse(with_legacy['executor']['frozen'])
-        self.assertTrue(any('Retired Soul' in item for item in with_legacy['warnings']))
+        self.assertFalse(with_legacy['executor']['inspected'])
+        self.assertEqual(with_legacy['state_digest'], row['state_digest'])
+        self.assertEqual(with_legacy['warnings'], row['warnings'])
+        self.assertTrue(legacy.is_file())
 
     def test_completed_plan_without_active_task_routes_to_retirement_check(self) -> None:
         actions = projection._actions(
@@ -1009,6 +1019,7 @@ class RuntimeFixture(RuntimeFixtureBase):
             holder.stdin.write('\n')
             holder.stdin.close()
             holder.wait(timeout=30)
+            holder.stdout.close()
         after = subprocess.run(
             [sys.executable, '-c', contend_script], env=env,
             capture_output=True, text=True, timeout=60)

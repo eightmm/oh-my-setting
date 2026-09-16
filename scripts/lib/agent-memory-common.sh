@@ -543,6 +543,19 @@ oms_check_sh_has_fast_mode() {
   grep -Eq '(^|[[:space:]("|'\''])fast("|'\'')?\)' "$check_sh_path"
 }
 
+# Select without executing project code. Never fall back to an unbounded suite.
+oms_default_verify_command() {
+  local check_sh_path="$1"
+  if [ "${2:-0}" = 1 ] && oms_check_sh_has_ml_smoke "$check_sh_path"; then
+    printf '%s\n' 'bash scripts/check.sh ml-smoke'
+  elif oms_check_sh_has_fast_mode "$check_sh_path"; then
+    printf '%s\n' 'bash scripts/check.sh fast'
+  else
+    echo 'error: scripts/check.sh has no bounded fast mode; select affected checks explicitly with --verify CMD' >&2
+    return 2
+  fi
+}
+
 # Pure read intent wins over write nouns ("review the fix" is a read), but a
 # read request explicitly coordinated with an action ("review and fix") is a
 # write. Anything ambiguous stays read — the conservative default.

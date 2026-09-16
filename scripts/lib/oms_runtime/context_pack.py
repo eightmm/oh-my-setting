@@ -172,7 +172,7 @@ def validate_context_pack(path: Path, repo: Path, *, max_bytes: int = MAX_PACK_B
 
 
 def automatic_context_pack(repo: Path, parent: Path, state: Path, task: str) -> Dict[str, Any]:
-    from oms_runtime.context import _safe_repo_file
+    from oms_runtime.context import _fresh_graph, _safe_repo_file
     from oms_runtime.common import atomic_write_bytes, ensure_private_dir, read_bytes, run_output
     from oms_graph.project import build
     from oms_graph.project.context import context_pack
@@ -203,8 +203,13 @@ def automatic_context_pack(repo: Path, parent: Path, state: Path, task: str) -> 
     if coherent:
         atomic_write_bytes(state / "graph.json", graph_bytes)
         atomic_write_bytes(state / "manifest.json", manifest_bytes)
-    build.ensure(repo, state=state)
-    return context_pack(repo, build.load_graph(repo, state=state), task=task[:2000], max_files=8, state=state)
+    checked = _fresh_graph(repo, state=state)
+    if checked is None:
+        build.ensure(repo, state=state)
+        checked = _fresh_graph(repo, state=state)
+    if checked is None:
+        raise CoreError("automatic context graph is stale, unsafe or inconsistent")
+    return context_pack(repo, checked[0], task=task[:2000], max_files=8, state=state)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

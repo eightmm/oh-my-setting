@@ -105,6 +105,12 @@ work_journal_prompt_tick "$repo"
 [ ! -e "$boundary_calls" ] || fail "prompt or Stop called the remote mirror"
 # The deferred fallback must survive captured Stop output and return before
 # its remote work completes, including when no tick timer is installed.
+(
+  unset OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID OMS_WORK_JOURNAL_NOTION_DATABASE_ID
+  # No Notion config and no GitHub origin: not even the Python launcher runs.
+  python3() { fail "unconfigured publishing launched Python"; }
+  work_journal_defer_finish "$repo"
+) || fail "empty deferred publishing must be a local no-op"
 OMS_HARNESS_CHILD=1 work_journal_defer_finish "$repo"
 [ ! -e "$boundary_calls" ] || fail "a child scheduled remote publishing"
 deferred_out="$(OMS_CI_TICK=0 work_journal_defer_finish "$repo")"

@@ -34,7 +34,7 @@ context_pack_targets=""
 # Artifact provenance belongs to this operation. Do not inherit a caller's
 # index annotations when context compilation is disabled or fails early.
 unset OMS_INDEX_CONTEXT_MANIFEST_DIGEST OMS_INDEX_CONTEXT_BUNDLE_SHA256 \
-  OMS_INDEX_CONTEXT_SELECTED_BYTES OMS_INDEX_CONTEXT_DEBT
+  OMS_INDEX_CONTEXT_SELECTED_BYTES OMS_INDEX_CONTEXT_DEBT OMS_INDEX_REPAIR_REPLAY_JSON
 BRIEF_FILE=""
 REVIEW_ARTIFACT=""
 ROLE=""
@@ -126,10 +126,11 @@ Options:
   --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --verify CMD         Command run inside the worktree after the worker
                        finishes (e.g. "uv run pytest tests/"). Non-zero exit
-                       marks the delegation failed. Default: when the project
-                       has executable scripts/check.sh, ML projects prefer
-                       "bash scripts/check.sh ml-smoke" when available, else
-                       "bash scripts/check.sh fast".
+                       marks the delegation failed. Default for writes:
+                       "bash scripts/check.sh fast" when implemented.
+                       A check.sh without fast needs an explicit --verify CMD
+                       (or --no-verify); ML checks are never inferred from style.
+                       Read-only reports have no automatic test run.
   --read-only          Run the worker with read access (plan mode / read-only
                        sandbox). An audit or review role produces a report,
                        never a patch; the role's prose mandate gains the
@@ -143,6 +144,8 @@ Options:
                        OMS_PEER_TIMEOUT of wall-clock budget.
                        No additional advisor unless OMS_ADVISE_ON_REPEAT=1.
                        Default: 0 (one-shot).
+                       With --repair 2|3, historical replay may stop repeated
+                       identical failures early; sparse evidence keeps this cap.
   --apply              Apply the resulting patch to the main tree when the
                        worker and --verify succeed. Requires a clean main tree.
   --allow-restructure  Forward to the landing gate: permit an unscoped patch
@@ -188,6 +191,7 @@ Environment:
   OH_MY_SETTING_DELEGATE_DRY_RUN=1  Same as --dry-run.
   OMS_ADVISE_ON_REPEAT=1     Permit one extra advisor call after a failed repair.
                              Default: off; set only within user-authorized scope.
+  OMS_REPAIR_REPLAY=0        Keep the explicit repair budget; still record outcomes.
   OMS_DELEGATE_WORKTREE_ROOT  Parent for temporary delegated worktrees. Default:
                              $XDG_CACHE_HOME/oh-my-setting/worktrees, else
                              ~/.cache/oh-my-setting/worktrees.
@@ -1029,7 +1033,17 @@ worker_identity_gitfile_sha="$OMS_WORKER_IDENTITY_GITFILE_SHA"
 worker_identity_backpointer_sha="$OMS_WORKER_IDENTITY_BACKPOINTER_SHA"
 worker_identity_worktree_stat="$OMS_WORKER_IDENTITY_WORKTREE_STAT"
 worker_identity_gitdir_stat="$OMS_WORKER_IDENTITY_GITDIR_STAT"
+repair_replay_base=""
+[ "$REPAIR" -lt 2 ] || repair_replay_base="$(git -C "$worktree" rev-parse HEAD)"
 oms_seed_local_agent_files "$REPO" "$worktree"
+
+# Resolve the trusted base's contract before graph work or provider startup.
+# Explicit commands and plan-task verification take precedence over defaults.
+if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] &&
+    [ "$WORKER_ACCESS" = write ] && [ -x "$worktree/scripts/check.sh" ]; then
+  VERIFY_CMD="$(oms_default_verify_command "$worktree/scripts/check.sh")" || exit 2
+  echo "auto-verify: $VERIFY_CMD (disable with --no-verify)"
+fi
 
 # Build against the worker's bytes, not dirty/untracked primary sources. The
 # parent cache is read-only input to a private copy checked against this
@@ -1316,19 +1330,6 @@ PY
   oms_with_file_lock "$delegation_lock_target" write_delegation_marker
 fi
 
-# Verification contract: default to the project's check.sh when present.
-if [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" = 0 ] && [ -x "$worktree/scripts/check.sh" ]; then
-  project_style="$("$(ma_scripts_dir)/detect-project-style.sh" "$worktree" 2>/dev/null || echo general)"
-  if [ "$project_style" = "ml" ] && oms_check_sh_has_ml_smoke "$worktree/scripts/check.sh"; then
-    VERIFY_CMD="bash scripts/check.sh ml-smoke"
-  elif oms_check_sh_has_fast_mode "$worktree/scripts/check.sh"; then
-    VERIFY_CMD="bash scripts/check.sh fast"
-  else
-    VERIFY_CMD="bash scripts/check.sh"
-  fi
-  echo "auto-verify: $VERIFY_CMD (disable with --no-verify)"
-fi
-
 {
   printf '# %s delegate\n\n' "$TO"
   printf -- '- started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1386,6 +1387,8 @@ delegate_attempt_transition() {  # STATE REASON KEY
 
   [ "$worker_attempt_owned" = 1 ] || return 0
   [ -n "$worker_attempt_id" ] || return 0
+  # Read-mode attempts are completed by the provider runner, not patch review.
+  [ "$WORKER_ACCESS" = write ] || return 0
   events="$(ma_scripts_dir)/agent-events.sh"
   args=(--repo "$REPO" transition --attempt "$worker_attempt_id" \
     --state "$state" --actor peer-delegate --idempotency-key "$key")
@@ -1451,7 +1454,9 @@ EOF
   worker_attempt_id="${OMS_LAST_ATTEMPT_ID:-}"
   worker_attempt_owned="${OMS_LAST_ATTEMPT_OWNED:-0}"
   if [ "$worker_attempt_owned" = 1 ]; then
-    if [ "$worker_status" -eq 0 ]; then
+    if [ "$worker_status" -eq 0 ] && [ "$WORKER_ACCESS" = read ]; then
+      worker_attempt_state="done"
+    elif [ "$worker_status" -eq 0 ]; then
       worker_attempt_state=working
     else
       worker_attempt_state=failed
@@ -1521,6 +1526,11 @@ run_verify() {
   local verify_pid verify_child_status
 
   : > "$verify_out"
+  if [ "$worker_status" = 126 ] || [ "$worker_status" = 127 ]; then
+    printf 'SKIPPED: provider unavailable or blocked; no verification run.\n' >> "$artifact"
+    verify_status=125
+    return 0
+  fi
   if ! worker_worktree_require_identity "verification"; then
     worker_status=125
     verify_status=125
@@ -1900,11 +1910,45 @@ advise_after_repeated_failure() {
   echo "advisor consulted after repeated failure" >&2
 }
 
+repair_replay_json=""
+repair_replay_stop=0
+repair_replay_disabled=0
+repair_replay_tick() {
+  local result decision
+  [ "$REPAIR" -gt 1 ] && [ "$DRY_RUN" = 0 ] && [ "$WORKER_ACCESS" = write ] &&
+    [ "${OMS_ADVISE_ON_REPEAT:-0}" != 1 ] &&
+    [ -n "$VERIFY_CMD" ] && [ "$repair_replay_disabled" = 0 ] || return 0
+  if [ "$worker_boundary_failed" = 1 ] || [ "${OMS_MODEL_FALLBACK_USED:-0}" = 1 ]; then
+    repair_replay_json=""
+    repair_replay_disabled=1
+    return 0
+  fi
+  if ! result="$(OMS_REPLAY_TRACE="$repair_replay_json" OMS_REPLAY_VERIFY="$VERIFY_CMD" \
+    python3 "$(ma_scripts_dir)/lib/repair_replay.py" \
+      --index "${OMS_ARTIFACT_INDEX:-$REPO/.oms/artifacts/index.jsonl}" \
+      --base "$repair_replay_base" --provider "$TO" --model "${OMS_MODEL_SELECTED:-}" \
+      --effort "${OMS_REASONING_SELECTED:-}" --budget "$REPAIR" --patch "$patch_file" \
+      --log "$verify_out" --worker "$worker_status" --verify "$verify_status")"; then
+    repair_replay_json=""
+    repair_replay_disabled=1
+    return 0
+  fi
+  result="${result//$'\r'/}"
+  decision="${result%%$'\n'*}"
+  repair_replay_json="${result#*$'\n'}"
+  if [ "$decision" = stop ]; then
+    repair_replay_stop=1
+    printf '\n## Repair replay\nStopped repeated identical failure using held-out historical evidence; still failed, not verified.\n' >> "$artifact"
+    echo "repair replay: repeated failure; stopping within the requested budget" >&2
+  fi
+}
+
+repair_replay_tick
 repair_used=0
-if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] &&
-   [ "$worker_status" -ne 126 ] &&
-   [ "$route_retry_terminal" = 0 ]; then
-  while [ "$repair_used" -lt "$REPAIR" ] && { [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; }; do
+if [ "$DRY_RUN" != "1" ]; then
+  while [ "$repair_used" -lt "$REPAIR" ] && [ "$repair_replay_stop" = 0 ] &&
+      [ "$route_retry_terminal" = 0 ] && [ "$worker_status" -ne 126 ] && [ "$worker_status" -ne 127 ] &&
+      { [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; }; do
     repair_used=$((repair_used + 1))
     write_repair_prompt "$repair_prompt_file"
     [ "$repair_used" -lt 2 ] || advise_after_repeated_failure "$repair_prompt_file"
@@ -1955,6 +1999,7 @@ if [ "$REPAIR" -gt 0 ] && [ "$DRY_RUN" != "1" ] && [ "$worker_status" -ne 127 ] 
     else
       delegate_attempt_finish_without_verify
     fi
+    repair_replay_tick
     echo "repair $repair_used: worker exit $worker_status, verify exit $verify_status"
   done
 fi
@@ -2112,7 +2157,8 @@ index_exit=0
 if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
   index_exit=1
 fi
-ma_append_artifact_index "$REPO" delegate "$TO" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" "$REVIEW_ARTIFACT" || true
+OMS_INDEX_REPAIR_REPLAY_JSON="$repair_replay_json" \
+  ma_append_artifact_index "$REPO" delegate "$TO" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" "$REVIEW_ARTIFACT" || true
 
 applied=0
 plan_reviewed=0

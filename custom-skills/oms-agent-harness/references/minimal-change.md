@@ -42,6 +42,12 @@ Create a test only for an uncovered observable contract, a reproduced bug, or
 a safety boundary; a changed line, refactor, document, or wiring task does not
 earn a new test by itself.
 
+For local feedback, select existing test files or node IDs when the native
+runner supports them; the project template accepts `bash scripts/check.sh fast
+tests/test_api.py::test_behavior`. Do not make each implementation step or
+experiment launch rerun the full suite. Keep heavier ML/GPU checks tied to the
+changed behavior and the project's experiment or release contract.
+
 Run affected checks and every check required by the project. After they pass,
 repeat or expand only for changed inputs, failures, or unresolved risk. A
 documentation-only edit does not justify unrelated test runs, but cannot waive
@@ -100,13 +106,12 @@ a mechanical verification failure.
 
 ## Measure without another benchmark
 
-Use `oms skill-forge eval` for baseline/treatment routing and task value,
-`oms patch-admit` for deterministic current-HEAD patch checks plus
-`oms peer-review --gate --prompt "<review rubric>"` for current-diff review,
-and `oms runtime benchmark compare`
-for existing effectiveness, duplicate-work, correction, defect, reversion,
-refusal, token, cost, and duration trends. Correctness and required checks are
-the gate; fewer files, dependencies, lines, tokens, or seconds are secondary.
+Reuse affected tests and existing receipts. `oms patch-admit` checks worker
+patches against current HEAD; peer review requires collaboration authority.
+Use `oms runtime benchmark compare` only when comparable recorded outcomes
+exist. Skill routing/task experiments belong to an explicit skill-evaluation
+task, not ordinary code cleanup. Correctness and required checks are the gate;
+fewer files, dependencies, lines, tokens, or seconds are secondary.
 
 The retired `semantic-eval` command only reports migration instructions. Its
 historical-base reports remain evidence for their recorded subject, not

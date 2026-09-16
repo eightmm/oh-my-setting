@@ -94,27 +94,6 @@ assert module.live_peer_sessions(Events(b""), "me", stamp.timestamp()) == {}
 PY
 }
 
-test_verification_disclosure_boundaries() {
-  python3 - "$ROOT/scripts/lib/hook_state.py" <<'PY'
-import importlib.util
-import sys
-
-spec = importlib.util.spec_from_file_location("hook_state", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(module)
-
-for text in ("파일을 확인했습니다.", "Tests were not run.", "Done."):
-    assert not module.has_verification_disclosure(text), text
-for text in (
-    "Verification: bash tests passed.",
-    "Not verified: shellcheck is unavailable.",
-    "검증: pytest 통과.",
-    "미검증: GPU를 사용할 수 없음.",
-):
-    assert module.has_verification_disclosure(text), text
-PY
-}
 
 route_prompt() {
   local repo="$1"
@@ -339,7 +318,6 @@ PY
 
 test_classifier_boundaries
 test_peer_tail_is_bounded
-test_verification_disclosure_boundaries
 test_explicit_goal_rotation
 test_fail_ledger_hook_resolves_on_success
 test_route_is_hermetic_to_inherited_harness_session

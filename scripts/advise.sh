@@ -10,8 +10,8 @@ set -euo pipefail
 # wrote of itself.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/lib/agent-memory-common.sh
-. "$SCRIPT_DIR/lib/agent-memory-common.sh"
+# shellcheck source=scripts/lib/peer-common.sh
+. "$SCRIPT_DIR/lib/peer-common.sh"
 
 fail() {
   echo "error: $*" >&2
@@ -24,6 +24,7 @@ PROMPT=""
 PROMPT_FILE=""
 INCLUDE_FAILURES=1
 INCLUDE_SESSION=0
+PREVIEW=0
 SESSION_ID=""
 ALLOW_SENSITIVE=0
 STRATEGY="${OMS_ADVISOR_STRATEGY:-decision-advisor}"
@@ -65,7 +66,7 @@ Options:
                        Alias: --role NAME.
   --model MODEL        Exact advisor model.
   --fallback-model M   Explicit one-shot capacity fallback model.
-  --reasoning-effort E Explicit effort; default is high, clamped to the model scale.
+  --reasoning-effort E Explicit effort; default uses the shared model router.
   --no-strategy        Do not inject a strategy profile.
   --no-failures        Do not attach unresolved fail-ledger rows.
   --memory             Attach shared harness memory.
@@ -133,6 +134,7 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --memory|--task|--ml-context|--no-memory|--no-task|--no-ml-context|--export-only|--dry-run)
+      case "$1" in --export-only|--dry-run) PREVIEW=1 ;; esac
       PASSTHROUGH+=("$1")
       shift
       ;;
@@ -292,15 +294,7 @@ summary="$PROMPT"
 # Not exec: the EXIT trap must outlive the call so the composed prompt file
 # exists while agent-call reads it and the tmpdir is still cleaned up after.
 status=0
-has_effort=0
-for option in "${PASSTHROUGH[@]+${PASSTHROUGH[@]}}"; do
-  [ "$option" = --reasoning-effort ] && has_effort=1
-done
-if [ "$has_effort" -eq 0 ]; then
-  PASSTHROUGH+=(--reasoning-effort high)
-  export OMS_REASONING_CLAMP=1
-fi
-bash "$SCRIPT_DIR/agent-call.sh" \
+ma_call_read_peer "" "$PREVIEW" \
   --to "$TO" \
   --repo "$REPO" \
   --artifact-dir "$REPO/.oms/artifacts/advise" \

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Project verification contract. Agents run this before claiming work done.
 #   fast      CPU-only, under 60 seconds, safe to run anytime.
+#             Optional pytest paths/node IDs; no implicit full-suite collection.
 #   ml-smoke  ML interface smoke: import/config/data/model/loss one-batch checks.
 #   gpu       Short GPU smoke; wrapped in a transient srun on Slurm machines.
 # Fill the TODO blocks as the project takes shape. An empty contract fails
@@ -9,6 +10,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 MODE="${1:-fast}"
+[ "$#" -eq 0 ] || shift
 
 run_fast() {
   local ran=0
@@ -23,6 +25,12 @@ run_fast() {
   if [ -f pyproject.toml ] && command -v uv >/dev/null 2>&1 &&
     uv run ruff --version >/dev/null 2>&1; then
     uv run ruff check .
+    ran=1
+  fi
+
+  if [ "$#" -gt 0 ]; then
+    command -v uv >/dev/null 2>&1 || { echo "selected tests require the project uv environment" >&2; exit 1; }
+    uv run python -m pytest -q "$@"
     ran=1
   fi
 
@@ -69,11 +77,11 @@ run_gpu() {
 }
 
 case "$MODE" in
-  fast) run_fast ;;
+  fast) run_fast "$@" ;;
   ml-smoke) run_ml_smoke ;;
   gpu) run_gpu ;;
   *)
-    echo "usage: scripts/check.sh [fast|ml-smoke|gpu]" >&2
+    echo "usage: scripts/check.sh fast [PYTEST_PATH_OR_NODE_ID...] | ml-smoke | gpu" >&2
     exit 2
     ;;
 esac

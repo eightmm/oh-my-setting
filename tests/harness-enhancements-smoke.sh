@@ -646,10 +646,12 @@ test_affected_gate_runs_positive_evidence_and_fails_open() {
   for script in check-python.sh check-bash32.sh; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/$script"
   done
+  printf '#!/usr/bin/env bash\nprintf "syntax:%%s\\n" "$*" >> "$OMS_TEST_AFFECTED_LOG"\n' > "$gate/scripts/check-python.sh"
   for suite in codex-hud-config-smoke.sh source-distribution-smoke.sh \
       platform-portability-smoke.sh bsd-portability-smoke.sh functional-evolution-smoke.sh; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/tests/$suite"
   done
+  printf '#!/usr/bin/env bash\nprintf "distribution:%%s\\n" "$*" >> "$OMS_TEST_AFFECTED_LOG"\n' > "$gate/tests/source-distribution-smoke.sh"
   cat > "$gate/scripts/graph.sh" <<'EOF'
 #!/usr/bin/env bash
 case "${OMS_TEST_GRAPH_MODE:-affected}" in
@@ -725,6 +727,8 @@ EOF
   grep -Fxq shell-selected "$log" || fail "affected gate omitted the selected shell case"
   grep -Fxq python-selected "$log" || fail "affected gate omitted the selected Python case"
   grep -Fxq shell-file "$log" || fail "affected gate omitted the selected shell file"
+  grep -Fxq 'syntax:lib/leaf.py' "$log" || fail "affected syntax check did not select only the changed Python"
+  grep -Fxq 'distribution:--docs-only' "$log" || fail "leaf change ran unrelated CI orchestration probes"
   if grep -Fq unselected "$log"; then
     fail "affected gate ran a test case absent from the graph plan: $(cat "$log")"
   fi

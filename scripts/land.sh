@@ -45,11 +45,12 @@ EOF
 
 REPO="$PWD" REMOTE=origin TARGET=main GATE="" WAIT=0 UPDATE=1 CI_WAIT=1500
 SIBLING_WAIT=1800 IGNORE_SIBLINGS=0
-MODE=start JSON=0 STAMP=""
+MODE=start JSON=0 STAMP="" READY_FILE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     status) MODE=status; shift ;;
     --run-job) MODE=job; STAMP="$2"; shift 2 ;;
+    --ready-file) READY_FILE="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
     --remote) REMOTE="$2"; shift 2 ;;
     --target) TARGET="$2"; shift 2 ;;
@@ -296,17 +297,6 @@ print(sys.argv[1] + "-" + hashlib.sha256(json.dumps(
 ).encode()).hexdigest()[:24])' "$1" "$REMOTE" "$TARGET" "$GATE" | tr -d '\r'
 }
 
-bounded_ci_query() {  # seconds, gh arguments
-  local seconds="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout --kill-after=1 "$seconds" gh "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout --kill-after=1 "$seconds" gh "$@"
-  else
-    python3 "$ROOT/scripts/lib/run-bounded.py" "$seconds" 1 land-ci gh "$@"
-  fi
-}
-
 run_job() {
   cd "$REPO"
   mkdir -p "$LAND_DIR"
@@ -365,20 +355,19 @@ run_job() {
   local conclusion=skipped run_id="" deadline remaining query_result
   if [ "$resume" -eq 1 ] && [ "$(receipt_value ci.conclusion)" = success ]; then
     conclusion=success
-  elif [ "$CI_WAIT" -gt 0 ] && command -v gh >/dev/null 2>&1; then
+  elif [ "$CI_WAIT" -gt 0 ]; then
     conclusion=timeout
+    rset ci.conclusion=pending
     deadline="$(( $(date +%s) + CI_WAIT ))"
     while [ "$(date +%s)" -lt "$deadline" ]; do
-      local ci_args=(--repo "$(repo_slug "$(git remote get-url --push "$REMOTE")")"
-        --commit "$SHA" --branch "$TARGET" --event push --limit 1)
-      [ ! -f "$REPO/.github/workflows/test.yml" ] || ci_args+=(--workflow test.yml)
+      local workflow=""
+      [ ! -f "$REPO/.github/workflows/test.yml" ] || workflow=test.yml
       remaining="$(( deadline - $(date +%s) ))"
       [ "$remaining" -gt 0 ] || break
       [ "$remaining" -le 30 ] || remaining=30
       rc=0
-      query_result="$(bounded_ci_query "$remaining" run list "${ci_args[@]}" \
-        --json databaseId,status,conclusion \
-        --jq '.[] | "\(.databaseId) \(if .status == "completed" then .conclusion else "pending" end)"' \
+      query_result="$(python3 "$ROOT/scripts/lib/ci-query.py" \
+        "$(git remote get-url --push "$REMOTE")" "$SHA" "$remaining" "$TARGET" "$workflow" \
         2>> "$LOG")" || rc=$?
       rset ci.query_rc="$rc"
       if [ "$rc" -ne 0 ]; then
@@ -388,7 +377,8 @@ run_job() {
       fi
       query_result="$(oms_strip_cr "$query_result")"
       read -r run_id conclusion <<< "$query_result"
-      [ -n "$run_id" ] && [ "$conclusion" != pending ] && break
+      rset ci.run_id="$run_id" ci.conclusion="$conclusion"
+      [ "$run_id" != 0 ] && [ "$conclusion" != pending ] && break
       conclusion=timeout
       remaining="$(( deadline - $(date +%s) ))"
       [ "$remaining" -gt 0 ] || break
@@ -403,14 +393,16 @@ run_job() {
     success|skipped) ;;
     *) finish failed "pushed $SHORT but ci $conclusion"; return 1 ;;
   esac
-  local install
+  local install installed_tree
   if [ "$UPDATE" -eq 1 ] && install="$(install_root)"; then
     if [ "$conclusion" != success ]; then
       finish blocked "pushed $SHORT; install update requires successful CI (ci $conclusion)"
       return 1
     fi
     if [ "$resume" -eq 1 ] && [ "$(receipt_value update.rc)" = 0 ] &&
-        [ "$(oms_strip_cr "$(receipt_value update.root)")" = "$install" ]; then
+        [ "$(oms_strip_cr "$(receipt_value update.root)")" = "$install" ] &&
+        [ "$(git -C "$install" rev-parse HEAD 2>/dev/null)" = "$SHA" ] &&
+        installed_tree="$(git -C "$install" status --porcelain)" && [ -z "$installed_tree" ]; then
       finish passed "already pushed and installed $SHORT; ci $conclusion"
       return 0
     fi
@@ -450,11 +442,19 @@ print("  log: %s" % r.get("log", ""))
 PY
 }
 
+run_ready_job() {
+  [ -z "$READY_FILE" ] || printf '0\n' > "$READY_FILE"
+  run_job
+}
+
 case "$MODE" in
   status) show_status; exit ;;
   job)
     rc=0
-    oms_try_file_lock "$LAND_DIR/active" run_job || rc=$?
+    oms_try_file_lock "$LAND_DIR/active" run_ready_job || rc=$?
+    if [ -n "$READY_FILE" ] && [ -f "$READY_FILE" ] && [ ! -s "$READY_FILE" ]; then
+      printf '%s\n' "$rc" > "$READY_FILE"
+    fi
     [ "$rc" -ne 75 ] || echo "land already active for this repository; use land status" >&2
     exit "$rc"
     ;;
@@ -491,9 +491,24 @@ if [ "$WAIT" -eq 1 ]; then
 fi
 # Job control on for the launch: a plain `&` from a script leaves SIGINT and
 # SIGQUIT ignored in the child, and the gate's own interrupt tests then fail.
+READY_FILE="$(mktemp "$LAND_DIR/.ready.XXXXXX")"
+trap 'rm -f "$READY_FILE"' EXIT
 set -m
-setsid bash "${job[@]}" < /dev/null > /dev/null 2>&1 &
+setsid bash "${job[@]}" --ready-file "$READY_FILE" < /dev/null > /dev/null 2>&1 &
 set +m
+for ((ready_attempt=0; ready_attempt<50; ready_attempt++)); do
+  [ ! -s "$READY_FILE" ] || break
+  sleep 0.1
+done
+if [ ! -s "$READY_FILE" ]; then
+  echo "error: landing start not confirmed; inspect land status before retrying" >&2
+  exit 1
+fi
+read -r ready_rc < "$READY_FILE"
+if [ "$ready_rc" != 0 ]; then
+  echo "land not started (exit $ready_rc); another landing may be active; use land status" >&2
+  exit "$ready_rc"
+fi
 echo "landing $(git -C "$REPO" rev-parse --short HEAD) in the background"
 echo "receipt: $LAND_DIR/$STAMP.json"
 echo "status: oms land status --repo $REPO"

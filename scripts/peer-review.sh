@@ -642,13 +642,7 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/review}"
 # Mechanical gate backstop: default to the project's own check contract so a
 # GATE: pass self-report alone cannot pass a diff that fails the checks.
 if [ "$GATE" -eq 1 ] && [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" -eq 0 ] && [ -x "$REPO/scripts/check.sh" ]; then
-  if [ "$ML_PRESET" -eq 1 ] && oms_check_sh_has_ml_smoke "$REPO/scripts/check.sh"; then
-    VERIFY_CMD="bash scripts/check.sh ml-smoke"
-  elif oms_check_sh_has_fast_mode "$REPO/scripts/check.sh"; then
-    VERIFY_CMD="bash scripts/check.sh fast"
-  else
-    fail "--gate needs --verify CMD: scripts/check.sh has no bounded fast mode; select affected checks explicitly"
-  fi
+  VERIFY_CMD="$(oms_default_verify_command "$REPO/scripts/check.sh" "$ML_PRESET")" || exit 2
   echo "gate auto-verify: $VERIFY_CMD (disable with --no-verify)"
 fi
 

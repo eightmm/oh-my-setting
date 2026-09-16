@@ -21,13 +21,19 @@ compatible; these groups do not grant combined authority.
 
 - Inbox projects shared state; detail-only lifecycle/approval reads remain
   separate because summaries truncate those lists. Reports are non-atomic
-  across underlying stores.
+  across underlying stores. State and runtime reuse validated task/plan results
+  within one query, without a persistent status cache or another CLI input.
 - Recent log windows read backwards; MCP display reads at most 64 KiB before
   its existing output cap. Full artifact/thread references stream once so an
   early result is not lost. Peer and MCP share final Output/Exit interpretation.
 - Runtime context reuses fresh Project Graph evidence selection, preserving
   explicit inputs and budgets. Missing/stale/unsupported graphs retain local
-  discovery; context acquisition neither builds graphs nor grants authority.
+  discovery; read-only context neither builds graphs nor grants authority.
+  Private delegation packs use the same freshness/path checks after their
+  bounded build; they never refresh the parent's graph from a worker tree.
+- Consult and advice share exact call-receipt validation; absent or ambiguous
+  receipts cannot borrow the newest artifact. Advice is a prompt variant using
+  the shared model router, not a separate fixed-high-effort routing policy.
 - Tick and install auto-update share scheduler detection/selection while
   preserving distinct schedules, ownership markers, and repair transactions.
 - Diagnostic, council, autonomy, profile, experiment, and continuity variants
@@ -49,7 +55,7 @@ provenance boundaries; remove duplicated routing and generated boilerplate.
 | Tool-family telemetry | Opt-in with `OMS_USAGE_TRACK=1`; historical usage remains readable and GC-managed. No daily scan of usage/skill bodies to recommend new skills. |
 | Skill selection and onboarding | ASCII trigger boundaries prevent `oom` matching `room`; generic continuation/model questions no longer force the harness. Keep specific collaboration/graph/autopilot triggers. Store ordinary build/test facts in the existing contract. |
 | Generic keyword skill hints | Off by default; native skill discovery remains. `OMS_SKILL_HINTS=1` restores keyword hints without changing live collaboration or journal delivery. |
-| Stop answer/budget guards | No implicit format block or session cap. Positive `OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN`, `OMS_SESSION_BUDGET_TURNS`, or `OMS_SESSION_BUDGET_HOURS` enables the requested guard. Journal finalization remains. |
+| Stop session budgets | Answer-format blocking is removed, including legacy opt-ins. Positive `OMS_SESSION_BUDGET_TURNS` or `OMS_SESSION_BUDGET_HOURS` enables a session cap. Journal finalization remains. |
 | External adapters | Removed Herdr pane control and the standalone A2A HTTP bridge/card. Native peer calls, live threads, and CLI/MCP state reads remain; external clients of the removed adapters must migrate. No extras dispatcher remains. |
 | Standalone semantic evaluation | Retired executable engine; use current-HEAD `patch-admit` checks and `peer-review` with the minimal-change rubric. Historical reports remain readable. |
 
@@ -165,10 +171,12 @@ oms project-doctor .
 oms project-private --check
 ```
 
-## Skill quality, supply chain, and learned drafts
+## Local skills and optional bundle operations
 
+Use `oms skill-forge add|validate|link` for ordinary local guidance. Neither
+external bundle management nor evaluation is required for a local edit.
 `oms skill-forge` remains the single project-skill authority. Local authored
-skills live under `.oms/skills`; imported bundles first pass a bounded,
+skills live under `.oms/skills`; explicitly imported bundles first pass a bounded,
 no-follow preview and then live as content-addressed immutable revisions under
 `.oms/skill-store`. Import, update, and rollback require explicit apply plus
 digest CAS. They reject links, hardlinks, nonregular entries, sensitive file
@@ -300,6 +308,43 @@ A write delegation:
 4. Returns an artifact and binary-safe patch; it does not commit or push.
 5. Optionally uses bounded repair rounds with the prior failure attached.
 
+Explicit `--verify` and plan-task checks win. Otherwise writes default only to
+an implemented `scripts/check.sh fast`; ML project detection does not select a
+heavier suite. A check script without `fast` requires a chosen verification
+command or an explicit `--no-verify`, before graph work or provider startup.
+Review and patch admission use the same selector. Admission has no implicit
+full-suite fallback or no-verify override; choose an explicit command when
+`fast` is absent. An explicit ML preset still selects an available `ml-smoke`.
+Read-only reports do not auto-run tests. Missing or blocked providers skip
+verification with a non-success result, rather than test unchanged code.
+
+With `--repair 2|3`, compact candidate/diagnostic hashes and exit codes go into
+the existing artifact-index `repair_replay` field. Replay compares the requested
+budget with stopping consecutive identical failures; single-repair runs skip
+this overhead. Selection requires 12 distinct prompts with the same base SHA,
+selected model/effort/provider, verifier command and cap. Latest complete baseline
+runs form chronological two-thirds development and one-third held-out sets;
+both must save calls. Any recorded success lost by early stopping, including
+duplicate-prompt reruns, vetoes selection. After four challenger runs, the next
+run retains the original cap to replenish uncensored evidence. These thresholds
+are OMS heuristics, not paper results or statistical guarantees.
+
+Reads are bounded to 1000 rows/2MiB. Censored failures, sparse/invalid history,
+unknown models and fallback routes cannot justify early stopping. A stop remains
+a failure. `OMS_REPAIR_REPLAY=0` retains the cap and records outcomes without
+reading history; `oms artifact-index telemetry` reports recorded/delegation
+counts, selections and stops, not a measured token or wall-clock saving.
+No extra run, timer, model, test omission or automatic delegation is introduced.
+Explicit repeated-failure advice bypasses replay: a different agent contributes
+to that trajectory and its cost, so single-worker evidence is not comparable.
+
+This is a narrow adaptation of [Dream-RSI §3](https://arxiv.org/html/2609.14858v1#S3),
+not a reproduction of its full exploration system: two fixed stopping policies,
+no generated policy code, no concurrency optimization. The [upstream repository](https://github.com/zhengkid/Dream-RSI)
+listed its full implementation as pending on 2026-09-15. Historical non-regression
+does not guarantee future task success or equivalent environments; a changed
+base/verifier/model cohort starts without transferable evidence.
+
 The worker does not see the caller's uncommitted changes. `patch-admit` checks
 applicability, path scope, sensitive content, syntax, and the stored test
 contract in another temporary worktree. If a patch changes its verifier,
@@ -373,6 +418,14 @@ Project state lives under ignored `.oms/` paths:
 attention. `oms fail-ledger list`, `oms artifact-index unresolved`, and
 `oms thread list` expose the underlying records. Writers are append-oriented;
 use migration and GC commands instead of editing JSONL by hand.
+
+Stop materializes the journal locally. Its detached publisher starts only if
+a Notion target is configured or GitHub CI polling is available for this repo.
+Existing content hashes, sync locks and CI polling intervals deduplicate work
+against scheduled maintenance; hosts without a timer keep the Stop fallback.
+Native telemetry drops metricless routine activity even from old per-tool
+registrations. Session boundaries and explicit failures remain; set
+`OMS_TELEMETRY_DEBUG=1` only when empty activity is useful for diagnosis.
 
 `.oms/` and project agent files are clone-local by design. A fresh clone needs
 the template/private setup again; continuity is not silently copied between
@@ -500,6 +553,7 @@ Soul executors and their command are removed. Existing records and bound reviews
 remain readable evidence but cannot authorize new execution or landing; create
 a fresh reviewed task without editing away the old binding. GC preserves legacy
 executor markers instead of attempting to resume or retire their contracts.
+Default state/envelope queries no longer scan or advertise these retired files.
 Normal task leases, scoped admission, one-use approvals and one-shot repair remain.
 
 Each new autopilot receipt also binds an opaque run owner. Claims and worker
@@ -560,7 +614,10 @@ skips symlinks, binaries, oversized and secret-shaped files, and treats
 every source byte as data.
 
 The **Execution Graph** (`oms graph exec validate|render|route|run|resume|decide|status|events|shadow|test|commit`)
-makes orchestration a first-class object. A GraphSpec (`config/graphs/*.json`)
+is an advanced option for explicit branching, concurrent graph tasks or resuming
+an existing graph run. Ordinary execution stays with plans/goal-drive/autopilot;
+the bundled goal-drive graph is an example, not another default driver.
+A GraphSpec (`config/graphs/*.json`)
 declares `agent`, `tool`, `gate`, `router`, `subgraph`, and `terminal` nodes,
 typed semantic outcomes (`completed failed unverified partial blocked
 changes_requested approved skipped`, deliberately separate from the plan
@@ -647,6 +704,10 @@ second updater. Receipt-owned schema-1 and schema-2 installs both preflight and
 apply through `update.sh`, which remains the canonical rollback-capable install
 transaction. Only receipt-less legacy checkouts retain the configured-upstream
 compatibility path until a successful update creates an install receipt.
+Before applying a new commit, both paths require successful `test.yml` push CI
+for that exact SHA. Missing, pending, failed, or unreadable CI defers to the next
+scheduled run; `gh` must be available and authenticated. Legacy updates merge
+the checked SHA, without a second pull that could fetch an unchecked tip.
 New cron/systemd triggers set `OMS_AUTO_UPDATE_MANAGED=1`: the wrapper selects
 the checkout's exact private uv Python before reading receipts or running the
 transaction. Runtime setup failures write a failed updater state instead of
@@ -795,8 +856,10 @@ still verifies the exact committed tree with one full gate, pushes its SHA,
 waits for CI success, then updates only to that SHA. Failed or skipped CI cannot
 refresh the installation. A moving update target is rejected by the updater.
 Retrying the same commit, destination and gate resumes CI/install from its
-successful push receipt; successful stages are reused. A repository-wide lock
-prevents concurrent landing gates. CI query errors are recorded immediately,
+successful push receipt; successful stages are reused. An installation receipt
+is reused only while the installed checkout is clean and still at the same SHA.
+A repository-wide lock prevents concurrent landing gates; background launches
+acknowledge lock acquisition before reporting success. CI query errors are recorded immediately,
 and each query is bounded by the remaining polling deadline (at most 30 seconds).
 
 The gate fingerprints `.oms` file contents, entry modes, symlinks, and

@@ -33,8 +33,8 @@ Run a command and append a row to the experiment ledger
 (default: docs/EXPERIMENTS.jsonl). Exit code mirrors the command.
 
 Before launching, when an executable scripts/check.sh exists, the project
-verification contract runs as a pre-flight gate (ml-smoke when implemented,
-else fast) and a failing gate aborts the launch. Identical earlier runs
+verification contract runs as a pre-flight gate (fast by default) and a
+failing gate aborts the launch. Identical earlier runs
 (same commit, same diff hash, same command) produce a warning.
 
 Options:
@@ -56,11 +56,12 @@ top             Rank runs by a recorded metric ("best run for val_auc"):
                 Failed runs (exit != 0) are excluded unless --all.
 
 Each row records its gate decision: "passed", "skipped" (with reason),
-"recorded" (command already ran, e.g. a capsule re-record), or "none"
+"recorded" (command is the check itself, or already ran), or "none"
 (no executable scripts/check.sh).
 
 Environment:
   OMS_RUN_LEDGER_GATE=0          Same as --no-gate.
+  OMS_RUN_LEDGER_CHECK_MODE=ml-smoke  Opt into the heavier ML pre-flight.
   OMS_RUN_LEDGER_GATE_REASON=..  Reason for an unsafe skip (same as --reason).
   OMS_RUN_LEDGER_DUP=0           Disable the duplicate-run warning.
 
@@ -298,12 +299,16 @@ if [ -n "${OMS_RUN_LEDGER_STATUS_OVERRIDE:-}" ]; then
   GATE_STATUS="recorded"
 elif [ ! -x scripts/check.sh ]; then
   GATE_STATUS="none"
+elif [ "$#" -ge 3 ] && [ "$1" = bash ] && [ "$2" = scripts/check.sh ] &&
+    [ "${OMS_RUN_LEDGER_CHECK_MODE:-$3}" = "$3" ] &&
+    { [ "$3" = fast ] || [ "$3" = ml-smoke ]; }; then
+  # The recorded command is itself the check; do not execute it twice.
+  GATE_STATUS="recorded"
 elif [ "$GATE" = "1" ]; then
-  gate_mode="fast"
-  # Mode is implemented only when a case label exists; a comment or usage
-  # mention must not select it. Labels may be quoted, parenthesized, or in
-  # an alternation: ml-smoke), (ml-smoke), "ml-smoke"), fast|ml-smoke).
-  if oms_check_sh_has_ml_smoke scripts/check.sh; then
+  gate_mode="${OMS_RUN_LEDGER_CHECK_MODE:-fast}"
+  case "$gate_mode" in fast|ml-smoke) ;; *) fail "OMS_RUN_LEDGER_CHECK_MODE must be fast or ml-smoke" ;; esac
+  if [ -z "${OMS_RUN_LEDGER_CHECK_MODE:-}" ] &&
+      ! oms_check_sh_has_fast_mode scripts/check.sh && oms_check_sh_has_ml_smoke scripts/check.sh; then
     gate_mode="ml-smoke"
   fi
   echo "ledger: pre-flight gate: bash scripts/check.sh $gate_mode (skip with --no-gate --reason ...)" >&2

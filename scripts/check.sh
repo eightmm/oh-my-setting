@@ -647,6 +647,7 @@ if [ "$RUN_QUICK" = 1 ]; then
   quick_python=0
   quick_docs=1
   quick_shell_files=()
+  quick_python_files=()
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     case "$path" in
@@ -654,7 +655,12 @@ if [ "$RUN_QUICK" = 1 ]; then
       *) quick_docs=0 ;;
     esac
     case "$path" in
-      *.py) quick_python=1 ;;
+      *.py)
+        if [ -f "$path" ]; then
+          quick_python=1
+          quick_python_files[${#quick_python_files[@]}]="$path"
+        fi
+        ;;
     esac
     case "$path" in
       *.sh|scripts/oms)
@@ -691,9 +697,9 @@ if [ "$RUN_QUICK" = 1 ]; then
     stage shellcheck-changed lint_shell "${quick_shell_files[@]}"
     stage bash-compat-changed bash scripts/check-bash32.sh "${quick_shell_files[@]}"
   fi
-  [ "$SKIP_LINT" = 1 ] || [ "$quick_python" = 0 ] || stage python-syntax bash scripts/check-python.sh
+  [ "$SKIP_LINT" = 1 ] || [ "$quick_python" = 0 ] || stage python-syntax bash scripts/check-python.sh "${quick_python_files[@]}"
   [ "$SKIP_LINT" = 1 ] || [ "$quick_skills" = 0 ] || stage skill-manifest bash scripts/install-skills.sh
-  if [ "$quick_docs" = 1 ]; then
+  if [ "$quick_docs" = 1 ] || [ "$quick_harness" = 0 ]; then
     stage source-distribution bash tests/source-distribution-smoke.sh --docs-only
   else
     stage source-distribution bash tests/source-distribution-smoke.sh

@@ -33,15 +33,10 @@ Commands:
   status                      Health summary; flags stale project skills.
   contracts                   List declared verify contracts, one
                               "name<TAB>command" row per skill that has one.
-  eval NAME --suite FILE      Evaluate an explicit black-box trigger/task
-      [--allow-host-commands] baseline. Task commands require the named flag;
-      [--record] [--json]     --record appends content-free runtime telemetry.
-  preview --source SOURCE     Validate a full skill bundle in quarantine and
-      [--ref REF] [--subdir P] print its pinned digest without project writes.
-  import|update ... --apply   Publish a reviewed immutable bundle revision;
-                              update requires an exact current digest CAS.
-  rollback NAME --to SHA      Repoint an imported skill to a verified stored
-      --expected-current-sha256 SHA --apply
+
+Optional bundle/experiment operations (not needed for local skills):
+  preview|import|update|rollback|eval --help
+                              Show the selected operation's arguments.
 
 Project skills live in <repo>/.oms/skills/<name>/SKILL.md. They load through
 each CLI's native project skill discovery — no router entry, no manifest.

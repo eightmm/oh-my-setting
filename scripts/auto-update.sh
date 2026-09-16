@@ -351,6 +351,20 @@ receipt_transaction_context() {
   RECEIPT_TRANSACTION_REF="$ref"
 }
 
+auto_update_ci_ready() {
+  local sha="$1" remote="${2:-origin}" destination result query_rc=0
+  destination="$(git -C "$ROOT" remote get-url "$remote" 2>/dev/null)" || destination=""
+  result="$(python3 "$ROOT/scripts/lib/ci-query.py" "$destination" "$sha" 30 "" test.yml 2>/dev/null)" || query_rc=$?
+  result="${result//$'\r'/}"
+  if [ "$query_rc" -ne 0 ] ||
+      [ "${result##* }" != success ]; then
+    write_state skipped "CI success not confirmed; auto-apply deferred" \
+      "$(git -C "$ROOT" rev-parse HEAD)" "$sha" "${upstream:-origin}"
+    echo "auto-update: skipped (CI success not confirmed; retry on next scheduled run)"
+    return 1
+  fi
+}
+
 receipt_transaction_update() {
   local ref="${RECEIPT_TRANSACTION_REF:-}"
   local current output status remote message upstream base latest expected
@@ -436,6 +450,7 @@ receipt_transaction_update() {
   # Close the fetch-to-apply race. A user edit or another updater changing HEAD
   # during preflight should make this run stand down, never feed a stale target
   # into the mutating transaction.
+  auto_update_ci_ready "$expected" || return 0
   latest="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
   if [ "$latest" != "$current" ] || [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
     write_state skipped "checkout changed during preflight; auto-apply skipped" "$latest" "$remote" "$upstream"
@@ -549,6 +564,8 @@ auto_update_apply_locked() {
 
   # Re-check dirtiness right before pulling: edits may have landed since the
   # earlier check, and --ff-only still updates a non-conflicting dirty tree.
+  remote_full="$(git -C "$ROOT" rev-parse "$remote_ref")"
+  auto_update_ci_ready "$remote_full" "$remote" || return 0
   if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
     local_full="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
     write_state skipped "tree became dirty before pull; auto-apply skipped" "$local_full" "" "$upstream"
@@ -558,7 +575,7 @@ auto_update_apply_locked() {
 
   old_short="$(git -C "$ROOT" rev-parse --short HEAD)"
   set +e
-  pull_text="$(git -C "$ROOT" pull --ff-only 2>&1)"
+  pull_text="$(git -C "$ROOT" merge --ff-only "$remote_full" 2>&1)"
   pull_status=$?
   set -e
   [ -z "$pull_text" ] || printf '%s\n' "$pull_text"

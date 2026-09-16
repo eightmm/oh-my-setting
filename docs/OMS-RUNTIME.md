@@ -81,7 +81,6 @@ The envelope projects, without copying authority:
 - `PROJECT.md`
 - `.oms/task/current.md`
 - `.oms/plan/tasks.json`
-- legacy Soul metadata as retired evidence, never effective scope
 - current Git state
 - unresolved failure receipts
 - criterion-level evidence coverage
@@ -93,6 +92,10 @@ authoritative. When current evidence completes the work, the projection keeps
 the two cleanup authorities distinct: it recommends `agent-task close` only
 for an active task packet, and the read-only `agent-plan retire --check` when
 an all-done plan is the remaining active record.
+
+Retired Soul files are not scanned or included in live-state digests. Existing
+files remain on disk; the compatibility `executor` field is inactive and
+`inspected: false`, and `state.executors` is empty rather than a history listing.
 
 Plan execution recommendations come from `agent-plan status --json.actionable`,
 not from the stored `ready` label alone. For a reviewed plan, the same snapshot
@@ -196,6 +199,8 @@ reproducibility matters.
 Ordinary `peer-delegate` calls automatically attach bounded graph file/test
 pointers, not source bytes. Preparation uses the detached snapshot and a private
 cache: a coherent parent graph/manifest can be copied but is never rewritten.
+Fresh private copies receive one freshness scan; only stale or missing copies
+take the build/refresh path followed by validation.
 The worker's default `.oms/project-graph` holds that private cache, allowing
 later graph queries and opt-in source bundles to reuse it without another build.
 Tracked or unignored cache targets are refused without overwriting existing ignore rules.
@@ -424,7 +429,11 @@ one pre-registered host command. Pass `--contract PATH` or the seven fields
 `--success`, `--change`, then `-- COMMAND...`. It streams command output and
 returns the command's exit code. `--metrics` and `--file` select ledger inputs;
 relative paths resolve from `--repo`. The existing run-ledger pre-flight gate
-still applies; `--no-gate` requires a recorded `--reason`. `--dry-run` validates
+defaults to `fast`; set `OMS_RUN_LEDGER_CHECK_MODE=ml-smoke` when the project's
+experiment contract requires ML verification. A project implementing only
+`ml-smoke` retains that fallback. Recording `bash scripts/check.sh fast` or
+`ml-smoke` runs that check once, without a duplicate pre-flight.
+`--no-gate` requires a recorded `--reason`. `--dry-run` validates
 without launching or writing the ledger. Conflicting contract overrides are
 rejected. This is not a multi-arm study and does not infer compute permission.
 

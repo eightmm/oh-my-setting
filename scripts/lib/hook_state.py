@@ -126,12 +126,6 @@ HIGH_RISK_TERMS = RELEASE_TERMS + (
     "훅",
     "플러그인",
 )
-VERIFICATION_DISCLOSURE_RE = re.compile(
-    r"(?:\b(?:verification|verified|tests?|not verified)"
-    r"|(?:검증|테스트|미검증|검증하지 않음))"
-    r"\s*[:：]\s*\S",
-    re.IGNORECASE,
-)
 CHITCHAT_RE = re.compile(
     r"^\s*(hi|hello|hey|thanks|thank you|안녕|안녕하세요|고마워|고맙|감사)\b",
     re.IGNORECASE,
@@ -424,6 +418,14 @@ def cmd_telemetry(_: argparse.Namespace) -> int:
         if isinstance(source, (str, int)) and str(source):
             fields[target] = sha256_text(str(source))[:16]
 
+    # Session boundaries drive live-peer detection even without usage metrics.
+    # Old installations may still call this per tool: discard empty activity.
+    event = payload.get("hook_event_name") or payload.get("hookEventName")
+    if (event not in ("SessionStart", "SessionEnd")
+            and not any(target in fields for _, target in metrics)
+            and fields.get("success") is not False
+            and os.environ.get("OMS_TELEMETRY_DEBUG") != "1"):
+        return 0
     append_event(repo, payload, **fields)
     return 0
 
@@ -786,67 +788,19 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
         return
 
 
-def route_state(payload: dict[str, Any], prompt: str, route: dict[str, Any]) -> None:
-    if os.environ.get("OMS_TURN_GUARD_OFF") == "1":
-        return
-    budget_enabled = session_budget_enabled()
-    if max_blocks_per_turn() == 0 and not budget_enabled:
+def route_state(payload: dict[str, Any]) -> None:
+    if os.environ.get("OMS_TURN_GUARD_OFF") == "1" or not session_budget_enabled():
         return
     repo = hook_repo(payload)
     if repo is None:
         return
-    hooks_dir = repo / ".oms" / "hooks"
-    state_path = session_state_path(hooks_dir, payload)
-    # A read-only prompt must replace this session's prior guarded route, or a
-    # release/task request remains armed and blocks unrelated later answers.
-    # Do not adopt a new repository merely because somebody asked a question.
-    if not route["guard"] and not budget_enabled and not state_path.is_file():
-        return
-    if route["guard"] or budget_enabled:
-        hooks_dir = ensure_oms(repo)
-        state_path = session_state_path(hooks_dir, payload)
+    state_path = session_state_path(ensure_oms(repo), payload)
     previous = load_state(state_path)
-    turn_id = str(payload.get("turn_id") or payload.get("turnId") or "")
-    previous_turn = str(previous.get("turn_id") or "")
-    # Without a payload turn id both sides are empty, so the old equality read
-    # every prompt as the same turn and carried a spent block budget forever.
-    same_turn = bool(turn_id) and previous_turn == turn_id
-    # A routed prompt is the one stable turn boundary every host shares, so a
-    # monotonic route sequence gives guard telemetry a content-free per-turn
-    # identity even when the Stop payload carries no id. Telemetry only: the
-    # block budget stays keyed by guard_turn_key.
-    route_seq = previous.get("route_seq")
-    if isinstance(route_seq, bool) or not isinstance(route_seq, int) or route_seq < 0:
-        route_seq = 0
-    state = {
-        "schema": 1,
-        "updated_at": utc_now(),
-        "session": session_hash(payload),
-        "turn_id": turn_id,
-        "prompt_hash": sha256_text(prompt),
-        "prompt_length": len(prompt),
-        "workflow": route["workflow"],
-        "risk": route["risk"],
-        "guard": bool(route["guard"]),
-        "guard_blocks": previous.get("guard_blocks", {}) if same_turn else {},
-        "stop_seq": previous.get("stop_seq", 0),
-        "route_seq": route_seq if same_turn else route_seq + 1,
-    }
-    if budget_enabled:
-        for key in ("started_at", "budget_turns", "budget_band"):
-            if key in previous:
-                state[key] = previous[key]
+    state = {"schema": 1, "session": session_hash(payload), "updated_at": utc_now()}
+    for key in ("started_at", "budget_turns", "budget_band"):
+        if key in previous:
+            state[key] = previous[key]
     write_json_atomic(state_path, state)
-    append_event(
-        repo,
-        payload,
-        action="route",
-        status="recorded",
-        workflow=route["workflow"],
-        risk=route["risk"],
-        guard=route["guard"],
-        prompt_hash=state["prompt_hash"],
-    )
 
 
 def load_skills(manifest_path: str) -> list[dict[str, Any]]:
@@ -1236,7 +1190,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 0
 
     route = classify_prompt(prompt)
-    route_state(payload, prompt, route)
+    route_state(payload)
     auto_task_record(payload, prompt, route)
 
     # Native skill catalogs already provide matching. Keep only state-aware
@@ -1340,32 +1294,8 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
         return ""  # Optional collaboration cannot block tools or ordinary replies.
 
 
-def git_dirty(repo: Path) -> bool:
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "status", "--short"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=3,
-        )
-    except Exception:
-        return False
-    return bool(proc.stdout.strip())
-
-
-# Shared wording with turn-guard.sh, which reports the failures that never
-# reach this process at all.
+# Shared wording with turn-guard.sh for an explicitly requested budget failure.
 GUARD_UNAVAILABLE = "oh-my-setting turn guard: unavailable (%s); this turn was not checked."
-
-
-def max_blocks_per_turn() -> int:
-    raw = os.environ.get("OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN", "0")
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        return 0
 
 
 def session_budget_enabled() -> bool:
@@ -1373,42 +1303,10 @@ def session_budget_enabled() -> bool:
         "OMS_SESSION_BUDGET_TURNS", "OMS_SESSION_BUDGET_HOURS"))
 
 
-def assistant_message(payload: dict[str, Any]) -> str:
-    for key in ("last_assistant_message", "lastAssistantMessage", "message"):
-        value = payload.get(key)
-        if isinstance(value, str):
-            return value
-    return ""
-
-
-def has_verification_disclosure(message: str) -> bool:
-    """Require an explicit verification-status field, not a keyword mention."""
-    return bool(VERIFICATION_DISCLOSURE_RE.search(message))
-
-
-def guard_turn_key(payload: dict[str, Any], state: dict[str, Any]) -> tuple[str, str, int]:
-    """Key the block budget per turn even when the Stop payload carries no id.
-
-    Claude Code's Stop payload has no turn identifier, so an empty key spent the
-    whole session's budget on the first block. A Stop that continues a blocked
-    turn is marked stop_hook_active; only an unmarked Stop opens the next turn,
-    which keeps the cap a loop fuse instead of a per-event allowance.
-    """
-    seq = state.get("stop_seq")
-    if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
-        seq = 0
-    raw = str(payload.get("turn_id") or payload.get("turnId") or "")
-    if raw:
-        return raw, "payload", seq
-    continuing = bool(payload.get("stop_hook_active") or payload.get("stopHookActive"))
-    seq = max(seq, 1) if continuing else seq + 1
-    return "stop-%d" % seq, "counter", seq
-
-
 def cmd_guard(_: argparse.Namespace) -> int:
     if os.environ.get("OMS_TURN_GUARD_OFF") == "1":
         return 0
-    if max_blocks_per_turn() == 0 and not session_budget_enabled():
+    if not session_budget_enabled():
         return 0
     payload, _ = load_payload()
     repo = hook_repo(payload)
@@ -1429,62 +1327,6 @@ def cmd_guard(_: argparse.Namespace) -> int:
         print(json.dumps({"decision": "block", "reason": budget}, ensure_ascii=False))
         return 0
 
-    if max_blocks_per_turn() == 0:
-        return 0
-    dirty = git_dirty(repo)
-    risk = str(state.get("risk") or "low")
-    workflow = str(state.get("workflow") or "unknown")
-    guard = bool(state.get("guard"))
-    should_guard = guard and max_blocks_per_turn() > 0 and (
-        risk == "high" or os.environ.get("OMS_TURN_GUARD_STRICT") == "1")
-
-    # Observation identity for every guard outcome: content-free, and purely
-    # telemetry — the block budget below still uses guard_turn_key unchanged.
-    # Without a payload turn id, the routed prompt's sequence anchors the key,
-    # so a block and its corrected continuation share one identity while the
-    # next routed turn opens a new one.
-    turn_key, key_source, stop_seq = guard_turn_key(payload, state)
-    obs_route_seq = state.get("route_seq")
-    if isinstance(obs_route_seq, bool) or not isinstance(obs_route_seq, int) or obs_route_seq < 0:
-        obs_route_seq = 0
-    if key_source == "payload":
-        obs_source = "payload"
-        obs_key = turn_key
-    else:
-        obs_source = "route"
-        obs_key = "route-%d:%s" % (obs_route_seq, turn_key)
-    turn_obs = sha256_text(session_hash(payload) + ":" + obs_key)[:16]
-
-    if not should_guard:
-        append_event(repo, payload, action="turn_guard", status="allow", workflow=workflow, risk=risk, dirty=dirty, turn_obs=turn_obs, turn_obs_source=obs_source, eligible=False)
-        return 0
-
-    if has_verification_disclosure(assistant_message(payload)):
-        append_event(repo, payload, action="turn_guard", status="allow_verified", workflow=workflow, risk=risk, dirty=dirty, turn_obs=turn_obs, turn_obs_source=obs_source, eligible=True)
-        return 0
-
-    blocks = state.get("guard_blocks")
-    if not isinstance(blocks, dict):
-        blocks = {}
-    count = int(blocks.get(turn_key, 0) or 0)
-    limit = max_blocks_per_turn()
-    if count >= limit:
-        append_event(repo, payload, action="turn_guard", status="allow_block_limit", workflow=workflow, risk=risk, dirty=dirty, turn_key_source=key_source, turn_obs=turn_obs, turn_obs_source=obs_source, eligible=True)
-        return 0
-
-    blocks[turn_key] = count + 1
-    state["guard_blocks"] = blocks
-    state["stop_seq"] = stop_seq
-    state["updated_at"] = utc_now()
-    write_json_atomic(state_path, state)
-    append_event(repo, payload, action="turn_guard", status="block_unverified", workflow=workflow, risk=risk, dirty=dirty, turn_key_source=key_source, turn_obs=turn_obs, turn_obs_source=obs_source, eligible=True)
-    reason = (
-        "oh-my-setting turn guard: high-risk "
-        + workflow
-        + " result lacks an explicit 'Verification:' or 'Not verified:' line. "
-        "Add one with the command/result or reason."
-    )
-    print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
     return 0
 
 

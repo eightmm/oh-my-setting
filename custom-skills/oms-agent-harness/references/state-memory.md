@@ -82,10 +82,12 @@ oms checkpoint restore <id> --apply
 
 The router keeps state-aware collaboration hints; generic keyword skill hints
 require `OMS_SKILL_HINTS=1`. `OMS_SKILL_ROUTER_OFF=1` disables routing.
-Guard state, Stop answer-format blocking and session budgets are off by default.
-Positive `OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN`, `OMS_SESSION_BUDGET_TURNS`, or
-`OMS_SESSION_BUDGET_HOURS` enables only the requested limit.
-`OMS_TURN_GUARD_OFF=1` bypasses both guards, not journal finalization.
+Stop never blocks answer wording; the retired format-guard settings are ignored.
+Positive `OMS_SESSION_BUDGET_TURNS` or `OMS_SESSION_BUDGET_HOURS` enables an
+explicit session limit. `OMS_TURN_GUARD_OFF=1` bypasses that limit, not journal
+finalization. Metricless routine telemetry is skipped; session boundaries,
+failures and real usage remain. `OMS_TELEMETRY_DEBUG=1` retains empty activity
+only when diagnosing hooks.
 
 ## Concurrent collaboration
 

@@ -150,11 +150,22 @@ if [ "$PLAN_HEALTHY" = 0 ]; then
   printf '{"schema":1,"present":false}\n' > "$RS_TMP/plan.json"
 fi
 RUNTIME_HEALTHY=1
-"$ROOT/scripts/runtime.sh" --repo "$REPO" envelope show \
-  > "$RS_TMP/runtime.json" 2>/dev/null || {
+if ! python3 - "$ROOT/scripts/lib" "$REPO" "$RS_TMP/task.json" "$RS_TMP/plan.json" \
+  > "$RS_TMP/runtime.json" 2>/dev/null <<'PY'
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from oms_runtime.evidence import build_envelope
+snapshots = {}
+for name, path in zip(('task', 'plan'), sys.argv[3:]):
+    with open(path, encoding='utf-8') as handle:
+        snapshots[name] = json.load(handle)
+print(json.dumps(build_envelope(Path(sys.argv[2]), status_snapshots=snapshots)))
+PY
+then
     RUNTIME_HEALTHY=0
     printf '{}\n' > "$RS_TMP/runtime.json"
-  }
+fi
 
 OMS_RS_AUTOUPDATE="$AUTOUPDATE_ATTENTION" \
 OMS_RS_REPO="$REPO" \
@@ -693,23 +704,8 @@ if os.path.isdir(deleg_dir):
                             "live": alive})
 state["delegations"] = delegations
 
-# --- Retired Soul records  -------------------------------------------------
-executors = []
-executor_dir = oms("executors")
-if os.path.isdir(executor_dir):
-    import glob as _executor_glob
-    for f in sorted(_executor_glob.glob(os.path.join(executor_dir, "*", "meta.json"))):
-        try:
-            d = json.load(open(f, encoding="utf-8"))
-        except Exception:
-            continue
-        executors.append({"id": d.get("executor_id", os.path.basename(os.path.dirname(f))),
-                          "state": d.get("state", "unknown"), "retired": True,
-                          "provider": d.get("provider", ""),
-                          "strategy": d.get("strategy", ""),
-                          "task_id": d.get("task_id", ""),
-                          "soul_sha256": d.get("soul_sha256", "")})
-state["executors"] = executors
+# Compatibility field only; retired records remain on disk, outside live state.
+state["executors"] = []
 
 # --- Change-guard active? ---------------------------------------------------
 guard = {"active": False, "stale": False}
@@ -1005,15 +1001,6 @@ else:
                 e.get("provider", "?"), ("role=%s " % e["role"]) if e.get("role") else "",
                 ("executor=%s soul=%s " % (e["executor_id"], (e.get("soul_sha256") or "-")[:12])) if e.get("executor_id") else "",
                 e.get("id", "?"), e.get("started_at", "?"), tag))
-
-    executors = state["executors"]
-    if executors:
-        line("\n## Legacy Soul records (retired)")
-        for e in executors:
-            line("  %-8s %s provider=%s strategy=%s task=%s soul=%s" % (
-                e.get("state", "?"), e.get("id", "?"), e.get("provider", "?") or "-",
-                e.get("strategy", "?") or "-", e.get("task_id", "") or "-",
-                (e.get("soul_sha256", "") or "-")[:12]))
 
     ci = state["ci"]
     if ci["state"] != "none":

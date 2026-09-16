@@ -7,6 +7,8 @@
   explicit authority.
 - Verify with the narrowest relevant command. Reuse existing coverage; add a
   test only for an uncovered observable contract, reproduced bug, or safety boundary.
+  Select related test files or node IDs during development; rerun or broaden
+  for changed inputs, failures, uncertainty, or the project's required release gate.
 - Keep generated artifacts, secrets, and private data out of git.
 
 Project-specific commands, paths, interfaces, do-not-touch areas, and success

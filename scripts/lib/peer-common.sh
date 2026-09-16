@@ -1146,6 +1146,15 @@ if covers_payload:
             sys.stderr.write("error: dependency_digests must map bounded repo-relative paths to hex digests\n")
             sys.exit(3)
         row["dependency_digests"] = {str(k): str(v) for k, v in covers_deps.items()}
+repair_payload = os.environ.get("OMS_INDEX_REPAIR_REPLAY_JSON", "")
+if kind == "delegate" and repair_payload:
+    from repair_replay import valid_trace
+    if len(repair_payload) > 8192:
+        sys.exit("error: repair replay payload exceeds 8KiB")
+    repair_trace = json.loads(repair_payload)
+    if not valid_trace(repair_trace):
+        sys.exit("error: invalid repair replay trace")
+    row["repair_replay"] = repair_trace
 review_payload = os.environ.get("OMS_INDEX_REVIEW_OUTCOME_JSON", "")
 if review_payload:
     if len(review_payload) > 16384:
@@ -1349,12 +1358,30 @@ extract_output() {
   python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" "$1"
 }
 
-# Did the provider actually answer? A CLI can exit 0 and still return nothing
-# usable — an empty body or a banner. Exit status alone cannot
-# tell a council "3/3 succeeded" from "2 answers and one non-answer".
-# Deliberately not a length test: a concise correct answer is still an answer,
-# and rejecting one costs a second provider call for nothing.
-# Prints: ok | empty | blocked | truncated. Semantic quality belongs to the parent.
+# One transport/result contract for consultation and its advice prompt variant.
+ma_call_read_peer() {  # ARTIFACT_OUT PREVIEW AGENT_CALL_ARGS...
+  local artifact_out="$1" preview="$2" log artifact rc=0
+  shift 2
+  OMS_PEER_ANSWER_QUALITY=blocked
+  [ "${OH_MY_SETTING_CALL_DRY_RUN:-0}" != 1 ] || preview=1
+  log="$(agent_memory_mktemp)" || return 1
+  bash "$(ma_scripts_dir)/agent-call.sh" "$@" > "$log" 2>&1 || rc=$?
+  cat "$log"
+  # Ambiguous or absent receipts never borrow another concurrent call's file.
+  artifact="$(awk '/^artifact: / {sub(/^artifact: /, ""); value=$0; count++} END {if (count == 1) print value}' "$log")"
+  [ -z "$artifact_out" ] || printf '%s\n' "$artifact" > "$artifact_out"
+  rm -f "$log"
+  OMS_PEER_ANSWER_QUALITY=ok
+  [ "$preview" = 1 ] || OMS_PEER_ANSWER_QUALITY="$(ma_answer_quality "$artifact")"
+  if [ "$rc" = 0 ] && [ "$OMS_PEER_ANSWER_QUALITY" != ok ]; then
+    echo 'peer: this call produced no usable answer receipt' >&2
+    rc=1
+  fi
+  return "$rc"
+}
+
+# Prints ok | empty | blocked | truncated, not a semantic judgment or length
+# score: a concise answer must not trigger another provider call.
 ma_answer_quality() {
   local artifact="$1"
   local helper
@@ -1373,7 +1400,7 @@ ma_answer_quality() {
     printf 'blocked\n'
     return 0
   fi
-  tmp="$(agent_memory_mktemp)" || { printf 'ok\n'; return 0; }
+  tmp="$(agent_memory_mktemp)" || { printf 'blocked\n'; return 0; }
   extract_output "$artifact" > "$tmp"
   if ! verdict="$(python3 "$helper" "$tmp" 2>/dev/null)" || [ -z "$verdict" ]; then
     rm -f "$tmp"

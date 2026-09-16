@@ -1,8 +1,10 @@
 # Skill Lifecycle
 
-Use this reference when writing, importing, or evaluating a project
-skill. `skill-forge` is the only activation authority; do not write links or
-`.oms/skill-store` by hand.
+Ordinary project guidance uses `skill-forge add`, `validate`, and `link`.
+No import store, evaluation suite or benchmark is needed for a local edit.
+The advanced operations below are only for an explicitly chosen external
+bundle or skill experiment. `skill-forge` is the activation authority; do not
+write links or `.oms/skill-store` by hand.
 
 ## Choose the operation
 

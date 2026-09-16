@@ -8,14 +8,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-if [ "$#" -gt 0 ]; then
-  case "$1" in
-    -h|--help) echo "usage: check-python.sh   (syntax-check the Python helpers recursively)"; exit 0 ;;
-    *) echo "error: check-python.sh takes no arguments: $1" >&2; exit 2 ;;
-  esac
-fi
+case "${1:-}" in -h|--help) echo "usage: check-python.sh [PATH...] (default: all Python helpers)"; exit 0 ;; esac
+[ "$#" -gt 0 ] || set -- scripts templates tests
 
-PYTHONDONTWRITEBYTECODE=1 python3 - scripts scripts/lib templates tests <<'PY'
+PYTHONDONTWRITEBYTECODE=1 python3 - "$@" <<'PY'
 import ast
 import pathlib
 import sys
@@ -26,8 +22,10 @@ seen = set()
 for directory in sys.argv[1:]:
     root = pathlib.Path(directory)
     if not root.exists():
+        print("error: missing syntax-check path: %s" % root, file=sys.stderr)
+        failed = 1
         continue
-    for path in sorted(root.rglob("*.py")):
+    for path in ([root] if root.is_file() else sorted(root.rglob("*.py"))):
         if "__pycache__" in path.parts:
             continue
         resolved = path.resolve()

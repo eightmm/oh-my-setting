@@ -121,7 +121,10 @@ contains "$TMP/entrypoint.md" "scripts/check.sh"
 cat > "$repo/scripts/check.sh" <<'EOF'
 #!/usr/bin/env bash
 set -eu
-bash scripts/check-python.sh
+case "${1:-fast}" in
+  fast) bash scripts/check-python.sh ;;
+  *) exit 2 ;;
+esac
 EOF
 cat > "$repo/scripts/check-python.sh" <<'EOF'
 #!/usr/bin/env bash

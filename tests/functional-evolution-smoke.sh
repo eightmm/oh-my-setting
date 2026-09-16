@@ -33,6 +33,12 @@ test_native_hook_telemetry_is_content_free_and_correlated() {
   local payload report
 
   make_repo "$repo"
+  # Old hook registrations must not flood the ledger with metricless activity.
+  for event in PostToolUse SubagentStop; do
+    printf '{"hook_event_name":"%s","cwd":"%s","success":true}' "$event" "$repo" |
+      bash "$ROOT/scripts/telemetry-hook.sh"
+  done
+  [ ! -e "$repo/.oms/hooks/events.jsonl" ] || fail "empty activity was recorded"
   payload="$(printf '%s' \
     '{"hook_event_name":"PostToolUse","session_id":"session-secret","turn_id":"turn-7","cwd":"'"$repo"'","tool_name":"Bash","tool_input":{"command":"echo private-command"},"tool_response":{"output":"private-output","success":true,"duration_ms":125},"usage":{"input_tokens":120,"output_tokens":30,"cache_read_input_tokens":40,"reasoning_tokens":5},"model":"claude-test"}')"
   printf '%s' "$payload" | bash "$ROOT/scripts/telemetry-hook.sh"
@@ -71,6 +77,17 @@ assert r["native_activity"]["tool_events"] == 1, r
 assert r["native_activity"]["usage"]["input_tokens"] == 120, r
 assert r["coverage"]["verification_reports"] == 2, r
 PY
+  # Boundaries remain live-peer evidence; failures and explicit debug survive.
+  for event in SessionStart SessionEnd; do
+    printf '{"hook_event_name":"%s","cwd":"%s"}' "$event" "$repo" |
+      bash "$ROOT/scripts/telemetry-hook.sh"
+  done
+  printf '{"hook_event_name":"SubagentStop","cwd":"%s","success":false}' "$repo" |
+    bash "$ROOT/scripts/telemetry-hook.sh"
+  printf '{"hook_event_name":"PostToolUse","cwd":"%s"}' "$repo" |
+    OMS_TELEMETRY_DEBUG=1 bash "$ROOT/scripts/telemetry-hook.sh"
+  [ "$(wc -l < "$repo/.oms/hooks/events.jsonl" | tr -d ' ')" = 5 ] ||
+    fail "lifecycle, failure or debug evidence was lost"
 }
 
 test_review_uptake_withholds_rates_until_both_cohorts_are_large_enough() {

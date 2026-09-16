@@ -13,7 +13,6 @@ from . import GRAPH_PACKAGE_VERSION
 from . import render
 from .child_policy import CHILD_GRAPH_ERROR, child_action_is_allowed
 from .errors import GraphError
-from .facts import collect_facts
 from .project import analytics
 from .project import affected as project_affected
 from .project import blast as project_blast
@@ -21,8 +20,6 @@ from .project import history as project_history
 from .project import build as project_build
 from .project import context as project_context
 from .project.query import Graph
-from .spec import load_spec
-from .validate import validate_spec
 from oms_runtime.common import CoreError, atomic_write_bytes, read_json, repo_root
 
 PROJECT_STATE_ENV = "OMS_PROJECT_GRAPH_STATE"
@@ -632,6 +629,7 @@ def _json_option(value: str) -> Dict[str, Any]:
 def _run_view(repo: Path, run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """Frozen spec, events projection, and current facts for one recorded run."""
     from . import events as exec_events, runner
+    from .facts import collect_facts
     spec = exec_events.load_run_spec(repo, run_id)
     rows = exec_events.read_events(repo, run_id)
     projection = exec_events.project(rows, spec)
@@ -639,6 +637,8 @@ def _run_view(repo: Path, run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], 
 
 
 def _exec_validate(args: argparse.Namespace) -> int:
+    from .spec import load_spec
+    from .validate import validate_spec
     verdict = validate_spec(load_spec(args.spec))
     if args.json:
         emit(verdict, args.pretty)
@@ -652,6 +652,7 @@ def _exec_validate(args: argparse.Namespace) -> int:
 
 
 def _exec_render(args: argparse.Namespace) -> int:
+    from .spec import load_spec
     spec = load_spec(args.spec)
     if args.html_fragment:
         _write_html_fragment(args.html_fragment, render.render_exec_html_fragment(spec))
@@ -671,6 +672,8 @@ def _print_route(route: Dict[str, Any]) -> None:
 
 def _exec_route(args: argparse.Namespace) -> int:
     from . import route as exec_route
+    from .facts import collect_facts
+    from .spec import load_spec
     repo = repo_root(args.repo)
     if args.run:
         spec, state, facts = _run_view(repo, args.run)

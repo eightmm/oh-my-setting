@@ -324,6 +324,6 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
     return {"schema": RUNTIME_SCHEMA, "criteria": projected, "counts": dict(sorted(counts.items())), "coverage": verified_weight / total_weight if total_weight else 0.0, "risk_score": risk_weight / total_weight if total_weight else 1.0, "complete": bool(projected) and all(item.get("status") == "verified" for item in projected), "unbound_evidence": unbound[-50:], "artifact_rows_seen": len(rows)}
 
 
-def build_envelope(repo: Path) -> Dict[str, Any]:
-    base = build_base_envelope(repo)
+def build_envelope(repo: Path, *, status_snapshots: Any = None) -> Dict[str, Any]:
+    base = build_base_envelope(repo, status_snapshots=status_snapshots)
     return finalize_envelope(base, build_coverage(repo, base))

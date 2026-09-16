@@ -61,10 +61,15 @@ class ContextPackValidatorTest(unittest.TestCase):
         build.build(self.repo)
         original_graph = (self.repo / '.oms/project-graph/graph.json').read_bytes()
         # Warm copies must not reparse or mutate the parent's cache.
-        with mock.patch.object(build, 'build', side_effect=AssertionError('unexpected rebuild')):
+        with mock.patch.object(build, 'build', side_effect=AssertionError('unexpected rebuild')), \
+                mock.patch.object(build, 'check', wraps=build.check) as freshness:
             warm = automatic_context_pack(self.repo, self.repo, Path(self.tmp.name) / 'warm', 'recover lease')
+        self.assertEqual(freshness.call_count, 1)
         self.assertEqual(warm['project_graph_revision'], cold['project_graph_revision'])
         self.assertEqual((self.repo / '.oms/project-graph/graph.json').read_bytes(), original_graph)
+        from oms_runtime import context as runtime_context
+        with mock.patch.object(runtime_context, '_fresh_graph', return_value=None), self.assertRaises(CoreError):
+            automatic_context_pack(self.repo, self.repo, Path(self.tmp.name) / 'unsafe', 'recover lease')
         mixed = json.loads(original_graph)
         mixed['revision'] = 'f' * 64
         mixed['nodes'] = []

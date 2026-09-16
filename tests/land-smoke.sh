@@ -278,6 +278,15 @@ cat > "$install/scripts/update.sh" <<'EOF'
 #!/usr/bin/env bash
 echo update >> "$OMS_TEST_LAND_EVENTS"
 [ "$OH_MY_SETTING_UPDATE_EXPECTED_TARGET" = "$(git -C "$OMS_TEST_LAND_REPO" rev-parse HEAD)" ] || exit 43
+[ "${OMS_TEST_UPDATE_RC:-42}" != 0 ] || {
+  # Advance the disposable installed Git state while retaining this stub updater.
+  root="$(cd "$(dirname "$0")/.." && pwd)"
+  git -C "$root" fetch -q origin
+  git -C "$root" update-ref HEAD "$OH_MY_SETTING_UPDATE_EXPECTED_TARGET"
+  git -C "$root" read-tree HEAD
+  git -C "$root" checkout-index -a -f
+  printf '/scripts/update.sh\n' > "$root/.git/info/exclude"
+}
 exit "${OMS_TEST_UPDATE_RC:-42}"
 EOF
 chmod +x "$install/scripts/update.sh"
@@ -292,10 +301,26 @@ cat > "$TMP/bin/gh" <<'EOF'
 echo ci >> "$OMS_TEST_LAND_EVENTS"
 [ "${OMS_TEST_CI_DELAY:-0}" = 0 ] || sleep "$OMS_TEST_CI_DELAY"
 if [ "${OMS_TEST_CI_RC:-0}" != 0 ]; then echo 'authentication required' >&2; exit "$OMS_TEST_CI_RC"; fi
-printf '1 %s\n' "$OMS_TEST_CI_RESULT"
+sha=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --commit ]; then sha="$2"; break; fi
+  shift
+done
+if [ "$OMS_TEST_CI_RESULT" = missing ]; then echo '[]'; exit 0; fi
+if [ "$OMS_TEST_CI_RESULT" = malformed ]; then echo '{}'; exit 0; fi
+[ "$OMS_TEST_CI_RESULT" != wrong-sha ] || sha=wrong
+printf '[{"databaseId":1,"headSha":"%s","status":"completed","conclusion":"%s"}]\n' "$sha" "$OMS_TEST_CI_RESULT"
 EOF
 chmod +x "$TMP/bin/gh"
 export PATH="$TMP/bin:$PATH" OMS_TEST_LAND_EVENTS="$TMP/events" OMS_TEST_LAND_REPO="$repo"
+for ci_result in malformed wrong-sha; do
+  query_rc=0
+  OMS_TEST_CI_RESULT="$ci_result" python3 "$ROOT/scripts/lib/ci-query.py" \
+    fixture/repo "$head" 1 main test.yml > "$TMP/query.out" 2>&1 || query_rc=$?
+  [ "$query_rc" = 2 ] || fail "invalid CI evidence must be rejected: $ci_result/$query_rc"
+done
+out="$(OMS_TEST_CI_RESULT=missing python3 "$ROOT/scripts/lib/ci-query.py" fixture/repo "$head" 1 main test.yml)"
+[ "$out" = '0 missing' ] || fail "absent CI must not look green"
 for ci_result in failure skipped success; do
   gate "echo CI $ci_result probe"
   : > "$TMP/events"
@@ -340,6 +365,15 @@ OMS_TEST_CI_RC=4 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/resume-complete.out" 2>&1 ||
   fail "completed landing retry failed"
 [ ! -s "$TMP/events" ] || fail "completed landing repeated CI/install"
+
+# A receipt cannot hide a later rollback of the installed checkout.
+git -C "$install" update-ref HEAD "$(git -C "$repo" rev-parse HEAD^)"
+: > "$TMP/events"
+OMS_TEST_CI_RC=4 OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/resume-rollback.out" 2>&1 ||
+  fail "rolled-back installation did not resume"
+[ "$(cat "$TMP/events")" = update ] || fail "old receipt hid installation rollback"
+: > "$TMP/events"
 
 # A different gate or destination cannot borrow a prior successful receipt.
 OMS_TEST_CI_RC=4 OMS_INSTALL_RECEIPT="$TMP/install.json" \
@@ -387,11 +421,12 @@ for lock_kind in 0 1; do
   for _ in $(seq 1 100); do [ ! -f "$OMS_TEST_LAND_COUNT" ] || break; sleep 0.05; done
   [ -f "$OMS_TEST_LAND_COUNT" ] || fail "first landing did not start: $(cat "$TMP/first.out")"
   second_rc=0
-  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 \
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" --repo "$repo" --no-update --ci-wait 0 \
     > "$TMP/second.out" 2>&1 || second_rc=$?
   touch "$OMS_TEST_LAND_RELEASE"
   wait "$first_pid" || fail "first landing failed: $(cat "$TMP/first.out")"
   [ "$second_rc" = 75 ] || fail "duplicate landing did not report lock contention: $(cat "$TMP/second.out")"
+  ! grep -q '^receipt:' "$TMP/second.out" || fail "rejected background launch advertised a receipt"
   [ "$(wc -l < "$OMS_TEST_LAND_COUNT" | tr -d ' ')" = 1 ] || fail "duplicate landing repeated the gate"
 done
 

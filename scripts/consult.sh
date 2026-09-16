@@ -81,12 +81,6 @@ EOF
 
 fail() { echo "error: $*" >&2; exit 2; }
 
-# The artifact agent-call just wrote for this provider, newest first.
-latest_artifact_for() {
-  local provider="$1"
-  ls -t "$REPO/.oms/artifacts/consult/$provider-"*.md 2>/dev/null | sed -n '1p'
-}
-
 # Shared memory holds prior conclusions (closed tasks, distilled decisions):
 # handing them to a consulted peer anchors the second opinion on the first
 # one. Opt-in via --memory, matching peer-ask/peer-review/agent-call. The task
@@ -199,12 +193,12 @@ thread="$(resolve_thread)" || fail "could not open a thread"
 call_one() {
   local target="$1"
   local artifact_out="${2:-}"
-  local provider model args rc=0 log
+  local provider model args
 
   provider="$(ma_target_provider "$target")"
   model="$(ma_target_model "$target")"
 
-  args=("$SCRIPT_DIR/agent-call.sh" --to "$provider" --repo "$REPO"
+  args=(--to "$provider" --repo "$REPO"
         --artifact-dir "$REPO/.oms/artifacts/consult"
         --thread "$thread")
   [ -z "$model" ] || args+=(--model "$model")
@@ -217,18 +211,7 @@ call_one() {
   fi
   args+=(${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"})
 
-  log="$(agent_memory_mktemp)" || log=""
-  if [ -z "$log" ]; then
-    bash "${args[@]}"
-    return $?
-  fi
-  bash "${args[@]}" > "$log" 2>&1 || rc=$?
-  cat "$log"
-  if [ -n "$artifact_out" ]; then
-    sed -n 's/^artifact: //p' "$log" | sed -n '1p' > "$artifact_out"
-  fi
-  rm -f "$log"
-  return "$rc"
+  ma_call_read_peer "$artifact_out" "$DRY_RUN" "${args[@]}"
 }
 
 # One consult should not die because the first CLI is broken, unauthenticated,
@@ -248,9 +231,7 @@ consult_with_failover() {
   call_one "$first" ${out:+"$out"} || rc=$?
   artifact=""
   [ -z "$out" ] || artifact="$(sed -n 1p "$out" 2>/dev/null || true)"
-  [ -n "$artifact" ] && [ -f "$artifact" ] || artifact="$(latest_artifact_for "$first")"
-  quality="ok"
-  [ -z "$artifact" ] || quality="$(ma_answer_quality "$artifact")"
+  quality="$OMS_PEER_ANSWER_QUALITY"
   if [ "$rc" -eq 0 ] && [ "$quality" = "ok" ]; then
     return 0
   fi
@@ -276,10 +257,10 @@ consult_with_failover() {
     fi
     return "$rc"
   fi
-  if [ "$rc" -ne 0 ]; then
-    echo "consult: $first failed (exit $rc); asking $next instead" >&2
-  else
+  if [ "$quality" != ok ]; then
     echo "consult: $first did not really answer ($quality); asking $next instead" >&2
+  else
+    echo "consult: $first failed (exit $rc); asking $next instead" >&2
   fi
   # The question is already in the thread from the first attempt; a failover
   # must not duplicate it.
@@ -287,13 +268,6 @@ consult_with_failover() {
   rc=0
   : > "$out"
   call_one "$next" "$out" || rc=$?
-  artifact="$(sed -n 1p "$out" 2>/dev/null || true)"
-  [ -n "$artifact" ] && [ -f "$artifact" ] || artifact="$(latest_artifact_for "$next")"
-  if [ "$rc" -eq 0 ] && [ -n "$artifact" ]; then
-    quality="$(ma_answer_quality "$artifact")"
-    [ "$quality" = "ok" ] ||
-      echo "consult: $next also did not really answer ($quality)" >&2
-  fi
   return "$rc"
 }
 
@@ -354,21 +328,6 @@ trap 'rm -rf "$artifact_dir_tmp"' EXIT
 if [ "${#targets[@]}" -eq 1 ]; then
   if [ "${#TARGETS_EXPLICIT[@]}" -gt 0 ]; then
     call_one "${targets[0]}" "$artifact_dir_tmp/0" || status=$?
-    # A pinned target is not retried, but a non-answer is still not an answer:
-    # exiting 0 over a refusal or banner-only artifact tells the caller a
-    # consultation happened when none did.
-    if [ "$status" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-      art="$(sed -n 1p "$artifact_dir_tmp/0" 2>/dev/null || true)"
-      if [ -n "$art" ] && [ -f "$art" ]; then
-        q="$(ma_answer_quality "$art")"
-        if [ "$q" != "ok" ]; then
-          echo "consult: ${targets[0]} did not really answer ($q)" >&2
-          [ "$q" != blocked ] ||
-            echo "consult: ${targets[0]} said: $(ma_answer_block_reason "$art")" >&2
-          status=1
-        fi
-      fi
-    fi
   else
     # Auto-picked: fall back to one other peer if this one cannot answer.
     peer_list=()

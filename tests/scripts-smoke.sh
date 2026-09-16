@@ -1779,7 +1779,7 @@ test_delegate_auto_verify_uses_check_contract() {
 
   make_committed_repo "$project"
   mkdir -p "$project/scripts" "$bin_dir" "$home_dir"
-  printf '#!/usr/bin/env bash\necho check-contract-ran\n' > "$project/scripts/check.sh"
+  printf '#!/usr/bin/env bash\ncase "$1" in fast) echo check-contract-ran ;; *) exit 2 ;; esac\n' > "$project/scripts/check.sh"
   chmod +x "$project/scripts/check.sh"
   git -C "$project" add scripts/check.sh
   git -C "$project" -c user.email=t@e.c -c user.name=T commit -qm check
@@ -1812,6 +1812,30 @@ EOF
   [ -n "$artifact" ] || fail "missing no-verify artifact"
   if grep -Fq '## Verify' "$artifact"; then
     fail "--no-verify should skip verification section"
+  fi
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --read-only --prompt 'Read only report' >/dev/null
+  artifact="$(find "$artifact_dir" -type f -name 'codex-read-only-report-*.md' | head -n 1)"
+  [ -n "$artifact" ] || fail "missing read-only report"
+  if grep -Fq '## Verify' "$artifact"; then
+    fail "read-only report must not automatically run project tests"
+  fi
+
+  printf '#!/usr/bin/env bash\necho unbounded-check\n' > "$project/scripts/check.sh"
+  git -C "$project" add scripts/check.sh
+  git -C "$project" -c user.email=t@e.c -c user.name=T commit -qm unbounded-check
+  printf '#!/usr/bin/env bash\necho worker-started >&2\nexit 91\n' > "$bin_dir/codex"
+  local out
+  if out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --prompt 'Unknown check mode' 2>&1)"; then
+    fail "unbounded default verification must not launch"
+  fi
+  printf '%s' "$out" | grep -Fq 'no bounded fast mode' || fail "missing actionable verification error: $out"
+  if printf '%s' "$out" | grep -Fq worker-started; then
+    fail "worker launched before resolving the verification command"
   fi
 }
 
@@ -4025,6 +4049,7 @@ write_auto_update_fixture_scripts() {
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$repo/scripts/lib/poll.sh"
+  printf 'import os; print("1 " + os.environ.get("OMS_TEST_CI_RESULT", "success"))\n' > "$repo/scripts/lib/ci-query.py"
   chmod +x "$repo/scripts/auto-update.sh"
 
   case "$link_mode" in
@@ -7895,6 +7920,7 @@ test_delegate_missing_cli_writes_exit_and_index() {
     --to codex \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
+    --verify 'echo unnecessary-verifier-ran' \
     --prompt "Fix missing provider" >"$project/out" 2>"$project/error" || rc=$?
 
   [ "$rc" = "1" ] || fail "delegate missing provider should exit 1, got $rc"
@@ -7904,6 +7930,9 @@ test_delegate_missing_cli_writes_exit_and_index() {
   assert_file_contains "$artifact" "SKIPPED: command not found: codex"
   assert_file_contains "$artifact" "## Exit"
   assert_file_contains "$artifact" "127"
+  if grep -Fxq unnecessary-verifier-ran "$artifact"; then
+    fail "missing provider must not spend time running the verifier"
+  fi
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "delegate"'
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"exit": 1'
 }
@@ -8055,7 +8084,7 @@ test_cli_argument_validation_rejects_invalid_inputs() {
   fi
 }
 
-test_delegate_auto_verify_prefers_ml_smoke() {
+test_delegate_auto_verify_prefers_fast() {
   local project="$TMP/delegate-ml-smoke"
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
@@ -8090,8 +8119,14 @@ EOF
     --artifact-dir "$artifact_dir" \
     --prompt "Auto verify ml smoke" >/dev/null
 
-  assert_one_artifact_contains "$artifact_dir" 'codex-auto-verify-ml-smoke-*.md' 'command: bash scripts/check.sh ml-smoke'
-  assert_one_artifact_contains "$artifact_dir" 'codex-auto-verify-ml-smoke-*.md' 'ml-smoke-ran'
+  assert_one_artifact_contains "$artifact_dir" 'codex-auto-verify-ml-smoke-*.md' 'command: bash scripts/check.sh fast'
+  assert_one_artifact_contains "$artifact_dir" 'codex-auto-verify-ml-smoke-*.md' 'fast-ran'
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --verify 'bash scripts/check.sh ml-smoke' \
+    --prompt 'Explicit ML verification' >/dev/null
+  assert_one_artifact_contains "$artifact_dir" 'codex-explicit-ml-verification-*.md' 'ml-smoke-ran'
 }
 
 
@@ -8972,10 +9007,35 @@ test_shared_fast_mode_detection_gates_auto_verify() {
   if bash -c '. "$1"; oms_check_sh_has_fast_mode "$2"' _ "$ROOT/scripts/lib/agent-memory-common.sh" "$ROOT/scripts/check.sh"; then
     fail "harness check.sh misdetected as having a fast mode"
   fi
-  grep -q 'oms_check_sh_has_fast_mode' "$ROOT/scripts/peer-review.sh" ||
+  grep -q 'oms_default_verify_command' "$ROOT/scripts/peer-review.sh" ||
     fail "peer-review gate auto-verify must probe fast mode before defaulting"
-  grep -q 'oms_check_sh_has_fast_mode' "$ROOT/scripts/peer-delegate.sh" ||
+  grep -q 'oms_default_verify_command' "$ROOT/scripts/peer-delegate.sh" ||
     fail "peer-delegate auto-verify must probe fast mode before defaulting"
+  (
+    . "$ROOT/scripts/lib/agent-memory-common.sh"
+    printf 'case "$1" in\nfast) : ;;\nml-smoke) : ;;\nesac\n' > "$check_sh"
+    [ "$(oms_default_verify_command "$check_sh")" = 'bash scripts/check.sh fast' ] || exit 1
+    [ "$(oms_default_verify_command "$check_sh" 1)" = 'bash scripts/check.sh ml-smoke' ] || exit 1
+    printf 'echo full-suite\n' > "$check_sh"
+    rc=0
+    oms_default_verify_command "$check_sh" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ]
+  ) || fail "shared verification selection widened the default"
+
+  mkdir -p "$dir/project/scripts" "$dir/bin"
+  cp "$ROOT/templates/check.sh" "$dir/project/scripts/check.sh"
+  touch "$dir/project/pyproject.toml"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$OMS_TEST_UV_LOG"\n' > "$dir/bin/uv"
+  chmod +x "$dir/bin/uv"
+  PATH="$dir/bin:$PATH" OMS_TEST_UV_LOG="$dir/uv.log" bash "$dir/project/scripts/check.sh" fast >/dev/null
+  if grep -q pytest "$dir/uv.log"; then
+    fail "default fast must not collect the whole test suite"
+  fi
+  : > "$dir/uv.log"
+  PATH="$dir/bin:$PATH" OMS_TEST_UV_LOG="$dir/uv.log" bash "$dir/project/scripts/check.sh" \
+    fast 'tests/test_api.py::test_behavior[a b]' >/dev/null
+  grep -Fxq 'run python -m pytest -q tests/test_api.py::test_behavior[a b]' "$dir/uv.log" ||
+    fail "fast must forward the selected test without full-suite collection"
 }
 
 
@@ -8983,41 +9043,46 @@ test_scrubber_blocks_credential_variants() {
   local f="$TMP/scrub-variants"
   local s
 
+  (
+  . "$ROOT/scripts/lib/agent-memory-common.sh"
   for s in "MY_API_K""EY=x" "api k""ey: x" "secret k""ey=x" "MY_PRIVATE_K""EY=x" "client_s""ecret = x" "CREDENTIAL""S=x" "aws_credential""s: x"; do
     printf '%s\n' "$s" > "$f"
-    bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'" ||
+    agent_memory_file_has_sensitive_content "$f" ||
       fail "scrubber should block: $s"
   done
 
   printf 'max_tokens: 512\nthe private keynote speech\nmonkey: banana\n' > "$f"
-  if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$f'"; then
+  if agent_memory_file_has_sensitive_content "$f"; then
     fail "benign vocabulary should pass the scrubber"
   fi
+  )
 }
 
 test_scrubber_tiers_split_secret_from_machine() {
   local f="$TMP/scrub-tiers"
-  local lib="$ROOT/scripts/lib/agent-memory-common.sh"
+  (
+  . "$ROOT/scripts/lib/agent-memory-common.sh"
 
   # Machine tier: home path matches the combined re but NOT the secret tier.
   printf 'edit /ho''me/researcher/proj/loader.py\n' > "$f"
-  bash -c ". '$lib'; agent_memory_file_has_sensitive_content '$f'" ||
+  agent_memory_file_has_sensitive_content "$f" ||
     fail "home path must still match the combined sensitive tier"
-  if bash -c ". '$lib'; agent_memory_file_has_secret_content '$f'"; then
+  if agent_memory_file_has_secret_content "$f"; then
     fail "home path must not match the secret tier"
   fi
 
   # Secret tier: a credential assignment matches both.
   printf 'export MY_API_T''OKEN=abc\n' > "$f"
-  bash -c ". '$lib'; agent_memory_file_has_secret_content '$f'" ||
+  agent_memory_file_has_secret_content "$f" ||
     fail "credential assignment must match the secret tier"
 
   # Normalizer folds home prefixes to ~ and leaves other paths alone.
   local got
   got="$(printf 'run /ho''me/researcher/proj/train.py --data /data/set\n' |
-    bash -c ". '$lib'; agent_memory_normalize_machine_paths")"
+    agent_memory_normalize_machine_paths)"
   [ "$got" = 'run ~/proj/train.py --data /data/set' ] ||
     fail "normalizer output unexpected: $got"
+  )
 }
 
 
@@ -9123,7 +9188,7 @@ EOF
     fail "failing pre-flight gate should abort the launch"
   fi
   assert_file_contains "$project/error" "pre-flight check failed"
-  assert_file_contains "$project/gate-mode" "ml-smoke"
+  assert_file_contains "$project/gate-mode" "fast"
   assert_not_exists "$project/launched"
   assert_not_exists "$project/docs/EXPERIMENTS.jsonl"
 
@@ -9167,9 +9232,20 @@ esac
 EOF
   chmod +x "$project/scripts/check.sh"
 
-  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1) ||
+  (cd "$project" && OMS_RUN_LEDGER_CHECK_MODE=ml-smoke "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1) ||
     fail "gate with quoted/alternation label should run"
   assert_file_contains "$project/gate-mode" "ml-smoke"
+
+  : > "$project/gate-mode"
+  (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash scripts/check.sh fast tests/test_api.py >/dev/null 2>&1) ||
+    fail "recording a check command should succeed"
+  [ "$(wc -l < "$project/gate-mode" | tr -d ' ')" = 1 ] || fail "recorded check ran twice"
+
+  : > "$project/gate-mode"
+  (cd "$project" && OMS_RUN_LEDGER_CHECK_MODE=ml-smoke "$ROOT/scripts/run-ledger.sh" \
+    -- bash scripts/check.sh fast >/dev/null 2>&1) || fail "explicit ML pre-flight failed"
+  [ "$(cat "$project/gate-mode")" = "$(printf 'ml-smoke\nfast')" ] ||
+    fail "recorded fast check bypassed the explicit ML pre-flight"
 }
 
 test_run_ledger_gate_mention_falls_back_to_fast() {
@@ -10316,6 +10392,13 @@ test_auto_update_apply_happy_path_records_applied() {
   git -C "$seed" push origin main >/dev/null
 
   mkdir -p "$home_dir"
+  local ci_result old_head
+  old_head="$(git -C "$work" rev-parse HEAD)"
+  for ci_result in pending failure missing; do
+    HOME="$home_dir" OMS_TEST_CI_RESULT="$ci_result" "$work/scripts/auto-update.sh" apply > "$TMP/auto-ci-out"
+    [ "$(git -C "$work" rev-parse HEAD)" = "$old_head" ] || fail "unverified CI changed installation"
+    assert_file_contains "$TMP/auto-ci-out" 'CI success not confirmed'
+  done
   HOME="$home_dir" OH_MY_SETTING_CODEX_PLUGIN=1 \
     "$work/scripts/auto-update.sh" apply >"$TMP/auto-apply-out" ||
     fail "happy apply should pass"
@@ -11062,12 +11145,23 @@ EOF
 # Every .sh here is linted; the Python helpers had nothing, and one of them now
 # decides what the installer may delete.
 test_python_helpers_are_syntax_checked() {
-  local out
+  local out dir="$TMP/selected-python"
 
   out="$(cd "$ROOT" && bash scripts/check-python.sh 2>&1)" ||
     fail "python syntax gate should pass: $out"
   printf '%s' "$out" | grep -Eq 'python-syntax: ok \([0-9]+ files\)' ||
     fail "python syntax gate must report what it checked: $out"
+  mkdir -p "$dir"
+  printf 'valid = 1\n' > "$dir/good.py"
+  printf 'invalid = (\n' > "$dir/bad.py"
+  out="$(bash "$ROOT/scripts/check-python.sh" "$dir/good.py")" || fail "selected valid Python failed"
+  [ "$out" = 'python-syntax: ok (1 files)' ] || fail "syntax gate inspected unrelated files: $out"
+  if bash "$ROOT/scripts/check-python.sh" "$dir/bad.py" >/dev/null 2>&1; then
+    fail "invalid selected Python passed"
+  fi
+  if bash "$ROOT/scripts/check-python.sh" "$dir/missing.py" >/dev/null 2>&1; then
+    fail "missing selected Python passed"
+  fi
 }
 
 test_ci_status_reports_conclusion() {
@@ -12154,6 +12248,20 @@ test_patch_admit_admits_clean_patch() {
   [ -n "$r" ] || fail "no admission report written"
   assert_file_contains "$r" "Patch admission: ADMIT"
   assert_file_contains "$r" "apply: PASS"
+
+  # A project check without fast must not silently become a full-suite gate.
+  mkdir -p "$repo/scripts"
+  printf '#!/usr/bin/env bash\ntouch "%s"\n' "$repo/full-gate-ran" > "$repo/scripts/check.sh"
+  chmod +x "$repo/scripts/check.sh"
+  git -C "$repo" add scripts/check.sh
+  git -C "$repo" commit -qm 'fixture check contract'
+  local rc=0
+  "$SH" --patch "$repo/change.patch" --repo "$repo" > "$repo/no-fast.out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "admission without bounded default must require explicit verification"
+  [ ! -e "$repo/full-gate-ran" ] || fail "admission ran an unrequested full suite"
+  assert_file_contains "$repo/no-fast.out" 'no bounded fast mode'
+  "$SH" --patch "$repo/change.patch" --repo "$repo" --verify true >/dev/null ||
+    fail "explicit verification must override default detection"
 }
 
 test_patch_admit_scope_uses_canonical_glob_and_deny_precedence() {
@@ -12582,7 +12690,7 @@ EOF
     --repo "$project" --gate --export-only --prompt "Select a bounded check" \
     > "$project/no-default" 2>&1 || rc=$?
   [ "$rc" != 0 ] || fail "review silently selected the full release suite"
-  assert_file_contains "$project/no-default" '--gate needs --verify CMD'
+  assert_file_contains "$project/no-default" 'select affected checks explicitly with --verify CMD'
 
   # All reviewers self-report pass, but the project's own check fails: the
   # mechanical backstop must force the gate to fail.
@@ -12647,6 +12755,50 @@ test_delegate_repair_retries_failed_verify() {
   local home_dir="$project/home"
   local rc=0
 
+  python3 - "$ROOT/scripts/lib" <<'PY' || fail "repair replay policy contract failed"
+import copy, sys
+sys.path.insert(0, sys.argv[1])
+from repair_replay import digest, replay, select, valid_trace
+key = digest(b"context")
+bad = dict(candidate=digest(b"patch"), failure=digest(b"error"), worker=0, verify=1)
+good = dict(candidate=digest(b"fixed"), failure=digest(b"ok"), worker=0, verify=0)
+def row(i, steps):
+    return dict(kind="delegate", exit=int(steps[-1]["verify"] != 0), verify_exit=steps[-1]["verify"], prompt_hash=digest(str(i).encode()),
+                repair_replay=dict(schema=1, cohort=key, budget=2, policy="budget", samples=0, steps=steps))
+rows = [row(i, [bad, bad, bad]) for i in range(12)]
+assert valid_trace(rows[0]["repair_replay"])
+assert select(rows[:11], key, 2) == ("budget", 11)
+assert select(rows, key, 2) == ("stop-repeat", 12)
+assert select(rows, digest(b"different checkout"), 2) == ("budget", 0)
+assert select(rows, key, 3) == ("budget", 0)
+assert select([rows[0]] * 12, key, 2) == ("budget", 1)
+# A later recovery on a repeated prompt must not be hidden by deduplication;
+# neither may a newer failure erase an already observed recovery.
+recovery = row(0, [bad, bad, good])
+assert select(rows + [recovery], key, 2) == ("budget", 12)
+assert select([recovery] + rows, key, 2) == ("budget", 12)
+# Periodically retain the original budget to observe censored continuations.
+stopped = copy.deepcopy(rows[0])
+stopped["repair_replay"].update(policy="stop-repeat", steps=[bad, bad])
+assert select(rows + [stopped] * 3, key, 2) == ("stop-repeat", 12)
+assert select(rows + [stopped] * 4, key, 2) == ("budget", 12)
+assert select(rows + [stopped] * 4 + [row(12, [bad, bad, bad])], key, 2) == ("stop-repeat", 13)
+assert select(rows + [stopped] * 4 + [row(12, [bad, bad])], key, 2) == ("budget", 12)
+# A future success cannot be revealed to the stopping policy early.
+assert replay([bad, bad, good], "stop-repeat") == (False, 2)
+assert replay([bad, bad, good], "budget") == (True, 3)
+for index in (0, 11):  # losses in either development or held-out history reject
+    changed = copy.deepcopy(rows)
+    changed[index] = row(index, [bad, bad, good])
+    assert select(changed, key, 2)[0] == "budget"
+censored = [row(i, [bad, bad]) for i in range(12)]
+assert select(censored, key, 2) == ("budget", 0)
+assert select([dict(r, fallback_used=True) for r in rows], key, 2) == ("budget", 0)
+assert select([dict(r, verify_exit=0) for r in rows], key, 2) == ("budget", 0)
+for value in (None, {}, {"schema": 1}, dict(rows[0]["repair_replay"], steps=[{}])):
+    assert not valid_trace(value)
+PY
+
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
   # First invocation writes a broken file; the repair prompt (recognizable by
@@ -12675,6 +12827,7 @@ EOF
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --role implementation-worker \
+    --model fixture-model \
     --verify "grep -q fixed delegated.txt" \
     --repair 2 \
     --prompt "Create fixed file" >"$project/out" 2>&1 || rc=$?
@@ -12683,6 +12836,98 @@ EOF
   assert_one_artifact_contains "$artifact_dir" 'codex-create-fixed-file-*.md' '## Repair 1'
   assert_one_artifact_contains "$artifact_dir" 'codex-create-fixed-file-*.md' 'worker repaired'
   assert_one_artifact_contains "$artifact_dir" 'codex-create-fixed-file-*.patch' 'fixed'
+
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "repair trace not recorded"
+import json, sys
+row = json.loads(open(sys.argv[1]).readlines()[-1])
+trace = row["repair_replay"]
+assert trace["policy"] == "budget" and trace["samples"] == 0, trace
+assert len(trace["steps"]) == 2 and trace["steps"][-1]["verify"] == 0, trace
+PY
+
+  # Seed complete, distinct historical fixture episodes without provider calls.
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY'
+import copy, hashlib, json, sys, uuid
+path = sys.argv[1]
+baseline = json.loads(open(path).readlines()[-1])
+with open(path, "a") as handle:
+    for i in range(12):
+        row = copy.deepcopy(baseline)
+        row.update(event_id="evt_" + uuid.uuid4().hex, exit=1, verify_exit=1,
+                   prompt_hash=hashlib.sha256(("historical fixture %d" % i).encode()).hexdigest())
+        row["repair_replay"]["steps"] = [row["repair_replay"]["steps"][0]] * 3
+        handle.write(json.dumps(row) + "\n")
+PY
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "broken\\n" > delegated.txt\necho worker-done\n' > "$bin_dir/codex"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --role implementation-worker --model fixture-model \
+    --verify 'grep -q fixed delegated.txt' --repair 2 --prompt 'Repeated failure' \
+    > "$project/replay.out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "replay stopping must not claim success"
+  assert_file_contains "$project/replay.out" 'repair: 1/2 round(s) used'
+  assert_file_contains "$project/replay.out" 'repair replay: repeated failure'
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "automatic replay selection failed"
+import json, sys
+row = json.loads(open(sys.argv[1]).readlines()[-1])
+assert row["exit"] == 1 and row["verify_exit"] == 1, row
+assert row["repair_replay"]["policy"] == "stop-repeat", row
+assert row["repair_replay"]["samples"] == 12, row
+assert len(row["repair_replay"]["steps"]) == 2, row
+PY
+  "$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry --json > "$project/telemetry.json"
+  python3 - "$project/telemetry.json" <<'PY' || fail "replay telemetry missing"
+import json, sys
+report = json.load(open(sys.argv[1]))
+assert report["repair_replay"]["early_stops"] == 1, report
+assert report["repair_replay"]["selected"] == 1, report
+assert report["repair_replay"]["delegations_seen"] >= report["repair_replay"]["recorded"], report
+assert "not measured" in report["repair_replay"]["cost_basis"], report
+PY
+
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" OMS_REPAIR_REPLAY=0 \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --role implementation-worker --model fixture-model \
+    --verify 'grep -q fixed delegated.txt' --repair 2 --prompt 'Explicit budget' \
+    > "$project/replay-disabled.out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "failed full repair must remain failed"
+  assert_file_contains "$project/replay-disabled.out" 'repair: 2/2 round(s) used'
+
+  # A single repair cannot benefit from stopping after two identical attempts.
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --model fixture-model \
+    --verify 'grep -q fixed delegated.txt' --repair 1 --prompt 'Single repair' \
+    > "$project/single-repair.out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "failed single repair must remain failed"
+  assert_file_contains "$project/single-repair.out" 'repair: 1/1 round(s) used'
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "single repair should skip replay overhead"
+import json, sys
+assert "repair_replay" not in json.loads(open(sys.argv[1]).readlines()[-1])
+PY
+
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+prompt="$(cat)"
+if printf '%s' "$prompt" | grep -q 'continuing your own previous attempt'; then
+  exit 127
+fi
+printf 'broken\n' > delegated.txt
+echo worker-done
+EOF
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --model fixture-model \
+    --verify 'grep -q fixed delegated.txt' --repair 2 --prompt 'Provider lost during repair' \
+    > "$project/terminal-repair.out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "unavailable repair provider must remain failed"
+  assert_file_contains "$project/terminal-repair.out" 'repair: 1/2 round(s) used'
+  assert_one_artifact_contains "$artifact_dir" 'codex-provider-lost-during-repair-*.md' \
+    'SKIPPED: provider unavailable or blocked'
 
   # Default stays one-shot: same failing first attempt, no repair, exit 1.
   rc=0
@@ -13300,7 +13545,7 @@ test_patch_admit_report_survives_prune() {
   git -C "$project" diff > "$project/p.patch"
   git -C "$project" checkout -q file.txt
 
-  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/p.patch" >/dev/null 2>&1 ) ||
+  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/p.patch" --verify 'bash scripts/check.sh' >/dev/null 2>&1 ) ||
     fail "benign patch should ADMIT"
   grep -Fq '"kind": "patch-admit"' "$project/.oms/artifacts/index.jsonl" ||
     fail "admit run should be recorded in the artifact index"
@@ -13325,12 +13570,12 @@ test_patch_admit_rejects_verifier_change() {
   git -C "$project" diff > "$project/evil.patch"
   git -C "$project" checkout -q scripts/check.sh
 
-  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/evil.patch" >/dev/null 2>&1 ); then
+  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/evil.patch" --verify 'bash scripts/check.sh' >/dev/null 2>&1 ); then
     fail "a patch modifying its own verifier must be REJECTED"
   fi
   grep -lFq 'verifier: FAIL' "$project"/.oms/artifacts/admit/*.md >/dev/null 2>&1 ||
     fail "report should record the verifier integrity gate failure"
-  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/evil.patch" --allow-verifier-change >/dev/null 2>&1 ) ||
+  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/evil.patch" --verify 'bash scripts/check.sh' --allow-verifier-change >/dev/null 2>&1 ) ||
     fail "--allow-verifier-change should admit the same patch"
 }
 
@@ -13354,7 +13599,7 @@ test_patch_admit_rejects_a_patch_that_deletes_assertions() {
   git -C "$project" diff > "$project/weaken.patch"
   git -C "$project" checkout -q tests/thing_test.sh
 
-  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/weaken.patch" >/dev/null 2>&1 ); then
+  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/weaken.patch" --verify 'bash scripts/check.sh' >/dev/null 2>&1 ); then
     fail "a patch that net-removes test assertions must be REJECTED"
   fi
   report="$(ls -t "$project"/.oms/artifacts/admit/*.md | head -n 1)"
@@ -13365,14 +13610,14 @@ test_patch_admit_rejects_a_patch_that_deletes_assertions() {
   assert_file_contains "$report" "verify: SKIP"
   assert_file_contains "$report" "pre-verification policy or integrity gate failed"
   assert_file_contains "$report" "verifier: PASS"
-  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/weaken.patch" --allow-test-reduction >/dev/null 2>&1 ) ||
+  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/weaken.patch" --verify 'bash scripts/check.sh' --allow-test-reduction >/dev/null 2>&1 ) ||
     fail "--allow-test-reduction should admit the same patch"
 
   # Adding coverage must not trip it, or the gate becomes noise people disable.
   printf 'assert_ok 1\nassert_ok 2\nassert_ok 3\necho done\n' > "$project/tests/thing_test.sh"
   git -C "$project" diff > "$project/strengthen.patch"
   git -C "$project" checkout -q tests/thing_test.sh
-  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/strengthen.patch" >/dev/null 2>&1 ) ||
+  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/strengthen.patch" --verify 'bash scripts/check.sh' >/dev/null 2>&1 ) ||
     fail "a patch that adds assertions must still be ADMITTED"
 }
 
@@ -13391,7 +13636,7 @@ test_patch_admit_rejects_a_deleted_test_file() {
   git -C "$project" diff --cached > "$project/delete.patch"
   git -C "$project" reset -q --hard HEAD
 
-  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/delete.patch" >/dev/null 2>&1 ); then
+  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/delete.patch" --verify 'bash scripts/check.sh' >/dev/null 2>&1 ); then
     fail "a patch deleting a test file must be REJECTED"
   fi
   grep -lFq 'deleted test file' "$project"/.oms/artifacts/admit/*.md >/dev/null 2>&1 ||
@@ -13551,7 +13796,7 @@ test_patch_land_admits_then_applies() {
   git -C "$project" diff > "$ok_patch"
   git -C "$project" checkout -q file.txt
 
-  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" >/dev/null 2>&1 ) ||
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" --verify 'bash scripts/check.sh' >/dev/null 2>&1 ) ||
     fail "a clean-tree benign patch should land"
   grep -Fq landed "$project/file.txt" || fail "patch-land should apply the patch to the tree"
   grep -Fq '"kind": "patch-land"' "$project/.oms/artifacts/index.jsonl" ||
@@ -13561,7 +13806,7 @@ test_patch_land_admits_then_applies() {
   git -C "$project" checkout -q file.txt
   git -C "$project" reset -q --hard HEAD
   printf 'dirty\n' >> "$project/file.txt"
-  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" >/dev/null 2>&1 ); then
+  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" --verify 'bash scripts/check.sh' >/dev/null 2>&1 ); then
     fail "patch-land must refuse a dirty main tree"
   fi
   git -C "$project" checkout -q file.txt
@@ -13570,7 +13815,7 @@ test_patch_land_admits_then_applies() {
   printf 'echo pwned\n' >> "$project/scripts/check.sh"
   git -C "$project" diff > "$evil_patch"
   git -C "$project" checkout -q scripts/check.sh
-  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$evil_patch" >/dev/null 2>&1 ); then
+  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$evil_patch" --verify 'bash scripts/check.sh' >/dev/null 2>&1 ); then
     fail "patch-land must not land a patch the admission gate rejects"
   fi
   if grep -Fq pwned "$project/scripts/check.sh"; then
@@ -15895,8 +16140,8 @@ EOF
 }
 
 test_skill_router_matches_and_dedupes() {
-  local OMS_SKILL_HINTS=1 OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1
-  export OMS_SKILL_HINTS OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN
+  local OMS_SKILL_HINTS=1
+  export OMS_SKILL_HINTS
   local d="$TMP/skill-router"
   local project="$d/project"
   local out
@@ -15907,7 +16152,7 @@ test_skill_router_matches_and_dedupes() {
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
   printf '%s' "$out" | grep -Fq "oms-ops" || fail "router should suggest oms-ops"
   [ -f "$project/.oms/hooks/events.jsonl" ] || fail "router should write hook events"
-  assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "route"'
+  assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "skill_hint"'
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"workflow": "task"'
   # A later turn in the same session may need the skill reminder again.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
@@ -16514,30 +16759,15 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   assert_not_exists "$plain/.oms"
 }
 
-test_turn_guard_blocks_unverified_dirty_task_once() {
-  local d="$TMP/turn-guard"
-  local project="$d/project"
-  local route_payload
-  local stop_payload
+test_turn_guard_ignores_retired_format_settings() {
+  local project="$TMP/turn-guard"
   local out
-
   make_committed_repo "$project"
   printf 'change\n' >> "$project/file.txt"
-
-  route_payload="$(printf '{"prompt":"fix this and push까지 진행","session_id":"s1","turn_id":"t1","cwd":"%s"}' "$project")"
-  printf '%s' "$route_payload" | OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1 TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
-
-  stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s1","turn_id":"t1","cwd":"%s","last_assistant_message":"Done."}' "$project")"
-  out="$(printf '%s' "$stop_payload" | env -u OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN bash "$ROOT/scripts/turn-guard.sh")"
-  [ -z "$out" ] || fail "answer-format blocking must be opt-in, even after a release request: $out"
-  out="$(printf '%s' "$stop_payload" | OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1 bash "$ROOT/scripts/turn-guard.sh")"
-  printf '%s' "$out" | grep -Fq '"decision": "block"' ||
-    fail "turn guard should block an unverified dirty task: $out"
-  assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "block_unverified"'
-
-  out="$(printf '%s' "$stop_payload" | OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1 bash "$ROOT/scripts/turn-guard.sh")"
-  [ -z "$out" ] || fail "turn guard should block at most once per turn"
-  assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "allow_block_limit"'
+  out="$(printf '{"hook_event_name":"Stop","session_id":"s1","cwd":"%s","last_assistant_message":"Done."}' "$project" |
+    OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=99 OMS_TURN_GUARD_STRICT=1 OMS_CI_TICK=0 OMS_WORK_JOURNAL=0 bash "$ROOT/scripts/turn-guard.sh")"
+  [ -z "$out" ] || fail "retired format settings must never block delivery: $out"
+  assert_not_exists "$project/.oms/hooks/sessions"
 }
 
 test_session_budget_blocks_once_past_the_turn_cap() {
@@ -16575,24 +16805,7 @@ test_turn_guard_allows_routine_dirty_task() {
   [ -z "$out" ] || fail "routine dirty task should not be blocked by the turn guard: $out"
 }
 
-test_turn_guard_allows_verified_task() {
-  local d="$TMP/turn-guard-verified"
-  local project="$d/project"
-  local route_payload
-  local stop_payload
-  local out
 
-  make_committed_repo "$project"
-  printf 'change\n' >> "$project/file.txt"
-
-  route_payload="$(printf '{"prompt":"fix this bug and push","session_id":"s2","turn_id":"t1","cwd":"%s"}' "$project")"
-  printf '%s' "$route_payload" | OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1 TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
-
-  stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s2","turn_id":"t1","cwd":"%s","last_assistant_message":"Changed file.txt. Verified: bash scripts/check.sh."}' "$project")"
-  out="$(printf '%s' "$stop_payload" | OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=1 bash "$ROOT/scripts/turn-guard.sh")"
-  [ -z "$out" ] || fail "turn guard should allow verified task: $out"
-  assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "allow_verified"'
-}
 
 test_claude_hud_renders_usage_safely() {
   local hud="$ROOT/scripts/claude-statusline.py"
@@ -18788,6 +19001,24 @@ test_consult_does_not_second_guess_a_pinned_peer() {
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
+  # Exercise receipt identity without launching a provider or another repo.
+  mkdir -p "$project/receipt-helper"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$OMS_TEST_RECEIPT"\n' > "$project/receipt-helper/agent-call.sh"
+  printf 'an old usable answer\n' > "$project/old-answer.md"
+  (
+    . "$ROOT/scripts/lib/peer-common.sh"
+    ma_scripts_dir() { printf '%s\n' "$project/receipt-helper"; }
+    ma_answer_quality() { if [ -f "$1" ]; then echo ok; else echo empty; fi; }
+    for OMS_TEST_RECEIPT in '' "artifact: $project/missing.md" "$(printf 'artifact: %s\nartifact: %s' "$project/old-answer.md" "$project/old-answer.md")"; do
+      export OMS_TEST_RECEIPT
+      if ma_call_read_peer "$project/receipt" 0 --to codex --prompt --dry-run >/dev/null 2>&1; then
+        fail "missing or ambiguous receipt borrowed an old answer"
+      fi
+    done
+    export OMS_TEST_RECEIPT="artifact: $project/old-answer.md"
+    ma_call_read_peer "$project/receipt" 0 --to codex >/dev/null || exit 1
+    [ "$(cat "$project/receipt")" = "$project/old-answer.md" ]
+  ) || fail "shared peer result identity contract failed"
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 echo "Could you clarify?"
@@ -22487,7 +22718,7 @@ EOF
 
   out="$(HOME="$home_dir" PATH="$bin:/usr/bin:/bin" OMS_ADVISOR_PROVIDER=claude OMS_ADVISE_ON_REPEAT=1 \
     "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
-    --prompt "a task that keeps failing" --no-verify --repair 2 2>&1)" || true
+    --prompt "a task that keeps failing" --model fixture-model --verify false --repair 2 2>&1)" || true
 
   printf '%s' "$out" | grep -Fq 'advisor consulted after repeated failure' ||
     fail "a second failing attempt should pull in an outside opinion: $out"
@@ -22500,6 +22731,11 @@ EOF
   # Once per delegation: the point is a different opinion, not a second loop.
   [ "$(grep -c 'Advisor (after repeated failure)' "$artifact")" = 1 ] ||
     fail "the advisor should be consulted once, not every round"
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "advised repair contaminated single-worker replay"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert not any("repair_replay" in row for row in rows if row.get("kind") == "delegate")
+PY
 
   # A repair budget permits the same worker, not a hidden second provider.
   local setting counter="$project/advisor-calls"
@@ -22699,7 +22935,8 @@ EOF
   chmod +x "$bin/codex"
 
   out="$(HOME="$home_dir" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
-    --to codex --repo "$project" --prompt "add a thing" --no-verify --repair 2 2>&1)" || rc=$?
+    --to codex --repo "$project" --prompt "add a thing" \
+    --verify 'echo unnecessary-verifier-ran' --repair 2 2>&1)" || rc=$?
 
   # The script keeps its one failure code; the distinct 126 rides on the worker
   # status, where a caller reading the run can tell "could not act" from "acted
@@ -22712,6 +22949,9 @@ EOF
   # No rewording of the brief grants a permission, so repair must not burn calls.
   if printf '%s' "$out" | grep -Fq 'repair 1'; then
     fail "a blocked worker is not repairable: $out"
+  fi
+  if grep -R -Fxq unnecessary-verifier-ran "$project/.oms/artifacts/delegate"; then
+    fail "blocked provider must not trigger project verification"
   fi
 }
 

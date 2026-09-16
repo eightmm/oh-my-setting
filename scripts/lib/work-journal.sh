@@ -29,6 +29,12 @@ work_journal_config_path() {
   printf '%s\n' "${path:-$HOME/.config/oh-my-setting/work-journal.json}"
 }
 
+work_journal_sync_configured() {
+  [ -n "${OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID:-}" ] ||
+    [ -n "${OMS_WORK_JOURNAL_NOTION_DATABASE_ID:-}" ] ||
+    [ -f "$(work_journal_config_path)" ]
+}
+
 work_journal_run_locked() {
   local repo="$1"
   shift
@@ -54,11 +60,7 @@ work_journal_sync() {
   local rc=0
   shift
 
-  if [ -z "${OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID:-}" ] &&
-    [ -z "${OMS_WORK_JOURNAL_NOTION_DATABASE_ID:-}" ] &&
-    [ ! -f "$(work_journal_config_path)" ]; then
-    return 0
-  fi
+  work_journal_sync_configured || return 0
 
   # Remote work never owns the canonical event/materialization lock. If another
   # lifecycle is already syncing, leave the pending state for a later tick
@@ -149,33 +151,34 @@ work_journal_finish() {
 # holding the provider's Stop pipe open. Sync locks and content hashes also
 # deduplicate this publisher against periodic maintenance.
 work_journal_defer_finish() {
-  local repo="$1"
+  local repo="$1" journal=0 ci=0 remote
   [ "${OMS_HARNESS_CHILD:-0}" != 1 ] || return 0
   [ "${OMS_WORK_JOURNAL_ACTIVE:-0}" != 1 ] || return 0
   [ -d "$repo/.oms" ] || return 0
-  if [ "${OMS_CI_TICK:-1}" != 1 ]; then
-    work_journal_enabled || return 0
-    [ "${OMS_WORK_JOURNAL_SUPPRESS:-0}" != 1 ] || return 0
+  if work_journal_enabled && [ "${OMS_WORK_JOURNAL_SUPPRESS:-0}" != 1 ] &&
+    work_journal_sync_configured; then
+    journal=1
   fi
-  python3 - "$WORK_JOURNAL_LIB_DIR/work-journal.sh" "$repo" <<'PY' 2>/dev/null || true
+  if [ "${OMS_CI_TICK:-1}" = 1 ] && command -v "${OMS_GH_BIN:-gh}" >/dev/null 2>&1; then
+    remote="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+    case "$remote" in *github.com:*|*github.com/*) ci=1 ;; esac
+  fi
+  [ "$journal" = 1 ] || [ "$ci" = 1 ] || return 0
+  python3 - "$WORK_JOURNAL_LIB_DIR/work-journal.sh" "$repo" "$journal" "$ci" <<'PY' 2>/dev/null || true
 import subprocess
 import sys
 
 command = '''
 . "$1"
 repo="$2"
-if work_journal_enabled && [ "${OMS_WORK_JOURNAL_SUPPRESS:-0}" != 1 ]; then
+if [ "$3" = 1 ]; then
   OMS_WORK_JOURNAL_NOTION_MAX_PER_TICK=2 \
     OMS_WORK_JOURNAL_NOTION_TIMEOUT_SECONDS=4 \
     OMS_WORK_JOURNAL_NOTION_BUDGET_SECONDS=8 \
     work_journal_sync "$repo" --force --today || true
 fi
-if [ "${OMS_CI_TICK:-1}" = 1 ]; then
-  remote="$(git -C "$repo" remote get-url origin 2>/dev/null)"
-  case "$remote" in
-    *github.com:*|*github.com/*)
-      (cd "$repo" && OMS_CI_TICK_QUIET=1 bash "$WORK_JOURNAL_LIB_DIR/../ci-status.sh" tick) || true ;;
-  esac
+if [ "$4" = 1 ]; then
+  (cd "$repo" && OMS_CI_TICK_QUIET=1 bash "$WORK_JOURNAL_LIB_DIR/../ci-status.sh" tick) || true
 fi
 '''
 try:
