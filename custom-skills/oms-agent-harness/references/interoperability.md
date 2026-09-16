@@ -40,17 +40,9 @@ a Task. Its `taskId` is the existing durable peer operation ID.
 Clients without all opt-ins receive the legacy CallToolResult. Do not treat a
 task handle as plan, approval, or patch authority.
 
-## Codex app-server read transport
+## Provider transport
 
-Set `OMS_CODEX_TRANSPORT=app-server` only for an explicitly selected read seat.
-The adapter starts one ephemeral thread and one turn with:
-
-- repository cwd;
-- `sandbox=read-only` / `sandboxPolicy.type=readOnly`;
-- network disabled;
-- `approvalPolicy=never`.
-
-It accepts bounded agent-message deltas and successful completion only. Any
-server request for approval, permissions, or user input fails closed. A failed
-app-server request is never resent through `codex exec`. Write delegation must
-use the ordinary CLI transport.
+Use the existing peer tools over the CLI transport. The optional OMS app-server
+read adapter was retired. A stale `OMS_CODEX_TRANSPORT=app-server` setting fails
+explicitly; remove it only when CLI execution is intended. Native model
+discovery, MCP graph views, and thread messaging are unaffected.

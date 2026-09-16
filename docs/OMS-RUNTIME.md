@@ -511,12 +511,9 @@ runtime task authority. It is advertised only for protocol `2026-07-28`, and
 only an individual request declaring `io.modelcontextprotocol/tasks` receives
 a task handle. There is intentionally no unscoped task listing.
 
-The Codex app-server adapter is likewise explicit and read-only. It creates one
-ephemeral thread with `approvalPolicy=never`, read-only sandboxing, and network
-disabled, then accepts only text deltas and a successful completion. Approval
-or input requests are a refusal, and an adapter failure does not retry through
-the CLI transport. `trusted-local`, isolated, remote, provider write workers,
-and patch admission retain their existing engines and authority.
+Provider work uses the CLI transport; the optional OMS app-server read adapter
+is retired. Its legacy opt-in fails explicitly, never silently falling back.
+Native model discovery and MCP graph presentation are unaffected.
 
 See the harness interoperability reference for the exact opt-ins and wire
 boundaries. State, inbox, and runtime profiles remain available through the

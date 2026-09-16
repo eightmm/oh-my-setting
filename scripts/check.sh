@@ -827,7 +827,6 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage skill-lifecycle bash tests/skill-lifecycle-smoke.sh
   stage model-doctor bash tests/model-doctor-smoke.sh
   stage tsp-queue bash tests/tsp-queue-smoke.sh
-  stage interoperability bash tests/interoperability-smoke.sh
   stage tool-lock bash tests/tool-lock-smoke.sh
   stage artifact-supersession bash tests/artifact-supersession-smoke.sh
   stage debate-delta bash tests/debate-delta-smoke.sh

@@ -328,9 +328,7 @@ oms_provider_supports_model_override() {
   esac
 }
 
-# Provider invocation transport. The installed CLI remains the default for
-# every provider. Codex's app-server is an explicit, read-only alternate wire;
-# selecting it never silently changes Claude or Antigravity routing.
+# Reject retired/unknown transports rather than silently changing authority.
 oms_provider_transport() {
   local provider
   provider="$(oms_provider_normalize "$1")" || return $?
@@ -340,7 +338,10 @@ oms_provider_transport() {
   fi
   case "${OMS_CODEX_TRANSPORT:-cli-exec}" in
     cli-exec|'') printf 'cli-exec\n' ;;
-    app-server) printf 'app-server\n' ;;
+    app-server)
+      echo 'error: OMS app-server read transport was retired; explicitly unset OMS_CODEX_TRANSPORT to use cli-exec' >&2
+      return 2
+      ;;
     *)
       echo "error: unsupported Codex transport: ${OMS_CODEX_TRANSPORT}" >&2
       return 2

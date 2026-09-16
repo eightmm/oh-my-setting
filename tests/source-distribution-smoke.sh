@@ -272,6 +272,39 @@ plan_body = workflow_text.split("\n  affected_plan:\n", 1)[1].split("\n  install
 plan_script = plan_body.split("      - name: select and verify affected changes\n", 1)[1].split("        run: |\n", 1)[1]
 plan_script = "\n".join(line[10:] for line in plan_script.splitlines()
                         if line.startswith("          "))
+setup_script = plan_body.split('      - name: prepare lazy shellcheck\n', 1)[1].split('      - name: select and verify affected changes\n', 1)[0].split('        run: |\n', 1)[1]
+setup_script = '\n'.join(line[10:] for line in setup_script.splitlines() if line.startswith('          '))
+subprocess.run(['bash', '-n'], input=setup_script, text=True, check=True)
+# The launcher is Linux CI only; no network or package install in this test.
+import shutil
+if sys.platform.startswith('linux') and shutil.which('flock'):
+    with tempfile.TemporaryDirectory(prefix='oms-ci-linter-') as tmp:
+        root = pathlib.Path(tmp)
+        binary = root / 'bin'
+        binary.mkdir()
+        scripts = {
+            'curl': 'echo fetched >> "$PROBE_LOG"\n',
+            'sha256sum': 'cat >/dev/null\n[ "${PROBE_BAD_CHECKSUM:-0}" != 1 ]\n',
+            'tar': 'd="$RUNNER_TEMP/oms-shellcheck-cache/shellcheck-v0.10.0"\nmkdir -p "$d"\nprintf "#!/bin/sh\\nexit 0\\n" > "$d/shellcheck"\nchmod +x "$d/shellcheck"\n',
+        }
+        for name, body in scripts.items():
+            path = binary / name
+            path.write_text('#!/bin/sh\n' + body, encoding='utf-8')
+            path.chmod(0o755)
+        env = dict(os.environ, RUNNER_TEMP=tmp, GITHUB_ENV=str(root/'env'),
+                   PROBE_LOG=str(root/'downloads'), PATH=str(binary)+os.pathsep+os.environ['PATH'])
+        subprocess.run(['bash', '-eu', '-c', setup_script], env=env, check=True)
+        assert not (root/'downloads').exists(), 'planning eagerly downloaded a linter'
+        workers = [subprocess.Popen([str(root/'oms-shellcheck'), '--version'], env=env) for _ in range(3)]
+        assert all(worker.wait() == 0 for worker in workers)
+        assert (root/'downloads').read_text().splitlines() == ['fetched'], 'parallel lint downloaded more than once'
+        bad = root/'bad'
+        bad.mkdir()
+        env.update(RUNNER_TEMP=str(bad), PROBE_BAD_CHECKSUM='1')
+        for _ in range(2):
+            assert subprocess.run([str(root/'oms-shellcheck'), '--version'], env=env).returncode != 0
+        assert not (bad/'oms-shellcheck-cache/shellcheck-v0.10.0/shellcheck').exists()
+        assert (root/'downloads').read_text().splitlines() == ['fetched', 'fetched'], 'failed acquisition retried per lint batch'
 with tempfile.TemporaryDirectory(prefix="oms-ci-plan-") as tmp:
     root = pathlib.Path(tmp)
     (root / "scripts").mkdir()
@@ -340,7 +373,6 @@ expected = {
     "provider-permissions-mcp-boundary": "provider-permissions-mcp-boundary-smoke.sh",
     "operator-tools": "operator-tools-smoke.sh",
     "skill-lifecycle": "skill-lifecycle-smoke.sh",
-    "interoperability": "interoperability-smoke.sh",
     "runtime-core": "runtime-core-smoke.sh",
     "runtime-core-integration": "runtime-core-integration-smoke.sh",
     "install-profile": "install-profile-smoke.sh",

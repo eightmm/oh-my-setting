@@ -29,14 +29,21 @@ oms peer-ask --prompt "Compare the two designs for this constraint."
 
 Choose the smallest context: none for a concept, `--repo-context` for repository
 state, `--diff` for an uncommitted change, or a local summary of specific files.
-Use `--debate 1` only when answers materially disagree. Longer debates
-(`--debate 2-3`) quote full positions once, then other peers' delta sections
-with a pointer to the full answer (bounded full quotes if deltas are absent).
-Each fresh invocation retains the question and its own previous answer.
+Use `--debate 1` only when answers materially disagree. Every later call is
+fresh: pass bounded current positions, evidence, changes and disagreements
+for all seats, including itself, plus full-answer paths. Structured excerpts
+share space across sections; freeform answers use bounded full quotes.
+Truncation is explicit. Read original answers when the excerpt is insufficient.
+`OMS_DEBATE_ROUND_BYTES` defaults to 65536 across all seats in each later
+round, including questions, references and instructions. Preparation fails
+before any seat starts if these cannot fit; shorten redundant context or
+explicitly raise the budget, never remove a requested participant.
 The debate stops early when every active seat explicitly reports no change;
 that does not prove consensus. Byte limits are not a total billed-token cap:
-retries and optional synthesis also cost calls. If policy forbids direct
-provider calls, use `--export-only` and import with `oms artifact-index import`.
+native instructions, tool reads, retries and optional synthesis also cost tokens.
+Reported prompt bytes exclude these costs and are not measured token savings.
+If policy forbids direct provider calls, use `--export-only` and import with
+`oms artifact-index import`.
 
 For a debate, raise the wall clock before launching — seats doing real
 verification die at the default 5m and their round is lost (a dropped seat's

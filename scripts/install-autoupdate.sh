@@ -67,14 +67,80 @@ case "$CLAUDE_HOOKS:$CODEX_PLUGIN" in
   *) echo "error: hook/plugin opt-outs must be 0 or 1" >&2; exit 2 ;;
 esac
 
-install_systemd() {
+install_systemd() (
   if [ "$DRY_RUN" = "1" ]; then
     printf 'would install systemd user timer: %s (%s)\n' "$TIMER_FILE" "$MODE"
     return 0
   fi
 
+  local backup file enabled active=0 changing=0 activation=0 linger_changed=0 linger_before="" restore_failed=0
   mkdir -p "$SYSTEMD_DIR"
-  cat > "$SERVICE_FILE" <<EOF
+  for file in "$SERVICE_FILE" "$TIMER_FILE"; do
+    if [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then
+      echo 'error: scheduler target is not a regular owned unit file' >&2
+      exit 1
+    fi
+  done
+  enabled="$(systemctl --user is-enabled oh-my-setting-autoupdate.timer 2>/dev/null || true)"
+  case "$enabled" in
+    enabled|enabled-runtime|disabled|not-found|static|indirect|'') ;;
+    *) echo "error: refusing to replace timer in state: $enabled" >&2; exit 1 ;;
+  esac
+  systemctl --user is-active --quiet oh-my-setting-autoupdate.timer && active=1
+  if [ "${OH_MY_SETTING_AUTO_UPDATE_LINGER:-0}" = 1 ]; then
+    linger_before="$(oms_install_autoupdate_linger)"
+    case "$linger_before" in
+      yes|no) ;;
+      *) echo 'error: cannot preserve unknown logout-persistence state' >&2; exit 1 ;;
+    esac
+  fi
+  backup="$(mktemp -d "$SYSTEMD_DIR/.oms-autoupdate.XXXXXX")"
+  rollback_systemd() {
+    local rc=$?
+    trap - EXIT
+    if [ "$rc" -ne 0 ] && [ "$changing" = 1 ]; then
+      for file in "$SERVICE_FILE" "$TIMER_FILE"; do
+        if [ -f "$backup/${file##*/}" ]; then
+          cp -p "$backup/${file##*/}" "$file" || restore_failed=1
+        else
+          rm -f "$file" || restore_failed=1
+        fi
+      done
+      systemctl --user daemon-reload || restore_failed=1
+      if [ "$activation" = 1 ]; then
+        case "$enabled" in
+          enabled) systemctl --user enable oh-my-setting-autoupdate.timer >/dev/null || restore_failed=1 ;;
+          enabled-runtime)
+            systemctl --user disable oh-my-setting-autoupdate.timer >/dev/null || restore_failed=1
+            systemctl --user enable --runtime oh-my-setting-autoupdate.timer >/dev/null || restore_failed=1 ;;
+          *) systemctl --user disable oh-my-setting-autoupdate.timer >/dev/null || restore_failed=1 ;;
+        esac
+        if [ "$active" = 1 ]; then
+          systemctl --user start oh-my-setting-autoupdate.timer || restore_failed=1
+        else
+          systemctl --user stop oh-my-setting-autoupdate.timer || restore_failed=1
+        fi
+      fi
+      if [ "$linger_changed" = 1 ]; then
+        loginctl --no-ask-password disable-linger "$(id -un)" || restore_failed=1
+      fi
+      if [ "$restore_failed" = 1 ]; then
+        echo "error: scheduler rollback incomplete; preserved backups: $backup" >&2
+      else
+        echo 'error: scheduler install failed; previous unit files and timer state restored' >&2
+      fi
+    fi
+    [ "$restore_failed" = 1 ] || rm -rf "$backup"
+    exit "$rc"
+  }
+  trap rollback_systemd EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  for file in "$SERVICE_FILE" "$TIMER_FILE"; do
+    [ ! -f "$file" ] || cp -p "$file" "$backup/${file##*/}"
+  done
+  cat > "$backup/service.new" <<EOF
 [Unit]
 Description=oh-my-setting auto-update
 
@@ -85,7 +151,7 @@ Environment=OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN
 Environment=OMS_AUTO_UPDATE_MANAGED=1
 ExecStart="$ROOT/scripts/auto-update.sh" $MODE
 EOF
-  cat > "$TIMER_FILE" <<'EOF'
+  cat > "$backup/timer.new" <<'EOF'
 [Unit]
 Description=Run oh-my-setting auto-update daily
 
@@ -98,21 +164,23 @@ RandomizedDelaySec=30m
 WantedBy=timers.target
 EOF
 
+  changing=1
+  mv "$backup/service.new" "$SERVICE_FILE"
+  mv "$backup/timer.new" "$TIMER_FILE"
   systemctl --user daemon-reload
-  systemctl --user enable --now oh-my-setting-autoupdate.timer >/dev/null
-  if [ "${OH_MY_SETTING_AUTO_UPDATE_LINGER:-0}" = 1 ]; then
-    loginctl --no-ask-password enable-linger "$(id -un)" || {
-      echo "error: timer installed, but logout persistence could not be enabled" >&2
-      return 1
-    }
+  if [ "$linger_before" = no ]; then
+    linger_changed=1
+    loginctl --no-ask-password enable-linger "$(id -un)"
   fi
+  activation=1
+  systemctl --user enable --now oh-my-setting-autoupdate.timer >/dev/null
   case "$(oms_install_autoupdate_linger)" in
     yes) echo "auto-update persistence: logout supported" ;;
     no) echo "warn: user timer can stop after logout; enable linger or use cron" >&2 ;;
     *) echo "warn: could not verify user timer logout persistence" >&2 ;;
   esac
   echo "auto-update trigger: systemd timer installed ($MODE)"
-}
+)
 
 install_cron() {
   local current

@@ -255,18 +255,17 @@ summary="$PROMPT"
     cat "$strategy_file"
     printf '\n\n'
   fi
-  printf 'You are the advisor for another coding agent at a decision point.\n'
-  printf 'Be adversarial: your job is to catch the wrong branch before it is\n'
-  printf 'taken, not to validate it. The caller consults you before\n'
-  printf 'irreversible or high-risk decisions, after repeated failures, or\n'
-  printf 'at a release go/no-go. Routine completion does not require advice.\n\n'
-  printf 'Respond with exactly these sections:\n'
-  printf 'VERDICT: proceed | revise | stop\n'
-  printf 'RISKS: flaws or risks in the plan, most severe first\n'
-  printf 'MISSING: checks, evidence, or alternatives the caller has not considered\n'
-  printf 'NEXT: the single next action you recommend\n\n'
-  printf 'Keep it under 40 lines. If the context is too thin to judge, say\n'
-  printf 'what is missing in MISSING and answer VERDICT: revise.\n\n'
+  # The bundled role already contains this contract; custom/no-role calls
+  # still need it. Compare paths, not role names: a project may override one.
+  if [ "$strategy_file" != "$(cd "$SCRIPT_DIR/.." && pwd)/roles/decision-advisor.md" ]; then
+    printf 'Read-only adversarial decision review. Respond with:\n'
+    printf 'VERDICT: proceed | revise | stop\n'
+    printf 'RISKS: blocking risks, most severe first\n'
+    printf 'MISSING: evidence or alternatives not yet checked\n'
+    printf 'NEXT: one concrete next action\n'
+    printf 'If evidence is incomplete, choose revise and name what is missing.\n'
+  fi
+  printf 'Keep the answer under 40 lines.\n\n'
   if [ "$INCLUDE_FAILURES" -eq 1 ] && [ -x "$SCRIPT_DIR/fail-ledger.sh" ]; then
     failures="$(cd "$REPO" && bash "$SCRIPT_DIR/fail-ledger.sh" list --unresolved 2>/dev/null | head -20 || true)"
     if [ -n "$failures" ]; then

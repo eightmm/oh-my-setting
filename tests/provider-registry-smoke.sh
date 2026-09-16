@@ -89,6 +89,15 @@ export OMS_PROVIDER_PROBE_TIMEOUT=1
 # shellcheck source=scripts/lib/provider-registry.sh
 . "$ROOT/scripts/lib/provider-registry.sh"
 
+[ "$(oms_provider_transport codex)" = cli-exec ] || fail "default CLI transport changed"
+for retired_transport in app-server unknown; do
+  if OMS_CODEX_TRANSPORT="$retired_transport" oms_provider_transport codex >/dev/null 2>&1; then
+    fail "unsupported transport silently fell back to CLI: $retired_transport"
+  fi
+done
+[ "$(OMS_CODEX_TRANSPORT=app-server oms_provider_transport claude)" = cli-exec ] ||
+  fail "Codex legacy setting changed Claude transport"
+
 expected_supported='codex
 claude
 antigravity
@@ -240,6 +249,17 @@ git -C "$repo" commit -qm base
 rm -f "$TMP/logs/probes"
 ma_write_harness_context "$repo" 0 0 0 >/dev/null
 [ ! -e "$TMP/logs/probes" ] || fail 'cached harness context invoked provider probes'
+
+for access in read write; do
+  (
+    oms_provider_cli_discovered() { fail 'retired transport reached a provider probe'; }
+    rc=0
+    OMS_CODEX_TRANSPORT=app-server ma_provider_attempt codex "$access" \
+      "$repo/README.md" "$TMP/retired-output" "$repo" provider-default "" \
+      retired "$repo" "retired-$access" 2>/dev/null || rc=$?
+    [ "$rc" = 2 ] || fail "retired transport did not fail closed for $access"
+  )
+done
 
 call_provider() {
   local provider="$1"

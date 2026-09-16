@@ -12,7 +12,7 @@ MA_SHOW_REPO=1
 MA_QUORUM_FALLBACK="review"
 MA_DEBATE_ROLE="reviewers"
 MA_DEBATE_TOPIC="diff"
-MA_DEBATE_SECTIONS=$'Findings:\nRisks:\nMissing tests:\nRecommendation:\nChanged from previous round:\nRemaining disagreements:'
+MA_DEBATE_SECTIONS=$'Findings:\nEvidence:\nRisks:\nMissing tests:\nRecommendation:\nVerification:\nChanged from previous round:\nRemaining disagreements:'
 
 REPO="$PWD"
 PROMPT=""
@@ -88,11 +88,12 @@ Options:
   --no-ml-context      Disable --ml-context (compatibility).
   --debate N           Add N debate rounds (1-3). Each round, every reviewer
                        sees the others' previous findings, critiques them, and
-                       revises its own. Debate rounds exchange findings only;
-                       the diff is attached to round-1 prompts only. Full
-                       findings cross once (round 2); later rounds quote only
-                       each reviewer's delta sections plus an on-disk
-                       reference to the full answer, and the debate stops
+                       revises its own. The diff is in round-1 prompts; later
+                       calls receive bounded findings, evidence and deltas,
+                       plus references to shared initial context and sanitized
+                       answer copies. All seats share
+                       OMS_DEBATE_ROUND_BYTES (default 65536, excluding native
+                       provider context). The debate stops
                        early when every seat declares "none" under "Changed
                        from previous round:".
   --gate               Require each reviewer to end with GATE: pass or
@@ -449,11 +450,11 @@ write_prompt() {
     else
       printf 'Git context omitted by --no-diff.\n'
     fi
-    printf '\nReturn exactly these sections:\n'
-    printf 'Findings:\n'
-    printf 'Risks:\n'
-    printf 'Missing tests:\n'
-    printf 'Recommendation:\n'
+    if [ "$DEBATE" -gt 0 ]; then
+      ma_debate_output_contract
+    else
+      printf '\nReturn exactly these sections:\nFindings:\nRisks:\nMissing tests:\nRecommendation:\n'
+    fi
   } > "$output"
 }
 
@@ -664,6 +665,7 @@ raw_diff_file="$(mktemp)" || fail "mktemp failed"
 prompt_file="$(mktemp)" || fail "mktemp failed"
 gate_verify_temp="$(mktemp)" || fail "mktemp failed"
 debate_dir=""
+MA_COUNCIL_CONTEXT_DIR=""
 cleanup_done=0
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
@@ -672,6 +674,7 @@ cleanup() {
   if [ -n "$debate_dir" ]; then
     rm -rf "$debate_dir"
   fi
+  ma_cleanup_council_context
 }
 cleanup_signal() {
   local code="$1"

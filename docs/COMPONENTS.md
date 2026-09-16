@@ -34,6 +34,9 @@ compatible; these groups do not grant combined authority.
 - Consult and advice share exact call-receipt validation; absent or ambiguous
   receipts cannot borrow the newest artifact. Advice is a prompt variant using
   the shared model router, not a separate fixed-high-effort routing policy.
+  Consult prints the current result without replaying recent thread history;
+  the thread retains that history for follow-up calls. Advice injects its
+  bundled decision contract once, retaining the contract for custom roles.
 - Tick and install auto-update share scheduler detection/selection while
   preserving distinct schedules, ownership markers, and repair transactions.
 - Diagnostic, council, autonomy, profile, experiment, and continuity variants
@@ -88,6 +91,13 @@ The owning agent remains responsible for scope, admission, verification,
 commit, push, and release decisions. Peer agreement is evidence, not approval.
 
 ## Install and ownership
+
+Systemd auto-update setup stages unit files and restores prior files, timer
+enablement/activity and any newly enabled linger if activation fails. Failed
+restoration retains the backup and reports its location; this cannot undo an
+update process that already started. CI prepares ShellCheck lazily, so a full
+selection does not download it again in the planning job, and parallel narrow
+checks share one verified download.
 
 The default installer selects the `core` capability: Bash, Git, Python, the
 harness, and one coding-agent provider. It installs or verifies only the locked
@@ -147,6 +157,9 @@ Structured doctor reports adapt the existing checks; they do not create a
 second health engine. Findings carry stable IDs, severity, and content-free
 remediation metadata. `--remediation-plan` prints commands and their authority
 class but never executes them, and it cannot be combined with `--repair`.
+Doctor checks installed Git HEAD/ref validity without fetching or rewriting
+refs. Damaged references require targeted recovery with preserved originals;
+link repair is not Git recovery.
 
 ## Project onboarding
 
@@ -206,6 +219,36 @@ preview/import flow for bundles. Automatic draft generation is not required.
 | Council or debate | `oms peer-ask` | Per-seat artifacts and family count |
 | Diff review | `oms peer-review --gate` | Verdicts plus mechanical backstop |
 | High-risk decision | `oms advise` | Adversarial recommendation |
+
+Debate rounds after the initial independent answers share a 64 KiB prompt
+budget across all seats (`OMS_DEBATE_ROUND_BYTES`). Each fresh call receives
+section-balanced excerpts of current claims/findings, evidence, changes and
+remaining disagreements, including its own position. Structured excerpts use
+at most 4 KiB each; freeform and undersized section budgets use a bounded
+head-and-tail excerpt, retaining the leading conclusion and final objections.
+Original artifacts remain linked, and omitted content is marked rather than
+presented as a complete summary. All prompts are prepared before any seat is
+started; a frame too large to retain evidence fails without partial calls.
+Round-byte reporting excludes provider-native context, reads, retries and
+synthesis, and must not be reported as measured token savings.
+Excerpts recognize plain and Markdown section headings without treating fenced
+or indented code and `>`-quoted examples as new answers; short sections donate unused space
+to longer ones. Early stopping requires every called seat to answer and its
+entire change section to explicitly declare no change. A dropped seat's last
+good answer remains available, labeled as stale in the synthesis.
+Initial and subsequent debate prompts share evidence/verification framing,
+while honoring explicitly requested answer formats. Claims use stable IDs and
+provider-reported confirmed/refuted/unverified labels; agreement never promotes
+them to owner-verified evidence. Retractions must accompany subsequent claims.
+Each run keeps a bounded, sanitized initial request and answer copies, mirrored
+into isolated read worktrees. Tracked base/state identity is shared and a tracked
+source change stops later rounds. Base plus supplied diff is the shared view;
+untracked or omitted bytes remain explicit uncertainty, not an identical full
+checkout promise. The copies are removed after the run; original artifacts stay.
+Usage details retain input/output and cache-read/write counts with unknowns as
+null. Codex cache reads are included in its input count; Claude reports caches
+separately. Historical `tokens used` semantics remain unchanged. Details are
+cached in the existing artifact index, not a new store or a billable-cost claim.
 
 Read calls scan outbound context for credentials and machine-sensitive data.
 `--export-only` writes a prompt without invoking another CLI; import the answer
@@ -821,10 +864,10 @@ chooses a connector or tracked summary.
   same-repository `oms_peer_start` reuses its durable operation ID as a Task;
   `tasks/get|update|cancel` add no list or second store. Older clients keep the
   prior CallToolResult shape.
-- Codex app-server transport: `OMS_CODEX_TRANSPORT=app-server` explicitly moves
-  only read seats to one ephemeral, read-only, no-network, approval-never turn.
-  The default remains `codex exec`; adapter failure never falls back to it and
-  write delegation is refused.
+- Provider work uses the existing CLI transport. The optional OMS app-server
+  read adapter is retired; stale `OMS_CODEX_TRANSPORT=app-server` configuration
+  fails explicitly instead of silently changing execution policy. Codex model
+  discovery may still use its native app-server; that is not a work transport.
 
 Integration removal failures propagate to `oms uninstall`; successful-looking
 messages are emitted only after the corresponding CLI confirms removal.

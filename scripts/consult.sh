@@ -193,7 +193,7 @@ thread="$(resolve_thread)" || fail "could not open a thread"
 call_one() {
   local target="$1"
   local artifact_out="${2:-}"
-  local provider model args
+  local provider model args rc=0 artifact
 
   provider="$(ma_target_provider "$target")"
   model="$(ma_target_model "$target")"
@@ -211,7 +211,14 @@ call_one() {
   fi
   args+=(${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"})
 
-  ma_call_read_peer "$artifact_out" "$DRY_RUN" "${args[@]}"
+  ma_call_read_peer "$artifact_out" "$DRY_RUN" "${args[@]}" || rc=$?
+  # Present only this call's answer, never a replay of unrelated thread turns.
+  if [ "$rc" -eq 0 ] && [ "$QUIET" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] &&
+     [ "${OH_MY_SETTING_CALL_DRY_RUN:-0}" != 1 ] && [ -s "$artifact_out" ]; then
+    artifact="$(sed -n '1p' "$artifact_out")"
+    [ ! -f "$artifact" ] || extract_output "$artifact"
+  fi
+  return "$rc"
 }
 
 # One consult should not die because the first CLI is broken, unauthenticated,
@@ -402,8 +409,4 @@ $family
 fi
 
 echo "thread: $thread"
-if [ "$QUIET" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-  echo "---"
-  bash "$THREAD_SH" --repo "$REPO" --id "$thread" --turns 4 context || true
-fi
 exit "$status"

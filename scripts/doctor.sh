@@ -966,6 +966,19 @@ check_install_receipt() {
   esac
 }
 
+check_install_git() {
+  # Distributed source trees need no Git metadata; installed checkouts do.
+  [ -e "$INSTALL_ROOT/.git" ] || return 0
+  if ! git -C "$INSTALL_ROOT" rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1 ||
+     ! git -C "$INSTALL_ROOT" show-ref --head >/dev/null 2>&1; then
+    echo 'broken: install Git HEAD or references are invalid; update cannot proceed'
+    echo 'hint: preserve local changes and damaged refs before targeted Git recovery; relinking does not repair Git'
+    FAILED=1
+  else
+    echo 'ok: install Git HEAD and references'
+  fi
+}
+
 check_snapshots() {
   local machine_mode=0
   local slurm_mode=0
@@ -1829,6 +1842,7 @@ if [ "$SURFACES" = "1" ]; then
 fi
 
 check_install_receipt
+check_install_git
 check_snapshots
 
 check_cmd git

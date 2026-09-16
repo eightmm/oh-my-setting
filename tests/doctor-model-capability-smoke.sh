@@ -22,6 +22,7 @@ chmod +x "$fixture/scripts/doctor.sh"
 
 cat > "$fixture/scripts/lib/agent-memory-common.sh" <<'EOF_STUB'
 agent_memory_file_has_sensitive_content() { return 1; }
+oms_platform_is_windows() { return 1; }
 EOF_STUB
 cat > "$fixture/scripts/lib/harness-residue.sh" <<'EOF_STUB'
 oms_harness_count_stale_worktrees() { printf '0\n'; }
@@ -133,5 +134,23 @@ MODEL_DOCTOR_FAIL=1 run_doctor --live-models > "$live" 2>&1 || rc=$?
 [ "$rc" = 1 ] || fail "live model validation should enforce model-doctor failure"
 grep -Fq 'model-doctor-args: --live-models' "$live" ||
   fail "doctor did not forward live model validation"
+
+# A broken remote-tracking ref must not look like a healthy legacy install.
+git -C "$fixture" init -q
+git -C "$fixture" -c user.name=fixture -c user.email=fixture@example.com \
+  -c commit.gpgsign=false commit -q --allow-empty -m fixture
+run_doctor --no-model-doctor > "$TMP/git-healthy.out"
+grep -Fq 'ok: install Git HEAD and references' "$TMP/git-healthy.out" ||
+  fail 'doctor did not check install Git refs'
+mkdir -p "$fixture/.git/refs/remotes/origin"
+printf 'ATOM fixture data, not a Git reference\n' > "$fixture/.git/refs/remotes/origin/main"
+cp "$fixture/.git/refs/remotes/origin/main" "$TMP/damaged-ref"
+rc=0
+run_doctor --no-model-doctor > "$TMP/git-damaged.out" 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "damaged install refs should fail doctor, got $rc"
+grep -Fq 'install Git HEAD or references are invalid' "$TMP/git-damaged.out" ||
+  fail 'doctor did not identify damaged install Git refs'
+cmp "$TMP/damaged-ref" "$fixture/.git/refs/remotes/origin/main" ||
+  fail 'doctor modified the damaged reference'
 
 echo 'doctor-model-capability-smoke: ok'

@@ -10,7 +10,7 @@ MA_SHOW_REPO=0
 MA_QUORUM_FALLBACK="answer"
 MA_DEBATE_ROLE="advisors"
 MA_DEBATE_TOPIC="question"
-MA_DEBATE_SECTIONS=$'Answer:\nChanged from previous round:\nRemaining disagreements:'
+MA_DEBATE_SECTIONS=$'Answer:\nEvidence:\nRisks:\nRecommendation:\nVerification:\nChanged from previous round:\nRemaining disagreements:'
 
 REPO="$PWD"
 PROMPT=""
@@ -69,11 +69,12 @@ Options:
                        providers the conversation so far (thread.sh).
   --debate N           Add N debate rounds (1-3). Each round, every provider
                        sees the others' previous answers, critiques them, and
-                       revises its own. Debate rounds exchange answers only;
-                       repo context is attached to round-1 prompts only. Full
-                       positions cross once (round 2); later rounds quote only
-                       each peer's delta sections plus an on-disk reference to
-                       the full answer, and the debate stops early when every
+                       revises its own. Repo context is in round-1 prompts;
+                       later calls receive bounded positions, evidence and
+                       deltas, plus references to shared initial context and
+                       sanitized answer copies. All seats share
+                       OMS_DEBATE_ROUND_BYTES (default 65536, excluding native
+                       provider context). The debate stops early when every
                        seat declares "none" under "Changed from previous
                        round:" — stability, not consensus: recorded
                        disagreements stand.
@@ -144,11 +145,12 @@ write_prompt() {
       cat "$diff_file"
       printf '\n'
     fi
-    printf '\nReturn exactly these sections:\n'
-    printf 'Answer:\n'
-    printf 'Tradeoffs:\n'
-    printf 'Risks:\n'
-    printf 'Recommendation:\n'
+    if [ "$DEBATE" -gt 0 ]; then
+      ma_debate_output_contract
+    else
+      printf '\nUnless the question explicitly requests another format, use these sections:\n'
+      printf 'Answer:\nTradeoffs:\nRisks:\nRecommendation:\n'
+    fi
   } > "$output"
 }
 
@@ -314,6 +316,7 @@ status_file="$(mktemp)" || fail "mktemp failed"
 diff_file="$(mktemp)" || fail "mktemp failed"
 prompt_file="$(mktemp)" || fail "mktemp failed"
 debate_dir=""
+MA_COUNCIL_CONTEXT_DIR=""
 cleanup_done=0
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
@@ -322,6 +325,7 @@ cleanup() {
   if [ -n "$debate_dir" ]; then
     rm -rf "$debate_dir"
   fi
+  ma_cleanup_council_context
 }
 cleanup_signal() {
   local code="$1"

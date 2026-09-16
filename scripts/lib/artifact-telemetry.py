@@ -97,6 +97,34 @@ def artifact_text(repo: str, row: dict[str, object]) -> Optional[str]:
     return raw.decode("utf-8", errors="replace")
 
 
+def artifact_usage_metrics(repo: str, row: dict[str, object]) -> Optional[dict]:
+    saved = row.get("provider_usage")
+    if isinstance(saved, dict):
+        return saved
+    text = artifact_text(repo, row)
+    if text is None:
+        return None
+    # Never count examples from the composed prompt as observed usage.
+    text = text.rsplit("\n## Output\n", 1)[-1]
+    reports = []
+    for raw in re.findall(r"(?m)^usage detail: (\{[^\r\n]+\})$", text):
+        try:
+            report = json.loads(raw)
+        except ValueError:
+            continue
+        if report.get("provider") == row.get("provider"):
+            reports.append(report)
+    if not reports:
+        return None
+    result = {"reports": len(reports), "measurement": "provider-reported"}
+    for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
+        values = [integer(report.get(key)) for report in reports]
+        result[key] = sum(values) if all(value is not None for value in values) else None
+    flags = [report.get("cache_in_input") for report in reports]
+    result["cache_in_input"] = flags[0] if type(flags[0]) is bool and all(flag is flags[0] for flag in flags) else None
+    return result
+
+
 def artifact_model_metrics(
     repo: str, row: dict[str, object]
 ) -> dict[str, object]:
