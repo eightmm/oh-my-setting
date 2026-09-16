@@ -71,6 +71,25 @@ with ae.file_lock(target):
     pass
 assert not lock.exists(), "a dead lock owner was not reclaimed"
 
+# A subreaper can retain a dead owner's PID as a zombie. It cannot release
+# its lock, even though kill(pid, 0) still succeeds.
+if sys.platform.startswith("linux"):
+    child = os.fork()
+    if child == 0:
+        try:
+            with ae.file_lock(target):
+                os._exit(0)
+        except BaseException:
+            os._exit(1)
+    try:
+        info = os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)
+        assert info.si_status == 0, "zombie fixture could not acquire the lock"
+        os.kill(child, 0)
+        with ae.file_lock(target):
+            pass
+    finally:
+        os.waitpid(child, 0)
+
 # Two contenders may both observe one dead generation. Pause B after that
 # observation, let A reclaim and acquire a new live generation, then resume B.
 # B must revalidate under a crash-safe recovery serialization boundary instead

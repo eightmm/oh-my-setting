@@ -354,6 +354,19 @@ def lock_snapshot_stale(snapshot: Dict[str, Any], unknown_stale_seconds: int) ->
         if pid > 0 and isinstance(owner_nonce, str) and owner_nonce:
             if not pid_alive(pid):
                 return True
+            # A Linux subreaper may retain a dead owner's PID indefinitely.
+            # Identity still exists, but a zombie cannot finish a critical
+            # section. Unknown/unreadable state must preserve the owner.
+            if sys.platform.startswith("linux"):
+                try:
+                    raw = (Path("/proc") / str(pid) / "stat").read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                    state = raw[raw.rfind(")") + 2:].split()
+                    if state and state[0] in ("Z", "X"):
+                        return True
+                except OSError:
+                    pass
             recorded_start = owner.get("process_start")
             if isinstance(recorded_start, str) and recorded_start:
                 actual_start = process_start_token(pid)

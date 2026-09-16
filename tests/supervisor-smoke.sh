@@ -933,7 +933,7 @@ last = None
 for _ in range(3):
     last = subprocess.run(
         [sup, "--repo", repo, "reconcile", "--apply"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15)
     row = runner.ae.load_projection(Path(repo))[1].get(attempt, {})
     if last.returncode == 0 and row.get("state") == "blocked" and row.get("reason_code") == "runner_lost":
         break
