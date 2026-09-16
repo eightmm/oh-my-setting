@@ -1,16 +1,14 @@
 # Project Guidelines
 
 - Prefer repository conventions over global defaults.
-- Read `PROJECT.md` and task-relevant references. Pause only when unresolved choices affect the requested change.
+- Read `PROJECT.md` and relevant references; ask only about choices affecting this change.
 - Inspect the implementation before editing; change only task-relevant lines.
 - Do not add dependencies, alter public contracts, or mask failures without
   explicit authority.
-- Verify with the narrowest relevant command. Reuse existing coverage; add a
-  test only for an uncovered observable contract, reproduced bug, or safety boundary.
-  Select related test files or node IDs during development; rerun or broaden
-  for changed inputs, failures, uncertainty, or the project's required release gate.
+- Run affected checks; reuse tests. Add coverage only for uncovered contracts,
+  reproduced bugs or safety boundaries. Select related files/node IDs; broaden
+  for changed inputs, failures, uncertainty or required release gates.
 - Keep generated artifacts, secrets, and private data out of git.
 
-Project-specific commands, paths, interfaces, do-not-touch areas, and success
-criteria belong in `PROJECT.md`. Once its state is past `draft`, fill Commands
-and Verification or mark them `n/a` with a reason.
+Keep commands, paths, interfaces, protected areas and success criteria in
+`PROJECT.md`. Past `draft`, fill Commands and Verification or explain `n/a`.
