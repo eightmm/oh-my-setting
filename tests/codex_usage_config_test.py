@@ -27,7 +27,7 @@ REALISTIC = """model = "gpt-test"
 [tui]
 animations = true
 
-[projects."/home/user/repo"]
+[projects."/srv/work/repo"]
 trust_level = "trusted"
 """
 V2_ENABLED = REALISTIC + "\n[features.multi_agent_v2]\nenabled = true\n"
@@ -61,7 +61,7 @@ class CodexUsageConfigTest(unittest.TestCase):
         parsed = self.load()
         self.assertEqual(parsed["background_terminal_max_timeout"], 900000)
         self.assertNotIn(
-            "background_terminal_max_timeout", parsed["projects"]["/home/user/repo"]
+            "background_terminal_max_timeout", parsed["projects"]["/srv/work/repo"]
         )
         self.assertNotIn("multi_agent_v2", parsed.get("features", {}))
         self.assertEqual(parsed["model"], "gpt-test")
