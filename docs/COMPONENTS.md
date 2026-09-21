@@ -796,7 +796,13 @@ ML/Slurm workflows use local-first experiment controls:
 - `oms data-manifest` for fingerprints, split checks, and leakage evidence.
 - `oms experiment-board` for claims and collision avoidance.
 - `oms run-reconcile`, `oms job-digest`, and `oms tsp-queue` for Slurm or local
-  GPU work.
+  GPU work. `oms job-digest <id> --wait --wait-timeout S --max-bytes N` keeps
+  the scheduler polling inside one shell call instead of repeated model turns:
+  a spent budget exits 124 with the job marked pending and untouched, the
+  digest is capped to whole lines with the omission stated, and a repeating
+  controller error is reported once plus a total. Leaving the queue or empty
+  accounting is reported as unknown, never as success. Where GNU `timeout` is
+  absent (BSD/macOS) a hung `squeue` is not preempted; only sleeps are bounded.
 
 Machine, cluster, dataset, and run details stay local unless the user explicitly
 chooses a connector or tracked summary.
@@ -812,6 +818,19 @@ chooses a connector or tracked summary.
   managed native status line when the user has not set one. On Python 3.9/3.10,
   arbitrary existing TOML requires `tomli` so
   the helper never rewrites an unvalidated config.
+  The same installer manages usage-efficiency keys it can evidence:
+  `background_terminal_max_timeout = 900000` (a longer ceiling for an empty
+  background-terminal poll, not a wait duration) and, only where the user
+  already enabled `[features.multi_agent_v2]` as a table, `min_wait_timeout_ms`
+  and `default_wait_timeout_ms`. A user value, a boolean-form feature flag, or
+  a lower user `max_wait_timeout_ms` is preserved; OMS never enables a feature,
+  and model, reasoning, service tier, compaction, sandbox and approval keys are
+  untouched. Codex rejects a config whose wait keys break `min <= default <=
+  max`, so only when it writes those floors the installer lets the real `codex
+  features list` load the result and removes its keys if that fails; an
+  ordinary install pays no extra provider probe, since Codex ignores a root
+  key it does not know. `oms doctor` reports the state; a project
+  config, profile or `-c` flag can still outrank the written value.
   Install/update retires exact legacy OMS user-hook bridge entries only after
   verifying an enabled native plugin, current cache and stable hook support.
   It backs up the original bytes and preserves custom hooks; inconclusive

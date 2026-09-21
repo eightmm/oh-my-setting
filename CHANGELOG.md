@@ -6,8 +6,24 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Added
+
+- Waiting costs model turns, not shell polls: `oms job-digest --wait` gains
+  `--wait-timeout` (exit 124, job pending and untouched) and `--max-bytes`
+  (whole-line cap that states what it dropped), and reports a repeating
+  scheduler error once plus a total. The Slurm skill now makes one bounded
+  call instead of telling the agent to poll `squeue`; common rules and a new
+  on-demand `efficient-waiting` reference separate timeouts from outcomes.
+- The Codex plugin installer manages usage-efficiency keys it can evidence: a
+  longer background-terminal wait ceiling and, only where `multi_agent_v2` is
+  already enabled as a table, its wait floors. User values are preserved, no
+  feature is enabled, keys the installed Codex cannot load are rolled back,
+  and `oms doctor` reports the state. Quota savings are not measured.
+
 ### Fixed
 
+- `oms job-digest <id>` no longer aborts before the log sections when `sacct`
+  fails; unavailable or empty accounting reads as unknown, not success.
 - Foreground tool installers can borrow their live parent's lifecycle lock
   without acquiring ownership or release authority, preventing nested update
   deadlocks while retaining standalone serialization.

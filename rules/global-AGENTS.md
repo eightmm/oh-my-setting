@@ -59,6 +59,8 @@ Default: concise, scoped, evidence-driven.
   and rationale; distinguish explicit requirements from interpretation.
   Continue unaffected authorized work.
 - Batch independent calls; serialize dependencies. Bound output; re-read changes.
+- Wait in one bounded call, not status-only turns; a read timeout is neither
+  failure nor restart permission.
 
 ## Specification
 

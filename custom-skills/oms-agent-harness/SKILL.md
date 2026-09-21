@@ -77,3 +77,4 @@ projections, not authority.
 - Review/release gates: [review-gates.md](references/review-gates.md)
 - Prior session: [session-handoff.md](references/session-handoff.md)
 - Evidence-first changes: [minimal-change.md](references/minimal-change.md)
+- Long waits, polling, output budgets: [efficient-waiting.md](references/efficient-waiting.md)
