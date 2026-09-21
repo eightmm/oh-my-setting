@@ -58,6 +58,23 @@ OMS_PEER_TIMEOUT=900 oms peer-ask --repo-context --debate 2 \
 `--providers` also pins models per seat (`codex:model=NAME`); same-provider
 seats share one model family, which the reported family count makes explicit.
 
+## Live council and focused follow-up
+
+Use `peer-ask --thread ID` for completed-turn delivery: each answer publishes
+without waiting for slower seats. Opening answers and any `--debate N` rounds
+stay parallel; every seat sees the same prior-round evidence and bounded
+round-start notes. Post corrections with `oms_peer_start kind=message`; they
+apply to the next configured round, not calls already running. Notes do not
+start more calls or grant authority. Read turns using thread cursors, not full
+transcript replay or tight polling.
+MCP `kind=ask` returns a ready thread; `debate_rounds=0..3` defaults to zero.
+Its suggested operation wait is zero to keep the serial connection available.
+For a remaining narrow disagreement, use an authorized `consult --to PROVIDER
+--thread ID` with the claim, counterevidence and question instead of repeating
+the whole council. Preserve requested participants when another full round is
+requested. There is no separate sequential mode, persistent provider session,
+token streaming, or automatic client wakeup.
+
 ## Advisor that reads your history
 
 `oms advise` is the decision-point advisor (VERDICT/RISKS/MISSING/NEXT).

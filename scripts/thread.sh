@@ -32,6 +32,7 @@ AFTER=""
 WAIT=0
 CONSUMER=""
 LIVE=0
+NOTES_ONLY=0
 HELPER="$ROOT/scripts/lib/thread_live.py"
 
 usage() {
@@ -39,7 +40,7 @@ usage() {
 Usage: thread.sh new     [--id ID] [--topic TEXT] [--live] [--repo PATH]
        thread.sh append  [--id ID] --role ROLE (--text TEXT | --text-file F)
                                [--provider P] [--model M] [--artifact PATH]
-       thread.sh context [--id ID] [--max-bytes N] [--turns N]
+       thread.sh context [--id ID] [--max-bytes N] [--turns N] [--notes-only]
        thread.sh show    [--id ID] [--json]
        thread.sh list    [--all] [--stale] [--json]
        thread.sh stats   [--json]
@@ -87,6 +88,8 @@ Options:
   --turns N       Context turn limit (default: 12, OMS_THREAD_CONTEXT_TURNS).
   --all           list: include closed threads.
   --live          new: opt this conversation into existing prompt/edit hooks.
+  --notes-only    context: human/coordinator notes and decisions, not answers
+                  or provider failure notes; useful between council rounds.
   --after CURSOR   updates/ack: cursor from a previous updates response.
   --wait SECONDS   updates: bounded wait for a change (default 0, maximum 30).
   --consumer NAME  ack: caller's session identifier, not an authenticated identity.
@@ -113,6 +116,7 @@ fail() { echo "error: $*" >&2; exit 2; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --notes-only) NOTES_ONLY=1; shift ;;
     new|append|context|show|list|stats|current|close|updates|ack)
       [ -z "$ACTION" ] || fail "only one command allowed"
       ACTION="$1"; shift ;;
@@ -334,6 +338,7 @@ cmd_context() {
   local id
   id="$(require_thread)"
   OMS_TH_FILE="$(thread_file "$id")" OMS_TH_ID="$id" \
+  OMS_TH_NOTES_ONLY="$NOTES_ONLY" \
   OMS_TH_BYTES="$MAX_BYTES" OMS_TH_TURNS="$MAX_TURNS" python3 - <<'PY'
 import json, os
 
@@ -355,6 +360,10 @@ with open(path, encoding="utf-8", errors="replace") as f:
 if not rows:
     raise SystemExit(0)
 live = any(row.get("live") is True for row in rows)
+if os.environ.get("OMS_TH_NOTES_ONLY") == "1":
+    rows = [row for row in rows if row.get("role") in ("note", "decision") and not row.get("provider")]
+    if not rows:
+        raise SystemExit(0)
 
 # The caller supplies this question separately. Never summarize, rewrite the
 # log, or remove older decisions: only an exactly repeated final question.

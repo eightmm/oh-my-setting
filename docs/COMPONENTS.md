@@ -241,6 +241,27 @@ or indented code and `>`-quoted examples as new answers; short sections donate u
 to longer ones. Early stopping requires every called seat to answer and its
 entire change section to explicitly declare no change. A dropped seat's last
 good answer remains available, labeled as stale in the synthesis.
+
+Councils with `--thread ID` publish every completed turn without waiting for
+slower seats. Opening answers and rebuttal rounds remain parallel, with one
+prior-round evidence/notes snapshot and all-seat budget preflight per round.
+Coordinator notes/decisions use `thread context --notes-only` (2 KiB, eight
+turns); answers and provider failure notes are not duplicated there. Notes
+arriving during a round apply only if another configured round runs.
+MCP `kind=ask` returns a ready thread and accepts `debate_rounds=0..3` (default
+zero); its suggested operation wait is zero while exchanging messages.
+Threads stay open for authorized focused follow-up through `consult`; neither
+notes nor reads start new calls. CLI export-only does not create/publish turns.
+There is one parallel council, not a separate sequential scheduler, persistent
+provider session, token stream, or mid-generation interruption.
+
+Claude read calls retain public assistant text from `stream-json --verbose`
+alongside the terminal result, so a closing remark cannot erase earlier
+evidence. User/tool/thinking/subagent events are not answers; absent terminal
+results are marked truncated. Existing JSON envelopes and write/interactive
+transports remain supported, with unchanged permissions. The transport follows
+the [official streaming contract](https://code.claude.com/docs/en/headless#stream-responses);
+fixture validation is not a live-provider guarantee or measured cost saving.
 Initial and subsequent debate prompts share evidence/verification framing,
 while honoring explicitly requested answer formats. Claims use stable IDs and
 provider-reported confirmed/refuted/unverified labels; agreement never promotes

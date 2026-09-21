@@ -2628,9 +2628,10 @@ test_peer_export_only_and_import_result() {
     --artifact-dir "$artifact_dir" \
     --providers claude \
     --repo-context \
-    --export-only \
+    --export-only --thread export-only-thread \
     --prompt "Assess handoff mode" >"$project/export-out"
 
+  [ ! -e "$project/.oms/threads/export-only-thread.jsonl" ] || fail 'export-only must not publish council turns'
   assert_file_contains "$project/export-out" "exported: claude ->"
   export_artifact="$(find "$artifact_dir" -type f -name 'claude-assess-handoff-mode-*.export.md' | head -n 1)"
   [ -n "$export_artifact" ] || fail "missing export artifact"
@@ -4144,6 +4145,20 @@ test_peer_ask_debate_dry_run() {
   assert_one_artifact_contains "$artifact_dir" 'claude-debate-two-options-*-r2.md' 'debate round 2'
   assert_one_artifact_contains "$artifact_dir" '_synthesis-debate-two-options-*.md' 'debate rounds: 1'
   assert_one_artifact_contains "$artifact_dir" '_synthesis-debate-two-options-*.md' '_final answer after debate_'
+
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" --repo "$project" \
+    --providers 'codex:model=alpha,codex:model=beta,claude:model=alpha,claude:model=beta,antigravity' \
+    --debate 1 --thread bounded-council --prompt 'Compare two options' > "$project/council.out"
+  assert_file_contains "$project/council.out" 'thread: bounded-council'
+  python3 - "$project/.oms/threads/bounded-council.jsonl" <<'PY' || fail 'council transcript replayed or lost turns'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert len([r for r in rows if r['role'] == 'question']) == 1, rows
+answers = [r for r in rows if r['role'] == 'answer']
+assert len(answers) == 10, answers
+assert len({r['provider'] for r in answers}) == 5, answers
+assert any(r.get('live') for r in rows), rows
+PY
 }
 
 test_peer_ask_debate_needs_two_providers() {
@@ -8791,6 +8806,8 @@ assert row['provider_usage']['cache_in_input'] is False, row
 PY
   grep -Fxq -- '--output-format' "$home_dir/claude-argv" ||
     fail "claude must be asked for the JSON envelope: $(cat "$home_dir/claude-argv")"
+  grep -Fxq -- 'stream-json' "$home_dir/claude-argv" || fail 'read seats need complete assistant messages'
+  grep -Fxq -- '--verbose' "$home_dir/claude-argv" || fail 'stream-json requires verbose output'
   # A read seat judges text and gets no MCP tool surface.
   grep -Fxq -- '--strict-mcp-config' "$home_dir/claude-argv" ||
     fail "a read seat must not inherit the user-scope MCP servers: $(cat "$home_dir/claude-argv")"
@@ -8802,6 +8819,25 @@ PY
   # four tools -- and writes the parent's .oms while it judges.
   grep -Fxq -- '--setting-sources' "$home_dir/claude-argv" ||
     fail "a read seat must not inherit the user-scope hooks: $(cat "$home_dir/claude-argv")"
+
+  # A closing remark must not replace the substantive preceding answer.
+  cat > "$project/stream" <<'EOF'
+{"type":"system","subtype":"init"}
+{"type":"user","message":{"content":"USER-CONTENT-NOT-ANSWER"}}
+{"type":"assistant","parent_tool_use_id":"child-tool","message":{"content":[{"type":"text","text":"CHILD-NOT-SEAT"}]}}
+{"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":"THINKING-NOT-ANSWER"},{"type":"tool_use","name":"Bash","input":{"command":"TOOL-NOT-ANSWER"}},{"type":"text","text":"Answer: substantive evidence."}]}}
+{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"The council answer above is my complete deliverable."}]}}
+{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"The council answer above is my complete deliverable.","usage":{"input_tokens":12,"output_tokens":3}}
+EOF
+  cp "$project/stream" "$project/cut-stream"
+  bash -c '. "$1/scripts/lib/peer-common.sh"; ma_claude_envelope_to_text "$2"' _ "$ROOT" "$project/stream"
+  assert_file_contains "$project/stream" 'Answer: substantive evidence.'
+  [ "$(grep -c 'complete deliverable' "$project/stream")" = 1 ] || fail 'terminal result was duplicated'
+  if grep -Eq 'NOT-ANSWER|CHILD-NOT-SEAT|"type"' "$project/stream"; then fail 'non-answer events leaked'; fi
+  sed '/"type":"result"/d' "$project/cut-stream" > "$project/cut"
+  bash -c '. "$1/scripts/lib/peer-common.sh"; ma_claude_envelope_to_text "$2"' _ "$ROOT" "$project/cut"
+  assert_file_contains "$project/cut" 'Answer: substantive evidence.'
+  [ "$(python3 "$ROOT/scripts/lib/answer-quality.py" "$project/cut")" = truncated ] || fail 'unterminated Claude stream passed'
 }
 
 test_codex_jsonl_carries_stop_reason() {
@@ -18694,6 +18730,11 @@ test_agent_thread_truncates_and_bounds_context() {
   fi
   printf '%s' "$out" | grep -Fq 'earlier turn(s) omitted' ||
     fail "context should say how much it dropped: $out"
+  "$ROOT/scripts/thread.sh" --repo "$project" --id big append --role answer --text 'SEAT-ANSWER-NOT-NOTE' >/dev/null
+  "$ROOT/scripts/thread.sh" --repo "$project" --id big append --role note --provider codex --text 'FAILED-SEAT-NOT-COORDINATOR' >/dev/null
+  out="$("$ROOT/scripts/thread.sh" --repo "$project" --id big context --notes-only --turns 2)"
+  printf '%s' "$out" | grep -Fq 'turn number 5' || fail 'note view lost coordinator input'
+  if printf '%s' "$out" | grep -Eq 'SEAT-ANSWER|FAILED-SEAT'; then fail 'note view repeated seat output'; fi
 }
 
 test_agent_call_threads_the_exchange() {

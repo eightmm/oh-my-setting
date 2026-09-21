@@ -417,9 +417,9 @@ TOOLS = [
             "thread": {
                 "type": "string",
                 "description": (
-                    "Continue this conversation: the thread id a finished"
-                    " oms_peer_result reported. Default: the repository's"
-                    " current thread, so follow-ups keep their context."
+                    "Continue this conversation using a returned thread id."
+                    " ask creates an operation-scoped thread when omitted;"
+                    " consult/advise use their current-thread defaults."
                 ),
             },
             "new_thread": {
@@ -429,6 +429,10 @@ TOOLS = [
                     " current one — a new topic, not a follow-up."
                     " consult, or message with an explicit new thread id."
                 ),
+            },
+            "debate_rounds": {
+                "type": "integer", "minimum": 0, "maximum": 3,
+                "description": "ask only: 0-3 additional parallel rebuttal rounds. Default 0 collects independent opening answers. Each round shares one evidence/notes snapshot; completed turns appear in the returned thread.",
             },
             "after": {"type": "string", "description": "ack: exact consumed thread cursor."},
             "consumer": {"type": "string", "description": "ack: self-reported session identifier."},
@@ -982,7 +986,7 @@ def peer_targets(raw: str) -> tuple[list[str], str]:
     return targets, ""
 
 
-def peer_command(kind, script, repo, prompt, prompt_file, targets, thread, new_thread):
+def peer_command(kind, script, repo, prompt, prompt_file, targets, thread, new_thread, debate_rounds=0):
     argv = ["bash", str(ROOT / script), "--repo", str(repo)]
     if thread:
         argv += ["--thread", thread]
@@ -991,6 +995,8 @@ def peer_command(kind, script, repo, prompt, prompt_file, targets, thread, new_t
     if kind == "ask":
         # peer-ask takes the question inline and one comma list of providers.
         argv += ["--prompt", prompt]
+        if debate_rounds:
+            argv += ["--debate", str(debate_rounds)]
         if targets:
             argv += ["--providers", ",".join(targets)]
         return argv, ""
@@ -1026,6 +1032,9 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
     kind, err = text_argument(arguments, "kind", 64)
     if err:
         return err, True
+    debate_rounds = arguments.get("debate_rounds", 0)
+    if type(debate_rounds) is not int or not 0 <= debate_rounds <= 3 or (debate_rounds and kind != "ask"):
+        return "error: debate_rounds must be an integer 0-3; positive values require kind='ask'", True
     if kind in ("message", "ack"):
         return thread_exchange(arguments, kind)
     spec = PEER_KINDS.get(kind)
@@ -1064,12 +1073,12 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
         new_thread = raw_new_thread
     else:
         return "error: new_thread must be a boolean", True
-    # advise and ask take a thread but cannot mint one, and naming a thread
-    # while asking for a fresh one is two different conversations at once.
+    # Ask already creates its own operation-scoped thread when none is named.
+    # new_thread remains the consult-specific choice, not a second ask mode.
     if new_thread and kind != "consult":
         return (
-            "error: new_thread applies to kind='consult'; advise and ask join"
-            " the thread they are given or the current one"
+            "error: new_thread applies to kind='consult'; ask creates its own"
+            " thread when no thread is given"
         ), True
     if new_thread and thread:
         return (
@@ -1082,6 +1091,8 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
         time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
         os.urandom(4).hex(),
     )
+    if kind == "ask" and not thread:
+        thread = operation
     run_dir = repo / RUN_ROOT / operation
     log = run_dir / "run.log"
     status = run_dir / "status"
@@ -1089,7 +1100,7 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
     prompt_file = run_dir / "prompt.txt"
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     argv, err = peer_command(
-        kind, spec["script"], repo, prompt, prompt_file, targets, thread, new_thread
+        kind, spec["script"], repo, prompt, prompt_file, targets, thread, new_thread, debate_rounds
     )
     if err:
         return err, True
@@ -1105,6 +1116,17 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
     if thread:
         meta["thread"] = thread
     try:
+        if kind == "ask":
+            # Make the advertised message endpoint readable before returning;
+            # the detached child's startup must not race the first user note.
+            thread_args = ["bash", str(ROOT / "scripts/thread.sh"), "--repo", str(repo), "--id", thread]
+            if (repo / ".oms" / "threads" / (thread + ".jsonl")).exists():
+                thread_args += ["context"]
+            else:
+                thread_args += ["new", "--live", "--topic", "Council"]
+            prepared = subprocess.run(thread_args, capture_output=True, text=True, timeout=5)
+            if prepared.returncode:
+                return "error: council thread could not be opened", True
         ensure_oms_ignore(repo)
         run_dir.mkdir(parents=True, exist_ok=True)
         prompt_file.write_text(prompt + "\n", encoding="utf-8")
@@ -1120,7 +1142,7 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-    except (OSError, UnicodeError) as exc:
+    except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
         return "error: %s" % exc, True
     try:
         launcher.wait(timeout=30)
@@ -1133,13 +1155,19 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
             "started": True,
             "started_at": started_at,
             "targets": targets,
+            **({"thread": thread, "debate_rounds": debate_rounds,
+                "thread_arguments": {"repo": str(repo), "thread": thread}} if kind == "ask" else {}),
             "artifact_dir": str(repo / ".oms" / "artifacts" / spec["artifacts"]),
             "run_dir": str(run_dir),
             "log": str(log),
             "result_arguments": {
-                "repo": str(repo), "operation": operation, "wait_seconds": 50,
+                "repo": str(repo), "operation": operation, "wait_seconds": 0 if kind == "ask" else 50,
             },
             "next": (
+                "Council replies are published as completed turns. Read oms_peer_result with thread_arguments and reuse its cursor at useful task boundaries, not in a tight poll loop. "
+                "Keep operation reads immediate while exchanging messages: a long wait blocks this serial connection. "
+                "Post a note via kind=message for the next configured round; all seats receive the same round-start snapshot. Notes never start a round, interrupt a call, or grant new authority. Reads never start more model calls."
+                if kind == "ask" else
                 "The peer is running detached. Do authorized independent work"
                 " or call oms_peer_result with result_arguments. Reduce"
                 " wait_seconds if needed to stay below the host timeout."

@@ -302,6 +302,80 @@ dropped_names=()
 fams="$(ma_answered_families)"
 [ "$fams" = 1 ] || fail "a never-answered seat must not count (got $fams)"
 
+# Parallel seats publish immediately, but all see the same round-start notes.
+# No provider CLI is invoked; the barrier rejects accidentally serial dispatch.
+(
+  MA_KIND=ask DEBATE=2 DRY_RUN=1
+  THREAD_ID=council-test
+  bash "$ROOT/scripts/thread.sh" --repo "$REPO" new --id "$THREAD_ID" --live --topic council >/dev/null
+  bash "$ROOT/scripts/thread.sh" --repo "$REPO" --id "$THREAD_ID" append --role note \
+    --text 'ROUND-START-NOTE compare evidence' >/dev/null
+  provider_names=(codex 'claude:model=opus' 'codex:model=sol' 'codex:model=astra' 'codex:model=terra')
+  alive=(1 1 1 1 1)
+  last_arts=("$self" "$other" "$self" "$other" "$self")
+  dropped=0 dropped_names=()
+  unset OMS_MODEL_SELECTED
+  mkdir "$TMP/parallel-seats"
+  run_provider() {
+    local tries=0
+    OMS_MODEL_SELECTED='seat-route-must-stay-local'
+    assert_contains "$2" 'ROUND-START-NOTE'
+    case "$2" in
+      *prompt-r2-*)
+        touch "$TMP/parallel-seats/$(ma_target_label "$1" "$(ma_target_model "$1")")"
+        until [ "$(find "$TMP/parallel-seats" -type f | wc -l)" -eq 5 ]; do
+          tries=$((tries + 1))
+          [ "$tries" -lt 50 ] || return 9
+          sleep 0.1
+        done
+        assert_lacks "$2" 'COORDINATOR-CORRECTION'
+        assert_lacks "$2" 'PARALLEL-codex revised body'
+        if [ "$1" = codex ]; then
+          bash "$ROOT/scripts/thread.sh" --repo "$REPO" --id "$THREAD_ID" append --role note \
+            --text 'COORDINATOR-CORRECTION check the filter first' >/dev/null
+        fi
+        ;;
+      *prompt-r3-*)
+        assert_contains "$2" 'PARALLEL-codex revised body'
+        assert_contains "$2" 'COORDINATOR-CORRECTION'
+        ;;
+    esac
+    write_echoing_artifact "$3" "PARALLEL-$(printf '%s' "$1" | tr ':=' '--')" 'revised using latest evidence'
+  }
+  ma_run_debate_rounds
+  [ -z "${OMS_MODEL_SELECTED:-}" ] || fail 'speaker routing leaked into owner/synthesis'
+  [ "$dropped" = 0 ] || fail 'parallel council dropped a seat'
+  [ "$(grep -c '"role": "answer"' "$REPO/.oms/threads/$THREAD_ID.jsonl")" = 10 ] || fail 'council must publish every reply once'
+
+  previous="${last_arts[1]}"
+  DEBATE=1 timestamp=council-failure
+  run_provider() {
+    [ "$1" != 'claude:model=opus' ] || return 7
+    write_echoing_artifact "$3" RETAIN none
+  }
+  ma_run_debate_rounds
+  [ "$dropped" = 1 ] && [ "${alive[1]}" = 0 ] || fail 'council failure was counted as success'
+  [ "${last_arts[1]}" = "$previous" ] || fail 'council failure replaced the last good answer'
+  assert_contains "$REPO/.oms/threads/$THREAD_ID.jsonl" 'no answer (exit 7)'
+
+  # Completion-order publication cannot wait for the first (slow) seat.
+  run_provider() {
+    if [ "$1" = slow ]; then
+      local tries=0
+      until grep -q 'FAST-PUBLISHED' "$REPO/.oms/threads/$THREAD_ID.jsonl"; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 50 ] || return 9
+        sleep 0.1
+      done
+    fi
+    write_echoing_artifact "$3" FAST-PUBLISHED none
+  }
+  ma_council_call slow "$self" "$ARTIFACT_DIR/council-slow.md" &
+  slow_pid=$!
+  ma_council_call fast "$self" "$ARTIFACT_DIR/council-fast.md"
+  wait "$slow_pid" || fail 'a slow seat blocked publication of the fast seat'
+)
+
 # All three seats share one round budget; oversized questions launch nobody.
 DEBATE=1
 provider_names=(codex claude antigravity)

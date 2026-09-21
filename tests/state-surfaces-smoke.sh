@@ -415,6 +415,7 @@ assert start["properties"]["new_thread"]["type"] == "boolean", start
 result = tools["oms_peer_result"]["inputSchema"]
 assert result["required"] == [], result  # thread and operation are alternatives
 assert {"operation", "thread", "after"} <= set(result["properties"]), result
+assert start["properties"]["debate_rounds"]["maximum"] == 3, start
 assert result["properties"]["wait_seconds"]["maximum"] == 50, result
 # The description has to teach the pattern, or a model blocks on a 25-minute run.
 assert "oms_peer_result" in tools["oms_peer_start"]["description"], tools
@@ -709,6 +710,42 @@ with patch.object(m, "run_status", return_value=("done", 0)):
 with patch.object(m, "run_status", return_value=("done", 1)):
     failed, bad = m.peer_result(dict(args, after=full["cursor"]))
     assert bad and json.loads(failed)["exit"] == 1 and not json.loads(failed)["unchanged"], failed
+
+# Councils use the same detached ask and thread delivery, never another tool or
+# a blocking wait on the shared message connection. No real model is started.
+with patch.object(m.subprocess, "Popen") as launcher:
+    launcher.return_value.wait.return_value = 0
+    # Thread creation is covered by the CLI fixture; subprocess.run also uses
+    # Popen, so isolate it from the detached-launcher assertion here.
+    with patch.object(m.subprocess, "run", return_value=m.subprocess.CompletedProcess([], 0, "", "")):
+        text, bad = m.start_peer({"repo": args["repo"], "kind": "ask", "prompt": "Compare evidence", "debate_rounds": 1})
+    council = json.loads(text)
+    assert not bad and council["debate_rounds"] == 1, text
+    assert council["thread"] == council["operation"], council
+    assert council["result_arguments"]["wait_seconds"] == 0, council
+    assert council["thread_arguments"]["thread"] == council["thread"], council
+    argv = launcher.call_args.args[0]
+    assert argv[argv.index("--debate") + 1] == "1", argv
+    with patch.object(m.subprocess, "run", return_value=m.subprocess.CompletedProcess([], 0, "", "")):
+        text, bad = m.start_peer({"repo": args["repo"], "kind": "ask", "prompt": "Independent views"})
+    assert not bad and json.loads(text)["debate_rounds"] == 0, text
+    assert json.loads(text)["thread"], text
+    assert "--debate" not in launcher.call_args.args[0], launcher.call_args
+    for value in (True, -1, 4, "1", None):
+        assert m.start_peer({"repo": args["repo"], "kind": "ask", "prompt": "x", "debate_rounds": value})[1]
+    assert m.start_peer({"repo": args["repo"], "kind": "consult", "prompt": "x", "debate_rounds": 1})[1]
+
+# Exercise the real thread preparation, mocking only the detached model launch.
+# A caller can post immediately, before the provider child has started at all.
+native_popen = m.subprocess.Popen
+with patch.object(m.subprocess, "Popen", side_effect=lambda argv, **kwargs:
+                  launcher.return_value if argv[:2] == ["bash", "-c"] else native_popen(argv, **kwargs)):
+    text, bad = m.start_peer({"repo": args["repo"], "kind": "ask", "prompt": "Ready thread"})
+    assert not bad, text
+    ready = json.loads(text)
+    text, bad = m.start_peer({"repo": args["repo"], "kind": "message", "thread": ready["thread"],
+                              "prompt": "Check the caller before changing the interface."})
+    assert not bad and json.loads(text)["status"] == "recorded", text
 PY
 }
 

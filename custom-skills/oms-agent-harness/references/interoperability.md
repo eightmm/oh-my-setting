@@ -14,6 +14,13 @@ See state-memory.md for
 delivery versus acknowledgment and hook boundaries. Core discovery stays at
 12 tools; no subscription or push capability is advertised.
 
+`oms_peer_start(kind=ask, debate_rounds=0..3)` returns a ready thread and uses
+parallel calls (default: opening answers only). `thread_arguments` reads turns
+as they complete. `kind=message` notes enter the next configured round's shared
+snapshot; they never start a round or interrupt a model. Councils suggest zero
+operation wait to keep the connection available. Reuse cursors at useful task
+boundaries; no automatic client wakeup is implied.
+
 ## MCP protocol revisions
 
 The stdio server is dual-era. A legacy client opens with `initialize` and is

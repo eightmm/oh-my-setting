@@ -65,8 +65,9 @@ Options:
   --no-memory          Disable --memory (compatibility).
   --no-task            Disable --task (compatibility).
   --no-ml-context      Disable --ml-context (compatibility).
-  --thread ID          Record every answer in a cross-agent thread and give the
-                       providers the conversation so far (thread.sh).
+  --thread ID          Publish each completed answer to a shared thread (create
+                       if absent). Later rounds share a bounded notes snapshot.
+                       Providers receive bounded prior thread context initially.
   --debate N           Add N debate rounds (1-3). Each round, every provider
                        sees the others' previous answers, critiques them, and
                        revises its own. Repo context is in round-1 prompts;
@@ -361,6 +362,13 @@ else
   : > "$diff_file"
 fi
 
+if [ -n "$THREAD_ID" ] && [ "$EXPORT_ONLY" -eq 0 ]; then
+  if [ ! -f "$REPO/.oms/threads/$THREAD_ID.jsonl" ]; then
+    bash "$(ma_scripts_dir)/thread.sh" --repo "$REPO" --id "$THREAD_ID" new --live --topic 'Council' >/dev/null || fail 'cannot open council thread'
+  fi
+  bash "$(ma_scripts_dir)/thread.sh" --repo "$REPO" --id "$THREAD_ID" context >/dev/null || fail 'council thread is not open'
+  echo "thread: $THREAD_ID"
+fi
 write_prompt "$prompt_file" "$REPO" "$PROMPT" "$status_file" "$diff_file"
 if [ -n "$THREAD_ID" ]; then
   thread_prompt="$(agent_memory_mktemp)" || thread_prompt=""
@@ -368,6 +376,10 @@ if [ -n "$THREAD_ID" ]; then
     { ma_write_thread_context "$REPO" "$THREAD_ID"; cat "$prompt_file"; } > "$thread_prompt"
     mv "$thread_prompt" "$prompt_file"
   fi
+fi
+if [ -n "$THREAD_ID" ] && [ "$EXPORT_ONLY" -eq 0 ]; then
+  printf '%s\n' "$PROMPT" > "$status_file"
+  ma_thread_append "$REPO" "$THREAD_ID" question "$status_file"
 fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -392,37 +404,6 @@ fi
 synth_file="$ARTIFACT_DIR/_synthesis-$slug-$timestamp.md"
 ma_write_synthesis "$synth_file"
 
-# One question, one turn per provider: the council becomes part of the same
-# conversation instead of a separate pile of artifacts.
-if [ -n "$THREAD_ID" ] && [ "$EXPORT_ONLY" -eq 0 ]; then
-  ask_turn="$(agent_memory_mktemp)" || ask_turn=""
-  if [ -n "$ask_turn" ]; then
-    printf '%s\n' "$PROMPT" > "$ask_turn"
-    ma_thread_append "$REPO" "$THREAD_ID" question "$ask_turn"
-    for ask_i in "${!provider_names[@]}"; do
-      if [ "${alive[ask_i]}" = 1 ]; then
-        extract_output "${last_arts[ask_i]}" | ma_sanitize_quoted_output > "$ask_turn" 2>/dev/null || true
-        ma_thread_append "$REPO" "$THREAD_ID" answer "$ask_turn" \
-          "${provider_names[ask_i]}" "" "${last_arts[ask_i]}"
-        continue
-      fi
-      # A seat that said nothing is named in one line rather than dropped from
-      # the thread: skipping it left the conversation of record missing a seat
-      # that the artifacts and the summary both know about.
-      # Only these two populations qualify. A seat dropped during debate also
-      # has alive=0, but it did answer round 1 and that answer is in the
-      # synthesis, so calling it a non-answer here would be the opposite lie.
-      if [ -n "${seat_quality[ask_i]:-}" ]; then
-        ma_thread_append_nonanswer "$REPO" "$THREAD_ID" "${provider_names[ask_i]}" \
-          "${seat_quality[ask_i]}" "${artifacts[ask_i]}" "${seat_quality[ask_i]}"
-      elif [ "${seat_exit[ask_i]:-0}" != 0 ]; then
-        ma_thread_append_nonanswer "$REPO" "$THREAD_ID" "${provider_names[ask_i]}" \
-          "exit ${seat_exit[ask_i]}" "${artifacts[ask_i]}"
-      fi
-    done
-    rm -f "$ask_turn"
-  fi
-fi
 ma_append_artifact_index "$REPO" ask-synthesis local 0 "$synth_file" || true
 
 if [ "$EXPORT_ONLY" -eq 1 ]; then
