@@ -17423,6 +17423,12 @@ EOF
   cat > "$bin/codex" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CODEX_LOG"
+if [ "$1 $2" = "features list" ]; then
+  # Like the real CLI, loading config.toml is what can fail here.
+  [ "${OMS_TEST_CODEX_REJECTS_USAGE:-0}" != 1 ] ||
+    ! grep -q '^min_wait_timeout_ms' "$CODEX_HOME/config.toml" || exit 1
+  exit 0
+fi
 if [ "$1 $2 $3" = "plugin marketplace list" ]; then
   [ "${OMS_TEST_CODEX_LOOKUP_FAIL:-}" != marketplace ] || exit 24
   if [ -f "$CODEX_HOME/.test-marketplace-installed" ]; then
@@ -17461,10 +17467,41 @@ exit 0
 EOF
   chmod +x "$bin/codex"
 
+  # Wait floors are cross-validated, and a config Codex rejects stops every
+  # session: a codex that cannot load them must get its config back, and an
+  # optimization it refuses must not fail the plugin install.
+  printf '[tui]\nanimations = true\n\n[features.multi_agent_v2]\nenabled = true\n' \
+    > "$codex_home/config.toml"
+  out="$(CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    OMS_TEST_CODEX_REJECTS_USAGE=1 PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/install-codex-plugin.sh" 2>&1)" ||
+    fail "rejected usage keys must not fail the Codex plugin install: $out"
+  printf '%s' "$out" | grep -Fq 'codex-usage: rolled back' ||
+    fail "installer should roll back usage keys this codex rejects: $out"
+  if grep -Eq 'min_wait_timeout_ms|background_terminal_max_timeout' "$codex_home/config.toml"; then
+    fail "rolled-back usage keys are still in the Codex config"
+  fi
+  assert_file_contains "$codex_home/config.toml" 'enabled = true'
+  # The same config on a codex that accepts it keeps the floors.
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/install-codex-plugin.sh" >/dev/null
+  assert_file_contains "$codex_home/config.toml" 'min_wait_timeout_ms = 120000'
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null
+  printf '[tui]\nanimations = true\n' > "$codex_home/config.toml"
+  rm -f "$codex_home/config.toml.oms-bak"
+  : > "$log"
+
   CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
     PATH="$bin:/usr/bin:/bin" \
     "$ROOT/scripts/install-codex-plugin.sh" >/dev/null
   assert_file_contains "$log" "plugin marketplace list"
+  # Writing only the root ceiling is an ordinary install: no provider probe.
+  if grep -Fq 'features list' "$log"; then
+    fail "an ordinary Codex install must not pay a config-load probe"
+  fi
   assert_file_contains "$log" "plugin marketplace add $ROOT"
   assert_file_contains "$log" "plugin add oh-my-setting@oh-my-setting-local"
   assert_file_contains "$codex_home/config.toml" '# >>> oh-my-setting managed Codex HUD >>>'
@@ -17480,6 +17517,9 @@ with open(sys.argv[1], "rb") as fh:
     row = tomllib.load(fh)
 assert row["tui"]["animations"] is True
 assert row["tui"]["status_line"][-1] == "git-branch"
+# A root key written after [tui] would become tui.background_terminal_...
+assert row["background_terminal_max_timeout"] == 900000
+assert "background_terminal_max_timeout" not in row["tui"]
 PY
 
   : > "$log"
@@ -17490,6 +17530,9 @@ PY
   assert_file_contains "$log" "plugin marketplace remove oh-my-setting-local"
   if grep -Fq 'status_line' "$codex_home/config.toml"; then
     fail "Codex plugin removal left the managed HUD"
+  fi
+  if grep -Fq 'background_terminal_max_timeout' "$codex_home/config.toml"; then
+    fail "Codex plugin removal left the managed usage key"
   fi
   assert_file_contains "$codex_home/config.toml" 'animations = true'
 
@@ -17666,6 +17709,7 @@ EOF
   assert_file_contains "$log" "plugin add oh-my-setting@oh-my-setting-local"
   assert_file_contains "$d/out" "ok: codex plugin oh-my-setting (cache parity)"
   assert_file_contains "$d/out" "ok: codex HUD configured (managed)"
+  assert_file_contains "$d/out" "ok: codex usage keys (terminal-ceiling=managed v2-waits=disabled)"
   assert_not_exists "$cache/stale.txt"
 }
 

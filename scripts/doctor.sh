@@ -1042,6 +1042,7 @@ check_codex_plugin() {
   local actual_hash
   local hud_config="${OMS_CODEX_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
   local hud_state
+  local usage_state
 
   if [ "$mode" = "0" ]; then
     echo "note: codex plugin check disabled (OH_MY_SETTING_CODEX_PLUGIN=0)"
@@ -1105,6 +1106,16 @@ PY
     echo "fail: codex HUD is not configured: $hud_state"
     echo "hint: run $INSTALL_ROOT/scripts/install-codex-plugin.sh"
     FAILED=1
+  fi
+
+  # An optimization, so its absence is a note: the keys are written to this
+  # file, and a project config, profile or -c flag can still outrank them.
+  if usage_state="$(python3 "$INSTALL_ROOT/scripts/lib/codex-usage-config.py" \
+    check "$hud_config" 2>&1)"; then
+    echo "ok: codex usage keys (${usage_state#codex-usage: })"
+  else
+    echo "note: codex usage keys not managed (${usage_state#codex-usage: })"
+    echo "hint: run $INSTALL_ROOT/scripts/install-codex-plugin.sh"
   fi
 }
 

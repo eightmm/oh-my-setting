@@ -14,6 +14,7 @@ DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 CODEX_CONFIG="${OMS_CODEX_CONFIG:-$CODEX_HOME_DIR/config.toml}"
 HUD_CONFIG_HELPER="$ROOT/scripts/lib/codex-hud-config.py"
+USAGE_CONFIG_HELPER="$ROOT/scripts/lib/codex-usage-config.py"
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 # shellcheck source=scripts/lib/file-lock.sh
@@ -33,7 +34,10 @@ Register oh-my-setting's local Codex plugin marketplace and install the
 oh-my-setting plugin. The plugin adds UserPromptSubmit skill hints, a Stop
 turn guard, pre-compaction handoff, and content-free lifecycle telemetry. A
 compact native Codex status line is added only when the user has not configured
-one. --remove removes only this plugin, marketplace entry, and managed HUD.
+one. Usage-efficiency keys (a longer background-terminal wait ceiling, and
+multi_agent_v2 wait floors only where that backend is already enabled) are added
+the same way and never override a user value. --remove removes only this
+plugin, marketplace entry, managed HUD, and managed usage keys.
 
 Environment:
   OH_MY_SETTING_DRY_RUN=1        Preview commands without changing Codex config.
@@ -60,6 +64,7 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 [ -f "$MARKETPLACE_FILE" ] || fail "missing marketplace: $MARKETPLACE_FILE"
 [ -d "$MARKETPLACE_ROOT" ] || fail "missing marketplace root: $MARKETPLACE_ROOT"
 [ -f "$HUD_CONFIG_HELPER" ] || fail "missing Codex HUD helper: $HUD_CONFIG_HELPER"
+[ -f "$USAGE_CONFIG_HELPER" ] || fail "missing Codex usage helper: $USAGE_CONFIG_HELPER"
 
 MARKETPLACE_NAME="$(python3 - "$MARKETPLACE_FILE" <<'PY'
 import json, sys
@@ -108,6 +113,43 @@ configure_hud() {
     python3 "$HUD_CONFIG_HELPER" "$action" "$CODEX_CONFIG" --dry-run
   else
     python3 "$HUD_CONFIG_HELPER" "$action" "$CODEX_CONFIG"
+  fi
+}
+
+codex_loads_config() {
+  # `features list` loads and validates config.toml without a model call. It
+  # reads CODEX_HOME, so it says nothing about an OMS_CODEX_CONFIG override.
+  [ "$CODEX_CONFIG" = "$CODEX_HOME_DIR/config.toml" ] || return 1
+  provider_cmd codex features list >/dev/null 2>&1
+}
+
+configure_usage() {
+  local action="$1"
+  local plan
+  local loaded_before=0
+  if [ "$DRY_RUN" = "1" ]; then
+    python3 "$USAGE_CONFIG_HELPER" "$action" "$CODEX_CONFIG" --dry-run
+    return
+  fi
+  if [ "$action" != "install" ]; then
+    python3 "$USAGE_CONFIG_HELPER" "$action" "$CODEX_CONFIG"
+    return
+  fi
+  plan="$(python3 "$USAGE_CONFIG_HELPER" install "$CODEX_CONFIG" --dry-run)" || return
+  case "$plan" in
+    # Only the wait floors are cross-validated (min <= default <= max), and a
+    # config Codex rejects stops every session. There the real binary gets the
+    # last word: keys it loaded without but not with are taken back out.
+    *"multi_agent_v2 waits would install"*) ! codex_loads_config || loaded_before=1 ;;
+    # The root ceiling cannot be rejected (Codex ignores unknown root keys), so
+    # an ordinary install still pays no extra provider probe.
+    *"would install"*) ;;
+    *) printf '%s\n' "$plan"; return 0 ;;
+  esac
+  python3 "$USAGE_CONFIG_HELPER" install "$CODEX_CONFIG" || return
+  if [ "$loaded_before" = "1" ] && ! codex_loads_config; then
+    python3 "$USAGE_CONFIG_HELPER" remove "$CODEX_CONFIG" >/dev/null || return
+    echo "codex-usage: rolled back; this codex rejected the managed keys"
   fi
 }
 
@@ -272,6 +314,10 @@ if [ "$REMOVE" = "1" ]; then
     echo "error: could not remove the managed Codex HUD" >&2
     remove_failed=1
   fi
+  if ! configure_usage remove; then
+    echo "error: could not remove the managed Codex usage keys" >&2
+    remove_failed=1
+  fi
   [ "$remove_failed" -eq 0 ] || exit 1
   echo "codex-plugin: removed $PLUGIN_NAME@$MARKETPLACE_NAME"
   exit 0
@@ -311,6 +357,10 @@ else
 fi
 
 configure_hud install
+# An optimization, not a dependency: a config this helper will not edit must
+# not fail the plugin install that already succeeded above.
+configure_usage install ||
+  echo "warning: left Codex usage keys unmanaged; see the error above" >&2
 
 # Native plugin hooks and user hooks are both loaded by stable-hook clients.
 # Only migrate a bridge when the replacement is installed, enabled and current.
