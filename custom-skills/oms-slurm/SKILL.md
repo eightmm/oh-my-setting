@@ -37,5 +37,11 @@ Static cluster facts live in the private reference, not in repeated probes.
 - `oms job-digest <log>` distills a job log to agent-sized context instead of
   pasting raw logs.
 - `oms run-reconcile` reconciles finished Slurm jobs against the run ledger.
-- Waiting on a job? Poll `squeue -j <id>` on a sensible interval, then digest
-  the log and report; do not tail interactively.
+- Waiting on a job? Make one bounded call, not repeated `squeue` turns:
+  `oms job-digest <id> [log] --wait --wait-timeout 540 --max-bytes 16384`
+  polls inside the shell. Keep the budget under the host's tool-call timeout,
+  or run it as a host background task that notifies on exit. Exit 124 means
+  still queued: the job is untouched, so do other authorized work or re-run
+  the same call; never resubmit. Do not tail interactively.
+- Leaving the queue is not success. Confirm sacct State/ExitCode and the
+  required outputs before downstream work or a success claim.

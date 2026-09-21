@@ -1067,6 +1067,118 @@ EOF
   assert_file_contains "$dir/sleep.log" "1"
 }
 
+test_job_digest_wait_budget_and_byte_cap() {
+  local dir="$TMP/job-digest-budget"
+  local bin="$dir/bin"
+  local out rc size
+  mkdir -p "$bin"
+  printf 'step 1 ok\n' > "$dir/run.log"
+
+  if "$ROOT/scripts/job-digest.sh" --wait-timeout 5 12345 >/dev/null 2>"$dir/err"; then
+    fail "--wait-timeout without --wait should fail"
+  fi
+  assert_file_contains "$dir/err" 'requires --wait'
+  if "$ROOT/scripts/job-digest.sh" --max-bytes 100 "$dir/run.log" >/dev/null 2>"$dir/err"; then
+    fail "--max-bytes below the marker reserve should fail"
+  fi
+  assert_file_contains "$dir/err" 'at least 512'
+
+  # Mock clock: every `date +%s` advances 40s, so a 100s budget is spent after
+  # a few polls with no real waiting. Other date calls reach the real binary.
+  printf '0\n' > "$dir/clock"
+  cat > "$bin/date" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "+%s" ]; then
+  n="\$(cat "$dir/clock")"
+  printf '%s\n' "\$((n + 40))" > "$dir/clock"
+  printf '%s\n' "\$n"
+  exit 0
+fi
+PATH="$PATH" exec date "\$@"
+EOF
+  # The controller stays down with one unchanging error and the job never
+  # leaves the queue: the observer must give up, not the job.
+  cat > "$bin/squeue" <<EOF
+#!/usr/bin/env bash
+printf 'q\n' >> "$dir/queries"
+echo "slurm_load_jobs error: Unable to contact slurm controller" >&2
+exit 1
+EOF
+  cat > "$bin/sleep" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/sleep.log"
+EOF
+  # Accounting storage down: a failing sacct must not abort the digest.
+  cat > "$bin/sacct" <<'EOF'
+#!/usr/bin/env bash
+echo "sacct: error: Problem talking to the database" >&2
+exit 1
+EOF
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\n' "$dir/scancel.log" > "$bin/scancel"
+  cp "$bin/scancel" "$bin/sbatch"
+  chmod +x "$bin/date" "$bin/squeue" "$bin/sleep" "$bin/sacct" "$bin/scancel" "$bin/sbatch"
+
+  set +e
+  out="$(OMS_JOB_DIGEST_POLL=60 PATH="$bin:$PATH" "$ROOT/scripts/job-digest.sh" \
+    --wait --wait-timeout 100 12345 "$dir/run.log" 2>"$dir/werr")"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "spent wait budget should exit 124, got $rc"
+  printf '%s' "$out" | grep -Fq 'wait: pending' || fail "pending digest should say the job is still queued"
+  printf '%s' "$out" | grep -Fq 'outcome unknown, not verified' ||
+    fail "failed accounting must read as unknown, not success"
+  printf '%s' "$out" | grep -Fq '## Tail' || fail "failed sacct must not abort the log sections"
+  assert_file_contains "$dir/werr" 'still queued and untouched'
+  [ ! -e "$dir/scancel.log" ] || fail "observer timeout must never cancel or resubmit the job"
+  # Same failure kind every poll: reported once, then only the total.
+  [ "$(grep -c 'transiently' "$dir/werr")" -eq 1 ] || fail "repeated identical query failure should be reported once"
+  # 2 where GNU timeout also bounds the query (it reads the clock), else 3.
+  grep -Eq 'failed [23] times while waiting' "$dir/werr" || fail "repeated query failures should be totalled once"
+  [ "$(wc -l < "$dir/queries" | tr -d ' ')" -ge 2 ] || fail "budgeted wait should re-query after sleeping"
+  # The sleep is clipped to the remaining budget instead of overshooting it.
+  while read -r slept; do
+    [ "$slept" -le 60 ] || fail "sleep $slept exceeded the poll interval"
+  done < "$dir/sleep.log"
+  [ "$(tail -n 1 "$dir/sleep.log")" -lt 60 ] || fail "last sleep should be clipped to the remaining budget"
+
+  # A scheduler query that never returns must not outlive the budget. Only
+  # GNU timeout can preempt it; BSD/macOS bound the sleeps alone (documented).
+  if command -v timeout >/dev/null 2>&1 && timeout --version >/dev/null 2>&1; then
+    rm -f "$bin/date"
+    printf '#!/usr/bin/env bash\nexec "%s" 30\n' "$(command -pv sleep)" > "$bin/squeue"
+    SECONDS=0
+    set +e
+    PATH="$bin:$PATH" "$ROOT/scripts/job-digest.sh" --wait --wait-timeout 1 12345 >/dev/null 2>"$dir/herr"
+    rc=$?
+    set -e
+    [ "$rc" -eq 124 ] || fail "hung scheduler query should end as pending, got $rc"
+    [ "$SECONDS" -lt 15 ] || fail "hung scheduler query outlived the wait budget (${SECONDS}s)"
+    assert_file_contains "$dir/herr" 'rc=124'
+  fi
+
+  # One multi-megabyte UTF-8 line must neither spend the budget nor be cut
+  # mid-character; the cap is on whole lines and says what it dropped.
+  {
+    printf 'ERROR: short cause line\n'
+    awk 'BEGIN { for (i = 0; i < 400000; i++) printf "가나다"; printf "\n" }'
+    printf '마지막 줄 ok\n'
+  } > "$dir/big.log"
+  out="$("$ROOT/scripts/job-digest.sh" --max-bytes 2048 "$dir/big.log")" ||
+    fail "byte-capped digest should succeed"
+  size="$(printf '%s\n' "$out" | wc -c | tr -d ' ')"
+  [ "$size" -le 2048 ] || fail "digest exceeded --max-bytes (got $size)"
+  printf '%s' "$out" | grep -Fq 'omitted by --max-bytes 2048' || fail "byte cap should mark the omission"
+  printf '%s' "$out" | grep -Fq 'ERROR: short cause line' || fail "byte cap should keep the short cause line"
+  printf '%s' "$out" | grep -Fq '마지막 줄 ok' || fail "byte cap should keep short lines after the long one"
+  if command -v iconv >/dev/null 2>&1; then
+    printf '%s\n' "$out" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 ||
+      fail "byte-capped digest must stay valid UTF-8"
+  fi
+  # Without the cap the same digest is unchanged and far over budget.
+  size="$("$ROOT/scripts/job-digest.sh" "$dir/big.log" | wc -c | tr -d ' ')"
+  [ "$size" -gt 1000000 ] || fail "uncapped digest should keep the long line"
+}
+
 
 write_fake_tsp() {
   local bin="$1"
