@@ -947,6 +947,12 @@ test_review_verdicts_subcommand() {
   printf '%s' "$out" | grep -Fq 'claude: no-verdict (incomplete answer: provider=claude reason=max_tokens' ||
     fail "truncated seat must be named with its stop reason: $out"
 
+  mkdir -p "$dir/agy-timeout"
+  printf '# antigravity review\n\n## Output\n\nGATE: pass\n[agy] print timeout after 10m0s with turn in progress; returning partial output\n\n## Exit\n\n0\n' \
+    > "$dir/agy-timeout/antigravity-x-$run.md"
+  out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/agy-timeout")" && rc=0 || rc=$?
+  [ "$rc" = 2 ] || fail "a legacy print-timeout artifact must not pass review: $out"
+
   # A marker quoted in the prompt (a replayed thread turn, a diff's context
   # lines) is not the transport's verdict: only the Output region counts.
   mkdir -p "$dir/quoted"
@@ -1096,8 +1102,7 @@ if [ "\${1:-}" = "+%s" ]; then
 fi
 PATH="$PATH" exec date "\$@"
 EOF
-  # The controller stays down with one unchanging error and the job never
-  # leaves the queue: the observer must give up, not the job.
+  # The controller stays down: queue state is unknown, not proof of a queued job.
   cat > "$bin/squeue" <<EOF
 #!/usr/bin/env bash
 printf 'q\n' >> "$dir/queries"
@@ -1124,11 +1129,14 @@ EOF
   rc=$?
   set -e
   [ "$rc" -eq 124 ] || fail "spent wait budget should exit 124, got $rc"
-  printf '%s' "$out" | grep -Fq 'wait: pending' || fail "pending digest should say the job is still queued"
+  printf '%s' "$out" | grep -Fq 'wait: pending' || fail "pending digest should report an incomplete observation"
   printf '%s' "$out" | grep -Fq 'outcome unknown, not verified' ||
     fail "failed accounting must read as unknown, not success"
   printf '%s' "$out" | grep -Fq '## Tail' || fail "failed sacct must not abort the log sections"
-  assert_file_contains "$dir/werr" 'still queued and untouched'
+  assert_file_contains "$dir/werr" 'queue state may be unknown'
+  if printf '%s' "$out" | grep -Fq 'still queued'; then
+    fail "failed queue queries cannot prove that the job is still queued"
+  fi
   [ ! -e "$dir/scancel.log" ] || fail "observer timeout must never cancel or resubmit the job"
   # Same failure kind every poll: reported once, then only the total.
   [ "$(grep -c 'transiently' "$dir/werr")" -eq 1 ] || fail "repeated identical query failure should be reported once"
@@ -1154,6 +1162,17 @@ EOF
     [ "$rc" -eq 124 ] || fail "hung scheduler query should end as pending, got $rc"
     [ "$SECONDS" -lt 15 ] || fail "hung scheduler query outlived the wait budget (${SECONDS}s)"
     assert_file_contains "$dir/herr" 'rc=124'
+
+    # The queue can finish promptly while accounting hangs; the same budget
+    # must cover both reads, including a scheduler that ignores TERM.
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$bin/squeue"
+    printf '#!/usr/bin/env bash\ntrap "" TERM\nexec "%s" 30\n' "$(command -pv sleep)" > "$bin/sacct"
+    SECONDS=0
+    PATH="$bin:$PATH" "$ROOT/scripts/job-digest.sh" --wait --wait-timeout 1 12345 "$dir/run.log" > "$dir/acct-out" 2>"$dir/acct-err" ||
+      fail "unknown accounting should still produce a digest"
+    [ "$SECONDS" -lt 10 ] || fail "accounting outlived the bounded observation (${SECONDS}s)"
+    assert_file_contains "$dir/acct-out" 'outcome unknown, not verified'
+    assert_file_contains "$dir/acct-out" '## Tail'
   fi
 
   # One multi-megabyte UTF-8 line must neither spend the budget nor be cut
@@ -8282,6 +8301,16 @@ test_artifact_index_records_call() {
 
   out="$($ROOT/scripts/artifact-index.sh --repo "$project" latest)"
   printf '%s' "$out" | grep -Fq 'call  codex  exit=0' || fail "artifact-index latest missing call row"
+  "$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry --json > "$project/telemetry.json"
+  python3 - "$project" <<'PY' || fail "primary prompt byte measurement missing or inconsistent"
+import json, pathlib, sys
+repo = pathlib.Path(sys.argv[1])
+row = json.loads((repo / '.oms/artifacts/index.jsonl').read_text().splitlines()[-1])
+assert type(row['prompt_bytes']) is int and row['prompt_bytes'] > len('Assess artifact indexing'), row
+metric = json.loads((repo / 'telemetry.json').read_text())['usage']['prompt_bytes']
+assert metric['reports'] == 1 and metric['total'] == row['prompt_bytes'], metric
+assert 'not tokens' in metric['basis'] and 'repair' in metric['basis'], metric
+PY
 }
 
 test_artifact_index_telemetry_is_scoped_and_read_only() {
@@ -8858,6 +8887,15 @@ test_agent_call_context_is_opt_in() {
   local artifact_dir="$project/artifacts"
 
   mkdir -p "$project" "$home_dir"
+  # Worker prompts must not enumerate models or suggest another delegation.
+  (
+    . "$ROOT/scripts/lib/peer-common.sh"
+    oms_provider_default_discovered_names() { printf 'probed\n' > "$project/model-probe"; printf 'codex\n'; }
+    oms_capability_routable_models() { printf 'irrelevant-model\n'; }
+    ma_write_harness_context "$project" 0 0 0 'Assess this plan'
+  ) > "$project/context"
+  assert_not_exists "$project/model-probe"
+  assert_file_contains "$project/context" 'verification and uncertainty'
   HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
     --repo "$project" append --agent codex --text "Prefer narrow verification commands." >/dev/null
 
@@ -9754,6 +9792,10 @@ test_link_and_unlink_with_home_override() {
   assert_symlink_to "$home_dir/.codex/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
   assert_symlink_to "$home_dir/.claude/CLAUDE.md" "$ROOT/rules/global-AGENTS.md"
   assert_symlink_to "$home_dir/.gemini/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
+  # All providers receive the same current waiting policy, not a stale copy.
+  cmp -s "$home_dir/.codex/AGENTS.md" "$ROOT/rules/global-AGENTS.md" || fail "Codex global policy drift"
+  cmp -s "$home_dir/.claude/CLAUDE.md" "$ROOT/rules/global-AGENTS.md" || fail "Claude global policy drift"
+  cmp -s "$home_dir/.gemini/AGENTS.md" "$ROOT/rules/global-AGENTS.md" || fail "Antigravity global policy drift"
   assert_symlink_to "$home_dir/.codex/skills/oms-agent-harness" "$ROOT/custom-skills/oms-agent-harness"
   assert_symlink_to "$home_dir/.claude/skills/oms-agent-harness" "$ROOT/custom-skills/oms-agent-harness"
   assert_symlink_to "$home_dir/.gemini/antigravity/skills/oms-agent-harness" "$ROOT/custom-skills/oms-agent-harness"
@@ -13029,11 +13071,14 @@ if printf '%s' "$prompt" | grep -q 'continuing your own previous attempt'; then
   printf '%s' "$prompt" | grep -q 'preserve contracts and safety' || exit 8
   printf '%s' "$prompt" | grep -q 'reuse existing tests, and run affected checks' || exit 8
   printf '%s' "$prompt" | grep -q 'IMPLEMENTATION-WORKER-STRATEGY' || exit 9
+  if printf '%s' "$prompt" | grep -q 'PRESERVED-PATCH-CONTENT'; then exit 10; fi
+  [ "$(git show :large.txt | grep -c PRESERVED-PATCH-CONTENT)" = 1000 ] || exit 11
   printf 'fixed\n' > delegated.txt
   echo "worker repaired"
 else
   printf 'broken\n' > delegated.txt
   echo "worker first try"
+  awk 'BEGIN { for (i=0; i<1000; i++) print "PRESERVED-PATCH-CONTENT" }' > large.txt
 fi
 EOF
   chmod +x "$bin_dir/codex"
@@ -14935,6 +14980,23 @@ path = sys.argv[1]
 spec = importlib.util.spec_from_file_location("oms_process_liveness", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+
+# /proc comm is parenthesized but may itself contain spaces and parentheses.
+# Keep parsing separate from callers' differing zombie/identity decisions.
+from unittest.mock import patch
+fields = ["Z", "1", "321"] + ["0"] * 16 + ["987654"]
+with patch.object(module.Path, "read_text", return_value="321 (worker ) (name)) " + " ".join(fields)):
+    assert module.proc_stat_fields(321) == fields
+    assert module.proc_stat_fields("321")[19] == "987654"
+with patch.object(module.Path, "read_text", return_value="321 (gone) "):
+    assert module.proc_stat_fields(321) == []
+with patch.object(module.Path, "read_text", side_effect=PermissionError):
+    try:
+        module.proc_stat_fields(321)
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError("unreadable stat must reach the caller's fallback")
 
 class Function:
     def __init__(self, result):
@@ -17490,7 +17552,7 @@ EOF
   CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
     PATH="$bin:/usr/bin:/bin" \
     "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null
-  printf '[tui]\nanimations = true\n' > "$codex_home/config.toml"
+  printf 'developer_instructions = "Keep my delegation policy."\n[tui]\nanimations = true\n' > "$codex_home/config.toml"
   rm -f "$codex_home/config.toml.oms-bak"
   : > "$log"
 
@@ -17520,7 +17582,15 @@ assert row["tui"]["status_line"][-1] == "git-branch"
 # A root key written after [tui] would become tui.background_terminal_...
 assert row["background_terminal_max_timeout"] == 900000
 assert "background_terminal_max_timeout" not in row["tui"]
+assert row["developer_instructions"] == "Keep my delegation policy."
 PY
+
+  cp "$codex_home/config.toml" "$d/config-installed.toml"
+  CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
+    PATH="$bin:/usr/bin:/bin" \
+    "$ROOT/scripts/install-codex-plugin.sh" >/dev/null
+  cmp -s "$d/config-installed.toml" "$codex_home/config.toml" ||
+    fail "Codex reinstall changed existing settings"
 
   : > "$log"
   CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
@@ -17535,6 +17605,7 @@ PY
     fail "Codex plugin removal left the managed usage key"
   fi
   assert_file_contains "$codex_home/config.toml" 'animations = true'
+  assert_file_contains "$codex_home/config.toml" 'developer_instructions = "Keep my delegation policy."'
 
   cat > "$codex_home/config.toml" <<'EOF'
 [tui]
@@ -17709,7 +17780,7 @@ EOF
   assert_file_contains "$log" "plugin add oh-my-setting@oh-my-setting-local"
   assert_file_contains "$d/out" "ok: codex plugin oh-my-setting (cache parity)"
   assert_file_contains "$d/out" "ok: codex HUD configured (managed)"
-  assert_file_contains "$d/out" "ok: codex usage keys (terminal-ceiling=managed v2-waits=disabled)"
+  assert_file_contains "$d/out" "ok: codex usage keys (terminal-ceiling=managed v2-waits=disabled scope=config-file effective=unverified)"
   assert_not_exists "$cache/stale.txt"
 }
 
@@ -18652,6 +18723,18 @@ test_agent_call_threads_the_exchange() {
     fail "the question should be recorded: $out"
   printf '%s' "$out" | grep -Fq 'answer' ||
     fail "the answer should be recorded: $out"
+
+  # Panel consultations can record the current question before dispatch.
+  "$ROOT/scripts/thread.sh" --repo "$project" --id work append --role question \
+    --text 'already recorded question' >/dev/null
+  OH_MY_SETTING_CALL_DRY_RUN=1 OMS_THREAD_QUESTION_RECORDED=1 \
+    "$ROOT/scripts/agent-call.sh" --to codex --repo "$project" --thread work \
+    --prompt 'already recorded question' >/dev/null
+  artifact="$(ls -t "$project"/.oms/artifacts/call/*already-recorded-question*.md | head -1)"
+  [ "$(grep -c 'already recorded question' "$artifact")" = 1 ] ||
+    fail "worker received its current question twice"
+  assert_file_contains "$artifact" 'first question'
+  assert_file_contains "$project/.oms/threads/work.jsonl" 'already recorded question'
 }
 
 test_consult_asks_a_peer_and_keeps_the_thread() {
@@ -19091,6 +19174,12 @@ ARTIFACT
   [ "$verdict" = "empty" ] || fail "a body with only harness lines is empty, got: $verdict"
   verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/ok.md'")"
   [ "$verdict" = "ok" ] || fail "a substantive answer should be ok, got: $verdict"
+
+  for body in '' 'A partial finding that looks complete.'; do
+    printf '## Output\n%s\n[agy] print timeout after 10m0s with turn in progress; returning partial output\r\n## Exit\n0\n' "$body" > "$dir/timeout.md"
+    verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/timeout.md'")"
+    [ "$verdict" = truncated ] || fail "zero-exit print timeout must not be an answer: $verdict"
+  done
 
   # A correct answer can be one sentence. Calling that a non-answer would spend
   # another provider call for nothing, so length alone must not decide.
@@ -19858,6 +19947,25 @@ test_peer_ask_council_does_not_seat_a_provider_that_never_answered() {
   if grep -Fq 'non-answer' "$project/out2" "$project/err2"; then
     fail "OMS_COUNCIL_QUALITY=0 must restore exit-status-only accounting"
   fi
+
+  make_council_stubs "$bin_dir"
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo '[agy] print timeout after 10m0s with turn in progress; returning partial output'
+EOF
+  chmod +x "$bin_dir/agy"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-ask.sh" --repo "$project" --artifact-dir "$project/timeout-artifacts" \
+    --providers codex,claude,antigravity --debate 1 --no-memory --no-task --no-ml-context \
+    --prompt 'Timeout seat' > "$project/timeout.out" 2> "$project/timeout.err" || fail 'remaining seats failed'
+  assert_file_contains "$project/timeout.out" 'summary: 2/3 providers succeeded (1 non-answer(s))'
+  assert_file_contains "$project/timeout.err" 'antigravity did not really answer (truncated)'
+  if find "$project/timeout-artifacts" -name 'antigravity-*-r2.md' | grep -q .; then
+    fail 'a timed-out seat was called for rebuttal'
+  fi
+  grep -q 'reason=stream_truncated subtype=print_timeout' "$project/timeout-artifacts"/antigravity-*.md ||
+    fail 'agy print timeout lacks a transport stop reason'
 }
 
 test_peer_ask_debate_drops_a_round_two_non_answer() {

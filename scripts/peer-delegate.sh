@@ -1584,6 +1584,8 @@ run_verify() {
 # same worker continuing in the same worktree.
 write_repair_prompt() {
   local output="$1"
+  local patch_bytes
+  patch_bytes="$(LC_ALL=C wc -c < "$patch_file" | tr -d ' ')"
 
   {
     printf 'You are %s, a delegated worker agent, continuing your own previous attempt.\n' "$TO"
@@ -1609,7 +1611,12 @@ write_repair_prompt() {
       printf '\n## Previous Worker Exit\n\n- exit %s (interrupted or timed out; finish the remaining work)\n' "$worker_status"
     fi
     printf '\n## Your Previous Patch (captured, not accepted yet)\n\n'
-    quote_head "$patch_file" 20000 "previous patch"
+    if [ "$patch_bytes" -le 4096 ]; then
+      quote_head "$patch_file" 4096 "previous patch"
+    else
+      printf 'The %s-byte patch is already staged in this worktree; its body is not repeated here.\n' "$patch_bytes"
+      printf 'Inspect current files and git diff --cached --no-ext-diff --no-textconv --stat, then the relevant path-scoped diff. Preserve unrelated changes.\n'
+    fi
     if [ -n "$VERIFY_CMD" ] && [ "$verify_status" -ne 0 ]; then
       printf '\n## Failing Verification\n\n- command: %s\n- exit: %s\n\nOutput tail:\n' "$VERIFY_CMD" "$verify_status"
       quote_tail "$verify_out" 4000 "verification output"

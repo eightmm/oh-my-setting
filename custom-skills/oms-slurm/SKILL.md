@@ -41,7 +41,7 @@ Static cluster facts live in the private reference, not in repeated probes.
   `oms job-digest <id> [log] --wait --wait-timeout 540 --max-bytes 16384`
   polls inside the shell. Keep the budget under the host's tool-call timeout,
   or run it as a host background task that notifies on exit. Exit 124 means
-  still queued: the job is untouched, so do other authorized work or re-run
+  observation expired, not confirmed queue state: the job is untouched, so do other authorized work or re-run
   the same call; never resubmit. Do not tail interactively.
 - Leaving the queue is not success. Confirm sacct State/ExitCode and the
   required outputs before downstream work or a success claim.

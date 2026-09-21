@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import errno
 import os
-from typing import Any, Callable, Optional
+from pathlib import Path
+from typing import Any, Callable, List, Optional, Union
 
 
 SYNCHRONIZE = 0x00100000
@@ -15,6 +16,14 @@ WAIT_FAILED = 0xFFFFFFFF
 ERROR_ACCESS_DENIED = 5
 ERROR_INVALID_PARAMETER = 87
 MSYS_PROC_NATIVE_PID_SOURCE = "msys-proc-v1"
+
+
+def proc_stat_fields(pid: Union[int, str]) -> List[str]:
+    """Read fields starting at state; comm may contain spaces and parentheses."""
+    raw = (Path("/proc") / str(pid) / "stat").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    return raw[raw.rfind(")") + 2:].split()
 
 
 def persisted_native_pid_is_proven(

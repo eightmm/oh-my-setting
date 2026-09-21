@@ -363,7 +363,7 @@ test_mcp_peer_actions_start_detached_and_poll() {
   local repo="$TMP/peer-repo"
   local out="$TMP/peer-out"
   local operation
-  local waited=0
+  local result_args
 
   make_repo "$repo"
   mkdir -p "$TMP/peer-bin" "$TMP/peer-home" "$TMP/peer-locks"
@@ -415,6 +415,7 @@ assert start["properties"]["new_thread"]["type"] == "boolean", start
 result = tools["oms_peer_result"]["inputSchema"]
 assert result["required"] == [], result  # thread and operation are alternatives
 assert {"operation", "thread", "after"} <= set(result["properties"]), result
+assert result["properties"]["wait_seconds"]["maximum"] == 50, result
 # The description has to teach the pattern, or a model blocks on a 25-minute run.
 assert "oms_peer_result" in tools["oms_peer_start"]["description"], tools
 listing = tools["oms_peer_operations"]["inputSchema"]
@@ -441,6 +442,10 @@ assert payload["operation"] in payload["run_dir"], payload
 assert os.path.isdir(payload["run_dir"]), payload
 assert os.path.isfile(payload["log"]), payload
 assert payload["targets"] == ["codex"], payload
+result_args = payload["result_arguments"]
+assert result_args["operation"] == payload["operation"], payload
+assert result_args["wait_seconds"] == result["properties"]["wait_seconds"]["maximum"], payload
+assert os.path.join(result_args["repo"], ".oms", "artifacts", "mcp", result_args["operation"]) == payload["run_dir"], payload
 
 # Thread control is offered only where the verb has it, and a thread id
 # becomes argv: neither may reach the verb unchecked.
@@ -476,6 +481,15 @@ with open(os.environ["OMS_T_OUT"], encoding="utf-8") as fh:
 PY
   )"
   [ -n "$operation" ] || fail "oms_peer_start returned no operation id"
+  result_args="$(OMS_T_OUT="$out" python3 - <<'PY'
+import json, os
+with open(os.environ["OMS_T_OUT"], encoding="utf-8") as fh:
+    for line in fh:
+        msg = json.loads(line)
+        if msg.get("id") == 5:
+            print(json.dumps(json.loads(msg["result"]["content"][0]["text"])["result_arguments"]))
+PY
+  )"
 
   # The run outlives the server that started it: the process above has exited,
   # and this is a new one reading nothing but the filesystem.
@@ -487,14 +501,10 @@ PY
     fail "a running consult must carry a log tail"
 
   : > "$TMP/peer-gate"
-  while :; do
-    printf '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"oms_peer_result","arguments":{"repo":"%s","operation":"%s"}}}\n' \
-      "$repo" "$operation" | peer_rpc "$out"
-    [ "$(peer_field "$out" status)" = "done" ] && break
-    waited=$((waited + 1))
-    [ "$waited" -lt 60 ] || fail "the released consult never completed"
-    sleep 1
-  done
+  # Follow the start response directly: one bounded read across server restarts.
+  printf '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"oms_peer_result","arguments":%s}}\n' \
+    "$result_args" | peer_rpc "$out"
+  [ "$(peer_field "$out" status)" = "done" ] || fail "the released consult never completed"
 
   OMS_T_OUT="$out" python3 - <<'PY' || fail "a finished consult did not report its answer"
 import json, os
@@ -583,7 +593,7 @@ PY
     fail "peer extraction must agree with MCP and omit quoted prompt sections"
 
   python3 - "$ROOT" "$artifact" "$run/run.log" <<'PY'
-import importlib.util, io, sys
+import importlib.util, io, json, sys
 from pathlib import Path
 from unittest.mock import patch
 root, artifact, log = map(Path, sys.argv[1:])
@@ -625,6 +635,80 @@ for body in ("a\nb\nc\n", "a\nb\nc", "가\r\n나\r\n", ""):
     log.write_text(body, encoding="utf-8")
     assert tail_lines(log, 2)[0] == body.splitlines()[-2:]
 assert tail_lines(log, 0) == ([], False)
+
+# Deterministic waits use the existing operation; no provider, real sleeps or
+# live scheduler. Activity in the log is not a completion event.
+args = {"repo": str(log.parents[4]), "operation": log.parent.name}
+clock = [0.0]
+def sleep(seconds):
+    clock[0] += seconds
+    log.write_text("heartbeat\n", encoding="utf-8")
+with patch.object(m, "run_status", return_value=("running", None)) as status, \
+     patch.object(m.time, "monotonic", side_effect=lambda: clock[0]), \
+     patch.object(m.time, "sleep", side_effect=sleep) as sleeper, \
+     patch.object(m.subprocess, "Popen", side_effect=AssertionError("read must not dispatch")):
+    text, bad = m.peer_result(args)
+    assert not bad and json.loads(text)["status"] == "running", text
+    sleeper.assert_not_called()
+    text, bad = m.peer_result(dict(args, wait_seconds=3))
+    assert not bad and json.loads(text)["status"] == "running", text
+    assert clock[0] == 3 and sleeper.call_count == 3, clock
+    first = json.loads(text)
+    text, bad = m.peer_result(dict(args, after=first["cursor"]))
+    same = json.loads(text)
+    assert not bad and same["unchanged"] and same["status"] == "running", same
+    assert "log_tail" not in same and same["cursor"] == first["cursor"], same
+    log.write_text("new diagnostic\n", encoding="utf-8")
+    text, bad = m.peer_result(dict(args, after=first["cursor"]))
+    changed = json.loads(text)
+    assert not bad and not changed["unchanged"] and "new diagnostic" in changed["log_tail"], changed
+    assert changed["cursor"] != first["cursor"], changed
+    # The elapsed clock is not new evidence and must not force a replay.
+    assert json.loads(m.peer_result_response({"status": "running", "elapsed_seconds": 999,
+                                            **{k: v for k, v in first.items()
+                                               if k not in ("cursor", "unchanged", "elapsed_seconds")}},
+                                           first["cursor"]))["unchanged"]
+    for invalid in (True, -1, 51, 1.5, "5", None):
+        assert m.peer_result(dict(args, wait_seconds=invalid))[1]
+    for invalid in (True, 1, None, "thread:cursor", "result:" + "a" * 65):
+        assert m.peer_result(dict(args, after=invalid))[1]
+    assert m.peer_result({"thread": "shared", "wait_seconds": 1})[1]
+artifact.write_text("## Output\nanswer\n## Exit\n0\n", encoding="utf-8")
+log.write_text("artifact: %s\n" % artifact, encoding="utf-8")
+with patch.object(m, "run_status", side_effect=[("running", None), ("done", 0)]), \
+     patch.object(m.time, "sleep") as sleeper:
+    text, bad = m.peer_result(dict(args, wait_seconds=50))
+    assert not bad and json.loads(text)["answer"] == "answer", text
+    sleeper.assert_called_once()
+with patch.object(m, "run_status", return_value=("stalled", None)), \
+     patch.object(m.time, "sleep") as sleeper:
+    text, bad = m.peer_result(dict(args, wait_seconds=50, after=first["cursor"]))
+    assert bad and json.loads(text)["status"] == "stalled", text
+    assert not json.loads(text)["unchanged"], text
+    text, bad = m.peer_result(dict(args, after=json.loads(text)["cursor"]))
+    assert bad and json.loads(text)["unchanged"] and json.loads(text)["status"] == "stalled", text
+    sleeper.assert_not_called()
+
+# Repeat reads stay stateless and reversible, including successful answers.
+artifact.write_text("## Output\n" + "evidence and uncertainty\n" * 500 + "## Exit\n0\n", encoding="utf-8")
+with patch.object(m, "run_status", return_value=("done", 0)):
+    text, bad = m.peer_result(dict(args, after=first["cursor"]))
+    full = json.loads(text)
+    assert not bad and not full["unchanged"] and full["answer"], full
+    small, bad = m.peer_result(dict(args, after=full["cursor"]))
+    same = json.loads(small)
+    assert not bad and same["unchanged"] and same["exit"] == 0 and "answer" not in same, same
+    assert same["artifacts"] == full["artifacts"] and same["log"] == full["log"], same
+    assert len(small.encode()) < len(text.encode()) // 4, (len(text), len(small))
+    print("peer-result repeated fixture bytes: %s -> %s" % (len(text.encode()), len(small.encode())))
+    again, bad = m.peer_result(args)
+    assert not bad and json.loads(again)["answer"] == full["answer"], again
+    artifact.write_text("## Output\ncorrected answer\n## Exit\n0\n", encoding="utf-8")
+    updated, bad = m.peer_result(dict(args, after=full["cursor"]))
+    assert not bad and not json.loads(updated)["unchanged"] and "corrected answer" in updated, updated
+with patch.object(m, "run_status", return_value=("done", 1)):
+    failed, bad = m.peer_result(dict(args, after=full["cursor"]))
+    assert bad and json.loads(failed)["exit"] == 1 and not json.loads(failed)["unchanged"], failed
 PY
 }
 

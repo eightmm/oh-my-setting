@@ -72,7 +72,8 @@ while IFS= read -r provider; do
     oms_capability_refresh "$provider" || true
   fi
   file="$(oms_capability_file "$provider")"
-  models_file="$(oms_capability_cache_dir)/$provider.models"
+  models_file="$tmp/$provider.models"
+  oms_capability_models "$provider" > "$models_file" || : > "$models_file"
   efforts_file="$(oms_capability_cache_dir)/$provider.efforts"
   routable_file="$tmp/$provider.routable"
   oms_capability_routable_models "$provider" > "$routable_file" 2>/dev/null || : > "$routable_file"

@@ -6,7 +6,11 @@ new task, approval, landing, provider-write, or publication authority.
 Live collaboration reuses the existing peer tools: `oms_peer_start` with
 `kind=message|ack` records only a thread turn; `oms_peer_result` with `thread`
 and optional `after` returns a bounded incremental page without starting a
-provider. Ordinary operation-id polling is unchanged. See state-memory.md for
+provider. Operation reads default to immediate; optional `wait_seconds` (0-50)
+waits inside the server for done/stalled, not log activity. Keep it below the
+host timeout; this serial stdio server serves its next request after the wait.
+Expiry returns running without cancelling, resubmitting, or starting a model.
+See state-memory.md for
 delivery versus acknowledgment and hook boundaries. Core discovery stays at
 12 tools; no subscription or push capability is advertised.
 

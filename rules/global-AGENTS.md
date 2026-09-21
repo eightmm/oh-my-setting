@@ -12,9 +12,8 @@ Default: concise, scoped, evidence-driven.
 
 ## Execution
 
-- Inspect enough relevant source, callers and tests to bound the change.
-  Scale planning and context to uncertainty; known local edits need no full
-  repository survey or formal plan.
+- Inspect source/callers/tests; scale planning to uncertainty.
+  Local edits need no full survey.
 - Complete authorized work through implementation, relevant verification and
   repair of failures caused by the change; stop when done or genuinely blocked.
   Infer reversible details; ask only about missing scope, authority, interface,
@@ -59,8 +58,8 @@ Default: concise, scoped, evidence-driven.
   and rationale; distinguish explicit requirements from interpretation.
   Continue unaffected authorized work.
 - Batch independent calls; serialize dependencies. Bound output; re-read changes.
-- Wait in one bounded call, not status-only turns; a read timeout is neither
-  failure nor restart permission.
+- Prefer completion notifications or bounded waits, not short polling or unchanged
+  log reads. Respect host limits; read timeouts imply neither failure nor restart permission.
 
 ## Specification
 
@@ -86,6 +85,7 @@ Default: concise, scoped, evidence-driven.
 - Run commands/tests directly. For authorized delegation, load
   `oms-agent-harness`; the parent owns admission, verification and publication.
   Workers cannot widen authority or recursively delegate.
+- Delegate with scoped briefs; skip unchanged heartbeats, not user updates.
 
 ## Harness
 

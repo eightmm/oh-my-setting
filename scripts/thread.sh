@@ -356,6 +356,22 @@ if not rows:
     raise SystemExit(0)
 live = any(row.get("live") is True for row in rows)
 
+# The caller supplies this question separately. Never summarize, rewrite the
+# log, or remove older decisions: only an exactly repeated final question.
+duplicate_question = False
+question_file = os.environ.get("OMS_THREAD_CURRENT_QUESTION_FILE")
+if question_file and rows[-1].get("role") == "question":
+    try:
+        with open(question_file, "rb") as handle:
+            raw = handle.read(budget + 1)
+        if len(raw) <= budget:
+            question = raw.decode("utf-8").rstrip("\r\n")
+            if question and rows[-1].get("text", "").rstrip("\r\n") == question:
+                rows.pop()
+                duplicate_question = True
+    except (OSError, UnicodeError):
+        pass
+
 # Newest turns matter most, so fill the budget from the end and then print
 # oldest-first for a readable transcript.
 kept = []
@@ -394,6 +410,8 @@ for row in reversed(rows[-limit:]):
     used += size
 omitted = len(rows) - len(kept)
 print("## Conversation so far (thread %s)" % os.environ["OMS_TH_ID"])
+if duplicate_question:
+    print("[latest question supplied separately; omitted from this view]")
 if omitted > 0:
     print("[%d earlier turn(s) omitted]" % omitted)
 print("")

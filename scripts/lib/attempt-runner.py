@@ -880,10 +880,8 @@ def process_identity(pid: int) -> str:
                     kernel32.CloseHandle(handle)
         except (AttributeError, OSError, ValueError):
             pass
-    proc_stat = Path("/proc") / str(pid) / "stat"
     try:
-        raw = proc_stat.read_text(encoding="utf-8", errors="replace")
-        tail = raw[raw.rfind(")") + 2 :].split()
+        tail = ae.proc_stat_fields(pid)
         start_ticks = tail[19]
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
             encoding="utf-8", errors="replace"
@@ -921,10 +919,7 @@ def pid_is_zombie(pid: int) -> bool:
     if pid <= 0 or os.name == "nt":
         return False
     try:
-        raw = (Path("/proc") / str(pid) / "stat").read_text(
-            encoding="utf-8", errors="replace"
-        )
-        tail = raw[raw.rfind(")") + 2 :].split()
+        tail = ae.proc_stat_fields(pid)
         if tail:
             return tail[0] == "Z"
     except OSError:
@@ -962,10 +957,8 @@ def leader_exited_unreaped(process: subprocess.Popen[Any], expected: str) -> boo
         return True
     if os.name == "nt":
         return process.poll() is not None
-    proc_stat = Path("/proc") / str(process.pid) / "stat"
     try:
-        raw = proc_stat.read_text(encoding="utf-8", errors="replace")
-        tail = raw[raw.rfind(")") + 2 :].split()
+        tail = ae.proc_stat_fields(process.pid)
         if tail:
             return tail[0] == "Z"
     except OSError:
@@ -999,10 +992,9 @@ def _group_has_runnable_member(pgid: int) -> Optional[bool]:
             if not entry.name.isdigit():
                 continue
             try:
-                raw = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+                tail = ae.proc_stat_fields(entry.name)
             except OSError:
                 continue
-            tail = raw[raw.rfind(")") + 2 :].split()
             if len(tail) < 3:
                 continue
             scanned = True

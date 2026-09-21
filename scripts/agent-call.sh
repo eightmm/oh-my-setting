@@ -228,6 +228,13 @@ trap 'cleanup_signal 129' HUP
 trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
 
+question_file=""
+if [ -n "$THREAD_ID" ]; then
+  question_file="$call_tmpdir/question"
+  if [ -n "$PROMPT_FILE" ]; then cat "$PROMPT_FILE" > "$question_file"
+  else printf '%s\n' "$PROMPT" > "$question_file"; fi
+fi
+
 {
   printf 'You are %s, called by an agent harness for an independent read-only pass.\n' "$TO"
   printf 'Do not modify files. Do not run git commit or git push.\n'
@@ -237,9 +244,11 @@ trap 'cleanup_signal 143' TERM
   [ "$OPERATION" = plan ] || ma_answer_language_block
   ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" \
     "$(if [ -n "$PROMPT_FILE" ]; then head -c 300 "$PROMPT_FILE" 2>/dev/null; else printf '%s' "$PROMPT"; fi)"
-  ma_write_thread_context "$REPO" "$THREAD_ID"
+  ma_write_thread_context "$REPO" "$THREAD_ID" "$question_file"
   printf 'Prompt:\n'
-  if [ -n "$PROMPT_FILE" ]; then
+  if [ -n "$question_file" ]; then
+    cat "$question_file"
+  elif [ -n "$PROMPT_FILE" ]; then
     cat "$PROMPT_FILE"
   else
     printf '%s\n' "$PROMPT"
@@ -291,14 +300,8 @@ fi
 # to be, and the next agent cannot see what it never got an answer to.
 record_thread_exchange() {  # record_thread_exchange [FAILED_EXIT]
   local status="${1:-}"
-  local question
+  local question="$question_file"
   [ -n "$THREAD_ID" ] || return 0
-  question="$(agent_memory_mktemp)" || return 0
-  if [ -n "$PROMPT_FILE" ]; then
-    cat "$PROMPT_FILE" > "$question"
-  else
-    printf '%s\n' "$PROMPT" > "$question"
-  fi
   if [ -n "$status" ]; then
     [ "${OMS_THREAD_QUESTION_RECORDED:-0}" = "1" ] ||
       ma_thread_append "$REPO" "$THREAD_ID" question "$question"
@@ -307,7 +310,6 @@ record_thread_exchange() {  # record_thread_exchange [FAILED_EXIT]
     ma_thread_record_exchange "$REPO" "$THREAD_ID" "$TO" "$OMS_MODEL_SELECTED" \
       "$artifact" "$question"
   fi
-  rm -f "$question"
 }
 
 if run_provider "$TO" "$prompt_file" "$artifact"; then

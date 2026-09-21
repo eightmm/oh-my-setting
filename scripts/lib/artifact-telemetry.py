@@ -533,6 +533,7 @@ def telemetry(
     coverage = Counter()
     outcomes = Counter()
     token_values: list[int] = []
+    prompt_byte_values: list[int] = []
     duration_values: list[float] = []
     routes: dict[tuple[str, str, str], dict] = {}
 
@@ -632,6 +633,9 @@ def telemetry(
             route["fallback_used"] += 1
 
         present, duration, tokens = artifact_metrics(repo, row)
+        prompt_bytes = integer(row.get("prompt_bytes"))
+        if prompt_bytes is not None:
+            prompt_byte_values.append(prompt_bytes)
         if present:
             coverage["artifact_files"] += 1
         if duration is not None:
@@ -704,6 +708,11 @@ def telemetry(
             "verification_reports": coverage["verification_reports"],
         },
         "usage": {
+            "prompt_bytes": {
+                "reports": len(prompt_byte_values),
+                "total": sum(prompt_byte_values),
+                "basis": "recorded primary prompt only; excludes provider-added context, retries and repair prompts; not tokens",
+            },
             "provider_reported_tokens": {
                 "reports": len(token_values),
                 "total": sum(token_values),
@@ -862,6 +871,9 @@ def emit_human(report: dict) -> None:
             usage["wall_seconds"]["reports"],
         )
     )
+    prompt_bytes = usage["prompt_bytes"]
+    print("prompt bytes: total=%d reports=%d (%s)" % (
+        prompt_bytes["total"], prompt_bytes["reports"], prompt_bytes["basis"]))
     native = report["native_activity"]
     print(
         "native activity: sessions=%d turns=%d tools=%d subagents=%d events=%d"

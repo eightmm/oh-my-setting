@@ -244,7 +244,11 @@ def check(parser, lines: List[str]) -> Tuple[str, int]:
     shown = root
     if root == "user":
         shown = "user(%s)" % parsed.get(ROOT.entries[0][0])
-    return "terminal-ceiling=%s v2-waits=%s" % (shown, v2), 0 if root != "missing" else 1
+    return (
+        "terminal-ceiling=%s v2-waits=%s scope=config-file effective=unverified"
+        % (shown, v2),
+        0 if root != "missing" else 1,
+    )
 
 
 def main() -> int:

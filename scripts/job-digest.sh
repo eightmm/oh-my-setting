@@ -168,7 +168,7 @@ if [ "$WAIT" = "1" ]; then
     if [ -n "$query_guard" ]; then
       q_budget=$((WAIT_TIMEOUT - ($(now_s) - wait_start)))
       [ "$q_budget" -ge 1 ] || q_budget=1
-      q_out="$("$query_guard" "$q_budget" squeue -h -j "$JOB_ID" 2>"$q_err")"
+      q_out="$("$query_guard" --kill-after=1s "$q_budget" squeue -h -j "$JOB_ID" 2>"$q_err")"
     else
       q_out="$(squeue -h -j "$JOB_ID" 2>"$q_err")"
     fi
@@ -204,7 +204,7 @@ if [ "$WAIT" = "1" ]; then
   [ "$q_failures" -le 1 ] ||
     echo "job-digest: squeue query failed $q_failures times while waiting" >&2
   if [ "$PENDING" = "1" ]; then
-    echo "job-digest: wait budget ${WAIT_TIMEOUT}s spent; job $JOB_ID still queued and untouched (exit 124, re-run to keep observing)" >&2
+    echo "job-digest: wait budget ${WAIT_TIMEOUT}s spent; observation incomplete, job $JOB_ID untouched (exit 124; queue state may be unknown)" >&2
   else
     echo "job-digest: job $JOB_ID no longer queued; digesting" >&2
   fi
@@ -215,7 +215,7 @@ emit_digest() {
   printf -- '- generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   [ -n "$JOB_ID" ] && printf -- '- slurm job: %s\n' "$JOB_ID"
   [ "$PENDING" = "1" ] &&
-    printf -- '- wait: pending, still queued after %ss; this is not completion\n' "$WAIT_TIMEOUT"
+    printf -- '- wait: pending after %ss; observation incomplete, not proof of queue state or completion\n' "$WAIT_TIMEOUT"
   [ -n "$LOG_FILE" ] && printf -- '- log: %s (%s lines)\n' "$LOG_FILE" "$(wc -l < "$LOG_FILE")"
   if git rev-parse --git-dir >/dev/null 2>&1; then
     printf -- '- git: %s, %s dirty files\n' \
@@ -229,8 +229,21 @@ emit_digest() {
       # Captured, not piped bare: under pipefail a failing sacct (accounting
       # storage down) used to abort the digest before any log section.
       acct_rc=0
-      acct="$(sacct -j "$JOB_ID" --format=JobID,JobName%20,State,ExitCode,Elapsed,MaxRSS,ReqMem,AllocTRES%40 2>&1 |
-        head -20)" || acct_rc=$?
+      acct_budget=""
+      if [ -n "$WAIT_TIMEOUT" ]; then
+        acct_budget=$((WAIT_TIMEOUT - ($(now_s) - wait_start)))
+      fi
+      if [ -n "$acct_budget" ] && [ "$acct_budget" -le 0 ]; then
+        acct="Accounting skipped: observation budget exhausted."
+        acct_rc=124
+      else
+        acct_command=(sacct)
+        if [ -n "${query_guard:-}" ]; then
+          acct_command=("$query_guard" --kill-after=1s "$acct_budget" sacct)
+        fi
+        acct="$("${acct_command[@]}" -j "$JOB_ID" --format=JobID,JobName%20,State,ExitCode,Elapsed,MaxRSS,ReqMem,AllocTRES%40 2>&1 |
+          head -20)" || acct_rc=$?
+      fi
       printf '```\n'
       printf '%s\n' "$acct"
       printf '```\n'

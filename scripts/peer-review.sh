@@ -245,6 +245,7 @@ review_verdicts() {
     # a replayed thread turn can quote a marker line into the prompt, and a
     # quoted marker is not the transport's verdict.
     died_stop="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0}
+      o && /^\[agy\] print timeout after .+ with turn in progress; returning partial output[[:space:]]*$/{print "provider=antigravity reason=stream_truncated"; exit}
       o && /^stop-reason: .*(reason=max_tokens|reason=stream_truncated|is_error=1)/{print substr($0, 14, 67); exit}' "$f")"
     if [ -n "$verdict" ] && [ -n "$died_stop" ]; then
       verdict=""
@@ -433,7 +434,7 @@ write_prompt() {
       printf -- '- Reproducibility/distribution: seeds, versions, checkpoint symmetry, sampler.set_epoch, rank-0 effects, metric reduction.\n'
       printf '\n'
     fi
-    ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$question" 0
+    ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$question"
     printf 'Question:\n%s\n\n' "$question"
     printf 'Repository:\n%s\n\n' "$(ma_repo_label "$repo")"
     if [ "$NO_DIFF" -eq 0 ]; then

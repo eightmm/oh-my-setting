@@ -23,6 +23,7 @@ PARSER = USAGE.toml_parser()
 # Shaped like a real config: root keys, then many tables. A root key appended
 # at the end would silently become a key of the last [projects."..."] table.
 REALISTIC = """model = "gpt-test"
+developer_instructions = "Preserve my scoped delegation policy."
 
 [tui]
 animations = true
@@ -65,13 +66,18 @@ class CodexUsageConfigTest(unittest.TestCase):
         )
         self.assertNotIn("multi_agent_v2", parsed.get("features", {}))
         self.assertEqual(parsed["model"], "gpt-test")
+        self.assertEqual(
+            parsed["developer_instructions"], "Preserve my scoped delegation policy."
+        )
 
         installed = self.config.read_bytes()
         status, stdout, _ = run_helper("install", self.config)
         self.assertEqual(status, 0)
         self.assertIn("already current", stdout)
         self.assertEqual(self.config.read_bytes(), installed)
-        self.assertEqual(run_helper("check", self.config)[0], 0)
+        status, checked, _ = run_helper("check", self.config)
+        self.assertEqual(status, 0)
+        self.assertIn("scope=config-file effective=unverified", checked)
 
         status, stdout, _ = run_helper("remove", self.config)
         self.assertEqual(status, 0)

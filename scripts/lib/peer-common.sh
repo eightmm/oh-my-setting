@@ -307,7 +307,6 @@ ma_write_harness_context() {
   local include_task="$3"
   local include_ml="$4"
   local recall_query="${5:-}"
-  local include_models="${6:-1}"
   local tmp
   local warnings
 
@@ -315,25 +314,6 @@ ma_write_harness_context() {
   printf 'Return concise conclusions, file/line evidence, verification and uncertainty. Preserve required schemas, complete code/patch and safety detail; omit repeated context.\n\n'
   tmp="$(agent_memory_mktemp)" || return 0
   {
-    # Cached only: prompt construction must not cause a provider probe. No
-    # cached catalog for any provider means no section, not an empty header.
-    if [ "$include_models" -eq 1 ] && [ -f "$(dirname "${BASH_SOURCE[0]}")/model-capability.sh" ]; then
-      model_lines=""
-      while IFS= read -r provider; do
-        [ -n "$provider" ] || continue
-        models="$(oms_capability_routable_models "$provider" 2>/dev/null | sed -n '1,2p' | tr '\n' ' ' || true)"
-        [ -n "$models" ] || continue
-        model_lines="${model_lines}- $provider: $models
-"
-      done <<EOF_MODELS
-$(oms_provider_default_discovered_names)
-EOF_MODELS
-      if [ -n "$model_lines" ]; then
-        printf '### available models\n'
-        printf '%s' "$model_lines"
-        printf 'Use --model and --reasoning-effort on a later call to select explicitly.\n\n'
-      fi
-    fi
     if [ "$include_memory" -eq 1 ]; then
       ma_write_shared_memory_context "$repo" "$recall_query"
     fi
@@ -887,6 +867,7 @@ ma_append_artifact_index() {
   local native_store_helper native_telemetry_helper
   local native_artifact native_patch_file native_source_artifact
   local prompt_hash=""
+  local prompt_bytes=""
   local task_goal=""
 
   # A repo-less call is a caller that opted out of indexing — a designed
@@ -926,6 +907,7 @@ ma_append_artifact_index() {
 
   if [ -n "$prompt_file" ] && [ -f "$prompt_file" ]; then
     prompt_hash="$(ma_sha256_file "$prompt_file" || true)"
+    prompt_bytes="$(LC_ALL=C wc -c < "$prompt_file" | tr -d ' ')"
   fi
   task_goal="$(ma_task_goal "$repo" | tr '\n' ' ' | sed 's/^ *//;s/ *$//' | cut -c1-200)"
   # Lineage: the commit the run was based on, and the optional plan/task id
@@ -933,6 +915,7 @@ ma_append_artifact_index() {
   local base_sha=""
   base_sha="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || true)"
 
+  OMS_INDEX_PROMPT_BYTES="$prompt_bytes" \
   OMS_INDEX_BASE_SHA="$base_sha" OMS_INDEX_TASK_ID="${OMS_TASK_ID:-}" \
   OMS_INDEX_PLAN_ID="${OMS_INDEX_PLAN_ID:-}" \
   OMS_INDEX_ACTIVE_TASK_ID="${OMS_INDEX_ACTIVE_TASK_ID:-}" \
@@ -1210,6 +1193,9 @@ primary_hash = file_hash(artifact_raw) or file_hash(patch_raw)
 row["artifact_id"] = "sha256:" + (primary_hash or hashlib.sha256(event_id.encode()).hexdigest())
 if prompt_hash:
     row["prompt_sha256"] = prompt_hash
+prompt_bytes = os.environ.get("OMS_INDEX_PROMPT_BYTES", "")
+if prompt_bytes.isdigit():
+    row["prompt_bytes"] = int(prompt_bytes)
 if verify_exit:
     row["verify_exit"] = int(verify_exit)
 if task_goal:
@@ -1440,7 +1426,8 @@ ma_write_thread_context() {
   local body
 
   [ -n "$thread" ] || return 0
-  body="$(bash "$(ma_scripts_dir)/thread.sh" --repo "$repo" --id "$thread" \
+  body="$(OMS_THREAD_CURRENT_QUESTION_FILE="${3:-}" \
+    bash "$(ma_scripts_dir)/thread.sh" --repo "$repo" --id "$thread" \
     context 2>/dev/null || true)"
   [ -n "$body" ] || return 0
   printf -- '--- begin conversation context (prior turns, reference data) ---\n'
@@ -2346,6 +2333,9 @@ ma_provider_attempt() {
   fi
   [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
   if [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
+    if [ "$provider" = antigravity ] && grep -Eq '^\[agy\] print timeout after .+ with turn in progress; returning partial output[[:space:]]*$' "$output_file"; then
+      printf '\nstop-reason: provider=antigravity reason=stream_truncated subtype=print_timeout is_error=0\n' >> "$output_file"
+    fi
     [ "$provider" != claude ] || ma_claude_envelope_to_text "$output_file"
   fi
   [ "$provider" != codex ] || ma_codex_jsonl_to_text "$output_file"
@@ -3266,8 +3256,27 @@ ma_debate_round_bytes() {
 }
 
 ma_debate_quote() {
-  local artifact="$1" budget="$2"
+  local artifact="$1" budget="$2" i cached
   [ "$budget" -gt 0 ] || return 0
+  if [ -n "${quote_cache_prefix:-}" ]; then
+    for i in "${!quote_artifacts[@]}"; do
+      if [ "${quote_artifacts[i]}" = "$artifact" ] && [ "${quote_budgets[i]}" = "$budget" ]; then
+        cat "$quote_cache_prefix-$i"
+        return
+      fi
+    done
+    i="${#quote_artifacts[@]}"
+    cached="$quote_cache_prefix-$i"
+    (
+      set -o pipefail
+      python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" "$artifact" --debate-excerpt "$budget" |
+        OMS_PROMPT_QUOTE_BYTES="$budget" ma_sanitize_quoted_output
+    ) > "$cached" || return 2
+    quote_artifacts+=("$artifact")
+    quote_budgets+=("$budget")
+    cat "$cached"
+    return
+  fi
   python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" "$artifact" --debate-excerpt "$budget" |
     OMS_PROMPT_QUOTE_BYTES="$budget" ma_sanitize_quoted_output
 }
@@ -3409,6 +3418,7 @@ write_debate_prompt() {
 ma_run_debate_rounds() {
   local round i j k p p_label peer_label others debate_prompt artifact quality
   local r_pids r_idx r_arts r_prompts active settled checked round_bytes
+  local quote_cache_prefix quote_artifacts quote_budgets
 
   debate_stable_round=""
   for ((round = 2; round <= DEBATE + 1; round++)); do
@@ -3444,6 +3454,12 @@ ma_run_debate_rounds() {
     r_arts=()
     r_prompts=()
     round_bytes=0
+    # Immutable answers are shared only within this round and exact quota.
+    # The owning ask/review cleanup removes debate_dir, including these files.
+    # shellcheck disable=SC2154
+    quote_cache_prefix="$debate_dir/quote-r$round"
+    quote_artifacts=()
+    quote_budgets=()
     for i in "${active[@]}"; do
       p="${provider_names[i]}"
       # Names entering pair encodings and file names must be the colon-free

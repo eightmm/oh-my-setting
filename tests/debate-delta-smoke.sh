@@ -149,6 +149,45 @@ write_debate_prompt "$r3f" codex 3 "$self" "claude:$no_sections"
 assert_contains "$r3f" 'freeform answer only'
 assert_contains "$r3f" 'full answer on disk:'
 
+# Reuse only identical artifact/quota pairs; bytes and sanitization stay intact.
+(
+  quote_cache_prefix="$TMP/quote-cache"
+  quote_artifacts=()
+  quote_budgets=()
+  python3() {
+    case "${2:-}:${3:-}" in
+      *:--debate-excerpt) printf 'extract\n' >> "$TMP/extractions" ;;
+    esac
+    command python3 "$@"
+  }
+  for ((seat=0; seat<5; seat++)); do
+    ma_debate_quote "$long" 1024 > "$TMP/cached-$seat"
+    cmp "$TMP/cached-0" "$TMP/cached-$seat" || fail 'cache changed quote bytes'
+  done
+  [ "$(wc -l < "$TMP/extractions")" -eq 1 ] || fail 'identical quotes were re-extracted'
+  ma_debate_quote "$long" 512 > "$TMP/smaller"
+  ma_debate_quote "$self" 1024 > "$TMP/different"
+  [ "$(wc -l < "$TMP/extractions")" -eq 3 ] || fail 'cache mixed quotas or artifacts'
+  (
+    unset quote_cache_prefix
+    ma_debate_quote "$long" 1024 > "$TMP/uncached"
+    ma_debate_quote "$long" 512 > "$TMP/uncached-smaller"
+  )
+  cmp "$TMP/cached-0" "$TMP/uncached" || fail 'cached quote differs from original'
+  cmp "$TMP/smaller" "$TMP/uncached-smaller" || fail 'smaller quota differs'
+  # A new round must not reuse the previous contents, even at the same path.
+  quote_artifacts=()
+  quote_budgets=()
+  before="$(wc -l < "$TMP/extractions")"
+  ma_debate_quote "$long" 1024 > "$TMP/refreshed"
+  [ "$(wc -l < "$TMP/extractions")" -eq "$((before + 1))" ] || fail 'cache survived its round'
+  python3() { return 1; }
+  if ma_debate_quote "$long" 256 > "$TMP/failed-quote"; then
+    fail 'failed extraction was cached as success'
+  fi
+  [ "${#quote_artifacts[@]}" -eq 1 ] || fail 'failed quote entered the cache'
+)
+
 # --- the loop stops when every seat declares none ---
 DEBATE=3
 DRY_RUN=1

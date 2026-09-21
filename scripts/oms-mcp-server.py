@@ -25,6 +25,7 @@ Stdlib only — this runs wherever the harness runs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -378,8 +379,9 @@ TOOLS = [
             " exchange in a thread; kind='advise' is an adversarial review of"
             " a decision; kind='ask' puts the same question to every installed"
             " peer. The peer keeps running after this call returns and often"
-            " takes 5-25 minutes. Read the answer with oms_peer_result; do"
-            " other work between polls instead of waiting."
+            " takes 5-25 minutes. Do authorized independent work, then read"
+            " with oms_peer_result and a bounded wait_seconds; avoid repeated"
+            " immediate status checks."
             " To collaborate with an already active agent without starting"
             " another model, use kind='message' (prompt + thread) or 'ack'"
             " (thread + after + consumer). new_thread=true with message creates"
@@ -442,8 +444,12 @@ TOOLS = [
             " log; when it finishes, status='done' with the answer, the exit"
             " code, the artifact paths, and the thread id to continue from."
             " status='stalled' means the run's process is gone without an"
-            " exit: no answer is coming. Polling is cheap and never blocks,"
-            " but the run takes minutes — do other work between polls."
+            " exit: no answer is coming. For an operation, wait_seconds (0-50)"
+            " waits for completion without repeated model turns; default 0"
+            " is an immediate read. Use authorized independent work or a"
+            " bounded wait, not repeated status-only calls."
+            " Reuse the returned cursor as after to omit unchanged answer/log"
+            " bodies; omit after when you need the full bounded result again."
             " Alternatively pass thread and optional after cursor (no operation)"
             " for new complete messages/acks. Retain cursor and page has_more;"
             " reading never acknowledges."
@@ -455,7 +461,11 @@ TOOLS = [
                 "description": "Operation id returned by oms_peer_start.",
             },
             "thread": {"type": "string", "description": "Existing thread id for incremental delivery."},
-            "after": {"type": "string", "description": "Cursor from previous thread read; omit to start."},
+            "after": {"type": "string", "description": "Cursor from the previous read of this operation or thread; omit for initial delivery."},
+            "wait_seconds": {
+                "type": "integer", "minimum": 0, "maximum": 50,
+                "description": "Operation only: bounded completion wait; keep below the host tool timeout. Default 0. Expiry never cancels or restarts the peer.",
+            },
         },
         "annotations": READ_ONLY,
     },
@@ -1126,10 +1136,14 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
             "artifact_dir": str(repo / ".oms" / "artifacts" / spec["artifacts"]),
             "run_dir": str(run_dir),
             "log": str(log),
+            "result_arguments": {
+                "repo": str(repo), "operation": operation, "wait_seconds": 50,
+            },
             "next": (
-                "The peer is running detached. Read it with oms_peer_result"
-                " operation=%s. It usually takes several minutes: do other work"
-                " and poll again rather than waiting on it." % operation
+                "The peer is running detached. Do authorized independent work"
+                " or call oms_peer_result with result_arguments. Reduce"
+                " wait_seconds if needed to stay below the host timeout."
+                " Avoid repeated immediate reads; expiry never restarts the peer."
             ),
         },
         ensure_ascii=False,
@@ -1313,11 +1327,36 @@ def peer_operations(arguments: dict) -> tuple[str, bool]:
     return json.dumps(payload, ensure_ascii=False, indent=2), False
 
 
+def peer_result_response(payload: dict, after: str) -> str:
+    # Fingerprint visible evidence, not elapsed time. No per-client state or
+    # acknowledgement: omitting the cursor always restores the full response.
+    stable = {key: value for key, value in payload.items() if key != "elapsed_seconds"}
+    cursor = "result:" + hashlib.sha256(
+        json.dumps(stable, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    unchanged = after == cursor
+    if unchanged:
+        payload = {key: value for key, value in payload.items()
+                   if key not in ("answer", "log_tail", "next")}
+        payload["next"] = "Visible result unchanged. Do not immediately recheck; omit after to retrieve the body again."
+    payload["cursor"] = cursor
+    payload["unchanged"] = unchanged
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 def peer_result(arguments: dict) -> tuple[str, bool]:
+    wait_seconds = arguments.get("wait_seconds", 0)
+    if type(wait_seconds) is not int or not 0 <= wait_seconds <= 50:
+        return "error: wait_seconds must be an integer from 0 to 50", True
     if "thread" in arguments:
         if arguments.get("operation"):
             return "error: choose thread or operation, not both", True
+        if wait_seconds:
+            return "error: wait_seconds requires an operation, not a thread", True
         return thread_exchange(arguments, "updates")
+    after = arguments.get("after", "")
+    if not isinstance(after, str) or (after and not re.fullmatch(r"result:[0-9a-f]{64}", after)):
+        return "error: after must be a cursor from an operation result", True
     repo, err = resolve_repo(arguments)
     if err:
         return err, True
@@ -1333,21 +1372,28 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
         return "error: unknown operation: %s" % operation, True
     log = run_dir / "run.log"
     payload = {"operation": operation, "log": str(log)}
+    deadline = time.monotonic() + wait_seconds
+    status, code = run_status(run_dir)
+    while status == "running" and wait_seconds:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(1.0, remaining))
+        status, code = run_status(run_dir)
     try:
         elapsed = time.time() - (run_dir / "prompt.txt").stat().st_mtime
         payload["elapsed_seconds"] = int(elapsed)
     except OSError:
         pass
-
-    status, code = run_status(run_dir)
     if status == "running":
         payload["status"] = "running"
         payload["log_tail"] = log_tail(log)
         payload["next"] = (
-            "Still running. Do other work and poll oms_peer_result again;"
-            " a consultation can take many minutes."
+            "Still running; this read did not cancel or restart the peer."
+            " Do authorized independent work, or reuse this operation with"
+            " wait_seconds=50 (below your host timeout). Avoid status-only loops."
         )
-        return json.dumps(payload, ensure_ascii=False, indent=2), False
+        return peer_result_response(payload, after), False
     if status == "stalled":
         payload["status"] = "stalled"
         payload["log_tail"] = log_tail(log)
@@ -1356,7 +1402,7 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
             " is coming. The log tail says how far it got; start a new"
             " consultation if the question still needs one."
         )
-        return json.dumps(payload, ensure_ascii=False, indent=2), True
+        return peer_result_response(payload, after), True
 
     artifacts, thread = log_references(log)
     sections = []
@@ -1397,7 +1443,7 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
             "the run exited 0 but no answer text could be extracted from its"
             " artifacts; judge by the log tail, not by the clean exit"
         )
-    return json.dumps(payload, ensure_ascii=False, indent=2), code != 0
+    return peer_result_response(payload, after), code != 0
 
 
 def task_run_dir(task_id: object) -> tuple[Path | None, str]:

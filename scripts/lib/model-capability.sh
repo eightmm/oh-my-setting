@@ -344,7 +344,16 @@ oms_capability_models() {
   local file
   file="$(oms_capability_cache_dir)/$provider.models"
   [ -f "$file" ] || return 1
-  cat "$file"
+  # Read normalization also repairs catalogs cached by older installations.
+  # A tab separates the stable ID from a display label; plain spaced names
+  # remain valid for providers whose catalog uses that notation.
+  LC_ALL=C awk -F '\t' '
+    { sub(/\r$/, ""); name=$1; sub(/^[ ]+/, "", name); sub(/[ ]+$/, "", name) }
+    name == "" || name == "Fetching available models..." { next }
+    name ~ /[[:cntrl:]]/ { next }
+    !seen[name]++ { print name; found=1 }
+    END { if (!found) exit 1 }
+  ' "$file"
 }
 
 # A CLI prints its catalog in one notation and accepts another: agy lists

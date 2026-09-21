@@ -45,6 +45,11 @@ def main(path: str) -> None:
     for index, line in enumerate(raw_lines):
         if line == "## Output":
             scan_from = index + 1
+    # agy can exit zero with only this diagnostic, or a partial answer.
+    if any(re.fullmatch(r"\[agy\] print timeout after .+ with turn in progress; returning partial output",
+                        line.strip()) for line in raw_lines[scan_from:]):
+        print("truncated")
+        return
     for line in raw_lines[scan_from:]:
         match = STOP_REASON.match(line.strip())
         if not match:

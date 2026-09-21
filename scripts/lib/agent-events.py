@@ -21,6 +21,7 @@ import re
 import runpy
 import secrets
 import signal
+import stat
 import shutil
 import subprocess
 import sys
@@ -35,9 +36,12 @@ trace_context_helpers = runpy.run_path(
 )
 attach_trace_context = trace_context_helpers["attach_trace_context"]
 persisted_context = trace_context_helpers["persisted_context"]
-process_pid_alive = runpy.run_path(
+process_helpers = runpy.run_path(
     str(Path(__file__).with_name("process_liveness.py"))
-)["pid_alive"]
+)
+process_pid_alive = process_helpers["pid_alive"]
+proc_stat_fields = process_helpers["proc_stat_fields"]
+ledger_helpers = runpy.run_path(str(Path(__file__).with_name("durable-jsonl.py")))
 
 
 SCHEMA = 1
@@ -359,10 +363,7 @@ def lock_snapshot_stale(snapshot: Dict[str, Any], unknown_stale_seconds: int) ->
             # section. Unknown/unreadable state must preserve the owner.
             if sys.platform.startswith("linux"):
                 try:
-                    raw = (Path("/proc") / str(pid) / "stat").read_text(
-                        encoding="utf-8", errors="replace"
-                    )
-                    state = raw[raw.rfind(")") + 2:].split()
+                    state = proc_stat_fields(pid)
                     if state and state[0] in ("Z", "X"):
                         return True
                 except OSError:
@@ -509,21 +510,83 @@ def file_lock(path: Path) -> Iterator[None]:
             pass
 
 
-def read_rows(path: Path) -> List[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: List[Dict[str, Any]] = []
-    with path.open(encoding="utf-8", errors="replace") as handle:
-        for number, line in enumerate(handle, 1):
-            if not line.strip():
-                continue
+@contextlib.contextmanager
+def _ledger_fd(path: Path, *, write: bool = False, private: bool = False) -> Iterator[int]:
+    """Validate the named/opened file before any read, append or chmod."""
+    path = path.absolute()
+    if write:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    parent = path.parent.lstat()
+    if not stat.S_ISDIR(parent.st_mode) or ledger_helpers["is_reparse"](parent):
+        raise OpsError("ledger parent must be a real directory")
+    directory = None
+    fd = None
+    try:
+        if os.name != "nt":
+            directory = os.open(str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                                | getattr(os, "O_NOFOLLOW", 0))
+            if not ledger_helpers["same_file"](parent, os.fstat(directory)):
+                raise OpsError("ledger parent changed before open")
+        try:
+            before = path.lstat()
+        except FileNotFoundError:
+            before = None
+        if before is not None and not ledger_helpers["safe_regular"](before):
+            raise OpsError("ledger must be a regular non-linked file")
+        flags = (os.O_RDWR | os.O_APPEND) if write else os.O_RDONLY
+        if write and before is None:
+            flags |= os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(str(path) if directory is None else path.name, flags,
+                     0o600 if private else 0o644,
+                     **({} if directory is None else {"dir_fd": directory}))
+        opened = os.fstat(fd)
+        if (not ledger_helpers["safe_regular"](opened) or
+                (before is not None and not ledger_helpers["same_file"](before, opened))):
+            raise OpsError("ledger changed before open")
+
+        def check_named() -> None:
             try:
-                row = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise OpsError("%s:%d is not valid JSON: %s" % (path, number, exc)) from exc
-            if not isinstance(row, dict):
-                raise OpsError("%s:%d is not a JSON object" % (path, number))
-            rows.append(row)
+                named_parent, named = path.parent.lstat(), path.lstat()
+            except OSError as exc:
+                raise OpsError("ledger pathname disappeared during access") from exc
+            if (not stat.S_ISDIR(named_parent.st_mode) or ledger_helpers["is_reparse"](named_parent)
+                    or not ledger_helpers["same_file"](parent, named_parent)
+                    or not ledger_helpers["safe_regular"](named)
+                    or not ledger_helpers["same_file"](opened, named)):
+                raise OpsError("ledger pathname changed during access")
+
+        check_named()
+        if private and hasattr(os, "fchmod"):
+            # Windows mode bits do not set an ACL; never chmod a raced pathname.
+            os.fchmod(fd, 0o600)
+        yield fd
+        check_named()
+        if write and directory is not None:
+            os.fsync(directory)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if directory is not None:
+            os.close(directory)
+
+
+def read_rows(path: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    try:
+        with _ledger_fd(path) as fd, os.fdopen(os.dup(fd), encoding="utf-8", errors="replace") as handle:
+            for number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise OpsError("%s:%d is not valid JSON: %s" % (path, number, exc)) from exc
+                if not isinstance(row, dict):
+                    raise OpsError("%s:%d is not a JSON object" % (path, number))
+                rows.append(row)
+    except FileNotFoundError:
+        return []
     return rows
 
 
@@ -553,7 +616,7 @@ def fsync_directory(path: Path) -> None:
 
 
 def _recent_identity_row(
-    path: Path, identity_key: str, identity: Any, *, max_bytes: int = 131072
+    fd: int, identity_key: str, identity: Any, *, max_bytes: int = 131072
 ) -> Optional[Dict[str, Any]]:
     """Best-effort newest same-identity row from the file tail.
 
@@ -565,11 +628,9 @@ def _recent_identity_row(
     there is nothing to inherit, so the parse is skipped entirely.
     """
     try:
-        with path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            handle.seek(max(0, size - max_bytes))
-            data = handle.read(max_bytes)
+        size = os.lseek(fd, 0, os.SEEK_END)
+        os.lseek(fd, max(0, size - max_bytes), os.SEEK_SET)
+        data = os.read(fd, max_bytes)
     except OSError:
         return None
     if not data:
@@ -593,38 +654,21 @@ def _recent_identity_row(
 
 
 def append_row(path: Path, row: Dict[str, Any], *, private: bool = False) -> None:
-    identity_key = "attempt_id" if row.get("attempt_id") else "approval_id" if row.get("approval_id") else ""
-    if identity_key:
-        previous = _recent_identity_row(path, identity_key, row.get(identity_key))
-        attach_trace_context(row, previous)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # A torn, unterminated tail (crash or full disk mid-write) must not eat
-    # this row too: start on a fresh line, so only the fragment is lost.
-    needs_newline = False
-    try:
-        with path.open("rb") as tail:
-            tail.seek(0, os.SEEK_END)
-            if tail.tell() > 0:
-                tail.seek(-1, os.SEEK_END)
-                needs_newline = tail.read(1) != b"\n"
-    except OSError:
+    with _ledger_fd(path, write=True, private=private) as fd:
+        identity_key = "attempt_id" if row.get("attempt_id") else "approval_id" if row.get("approval_id") else ""
+        if identity_key:
+            previous = _recent_identity_row(fd, identity_key, row.get(identity_key))
+            attach_trace_context(row, previous)
+        # Preserve recovery from a torn tail using the same verified handle.
         needs_newline = False
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-    fd = os.open(str(path), flags, 0o600 if private else 0o644)
-    try:
+        if os.lseek(fd, 0, os.SEEK_END) > 0:
+            os.lseek(fd, -1, os.SEEK_END)
+            needs_newline = os.read(fd, 1) != b"\n"
         payload = json_bytes(row) + b"\n"
         if needs_newline:
             payload = b"\n" + payload
         write_all(fd, payload)
         os.fsync(fd)
-    finally:
-        os.close(fd)
-    if private:
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-    fsync_directory(path.parent)
 
 
 def write_json_atomic(path: Path, value: Dict[str, Any], mode: int = 0o600) -> None:
@@ -805,10 +849,6 @@ def project_attempts(rows: Sequence[Dict[str, Any]], *, validate: bool = True) -
     return attempts
 
 
-def next_seq(rows: Sequence[Dict[str, Any]], attempt_id: str) -> int:
-    return 1 + sum(1 for row in rows if row.get("attempt_id") == attempt_id)
-
-
 def existing_idempotent(rows: Sequence[Dict[str, Any]], candidate: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     key = candidate.get("idempotency_key")
     if not key:
@@ -856,7 +896,7 @@ def append_lifecycle(repo: Path, candidate: Dict[str, Any]) -> Dict[str, Any]:
         else:
             if attempt_id not in projection:
                 raise OpsError("unknown attempt: %s" % attempt_id)
-            candidate["seq"] = next_seq(rows, attempt_id)
+            candidate["seq"] = projection[attempt_id]["sequence"] + 1
             if event_type == "attempt.state_changed":
                 old = projection[attempt_id]["state"]
                 new = candidate.get("to_state")
@@ -1241,7 +1281,7 @@ def event_reconcile(args: argparse.Namespace) -> int:
         if args.apply:
             for item in stale:
                 event = new_event(
-                    item["attempt_id"], next_seq(rows, item["attempt_id"]),
+                    item["attempt_id"], item["sequence"] + 1,
                     "attempt.state_changed", from_state=item["state"],
                     to_state="blocked", reason_code="heartbeat_expired",
                     actor={"kind": "reconciler", "name": "agent-events"},

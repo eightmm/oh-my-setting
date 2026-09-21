@@ -210,6 +210,79 @@ finally:
 rows = [json.loads(line) for line in short_path.read_text(encoding="utf-8").splitlines()]
 assert rows == [{"event": "short-write-safe"}], rows
 
+# Read, trace inheritance, tail recovery and private permissions must not
+# follow a linked ledger. These are disposable canaries, not host files.
+canary = base / "canary.jsonl"
+canary.write_text('{"canary":true}\n', encoding="utf-8")
+canary.chmod(0o644)
+before_bytes = canary.read_bytes()
+before_mode = stat.S_IMODE(canary.stat().st_mode)
+for kind in ("symlink", "hardlink"):
+    linked = base / (kind + ".jsonl")
+    try:
+        if kind == "symlink":
+            linked.symlink_to(canary)
+        else:
+            os.link(canary, linked)
+    except OSError:
+        if os.name != "nt":
+            raise
+        continue  # Native Windows may forbid symlink creation for this user.
+    try:
+        for action in (lambda: ae.read_rows(linked),
+                       lambda: ae.append_row(linked, {"attempt_id": "probe"}, private=True)):
+            try:
+                action()
+            except ae.OpsError:
+                pass
+            else:
+                raise AssertionError(kind + " ledger was accepted")
+        assert canary.read_bytes() == before_bytes
+        assert stat.S_IMODE(canary.stat().st_mode) == before_mode
+    finally:
+        linked.unlink()
+
+private_path = base / "private.jsonl"
+private_path.write_bytes(b'{"torn":')
+ae.append_row(private_path, {"event": "recovered"}, private=True)
+assert private_path.read_bytes() == b'{"torn":\n{"event":"recovered"}\n'
+if os.name != "nt":
+    assert stat.S_IMODE(private_path.stat().st_mode) == 0o600
+    # A leaf swapped after lstat must be refused before any write/chmod.
+    raced = base / "raced.jsonl"
+    raced.write_bytes(b'{}\n')
+    original_open = ae.os.open
+    def swapped_open(name, flags, *args, **kwargs):
+        if str(name) == raced.name:
+            raced.unlink()
+            raced.symlink_to(canary)
+        return original_open(name, flags, *args, **kwargs)
+    ae.os.open = swapped_open
+    try:
+        try:
+            ae.append_row(raced, {"attempt_id": "probe"}, private=True)
+        except (ae.OpsError, OSError):
+            pass
+        else:
+            raise AssertionError("raced leaf link was accepted")
+    finally:
+        ae.os.open = original_open
+        raced.unlink()
+    assert canary.read_bytes() == before_bytes
+    assert stat.S_IMODE(canary.stat().st_mode) == before_mode
+
+    # Host ancestry aliases remain supported; a linked direct parent does not.
+    alias = base / "alias"
+    alias.symlink_to(base / "short", target_is_directory=True)
+    try:
+        ae.append_row(alias / "events.jsonl", {"bad": True})
+    except ae.OpsError:
+        pass
+    else:
+        raise AssertionError("linked direct parent accepted")
+    ae.append_row(alias / "nested" / "events.jsonl", {"ok": True})
+    assert ae.read_rows(base / "short" / "nested" / "events.jsonl") == [{"ok": True}]
+
 if os.name != "nt":
     directory_syncs = []
     original_fsync = ae.os.fsync
@@ -422,7 +495,7 @@ with ae.file_lock(path):
     time.sleep(2)
     rows = ae.read_rows(path)
     event = ae.new_event(
-        attempt, ae.next_seq(rows, attempt), "attempt.heartbeat",
+        attempt, ae.project_attempts(rows)[attempt]["sequence"] + 1, "attempt.heartbeat",
         actor={"kind": "runner", "name": "race-holder"},
         idempotency_key="race-fresh-heartbeat",
     )

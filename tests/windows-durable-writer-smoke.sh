@@ -603,4 +603,28 @@ PY
   rm -f "$repo/.oms/artifacts/index.jsonl"
 fi
 
+# The lifecycle writer has a separate torn-tail/private-mode contract, but
+# must exercise its native Windows no-directory-handle branch in this job too.
+python3 - "$ROOT/scripts/lib/agent-events.py" "$repo" <<'PY'
+import os, runpy, sys
+from pathlib import Path
+ae = runpy.run_path(sys.argv[1])
+path = Path(sys.argv[2]) / '.oms/lifecycle/events.jsonl'
+ae['append_row'](path, {'ok': True}, private=True)
+assert ae['read_rows'](path) == [{'ok': True}]
+path.write_bytes(b'{"torn":')
+ae['append_row'](path, {'recovered': True}, private=True)
+assert path.read_bytes() == b'{"torn":\n{"recovered":true}\n'
+linked = path.with_name('linked.jsonl')
+os.link(path, linked)
+try:
+    ae['append_row'](linked, {'bad': True}, private=True)
+except ae['OpsError']:
+    pass
+else:
+    raise AssertionError('hard-linked lifecycle file accepted')
+finally:
+    linked.unlink()
+PY
+
 echo "windows-durable-writer-smoke: ok"

@@ -108,4 +108,16 @@ grep -Fq 'models: gpt-5.6-sol, gpt-5.6-luna' "$text" ||
 grep -Fq 'not routed (previous generation or foreign family): gpt-5.5, gpt-5.3-codex-spark' "$text" ||
   fail "what is not routable must still be visible, and say why: $(cat "$text")"
 
+# Cached ID/display-name rows and progress banners must never become routes.
+printf 'Fetching available models...\r\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\r\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\r\ngemini-3.8-flash-high\tDuplicate\n' > "$gen/antigravity.models"
+PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" bash -c '
+  . "$1/scripts/lib/model-routing.sh"
+  [ "$(oms_model_alternative antigravity gemini-3.8-flash-high)" = gemini-3.8-flash-low ]
+  [ "$(oms_capability_models antigravity | wc -l)" -eq 2 ]
+  oms_model_validate_name "$(oms_model_alternative antigravity provider-default)"
+' _ "$ROOT" || fail 'cached display labels polluted the fallback route'
+PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" "$ROOT/scripts/models.sh" --providers antigravity > "$TMP/normalized.out"
+grep -Fq 'models: gemini-3.8-flash-high, gemini-3.8-flash-low' "$TMP/normalized.out" || fail 'display did not use normalized IDs'
+if grep -Fq 'Fetching available' "$TMP/normalized.out"; then fail 'progress banner appeared as a model'; fi
+
 echo 'models-smoke: ok'

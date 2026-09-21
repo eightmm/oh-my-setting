@@ -229,8 +229,13 @@ head-and-tail excerpt, retaining the leading conclusion and final objections.
 Original artifacts remain linked, and omitted content is marked rather than
 presented as a complete summary. All prompts are prepared before any seat is
 started; a frame too large to retain evidence fails without partial calls.
+Within a round, identical artifact/quota pairs reuse the sanitized excerpt;
+different quotas and later rounds are processed separately. This reduces local
+processing, not the number of model calls or the prompt's token count.
 Round-byte reporting excludes provider-native context, reads, retries and
 synthesis, and must not be reported as measured token savings.
+An agy print-timeout diagnostic is incomplete output even with exit status zero;
+it cannot count as an answered seat, enter a later round, or pass a review gate.
 Excerpts recognize plain and Markdown section headings without treating fenced
 or indented code and `>`-quoted examples as new answers; short sections donate unused space
 to longer ones. Early stopping requires every called seat to answer and its
@@ -330,6 +335,8 @@ Routing is deliberately small:
 or `ultra`, then validates the value against the selected provider/model
 capability snapshot. `oms models` reads the cache; `oms models --refresh` and
 `oms model-doctor` perform explicit probes.
+Cached catalog reads separate tab-delimited model IDs from display labels and
+discard listing banners, so labels cannot leak into automatic recovery routes.
 
 Artifacts record requested and selected models, reasoning effort, fallback use,
 and reason.
@@ -482,6 +489,29 @@ delivery cursor, never a second transcript. Worktrees can address the canonical
 log explicitly with `--repo`; no cross-machine sync or forced live-model
 interruption is implied. MCP reuses `oms_peer_start` message/ack modes and
 `oms_peer_result(thread, after)` without increasing its 12-tool core catalog.
+Operation reads optionally wait up to 50 seconds (`wait_seconds`) for completion
+inside the existing server; log activity does not wake that wait. Default reads
+remain immediate and expiry never cancels or restarts the peer. The host timeout
+must exceed the wait; this serial stdio server cannot handle another request
+until it returns.
+Start responses include `result_arguments` for that bounded read of the same
+operation. Install/update distributes the shared waiting guidance through the
+existing global-rule and skill links; it does not add polling hooks or overwrite
+user-owned Codex `developer_instructions`. Configured ceilings permit longer
+waits but do not enforce agent behavior or prove usage savings.
+Operation results return a content `cursor`; passing it back as `after` omits
+unchanged answer/log bodies while retaining status, exit and artifact references.
+Omit it to reread the full bounded result. Elapsed time alone does not invalidate
+the cursor; changed visible evidence, completion and failure do. This is stateless
+conditional delivery, not automatic completion notification or acknowledgement.
+Worker prompts omit the model catalog: model choice stays with the authorized
+parent through `oms models`, not with non-delegating workers.
+Read-call thread views omit an exactly repeated final question already supplied
+separately; stored turns and earlier decisions stay intact. Repair briefs retain
+the task and required context, but patches over 4 KiB are read from the preserved
+staged worktree instead of embedding another copy. Artifact telemetry records
+primary `prompt_bytes` separately from reported tokens and wall time; provider
+context and retry/repair inputs are not included in this byte metric.
 The detailed operating contract is in the harness state-memory reference.
 
 ## Plans and bounded autonomy
@@ -696,6 +726,11 @@ graph runs; existing comparison history is preserved.
 
 ## Durable operations and optional frontends
 
+Lifecycle and approval JSONL access rejects linked leaves/direct parents and
+checks named/opened file identity. Trace-tail reads, append and POSIX private
+permissions use the same verified handle; torn-tail recovery remains intact.
+Host ancestry aliases remain supported. This is not a same-user filesystem sandbox.
+
 | Front door | Actual boundary |
 |---|---|
 | `agent-events`, `agent-supervisor` | Append-only attempt lifecycle and bounded `trusted-local` execution. Resume creates a child attempt; reconcile closes stale supervisor-owned queues that lost their runtime record. The supervisor never lands, commits, or pushes. |
@@ -798,11 +833,13 @@ ML/Slurm workflows use local-first experiment controls:
 - `oms run-reconcile`, `oms job-digest`, and `oms tsp-queue` for Slurm or local
   GPU work. `oms job-digest <id> --wait --wait-timeout S --max-bytes N` keeps
   the scheduler polling inside one shell call instead of repeated model turns:
-  a spent budget exits 124 with the job marked pending and untouched, the
+  a spent budget exits 124 with observation incomplete and the job untouched, the
   digest is capped to whole lines with the omission stated, and a repeating
   controller error is reported once plus a total. Leaving the queue or empty
   accounting is reported as unknown, never as success. Where GNU `timeout` is
-  absent (BSD/macOS) a hung `squeue` is not preempted; only sleeps are bounded.
+  present, both `squeue` and `sacct` use the remaining observation budget, with
+  a one-second kill grace. Expired budgets skip accounting. Without GNU `timeout`
+  (BSD/macOS), scheduler calls cannot be preempted; only sleeps are bounded.
 
 Machine, cluster, dataset, and run details stay local unless the user explicitly
 chooses a connector or tracked summary.

@@ -38,10 +38,20 @@ a requested split or missing decision to the existing parent. Use shared OMS
 task/lease/artifact references, not a Codex-only conversation identifier, for
 cross-provider coordination. Native app threads remain an optional local UI.
 
-For each worker, supply one outcome, relevant paths/current source references,
-constraints, a verifier, and when to stop or return a decision. Respect the
-detached-context boundary below and keep code in files/patches.
-Give workers a bounded brief and a role when useful;
+For each worker, supply the outcome, relevant source paths, constraints/authority,
+verified facts versus uncertainty, a verifier, and a concise return contract.
+Default to fresh context: when native `spawn_agent` offers `fork_turns`, explicitly
+use `"none"`; omitting it may inherit the whole parent context. Use recent turns
+or full history only when requested or necessary, explaining why a brief is
+insufficient. Preserve applicable instructions, not unrelated conversation.
+Let the worker inspect referenced source; add missing context selectively.
+Repair calls remain fresh: retain the original brief and required evidence.
+Large previous patches are referenced through the preserved worktree/index,
+not replayed in full; the verifier failure remains inline. Conversation views
+omit only an exactly repeated final question already supplied in the new brief,
+never earlier decisions or unresolved objections from the stored log.
+Respect the detached-context boundary below and keep code in files/patches.
+Give workers a role when useful;
 the parent owns admission, verification, commit, push and
 synthesis. Match workers to the task: session-model judgment for uncertain
 decisions, cheaper workers for bounded routine analysis. See
@@ -52,6 +62,7 @@ disjoint work with useful parent work alongside it. Reuse an already-running
 collaborator through its thread instead of starting a duplicate.
 
 When delegating, briefly state what the parent retains and who owns each slice.
+For host-bounded waits and peer notifications, see [efficient-waiting.md](efficient-waiting.md).
 The parent admits the result and verifies behavior; uncertainty, permission,
 quota, or repeated failure returns control instead of causing an unbounded
 provider switch. Existing routing recovery and frozen routes remain unchanged.
