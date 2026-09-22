@@ -144,7 +144,9 @@ jobs:
               --ci-output "$GITHUB_OUTPUT"
           else
             echo 'mode=full' >> "$GITHUB_OUTPUT"
-            printf '\n### OMS verification selection\n\nFull check: scheduled/manual run or unavailable base revision.\n' >> "$GITHUB_STEP_SUMMARY"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '\n### OMS verification selection\n\nFull check: scheduled/manual run or unavailable base revision.\n' >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
 
   # Exercise the same install -> update -> uninstall contract on every
