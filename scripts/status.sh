@@ -306,6 +306,34 @@ PY
 
 load_user_tool_paths
 
+checkout_alignment() {
+  local workspace source_head installed_head source_changes installed_changes alignment
+  workspace="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  workspace="${workspace//$'\r'/}"
+  if [ ! -f "$workspace/scripts/oms" ] || [ ! -f "$workspace/rules/global-AGENTS.md" ]; then
+    workspace="$ROOT"
+  fi
+  workspace="$(cd "$workspace" && pwd -P)"
+  source_head="$(git -C "$workspace" rev-parse HEAD 2>/dev/null || printf unknown)"
+  installed_head="$(git -C "$INSTALL_ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
+  source_head="${source_head//$'\r'/}"
+  installed_head="${installed_head//$'\r'/}"
+  source_changes="$(git -C "$workspace" status --porcelain --untracked-files=normal 2>/dev/null | wc -l | tr -d ' \r')" || source_changes=unknown
+  installed_changes="$(git -C "$INSTALL_ROOT" status --porcelain --untracked-files=normal 2>/dev/null | wc -l | tr -d ' \r')" || installed_changes=unknown
+  alignment=unknown
+  if [ "$RECEIPT_STATE" = valid ] && [ "$source_head" != unknown ] && [ "$installed_head" != unknown ] &&
+      [ "$source_changes" != unknown ] && [ "$installed_changes" != unknown ]; then
+    if [ "$installed_changes" != 0 ]; then alignment=installed-uncommitted
+    elif [ "$source_changes" != 0 ]; then alignment=pending-source-changes
+    elif [ "$source_head" != "$installed_head" ]; then alignment=different-revision
+    else alignment=in-sync; fi
+  fi
+  printf '\n## Checkout Alignment\n\n'
+  printf -- '- workspace_root: %s\n- workspace_commit: %s\n- workspace_changed_entries: %s\n' "$workspace" "$source_head" "$source_changes"
+  printf -- '- installed_root: %s\n- installed_actual_commit: %s\n- installed_changed_entries: %s\n' "$INSTALL_ROOT" "$installed_head" "$installed_changes"
+  printf -- '- alignment: %s (checkout state; not plugin-cache or verification proof)\n' "$alignment"
+}
+
 printf '# oh-my-setting status\n\n'
 printf -- '- root: %s\n' "$ROOT"
 if [ -f "$ROOT/VERSION" ]; then
@@ -347,6 +375,8 @@ case "$RECEIPT_STATE" in
     printf -- '- expected_root: %s\n' "$ROOT"
     ;;
 esac
+
+checkout_alignment
 
 printf '\n## Agent config links\n\n'
 link_status "$HOME/.codex/AGENTS.md" "$INSTALL_ROOT/rules/global-AGENTS.md"

@@ -366,7 +366,7 @@ if [ -n "$THREAD_ID" ] && [ "$EXPORT_ONLY" -eq 0 ]; then
   if [ ! -f "$REPO/.oms/threads/$THREAD_ID.jsonl" ]; then
     bash "$(ma_scripts_dir)/thread.sh" --repo "$REPO" --id "$THREAD_ID" new --live --topic 'Council' >/dev/null || fail 'cannot open council thread'
   fi
-  bash "$(ma_scripts_dir)/thread.sh" --repo "$REPO" --id "$THREAD_ID" context >/dev/null || fail 'council thread is not open'
+  bash "$(ma_scripts_dir)/thread.sh" --repo "$REPO" --id "$THREAD_ID" context --require-open >/dev/null || fail 'council thread is not open'
   echo "thread: $THREAD_ID"
 fi
 write_prompt "$prompt_file" "$REPO" "$PROMPT" "$status_file" "$diff_file"

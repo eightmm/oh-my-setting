@@ -53,6 +53,25 @@ repeat or expand only for changed inputs, failures, or unresolved risk. A
 documentation-only edit does not justify unrelated test runs, but cannot waive
 a declared full or release gate. Report any required check not run.
 
+Keep routine PR/push verification a small CPU gate plus affected tests, with
+an expected runtime recorded in `PROJECT.md`. A few minutes is a planning
+target, not permission to skip required checks or time out valid workloads.
+Use existing native selection before adding another runner. Uncertainty widens
+to the affected subsystem when its boundary is known; otherwise use the broader
+project gate. New CI jobs, matrices and test files need a distinct risk they
+cover, not a feature-count target. Combine repeated setup and duplicate
+assertions; retain distinct regression cases. Keep real-process/platform tests
+at genuine boundaries rather than repeating every behavior end-to-end.
+
+Put GPU/training, external downloads, exhaustive data and compatibility checks
+behind relevant-change, release, scheduled or explicit triggers as the project
+contract permits. Avoid running the same suite on both branch push and PR;
+keep required status checks reporting for documentation-only changes too.
+Cancel superseded checks in the same workflow/event/ref, not deployment work
+or another event's release evidence. Parallelism lowers wall time, not test
+count or necessarily total runner cost. Cache dependencies by their lockfile,
+never treat a stale test result as verification of a new revision.
+
 Keep one primary test layer per behavior and use thinner smoke checks only for
 real serialization, process, install, platform, or trust boundaries. Graph
 relationships are positive reuse evidence, not proof that an omitted test is

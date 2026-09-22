@@ -1121,7 +1121,7 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
             # the detached child's startup must not race the first user note.
             thread_args = ["bash", str(ROOT / "scripts/thread.sh"), "--repo", str(repo), "--id", thread]
             if (repo / ".oms" / "threads" / (thread + ".jsonl")).exists():
-                thread_args += ["context"]
+                thread_args += ["context", "--require-open"]
             else:
                 thread_args += ["new", "--live", "--topic", "Council"]
             prepared = subprocess.run(thread_args, capture_output=True, text=True, timeout=5)

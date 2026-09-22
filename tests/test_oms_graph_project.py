@@ -342,8 +342,29 @@ class ProjectGraphTest(unittest.TestCase):
         self.write("docs/note.md", "# note\n")
         self.write(".github/workflows/test.yml", "name: test\n")
         self.write("nested/AGENTS.md", "# policy\n")
+        self.write("prompts/system.md", "# runtime prompt\n")
+        self.write("scripts/untested.sh", "echo untested\n")
         graph = Graph(self.graph())
         self.assertEqual(affected_plan(graph, ["docs/note.md"])["mode"], "affected")
+        # Unindexed prose must not widen an otherwise covered code change.
+        mixed = affected_plan(graph, ["scripts/a.sh", "docs/usage.rst"])
+        self.assertEqual(mixed["mode"], "affected")
+        self.assertEqual(mixed["tests"], selected["tests"])
+        self.assertEqual(mixed["documentation_paths"], ["docs/usage.rst"])
+        docs = affected_plan(graph, ["README.md", "docs/usage.rst"])
+        self.assertEqual(docs["mode"], "affected")
+        self.assertEqual(docs["tests"], [])
+        for path in ("fixtures/input.txt", "prompts/system.md", "docs/AGENTS.md", "docs/demo.py"):
+            with self.subTest(unindexed=path):
+                self.assertEqual(affected_plan(graph, ["scripts/a.sh", path])["mode"], "full")
+        partially_tested = affected_plan(graph, ["scripts/a.sh", "scripts/untested.sh"])
+        self.assertEqual(partially_tested["mode"], "full")
+        self.assertIn("no-tests:scripts/untested.sh", partially_tested["reasons"])
+        self.assertEqual(affected_plan(graph, ["README.md"], workspace_exact=False)["mode"], "full")
+        self.assertEqual(affected_plan(graph, ["docs/usage.rst"],
+                                       boundary_patterns=("docs/*",))["mode"], "full")
+        self.assertEqual(affected_plan(graph, ["README.md"], changes=[
+            {"path": "README.md", "old_path": "source.py", "status": "R"}])["mode"], "full")
         boundary = affected_plan(graph, [".github/workflows/test.yml"])
         self.assertEqual(boundary["mode"], "full")
         self.assertIn("boundary:.github/workflows/test.yml", boundary["reasons"])

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${OMS_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+if [ "${OMS_SMOKE_RUNNER_ACTIVE:-0}" != 1 ]; then
+  OMS_SMOKE_SUITE="$ROOT/tests/autonomy-plan-run-smoke.sh" exec "$ROOT/tests/run-smoke-shard.sh" "$@"
+fi
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-plan-run-tests.XXXXXX")"
 trap '[ "${KEEP_TMP:-0}" = 1 ] || rm -rf "$TMP"' EXIT HUP INT TERM
 
@@ -84,6 +87,7 @@ chmod +x "$bin/codex"
 PLAN="$ROOT/scripts/agent-plan.sh"
 RUN="$ROOT/scripts/plan-run.sh"
 
+test_plan_lifecycle() {
 # A parent transport is not a worker identity. Preserve reviewed routes in
 # atomic claims, dry-run, and direct peer hydration without calling real CLIs.
 assignment_repo="$TMP/assignment-repo"
@@ -810,6 +814,9 @@ assert row["plan_id"] != plan["plan_id"], (row, plan)
 PY
   fail "delegation borrowed a replacement plan lineage after its verifier"
 
+}
+
+test_context_pack() {
 # --- --context-pack: typed Project Graph orientation, never a write scope ----
 # The pack says where to look; the brief's allowed_paths stay the only place a
 # worker may write. It is validated as a typed input before anything is
@@ -943,17 +950,20 @@ grep -Eq '^plan-run: context-pack=.*/valid\.json files=2 sha256=[0-9a-f]{64}$' \
   fail "the dry run did not print the context-pack line: $(tail -3 "$TMP/cp-dry.out")"
 
 # 4. peer-delegate is a public front door: it renders and revalidates the pack
-#    on its own, without plan-run in front of it.
+#    on its own, without plan-run in front of it; explicit packs take precedence.
 : > "$TMP/cp-direct-prompt.txt"
 PROMPT_DUMP="$TMP/cp-direct-prompt.txt" HOME="$home" PATH="$bin:/usr/bin:/bin" \
   "$ROOT/scripts/peer-delegate.sh" --repo "$pack_repo" --to codex --no-verify \
-  --prompt 'direct orientation check' --context-pack "$packs/valid.json" \
+  --prompt 'direct orientation check' --graph-context --context-pack "$packs/valid.json" \
   >"$TMP/cp-direct.out" 2>&1 ||
   fail "direct peer-delegate --context-pack failed: $(tail -5 "$TMP/cp-direct.out")"
 grep -Fq '## Project Graph orientation' "$TMP/cp-direct-prompt.txt" ||
   fail "direct peer-delegate rendered no orientation section"
 grep -Fq -- '- scripts/check.sh  (query:file)' "$TMP/cp-direct-prompt.txt" ||
   fail "direct peer-delegate dropped the pack files"
+if grep -Fq 'Graph source: detached worker snapshot' "$TMP/cp-direct-prompt.txt"; then
+  fail "graph preparation replaced an explicit context pack"
+fi
 cp_direct_rc=0
 : > "$TMP/cp-calls"
 CALL_LOG="$TMP/cp-calls" HOME="$home" PATH="$bin:/usr/bin:/bin" \
@@ -993,8 +1003,21 @@ assert targets == ["README.md", "tests/run.sh"], targets
 assert {"README.md", "tests/run.sh"} <= selected, selected
 assert manifest.get("sufficient") is True, manifest.get("missing_required")
 assert not manifest.get("missing_required"), manifest.get("missing_required")
+from pathlib import Path
+index = Path(sys.argv[1]).parents[2] / 'artifacts/index.jsonl'
+rows = [json.loads(line) for line in index.read_text(encoding='utf-8').splitlines()]
+row = next(row for row in reversed(rows) if row.get('kind') == 'delegate')
+assert row['context_mode'] == 'pack+bundle', row
+assert row['context_orientation_bytes'] > 0 and row['context_prepare_seconds'] >= 0, row
+assert row['context_bundle_sha256'] and row['context_selected_bytes'] > 0, row
 PY
 grep -Fq 'ORIENTATION-FILE-BODY' "$TMP/cp-manifest-prompt.txt" ||
   fail "the compiled bundle did not deliver the pack file's bytes to the worker"
 
+}
+
+# SMOKE_TEST_CALLS_BEGIN
+test_plan_lifecycle
+test_context_pack
+# SMOKE_TEST_CALLS_END
 echo "autonomy-plan-run-smoke: ok"

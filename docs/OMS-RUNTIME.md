@@ -196,8 +196,10 @@ This is intentionally not a mandatory compiler for every interactive turn.
 It is suited to delegated implementation and review boundaries where context
 reproducibility matters.
 
-Ordinary `peer-delegate` calls automatically attach bounded graph file/test
-pointers, not source bytes. Preparation uses the detached snapshot and a private
+Ordinary `peer-delegate` calls skip graph preparation. `--graph-context` opts in
+when relationships or change impact are unclear; known local scope uses direct
+source discovery. The opt-in attaches bounded file/test pointers, not source
+bytes. Preparation uses the detached snapshot and a private
 cache: a coherent parent graph/manifest can be copied but is never rewritten.
 Fresh private copies receive one freshness scan; only stale or missing copies
 take the build/refresh path followed by validation.
@@ -207,7 +209,17 @@ Tracked or unignored cache targets are refused without overwriting existing igno
 Timeout (10 seconds plus one for termination), errors and no matches fall back
 to a direct-source inspection instruction. Explicit `--context-pack` takes
 precedence; `--no-graph-context`, `OMS_GRAPH_AUTOBUILD=0` and dry runs disable
-automatic preparation. No extra provider call or session hook is involved.
+preparation. No extra provider call or session hook is involved.
+
+Delegation rows record `context_mode` (direct, pack, graph, graph-fallback,
+or a bundle combination), `context_prepare_seconds` (whole-second preparation
+time) and `context_orientation_bytes`. Join these with existing `prompt_bytes`,
+provider usage and verification outcomes; bytes are not tokens or proven savings.
+Unavailable usage remains unknown. Pack validation and prompt rendering share
+one Python invocation; source bundles retain their separate explicit contract.
+Delegation also records a content-free task/verifier/run-cap digest and whether
+verification was requested, absent or a dry run. A zero no-verify exit is not
+a passed test in context-effectiveness reporting.
 
 `oms peer-delegate --context-manifest` compiles from the worker's detached
 `HEAD`, appends that exact bundle to the initial and repair prompts, and records
@@ -502,6 +514,14 @@ cannot be inferred mechanically, such as escaped defects, human corrections,
 false refusals, reverted lines, and duplicate work. Once recorded through the
 existing manual-outcome path, `benchmark compare` includes their deltas beside
 the mechanically collected metrics.
+
+Benchmark model totals are null when unmeasured, with per-metric sample counts;
+partial input-only usage is not a total-token measurement. `delegation_context`
+groups preparation time, orientation/prompt bytes, usage and mechanical check
+outcomes by context mode. Its matched cohorts require the same task/verifier/cap
+digest, base, provider, attributable model and effort. Missing identity, fallback,
+dry-run and no-verify calls cannot support that comparison. Even matched cohorts
+are observational, not causal savings or a reason for automatic model routing.
 
 ## Optional interoperability adapters
 

@@ -6,6 +6,8 @@
 #   gpu       Short GPU smoke; wrapped in a transient srun on Slurm machines.
 # Fill the TODO blocks as the project takes shape. An empty contract fails
 # loudly on purpose -- never let "no checks" look like a pass.
+# Run project Setup (uv sync) first; CI syncs from its lockfile once. Checks
+# reuse that environment rather than resolving/installing dependencies again.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -19,24 +21,24 @@ run_fast() {
   [ -d scripts ] && dirs+=(scripts)
 
   if [ "${#dirs[@]}" -gt 0 ] && [ -f pyproject.toml ] && command -v uv >/dev/null 2>&1; then
-    uv run python -m compileall -q "${dirs[@]}"
+    uv run --no-sync python -m compileall -q "${dirs[@]}"
     ran=1
   fi
   if [ -f pyproject.toml ] && command -v uv >/dev/null 2>&1 &&
-    uv run ruff --version >/dev/null 2>&1; then
-    uv run ruff check .
+    uv run --no-sync ruff --version >/dev/null 2>&1; then
+    uv run --no-sync ruff check .
     ran=1
   fi
 
   if [ "$#" -gt 0 ]; then
     command -v uv >/dev/null 2>&1 || { echo "selected tests require the project uv environment" >&2; exit 1; }
-    uv run python -m pytest -q "$@"
+    uv run --no-sync python -m pytest -q "$@"
     ran=1
   fi
 
   # TODO project: add an import smoke and a 1-batch forward/backward on
   # synthetic data (<60s, CPU), e.g.:
-  #   uv run python -c "from <package>.models import <Model>; ..."
+  #   uv run --no-sync python -c "from <package>.models import <Model>; ..."
 
   if [ "$ran" -eq 0 ]; then
     echo "check fast: no checks ran; configure scripts/check.sh" >&2
@@ -49,7 +51,7 @@ run_ml_smoke() {
   local ran=0
 
   if [ -f scripts/ml_smoke.py ] && [ -f pyproject.toml ] && command -v uv >/dev/null 2>&1; then
-    uv run python scripts/ml_smoke.py
+    uv run --no-sync python scripts/ml_smoke.py
     ran=1
   elif [ -f scripts/ml_smoke.py ]; then
     python3 scripts/ml_smoke.py

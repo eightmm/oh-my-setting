@@ -816,8 +816,16 @@ cases, path coverage, and whether a finite depth truncated the closure.
 explicit depth is diagnostic-only for selection: if it truncates, the plan is
 `mode: full`, never a silently incomplete affected set. Selection follows only
 `EXTRACTED` edges; `INFERRED`/`AMBIGUOUS` frontier counts are diagnostic. An
-unmatched path or a non-document change with no extracted runnable test still
-falls back to the complete gate.
+unmatched executable/data/policy path or a non-document change with no extracted
+runnable test still falls back to the complete gate. Ordinary README/CHANGELOG/
+CONTRIBUTING prose and Markdown/reStructuredText/AsciiDoc under `doc/` or `docs/`
+are listed separately as `documentation_paths` (text: `documentation:`).
+Missing prose nodes do not widen otherwise covered code changes to the full
+suite; the caller still runs its documentation checks. Extracted dependents of
+documents are retained. Policy boundaries, data fixtures, prompts, dirty state,
+deletions and renames remain conservative; a `.txt` suffix is not proof of prose.
+Each non-document changed path needs its own extracted route to a selected
+test; one covered file does not hide another changed file's missing evidence.
 
 Co-change coupling (`history.py`): `oms graph project coupling` reads the last
 N commits (`--commits`, default 500, `--no-merges`, commits touching more than
@@ -1012,6 +1020,10 @@ a value may never start with `-`. Output stays under the server's
 
 ## Tests
 
+- `tests/autonomy-plan-run-smoke.sh --only test_context_pack` checks the
+  existing pack/worker boundary without running unrelated plan lifecycle cases.
+  The default still runs both groups; the affected gate can select either from
+  positive graph evidence. No additional CI job is required.
 - `tests/test_oms_graph_exec.py`: validator (every error code), evaluator
   (initial, completed, failed, unverified, partial/repeat, budget exhaustion,
   unknown node, unreachable, cycle without stop policy, terminal correctness,

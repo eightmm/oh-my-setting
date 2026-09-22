@@ -122,23 +122,54 @@ EOF_PLAN
   fi
 fi
 
-# Newest handoff digest, capped at 72h: old enough to survive an overnight
-# gap, young enough not to anchor a new week on stale context. Pointer only —
-# the digest is one `show` away and inlining it would blow the line budget.
-newest_handoff="$(find "$cwd/.oms/handoffs" -maxdepth 1 -name '*.md' -mmin -4320 2>/dev/null |
-  xargs -r ls -t 2>/dev/null | head -n 1)"
-if [ -n "$newest_handoff" ]; then
-  name="$(basename "$newest_handoff")"
-  age_h="$(python3 -c '
-import os, sys, time
+# Prefer the current task over recency. Legacy/other-task digests stay readable,
+# but never silently become the current task's continuation.
+handoff_line="$(python3 - "$cwd" "${task_id:-}" "${task_status:-}" <<'PY'
+import hashlib, pathlib, re, shlex, subprocess, sys, time
+repo = pathlib.Path(sys.argv[1])
+active = sys.argv[2] if sys.argv[3] != 'closed' else ''
+root = repo / '.oms/handoffs'
+if any(p.is_symlink() for p in (root, *root.parents)):
+    raise SystemExit(0)
 try:
-    print(int((time.time() - os.path.getmtime(sys.argv[1])) // 3600))
-except Exception:
-    print("?")
-' "$newest_handoff" 2>/dev/null)" || age_h="?"
-  age_h="${age_h//$'\r'/}"
-  append "- handoff (${age_h}h old): oms session-handoff show $name"
-fi
+    head = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], stderr=subprocess.DEVNULL, text=True).strip()
+except (OSError, subprocess.CalledProcessError):
+    head = ''
+task_digest = ''
+task = repo / '.oms/task/current.md'
+try:
+    if not any(p.is_symlink() for p in (task, *task.parents)):
+        with task.open('rb') as handle:
+            raw = handle.read(65537)
+        if len(raw) <= 65536:
+            task_digest = hashlib.sha256(raw).hexdigest()
+except OSError:
+    pass
+best = None
+for path in root.glob('*.md'):
+    try:
+        if path.is_symlink() or not path.is_file():
+            continue
+        stamp = path.stat().st_mtime
+        if time.time() - stamp > 72 * 3600:
+            continue
+        with path.open(encoding='utf-8') as handle:
+            header = handle.read(4096)
+        meta = dict(re.findall(r'^- (task_id|head|task_digest): ([^\r\n]+)$', header, re.M))
+        matched = bool(active and meta.get('task_id') == active)
+        current = matched and bool(head) and meta.get('head') == head and meta.get('task_digest') == task_digest
+        label = 'current task snapshot; recheck source' if current else 'same task, recheck changed state' if matched else 'historical/unbound reference'
+        candidate = (int(matched), int(current), stamp, path.name, label)
+        if best is None or candidate[:4] > best[:4]:
+            best = candidate
+    except (OSError, ValueError):
+        continue
+if best:
+    print('- handoff (%s; %dh old): oms session-handoff show %s' % (best[4], max(0, int((time.time() - best[2]) // 3600)), shlex.quote(best[3])))
+PY
+)" || handoff_line=""
+handoff_line="${handoff_line//$'\r'/}"
+[ -z "$handoff_line" ] || append "$handoff_line"
 
 # Latest imported portable capsule: validated through the runtime projection so
 # a stale pointer, tampered digest, or authority-bearing payload never becomes
@@ -228,5 +259,19 @@ case "$au_line" in
 esac
 
 [ -n "$out" ] || exit 0
-printf '[oms resume] %s\n%s- more: oms state\n' "$(basename "$cwd")" "$out"
+printf '[oms resume] %s\n%s' "$(basename "$cwd")" "$out" |
+  python3 -c '
+import os, sys
+try:
+    cap = max(512, min(16384, int(os.environ.get("OMS_RESUME_MAX_BYTES", "4096"))))
+except ValueError:
+    cap = 4096
+text = sys.stdin.read().replace("\r", "")
+footer = "- more: oms state\n"
+raw = text.encode("utf-8")
+if len(raw) + len(footer.encode()) > cap:
+    footer = "\n[resume truncated; inspect current state]\n" + footer
+    text = raw[:cap - len(footer.encode())].decode("utf-8", errors="ignore")
+sys.stdout.buffer.write((text + footer).encode("utf-8"))
+' | tr -d '\r'
 exit 0

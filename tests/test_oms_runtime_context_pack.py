@@ -179,6 +179,18 @@ class ContextPackValidatorTest(unittest.TestCase):
         self.assertEqual(ok.returncode, 0, ok.stderr)
         self.assertEqual(json.loads(ok.stdout)["file_count"], 2)
 
+        rendered = subprocess.run([sys.executable, str(MODULE), "--shell-view", "--repo", str(self.repo), str(path)],
+                                  cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        lines = rendered.stdout.splitlines()
+        count, digest, size = lines[0].split('\t')
+        self.assertEqual((count, digest), ('2', json.loads(ok.stdout)['sha256']))
+        self.assertEqual(lines[1:4], ['2', 'scripts/plan-run.sh', 'scripts/peer-delegate.sh'])
+        section = '\n'.join(lines[4:])
+        self.assertEqual(int(size), len(section.encode('utf-8')))
+        self.assertIn('- scripts/plan-run.sh  (query:file)', section)
+        self.assertIn('- test_context_pack  (shell, tests/autonomy-plan-run-smoke.sh)', section)
+
         self.write(_pack(files=["/etc/passwd"]))
         bad = subprocess.run([sys.executable, str(MODULE), "--repo", str(self.repo), str(path)],
                              cwd=self.repo, capture_output=True, text=True)
@@ -186,6 +198,10 @@ class ContextPackValidatorTest(unittest.TestCase):
         self.assertEqual(bad.stdout, "")
         self.assertTrue(bad.stderr.strip())
         self.assertNotIn("Traceback", bad.stderr)
+        bad_view = subprocess.run([sys.executable, str(MODULE), "--shell-view", "--repo", str(self.repo), str(path)],
+                                  cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(bad_view.returncode, 2)
+        self.assertEqual(bad_view.stdout, '')
 
         usage = subprocess.run([sys.executable, str(MODULE), str(path)], cwd=self.repo,
                                capture_output=True, text=True)

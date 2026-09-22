@@ -352,6 +352,49 @@ print("LAST_ASSISTANT\t(antigravity assistant output not available from history.
 PY
 }
 
+current_snapshot() {
+  local repo task status=""
+  repo="$(oms_repo_root "$1" 2>/dev/null || printf '%s' "$1")"
+  task="$repo/.oms/task/current.md"
+  if [ -f "$task" ] && [ ! -L "$task" ]; then
+    status="$("$ROOT/scripts/agent-task.sh" --repo "$repo" status 2>/dev/null || true)"
+  fi
+  python3 - "$repo" "$status" <<'PY'
+import hashlib, pathlib, re, subprocess, sys
+repo, status = pathlib.Path(sys.argv[1]), sys.argv[2]
+meta = dict(line.split(': ', 1) for line in status.splitlines() if ': ' in line)
+try:
+    head = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], stderr=subprocess.DEVNULL, text=True).strip()
+except (OSError, subprocess.CalledProcessError):
+    head = 'unknown'
+print('- head: ' + head)
+task = repo / '.oms/task/current.md'
+try:
+    if any(p.is_symlink() for p in (task, *task.parents)):
+        raise ValueError('linked packet')
+    with task.open('rb') as handle:
+        raw = handle.read(65537)
+    if len(raw) > 65536:
+        raise ValueError('oversized packet')
+    text = raw.decode('utf-8')
+except (OSError, ValueError):
+    text, raw = '', b''
+print('- task_id: ' + meta.get('task_id', 'unknown'))
+print('- task_digest: ' + (hashlib.sha256(raw).hexdigest() if raw else 'unknown'))
+print('- verification: ' + meta.get('verification', 'unknown'))
+print('\n## Current task snapshot (advisory)\n')
+if not text or meta.get('status') == 'closed':
+    print('No active task snapshot; use the recent request and recheck current state.\n')
+else:
+    sections = dict(re.findall(r'^## ([^\n]+)\n(.*?)(?=^## |\Z)', text, re.M | re.S))
+    for name, label in [('Goal', 'Goal'), ('Current State', 'Completed / remaining (recorded)'),
+                        ('Verification', 'Verification evidence (recorded)'), ('Next Step', 'Next action')]:
+        value = ' '.join(sections.get(name, '').split())
+        print('- %s: %s' % (label, (value[:700] + (' [truncated]' if len(value) > 700 else '')) or 'not recorded'))
+    print('\nRecheck the current packet and source before acting; this is not fresh verification.\n')
+PY
+}
+
 render_digest() {
   # Read TAB-separated extractor lines on stdin, emit markdown.
   local agent="$1"
@@ -367,6 +410,9 @@ render_digest() {
   printf -- '- cwd: %s\n' "$cwd"
   printf -- '- source: %s\n' "$source"
   [ -n "$note" ] && printf -- '- note: %s\n' "$note"
+  printf -- '- verification_observed_at: %s\n' "$ts"
+  printf -- '- assistant_summary: unverified claim\n'
+  printf '%s\n' "$7"
   printf '\n'
 
   local goal="" last="" user_count=""
@@ -384,7 +430,8 @@ render_digest() {
     esac
   done
 
-  printf '## Goal (first user turn)\n\n%s\n\n' "$goal"
+  printf '## Last assistant summary\n\n%s\n\n' "$last"
+  printf '## Original request (historical)\n\n%s\n\n' "$goal"
   printf '## Recent user turns'
   [ -n "$user_count" ] && printf ' (last %d of %s)' "${#users[@]}" "$user_count"
   printf '\n\n'
@@ -407,7 +454,6 @@ render_digest() {
     done
     printf '\n'
   fi
-  printf '## Last assistant summary\n\n%s\n' "$last"
 }
 
 # A digest is what the next session resumes from, and a checkpoint is state
@@ -649,8 +695,11 @@ cmd_capture() {
   # rendered digest, whose header carries our own machine paths (cwd/source)
   # and would otherwise self-block every real capture. Block by default since
   # the digest is meant to be loaded into another, possibly external, agent.
+  local task_snapshot
+  task_snapshot="$(current_snapshot "$CWD")"
+  task_snapshot="${task_snapshot//$'\r'/}"
   SCAN_FILE="$(mktemp)" || fail "mktemp failed"
-  { printf '%s\n' "$extract"; printf '%s\n' "$NOTE"; } > "$SCAN_FILE"
+  { printf '%s\n' "$extract"; printf '%s\n' "$NOTE"; printf '%s\n' "$task_snapshot"; } > "$SCAN_FILE"
   if agent_memory_file_has_secret_content "$SCAN_FILE"; then
     rm -f "$SCAN_FILE"; SCAN_FILE=""
     if [ "${ALLOW_SENSITIVE:-0}" = 1 ]; then
@@ -666,6 +715,7 @@ cmd_capture() {
     rm -f "$SCAN_FILE"; SCAN_FILE=""
     extract="$(printf '%s\n' "$extract" | agent_memory_normalize_machine_paths)"
     NOTE="$(printf '%s' "$NOTE" | agent_memory_normalize_machine_paths)"
+    task_snapshot="$(printf '%s' "$task_snapshot" | agent_memory_normalize_machine_paths)"
   else
     rm -f "$SCAN_FILE"; SCAN_FILE=""
   fi
@@ -688,10 +738,10 @@ cmd_capture() {
   fi
 
   printf '%s\n' "$extract" |
-    render_digest "$AGENT" "$source" "$session_id" "$CWD" "$NOTE" "$ts" > "$out"
+    render_digest "$AGENT" "$source" "$session_id" "$CWD" "$NOTE" "$ts" "$task_snapshot" > "$out"
   append_resume_contract "$CWD" "$out" || true
   handoff_hash="$(
-    printf '%s\n%s\n' "$extract" "$NOTE" |
+    printf '%s\n%s\n%s\n' "$extract" "$NOTE" "$task_snapshot" |
       oms_sha256_stream 2>/dev/null || printf 'unhashed'
   )"
   work_journal_observe "$CWD" session-handoff "$out" \

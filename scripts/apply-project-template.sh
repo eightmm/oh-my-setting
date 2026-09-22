@@ -223,6 +223,7 @@ project_content() {
   printf -- '- Success criteria:\n'
   printf -- '- Affected checks:\n'
   printf -- '- Always-run checks:\n'
+  printf -- '- CI scope/runtime:\n'
   printf -- '- Required checks:\n\n'
   if [ "$style" = "ml" ]; then
     printf '## Experiment Pre-Registration\n\n'

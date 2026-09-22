@@ -19,6 +19,14 @@ written) — there is nothing to hand off; pass `--min-user-turns 0` to capture
 a trivial session anyway. A sensitive transcript still refuses loudly
 regardless of the floor.
 
+New digests put the active task snapshot before historical conversation, naming
+the task ID, HEAD, packet digest and verification observation time. The assistant
+summary remains an unverified claim. Resume prefers the current task over a
+newer unrelated digest, labels changed/unbound snapshots, and sends a pointer
+instead of the transcript. Source and verification must still be rechecked.
+The entire resume block defaults to 4 KiB (`OMS_RESUME_MAX_BYTES`, 512–16384),
+including the truncation notice and state pointer; no model call is added.
+
 Claude captures user/assistant turns, Codex captures task messages and final
 answers, and Antigravity history may contain prompts only. State that limitation
 when it affects continuity. Loading a digest into another provider is always an

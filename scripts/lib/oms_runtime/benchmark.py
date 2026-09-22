@@ -5,6 +5,8 @@ from __future__ import annotations
 import collections
 import datetime as dt
 import heapq
+import math
+import re
 import statistics
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -19,7 +21,7 @@ def _find_numbers(value: Any, keys: Sequence[str]) -> List[float]:
     wanted = set(keys)
     if isinstance(value, dict):
         for key, item in value.items():
-            if key in wanted and isinstance(item, (int, float)) and not isinstance(item, bool):
+            if key in wanted and isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(item) and item >= 0:
                 result.append(float(item))
             result.extend(_find_numbers(item, keys))
     elif isinstance(value, list):
@@ -41,7 +43,7 @@ def _artifact_tokens(row: Mapping[str, Any]) -> Optional[float]:
     output_tokens = _one_number(row, ("output_tokens", "completion_tokens"))
     if input_tokens is None and output_tokens is None:
         return _one_number(row, ("tokens",))
-    return float(input_tokens or 0.0) + float(output_tokens or 0.0)
+    return input_tokens + output_tokens if input_tokens is not None and output_tokens is not None else None
 
 
 def _model_identity(row: Mapping[str, Any]) -> Tuple[Optional[str], Optional[str]]:
@@ -70,7 +72,7 @@ def _model_table(artifacts: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, 
         if not name:
             continue
         key = "%s/%s" % (row.get("provider") or "unknown", name)
-        entry = table.setdefault(key, {"calls": 0, "verified": 0, "failed": 0, "tokens": 0.0, "cost_usd": 0.0, "sources": {}})
+        entry = table.setdefault(key, {"calls": 0, "verified": 0, "failed": 0, "tokens": None, "cost_usd": None, "tokens_count": 0, "cost_usd_count": 0, "sources": {}})
         entry["calls"] += 1
         entry["sources"][source] = entry["sources"].get(source, 0) + 1
         value = outcome(row)
@@ -80,10 +82,12 @@ def _model_table(artifacts: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, 
             entry["failed"] += 1
         tokens = _artifact_tokens(row)
         if tokens is not None:
-            entry["tokens"] += tokens
+            entry["tokens"] = (entry["tokens"] or 0.0) + tokens
+            entry["tokens_count"] += 1
         cost = _one_number(row, ("cost_usd", "cost"))
         if cost is not None:
-            entry["cost_usd"] += cost
+            entry["cost_usd"] = (entry["cost_usd"] or 0.0) + cost
+            entry["cost_usd_count"] += 1
         duration = _one_number(row, ("duration_seconds", "duration_s"))
         if duration is not None:
             durations.setdefault(key, []).append(duration)
@@ -92,8 +96,49 @@ def _model_table(artifacts: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, 
         entry["success_rate"] = entry["verified"] / decided if decided else None
         samples = durations.get(key, [])
         entry["duration_seconds_mean"] = statistics.mean(samples) if samples else None
+        entry["duration_seconds_count"] = len(samples)
         entry["sources"] = dict(sorted(entry["sources"].items()))
     return dict(sorted(table.items()))
+
+
+def _context_modes(artifacts: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    modes: Dict[str, List[Mapping[str, Any]]] = collections.defaultdict(list)
+    cohorts: Dict[str, Dict[str, List[Mapping[str, Any]]]] = {}
+    fields = ("context_prepare_seconds", "context_orientation_bytes", "prompt_bytes", "duration_seconds")
+
+    def summarize(rows):
+        checks = [row for row in rows if row.get("context_verification") == "command"
+                  and type(row.get("verify_exit")) is int and 0 <= row["verify_exit"] < 125]
+        verified = sum(row["verify_exit"] == 0 and row.get("exit") == 0 for row in checks)
+        checked = len(checks)
+        result = {"calls": len(rows), "verified": verified, "checked": checked,
+                  "verification_rate": verified / checked if checked else None}
+        for field in fields + ("tokens", "cost_usd"):
+            keys = ("duration_seconds", "duration_s") if field == "duration_seconds" else (field,)
+            samples = [_artifact_tokens(row) if field == "tokens" else _one_number(row, keys) for row in rows]
+            samples = [value for value in samples if value is not None]
+            result[field] = {"count": len(samples), "mean": statistics.mean(samples) if samples else None}
+        return result
+
+    for row in artifacts:
+        mode = row.get("context_mode")
+        if row.get("kind") != "delegate" or mode not in {"direct", "pack", "graph", "graph-fallback", "bundle", "pack+bundle", "graph+bundle", "graph-fallback+bundle"}:
+            continue
+        modes[mode].append(row)
+        model, source = _model_identity(row)
+        task = row.get("context_task_sha256", "")
+        base = row.get("base_sha", "")
+        # Aggregate modes are descriptive. Only exact task/verifier/cap/base
+        # and attributable model/effort matches enter a comparison cohort.
+        if not model or row.get("context_verification") != "command" or not isinstance(task, str) or not re.fullmatch(r"[0-9a-f]{64}", task) or not base:
+            continue
+        key = sha256_text(str((base, row.get("provider"), model, source,
+                              row.get("selected_reasoning_effort", row.get("reasoning_effort")), task)))
+        cohorts.setdefault(key, {}).setdefault(mode, []).append(row)
+    return {"modes": {mode: summarize(rows) for mode, rows in sorted(modes.items())},
+            "matched_cohorts": {key: {mode: summarize(rows) for mode, rows in sorted(groups.items())}
+                                for key, groups in sorted(cohorts.items()) if len(groups) > 1},
+            "comparison": "observational; matched cohorts do not prove causal savings"}
 
 
 def _context_rows(repo: Path) -> List[Dict[str, Any]]:
@@ -214,6 +259,7 @@ def snapshot(repo: Path) -> Dict[str, Any]:
         "success_rate": verified / len(decided) if decided else None,
         "providers": dict(sorted(providers.items())),
         "models": _model_table(artifacts),
+        "delegation_context": _context_modes(artifacts),
         "artifact_kinds": dict(sorted(kinds.items())),
         "duration_seconds": {"count": len(durations), "sum": sum(durations) if durations else None, "mean": statistics.mean(durations) if durations else None},
         "tokens": {"count": len(tokens), "sum": sum(tokens) if tokens else None},

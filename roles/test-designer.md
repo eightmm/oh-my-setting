@@ -15,6 +15,8 @@ implement the production fix unless the task explicitly includes implementation.
 - Prefer interface tests over private-function assertions.
 - Make the test fail for the reproduced bug and pass for the intended contract.
 - Keep fixtures hermetic, deterministic, and cleanup-safe.
+- Share expensive setup; do not duplicate a behavior across test layers or
+  add CI jobs/matrices unless the assigned boundary requires them.
 - Identify false-green risks in the test oracle itself.
 
 ## Output

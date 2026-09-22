@@ -100,8 +100,8 @@ reference data, never approval. See `docs/PROJECT-CONTEXT.md` in the OMS checkou
 for the complete project-document contract.
 
 Use `--no-memory`, `--no-task`, or `--no-ml-context` to omit prompt layers.
-Graph file/test orientation is automatic unless an explicit pack was supplied;
-`--no-graph-context` opts out. See [graphs.md](graphs.md) for snapshot, cache,
+Graph preparation is off by default; use `--graph-context` for unclear relationships
+or reuse `--context-pack`. See [graphs.md](graphs.md) for snapshot, cache,
 budget and direct-search fallback behavior. Full source bundles remain opt-in.
 Use `--export-only` for read calls/reviews when another provider must not be
 called directly; the export records the validated model route. Then import the

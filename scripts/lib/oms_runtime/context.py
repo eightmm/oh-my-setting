@@ -78,7 +78,10 @@ def _python_import_candidates(repo: Path, target: Path) -> List[Tuple[Path, str,
         return result
     modules: Set[str] = set()
     relative_modules: Set[Tuple[int, str]] = set()
-    symbols: Set[str] = set()
+    # Imported types/future flags are dependencies, not this module's API.
+    # Matching `Any`, `Path` or `annotations` selected most Python files.
+    symbols = {node.name for node in tree.body
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
@@ -87,9 +90,6 @@ def _python_import_candidates(repo: Path, target: Path) -> List[Tuple[Path, str,
                 relative_modules.add((int(node.level), node.module or ""))
             elif node.module:
                 modules.add(node.module)
-            symbols.update(alias.name for alias in node.names)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            symbols.add(node.name)
     search_roots = [repo, repo / "src", repo / "scripts"]
     target_resolved = target.resolve()
     for level, module in sorted(relative_modules):

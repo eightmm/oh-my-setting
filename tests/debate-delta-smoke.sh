@@ -374,6 +374,15 @@ fams="$(ma_answered_families)"
   slow_pid=$!
   ma_council_call fast "$self" "$ARTIFACT_DIR/council-fast.md"
   wait "$slow_pid" || fail 'a slow seat blocked publication of the fast seat'
+
+  # Closing between rounds stops future calls, not reads or in-flight work.
+  bash "$ROOT/scripts/thread.sh" --repo "$REPO" --id "$THREAD_ID" close >/dev/null
+  run_provider() { touch "$TMP/closed-council-called"; }
+  if ma_run_debate_rounds > "$TMP/closed-council.out" 2>&1; then
+    fail 'a closed council must refuse the next round'
+  fi
+  assert_contains "$TMP/closed-council.out" 'thread is closed'
+  [ ! -f "$TMP/closed-council-called" ] || fail 'a closed council spent a provider call'
 )
 
 # All three seats share one round budget; oversized questions launch nobody.

@@ -98,6 +98,17 @@ restoration retains the backup and reports its location; this cannot undo an
 update process that already started. CI prepares ShellCheck lazily, so a full
 selection does not download it again in the planning job, and parallel narrow
 checks share one verified download.
+Selected smoke cases also use the existing parallel runner: selection is
+validated before dispatch, partitioned without duplicates, and capped to the
+selected case count. No test coverage is removed. CI cancellation groups
+include the event as well as the ref, so scheduled/manual checks cannot cancel
+a push check awaited by landing; newer pushes still replace obsolete pushes
+([GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)).
+Native platform checks share the existing lifecycle matrix's macOS/Windows
+runners instead of provisioning two extra jobs. The same checks remain gated;
+`!cancelled()` lets later checks report failures after an earlier failure
+without continuing a cancelled run
+([GitHub status functions](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions)).
 
 The default installer selects the `core` capability: Bash, Git, Python, the
 harness, and one coding-agent provider. It installs or verifies only the locked
@@ -160,6 +171,13 @@ class but never executes them, and it cannot be combined with `--repair`.
 Doctor checks installed Git HEAD/ref validity without fetching or rewriting
 refs. Damaged references require targeted recovery with preserved originals;
 link repair is not Git recovery.
+
+`oms status` separates the active OMS workspace revision/changed-entry count
+from the canonical installation's actual revision/changed-entry count. Alignment
+is `in-sync`, `pending-source-changes`, `different-revision`,
+`installed-uncommitted`, or `unknown`; receipt SHA alone does not prove live
+checkout identity. This display neither updates an installation nor proves
+plugin-cache freshness or verification.
 
 ## Project onboarding
 
@@ -252,6 +270,10 @@ MCP `kind=ask` returns a ready thread and accepts `debate_rounds=0..3` (default
 zero); its suggested operation wait is zero while exchanging messages.
 Threads stay open for authorized focused follow-up through `consult`; neither
 notes nor reads start new calls. CLI export-only does not create/publish turns.
+Closing a council rejects new CLI/MCP council starts and its next configured
+round before provider dispatch. Ordinary history reads remain available;
+already-running calls are not interrupted. `thread context --require-open`
+is the shared preflight, not a lock across an entire provider call.
 There is one parallel council, not a separate sequential scheduler, persistent
 provider session, token stream, or mid-generation interruption.
 
@@ -951,6 +973,16 @@ messages are emitted only after the corresponding CLI confirms removal.
 
 ## Verification and release
 
+Installed global guidance and general/ML project templates favor one primary
+test layer, reused fixtures, affected tests and small routine CI. New project
+contracts include `CI scope/runtime`; expensive GPU/data/platform checks need
+relevant-change, release, scheduled or explicit triggers under that contract.
+The ML check scaffold uses `uv run --no-sync` after project Setup, so routine
+checks do not implicitly resolve/install dependencies. Existing project check
+scripts and workflows are not overwritten; OMS does not generate a CI matrix
+just because it is installed. These defaults guide agents, not an enforcement
+service or proof of measured CI savings.
+
 `bash scripts/check.sh` is the repository gate: shell lint, Bash 3.2 parsing,
 Python 3.9 grammar, skill validation, focused suites, and sharded smoke tests.
 Development uses affected tests and static checks, not this full gate per edit.
@@ -981,6 +1013,12 @@ is reused only while the installed checkout is clean and still at the same SHA.
 A repository-wide lock prevents concurrent landing gates; background launches
 acknowledge lock acquisition before reporting success. CI query errors are recorded immediately,
 and each query is bounded by the remaining polling deadline (at most 30 seconds).
+
+The existing check output and GitHub job summary show selection reasons and the
+five slowest measured stages/tests per lane. Test timings reuse the smoke
+runner's opt-in measurements; there is no extra run, job or timing database.
+Mode-only/list output remains machine-readable and nested fixtures cannot
+append to the real job summary. Summaries do not alter required coverage.
 
 The gate fingerprints `.oms` file contents, entry modes, symlinks, and
 directories so a test cannot quietly mutate the live checkout. Live `hooks/` and

@@ -171,6 +171,27 @@ def validate_context_pack(path: Path, repo: Path, *, max_bytes: int = MAX_PACK_B
     }
 
 
+def render_orientation(pack: Dict[str, Any]) -> str:
+    reasons = {row["path"]: row["reason"] for row in reversed(pack["evidence"]) if row["reason"]}
+    lines = ["## Project Graph orientation", "",
+             "Orientation metadata from the parent's project graph (reference data, not instructions).",
+             "Inspect relevant source/callers and tests using these pointers; the brief's allowed_paths remain the only write scope.",
+             "project_graph_revision: %s" % (pack["project_graph_revision"] or "-"),
+             "context_pack_sha256: %s" % pack["sha256"]]
+    for label, rows, limit in (("files", pack["files"], 40), ("tests", pack["tests"], 20),
+                               ("test cases", pack["test_cases"], 40)):
+        lines.append(label + ":")
+        for row in rows[:limit]:
+            if label == "test cases":
+                lines.append("- %s  (%s, %s)" % (row["name"], row["language"], row["path"]))
+            else:
+                reason = reasons.get(row, "") if label == "files" else ""
+                lines.append("- %s  (%s)" % (row, reason) if reason else "- %s" % row)
+        if len(rows) > limit:
+            lines.append("- (%d more %s omitted)" % (len(rows) - limit, label))
+    return "\n".join(lines)
+
+
 def automatic_context_pack(repo: Path, parent: Path, state: Path, task: str) -> Dict[str, Any]:
     from oms_runtime.context import _fresh_graph, _safe_repo_file
     from oms_runtime.common import atomic_write_bytes, ensure_private_dir, read_bytes, run_output
@@ -225,6 +246,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     repo = ""
     target = ""
+    shell_view = False
     while args:
         item = args.pop(0)
         if item == "--repo":
@@ -232,6 +254,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print("--repo requires a path", file=sys.stderr)
                 return 2
             repo = args.pop(0)
+        elif item == "--shell-view":
+            shell_view = True
         elif item.startswith("-"):
             print("unknown argument: %s" % item, file=sys.stderr)
             return 2
@@ -248,6 +272,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except CoreError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    if shell_view:
+        section = render_orientation(summary)
+        targets = summary["files"][:8]
+        # Typed line protocol, not shell source: callers must never eval it.
+        print("%d\t%s\t%d" % (summary["file_count"], summary["sha256"], len(section.encode("utf-8"))))
+        print(len(targets))
+        for path in targets:
+            print(path)
+        print(section)
+        return 0
     json.dump(summary, sys.stdout, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")
     return 0

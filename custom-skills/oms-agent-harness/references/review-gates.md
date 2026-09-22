@@ -9,8 +9,13 @@ every edit or commit. Prose needs reference checks; skill/template Markdown
 uses direct format/resource validation, not unrelated runtime suites.
 Executable templates and install/permission/state boundaries need behavioral checks.
 Reuse tests; do not add tests or invoke a review council for ceremony.
+For CI changes, use the cost/trigger guidance in
+[minimal-change.md](minimal-change.md#spend-test-coverage-once). OMS's own
+release matrix is not the default for projects using OMS. Do not expand their
+CI or required checks as a side effect of ordinary feature work.
 
-For an authorized deployment, finish focused checks and local commits, then use
+Other projects use their declared release check, not an inferred full suite.
+For an authorized OMS deployment, finish focused checks and local commits, then use
 `oms land` to run the full gate once, push the verified SHA, follow CI, and
 update the installation only after success. Skipped CI does not authorize an
 installation refresh. It owns that sequence; do not precede it with another full gate or

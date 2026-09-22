@@ -412,11 +412,27 @@ test_smoke_runner_tail_and_signal_cleanup() {
   local out="$TMP/overlap.out"
 
   cat > "$suite" <<'EOF'
+set -e
+meet_peer() {
+  [ -n "${OMS_TEST_BARRIER:-}" ] || return 0
+  touch "$OMS_TEST_BARRIER/$1"
+  local tries=0
+  while [ ! -f "$OMS_TEST_BARRIER/$2" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -le 50 ] || return 1
+    sleep 0.1
+  done
+}
 test_first() {
+  meet_peer first second
   echo first
 }
 test_second() {
+  meet_peer second first
   echo second
+}
+test_selected_failure() {
+  return 7
 }
 # SMOKE_TEST_CALLS_BEGIN
   test_first # legacy formatting must be discarded
@@ -430,6 +446,40 @@ EOF
   grep -Fq 'second' "$out" || fail "owning shard did not execute its test"
   if grep -Fq 'first' "$out"; then
     fail "legacy call block formatting caused cross-shard duplicate execution"
+  fi
+
+  # Select before partitioning; repeats must not execute twice, and extra
+  # workers must not silently widen a small selection to the full suite.
+  OMS_VERBOSE=1 OMS_SMOKE_SUITE="$suite" "$ROOT/tests/run-smoke-shard.sh" \
+    --jobs 4 --only test_second --only test_second > "$out"
+  [ "$(grep -c '^second$' "$out")" = 1 ] || fail 'selected parallel test must run exactly once'
+  if grep -q '^first$' "$out"; then fail 'parallel selection ran an unselected test'; fi
+  mkdir -p "$TMP/selected-barrier"
+  OMS_TEST_BARRIER="$TMP/selected-barrier" OMS_VERBOSE=1 OMS_SMOKE_SUITE="$suite" \
+    "$ROOT/tests/run-smoke-shard.sh" --jobs 2 --only test_first --only test_second > "$out" ||
+    fail 'selected workers did not overlap'
+  [ "$(grep -c '^first$' "$out")" = 1 ] && [ "$(grep -c '^second$' "$out")" = 1 ] ||
+    fail 'each selected parallel worker must execute once'
+  if OMS_VERBOSE=1 OMS_SMOKE_SUITE="$suite" "$ROOT/tests/run-smoke-shard.sh" \
+      --jobs 2 --only test_first --only test_missing > "$out" 2>&1; then
+    fail 'parallel selection accepted an unknown test'
+  fi
+  if grep -q '^first$' "$out"; then fail 'invalid selection launched workers before validation'; fi
+  if OMS_SMOKE_SUITE="$suite" "$ROOT/tests/run-smoke-shard.sh" \
+      --jobs 0 --only test_second > "$out" 2>&1; then
+    fail 'selected execution accepted zero workers'
+  fi
+  if OMS_SMOKE_SUITE="$suite" "$ROOT/tests/run-smoke-shard.sh" \
+      --jobs 2 --list > "$out" 2>&1; then
+    fail 'parallel execution accepted list mode'
+  fi
+  if OMS_SMOKE_SUITE="$suite" "$ROOT/tests/run-smoke-shard.sh" \
+      --jobs 2 --shard 4/4 --only test_second > "$out" 2>&1; then
+    fail 'empty selection bypassed mutually exclusive worker controls'
+  fi
+  if OMS_SMOKE_SUITE="$suite" "$ROOT/tests/run-smoke-shard.sh" \
+      --jobs 2 --only test_first --only test_selected_failure > "$out" 2>&1; then
+    fail 'a failed selected worker must fail the parallel run'
   fi
 
   local signal_suite="$TMP/signal-smoke.sh"
@@ -660,7 +710,7 @@ case "${OMS_TEST_GRAPH_MODE:-affected}" in
     ;;
   error) exit 23 ;;
   *)
-    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/test_leaf.py"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"}]}'
+    printf '%s\n' '{"schema":1,"mode":"affected","reasons":[],"tests":["tests/leaf-smoke.sh","tests/scripts-smoke.sh","tests/autonomy-plan-run-smoke.sh","tests/test_leaf.py"],"test_cases":[{"id":"symbol:tests/scripts-smoke.sh::test_selected","language":"shell","name":"test_selected","path":"tests/scripts-smoke.sh"},{"id":"symbol:tests/autonomy-plan-run-smoke.sh::test_context_pack","language":"shell","name":"test_context_pack","path":"tests/autonomy-plan-run-smoke.sh"},{"id":"symbol:tests/test_leaf.py::LeafTest.test_selected","language":"python","name":"test_selected","path":"tests/test_leaf.py"}]}'
     ;;
 esac
 EOF
@@ -681,6 +731,19 @@ EOF
   cat > "$gate/tests/leaf-smoke.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'shell-file\n' >> "$OMS_TEST_AFFECTED_LOG"
+EOF
+  cat > "$gate/tests/autonomy-plan-run-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+test_context_pack() {
+  printf 'plan-context-selected\n' >> "$OMS_TEST_AFFECTED_LOG"
+}
+test_plan_lifecycle() {
+  printf 'plan-lifecycle-unselected\n' >> "$OMS_TEST_AFFECTED_LOG"
+}
+# SMOKE_TEST_CALLS_BEGIN
+test_context_pack
+test_plan_lifecycle
+# SMOKE_TEST_CALLS_END
 EOF
   cat > "$gate/tests/test_leaf.py" <<'EOF'
 import os
@@ -719,12 +782,15 @@ EOF
   [ "$out" = full ] || fail "uncertain graph plan reported the wrong mode: $out"
 
   : > "$log"
-  (cd "$gate" && OMS_TEST_AFFECTED_LOG="$log" \
+  (cd "$gate" && OMS_TEST_AFFECTED_LOG="$log" GITHUB_STEP_SUMMARY="$TMP/affected-summary.md" \
     bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" \
       --ci-output "$TMP/ci-mode" >/dev/null) ||
     fail "affected gate rejected a positive graph plan"
   grep -Fxq 'mode=affected' "$TMP/ci-mode" || fail "CI mode was not recorded"
+  grep -Fq 'mode=affected' "$TMP/affected-summary.md" || fail "CI summary omitted selected mode"
+  grep -Fq 'slow-stage:' "$TMP/affected-summary.md" || fail "CI summary omitted stage timings"
   grep -Fxq shell-selected "$log" || fail "affected gate omitted the selected shell case"
+  grep -Fxq plan-context-selected "$log" || fail "affected gate omitted the selected plan context case"
   grep -Fxq python-selected "$log" || fail "affected gate omitted the selected Python case"
   grep -Fxq shell-file "$log" || fail "affected gate omitted the selected shell file"
   grep -Fxq 'syntax:lib/leaf.py' "$log" || fail "affected syntax check did not select only the changed Python"
@@ -732,10 +798,11 @@ EOF
   if grep -Fq unselected "$log"; then
     fail "affected gate ran a test case absent from the graph plan: $(cat "$log")"
   fi
-  (cd "$gate" && OMS_TEST_GRAPH_MODE=full bash scripts/check.sh --affected \
+  (cd "$gate" && OMS_TEST_GRAPH_MODE=full GITHUB_STEP_SUMMARY="$TMP/full-summary.md" bash scripts/check.sh --affected \
     --changed-from "$base" --changed-to "$head" --ci-output "$TMP/ci-full") ||
     fail "CI selector tried to execute full lanes inline"
   grep -Fxq 'mode=full' "$TMP/ci-full" || fail "CI full mode was not recorded"
+  grep -Fq 'unmatched:lib/leaf.py' "$TMP/full-summary.md" || fail "CI summary omitted full fallback reason"
 
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=full \
     bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" --list-stages)" ||
@@ -979,6 +1046,17 @@ EOF
     fail "status should flag auto-update state from a different canonical HEAD"
   printf '%s' "$out" | grep -Fq -- '- recorded_status: up_to_date' ||
     fail "stale status should preserve the recorded auto-update conclusion"
+  printf '%s' "$out" | grep -Fq -- "- installed_actual_commit: $(git -C "$canonical" rev-parse HEAD)" ||
+    fail "status omitted live installed revision"
+  mkdir -p "$canonical/scripts" "$canonical/rules"
+  touch "$canonical/scripts/oms" "$canonical/rules/global-AGENTS.md"
+  git -C "$canonical" add .
+  git -C "$canonical" commit -qm markers
+  out="$(cd "$canonical" && HOME="$home_dir" OMS_INSTALL_RECEIPT="$receipt" "$ROOT/scripts/status.sh" 2>/dev/null)"
+  printf '%s' "$out" | grep -Fq -- '- alignment: in-sync' || fail "same clean checkout should be in sync"
+  printf 'edited\n' >> "$canonical/file"
+  out="$(cd "$canonical" && HOME="$home_dir" OMS_INSTALL_RECEIPT="$receipt" "$ROOT/scripts/status.sh" 2>/dev/null)"
+  printf '%s' "$out" | grep -Fq -- '- alignment: installed-uncommitted' || fail "live edits should not be reported as a clean installation"
 }
 
 test_checkout_runtime_is_current

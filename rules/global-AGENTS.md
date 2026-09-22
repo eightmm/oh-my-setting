@@ -68,15 +68,16 @@ Default: concise, scoped, evidence-driven.
 
 ## Verification
 
-- Reuse coverage; test uncovered contracts, bugs, or safety boundaries.
-- Scale verification to changed contracts: ordinary prose needs reference
-  checks, code needs affected native checks, and install/permission/state
-  changes need broader coverage. Agent instructions are behavioral contracts.
-- Graph uncertainty widens the affected scope; it is not proof of safety.
-- Run syntax, affected and required checks; repeat/broaden only for changes,
-  failures, or unresolved risk. Do not impose full CI on every edit or add
-  duplicate local/CI gates. Preserve project-required release gates.
-- Report every skipped, failed, or impossible check. State evidence.
+- Reuse coverage; add only uncovered behavior, reproduced bugs or safety cases.
+- Run syntax, affected and required checks. Prose needs reference checks;
+  agent instructions are contracts; install/permission/state changes need
+  broader coverage. Graph uncertainty is not proof of safety.
+- Keep CI small: reuse tests/fixtures, avoid duplicate push/PR runs and
+  speculative matrices. Expensive checks need
+  affected-risk, release, scheduled or explicit triggers; preserve required gates.
+- No speculative CI jobs or test scaffolding. Record CI
+  scope/runtime in PROJECT.md. Repeat only for changed inputs, failures or
+  unresolved risk; report failed/skipped checks.
 
 ## Multi-Agent Work
 

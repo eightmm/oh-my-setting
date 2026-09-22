@@ -54,9 +54,9 @@ an explicitly bounded traversal that finds more dependents falls back to
 `mode: full`. An unmatched path, dirty workspace, deletion/rename, boundary file,
 unsupported test runner, or non-document change with no test evidence means
 `mode: full`; graph absence or failure is never evidence
-to skip verification. This repository's PR gate projects the mode first:
+to skip verification. This repository's PR and main-push gates project the mode first:
 positive evidence runs the narrow affected job, while full fallback reuses the
-parallel focused and smoke matrices. The main-branch gate remains complete.
+parallel focused and smoke matrices. Weekly/manual runs retain full coverage.
 Inferred edges and every enumerated ambiguous candidate remain orientation and
 diagnostic evidence; they are not treated as affected-test proof. The plan
 reports ignored frontier confidence counts, and no extracted runnable test
@@ -119,19 +119,18 @@ The agent owns the loop:
    ordinary queries already refresh stale caches. For an active execution-graph
    run, use `exec status` at a gate or handoff when its live route is needed.
 
-`peer-delegate` supplies automatic orientation when no explicit `--context-pack`
-was passed: up to 8 file pointers, related tests and bounded case names, not
-source bodies. It checks a private copy of a coherent parent cache against the
-detached snapshot, or builds privately; it never rewrites the parent's graph.
-The private cache lives at the worker's normal `.oms/project-graph` path, so
-subsequent queries and opt-in runtime bundles reuse it. Read the indicated code
-only when needed; use `--no-graph-context` for a delegated, known-location trivial
-edit. Do not infer "trivial" from brief length or suppress graph context by keywords.
-Tracked or unignored cache targets fall back rather than changing project ignore rules.
-Preparation has a 10-second wall-clock limit (plus one second for termination).
-Failure or no match adds a direct-search fallback to the brief. `--no-graph-context`,
-`OMS_GRAPH_AUTOBUILD=0`, and dry runs skip automatic preparation; explicit packs
-retain their validation and precedence. `--context-manifest` remains opt-in.
+`peer-delegate` defaults to direct source discovery, without graph preparation.
+Use `--graph-context` when relationships or change impact are unclear, or reuse
+an explicit `--context-pack` (which takes precedence). The opt-in prepares up to
+8 file pointers, related tests and bounded case names, not source bodies.
+It checks a private parent-cache copy against the detached worker snapshot or
+builds privately under `.oms/project-graph`; later queries can reuse that cache.
+It never rewrites the parent's graph or existing ignore rules. Preparation is
+bounded to 10 seconds plus one for termination; failure or no match falls back
+to direct search. `--no-graph-context`, `OMS_GRAPH_AUTOBUILD=0`, and dry runs skip
+preparation. Inspect relevant pointers on demand, not every listed file.
+For tasks whose language differs from identifiers, discover paths first and
+pass a pack built with `--entry-path`. `--context-manifest` remains opt-in.
 
 Runtime context reuses fresh partial graphs as supplementary evidence while
 retaining Python discovery for incomplete or uncertain coverage. It never

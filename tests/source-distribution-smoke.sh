@@ -124,8 +124,6 @@ grep -Fq 'link_mode: copy' "$workflow" ||
 # The macOS job is the only stock Bash 3.2 parser and the only BSD userland in
 # CI. Both catch a class nothing else does, and both have already shipped
 # breakage, so neither may quietly disappear again.
-grep -Fq 'portability_macos:' "$workflow" ||
-  fail "macOS portability job must exist"
 grep -Fq 'bsd-portability-smoke.sh' "$workflow" ||
   fail "macOS portability job must run the BSD userland fixtures"
 grep -Fq 'OMS_BASH32_BIN=/bin/bash' "$workflow" ||
@@ -186,6 +184,19 @@ import re
 import sys
 
 lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+workflow_text = "\n".join(lines)
+concurrency = workflow_text.split("\nconcurrency:\n", 1)[1].split("\njobs:", 1)[0]
+group = re.search(r"^  group: (.+)$", concurrency, re.M).group(1)
+def concurrency_key(event, ref):
+    values = {"workflow": "test", "event_name": event, "ref": ref}
+    result = re.sub(r"\$\{\{\s*github\.(\w+)\s*\}\}", lambda match: values[match.group(1)], group)
+    assert "${{" not in result, "unhandled concurrency expression"
+    return result.lower()
+keys = {concurrency_key(event, "refs/heads/main")
+        for event in ("push", "schedule", "workflow_dispatch", "pull_request")}
+assert len(keys) == 4, "scheduled/manual checks must not cancel a landing's push CI"
+assert concurrency_key("push", "refs/heads/main") != concurrency_key("push", "refs/heads/feature")
+assert "  cancel-in-progress: true" in concurrency, "new pushes should still replace obsolete push runs"
 try:
     start = next(i for i, line in enumerate(lines) if line.rstrip() == "jobs:")
 except StopIteration:
@@ -210,6 +221,19 @@ if "gate" not in jobs:
 required = set(jobs) - {"gate"}
 if not required:
     raise SystemExit("workflow defines no verification jobs to gate on")
+assert "portability_macos" not in jobs and "windows_durable_writer" not in jobs, \
+    "native checks should reuse their lifecycle runner, not provision duplicate hosts"
+native = workflow_text.split("\n  install_e2e:\n", 1)[1].split("\n  python39:\n", 1)[0]
+for command, host in (
+    ("bash tests/windows-durable-writer-smoke.sh", "Windows"),
+    ("bash tests/scripts-smoke.sh --only test_process_liveness_uses_non_destructive_windows_probe", "Windows"),
+    ("bash tests/scripts-smoke.sh --only test_autopilot_windows_reenter_launch_keeps_parent_anchor", "Windows"),
+    ("OMS_BASH32_BIN=/bin/bash bash scripts/check-bash32.sh", "macOS"),
+    ("bash tests/bsd-portability-smoke.sh", "macOS"),
+):
+    step = next((part for part in native.split("      - name:") if "run: " + command in part), "")
+    assert step and "!cancelled() && runner.os == '%s'" % host in step, (command, host)
+    assert "continue-on-error" not in step, "native failure must fail the merged job"
 
 needs = set()
 for index, line in enumerate(gate_body):

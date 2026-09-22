@@ -22,6 +22,7 @@ Run every test_* function defined in scripts-smoke.sh. --shard selects one
 deterministic, 1-based round-robin partition. --jobs runs N shards in parallel.
 --only NAME runs just that test (repeatable); it is the focused-verification
 path between edits, so a change to one behaviour does not cost the whole suite.
+Combine --only with --jobs or --shard to partition just the selected tests.
 Names come from --list, and an unknown one is refused rather than silently
 running nothing.
 
@@ -77,61 +78,12 @@ done
 
 if [ -n "$ONLY" ]; then
   [ "$MODE" = "run" ] || fail "--only cannot be combined with --list"
-  [ -z "$JOBS" ] || fail "--only cannot be combined with --jobs"
-  [ "$SHARD" -eq 1 ] && [ "$TOTAL" -eq 1 ] || fail "--only cannot be combined with --shard"
 fi
-
 if [ -n "$JOBS" ]; then
   [ "$MODE" = "run" ] || fail "--jobs cannot be combined with --list"
   [ "$SHARD" -eq 1 ] && [ "$TOTAL" -eq 1 ] || fail "--jobs cannot be combined with --shard"
   case "$JOBS" in *[!0-9]*|"") fail "--jobs requires a positive integer" ;; esac
   [ "$JOBS" -gt 0 ] || fail "--jobs requires a positive integer"
-
-  LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/oms-smoke-shards.XXXXXX")"
-  PIDS=""
-  cleanup_workers() {
-    local pid
-    trap - EXIT HUP INT TERM
-    for pid in $PIDS; do
-      kill -TERM -- "-$pid" >/dev/null 2>&1 || kill -TERM "$pid" >/dev/null 2>&1 || true
-    done
-    sleep 1
-    for pid in $PIDS; do
-      kill -KILL -- "-$pid" >/dev/null 2>&1 || kill -KILL "$pid" >/dev/null 2>&1 || true
-    done
-    for pid in $PIDS; do
-      wait "$pid" 2>/dev/null || true
-    done
-    rm -rf "$LOG_DIR"
-    rm -f "$RUN_SCRIPT"
-  }
-  trap cleanup_workers EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  set -m
-  i=1
-  while [ "$i" -le "$JOBS" ]; do
-    OMS_SMOKE_TIMINGS="$TIMINGS" OMS_SMOKE_TIMING_LIMIT="$TIMING_LIMIT" \
-      "$0" --shard "$i/$JOBS" > "$LOG_DIR/$i.log" 2>&1 &
-    PIDS="$PIDS $!"
-    i=$((i + 1))
-  done
-  set +m
-  status=0
-  i=1
-  for pid in $PIDS; do
-    if ! wait "$pid"; then
-      status=1
-    fi
-    echo "== smoke shard $i/$JOBS =="
-    cat "$LOG_DIR/$i.log"
-    i=$((i + 1))
-  done
-  rm -rf "$LOG_DIR"
-  rm -f "$RUN_SCRIPT"
-  trap - EXIT HUP INT TERM
-  exit "$status"
 fi
 
 manifest() {
@@ -165,6 +117,82 @@ if [ "$MODE" = "list" ]; then
   exit 0
 fi
 
+# Validate the complete selection before launching any worker. Match against
+# definitions (not call sites); repeated selectors still execute only once.
+all_manifest="$(manifest)"
+[ -n "$all_manifest" ] || fail "no smoke test definitions"
+for only_name in $ONLY; do
+  case "
+$all_manifest
+" in
+    *"
+$only_name
+"*) ;;
+    *) fail "unknown test: $only_name (see --list)" ;;
+  esac
+done
+run_count="$(printf '%s\n' "$all_manifest" | awk -v only=" $ONLY " -v shard="$SHARD" -v total="$TOTAL" '
+  only != "  " && index(only, " " $0 " ") == 0 { next }
+  (++selected - 1) % total == shard - 1 { count++ }
+  END { print count+0 }
+')"
+if [ "$run_count" -eq 0 ]; then
+  echo "scripts-smoke: skipped (shard $SHARD/$TOTAL, no selected tests)"
+  exit 0
+fi
+
+if [ -n "$JOBS" ]; then
+  [ "$JOBS" -le "$run_count" ] || JOBS="$run_count"
+  selection_args=()
+  for only_name in $ONLY; do selection_args+=(--only "$only_name"); done
+
+  LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/oms-smoke-shards.XXXXXX")"
+  PIDS=""
+  cleanup_workers() {
+    local pid
+    trap - EXIT HUP INT TERM
+    for pid in $PIDS; do
+      kill -TERM -- "-$pid" >/dev/null 2>&1 || kill -TERM "$pid" >/dev/null 2>&1 || true
+    done
+    sleep 1
+    for pid in $PIDS; do
+      kill -KILL -- "-$pid" >/dev/null 2>&1 || kill -KILL "$pid" >/dev/null 2>&1 || true
+    done
+    for pid in $PIDS; do
+      wait "$pid" 2>/dev/null || true
+    done
+    rm -rf "$LOG_DIR"
+    rm -f "$RUN_SCRIPT"
+  }
+  trap cleanup_workers EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  set -m
+  i=1
+  while [ "$i" -le "$JOBS" ]; do
+    OMS_SMOKE_TIMINGS="$TIMINGS" OMS_SMOKE_TIMING_LIMIT="$TIMING_LIMIT" \
+      "$0" --shard "$i/$JOBS" ${selection_args[@]+"${selection_args[@]}"} > "$LOG_DIR/$i.log" 2>&1 &
+    PIDS="$PIDS $!"
+    i=$((i + 1))
+  done
+  set +m
+  status=0
+  i=1
+  for pid in $PIDS; do
+    if ! wait "$pid"; then
+      status=1
+    fi
+    echo "== smoke shard $i/$JOBS =="
+    cat "$LOG_DIR/$i.log"
+    i=$((i + 1))
+  done
+  rm -rf "$LOG_DIR"
+  rm -f "$RUN_SCRIPT"
+  trap - EXIT HUP INT TERM
+  exit "$status"
+fi
+
 # Rewrite the explicitly marked legacy call tail in memory and derive calls
 # from definitions, so a newly added test can never be silently omitted.
 awk -v shard="$SHARD" -v total="$TOTAL" -v timings="$TIMINGS" -v only=" $ONLY " '
@@ -188,9 +216,8 @@ awk -v shard="$SHARD" -v total="$TOTAL" -v timings="$TIMINGS" -v only=" $ONLY " 
     for (i=1; i<=count; i++) {
       if (only != "  ") {
         if (index(only, " " names[i] " ") == 0) continue
-      } else if ((i - 1) % total != shard - 1) {
-        continue
       }
+      if ((++selected - 1) % total != shard - 1) continue
       if (timings == "1") print "oms_smoke_run_test " names[i]
       else print names[i]
     }
@@ -215,28 +242,6 @@ awk -v shard="$SHARD" -v total="$TOTAL" -v timings="$TIMINGS" -v only=" $ONLY " 
 # Passing tests say nothing but "ok": the per-test chatter is only evidence for
 # a failure, and printing thousands of lines on every green run is context an
 # agent has to read and pay for. A failure prints everything.
-if [ -n "$ONLY" ]; then
-  # An unknown name would otherwise run zero tests and still print ok, which is
-  # the one answer a focused verification must never give.
-  # Matched in-shell rather than through `manifest | grep -q`: grep exits on
-  # the first match, awk takes SIGPIPE, and pipefail then reports the whole
-  # pipeline as failed -- so the found case and the missing case both looked
-  # like "unknown test".
-  only_manifest="$(manifest)"
-  for only_name in $ONLY; do
-    case "
-$only_manifest
-" in
-      *"
-$only_name
-"*) ;;
-      *) fail "unknown test: $only_name (see --list)" ;;
-    esac
-  done
-  run_count="$(printf '%s\n' $ONLY | grep -c .)"
-else
-  run_count="$(manifest | awk -v shard="$SHARD" -v total="$TOTAL" '(NR - 1) % total == shard - 1' | grep -c .)"
-fi
 run_log="$(mktemp "${TMPDIR:-/tmp}/oms-smoke-run.XXXXXX")"
 timing_file=""
 if [ "$TIMINGS" = "1" ]; then

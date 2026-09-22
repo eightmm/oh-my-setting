@@ -23,6 +23,7 @@ Minimum `PROJECT.md` sections:
 - Success criteria:
 - Affected checks:
 - Always-run checks:
+- CI scope/runtime:
 - Required checks:
 - Required check files:
 ## Decisions
@@ -39,6 +40,13 @@ entrypoint. `Always-run checks` lists the small portability, schema, security,
 or lifecycle floor that selection may not remove. Leave either `n/a` when the
 repository has no supported distinction; never infer safety from an empty or
 partial selector.
+
+`CI scope/runtime` records routine PR/push checks and their expected elapsed
+time, plus affected-risk/release/scheduled triggers for expensive checks.
+Prefer the existing workflow and one primary test layer. Do not copy OMS's
+own multi-platform release matrix into a project by default or create CI
+merely to complete onboarding. Existing project workflows are user-owned;
+changing their required checks needs task authority.
 
 Keep `Required checks` to one executable Markdown line. One complete inline
 code wrapper is allowed (for example, `` `bash scripts/check.sh` ``). For a

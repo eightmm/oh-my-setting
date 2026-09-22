@@ -1196,6 +1196,21 @@ if prompt_hash:
 prompt_bytes = os.environ.get("OMS_INDEX_PROMPT_BYTES", "")
 if prompt_bytes.isdigit():
     row["prompt_bytes"] = int(prompt_bytes)
+if kind == "delegate":
+    verification = os.environ.get("OMS_INDEX_CONTEXT_VERIFICATION", "")
+    if verification in {"none", "command", "dry-run"}:
+        row["context_verification"] = verification
+    task_digest = os.environ.get("OMS_INDEX_CONTEXT_TASK_SHA256", "")
+    if re.fullmatch(r"[0-9a-f]{64}", task_digest):
+        row["context_task_sha256"] = task_digest
+    context_mode = os.environ.get("OMS_INDEX_CONTEXT_MODE", "")
+    if context_mode in {"direct", "bundle", "pack", "graph", "graph-fallback",
+                        "pack+bundle", "graph+bundle", "graph-fallback+bundle"}:
+        row["context_mode"] = context_mode
+        for field in ("context_prepare_seconds", "context_orientation_bytes"):
+            value = os.environ.get("OMS_INDEX_" + field.upper(), "")
+            if value.isascii() and value.isdigit() and len(value) <= 12:
+                row[field] = int(value)
 if verify_exit:
     row["verify_exit"] = int(verify_exit)
 if task_goal:
@@ -3485,7 +3500,7 @@ ma_council_notes() {
   # Answers are already quoted per seat. Do not replay the whole transcript
   # just to receive a correction. All seats see the same round-start snapshot.
   bash "$(ma_scripts_dir)/thread.sh" --repo "$REPO" --id "$THREAD_ID" \
-    context --notes-only --max-bytes 2048 --turns 8 > "$council_notes_file.raw" || return 2
+    context --require-open --notes-only --max-bytes 2048 --turns 8 > "$council_notes_file.raw" || return 2
   OMS_PROMPT_QUOTE_BYTES=2048 ma_sanitize_quoted_output < "$council_notes_file.raw" > "$council_notes_file"
 }
 

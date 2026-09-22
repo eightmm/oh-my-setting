@@ -20,6 +20,9 @@
   unverified data/model contract.
 - Reuse existing interface cases and fixtures. Add a test only for uncovered
   behavior, a reproduced bug, leakage risk, or a data/model safety boundary.
+- Default CI uses small CPU fixtures. GPU, downloads, training, full datasets
+  and compatibility matrices need an affected-risk or explicit release/scheduled
+  trigger; preserve required checks. Record CI scope/runtime in `PROJECT.md`.
 - For claim-bearing experiments, pre-register the hypothesis, predicted
   outcome, one changed variable, baseline, metric/split, and stop threshold;
   record negative and null results too.

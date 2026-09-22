@@ -10,7 +10,7 @@ from typing import Any, Dict, Mapping, Sequence
 from oms_graph.errors import GraphError
 from oms_runtime.common import run_output
 
-from .blast import blast_radius
+from .blast import DEFAULT_RELATIONS, blast_radius
 from .query import Graph
 
 
@@ -25,7 +25,7 @@ DEFAULT_BOUNDARIES = (
     "**/uninstall*.sh", "**/check.sh", "**/run-smoke-shard.sh",
 )
 
-DOCUMENT_SUFFIXES = (".md", ".mdx", ".rst", ".txt", ".adoc")
+DOCUMENT_SUFFIXES = (".md", ".mdx", ".rst", ".adoc")
 
 
 def changed_entries(repo: Path, base: str, head: str = "HEAD") -> Sequence[Dict[str, str]]:
@@ -86,8 +86,12 @@ def _boundary(path: str, patterns: Sequence[str]) -> bool:
     return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
 
 
-def _docs_only(paths: Sequence[str]) -> bool:
-    return bool(paths) and all(Path(path).suffix.lower() in DOCUMENT_SUFFIXES for path in paths)
+def _documentation_path(path: str) -> bool:
+    pure = Path(path)
+    if pure.suffix.lower() not in DOCUMENT_SUFFIXES:
+        return False
+    return (pure.parts[0] in ("doc", "docs")
+            or pure.name.upper().startswith(("README.", "CHANGELOG.", "CONTRIBUTING.")))
 
 
 def _runnable_test(path: str) -> bool:
@@ -109,6 +113,8 @@ def affected_plan(
         raise GraphError("affected depth must be zero or greater")
     index = graph if isinstance(graph, Graph) else Graph(graph)
     normalized = sorted(set(str(path).replace("\\", "/").lstrip("/") for path in paths if path))
+    documents = [path for path in normalized
+                 if _documentation_path(path) and not _boundary(path, boundary_patterns)]
     result = blast_radius(index, normalized, depth=None if depth == 0 else depth,
                           confidences=("EXTRACTED",))
     tests = [path for path in result["tests"] if _runnable_test(path)]
@@ -117,7 +123,7 @@ def affected_plan(
     reasons = []
     if not workspace_exact:
         reasons.append("workspace-differs-from-head")
-    reasons.extend("unmatched:%s" % path for path in result["unmatched"])
+    reasons.extend("unmatched:%s" % path for path in result["unmatched"] if path not in documents)
     reasons.extend("boundary:%s" % path for path in normalized if _boundary(path, boundary_patterns))
     if result["truncated"]:
         reasons.append("depth-truncated")
@@ -142,13 +148,29 @@ def affected_plan(
             if confidence != "EXTRACTED" and edge["source"] not in reached and key not in ignored_edges:
                 ignored_edges.add(key)
                 ignored_confidence_counts[confidence] = ignored_confidence_counts.get(confidence, 0) + 1
-    if normalized and not tests and not _docs_only(normalized):
+    if any(path not in documents for path in normalized) and not tests:
         reasons.append("no-tests")
+    if tests and not reasons:
+        # One covered file cannot certify another changed file. Walk from the
+        # selected tests once, not a fresh graph traversal per changed path.
+        covered = {ident for ident in reached if index.nodes[ident].get("path") in test_paths}
+        pending = list(covered)
+        while pending:
+            for edge in index.out.get(pending.pop(), []):
+                target = edge["target"]
+                if (edge["relation"] in DEFAULT_RELATIONS and edge.get("confidence") == "EXTRACTED"
+                        and target in reached and target not in covered):
+                    covered.add(target)
+                    pending.append(target)
+        covered_paths = {index.nodes[ident].get("path") for ident in covered}
+        reasons.extend("no-tests:%s" % path for path in normalized
+                       if path not in documents and path not in covered_paths)
     return {
         "schema": 1,
         "mode": "full" if reasons else "affected",
         "depth": int(depth),
         "paths": normalized,
+        "documentation_paths": documents,
         "tests": tests,
         "test_cases": test_cases,
         "unsupported_test_count": len(result["tests"]) - len(tests),

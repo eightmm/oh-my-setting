@@ -640,6 +640,7 @@ test_generated_project_contracts_stay_compact() {
   assert_file_contains "$ml/PROJECT.md" '- Success criteria:'
   assert_file_contains "$general/PROJECT.md" '- Affected checks:'
   assert_file_contains "$general/PROJECT.md" '- Always-run checks:'
+  assert_file_contains "$general/PROJECT.md" '- CI scope/runtime:'
   assert_file_contains "$general/PROJECT.md" '- Required checks:'
 }
 
@@ -731,13 +732,18 @@ test_apply_ml_scaffolds_check_contract() {
   local project="$TMP/ml-check"
   mkdir -p "$project/scripts"
   printf '#!/bin/sh\necho custom\n' > "$project/scripts/check.sh"
+  mkdir -p "$project/.github/workflows"
+  printf 'name: existing-ci\n' > "$project/.github/workflows/custom.yml"
 
   "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
   assert_file_contains "$project/scripts/check.sh" "custom"
+  [ "$(cat "$project/.github/workflows/custom.yml")" = 'name: existing-ci' ] ||
+    fail 'onboarding must preserve existing CI'
 
   local project2="$TMP/ml-check-new"
   mkdir -p "$project2"
   "$ROOT/scripts/apply-project-template.sh" ml "$project2" >/dev/null
+  [ ! -d "$project2/.github/workflows" ] || fail 'onboarding must not add CI by default'
   [ -x "$project2/scripts/check.sh" ] || fail "check.sh not scaffolded executable"
   assert_file_contains "$project2/scripts/check.sh" "Project verification contract"
   [ -f "$project2/scripts/ml_smoke.py" ] || fail "ml_smoke.py not scaffolded"
@@ -4159,6 +4165,13 @@ assert len(answers) == 10, answers
 assert len({r['provider'] for r in answers}) == 5, answers
 assert any(r.get('live') for r in rows), rows
 PY
+  "$ROOT/scripts/thread.sh" --repo "$project" --id bounded-council close >/dev/null
+  "$ROOT/scripts/thread.sh" --repo "$project" --id bounded-council context >/dev/null ||
+    fail 'closing a council must not prevent reading its history'
+  if OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" --repo "$project" \
+      --thread bounded-council --prompt 'Closed council' > "$project/closed.out" 2>&1; then
+    fail 'closed council must not launch more provider calls'
+  fi
 }
 
 test_peer_ask_debate_needs_two_providers() {
@@ -4430,7 +4443,7 @@ EOF
   assert_one_artifact_contains "$artifact_dir" 'codex-create-delegated-file-*.md' 'worker done'
 }
 
-test_delegate_graph_context_is_automatic_and_snapshot_bound() {
+test_delegate_graph_context_is_opt_in_and_snapshot_bound() {
   local project="$TMP/delegate-auto-graph"
   local bin_dir="$TMP/delegate-auto-graph-bin"
   local home_dir="$TMP/delegate-auto-graph-home"
@@ -4471,18 +4484,26 @@ with mock.patch.object(build, 'build', side_effect=AssertionError('duplicate gra
 assert _fresh_graph(repo) is not None, 'runtime context cannot reuse prepared graph'
 PY
   git check-ignore -q .oms/project-graph/graph.json
+else
+  [ ! -e .oms/project-graph ] || { echo 'unrequested graph preparation' >&2; exit 1; }
 fi
 printf 'worker done\n'
 EOF
   chmod +x "$bin_dir/codex"
 
   local mode
-  for mode in first cached disabled unmatched; do
+  for mode in default first cached disabled unmatched; do
     local flags=()
     local query='recover lease'
-    local expect_ready=1
-    [ "$mode" != disabled ] || flags+=(--no-graph-context)
-    [ "$mode" != disabled ] || expect_ready=0
+    local expect_ready=0
+    if [ "$mode" != default ]; then
+      flags+=(--graph-context)
+      expect_ready=1
+    fi
+    if [ "$mode" = disabled ]; then
+      flags+=(--no-graph-context)
+      expect_ready=0
+    fi
     [ "$mode" != unmatched ] || query='zzzz_no_matching_subject'
     HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
       OMS_CONTEXT_CAPTURE="$capture" OMS_GRAPH_EXPECT_READY="$expect_ready" \
@@ -4500,14 +4521,28 @@ mode = sys.argv[4]
 text = prompt.read_text(encoding="utf-8")
 assert "private_recover_lease" not in text and "untracked.py" not in text, text
 assert "def recover_lease" not in text, "automatic orientation included source bytes"
-if mode in ("disabled", "unmatched"):
+if mode in ("default", "disabled", "unmatched"):
     assert "## Project Graph orientation" not in text, text
     if mode == "unmatched":
         assert "inspect source paths, callers and tests directly" in text, text
+    else:
+        assert "Graph orientation unavailable" not in text, text
 else:
     assert "## Project Graph orientation" in text, text
     assert "lease.py" in text and "tests/test_lease.py" in text, text
     assert "detached worker snapshot" in text, text
+rows = [json.loads(line) for line in (graph.parents[1] / 'artifacts/index.jsonl').read_text(encoding='utf-8').splitlines()]
+row = next(row for row in reversed(rows) if row.get('kind') == 'delegate')
+expected = 'direct' if mode in ('default', 'disabled') else 'graph-fallback' if mode == 'unmatched' else 'graph'
+assert row['context_mode'] == expected, row
+assert row['context_prepare_seconds'] >= 0, row
+assert (row['context_orientation_bytes'] > 0) == (expected == 'graph'), row
+assert row['prompt_bytes'] >= row['context_orientation_bytes'], row
+assert row['context_verification'] == 'none', row
+assert len(row['context_task_sha256']) == 64, row
+if mode in ('first', 'cached', 'disabled'):
+    initial = next(row for row in rows if row.get('kind') == 'delegate')
+    assert row['context_task_sha256'] == initial['context_task_sha256'], 'context mode changed the comparison task'
 data = graph.read_text(encoding="utf-8")
 assert "private_recover_lease" not in data and "untracked.py" not in data, data
 assert json.loads(data)["nodes"]
@@ -9250,8 +9285,17 @@ test_shared_fast_mode_detection_gates_auto_verify() {
   : > "$dir/uv.log"
   PATH="$dir/bin:$PATH" OMS_TEST_UV_LOG="$dir/uv.log" bash "$dir/project/scripts/check.sh" \
     fast 'tests/test_api.py::test_behavior[a b]' >/dev/null
-  grep -Fxq 'run python -m pytest -q tests/test_api.py::test_behavior[a b]' "$dir/uv.log" ||
+  grep -Fxq 'run --no-sync python -m pytest -q tests/test_api.py::test_behavior[a b]' "$dir/uv.log" ||
     fail "fast must forward the selected test without full-suite collection"
+  mkdir -p "$dir/project/src"
+  printf '# configured smoke\n' > "$dir/project/scripts/ml_smoke.py"
+  PATH="$dir/bin:$PATH" OMS_TEST_UV_LOG="$dir/uv.log" bash "$dir/project/scripts/check.sh" fast >/dev/null
+  PATH="$dir/bin:$PATH" OMS_TEST_UV_LOG="$dir/uv.log" bash "$dir/project/scripts/check.sh" ml-smoke >/dev/null
+  if grep -Ev '^run --no-sync ' "$dir/uv.log"; then
+    fail 'routine checks must reuse the prepared environment without dependency sync'
+  fi
+  grep -Fq 'python -m compileall' "$dir/uv.log" || fail 'no-sync checks lost Python syntax coverage'
+  grep -Fq 'python scripts/ml_smoke.py' "$dir/uv.log" || fail 'no-sync checks lost ML smoke coverage'
 }
 
 
@@ -11791,6 +11835,10 @@ test_session_handoff_carries_resume_contract_and_dissents() {
     capture --agent claude --cwd "$cwd" --out "$home/digest.md" 2>/dev/null)"
   [ -f "$out" ] || fail "resume-contract digest not written"
   assert_file_contains "$out" "## Resume contract"
+  assert_file_contains "$out" "## Current task snapshot (advisory)"
+  assert_file_contains "$out" "- Goal: ship"
+  assert_file_contains "$out" "- verification_observed_at:"
+  assert_file_contains "$out" "## Original request (historical)"
   assert_file_contains "$out" "bash scripts/check.sh --focused-only"
   assert_file_contains "$out" "## Open dissents"
   assert_file_contains "$out" "codex: pass"
@@ -17504,6 +17552,30 @@ EOF
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" |
     OMS_RESUME_HOOK=0 "$ROOT/scripts/resume-hook.sh")"
   [ -z "$out" ] || fail "OMS_RESUME_HOOK=0 must disable the hook"
+
+  # A newer unrelated session must not displace this task's handoff.
+  python3 - "$repo" <<'PY'
+import hashlib, os, pathlib, re, subprocess, sys, time
+repo = pathlib.Path(sys.argv[1])
+raw = (repo / '.oms/task/current.md').read_bytes()
+task_id = re.search(rb'^- task_id: (.+)$', raw, re.M).group(1).decode()
+head = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+path = repo / '.oms/handoffs/matching.md'
+path.write_text('- task_id: %s\n- head: %s\n- task_digest: %s\n' % (task_id, head, hashlib.sha256(raw).hexdigest()))
+os.utime(path, (time.time() - 600, time.time() - 600))
+(repo / '.oms/handoffs/unrelated.md').write_text('- task_id: different\n')
+PY
+  out="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  printf '%s' "$out" | grep -Fq 'current task snapshot' || fail "matching handoff was not recognized"
+  printf '%s' "$out" | grep -Fq 'show matching.md' || fail "newer unrelated handoff displaced the active task"
+  (cd "$repo" && "$ROOT/scripts/agent-task.sh" update --next "changed next action" >/dev/null)
+  out="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  printf '%s' "$out" | grep -Fq 'same task, recheck changed state' || fail "changed packet was treated as current"
+  (cd "$repo" && "$ROOT/scripts/agent-task.sh" update --goal "$(python3 -c 'print("긴목표" * 2000)')" >/dev/null)
+  out="$(printf '{"cwd":"%s"}' "$repo" | OMS_RESUME_MAX_BYTES=512 "$ROOT/scripts/resume-hook.sh")"
+  [ "$(printf '%s' "$out" | wc -c)" -le 512 ] || fail "resume byte budget exceeded"
+  printf '%s' "$out" | grep -Fq 'resume truncated' || fail "resume truncation was hidden"
+  printf '%s' "$out" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' || fail "resume split a UTF-8 character"
 }
 
 test_install_codex_plugin_registers_marketplace() {
@@ -18735,6 +18807,19 @@ test_agent_thread_truncates_and_bounds_context() {
   out="$("$ROOT/scripts/thread.sh" --repo "$project" --id big context --notes-only --turns 2)"
   printf '%s' "$out" | grep -Fq 'turn number 5' || fail 'note view lost coordinator input'
   if printf '%s' "$out" | grep -Eq 'SEAT-ANSWER|FAILED-SEAT'; then fail 'note view repeated seat output'; fi
+  python3 -c 'print("한글 대화 " * 1000)' > "$TMP/thread-big.txt"
+  OMS_THREAD_TURN_BYTES=20000 "$ROOT/scripts/thread.sh" --repo "$project" --id big \
+    append --role answer --text-file "$TMP/thread-big.txt" --provider codex >/dev/null
+  "$ROOT/scripts/thread.sh" --repo "$project" --id big context --max-bytes 512 > "$TMP/thread-context.txt"
+  python3 - "$TMP/thread-context.txt" <<'PY'
+from pathlib import Path
+import sys
+raw = Path(sys.argv[1]).read_bytes()
+assert len(raw) <= 512, len(raw)
+text = raw.decode('utf-8')
+assert 'newest turn truncated' in text, text
+assert '[end untrusted peer answer from codex]' in text, text
+PY
 }
 
 test_agent_call_threads_the_exchange() {
@@ -23072,6 +23157,8 @@ for index, call in enumerate(calls):
     if index == 0:
         assert resume not in args, args
     else:
+        assert 'Make the initial fixture edit.' not in delivered, 'resumed turn replayed initial context'
+        assert 'Completed the requested fixture edit' not in delivered, 'resumed turn replayed prior answer'
         assert args[args.index(resume) + 1] == "fixture-session", args
         def frozen(row):
             values = row["args"][:]

@@ -739,13 +739,20 @@ with patch.object(m.subprocess, "Popen") as launcher:
 # A caller can post immediately, before the provider child has started at all.
 native_popen = m.subprocess.Popen
 with patch.object(m.subprocess, "Popen", side_effect=lambda argv, **kwargs:
-                  launcher.return_value if argv[:2] == ["bash", "-c"] else native_popen(argv, **kwargs)):
+                  launcher.return_value if argv[:2] == ["bash", "-c"] else native_popen(argv, **kwargs)) as launch_check:
     text, bad = m.start_peer({"repo": args["repo"], "kind": "ask", "prompt": "Ready thread"})
     assert not bad, text
     ready = json.loads(text)
     text, bad = m.start_peer({"repo": args["repo"], "kind": "message", "thread": ready["thread"],
                               "prompt": "Check the caller before changing the interface."})
     assert not bad and json.loads(text)["status"] == "recorded", text
+    m.subprocess.run(["bash", str(root / "scripts/thread.sh"), "--repo", args["repo"],
+                      "--id", ready["thread"], "close"], capture_output=True, check=True)
+    launch_check.reset_mock()
+    text, bad = m.start_peer({"repo": args["repo"], "kind": "ask", "prompt": "Closed council",
+                             "thread": ready["thread"]})
+    assert bad, "a closed council must be refused before launching a provider"
+    assert all(call.args[0][:2] != ["bash", "-c"] for call in launch_check.call_args_list)
 PY
 }
 

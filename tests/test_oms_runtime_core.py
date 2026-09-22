@@ -328,6 +328,10 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(statuses['project-safe'], 'stale')
 
     def test_context_manifest_selects_target_imports_tests_and_reports_debt(self) -> None:
+        target = self.repo / 'scripts' / 'sample.py'
+        target.write_text('from __future__ import annotations\nfrom typing import Any\nfrom pathlib import Path\n' + target.read_text(encoding='utf-8'), encoding='utf-8')
+        noise = self.repo / 'scripts' / 'unrelated.py'
+        noise.write_text('from __future__ import annotations\nfrom typing import Any\nfrom pathlib import Path\nvalue = 42\n', encoding='utf-8')
         caller = self.repo / 'scripts' / 'caller.py'
         caller.write_text('from scripts.sample import calculate\ncalculate(2)\n', encoding='utf-8')
         with patch.object(context, '_discovery_text', wraps=context._discovery_text) as discover:
@@ -338,6 +342,7 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertIn('scripts/helper.py', selected)
         self.assertIn('tests/test_sample.py', selected)
         self.assertIn('scripts/caller.py', selected)
+        self.assertNotIn('scripts/unrelated.py', selected)
         self.assertFalse(manifest['sufficient'])
         self.assertIn('missing-required.py', manifest['missing_required'])
         self.assertEqual(manifest['targets'], ['scripts/sample.py'])
@@ -1202,6 +1207,8 @@ class RuntimeFixture(RuntimeFixtureBase):
             {'schema': 1, 'event_id': 'evt-m4', 'kind': 'call', 'provider': 'antigravity', 'selected_model': 'provider-default', 'status': 'success'},
             {'schema': 1, 'event_id': 'evt-m5', 'kind': 'call', 'provider': 'codex', 'selected_model': 'gpt-5.6-sol', 'fallback_used': True, 'status': 'success', 'tokens': 200, 'cost_usd': 0.2},
             {'schema': 1, 'event_id': 'evt-m6', 'kind': 'call', 'provider': 'codex', 'configured_model': 'gpt-5.6-luna', 'model_attribution': 'configured-default', 'status': 'success', 'tokens': 20},
+            {'schema': 1, 'event_id': 'evt-m7', 'kind': 'call', 'provider': 'codex', 'selected_model': 'unknown-usage'},
+            {'schema': 1, 'event_id': 'evt-m8', 'kind': 'call', 'provider': 'codex', 'selected_model': 'partial-usage', 'input_tokens': 30},
         ]
         with index.open('a', encoding='utf-8') as handle:
             for item in rows:
@@ -1214,12 +1221,40 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(terra['tokens'], 150)
         self.assertEqual(terra['duration_seconds_mean'], 3.0)
         self.assertAlmostEqual(terra['cost_usd'], 0.01)
+        self.assertEqual(terra['tokens_count'], 2)
+        self.assertEqual(terra['cost_usd_count'], 1)
+        for name in ('unknown-usage', 'partial-usage'):
+            self.assertIsNone(models['codex/' + name]['tokens'])
+            self.assertIsNone(models['codex/' + name]['cost_usd'])
+            self.assertEqual(models['codex/' + name]['tokens_count'], 0)
         self.assertEqual(terra['sources'], {'transport': 2})
         self.assertEqual(models['claude/claude-opus-5']['calls'], 1)
         self.assertEqual(models['codex/gpt-5.6-luna']['sources'], {'configured-default': 1})
         self.assertNotIn('codex/gpt-5.6-sol', models)
         self.assertNotIn('antigravity/provider-default', models)
         self.assertFalse(any(key.startswith('antigravity/') for key in models))
+
+        from oms_runtime.benchmark import _context_modes
+        common = dict(kind='delegate', provider='codex', selected_model='test-model', base_sha='abc123',
+                      context_task_sha256='a' * 64, context_verification='command', verify_exit=0, exit=0)
+        result = _context_modes([
+            dict(common, context_mode='direct', context_prepare_seconds=0, prompt_bytes=100),
+            dict(common, context_mode='graph', context_prepare_seconds=2, prompt_bytes=150, tokens=30, duration_s=3),
+            dict(common, context_mode='graph', context_task_sha256='b' * 64, verify_exit=1),
+            dict(common, context_mode='graph', base_sha='changed', verify_exit=125),
+            dict(common, context_mode='bundle', fallback_used=True),
+            dict(common, context_mode='pack', context_verification='none'),
+        ])
+        modes = result['modes']
+        self.assertIsNone(modes['direct']['tokens']['mean'])
+        self.assertEqual(modes['graph']['tokens']['count'], 1)
+        self.assertEqual(modes['graph']['duration_seconds']['mean'], 3)
+        self.assertEqual(modes['graph']['verification_rate'], 0.5)
+        self.assertIsNone(modes['pack']['verification_rate'])
+        self.assertEqual(len(result['matched_cohorts']), 1)
+        matched = next(iter(result['matched_cohorts'].values()))
+        self.assertEqual(set(matched), {'direct', 'graph'})
+        self.assertEqual(matched['graph']['calls'], 1)
 
     def test_artifact_model_metrics_refuse_multi_model_attribution(self) -> None:
         artifact = self.repo / '.oms' / 'artifacts' / 'multi-model.md'

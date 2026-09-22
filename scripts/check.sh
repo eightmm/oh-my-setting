@@ -43,6 +43,38 @@ unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
 # must resolve identically from a desktop shell and from the auto-update timer,
 # so the production path cannot key off an ambient XDG variable (file-lock.sh).
 CHECK_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/oms-check-runtime.XXXXXX")"
+# Nested fixtures must not append to the real job summary.
+CHECK_SUMMARY="${GITHUB_STEP_SUMMARY:-}"
+unset GITHUB_STEP_SUMMARY
+report_check() {
+  [ "${LIST_STAGES:-0}" != 1 ] || return 0
+  [ "${PRINT_AFFECTED_MODE:-0}" != 1 ] || return 0
+  [ -s "$CHECK_RUNTIME/timings" ] || [ "${RUN_AFFECTED:-0}" = 1 ] || return 0
+  python3 - "$CHECK_RUNTIME/timings" "$CHECK_SUMMARY" "${AFFECTED_MODE:-${MODE:-full}}" \
+    "${AFFECTED_REASONS:-explicit check mode}" "$1" <<'PY'
+import html, pathlib, sys
+path, summary, mode, reasons, rc = sys.argv[1:]
+rows = []
+try:
+    for line in pathlib.Path(path).read_text().splitlines():
+        seconds, kind, name = line.split('\t', 2)
+        rows.append((int(seconds), kind, name))
+except (OSError, ValueError):
+    pass
+reason = ' '.join(reasons.split())[:800]
+lines = ['check-summary: mode=%s; exit=%s; reason=%s' % (mode, rc, reason)]
+for kind in ('stage', 'test'):
+    for seconds, _, name in sorted((row for row in rows if row[1] == kind), reverse=True)[:5]:
+        lines.append('slow-%s: %ss %s' % (kind, seconds, name))
+print('\n'.join(lines))
+if summary:
+    try:
+        with open(summary, 'a', encoding='utf-8') as handle:
+            handle.write('\n### OMS verification selection and timing\n\n<pre>' + html.escape('\n'.join(lines)) + '</pre>\n')
+    except OSError as exc:
+        print('warning: could not append CI summary: %s' % exc, file=sys.stderr)
+PY
+}
 CHECK_STATE_GUARD_ACTIVE=0
 CHECK_ORIGINAL_LOCK_DIR="${OMS_LOCK_DIR:-}"
 cleanup_check_runtime() {
@@ -55,6 +87,7 @@ cleanup_check_runtime() {
   if [ -n "${OMS_CHECK_MAINTENANCE_MARKER:-}" ]; then
     oms_check_maintenance_end
   fi
+  report_check "$rc" || true
   rm -rf "$CHECK_RUNTIME"
   exit "$rc"
 }
@@ -361,6 +394,11 @@ stage() {  # stage NAME COMMAND...
   started="$(date +%s)"
   "$@" > "$log" 2>&1 || rc=$?
   elapsed=$(( $(date +%s) - started ))
+  printf '%s\tstage\t%s\n' "$elapsed" "$name" >> "$CHECK_RUNTIME/timings"
+  # Reuse the runner's bounded per-test timings before its successful log is
+  # discarded. No extra test run or persistent timing database.
+  awk '/^smoke-timing: [0-9]+s [A-Za-z0-9_]+$/ { sub(/s$/, "", $2); print $2 "\ttest\t" $3 }' \
+    "$log" >> "$CHECK_RUNTIME/timings"
   if [ "${OMS_VERBOSE:-0}" = "1" ]; then
     cat "$log"
     rm -f "$log"
@@ -464,7 +502,7 @@ if mode == "affected":
             name = clean(row.get("name"), "test case name")
             if path not in languages or language != languages[path]:
                 raise ValueError("orphan test case:%s" % ident)
-            if path == "tests/scripts-smoke.sh":
+            if path in ("tests/scripts-smoke.sh", "tests/autonomy-plan-run-smoke.sh"):
                 if language != "shell" or not re.fullmatch(r"test_[A-Za-z0-9_]+", name):
                     raise ValueError("unsupported test case:%s" % ident)
                 cases.append((language, path, name))
@@ -582,6 +620,7 @@ prepare_affected_gate() {
   fi
 
   if [ "$AFFECTED_MODE" = affected ]; then
+    AFFECTED_REASONS="${AFFECTED_REASONS:-positive graph evidence}"
     RUN_QUICK=1
     echo "affected: ${AFFECTED_REASONS:-positive graph evidence}; ${#AFFECTED_TESTS[@]} selected test file(s)" >&2
   else
@@ -731,7 +770,7 @@ affected_test_was_run_by_quick() {  # affected_test_was_run_by_quick PATH
 if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
   for affected_test in ${AFFECTED_TESTS[@]+"${AFFECTED_TESTS[@]}"}; do
     affected_test_was_run_by_quick "$affected_test" && continue
-    if [ "$affected_test" = tests/scripts-smoke.sh ]; then
+    if [ "$affected_test" = tests/scripts-smoke.sh ] || [ "$affected_test" = tests/autonomy-plan-run-smoke.sh ]; then
       affected_args=()
       affected_index=0
       while [ "$affected_index" -lt "${#AFFECTED_CASE_PATHS[@]}" ]; do
@@ -743,9 +782,9 @@ if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
         affected_index=$((affected_index + 1))
       done
       if [ "${#affected_args[@]}" -gt 0 ]; then
-        stage affected-scripts-smoke bash tests/run-smoke-shard.sh "${affected_args[@]}"
+        stage affected-scripts-smoke env OMS_SMOKE_SUITE="$ROOT/$affected_test" bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}" "${affected_args[@]}"
       else
-        stage affected-scripts-smoke bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
+        stage affected-scripts-smoke env OMS_SMOKE_SUITE="$ROOT/$affected_test" bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
       fi
     elif [ "${affected_test%.py}" != "$affected_test" ]; then
       affected_args=()

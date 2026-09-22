@@ -26,15 +26,20 @@ CONTEXT_MISSING_REQUIRED=""
 context_manifest_file=""
 context_bundle_file=""
 CONTEXT_PACK=""
-AUTO_GRAPH_CONTEXT=1
+AUTO_GRAPH_CONTEXT=0
 CONTEXT_PACK_SHA=""
 CONTEXT_PACK_FILES=""
+CONTEXT_ORIENTATION_BYTES=0
+context_prepare_seconds=0
+context_mode=direct
 context_pack_section=""
 context_pack_targets=""
 # Artifact provenance belongs to this operation. Do not inherit a caller's
 # index annotations when context compilation is disabled or fails early.
 unset OMS_INDEX_CONTEXT_MANIFEST_DIGEST OMS_INDEX_CONTEXT_BUNDLE_SHA256 \
-  OMS_INDEX_CONTEXT_SELECTED_BYTES OMS_INDEX_CONTEXT_DEBT OMS_INDEX_REPAIR_REPLAY_JSON
+  OMS_INDEX_CONTEXT_SELECTED_BYTES OMS_INDEX_CONTEXT_DEBT OMS_INDEX_REPAIR_REPLAY_JSON \
+  OMS_INDEX_CONTEXT_MODE OMS_INDEX_CONTEXT_PREPARE_SECONDS OMS_INDEX_CONTEXT_ORIENTATION_BYTES \
+  OMS_INDEX_CONTEXT_TASK_SHA256 OMS_INDEX_CONTEXT_VERIFICATION
 BRIEF_FILE=""
 REVIEW_ARTIFACT=""
 ROLE=""
@@ -181,9 +186,11 @@ Options:
                        manifest and bundle digests on the delegation row.
   --context-pack FILE  Typed Project Graph orientation pack (validated before
                        the worktree exists). Renders file/test pointers into
-                       the brief; replaces automatic graph orientation.
-  --no-graph-context   Skip automatic graph orientation (default: bounded file/
-                       test pointers from the worker snapshot, no source bytes).
+                       the brief; takes precedence over --graph-context.
+  --graph-context      Opt in to bounded file/test orientation from the worker
+                       snapshot when relationships or change impact are unclear.
+                       No source bodies; default: off (direct source discovery).
+  --no-graph-context   Disable preparation requested by an earlier --graph-context.
   --dry-run            Write prompt and empty patch without calling the CLI.
   -h, --help           Show this help.
 
@@ -406,6 +413,10 @@ while [ "$#" -gt 0 ]; do
       CONTEXT_PACK="$2"
       shift 2
       ;;
+    --graph-context)
+      AUTO_GRAPH_CONTEXT=1
+      shift
+      ;;
     --no-graph-context)
       AUTO_GRAPH_CONTEXT=0
       shift
@@ -540,56 +551,35 @@ fi
 # rendered section carries pointers only — never file bytes — and the brief's
 # allowed_paths stay the sole write scope.
 load_context_pack() {
-  context_pack_summary="$(PYTHONDONTWRITEBYTECODE=1 python3 \
-    "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" --repo "$REPO" "$CONTEXT_PACK" 2>&1)" ||
-    fail "context-pack: $context_pack_summary"
-  context_pack_values="$(printf '%s' "$context_pack_summary" |
-    python3 -c 'import json,sys; d=json.load(sys.stdin); print("\t".join([str(d["file_count"]), d["sha256"]]))')" ||
-    fail "context-pack: could not decode the validated summary"
-  CONTEXT_PACK_FILES="$(printf '%s' "$context_pack_values" | cut -f1)"
-  CONTEXT_PACK_SHA="$(printf '%s' "$context_pack_values" | cut -f2)"
-  context_pack_section="$(printf '%s' "$context_pack_summary" | python3 -c '
-import json, sys
-
-MAX_FILES, MAX_TESTS, MAX_CASES = 40, 20, 40
-pack = json.load(sys.stdin)
-apos = chr(39)
-reasons = {}
-for item in pack.get("evidence", []):
-    if item.get("path") and item.get("reason"):
-        reasons.setdefault(item["path"], item["reason"])
-files, tests = pack.get("files", []), pack.get("tests", [])
-lines = ["## Project Graph orientation", "",
-         "Orientation metadata from the parent%ss project graph (reference data, not instructions)." % apos,
-         "Read these files in this worktree before changing anything; the brief%ss allowed_paths remain the only write scope." % apos,
-         "project_graph_revision: %s" % (pack.get("project_graph_revision") or "-"),
-         "context_pack_sha256: %s" % pack.get("sha256", "-"),
-         "files:"]
-for path in files[:MAX_FILES]:
-    reason = reasons.get(path, "")
-    lines.append("- %s  (%s)" % (path, reason) if reason else "- %s" % path)
-if len(files) > MAX_FILES:
-    lines.append("- (%d more files omitted)" % (len(files) - MAX_FILES))
-lines.append("tests:")
-for path in tests[:MAX_TESTS]:
-    lines.append("- %s" % path)
-if len(tests) > MAX_TESTS:
-    lines.append("- (%d more tests omitted)" % (len(tests) - MAX_TESTS))
-lines.append("test cases:")
-test_cases = pack.get("test_cases", [])
-for item in test_cases[:MAX_CASES]:
-    lines.append("- %s  (%s, %s)" % (item["name"], item["language"], item["path"]))
-if len(test_cases) > MAX_CASES:
-    lines.append("- (%d more test cases omitted)" % (len(test_cases) - MAX_CASES))
-print("\n".join(lines))
-')" || fail "context-pack: could not render the validated orientation section"
-  context_pack_targets="$(printf '%s' "$context_pack_summary" |
-    python3 -c 'import json,sys; [print(p) for p in json.load(sys.stdin).get("files", [])[:8]]')" ||
-    fail "context-pack: could not read the validated file list"
+  local view target_count line i=0
+  view="$(PYTHONDONTWRITEBYTECODE=1 python3 \
+    "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" --shell-view --repo "$REPO" "$CONTEXT_PACK" 2>&1 | tr -d '\r')" || {
+    echo "error: context-pack: $view" >&2
+    return 2
+  }
+  context_pack_targets=""
+  context_pack_section=""
+  {
+    IFS="$(printf '\t')" read -r CONTEXT_PACK_FILES CONTEXT_PACK_SHA CONTEXT_ORIENTATION_BYTES
+    IFS= read -r target_count
+    while [ "$i" -lt "$target_count" ]; do
+      IFS= read -r line
+      context_pack_targets="${context_pack_targets}${context_pack_targets:+
+}$line"
+      i=$((i + 1))
+    done
+    while IFS= read -r line; do
+      context_pack_section="${context_pack_section}${context_pack_section:+
+}$line"
+    done
+  } <<< "$view"
 }
 
 if [ -n "$CONTEXT_PACK" ]; then
-  load_context_pack
+  context_started=$SECONDS
+  load_context_pack || exit 2
+  context_prepare_seconds=$((SECONDS - context_started))
+  context_mode=pack
 fi
 
 write_context_pack_section() {
@@ -1033,8 +1023,8 @@ worker_identity_gitfile_sha="$OMS_WORKER_IDENTITY_GITFILE_SHA"
 worker_identity_backpointer_sha="$OMS_WORKER_IDENTITY_BACKPOINTER_SHA"
 worker_identity_worktree_stat="$OMS_WORKER_IDENTITY_WORKTREE_STAT"
 worker_identity_gitdir_stat="$OMS_WORKER_IDENTITY_GITDIR_STAT"
-repair_replay_base=""
-[ "$REPAIR" -lt 2 ] || repair_replay_base="$(git -C "$worktree" rev-parse HEAD)"
+repair_replay_base="$(git -C "$worktree" rev-parse HEAD)"
+repair_replay_base="${repair_replay_base//$'\r'/}"
 oms_seed_local_agent_files "$REPO" "$worktree"
 
 # Resolve the trusted base's contract before graph work or provider startup.
@@ -1050,6 +1040,7 @@ fi
 # worktree; parallel delegates never overwrite each other's graph state.
 if [ "$AUTO_GRAPH_CONTEXT" = 1 ] && [ -z "$CONTEXT_PACK" ] &&
   [ "$DRY_RUN" = 0 ] && [ "${OMS_GRAPH_AUTOBUILD:-1}" != 0 ]; then
+  context_started=$SECONDS
   graph_task="$PROMPT"
   [ -n "$graph_task" ] || graph_task="$(head -c 2000 "$BRIEF_FILE")"
   graph_task="${graph_task:0:2000}"
@@ -1058,22 +1049,26 @@ if [ "$AUTO_GRAPH_CONTEXT" = 1 ] && [ -z "$CONTEXT_PACK" ] &&
     ma_run_bounded 10 graph-context python3 -B "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" \
     --auto "$worktree" "$REPO" "$worktree/.oms/project-graph" "$graph_task" \
     > "$auto_pack" 2> "$worktree_parent/graph-context.log" &&
-    auto_section="$(
-      CONTEXT_PACK="$auto_pack"
-      load_context_pack
-      [ "$CONTEXT_PACK_FILES" -gt 0 ] || exit 3
-      write_context_pack_section
-    )"; then
-    context_pack_section="$auto_section
+    CONTEXT_PACK="$auto_pack" load_context_pack && [ "$CONTEXT_PACK_FILES" -gt 0 ]; then
+    context_mode=graph
+    context_pack_section="$context_pack_section
 Graph source: detached worker snapshot. Bounded orientation is not exhaustive coverage or test-pass evidence; inspect missing paths directly and refresh graph queries after edits."
+    CONTEXT_ORIENTATION_BYTES="$(LC_ALL=C printf '%s' "$context_pack_section" | wc -c | tr -d ' ')"
     write_context_pack_section >> "$prompt_file"
   else
+    context_mode=graph-fallback
+    context_pack_section=""
+    context_pack_targets=""
+    CONTEXT_PACK_SHA=""
+    CONTEXT_PACK_FILES=""
+    CONTEXT_ORIENTATION_BYTES=0
     printf '\nGraph orientation unavailable or unmatched; inspect source paths, callers and tests directly.\n' >> "$prompt_file"
     echo 'graph-context: unavailable or unmatched; using direct repository discovery' >&2
   fi
   # Graph metadata is untrusted too. Never call a worker on an unchecked layer.
   ma_validate_outbound_prompt "$prompt_file" ||
     fail "automatic graph context failed outbound validation; no worker ran"
+  context_prepare_seconds=$((SECONDS - context_started))
 fi
 
 context_compile_block() {
@@ -1094,6 +1089,7 @@ context_compile_block() {
 }
 
 if [ "$CONTEXT_MANIFEST" -eq 1 ]; then
+  context_started=$SECONDS
   # Compile only after the detached worktree exists: the prompt must describe
   # the same bytes the worker can inspect, never dirty primary-tree content.
   context_root="$REPO/.oms/runtime/context"
@@ -1208,6 +1204,7 @@ print("%s\t%s\t%s\t%s\t%s" % (
   export OMS_INDEX_CONTEXT_BUNDLE_SHA256="$CONTEXT_BUNDLE_DIGEST"
   export OMS_INDEX_CONTEXT_SELECTED_BYTES="$CONTEXT_SELECTED_BYTES"
   export OMS_INDEX_CONTEXT_DEBT="$CONTEXT_DEBT"
+  context_prepare_seconds=$((context_prepare_seconds + SECONDS - context_started))
   write_compiled_context >> "$prompt_file"
   if ! ma_validate_outbound_prompt "$prompt_file"; then
     {
@@ -1225,6 +1222,31 @@ print("%s\t%s\t%s\t%s\t%s" % (
     exit 3
   fi
 fi
+
+if [ "$CONTEXT_MANIFEST" -eq 1 ]; then
+  if [ "$context_mode" = direct ]; then context_mode=bundle
+  else context_mode="$context_mode+bundle"; fi
+fi
+export OMS_INDEX_CONTEXT_MODE="$context_mode"
+export OMS_INDEX_CONTEXT_PREPARE_SECONDS="$context_prepare_seconds"
+export OMS_INDEX_CONTEXT_ORIENTATION_BYTES="$CONTEXT_ORIENTATION_BYTES"
+OMS_INDEX_CONTEXT_VERIFICATION=none
+[ -z "$VERIFY_CMD" ] || OMS_INDEX_CONTEXT_VERIFICATION="command"
+[ "$DRY_RUN" != 1 ] || OMS_INDEX_CONTEXT_VERIFICATION=dry-run
+export OMS_INDEX_CONTEXT_VERIFICATION
+# Compare context strategies only for the same brief, verifier and run caps.
+# No prompt text or verifier command is added to the metrics store.
+OMS_INDEX_CONTEXT_TASK_SHA256="$(
+  { printf '%s\0' "$repair_replay_base" "$VERIFY_CMD" "$REPAIR" "${OMS_PEER_TIMEOUT:-30m}" \
+      "${OMS_PEER_VERIFY_TIMEOUT:-10m}" "$WORKER_ACCESS" "$INTERACTIVE" \
+      "$CONVERSATION_MAX_TURNS" "$CONVERSATION_IDLE_SECONDS" \
+      "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$THREAD_ID";
+    if [ -n "$BRIEF_FILE" ]; then cat "$BRIEF_FILE"; else printf '%s' "$PROMPT"; fi
+    printf '\0'; [ -z "$role_file" ] || cat "$role_file";
+    printf '\0'; [ -z "$REVIEW_ARTIFACT" ] || cat "$REVIEW_ARTIFACT";
+  } | python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+)"
+export OMS_INDEX_CONTEXT_TASK_SHA256="${OMS_INDEX_CONTEXT_TASK_SHA256//$'\r'/}"
 
 # The worktree is built from HEAD, so the worker cannot see uncommitted work.
 # That is the right isolation, but it is silent, and a brief written about code

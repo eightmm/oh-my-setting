@@ -480,6 +480,8 @@ def _project_affected(args: argparse.Namespace, repo: Path, state: Path) -> int:
         print("ignored_confidence: %s %d" % (confidence, count))
     for reason in result["reasons"]:
         print("reason: %s" % reason)
+    for path in result["documentation_paths"]:
+        print("documentation: %s" % path)
     for path in result["tests"]:
         print("test: %s" % path)
     for row in result["test_cases"]:
