@@ -54,6 +54,14 @@ allowed top-level Stop, the final `HEAD` is reconciled locally. Periodic
 `oms journal sync` publish the mirror;
 stable content hashes prevent repeated publication of unchanged summaries.
 
+Session capture keeps the beginning and end of long messages within the existing
+character budgets, marking omitted middle text. Handoff events retain the
+assistant summary across Markdown headings and lines, bounded to 2,000 UTF-8
+bytes with the beginning and end preserved. Historical request/contract sections
+are excluded. Verification claims remain prose, never a `passed` receipt; no
+model summarizer or extra event is added. Existing events and Notion pages are
+not automatically rewritten by this change.
+
 An event ID is derived, in order, from an authoritative source record ID, a
 caller operation ID, or a hash of normalized stable source fields. Current time
 is never a deduplication input. `occurred_at` is UTC RFC 3339; local date and ISO

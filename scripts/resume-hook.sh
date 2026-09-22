@@ -31,6 +31,10 @@ cwd="${cwd//$'\r'/}"
 
 # Only a harness-adopted repo has state worth resuming; a random directory
 # must not produce noise (or a .oms tree) because a session started there.
+repo="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || repo=""
+repo="${repo//$'\r'/}"
+[ -z "$repo" ] || cwd="$repo"
+cwd="$(cd "$cwd" && pwd -P)" || exit 0
 [ -d "$cwd/.oms" ] || exit 0
 
 out=""

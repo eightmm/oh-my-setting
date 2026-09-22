@@ -1267,6 +1267,19 @@ class ObserveDiagnosticsTest(unittest.TestCase):
         self.assertEqual(self.observe("--source-type", "session-handoff", "--source-id", "s2").returncode, 0)
         row = json.loads(events.read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(row["outcome"]["summary"], "Session handoff captured")
+        self.source.write_text(
+            '## Last assistant summary\n\n## What changed\nParser repaired.\n## Goal\nKeep the public interface.\n'
+            + '세부 설명 반복. ' * 300 + '\nVerification: failed\nRemaining: migration unsafe\n'
+            '\n## Original request (historical)\nOLD_REQUEST_MUST_NOT_LEAK\n', encoding='utf-8')
+        self.assertEqual(self.observe('--source-type', 'session-handoff', '--source-id', 's3').returncode, 0)
+        row = json.loads(events.read_text(encoding='utf-8').splitlines()[-1])
+        summary = row['outcome']['summary']
+        self.assertIn('Parser repaired.', summary)
+        self.assertIn('Verification: failed', summary)
+        self.assertIn('Remaining: migration unsafe', summary)
+        self.assertNotIn('OLD_REQUEST_MUST_NOT_LEAK', summary)
+        self.assertLessEqual(len(summary.encode('utf-8')), wj.MAX_TEXT_BYTES)
+        self.assertNotEqual(row['verification_status'], 'passed')
 
     def test_unregistered_source_type_without_a_json_record_says_so(self):
         result = self.observe("--source-type", "evolution-round")

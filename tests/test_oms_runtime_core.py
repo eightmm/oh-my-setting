@@ -1171,6 +1171,25 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertNotIn('useful_work_efficiency', json.dumps(comparison))
         self.assertIn('human_corrections', row['unknown_metrics'])
 
+        index = self.repo / '.oms/artifacts/index.jsonl'
+        records = [
+            dict(kind='review', provider='codex', exit=0, tokens=100),
+            dict(kind='review-synthesis', provider='local', exit=0, tokens=100),
+            dict(kind='review-outcome', provider='local', exit=1, tokens=100),
+            dict(kind='review-verify', provider='local', exit=1, verify_exit=1),
+        ]
+        index.write_text(''.join(json.dumps(item) + '\n' for item in records))
+        separated = benchmark_snapshot(self.repo)
+        self.assertEqual(separated['tokens']['sum'], 100)
+        self.assertEqual(separated['decided_outcomes'], 1)
+        self.assertEqual(separated['verified_outcomes'], 0)
+        self.assertEqual(separated['success_rate'], 0)
+        self.assertEqual(separated['call_outcomes']['passed'], 1)
+        self.assertEqual(separated['review_outcomes']['failed'], 1)
+        legacy = {key: value for key, value in separated.items() if key != 'measurement_basis'}
+        changed_basis = compare(legacy, separated)
+        self.assertIsNone(next(item for item in changed_basis['changes'] if item['field'] == 'success_rate')['delta'])
+
         # Digest names and copied-file mtimes do not identify recent context.
         from oms_runtime.benchmark import _context_rows
         context_root = self.repo / '.oms' / 'runtime' / 'context'
@@ -1201,8 +1220,8 @@ class RuntimeFixture(RuntimeFixtureBase):
         # transport left anonymous.
         index = self.repo / '.oms' / 'artifacts' / 'index.jsonl'
         rows = [
-            {'schema': 1, 'event_id': 'evt-m1', 'kind': 'call', 'provider': 'codex', 'served_model': 'gpt-5.6-terra', 'status': 'success', 'tokens': 100, 'duration_s': 2.0, 'cost_usd': 0.01},
-            {'schema': 1, 'event_id': 'evt-m2', 'kind': 'call', 'provider': 'codex', 'served_model': 'gpt-5.6-terra', 'status': 'failed', 'tokens': 50, 'duration_s': 4.0},
+            {'schema': 1, 'event_id': 'evt-m1', 'kind': 'delegate', 'provider': 'codex', 'served_model': 'gpt-5.6-terra', 'exit': 0, 'context_verification': 'command', 'verify_exit': 0, 'tokens': 100, 'duration_s': 2.0, 'cost_usd': 0.01},
+            {'schema': 1, 'event_id': 'evt-m2', 'kind': 'delegate', 'provider': 'codex', 'served_model': 'gpt-5.6-terra', 'exit': 1, 'context_verification': 'command', 'verify_exit': 1, 'tokens': 50, 'duration_s': 4.0},
             {'schema': 1, 'event_id': 'evt-m3', 'kind': 'call', 'provider': 'claude', 'selected_model': 'claude-opus-5', 'status': 'success', 'tokens': 10},
             {'schema': 1, 'event_id': 'evt-m4', 'kind': 'call', 'provider': 'antigravity', 'selected_model': 'provider-default', 'status': 'success'},
             {'schema': 1, 'event_id': 'evt-m5', 'kind': 'call', 'provider': 'codex', 'selected_model': 'gpt-5.6-sol', 'fallback_used': True, 'status': 'success', 'tokens': 200, 'cost_usd': 0.2},
@@ -1229,6 +1248,9 @@ class RuntimeFixture(RuntimeFixtureBase):
             self.assertEqual(models['codex/' + name]['tokens_count'], 0)
         self.assertEqual(terra['sources'], {'transport': 2})
         self.assertEqual(models['claude/claude-opus-5']['calls'], 1)
+        self.assertEqual(models['claude/claude-opus-5']['verified'], 0)
+        self.assertEqual(models['claude/claude-opus-5']['completion']['passed'], 1)
+        self.assertIsNone(models['claude/claude-opus-5']['success_rate'])
         self.assertEqual(models['codex/gpt-5.6-luna']['sources'], {'configured-default': 1})
         self.assertNotIn('codex/gpt-5.6-sol', models)
         self.assertNotIn('antigravity/provider-default', models)
@@ -1256,6 +1278,53 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(set(matched), {'direct', 'graph'})
         self.assertEqual(matched['graph']['calls'], 1)
 
+        # A successful process is not verification when checks were skipped.
+        for mode, worker, verifier, expected in (
+            ('none', 0, 0, 'inconclusive'),
+            ('none', 1, 0, 'failed'),
+            ('dry-run', 0, 0, 'skipped_with_reason'),
+            ('dry-run', 2, 0, 'failed'),
+            ('command', 1, 0, 'failed'),
+            ('command', 0, 1, 'failed'),
+            ('command', 0, 125, 'inconclusive'),
+            ('command', 0, None, 'inconclusive'),
+            ('command', None, 0, 'inconclusive'),
+            ('command', False, 0, 'inconclusive'),
+            ('command', 0, False, 'inconclusive'),
+            ('command', 0, 0, 'verified'),
+        ):
+            row = dict(common, context_verification=mode, exit=worker, verify_exit=verifier)
+            self.assertEqual(evidence.outcome(row), expected, row)
+            metrics = _context_modes([dict(row, context_mode='direct')])['modes']['direct']
+            self.assertEqual(metrics['verified'], int(expected == 'verified'), row)
+        from oms_runtime.benchmark import _model_table
+        rows = [dict(common, context_verification=mode) for mode in ('none', 'dry-run', 'command')]
+        table = _model_table(rows)['codex/test-model']
+        self.assertEqual(table['calls'], 3)
+        self.assertEqual(table['verified'], 1)
+        with index.open('w', encoding='utf-8') as handle:
+            for row in rows:
+                handle.write(json.dumps(row) + '\n')
+        self.assertEqual(benchmark_snapshot(self.repo)['verified_outcomes'], 1)
+
+        from oms_runtime.benchmark import _artifact_tokens
+        from peer_artifacts import usage_footer
+        usage = {'input_tokens': 10, 'output_tokens': 20,
+                 'cache_read_input_tokens': 100, 'cache_creation_input_tokens': 20}
+        detail = json.loads(usage_footer('claude', [usage])[-1].split(': ', 1)[1])
+        row = {'tokens': 30, 'provider_usage': detail}
+        self.assertEqual(_artifact_tokens(row), 150)
+        detail['cache_write_tokens'] = None
+        self.assertIsNone(_artifact_tokens(row))
+        detail['cache_in_input'] = None
+        self.assertIsNone(_artifact_tokens(row))
+        detail['cache_in_input'] = True
+        self.assertEqual(_artifact_tokens(row), 30)
+        detail['output_tokens'] = None
+        self.assertIsNone(_artifact_tokens(row))
+        row['total_tokens'] = 150
+        self.assertEqual(_artifact_tokens(row), 150)
+
     def test_artifact_model_metrics_refuse_multi_model_attribution(self) -> None:
         artifact = self.repo / '.oms' / 'artifacts' / 'multi-model.md'
         artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -1273,6 +1342,33 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertIsNone(model_metrics['configured_model'])
         self.assertAlmostEqual(model_metrics['cost_usd'], 0.3)
         self.assertEqual(telemetry['artifact_metrics'](str(self.repo), row)[2], 10)
+
+        artifact.write_text(
+            '# call\n\n## Prompt\n\nExample:\n'
+            'tokens used\n900\nserved model\nexample\ncost usd\n9\n'
+            '\n## Output\n\nanswer\nserved model\nmodel-a\n'
+            'tokens used\n100\ncost usd\n0.1\n\n## Exit\n\n0\n', encoding='utf-8')
+        self.assertEqual(telemetry['artifact_metrics'](str(self.repo), row)[2], 100)
+        self.assertEqual(telemetry['artifact_model_metrics'](str(self.repo), row)['served_model'], 'model-a')
+        self.assertEqual(telemetry['artifact_model_metrics'](str(self.repo), row)['cost_usd'], 0.1)
+        artifact.write_text('# synthesis\n\n## Prompt\n\ntokens used\n900\n', encoding='utf-8')
+        self.assertIsNone(telemetry['artifact_metrics'](str(self.repo), row)[2])
+
+        artifact.write_text(
+            '# delegate\n\n## Prompt\n\ntokens used\n900\n'
+            '\n## Output\n\ntokens used\n100\n'
+            '\n## Verify\n\ntokens used\n800\n'
+            '\n## Repair 1\n\n### Prompt\n\ntokens used\n700\n'
+            '\n### Output\n\ntokens used\n20\n'
+            '\n## Verify (repair 1)\n\ntokens used\n600\n'
+            '\n## Exit\n\n0\n', encoding='utf-8')
+        self.assertEqual(telemetry['artifact_metrics'](str(self.repo), row)[2], 120)
+        artifact.write_text(
+            '# synthesis\n\n## codex\n\ntokens used\n900\n'
+            '\n## Synthesis (claude)\n\ntokens used\n40\ncost usd\n0.2\n', encoding='utf-8')
+        synthesis_row = dict(row, kind='review-synthesis', provider='claude')
+        self.assertEqual(telemetry['artifact_metrics'](str(self.repo), synthesis_row)[2], 40)
+        self.assertEqual(telemetry['artifact_model_metrics'](str(self.repo), synthesis_row)['cost_usd'], 0.2)
 
         artifact.write_text(
             '# call\n\n- started: 2026-08-31T00:00:00Z\n\n## Output\n\n'

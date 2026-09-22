@@ -489,6 +489,13 @@ oms runtime benchmark compare before.json after.json
 The snapshot uses existing content-free receipts to report evidence coverage,
 risk, success rate, durations, token/cost fields when present, context bytes,
 skill-evaluation trigger errors and baseline/treatment task-pass deltas.
+`success_rate` and verified/failed counts cover explicit verification receipts,
+not artifact creation or provider completion. `call_outcomes` reports recorded
+provider operation completion separately from `review_outcomes`; each model's
+`completion` has the same boundary. A completed call does not prove a correct
+answer. Delegations without an explicit verification mode remain unknown for
+verification, including legacy rows. Local synthesis and review-outcome copies
+do not add provider usage; an explicitly requested provider synthesis does.
 Context metrics cover at most the latest 1,000 manifests by `generated_at`,
 not hash filename or filesystem modification time. The snapshot reports
 `context.sample_limit` and `context.selection`; these are sample totals, not
@@ -522,6 +529,18 @@ outcomes by context mode. Its matched cohorts require the same task/verifier/cap
 digest, base, provider, attributable model and effort. Missing identity, fallback,
 dry-run and no-verify calls cannot support that comparison. Even matched cohorts
 are observational, not causal savings or a reason for automatic model routing.
+Structured provider usage includes cache tokens exactly once: Codex input
+already includes cache, while Claude cache reads/writes are separate. Missing
+cache accounting leaves totals unknown; legacy receipts without usage detail
+retain their historical token count and are not fully comparable. Provider
+process completion alone is not test verification: new no-verify/dry-run
+delegations do not increase verified outcomes in model or overall summaries.
+The artifact reader shares one output-section selector for tokens, model, cost
+and structured usage. Prompt examples, repair prompts and verifier logs are not
+measurements. Previously cached rows/snapshots are retained, not retroactively
+rewritten. Snapshots label `measurement_basis`; `compare` withholds affected
+rate/usage/duration deltas when the bases differ, rather than presenting a
+measurement change as an improvement.
 
 ## Optional interoperability adapters
 

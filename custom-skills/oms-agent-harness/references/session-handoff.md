@@ -26,6 +26,11 @@ newer unrelated digest, labels changed/unbound snapshots, and sends a pointer
 instead of the transcript. Source and verification must still be rechecked.
 The entire resume block defaults to 4 KiB (`OMS_RESUME_MAX_BYTES`, 512–16384),
 including the truncation notice and state pointer; no model call is added.
+Starting inside a Git subdirectory still resumes the repository root's state.
+Capture retains only the first request, bounded recent turns and latest answer,
+not the entire conversation in memory; multiline summaries keep their evidence
+and uncertainty lines. `OMS_HANDOFF_TURNS` selects 0–50 recent turns (default 6);
+zero omits that section's turns without changing the real session turn count.
 
 Claude captures user/assistant turns, Codex captures task messages and final
 answers, and Antigravity history may contain prompts only. State that limitation

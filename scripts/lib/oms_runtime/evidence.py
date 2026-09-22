@@ -58,6 +58,21 @@ def criterion_refs(row: Mapping[str, Any]) -> List[str]:
 
 
 def outcome(row: Mapping[str, Any]) -> Optional[str]:
+    if row.get("kind") == "delegate" and row.get("context_verification") in ("none", "dry-run", "command"):
+        # New delegate receipts distinguish a completed worker from a tested
+        # result. A zero placeholder verifier exit cannot override a failure.
+        worker, verifier = row.get("exit"), row.get("verify_exit")
+        if type(worker) is int and worker != 0:
+            return "failed"
+        if row["context_verification"] == "dry-run":
+            return "skipped_with_reason"
+        if row["context_verification"] == "none":
+            return "inconclusive"
+        if type(verifier) is not int or not 0 <= verifier < 125:
+            return "inconclusive"
+        if verifier != 0:
+            return "failed"
+        return "verified" if type(worker) is int and worker == 0 else "inconclusive"
     status = str(row.get("status", row.get("state", row.get("verdict", "")))).lower()
     if status in ("pass", "passed", "success", "succeeded", "verified", "done", "approved", "admit", "admitted"):
         return "verified"

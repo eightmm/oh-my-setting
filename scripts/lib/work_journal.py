@@ -3165,15 +3165,37 @@ def _source_ref(repo: pathlib.Path, source_path: pathlib.Path, source_id: str) -
 
 
 def _handoff_summary(path: pathlib.Path) -> str:
-    """First line of the digest's last assistant summary: the human page then
-    reads what the session concluded instead of identical 'captured' rows."""
+    """Carry the bounded assistant claim, never upgrading it to verification."""
     try:
-        match = re.search(r"^## Last assistant summary\n+(.+)$",
-                          path.read_text(encoding="utf-8"), re.M)
+        with path.open(encoding="utf-8") as handle:
+            text = handle.read(MAX_SOURCE_BYTES)
     except OSError:
-        match = None
-    line = " ".join(match.group(1).split()).strip("* ") if match else ""
-    return line[:240] if line and not line.startswith("#") else "Session handoff captured"
+        return "Session handoff captured"
+    lines = []
+    inside = False
+    historical = "## Original request (historical)"
+    modern = historical in text.splitlines()
+    for line in text.splitlines():
+        if line == "## Last assistant summary":
+            inside = True
+            continue
+        if not inside:
+            continue
+        if line == historical or (not modern and re.fullmatch(
+            r"## (?:Goal|Recent user turns.*|Files touched|Resume contract|Open dissents)", line
+        )):
+            break
+        clean = re.sub(r"^#{1,6}\s+", "", line.strip()).strip("* ")
+        if clean:
+            lines.append(clean)
+    value = sanitize_text(" | ".join(lines), MAX_SOURCE_BYTES)
+    raw = value.encode("utf-8")
+    if len(raw) > MAX_TEXT_BYTES:
+        marker = " …(truncated)… "
+        room = MAX_TEXT_BYTES - len(marker.encode("utf-8"))
+        value = (raw[:room // 2].decode("utf-8", errors="ignore") + marker
+                 + raw[-(room - room // 2):].decode("utf-8", errors="ignore"))
+    return value or "Session handoff captured"
 
 def _read_json_source(path: pathlib.Path) -> Dict[str, Any]:
     if path.stat().st_size > MAX_SOURCE_BYTES:

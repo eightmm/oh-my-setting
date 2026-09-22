@@ -69,6 +69,7 @@ capture options:
 
 Notes:
   - Extraction is mechanical; no model is called.
+  - OMS_HANDOFF_TURNS sets the retained recent user turns (0-50, default: 6).
   - A session below --min-user-turns is skipped, not failed: it writes no
     digest, says so on stderr, and exits 0, so the automatic hooks stay quiet
     instead of reporting a failure for every trivial session.
@@ -176,10 +177,20 @@ digest_claude() {
   local path="$1"
   OMS_TURNS="$TURNS" python3 - "$path" <<'PY'
 import json, os, sys
+from collections import deque
 
 path = sys.argv[1]
 turns = int(os.environ.get("OMS_TURNS", "6"))
-users, assistants, files = [], [], {}
+users, files = deque(maxlen=turns), {}
+goal, last, user_count = "", "", 0
+
+def trim(s, n=1200):
+    s = s.strip()
+    if len(s) <= n:
+        return s
+    marker = "\n…(truncated)…\n"
+    room = n - len(marker)
+    return s[:room // 2] + marker + s[-(room - room // 2):]
 
 def text_of(content):
     if isinstance(content, str):
@@ -219,6 +230,8 @@ with open(path, encoding="utf-8") as fh:
             obj = json.loads(line)
         except Exception:
             continue
+        if not isinstance(obj, dict):
+            continue
         t = obj.get("type")
         msg = obj.get("message")
         if t == "user" and isinstance(msg, dict):
@@ -233,12 +246,15 @@ with open(path, encoding="utf-8") as fh:
                 continue
             txt = clean(txt)
             if txt:
-                users.append(txt)
+                if user_count == 0:
+                    goal = trim(txt, 600)
+                user_count += 1
+                users.append(trim(txt, 400).replace("\n", " "))
         elif t == "assistant" and isinstance(msg, dict):
             content = msg.get("content")
             txt = text_of(content)
             if txt:
-                assistants.append(txt)
+                last = trim(txt)
             if isinstance(content, list):
                 for it in content:
                     if isinstance(it, dict) and it.get("type") == "tool_use":
@@ -248,17 +264,13 @@ with open(path, encoding="utf-8") as fh:
                             if fp:
                                 files[fp] = files.get(fp, 0) + 1
 
-def trim(s, n=1200):
-    s = s.strip()
-    return s if len(s) <= n else s[:n] + " …(truncated)"
-
-print("GOAL\t" + (trim(users[0], 600) if users else "(no user message found)"))
-print("USER_COUNT\t%d" % len(users))
-for u in users[-turns:]:
-    print("USER\t" + trim(u, 400).replace("\n", " "))
+print("GOAL\t" + (goal or "(no user message found)").replace("\n", "\nGOAL_CONT\t"))
+print("USER_COUNT\t%d" % user_count)
+for u in users:
+    print("USER\t" + u)
 for fp, c in sorted(files.items(), key=lambda kv: -kv[1]):
     print("FILE\t%s\t%d" % (fp, c))
-print("LAST_ASSISTANT\t" + (trim(assistants[-1]) if assistants else "(none)"))
+print("LAST_ASSISTANT\t" + (last or "(none)").replace("\n", "\nLAST_ASSISTANT_CONT\t"))
 PY
 }
 
@@ -266,10 +278,20 @@ digest_codex() {
   local path="$1"
   OMS_TURNS="$TURNS" python3 - "$path" <<'PY'
 import json, os, sys
+from collections import deque
 
 path = sys.argv[1]
 turns = int(os.environ.get("OMS_TURNS", "6"))
-users, lasts, cwd = [], [], ""
+users = deque(maxlen=turns)
+goal, last, cwd, user_count = "", "", "", 0
+
+def trim(s, n=1200):
+    s = s.strip()
+    if len(s) <= n:
+        return s
+    marker = "\n…(truncated)…\n"
+    room = n - len(marker)
+    return s[:room // 2] + marker + s[-(room - room // 2):]
 
 with open(path, encoding="utf-8") as fh:
     for line in fh:
@@ -277,28 +299,29 @@ with open(path, encoding="utf-8") as fh:
             obj = json.loads(line)
         except Exception:
             continue
+        if not isinstance(obj, dict):
+            continue
         p = obj.get("payload", {})
         if not isinstance(p, dict):
             continue
         if obj.get("type") == "session_meta" and p.get("cwd"):
             cwd = p["cwd"]
         pt = p.get("type")
-        if pt == "user_message" and p.get("message"):
-            users.append(p["message"].strip())
-        elif pt == "task_complete" and p.get("last_agent_message"):
-            lasts.append(p["last_agent_message"].strip())
-
-def trim(s, n=1200):
-    s = s.strip()
-    return s if len(s) <= n else s[:n] + " …(truncated)"
+        if pt == "user_message" and isinstance(p.get("message"), str) and p["message"].strip():
+            if user_count == 0:
+                goal = trim(p["message"], 600)
+            user_count += 1
+            users.append(trim(p["message"], 400).replace("\n", " "))
+        elif pt == "task_complete" and isinstance(p.get("last_agent_message"), str):
+            last = trim(p["last_agent_message"])
 
 if cwd:
     print("CWD\t" + cwd)
-print("GOAL\t" + (trim(users[0], 600) if users else "(no user message found)"))
-print("USER_COUNT\t%d" % len(users))
-for u in users[-turns:]:
-    print("USER\t" + trim(u, 400).replace("\n", " "))
-print("LAST_ASSISTANT\t" + (trim(lasts[-1]) if lasts else "(none)"))
+print("GOAL\t" + (goal or "(no user message found)").replace("\n", "\nGOAL_CONT\t"))
+print("USER_COUNT\t%d" % user_count)
+for u in users:
+    print("USER\t" + u)
+print("LAST_ASSISTANT\t" + (last or "(none)").replace("\n", "\nLAST_ASSISTANT_CONT\t"))
 PY
 }
 
@@ -309,45 +332,54 @@ digest_antigravity() {
   [ -f "$hist" ] || absent "no antigravity history: $hist"
   OMS_TURNS="$TURNS" OMS_MATCH_CWD="$cwd" OMS_MATCH_ID="$id" python3 - "$hist" <<'PY'
 import json, os, sys
+from collections import deque
 
 path = sys.argv[1]
 turns = int(os.environ.get("OMS_TURNS", "6"))
 want_cwd = os.environ.get("OMS_MATCH_CWD", "")
 want_id = os.environ.get("OMS_MATCH_ID", "")
-rows = []
-with open(path, encoding="utf-8") as fh:
+def matching(fh):
     for line in fh:
         try:
             obj = json.loads(line)
         except Exception:
             continue
-        if want_cwd and obj.get("workspace") != want_cwd:
+        if not isinstance(obj, dict) or (want_cwd and obj.get("workspace") != want_cwd):
             continue
         if want_id and obj.get("conversationId") != want_id:
             continue
-        if obj.get("display"):
-            rows.append(obj)
-
-if not rows:
-    print("GOAL\t(no antigravity prompts matched)")
-    sys.exit(0)
-
-# Default to the most recent conversation when no id is pinned.
-if not want_id:
-    last_conv = rows[-1].get("conversationId")
-    rows = [r for r in rows if r.get("conversationId") == last_conv]
+        if isinstance(obj.get("display"), str) and obj["display"].strip():
+            yield obj
 
 def trim(s, n=400):
     s = (s or "").strip()
-    return s if len(s) <= n else s[:n] + " …(truncated)"
+    if len(s) <= n:
+        return s
+    marker = "\n…(truncated)…\n"
+    room = n - len(marker)
+    return s[:room // 2] + marker + s[-(room - room // 2):]
 
-conv = rows[-1].get("conversationId", "")
+users = deque(maxlen=turns)
+goal, count, conv = "", 0, want_id
+with open(path, encoding="utf-8") as fh:
+    if not want_id:
+        # Select the latest conversation without retaining every transcript.
+        for row in matching(fh):
+            conv = row.get("conversationId")
+        fh.seek(0)
+    for row in matching(fh):
+        if not want_id and row.get("conversationId") != conv:
+            continue
+        if count == 0:
+            goal = trim(row["display"], 600)
+        count += 1
+        users.append(trim(row["display"]).replace("\n", " "))
 if conv:
     print("CONVERSATION\t" + conv)
-print("GOAL\t" + trim(rows[0]["display"], 600))
-print("USER_COUNT\t%d" % len(rows))
-for r in rows[-turns:]:
-    print("USER\t" + trim(r["display"]).replace("\n", " "))
+print("GOAL\t" + (goal or "(no antigravity prompts matched)").replace("\n", "\nGOAL_CONT\t"))
+print("USER_COUNT\t%d" % count)
+for user in users:
+    print("USER\t" + user)
 print("LAST_ASSISTANT\t(antigravity assistant output not available from history.jsonl)")
 PY
 }
@@ -396,7 +428,7 @@ PY
 }
 
 render_digest() {
-  # Read TAB-separated extractor lines on stdin, emit markdown.
+  # Continuation records preserve newlines without letting prose become keys.
   local agent="$1"
   local source="$2"
   local session_id="$3"
@@ -422,10 +454,12 @@ render_digest() {
   while IFS=$'\t' read -r key rest; do
     case "$key" in
       GOAL) goal="$rest" ;;
+      GOAL_CONT) goal="$goal"$'\n'"$rest" ;;
       USER) users+=("$rest") ;;
       USER_COUNT) user_count="$rest" ;;
       FILE) files+=("$rest") ;;
       LAST_ASSISTANT) last="$rest" ;;
+      LAST_ASSISTANT_CONT) last="$last"$'\n'"$rest" ;;
       CWD|CONVERSATION) ;; # informational; already have cwd
     esac
   done
@@ -627,6 +661,8 @@ cmd_capture() {
     esac
   done
   AGENT="${AGENT:-claude}"
+  case "$TURNS" in ''|*[!0-9]*) fail "OMS_HANDOFF_TURNS must be an integer from 0 to 50" ;; esac
+  [ "${#TURNS}" -le 2 ] && [ "$TURNS" -le 50 ] || fail "OMS_HANDOFF_TURNS must be an integer from 0 to 50"
   CWD="$(cd "$CWD" 2>/dev/null && pwd || printf '%s' "$CWD")"
 
   # Resolver exit 3 means the session transcript is absent. Under skip the

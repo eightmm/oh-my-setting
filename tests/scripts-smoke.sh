@@ -8489,6 +8489,10 @@ PY
     fail "human telemetry must distinguish mechanical verification from task success: $human"
   printf '%s' "$human" | grep -Fq 'provider-reported tokens: total=4200 reports=2' ||
     fail "human telemetry should expose the measured token subtotal: $human"
+  printf '%s\n' '{"kind":"delegate","provider":"codex","exit":0,"verify_exit":0,"context_verification":"none"}' >> "$index"
+  "$ROOT/scripts/artifact-index.sh" --repo "$project" --json telemetry |
+    python3 -c 'import json,sys; row=json.load(sys.stdin); assert row["outcomes"]["verified_success"] == 0; assert row["verification"]["unavailable"] == 2' ||
+    fail "no-verify placeholder counted as a real verification"
 }
 
 test_artifact_index_latest_run_groups_rows() {
@@ -11782,11 +11786,11 @@ test_session_handoff_claude_digest() {
   mkdir -p "$proj"
   {
     printf '%s\n' '{"type":"user","message":{"role":"user","content":"<local-command-caveat>noise</local-command-caveat>"}}'
-    printf '%s\n' '{"type":"user","message":{"role":"user","content":"build the widget feature"}}'
+    printf '%s\n' '{"type":"user","message":{"role":"user","content":"build the widget feature\nkeep the existing interface"}}'
     printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working on it"},{"type":"tool_use","name":"Edit","input":{"file_path":"/proj/demo-app/widget.py"}}]}}'
     printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}'
     printf '%s\n' '{"type":"user","message":{"role":"user","content":"now add tests"}}'
-    printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done: widget plus tests"}]}}'
+    printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done: widget plus tests\nVerification: widget check passed\nUSER_COUNT\t999\nRemaining: native check not run"}]}}'
   } > "$sess"
 
   out="$(OMS_CLAUDE_HOME="$home" "$ROOT/scripts/session-handoff.sh" \
@@ -11796,6 +11800,10 @@ test_session_handoff_claude_digest() {
   assert_file_contains "$out" "now add tests"
   assert_file_contains "$out" "widget.py (1 edits)"
   assert_file_contains "$out" "done: widget plus tests"
+  assert_file_contains "$out" "keep the existing interface"
+  assert_file_contains "$out" "Verification: widget check passed"
+  assert_file_contains "$out" "Remaining: native check not run"
+  assert_file_contains "$out" 'Recent user turns (last 2 of 2)'
   # Slash-command caveat noise must not become the goal.
   if grep -Fq "local-command-caveat" "$out"; then
     fail "claude digest leaked command-caveat noise"
@@ -11804,6 +11812,24 @@ test_session_handoff_claude_digest() {
   if grep -Fq '"tool_result"' "$out"; then
     fail "claude digest leaked tool_result content"
   fi
+  python3 - "$sess" <<'PY'
+import json, sys
+with open(sys.argv[1], 'a', encoding='utf-8') as handle:
+    for number in range(20):
+        for role in ('user', 'assistant'):
+            handle.write(json.dumps({'type': role, 'message': {
+                'content': '%s turn %d ' % (role, number) + 'x' * 4000}}) + '\n')
+PY
+  out="$(OMS_CLAUDE_HOME="$home" OMS_HANDOFF_TURNS=2 "$ROOT/scripts/session-handoff.sh" \
+    capture --agent claude --cwd "$cwd" --out "$home/bounded.md" 2>/dev/null)"
+  assert_file_contains "$out" 'Recent user turns (last 2 of 22)'
+  assert_file_contains "$out" 'build the widget feature'
+  assert_file_contains "$out" 'user turn 19 '
+  assert_file_contains "$out" 'assistant turn 19 '
+  if grep -Fq 'user turn 17 ' "$out"; then
+    fail "handoff retained a user turn outside the selected window"
+  fi
+  [ "$(wc -c < "$out")" -lt 6000 ] || fail "long history bloated the digest"
 }
 
 test_session_handoff_carries_resume_contract_and_dissents() {
@@ -11933,7 +11959,7 @@ test_session_handoff_codex_digest() {
     printf '%s\n' '{"type":"event_msg","payload":{"type":"user_message","message":"refactor the parser"}}'
     printf '%s\n' '{"type":"event_msg","payload":{"type":"agent_message","message":"thinking"}}'
     printf '%s\n' '{"type":"event_msg","payload":{"type":"user_message","message":"now cover the edge cases"}}'
-    printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"parser refactored and tested"}}'
+    printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"parser refactored and tested\nVerification: parser check passed\nRemaining: portability untested"}}'
   } > "$sess"
 
   out="$(OMS_CODEX_HOME="$home" "$ROOT/scripts/session-handoff.sh" \
@@ -11941,6 +11967,29 @@ test_session_handoff_codex_digest() {
   [ -f "$out" ] || fail "codex handoff digest not written"
   assert_file_contains "$out" "refactor the parser"
   assert_file_contains "$out" "parser refactored and tested"
+  assert_file_contains "$out" "Verification: parser check passed"
+  assert_file_contains "$out" "Remaining: portability untested"
+
+  out="$(OMS_CODEX_HOME="$home" OMS_HANDOFF_TURNS=0 "$ROOT/scripts/session-handoff.sh" \
+    capture --agent codex --cwd "$cwd" --out "$home/zero.md" 2>/dev/null)"
+  assert_file_contains "$out" 'Recent user turns (last 0 of 2)'
+  if OMS_CODEX_HOME="$home" OMS_HANDOFF_TURNS=-1 "$ROOT/scripts/session-handoff.sh" \
+      capture --agent codex --cwd "$cwd" --out "$home/invalid.md" >/dev/null 2>&1; then
+    fail "negative handoff turn budget was accepted"
+  fi
+  python3 - "$sess" <<'PY'
+import json, sys
+answer = 'Parser repaired.\n' + 'details ' * 250 + '\nVerification: failed\nRemaining: migration unsafe'
+with open(sys.argv[1], 'a', encoding='utf-8') as handle:
+    handle.write(json.dumps({'type': 'event_msg', 'payload': {
+        'type': 'task_complete', 'last_agent_message': answer}}) + '\n')
+PY
+  out="$(OMS_CODEX_HOME="$home" "$ROOT/scripts/session-handoff.sh" \
+    capture --agent codex --cwd "$cwd" --out "$home/long.md" 2>/dev/null)"
+  assert_file_contains "$out" 'Parser repaired.'
+  assert_file_contains "$out" 'Verification: failed'
+  assert_file_contains "$out" 'Remaining: migration unsafe'
+  assert_file_contains "$out" '(truncated)'
 }
 
 test_session_handoff_antigravity_prompts_only() {
@@ -11953,6 +12002,8 @@ test_session_handoff_antigravity_prompts_only() {
   {
     printf '%s\n' "{\"display\":\"first agy prompt\",\"timestamp\":1,\"workspace\":\"$cwd\",\"conversationId\":\"c1\"}"
     printf '%s\n' "{\"display\":\"second agy prompt\",\"timestamp\":2,\"workspace\":\"$cwd\",\"conversationId\":\"c1\"}"
+    printf '%s\n' "{\"display\":\"unrelated conversation\",\"workspace\":\"$cwd\",\"conversationId\":\"c0\"}"
+    printf '%s\n' "{\"display\":\"last agy prompt\",\"workspace\":\"$cwd\",\"conversationId\":\"c1\"}"
     printf '%s\n' '{"display":"other project","timestamp":3,"workspace":"/elsewhere","conversationId":"c2"}'
   } > "$hist"
 
@@ -11961,10 +12012,18 @@ test_session_handoff_antigravity_prompts_only() {
   [ -f "$out" ] || fail "antigravity handoff digest not written"
   assert_file_contains "$out" "first agy prompt"
   assert_file_contains "$out" "second agy prompt"
+  assert_file_contains "$out" "last agy prompt"
+  assert_file_contains "$out" 'Recent user turns (last 3 of 3)'
   assert_file_contains "$out" "assistant output not available"
   if grep -Fq "other project" "$out"; then
     fail "antigravity digest leaked a non-matching workspace"
   fi
+  if grep -Fq 'unrelated conversation' "$out"; then
+    fail "antigravity digest mixed conversations"
+  fi
+  out="$(OMS_GEMINI_HOME="$home" OMS_HANDOFF_TURNS=0 "$ROOT/scripts/session-handoff.sh" \
+    capture --agent antigravity --cwd "$cwd" --session c1 --out "$home/zero.md" 2>/dev/null)"
+  assert_file_contains "$out" 'Recent user turns (last 0 of 3)'
 }
 
 test_cli_unknown_subcommands_fail() {
@@ -17504,6 +17563,14 @@ test_resume_hook_prints_bounded_resume_block() {
     fail "resume hook must leave graph work to an explicit reader: $out"
   fi
   [ "$(printf '%s\n' "$out" | wc -l)" -le 15 ] || fail "resume block exceeds its line budget"
+
+  mkdir -p "$repo/src/nested"
+  out="$(printf '{"cwd":"%s/src/nested"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  printf '%s' "$out" | grep -Fq 'Ship the resume surface' || fail "nested cwd lost the active task"
+  [ ! -e "$repo/src/nested/.oms" ] || fail "resume created nested state"
+  mkdir -p "$repo/src/nested/.oms"
+  out="$(printf '{"cwd":"%s/src/nested"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  printf '%s' "$out" | grep -Fq 'Ship the resume surface' || fail "nested state shadowed the repository root"
 
   # Native Windows Python writes CRLF to a pipe. Every value read back into
   # Bash must lose the CR before it participates in path checks or output.

@@ -97,6 +97,29 @@ def artifact_text(repo: str, row: dict[str, object]) -> Optional[str]:
     return raw.decode("utf-8", errors="replace")
 
 
+def metric_output(text: str, row: dict[str, object]) -> str:
+    """Read provider sections, not quoted prompts, verifier logs or summaries."""
+    lines = []
+    active = repair = False
+    synthesis = "## Synthesis (%s)" % row.get("provider")
+    for line in text.splitlines():
+        if line == "## Output" or (
+            row.get("kind") == "review-synthesis" and row.get("provider") != "local" and line == synthesis
+        ):
+            lines = []
+            active = True
+            repair = False
+        elif re.fullmatch(r"## Repair [0-9]+", line):
+            active, repair = False, True
+        elif repair and line == "### Output":
+            active = True
+        elif line in ("## Prompt", "### Prompt", "## Exit") or re.fullmatch(r"## Verify(?: \(repair [0-9]+\))?", line):
+            active = False
+        elif active:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def artifact_usage_metrics(repo: str, row: dict[str, object]) -> Optional[dict]:
     saved = row.get("provider_usage")
     if isinstance(saved, dict):
@@ -104,15 +127,14 @@ def artifact_usage_metrics(repo: str, row: dict[str, object]) -> Optional[dict]:
     text = artifact_text(repo, row)
     if text is None:
         return None
-    # Never count examples from the composed prompt as observed usage.
-    text = text.rsplit("\n## Output\n", 1)[-1]
+    text = metric_output(text, row)
     reports = []
     for raw in re.findall(r"(?m)^usage detail: (\{[^\r\n]+\})$", text):
         try:
             report = json.loads(raw)
         except ValueError:
             continue
-        if report.get("provider") == row.get("provider"):
+        if isinstance(report, dict) and report.get("provider") == row.get("provider"):
             reports.append(report)
     if not reports:
         return None
@@ -142,9 +164,7 @@ def artifact_model_metrics(
     saved_cost = float(saved_cost) if isinstance(saved_cost, (int, float)) and not isinstance(saved_cost, bool) else None
     text = artifact_text(repo, row)
     if text is not None:
-        marker = re.search(r"(?m)^## Output$", text)
-        if marker:
-            text = text[marker.end():]
+        text = metric_output(text, row)
         models = SERVED_MODEL_RE.findall(text)
         configured = CONFIGURED_MODEL_RE.findall(text)
         costs = COST_RE.findall(text)
@@ -215,7 +235,7 @@ def artifact_metrics(
     if text is None:
         return False, saved_duration, saved_tokens
 
-    token_matches = TOKENS_RE.findall(text)
+    token_matches = TOKENS_RE.findall(metric_output(text, row))
     tokens = sum(int(value.replace(",", "")) for value in token_matches) if token_matches else None
     started_match = STARTED_RE.search(text)
     started = parse_timestamp(started_match.group(1)) if started_match else None
@@ -555,6 +575,8 @@ def telemetry(
                 resolution["unresolved_nonzero"] += 1
 
         verify_exit = integer(row.get("verify_exit"))
+        if row.get("kind") == "delegate" and row.get("context_verification") in ("none", "dry-run"):
+            verify_exit = None
         if verify_exit is None:
             verification["unavailable"] += 1
             outcomes["unknown"] += 1

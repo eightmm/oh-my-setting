@@ -39,6 +39,17 @@ def _artifact_tokens(row: Mapping[str, Any]) -> Optional[float]:
     total = _one_number(row, ("total_tokens",))
     if total is not None:
         return total
+    usage = row.get("provider_usage")
+    if isinstance(usage, dict):
+        # Codex includes cached input; Claude reports it separately. The
+        # historical tokens footer omits Claude cache and can be partial.
+        keys = ["input_tokens", "output_tokens"]
+        if usage.get("cache_in_input") is False:
+            keys.extend(("cache_read_tokens", "cache_write_tokens"))
+        elif usage.get("cache_in_input") is not True:
+            return None
+        values = [_one_number(usage, (key,)) for key in keys]
+        return sum(values) if all(value is not None for value in values) else None
     input_tokens = _one_number(row, ("input_tokens", "prompt_tokens"))
     output_tokens = _one_number(row, ("output_tokens", "completion_tokens"))
     if input_tokens is None and output_tokens is None:
@@ -64,10 +75,39 @@ def _model_identity(row: Mapping[str, Any]) -> Tuple[Optional[str], Optional[str
     return None, None
 
 
+def _provider_call(row: Mapping[str, Any]) -> bool:
+    return row.get("kind") in ("call", "ask", "review", "delegate") or (
+        row.get("kind") == "review-synthesis" and row.get("provider") not in (None, "", "local"))
+
+
+def _verification_outcome(row: Mapping[str, Any]) -> Optional[str]:
+    if row.get("kind") == "delegate":
+        return outcome(row) if row.get("context_verification") == "command" else None
+    if row.get("kind") in ("review-verify", "acceptance", "task-verification"):
+        return outcome(row)
+    return None
+
+
+def _completion_outcome(row: Mapping[str, Any]) -> Optional[str]:
+    if row.get("context_verification") == "dry-run":
+        return None
+    return outcome({key: row[key] for key in ("status", "exit", "exit_code") if key in row})
+
+
+def _outcome_counts(values: Sequence[Optional[str]]) -> Dict[str, Any]:
+    passed, failed = values.count("verified"), values.count("failed")
+    decided = passed + failed
+    return {"count": len(values), "passed": passed, "failed": failed,
+            "unknown": len(values) - decided, "success_rate": passed / decided if decided else None}
+
+
 def _model_table(artifacts: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
     table: Dict[str, Dict[str, Any]] = {}
     durations: Dict[str, List[float]] = {}
+    completions: Dict[str, List[Optional[str]]] = collections.defaultdict(list)
     for row in artifacts:
+        if not _provider_call(row):
+            continue
         name, source = _model_identity(row)
         if not name:
             continue
@@ -75,7 +115,8 @@ def _model_table(artifacts: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, 
         entry = table.setdefault(key, {"calls": 0, "verified": 0, "failed": 0, "tokens": None, "cost_usd": None, "tokens_count": 0, "cost_usd_count": 0, "sources": {}})
         entry["calls"] += 1
         entry["sources"][source] = entry["sources"].get(source, 0) + 1
-        value = outcome(row)
+        completions[key].append(_completion_outcome(row))
+        value = _verification_outcome(row)
         if value == "verified":
             entry["verified"] += 1
         elif value == "failed":
@@ -94,6 +135,7 @@ def _model_table(artifacts: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, 
     for key, entry in table.items():
         decided = entry["verified"] + entry["failed"]
         entry["success_rate"] = entry["verified"] / decided if decided else None
+        entry["completion"] = _outcome_counts(completions[key])
         samples = durations.get(key, [])
         entry["duration_seconds_mean"] = statistics.mean(samples) if samples else None
         entry["duration_seconds_count"] = len(samples)
@@ -109,7 +151,7 @@ def _context_modes(artifacts: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     def summarize(rows):
         checks = [row for row in rows if row.get("context_verification") == "command"
                   and type(row.get("verify_exit")) is int and 0 <= row["verify_exit"] < 125]
-        verified = sum(row["verify_exit"] == 0 and row.get("exit") == 0 for row in checks)
+        verified = sum(outcome(row) == "verified" for row in checks)
         checked = len(checks)
         result = {"calls": len(rows), "verified": verified, "checked": checked,
                   "verification_rate": verified / checked if checked else None}
@@ -225,16 +267,17 @@ def snapshot(repo: Path) -> Dict[str, Any]:
     manual_outcomes = read_jsonl(outcome_path(repo), limit_rows=MAX_JSONL_ROWS) if outcome_path(repo).is_file() else []
     skill_evals = read_jsonl(skill_eval_path(repo), limit_rows=MAX_JSONL_ROWS) if skill_eval_path(repo).is_file() else []
     envelope = build_envelope(repo)
-    outcomes = [outcome(row) for row in artifacts]
+    calls = [row for row in artifacts if _provider_call(row)]
+    outcomes = [_verification_outcome(row) for row in artifacts]
     decided = [value for value in outcomes if value in ("verified", "failed")]
     verified = sum(value == "verified" for value in decided)
     providers = collections.Counter(str(row.get("provider")) for row in artifacts if row.get("provider"))
     kinds = collections.Counter(str(row.get("kind", "unknown")) for row in artifacts)
-    artifact_durations = [value for row in artifacts for value in [_one_number(row, ("duration_seconds", "duration_s"))] if value is not None]
+    artifact_durations = [value for row in calls for value in [_one_number(row, ("duration_seconds", "duration_s"))] if value is not None]
     lifecycle_durations = [value for row in events for value in [_one_number(row, ("duration_seconds", "duration_s"))] if value is not None]
     durations = artifact_durations or lifecycle_durations
-    tokens = [value for row in artifacts for value in [_artifact_tokens(row)] if value is not None]
-    costs = [value for row in artifacts for value in [_one_number(row, ("cost_usd", "cost"))] if value is not None]
+    tokens = [value for row in calls for value in [_artifact_tokens(row)] if value is not None]
+    costs = [value for row in calls for value in [_one_number(row, ("cost_usd", "cost"))] if value is not None]
     context_bytes = [float(row.get("selected_bytes")) for row in contexts if isinstance(row.get("selected_bytes"), (int, float))]
     context_debt = [float(row.get("context_debt")) for row in contexts if isinstance(row.get("context_debt"), (int, float))]
     acceptance_weight = sum(float(item.get("weight", 1)) for item in envelope.get("criteria", []) if item.get("status") == "verified")
@@ -249,6 +292,7 @@ def snapshot(repo: Path) -> Dict[str, Any]:
                 manual_metrics[key] += value
     return {
         "schema": RUNTIME_SCHEMA,
+        "measurement_basis": "provider-calls/explicit-verification-v1",
         "generated_at": utc_now(),
         "state_digest": envelope.get("state_digest"),
         "acceptance": {"coverage": envelope.get("evidence", {}).get("coverage"), "risk_score": envelope.get("evidence", {}).get("risk_score"), "complete": envelope.get("evidence", {}).get("complete"), "verified_weight": acceptance_weight},
@@ -257,6 +301,8 @@ def snapshot(repo: Path) -> Dict[str, Any]:
         "decided_outcomes": len(decided),
         "verified_outcomes": verified,
         "success_rate": verified / len(decided) if decided else None,
+        "call_outcomes": _outcome_counts([_completion_outcome(row) for row in calls]),
+        "review_outcomes": _outcome_counts([outcome(row) for row in artifacts if row.get("kind") == "review-outcome"]),
         "providers": dict(sorted(providers.items())),
         "models": _model_table(artifacts),
         "delegation_context": _context_modes(artifacts),
@@ -299,5 +345,8 @@ def compare(left: Mapping[str, Any], right: Mapping[str, Any]) -> Dict[str, Any]
         a = get(left, path)
         b = get(right, path)
         delta = b - a if isinstance(a, (int, float)) and isinstance(b, (int, float)) else None
-        changes.append({"field": ".".join(path), "left": a, "right": b, "delta": delta})
+        item = {"field": ".".join(path), "left": a, "right": b, "delta": delta}
+        if path[0] in ("success_rate", "tokens", "cost_usd", "duration_seconds") and left.get("measurement_basis") != right.get("measurement_basis"):
+            item.update(delta=None, reason="measurement basis differs; not comparable")
+        changes.append(item)
     return {"schema": RUNTIME_SCHEMA, "changes": changes}
