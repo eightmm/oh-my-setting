@@ -19,6 +19,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   already enabled as a table, its wait floors. User values are preserved, no
   feature is enabled, keys the installed Codex cannot load are rolled back,
   and `oms doctor` reports the state. Quota savings are not measured.
+- Claude Code and Codex relay turn completions to each other, shown once per
+  session as `[oms relay]` at the other CLI's next prompt or session start.
+  Claude's Stop hook writes the redacted tail of its final answer, branch and
+  HEAD to `.oms/hooks/relay/claude.json`; Codex fires no Stop hook, so the
+  Claude side reads the newest `task_complete` from Codex rollouts for the
+  repo, skipping guardian/reviewer threads and headless `exec` runs. Harness
+  children stay silent; `OMS_RELAY=0` disables, `OMS_RELAY_MAX_AGE_SEC`
+  (default 86400) and `OMS_RELAY_BYTES` (default 800) bound it.
 
 ### Fixed
 

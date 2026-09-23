@@ -262,6 +262,9 @@ case "$au_line" in
   *) append "- auto-update ${au_line#attention: }" ;;
 esac
 
+relay_line="$(printf '%s' "$payload" | python3 "$ROOT/scripts/lib/hook_state.py" relay-hint 2>/dev/null)" || relay_line=""
+[ -z "$relay_line" ] || append "${relay_line//$'\r'/}"
+
 [ -n "$out" ] || exit 0
 printf '[oms resume] %s\n%s' "$(basename "$cwd")" "$out" |
   python3 -c '

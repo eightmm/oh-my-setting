@@ -1185,6 +1185,12 @@ def cmd_route(args: argparse.Namespace) -> int:
     collaboration = live_thread_hint(payload)
     if collaboration:
         print(collaboration)
+    try:
+        relay = relay_hint(payload)
+    except Exception:
+        relay = None
+    if relay:
+        print(relay)
     prompt = str(payload.get("prompt") or "")
     if should_skip_prompt(prompt):
         return 0
@@ -1298,6 +1304,170 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
 GUARD_UNAVAILABLE = "oh-my-setting turn guard: unavailable (%s); this turn was not checked."
 
 
+RELAY_AGENTS = ("claude", "codex")
+
+
+def payload_agent(payload: dict[str, Any]) -> str:
+    """Which CLI fired this hook: the plugin table is shared, the payload is not."""
+    forced = os.environ.get("OMS_HOOK_AGENT", "")
+    if forced in RELAY_AGENTS:
+        return forced
+    transcript = str(payload.get("transcript_path") or payload.get("transcriptPath") or "")
+    if Path(transcript).name.startswith("rollout-"):
+        return "codex"
+    if "/.claude/" in transcript.replace("\\", "/"):
+        return "claude"
+    # Codex payloads carry turn_id; Claude Code's do not.
+    return "codex" if payload.get("turn_id") or payload.get("turnId") else "claude"
+
+
+def codex_rollout_card(repo: Path, max_age: int) -> dict[str, Any]:
+    """Codex fires no Stop hook, but every rollout records task_complete."""
+    sessions = Path(os.environ.get("OMS_CODEX_HOME") or Path.home() / ".codex") / "sessions"
+    now = time.time()
+    # An app thread appends to the rollout under its start date for weeks, so
+    # rank every rollout by mtime (a stat walk, ~5ms per 1300 files).
+    files = []
+    for folder, _, names in os.walk(sessions):
+        for name in names:
+            if name.startswith("rollout-") and name.endswith(".jsonl"):
+                with contextlib.suppress(OSError):
+                    mtime = os.stat(os.path.join(folder, name)).st_mtime
+                    if now - mtime <= max_age:
+                        files.append((mtime, Path(folder) / name))
+    for _, path in sorted(files, reverse=True)[:40]:
+        try:
+            with path.open("rb") as handle:
+                meta = json.loads(handle.readline(262144).decode("utf-8", errors="replace")).get("payload") or {}
+                # Guardian/reviewer threads and headless exec runs (delegated
+                # workers included) are not the conversation the user sees.
+                source = meta.get("source")
+                if source == "exec" or (isinstance(source, dict) and "subagent" in source):
+                    continue
+                cwd = Path(str(meta.get("cwd") or "")).resolve()
+                if cwd != repo and repo not in cwd.parents:
+                    continue
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - 262144))
+                tail = handle.read().decode("utf-8", errors="replace").splitlines()
+        except (OSError, ValueError, AttributeError):
+            continue
+        for line in reversed(tail):
+            if '"task_complete"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            done = row.get("payload") or {}
+            if done.get("type") == "task_complete" and done.get("last_agent_message"):
+                return {"ended_at": str(row.get("timestamp") or ""),
+                        "message": str(done["last_agent_message"])[-4000:]}
+    return {}
+
+
+def relay_dir(repo: Path) -> Path:
+    return repo / ".oms" / "hooks" / "relay"
+
+
+def git_line(repo: Path, *args: str) -> str:
+    try:
+        proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                              text=True, timeout=2, check=False)
+    except Exception:
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def cmd_relay(_: argparse.Namespace) -> int:
+    """Stop: overwrite this agent's latest-turn card for the other CLI to read."""
+    if os.environ.get("OMS_RELAY", "1") != "1" or is_harness_child():
+        return 0
+    payload, _ = load_payload()
+    if payload.get("stop_hook_active") or payload.get("stopHookActive"):
+        return 0
+    message = str(payload.get("last_assistant_message") or "").strip()
+    repo = hook_repo(payload)
+    if not message or repo is None or not (repo / ".oms").is_dir():
+        return 0
+    # Codex has no Stop event; its reader side scans the rollout instead.
+    if payload_agent(payload) != "claude":
+        return 0
+    from work_journal import sanitize_text
+
+    ensure_oms(repo)
+    path = relay_dir(repo) / "claude.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # The tail, not the head: a final answer ends with its conclusion.
+    tail = message[-4000:]
+    write_json_atomic(path, {
+        "schema": 1,
+        "agent": "claude",
+        "session": session_hash(payload),
+        "ended_at": utc_now(),
+        "head": git_line(repo, "rev-parse", "--short", "HEAD"),
+        "branch": git_line(repo, "branch", "--show-current"),
+        "message": sanitize_text(tail, env_int("OMS_RELAY_BYTES", 800, minimum=120, maximum=4000)),
+    })
+    return 0
+
+
+def relay_hint(payload: dict[str, Any]) -> str | None:
+    """Show each other-agent turn completion once per reading session."""
+    if os.environ.get("OMS_RELAY", "1") != "1" or is_harness_child():
+        return None
+    if not (payload.get("session_id") or payload.get("sessionId")):
+        return None
+    repo = hook_repo(payload)
+    if repo is None or not (repo / ".oms").is_dir():
+        return None
+    me = payload_agent(payload)
+    max_age = env_int("OMS_RELAY_MAX_AGE_SEC", 86400, minimum=60)
+    now = time.time()
+    state_path = repo / ".oms" / "hooks" / "sessions" / f"{session_hash(payload)}.relay.json"
+    state = load_state(state_path)
+    seen = state.get("seen") if isinstance(state.get("seen"), dict) else {}
+    lines = []
+    for agent in RELAY_AGENTS:
+        if agent == me:
+            continue
+        if agent == "codex":
+            card = codex_rollout_card(repo.resolve(), max_age)
+            if card:
+                from work_journal import sanitize_text
+                card["message"] = sanitize_text(
+                    card["message"], env_int("OMS_RELAY_BYTES", 800, minimum=120, maximum=4000))
+        else:
+            card = load_state(relay_dir(repo) / (agent + ".json"))
+        ended = card.get("ended_at")
+        when = event_epoch(ended)
+        if when is None or now - when > max_age or seen.get(agent) == ended:
+            continue
+        seen[agent] = ended
+        where = " ".join(x for x in (str(card.get("branch") or ""), str(card.get("head") or "")) if x)
+        lines.append(
+            "[oms relay] %s finished a turn ~%dm ago%s: %s" % (
+                agent, max(0, int((now - when) // 60)), " (" + where + ")" if where else "",
+                str(card.get("message") or "")))
+    if not lines:
+        return None
+    write_json_atomic(state_path, {"schema": 1, "updated_at": utc_now(), "seen": seen})
+    append_event(repo, payload, action="relay", status="shown", agents=len(lines))
+    lines.append("[oms relay] Tell the user this first; continue that work only if they ask.")
+    return "\n".join(lines)
+
+
+def cmd_relay_hint(_: argparse.Namespace) -> int:
+    payload, _ = load_payload()
+    try:
+        hint = relay_hint(payload)
+    except Exception:
+        hint = None
+    if hint:
+        print(hint)
+    return 0
+
+
 def session_budget_enabled() -> bool:
     return any(env_int(name, 0) > 0 for name in (
         "OMS_SESSION_BUDGET_TURNS", "OMS_SESSION_BUDGET_HOURS"))
@@ -1391,6 +1561,8 @@ def main() -> int:
     compact.set_defaults(func=cmd_compact_events)
     repo = sub.add_parser("repo")
     repo.set_defaults(func=cmd_repo)
+    sub.add_parser("relay").set_defaults(func=cmd_relay)
+    sub.add_parser("relay-hint").set_defaults(func=cmd_relay_hint)
     args = parser.parse_args()
     return int(args.func(args))
 

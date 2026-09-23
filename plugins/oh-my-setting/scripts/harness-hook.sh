@@ -4,6 +4,8 @@ set -euo pipefail
 tool="${1:-}"
 case "$tool" in skill-router|turn-guard|precompact-handoff|resume-hook|syntax-guard-hook|telemetry-hook) ;; *) exit 0 ;; esac
 payload="$(cat)"
+# Only the Codex plugin dispatches here; Codex SessionStart carries no turn_id.
+export OMS_HOOK_AGENT="${OMS_HOOK_AGENT:-codex}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "${CLAUDE_PLUGIN_ROOT:-$SCRIPT_DIR/..}" 2>/dev/null && pwd || printf '%s\n' "$SCRIPT_DIR/..")"
 SOURCE_ROOT=""

@@ -62,6 +62,10 @@ fi
 
 [ "$decision" != "block" ] || exit 0
 
+# The other CLI's next prompt shows this turn's completion card; stdout here
+# belongs to the Stop protocol, so the writer stays silent.
+printf '%s' "$payload" | python3 "$HELPER" relay >/dev/null 2>&1 || true
+
 # shellcheck source=scripts/lib/work-journal.sh
 . "$ROOT/scripts/lib/work-journal.sh"
 if ! work_journal_enabled && [ "${OMS_CI_TICK:-1}" != "1" ]; then

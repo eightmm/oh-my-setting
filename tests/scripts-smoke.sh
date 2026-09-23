@@ -17227,6 +17227,40 @@ test_turn_guard_allows_routine_dirty_task() {
   [ -z "$out" ] || fail "routine dirty task should not be blocked by the turn guard: $out"
 }
 
+test_turn_relay_crosses_between_claude_and_codex() {
+  local d="$TMP/turn-relay"
+  local project="$d/project"
+  local day out stamp
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms"
+  day="$d/codex/sessions/$(date +%Y/%m/%d)"
+  mkdir -p "$day"
+  out="$(printf '{"hook_event_name":"Stop","session_id":"relay-c1","cwd":"%s","transcript_path":"%s/.claude/projects/x.jsonl","last_assistant_message":"Patched it. token=sk-abcdefghijklmnopqrstuvwx"}' "$project" "$d" |
+    OMS_CI_TICK=0 OMS_WORK_JOURNAL=0 bash "$ROOT/scripts/turn-guard.sh")"
+  [ -z "$out" ] || fail "the relay writer must keep Stop stdout empty: $out"
+  assert_file_contains "$project/.oms/hooks/relay/claude.json" 'token=[REDACTED]'
+
+  # Codex dispatches through the plugin, whose SessionStart has no turn_id.
+  out="$(printf '{"hook_event_name":"SessionStart","session_id":"relay-k1","cwd":"%s"}' "$project" |
+    OMS_HOOK_AGENT=codex OMS_CODEX_HOME="$d/codex" bash "$ROOT/scripts/resume-hook.sh")"
+  printf '%s' "$out" | grep -Fq '[oms relay] claude finished a turn' ||
+    fail "a codex session start must see the claude completion: $out"
+  out="$(printf '{"prompt":"status?","session_id":"relay-k1","turn_id":"t2","cwd":"%s"}' "$project" |
+    OMS_HOOK_AGENT=codex OMS_CODEX_HOME="$d/codex" OMS_HUD_CACHE_DIR="$d/no-cache" bash "$ROOT/scripts/skill-router.sh")"
+  if printf '%s' "$out" | grep -Fq '[oms relay]'; then fail "a completion is shown once per session: $out"; fi
+
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  printf '{"type":"session_meta","payload":{"cwd":"%s","source":{"subagent":{"other":"guardian"}}}}\n{"timestamp":"%s","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"allow"}}\n' "$project" "$stamp" > "$day/rollout-guard.jsonl"
+  printf '{"type":"session_meta","payload":{"cwd":"%s","source":"vscode"}}\n{"timestamp":"%s","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Codex ran the tests."}}\n' "$project/sub" "$stamp" > "$day/rollout-main.jsonl"
+  touch "$day/rollout-guard.jsonl"
+  out="$(printf '{"hook_event_name":"SessionStart","session_id":"relay-c2","cwd":"%s"}' "$project" |
+    OMS_CODEX_HOME="$d/codex" bash "$ROOT/scripts/resume-hook.sh")"
+  printf '%s' "$out" | grep -Fq '[oms relay] codex finished a turn ~0m ago: Codex ran the tests.' ||
+    fail "a claude session start must see the codex rollout completion, not a guardian's: $out"
+  if printf '%s' "$out" | grep -Fq 'claude finished'; then fail "an agent never sees its own card: $out"; fi
+}
+
 
 
 test_claude_hud_renders_usage_safely() {
