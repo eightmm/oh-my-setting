@@ -19,6 +19,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   already enabled as a table, its wait floors. User values are preserved, no
   feature is enabled, keys the installed Codex cannot load are rolled back,
   and `oms doctor` reports the state. Quota savings are not measured.
+- A finished Claude Code turn raises the Codex desktop app's own
+  notification, in every project: the Stop hook runs one `cat` of a message
+  file through `thread/shellCommand` on the local app-server control socket,
+  so no model is called. All notifications go to one reused "Claude 알림"
+  chat (`$XDG_STATE_HOME/oh-my-setting/codex-notify.json`; a deleted chat is
+  skipped, never replaced), with hooks disabled for that chat. The app
+  notifies only for a chat it has open once. Turns shorter than
+  `OMS_CODEX_NOTIFY_MIN_SEC` (default 30) stay quiet; `OMS_CODEX_NOTIFY=0`
+  disables. Codex-app only; terminal Claude gets no popup.
 - Claude Code and Codex relay turn completions to each other, shown once per
   session as `[oms relay]` at the other CLI's next prompt or session start.
   Claude's Stop hook writes the redacted tail of its final answer, branch and

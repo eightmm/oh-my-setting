@@ -7,6 +7,8 @@ fi
 
 ROOT="${OMS_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 TMP="$(mktemp -d /tmp/oms-tests.XXXXXX)"
+# Stop fixtures must never reach a live Codex app on the developer machine.
+export OMS_CODEX_NOTIFY=0
 # Worker-guard cases pin strictness per call. A caller that exports
 # OMS_WORKER_GUARD_STRICT=1 for its own workers (autopilot acceptance does)
 # must not turn the soft-surface cases strict.
@@ -17225,6 +17227,12 @@ test_turn_guard_allows_routine_dirty_task() {
   stop_payload="$(printf '{"hook_event_name":"Stop","session_id":"s-routine","turn_id":"t1","cwd":"%s","last_assistant_message":"Done."}' "$project")"
   out="$(printf '%s' "$stop_payload" | bash "$ROOT/scripts/turn-guard.sh")"
   [ -z "$out" ] || fail "routine dirty task should not be blocked by the turn guard: $out"
+}
+
+test_codex_app_notify_contract() {
+  # Fake app-server socket: one reused chat, no model turn, file-borne text.
+  PYTHONDONTWRITEBYTECODE=1 python3 -W ignore::ResourceWarning "$ROOT/tests/codex_app_notify_test.py" >/dev/null 2>"$TMP/codex-notify.err" ||
+    fail "codex app notification contract failed: $(cat "$TMP/codex-notify.err")"
 }
 
 test_turn_relay_crosses_between_claude_and_codex() {

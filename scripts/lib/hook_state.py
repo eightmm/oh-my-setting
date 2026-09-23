@@ -1191,6 +1191,8 @@ def cmd_route(args: argparse.Namespace) -> int:
         relay = None
     if relay:
         print(relay)
+    with contextlib.suppress(Exception):
+        record_turn_start(payload)
     prompt = str(payload.get("prompt") or "")
     if should_skip_prompt(prompt):
         return 0
@@ -1335,7 +1337,11 @@ def codex_rollout_card(repo: Path, max_age: int) -> dict[str, Any]:
                     mtime = os.stat(os.path.join(folder, name)).st_mtime
                     if now - mtime <= max_age:
                         files.append((mtime, Path(folder) / name))
+    notify_thread = codex_notify_thread()
     for _, path in sorted(files, reverse=True)[:40]:
+        # The notification thread's echo turns are Claude's, not Codex work.
+        if notify_thread and notify_thread in path.name:
+            continue
         try:
             with path.open("rb") as handle:
                 meta = json.loads(handle.readline(262144).decode("utf-8", errors="replace")).get("payload") or {}
@@ -1366,6 +1372,63 @@ def codex_rollout_card(repo: Path, max_age: int) -> dict[str, Any]:
     return {}
 
 
+def codex_notify_thread() -> str:
+    sys.path.insert(0, str(Path(__file__).parent))
+    import codex_app_notify
+
+    return codex_app_notify.thread_id()
+
+
+def codex_notify_ready() -> Any:
+    """The notifier module when a Codex app-server is reachable, else None."""
+    if os.environ.get("OMS_CODEX_NOTIFY", "1") != "1":
+        return None
+    sys.path.insert(0, str(Path(__file__).parent))
+    import codex_app_notify
+
+    return codex_app_notify if codex_app_notify.socket_path().exists() else None
+
+
+def turn_state_path(notify: Any, payload: dict[str, Any]) -> Path:
+    # Machine state, not repo state: the notification covers every project.
+    return notify.state_path().parent / "codex-notify-sessions" / f"{session_hash(payload)}.json"
+
+
+def record_turn_start(payload: dict[str, Any]) -> None:
+    notify = codex_notify_ready()
+    if notify is None or payload_agent(payload) != "claude":
+        return
+    path = turn_state_path(notify, payload)
+    write_json_atomic(path, {"schema": 1, "prompt_at": time.time()})
+    # Sessions end without a hook this relies on; keep the folder bounded.
+    for old in path.parent.glob("*.json"):
+        with contextlib.suppress(OSError):
+            if time.time() - old.stat().st_mtime > 7 * 86400:
+                old.unlink()
+
+
+def start_codex_notify(cwd: Path, payload: dict[str, Any], message: str) -> None:
+    """Fire-and-forget a Codex app notification for a finished Claude turn."""
+    notify = codex_notify_ready()
+    if notify is None:
+        return
+    started = load_state(turn_state_path(notify, payload)).get("prompt_at")
+    elapsed = time.time() - started if isinstance(started, (int, float)) else None
+    if elapsed is None or elapsed < env_int("OMS_CODEX_NOTIFY_MIN_SEC", 30, minimum=0):
+        return
+    from work_journal import sanitize_text
+
+    minutes = int(elapsed // 60)
+    text = "🔔 Claude Code 작업 완료 · %s (%s)\n%s" % (
+        cwd.name, "%d분" % minutes if minutes else "%d초" % int(elapsed),
+        sanitize_text(message[-2000:], env_int("OMS_CODEX_NOTIFY_BYTES", 300, minimum=0, maximum=2000)))
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__).with_name("codex_app_notify.py")), "send", str(cwd), text],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
 def relay_dir(repo: Path) -> Path:
     return repo / ".oms" / "hooks" / "relay"
 
@@ -1380,18 +1443,21 @@ def git_line(repo: Path, *args: str) -> str:
 
 
 def cmd_relay(_: argparse.Namespace) -> int:
-    """Stop: overwrite this agent's latest-turn card for the other CLI to read."""
-    if os.environ.get("OMS_RELAY", "1") != "1" or is_harness_child():
+    """Stop: notify the Codex app, and leave the latest-turn card for Codex to read."""
+    if is_harness_child():
         return 0
     payload, _ = load_payload()
     if payload.get("stop_hook_active") or payload.get("stopHookActive"):
         return 0
     message = str(payload.get("last_assistant_message") or "").strip()
-    repo = hook_repo(payload)
-    if not message or repo is None or not (repo / ".oms").is_dir():
-        return 0
     # Codex has no Stop event; its reader side scans the rollout instead.
-    if payload_agent(payload) != "claude":
+    if not message or payload_agent(payload) != "claude":
+        return 0
+    repo = hook_repo(payload)
+    if repo is not None:
+        with contextlib.suppress(Exception):
+            start_codex_notify(repo, payload, message)
+    if os.environ.get("OMS_RELAY", "1") != "1" or repo is None or not (repo / ".oms").is_dir():
         return 0
     from work_journal import sanitize_text
 

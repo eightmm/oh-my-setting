@@ -104,6 +104,8 @@ export XDG_CACHE_HOME="${OMS_CHECK_CACHE_HOME:-$CHECK_RUNTIME/cache}"
 # invoking user's real config.
 export XDG_CONFIG_HOME="${OMS_CHECK_CONFIG_HOME:-$CHECK_RUNTIME/config}"
 export OMS_LOCK_DIR="${OMS_CHECK_LOCK_DIR:-$CHECK_RUNTIME/locks}"
+# Fixture Stop hooks must never reach the developer's live Codex app.
+export OMS_CODEX_NOTIFY=0
 mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$OMS_LOCK_DIR"
 
 # These tune only the outer scripts-smoke runner. Do not export them into the
