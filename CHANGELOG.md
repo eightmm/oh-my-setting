@@ -64,6 +64,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- `oms land` runs its gate in a detached worktree of the verified commit, as
+  CI checks a fresh clone. The session driving the checkout writes its own
+  `.oms` (handoffs, fail-ledger rows) during a 25-minute gate, and the gate's
+  purity check failed a green commit on exactly those writes; untracked files
+  no longer reach the verdict either. A tree left by a killed job is removed by
+  the next landing.
+- The Codex app notification no longer calls a Claude turn finished while that
+  session's background tasks still run: such a turn reads `⏳ … 대기 중 ·
+  백그라운드 N개 진행`, and only a turn with none pending reads `작업 완료`.
+  The project label is the session's own directory, not wherever the shell
+  last changed into.
 - `oms job-digest <id>` no longer aborts before the log sections when `sacct`
   fails; unavailable or empty accounting reads as unknown, not success.
 - Foreground tool installers can borrow their live parent's lifecycle lock

@@ -1407,6 +1407,67 @@ def record_turn_start(payload: dict[str, Any]) -> None:
                 old.unlink()
 
 
+BACKGROUND_LAUNCH = re.compile(r"^(?:Command running in background with ID: |Monitor started \(task )([A-Za-z0-9_-]+)")
+BACKGROUND_END = re.compile(r"<task-id>([A-Za-z0-9_-]+)</task-id>.*?<status>([a-z_]+)</status>", re.S)
+
+
+def claude_session_project(payload: dict[str, Any]) -> Path | None:
+    """The directory the session was opened in; the shell cwd drifts per command."""
+    project = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if not project:
+        with contextlib.suppress(OSError, ValueError), \
+                open(str(payload.get("transcript_path") or ""), "rb") as handle:
+            for _, line in zip(range(50), handle):
+                project = str(json.loads(line).get("cwd") or "")
+                if project:
+                    break
+    return repo_root(project) if project else None
+
+
+def pending_background(payload: dict[str, Any], max_age: int = 86400) -> int:
+    """Background tasks this session launched that have not reported an end.
+
+    Stop marks the end of a reply, not of the work: a turn that leaves a watcher
+    or job running still stops. Only the session's own structured rows count
+    (a tool result that begins with the launch notice, a task notification, a
+    TaskStop call), never those strings quoted inside other output. A launch
+    older than max_age is dropped: a restarted CLI killed it without a notice.
+    """
+    launched: dict[str, float] = {}
+    ended: set[str] = set()
+    with contextlib.suppress(OSError), \
+            open(str(payload.get("transcript_path") or ""), "rb") as handle:
+        for raw in handle:
+            if not (b"background with ID" in raw or b"Monitor started" in raw
+                    or b"<task-notification>" in raw or b"TaskStop" in raw):
+                continue
+            try:
+                row = json.loads(raw)
+                content = row["message"]["content"]
+            except (ValueError, KeyError, TypeError):
+                continue
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            for item in content if isinstance(content, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "tool_use" and item.get("name") == "TaskStop":
+                    ended.add(str((item.get("input") or {}).get("task_id") or ""))
+                    continue
+                text = item.get("content") if item.get("type") == "tool_result" else item.get("text")
+                if isinstance(text, list):
+                    text = "".join(str(part.get("text") or "") for part in text if isinstance(part, dict))
+                text = str(text or "").lstrip()
+                launch = BACKGROUND_LAUNCH.match(text)
+                if launch:
+                    with contextlib.suppress(ValueError):
+                        launched[launch.group(1)] = datetime.fromisoformat(
+                            str(row.get("timestamp")).replace("Z", "+00:00")).timestamp()
+                elif text.startswith("<task-notification>"):
+                    ended.update(tid for tid, status in BACKGROUND_END.findall(text) if status != "running")
+    return sum(1 for tid, at in launched.items() if tid not in ended and time.time() - at <= max_age)
+
+
 def start_codex_notify(cwd: Path, payload: dict[str, Any], message: str) -> None:
     """Fire-and-forget a Codex app notification for a finished Claude turn."""
     notify = codex_notify_ready()
@@ -1419,8 +1480,11 @@ def start_codex_notify(cwd: Path, payload: dict[str, Any], message: str) -> None
     from work_journal import sanitize_text
 
     minutes = int(elapsed // 60)
-    text = "🔔 Claude Code 작업 완료 · %s (%s)\n%s" % (
-        cwd.name, "%d분" % minutes if minutes else "%d초" % int(elapsed),
+    pending = pending_background(payload)
+    headline = ("⏳ Claude Code 대기 중 · 백그라운드 %d개 진행" % pending if pending
+                else "🔔 Claude Code 작업 완료")
+    text = "%s · %s (%s)\n%s" % (
+        headline, cwd.name, "%d분" % minutes if minutes else "%d초" % int(elapsed),
         sanitize_text(message[-2000:], env_int("OMS_CODEX_NOTIFY_BYTES", 300, minimum=0, maximum=2000)))
     subprocess.Popen(
         [sys.executable, str(Path(__file__).with_name("codex_app_notify.py")), "send", str(cwd), text],
@@ -1456,7 +1520,7 @@ def cmd_relay(_: argparse.Namespace) -> int:
     repo = hook_repo(payload)
     if repo is not None:
         with contextlib.suppress(Exception):
-            start_codex_notify(repo, payload, message)
+            start_codex_notify(claude_session_project(payload) or repo, payload, message)
     if os.environ.get("OMS_RELAY", "1") != "1" or repo is None or not (repo / ".oms").is_dir():
         return 0
     from work_journal import sanitize_text
