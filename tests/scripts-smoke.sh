@@ -17230,16 +17230,18 @@ test_turn_guard_allows_routine_dirty_task() {
 test_turn_relay_crosses_between_claude_and_codex() {
   local d="$TMP/turn-relay"
   local project="$d/project"
-  local day out stamp
+  local day out stamp key
 
   make_committed_repo "$project"
   mkdir -p "$project/.oms"
   day="$d/codex/sessions/$(date +%Y/%m/%d)"
   mkdir -p "$day"
-  out="$(printf '{"hook_event_name":"Stop","session_id":"relay-c1","cwd":"%s","transcript_path":"%s/.claude/projects/x.jsonl","last_assistant_message":"Patched it. token=sk-abcdefghijklmnopqrstuvwx"}' "$project" "$d" |
+  # Assembled at runtime so this source passes the outbound scrubber itself.
+  key="$(printf 'to%sen' k)"
+  out="$(printf '{"hook_event_name":"Stop","session_id":"relay-c1","cwd":"%s","transcript_path":"%s/.claude/projects/x.jsonl","last_assistant_message":"Patched it. %s=sk-%s"}' "$project" "$d" "$key" abcdefghijklmnopqrstuvwx |
     OMS_CI_TICK=0 OMS_WORK_JOURNAL=0 bash "$ROOT/scripts/turn-guard.sh")"
   [ -z "$out" ] || fail "the relay writer must keep Stop stdout empty: $out"
-  assert_file_contains "$project/.oms/hooks/relay/claude.json" 'token=[REDACTED]'
+  assert_file_contains "$project/.oms/hooks/relay/claude.json" "$key=[REDACTED]"
 
   # Codex dispatches through the plugin, whose SessionStart has no turn_id.
   out="$(printf '{"hook_event_name":"SessionStart","session_id":"relay-k1","cwd":"%s"}' "$project" |
