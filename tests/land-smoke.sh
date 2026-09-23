@@ -101,6 +101,20 @@ git -C "$repo" worktree remove --force "$peer"
   fail "main checkout must read the removed worktree's receipt"
 git -C "$repo" pull -q --ff-only origin main
 
+# --- 2b. the gate checks the committed tree, not the live checkout -----------
+# A session driving the checkout writes its own .oms during the gate, and an
+# untracked file must not sway a verdict the push attributes to the commit.
+echo scratch > "$repo/untracked-scratch"
+gate 'test ! -e untracked-scratch || exit 9; mkdir -p .oms; touch .oms/gate-wrote; echo isolated gate ok'
+repo_oms_before="$(find "$repo/.oms" -print | sort)"
+"$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/isolated.out" 2>&1 ||
+  fail "the gate must run in a tree without untracked files: $(cat "$TMP/isolated.out")"
+[ "$repo_oms_before" = "$(find "$repo/.oms" -print | sort)" ] ||
+  fail "a gate's .oms writes must not reach the landing checkout"
+git -C "$repo" worktree list --porcelain | grep -q 'oms-land-gate\.' &&
+  fail "the gate worktree must be removed after the gate"
+rm -f "$repo/untracked-scratch"
+
 # --- 3. live siblings are recorded, waited for, or explicitly ignored ---------
 sibling="$TMP/sibling.. worktree"
 git -C "$repo" worktree add -q -b oms/autopilot-aaaaaaaaaaaa "$sibling" HEAD
@@ -450,6 +464,7 @@ grep -q ': passed' "$TMP/update-pass.out" || fail "successful update receipt was
   request_stamp() { printf '%s\n' "$STAMP"; }
   collect_live_siblings() { export SIBLING_LIVE=''; }
   clean_tree() { return 0; }
+  run_gate() { return 0; }
   finish() { printf '%s\n' "$1" > "$TMP/race-result"; }
   wait_for_live_siblings() { probe_head=unverified; }
   git() {

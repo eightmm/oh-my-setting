@@ -26,7 +26,9 @@ remote tip as an ancestor (rebase first otherwise), and a gate command
 Stages, each recorded beside its gate log under
 $XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/<sha>-<request-digest>.json,
 outside the repo:
-  gate    the gate command; a failure is recorded in the fail ledger
+  gate    the gate command, run in a detached worktree of the verified
+          commit (untracked files and checkout .oms stay out); a failure
+          is recorded in the fail ledger
   push    git push --no-verify REMOTE VERIFIED_SHA:TARGET, only if HEAD and the tree
           are unchanged since the gate started
   ci      the GitHub run for the pushed commit, polled up to --ci-wait
@@ -297,6 +299,36 @@ print(sys.argv[1] + "-" + hashlib.sha256(json.dumps(
 ).encode()).hexdigest()[:24])' "$1" "$REMOTE" "$TARGET" "$GATE" | tr -d '\r'
 }
 
+# The gate checks the committed SHA in its own detached worktree, as CI checks
+# a fresh clone. In the checkout, the session driving the landing keeps writing
+# its own .oms (handoffs, fail-ledger rows) through a 25-minute gate, and the
+# gate's purity check failed fc74aab on exactly those writes; untracked files
+# could also sway a verdict the push then attributes to the commit.
+# The job's EXIT trap belongs to the landing lock, so a tree a killed job left
+# behind is swept by the next job for this repository, which holds that lock.
+drop_gate_tree() {  # PATH
+  git -C "$REPO" worktree remove --force "$1" >/dev/null 2>&1 || rm -rf "$1"
+}
+run_gate() {
+  local rc=0 listing line tree
+  listing="$(git -C "$REPO" worktree list --porcelain 2>/dev/null)" || listing=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(oms_strip_cr "$line")"
+    case "$line" in "worktree "*/oms-land-gate.*) drop_gate_tree "${line#worktree }" ;; esac
+  done <<EOF
+$listing
+EOF
+  git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+  tree="$(mktemp -d "${TMPDIR:-/tmp}/oms-land-gate.XXXXXX")" || return 1
+  if ! git -C "$REPO" -c core.fsmonitor=false worktree add --quiet --detach \
+      "$tree" "$SHA" >> "$LOG" 2>&1; then
+    rm -rf "$tree"; return 1
+  fi
+  (cd "$tree" && bash -c "$GATE") >> "$LOG" 2>&1 || rc=$?
+  drop_gate_tree "$tree"
+  return "$rc"
+}
+
 run_job() {
   cd "$REPO"
   mkdir -p "$LAND_DIR"
@@ -328,7 +360,7 @@ run_job() {
       [ -z "$SIBLING_LIVE" ] || rset siblings.live="$SIBLING_LIVE"
     fi
     t0="$(date +%s)"
-    bash -c "$GATE" >> "$LOG" 2>&1 || rc=$?
+    run_gate || rc=$?
     rset gate.rc="$rc" gate.seconds="$(( $(date +%s) - t0 ))"
     if [ "$rc" -ne 0 ]; then
       "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" record --kind verify --cmd "$GATE" \
