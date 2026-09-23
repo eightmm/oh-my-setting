@@ -71,10 +71,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   no longer reach the verdict either. A tree left by a killed job is removed by
   the next landing.
 - The Codex app notification no longer calls a Claude turn finished while that
-  session's background tasks still run: such a turn reads `⏳ … 대기 중 ·
-  백그라운드 N개 진행`, and only a turn with none pending reads `작업 완료`.
-  The project label is the session's own directory, not wherever the shell
-  last changed into.
+  session's background tasks still run: such a turn stays silent, and the turn
+  that ends with none pending announces the run once. The project label is the
+  session's own directory, not wherever the shell last changed into.
+- Codex GPT-6 is seeded in the price order (astra, sol, luna, the catalog's
+  own priority), so a delegated write worker runs `gpt-6-sol` and routine work
+  `gpt-6-luna` instead of every route falling back to the provider default.
 - `oms job-digest <id>` no longer aborts before the log sections when `sacct`
   fails; unavailable or empty accounting reads as unknown, not success.
 - Foreground tool installers can borrow their live parent's lifecycle lock

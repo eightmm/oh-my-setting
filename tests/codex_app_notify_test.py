@@ -153,7 +153,7 @@ class CodexAppNotifyTest(unittest.TestCase):
         self.assertIn("repo (6분)", text)
         self.assertIn("Fixed the relay.", text)
 
-    def test_a_turn_that_leaves_background_work_is_not_announced_as_done(self):
+    def test_a_turn_that_leaves_background_work_stays_silent(self):
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
         def row(kind, content, cwd=None):
             return json.dumps({"type": kind, "timestamp": stamp, "cwd": cwd,
@@ -182,16 +182,17 @@ class CodexAppNotifyTest(unittest.TestCase):
                 hook_state.write_json_atomic(state, {"prompt_at": time.time() - 400})
                 hook_state.start_codex_notify(
                     hook_state.claude_session_project(payload) or drifted, payload, message)
-                deadline = time.time() + 20
-                while message not in "".join(c.get("printed", "") for c in server.calls) and time.time() < deadline:
-                    time.sleep(0.05)
                 rows.append(row("user", "<task-notification> <task-id>bwatch1</task-id> "
                                         "<status>completed</status> </task-notification>"))
                 transcript.write_text("".join(rows), encoding="utf-8")
+            deadline = time.time() + 20
+            while "thread/shellCommand" not in server.methods() and time.time() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.2)
         printed = [c["printed"] for c in server.calls if c.get("method") == "thread/shellCommand"]
-        self.assertEqual(len(printed), 2, server.methods())
-        self.assertIn("⏳ Claude Code 대기 중 · 백그라운드 1개 진행 · repo (6분)", printed[0])
-        self.assertIn("🔔 Claude Code 작업 완료 · repo (6분)", printed[1])
+        self.assertEqual(len(printed), 1, server.methods())
+        self.assertIn("🔔 Claude Code 작업 완료 · repo (6분)", printed[0])
+        self.assertIn("all done", printed[0])
 
     def test_relay_ignores_the_notification_chat_rollout(self):
         target = codex_app_notify.state_path()

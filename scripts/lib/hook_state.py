@@ -1477,14 +1477,15 @@ def start_codex_notify(cwd: Path, payload: dict[str, Any], message: str) -> None
     elapsed = time.time() - started if isinstance(started, (int, float)) else None
     if elapsed is None or elapsed < env_int("OMS_CODEX_NOTIFY_MIN_SEC", 30, minimum=0):
         return
+    # A turn that leaves background work stays silent; the turn it wakes into
+    # when the last task ends announces the whole run once.
+    if pending_background(payload):
+        return
     from work_journal import sanitize_text
 
     minutes = int(elapsed // 60)
-    pending = pending_background(payload)
-    headline = ("⏳ Claude Code 대기 중 · 백그라운드 %d개 진행" % pending if pending
-                else "🔔 Claude Code 작업 완료")
-    text = "%s · %s (%s)\n%s" % (
-        headline, cwd.name, "%d분" % minutes if minutes else "%d초" % int(elapsed),
+    text = "🔔 Claude Code 작업 완료 · %s (%s)\n%s" % (
+        cwd.name, "%d분" % minutes if minutes else "%d초" % int(elapsed),
         sanitize_text(message[-2000:], env_int("OMS_CODEX_NOTIFY_BYTES", 300, minimum=0, maximum=2000)))
     subprocess.Popen(
         [sys.executable, str(Path(__file__).with_name("codex_app_notify.py")), "send", str(cwd), text],

@@ -1696,7 +1696,7 @@ test_run_ledger_no_check_records_gate_none() {
 }
 
 test_experiment_launch_no_gate_requires_reason() {
-  local project="$TMP/research-runner-gate"
+  local project="$TMP/experiment-launch-gate"
   make_committed_repo "$project"
   mkdir -p "$project/scripts"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
@@ -1706,7 +1706,7 @@ test_experiment_launch_no_gate_requires_reason() {
     --question q --hypothesis h --prediction p --baseline b \
     --metric m --success s --change c --no-gate \
     -- bash -c 'exit 0' >/dev/null 2>"$project/e"); then
-    fail "research-runner --no-gate without --reason must fail"
+    fail "experiment launch --no-gate without --reason must fail"
   fi
   assert_file_contains "$project/e" "reason"
 }
@@ -1810,20 +1810,20 @@ EOF
 
 
 test_experiment_launch_requires_registration() {
-  local project="$TMP/research-runner-required"
+  local project="$TMP/experiment-launch-required"
 
   make_committed_repo "$project"
   if (cd "$project" && "$ROOT/scripts/runtime.sh" experiment launch \
     --question "Does lr help?" \
     -- bash -c 'exit 0' >/dev/null 2>"$project/error"); then
-    fail "research-runner should require full pre-registration"
+    fail "experiment launch should require full pre-registration"
   fi
   assert_file_contains "$project/error" "--hypothesis is required"
   assert_not_exists "$project/docs/EXPERIMENTS.jsonl"
 }
 
 test_experiment_launch_records_registered_run() {
-  local project="$TMP/research-runner-record"
+  local project="$TMP/experiment-launch-record"
 
   make_committed_repo "$project"
   printf '{"val_auc": 0.82, "split": "scaffold"}\n' > "$project/metrics.json"
@@ -1845,7 +1845,7 @@ test_experiment_launch_records_registered_run() {
 }
 
 test_experiment_launch_dry_run_no_ledger() {
-  local project="$TMP/research-runner-dry"
+  local project="$TMP/experiment-launch-dry"
 
   make_committed_repo "$project"
   (cd "$project" && "$ROOT/scripts/runtime.sh" experiment launch \
@@ -1858,7 +1858,7 @@ test_experiment_launch_dry_run_no_ledger() {
     --change "batch_size 32 -> 64" \
     --dry-run \
     -- bash -c 'exit 0' >"$project/out") ||
-    fail "research-runner dry-run should pass validation"
+    fail "experiment launch dry-run should pass validation"
 
   assert_file_contains "$project/out" "experiment launch: dry-run"
   assert_file_contains "$project/out" "Batch size 64 improves val_loss"

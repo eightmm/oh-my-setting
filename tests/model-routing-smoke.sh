@@ -149,6 +149,12 @@ done
 # is the cheapest seeded rank, so recovery can only climb to Fable.
 out="$(role_prepare claude delegate implementation-worker "$TMP/role6.err")"
 [ "$out" = 'claude-opus-5-5|role-default|role:worker|claude-fable-5-1' ] || fail "a catalog-less provider routes its worker and recovery from the seed: $out"
+# GPT-6 carries the catalog's own priority order: astra, sol, luna.
+printf 'gpt-6-astra\ngpt-6-sol\ngpt-6-luna\ngpt-5.6-sol\n' > "$gen/codex.models"
+out="$(role_prepare codex delegate implementation-worker "$TMP/role-g6.err")"
+[ "$out" = 'gpt-6-sol|role-default|role:worker|gpt-6-luna' ] || fail "a GPT-6 write worker takes sol: $out"
+out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine-g6.err")"
+case "$out" in 'gpt-6-luna|role-default|role:routine-worker|'*) ;; *) fail "GPT-6 routine work takes luna: $out" ;; esac
 printf 'gpt-5.6-sol\ngpt-5.10-nova\n' > "$gen/codex.models"
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine-new.err")"
 case "$out" in 'provider-default|provider-default|'*) ;; *) fail "routine must not invent unseeded generation models: $out" ;; esac
