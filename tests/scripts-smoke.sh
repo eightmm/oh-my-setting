@@ -17449,6 +17449,7 @@ assert "claude-statusline.py" in status["command"]
 subagent = d["subagentStatusLine"]
 assert subagent["type"] == "command"
 assert "claude-subagent-statusline.py" in subagent["command"]
+assert d["modelSettings"] == {"claude-opus-5-5": {"effortLevel": "high"}}, d["modelSettings"]
 PY
   [ -f "$s.oms-bak" ] || fail "installer should back up settings before the first change"
   OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" --remove >/dev/null
@@ -17464,6 +17465,7 @@ for event in ("SessionStart", "PostToolUse", "SubagentStop", "SessionEnd"):
     assert event not in d["hooks"], (event, d["hooks"])
 assert "statusLine" not in d
 assert "subagentStatusLine" not in d
+assert "modelSettings" not in d
 PY
   # A status line the user already owns must survive install and remove.
   python3 - "$s" <<'PY'
@@ -17478,11 +17480,15 @@ d["subagentStatusLine"] = {
     "type": "command",
     "command": "python3 /tmp/claude-subagent-statusline.py",
 }
+d["modelSettings"] = {
+    "claude-opus-5-5": {"effortLevel": "medium"},
+    "claude-opus-5": {"effortLevel": "high"},
+}
 json.dump(d, open(path, "w"))
 PY
   OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" >/dev/null
   OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" --remove >/dev/null
-  python3 - "$s" <<'PY' || fail "installer should preserve a user-owned status line"
+  python3 - "$s" <<'PY' || fail "installer should preserve a user-owned status line and model effort"
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["statusLine"] == {
@@ -17493,6 +17499,10 @@ assert d["subagentStatusLine"] == {
     "type": "command",
     "command": "python3 /tmp/claude-subagent-statusline.py",
 }
+assert d["modelSettings"] == {
+    "claude-opus-5-5": {"effortLevel": "medium"},
+    "claude-opus-5": {"effortLevel": "high"},
+}, d["modelSettings"]
 PY
   # Broken settings must refuse loudly, not clobber.
   printf '{broken' > "$s"

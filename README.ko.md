@@ -63,7 +63,7 @@ GitHub 또는 Notion capability를 선택한 경우 대화형 설치기는 `gh a
 `ntn login`의 브라우저 로그인을 위임하고 Work Journal의 Notion 대상을 찾을 수
 있다. 비대화형 설치에서는 core runtime을 약화시키지 않고 누락된 capability를
 명시적으로 기록한다. Claude Code에는 메인·서브에이전트 HUD가
-설치되고, Codex에는 사용자가 직접 정한 footer가 없을 때 같은 목적의 내장
+설치되고 사용자가 정하지 않았다면 Opus 5.5 effort 기본값이 `high`로 설정되며, Codex에는 사용자가 직접 정한 footer가 없을 때 같은 목적의 내장
 footer가 기본 설정된다. 매일 실행되는 updater는 깨끗한 checkout만 기본적으로
 fast-forward하며 dirty 또는 diverged checkout은 건너뛴다. uninstall은 관리
 설정을 복원하지만 외부 CLI와 user-local PATH 항목은 남긴다.

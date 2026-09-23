@@ -8,6 +8,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- The Claude settings installer pins Claude Opus 5.5 to `high` effort under
+  `modelSettings` when no value is set. Opus 5.5 defaults to `medium` and
+  thinks more per level than Opus 5, so a top-level `xhigh` would otherwise
+  carry over. A user value wins, and uninstall removes only a value still
+  equal to the default.
 - Waiting costs model turns, not shell polls: `oms job-digest --wait` gains
   `--wait-timeout` (exit 124, job pending and untouched) and `--max-bytes`
   (whole-line cap that states what it dropped), and reports a repeating

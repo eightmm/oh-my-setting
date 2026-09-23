@@ -106,9 +106,10 @@ Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
 hook, PostToolUseFailure/PostToolUse fail-ledger hooks, PostToolUse
 edit-time syntax-guard hook, PreCompact/SessionEnd handoff-snapshot hooks,
 SessionStart resume hook, SessionStart/SubagentStop/SessionEnd telemetry hooks, main usage
-HUD, and compact subagent HUD in Claude Code's
-settings.json. The merge is additive: existing hooks and user-owned
-statusLine/subagentStatusLine entries are preserved, and repeated installs are
+HUD, compact subagent HUD, and the per-model effort default for the Claude
+models OMS routes (Opus 5.5: high) in Claude Code's settings.json. The merge
+is additive: existing hooks, user-owned statusLine/subagentStatusLine entries
+and user-set modelSettings effort are preserved, and repeated installs are
 idempotent. --remove deletes only oh-my-setting entries.
 
 Options:
@@ -232,6 +233,12 @@ MARKS = (
     "resume-hook.sh", "telemetry-hook.sh",
 )
 expected_pairs = {(row["event"], row["script"]) for row in expected}
+# Per-model effort for the Claude models OMS routes through. Claude Opus 5.5
+# defaults to medium and thinks more per level than Opus 5, so a top-level
+# xhigh would otherwise carry over; high is the chosen default (user decision
+# 2026-09-23). A value the user already set wins, and --remove deletes only a
+# value still equal to ours.
+MODEL_EFFORT = {"claude-opus-5-5": "high"}
 
 settings = {}
 if os.path.isfile(path):
@@ -350,6 +357,16 @@ if remove:
         "claude-subagent-statusline.py",
     ):
         del settings["subagentStatusLine"]
+    model_settings = settings.get("modelSettings")
+    if isinstance(model_settings, dict):
+        for model, effort in MODEL_EFFORT.items():
+            row = model_settings.get(model)
+            if isinstance(row, dict) and row.get("effortLevel") == effort:
+                del row["effortLevel"]
+                if not row:
+                    del model_settings[model]
+        if not model_settings:
+            del settings["modelSettings"]
     action = "removed"
 else:
     prune_obsolete_surfaces()
@@ -377,6 +394,14 @@ else:
     ):
         settings["subagentStatusLine"]["type"] = "command"
         settings["subagentStatusLine"]["command"] = subagent_status_cmd
+    model_settings = settings.get("modelSettings")
+    if model_settings is None:
+        model_settings = settings["modelSettings"] = {}
+    if isinstance(model_settings, dict):
+        for model, effort in MODEL_EFFORT.items():
+            row = model_settings.setdefault(model, {})
+            if isinstance(row, dict):
+                row.setdefault("effortLevel", effort)
     action = "installed"
 
 if json.dumps(settings, sort_keys=True) == before:
@@ -398,7 +423,7 @@ try:
 except Exception:
     os.unlink(tmp)
     raise
-print("claude-settings: %s oh-my-setting hooks/HUDs (%s)" % (action, path))
+print("claude-settings: %s oh-my-setting hooks/HUDs/model effort (%s)" % (action, path))
 PY
 
 # Record which surface list this registration came from. link.sh rewrites the

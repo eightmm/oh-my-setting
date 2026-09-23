@@ -70,8 +70,9 @@ delegate browser login to `gh auth login` and `ntn login` and discover the Work
 Journal's Notion target; a non-interactive install records the missing
 capability instead of weakening the core runtime.
 Claude Code gets compact main and subagent HUDs (model/effort, context,
-rate-limit countdowns, cost, Git state); Codex gets the equivalent native footer
-when it has no user footer. The daily updater applies clean fast-forwards by
+rate-limit countdowns, cost, Git state) and a `high` effort default for Opus
+5.5 unless you set one; Codex gets the equivalent native footer when it has no
+user footer. The daily updater applies clean fast-forwards by
 default and skips dirty or diverged checkouts. Uninstall restores managed
 configuration but leaves the external CLIs and the user-local PATH entry in
 place.
