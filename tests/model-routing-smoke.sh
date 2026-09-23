@@ -115,7 +115,7 @@ out="$(role_prepare codex delegate implementation-worker "$TMP/role.err")"
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine.err")"
 case "$out" in 'gpt-5.6-luna|role-default|role:routine-worker|'*) ;; *) fail "routine work must select the lowest routable seeded rank: $out" ;; esac
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare claude delegate implementation-worker "$TMP/routine-claude.err")"
-case "$out" in 'sonnet|role-default|role:routine-worker|'*) ;; *) fail "routine selection must work across providers: $out" ;; esac
+case "$out" in 'claude-opus-5-5|role-default|role:routine-worker|'*) ;; *) fail "routine selection must work across providers: $out" ;; esac
 out="$(OMS_MODEL_WORKLOAD=routine OMS_ROLE_ROUTING=0 role_prepare codex delegate implementation-worker "$TMP/routine-off.err")"
 case "$out" in 'provider-default|provider-default|'*) ;; *) fail "routing opt-out must also disable routine: $out" ;; esac
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex consult '' "$TMP/role2.err")"
@@ -133,10 +133,10 @@ for workload in standard routine; do
   out="$(OMS_MODEL_WORKLOAD="$workload" role_prepare antigravity delegate implementation-worker "$TMP/spaced.err")"
   case "$out" in 'Gemini 3.7 Flash (Low)|role-default|'*) ;; *) fail "worker ranks must preserve spaced catalog names: $out" ;; esac
 done
-# No catalog at all (claude): the seed stands in for the routable set, and
-# recovery tries the cheaper seeded rank before a higher one.
+# No catalog at all (claude): the seed stands in for the routable set. Opus
+# is the cheapest seeded rank, so recovery can only climb to Fable.
 out="$(role_prepare claude delegate implementation-worker "$TMP/role6.err")"
-[ "$out" = 'opus|role-default|role:worker|sonnet' ] || fail "a catalog-less provider routes its worker and recovery from the seed: $out"
+[ "$out" = 'claude-opus-5-5|role-default|role:worker|claude-fable-5-1' ] || fail "a catalog-less provider routes its worker and recovery from the seed: $out"
 printf 'gpt-5.6-sol\ngpt-5.10-nova\n' > "$gen/codex.models"
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine-new.err")"
 case "$out" in 'provider-default|provider-default|'*) ;; *) fail "routine must not invent unseeded generation models: $out" ;; esac

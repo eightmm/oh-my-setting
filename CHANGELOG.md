@@ -37,6 +37,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   children stay silent; `OMS_RELAY=0` disables, `OMS_RELAY_MAX_AGE_SEC`
   (default 86400) and `OMS_RELAY_BYTES` (default 800) bound it.
 
+- OMS routes Claude only through Fable 5.1 and Opus 5.5: the price seed names
+  the exact ids `claude-fable-5-1 claude-opus-5-5` instead of the floating
+  `fable opus sonnet` aliases, so routine workers run Opus instead of Sonnet
+  and a new release waits for the seed to move. Explicitly named models and
+  Claude Code's own default model (today `claude-opus-5-5[1m]`) are untouched.
+
 ### Fixed
 
 - `oms job-digest <id>` no longer aborts before the log sections when `sacct`
