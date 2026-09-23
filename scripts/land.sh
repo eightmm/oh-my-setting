@@ -22,7 +22,8 @@ Usage: land.sh [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD]
 
 Preconditions: a clean tracked tree, HEAD ahead of REMOTE/TARGET with the
 remote tip as an ancestor (rebase first otherwise), and a gate command
-(default: bash scripts/check.sh when the repo has one).
+(default: bash scripts/check.sh when the repo has one, with --parallel
+in the harness checkout itself).
 Stages, each recorded beside its gate log under
 $XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/<sha>-<request-digest>.json,
 outside the repo:
@@ -496,6 +497,10 @@ clean_tree || { echo "error: commit or stash tracked changes first" >&2; exit 2;
 if [ -z "$GATE" ]; then
   [ -f "$REPO/scripts/check.sh" ] || { echo "error: no scripts/check.sh here; pass --gate CMD" >&2; exit 2; }
   GATE="bash scripts/check.sh"
+  # The harness's own gate runs its CI partitions concurrently: 465s and 473s
+  # against 1709-2137s serial on the same tree (2026-09-23). Other repositories
+  # keep the plain call; the project template takes no --parallel.
+  ! install_root >/dev/null || GATE="$GATE --parallel"
 fi
 git -C "$REPO" fetch -q "$REMOTE" || { echo "error: fetch from $REMOTE failed" >&2; exit 2; }
 if ! git -C "$REPO" merge-base --is-ancestor "$REMOTE/$TARGET" HEAD; then

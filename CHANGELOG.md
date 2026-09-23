@@ -86,7 +86,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   paths in unattended timers without sourcing shell startup files.
 
 ### Changed
-- Retire Soul executors in favor of reviewed plan tasks and worker briefs.
+-- `oms land` in the harness checkout gates with `check.sh --parallel`, the
+  complete gate as concurrent CI partitions: two runs took 465s and 473s
+  against 1709-2137s serial. Other repositories keep the plain `check.sh`.
+ Retire Soul executors in favor of reviewed plan tasks and worker briefs.
   Keep legacy records as evidence, reject their reuse for execution or landing,
   and preserve task leases, scoped admission and exact-action approvals.
 - Condense duplicated worker guidance, follow nested skill references, and stop

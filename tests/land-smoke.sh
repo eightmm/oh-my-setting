@@ -88,6 +88,7 @@ assert r["state"] == "passed" and r["sha"] == sys.argv[2], r
 assert r["gate"]["rc"] == 0 and r["push"]["rc"] == 0, r
 assert r["update"]["rc"] == "skipped" and r["ci"]["conclusion"] == "skipped", r
 assert "siblings" not in r, r
+assert r["gate"]["command"] == "bash scripts/check.sh", r
 PY
 grep -q 'gate ok' "$(log_of "$receipt")" || fail "gate output must land in the receipt log"
 case "$(log_of "$receipt")" in "$state_land"/*) ;; *) fail "the gate log must live outside the repo: $(log_of "$receipt")" ;; esac
@@ -451,6 +452,8 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
   fail "successful CI and update failed to land"
 [ "$(cat "$TMP/events")" = "$(printf 'ci\nupdate')" ] || fail "successful update did not follow CI"
 grep -q ': passed' "$TMP/update-pass.out" || fail "successful update receipt was not passed"
+grep -rqs '"command": *"bash scripts/check.sh --parallel"' "$receipt_dir" ||
+  fail "the harness checkout's default gate must run --parallel"
 
 # Probe the real job function with deterministic wait/push interleavings.
 # Git is stubbed: this cannot publish or mutate the caller's repository.
