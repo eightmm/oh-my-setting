@@ -127,15 +127,22 @@ configure_usage() {
   local action="$1"
   local plan
   local loaded_before=0
+  local -a notify=()
+  # Codex turn notifications reach the Claude terminal through a tty escape;
+  # Windows consoles have no such target.
+  case "$action:$(uname -s 2>/dev/null)" in
+    install:MINGW*|install:MSYS*|install:CYGWIN*) ;;
+    install:*) notify=(--notify-script "$ROOT/scripts/lib/codex_turn_notify.py") ;;
+  esac
   if [ "$DRY_RUN" = "1" ]; then
-    python3 "$USAGE_CONFIG_HELPER" "$action" "$CODEX_CONFIG" --dry-run
+    python3 "$USAGE_CONFIG_HELPER" "$action" "$CODEX_CONFIG" --dry-run ${notify[@]+"${notify[@]}"}
     return
   fi
   if [ "$action" != "install" ]; then
     python3 "$USAGE_CONFIG_HELPER" "$action" "$CODEX_CONFIG"
     return
   fi
-  plan="$(python3 "$USAGE_CONFIG_HELPER" install "$CODEX_CONFIG" --dry-run)" || return
+  plan="$(python3 "$USAGE_CONFIG_HELPER" install "$CODEX_CONFIG" --dry-run ${notify[@]+"${notify[@]}"})" || return
   case "$plan" in
     # Only the wait floors are cross-validated (min <= default <= max), and a
     # config Codex rejects stops every session. There the real binary gets the
@@ -146,7 +153,7 @@ configure_usage() {
     *"would install"*) ;;
     *) printf '%s\n' "$plan"; return 0 ;;
   esac
-  python3 "$USAGE_CONFIG_HELPER" install "$CODEX_CONFIG" || return
+  python3 "$USAGE_CONFIG_HELPER" install "$CODEX_CONFIG" ${notify[@]+"${notify[@]}"} || return
   if [ "$loaded_before" = "1" ] && ! codex_loads_config; then
     python3 "$USAGE_CONFIG_HELPER" remove "$CODEX_CONFIG" >/dev/null || return
     echo "codex-usage: rolled back; this codex rejected the managed keys"

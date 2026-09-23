@@ -19,6 +19,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   already enabled as a table, its wait floors. User values are preserved, no
   feature is enabled, keys the installed Codex cannot load are rolled back,
   and `oms doctor` reports the state. Quota savings are not measured.
+- The reverse direction: a finished Codex turn shows an OS notification from
+  the terminal running Claude Code. The Codex installer manages a `notify`
+  entry (its own marked block; a user's `notify` is preserved, remove is
+  byte-symmetric) that writes one OSC 9 escape to the tmux client showing a
+  Claude pane in that project, else the most recent client. Guardian and
+  exec threads, harness children and the Claude notification chat stay
+  quiet; `OMS_TERMINAL_NOTIFY=0` disables, `OMS_TERMINAL_NOTIFY_OSC=777`
+  switches the escape. The terminal app must honor OSC 9; not installed on
+  Windows.
 - A finished Claude Code turn raises the Codex desktop app's own
   notification, in every project: the Stop hook runs one `cat` of a message
   file through `thread/shellCommand` on the local app-server control socket,

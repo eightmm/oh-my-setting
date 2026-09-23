@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import re
 import sys
@@ -36,11 +37,35 @@ V2_DEFAULT_WAIT_MS = 300000
 
 
 class Block:
-    def __init__(self, name: str, entries: List[Tuple[str, int]]):
+    def __init__(self, name: str, entries: List[Tuple[str, object]], lines: Optional[List[str]] = None):
         self.begin = "# >>> oh-my-setting managed Codex usage (%s) >>>" % name
         self.end = "# <<< oh-my-setting managed Codex usage (%s) <<<" % name
         self.entries = entries
-        self.lines = ["%s = %d" % entry for entry in entries]
+        self.lines = lines if lines is not None else ["%s = %d" % entry for entry in entries]
+
+    def owns(self, body: List[str]) -> bool:
+        return body == self.lines
+
+
+class NotifyBlock(Block):
+    """Codex `notify` pointing at the turn-complete terminal notifier.
+
+    Its own block, not a line in the root block: an existing root block with
+    different lines would read as customized and never be touched again.
+    Any single notifier line inside these markers is ours, whatever install
+    path wrote it, so remove stays symmetric after the install root moves.
+    """
+
+    SCRIPT = "codex_turn_notify.py"
+
+    def __init__(self, command: Optional[List[str]] = None):
+        command = command or []
+        super().__init__("notify", [("notify", command)],
+                         ["notify = %s" % json.dumps(command, ensure_ascii=False)])
+
+    def owns(self, body: List[str]) -> bool:
+        return len(body) == 1 and bool(re.match(
+            r'^notify = \[.*%s"\]$' % re.escape(self.SCRIPT), body[0]))
 
 
 # Raises the ceiling of an empty background-terminal poll (Codex default
@@ -121,7 +146,7 @@ def marker_block(lines: List[str], block: Block) -> Optional[Tuple[int, int, boo
     if len(begins) != 1 or len(ends) != 1 or ends[0] <= begins[0]:
         raise ConfigError("managed Codex usage markers are incomplete or duplicated")
     start, finish = begins[0], ends[0]
-    managed = [HUD.body(line) for line in lines[start + 1 : finish]] == block.lines
+    managed = block.owns([HUD.body(line) for line in lines[start + 1 : finish]])
     return start, finish, managed
 
 
@@ -142,6 +167,14 @@ def root_state(lines: List[str], parsed: Dict) -> str:
     if marked is not None:
         return "managed" if marked[2] else "customized"
     return "user" if ROOT.entries[0][0] in parsed else "missing"
+
+
+def notify_state(lines: List[str], parsed: Dict) -> str:
+    marked = marker_block(lines, NotifyBlock())
+    if marked is not None:
+        return "managed" if marked[2] else "customized"
+    # One notify program per config: a user's own is never replaced.
+    return "user" if "notify" in parsed else "missing"
 
 
 def v2_state(lines: List[str], parsed: Dict) -> str:
@@ -170,10 +203,12 @@ def fenced(block: Block, newline: str) -> List[str]:
 
 
 def install(
-    parser, lines: List[str], newline: str, dry_run: bool
+    parser, lines: List[str], newline: str, dry_run: bool,
+    notifier: Optional[NotifyBlock] = None,
 ) -> Tuple[List[str], List[str], bool]:
     parsed = parse(parser, lines)
     root, v2 = root_state(lines, parsed), v2_state(lines, parsed)
+    notify = notify_state(lines, parsed) if notifier is not None else "skipped"
     updated = list(lines)
 
     # Lower index last, so the header index stays valid.
@@ -187,11 +222,16 @@ def install(
         # Root keys are only valid before the first table; the top of the
         # file is that place without having to find where tables begin.
         updated[0:0] = fenced(ROOT, newline) + ([newline] if updated else [])
+    if notify == "missing":
+        assert notifier is not None
+        updated[0:0] = fenced(notifier, newline) + ([newline] if updated else [])
 
-    if root == "missing" or v2 == "missing":
+    if root == "missing" or v2 == "missing" or notify == "missing":
         after = parse(parser, updated)
         table = v2_table(after)
         landed = root != "missing" or all(after.get(k) == v for k, v in ROOT.entries)
+        if notify == "missing":
+            landed = landed and after.get("notify") == notifier.entries[0][1]
         if v2 == "missing":
             landed = landed and isinstance(table, dict) and all(
                 table.get(k) == v for k, v in V2.entries
@@ -206,7 +246,11 @@ def install(
         "multi_agent_v2 waits %s"
         % ("%s (%s)" % (verb, ", ".join(V2.lines)) if v2 == "missing" else V2_NOTES[v2]),
     ]
-    return updated, notes, root == "missing" or v2 == "missing"
+    if notifier is not None:
+        notes.append("turn notify %s" % ("%s (%s)" % (verb, notifier.lines[0])
+                                          if notify == "missing" else ROOT_NOTES[notify]))
+    changed = root == "missing" or v2 == "missing" or notify == "missing"
+    return updated, notes, changed
 
 
 def remove(parser, lines: List[str], dry_run: bool) -> Tuple[List[str], List[str], bool]:
@@ -214,7 +258,8 @@ def remove(parser, lines: List[str], dry_run: bool) -> Tuple[List[str], List[str
     verb = "would remove" if dry_run else "removed"
     notes = {}
     spans = []
-    for block, label in ((ROOT, "terminal ceiling"), (V2, "multi_agent_v2 waits")):
+    for block, label in ((ROOT, "terminal ceiling"), (V2, "multi_agent_v2 waits"),
+                         (NotifyBlock(), "turn notify")):
         marked = marker_block(lines, block)
         if marked is None:
             notes[label] = "already absent"
@@ -223,10 +268,15 @@ def remove(parser, lines: List[str], dry_run: bool) -> Tuple[List[str], List[str
         else:
             notes[label] = verb
             spans.append((marked[0], marked[1]))
-    # Higher index first, so deleting one block cannot shift the other.
+    # Higher index first, so deleting one block cannot shift another.
+    ours = set()
+    for start, finish in spans:
+        ours.update(range(start, finish + 1))
     for start, finish in sorted(spans, reverse=True):
-        # install separates the top block from the user's first line.
-        if start == 0 and finish + 1 < len(updated) and not HUD.body(updated[finish + 1]).strip():
+        # install separates each top block from what follows with one blank
+        # line; a block counts as top when only our blocks and blanks precede it.
+        top = all(i in ours or not HUD.body(lines[i]).strip() for i in range(start))
+        if top and finish + 1 < len(updated) and not HUD.body(updated[finish + 1]).strip():
             finish += 1
         del updated[start : finish + 1]
     # Exactly the lines this helper wrote are deleted, so what remains is the
@@ -245,8 +295,8 @@ def check(parser, lines: List[str]) -> Tuple[str, int]:
     if root == "user":
         shown = "user(%s)" % parsed.get(ROOT.entries[0][0])
     return (
-        "terminal-ceiling=%s v2-waits=%s scope=config-file effective=unverified"
-        % (shown, v2),
+        "terminal-ceiling=%s v2-waits=%s turn-notify=%s scope=config-file effective=unverified"
+        % (shown, v2, notify_state(lines, parsed)),
         0 if root != "missing" else 1,
     )
 
@@ -256,6 +306,7 @@ def main() -> int:
     arguments.add_argument("action", choices=("install", "remove", "check"))
     arguments.add_argument("path")
     arguments.add_argument("--dry-run", action="store_true")
+    arguments.add_argument("--notify-script", help="install: point Codex notify at this notifier")
     args = arguments.parse_args()
     path = os.path.abspath(args.path)
 
@@ -272,7 +323,10 @@ def main() -> int:
                 # reading the TOML, and guessing risks overriding them.
                 print("codex-usage: skipped (needs Python 3.11+ or tomli to read the config)")
                 return 0
-            updated, notes, changed = install(parser, lines, newline, args.dry_run)
+            # The daemon that runs notify has its own PATH: name both absolutely.
+            notifier = (NotifyBlock([sys.executable, os.path.abspath(args.notify_script)])
+                        if args.notify_script else None)
+            updated, notes, changed = install(parser, lines, newline, args.dry_run, notifier)
         else:
             updated, notes, changed = remove(parser, lines, args.dry_run)
         if changed and not args.dry_run:

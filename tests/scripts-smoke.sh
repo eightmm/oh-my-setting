@@ -17229,6 +17229,12 @@ test_turn_guard_allows_routine_dirty_task() {
   [ -z "$out" ] || fail "routine dirty task should not be blocked by the turn guard: $out"
 }
 
+test_codex_turn_notify_contract() {
+  # Codex notify -> one OSC 9 on the Claude terminal; foreign chats stay quiet.
+  PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/codex_turn_notify_test.py" >/dev/null 2>"$TMP/codex-turn-notify.err" ||
+    fail "codex turn notification contract failed: $(cat "$TMP/codex-turn-notify.err")"
+}
+
 test_codex_app_notify_contract() {
   # Fake app-server socket: one reused chat, no model turn, file-borne text.
   PYTHONDONTWRITEBYTECODE=1 python3 -W ignore::ResourceWarning "$ROOT/tests/codex_app_notify_test.py" >/dev/null 2>"$TMP/codex-notify.err" ||
@@ -17802,6 +17808,8 @@ assert row["tui"]["status_line"][-1] == "git-branch"
 assert row["background_terminal_max_timeout"] == 900000
 assert "background_terminal_max_timeout" not in row["tui"]
 assert row["developer_instructions"] == "Keep my delegation policy."
+# Codex runs notify from its daemon's environment: both paths are absolute.
+assert row["notify"][0].startswith("/") and row["notify"][1].endswith("/scripts/lib/codex_turn_notify.py"), row["notify"]
 PY
 
   cp "$codex_home/config.toml" "$d/config-installed.toml"
@@ -17822,6 +17830,9 @@ PY
   fi
   if grep -Fq 'background_terminal_max_timeout' "$codex_home/config.toml"; then
     fail "Codex plugin removal left the managed usage key"
+  fi
+  if grep -Fq 'codex_turn_notify' "$codex_home/config.toml"; then
+    fail "Codex plugin removal left the managed turn notifier"
   fi
   assert_file_contains "$codex_home/config.toml" 'animations = true'
   assert_file_contains "$codex_home/config.toml" 'developer_instructions = "Keep my delegation policy."'
@@ -17999,7 +18010,7 @@ EOF
   assert_file_contains "$log" "plugin add oh-my-setting@oh-my-setting-local"
   assert_file_contains "$d/out" "ok: codex plugin oh-my-setting (cache parity)"
   assert_file_contains "$d/out" "ok: codex HUD configured (managed)"
-  assert_file_contains "$d/out" "ok: codex usage keys (terminal-ceiling=managed v2-waits=disabled scope=config-file effective=unverified)"
+  assert_file_contains "$d/out" "ok: codex usage keys (terminal-ceiling=managed v2-waits=disabled turn-notify=managed scope=config-file effective=unverified)"
   assert_not_exists "$cache/stale.txt"
 }
 

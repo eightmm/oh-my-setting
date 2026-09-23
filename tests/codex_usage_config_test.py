@@ -85,6 +85,28 @@ class CodexUsageConfigTest(unittest.TestCase):
         self.assertEqual(self.config.read_text(encoding="utf-8"), REALISTIC)
         self.assertEqual(run_helper("check", self.config)[0], 1)
 
+    def test_turn_notifier_lands_absolute_and_removes_byte_for_byte(self):
+        self.config.write_text(REALISTIC, encoding="utf-8")
+        script = str(ROOT / "scripts" / "lib" / "codex_turn_notify.py")
+        status, stdout, _ = run_helper("install", self.config, "--notify-script", script)
+        self.assertEqual(status, 0)
+        self.assertIn("turn notify installed", stdout)
+        self.assertEqual(self.load()["notify"], [sys.executable, script])
+        # A different install root still reads as ours, so remove stays symmetric.
+        moved = self.config.read_text(encoding="utf-8").replace(script, "/elsewhere/codex_turn_notify.py")
+        self.config.write_text(moved, encoding="utf-8")
+        status, stdout, _ = run_helper("remove", self.config)
+        self.assertIn("turn notify removed", stdout)
+        self.assertEqual(self.config.read_text(encoding="utf-8"), REALISTIC)
+
+    def test_users_own_notify_program_is_kept(self):
+        mine = 'notify = ["my-notifier"]\n' + REALISTIC
+        self.config.write_text(mine, encoding="utf-8")
+        status, stdout, _ = run_helper("install", self.config, "--notify-script", "/x/codex_turn_notify.py")
+        self.assertEqual(status, 0)
+        self.assertIn("turn notify preserved user value", stdout)
+        self.assertEqual(self.load()["notify"], ["my-notifier"])
+
     def test_user_value_is_never_overridden(self):
         original = "background_terminal_max_timeout = 60000\n" + REALISTIC
         self.config.write_text(original, encoding="utf-8")
