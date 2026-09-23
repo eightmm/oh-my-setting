@@ -574,6 +574,18 @@ oms_provider_price_order() {
   esac
 }
 
+# The last model a safeguard retry may reach, never a first choice. Fable 5.1
+# and Opus 5.5 share a broad biology filter that Opus 5 does not; the error
+# itself says to change the model (user decision 2026-09-23).
+oms_provider_safeguard_floor() {
+  local provider
+  provider="$(oms_provider_normalize "$1")" || return $?
+  case "$provider" in
+    claude) printf 'claude-opus-5\n' ;;
+    *) return 1 ;;
+  esac
+}
+
 oms_provider_primary_family() {
   local provider
   provider="$(oms_provider_normalize "$1")" || return $?

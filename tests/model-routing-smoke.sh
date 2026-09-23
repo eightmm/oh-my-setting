@@ -86,6 +86,18 @@ out="$(prepare_gen antigravity 'Gemini 3.1 Pro (High)' "$TMP/gen3.err" 'printf "
 out="$(prepare_gen codex gpt-7-unlisted "$TMP/gen4.err" 'printf "%s" "$OMS_MODEL_PREVIOUS_GENERATION"')"
 [ "$out" = 0 ] && [ ! -s "$TMP/gen4.err" ] || fail "a model the catalog does not know cannot be judged: $out $(cat "$TMP/gen4.err")"
 # Generations compare as numbers: 5.10 is newer than 5.6.
+# A safeguard retry walks the recovery chain and then Claude's Opus 5 floor;
+# the floor is never a first choice, and a named model gets no retry at all.
+safeguard_chain() {  # safeguard_chain PROVIDER OPERATION EXPLICIT
+  PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" OMS_MODEL_EXPLICIT="$3" OMS_REASONING_EFFORT_REQUEST=auto \
+    OMS_MODEL_OPERATION="$2" bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare "$1" 2>/dev/null; printf "%s" "$OMS_MODEL_SAFEGUARD_CHAIN" | tr "\n" ","' _ "$1"
+}
+[ "$(safeguard_chain claude delegate '')" = 'claude-fable-5-1,claude-opus-5' ] ||
+  fail "a claude worker's safeguard retry must end on Opus 5: $(safeguard_chain claude delegate '')"
+[ "$(safeguard_chain claude consult '')" = 'claude-opus-5' ] ||
+  fail "a provider-default claude call must still reach the Opus 5 floor: $(safeguard_chain claude consult '')"
+[ -z "$(safeguard_chain claude delegate claude-opus-5-5)" ] || fail "a named model must keep no safeguard chain"
+case "$(safeguard_chain codex delegate '')" in *opus*) fail "the floor belongs to claude only" ;; esac
 printf 'gpt-5.6-sol\ngpt-5.10-nova\n' > "$gen/codex.models"
 out="$(routable codex)"
 [ "$out" = 'gpt-5.10-nova ' ] || fail "a two-digit minor must compare numerically: $out"

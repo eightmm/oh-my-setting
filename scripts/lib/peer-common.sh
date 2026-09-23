@@ -2586,7 +2586,7 @@ ma_run_routed_provider_inner() {
     OMS_MODEL_FALLBACK_REASON="model-safeguard"
     case "$safeguard_cap" in *[!0-9]*|"") safeguard_cap=2 ;; esac
     safeguard_prev="$OMS_MODEL_SELECTED"
-    if [ -n "${OMS_MODEL_DISTINCT_CHAIN:-}" ]; then
+    if [ -n "${OMS_MODEL_SAFEGUARD_CHAIN:-}" ]; then
       while IFS= read -r safeguard_next; do
         [ -n "$safeguard_next" ] || continue
         [ "$safeguard_tries" -lt "$safeguard_cap" ] || break
@@ -2615,7 +2615,7 @@ ma_run_routed_provider_inner() {
         cat "$attempt_file" >> "$artifact"
         [ "$OMS_WORKER_AUTHORITY_VIOLATION" != 1 ] || break
       done <<EOF
-$OMS_MODEL_DISTINCT_CHAIN
+$OMS_MODEL_SAFEGUARD_CHAIN
 EOF
     fi
     if [ "$OMS_WORKER_AUTHORITY_VIOLATION" = 1 ]; then

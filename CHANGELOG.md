@@ -42,6 +42,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `fable opus sonnet` aliases, so routine workers run Opus instead of Sonnet
   and a new release waits for the seed to move. Explicitly named models and
   Claude Code's own default model (today `claude-opus-5-5[1m]`) are untouched.
+- When a Claude safeguard flags a message (the broad biology filter shared by
+  Fable 5.1 and Opus 5.5), the retry chain now ends on `claude-opus-5`, a
+  floor that is never a first choice. Provider-default Claude calls, which
+  had no retry chain at all, reach it too; explicitly named models and
+  policy declines still never retry.
 
 ### Fixed
 

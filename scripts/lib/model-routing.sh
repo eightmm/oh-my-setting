@@ -216,7 +216,7 @@ oms_model_prepare() {
   local explicit_fallback="${OMS_MODEL_FALLBACK_EXPLICIT:-}"
   local effort_requested="${OMS_REASONING_EFFORT_REQUEST:-auto}"
   local effort_fallback_explicit="${OMS_REASONING_FALLBACK_EXPLICIT:-}"
-  local candidate filtered_chain="" standing role_model role_chain
+  local candidate filtered_chain="" standing role_model role_chain floor
 
   provider="$(oms_provider_normalize "$provider")" || return $?
   oms_model_validate_name "$explicit" || return $?
@@ -302,11 +302,19 @@ EOF
       OMS_MODEL_ALTERNATE="$(printf '%s\n' "$filtered_chain" | sed -n '1p')"
     fi
   fi
+  # Safeguard retries walk the recovery chain, then the provider's floor.
+  # An explicit model stays exact: no chain, no floor.
+  OMS_MODEL_SAFEGUARD_CHAIN="$OMS_MODEL_DISTINCT_CHAIN"
+  if [ -z "$explicit" ] && floor="$(oms_provider_safeguard_floor "$provider" 2>/dev/null)" &&
+    [ "$(oms_model_catalog_key "$floor")" != "$(oms_model_catalog_key "$OMS_MODEL_PRIMARY")" ] &&
+    ! printf '%s\n' "$OMS_MODEL_DISTINCT_CHAIN" | grep -Fxq "$floor"; then
+    OMS_MODEL_SAFEGUARD_CHAIN="${OMS_MODEL_DISTINCT_CHAIN}${OMS_MODEL_DISTINCT_CHAIN:+$'\n'}$floor"
+  fi
   OMS_MODEL_SELECTED="$OMS_MODEL_PRIMARY"
   OMS_MODEL_FALLBACK_USED=0
   OMS_MODEL_FALLBACK_REASON=""
   export OMS_MODEL_RESOLVED_CLASS OMS_MODEL_CLASS_REASON OMS_MODEL_PRIMARY OMS_MODEL_FALLBACK
-  export OMS_MODEL_ALTERNATE OMS_MODEL_DISTINCT_CHAIN OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON
+  export OMS_MODEL_ALTERNATE OMS_MODEL_DISTINCT_CHAIN OMS_MODEL_SAFEGUARD_CHAIN OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON
   export OMS_MODEL_PREVIOUS_GENERATION
   export OMS_REASONING_EXPLICIT OMS_REASONING_RESOLVED OMS_REASONING_FALLBACK OMS_REASONING_SELECTED
 }
