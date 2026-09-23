@@ -868,9 +868,21 @@ PY
 done
 [ -n "$runner_pid" ] || fail "runner-loss fixture never entered running"
 kill -KILL "$runner_pid"
-"$SUP" --repo "$REPO" reconcile --apply >/dev/null ||
-  fail "reconcile could not clean a lost runner"
-"$EVENTS" --repo "$REPO" show --attempt "$runner_lost" --json > "$TMP/runner-lost.json"
+# Reconcile rightly treats a killed but not yet dead runner as alive, and on a
+# loaded CI runner that teardown outlasted an immediate reconcile (ba3c539).
+# Wait for it to be gone or a zombie, then retry reconcile a bounded number of
+# times; the assertion below is the classification, not the timing.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+  case "$(ps -o stat= -p "$runner_pid" 2>/dev/null)" in ''|Z*) break ;; esac
+  sleep 0.1
+done
+for _ in 1 2 3 4 5; do
+  "$SUP" --repo "$REPO" reconcile --apply >/dev/null ||
+    fail "reconcile could not clean a lost runner"
+  "$EVENTS" --repo "$REPO" show --attempt "$runner_lost" --json > "$TMP/runner-lost.json"
+  grep -q '"state": *"blocked"' "$TMP/runner-lost.json" && break
+  sleep 0.5
+done
 python3 - "$TMP/runner-lost.json" <<'PY' || fail "lost runner did not become blocked"
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
