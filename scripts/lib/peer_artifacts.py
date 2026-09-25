@@ -69,7 +69,7 @@ def artifact_sections(path: Path, *, require_exit: bool = True) -> tuple[str, st
 def debate_sections(answer: str) -> tuple[str, list[tuple[str, str]]]:
     """Ignore quoted headings, retaining the last response after prompt echoes."""
     lines = answer.splitlines()
-    headers = {"Answer", "Findings", "Evidence", "Tradeoffs", "Risks", "Missing tests",
+    headers = {"Answer", "Findings", "Alternatives", "Counterargument", "Evidence", "Tradeoffs", "Risks", "Missing tests",
                "Recommendation", "Verification", "Changed from previous round", "Remaining disagreements"}
     entries = []
     fence = ""
@@ -92,6 +92,12 @@ def debate_sections(answer: str) -> tuple[str, list[tuple[str, str]]]:
         bold = re.match(r"^(\*\*|__)(.+?)\1(.*)$", value)
         if bold:
             value = bold[2] + bold[3]
+            # A heading's parenthetical qualification is metadata, not evidence
+            # for an otherwise empty section (e.g. **Verification** (reported):).
+            if bold[2] in headers:
+                qualified = re.fullmatch(r"\s+\([^()\n]*\)\s*:(.*)", bold[3])
+                if qualified:
+                    value = bold[2] + ":" + qualified[1]
         heading, colon, rest = value.partition(":")
         if heading in headers and (colon or atx or bold):
             entries.append((i, heading, rest.strip()))
@@ -104,6 +110,22 @@ def debate_sections(answer: str) -> tuple[str, list[tuple[str, str]]]:
         sections.append((heading, "\n".join([rest] + lines[i + 1:end]).strip()))
     body = "\n".join(lines[entries[0][0]:]).strip() if entries else answer
     return body, sections
+
+
+def valid_deliberation(answer: str) -> bool:
+    """Check the response contract, not whether its reasoning is correct."""
+    answer = re.split(r"(?m)^(?:model-result:|tokens used$|usage detail:|served model$|cost usd$)", answer)[0]
+    _, sections = debate_sections(answer)
+    required = ("Answer", "Alternatives", "Evidence", "Counterargument",
+                "Risks", "Recommendation", "Verification", "Changed from previous round", "Remaining disagreements")
+    for key in required:
+        bodies = [body for heading, body in sections if heading == key]
+        if len(bodies) != 1 or not bodies[0].strip():
+            return False
+        if key not in ("Risks", "Changed from previous round", "Remaining disagreements"):
+            if bodies[0].strip().lower().rstrip(".! ") in ("none", "n/a", "unknown", "tbd"):
+                return False
+    return True
 
 
 def debate_unchanged(answer: str) -> bool:
@@ -229,6 +251,8 @@ if __name__ == "__main__":
         answer, _ = artifact_sections(Path(sys.argv[1]), require_exit=False)
         if len(sys.argv) == 4 and sys.argv[2] == "--debate-excerpt":
             answer = debate_excerpt(answer, min(4096, int(sys.argv[3])))
+        elif len(sys.argv) == 3 and sys.argv[2] == "--deliberation-check":
+            raise SystemExit(0 if valid_deliberation(answer) else 1)
         elif len(sys.argv) == 3 and sys.argv[2] == "--debate-unchanged":
             raise SystemExit(0 if debate_unchanged(answer) else 1)
         if answer:

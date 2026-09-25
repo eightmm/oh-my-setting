@@ -473,14 +473,14 @@ write_done_plan() {
   # Each fixture call models a fresh outer operator invocation. Individual
   # receipt-resume behavior is covered explicitly below.
   [ "$preserve_receipt" = 1 ] || rm -f "$repo/.oms/plan/autopilot-run.json"
-  OMS_T_ACCEPT="$accept" OMS_T_REPLAN="$include_replan" python3 - "$repo/.oms/plan/tasks.json" <<'PY'
+  OMS_T_ACCEPT="$accept" OMS_T_REPLAN="$include_replan" OMS_T_WORKER="${5:-codex}" python3 - "$repo/.oms/plan/tasks.json" <<'PY'
 import datetime, json, os, sys
 now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 tasks = {
     "t1": {
         "id": "t1", "title": "feat: initial", "state": "done",
         "depends": [], "allowed_paths": ["src/"], "forbidden_paths": [],
-        "verify": "true", "role": "", "provider": "codex", "ttl": "",
+        "verify": "true", "role": "", "provider": os.environ["OMS_T_WORKER"], "ttl": "",
         "artifact": "artifact", "patch": "patch", "reason": "",
         "executor_id": "", "executor_soul_sha256": "", "lease_epoch": 1,
         "lease_id": "lease", "review_lease_id": "lease", "repair_count": 0,
@@ -2777,6 +2777,220 @@ JSON
     fail "autopilot did not bind goal-drive to its exact work ref"
 }
 
+
+test_auto_collaboration() {
+  local repo="$TMP/auto-collab" bin="$TMP/auto-collab-bin" rc proposal sha
+  make_repo "$repo"
+  mkdir -p "$bin" "$repo/calls"
+  write_orchestration_stubs "$TMP/bin"
+  cat > "$bin/peer-ask" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$OMS_T_CALLS/council"
+if [ "${OMS_T_COUNCIL_SILENT_TIMEOUT:-0}" = 1 ]; then
+  log="$(sed -n 's/^plan-from-spec: council log: //p' "$OMS_T_COUNCIL_PARENT_OUTPUT")"
+  [ -f "$log" ] && printf '%s\n' "$log" > "$OMS_T_CALLS/prelaunch-log"
+  exit 124
+fi
+[ "${OMS_T_COUNCIL_FAIL:-0}" = 0 ] && [ "${OMS_T_COUNCIL_DROP:-0}" = 0 ] || exit 1
+while [ "$#" -gt 0 ]; do
+  case "$1" in --artifact-dir) dir="$2"; shift 2 ;; *) shift ;; esac
+done
+printf '# Peer ask synthesis\n- success: 2/2 providers\nEvidence: council-marker-42\n' > "$dir/synthesis.md"
+echo "synthesis: $dir/synthesis.md"
+EOF
+  cat > "$bin/agent-call" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$OMS_T_CALLS/planner-args"
+while [ "$#" -gt 0 ]; do
+  case "$1" in --prompt) printf '%s\n' "$2" > "$OMS_T_CALLS/planner-prompt"; shift 2 ;; *) shift ;; esac
+done
+artifact="$OMS_T_CALLS/planner-artifact.md"
+printf '## Output\n\n%s\n' '{"tasks":[{"id":"t1","title":"feat: bounded change","allowed":["src/"],"verify":"true","depends":[],"assignment":{"provider":"codex","model":"gpt-6-sol"}}]}' > "$artifact"
+echo "artifact: $artifact"
+EOF
+  chmod +x "$bin"/*
+  rc=0
+  OMS_PLAN_FROM_SPEC_AGENT_CALL="$bin/agent-call" OMS_CAPABILITY_DIR="$TMP/collab-cap" \
+    OMS_T_CALLS="$repo/calls" OMS_AUTOPILOT_PEER_ASK="$bin/peer-ask" \
+    "$ROOT/scripts/autopilot.sh" --repo "$repo" --collaboration auto \
+      --planner codex --allowed src,tests --base main propose > "$repo/propose.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "auto collaboration proposal: rc=$rc $(tail -8 "$repo/propose.out")"
+  [ ! -e "$repo/.oms/plan/tasks.json" ] || fail "council applied its own proposal"
+  grep -Fq -- '--providers codex:model=gpt-6-astra,claude --artifact-dir' "$repo/calls/council" || fail 'council did not pin Codex while preserving Claude routing'
+  grep -Fq -- '--repo-context' "$repo/calls/council" || fail 'automatic council missing tracked source context'
+  grep -Fq -- '--deliberation' "$repo/calls/council" || fail 'council did not require deliberation'
+  if grep -Fq 'Return ONLY one JSON object' "$repo/calls/council"; then
+    fail 'decomposition output instructions leaked into council'
+  fi
+  grep -Fq 'Return ONLY one JSON object' "$repo/calls/planner-prompt" || fail 'planner lost JSON contract'
+  grep -Fq -- '--require-complete' "$repo/calls/council" || fail 'council did not require final answers'
+  grep -Fq -- '--debate 1' "$repo/calls/council" || fail 'council rebuttal was not bounded'
+  grep -Fq 'council-marker-42' "$repo/calls/planner-prompt" || fail 'council evidence never reached planner'
+  grep -Fq -- '--collaboration auto' "$repo/propose.out" || fail 'continuation lost collaboration mode'
+  python3 - "$repo/.oms/plan/autopilot-run.json" "$ROOT/scripts/lib" <<'PYTEST' || fail 'collaboration receipt contract'
+import json, runpy, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+rules = runpy.run_path(sys.argv[2] + '/autopilot-receipt.py')
+row, _ = rules['load_receipt'](Path(sys.argv[1]))
+assert row['contract']['collaboration'] == 'auto'
+assert row['contract']['review_mode'] == 'gate'
+assert row['routing']['worker']['model'] == 'gpt-6-sol'
+args = rules['option_args'](row)
+assert args[args.index('--collaboration')+1] == 'auto'
+PYTEST
+  proposal="$(sed -n 's/^plan-from-spec: proposed .* -> //p' "$repo/propose.out")"
+  sha="$(sha256_file "$proposal")"
+  rc=0
+  run_autopilot "$repo" --planner codex --worker-model gpt-6-sol \
+    --planner-model gpt-6-astra --review-mode gate --allowed src,tests --base main \
+    run --proposal "$proposal" --expected-proposal-sha256 "$sha" > "$repo/drop-mode.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail 'resume silently dropped collaboration'
+  [ ! -e "$repo/calls/goal-drive" ] || fail 'changed collaboration reached worker'
+  grep -Fq 'immutable contract changed (contract)' "$repo/drop-mode.out" || fail 'resume failed for an unrelated reason'
+  [ ! -e "$repo/.oms/plan/tasks.json" ] || fail 'changed collaboration mutated plan'
+
+  # A council failure must not quietly become a solo planning call.
+  local failed="$TMP/auto-council-failed"
+  make_repo "$failed"; mkdir -p "$failed/calls"
+  rc=0
+  OMS_PLAN_FROM_SPEC_AGENT_CALL="$bin/agent-call" OMS_T_CALLS="$failed/calls" OMS_T_COUNCIL_FAIL=1 \
+    OMS_AUTOPILOT_PEER_ASK="$bin/peer-ask" "$ROOT/scripts/plan-from-spec.sh" \
+    --repo "$failed" --to codex --collaboration auto > "$failed/failed.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail 'failed council should stop planning'
+  grep -Fq 'child exit: 1;' "$failed/failed.out" || fail 'council failure lost child exit'
+  [ ! -e "$failed/calls/planner-prompt" ] || fail 'failed council reached planner'
+  rc=0
+  OMS_PLAN_FROM_SPEC_AGENT_CALL="$bin/agent-call" OMS_T_CALLS="$failed/calls" OMS_T_COUNCIL_DROP=1 \
+    OMS_AUTOPILOT_PEER_ASK="$bin/peer-ask" "$ROOT/scripts/plan-from-spec.sh" \
+    --repo "$failed" --to codex --collaboration auto > "$failed/dropped.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail 'dropped rebuttal seat should stop planning'
+  [ ! -e "$failed/calls/planner-prompt" ] || fail 'incomplete rebuttal reached planner'
+
+  # A silent child timeout must leave a discoverable log before it returns.
+  local timed="$TMP/auto-council-silent-timeout" log_path
+  make_repo "$timed"; mkdir -p "$timed/calls"
+  rc=0
+  OMS_PLAN_FROM_SPEC_AGENT_CALL="$bin/agent-call" OMS_T_CALLS="$timed/calls" \
+    OMS_T_COUNCIL_SILENT_TIMEOUT=1 OMS_T_COUNCIL_PARENT_OUTPUT="$timed/failed.out" \
+    OMS_AUTOPILOT_PEER_ASK="$bin/peer-ask" "$ROOT/scripts/plan-from-spec.sh" \
+    --repo "$timed" --to codex --collaboration auto > "$timed/failed.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail 'silent council timeout accepted'
+  grep -Fq 'child exit: 124;' "$timed/failed.out" || fail 'council timeout lost child exit'
+  [ ! -e "$timed/calls/planner-prompt" ] || fail 'silent timeout reached planner'
+  [ ! -e "$timed/.oms/plan/tasks.json" ] || fail 'silent timeout applied tasks'
+  [ -s "$timed/calls/prelaunch-log" ] || fail 'council log not discoverable before child exit'
+  log_path="$(cat "$timed/calls/prelaunch-log")"
+  [ -f "$log_path" ] || fail 'council timeout log was not retained'
+  grep -Fq "council log: $log_path" "$timed/failed.out" || fail 'council failure lost log path'
+
+  # Planner-only effort must not silently change the independent council seat.
+  local effort_repo planner effort
+  for planner in codex claude; do
+    effort=high; [ "$planner" != claude ] || effort=max
+    effort_repo="$TMP/auto-council-effort-$planner"
+    make_repo "$effort_repo"; mkdir -p "$effort_repo/calls"
+    OMS_PLAN_FROM_SPEC_AGENT_CALL="$bin/agent-call" OMS_T_CALLS="$effort_repo/calls" \
+      OMS_AUTOPILOT_PEER_ASK="$bin/peer-ask" "$ROOT/scripts/plan-from-spec.sh" \
+      --repo "$effort_repo" --to "$planner" --collaboration auto --reasoning-effort "$effort" \
+      > "$effort_repo/propose.out" 2>&1 || fail 'planner effort rejected by council'
+    grep -Fq -- "--reasoning-effort $effort" "$effort_repo/calls/planner-args" || fail 'planner effort lost'
+    if grep -Fq -- '--reasoning-effort' "$effort_repo/calls/council"; then
+      fail 'planner effort leaked into council'
+    fi
+    grep -Fq "council reasoning effort: auto (provider defaults); decomposition reasoning effort: $effort" \
+      "$effort_repo/propose.out" || fail 'independent council effort not disclosed'
+  done
+
+  # Revalidate reviewed assignments at apply, not just generated prose.
+  local rejected="$TMP/auto-assignment-rejected" assignment
+  make_repo "$rejected"
+  for assignment in '{"provider":"codex","model":"gpt-5.5"}' \
+    '{"provider":"codex","workload":"routine"}' \
+    '{"provider":"codex","model":"gpt-6-sol","fallback_model":"gpt-5.6-sol"}' \
+    '{"provider":"claude","model":"claude-opus-5-5"}'; do
+    write_proposal "$rejected/proposal.json"
+    python3 - "$rejected/proposal.json" "$assignment" <<'PYTEST'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['tasks'][0]['assignment']=json.loads(sys.argv[2])
+with open(p,'w') as f: json.dump(d,f)
+PYTEST
+    sha="$(sha256_file "$rejected/proposal.json")"
+    if "$ROOT/scripts/plan-from-spec.sh" --repo "$rejected" --collaboration auto \
+      --worker-provider codex --apply "$rejected/proposal.json" \
+      --expected-proposal-sha256 "$sha" --allowed src,tests > "$rejected/reject.out" 2>&1; then
+      fail "unsafe collaboration assignment applied: $assignment"
+    fi
+    [ ! -e "$rejected/.oms/plan/tasks.json" ] || fail 'rejected assignment mutated plan'
+  done
+
+  # Claude can implement a whole campaign, with Codex as the review gate.
+  local claude_repo="$TMP/auto-claude-worker"
+  make_repo "$claude_repo"; mkdir -p "$claude_repo/calls"
+  write_done_plan "$claude_repo" true 0 0 claude
+  OMS_T_GOAL_RESULT=success run_autopilot "$claude_repo" --collaboration auto \
+    --worker claude --base main run > "$claude_repo/run.out" 2>&1 ||
+    fail "Claude worker campaign failed: $(tail -8 "$claude_repo/run.out")"
+  grep -Fq -- '--to claude' "$claude_repo/calls/goal-drive" || fail 'Claude worker not dispatched'
+  grep -Fq -- '--providers codex' "$claude_repo/calls/peer-review" || fail 'Claude worker lacks Codex reviewer'
+  grep -Fq -- '--model gpt-6-astra' "$claude_repo/calls/peer-review" || fail 'Codex reviewer unpinned'
+
+  local replan="$TMP/auto-replan"
+  make_repo "$replan"; mkdir -p "$replan/calls"
+  write_done_plan "$replan" false
+  rc=0
+  OMS_T_GOAL_RESULT=exhausted run_autopilot "$replan" --collaboration auto \
+    --allowed src,tests --base main run > "$replan/replan.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "auto remainder did not return to parent review: $rc"
+  grep -Fq -- '--collaboration auto' "$replan/calls/plan-from-spec" || fail 'replan lost council trigger'
+  grep -Fq -- '--id-prefix r1-' "$replan/calls/plan-from-spec" || fail 'replan lost bounded tranche'
+}
+
+test_autopilot_acceptance_reuse() {
+  local policy repo expected
+  for policy in fresh same-run; do
+    repo="$TMP/reuse-autopilot-$policy"
+    make_repo "$repo"
+    if [ "$policy" = same-run ]; then
+      printf '%s\n' '- Acceptance reuse: same-run' >> "$repo/PROJECT.md"
+      git -C "$repo" add PROJECT.md
+      git -C "$repo" commit -qm 'test: declare pure acceptance'
+      git -C "$repo" branch -f main HEAD
+      git -C "$repo" branch -m "oms/autopilot-$(sha256_file "$repo/PROJECT.md" | cut -c1-12)"
+    fi
+    mkdir -p "$repo/calls"
+    write_done_plan "$repo" 'printf x >> .oms/count'
+    # Only the semantic provider is a fixture; driver, acceptance supervisor,
+    # receipt bindings and both parent acceptance boundaries are real.
+    cat > "$TMP/reuse-review" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo) repo="$2"; shift 2 ;;
+    --verify) verify="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cd "$repo"
+bash -c "$verify"
+EOF
+    chmod +x "$TMP/reuse-review"
+    OMS_AUTOPILOT_PEER_REVIEW="$TMP/reuse-review" \
+      "$ROOT/scripts/autopilot.sh" --repo "$repo" --base main run \
+      > "$repo/run.out" 2>&1 || fail "real reuse orchestration: $(tail -12 "$repo/run.out")"
+    expected=xxxx
+    if [ "$policy" = same-run ]; then
+      expected=xxx
+      grep -Fq 'reused pass run=' "$repo/run.out" || fail 'autopilot did not reuse intermediate pass'
+    fi
+    [ "$(cat "$repo/.oms/count")" = "$expected" ] ||
+      fail "autopilot $policy skipped a fresh boundary or repeated the reusable check"
+  done
+}
+
+test_autopilot_acceptance_reuse
+test_auto_collaboration
 test_atomic_proposal_apply
 test_autopilot_orchestration
 

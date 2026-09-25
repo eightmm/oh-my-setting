@@ -21,6 +21,22 @@ oms_model_validate_name() {
   fi
 }
 
+# This opt-in campaign authorizes two transports, not arbitrary recovery peers.
+# Empty Codex routes are pinned by the caller before any catalog/default logic.
+oms_collaboration_route_validate() {
+  local provider="$1" model="$2" fallback="${3:-}"
+  case "$provider" in
+    claude) return 0 ;;
+    codex)
+      case "$model" in gpt-6-astra|gpt-6-sol|gpt-6-luna) ;; *)
+        echo 'error: auto collaboration requires an exact GPT-6 Codex model' >&2; return 2 ;; esac
+      case "$fallback" in ''|gpt-6-astra|gpt-6-sol|gpt-6-luna) return 0 ;; esac
+      echo 'error: auto collaboration forbids a non-GPT-6 fallback' >&2 ;;
+    *) echo 'error: auto collaboration authorizes only codex and claude' >&2 ;;
+  esac
+  return 2
+}
+
 # Syntax only. Provider and model support are checked against the capability
 # snapshot below.
 oms_reasoning_validate() {
@@ -219,6 +235,16 @@ oms_model_prepare() {
   local candidate filtered_chain="" standing role_model role_chain floor
 
   provider="$(oms_provider_normalize "$provider")" || return $?
+  if [ "${OMS_AUTOPILOT_COLLABORATION:-off}" = auto ]; then
+    if [ "$provider" = codex ] && [ -z "$explicit" ]; then
+      case "${OMS_MODEL_OPERATION:-}" in
+        delegate) explicit=gpt-6-sol ;;
+        *) explicit=gpt-6-astra ;;
+      esac
+      OMS_MODEL_EXPLICIT="$explicit"
+    fi
+    oms_collaboration_route_validate "$provider" "$explicit" "$explicit_fallback" || return $?
+  fi
   oms_model_validate_name "$explicit" || return $?
   oms_model_validate_name "$explicit_fallback" || return $?
   oms_reasoning_validate "$effort_requested" || return $?

@@ -1,10 +1,10 @@
 # Project Guidelines
 
 - Prefer repository conventions over global defaults.
-- Read `PROJECT.md`; ask only about material choices.
+- Read `PROJECT.md`.
 - Inspect the implementation before editing; change only task-relevant lines.
-- Do not add dependencies, alter public contracts, or mask failures without
-  explicit authority.
+- Ask only about out-of-scope dependency/contract changes or unresolved
+  compatibility/cost risks. Never mask failures or re-ask unchanged authorization.
 - Run affected checks; reuse tests and fixtures for uncovered behavior, bugs
   or safety boundaries. Broaden only for uncertainty or required gates.
 - Keep routine CI small; no speculative jobs/matrices or duplicate suites.

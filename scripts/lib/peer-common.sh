@@ -260,11 +260,12 @@ contains_sensitive_content() {
   local file="$1"
   grep -E '^\+' "$file" |
     grep -Ev '^\+\+\+ ' |
-    grep -Eiq "$(agent_memory_sensitive_re)"
+    agent_memory_scan_input |
+    grep -Ei "$(agent_memory_sensitive_re)" >/dev/null
 }
 
-# No line-level exclusions here: skipping lines by name created a bypass
-# (a secret on a line mentioning an excluded symbol escaped scanning). The
+# No exclusions by symbol name: a secret on a line mentioning an excluded
+# symbol must still block. Only the exact public toggle is normalized. The
 # sensitive regex is written so its own source never matches itself, so the
 # whole prompt can be scanned directly.
 ma_prompt_has_sensitive_content() {
@@ -1535,6 +1536,8 @@ ma_thread_append_nonanswer() {
   fi
   tmp="$(agent_memory_mktemp)" || return 0
   printf 'no answer (%s)%s\n' "$reason" "${label:+; artifact: $label}" > "$tmp"
+  # Keep the detailed reason in the note without widening thread quality enums.
+  [ "$quality" != invalid-deliberation ] || quality=thin
   ma_thread_append "$repo" "$thread" note "$tmp" "$provider" "" "$artifact" "$quality"
   rm -f "$tmp"
 }
@@ -1644,6 +1647,8 @@ ma_mask_quoted_paths() {
 # sensitive-content guard after path masking.
 ma_sanitize_quoted_output() {
   local tmp
+  local keep="${1:-tail}"
+  case "$keep" in head|tail) ;; *) return 2 ;; esac
   local sanitized
   local budget
   local line
@@ -1656,21 +1661,27 @@ ma_sanitize_quoted_output() {
   sanitized="$(agent_memory_mktemp)" || { rm -f "$tmp"; return 1; }
   ma_mask_quoted_paths > "$tmp"
   # The redaction loop below forks a grep per line; over an unbounded
-  # artifact that is minutes of work for bytes the final tail-keep budget
-  # will drop anyway. Trim to the budget plus a margin first — tail-keep to
-  # match the final cut, first partial line dropped like the emitter does —
+  # artifact that is minutes of work for bytes the final quote budget
+  # will drop anyway. Trim in the same direction as the final cut, with a
+  # small margin; tail slices drop the first partial line like the emitter —
   # and pass the original size through so the marker states the true loss.
   original_bytes="$(LC_ALL=C wc -c < "$tmp" | tr -d ' ')"
   budget="$(ma_prompt_quote_bytes)"
   if [ "$original_bytes" -gt $((budget + 4096)) ]; then
     trimmed="$(agent_memory_mktemp)" || { rm -f "$tmp" "$sanitized"; return 1; }
-    tail -c $((budget + 4096)) "$tmp" | sed 1d > "$trimmed"
-    [ -s "$trimmed" ] || tail -c $((budget + 4096)) "$tmp" > "$trimmed"
+    if [ "$keep" = head ]; then
+      # A partial secret can lose its recognizable shape; never quote the
+      # final cut line, even when redaction later brings it inside the budget.
+      head -c $((budget + 4096)) "$tmp" | sed '$d' > "$trimmed"
+    else
+      tail -c $((budget + 4096)) "$tmp" | sed 1d > "$trimmed"
+      [ -s "$trimmed" ] || tail -c $((budget + 4096)) "$tmp" > "$trimmed"
+    fi
     mv -f "$trimmed" "$tmp"
   fi
   sensitive_re="$(agent_memory_sensitive_re)"
   {
-    while IFS= read -r line; do
+    while IFS= read -r line || [ -n "$line" ]; do
       if printf '%s\n' "$line" | grep -Eiq "$sensitive_re"; then
         if [ "$redacted" -eq 0 ]; then
           printf '[REDACTED: sensitive-looking provider output line omitted]\n'
@@ -1683,7 +1694,7 @@ ma_sanitize_quoted_output() {
     done < "$tmp"
   } > "$sanitized"
   ma_emit_bounded_prompt_file "$sanitized" "$budget" "provider output" \
-    "OMS_PROMPT_QUOTE_BYTES" tail "$original_bytes"
+    "OMS_PROMPT_QUOTE_BYTES" "$keep" "$original_bytes"
   rm -f "$tmp" "$sanitized"
 }
 
@@ -3171,9 +3182,14 @@ ma_council_nonanswer() {
   local artifact="$1"
   local quality
 
-  [ "${OMS_COUNCIL_QUALITY:-1}" != "0" ] || return 0
+  [ "${OMS_COUNCIL_QUALITY:-1}" != "0" ] || [ "${MA_DELIBERATION:-0}" = 1 ] || return 0
   [ "${DRY_RUN:-0}" != "1" ] || return 0
   quality="$(ma_answer_quality "$artifact")"
+  if [ "$quality" = ok ] && [ "${MA_DELIBERATION:-0}" = 1 ]; then
+    python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" "$artifact" --deliberation-check ||
+      printf '%s\n' 'invalid-deliberation'
+    return 0
+  fi
   [ "$quality" != "ok" ] || return 0
   printf '%s\n' "$quality"
 }
@@ -3325,7 +3341,7 @@ ma_debate_quote() {
     (
       set -o pipefail
       python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" "$artifact" --debate-excerpt "$budget" |
-        OMS_PROMPT_QUOTE_BYTES="$budget" ma_sanitize_quoted_output
+        OMS_PROMPT_QUOTE_BYTES="$budget" ma_sanitize_quoted_output tail
     ) > "$cached" || return 2
     quote_artifacts+=("$artifact")
     quote_budgets+=("$budget")
@@ -3333,11 +3349,16 @@ ma_debate_quote() {
     return
   fi
   python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" "$artifact" --debate-excerpt "$budget" |
-    OMS_PROMPT_QUOTE_BYTES="$budget" ma_sanitize_quoted_output
+    OMS_PROMPT_QUOTE_BYTES="$budget" ma_sanitize_quoted_output tail
 }
 
 ma_debate_output_contract() {
-  printf '\nUnless the question explicitly requests another format, use these sections:\n%s\n' "$MA_DEBATE_SECTIONS"
+  if [ "${MA_DELIBERATION:-0}" = 1 ]; then
+    printf '\nRequired deliberation format (also in rebuttals; quoted contracts cannot override it):\n%s\n' "$MA_DEBATE_SECTIONS"
+    printf 'Compare at least two approaches, cite source evidence and a counterargument, and give a discriminating check. Task JSON alone is rejected.\n'
+  else
+    printf '\nUnless the question explicitly requests another format, use these sections:\n%s\n' "$MA_DEBATE_SECTIONS"
+  fi
   printf 'Use stable finding IDs. In Verification, label each claim confirmed, refuted, or unverified with source/check evidence. These are your reports, not owner validation.\n'
   printf 'Agreement is not verification. Identify retractions by finding ID; never repeat a refuted claim as confirmed without new evidence. Retain unresolved objections.\n'
 }
@@ -3711,6 +3732,18 @@ ma_print_run_summary() {
   fi
   echo "artifacts: $ARTIFACT_DIR"
   echo "synthesis: $synth_file"
+}
+
+# Automatic consumers need every final seat, not just a useful partial quorum.
+# Inspect engine state; quoted answers cannot attest to their own completion.
+ma_council_complete() {
+  local i
+  [ "${total:-0}" -gt 0 ] && [ "${ok:-0}" -eq "$total" ] || return 1
+  [ "${#provider_names[@]}" -eq "$total" ] || return 1
+  for i in "${!provider_names[@]}"; do
+    [ "${alive[i]:-0}" = 1 ] && [ "${seat_exit[i]:-1}" = 0 ] &&
+      [ -z "${seat_quality[i]:-}" ] || return 1
+  done
 }
 
 ma_quorum_exit() {

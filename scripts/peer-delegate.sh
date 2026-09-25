@@ -955,7 +955,9 @@ write_minimal_change_doctrine() {
     printf 'Untrusted reviewer claims from a prior peer review. Address each\n'
     printf 'must-fix item or state in your report why it is wrong; verify\n'
     printf 'every claim against the code before acting on it.\n\n'
-    quote_head "$REVIEW_ARTIFACT" 8000 "review findings"
+    # Gate logs and reviewer output are reference data, just like debate
+    # quotes. Preserve the source artifact; sanitize only its bounded quote.
+    OMS_PROMPT_QUOTE_BYTES=8000 ma_sanitize_quoted_output head < "$REVIEW_ARTIFACT"
     printf '\n\n'
   fi
   printf '## Brief\n\n'

@@ -10,7 +10,7 @@ agent, a Grok/GLM route, or a custom adapter.
    `--refresh` only when a live probe is needed.
 2. No `--model` means provider default — except for a write worker
    (`peer-delegate`, `plan-run`, autopilot), which takes the second price
-   rank of the routable set (`gpt-5.6-terra`, `opus`, the medium Gemini
+   rank of the routable set (`gpt-6-sol`, the seeded Claude worker, the medium Gemini
    line). This is a stable worker preset; it is not computed relative to an
    account-specific provider default. Judging calls keep that provider
    default. Recovery tries cheaper seeded candidates before higher ones. The
@@ -58,3 +58,9 @@ agent, a Grok/GLM route, or a custom adapter.
    Claude Code using Anthropic remain one family.
 8. The owner still admits patches and runs mechanical verification. Agreement
    is evidence, not a pass condition.
+
+`autopilot --collaboration auto` narrows this generic router to GPT-6 and Claude:
+Codex defaults are pinned before catalog recovery, older explicit models and
+fallbacks are rejected, and reviewed Codex assignments require an exact Astra,
+Sol or Luna model. Claude follows the existing registry. This restriction is
+scoped to that campaign; it does not configure native Codex app subagents.

@@ -247,10 +247,28 @@ agent_memory_sensitive_re() {
   printf '%s|%s\n' "$(agent_memory_secret_re)" "$(agent_memory_machine_re)"
 }
 
+# This exact public checkout toggle carries no credential material. Blank the
+# whole line only, retaining line numbers and scanning comments/other values.
+agent_memory_scan_input() {
+  LC_ALL=C sed -E 's/^[+]?[[:space:]]*persist-credentia[l]s: false[[:space:]]*$//' "$@"
+}
+
+# Preserve filter errors: pipefail alone can report grep's no-match (1)
+# instead of an upstream read/filter failure, incorrectly classifying it clean.
+agent_memory_match_file() {
+  local file="$1" re="$2"
+  local scan_status=()
+  agent_memory_scan_input "$file" | LC_ALL=C grep -Ei "$re" >/dev/null || {
+    scan_status=("${PIPESTATUS[@]}")
+    [ "${scan_status[0]}" -eq 0 ] || return 2
+    return "${scan_status[1]}"
+  }
+}
+
 agent_memory_file_has_sensitive_content() {
   local file="$1"
   [ -s "$file" ] || return 1
-  grep -Eiq "$(agent_memory_sensitive_re)" "$file"
+  agent_memory_match_file "$file" "$(agent_memory_sensitive_re)"
 }
 
 # Where the scrubber matched, and in which half of the composed prompt, without
@@ -295,7 +313,7 @@ agent_memory_sensitive_report() {  # FILE
         [ "$prompt_count" -gt 3 ] || prompt_lines="${prompt_lines:+$prompt_lines, }$number"
       fi
     done <<EOF
-$(grep -Ein "$re" "$file" 2>/dev/null | cut -d: -f1)
+$(agent_memory_scan_input "$file" 2>/dev/null | grep -Ein "$re" | cut -d: -f1)
 EOF
     agent_memory_sensitive_report_line "$tier" "your prompt" "$prompt_lines" "$prompt_count"
     agent_memory_sensitive_report_line "$tier" "attached harness context" "$context_lines" "$context_count"
@@ -320,7 +338,7 @@ agent_memory_sensitive_report_line() {  # TIER WHERE LINES COUNT
 agent_memory_file_has_secret_content() {
   local file="$1"
   [ -s "$file" ] || return 1
-  grep -Eiq "$(agent_memory_secret_re)" "$file"
+  agent_memory_match_file "$file" "$(agent_memory_secret_re)"
 }
 
 # Rewrite machine-identifying path prefixes to ~ so repo-local records can keep

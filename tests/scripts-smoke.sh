@@ -754,6 +754,55 @@ test_apply_ml_scaffolds_check_contract() {
   printf 'custom smoke\n' > "$project/scripts/ml_smoke.py"
   "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
   assert_file_contains "$project/scripts/ml_smoke.py" "custom smoke"
+
+  # --python-ci is opt-in and refuses before any write: not a uv project, no
+  # tests/ suite, a foreign checker, or existing CI.
+  local py="$TMP/python-ci" before
+  mkdir -p "$py/tests"
+  printf '[project]\nname = "x"\n' > "$py/pyproject.toml"
+  before="$(find "$py" | sort)"
+  if "$ROOT/scripts/apply-project-template.sh" general "$py" --python-ci >/dev/null 2>&1; then
+    fail '--python-ci must require uv.lock'
+  fi
+  [ "$(find "$py" | sort)" = "$before" ] || fail 'refused --python-ci wrote files'
+  : > "$py/uv.lock"
+  rmdir "$py/tests"
+  if "$ROOT/scripts/apply-project-template.sh" general "$py" --python-ci >/dev/null 2>&1; then
+    fail '--python-ci must require a tests/ suite'
+  fi
+  mkdir "$py/tests"
+  : > "$project/pyproject.toml"; : > "$project/uv.lock"; mkdir -p "$project/tests"
+  if "$ROOT/scripts/apply-project-template.sh" ml "$project" --python-ci >/dev/null 2>&1; then
+    fail '--python-ci must refuse a custom checker'
+  fi
+  cp "$ROOT/templates/check.sh" "$project/scripts/check.sh"
+  before="$(cat "$project/AGENTS.md")"
+  if "$ROOT/scripts/apply-project-template.sh" ml "$project" --python-ci >/dev/null 2>&1; then
+    fail '--python-ci must not add a second workflow'
+  fi
+  [ "$(cat "$project/AGENTS.md")" = "$before" ] && [ ! -e "$project/.github/workflows/python-ci.yml" ] ||
+    fail 'refused --python-ci mutated the project'
+
+  # Dangling links are destinations too; do not write outside the project.
+  ln -s "$TMP/ci-outside" "$py/scripts"
+  if "$ROOT/scripts/apply-project-template.sh" general "$py" --python-ci >/dev/null 2>&1; then
+    fail '--python-ci must refuse symlink destinations'
+  fi
+  [ ! -e "$TMP/ci-outside" ] && [ ! -e "$py/AGENTS.md" ] || fail 'symlink refusal wrote files'
+  rm "$py/scripts"
+  before="$(find "$py" | sort)"
+  OH_MY_SETTING_DRY_RUN=1 "$ROOT/scripts/apply-project-template.sh" general "$py" --python-ci >/dev/null
+  [ "$(find "$py" | sort)" = "$before" ] || fail '--python-ci dry run wrote files'
+  "$ROOT/scripts/apply-project-template.sh" general "$py" --python-ci >/dev/null
+  "$ROOT/scripts/apply-project-template.sh" general "$py" --python-ci >/dev/null ||
+    fail '--python-ci reapply must be idempotent'
+  cmp -s "$ROOT/templates/check.sh" "$py/scripts/check.sh" && [ -x "$py/scripts/check.sh" ] ||
+    fail '--python-ci did not scaffold the shared checker'
+  cmp -s "$ROOT/templates/python-ci.yml" "$py/.github/workflows/python-ci.yml" ||
+    fail '--python-ci did not scaffold the workflow'
+  [ "$(ls "$py/.github/workflows")" = python-ci.yml ] && [ ! -e "$py/scripts/ml_smoke.py" ] ||
+    fail '--python-ci added more than the checker and one workflow'
+  assert_file_contains "$py/.github/workflows/python-ci.yml" 'bash scripts/check.sh fast --jobs 2 tests'
 }
 
 test_project_doctor_warns_missing_check() {
@@ -2955,6 +3004,10 @@ test_peer_review_gate_binds_complete_diff_and_refuses_truncation() {
   local expected_sha rc=0
 
   make_committed_repo "$project"
+  printf 'renamed review input\n' > "$project/old.txt"
+  git -C "$project" add old.txt
+  git -C "$project" commit -qm 'test: rename base'
+  git -C "$project" mv old.txt new.txt
   mkdir -p "$home_dir"
   write_fake_review_gate_provider "$bin_dir" claude pass
   printf '/artifacts/\n/truncated-artifacts/\n/bin/\n/out\n/truncated.out\n/provider-called\n' >> "$project/.git/info/exclude"
@@ -2975,15 +3028,43 @@ EOF
   [ "$rc" = 0 ] || fail "complete gate diff should pass, got $rc: $(cat "$project/out")"
   [ ! -e "$project/.git/external-diff-fired" ] ||
     fail "repository diff.external executed with reviewer authority"
-  python3 - "$project/.oms/artifacts/index.jsonl" "$expected_sha" <<'PY' ||
+  python3 - "$project/.oms/artifacts/index.jsonl" "$expected_sha" "$ROOT/scripts/peer-review.sh" <<'PY' ||
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 review = [row["review"] for row in rows if row.get("kind") == "review-outcome"][-1]
 assert review["diff_sha256"] == sys.argv[2], review
+from pathlib import Path
+scopes = list((Path(sys.argv[1]).parents[2] / "artifacts").glob("_scope-*.json"))
+assert len(scopes) == 1, scopes
+scope = json.loads(scopes[0].read_text())
+assert scope["diff_sha256"] == review["diff_sha256"], scope
+assert scope["paths"] == ["file.txt", "new.txt", "old.txt"], scope
+assert scope["external_recovery"] == "not-covered", scope
+assert scope["diff_included"] is True and scope["base"] and scope["head"], scope
 seat = review["seats"][0]
 assert seat["requested_model"], seat
 assert seat["selected_model"], seat
 assert seat["model_family"] == "anthropic", seat
+# Exercise the actual scope capture block with an executable global filter.
+# The surrounding provider fixture is intentionally not involved in this probe.
+import os, subprocess
+project = Path(sys.argv[1]).parents[2]
+source = Path(sys.argv[3]).read_text()
+block = source.split("<<'PYSCOPE'", 1)[1].split('\n', 1)[1].split('\nPYSCOPE', 1)[0]
+config = project / '.git' / 'scope-global'
+attributes = project / '.git' / 'info' / 'attributes'
+attributes.write_text('*.txt filter=scopeprobe\n')
+subprocess.check_call(['git', 'config', '--file', str(config), 'filter.scopeprobe.clean',
+                       'touch .git/scope-filter-fired; cat'])
+env = dict(os.environ, GIT_CONFIG_GLOBAL=str(config))
+args = [sys.executable, '-', str(project), 'HEAD', 'probe-digest', '0', '.']
+probe = json.loads(subprocess.check_output(args, input=block.encode(), env=env))
+assert probe['paths'] == ['file.txt', 'new.txt', 'old.txt'], probe
+assert not (project / '.git' / 'scope-filter-fired').exists()
+args[3:6] = ['', '', '1']
+probe = json.loads(subprocess.check_output(args, input=block.encode(), env=env))
+assert probe['diff_included'] is False and probe['paths'] == [], probe
+attributes.unlink()
 PY
     fail "typed gate outcome did not bind full diff/model provenance"
 
@@ -4389,6 +4470,8 @@ test_delegate_embeds_review_findings() {
 
   make_committed_repo "$project"
   printf '# Review synthesis\n\nMust-fix: the loop off-by-one in foo().\n' > "$review"
+  printf 'Diagnostic: /ho''me/fixture/project/report.md\napi_t''oken=fixture-only\n' >> "$review"
+  printf '%s' 'Final finding without newline.' >> "$review"
 
   OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex \
@@ -4402,8 +4485,47 @@ test_delegate_embeds_review_findings() {
   assert_one_artifact_contains "$artifact_dir" 'codex-fix-per-review-*.md' 'Review findings to address'
   assert_one_artifact_contains "$artifact_dir" 'codex-fix-per-review-*.md' 'the loop off-by-one in foo()'
   assert_one_artifact_contains "$artifact_dir" 'codex-fix-per-review-*.md' 'Untrusted reviewer claims'
+  assert_one_artifact_contains "$artifact_dir" 'codex-fix-per-review-*.md' '<PATH>'
+  assert_one_artifact_contains "$artifact_dir" 'codex-fix-per-review-*.md' 'Final finding without newline.'
+  assert_one_artifact_contains "$artifact_dir" 'codex-fix-per-review-*.md' '[REDACTED:'
+  if grep -F 'fixture-only' "$artifact_dir"/*.md >/dev/null; then
+    fail "review quote leaked sensitive reference data"
+  fi
+  grep -F 'fixture-only' "$review" >/dev/null || fail "quoting modified the source evidence"
+  if OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --artifact-dir "$artifact_dir" \
+    --review-artifact "$review" --prompt 'api_t'"oken=operator-private" >/dev/null 2>&1; then
+    fail "quote sanitization must not bypass operator prompt validation"
+  fi
   grep -Fq '"source": "review-synthesis.md"' "$project/.oms/artifacts/index.jsonl" ||
     fail "delegation index row must record the review artifact as its source"
+
+  # Long reviews keep their first actionable finding with one honest bound.
+  python3 - "$review" <<'PY_REVIEW'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text('Must-fix: FIRST-FINDING\n' + 'safe reference detail\n' * 1000)
+PY_REVIEW
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --artifact-dir "$artifact_dir" \
+    --review-artifact "$review" --prompt "Long review" >/dev/null
+  assert_one_artifact_contains "$artifact_dir" 'codex-long-review-*.md' 'FIRST-FINDING'
+  assert_one_artifact_contains "$artifact_dir" 'codex-long-review-*.md' '[TRUNCATED:'
+
+  # Redaction may shrink enough text to expose a cut token's short prefix.
+  python3 - "$review" <<'PY_REVIEW'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text('api_' + 'token=' + 'x' * 12072 + '\n' + 'gh' + 'p_' + '1' * 30)
+PY_REVIEW
+  (
+    . "$ROOT/scripts/lib/peer-common.sh"
+    OMS_PROMPT_QUOTE_BYTES=8000 ma_sanitize_quoted_output head < "$review"
+  ) > "$project/head-quote.txt"
+  if grep -F 'ghp_' "$project/head-quote.txt" >/dev/null; then
+    fail "head clipping exposed a partial sensitive line"
+  fi
+  assert_file_contains "$project/head-quote.txt" '[REDACTED:'
 
   # A missing review artifact is misuse, caught before any worker runs.
   if OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
@@ -5232,7 +5354,7 @@ test_agent_memory_db_preserves_search_and_adds_ranked_recall() {
 test_agent_memory_database_concurrent_appends_converge() {
   local project="$TMP/agent-memory-db-race"
   local home_dir="$project/home"
-  local pids=""
+  local append_pids=""
   local pid
   local status=0
   local i=0
@@ -5241,10 +5363,10 @@ test_agent_memory_database_concurrent_appends_converge() {
   while [ "$i" -lt 12 ]; do
     HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" append \
       --agent codex --text "parallel memory note $i" >/dev/null 2>&1 &
-    pids="$pids $!"
+    append_pids="$append_pids $!"
     i=$((i + 1))
   done
-  for pid in $pids; do
+  for pid in $append_pids; do
     wait "$pid" || status=1
   done
   [ "$status" -eq 0 ] || fail "a concurrent memory append failed"
@@ -9293,6 +9415,119 @@ test_shared_fast_mode_detection_gates_auto_verify() {
     fast 'tests/test_api.py::test_behavior[a b]' >/dev/null
   grep -Fxq 'run --no-sync python -m pytest -q tests/test_api.py::test_behavior[a b]' "$dir/uv.log" ||
     fail "fast must forward the selected test without full-suite collection"
+  : > "$dir/uv.log"
+  PATH="$dir/bin:$PATH" OMS_TEST_UV_LOG="$dir/uv.log" bash "$dir/project/scripts/check.sh" \
+    fast --jobs 2 'tests/test_api.py::test_behavior[a b]' >/dev/null
+  [ "$(grep -c pytest "$dir/uv.log")" = 1 ] &&
+    grep -Fxq 'run --no-sync python -m pytest -q tests/test_api.py::test_behavior[a b]' "$dir/uv.log" ||
+    fail "fast --jobs must run the selected test once with the selector intact"
+  if PATH="$dir/bin:$PATH" OMS_TEST_UV_LOG="$dir/uv.log" bash "$dir/project/scripts/check.sh" \
+    fast --jobs 0 tests >/dev/null 2>&1; then
+    fail "fast --jobs must stay within 1-4"
+  fi
+  python3 - "$ROOT" <<'PY_PARALLEL'
+"""Parent-frozen CPU fixture: measure concurrency and preserve argv/failures."""
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import signal
+import sys
+import time
+
+ROOT = Path(sys.argv[1])
+checker = os.environ.get('OMS_BASH32_BIN', 'bash')
+with tempfile.TemporaryDirectory(prefix='oms-ci-parallel-probe-') as tmp:
+    root = Path(tmp)
+    (root / 'scripts').mkdir()
+    (root / 'src').mkdir()
+    (root / 'src/app.py').write_text('value = 1\n')
+    (root / 'pyproject.toml').write_text('')
+    (root / 'bin').mkdir()
+    shutil.copyfile(ROOT / 'templates/check.sh', root / 'scripts/check.sh')
+    stub = root / 'bin/uv'
+    stub.write_text('''#!/usr/bin/env python3
+import json, os, signal, subprocess, sys, time
+args = sys.argv[1:]
+if 'compileall' in args: stage='compile'
+elif 'ruff' in args and 'check' in args: stage='lint'
+elif 'pytest' in args: stage='test'
+else: sys.exit(0)
+def log(phase):
+    fd=os.open(os.environ['PROBE_LOG'],os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
+    os.write(fd,(json.dumps(dict(stage=stage,phase=phase,time=time.monotonic(),args=args))+'\\n').encode())
+    os.close(fd)
+log('start')
+if os.environ.get('PROBE_FORK'):
+    child = "import pathlib,signal,sys,time; p=pathlib.Path(sys.argv[1]); signal.signal(signal.SIGTERM,signal.SIG_IGN if sys.argv[2] else lambda *a:(p.with_suffix('.stopped').write_text('yes'),sys.exit(0))); p.write_text(str(__import__('os').getpid())); time.sleep(30)"
+    if os.environ.get('PROBE_IGNORE') == 'both': signal.signal(signal.SIGTERM,signal.SIG_IGN)
+    subprocess.run([sys.executable,'-c',child,os.environ['PROBE_LOG']+'.'+stage+'.ready',os.environ.get('PROBE_IGNORE','')])
+time.sleep(.25)
+log('end')
+sys.exit(9 if os.environ.get('PROBE_FAIL')==stage else 0)
+''')
+    stub.chmod(0o755)
+    (root/'logs').mkdir()
+    env=dict(os.environ,TMPDIR=str(root/'logs'),PATH=str(root/'bin')+os.pathsep+os.environ['PATH'],PROBE_LOG=str(root/'events'))
+    selector='tests/test_api.py::test_case[a b]'
+    for jobs in (1,2):
+        for failure in ('','lint'):
+            (root/'events').write_text('')
+            result=subprocess.run([checker,str(root/'scripts/check.sh'),'fast','--jobs',str(jobs),selector],env=dict(env,PROBE_FAIL=failure),capture_output=True,text=True,timeout=15)
+            assert (result.returncode==0)==(not failure), result.stdout+result.stderr
+            assert not list((root/'logs').iterdir()),'stage logs leaked'
+            rows=[json.loads(line) for line in (root/'events').read_text().splitlines()]
+            active=peak=0
+            for row in sorted(rows,key=lambda r:r['time']):
+                active+=1 if row['phase']=='start' else -1
+                peak=max(peak,active)
+            assert active==0 and peak==jobs,(active,peak,jobs,rows)
+            tests=[r for r in rows if r['stage']=='test' and r['phase']=='start']
+            assert len(tests)==1 and tests[0]['args']==['run','--no-sync','python','-m','pytest','-q',selector],tests
+            assert {r['stage'] for r in rows if r['phase']=='end'}=={'compile','lint','test'},rows
+            print('jobs=%s failure=%s peak=%s all stages reaped'%(jobs,failure or 'none',peak))
+    (root/'events').write_text('')
+    result=subprocess.run([checker,str(root/'scripts/check.sh'),'fast',selector],env=dict(env,PROBE_FAIL='compile'),capture_output=True,timeout=15)
+    rows=[json.loads(line) for line in (root/'events').read_text().splitlines()]
+    assert result.returncode != 0 and {row['stage'] for row in rows} == {'compile'},rows
+    # Include children ignoring TERM and wrappers that ignore it too.
+    if os.name == 'posix':
+        for ignore in ('', 'descendant', 'both'):
+            for entry in root.glob('events.*.*'): entry.unlink()
+            proc=subprocess.Popen([checker,str(root/'scripts/check.sh'),'fast','--jobs','2',selector],env=dict(env,PROBE_FORK='1',PROBE_IGNORE=ignore),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            children=[]
+            def live(pid):
+                state=subprocess.run(['ps','-o','stat=','-p',str(pid)],capture_output=True,text=True).stdout.strip()
+                return bool(state) and not state.startswith('Z')
+            try:
+                deadline=time.monotonic()+10
+                while time.monotonic()<deadline:
+                    ready=list(root.glob('events.*.ready'))
+                    if len(ready)==2 and all(p.read_text().isdigit() for p in ready): break
+                    time.sleep(.02)
+                else: raise AssertionError('children did not start')
+                children=[int(p.read_text()) for p in ready]
+                proc.terminate()
+                assert proc.wait(timeout=5) == 143
+                assert not list((root/'logs').iterdir()),'cancelled stage logs leaked'
+                deadline=time.monotonic()+2
+                while any(live(pid) for pid in children) and time.monotonic()<deadline: time.sleep(.02)
+                assert not any(live(pid) for pid in children),'descendant survived cancellation'
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+                for pid in children:
+                    if live(pid):
+                        try: os.kill(pid,signal.SIGKILL)
+                        except ProcessLookupError: pass
+    for value in ('0','5','auto','-1'):
+        result=subprocess.run([checker,str(root/'scripts/check.sh'),'fast','--jobs',value,selector],env=env,capture_output=True,timeout=15)
+        assert result.returncode!=0,value
+print('parallel parent probe passed')
+PY_PARALLEL
   mkdir -p "$dir/project/src"
   printf '# configured smoke\n' > "$dir/project/scripts/ml_smoke.py"
   PATH="$dir/bin:$PATH" OMS_TEST_UV_LOG="$dir/uv.log" bash "$dir/project/scripts/check.sh" fast >/dev/null
@@ -9316,6 +9551,25 @@ test_scrubber_blocks_credential_variants() {
     agent_memory_file_has_sensitive_content "$f" ||
       fail "scrubber should block: $s"
   done
+
+  printf '+          persist-credentia''ls: false\r\n' > "$f"
+  if agent_memory_file_has_sensitive_content "$f" || agent_memory_file_has_secret_content "$f"; then
+    fail "public checkout false toggle must not be classified as a secret"
+  fi
+  [ -z "$(agent_memory_sensitive_report "$f")" ] || fail "scan/report disagreement"
+  (
+    . "$ROOT/scripts/lib/peer-common.sh"
+    if contains_sensitive_content "$f"; then fail "diff scanner must agree on public toggle"; fi
+    printf '+api_t''oken=private\n' >> "$f"
+    contains_sensitive_content "$f" || fail "diff scanner must retain adjacent secret"
+  )
+  for s in 'persist-credentia'"ls: unknown" 'persist-credentia'"ls: false # private" 'prefix persist-credentia'"ls: false"; do
+    printf '%s\n' "$s" > "$f"
+    agent_memory_file_has_secret_content "$f" || fail "only exact public toggle may pass"
+  done
+  printf 'persist-credentia''ls: false\napi_t''oken=private\n' > "$f"
+  agent_memory_file_has_secret_content "$f" || fail "public toggle must not mask adjacent secrets"
+  agent_memory_sensitive_report "$f" | grep -F 'line 2:' >/dev/null || fail "scrubber must preserve diagnostic line numbers"
 
   printf 'max_tokens: 512\nthe private keynote speech\nmonkey: banana\n' > "$f"
   if agent_memory_file_has_sensitive_content "$f"; then
@@ -9341,6 +9595,16 @@ test_scrubber_tiers_split_secret_from_machine() {
   printf 'export MY_API_T''OKEN=abc\n' > "$f"
   agent_memory_file_has_secret_content "$f" ||
     fail "credential assignment must match the secret tier"
+
+  (
+    sed() { printf 'partial ordinary output\n'; return 2; }
+    local rc=0
+    agent_memory_file_has_sensitive_content "$f" || rc=$?
+    [ "$rc" = 2 ] || fail "filter failure must not become no-match"
+    rc=0
+    agent_memory_file_has_secret_content "$f" || rc=$?
+    [ "$rc" = 2 ] || fail "secret filter failure must retain its error"
+  )
 
   # Normalizer folds home prefixes to ~ and leaves other paths alone.
   local got

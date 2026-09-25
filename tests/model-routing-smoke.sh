@@ -434,6 +434,40 @@ env -u NVM_DIR HOME="$TMP/home" PATH="$TMP/bin:$PATH" AGY_ARGV_OUT="$TMP/agy.arg
 grep -Fxq -- '--effort' "$TMP/agy.argv" || fail 'peer-review dropped Antigravity --effort'
 grep -Fxq -- 'high' "$TMP/agy.argv" || fail 'peer-review dropped Antigravity effort value'
 
+# Exercise the real review parser: an unterminated final line used to count
+# one provider as zero and two providers as one for explicit model options.
+for model_option in --model --fallback-model; do
+  bash "$ROOT/scripts/peer-review.sh" --repo "$TMP/invoke-repo" \
+    --providers codex "$model_option" gpt-6-astra --no-diff --dry-run \
+    --prompt 'single reviewer model' > "$TMP/review-model.out" 2>&1 ||
+    fail "single reviewer rejected $model_option: $(cat "$TMP/review-model.out")"
+  if bash "$ROOT/scripts/peer-review.sh" --repo "$TMP/invoke-repo" \
+      --providers codex,claude "$model_option" gpt-6-astra --no-diff --dry-run \
+      --prompt 'ambiguous reviewer model' > "$TMP/review-model.out" 2>&1; then
+    fail "multiple reviewers accepted $model_option"
+  fi
+  grep -Fq 'requires exactly one provider' "$TMP/review-model.out" ||
+    fail 'multiple reviewer model failed for an unrelated reason'
+done
+
+# Per-seat model notation must survive effort validation, including spaces;
+# use each model's scale rather than the provider-wide maximum.
+for target in 'codex:model=model-a' 'codex:model=Model B'; do
+  PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" \
+    bash "$ROOT/scripts/peer-ask.sh" --repo "$TMP/invoke-repo" \
+      --providers "$target" --reasoning-effort medium --dry-run \
+      --prompt 'pinned effort' > "$TMP/ask-effort.out" 2>&1 ||
+    fail "pinned council effort rejected: $(cat "$TMP/ask-effort.out")"
+done
+if PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" \
+    bash "$ROOT/scripts/peer-ask.sh" --repo "$TMP/invoke-repo" \
+      --providers codex:model=model-a --reasoning-effort high --dry-run \
+      --prompt 'unsupported pinned effort' > "$TMP/ask-effort.out" 2>&1; then
+  fail 'council ignored the pinned model effort scale'
+fi
+grep -Fq "does not accept reasoning effort 'high'" "$TMP/ask-effort.out" ||
+  fail 'pinned effort refused for unrelated reason'
+
 # An explicit capacity fallback uses provider-default effort unless a separate
 # fallback effort is frozen. Antigravity must omit the flag rather than pass an
 # empty value, which its CLI rejects.
@@ -543,4 +577,29 @@ OMS_AGENT=claude OMS_TEST_PROVIDER_MODE=policy-success \
   fail 'automatic consult routed a policy decline to the next provider'
 [ "$(cat "$TMP/agy.count")" = 0 ] ||
   fail 'automatic consult invoked Antigravity after a policy decline'
+
+# The collaboration profile must remain pinned even with a legacy-only catalog.
+for operation in delegate plan; do
+  out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" \
+    OMS_AUTOPILOT_COLLABORATION=auto OMS_MODEL_EXPLICIT='' \
+    OMS_MODEL_OPERATION="$operation" OMS_MODEL_FALLBACK_EXPLICIT='' \
+    bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex || exit; printf "%s|%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_DISTINCT_CHAIN" "$OMS_MODEL_SAFEGUARD_CHAIN"')"
+  case "$operation" in delegate) expected=gpt-6-sol ;; *) expected=gpt-6-astra ;; esac
+  [ "$out" = "$expected||" ] || fail "collaboration recovered to a legacy model: $out"
+done
+for bad in gpt-5.5 gpt-5.6-sol provider-default; do
+  if OMS_AUTOPILOT_COLLABORATION=auto OMS_MODEL_EXPLICIT="$bad" \
+    bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex' >/dev/null 2>&1; then
+    fail "collaboration accepted $bad"
+  fi
+  if OMS_AUTOPILOT_COLLABORATION=auto OMS_MODEL_EXPLICIT=gpt-6-sol OMS_MODEL_FALLBACK_EXPLICIT="$bad" \
+    bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex' >/dev/null 2>&1; then
+    fail "collaboration accepted fallback $bad"
+  fi
+done
+if OMS_AUTOPILOT_COLLABORATION=auto bash -c \
+  '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare antigravity' >/dev/null 2>&1; then
+  fail 'collaboration widened provider authority'
+fi
+
 echo 'model-routing-smoke: ok'

@@ -229,9 +229,12 @@ for command, host in (
     ("bash tests/scripts-smoke.sh --only test_process_liveness_uses_non_destructive_windows_probe", "Windows"),
     ("bash tests/scripts-smoke.sh --only test_autopilot_windows_reenter_launch_keeps_parent_anchor", "Windows"),
     ("OMS_BASH32_BIN=/bin/bash bash scripts/check-bash32.sh", "macOS"),
+    ("OMS_BASH32_BIN=/bin/bash bash tests/scripts-smoke.sh --only test_shared_fast_mode_detection_gates_auto_verify", "macOS"),
     ("bash tests/bsd-portability-smoke.sh", "macOS"),
 ):
-    step = next((part for part in native.split("      - name:") if "run: " + command in part), "")
+    step = next((part for part in native.split("      - name:")
+                 if "run: " + command in part or
+                 ("run: |\n" in part and "\n          " + command + "\n" in part)), "")
     assert step and "!cancelled() && runner.os == '%s'" % host in step, (command, host)
     assert "continue-on-error" not in step, "native failure must fail the merged job"
 
@@ -558,5 +561,8 @@ for row in json.load(open(sys.argv[1], encoding="utf-8"))["skills"]:
     assert row["name"].startswith("oms-"), row["name"]
     assert os.path.basename(row["source"]).startswith("oms-"), row["source"]
 PY
+
+grep -Fxq 'keep-coding-instructions: true' "$ROOT/output-styles/oms-korean.md" ||
+  fail "language style must preserve native Claude coding instructions"
 
 echo "source-distribution-smoke: ok"

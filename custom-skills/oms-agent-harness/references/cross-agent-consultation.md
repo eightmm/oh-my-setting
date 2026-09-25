@@ -42,6 +42,9 @@ The debate stops early when every active seat explicitly reports no change;
 that does not prove consensus. Byte limits are not a total billed-token cap:
 native instructions, tool reads, retries and optional synthesis also cost tokens.
 Reported prompt bytes exclude these costs and are not measured token savings.
+Automatic consumers can use `--require-complete` to require every final seat's
+successful, usable answer. A dropped rebuttal then fails even if its earlier
+answer remains in the synthesis; quoted status text cannot satisfy this check.
 If policy forbids direct provider calls, use `--export-only` and import with
 `oms artifact-index import`.
 

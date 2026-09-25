@@ -171,6 +171,7 @@ def load_receipt(path: Path) -> tuple[dict[str, Any], bytes]:
     contract = row.get("contract")
     if isinstance(contract, dict):
         contract.setdefault("allow_verifier_change", False)
+        contract.setdefault("collaboration", "off")
     # Legacy receipts predate owner-fenced task recovery. Keep them readable,
     # but leave the owner empty so recovery fails closed instead of guessing.
     row.setdefault("owner_id", "")
@@ -276,6 +277,7 @@ def validate_receipt(row: dict[str, Any]) -> None:
         "review_mode",
         "draft_pr",
         "allow_verifier_change",
+        "collaboration",
     }
     if not isinstance(contract, dict) or set(contract) != contract_keys:
         raise ReceiptError("run contract is invalid")
@@ -293,6 +295,21 @@ def validate_receipt(row: dict[str, Any]) -> None:
     boolean(contract.get("retry_known"), "retry known")
     boolean(contract.get("draft_pr"), "draft PR")
     boolean(contract.get("allow_verifier_change"), "allow verifier change")
+    if contract.get("collaboration") not in {"off", "auto"}:
+        raise ReceiptError("collaboration mode is invalid")
+    if contract["collaboration"] == "auto":
+        if contract.get("review_mode") != "gate":
+            raise ReceiptError("auto collaboration requires gated review")
+        if providers["worker"] == providers["reviewer"]:
+            raise ReceiptError("auto collaboration requires a separate reviewer")
+        for role in ("planner", "worker", "reviewer"):
+            if providers[role] not in {"codex", "claude"}:
+                raise ReceiptError("auto collaboration transport is not authorized")
+            if providers[role] == "codex":
+                allowed_models = {"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}
+                if (routing[role]["model"] not in allowed_models or
+                        routing[role]["fallback_model"] not in allowed_models | {""}):
+                    raise ReceiptError("auto collaboration requires GPT-6 Codex routes")
     if contract.get("review_mode") not in {"shadow", "gate", "off"}:
         raise ReceiptError("review mode is invalid")
     if not isinstance(proposal, dict) or set(proposal) != {"path", "sha256"}:
@@ -683,6 +700,8 @@ def option_args(row: dict[str, Any]) -> list[str]:
         routing["reviewer"]["reasoning_effort"],
         "--review-mode",
         contract["review_mode"],
+        "--collaboration",
+        contract["collaboration"],
     ]
     for role in ("planner", "worker", "reviewer"):
         if routing[role]["model"]:
@@ -756,6 +775,7 @@ def row_from_args(args: argparse.Namespace) -> dict[str, Any]:
             "auto_repair": args.auto_repair,
             "retry_known": args.retry_known,
             "review_mode": args.review_mode,
+            "collaboration": args.collaboration,
             "draft_pr": args.draft_pr,
             "allow_verifier_change": args.allow_verifier_change,
         },
@@ -788,6 +808,7 @@ def add_binding_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--retry-known", action="store_true")
     parser.add_argument("--allow-verifier-change", action="store_true")
     parser.add_argument("--review-mode", required=True)
+    parser.add_argument("--collaboration", choices=("off", "auto"), default="off")
     parser.add_argument("--draft-pr", action="store_true")
     parser.add_argument("--proposal", default="")
     parser.add_argument("--proposal-sha256", default="")

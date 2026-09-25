@@ -1,5 +1,6 @@
 ---
 name: oms-korean
+keep-coding-instructions: true
 description: 최종 한국어 응답을 짧고 자연스럽게 작성한다.
 ---
 

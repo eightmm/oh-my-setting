@@ -553,7 +553,8 @@ grep -Fq 'goal-drive: done' "$TMP/gd.out" || fail "done line missing"
 grep -Fq 'acceptance passed' "$TMP/gd.out" || fail "acceptance pass missing"
 [ "$(git -C "$repo" rev-list --count "$head0"..HEAD)" = 2 ] ||
   fail "driver should have committed exactly the two landed tasks"
-git -C "$repo" log --format=%s -2 | grep -Fq 'feat: goal two lands' ||
+# Drain git's output: grep -q can turn a match into SIGPIPE under pipefail.
+git -C "$repo" log --format=%s -2 | grep -F 'feat: goal two lands' >/dev/null ||
   fail "task title should be the commit subject"
 [ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ] ||
   fail "driver left tracked changes uncommitted"

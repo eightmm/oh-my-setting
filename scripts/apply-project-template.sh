@@ -6,14 +6,16 @@ DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 ML_FULL_DOCS="${OH_MY_SETTING_ML_FULL_DOCS:-0}"
 PRIVATE="${OH_MY_SETTING_PRIVATE_AGENT_FILES:-1}"
 ADD_SLURM=0
+PYTHON_CI=0
 
-# --private/--no-private may appear anywhere, so strip them before the
-# positional style/dir/files parse below.
+# --private/--no-private/--python-ci may appear anywhere, so strip them before
+# the positional style/dir/files parse below.
 KEPT_ARGS=()
 for arg in "$@"; do
   case "$arg" in
     --no-private) PRIVATE=0 ;;
     --private) PRIVATE=1 ;;
+    --python-ci) PYTHON_CI=1 ;;
     *) KEPT_ARGS+=("$arg") ;;
   esac
 done
@@ -25,11 +27,18 @@ BASE_STYLE="$STYLE"
 usage() {
   cat <<'EOF'
 Usage: apply-project-template.sh [auto|general|ml|slurm] [project_dir]
-                                 [--full-docs] [--no-private] [files...]
+                                 [--full-docs] [--no-private] [--python-ci]
+                                 [files...]
 
 Apply oh-my-setting project rule blocks and scaffold PROJECT.md.
 ML projects keep the scientific contract in PROJECT.md by default.
 --full-docs additionally creates optional documentation templates.
+--python-ci opts a uv project (pyproject.toml, uv.lock, tests/) into the
+scripts/check.sh checker and one CPU CI workflow running
+`scripts/check.sh fast --jobs 2 tests`. It refuses, before writing anything,
+a different scripts/check.sh or another workflow; existing files are preserved.
+Other layouts
+adapt the test selector in the workflow by hand. Default onboarding adds no CI.
 The agent-facing files are hidden from git locally (see project-private.sh);
 --no-private, or OH_MY_SETTING_PRIVATE_AGENT_FILES=0, keeps them visible.
 EOF
@@ -333,6 +342,37 @@ drop_stale_styles() {
   done
 }
 
+CHECK_SRC="$ROOT/templates/check.sh"
+CHECK_DST="$PROJECT_DIR/scripts/check.sh"
+CI_SRC="$ROOT/templates/python-ci.yml"
+CI_DIR="$PROJECT_DIR/.github/workflows"
+CI_DST="$CI_DIR/python-ci.yml"
+
+# Every --python-ci refusal happens here, before the first write. A foreign
+# checker is compared, never executed or grepped for a contract keyword.
+if [ "$PYTHON_CI" = "1" ]; then
+  refuse_python_ci() {
+    echo "error: --python-ci: $*; nothing was changed" >&2
+    exit 2
+  }
+  for target in "$PROJECT_DIR/scripts" "$CHECK_DST" "$PROJECT_DIR/.github" "$CI_DIR" "$CI_DST"; do
+    [ ! -L "$target" ] || refuse_python_ci "symlink at scaffold destination"
+  done
+  if [ ! -f "$PROJECT_DIR/pyproject.toml" ] || [ ! -f "$PROJECT_DIR/uv.lock" ]; then
+    refuse_python_ci "needs a uv project with pyproject.toml and uv.lock"
+  fi
+  [ -d "$PROJECT_DIR/tests" ] ||
+    refuse_python_ci "the generated workflow selects the CPU suite in tests/; create it, or adapt check.sh and a workflow for another layout by hand"
+  if [ -e "$CHECK_DST" ] && ! cmp -s "$CHECK_SRC" "$CHECK_DST"; then
+    refuse_python_ci "scripts/check.sh differs from the oh-my-setting checker the workflow calls (fast --jobs 2 tests); keep yours and wire CI by hand"
+  fi
+  for wf in "$CI_DIR"/*; do
+    [ -e "$wf" ] || [ -L "$wf" ] || continue
+    [ "$wf" = "$CI_DST" ] ||
+      refuse_python_ci "$CI_DIR already holds CI; add 'bash scripts/check.sh fast --jobs 2 tests' there instead of a second workflow"
+  done
+fi
+
 for f in "${FILES[@]}"; do
   applied=()
   drop_stale_styles "$f"
@@ -387,21 +427,6 @@ if [ "$BASE_STYLE" = "ml" ]; then
     fi
   fi
 
-  CHECK_SRC="$ROOT/templates/check.sh"
-  CHECK_DST="$PROJECT_DIR/scripts/check.sh"
-  if [ -f "$CHECK_SRC" ]; then
-    if [ "$DRY_RUN" = "1" ]; then
-      echo "would scaffold $CHECK_DST"
-    elif [ -e "$CHECK_DST" ]; then
-      echo "skip existing $CHECK_DST"
-    else
-      mkdir -p "$PROJECT_DIR/scripts"
-      cp "$CHECK_SRC" "$CHECK_DST"
-      chmod +x "$CHECK_DST"
-      echo "created $CHECK_DST"
-    fi
-  fi
-
   ML_SMOKE_SRC="$ROOT/templates/ml_smoke.py"
   ML_SMOKE_DST="$PROJECT_DIR/scripts/ml_smoke.py"
   if [ -f "$ML_SMOKE_SRC" ]; then
@@ -452,6 +477,33 @@ if [ "$BASE_STYLE" = "ml" ]; then
     if [ "$added" -gt 0 ]; then
       echo "updated $GITIGNORE: added $added ML entries"
     fi
+  fi
+fi
+
+if [ "$BASE_STYLE" = "ml" ] || [ "$PYTHON_CI" = "1" ]; then
+  if [ -f "$CHECK_SRC" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "would scaffold $CHECK_DST"
+    elif [ -e "$CHECK_DST" ]; then
+      echo "skip existing $CHECK_DST"
+    else
+      mkdir -p "$PROJECT_DIR/scripts"
+      cp "$CHECK_SRC" "$CHECK_DST"
+      chmod +x "$CHECK_DST"
+      echo "created $CHECK_DST"
+    fi
+  fi
+fi
+
+if [ "$PYTHON_CI" = "1" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "would scaffold $CI_DST"
+  elif [ -e "$CI_DST" ]; then
+    echo "skip existing $CI_DST"
+  else
+    mkdir -p "$CI_DIR"
+    cp "$CI_SRC" "$CI_DST"
+    echo "created $CI_DST"
   fi
 fi
 

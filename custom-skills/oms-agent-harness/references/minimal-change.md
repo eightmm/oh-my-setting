@@ -69,7 +69,9 @@ contract permits. Avoid running the same suite on both branch push and PR;
 keep required status checks reporting for documentation-only changes too.
 Cancel superseded checks in the same workflow/event/ref, not deployment work
 or another event's release evidence. Parallelism lowers wall time, not test
-count or necessarily total runner cost. Cache dependencies by their lockfile,
+count or necessarily total runner cost. Use the same verification entrypoint
+locally and in CI; parallelize only independent checks within host limits,
+without multiplying inner test workers. Cache dependencies by their lockfile,
 never treat a stale test result as verification of a new revision.
 
 Keep one primary test layer per behavior and use thinner smoke checks only for

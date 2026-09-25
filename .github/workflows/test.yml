@@ -194,9 +194,11 @@ jobs:
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         timeout-minutes: 3
         run: bash tests/scripts-smoke.sh --only test_autopilot_windows_reenter_launch_keeps_parent_anchor
-      - name: stock Bash 3.2 parse
+      - name: stock Bash 3.2 parse and project checker
         if: ${{ !cancelled() && runner.os == 'macOS' }}
-        run: OMS_BASH32_BIN=/bin/bash bash scripts/check-bash32.sh
+        run: |
+          OMS_BASH32_BIN=/bin/bash bash scripts/check-bash32.sh
+          OMS_BASH32_BIN=/bin/bash bash tests/scripts-smoke.sh --only test_shared_fast_mode_detection_gates_auto_verify
       - name: BSD userland fixtures
         if: ${{ !cancelled() && runner.os == 'macOS' }}
         run: bash tests/bsd-portability-smoke.sh

@@ -51,9 +51,27 @@ def resolve(task, defaults):
     return dict(DEFAULTS, **defaults)
 
 
+def validate_collaboration(task, worker):
+    """Keep a campaign's reviewer outside its implementation transport."""
+    if worker not in {"codex", "claude"}:
+        raise ValueError("auto collaboration worker must be codex or claude")
+    assignment = validate(task.get("assignment", {}))
+    if assignment and assignment["provider"] != worker:
+        raise ValueError("auto collaboration assignments must use the campaign worker")
+    if task.get("provider") and task["provider"] != worker:
+        raise ValueError("auto collaboration plan contains another implementation provider")
+    if assignment and worker == "codex":
+        allowed = {"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}
+        if (assignment.get("model") not in allowed or
+                assignment.get("fallback_model", "") not in allowed | {""}):
+            raise ValueError("auto collaboration assignment requires an exact GPT-6 route")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task-json", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--task-json")
+    source.add_argument("--check-collaboration-plan")
     parser.add_argument("--provider", required=True)
     parser.add_argument("--model", default="")
     parser.add_argument("--fallback-model", default="")
@@ -61,11 +79,18 @@ def main():
     parser.add_argument("--workload", default="standard")
     args = vars(parser.parse_args())
     try:
+        plan = args.pop("check_collaboration_plan")
+        if plan:
+            with open(plan, encoding="utf-8") as handle:
+                tasks = json.load(handle)["tasks"]
+            for task in tasks.values():
+                validate_collaboration(task, args["provider"])
+            return 0
         task = json.loads(args.pop("task_json"))
         if not isinstance(task, dict):
             raise ValueError("task must be an object")
         print(json.dumps(resolve(task, args), sort_keys=True))
-    except (ValueError, TypeError) as exc:
+    except (OSError, KeyError, AttributeError, ValueError, TypeError) as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
     return 0

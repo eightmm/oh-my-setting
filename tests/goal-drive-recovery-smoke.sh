@@ -1919,4 +1919,155 @@ then
   fail "goal provider supervisor lost its Windows Git Bash execution contract"
 fi
 
+# Snapshot-pure acceptance is explicitly declared; otherwise requests stay fresh.
+reuse_repo="$TMP/accept-reuse"
+mkdir -p "$reuse_repo"
+git -C "$reuse_repo" init -q
+printf '/.oms/\n' > "$reuse_repo/.gitignore"
+printf 'base\n' > "$reuse_repo/source.txt"
+printf '## Verification\n' > "$reuse_repo/PROJECT.md"
+git -C "$reuse_repo" add .
+git -C "$reuse_repo" -c user.name=Test -c user.email=test@example.com commit -qm initial
+"$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" init --goal reuse \
+  --accept 'printf x >> .oms/count' >/dev/null
+OMS_GOAL_RUN_ID=reuse-1 "$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" accept >/dev/null
+"$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" accept --reuse-pass reuse-1 >/dev/null
+[ "$(cat "$reuse_repo/.oms/count")" = xx ] || fail 'undeclared acceptance was reused'
+printf '%s\n' '- Acceptance reuse: same-run' >> "$reuse_repo/PROJECT.md"
+OMS_GOAL_RUN_ID=reuse-1 "$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" accept >/dev/null
+sleep 1
+"$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" accept --reuse-pass reuse-1 > "$TMP/reused.out"
+grep -Fq 'reused pass run=reuse-1 receipt=' "$TMP/reused.out" || fail 'same-run pass not reused'
+[ "$(cat "$reuse_repo/.oms/count")" = xxx ] || fail 'reuse re-executed acceptance'
+# A fresh final check remains fresh even when the policy is enabled; with no
+# run id or reuse request it cannot yield a reusable row, so builds no context.
+mkdir -p "$TMP/reuse-bin"
+printf '#!/usr/bin/env bash\ncase "${1:-}:${2:-}" in */acceptance-reuse.py:context) printf x >> %q ;; esac\nexec %q "$@"\n' \
+  "$TMP/reuse-context-calls" "$(command -v python3)" > "$TMP/reuse-bin/python3"
+chmod +x "$TMP/reuse-bin/python3"
+env -u OMS_GOAL_RUN_ID PATH="$TMP/reuse-bin:$PATH" \
+  "$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" accept >/dev/null
+[ "$(cat "$reuse_repo/.oms/count")" = xxxx ] || fail 'fresh acceptance incorrectly reused'
+[ ! -e "$TMP/reuse-context-calls" ] || fail 'manual acceptance built an unusable reuse context'
+python3 - "$reuse_repo/.oms/plan/progress.jsonl" <<'PYMANUAL' || fail 'manual acceptance receipt regressed'
+import json, sys
+row = [r for r in map(json.loads, open(sys.argv[1])) if r.get('kind') == 'acceptance'][-1]
+assert row['status'] == 'pass' and 'run_id' not in row and row['reuse_context_sha256'] == '', row
+PYMANUAL
+git -C "$reuse_repo" config core.filemode false
+for mutation in tracked untracked tracked-mode untracked-mode environment run plan spec; do
+  OMS_GOAL_RUN_ID=reuse-1 "$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" accept >/dev/null
+  before="$(wc -c < "$reuse_repo/.oms/count")"
+  reuse_id=reuse-1
+  case "$mutation" in
+    tracked) printf changed >> "$reuse_repo/source.txt" ;;
+    untracked) printf new > "$reuse_repo/new.txt" ;;
+    tracked-mode|untracked-mode)
+      mode_file="$reuse_repo/source.txt"
+      [ "$mutation" != untracked-mode ] || mode_file="$reuse_repo/new.txt"
+      chmod +x "$mode_file"
+      if [ ! -x "$mode_file" ]; then continue; fi ;;
+    environment) export OMS_REUSE_TEST_CHANGED=1 ;;
+    run) reuse_id=reuse-2 ;;
+    plan) "$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" add --id extra --title extra --verify true >/dev/null ;;
+    spec) printf '\nextra constraint\n' >> "$reuse_repo/PROJECT.md" ;;
+  esac
+  "$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" accept --reuse-pass "$reuse_id" > "$TMP/reuse-$mutation.out"
+  after="$(wc -c < "$reuse_repo/.oms/count")"
+  [ "$after" -eq "$((before + 1))" ] || fail "stale $mutation acceptance reused"
+  unset OMS_REUSE_TEST_CHANGED
+done
+
+# Git's text normalization must not hide a change in acceptance input bytes.
+printf 'source.txt text\n' > "$reuse_repo/.gitattributes"
+printf 'base\n' > "$reuse_repo/source.txt"
+git -C "$reuse_repo" add .
+git -C "$reuse_repo" -c user.name=Test -c user.email=test@example.com commit -qm normalized
+OMS_GOAL_RUN_ID=reuse-1 "$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" accept >/dev/null
+before="$(wc -c < "$reuse_repo/.oms/count")"
+printf 'base\r\n' > "$reuse_repo/source.txt"
+git -C "$reuse_repo" diff --quiet || fail 'normalization fixture has a Git-visible diff'
+"$ROOT/scripts/agent-plan.sh" --repo "$reuse_repo" accept --reuse-pass reuse-1 > "$TMP/reuse-crlf.out"
+[ "$(wc -c < "$reuse_repo/.oms/count")" -eq "$((before + 1))" ] ||
+  fail 'Git-normalized byte mutation reused a stale pass'
+
+# Aggregate-oversized trees are rejected before content reads; size metadata
+# only rejects, so an understated size still meets the streamed budget.
+python3 - "$ROOT/scripts/lib/acceptance-reuse.py" "$ROOT/scripts/agent-plan.sh" "$TMP/reuse-oversized" <<'PYOVERSIZED' || fail 'oversized reuse preflight regressed'
+import os, pathlib, runpy, subprocess, sys
+from unittest import mock
+context = runpy.run_path(sys.argv[1])['context']
+runner, repo = sys.argv[2], pathlib.Path(sys.argv[3])
+repo.mkdir()
+subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+(repo / 'PROJECT.md').write_text('## Verification\n- Acceptance reuse: same-run\n')
+for name in ('a.bin', 'b.bin'):
+    with open(repo / name, 'wb') as f:
+        f.truncate(33 << 20)
+subprocess.run(['git', '-C', str(repo), 'add', '.'], check=True)
+open_, lstat_ = pathlib.Path.open, pathlib.Path.lstat
+def guarded(path, *args, **kwargs):
+    assert path.suffix != '.bin', 'oversized tracked content was read'
+    return open_(path, *args, **kwargs)
+def understated(path):
+    info = lstat_(path)
+    return os.stat_result(info[:6] + (0,) + info[7:]) if path.suffix == '.bin' else info
+with mock.patch.object(pathlib.Path, 'open', guarded):
+    assert context(str(repo), runner) == ''
+with mock.patch.object(pathlib.Path, 'lstat', understated):
+    assert context(str(repo), runner) == ''
+with open(repo / 'a.bin', 'r+b') as f:
+    f.truncate((31 << 20) - (repo / 'PROJECT.md').stat().st_size)
+assert context(str(repo), runner), 'tree at exactly the budget was rejected'
+PYOVERSIZED
+
+# Exercise the actual driver-to-parent environment boundary, including the
+# driver's duplicate hooksPath suppression, without dispatching a worker.
+reuse_drive="$TMP/reuse-drive"
+mkdir -p "$reuse_drive"
+git -C "$reuse_drive" init -q -b main
+printf '/.oms/\n' > "$reuse_drive/.gitignore"
+printf '## Verification\n- Acceptance reuse: same-run\n' > "$reuse_drive/PROJECT.md"
+git -C "$reuse_drive" add .
+git -C "$reuse_drive" -c user.name=Test -c user.email=test@example.com commit -qm initial
+"$ROOT/scripts/agent-plan.sh" --repo "$reuse_drive" init --goal reuse --accept 'printf x >> .oms/count' >/dev/null
+"$ROOT/scripts/agent-plan.sh" --repo "$reuse_drive" add --id finished --title finished --verify true >/dev/null
+python3 - "$reuse_drive/.oms/plan/tasks.json" <<'PYFIXTURE'
+import json, sys
+p = sys.argv[1]
+with open(p) as f: data = json.load(f)
+data['tasks']['finished']['state'] = 'done'
+with open(p, 'w') as f: json.dump(data, f)
+PYFIXTURE
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
+  OMS_WORKER_GUARD_STRICT=1 OMS_WORKER_GUARD_OFF=0 OMS_PEER_TIMEOUT=5m \
+  "$ROOT/scripts/goal-drive.sh" --repo "$reuse_drive" --to codex --run-id reuse-drive \
+    --max-cycles 1 > "$TMP/reuse-drive.out"
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
+  OMS_WORKER_GUARD_STRICT=1 OMS_WORKER_GUARD_OFF=0 OMS_PEER_TIMEOUT=5m \
+  "$ROOT/scripts/agent-plan.sh" --repo "$reuse_drive" accept --reuse-pass reuse-drive > "$TMP/reuse-driver-parent.out"
+grep -Fq 'reused pass' "$TMP/reuse-driver-parent.out" || fail 'driver-to-parent proof was not reusable'
+[ "$(cat "$reuse_drive/.oms/count")" = x ] || fail 'driver-to-parent verification repeated'
+python3 - "$ROOT/scripts/lib/acceptance-reuse.py" "$reuse_drive/.oms/plan/progress.jsonl" "$TMP" <<'PYREUSE' || fail 'invalid reuse proof accepted'
+import json, pathlib, runpy, sys
+check = runpy.run_path(sys.argv[1])['reusable']
+rows = [json.loads(line) for line in pathlib.Path(sys.argv[2]).read_text().splitlines()]
+row = [r for r in rows if r.get('kind') == 'acceptance'][-1]
+p = pathlib.Path(sys.argv[3]) / 'proof.jsonl'
+args = [row['run_id'], row['reuse_context_sha256'], row['plan_sha256'],
+        row['repo_snapshot_sha256'], row['manifest_sha256'], 'printf x >> .oms/count']
+p.write_text(json.dumps(row) + '\n')
+assert check(str(p), *args)
+for delta in [{'ts': '2000-01-01T00:00:00Z'}, {'ts': '2999-01-01T00:00:00Z'},
+              {'status': 'fail'}, {'exit': 1}, {'timed_out': True},
+              {'output_limited': True}, {'manifest_sha256': 'changed'},
+              {'accept_sha256_full': 'changed'}, {'reuse_context_sha256': 'changed'}]:
+    p.write_text(json.dumps(row) + '\n' + json.dumps(dict(row, **delta)) + '\n')
+    assert not check(str(p), *args), delta
+link = p.with_suffix('.link')
+link.symlink_to(p)
+assert not check(str(link), *args)
+PYREUSE
+
+
 echo "goal-drive-recovery-smoke: ok"

@@ -35,6 +35,7 @@ INITIAL_TASKS=6
 REPLAN_TASKS=2
 AUTO_REPAIR=0
 ALLOW_VERIFIER_CHANGE=0
+COLLABORATION=off
 REVIEW_MODE="shadow"
 REVIEW_MODE_EXPLICIT=0
 DRAFT_PR=0
@@ -151,9 +152,13 @@ Options:
   --reviewer-fallback-model MODEL
                           One-shot capacity fallback for that role.
   --planner-reasoning-effort E
+                          Decomposition only; the auto council keeps provider defaults.
   --worker-reasoning-effort E
   --reviewer-reasoning-effort E
                           auto, low, medium, high, xhigh, max, or ultra.
+  --collaboration MODE    off (default) or auto: bounded GPT-6/Claude planning
+                          debate, GPT-6-only Codex routes, opposite-provider
+                          review gate. The parent still reviews each proposal.
   --review-mode MODE      shadow (default), gate, or off. Shadow reports a
                           semantic finding. With --draft-pr, gate is the
                           default unless this option is explicitly supplied.
@@ -250,6 +255,7 @@ while [ "$#" -gt 0 ]; do
     --reviewer-reasoning-effort)
       [ "$#" -ge 2 ] || fail "--reviewer-reasoning-effort requires a value"
       REVIEWER_REASONING_EFFORT="$2"; shift 2 ;;
+    --collaboration) [ "$#" -ge 2 ] || fail "--collaboration requires off or auto"; COLLABORATION="$2"; shift 2 ;;
     --review-mode)
       [ "$#" -ge 2 ] || fail "--review-mode requires shadow, gate, or off"
       REVIEW_MODE="$2"; REVIEW_MODE_EXPLICIT=1; shift 2 ;;
@@ -348,6 +354,14 @@ print(int(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)])
 PY
 }
 
+case "$COLLABORATION" in off|auto) ;; *) fail "--collaboration must be off or auto" ;; esac
+if [ "$COLLABORATION" = auto ]; then
+  [ "$REVIEW_MODE_EXPLICIT" -eq 0 ] || [ "$REVIEW_MODE" = gate ] ||
+    fail "auto collaboration requires --review-mode gate"
+  REVIEW_MODE=gate
+fi
+# Child routing is part of this receipt, never inherited from a different run.
+export OMS_AUTOPILOT_COLLABORATION="$COLLABORATION"
 case "$MAX_CYCLES" in *[!0-9]*|"") fail "--max-cycles must be 1..10" ;; esac
 [ "$MAX_CYCLES" -ge 1 ] && [ "$MAX_CYCLES" -le 10 ] || fail "--max-cycles must be 1..10"
 case "$INITIAL_TASKS" in *[!0-9]*|"") fail "--initial-tasks must be 1..12" ;; esac
@@ -370,6 +384,8 @@ reviewer_seconds="$(duration_seconds "$REVIEWER_TIMEOUT")"; reviewer_seconds="${
 # A routed model call may spend primary + two safeguard recoveries + one
 # catalog alternate + one capacity fallback before returning.
 PLANNER_PHASE_WALL=$((planner_seconds * 5 + 60))
+# Two parallel seats, an opening and one rebuttal, then decomposition.
+[ "$COLLABORATION" != auto ] || PLANNER_PHASE_WALL=$((planner_seconds * 15 + 120))
 # goal-drive may spend up to five bounded model attempts per cycle. It also performs one
 # separately supervised repair attempt when enabled. These are ceilings only;
 # every inner call retains the exact role timeout from the durable contract.
@@ -921,6 +937,7 @@ outer_receipt_write_locked() {  # STAGE
     --base "$BASE" --base-sha "$review_base_sha" --remote "$REMOTE" \
     --max-cycles "$MAX_CYCLES" --initial-tasks "$INITIAL_TASKS" \
     --replan-tasks "$REPLAN_TASKS" --review-mode "$REVIEW_MODE" \
+    --collaboration "$COLLABORATION" \
     --proposal "$APPROVED_PROPOSAL_PATH" \
     --proposal-sha256 "$APPROVED_PROPOSAL_SHA" \
     --branch "$receipt_branch" --owner-id "$AUTOPILOT_OWNER_ID" \
@@ -1069,6 +1086,14 @@ if [ -z "$REVIEWER" ]; then
   if [ "$WORKER" = codex ]; then REVIEWER=claude; else REVIEWER=codex; fi
 fi
 REVIEWER="$(oms_normalize_provider "$REVIEWER")" || fail "unknown reviewer provider"
+if [ "$COLLABORATION" = auto ]; then
+  [ "$PLANNER" != codex ] || [ -n "$PLANNER_MODEL" ] || PLANNER_MODEL=gpt-6-astra
+  [ "$WORKER" != codex ] || [ -n "$WORKER_MODEL" ] || WORKER_MODEL=gpt-6-sol
+  [ "$REVIEWER" != codex ] || [ -n "$REVIEWER_MODEL" ] || REVIEWER_MODEL=gpt-6-astra
+  oms_collaboration_route_validate "$PLANNER" "$PLANNER_MODEL" "$PLANNER_FALLBACK_MODEL" || exit $?
+  oms_collaboration_route_validate "$WORKER" "$WORKER_MODEL" "$WORKER_FALLBACK_MODEL" || exit $?
+  oms_collaboration_route_validate "$REVIEWER" "$REVIEWER_MODEL" "$REVIEWER_FALLBACK_MODEL" || exit $?
+fi
 if [ "$REVIEW_MODE" != off ] && [ "$REVIEWER" = "$WORKER" ]; then
   fail "semantic reviewer must differ from the implementation provider"
 fi
@@ -1223,7 +1248,7 @@ propose_tasks() {  # PREFIX MAX
   outer_receipt_write proposing >/dev/null ||
     fail "cannot bind this planning call to the durable outer receipt"
   args=(--repo "$REPO" --to "$PLANNER" --max-tasks "$max_tasks" --allowed "$ALLOWED"
-    --worker-provider "$WORKER")
+    --worker-provider "$WORKER" --collaboration "$COLLABORATION")
   [ -z "$prefix" ] || args+=(--id-prefix "$prefix")
   [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || args+=(--allow-verifier-change)
   [ -z "$PLANNER_MODEL" ] || args+=(--model "$PLANNER_MODEL")
@@ -1277,7 +1302,7 @@ PY
     --planner-reasoning-effort "$PLANNER_REASONING_EFFORT" \
     --worker-reasoning-effort "$WORKER_REASONING_EFFORT" \
     --reviewer-reasoning-effort "$REVIEWER_REASONING_EFFORT" \
-    --review-mode "$REVIEW_MODE")
+    --review-mode "$REVIEW_MODE" --collaboration "$COLLABORATION")
   [ -z "$PLANNER_MODEL" ] || continuation+=(--planner-model "$PLANNER_MODEL")
   [ -z "$WORKER_MODEL" ] || continuation+=(--worker-model "$WORKER_MODEL")
   [ -z "$REVIEWER_MODEL" ] || continuation+=(--reviewer-model "$REVIEWER_MODEL")
@@ -1405,6 +1430,7 @@ PY
   elif [ -n "$prefix" ]; then
     fail "unsupported proposal tranche prefix: $prefix"
   fi
+  apply_args+=(--collaboration "$COLLABORATION" --worker-provider "$WORKER")
   OMS_AUTOPILOT=1 run_phase proposal-apply "$PLANNER_PHASE_WALL" \
     "$PLAN_FROM_SPEC" "${apply_args[@]}"
   oms_git_assert_safe_execution_config "$REPO" ||
@@ -1415,6 +1441,10 @@ fi
 
 [ -f "$PLAN_FILE" ] || fail "no approved plan; run autopilot propose first"
 bind_plan_contract
+if [ "$COLLABORATION" = auto ]; then
+  python3 "$ROOT/scripts/lib/task-assignment.py" --check-collaboration-plan "$PLAN_FILE" \
+    --provider "$WORKER" || fail "plan assignments violate the auto collaboration contract"
+fi
 
 # A branch name is mutable. Freeze the reviewed commit before goal-drive can
 # advance the current branch, then use this exact object for semantic review
@@ -1712,9 +1742,11 @@ fi
 }
 rm -f "$drive_out"
 
-# Re-run the exact acceptance receipt immediately before any semantic or remote
-# effect. A provider's prose and goal-drive's terminal line are not proof here.
-if ! "$ROOT/scripts/agent-plan.sh" --repo "$REPO" accept >/dev/null 2>&1; then
+# The supervised acceptance receipt, not provider prose or the terminal line,
+# may be reused only for an explicit snapshot-pure contract in this drive.
+# Arbitrary checks stay fresh; post-review acceptance always runs again.
+if ! OMS_WORKER_GUARD_STRICT=1 OMS_WORKER_GUARD_OFF=0 OMS_PEER_TIMEOUT="$WORKER_TIMEOUT" \
+    "$ROOT/scripts/agent-plan.sh" --repo "$REPO" accept --reuse-pass "$drive_run_id"; then
   park "final-acceptance-failed" "the repository changed after goal-drive completion"
 fi
 
@@ -1793,7 +1825,8 @@ PY
   rm -f "$review_out"
   if [ "$review_rc" -eq 0 ]; then
     echo "autopilot: semantic review: pass"
-    review_evidence="mode=$REVIEW_MODE outcome=pass reviewer=$REVIEWER writers=$review_writers family-independence=not-verified"
+    review_evidence="mode=$REVIEW_MODE outcome=pass reviewer=$REVIEWER writers=$review_writers review-scope=campaign:$review_base_sha..$final_head family-independence=not-verified"
+    echo "autopilot: review scope: campaign $review_base_sha..$final_head; external recovery patches require separate review"
   elif [ "$REVIEW_MODE" = shadow ]; then
     if [ "$review_rc" -eq 1 ]; then
       echo "autopilot: semantic review: advisory fail"

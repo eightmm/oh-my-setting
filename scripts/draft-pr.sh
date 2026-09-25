@@ -590,13 +590,16 @@ scan_remaining() {  # DEADLINE_EPOCH -> remaining positive seconds
 draft_bounded_file_has_sensitive_content() {  # FILE DEADLINE
   local file="$1"
   local deadline="$2"
-  local remaining scan_rc=0 sensitive_re
+  local remaining scan_rc=0
   [ -s "$file" ] || return 1
   remaining="$(scan_remaining "$deadline")" ||
     return 124
-  sensitive_re="$(agent_memory_sensitive_re)" ||
-    return 125
-  draft_run_scan "${remaining}s" grep -Eiq "$sensitive_re" "$file" || scan_rc=$?
+  # Admission, outbound prompts and object history must share the same policy.
+  # Keep the complete scan inside the existing deadline, including filtering.
+  draft_run_scan "${remaining}s" bash -o pipefail -c '
+    . "$1" || exit 125
+    agent_memory_file_has_sensitive_content "$2"
+  ' _ "$ROOT/scripts/lib/agent-memory-common.sh" "$file" || scan_rc=$?
   return "$scan_rc"
 }
 

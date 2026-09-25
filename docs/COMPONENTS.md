@@ -401,6 +401,11 @@ A write delegation:
 4. Returns an artifact and binary-safe patch; it does not commit or push.
 5. Optionally uses bounded repair rounds with the prior failure attached.
 
+Attached review/repair findings use bounded, sanitized reference quotes: local
+paths are masked and sensitive lines redacted without rewriting the original
+evidence. Long reviews keep their opening findings; unterminated final lines
+remain readable. The operator brief still passes the strict outbound guard.
+
 Explicit `--verify` and plan-task checks win. Otherwise writes default only to
 an implemented `scripts/check.sh fast`; ML project detection does not select a
 heavier suite. A check script without `fast` requires a chosen verification
@@ -614,6 +619,43 @@ latest receipt as display context; `state-verify` is the trust surface that
 rejects malformed/duplicate receipts, proof or task-state contradictions,
 residual intents, and active/retired lineage conflicts.
 
+With `--collaboration auto`, initial planning and the bounded remainder proposal
+trigger a GPT-6/Claude council with one rebuttal round (Codex defaults to Astra
+or the explicit Codex planner model). Both seats must
+finish and meet `--deliberation`'s per-seat response contract: alternatives,
+evidence, counterargument, verification and explicit deltas/disagreements.
+JSON-only task lists or empty sections fail closed. The council receives only
+contract data; JSON decomposition instructions stay in the planner call.
+Structure is checked mechanically; reasoning still needs parent judgment.
+Planner reasoning effort applies only to decomposition; the council keeps
+provider defaults, disclosed before dispatch alongside its retained log path.
+That path remains available for parent inspection after early child failure,
+even when the child did not emit its own summary.
+The bounded synthesis feeds the planner as untrusted evidence before
+normal exact parent proposal review. The durable contract retains this mode
+through resume and enforces gated opposite-provider review. Codex routes are
+pinned to GPT-6 Astra/Sol/Luna, including reviewed assignments and optional
+capacity fallbacks. Claude Code can implement with `--worker claude`, leaving
+Codex as the reviewer; each campaign keeps one implementation transport to
+preserve independent review. The existing provider-neutral behavior is unchanged
+when the option is off. No background daemon or publication permission is added.
+
+A peer review emits a `review-scope` artifact binding its base, HEAD, exact diff
+digest and paths; external parent recovery patches are explicitly not covered.
+The parent must obtain a separate or combined review of those exact patches
+before declaring the whole request complete. Campaign scope remains immutable.
+
+Acceptance stays fresh by default. An explicit `- Acceptance reuse: same-run`
+in PROJECT.md's Verification section asserts snapshot-pure checks and stable
+external tools. Only then may the immediate post-drive check reuse the latest
+supervised pass from that same run, for at most ten minutes from acceptance start, with matching
+command, plan/spec, manifest, repository snapshot, runner and environment.
+Missing or stale evidence runs fresh. The review verifier, post-review check
+and publication gates remain fresh; reuse neither creates a new pass nor
+refreshes the original receipt. Network, time, hardware, filesystem metadata other than modes, and mutable
+ignored inputs are ineligible. This reduces four acceptance executions to three in an
+unchanged local campaign; it does not claim a model-token or wall-time saving.
+
 `oms autopilot` is an agent-side control plane: the end user states the goal and
 authority while the top-level parent performs every transition below. It
 proposes an initial plan for parent review, atomically applies only that exact
@@ -640,6 +682,8 @@ credential-shaped and machine-private content; defaults cap this at 20,000
 objects, 32 MiB per object, 256 MiB total, and a 180-second scan budget with
 fixed termination escalation; Git history traversal also runs under a 512 MiB
 process-memory ceiling. Hosts without both controls park before traversal.
+The bounded history scan shares admission's public-configuration filter, scans
+raw bytes in the C locale, and distinguishes filter errors from clean input.
 Temporary payloads are removed before parking.
 Hidden/sparse index entries and Git grafts are refused. Its local intent records
 a pre-push uncertainty phase, and verifier mutation terminally spends that
@@ -979,8 +1023,19 @@ contracts include `CI scope/runtime`; expensive GPU/data/platform checks need
 relevant-change, release, scheduled or explicit triggers under that contract.
 The ML check scaffold uses `uv run --no-sync` after project Setup, so routine
 checks do not implicitly resolve/install dependencies. Existing project check
-scripts and workflows are not overwritten; OMS does not generate a CI matrix
-just because it is installed. These defaults guide agents, not an enforcement
+scripts and workflows are not overwritten. The explicit `--python-ci` onboarding
+option requires `pyproject.toml`, `uv.lock`, and a project-owned CPU `tests/`
+suite. It adds one PR/manual CPU job, one locked sync, and the same
+`bash scripts/check.sh fast --jobs 2 tests` entrypoint used locally. Other CI
+or a custom checker requires project-specific integration; reapplying the
+scaffold preserves existing files. No CI is added by default.
+
+The checker keeps plain `fast` serial and fail-fast. Explicit `--jobs N`
+(1–4) bounds concurrent compile/lint/selected-pytest stages, collects every
+stage failure, and terminates their process groups on cancellation. It does
+not shard pytest, add nested workers, or collect tests without selectors.
+Only independent CPU checks belong in this mode; record actual scope/runtime
+in the project's `PROJECT.md`. These defaults guide agents, not an enforcement
 service or proof of measured CI savings.
 
 `bash scripts/check.sh` is the repository gate: shell lint, Bash 3.2 parsing,
@@ -1072,3 +1127,9 @@ declared mechanical gate.
   request and parks on drift, but another authorized GitHub writer can still
   move a ref in that request window; restrict writers or protect those branches
   when that residual race is unacceptable.
+
+Claude's `oms-korean` output style declares `keep-coding-instructions: true`:
+its final-reply language guidance retains Claude's native engineering
+instructions. The repository `CLAUDE.md` imports `AGENTS.md`, avoiding a
+second copy of policy. Global rules remain in `rules/global-AGENTS.md`;
+provider system instructions and user-owned settings are not replaced.

@@ -23,6 +23,8 @@ INCLUDE_MEMORY=0
 INCLUDE_TASK=0
 INCLUDE_ML_CONTEXT=0
 DEBATE=0
+REQUIRE_COMPLETE=0
+MA_DELIBERATION=0
 HYPOTHESIS_PRESET=0
 EXPORT_ONLY=0
 MODEL=""
@@ -68,6 +70,11 @@ Options:
   --thread ID          Publish each completed answer to a shared thread (create
                        if absent). Later rounds share a bounded notes snapshot.
                        Providers receive bounded prior thread context initially.
+  --deliberation       Require evidence, alternatives, counterargument and checks
+                       from every seat; task JSON alone is not a deliberation.
+                       Requires --debate; implies --require-complete.
+  --require-complete   Fail unless every seat completes the final round.
+                       Partial quorum remains available without this flag.
   --debate N           Add N debate rounds (1-3). Each round, every provider
                        sees the others' previous answers, critiques them, and
                        revises its own. Repo context is in round-1 prompts;
@@ -231,6 +238,8 @@ while [ "$#" -gt 0 ]; do
       THREAD_ID="$2"
       shift 2
       ;;
+    --deliberation) MA_DELIBERATION=1; REQUIRE_COMPLETE=1; shift ;;
+    --require-complete) REQUIRE_COMPLETE=1; shift ;;
     --debate)
       [ "$#" -ge 2 ] || fail "--debate requires round count"
       case "$2" in
@@ -273,6 +282,13 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "$MA_DELIBERATION" = 1 ]; then
+  [ "$DEBATE" -gt 0 ] || fail "--deliberation requires --debate"
+  MA_DEBATE_SECTIONS=$'Answer:\nAlternatives:\nEvidence:\nCounterargument:\nRisks:\nRecommendation:\nVerification:\nChanged from previous round:\nRemaining disagreements:'
+fi
+if [ "$REQUIRE_COMPLETE" = 1 ] && { [ "$EXPORT_ONLY" = 1 ] || [ "$DRY_RUN" = 1 ]; }; then
+  fail "--require-complete needs live answers, not export-only or dry-run"
+fi
 if [ -z "$PROMPT" ] && [ "$HYPOTHESIS_PRESET" -eq 1 ]; then
   fail "--hypothesis needs a prompt (--prompt or positional) with the hypothesis and the planned experiment"
 fi
@@ -290,8 +306,12 @@ fi
 # names: the scales differ (claude reaches xhigh and max, the others stop at
 # high) and they move as the CLIs are updated.
 if [ "$REASONING_EFFORT" != auto ]; then
-  for ask_provider in $(printf '%s' "$PROVIDERS" | tr ',' ' '); do
-    oms_reasoning_provider_validate "$ask_provider" "$REASONING_EFFORT" || exit $?
+  IFS=',' read -r -a ask_targets <<< "$PROVIDERS"
+  for ask_target in "${ask_targets[@]}"; do
+    ask_provider="$(ma_target_provider "$ask_target")"
+    ask_model="$(ma_target_model "$ask_target")"
+    [ -n "$ask_model" ] || ask_model="$MODEL"
+    oms_reasoning_provider_validate "$ask_provider" "$REASONING_EFFORT" "$ask_model" || exit $?
   done
 fi
 export OMS_MODEL_EXPLICIT="$MODEL"
@@ -413,4 +433,9 @@ if [ "$EXPORT_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+if [ "$REQUIRE_COMPLETE" = 1 ] && ! ma_council_complete; then
+  ma_print_run_summary
+  echo 'error: complete council required; at least one seat did not finish' >&2
+  exit 1
+fi
 ma_quorum_exit

@@ -414,6 +414,11 @@ test_prepare_publish_recovery() {
 
   mkdir -p "$TMP/bin"
   make_repo "$repo" "$bare"
+  # The same public checkout toggle admitted locally must survive the bounded
+  # object-history scan; later fixtures still reject actual credential material.
+  printf 'persist-credentia''ls: false\n' > "$repo/checkout.yml"
+  "$REAL_GIT" -C "$repo" add checkout.yml
+  "$REAL_GIT" -C "$repo" commit -qm 'test: public checkout configuration'
   write_git_wrapper "$TMP/bin/git"
   write_gh_stub "$TMP/bin/gh"
   : > "$repo/git.log"
@@ -596,7 +601,8 @@ test_remote_and_recovery_hardening() {
   bare="$TMP/sensitive-final-tree.git"
   make_repo "$repo" "$bare"
   : > "$repo/git.log"; : > "$repo/gh.log"
-  printf '%s%s\n' 'ghp_' '12345678901234567890' > "$repo/leak.txt"
+  printf '\377\376\n' > "$repo/leak.txt"
+  printf '%s%s\n' 'ghp_' '12345678901234567890' >> "$repo/leak.txt"
   "$REAL_GIT" -C "$repo" add leak.txt
   "$REAL_GIT" -C "$repo" commit -qm 'test: add outbound fixture'
   rc=0
@@ -680,6 +686,37 @@ test_remote_and_recovery_hardening() {
     fail "native object graph was not scanned behind the replace ref"
   if "$REAL_GIT" --git-dir "$bare" show-ref --verify --quiet refs/heads/codex/draft-fixture; then
     fail "sensitive original behind replace ref reached the remote"
+  fi
+
+  # A filter failure in a raw object must not collapse into grep's no-match.
+  repo="$TMP/filter-scan-error"
+  bare="$TMP/filter-scan-error.git"
+  make_repo "$repo" "$bare"
+  printf 'FILTER_FAILURE_PAYLOAD\nordinary data\n' > "$repo/filter.txt"
+  "$REAL_GIT" -C "$repo" add filter.txt
+  "$REAL_GIT" -C "$repo" commit -qm 'test: filter error fixture'
+  local filter_bin="$TMP/filter-fail-bin" real_sed
+  real_sed="$(command -v sed)"
+  mkdir -p "$filter_bin"
+  cat > "$filter_bin/sed" <<'EOF'
+#!/usr/bin/env bash
+last=""
+for arg in "$@"; do last="$arg"; done
+if [ -f "$last" ] && [ "$(head -n 1 "$last")" = FILTER_FAILURE_PAYLOAD ]; then
+  printf 'partial ordinary output\n'
+  exit 2
+fi
+exec "$OMS_T_REAL_SED" "$@"
+EOF
+  chmod +x "$filter_bin/sed"
+  rc=0
+  PATH="$filter_bin:$PATH" OMS_T_REAL_SED="$real_sed" run_draft_pr "$repo" prepare \
+    --remote origin --base main --verify true > "$repo/filter-error.out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "filter failure should park, got $rc"
+  grep -Fq 'reason=publish-payload-scan-failed' "$repo/filter-error.out" ||
+    fail "filter failure was mistaken for a clean payload"
+  if "$REAL_GIT" --git-dir "$bare" show-ref --verify --quiet refs/heads/codex/draft-fixture; then
+    fail "filter failure reached the remote"
   fi
 
   # Scanner infrastructure is a tri-state gate. A matcher error is unknown,

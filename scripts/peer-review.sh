@@ -615,7 +615,7 @@ oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
 if { [ -n "$MODEL" ] || [ -n "$FALLBACK_MODEL" ]; } &&
-   [ "$(printf '%s' "$PROVIDERS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')" != 1 ]; then
+   [ "$(printf '%s\n' "$PROVIDERS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')" != 1 ]; then
   fail "--model/--fallback-model requires exactly one provider"
 fi
 if { [ -n "$MODEL" ] || [ -n "$FALLBACK_MODEL" ]; } && [ -n "$SYNTHESIZE" ]; then
@@ -767,6 +767,8 @@ if [ "$NO_DIFF" -eq 0 ]; then
   # config inspection rejects filters, includes, and fsmonitor first.
   oms_git_assert_safe_execution_config "$REPO" diff-read ||
     fail "unsafe Git execution config blocks review diff capture"
+  review_source_before="$(oms_git_tracked_state_fingerprint "$REPO")" || fail "cannot freeze review source"
+  review_head_before="$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null || true)"
   ma_safe_status "$REPO" > "$status_file"
   diff_base="$(ma_git_diff_base "$REPO")"
   # The checkout is worker-writable. Never let diff.external, a per-path
@@ -815,6 +817,30 @@ fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 export OMS_OPERATION_ID="${OMS_OPERATION_ID:-review-$timestamp}"
+# An outcome names exactly what was reviewed; parent recovery in another
+# checkout is never implied by a passing campaign review.
+review_scope_file="$ARTIFACT_DIR/_scope-$timestamp.json"
+python3 - "$REPO" "${diff_base:-}" "$REVIEW_DIFF_SHA" "$NO_DIFF" "${MA_SAFE_PATHS[@]}" > "$review_scope_file" <<'PYSCOPE' || fail "cannot record review scope"
+import json, os, subprocess, sys
+repo, base, digest, omitted = sys.argv[1:5]
+git = ["git", "-c", "core.fsmonitor=false", "-C", repo]
+env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+head_result = subprocess.run(git + ["rev-parse", "--verify", "HEAD"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+head = head_result.stdout.decode().strip() if head_result.returncode == 0 else ""
+paths = []
+if omitted != "1":
+    paths = subprocess.check_output(git + ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", base, "--"] + sys.argv[5:], env=env).decode("utf-8", "surrogateescape").split("\0")
+    base = subprocess.check_output(git + ["rev-parse", base], env=env).decode().strip()
+print(json.dumps({"schema": 1, "kind": "review-scope", "base": base,
+    "head": head, "diff_sha256": digest, "paths": [p for p in paths if p],
+    "diff_included": omitted != "1", "external_recovery": "not-covered"}, sort_keys=True))
+PYSCOPE
+if [ "$NO_DIFF" -eq 0 ]; then
+  [ "$(oms_git_tracked_state_fingerprint "$REPO")" = "$review_source_before" ] &&
+    [ "$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null || true)" = "$review_head_before" ] ||
+    fail "source changed while capturing review scope"
+fi
+echo "review-scope: $review_scope_file"
 slug="$(slugify "$PROMPT")"
 [ -n "$slug" ] || slug="review"
 declare -a pids artifacts provider_names alive last_arts

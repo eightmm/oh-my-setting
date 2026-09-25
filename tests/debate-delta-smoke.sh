@@ -62,6 +62,49 @@ write_echoing_artifact() {  # PATH MARKER CHANGED_TEXT
 REPO="$TMP/repo"
 mkdir -p "$REPO/.oms/artifacts/ask"
 
+# Strict deliberation is opt-in; transport success or task JSON is not enough.
+python3 - "$ROOT/scripts/lib" <<'PYTEST' || fail 'deliberation contract'
+import sys
+sys.path.insert(0, sys.argv[1])
+from peer_artifacts import valid_deliberation
+valid = """Answer: Connect the existing source guard.
+Alternatives: Reuse the guard; doing nothing retains revision mixing.
+Evidence: scripts/lib/peer-common.sh captures the tracked state.
+Counterargument: Rejecting concurrent edits interrupts planning.
+Risks: Concurrent changes now stop planning.
+Recommendation: Reuse the existing guard.
+Verification: Change a tracked file between rounds; expect refusal.
+Changed from previous round: none
+Remaining disagreements: none
+"""
+assert valid_deliberation(valid)
+assert valid_deliberation(valid.replace('Verification:', '**Verification** (provider-reported):'))
+assert not valid_deliberation(valid.replace('Verification: Change a tracked file between rounds; expect refusal.', '**Verification** (provider-reported):'))
+assert not valid_deliberation(valid.replace('Verification:', '**Verification** (unterminated:'))
+assert not valid_deliberation('{"tasks": [{"id": "t1"}]}')
+assert valid_deliberation(valid.replace("Evidence:", 'Evidence: A previous seat returned `{"tasks": []}`.'))
+for key in ['Answer', 'Alternatives', 'Evidence', 'Counterargument', 'Risks', 'Recommendation', 'Verification']:
+    broken = '\n'.join(key + ':' if line.startswith(key + ':') else line for line in valid.splitlines())
+    assert not valid_deliberation(broken), key
+assert not valid_deliberation(valid.replace('Remaining disagreements: none', 'Remaining disagreements:') + '\nmodel-result: selected=gpt-6-astra')
+PYTEST
+strict_artifact="$TMP/deliberation-json.md"
+printf '## Output\n{"tasks": []}\n## Exit\n0\n' > "$strict_artifact"
+MA_DELIBERATION=1
+[ "$(ma_council_nonanswer "$strict_artifact")" = invalid-deliberation ] || fail 'JSON-only seat accepted'
+OMS_COUNCIL_QUALITY=0
+[ "$(ma_council_nonanswer "$strict_artifact")" = invalid-deliberation ] || fail 'strict contract bypassed'
+(
+  ma_thread_append() {
+    [ "$8" = thin ] && grep -Fq invalid-deliberation "$4" || exit 1
+    : > "$TMP/thread-quality-ok"
+  }
+  ma_thread_append_nonanswer "$REPO" strict codex invalid-deliberation "$strict_artifact" invalid-deliberation
+) || fail 'strict deliberation failure could not be recorded'
+[ -f "$TMP/thread-quality-ok" ] || fail 'strict deliberation failure note missing'
+unset OMS_COUNCIL_QUALITY MA_DELIBERATION
+[ -z "$(ma_council_nonanswer "$strict_artifact")" ] || fail 'ordinary council contract changed'
+
 # Repeatable byte baseline; no model calls and no token-count claim.
 long="$REPO/.oms/artifacts/ask/long.md"
 {
@@ -556,5 +599,31 @@ assert not debate_unchanged('Answer:\nposition\nChanged from previous round:\nno
 assert not debate_unchanged('Answer:\nposition\nChanged from previous round:\nnone\nOther correction:\nrace')
 assert not debate_unchanged('Answer:\nposition\nChanged from previous round:\nnone\n```text\nRemaining disagreements:\nrace\n```')
 PY
+
+# Synthesis prose may quote status strings; only the engine's final seats can
+# authorize automatic consumption. A dropped rebuttal retains its old answer
+# for humans, but must not count as a complete council.
+(
+  total=2 ok=2
+  provider_names=(codex claude)
+  alive=(1 1)
+  seat_exit=(0 0)
+  seat_quality=('' '')
+  ma_council_complete || fail 'two completed seats were rejected'
+  alive[1]=0
+  if ma_council_complete; then fail 'dropped final seat counted as complete'; fi
+  alive[1]=1
+  seat_quality[1]=truncated
+  if ma_council_complete; then fail 'truncated answer counted as complete'; fi
+  seat_quality[1]=''
+  seat_exit[1]=1
+  if ma_council_complete; then fail 'failed seat counted as complete'; fi
+  seat_exit[1]=0
+  ok=1
+  if ma_council_complete; then fail 'partial quorum counted as complete'; fi
+)
+if bash "$ROOT/scripts/peer-ask.sh" --require-complete --dry-run --prompt test >/dev/null 2>&1; then
+  fail 'dry-run must not attest a complete council'
+fi
 
 echo "debate-delta-smoke: ok"

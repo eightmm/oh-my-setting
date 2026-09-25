@@ -23,6 +23,86 @@ may follow a clear implementation request; a Draft PR requires explicit current
 or standing repo authority. Existing-branch updates, push, merge, ready, tag,
 and release remain separate authority decisions.
 
+## Automatic GPT-6 and Claude collaboration
+
+When the user authorizes automatic discussion plus implementation with Codex and
+Claude Code, select `oms autopilot --collaboration auto` for a multi-step goal.
+The parent handles propose, exact proposal review, run and recovery without
+asking the user to approve routine transitions. A capability question alone
+does not start the loop. Keep small, clear edits local instead of paying for a
+planning council.
+
+The runtime triggers a two-seat GPT-6/Claude council at initial planning
+and at the single permitted remainder proposal. The Codex seat defaults to Astra
+and follows an explicit Codex planner model; Claude keeps its normal recovery
+router unless a Claude planner model is pinned. Each seat answers independently,
+then receives one rebuttal round. Both must complete; missing or dropped answers
+stop planning. The bounded synthesis feeds decomposition as untrusted evidence.
+Planner reasoning effort controls decomposition only; the council retains each
+provider's defaults. Do not forward it globally: provider effort scales differ,
+and changing the other seat's effort changes its cost and configuration.
+Planning prints the council artifact directory and log before dispatch. Inspect
+that retained log after a timeout or interruption; an absent child summary is
+not evidence that the council never started or that it is safe to repeat.
+Every seat must satisfy `--deliberation`: nonempty alternatives, evidence,
+counterargument, verification and explicit deltas/disagreements. Task JSON alone
+is rejected. The council receives contract data, not decomposition instructions.
+This is a response-structure check, not proof of sound reasoning.
+The parent checks the original council artifacts when needed, resolves disputed
+claims against source/tests, and reviews the resulting exact proposal bytes.
+Agreement never substitutes for the acceptance command.
+
+Choose the implementation transport from the task and repository evidence:
+Codex defaults to GPT-6 Sol; `--worker claude` lets Claude Code implement and
+selects GPT-6 Astra for final review. Keep one implementation transport per run
+so the opposite transport remains an independent reviewer. Do not force mixed
+assignments that would make the reviewer an author. Codex assignments may name
+GPT-6 Luna, Sol or Astra explicitly; missing or older assignment models and
+non-GPT-6 fallbacks are rejected. Claude retains the existing model router.
+
+The mode binds into the durable receipt, requires gated review, and survives
+re-entry; it cannot be silently disabled while resuming. Existing scope, timeout,
+cycle, one-shot repair and remainder limits still apply. `--auto-repair` remains
+an explicit bounded option. After a failure, inspect its evidence before retrying;
+do not auto-enable `--retry-known`, expand scope, weaken verification, or ask the
+council to override a policy denial. Completion requires acceptance and review.
+Report completion or the material blocker; do not emit unchanged heartbeats.
+
+A campaign review covers only its frozen base-to-HEAD diff. `peer-review` writes
+an exact diff digest and path list in its `review-scope` artifact, explicitly
+excluding external recovery changes. Before reporting the whole user request
+complete, the parent must include every parent-authored recovery patch in a
+separate peer review at its exact current diff, or a combined final review.
+Keep each patch's base/diff digest and review outcome; tests alone do not make
+an external recovery patch peer-reviewed. Never widen a live campaign's scope
+or treat its `done` receipt as coverage of another checkout.
+
+For demonstrably snapshot-pure acceptance, a project may explicitly put
+`- Acceptance reuse: same-run` in PROJECT.md's Verification section. This asserts
+all result-affecting inputs are tracked or manifest-bound bytes/modes, with external tools
+stable for the run; network, clock, hardware, other filesystem metadata and mutable ignored inputs do not
+qualify. Autopilot may reuse only the latest supervised pass immediately after
+the same goal-drive run, for at most ten minutes from acceptance start, matching command, plan, spec,
+manifest, repository state, runner and environment. Missing/stale/mismatched
+proof runs fresh; default contracts always run fresh. Peer-review's verifier
+and post-review acceptance remain fresh, as do release/publication gates.
+Raw tracked bytes are bound independently of Git's text normalization; trees
+over the 64 MiB reuse budget or containing submodules stay fresh.
+Reuse prints its source receipt and never refreshes that receipt's timestamp.
+
+Serialize repository-local peer calls and a full `check.sh` gate: even read-only
+peers append artifacts under `.oms/`, which the gate correctly treats as changes
+to protected user state. Finish model calls before starting that gate.
+
+Keep known one-line fixes local unless exercising collaboration is itself the
+request. Spend a council on a material unresolved decision, and use one bounded
+rebuttal round when it discriminates alternatives. A completed call, consensus,
+and a valid response format are separate from substantive reasoning and tests.
+
+This is an agent-driven loop while a parent is running, not an always-on daemon
+or an app notification service. Session wakeups need a separately configured
+scheduler. Publication and expensive compute retain their own authorization.
+
 ## Task Loop
 
 1. Orient: inspect repository instructions and the worktree; consult existing

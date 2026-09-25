@@ -2,7 +2,8 @@
 name: oms-agent-harness
 description: >
   Use OMS for shared task state, graph-guided context, agent collaboration,
-  recovery or verified landing; ordinary self-contained edits need no harness workflow.
+  authorized FSD-style automatic collaboration, recovery or verified landing;
+  ordinary self-contained edits need no harness workflow.
 ---
 
 # Agent Harness
@@ -44,6 +45,12 @@ Work locally unless the user or applicable instructions explicitly request
 subagents or delegation. Task size or routine complexity alone is not permission
 to launch a worker. Questions do not authorize edits or autopilot.
 Avoid duplicate collectors, worker calls, or full-conversation replay.
+
+For an authorized FSD-style or automatic discussion-and-implementation request
+using Codex and Claude Code, use `autopilot --collaboration auto` after reading
+[autonomy-loop.md](references/autonomy-loop.md). The parent starts the workflow,
+reviews proposals, runs and recovers it internally until completion or a material
+blocker. This is permission for the requested goal, not future unrelated goals.
 
 For skill evaluation/import, load
 [skill-lifecycle.md](references/skill-lifecycle.md). For MCP Tasks or Codex

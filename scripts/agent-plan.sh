@@ -51,6 +51,7 @@ ALLOWED=""
 FORBIDDEN=""
 VERIFY=""
 ACCEPT=""
+REUSE_PASS_RUN=""
 ROLE=""
 ASSIGNMENT="{}"
 STATE_FILTER=""
@@ -182,7 +183,10 @@ Commands:
                                      emits every task's `show` view at once.
   ready                              Print ids actionable now (deps done).
   status [--json]                    Typed plan snapshot or human summary.
-  accept                             Run the stored acceptance command from the
+  accept [--reuse-pass RUN_ID]        Reuse a matching pass only when PROJECT.md
+                                     declares Acceptance reuse: same-run; otherwise
+                                     run fresh. Reuse expires after ten minutes.
+                                     Run the stored acceptance command from the
                                      repo root (outside the plan lock), append
                                      one row to .oms/plan/progress.jsonl, and
                                      exit 0 on pass / 3 on fail.
@@ -257,6 +261,7 @@ while [ "$#" -gt 0 ]; do
     --role) [ "$#" -ge 2 ] || fail "--role requires a name"; ROLE="$2"; shift 2 ;;
     --forbidden) [ "$#" -ge 2 ] || fail "--forbidden requires list"; FORBIDDEN="$2"; shift 2 ;;
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; shift 2 ;;
+    --reuse-pass) [ "$#" -ge 2 ] || fail "--reuse-pass requires a run id"; REUSE_PASS_RUN="$2"; shift 2 ;;
     --accept) [ "$#" -ge 2 ] || fail "--accept requires command"; ACCEPT="$2"; shift 2 ;;
     --accept-files) [ "$#" -ge 2 ] || fail "--accept-files requires a value"; ACCEPT_FILES="$2"; shift 2 ;;
     --owner-id) [ "$#" -ge 2 ] || fail "--owner-id requires a value"; OWNER_ID="$2"; shift 2 ;;
@@ -297,6 +302,7 @@ done
   fail "--check is valid only with recover-lease or retire"
 [ "$APPLY" = 0 ] || [ "$ACTION" = retire ] || fail "--apply is valid only with retire"
 [ "$APPLY" = 0 ] || [ "$CHECK_ONLY" = 0 ] || fail "retire --apply and --check are mutually exclusive"
+[ -z "$REUSE_PASS_RUN" ] || [ "$ACTION" = accept ] || fail "--reuse-pass requires accept"
 PLAN_READ_ONLY=0
 case "$ACTION" in
   show|evidence-snapshot|list|ready|status|brief) PLAN_READ_ONLY=1 ;;
@@ -2029,7 +2035,7 @@ for index, rel in enumerate(files):
     value = digest.hexdigest()
     if value != expected.get("sha256"):
         raise SystemExit(3)
-    current.append({"path": rel, "sha256": value})
+    current.append({"path": rel, "sha256": value, "mode": stat.S_IMODE(info.st_mode)})
 if files != sorted(set(files)):
     raise SystemExit(2)
 print(hashlib.sha256(json.dumps(
@@ -2089,6 +2095,16 @@ command(["git", "-C", repo, "ls-files", "--stage", "-z"])
 command(["git", "-c", "core.fsmonitor=false", "-c", "diff.external=",
          "-C", repo, "diff", "--no-ext-diff", "--no-textconv",
          "--binary", "HEAD", "--"])
+# Git may ignore executable changes when core.filemode=false. A local
+# acceptance can still observe them, including on manifest-bound files.
+tracked = command(["git", "-C", repo, "ls-files", "-z"])
+for raw in sorted(value for value in tracked.split(b"\0") if value):
+    target = os.path.join(repo, os.fsdecode(raw))
+    try:
+        mode = os.lstat(target).st_mode
+    except FileNotFoundError:
+        mode = 0
+    digest.update(raw + b"\0mode\0" + str(mode).encode() + b"\0")
 untracked = command(["git", "-C", repo, "ls-files", "--others", "--exclude-standard", "-z"])
 for raw in sorted(value for value in untracked.split(b"\0") if value):
     rel = os.fsdecode(raw)
@@ -2096,7 +2112,7 @@ for raw in sorted(value for value in untracked.split(b"\0") if value):
     if os.path.commonpath((repo, os.path.realpath(target))) != repo:
         raise SystemExit(2)
     info = os.lstat(target)
-    digest.update(raw + b"\0" + str(stat.S_IFMT(info.st_mode)).encode() + b"\0")
+    digest.update(raw + b"\0" + str(info.st_mode).encode() + b"\0")
     if stat.S_ISLNK(info.st_mode):
         value = os.fsencode(os.readlink(target))
         total += len(value)
@@ -2165,6 +2181,29 @@ PY
     retire_accept_context_matches ||
       acceptance_integrity_error acceptance-retire-context-changed \
         "plan, HEAD, ref, generation, or clean status changed before retirement acceptance"
+  fi
+
+  # Only a run-bound row can later be reused, and only a reuse request consumes
+  # one; without either, the context proof is unusable, so skip its helpers.
+  reuse_context=""
+  reuse_bound=0
+  [ -z "${OMS_GOAL_RUN_ID:-}$REUSE_PASS_RUN" ] || reuse_bound=1
+  if [ "$reuse_bound" = 1 ]; then
+    reuse_context="$(python3 "$ROOT/scripts/lib/acceptance-reuse.py" context "$REPO" "$0" 2>/dev/null || true)"
+    reuse_context="${reuse_context//$'\r'/}"
+  fi
+  if [ -n "$REUSE_PASS_RUN" ] && [ -z "$retire_proof" ] && [ -n "$reuse_context" ]; then
+    reuse_result="$(python3 "$ROOT/scripts/lib/acceptance-reuse.py" check "$progress" \
+      "$REUSE_PASS_RUN" "$reuse_context" "$plan_before" "$repo_before" \
+      "$manifest_before" "$accept_cmd" 2>/dev/null)" || reuse_result=""
+    if [ -n "$reuse_result" ] &&
+        [ "$(acceptance_repo_snapshot)" = "$repo_before" ] &&
+        [ "$(oms_sha256_file "$PLAN_FILE")" = "$plan_before" ] &&
+        [ "$(acceptance_manifest)" = "$manifest_before" ] &&
+        [ "$(python3 "$ROOT/scripts/lib/acceptance-reuse.py" context "$REPO" "$0" | tr -d '\r')" = "$reuse_context" ]; then
+      printf '%s\n' "${reuse_result//$'\r'/}"
+      exit 0
+    fi
   fi
 
   timeout_value="${OMS_PLAN_ACCEPT_TIMEOUT:-10m}"
@@ -2295,6 +2334,12 @@ PY
   git_ref="$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null || true)"
   git_ref="${git_ref//$'\r'/}"
   [ -n "$git_ref" ] || git_ref="DETACHED@$base_sha"
+  if [ "$reuse_bound" = 1 ]; then
+    reuse_after="$(python3 "$ROOT/scripts/lib/acceptance-reuse.py" context "$REPO" "$0" 2>/dev/null || true)"
+    reuse_after="${reuse_after//$'\r'/}"
+    [ "$reuse_context" = "$reuse_after" ] || reuse_context=""
+  fi
+  OMS_PA_REUSE="$reuse_context" OMS_PA_MANIFEST="$manifest_before" \
   OMS_PA_TS="$ts" OMS_PA_SHA="$base_sha" OMS_PA_VERDICT="$verdict" \
     OMS_PA_EXIT="$accept_exit" OMS_PA_DIGEST="$out_digest" OMS_PA_DUR="$duration" \
     OMS_PA_ACCEPT="$accept_digest" OMS_PA_RUN="${OMS_GOAL_RUN_ID:-}" \
@@ -2320,6 +2365,8 @@ row = {
     "accept_sha256_full": os.environ["OMS_PA_ACCEPT"],
     "output_sha256_full": os.environ["OMS_PA_DIGEST"],
     "repo_snapshot_sha256": os.environ["OMS_PA_REPO"],
+    "reuse_context_sha256": os.environ["OMS_PA_REUSE"],
+    "manifest_sha256": os.environ["OMS_PA_MANIFEST"],
 }
 if os.environ.get("OMS_PA_RUN"): row["run_id"] = os.environ["OMS_PA_RUN"]
 if os.environ.get("OMS_PA_CYCLE"): row["cycle"] = int(os.environ["OMS_PA_CYCLE"])

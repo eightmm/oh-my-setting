@@ -1,0 +1,32 @@
+name: check
+
+# Pull requests plus manual runs: a branch push that opens a PR would otherwise
+# run the same suite twice.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: sync locked environment
+        run: uv sync --locked
+      # Same entrypoint as local verification. `tests` is the CPU suite
+      # apply-project-template.sh --python-ci required; point it at your own
+      # CPU test paths or node IDs if the layout differs. An empty or missing
+      # selection fails rather than passing.
+      - name: check fast
+        run: bash scripts/check.sh fast --jobs 2 tests
