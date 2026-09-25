@@ -4516,7 +4516,7 @@ PY_REVIEW
   python3 - "$review" <<'PY_REVIEW'
 from pathlib import Path
 import sys
-Path(sys.argv[1]).write_text('api_' + 'token=' + 'x' * 12072 + '\n' + 'gh' + 'p_' + '1' * 30)
+Path(sys.argv[1]).write_text('api_' + 'to' + 'ken=' + 'x' * 12072 + '\n' + 'gh' + 'p_' + '1' * 30)
 PY_REVIEW
   (
     . "$ROOT/scripts/lib/peer-common.sh"
@@ -9260,7 +9260,7 @@ test_scrubber_passes_harness_sources() {
   (cd "$ROOT" && git ls-files -z -- . ':(exclude).env*' ':(exclude,glob).github/**' |
     while IFS= read -r -d '' file; do [ ! -f "$file" ] || cat "$file"; done) > "$bundle"
   if bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_has_sensitive_content '$bundle'"; then
-    bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; grep -Ein \"\$(agent_memory_sensitive_re)\" '$bundle' | head -n 5" >&2 || true
+    bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_sensitive_report '$bundle'" >&2 || true
     fail "harness sources must pass the outbound scrubber (self-review regression)"
   fi
 }
