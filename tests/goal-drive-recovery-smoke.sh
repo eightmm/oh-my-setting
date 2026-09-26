@@ -1373,6 +1373,8 @@ grep -Fq 'reason=acceptance-timeout' "$TMP/accept-timeout.out" ||
 # Acceptance cleanup owns nested process groups/sessions too. A verifier may
 # daemonize a setsid child before its shell reaches the timeout; neither that
 # PID nor a delayed write may survive the typed timeout receipt.
+# Include slow startup explicitly: a one-second budget can kill the parent
+# before it creates the descendant, testing scheduler speed instead of cleanup.
 if command -v setsid >/dev/null 2>&1; then
   accept_escape_repo="$TMP/accept-setsid-timeout"
   make_case "$accept_escape_repo" tracked
@@ -1380,11 +1382,11 @@ if command -v setsid >/dev/null 2>&1; then
   accept_escape_marker="$TMP/accept-setsid-timeout.leaked"
   "$ROOT/scripts/agent-plan.sh" --repo "$accept_escape_repo" init \
     --goal setsid-timeout \
-    --accept 'setsid bash -c '\''trap "" TERM HUP INT; printf "%s\n" "$$" > "$1"; sleep 3; : > "$2"'\'' child "$OMS_ESCAPE_PID" "$OMS_ESCAPE_MARKER" & wait' \
+    --accept 'sleep 1.25; setsid bash -c '\''trap "" TERM HUP INT; printf "%s\n" "$$" > "$1"; sleep 5; : > "$2"'\'' child "$OMS_ESCAPE_PID" "$OMS_ESCAPE_MARKER" & wait' \
     >/dev/null
   rc=0
   OMS_ESCAPE_PID="$accept_escape_pid" OMS_ESCAPE_MARKER="$accept_escape_marker" \
-    OMS_PLAN_ACCEPT_TIMEOUT=1s "$ROOT/scripts/agent-plan.sh" \
+    OMS_PLAN_ACCEPT_TIMEOUT=3s "$ROOT/scripts/agent-plan.sh" \
     --repo "$accept_escape_repo" accept > "$TMP/accept-setsid-timeout.out" 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "setsid acceptance timeout should fail closed, got $rc"
   grep -Fq 'reason=acceptance-timeout' "$TMP/accept-setsid-timeout.out" ||
@@ -1393,9 +1395,9 @@ if command -v setsid >/dev/null 2>&1; then
   accept_escape_child="$(tr -d '\r\n' < "$accept_escape_pid")"
   ! kill -0 "$accept_escape_child" 2>/dev/null ||
     fail "setsid acceptance child survived timeout"
-  # Outwait the fixture's 3s delayed write with a real margin (thin
+  # Outwait the fixture's 5s delayed write with a real margin (thin
   # windows read a real leak as green on a slow runner).
-  sleep 4.5
+  sleep 5.5
   [ ! -e "$accept_escape_marker" ] ||
     fail "setsid acceptance child wrote after timeout"
 fi
