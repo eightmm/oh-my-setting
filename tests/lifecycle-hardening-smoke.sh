@@ -783,6 +783,8 @@ user = {"type": "command", "command": "echo preserve-user", "timeout": 5}
 data = {"description": "Keep this custom description", "custom": {"keep": True},
         "hooks": {"UserPromptSubmit": [{"hooks": [owned, custom, user]}],
                   "PostToolUse": [{"hooks": [dict(owned, command=prefix + "telemetry-hook")]}],
+                  # Retired from the native plugin, still retired from an old bridge.
+                  "SubagentStop": [{"hooks": [dict(owned, command=prefix + "telemetry-hook"), user]}],
                   "SessionStart": [{"hooks": [owned], "custom": "preserve-whole-group"}]}}
 hooks = area / "hooks.json"
 original = (json.dumps(data, indent=4) + "\r\n").encode()
@@ -823,6 +825,8 @@ changed = json.loads(hooks.read_bytes())
 assert changed["custom"] == data["custom"] and changed["description"] == data["description"]
 assert changed["hooks"]["UserPromptSubmit"][0]["hooks"] == [custom, user]
 assert changed["hooks"]["PostToolUse"] == []
+assert changed["hooks"]["SubagentStop"] == [{"hooks": [user]}]
+assert "SubagentStop" not in json.loads((native / "hooks.json").read_text())["hooks"]
 assert changed["hooks"]["SessionStart"] == data["hooks"]["SessionStart"]
 backup = hooks.with_name(hooks.name + ".oms-bridge-" + hashlib.sha256(original).hexdigest() + ".bak")
 assert backup.read_bytes() == original

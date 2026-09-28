@@ -1125,7 +1125,9 @@ PY
 # receipt; --repair re-runs install-claude-hooks.sh, which is the remedy.
 check_claude_hooks() {
   local settings="${OMS_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
-  local missing
+  local expected
+  local problems
+  local errlog
 
   if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" != "1" ]; then
     echo "note: claude hooks check disabled (OH_MY_SETTING_CLAUDE_HOOKS=0)"
@@ -1150,52 +1152,61 @@ check_claude_hooks() {
     FAILED=1
     return 0
   fi
-  missing="$(python3 - "$settings" <<'PY'
-import json, sys
+  # The installer's own expected list and ownership rules are the contract:
+  # a doctor holding a copy would certify whatever list it shipped with.
+  errlog="$(mktemp "${TMPDIR:-/tmp}/oms-claude-hooks.XXXXXX")"
+  if ! expected="$("$INSTALL_ROOT/scripts/install-claude-hooks.sh" --print-expected 2>"$errlog")"; then
+    echo "fail: claude hooks: cannot read the expected surface list from $INSTALL_ROOT"
+    sed -n '1,3p' "$errlog" | sed 's/^/  /'
+    rm -f "$errlog"
+    FAILED=1
+    return 0
+  fi
+  rm -f "$errlog"
+  if ! problems="$(OMS_DOCTOR_EXPECTED="$expected" OMS_DOCTOR_ROOT="$INSTALL_ROOT" \
+    python3 - "$settings" <<'PY'
+import importlib.util, json, os, sys
 
+root = os.environ["OMS_DOCTOR_ROOT"]
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location(
+    "oms_claude_hooks", os.path.join(root, "scripts", "lib", "claude-hook-surfaces.py"))
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
 try:
     with open(sys.argv[1], encoding="utf-8") as fh:
         settings = json.load(fh)
 except Exception:
-    print("unreadable settings JSON")
+    print("missing: unreadable settings JSON")
     sys.exit(0)
 hooks = settings.get("hooks", {}) if isinstance(settings, dict) else {}
-
-def registered(event, mark):
-    entries = hooks.get(event)
-    for entry in entries if isinstance(entries, list) else []:
-        for h in entry.get("hooks", []) if isinstance(entry, dict) else []:
-            if mark in str(h.get("command", "")):
-                return True
-    return False
-
-for event, mark in (
-    ("UserPromptSubmit", "skill-router.sh"),
-    ("Stop", "turn-guard.sh"),
-    ("PostToolUseFailure", "fail-ledger-hook.sh"),
-    ("PostToolUse", "fail-ledger-hook.sh"),
-    ("PostToolUse", "syntax-guard-hook.sh"),
-    ("PreCompact", "precompact-handoff.sh"),
-    ("SessionEnd", "precompact-handoff.sh"),
-    ("SessionStart", "resume-hook.sh"),
-    ("SessionStart", "telemetry-hook.sh"),
-    ("SubagentStop", "telemetry-hook.sh"),
-    ("SessionEnd", "telemetry-hook.sh"),
-):
-    if not registered(event, mark):
-        print("%s -> %s" % (event, mark))
+if not isinstance(hooks, dict):
+    hooks = {}
+surfaces = json.loads(os.environ["OMS_DOCTOR_EXPECTED"])["surfaces"]
+problems, retired = lib.audit(hooks, surfaces, root, [root])
+for row in surfaces:
+    label = "%s -> %s" % (row["event"], row["script"])
+    for kind, detail in problems[(row["event"], row["script"])]:
+        print("%s: %s%s" % (kind, label, " (%s)" % detail if detail else ""))
+for event, script in retired:
+    print("retired: %s -> %s (still registered)" % (event, script))
 # User-owned status lines are preserved by the installer and count as wired.
 for key in ("statusLine", "subagentStatusLine"):
     status = settings.get(key) if isinstance(settings, dict) else None
     if not (isinstance(status, dict) and status.get("command")):
-        print(key)
+        print("missing: %s" % key)
 PY
-)"
-  if [ -n "$missing" ]; then
+)"; then
+    echo "fail: claude hooks: cannot audit $settings against $INSTALL_ROOT"
+    FAILED=1
+    return 0
+  fi
+  problems="$(oms_strip_cr "$problems")"
+  if [ -n "$problems" ]; then
     while IFS= read -r line; do
-      echo "fail: claude hook missing: $line"
+      echo "fail: claude hook $line"
     done <<EOF
-$missing
+$problems
 EOF
     echo "hint: run $INSTALL_ROOT/scripts/install-claude-hooks.sh"
     FAILED=1
@@ -1206,10 +1217,11 @@ EOF
 
 # Three layers have to agree before a hook surface is actually live: the list
 # this checkout would install, the registrations in the live settings.json, and
-# whether the hook has been heard from lately. check_claude_hooks above only
-# compares the first two, and against a list it carries itself — so an install
+# whether the hook has been heard from lately. check_claude_hooks above
+# compares the first two using the installed checkout's list, so an install
 # that predates a new surface reports "registered" for a set that no longer
-# matches the source. This section asks the source for the list instead.
+# matches the source. This section asks the source for the list instead, and
+# expects the live commands to point at the install owner.
 check_hook_surfaces() {
   local settings="${OMS_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
   local project_dir="${OMS_DOCTOR_PROJECT_DIR:-$PWD}"
@@ -1244,14 +1256,23 @@ check_hook_surfaces() {
   fi
 
   OMS_DOCTOR_EXPECTED="$expected" \
+  OMS_DOCTOR_SOURCE_ROOT="$ROOT" \
+  OMS_DOCTOR_COMMAND_ROOT="$INSTALL_ROOT" \
   OMS_DOCTOR_SETTINGS="$settings" \
   OMS_DOCTOR_EVENTS="$project_dir/.oms/hooks/events.jsonl" \
   OMS_DOCTOR_RECEIPT_SCHEMA="$receipt_schema" \
   OMS_DOCTOR_EVIDENCE_DAYS="${OMS_SURFACE_EVIDENCE_DAYS:-14}" \
     python3 <<'PY' || status=$?
-import datetime, json, os, shlex, sys
+import datetime, importlib.util, json, os, sys
 
 expected = json.loads(os.environ["OMS_DOCTOR_EXPECTED"])
+source_root = os.environ["OMS_DOCTOR_SOURCE_ROOT"]
+command_root = os.environ["OMS_DOCTOR_COMMAND_ROOT"]
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location(
+    "oms_claude_hooks", os.path.join(source_root, "scripts", "lib", "claude-hook-surfaces.py"))
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
 settings_path = os.environ["OMS_DOCTOR_SETTINGS"]
 events_path = os.environ["OMS_DOCTOR_EVENTS"]
 receipt_schema = os.environ["OMS_DOCTOR_RECEIPT_SCHEMA"].strip()
@@ -1276,20 +1297,10 @@ else:
         hooks = settings.get("hooks", {}) if isinstance(settings, dict) else {}
     except Exception as exc:
         print("fail: settings file is not readable JSON (%s)" % exc)
-
-def registered(event, script):
-    for entry in hooks.get(event) or []:
-        if not isinstance(entry, dict):
-            continue
-        for hook in entry.get("hooks", []) or []:
-            command = str(hook.get("command", ""))
-            try:
-                argv = shlex.split(command)
-            except ValueError:
-                argv = command.split()
-            if script in {os.path.basename(a.replace("\\", "/")) for a in argv}:
-                return True
-    return False
+if not isinstance(hooks, dict):
+    hooks = {}
+problems, retired = lib.audit(
+    hooks, expected["surfaces"], command_root, [command_root, source_root])
 
 # Last time each action was recorded. Timestamps are fixed-width UTC
 # ("2026-08-07T04:57:48Z"), so string order is time order and no parsing is
@@ -1327,13 +1338,17 @@ cutoff = (
     datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
 ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+HEADINGS = {"missing": "MISSING REGISTRATION", "duplicate": "DUPLICATE REGISTRATION",
+            "drift": "REGISTRATION DRIFT"}
 missing = 0
 stale = 0
 for surface in expected["surfaces"]:
     event, script = surface["event"], surface["script"]
     label = "%s -> %s" % (event, script)
-    if not registered(event, script):
-        print("MISSING REGISTRATION: %s" % label)
+    issues = problems[(event, script)]
+    for kind, detail in issues:
+        print("%s: %s%s" % (HEADINGS[kind], label, " (%s)" % detail if detail else ""))
+    if issues:
         missing += 1
         continue
     action = EVIDENCE.get(script)
@@ -1354,6 +1369,10 @@ for surface in expected["surfaces"]:
     else:
         print("ok: %s (registered; last %s %s)" % (label, action, seen))
 
+for event, script in retired:
+    print("RETIRED REGISTRATION: %s -> %s (still registered)" % (event, script))
+    missing += 1
+
 source_schema = expected["hooks_schema"]
 if receipt_schema == "skip":
     print("note: no valid install receipt; hooks_schema %d unverified" % source_schema)
@@ -1371,7 +1390,9 @@ elif receipt_schema != str(source_schema):
 else:
     print("ok: hooks_schema %d matches the install receipt" % source_schema)
 
-# Only a missing registration is a failure. Silence can be normal — a machine
+# Only drift from the installer contract (a missing, duplicate or retired
+# registration, or a wrong command, timeout or matcher) is a failure. Silence
+# can be normal — a machine
 # that has not compacted, a repository nobody worked in this fortnight — and a
 # schema stamp is a staleness hint, not a broken surface.
 if stale:

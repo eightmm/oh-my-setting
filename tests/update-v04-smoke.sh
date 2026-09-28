@@ -102,6 +102,7 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   # must come from the same tree — a working-tree doctor against a HEAD-clone
   # installer fails on any hook the working tree added.
   cp "$ROOT/scripts/install-claude-hooks.sh" "$source/scripts/install-claude-hooks.sh"
+  cp "$ROOT/scripts/lib/claude-hook-surfaces.py" "$source/scripts/lib/claude-hook-surfaces.py"
   cp "$ROOT/scripts/claude-statusline.py" "$source/scripts/claude-statusline.py"
   cp "$ROOT/scripts/claude-subagent-statusline.py" "$source/scripts/claude-subagent-statusline.py"
   cp "$ROOT/scripts/telemetry-hook.sh" "$source/scripts/telemetry-hook.sh"
@@ -349,7 +350,8 @@ test_schema1_update_preserves_channel_pin_and_cron() {
 
   git clone -q "$ROOT" "$source"
   for file in scripts/update.sh scripts/link.sh scripts/doctor.sh \
-    scripts/install-claude-hooks.sh scripts/claude-statusline.py \
+    scripts/install-claude-hooks.sh scripts/lib/claude-hook-surfaces.py \
+    scripts/claude-statusline.py \
     scripts/claude-subagent-statusline.py scripts/telemetry-hook.sh \
     scripts/precompact-handoff.sh scripts/resume-hook.sh \
     scripts/install-mcp.sh scripts/install-agy-plugin.sh \
@@ -779,6 +781,7 @@ test_missing_codex_degrades_and_dead_ref_is_fail_closed() {
   cp "$ROOT/tools.lock.json" "$source/tools.lock.json"
   cp "$ROOT/scripts/lib/tool-lock.py" "$source/scripts/lib/tool-lock.py"
   cp "$ROOT/scripts/install-claude-hooks.sh" "$source/scripts/install-claude-hooks.sh"
+  cp "$ROOT/scripts/lib/claude-hook-surfaces.py" "$source/scripts/lib/claude-hook-surfaces.py"
   cp "$ROOT/scripts/claude-statusline.py" "$source/scripts/claude-statusline.py"
   cp "$ROOT/scripts/claude-subagent-statusline.py" "$source/scripts/claude-subagent-statusline.py"
   cp "$ROOT/scripts/telemetry-hook.sh" "$source/scripts/telemetry-hook.sh"

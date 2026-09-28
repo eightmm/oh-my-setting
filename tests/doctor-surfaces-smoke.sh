@@ -4,7 +4,8 @@ set -euo pipefail
 # Smoke tests for the hook-surface report: install-claude-hooks.sh
 # --print-expected, `doctor.sh --surfaces` comparing source against a live
 # settings.json and the harness event stream, the receipt's hooks_schema
-# stamp, the displaced-user-config notice in the default doctor run, and the
+# stamp, installer convergence and ownership, registration drift in both doctor
+# modes, the displaced-user-config notice in the default doctor run, and the
 # gate that forces a schema bump when the expected list changes.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,8 +14,8 @@ trap 'rm -rf "$TMP"' EXIT
 
 # The expected surface list, recorded. Both literals move together or the gate
 # below fails; see test_expected_surface_list_is_bump_gated.
-EXPECTED_HOOKS_SCHEMA=4
-EXPECTED_SURFACES_SHA256=2b63d8c255ceb2c20471552ae8a9283e35eb17d2f01f64188053e0221666fca9
+EXPECTED_HOOKS_SCHEMA=5
+EXPECTED_SURFACES_SHA256=d306250d3243748dcedb31eb332b5b9d881cf7b598f14f1b8c8b2c3a1989b934
 
 fail() {
   echo "FAIL: $*" >&2
@@ -124,62 +125,285 @@ assert ("PostToolUse", "fail-ledger-hook.sh") in pairs, pairs
 assert ("UserPromptSubmit", "skill-router.sh") in pairs, pairs
 assert ("PreToolUse", "tier-guard-hook.sh") not in pairs, pairs
 assert ("PostToolUse", "telemetry-hook.sh") not in pairs, pairs
+assert ("SubagentStop", "telemetry-hook.sh") not in pairs, pairs
+assert ("SessionStart", "telemetry-hook.sh") in pairs, pairs
+assert ("SessionEnd", "telemetry-hook.sh") in pairs, pairs
 assert len(pairs) == len(set(pairs)), pairs
 for surface in doc["surfaces"]:
     assert surface["command"].endswith("/scripts/" + surface["script"]), surface
 PY
 }
 
-test_install_prunes_retired_default_surfaces() {
-  local home="$TMP/prune-defaults"
-
-  make_fixture "$home" rows 3
-  python3 - "$home/.claude/settings.json" <<'PY'
-import json, sys
-
-path = sys.argv[1]
-with open(path, encoding="utf-8") as fh:
-    row = json.load(fh)
-hooks = row["hooks"]
-hooks.setdefault("PreToolUse", []).append({
-    "matcher": "Edit|Write|MultiEdit|NotebookEdit",
-    "hooks": [{"type": "command", "command": "bash /old/scripts/tier-guard-hook.sh", "timeout": 5}],
-})
-hooks.setdefault("PostToolUse", []).append({
-    "hooks": [{"type": "command", "command": "bash /old/scripts/telemetry-hook.sh", "timeout": 5}],
-})
-hooks["PostToolUse"].append({
-    "hooks": [{"type": "command", "command": "echo user-post-hook"}],
-})
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(row, fh, indent=2)
-    fh.write("\n")
-PY
+run_install() {
+  local home="$1"
 
   HOME="$home" \
   XDG_CONFIG_HOME="$home/.config" \
   OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" \
   OMS_LOCK_DIR="$home/.locks" \
     bash "$ROOT/scripts/install-claude-hooks.sh" \
-      --settings "$home/.claude/settings.json" >/dev/null ||
-    fail "install should converge a previous hook surface list"
-
-  python3 - "$home/.claude/settings.json" <<'PY' || fail "retired hook surfaces survived install"
-import json, sys
-
-hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
-commands = {
-    event: [hook.get("command", "")
-            for entry in entries
-            for hook in entry.get("hooks", [])]
-    for event, entries in hooks.items()
+      --settings "$home/.claude/settings.json"
 }
-assert not any("tier-guard-hook.sh" in command
-               for values in commands.values() for command in values), commands
-assert not any("telemetry-hook.sh" in command
-               for command in commands.get("PostToolUse", [])), commands
-assert "echo user-post-hook" in commands.get("PostToolUse", []), commands
+
+run_default_doctor() {
+  local home="$1"
+
+  # Other subsystems are absent from a fixture HOME, so only the hook lines
+  # are asserted, never the exit status.
+  HOME="$home" \
+  XDG_CONFIG_HOME="$home/.config" \
+  OMS_CLAUDE_SETTINGS="$home/.claude/settings.json" \
+  OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" \
+  OMS_DOCTOR_PROJECT_DIR="$home/repo" \
+  OH_MY_SETTING_MODEL_DOCTOR=0 \
+  OH_MY_SETTING_CODEX_PLUGIN=0 \
+    bash "$ROOT/scripts/doctor.sh" 2>&1 || true
+}
+
+# A directory carrying the source markers an earlier OMS checkout has.
+make_old_root() {
+  mkdir -p "$1/.agents/plugins" "$1/scripts"
+  : > "$1/.agents/plugins/marketplace.json"
+  : > "$1/scripts/install-claude-hooks.sh"
+}
+
+test_install_converges_owned_rows_only() {
+  local home="$TMP/converge"
+  local old="$home/old oms"
+  local out
+
+  # Rows from a verified earlier checkout whose path has a space, in both the
+  # quoted form and the unquoted form earlier installers wrote; retired rows;
+  # a deleted timeout, a wrong matcher and a duplicate; and user hooks that
+  # merely name an OMS script.
+  make_fixture "$home" rows 4
+  make_old_root "$old"
+  OMS_T_ROOT="$ROOT" python3 - "$home/.claude/settings.json" "$old" "$home" <<'PY'
+import json, os, shlex, sys
+
+path, old, home = sys.argv[1:]
+root = os.environ["OMS_T_ROOT"]
+with open(path, encoding="utf-8") as fh:
+    row = json.load(fh)
+hooks = row["hooks"]
+
+def cmd(base, script, quote=True):
+    target = "%s/scripts/%s" % (base, script)
+    return "bash " + (shlex.quote(target) if quote else target)
+
+hooks.setdefault("PreToolUse", []).extend([
+    {"matcher": "Edit|Write|MultiEdit|NotebookEdit",
+     "hooks": [{"type": "command", "command": cmd(old, "tier-guard-hook.sh"), "timeout": 5}]},
+    # An unverifiable root is not evidence of ownership, even for an OMS name.
+    {"hooks": [{"type": "command", "command": cmd(home + "/gone", "tier-guard-hook.sh")}]},
+])
+hooks["PostToolUse"].append(
+    {"hooks": [{"type": "command", "command": cmd(old, "telemetry-hook.sh"), "timeout": 5}]})
+hooks["PostToolUse"].append({"hooks": [{"type": "command", "command": "echo user-post-hook"}]})
+hooks["SubagentStop"] = [{"hooks": [
+    {"type": "command", "command": cmd(old, "telemetry-hook.sh", quote=False), "timeout": 5}]}]
+for entry in hooks["PostToolUse"]:
+    for hook in entry["hooks"]:
+        if hook["command"] == cmd(root, "syntax-guard-hook.sh"):
+            entry["matcher"] = "Edit"
+            hook["command"] = cmd(old, "syntax-guard-hook.sh", quote=False)
+hooks["UserPromptSubmit"][0]["hooks"][0]["command"] = cmd(old, "skill-router.sh")
+del hooks["Stop"][0]["hooks"][0]["timeout"]
+hooks["Stop"][0].update(matcher="user-only", description="preserve segments")
+hooks["Stop"][0]["hooks"][:0] = [{"type": "command", "command": "echo before", "timeout": 9}]
+hooks["Stop"][0]["hooks"].append({"type": "command", "command": "echo after", "timeout": 8})
+hooks["SessionStart"][0]["hooks"][0]["timeout"] = 99
+hooks["Stop"].append({"matcher": "keep-me", "hooks": [
+    {"type": "command", "command": "echo user-a"},
+    {"type": "command", "command": cmd(old, "turn-guard.sh"), "timeout": 12},
+    {"type": "command", "command": "echo user-b"},
+]})
+hooks["Stop"].append({"hooks": [
+    {"type": "command", "command": cmd(home + "/elsewhere", "turn-guard.sh")},
+    {"type": "command", "command": "echo turn-guard.sh"},
+    {"type": "command", "command": "bash %s/wrap.sh %s" % (home, cmd(root, "turn-guard.sh")[5:])},
+]})
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(row, fh, indent=2)
 PY
+  cp "$home/.claude/settings.json" "$TMP/converge-before.json"
+
+  run_install "$home" >/dev/null || fail "install should converge a previous hook surface list"
+
+  OMS_T_ROOT="$ROOT" python3 - "$home/.claude/settings.json" "$TMP/converge-before.json" "$home" \
+    <<'PY' || fail "install did not converge exactly the OMS-owned rows"
+import json, os, sys
+
+path, before_path, home = sys.argv[1:]
+root = os.environ["OMS_T_ROOT"]
+hooks = json.load(open(path, encoding="utf-8"))["hooks"]
+before = json.load(open(before_path, encoding="utf-8"))["hooks"]
+own = lambda script: "bash %s/scripts/%s" % (root, script)
+commands = [h.get("command", "") for entries in hooks.values()
+            for entry in entries for h in entry.get("hooks", [])]
+assert not any("old oms" in c for c in commands), commands
+assert "SubagentStop" not in hooks, hooks
+assert hooks["PreToolUse"] == before["PreToolUse"][1:], hooks["PreToolUse"]
+assert not any("telemetry-hook.sh" in h["command"]
+               for entry in hooks["PostToolUse"] for h in entry["hooks"]), hooks
+assert {"hooks": [{"type": "command", "command": "echo user-post-hook"}]} in hooks["PostToolUse"]
+guard = [e for e in hooks["PostToolUse"] if e["hooks"][0]["command"] == own("syntax-guard-hook.sh")]
+assert guard == [{"matcher": "Edit|Write|MultiEdit",
+                  "hooks": [{"type": "command", "command": own("syntax-guard-hook.sh"), "timeout": 5}]}], guard
+assert hooks["UserPromptSubmit"][0]["hooks"][0]["command"] == own("skill-router.sh"), hooks
+assert hooks["Stop"] == [
+    {"matcher": "user-only", "description": "preserve segments",
+     "hooks": [{"type": "command", "command": "echo before", "timeout": 9}]},
+    {"description": "preserve segments",
+     "hooks": [{"type": "command", "command": own("turn-guard.sh"), "timeout": 12}]},
+    {"matcher": "user-only", "description": "preserve segments",
+     "hooks": [{"type": "command", "command": "echo after", "timeout": 8}]},
+    {"matcher": "keep-me", "hooks": [{"type": "command", "command": "echo user-a"},
+                                     {"type": "command", "command": "echo user-b"}]},
+    before["Stop"][2],
+], hooks["Stop"]
+PY
+
+  out="$(run_install "$home")" || fail "a converged install should rerun cleanly"
+  case "$out" in
+    *"already current"*) ;;
+    *) printf '%s\n' "$out"; fail "a converged settings.json should be a no-op" ;;
+  esac
+  out="$(run_surfaces "$home")" ||
+    { printf '%s\n' "$out"; fail "a converged settings.json should pass --surfaces"; }
+}
+
+test_install_quotes_a_root_with_spaces() {
+  OMS_T_ROOT="$ROOT" python3 - <<'PY' || fail "a root with spaces must be quoted and still recognized"
+import importlib.util, os, shlex, sys
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location(
+    "hooks", os.path.join(os.environ["OMS_T_ROOT"], "scripts", "lib", "claude-hook-surfaces.py"))
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
+root = "/opt/my oms"
+command = lib.hook_command(root, "turn-guard.sh")
+assert shlex.split(command) == ["bash", "/opt/my oms/scripts/turn-guard.sh"], command
+assert lib.owned_script({"type": "command", "command": command}, [root]) == "turn-guard.sh"
+plain = lib.hook_command("/opt/oms", "turn-guard.sh")
+assert plain == "bash /opt/oms/scripts/turn-guard.sh", plain
+assert lib.owned_script({"type": "command", "command": "bash /opt/oms/scripts/turn-guard.sh x"},
+                        ["/opt/oms"]) is None
+assert lib.owned_script({"type": "command", "command": "bash scripts/turn-guard.sh"}, ["/opt/oms"]) is None
+PY
+}
+
+test_registration_drift_fails_both_doctor_modes() {
+  local home="$TMP/drift"
+  local out
+
+  make_fixture "$home" rows "$EXPECTED_HOOKS_SCHEMA"
+  make_old_root "$home/old"
+  OMS_T_ROOT="$ROOT" python3 - "$home/.claude/settings.json" "$home" <<'PY'
+import json, os, sys
+
+path, home = sys.argv[1:]
+root = os.environ["OMS_T_ROOT"]
+with open(path, encoding="utf-8") as fh:
+    row = json.load(fh)
+hooks = row["hooks"]
+del hooks["Stop"][0]["hooks"][0]["timeout"]
+del hooks["SessionEnd"][0]["hooks"][0]["type"]
+for entry in hooks["PostToolUse"]:
+    if "syntax-guard-hook.sh" in entry["hooks"][0]["command"]:
+        entry["matcher"] = "Edit"
+resume = [e for e in hooks["SessionStart"] if "resume-hook.sh" in e["hooks"][0]["command"]]
+hooks["SessionStart"].append(json.loads(json.dumps(resume[0])))
+hooks["SubagentStop"] = [{"hooks": [
+    {"type": "command", "command": "bash %s/scripts/telemetry-hook.sh" % root, "timeout": 5}]}]
+hooks["UserPromptSubmit"][0]["hooks"][0]["command"] = "bash %s/old/scripts/skill-router.sh" % home
+# A same-named script outside an OMS checkout does not count as registered.
+hooks["PreCompact"][0]["hooks"][0]["command"] = "bash %s/elsewhere/scripts/precompact-handoff.sh" % home
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(row, fh, indent=2)
+PY
+
+  if out="$(run_surfaces "$home")"; then
+    printf '%s\n' "$out"
+    fail "--surfaces should fail on registration drift"
+  fi
+  for line in \
+    "REGISTRATION DRIFT: Stop -> turn-guard.sh (timeout absent, expected 12)" \
+    "REGISTRATION DRIFT: SessionEnd -> precompact-handoff.sh (type absent, expected command)" \
+    "REGISTRATION DRIFT: PostToolUse -> syntax-guard-hook.sh (matcher 'Edit', expected 'Edit|Write|MultiEdit')" \
+    "DUPLICATE REGISTRATION: SessionStart -> resume-hook.sh (2 registrations)" \
+    "RETIRED REGISTRATION: SubagentStop -> telemetry-hook.sh (still registered)" \
+    "REGISTRATION DRIFT: UserPromptSubmit -> skill-router.sh (command" \
+    "MISSING REGISTRATION: PreCompact -> precompact-handoff.sh"; do
+    case "$out" in
+      *"$line"*) ;;
+      *) printf '%s\n' "$out"; fail "--surfaces should report: $line" ;;
+    esac
+  done
+
+  out="$(run_default_doctor "$home")"
+  for line in \
+    "fail: claude hook drift: Stop -> turn-guard.sh (timeout absent, expected 12)" \
+    "fail: claude hook drift: SessionEnd -> precompact-handoff.sh (type absent, expected command)" \
+    "fail: claude hook drift: PostToolUse -> syntax-guard-hook.sh (matcher" \
+    "fail: claude hook duplicate: SessionStart -> resume-hook.sh (2 registrations)" \
+    "fail: claude hook retired: SubagentStop -> telemetry-hook.sh (still registered)" \
+    "fail: claude hook drift: UserPromptSubmit -> skill-router.sh (command" \
+    "fail: claude hook missing: PreCompact -> precompact-handoff.sh"; do
+    case "$out" in
+      *"$line"*) ;;
+      *) printf '%s\n' "$out"; fail "the default doctor should report: $line" ;;
+    esac
+  done
+  case "$out" in
+    *"ok: claude hooks registered"*) printf '%s\n' "$out"; fail "drift must not read as registered" ;;
+  esac
+
+  # The installer is the remedy both reports name, and it clears every line.
+  run_install "$home" >/dev/null || fail "install should repair registration drift"
+  out="$(run_surfaces "$home")" ||
+    { printf '%s\n' "$out"; fail "--surfaces should pass after the installer converges"; }
+  out="$(run_default_doctor "$home")"
+  case "$out" in
+    *"ok: claude hooks registered"*) ;;
+    *) printf '%s\n' "$out"; fail "the default doctor should pass after the installer converges" ;;
+  esac
+  python3 - "$home/.claude/settings.json" "$home" <<'PY' || fail "the lookalike user hook must survive"
+import json, sys
+hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
+commands = [h["command"] for e in hooks["PreCompact"] for h in e["hooks"]]
+assert "bash %s/elsewhere/scripts/precompact-handoff.sh" % sys.argv[2] in commands, commands
+PY
+}
+
+test_surfaces_expect_commands_at_the_install_owner() {
+  local home="$TMP/owner"
+  local installed="$home/installed"
+  local out
+
+  # --surfaces runs from a newer source while settings point at the install
+  # owner; that is the expected shape, not command drift.
+  make_fixture "$home" rows "$EXPECTED_HOOKS_SCHEMA"
+  make_old_root "$installed"
+  OMS_T_ROOT="$ROOT" python3 - "$home" "$installed" <<'PY'
+import json, os, sys
+
+home, installed = sys.argv[1:]
+root = os.environ["OMS_T_ROOT"]
+path = os.path.join(home, ".claude", "settings.json")
+text = open(path, encoding="utf-8").read().replace(root + "/scripts/", installed + "/scripts/")
+open(path, "w", encoding="utf-8").write(text)
+receipt = os.path.join(home, ".config", "oh-my-setting", "install.json")
+row = json.load(open(receipt, encoding="utf-8"))
+row["source_root"] = installed
+json.dump(row, open(receipt, "w", encoding="utf-8"))
+PY
+  out="$(run_surfaces "$home")" ||
+    { printf '%s\n' "$out"; fail "commands at the install owner should pass --surfaces"; }
+  case "$out" in
+    *"DRIFT"*) printf '%s\n' "$out"; fail "the install owner's commands are not drift" ;;
+  esac
 }
 
 # --- source vs live registrations -------------------------------------------
@@ -523,7 +747,10 @@ EOF
 }
 
 test_print_expected_emits_the_registration_list
-test_install_prunes_retired_default_surfaces
+test_install_converges_owned_rows_only
+test_install_quotes_a_root_with_spaces
+test_registration_drift_fails_both_doctor_modes
+test_surfaces_expect_commands_at_the_install_owner
 test_missing_registration_fails_and_is_named
 test_complete_registration_is_ok
 test_evidence_window_marks_a_silent_registered_surface

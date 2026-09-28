@@ -17719,7 +17719,7 @@ resume = [
 ]
 assert len(resume) == 1, d["hooks"]["SessionStart"]
 assert resume[0]["hooks"][0]["timeout"] == 10
-for event in ("SessionStart", "SubagentStop", "SessionEnd"):
+for event in ("SessionStart", "SessionEnd"):
     telemetry = [
         entry for entry in d["hooks"][event]
         if "telemetry-hook.sh" in entry["hooks"][0]["command"]
@@ -17727,6 +17727,10 @@ for event in ("SessionStart", "SubagentStop", "SessionEnd"):
     assert len(telemetry) == 1, (event, d["hooks"][event])
     hook = telemetry[0]["hooks"][0]
     assert hook["timeout"] == 5, (event, hook)
+assert "SubagentStop" not in d["hooks"], d["hooks"]
+assert sum(
+    len(entry["hooks"]) for entries in d["hooks"].values() for entry in entries
+) == 10 + 1, d["hooks"]  # the ten OMS registrations plus the user router
 assert not any(
     "telemetry-hook.sh" in h.get("command", "")
     for entry in d["hooks"].get("PostToolUse", []) for h in entry.get("hooks", [])
@@ -17793,6 +17797,36 @@ assert d["modelSettings"] == {
     "claude-opus-5-5": {"effortLevel": "medium"},
     "claude-opus-5": {"effortLevel": "high"},
 }, d["modelSettings"]
+PY
+  # A user hook sharing an entry with ours keeps that entry, its metadata and
+  # its place on remove; a same-named script outside an OMS checkout and a
+  # wrapper naming ours are the user's own and survive both directions.
+  OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" >/dev/null
+  python3 - "$s" "$d" "$ROOT" <<'PY'
+import json, sys
+path, d, root = sys.argv[1:]
+data = json.load(open(path))
+entry = data["hooks"]["Stop"][0]
+entry["x-user"] = True
+entry["hooks"][:0] = [{"type": "command", "command": "echo user-before"}]
+entry["hooks"] += [
+    {"type": "command", "command": "bash %s/scripts/turn-guard.sh" % d},
+    {"type": "command", "command": "bash %s/wrap.sh %s/scripts/turn-guard.sh" % (d, root)},
+]
+json.dump(data, open(path, "w"))
+PY
+  OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" | grep -q "already current" ||
+    fail "an OMS hook sharing a user entry is already current"
+  OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" --remove >/dev/null
+  python3 - "$s" "$d" "$ROOT" <<'PY' || fail "remove must keep user siblings, their entry metadata and order"
+import json, sys
+path, d, root = sys.argv[1:]
+stop = json.load(open(path))["hooks"]["Stop"]
+assert stop == [{"x-user": True, "hooks": [
+    {"type": "command", "command": "echo user-before"},
+    {"type": "command", "command": "bash %s/scripts/turn-guard.sh" % d},
+    {"type": "command", "command": "bash %s/wrap.sh %s/scripts/turn-guard.sh" % (d, root)},
+]}], stop
 PY
   # Broken settings must refuse loudly, not clobber.
   printf '{broken' > "$s"

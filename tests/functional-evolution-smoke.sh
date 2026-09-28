@@ -478,20 +478,23 @@ test_hook_installers_keep_telemetry_off_the_tool_hot_path() {
   python3 - "$settings" <<'PY' || fail "Claude telemetry hooks were not installed"
 import json, sys
 hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
-for event in ("SessionStart", "SubagentStop", "SessionEnd"):
+for event in ("SessionStart", "SessionEnd"):
     commands = [h.get("command", "") for entry in hooks.get(event, []) for h in entry.get("hooks", [])]
     assert any("telemetry-hook.sh" in command for command in commands), (event, commands)
-post = [h.get("command", "") for entry in hooks.get("PostToolUse", []) for h in entry.get("hooks", [])]
-assert not any("telemetry-hook.sh" in command for command in post), post
+for event in ("PostToolUse", "SubagentStop"):
+    commands = [h.get("command", "") for entry in hooks.get(event, []) for h in entry.get("hooks", [])]
+    assert not any("telemetry-hook.sh" in command for command in commands), (event, commands)
 PY
   python3 - "$ROOT/plugins/oh-my-setting/hooks.json" <<'PY' || fail "Codex telemetry hooks use the wrong events"
 import json, sys
 hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
-for event in ("SessionStart", "SubagentStop", "SessionEnd"):
+for event in ("SessionStart", "SessionEnd"):
     commands = [h.get("command", "") for entry in hooks.get(event, []) for h in entry.get("hooks", [])]
     assert any("telemetry-hook" in command for command in commands), (event, commands)
-post = [h.get("command", "") for entry in hooks.get("PostToolUse", []) for h in entry.get("hooks", [])]
-assert not any("telemetry-hook" in command for command in post), post
+for event in ("PostToolUse", "SubagentStop"):
+    commands = [h.get("command", "") for entry in hooks.get(event, []) for h in entry.get("hooks", [])]
+    assert not any("telemetry-hook" in command for command in commands), (event, commands)
+assert sum(len(entry.get("hooks", [])) for entries in hooks.values() for entry in entries) == 7, hooks
 PY
 }
 

@@ -84,8 +84,21 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   deadlocks while retaining standalone serialization.
 - Preserve native standalone Codex updates and discover installed provider/Node
   paths in unattended timers without sourcing shell startup files.
+- Reinstalling the Claude hooks converges each OMS row's command, timeout and
+  matcher and drops duplicates; before, only the command was rewritten, so a
+  deleted Stop timeout stayed deleted. A hook is OMS-owned only when its exact
+  `bash <root>/scripts/<script>` command points at this or a verified earlier
+  OMS checkout; a same-named script elsewhere or a wrapper stays the user's.
+  Remove no longer drops a whole entry that also holds user hooks, and a row
+  moved to its matcher is split out, so user siblings keep their metadata and
+  order. `oms doctor` and `--surfaces` read
+  the installer's contract and fail on duplicate, retired or drifted rows.
 
 ### Changed
+- SubagentStop telemetry is no longer registered for Claude Code or the Codex
+  plugin (Claude 11 hooks to 10, Codex 8 to 7); session boundary telemetry,
+  which live peer discovery reads, stays. Install/update removes the old row
+  and the Codex bridge still retires an old SubagentStop bridge entry.
 -- `oms land` in the harness checkout gates with `check.sh --parallel`, the
   complete gate as concurrent CI partitions: two runs took 465s and 473s
   against 1709-2137s serial. Other repositories keep the plain `check.sh`.

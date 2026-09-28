@@ -18,6 +18,8 @@ spec = importlib.util.spec_from_file_location(
 io = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(io)
 
+# Every bridge surface OMS ever wrote stays recognizable so an old bridge can be
+# retired; RETIRED rows have no native replacement to verify.
 SURFACES = {
     ("UserPromptSubmit", "", "skill-router"): {5},
     ("Stop", "", "turn-guard"): {12},
@@ -29,6 +31,8 @@ SURFACES = {
     ("SubagentStop", "", "telemetry-hook"): {5},
     ("SessionEnd", "", "telemetry-hook"): {3, 5},
 }
+# Tool-level and subagent-stop telemetry were deliberately retired, not moved.
+RETIRED = {("PostToolUse", "", "telemetry-hook"), ("SubagentStop", "", "telemetry-hook")}
 
 
 def read_json(path):
@@ -62,8 +66,7 @@ def native_verified(args):
         return False
     hooks = read_json(args.native_root / "hooks.json").get("hooks", {})
     for (event, matcher, action) in SURFACES:
-        # Tool-level telemetry was deliberately retired, not moved to native hooks.
-        if event == "PostToolUse" and action == "telemetry-hook":
+        if (event, matcher, action) in RETIRED:
             continue
         expected = 'bash "${CLAUDE_PLUGIN_ROOT:-.}/scripts/harness-hook.sh" ' + action
         if not any(isinstance(group, dict) and group.get("matcher", "") == matcher

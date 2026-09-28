@@ -2,10 +2,12 @@
 set -euo pipefail
 
 # Register (or remove) oh-my-setting's Claude Code hooks and HUDs in the user's
-# ~/.claude/settings.json. Additive merge: existing settings and hooks are
-# preserved, our entries are identified by the "oh-my-setting" script names,
-# install is idempotent (re-running updates command paths in place), and a
-# one-time backup is written next to the file before the first change.
+# ~/.claude/settings.json. Additive merge: existing settings and user hooks are
+# preserved, our hooks are identified by their exact command path under this or
+# a verified earlier OMS checkout (scripts/lib/claude-hook-surfaces.py), install
+# is idempotent (re-running converges command, timeout and matcher in place and
+# drops duplicates), and a one-time backup is written next to the file before
+# the first change.
 #
 # Codex gets equivalent hooks through install-codex-plugin.sh; this file only
 # manages Claude Code settings.json.
@@ -22,7 +24,7 @@ PRINT_EXPECTED=0
 # --- expected hook surfaces --------------------------------------------------
 #
 # The one place that says which Claude Code events this harness registers a
-# hook on. The upsert loop below installs exactly these rows, and
+# hook on. The convergence below installs exactly these rows, and
 # --print-expected emits the same rows as JSON, so a doctor can compare a live
 # settings.json against what a given checkout would install rather than against
 # a list it carries separately. An installed doctor holding its own copy could
@@ -31,15 +33,15 @@ PRINT_EXPECTED=0
 #
 # Rows are event|script|matcher|timeout. An empty matcher or timeout field is
 # omitted from the registration; the command is always `bash $ROOT/scripts/
-# <script>`. Blank lines and # comments are ignored, so the reason a surface
-# exists lives next to the surface.
+# <script>`, shell-quoted when the root needs it. Blank lines and # comments
+# are ignored, so the reason a surface exists lives next to the surface.
 #
 # HOOKS_SCHEMA is bumped whenever a row changes. It is stamped into the install
 # receipt at install/update time, which is what lets `doctor --surfaces` say
 # "the installed harness predates this list" instead of silently comparing
 # against the wrong expectations. tests/doctor-surfaces-smoke.sh hashes the row
 # set and fails until the bump and the recorded hash move together.
-HOOKS_SCHEMA=4
+HOOKS_SCHEMA=5
 HOOK_SURFACES='
 UserPromptSubmit|skill-router.sh||
 Stop|turn-guard.sh||12
@@ -76,11 +78,10 @@ SessionEnd|precompact-handoff.sh||30
 # failures instead of rediscovering them. The prompt router owns peer warnings.
 SessionStart|resume-hook.sh||10
 
-# Only session/subagent lifecycle counters and bounded identifiers are retained.
-# Tool-level telemetry used to start a shell and Python process after every tool
-# call; the sparse useful fields did not justify that synchronous hot-path cost.
+# Only session lifecycle counters and bounded identifiers are retained; live
+# peer discovery reads these boundaries. Tool-level and subagent-stop telemetry
+# were retired: their activity carried no metrics worth a process per event.
 SessionStart|telemetry-hook.sh||5
-SubagentStop|telemetry-hook.sh||5
 SessionEnd|telemetry-hook.sh||5
 '
 
@@ -105,12 +106,13 @@ Usage: install-claude-hooks.sh [--remove] [--settings PATH] [--print-expected]
 Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
 hook, PostToolUseFailure/PostToolUse fail-ledger hooks, PostToolUse
 edit-time syntax-guard hook, PreCompact/SessionEnd handoff-snapshot hooks,
-SessionStart resume hook, SessionStart/SubagentStop/SessionEnd telemetry hooks, main usage
+SessionStart resume hook, SessionStart/SessionEnd telemetry hooks, main usage
 HUD, compact subagent HUD, and the per-model effort default for the Claude
 models OMS routes (Opus 5.5: high) in Claude Code's settings.json. The merge
-is additive: existing hooks, user-owned statusLine/subagentStatusLine entries
-and user-set modelSettings effort are preserved, and repeated installs are
-idempotent. --remove deletes only oh-my-setting entries.
+is additive: user hooks, user-owned statusLine/subagentStatusLine entries
+and user-set modelSettings effort are preserved, and repeated installs
+converge OMS hook commands, timeouts and matchers and drop duplicates.
+--remove deletes only oh-my-setting hooks, keeping user siblings in place.
 
 Options:
   --remove          Remove the oh-my-setting hook entries instead.
@@ -124,15 +126,20 @@ EOF
 
 fail() { echo "error: $*" >&2; exit 2; }
 
-# The manifest becomes structured rows in exactly one place. Both the upserts
+# The manifest becomes structured rows in exactly one place. Both the merge
 # below and --print-expected consume this JSON, so the list a doctor compares
 # against is the list that would actually be installed.
 print_expected_json() {
   OMS_CH_ROOT="$ROOT" OMS_CH_SURFACES="$HOOK_SURFACES" \
     OMS_CH_HOOKS_SCHEMA="$HOOKS_SCHEMA" python3 <<'PY'
-import json, os, sys
+import importlib.util, json, os, sys
 
 root = os.environ["OMS_CH_ROOT"]
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location(
+    "oms_claude_hooks", os.path.join(root, "scripts", "lib", "claude-hook-surfaces.py"))
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
 surfaces = []
 for line in os.environ["OMS_CH_SURFACES"].splitlines():
     line = line.strip()
@@ -155,7 +162,7 @@ for line in os.environ["OMS_CH_SURFACES"].splitlines():
         "script": script,
         "matcher": matcher or None,
         "timeout": int(timeout) if timeout else None,
-        "command": "bash %s/scripts/%s" % (root, script),
+        "command": lib.hook_command(root, script),
     })
 json.dump(
     {
@@ -198,6 +205,7 @@ fi
 [ -f "$ROOT/scripts/telemetry-hook.sh" ] || fail "telemetry-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/claude-statusline.py" ] || fail "claude-statusline.py not found under $ROOT"
 [ -f "$ROOT/scripts/claude-subagent-statusline.py" ] || fail "claude-subagent-statusline.py not found under $ROOT"
+[ -f "$ROOT/scripts/lib/claude-hook-surfaces.py" ] || fail "scripts/lib/claude-hook-surfaces.py not found under $ROOT"
 
 if [ "$REMOVE" != "1" ] && [ -f "$(oms_install_receipt_path)" ]; then
   owner="$(oms_install_receipt_owner "$(oms_install_receipt_path)" 2>/dev/null)" ||
@@ -215,24 +223,24 @@ mkdir -p "$(dirname "$SETTINGS")"
 EXPECTED_JSON="$(print_expected_json)"
 
 OMS_CH_SETTINGS="$SETTINGS" OMS_CH_REMOVE="$REMOVE" \
-  OMS_CH_EXPECTED="$EXPECTED_JSON" \
+  OMS_CH_EXPECTED="$EXPECTED_JSON" OMS_CH_ROOT="$ROOT" \
   OMS_CH_STATUS_PATH="$ROOT/scripts/claude-statusline.py" \
   OMS_CH_SUBAGENT_STATUS_PATH="$ROOT/scripts/claude-subagent-statusline.py" python3 <<'PY'
-import json, os, shlex, sys, tempfile
+import importlib.util, json, os, shlex, sys, tempfile
 
 path = os.environ["OMS_CH_SETTINGS"]
 remove = os.environ["OMS_CH_REMOVE"] == "1"
+root = os.environ["OMS_CH_ROOT"]
 expected = json.loads(os.environ["OMS_CH_EXPECTED"])["surfaces"]
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location(
+    "oms_claude_hooks", os.path.join(root, "scripts", "lib", "claude-hook-surfaces.py"))
+lib = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lib)
 status_cmd = "python3 %s" % shlex.quote(os.environ["OMS_CH_STATUS_PATH"])
 subagent_status_cmd = "python3 %s" % shlex.quote(
     os.environ["OMS_CH_SUBAGENT_STATUS_PATH"]
 )
-MARKS = (
-    "skill-router.sh", "turn-guard.sh", "fail-ledger-hook.sh",
-    "syntax-guard-hook.sh", "tier-guard-hook.sh", "precompact-handoff.sh",
-    "resume-hook.sh", "telemetry-hook.sh",
-)
-expected_pairs = {(row["event"], row["script"]) for row in expected}
 # Per-model effort for the Claude models OMS routes through. Claude Opus 5.5
 # defaults to medium and thinks more per level than Opus 5, so a top-level
 # xhigh would otherwise carry over; high is the chosen default (user decision
@@ -255,65 +263,9 @@ if not isinstance(settings, dict):
     sys.exit(2)
 
 hooks = settings.setdefault("hooks", {})
-
-def ours(entry):
-    for h in entry.get("hooks", []) if isinstance(entry, dict) else []:
-        cmd = str(h.get("command", ""))
-        if any(mark in cmd for mark in MARKS):
-            return True
-    return False
-
-def managed_mark(hook):
-    command = str(hook.get("command", "")) if isinstance(hook, dict) else ""
-    return next((mark for mark in MARKS if mark in command), None)
-
-def prune_obsolete_surfaces():
-    """Converge old OMS rows without touching hooks the user owns."""
-    for event in list(hooks):
-        entries = hooks.get(event)
-        if not isinstance(entries, list):
-            continue
-        kept_entries = []
-        for entry in entries:
-            if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
-                kept_entries.append(entry)
-                continue
-            kept_hooks = []
-            removed = False
-            for hook in entry["hooks"]:
-                mark = managed_mark(hook)
-                if mark is not None and (event, mark) not in expected_pairs:
-                    removed = True
-                    continue
-                kept_hooks.append(hook)
-            if kept_hooks or not removed:
-                if removed:
-                    entry = dict(entry, hooks=kept_hooks)
-                kept_entries.append(entry)
-        if kept_entries:
-            hooks[event] = kept_entries
-        else:
-            del hooks[event]
-
-def upsert(event, mark, cmd, matcher=None, timeout=None):
-    entries = hooks.setdefault(event, [])
-    existing = [e for e in entries if any(
-        mark in str(h.get("command", ""))
-        for h in e.get("hooks", []) if isinstance(e, dict)
-    )]
-    if existing:
-        for e in existing:
-            for h in e.get("hooks", []):
-                if mark in str(h.get("command", "")):
-                    h["command"] = cmd
-    else:
-        hook = {"type": "command", "command": cmd}
-        if timeout is not None:
-            hook["timeout"] = timeout
-        entry = {"hooks": [hook]}
-        if matcher is not None:
-            entry["matcher"] = matcher
-        entries.append(entry)
+if not isinstance(hooks, dict):
+    sys.stderr.write("error: %s hooks is not an object; fix it first\n" % path)
+    sys.exit(2)
 
 def status_ours(value, command, script_name):
     if not isinstance(value, dict):
@@ -341,12 +293,7 @@ def status_ours(value, command, script_name):
 
 before = json.dumps(settings, sort_keys=True)
 if remove:
-    for event in list(hooks):
-        entries = hooks.get(event)
-        if isinstance(entries, list):
-            hooks[event] = [e for e in entries if not ours(e)]
-            if not hooks[event]:
-                del hooks[event]
+    lib.remove(hooks, [root])
     if not hooks:
         del settings["hooks"]
     if status_ours(settings.get("statusLine"), status_cmd, "claude-statusline.py"):
@@ -369,12 +316,11 @@ if remove:
             del settings["modelSettings"]
     action = "removed"
 else:
-    prune_obsolete_surfaces()
-    for surface in expected:
-        upsert(
-            surface["event"], surface["script"], surface["command"],
-            matcher=surface["matcher"], timeout=surface["timeout"],
-        )
+    try:
+        lib.converge(hooks, expected, root, [root])
+    except ValueError as e:
+        sys.stderr.write("error: %s: %s; fix it first\n" % (path, e))
+        sys.exit(2)
     if "statusLine" not in settings:
         settings["statusLine"] = {"type": "command", "command": status_cmd}
     elif status_ours(

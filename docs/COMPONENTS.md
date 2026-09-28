@@ -521,8 +521,9 @@ Stop materializes the journal locally. Its detached publisher starts only if
 a Notion target is configured or GitHub CI polling is available for this repo.
 Existing content hashes, sync locks and CI polling intervals deduplicate work
 against scheduled maintenance; hosts without a timer keep the Stop fallback.
-Native telemetry drops metricless routine activity even from old per-tool
-registrations. Session boundaries and explicit failures remain; set
+Native telemetry registers only session boundaries, which live peer discovery
+reads; per-tool and SubagentStop registrations were retired, and metricless
+activity from an old registration is still dropped. Explicit failures remain; set
 `OMS_TELEMETRY_DEBUG=1` only when empty activity is useful for diagnosis.
 
 `.oms/` and project agent files are clone-local by design. A fresh clone needs
@@ -937,7 +938,15 @@ chooses a connector or tracked summary.
   (a file that does not parse after Edit/Write is reported in the same turn as
   feedback, never a block), session capture, handoff, and compact main/subagent
   HUDs. Model routing stays explicit in delegate/run commands; direct edits do
-  not pay for a separate policy hook.
+  not pay for a separate policy hook. Reinstalling converges each OMS hook's
+  command, timeout and matcher and drops duplicates. A hook is OMS-owned only
+  when its exact `bash <root>/scripts/<script>` command points at this or a
+  verified earlier OMS checkout, so wrappers and same-named user scripts stay
+  untouched and uninstall keeps user siblings in place. `oms doctor` and
+  `oms doctor --surfaces` audit the same contract read-only.
+  `OMS_SKILL_ROUTER_OFF=1` skips the routing helper, including context/peer/relay
+  hints and turn-start tracking. The prompt hook still runs its journal/daily-state
+  work and state hints first; `OMS_STATE_HINTS=0` disables the hints.
 - Codex: local plugin hooks, including the edit-time syntax guard, plus a
   managed native status line when the user has not set one. On Python 3.9/3.10,
   arbitrary existing TOML requires `tomli` so

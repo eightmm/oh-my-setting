@@ -5,8 +5,10 @@ set -euo pipefail
 # matching owns ordinary routing; OMS_SKILL_HINTS=1 enables bounded keyword
 # suggestions from skills.manifest.json. Fail-open: never block a prompt.
 #
-# Automatic task recording is opt-in with OMS_AUTO_TASK=1. Disable the router
-# entirely with OMS_SKILL_ROUTER_OFF=1. Claude Code installs this directly;
+# Automatic task recording is opt-in with OMS_AUTO_TASK=1.
+# OMS_SKILL_ROUTER_OFF=1 skips the routing helper (including context/peer/relay
+# hints and turn-start tracking). Journal/daily-state work and state hints run
+# first; OMS_STATE_HINTS=0 disables the hints. Claude Code installs this directly;
 # Codex installs it through the repo-local oh-my-setting plugin.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
