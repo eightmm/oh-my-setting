@@ -1,4 +1,4 @@
 interface:
   display_name: "Spec Interview"
-  short_description: "Resolve implementation-shaping choices first"
-  default_prompt: "Use $oms-spec-interview to inspect this project, ask only about material gaps, and write the spec before coding."
+  short_description: "Resolve material choices when needed"
+  default_prompt: "Use $oms-spec-interview to inspect evidence, continue authorized clear bounded work, and ask only about unresolved material choices."

@@ -1,6 +1,8 @@
 # Spec Shapes
 
-Minimum `PROJECT.md` sections:
+Adapt this project-contract shape to the work. Preserve durable goals, scope,
+decisions, acceptance criteria, and runtime field names. Include narrative
+sections only when relevant; do not invent details to fill the template.
 
 ```md
 # PROJECT.md
@@ -31,9 +33,11 @@ Minimum `PROJECT.md` sections:
 - Open:
 ```
 
-Keep the state draft while task-relevant decisions remain. Record paths,
+Keep the canonical `State` field and existing state-transition/adoption rules.
+Keep `State: draft` while task-relevant decisions remain. Record paths,
 resources, security constraints, and do-not-touch boundaries only when they
-apply; use `n/a` with a reason rather than invented detail.
+apply; `n/a` may describe an inapplicable narrative fact, with a reason, but
+must not replace executable verification.
 
 `Affected checks` names the repository's narrow changed-file or test-selector
 entrypoint. `Always-run checks` lists the small portability, schema, security,
@@ -48,15 +52,17 @@ own multi-platform release matrix into a project by default or create CI
 merely to complete onboarding. Existing project workflows are user-owned;
 changing their required checks needs task authority.
 
-Keep `Required checks` to one executable Markdown line. One complete inline
-code wrapper is allowed (for example, `` `bash scripts/check.sh` ``). For a
-custom or composed command, list every repo-relative regular file that defines
-the verifier under `Required check files` (comma-separated; at most 64 paths,
-240 bytes each). Conventional project check entrances such as
-`scripts/check.sh`, `tests/run.sh`, `make test`, or a package-manager test
-command can be discovered automatically; their verifier floor is enforced by
-the harness even when the explicit file list is empty.
+Before broad automation, provide an executable verification command.
+`Required checks` takes precedence; when absent or empty, the runtime falls
+back to `Test` under `Commands`. Keep either command to one executable Markdown
+line. One complete inline code wrapper is allowed (for example,
+`` `bash scripts/check.sh` ``). For a custom or composed command, list every
+repo-relative regular non-symlink file that defines the verifier under
+`Required check files` (comma-separated; at most 64 normalized paths,
+240 bytes each). Recognized conventional commands such as `bash scripts/check.sh`,
+`make test`, or `pytest` allow automatic verifier discovery; the harness still
+enforces the verifier floor when the explicit file list is empty.
 
-For non-project work, use a compact spec: goal, non-goals, scope, constraints,
-interface/data, success criteria, verification, assumptions, and open
-questions. Ask for confirmation only when material choices remain.
+For routine or non-project work, keep necessary decisions and verification in
+the existing task context; no separate spec is required. Ask only about
+unresolved material choices or missing authority.

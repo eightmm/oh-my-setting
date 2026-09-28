@@ -7,22 +7,29 @@ description: >
 
 # Specification Interview
 
-Bounded changes with a clear local contract do not require an interview.
+Clear bounded changes need neither an interview nor a separate spec. Inspect
+local evidence and continue already-authorized work. Exploration and prototypes
+must stay within current authority and not depend on unresolved material choices.
 
 | State | Route |
 |---|---|
-| New project | Interview material choices -> draft `PROJECT.md` -> confirm -> bootstrap |
-| Existing, not onboarded | Inspect -> draft from evidence -> resolve gaps -> template + doctor |
+| New project | Resolve material choices -> confirm `PROJECT.md` -> bootstrap; parent continues requested implementation |
+| Existing, not onboarded | Inspect -> use current contract/evidence; resolve material gaps -> template + doctor when needed |
 | Ongoing draft | Ask only about open decisions affecting this request |
 | Ongoing confirmed | Proceed unless contract and implementation drifted |
 
 Do not ask which state applies. Determine it from managed blocks,
 `PROJECT.md`, source, config, and git.
 
-Flow: inspect evidence, resolve only implementation-shaping gaps, persist the
-contract, then proceed. Clarify public interfaces, persistence/schema,
+Reuse decisions and approval already supplied for this request; record their
+evidence without asking for redundant document approval. Use existing
+confirmation/adoption procedures. A State label or model assumption grants no
+new authority. Clarify public interfaces, persistence/schema,
 auth/privacy, destructive or expensive work, Slurm resources, dependencies,
 and acceptance criteria only when relevant.
+
+Broad work and managed bootstrap still require a confirmed contract.
+After bootstrap, continue implementation already authorized by the request.
 
 Keep build/test commands and project facts in the existing contract. Add a
 project skill only for a verified recurring procedure that existing guidance
