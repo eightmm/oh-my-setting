@@ -114,7 +114,7 @@ def main() -> int:
         return 0
     cwd = str(event.get("cwd") or "")
     data = escape("🔔 Codex 작업 완료 · %s" % (Path(cwd).name or "codex"),
-                  str(event.get("last-assistant-message") or "")[-1000:])
+                  str(event.get("last-assistant-message") or ""))
     for tty in target_ttys(cwd):
         try:
             with open(tty, "wb", buffering=0) as handle:
