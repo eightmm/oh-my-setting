@@ -467,6 +467,212 @@ test_checkpoint_restores_staged_and_unstaged_content_with_a_backup() {
   fi
 }
 
+checkpoint_ids() {
+  local checkpoint_root="$1" checkpoint_path
+  for checkpoint_path in "$checkpoint_root"/cp-*; do
+    [ -e "$checkpoint_path" ] || continue
+    printf '%s\n' "${checkpoint_path##*/}"
+  done
+}
+
+# Each diff option is exercised in its own repository so one fix cannot mask the
+# other. Verify and dry-run, then restore after both staged and unstaged content
+# have diverged from the checkpoint.
+checkpoint_config_roundtrip() {
+  local repo="$1" config_key="$2" config_value="$3"
+  local created checkpoint_id before_status
+
+  make_repo "$repo"
+  printf 'b-base\n' > "$repo/b.txt"
+  git -C "$repo" add b.txt
+  git -C "$repo" commit -qm add-b
+  printf 'staged-checkpoint\n' > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  printf 'unstaged-checkpoint\n' > "$repo/b.txt"
+  : > "$repo/new-empty.txt"
+  printf 'new staged content\n' > "$repo/new-added.txt"
+  git -C "$repo" add new-empty.txt new-added.txt
+  git -C "$repo" config "$config_key" "$config_value"
+
+  created="$(cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" create --json)" ||
+    fail "checkpoint creation failed with $config_key=$config_value"
+  checkpoint_id="$(OMS_TEST_REPORT="$created" python3 -c 'import json,os; print(json.loads(os.environ["OMS_TEST_REPORT"])["id"])' | tr -d '\r')"
+  (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" verify "$checkpoint_id") >/dev/null ||
+    fail "checkpoint patch format depended on $config_key=$config_value"
+
+  before_status="$(git -C "$repo" status --porcelain=v1)"
+  (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" restore "$checkpoint_id") >/dev/null ||
+    fail "checkpoint dry-run failed with $config_key=$config_value"
+  [ "$before_status" = "$(git -C "$repo" status --porcelain=v1)" ] ||
+    fail "checkpoint dry-run changed status with $config_key=$config_value"
+
+  printf 'later-staged\n' > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  printf 'later-unstaged\n' > "$repo/b.txt"
+  (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" restore "$checkpoint_id" --apply) >/dev/null ||
+    fail "checkpoint apply failed with $config_key=$config_value"
+  [ "$(cat "$repo/file.txt")" = 'staged-checkpoint' ] ||
+    fail "checkpoint apply lost staged bytes with $config_key=$config_value"
+  [ "$(cat "$repo/b.txt")" = 'unstaged-checkpoint' ] ||
+    fail "checkpoint apply lost unstaged bytes with $config_key=$config_value"
+  git -C "$repo" ls-files --error-unmatch new-empty.txt new-added.txt >/dev/null ||
+    fail "checkpoint lost ordinary staged additions"
+  if [ ! -f "$repo/new-empty.txt" ] || [ -s "$repo/new-empty.txt" ]; then
+    fail "checkpoint lost a staged empty file"
+  fi
+  git -C "$repo" diff --cached --name-only -- new-empty.txt | grep -Fxq new-empty.txt ||
+    fail "checkpoint converted an ordinary staged empty file to intent-to-add"
+  [ "$(git -C "$repo" show :new-added.txt)" = 'new staged content' ] ||
+    fail "checkpoint lost staged new-file content"
+  git -C "$repo" diff --cached -- file.txt | grep -Fq 'staged-checkpoint' ||
+    fail "checkpoint apply lost staged index state with $config_key=$config_value"
+  git -C "$repo" diff -- b.txt | grep -Fq 'unstaged-checkpoint' ||
+    fail "checkpoint apply lost unstaged index state with $config_key=$config_value"
+}
+
+test_checkpoint_ignores_diff_prefix_and_color_config() {
+  checkpoint_config_roundtrip "$TMP/checkpoint-noprefix" diff.noprefix true
+  checkpoint_config_roundtrip "$TMP/checkpoint-color" color.ui always
+}
+
+# Intent-to-add is not represented by the current two-patch checkpoint format.
+# Reject it before creating checkpoint files or mutating tracked state.
+test_checkpoint_rejects_intent_to_add_without_mutation() {
+  local repo="$TMP/checkpoint-ita-create"
+  local before_status before_index before_worktree checkpoint_artifacts
+
+  make_repo "$repo"
+  printf 'intent content\n' > "$repo/new.txt"
+  git -C "$repo" add -N new.txt
+  before_status="$(git -C "$repo" status --porcelain=v1)"
+  before_index="$(git -C "$repo" ls-files --stage)"
+  before_worktree="$(git -C "$repo" hash-object new.txt)"
+
+  if (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" create --json) >/dev/null 2>&1; then
+    fail "checkpoint creation accepted an intent-to-add entry"
+  fi
+  [ "$before_status" = "$(git -C "$repo" status --porcelain=v1)" ] ||
+    fail "intent-to-add create refusal changed status"
+  [ "$before_index" = "$(git -C "$repo" ls-files --stage)" ] ||
+    fail "intent-to-add create refusal changed the index"
+  [ "$before_worktree" = "$(git -C "$repo" hash-object new.txt)" ] ||
+    fail "intent-to-add create refusal changed file content"
+  checkpoint_artifacts="$(checkpoint_ids "$repo/.oms/checkpoints")"
+  [ -z "$checkpoint_artifacts" ] ||
+    fail "intent-to-add create refusal left checkpoint artifacts"
+}
+
+# Also reject a current intent-to-add entry before restore creates its mandatory
+# backup or attempts reverse/apply operations; preserve the complete user state.
+test_checkpoint_restore_refuses_current_intent_to_add_without_mutation() {
+  local repo="$TMP/checkpoint-ita-restore"
+  local created checkpoint_id before_status before_index before_worktree before_checkpoints
+
+  make_repo "$repo"
+  created="$(cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" create --json)" ||
+    fail "clean checkpoint creation failed"
+  checkpoint_id="$(OMS_TEST_REPORT="$created" python3 -c 'import json,os; print(json.loads(os.environ["OMS_TEST_REPORT"])["id"])' | tr -d '\r')"
+  printf 'current intent content\n' > "$repo/new.txt"
+  git -C "$repo" add -N new.txt
+  before_status="$(git -C "$repo" status --porcelain=v1)"
+  before_index="$(git -C "$repo" ls-files --stage)"
+  before_worktree="$(git -C "$repo" hash-object new.txt)"
+  before_checkpoints="$(checkpoint_ids "$repo/.oms/checkpoints")"
+
+  if (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" restore "$checkpoint_id" --apply) >/dev/null 2>&1; then
+    fail "checkpoint restore accepted a current intent-to-add entry"
+  fi
+  [ "$before_status" = "$(git -C "$repo" status --porcelain=v1)" ] ||
+    fail "intent-to-add restore refusal changed status"
+  [ "$before_index" = "$(git -C "$repo" ls-files --stage)" ] ||
+    fail "intent-to-add restore refusal changed the index"
+  [ "$before_worktree" = "$(git -C "$repo" hash-object new.txt)" ] ||
+    fail "intent-to-add restore refusal changed file content"
+  [ "$before_checkpoints" = "$(checkpoint_ids "$repo/.oms/checkpoints")" ] ||
+    fail "intent-to-add restore refusal created a backup checkpoint"
+}
+
+# Reproduce a schema-1 checkpoint made while new.txt had intent-to-add state.
+# Git accepted this old binary patch in verify, but restore later can lose the
+# current staged file and fail its automatic rollback. Reject before mutation.
+test_checkpoint_rejects_legacy_intent_to_add_snapshot_without_mutation() {
+  local repo="$TMP/checkpoint-ita-legacy"
+  local created checkpoint_id before_status before_index before_worktree before_checkpoints
+
+  make_repo "$repo"
+  created="$(cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" create --json)" ||
+    fail "clean checkpoint creation failed for legacy fixture"
+  checkpoint_id="$(OMS_TEST_REPORT="$created" python3 -c 'import json,os; print(json.loads(os.environ["OMS_TEST_REPORT"])["id"])' | tr -d '\r')"
+
+  # Manufacture only in this temporary fixture: capture the old ITA diff and
+  # update schema-1 integrity metadata exactly as a valid historical artifact.
+  printf 'legacy intent snapshot\n' > "$repo/new.txt"
+  git -C "$repo" add -N new.txt
+  git -C "$repo" diff --binary --full-index --no-ext-diff --no-textconv -- \
+    > "$repo/.oms/checkpoints/$checkpoint_id/worktree.patch"
+  python3 - "$repo/.oms/checkpoints/$checkpoint_id" <<'PY' ||
+import hashlib, json, os, sys
+root = sys.argv[1]
+patch = os.path.join(root, "worktree.patch")
+with open(patch, "rb") as handle:
+    data = handle.read()
+meta_path = os.path.join(root, "meta.json")
+with open(meta_path, encoding="utf-8") as handle:
+    meta = json.load(handle)
+meta["worktree_sha256"] = hashlib.sha256(data).hexdigest()
+meta["unstaged_bytes"] = len(data)
+with open(meta_path, "w", encoding="utf-8", newline="\n") as handle:
+    json.dump(meta, handle, ensure_ascii=False, sort_keys=True)
+    handle.write("\n")
+PY
+    fail "could not build a checksummed legacy fixture"
+  printf 'later normal staged content\n' > "$repo/new.txt"
+  git -C "$repo" add new.txt
+  before_status="$(git -C "$repo" status --porcelain=v1)"
+  before_index="$(git -C "$repo" ls-files --stage)"
+  before_worktree="$(git -C "$repo" hash-object new.txt)"
+  before_checkpoints="$(checkpoint_ids "$repo/.oms/checkpoints")"
+
+  if (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" verify "$checkpoint_id") >/dev/null 2>&1; then
+    fail "verify accepted a legacy intent-to-add checkpoint"
+  fi
+  [ "$before_status" = "$(git -C "$repo" status --porcelain=v1)" ] ||
+    fail "legacy checkpoint verify changed status"
+  [ "$before_index" = "$(git -C "$repo" ls-files --stage)" ] ||
+    fail "legacy checkpoint verify changed the index"
+  [ "$before_worktree" = "$(git -C "$repo" hash-object new.txt)" ] ||
+    fail "legacy checkpoint verify changed file content"
+
+  if (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" restore "$checkpoint_id" --apply) >/dev/null 2>&1; then
+    fail "restore applied a legacy intent-to-add checkpoint"
+  fi
+  [ "$before_status" = "$(git -C "$repo" status --porcelain=v1)" ] ||
+    fail "legacy checkpoint restore refusal changed status"
+  [ "$before_index" = "$(git -C "$repo" ls-files --stage)" ] ||
+    fail "legacy checkpoint restore refusal changed the index"
+  [ "$before_worktree" = "$(git -C "$repo" hash-object new.txt)" ] ||
+    fail "legacy checkpoint restore refusal changed file content"
+  [ "$before_checkpoints" = "$(checkpoint_ids "$repo/.oms/checkpoints")" ] ||
+    fail "legacy checkpoint restore refusal created a backup checkpoint"
+}
+
+# Native Windows Python emits CRLF on stdout; parsed Git IDs must lose CR.
+test_checkpoint_accepts_crlf_python_output() {
+  local shim_dir="$TMP/checkpoint-crlf-bin" real_python="$1"
+  mkdir -p "$shim_dir"
+  python3 - "$shim_dir/python3" "$real_python" <<'PYSHIM'
+import pathlib, shlex, sys
+script = "#!/usr/bin/env bash\n" + shlex.quote(sys.argv[2])
+script += """ "$@" | awk '{printf "%s\\r\\n", $0}'
+exit "${PIPESTATUS[0]}"
+"""
+pathlib.Path(sys.argv[1]).write_bytes(script.encode("utf-8"))
+PYSHIM
+  chmod +x "$shim_dir/python3"
+  PATH="$shim_dir:$PATH" checkpoint_config_roundtrip "$TMP/checkpoint-crlf" diff.noprefix false
+}
+
+
 test_hook_installers_keep_telemetry_off_the_tool_hot_path() {
   local settings="$TMP/claude-settings.json"
   local home_dir="$TMP/claude-home"
@@ -623,6 +829,11 @@ test_inbox_ranks_state_and_applies_only_safe_repairs
 test_unresolved_queue_triages_by_patch_bytes_and_clears_in_one_batch
 test_memory_citations_revalidate_and_stay_out_of_default_context
 test_checkpoint_restores_staged_and_unstaged_content_with_a_backup
+test_checkpoint_ignores_diff_prefix_and_color_config
+test_checkpoint_rejects_intent_to_add_without_mutation
+test_checkpoint_restore_refuses_current_intent_to_add_without_mutation
+test_checkpoint_rejects_legacy_intent_to_add_snapshot_without_mutation
+test_checkpoint_accepts_crlf_python_output "$(command -v python3)"
 test_hook_installers_keep_telemetry_off_the_tool_hot_path
 test_gc_bounds_old_checkpoint_and_hook_state
 
