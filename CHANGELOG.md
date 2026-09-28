@@ -64,6 +64,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A Notion journal page whose body needs more than one 100-block request is
+  created with an empty content hash and gets its final hash only after every
+  batch lands. An interrupted overflow append used to leave a truncated page
+  carrying the final hash, so the retry reported it unchanged; the retry now
+  finds the page by key and rebuilds its body.
 - `oms land` runs its gate in a detached worktree of the verified commit, as
   CI checks a fresh clone. The session driving the checkout writes its own
   `.oms` (handoffs, fail-ledger rows) during a 25-minute gate, and the gate's

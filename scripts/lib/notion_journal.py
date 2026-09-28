@@ -734,9 +734,18 @@ class NotionJournalExporter:
             ),
             "children": children[:NOTION_CHILD_BATCH],
         }
+        overflow = children[NOTION_CHILD_BATCH:]
+        if overflow:
+            # Create with an empty hash so an interrupted overflow append
+            # leaves a keyed page that the next upsert repairs, not skips.
+            payload["properties"][self._hash_property] = {"rich_text": []}
         response = self._request("POST", "/v1/pages", payload)
         page_id = self._page_id(response)
-        self._append_children(page_id, children[NOTION_CHILD_BATCH:])
+        if overflow:
+            self._append_children(page_id, overflow)
+            self._publish_properties(
+                page_id, summary_key, title, content_hash, metadata
+            )
         return page_id
 
     def _update_page(
@@ -758,6 +767,13 @@ class NotionJournalExporter:
         self._append_children(page_id, self._summary_children(content))
         # Publish the hash only after child replacement succeeds. A retry after
         # interruption must not mistake stale body content for the new version.
+        self._publish_properties(
+            page_id, summary_key, title, content_hash, metadata
+        )
+
+    def _publish_properties(
+        self, page_id, summary_key, title, content_hash, metadata
+    ):
         encoded_page_id = urllib.parse.quote(page_id, safe="")
         self._request(
             "PATCH",
