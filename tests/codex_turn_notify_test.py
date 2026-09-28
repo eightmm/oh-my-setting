@@ -81,5 +81,31 @@ class CodexTurnNotifyTest(unittest.TestCase):
         self.assertFalse(self.far.exists())
 
 
+    def test_long_messages_keep_the_opening_summary(self):
+        self.rollout("t-main", "vscode")
+        for osc in ("9", "777"):
+            with self.subTest(osc=osc):
+                message = "완료 요약: 검사 통과. " + "x" * 1200 + " 끝."
+                self.run_notify(self.event(**{"last-assistant-message": message}),
+                                OMS_TERMINAL_NOTIFY_OSC=osc)
+                data = self.near.read_bytes()
+                prefix = b"\x1b]777;notify;" if osc == "777" else b"\x1b]9;"
+                self.assertTrue(data.startswith(prefix))
+                self.assertTrue(data.endswith(b"\x07"))
+                self.assertIn("완료 요약: 검사 통과.".encode(), data)
+                self.assertLess(len(data), 400)
+                self.assertEqual(1, data.count(b"\x07"))
+                self.assertFalse(self.far.exists())
+
+    def test_long_credentials_are_redacted_before_message_truncation(self):
+        self.rollout("t-main", "vscode")
+        message = "완료: token=" + "X" * 1500 + " done"
+        self.run_notify(self.event(**{"last-assistant-message": message}))
+        data = self.near.read_bytes()
+        self.assertIn(b"[REDACTED]", data)
+        self.assertNotIn(b"X" * 20, data)
+
+
+
 if __name__ == "__main__":
     unittest.main()
