@@ -304,6 +304,39 @@ proc = subprocess.run(["bash", str(root / "scripts/syntax-guard-hook.sh")], cwd=
 message = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
 assert "backward compatibility" in message and "does not parse" in message
 assert not hook_state.live_thread_hint(payload("codex")), "edit and prompt delivery must share the cursor"
+large = "\\" * 3000
+for suffix in ("one", "two"):
+    call("append", "--id", "live", "--role", "answer", "--text", large + suffix)
+call("append", "--id", "live", "--role", "note", "--text", "after-large-turns")
+seen = []
+for _ in range(3):
+    message = hook_state.live_thread_hint(payload("codex"))
+    assert "needs inspection" not in message, "a valid stored turn must not wedge live delivery"
+    if message:
+        seen.extend(json.loads(message.splitlines()[1])["turns"])
+        assert len(message.encode()) < 68000, "delivery must retain a bounded output"
+assert [row["text"] for row in seen] == [large + "one", large + "two", "after-large-turns"]
+assert not hook_state.live_thread_hint(payload("codex")), "delivered turns must not replay"
+# Ordinary messages still use the existing 6000-byte batch budget.
+ordinary = ["m" * 3500 + suffix for suffix in ("one", "two")]
+for text in ordinary:
+    call("append", "--id", "live", "--role", "note", "--text", text)
+for text in ordinary:
+    message = hook_state.live_thread_hint(payload("codex"))
+    turns = json.loads(message.splitlines()[1])["turns"]
+    assert [row["text"] for row in turns] == [text], "normal delivery must keep the 6000-byte batch budget"
+assert not hook_state.live_thread_hint(payload("codex"))
+# Explicit CLI byte budgets remain strict even when hooks can recover a large row.
+small = subprocess.run(thread + ["updates", "--id", "live", "--max-bytes", "10"],
+                       capture_output=True, text=True)
+assert small.returncode, "an explicit user byte limit must not silently grow"
+code = "    def nested():\n        return 1\n"
+code_file = repo / "snippet.txt"
+code_file.write_text(code, encoding="utf-8")
+call("append", "--id", "live", "--role", "note", "--text-file", str(code_file))
+saved = json.loads(path.read_text().splitlines()[-1])["text"]
+assert saved.startswith("    def nested():\n        return 1"), "file-based turns must retain code indentation"
+assert "    def nested()" in hook_state.live_thread_hint(payload("codex"))
 os.environ["OMS_LIVE_COLLAB"] = "0"
 assert not hook_state.live_thread_hint(payload("new"))
 os.environ.pop("OMS_LIVE_COLLAB")
