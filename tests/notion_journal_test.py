@@ -165,6 +165,48 @@ class NotionJournalTest(unittest.TestCase):
             loaded = load_work_journal()
         self.assertEqual(1, loaded.SCHEMA_VERSION)
 
+    def test_create_publishes_hash_after_all_child_batches(self):
+        content = "\n".join("line {}".format(i) for i in range(101))
+        transport = FakeTransport([{"results": []}, {"id": "page-1"}, {}, {}])
+        result = self.exporter(transport).upsert("key", "title", "final-hash", content)
+        self.assertEqual({"status": "synced", "page_id": "page-1"}, result)
+        calls = transport.calls
+        self.assertEqual(4, len(calls))
+        self.assertEqual([100, 1], [len(call[2]["children"]) for call in calls[1:3]])
+        self.assertNotEqual("final-hash", notion.NotionJournalExporter._property_text(
+            {"properties": calls[1][2]["properties"]}, "Content Hash"))
+        self.assertEqual(("PATCH", "/v1/pages/page-1"), calls[3][:2])
+        self.assertEqual("final-hash", notion.NotionJournalExporter._property_text(
+            {"properties": calls[3][2]["properties"]}, "Content Hash"))
+
+    def test_retry_repairs_partial_create_after_child_append_failure(self):
+        content = "\n".join("line {}".format(i) for i in range(101))
+        transport = FakeTransport([
+            {"results": []}, {"id": "page-1"}, notion.NotionHTTPError(400),
+        ])
+        exporter = self.exporter(transport)
+        with self.assertRaises(notion.NotionHTTPError):
+            exporter.upsert("key", "title", "final-hash", content)
+        # Retry sees the properties actually published with the partial body.
+        partial_page = {"id": "page-1", "properties": json.loads(json.dumps(
+            transport.calls[1][2]["properties"]))}
+        transport.responses.extend([
+            {"results": [partial_page]},
+            {"results": [{"id": "child-{}".format(i)} for i in range(100)],
+             "has_more": False},
+        ] + [{} for _ in range(100)] + [{}, {}, {}])
+        result = exporter.upsert("key", "title", "final-hash", content)
+        self.assertEqual({"status": "synced", "page_id": "page-1"}, result)
+        retry = transport.calls[3:]
+        self.assertEqual(100, sum(call[0] == "DELETE" for call in retry))
+        appends = [call for call in retry if call[1] == "/v1/blocks/page-1/children"
+                   and call[0] == "PATCH"]
+        self.assertEqual([100, 1], [len(call[2]["children"]) for call in appends])
+        self.assertEqual(("PATCH", "/v1/pages/page-1"), retry[-1][:2])
+        self.assertEqual("final-hash", notion.NotionJournalExporter._property_text(
+            {"properties": retry[-1][2]["properties"]}, "Content Hash"))
+        self.assertEqual([], transport.responses)
+
     def test_create_after_remote_key_miss(self):
         transport = FakeTransport(
             [
