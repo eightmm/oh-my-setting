@@ -309,12 +309,13 @@ for suffix in ("one", "two"):
     call("append", "--id", "live", "--role", "answer", "--text", large + suffix)
 call("append", "--id", "live", "--role", "note", "--text", "after-large-turns")
 seen = []
-for _ in range(3):
+for expected in (large + "one", large + "two", "after-large-turns"):
     message = hook_state.live_thread_hint(payload("codex"))
     assert "needs inspection" not in message, "a valid stored turn must not wedge live delivery"
-    if message:
-        seen.extend(json.loads(message.splitlines()[1])["turns"])
-        assert len(message.encode()) < 68000, "delivery must retain a bounded output"
+    turns = json.loads(message.splitlines()[1])["turns"]
+    assert [row["text"] for row in turns] == [expected], "oversized delivery must stop after one row"
+    seen.extend(turns)
+    assert len(message.encode()) < 68000, "delivery must retain a bounded output"
 assert [row["text"] for row in seen] == [large + "one", large + "two", "after-large-turns"]
 assert not hook_state.live_thread_hint(payload("codex")), "delivered turns must not replay"
 # Ordinary messages still use the existing 6000-byte batch budget.
@@ -330,13 +331,41 @@ assert not hook_state.live_thread_hint(payload("codex"))
 small = subprocess.run(thread + ["updates", "--id", "live", "--max-bytes", "10"],
                        capture_output=True, text=True)
 assert small.returncode, "an explicit user byte limit must not silently grow"
-code = "    def nested():\n        return 1\n"
+code = "\r\n    def nested():  \r\n\r\n        return 1  \r\n"
+expected_code = "\n    def nested():  \n\n        return 1  "
 code_file = repo / "snippet.txt"
-code_file.write_text(code, encoding="utf-8")
+code_file.write_bytes(code.encode("utf-8"))
 call("append", "--id", "live", "--role", "note", "--text-file", str(code_file))
 saved = json.loads(path.read_text().splitlines()[-1])["text"]
-assert saved.startswith("    def nested():\n        return 1"), "file-based turns must retain code indentation"
-assert "    def nested()" in hook_state.live_thread_hint(payload("codex"))
+assert saved == expected_code, "file-based turns must retain indentation, blank lines and trailing spaces"
+message = hook_state.live_thread_hint(payload("codex"))
+assert json.loads(message.splitlines()[1])["turns"][0]["text"] == expected_code
+# Oversize recovery must never skip invalid history or advance its cursor.
+state_path = repo / ".oms/hooks/sessions" / (hook_state.session_hash(payload("codex")) + ".thread.json")
+invalid_rows = [
+    b"{" + b" " * 6100 + b"\n",
+    (json.dumps({"thread": "other", "text": large}) + "\n").encode(),
+    (json.dumps({"thread": "live", "text": "x" * 65536}) + "\n").encode(),
+]
+for invalid in invalid_rows:
+    prefix = path.read_bytes()
+    cursor = json.loads(state_path.read_text())["cursor"]
+    with path.open("ab") as handle:
+        handle.write(invalid)
+    assert "needs inspection" in hook_state.live_thread_hint(payload("codex"))
+    state = json.loads(state_path.read_text())
+    assert state["cursor"] == cursor and state["delivery_error"], "invalid history must not advance delivery"
+    assert not hook_state.live_thread_hint(payload("codex")), "repeat inspection warnings must be deduplicated"
+    # Repair only the unconsumed suffix in this isolated fixture, preserving the
+    # file identity and consumed prefix to exercise the existing error latch.
+    path.write_bytes(prefix)
+    call("append", "--id", "live", "--role", "note", "--text", large + "recovered")
+    call("append", "--id", "live", "--role", "note", "--text", "after-recovery")
+    for expected in (large + "recovered", "after-recovery"):
+        message = hook_state.live_thread_hint(payload("codex"))
+        assert [row["text"] for row in json.loads(message.splitlines()[1])["turns"]] == [expected]
+    assert not json.loads(state_path.read_text()).get("delivery_error"), "successful delivery must clear the error latch"
+    assert not hook_state.live_thread_hint(payload("codex")), "recovered turns must not replay"
 os.environ["OMS_LIVE_COLLAB"] = "0"
 assert not hook_state.live_thread_hint(payload("new"))
 os.environ.pop("OMS_LIVE_COLLAB")
