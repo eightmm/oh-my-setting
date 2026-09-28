@@ -64,6 +64,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Live hook delivery can pass through one validated thread row above its usual
+  byte budget, preventing a large complete update from wedging that session's
+  cursor. CLI byte limits remain strict. Thread text files now retain leading
+  indentation, blank lines, and trailing spaces.
 - Checkpoint patches now use color-free `a/` and `b/` paths regardless of Git
   display settings. Creation and restore refuse current intent-to-add entries,
   and verification rejects older patches that cannot reproduce their saved

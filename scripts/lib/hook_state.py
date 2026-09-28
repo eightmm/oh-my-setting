@@ -1277,7 +1277,7 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
             state = load_state(path)
             after = state.get("cursor", "") if state.get("thread") == tid else ""
             try:
-                delta = thread_live.updates(repo, tid, after)
+                delta = thread_live.updates(repo, tid, after, allow_first_row_over_budget=True)
             except (ValueError, OSError, RecursionError):
                 if state.get("thread") == tid and state.get("delivery_error"):
                     return ""

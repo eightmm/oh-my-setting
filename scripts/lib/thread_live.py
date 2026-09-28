@@ -91,7 +91,8 @@ def cursor_offset(handle, thread, cursor):
     return offset
 
 
-def updates(repo, thread, after="", budget=6000, limit=12, wait=0):
+def updates(repo, thread, after="", budget=6000, limit=12, wait=0, *,
+            allow_first_row_over_budget=False):
     if (type(budget) is not int or not 1 <= budget <= MAX_ROW
             or type(limit) is not int or not 1 <= limit <= 200
             or type(wait) not in (int, float) or not 0 <= wait <= 30):
@@ -113,6 +114,10 @@ def updates(repo, thread, after="", budget=6000, limit=12, wait=0):
                     raise ValueError("invalid thread row")
                 if used + len(line) > budget:
                     if not rows:
+                        if allow_first_row_over_budget:
+                            rows.append(row)
+                            offset += len(line)
+                            break
                         raise ValueError("next complete turn exceeds byte budget; increase --max-bytes")
                     break
                 rows.append(row)
@@ -157,7 +162,7 @@ def append_from_env():
     if fields and any(all(row.get(key) == val for key, val in fields.items()) for row in rows):
         return  # Replayed acknowledgment is idempotent under the existing lock.
     text_file = env.get("OMS_TH_TEXT_FILE")
-    text = Path(text_file).read_text(encoding="utf-8", errors="replace").strip() if text_file else ""
+    text = Path(text_file).read_text(encoding="utf-8", errors="replace").rstrip("\r\n") if text_file else ""
     try:
         budget = max(1, min(32768, int(env.get("OMS_TH_MAX", "4000"))))
     except ValueError:
