@@ -30,8 +30,8 @@ Untracked files are counted for visibility but are not captured or modified.
 Commands:
   create              Save the current index and tracked worktree changes.
   list                List checkpoints, newest first.
-  verify ID           Verify metadata, hashes, and patch applicability in a
-                      temporary detached worktree.
+  verify ID           Verify metadata, hashes, and reconstructed tracked state
+                      in a temporary detached worktree.
   restore ID          Validate a restore without changing files (default).
   restore ID --apply  Create an automatic backup, then replace tracked index
                       and worktree state. Requires the same HEAD as creation.
@@ -311,6 +311,13 @@ replace_tracked_state() {
   # files untouched.
   if [ "$rc" -eq 0 ] && [ -s "$tmp/worktree.patch" ]; then
     git -C "$REPO" apply --reverse "$tmp/worktree.patch" || rc=1
+  fi
+  # Reversing the worktree patch can make its bytes match the index while
+  # leaving cached stat data stale. Refresh before applying the index patch.
+  if [ "$rc" -eq 0 ] && {
+    [ -s "$tmp/index.patch" ] || [ -s "$target_dir/index.patch" ]
+  }; then
+    git -C "$REPO" update-index --refresh || rc=1
   fi
   if [ "$rc" -eq 0 ] && [ -s "$tmp/index.patch" ]; then
     git -C "$REPO" apply --reverse --index "$tmp/index.patch" || rc=1

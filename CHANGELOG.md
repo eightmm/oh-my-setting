@@ -68,6 +68,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   display settings. Creation and restore refuse current intent-to-add entries,
   and verification rejects older patches that cannot reproduce their saved
   tracked state before restore changes files or creates a recovery backup.
+  Restore refreshes Git's cached index stat data after reversing unstaged
+  changes, so staged and unstaged edits to the same file restore reliably.
 - A Notion journal page whose body needs more than one 100-block request is
   created with an empty content hash and gets its final hash only after every
   batch lands. An interrupted overflow append used to leave a truncated page

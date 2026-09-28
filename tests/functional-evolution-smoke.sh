@@ -489,6 +489,7 @@ checkpoint_config_roundtrip() {
   git -C "$repo" commit -qm add-b
   printf 'staged-checkpoint\n' > "$repo/file.txt"
   git -C "$repo" add file.txt
+  printf 'mixed-unstaged-checkpoint\n' > "$repo/file.txt"
   printf 'unstaged-checkpoint\n' > "$repo/b.txt"
   : > "$repo/new-empty.txt"
   printf 'new staged content\n' > "$repo/new-added.txt"
@@ -508,7 +509,14 @@ checkpoint_config_roundtrip() {
     fail "checkpoint dry-run changed status with $config_key=$config_value"
 
   printf 'later-staged\n' > "$repo/file.txt"
+  # Force stale stat data without sleeping: undoing unstaged bytes must refresh
+  # the index before the next --index apply checks worktree/index agreement.
+  python3 - "$repo/file.txt" <<'PYTIME'
+import os, sys
+os.utime(sys.argv[1], (946684800, 946684800))
+PYTIME
   git -C "$repo" add file.txt
+  printf 'mixed-later-unstaged\n' > "$repo/file.txt"
   printf 'later-unstaged\n' > "$repo/b.txt"
   (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" restore "$checkpoint_id" --apply) >/dev/null ||
     fail "checkpoint apply failed with $config_key=$config_value"
@@ -516,7 +524,7 @@ checkpoint_config_roundtrip() {
 import pathlib, subprocess, sys
 repo = pathlib.Path(sys.argv[1])
 for name, staged, working in (
-    ("file.txt", b"staged-checkpoint\n", b"staged-checkpoint\n"),
+    ("file.txt", b"staged-checkpoint\n", b"mixed-unstaged-checkpoint\n"),
     ("b.txt", b"b-base\n", b"unstaged-checkpoint\n"),
     ("new-empty.txt", b"", b""),
     ("new-added.txt", b"new staged content\n", b"new staged content\n"),
@@ -531,6 +539,33 @@ PY
   fi
   git -C "$repo" diff --cached --name-only -- new-empty.txt | grep -Fxq new-empty.txt ||
     fail "checkpoint converted an ordinary staged empty file to intent-to-add"
+}
+
+test_checkpoint_restores_from_unstaged_only_with_stale_stat() {
+  local repo="$TMP/checkpoint-unstaged-stat" created checkpoint_id
+  make_repo "$repo"
+  git -C "$repo" config core.autocrlf false
+  printf 'target-staged\n' > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  created="$(cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" create --json)" ||
+    fail "checkpoint creation failed for unstaged-only restore"
+  checkpoint_id="$(OMS_TEST_REPORT="$created" python3 -c 'import json,os; print(json.loads(os.environ["OMS_TEST_REPORT"])["id"])' | tr -d '\r')"
+  git -C "$repo" show HEAD:file.txt > "$repo/file.txt"
+  python3 - "$repo/file.txt" <<'PYTIME'
+import os, sys
+os.utime(sys.argv[1], (946684800, 946684800))
+PYTIME
+  git -C "$repo" add file.txt
+  git -C "$repo" diff --cached --quiet || fail "fixture must have no staged changes"
+  printf 'later-unstaged\n' > "$repo/file.txt"
+  (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" restore "$checkpoint_id" --apply) >/dev/null ||
+    fail "checkpoint could not apply target index after unstaged-only state"
+  python3 - "$repo" <<'PYBYTES' || fail "unstaged-only restore changed target bytes"
+import pathlib, subprocess, sys
+repo = pathlib.Path(sys.argv[1])
+assert (repo / "file.txt").read_bytes() == b"target-staged\n"
+assert subprocess.check_output(["git", "-C", str(repo), "show", ":file.txt"]) == b"target-staged\n"
+PYBYTES
 }
 
 test_checkpoint_ignores_diff_prefix_and_color_config() {
@@ -845,6 +880,8 @@ test_inbox_ranks_state_and_applies_only_safe_repairs
 test_unresolved_queue_triages_by_patch_bytes_and_clears_in_one_batch
 test_memory_citations_revalidate_and_stay_out_of_default_context
 test_checkpoint_restores_staged_and_unstaged_content_with_a_backup
+test_checkpoint_restores_from_unstaged_only_with_stale_stat
+
 test_checkpoint_ignores_diff_prefix_and_color_config
 test_checkpoint_rejects_intent_to_add_without_mutation
 test_checkpoint_restore_refuses_current_intent_to_add_without_mutation
