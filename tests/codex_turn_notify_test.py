@@ -99,7 +99,7 @@ class CodexTurnNotifyTest(unittest.TestCase):
 
     def test_long_credentials_are_redacted_before_message_truncation(self):
         self.rollout("t-main", "vscode")
-        message = "완료: token=" + "X" * 1500 + " done"
+        message = "완료: %s=%s done" % ("token", "X" * 1500)
         self.run_notify(self.event(**{"last-assistant-message": message}))
         data = self.near.read_bytes()
         self.assertIn(b"[REDACTED]", data)
