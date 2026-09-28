@@ -483,6 +483,7 @@ checkpoint_config_roundtrip() {
   local created checkpoint_id before_status
 
   make_repo "$repo"
+  git -C "$repo" config core.autocrlf false
   printf 'b-base\n' > "$repo/b.txt"
   git -C "$repo" add b.txt
   git -C "$repo" commit -qm add-b
@@ -511,10 +512,18 @@ checkpoint_config_roundtrip() {
   printf 'later-unstaged\n' > "$repo/b.txt"
   (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" restore "$checkpoint_id" --apply) >/dev/null ||
     fail "checkpoint apply failed with $config_key=$config_value"
-  [ "$(cat "$repo/file.txt")" = 'staged-checkpoint' ] ||
-    fail "checkpoint apply lost staged bytes with $config_key=$config_value"
-  [ "$(cat "$repo/b.txt")" = 'unstaged-checkpoint' ] ||
-    fail "checkpoint apply lost unstaged bytes with $config_key=$config_value"
+  python3 - "$repo" <<'PY' || fail "checkpoint changed index or worktree bytes"
+import pathlib, subprocess, sys
+repo = pathlib.Path(sys.argv[1])
+for name, staged, working in (
+    ("file.txt", b"staged-checkpoint\n", b"staged-checkpoint\n"),
+    ("b.txt", b"b-base\n", b"unstaged-checkpoint\n"),
+    ("new-empty.txt", b"", b""),
+    ("new-added.txt", b"new staged content\n", b"new staged content\n"),
+):
+    assert (repo / name).read_bytes() == working, name
+    assert subprocess.check_output(["git", "-C", str(repo), "show", ":" + name]) == staged, name
+PY
   git -C "$repo" ls-files --error-unmatch new-empty.txt new-added.txt >/dev/null ||
     fail "checkpoint lost ordinary staged additions"
   if [ ! -f "$repo/new-empty.txt" ] || [ -s "$repo/new-empty.txt" ]; then
@@ -522,12 +531,6 @@ checkpoint_config_roundtrip() {
   fi
   git -C "$repo" diff --cached --name-only -- new-empty.txt | grep -Fxq new-empty.txt ||
     fail "checkpoint converted an ordinary staged empty file to intent-to-add"
-  [ "$(git -C "$repo" show :new-added.txt)" = 'new staged content' ] ||
-    fail "checkpoint lost staged new-file content"
-  git -C "$repo" diff --cached -- file.txt | grep -Fq 'staged-checkpoint' ||
-    fail "checkpoint apply lost staged index state with $config_key=$config_value"
-  git -C "$repo" diff -- b.txt | grep -Fq 'unstaged-checkpoint' ||
-    fail "checkpoint apply lost unstaged index state with $config_key=$config_value"
 }
 
 test_checkpoint_ignores_diff_prefix_and_color_config() {
@@ -538,28 +541,35 @@ test_checkpoint_ignores_diff_prefix_and_color_config() {
 # Intent-to-add is not represented by the current two-patch checkpoint format.
 # Reject it before creating checkpoint files or mutating tracked state.
 test_checkpoint_rejects_intent_to_add_without_mutation() {
-  local repo="$TMP/checkpoint-ita-create"
+  local repo variant
   local before_status before_index before_worktree checkpoint_artifacts
 
-  make_repo "$repo"
-  printf 'intent content\n' > "$repo/new.txt"
-  git -C "$repo" add -N new.txt
-  before_status="$(git -C "$repo" status --porcelain=v1)"
-  before_index="$(git -C "$repo" ls-files --stage)"
-  before_worktree="$(git -C "$repo" hash-object new.txt)"
+  for variant in content empty missing; do
+    repo="$TMP/checkpoint-ita-create-$variant"
+    make_repo "$repo"
+    printf 'intent content\n' > "$repo/new.txt"
+    [ "$variant" != empty ] || : > "$repo/new.txt"
+    git -C "$repo" add -N new.txt
+    [ "$variant" != missing ] || rm "$repo/new.txt"
+    before_status="$(git -C "$repo" status --porcelain=v1)"
+    before_index="$(git -C "$repo" ls-files --stage)"
+    before_worktree="$(git -C "$repo" hash-object new.txt 2>/dev/null || printf missing)"
 
-  if (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" create --json) >/dev/null 2>&1; then
-    fail "checkpoint creation accepted an intent-to-add entry"
-  fi
-  [ "$before_status" = "$(git -C "$repo" status --porcelain=v1)" ] ||
-    fail "intent-to-add create refusal changed status"
-  [ "$before_index" = "$(git -C "$repo" ls-files --stage)" ] ||
-    fail "intent-to-add create refusal changed the index"
-  [ "$before_worktree" = "$(git -C "$repo" hash-object new.txt)" ] ||
-    fail "intent-to-add create refusal changed file content"
-  checkpoint_artifacts="$(checkpoint_ids "$repo/.oms/checkpoints")"
-  [ -z "$checkpoint_artifacts" ] ||
-    fail "intent-to-add create refusal left checkpoint artifacts"
+    if (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" create --json) >/dev/null 2>&1; then
+      fail "checkpoint creation accepted an intent-to-add entry"
+    fi
+    [ "$before_status" = "$(git -C "$repo" status --porcelain=v1)" ] ||
+      fail "intent-to-add create refusal changed status"
+    [ "$before_index" = "$(git -C "$repo" ls-files --stage)" ] ||
+      fail "intent-to-add create refusal changed the index"
+    [ "$before_worktree" = "$(git -C "$repo" hash-object new.txt 2>/dev/null || printf missing)" ] ||
+      fail "intent-to-add create refusal changed file content"
+    [ "$variant" != missing ] || [ ! -e "$repo/new.txt" ] ||
+      fail "intent-to-add create refusal recreated a missing file"
+    checkpoint_artifacts="$(checkpoint_ids "$repo/.oms/checkpoints")"
+    [ -z "$checkpoint_artifacts" ] ||
+      fail "intent-to-add create refusal left checkpoint artifacts"
+  done
 }
 
 # Also reject a current intent-to-add entry before restore creates its mandatory
@@ -579,6 +589,9 @@ test_checkpoint_restore_refuses_current_intent_to_add_without_mutation() {
   before_worktree="$(git -C "$repo" hash-object new.txt)"
   before_checkpoints="$(checkpoint_ids "$repo/.oms/checkpoints")"
 
+  if (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" restore "$checkpoint_id") >/dev/null 2>&1; then
+    fail "checkpoint dry-run accepted a current intent-to-add entry"
+  fi
   if (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" restore "$checkpoint_id" --apply) >/dev/null 2>&1; then
     fail "checkpoint restore accepted a current intent-to-add entry"
   fi
@@ -643,6 +656,9 @@ PY
   [ "$before_worktree" = "$(git -C "$repo" hash-object new.txt)" ] ||
     fail "legacy checkpoint verify changed file content"
 
+  if (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" restore "$checkpoint_id") >/dev/null 2>&1; then
+    fail "dry-run accepted a legacy intent-to-add checkpoint"
+  fi
   if (cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" restore "$checkpoint_id" --apply) >/dev/null 2>&1; then
     fail "restore applied a legacy intent-to-add checkpoint"
   fi
