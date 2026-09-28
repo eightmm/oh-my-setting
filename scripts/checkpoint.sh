@@ -57,14 +57,50 @@ PY
 
 write_index_patch() {
   local output="$1"
-  git -C "$REPO" diff --cached --binary --full-index --no-ext-diff \
-    --no-textconv HEAD -- > "$output"
+  local repo="${2:-$REPO}"
+  git -C "$repo" -c diff.noprefix=false -c color.ui=false diff \
+    --no-color --src-prefix=a/ --dst-prefix=b/ --cached --binary \
+    --full-index --no-ext-diff --no-textconv HEAD -- > "$output"
 }
 
 write_worktree_patch() {
   local output="$1"
-  git -C "$REPO" diff --binary --full-index --no-ext-diff --no-textconv -- \
-    > "$output"
+  local repo="${2:-$REPO}"
+  git -C "$repo" -c diff.noprefix=false -c color.ui=false diff \
+    --no-color --src-prefix=a/ --dst-prefix=b/ --binary --full-index \
+    --no-ext-diff --no-textconv -- > "$output"
+}
+
+ensure_no_intent_to_add() {
+  python3 - "$REPO" <<'PY'
+import re
+import subprocess
+import sys
+
+result = subprocess.run(
+    ["git", "-C", sys.argv[1], "ls-files", "--debug", "-z"],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+)
+if result.returncode:
+    print("error: could not inspect the Git index", file=sys.stderr)
+    raise SystemExit(2)
+
+# -z places each pathname before a NUL, followed by its index metadata. The
+# intent-to-add bit is absent from --stage and --status, including for empty
+# files; --debug exposes it without changing the index.
+for entry in result.stdout.split(b"\0")[1:]:
+    match = re.match(
+        rb"  ctime:[^\n]*\n  mtime:[^\n]*\n  dev:[^\n]*\n"
+        rb"  uid:[^\n]*\n  size:[^\n]*\tflags: ([0-9a-fA-F]+)\n",
+        entry,
+    )
+    if match is None:
+        print("error: could not read Git index flags", file=sys.stderr)
+        raise SystemExit(2)
+    if int(match.group(1), 16) & 0x20000000:
+        print("error: intent-to-add entries cannot be checkpointed or restored", file=sys.stderr)
+        raise SystemExit(2)
+PY
 }
 
 ensure_supported_tree() {
@@ -78,6 +114,7 @@ ensure_supported_tree() {
     echo "error: resolve unmerged paths before creating or restoring a checkpoint" >&2
     return 2
   }
+  ensure_no_intent_to_add
 }
 
 valid_id() {
@@ -205,7 +242,7 @@ checkpoint_verify_raw() {
     echo "error: checkpoint not found or unsafe: $id" >&2
     return 2
   fi
-  head="$(checkpoint_metadata_head "$dir" "$id")" || return 1
+  head="$(checkpoint_metadata_head "$dir" "$id" | tr -d '\r')" || return 1
   git -C "$REPO" cat-file -e "$head^{commit}" 2>/dev/null || {
     echo "error: checkpoint commit is not available locally: $head" >&2
     return 1
@@ -225,8 +262,16 @@ checkpoint_verify_raw() {
   if [ "$rc" -eq 0 ] && [ -s "$dir/worktree.patch" ]; then
     git -C "$worktree" apply "$dir/worktree.patch" >/dev/null 2>&1 || rc=1
   fi
+  if [ "$rc" -eq 0 ]; then
+    write_index_patch "$tmp/index.patch" "$worktree" || rc=1
+    write_worktree_patch "$tmp/worktree.patch" "$worktree" || rc=1
+    if [ "$rc" -eq 0 ]; then
+      cmp -s "$dir/index.patch" "$tmp/index.patch" &&
+        cmp -s "$dir/worktree.patch" "$tmp/worktree.patch" || rc=1
+    fi
+  fi
   if [ "$rc" -ne 0 ]; then
-    echo "error: checkpoint patches do not apply cleanly to their saved HEAD: $id" >&2
+    echo "error: checkpoint patches cannot reproduce their saved tracked state: $id" >&2
   fi
   if [ "$added" -eq 1 ]; then
     git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1 || true
@@ -243,10 +288,10 @@ tracked_state_matches() {
   write_index_patch "$tmp/index.patch" || rc=1
   write_worktree_patch "$tmp/worktree.patch" || rc=1
   if [ "$rc" -eq 0 ]; then
-    current_index="$(file_sha256 "$tmp/index.patch")"
-    current_worktree="$(file_sha256 "$tmp/worktree.patch")"
-    saved_index="$(file_sha256 "$dir/index.patch")"
-    saved_worktree="$(file_sha256 "$dir/worktree.patch")"
+    current_index="$(file_sha256 "$tmp/index.patch" | tr -d '\r')"
+    current_worktree="$(file_sha256 "$tmp/worktree.patch" | tr -d '\r')"
+    saved_index="$(file_sha256 "$dir/index.patch" | tr -d '\r')"
+    saved_worktree="$(file_sha256 "$dir/worktree.patch" | tr -d '\r')"
     [ "$current_index" = "$saved_index" ] &&
       [ "$current_worktree" = "$saved_worktree" ] || rc=1
   fi
@@ -299,7 +344,7 @@ cmd_restore_locked() {
     echo "error: checkpoint not found or unsafe: $id" >&2
     return 2
   fi
-  saved_head="$(checkpoint_metadata_head "$dir" "$id")" || return 1
+  saved_head="$(checkpoint_metadata_head "$dir" "$id" | tr -d '\r')" || return 1
   current_head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null | tr -d '\r')"
   [ "$current_head" = "$saved_head" ] || {
     echo "error: checkpoint $id belongs to HEAD $saved_head; current HEAD is $current_head" >&2

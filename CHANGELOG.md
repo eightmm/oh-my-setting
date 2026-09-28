@@ -64,6 +64,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Checkpoint patches now use color-free `a/` and `b/` paths regardless of Git
+  display settings. Creation and restore refuse current intent-to-add entries,
+  and verification rejects older patches that cannot reproduce their saved
+  tracked state before restore changes files or creates a recovery backup.
 - A Notion journal page whose body needs more than one 100-block request is
   created with an empty content hash and gets its final hash only after every
   batch lands. An interrupted overflow append used to leave a truncated page
