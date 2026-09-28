@@ -531,6 +531,50 @@ class ProjectGraphTest(unittest.TestCase):
         self.assertEqual(refreshed["stats"]["parsed"], 1)
         self.assertTrue(check(self.repo, state=self.state)["fresh"])
 
+    def test_ensure_recovers_unusable_graph_artifacts(self) -> None:
+        self.write("a.py", "def first():\n    return 1\n")
+        for defect in ("missing", "json", "utf8", "non-object", "revision", "schema", "nodes", "edges"):
+            with self.subTest(defect=defect):
+                build(self.repo, state=self.state)
+                path = self.state / "graph.json"
+                expected = json.loads(path.read_text())
+                if defect == "missing":
+                    path.unlink()
+                elif defect == "json":
+                    path.write_bytes(b"{")
+                elif defect == "utf8":
+                    path.write_bytes(b"\xff")
+                elif defect == "non-object":
+                    path.write_text("[]")
+                else:
+                    broken = dict(expected)
+                    broken[defect] = {"revision": "stale", "schema": -1,
+                                      "nodes": None, "edges": {}}[defect]
+                    path.write_text(json.dumps(broken))
+                self.assertFalse(check(self.repo, state=self.state)["fresh"])
+                self.assertEqual(ensure(self.repo, state=self.state)["action"], "refreshed")
+                self.assertEqual(load_graph(self.repo, state=self.state), expected)
+                self.assertEqual(ensure(self.repo, state=self.state)["action"], "fresh")
+
+    def test_ensure_refuses_an_unsafe_graph_target(self) -> None:
+        from oms_runtime.common import CoreError
+
+        self.write("a.py", "def first():\n    return 1\n")
+        build(self.repo, state=self.state)
+        graph = self.state / "graph.json"
+        outside = self.state.parent / "outside.json"
+        original = graph.read_bytes()
+        outside.write_bytes(original)
+        graph.unlink()
+        try:
+            graph.symlink_to(outside)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        with self.assertRaises(CoreError):
+            ensure(self.repo, state=self.state)
+        self.assertTrue(graph.is_symlink())
+        self.assertEqual(outside.read_bytes(), original)
+
     def test_ensure_refuses_a_first_build_over_the_file_bound_but_never_a_refresh(self) -> None:
         self.write("a.py", "def first():\n    return 1\n")
         self.write("b.py", "def second():\n    return 2\n")
