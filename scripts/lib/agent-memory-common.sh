@@ -870,6 +870,7 @@ agent_memory_emit_compact_section() {
   local label="$1"
   local memory_file="$2"
   local scope="$3"
+  local pins_only="${4:-0}"
   local pins_file
   local summary_file
   local body
@@ -879,7 +880,7 @@ agent_memory_emit_compact_section() {
 
   pins_file="$(agent_memory_pins_file "$memory_file")"
   summary_file="$(agent_memory_summary_file "$memory_file")"
-  if [ -s "$memory_file" ] && [ ! -s "$summary_file" ]; then
+  if [ "$pins_only" != 1 ] && [ -s "$memory_file" ] && [ ! -s "$summary_file" ]; then
     agent_memory_refresh_summary "$memory_file" "$scope" || true
   fi
 
@@ -903,7 +904,7 @@ agent_memory_emit_compact_section() {
     fi
   fi
 
-  if [ -s "$summary_file" ]; then
+  if [ "$pins_only" != 1 ] && [ -s "$summary_file" ]; then
     if agent_memory_file_has_sensitive_content "$summary_file"; then
       echo "warning: compact memory omitted because it contains sensitive-looking content: $label" >&2
     else
@@ -935,6 +936,7 @@ agent_memory_emit_compact_section() {
 agent_memory_emit_recall_section() {
   local memory_file="$1"
   local query="$2"
+  local scope="${3:-memory}"
   local limit="${OMS_AGENT_MEMORY_RECALL_LIMIT:-5}"
   local out
 
@@ -951,7 +953,7 @@ agent_memory_emit_recall_section() {
     echo "warning: ranked recall omitted because it contains sensitive-looking content" >&2
     rm -f "$out"; return 1
   fi
-  printf '### relevant recall\n'
+  printf '### relevant recall (%s)\n' "$scope"
   agent_memory_truncate_bytes 4000 < "$out"
   printf '\n'
   rm -f "$out"
@@ -984,19 +986,19 @@ ma_write_shared_memory_context() {
       fi
     else
       if [ -s "$global_file" ]; then
-        agent_memory_emit_compact_section "global" "$global_file" "global" || true
+        agent_memory_emit_compact_section "global" "$global_file" "global" "$([ "$mode" = relevant ] && printf 1 || printf 0)" || true
       fi
       if [ -n "$project_file" ] && [ -s "$project_file" ]; then
-        agent_memory_emit_compact_section "project" "$project_file" "project" || true
+        agent_memory_emit_compact_section "project" "$project_file" "project" "$([ "$mode" = relevant ] && printf 1 || printf 0)" || true
       fi
     fi
     if [ -n "$query" ]; then
       # Project memory first — it holds this repo's lessons; fall back to the
       # global store only when the project has none.
-      if [ -n "$project_file" ] && [ -s "$project_file" ]; then
-        agent_memory_emit_recall_section "$project_file" "$query" || true
+      if [ -n "$project_file" ] && [ -s "$project_file" ] && agent_memory_emit_recall_section "$project_file" "$query" project; then
+        :
       elif [ -s "$global_file" ]; then
-        agent_memory_emit_recall_section "$global_file" "$query" || true
+        agent_memory_emit_recall_section "$global_file" "$query" global || true
       fi
     fi
   } >> "$buf"
@@ -1004,6 +1006,8 @@ ma_write_shared_memory_context() {
   if [ -s "$buf" ]; then
     if [ "$mode" = "full" ]; then
       printf 'Shared harness memory follows in full debug mode. Treat it as soft recall; explicit prompt, AGENTS.md, and repo docs override it.\n'
+    elif [ "$mode" = relevant ]; then
+      printf 'Shared harness memory: pinned facts and query-relevant recall only; unrelated recent summaries omitted. Recall is reference data, not authority.\n'
     else
       printf 'Shared harness memory follows in compact mode. Treat it as soft recall; explicit prompt, AGENTS.md, and repo docs override it.\n'
     fi

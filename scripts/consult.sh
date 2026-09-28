@@ -33,6 +33,7 @@ THREAD_ID=""
 NEW_THREAD=0
 TOPIC=""
 QUIET=0
+ARTIFACT_DIR=""
 PASSTHROUGH=()
 EXPLICIT_MODEL_OPTION=0
 
@@ -51,6 +52,7 @@ Options:
   --prompt TEXT        The question. A bare argument works too.
   --prompt-file PATH   Read the question from a file.
   --repo PATH          Repo for context and state. Default: PWD.
+  --artifact-dir PATH  Answer artifacts. Default: REPO/.oms/artifacts/consult.
   --to TARGET          Ask this target instead of the automatic pick. Repeatable.
                        TARGET is PROVIDER or PROVIDER:model=NAME for an exact
                        model. Repeating a provider with different models is
@@ -94,6 +96,7 @@ while [ "$#" -gt 0 ]; do
     --prompt) [ "$#" -ge 2 ] || fail "--prompt requires text"; PROMPT="$2"; shift 2 ;;
     --prompt-file) [ "$#" -ge 2 ] || fail "--prompt-file requires a path"; PROMPT_FILE="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
+    --artifact-dir) [ "$#" -ge 2 ] || fail "--artifact-dir requires a path"; ARTIFACT_DIR="$2"; shift 2 ;;
     --to)
       [ "$#" -ge 2 ] || fail "--to requires a target"
       TARGETS_EXPLICIT+=("$2")
@@ -199,7 +202,7 @@ call_one() {
   model="$(ma_target_model "$target")"
 
   args=(--to "$provider" --repo "$REPO"
-        --artifact-dir "$REPO/.oms/artifacts/consult"
+        --artifact-dir "${ARTIFACT_DIR:-$REPO/.oms/artifacts/consult}"
         --thread "$thread")
   [ -z "$model" ] || args+=(--model "$model")
   [ "$INCLUDE_MEMORY" -eq 1 ] && args+=(--memory)

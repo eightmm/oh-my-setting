@@ -26,6 +26,7 @@ Stdlib only — this runs wherever the harness runs.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -41,7 +42,8 @@ if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 
 from oms_graph import render as graph_render
-from peer_artifacts import artifact_sections, tail_lines
+from peer_artifacts import artifact_sections, artifact_sections_stream, bounded_answer, tail_lines
+from peer_cancellation import valid_receipt
 
 FALLBACK_PROTOCOL = "2025-06-18"
 # Revisions whose semantics this server actually implements. Echoing an
@@ -65,6 +67,9 @@ SESSION_PROTOCOL = FALLBACK_PROTOCOL
 OUTPUT_LIMIT = 60_000
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_PROMPT_BYTES = 64 * 1024
+MAX_ANSWER_FILE_BYTES = 8 * 1024 * 1024
+ANSWER_PAGE_BYTES = 16 * 1024
+ANSWER_NAME_RE = re.compile(r"[\w.-]{1,240}\.md\Z")
 MAX_PATH_BYTES = 4 * 1024
 MAX_ARGUMENT_BYTES = 16 * 1024
 PROJECT_GRAPH_UI_URI = "ui://oms/project-graph/v1.html"
@@ -434,6 +439,14 @@ TOOLS = [
                 "type": "integer", "minimum": 0, "maximum": 3,
                 "description": "ask only: 0-3 additional parallel rebuttal rounds. Default 0 collects independent opening answers. Each round shares one evidence/notes snapshot; completed turns appear in the returned thread.",
             },
+            "include_memory": {
+                "type": "boolean",
+                "description": "consult/advise/ask only: include existing shared memory as reference context, using the CLI's selection and scrubbing. Default false; does not write memory.",
+            },
+            "include_task": {
+                "type": "boolean",
+                "description": "consult/advise/ask only: include current task reference context. Default true for consult, false for advise/ask. False explicitly omits it.",
+            },
             "after": {"type": "string", "description": "ack: exact consumed thread cursor."},
             "consumer": {"type": "string", "description": "ack: self-reported session identifier."},
         },
@@ -454,6 +467,11 @@ TOOLS = [
             " bounded wait, not repeated status-only calls."
             " Reuse the returned cursor as after to omit unchanged answer/log"
             " bodies; omit after when you need the full bounded result again."
+            " Large answers retain start/end previews with answer_details"
+            " (normalized answer byte sizes and SHA-256). Use a detail's"
+            " read_arguments for byte-range retrieval of operation-owned"
+            " answers; legacy artifacts require direct file access."
+            " A digest is not verification."
             " Alternatively pass thread and optional after cursor (no operation)"
             " for new complete messages/acks. Retain cursor and page has_more;"
             " reading never acknowledges."
@@ -470,6 +488,10 @@ TOOLS = [
                 "type": "integer", "minimum": 0, "maximum": 50,
                 "description": "Operation only: bounded completion wait; keep below the host tool timeout. Default 0. Expiry never cancels or restarts the peer.",
             },
+            "answer_ref": {"type": "string", "description": "Use returned read_arguments to read one completed answer snapshot; no arbitrary paths. Incompatible with thread, after, or a positive wait_seconds."},
+            "answer_offset": {"type": "integer", "minimum": 0, "maximum": MAX_ANSWER_FILE_BYTES, "description": "answer_ref only: UTF-8 byte offset in the normalized answer. Default 0; reuse next_read_arguments for continuation."},
+            "answer_limit": {"type": "integer", "minimum": 4, "maximum": ANSWER_PAGE_BYTES, "description": "answer_ref only: maximum returned answer bytes, excluding JSON. Default 16384; pages never split a UTF-8 character."},
+            "answer_query": {"type": "string", "description": "answer_ref only: case-sensitive literal search (1-256 UTF-8 bytes), starting at answer_offset. Returns up to 8 matches with context and read arguments. Incompatible with answer_limit; no regex."},
         },
         "annotations": READ_ONLY,
     },
@@ -986,8 +1008,15 @@ def peer_targets(raw: str) -> tuple[list[str], str]:
     return targets, ""
 
 
-def peer_command(kind, script, repo, prompt, prompt_file, targets, thread, new_thread, debate_rounds=0):
-    argv = ["bash", str(ROOT / script), "--repo", str(repo)]
+def peer_command(kind, script, repo, prompt, prompt_file, targets, thread, new_thread, debate_rounds=0, context_options=None):
+    argv = ["bash", str(ROOT / script), "--repo", str(repo),
+            "--artifact-dir", str(prompt_file.parent / "answers")]
+    for name, enabled in (context_options or {}).items():
+        # consult includes task context by default and has no --task flag.
+        if name == "include_task" and enabled and kind == "consult":
+            continue
+        flag = name.removeprefix("include_")
+        argv.append("--" + ("" if enabled else "no-") + flag)
     if thread:
         argv += ["--thread", thread]
     if new_thread:
@@ -1029,12 +1058,21 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
     repo, err = resolve_repo(arguments)
     if err:
         return err, True
+    repo = repo.resolve()
     kind, err = text_argument(arguments, "kind", 64)
     if err:
         return err, True
     debate_rounds = arguments.get("debate_rounds", 0)
     if type(debate_rounds) is not int or not 0 <= debate_rounds <= 3 or (debate_rounds and kind != "ask"):
         return "error: debate_rounds must be an integer 0-3; positive values require kind='ask'", True
+    context_options = {}
+    for name in ("include_memory", "include_task"):
+        if name in arguments:
+            if type(arguments[name]) is not bool:
+                return "error: %s must be a boolean" % name, True
+            if kind not in PEER_KINDS:
+                return "error: %s applies only to consult, advise, or ask" % name, True
+            context_options[name] = arguments[name]
     if kind in ("message", "ack"):
         return thread_exchange(arguments, kind)
     spec = PEER_KINDS.get(kind)
@@ -1100,7 +1138,7 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
     prompt_file = run_dir / "prompt.txt"
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     argv, err = peer_command(
-        kind, spec["script"], repo, prompt, prompt_file, targets, thread, new_thread, debate_rounds
+        kind, spec["script"], repo, prompt, prompt_file, targets, thread, new_thread, debate_rounds, context_options
     )
     if err:
         return err, True
@@ -1109,12 +1147,16 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
         "kind": kind,
         "targets": targets,
         "started_at": started_at,
+        "answer_storage": "operation",
+        "cancellation_supported": os.name == "posix",
         # One line of the question, so a later listing says what was asked
         # without reading the prompt file of every run.
         "title": " ".join(prompt.split())[:TITLE_LIMIT],
     }
     if thread:
         meta["thread"] = thread
+    if context_options:
+        meta["context_options"] = context_options
     try:
         if kind == "ask":
             # Make the advertised message endpoint readable before returning;
@@ -1141,6 +1183,8 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+                env={**os.environ, "OMS_AGENT_MEMORY_MODE": os.environ.get("OMS_AGENT_MEMORY_MODE", "relevant"),
+                     **({"OMS_PEER_CANCEL_DIR": str(run_dir)} if os.name == "posix" else {})},
             )
     except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
         return "error: %s" % exc, True
@@ -1155,9 +1199,10 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
             "started": True,
             "started_at": started_at,
             "targets": targets,
+            **({"context_options": context_options} if context_options else {}),
             **({"thread": thread, "debate_rounds": debate_rounds,
                 "thread_arguments": {"repo": str(repo), "thread": thread}} if kind == "ask" else {}),
-            "artifact_dir": str(repo / ".oms" / "artifacts" / spec["artifacts"]),
+            "artifact_dir": str(run_dir / "answers"),
             "run_dir": str(run_dir),
             "log": str(log),
             "result_arguments": {
@@ -1218,6 +1263,109 @@ def artifact_answer(path: str) -> tuple[str, str]:
         return artifact_sections(Path(path))
     except OSError as exc:
         return "error: %s" % exc, ""
+
+
+def owned_answer(repo: Path, operation: str, name: str) -> tuple[str, str]:
+    """Read a bounded, stable regular artifact below this operation only.
+
+    Local state is owner-controlled, not a sandbox against a hostile process
+    with the same filesystem rights. Reject links and observable replacement;
+    never reopen the pathname for parsing after checking the opened descriptor.
+    """
+    if not ANSWER_NAME_RE.fullmatch(name):
+        raise ValueError("invalid answer name")
+    path = repo
+    directories = []
+    for component in (*RUN_ROOT.parts, operation, "answers"):
+        path = path / component
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ValueError("unsafe answer directory")
+        directories.append((path, info))
+    path = path / name
+    before = path.lstat()
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or getattr(before, "st_file_attributes", 0) & 0x400):
+        raise ValueError("unsafe answer file")
+    if before.st_size > MAX_ANSWER_FILE_BYTES:
+        raise ValueError("answer artifact exceeds 8 MiB read limit")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    with os.fdopen(os.open(str(path), flags), "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(before, opened):
+            raise ValueError("answer file changed before read")
+        data = handle.read(MAX_ANSWER_FILE_BYTES + 1)
+        after = os.fstat(handle.fileno())
+    if (len(data) > MAX_ANSWER_FILE_BYTES or before.st_size != len(data)
+            or (before.st_mtime_ns, before.st_ctime_ns) != (after.st_mtime_ns, after.st_ctime_ns)
+            or not os.path.samestat(before, path.lstat())):
+        raise ValueError("answer file changed during read or exceeds limit")
+    for directory, info in directories:
+        current = directory.lstat()
+        if not stat.S_ISDIR(current.st_mode) or not os.path.samestat(info, current):
+            raise ValueError("answer directory changed during read")
+    answer, artifact_exit = artifact_sections_stream(io.BytesIO(data))
+    if len(answer.encode("utf-8")) > MAX_ANSWER_FILE_BYTES:
+        raise ValueError("normalized answer exceeds 8 MiB read limit")
+    return answer, artifact_exit
+
+
+def answer_reference(operation: str, name: str, answer: str) -> str:
+    digest = hashlib.sha256((operation + "\0" + name + "\0" + answer).encode("utf-8")).hexdigest()
+    return name + ":" + digest
+
+
+def answer_page(repo: Path, run_dir: Path, arguments: dict, code: int) -> tuple[str, bool]:
+    ref = arguments["answer_ref"]
+    name = ref.rsplit(":", 1)[0]
+    try:
+        answer, artifact_exit = owned_answer(repo, run_dir.name, name)
+    except (OSError, ValueError) as exc:
+        # Filesystem exceptions can contain private paths; the caller already
+        # has the operation id and needs no unrelated machine details.
+        reason = str(exc) if isinstance(exc, ValueError) else "answer artifact missing or unreadable"
+        return "error: " + reason, True
+    if ref != answer_reference(run_dir.name, name, answer):
+        return "error: answer reference changed or belongs to another operation; refresh the operation result", True
+    if not artifact_exit:
+        return "error: answer has no completed exit section", True
+    raw = answer.encode("utf-8")
+    offset = arguments.get("answer_offset", 0)
+    if offset > len(raw) or (offset < len(raw) and raw[offset] & 0xC0 == 0x80):
+        return "error: answer_offset must be a UTF-8 boundary within the answer", True
+    if "answer_query" in arguments:
+        needle = arguments["answer_query"].encode("utf-8")
+        matches = []
+        position = raw.find(needle, offset)
+        end = offset
+        while position >= 0 and len(matches) < 8:
+            start = max(0, position - 128)
+            while start < position and raw[start] & 0xC0 == 0x80:
+                start += 1
+            snippet = raw[start:position + len(needle) + 128].decode("utf-8", errors="ignore")
+            end = position + len(needle)
+            matches.append({"answer_offset": position, "context": snippet,
+                            "read_arguments": {"repo": str(repo), "operation": run_dir.name,
+                                               "answer_ref": ref, "answer_offset": start}})
+            position = raw.find(needle, end)
+        payload = {"operation": run_dir.name, "status": "done", "exit": code,
+                   "artifact_exit": artifact_exit, "answer_ref": ref,
+                   "answer_bytes": len(raw), "matches": matches, "has_more": position >= 0}
+        if payload["has_more"]:
+            payload["next_search_arguments"] = {"repo": str(repo), "operation": run_dir.name,
+                "answer_ref": ref, "answer_query": arguments["answer_query"], "answer_offset": end}
+        return json.dumps(payload, ensure_ascii=False, indent=2), code != 0 or artifact_exit != "0"
+    page = raw[offset:offset + arguments.get("answer_limit", ANSWER_PAGE_BYTES)].decode("utf-8", errors="ignore")
+    end = offset + len(page.encode("utf-8"))
+    payload = {"operation": run_dir.name, "status": "done", "exit": code,
+               "artifact_exit": artifact_exit, "answer_ref": ref, "answer": page,
+               "answer_offset": offset, "answer_end": end, "answer_bytes": len(raw),
+               "answer_sha256": hashlib.sha256(raw).hexdigest(), "has_more": end < len(raw)}
+    if payload["has_more"]:
+        payload["next_read_arguments"] = {"repo": str(repo), "operation": run_dir.name,
+            "answer_ref": ref, "answer_offset": end,
+            "answer_limit": arguments.get("answer_limit", ANSWER_PAGE_BYTES)}
+    return json.dumps(payload, ensure_ascii=False, indent=2), code != 0 or artifact_exit != "0"
 
 
 def run_meta(run_dir: Path) -> dict:
@@ -1324,6 +1472,10 @@ def peer_operations(arguments: dict) -> tuple[str, bool]:
             "status": status,
             "started_at": meta.get("started_at") or started,
         }
+        if cancellation_is_valid(run_dir):
+            row["cancellation_requested"] = True
+        if status == "done" and valid_receipt(run_dir, "cancel-observed"):
+            row["termination_reason"] = "cancelled"
         age = run_age(run_dir)
         if age is not None:
             row["age_seconds"] = age
@@ -1333,6 +1485,12 @@ def peer_operations(arguments: dict) -> tuple[str, bool]:
         if isinstance(targets, list) and targets:
             row["targets"] = [t for t in targets if isinstance(t, str)][:8]
         title = meta.get("title")
+        context_options = meta.get("context_options")
+        if isinstance(context_options, dict):
+            selected = {name: context_options[name] for name in ("include_memory", "include_task")
+                        if type(context_options.get(name)) is bool}
+            if selected:
+                row["context_options"] = selected
         if isinstance(title, str) and title:
             row["title"] = title[:TITLE_LIMIT]
         thread = log_thread(run_dir / "run.log") or meta.get("thread")
@@ -1376,6 +1534,23 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
     wait_seconds = arguments.get("wait_seconds", 0)
     if type(wait_seconds) is not int or not 0 <= wait_seconds <= 50:
         return "error: wait_seconds must be an integer from 0 to 50", True
+    page_requested = "answer_ref" in arguments
+    if page_requested:
+        ref = arguments["answer_ref"]
+        name, separator, digest = ref.rpartition(":") if isinstance(ref, str) else ("", "", "")
+        if not separator or not ANSWER_NAME_RE.fullmatch(name) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return "error: answer_ref must be a returned answer reference", True
+        if "thread" in arguments or "after" in arguments or wait_seconds:
+            return "error: answer_ref cannot be combined with thread, after, or a completion wait", True
+    elif any(name in arguments for name in ("answer_offset", "answer_limit", "answer_query")):
+        return "error: answer_offset and answer_limit require answer_ref", True
+    if "answer_query" in arguments:
+        query = arguments["answer_query"]
+        if not isinstance(query, str) or not 1 <= len(query.encode("utf-8")) <= 256 or "answer_limit" in arguments:
+            return "error: answer_query requires 1-256 UTF-8 bytes and cannot accompany answer_limit", True
+    for name, low, high in (("answer_offset", 0, MAX_ANSWER_FILE_BYTES), ("answer_limit", 4, ANSWER_PAGE_BYTES)):
+        if name in arguments and (type(arguments[name]) is not int or not low <= arguments[name] <= high):
+            return "error: %s must be an integer from %s to %s" % (name, low, high), True
     if "thread" in arguments:
         if arguments.get("operation"):
             return "error: choose thread or operation, not both", True
@@ -1388,6 +1563,7 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
     repo, err = resolve_repo(arguments)
     if err:
         return err, True
+    repo = repo.resolve()
     operation, err = text_argument(arguments, "operation", 128)
     if err:
         return err, True
@@ -1402,12 +1578,21 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
     payload = {"operation": operation, "log": str(log)}
     deadline = time.monotonic() + wait_seconds
     status, code = run_status(run_dir)
+    owned = run_meta(run_dir).get("answer_storage") == "operation"
+    if page_requested:
+        if status != "done" or not owned:
+            return "error: answer ranges require a completed operation with operation-owned artifacts", True
+        return answer_page(repo, run_dir, arguments, code)
     while status == "running" and wait_seconds:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         time.sleep(min(1.0, remaining))
         status, code = run_status(run_dir)
+    if cancellation_is_valid(run_dir):
+        payload["cancellation_requested"] = True
+    if status == "done" and valid_receipt(run_dir, "cancel-observed"):
+        payload["termination_reason"] = "cancelled"
     try:
         elapsed = time.time() - (run_dir / "prompt.txt").stat().st_mtime
         payload["elapsed_seconds"] = int(elapsed)
@@ -1434,28 +1619,62 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
 
     artifacts, thread = log_references(log)
     sections = []
-    # Each seat gets an equal slice of the budget: joining before cutting let
-    # the first artifact spend it all and silently dropped the later seats.
-    per_artifact = OUTPUT_LIMIT // max(1, len(artifacts))
+    details = []
+    # Reserve separators and each seat's label before clipping its body. A
+    # second head-only cut would discard conclusions from the final seat.
+    per_artifact = max(0, OUTPUT_LIMIT - 2 * max(0, len(artifacts) - 1)) // max(1, len(artifacts))
     for path in artifacts:
-        answer, artifact_exit = artifact_answer(path)
+        if owned:
+            try:
+                if Path(path).parent != run_dir / "answers":
+                    raise ValueError("artifact is outside this operation")
+                answer, artifact_exit = owned_answer(repo, operation, Path(path).name)
+            except (OSError, ValueError):
+                payload.setdefault("answer_errors", []).append("An artifact is missing, unsafe, changed, or exceeds the 8 MiB read limit.")
+                continue
+        else:
+            answer, artifact_exit = artifact_answer(path)
         if not answer:
             continue
-        if len(answer) > per_artifact:
-            answer = answer[:per_artifact] + "\n[truncated]"
+        header = ""
         # The recorded exit is part of the answer's meaning: a nonzero seat's
         # text is a partial, and dropping the label on single-artifact runs
         # (the common case) hid exactly that.
         if len(artifacts) > 1 or str(artifact_exit or "0") != "0":
-            answer = "--- %s (exit %s) ---\n%s" % (
+            header = "--- %s (exit %s) ---\n" % (
                 Path(path).name,
                 artifact_exit or "?",
-                answer,
             )
-        sections.append(answer)
+        raw = answer.encode("utf-8")
+        framing_fits = len(header.encode("utf-8")) <= per_artifact
+        preview = bounded_answer(answer, max(0, per_artifact - len(header.encode("utf-8"))))
+        details.append({
+            "artifact": path,
+            "exit": artifact_exit,
+            "answer_bytes": len(raw),
+            "preview_bytes": len(preview.encode("utf-8")),
+            "answer_sha256": hashlib.sha256(raw).hexdigest(),
+            "truncated": preview != answer,
+        })
+        if owned and artifact_exit:
+            details[-1]["read_arguments"] = {"repo": str(repo), "operation": operation,
+                "answer_ref": answer_reference(operation, Path(path).name, answer)}
+        if not framing_fits:
+            details[-1]["inline_omitted"] = True
+        elif header or preview:
+            sections.append(header + preview)
     answer = "\n\n".join(sections)
-    if len(answer) > OUTPUT_LIMIT:
-        answer = answer[:OUTPUT_LIMIT] + "\n[truncated]"
+    if owned and details:
+        payload["answer_details"] = details
+    if any(detail["truncated"] for detail in details):
+        payload["answer_truncated"] = True
+        payload["answer_details"] = details
+        payload["next"] = (
+            "Answer previews omit evidence. Use read_arguments when present to retrieve ranges; otherwise read the original artifacts before deciding."
+            " answer_sha256 identifies the extracted, normalized UTF-8 answer, not"
+            " the artifact file or its authority. preview_bytes includes truncation markers."
+            " inline_omitted means the seat label could not fit; its exit remains in answer_details."
+        )
     payload["status"] = "done"
     payload["exit"] = code
     payload["artifacts"] = artifacts
@@ -1466,12 +1685,12 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
         payload["thread"] = thread
     if code != 0 or not answer:
         payload["log_tail"] = log_tail(log)
-    if not answer and code == 0:
+    if not answer and code == 0 and not details:
         payload["note"] = (
             "the run exited 0 but no answer text could be extracted from its"
             " artifacts; judge by the log tail, not by the clean exit"
         )
-    return peer_result_response(payload, after), code != 0
+    return peer_result_response(payload, after), code != 0 or bool(payload.get("answer_errors"))
 
 
 def task_run_dir(task_id: object) -> tuple[Path | None, str]:
@@ -1505,21 +1724,7 @@ def iso_mtime(paths: list[Path], fallback: str) -> str:
 
 
 def cancellation_is_valid(run_dir: Path) -> bool:
-    path = run_dir / "cancel-request.json"
-    try:
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
-            return False
-        with path.open("r", encoding="utf-8") as handle:
-            row = json.load(handle)
-    except (OSError, UnicodeError, ValueError):
-        return False
-    return (
-        isinstance(row, dict)
-        and row.get("schema") == 1
-        and row.get("kind") == "mcp-task-cancel-request"
-        and row.get("task_id") == run_dir.name
-    )
+    return valid_receipt(run_dir, "cancel-request")
 
 
 def task_snapshot(run_dir: Path) -> dict:
@@ -1538,11 +1743,12 @@ def task_snapshot(run_dir: Path) -> dict:
         "ttlMs": None,
         "pollIntervalMs": 5000,
     }
-    if cancellation_is_valid(run_dir):
-        return {**base, "status": "cancelled", "statusMessage": "Cancellation requested by the client."}
     status, code = run_status(run_dir)
+    if status == "done" and valid_receipt(run_dir, "cancel-observed"):
+        return {**base, "status": "cancelled", "statusMessage": "Provider cancellation was observed and the operation exited. Partial artifacts are retained."}
     if status == "running":
-        return {**base, "status": "working", "statusMessage": "Peer consultation is running."}
+        return {**base, "status": "working", "cancellation_requested": cancellation_is_valid(run_dir),
+                "statusMessage": "Cancellation requested; awaiting provider cleanup." if cancellation_is_valid(run_dir) else "Peer consultation is running."}
     if status == "stalled":
         return {
             **base,
@@ -1801,6 +2007,8 @@ def handle(message: dict):
                 msg_id,
                 error={"code": -32602, "message": "task is already terminal"},
             )
+        if run_meta(run_dir).get("cancellation_supported") is not True:
+            return response(msg_id, error={"code": -32602, "message": "this legacy or non-POSIX operation has no supervised cancellation; execution state is unchanged"})
         try:
             write_cancel_request(run_dir)
         except OSError as exc:

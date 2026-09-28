@@ -1026,6 +1026,7 @@ def emit(
     entries: Iterable[tuple[object, ...]],
     as_json: bool = False,
     citations: Optional[dict[str, dict[str, object]]] = None,
+    selection_reason: str = "",
 ) -> int:
     citations = citations or {}
     shown = 0
@@ -1037,11 +1038,16 @@ def emit(
             if values["git_dirty"] is not None:
                 values["git_dirty"] = bool(values["git_dirty"])
             payload = {"schema": SCHEMA_VERSION, **values}
+            if selection_reason:
+                payload["selection_reason"] = selection_reason
             if citation is not None:
                 payload["citation"] = citation
             sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
         else:
             sys.stdout.write(rendered.rstrip() + "\n\n")
+            if selection_reason:
+                sys.stdout.write("[selection: %s; source=%s; event=%s; recorded=%s]\n\n" %
+                                 (selection_reason, values["source"], values["event_id"], values["occurred_at"]))
             if citation is not None:
                 current_line = citation.get("current_line", citation["line"])
                 sys.stdout.write(
@@ -1305,7 +1311,7 @@ def main() -> int:
             )
             entries = entries[: args.limit]
             touch_access(db, entries)
-            shown = emit(entries, args.json, validation)
+            shown = emit(entries, args.json, validation, "query relevance with access decay; citation status reported when available")
             sys.stderr.write(
                 'memory: %d recalled entr%s for "%s"\n'
                 % (shown, "y" if shown == 1 else "ies", args.query)

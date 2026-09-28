@@ -348,6 +348,7 @@ peer_rpc() {
     HOME="$TMP/peer-home" PATH="$TMP/peer-bin:$PATH" \
     OMS_LOCK_DIR="$TMP/peer-locks" OMS_LOCK_FORCE_MKDIR=1 \
     STUB_GATE="$TMP/peer-gate" OMS_MCP_TOOL_PROFILE=core \
+    STUB_PROMPT="$TMP/peer-prompt" \
     python3 "$ROOT/scripts/oms-mcp-server.py" > "$1"
 }
 
@@ -367,11 +368,13 @@ test_mcp_peer_actions_start_detached_and_poll() {
 
   make_repo "$repo"
   mkdir -p "$TMP/peer-bin" "$TMP/peer-home" "$TMP/peer-locks"
+  HOME="$TMP/peer-home" bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" \
+    append --agent codex --text "Gate evidence comes from the retained receipt." >/dev/null
   # The fixture peer waits for the gate before answering, which is what makes
   # "started but not finished" a state the test can observe instead of race.
   cat > "$TMP/peer-bin/codex" <<'EOF'
 #!/usr/bin/env bash
-cat > /dev/null
+cat > "$STUB_PROMPT"
 tries=0
 while [ ! -f "$STUB_GATE" ] && [ "$tries" -lt 120 ]; do
   sleep 1
@@ -387,7 +390,7 @@ EOF
     printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"   "}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"q","providers":"--sandbox"}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"oms_peer_result","arguments":{"repo":"%s","operation":"../../../etc"}}}\n' "$repo"
-    printf '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"is the gate open","providers":"codex"}}}\n' "$repo"
+    printf '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"is the gate open","providers":"codex","include_memory":true,"include_task":true}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"advise","prompt":"q","new_thread":true}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"q","thread":"--print-timeout"}}}\n' "$repo"
     printf '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"oms_peer_operations","arguments":{"repo":"%s"}}}\n' "$repo"
@@ -412,6 +415,7 @@ assert sorted(start["properties"]["kind"]["enum"]) == ["ack", "advise", "ask", "
 assert "providers" in start["properties"], start
 assert "thread" in start["properties"], start
 assert start["properties"]["new_thread"]["type"] == "boolean", start
+assert all(start["properties"][key]["type"] == "boolean" for key in ("include_memory", "include_task")), start
 result = tools["oms_peer_result"]["inputSchema"]
 assert result["required"] == [], result  # thread and operation are alternatives
 assert {"operation", "thread", "after"} <= set(result["properties"]), result
@@ -438,7 +442,7 @@ assert not started["isError"], started
 payload = json.loads(started["content"][0]["text"])
 assert payload["started"] is True, payload
 assert payload["kind"] == "consult", payload
-assert payload["artifact_dir"].endswith("/.oms/artifacts/consult"), payload
+assert payload["artifact_dir"] == os.path.join(payload["run_dir"], "answers"), payload
 assert payload["operation"] in payload["run_dir"], payload
 assert os.path.isdir(payload["run_dir"]), payload
 assert os.path.isfile(payload["log"]), payload
@@ -506,6 +510,8 @@ PY
   printf '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"oms_peer_result","arguments":%s}}\n' \
     "$result_args" | peer_rpc "$out"
   [ "$(peer_field "$out" status)" = "done" ] || fail "the released consult never completed"
+  grep -Fq 'Gate evidence comes from the retained receipt.' "$TMP/peer-prompt" ||
+    fail "MCP memory opt-in did not reach the provider prompt"
 
   OMS_T_OUT="$out" python3 - <<'PY' || fail "a finished consult did not report its answer"
 import json, os
@@ -517,7 +523,7 @@ assert payload["exit"] == 0, payload
 assert "STUB-ANSWER: the fixture peer replied" in payload["answer"], payload
 assert payload["artifacts"], payload
 for path in payload["artifacts"]:
-    assert "/.oms/artifacts/consult/" in path, payload
+    assert "/.oms/artifacts/mcp/" in path and "/answers/" in path, payload
     assert os.path.isfile(path), payload
 # The follow-up address: without it a second question starts from nothing.
 assert payload["thread"], payload
@@ -680,6 +686,7 @@ with patch.object(m, "run_status", side_effect=[("running", None), ("done", 0)])
      patch.object(m.time, "sleep") as sleeper:
     text, bad = m.peer_result(dict(args, wait_seconds=50))
     assert not bad and json.loads(text)["answer"] == "answer", text
+    assert "answer_details" not in json.loads(text) and "answer_truncated" not in json.loads(text)
     sleeper.assert_called_once()
 with patch.object(m, "run_status", return_value=("stalled", None)), \
      patch.object(m.time, "sleep") as sleeper:
@@ -711,6 +718,70 @@ with patch.object(m, "run_status", return_value=("done", 1)):
     failed, bad = m.peer_result(dict(args, after=full["cursor"]))
     assert bad and json.loads(failed)["exit"] == 1 and not json.loads(failed)["unchanged"], failed
 
+# Large peer answers retain conclusions from every seat within a UTF-8 byte
+# budget. A changed, omitted middle is new evidence even if previews match.
+import hashlib
+seats = [artifact.with_name("seat-%s.md" % i) for i in range(3)]
+for count in (1, 3):
+    answers = ["HEAD-%s\n" % i + "근거🙂\n" * 20000 + "\nRecommendation: TAIL-%s" % i
+               for i in range(count)]
+    originals = []
+    for i, answer in enumerate(answers):
+        raw = ("## Output\n" + answer + "\n## Exit\n%s\n" % (i % 2)).replace("\n", "\r\n").encode()
+        seats[i].write_bytes(raw)
+        originals.append(raw)
+    log.write_text("".join("artifact: %s\n" % p for p in seats[:count]), encoding="utf-8")
+    with patch.object(m, "run_status", return_value=("done", 0)):
+        text, bad = m.peer_result(args)
+        data = json.loads(text)
+        assert not bad and "TAIL-0" in data["answer"], "large answer lost its conclusion"
+        assert data["answer_truncated"], data
+        assert len(data["answer"].encode()) <= m.OUTPUT_LIMIT
+        for i, detail in enumerate(data["answer_details"]):
+            assert "HEAD-%s" % i in data["answer"] and "TAIL-%s" % i in data["answer"], i
+            assert detail["artifact"] == str(seats[i]) and detail["truncated"], detail
+            assert detail["answer_bytes"] == len(answers[i].encode()), detail
+            assert detail["answer_sha256"] == hashlib.sha256(answers[i].encode()).hexdigest(), detail
+            assert detail["preview_bytes"] < detail["answer_bytes"], detail
+            assert seats[i].read_bytes() == originals[i]
+        assert "TRUNCATED" in data["answer"] and "�" not in data["answer"]
+        if count == 3:
+            assert "seat-1.md (exit 1)" in data["answer"]
+        unchanged, bad = m.peer_result(dict(args, after=data["cursor"]))
+        assert not bad and json.loads(unchanged)["unchanged"] and "answer" not in json.loads(unchanged)
+        seats[0].write_text("## Output\n" + answers[0] + "\n## Exit\n0\n", encoding="utf-8")
+        normalized, bad = m.peer_result(dict(args, after=data["cursor"]))
+        assert not bad and json.loads(normalized)["unchanged"], "CRLF normalization must not invalidate a result"
+        middle = len(answers[0]) // 2
+        answers[0] = answers[0][:middle] + answers[0][middle:].replace("근거🙂", "다름🚀", 1)
+        seats[0].write_text("## Output\n" + answers[0] + "\n## Exit\n0\n", encoding="utf-8")
+        changed, bad = m.peer_result(dict(args, after=data["cursor"]))
+        changed = json.loads(changed)
+        assert not bad and not changed["unchanged"] and changed["cursor"] != data["cursor"]
+        assert changed["answer"] == data["answer"], "the change must be outside both previews"
+        assert changed["answer_details"][0]["answer_bytes"] == data["answer_details"][0]["answer_bytes"]
+        assert changed["answer_details"][0]["answer_sha256"] != data["answer_details"][0]["answer_sha256"]
+
+# If framing itself cannot fit, keep identity/exits in metadata instead of
+# silently cutting a seat's label or claiming the source had no answer.
+with patch.object(m, "OUTPUT_LIMIT", 10), patch.object(m, "run_status", return_value=("done", 0)):
+    text, bad = m.peer_result(args)
+    framed = json.loads(text)
+    assert not bad and framed["answer_truncated"] and framed["answer"] == ""
+    assert len(framed["answer_details"]) == 3 and "note" not in framed
+    assert all(d["inline_omitted"] and d["preview_bytes"] == 0 for d in framed["answer_details"])
+    assert framed["answer_details"][1]["exit"] == "1"
+
+with patch.object(m, "run_status", return_value=("done", 0)):
+    seats[0].write_text("## Output\nshort evidence\n## Exit\n0\n", encoding="utf-8")
+    mixed = json.loads(m.peer_result(args)[0])
+    assert "short evidence" in mixed["answer"] and not mixed["answer_details"][0]["truncated"]
+    assert mixed["answer_details"][1]["truncated"] and len(mixed["answer"].encode()) <= m.OUTPUT_LIMIT
+    seats[0].write_text("## Output\n" + "x" * m.OUTPUT_LIMIT + "\n## Exit\n0\n", encoding="utf-8")
+    log.write_text("artifact: %s\n" % seats[0], encoding="utf-8")
+    exact = json.loads(m.peer_result(args)[0])
+    assert exact["answer"] == "x" * m.OUTPUT_LIMIT and "answer_details" not in exact
+
 # Councils use the same detached ask and thread delivery, never another tool or
 # a blocking wait on the shared message connection. No real model is started.
 with patch.object(m.subprocess, "Popen") as launcher:
@@ -734,6 +805,166 @@ with patch.object(m.subprocess, "Popen") as launcher:
     for value in (True, -1, 4, "1", None):
         assert m.start_peer({"repo": args["repo"], "kind": "ask", "prompt": "x", "debate_rounds": value})[1]
     assert m.start_peer({"repo": args["repo"], "kind": "consult", "prompt": "x", "debate_rounds": 1})[1]
+
+# Defaults remain owned by each CLI; explicit options survive detached launch
+# and later discovery. consult has no --task flag, unlike ask and advise.
+with patch.object(m.subprocess, "Popen") as context_launch, patch.object(
+        m.subprocess, "run", return_value=m.subprocess.CompletedProcess([], 0, "", "")) as prepare:
+    context_launch.return_value.wait.return_value = 0
+    for kind in ("consult", "advise", "ask"):
+        for selected in ({}, {"include_task": True, "include_memory": True},
+                         {"include_task": False, "include_memory": False},
+                         {"include_memory": True}, {"include_task": False}):
+            text, bad = m.start_peer(dict(repo=args["repo"], kind=kind, prompt="Context probe", **selected))
+            assert not bad, text
+            started = json.loads(text)
+            command = context_launch.call_args.args[0]
+            for name, flag in (("include_task", "task"), ("include_memory", "memory")):
+                assert ("--" + flag in command) == (selected.get(name) is True and not (kind == "consult" and flag == "task")), command
+                assert ("--no-" + flag in command) == (selected.get(name) is False), command
+            meta = json.loads((Path(started["run_dir"]) / "meta.json").read_text())
+            rows = json.loads(m.peer_operations({"repo": args["repo"]})[0])["operations"]
+            row = next(r for r in rows if r["operation"] == started["operation"])
+            for record in (started, meta, row):
+                assert record.get("context_options", {}) == selected, record
+                assert bool(selected) == ("context_options" in record), record
+    context_launch.reset_mock()
+    prepare.reset_mock()
+    run_root = Path(args["repo"]) / m.RUN_ROOT
+    before = set(run_root.iterdir())
+    for name in ("include_memory", "include_task"):
+        for value in (None, 0, 1, "true", [], {}):
+            text, bad = m.start_peer(dict(repo=args["repo"], kind="ask", prompt="x", **{name: value}))
+            assert bad and "boolean" in text, text
+        for kind in ("message", "ack"):
+            for value in (False, True):
+                text, bad = m.start_peer(dict(repo=args["repo"], kind=kind, prompt="x", **{name: value}))
+                assert bad and "applies only" in text, text
+    assert set(run_root.iterdir()) == before
+    context_launch.assert_not_called()
+    prepare.assert_not_called()
+
+# Retrieve omitted evidence from operation-owned answers without another model
+# call. Normalized byte pages must reconstruct the full answer exactly.
+owned_run = Path(args["repo"]).resolve() / m.RUN_ROOT / "ask-20260927T000000Z-aabbccdd"
+owned_dir = owned_run / "answers"
+owned_dir.mkdir(parents=True)
+(owned_run / "meta.json").write_text(json.dumps({"answer_storage": "operation"}))
+(owned_run / "status").write_text("0\n")
+owned_file = owned_dir / "codex-근거.md"
+full_answer = "HEAD\n" + "근거🙂\n" * 20000 + "MIDDLE EVIDENCE\n" + "x" * 20000 + "\nTAIL"
+original = ("## Prompt\nPRIVATE PROMPT\n## Output\n" + full_answer + "\n## Exit\n0\n").replace("\n", "\r\n").encode()
+owned_file.write_bytes(original)
+(owned_run / "run.log").write_text("artifact: %s\n" % owned_file)
+owned_args = {"repo": args["repo"], "operation": owned_run.name}
+preview, bad = m.peer_result(owned_args)
+preview = json.loads(preview)
+assert not bad and "MIDDLE EVIDENCE" not in preview["answer"]
+read_args = preview["answer_details"][0]["read_arguments"]
+with patch.object(m.Path, "cwd", return_value=Path(args["repo"])):
+    assert not m.peer_result({k: v for k, v in read_args.items() if k != "repo"})[1]
+next_args = read_args
+chunks = []
+sequential_json_bytes = 0
+import time
+started_scan = time.perf_counter()
+with patch.object(m.subprocess, "Popen") as no_model:
+    while next_args:
+        text, bad = m.peer_result(next_args)
+        assert not bad, text
+        page = json.loads(text)
+        sequential_json_bytes += len(text.encode())
+        chunks.append(page["answer"])
+        assert len(page["answer"].encode()) <= m.ANSWER_PAGE_BYTES and "�" not in page["answer"]
+        next_args = page.get("next_read_arguments")
+    no_model.assert_not_called()
+assert "".join(chunks) == full_answer and owned_file.read_bytes() == original
+scan_seconds = time.perf_counter() - started_scan
+assert "PRIVATE PROMPT" not in "".join(chunks)
+import time
+started_search = time.perf_counter()
+text, bad = m.peer_result(dict(read_args, answer_query="MIDDLE EVIDENCE"))
+found = json.loads(text)
+assert not bad and len(found["matches"]) == 1 and not found["has_more"]
+assert found["matches"][0]["answer_offset"] == len(full_answer[:full_answer.index("MIDDLE EVIDENCE")].encode())
+targeted, bad = m.peer_result(found["matches"][0]["read_arguments"])
+search_seconds = time.perf_counter() - started_search
+assert not bad and "MIDDLE EVIDENCE" in json.loads(targeted)["answer"]
+sequential_bytes = len("".join(chunks).encode())
+targeted_bytes = len(text.encode()) + len(targeted.encode())
+assert targeted_bytes < sequential_bytes and len(chunks) > 2
+print("answer retrieval fixture: sequential=%d calls/%d JSON bytes/%.4fs; search+range=2 calls/%d JSON bytes/%.4fs; evidence=present" %
+      (len(chunks), sequential_json_bytes, scan_seconds, targeted_bytes, search_seconds))
+text, bad = m.peer_result(dict(read_args, answer_query="근거🙂"))
+found = json.loads(text)
+assert not bad and len(found["matches"]) == 8 and found["has_more"]
+next_search, bad = m.peer_result(found["next_search_arguments"])
+assert not bad and json.loads(next_search)["matches"][0]["answer_offset"] > found["matches"][-1]["answer_offset"]
+assert not json.loads(m.peer_result(dict(read_args, answer_query="ABSENT-LITERAL"))[0])["matches"]
+for extra in ({"answer_query": ""}, {"answer_query": True}, {"answer_query": "🙂" * 65},
+              {"answer_query": "HEAD", "answer_limit": 16}):
+    assert m.peer_result(dict(read_args, **extra))[1], extra
+page, bad = m.peer_result(dict(read_args, answer_offset=5, answer_limit=4))
+assert not bad and json.loads(page)["answer"] == "근" and json.loads(page)["answer_end"] == 8
+middle = len(full_answer[:full_answer.index("MIDDLE EVIDENCE")].encode())
+page, bad = m.peer_result(dict(read_args, answer_offset=middle, answer_limit=15))
+assert not bad and json.loads(page)["answer"].startswith("MIDDLE EVIDENCE")
+empty, bad = m.peer_result(dict(read_args, answer_offset=len(full_answer.encode())))
+assert not bad and json.loads(empty)["answer"] == "" and not json.loads(empty)["has_more"]
+for extra in ({"answer_offset": 6}, {"answer_offset": len(full_answer.encode()) + 1},
+              {"answer_offset": True}, {"answer_offset": -1}, {"answer_limit": 3},
+              {"answer_limit": None}, {"answer_limit": 16385}, {"after": ""},
+              {"thread": "x"}, {"wait_seconds": 1}, {"answer_ref": "../escape"}):
+    assert m.peer_result(dict(read_args, **extra))[1], extra
+assert m.peer_result(dict(owned_args, answer_offset=0))[1]
+assert m.peer_result(dict(args, answer_ref=read_args["answer_ref"]))[1], "legacy runs cannot serve ranges"
+owned_file.write_bytes(original.replace(b"MIDDLE EVIDENCE", b"CHANGED PROOF!"))
+assert m.peer_result(read_args)[1], "a changed hidden middle must invalidate range references"
+owned_file.write_bytes(original.replace(b"\r\n", b"\n"))
+assert not m.peer_result(read_args)[1], "line-ending normalization preserves the answer snapshot"
+with patch.object(m, "MAX_ANSWER_FILE_BYTES", 128):
+    assert m.peer_result(read_args)[1], "oversized artifacts must fail before parsing"
+    text, bad = m.peer_result(owned_args)
+    assert bad and json.loads(text)["answer_errors"], "an unavailable preview must not look successful"
+owned_file.unlink()
+assert m.peer_result(read_args)[1], "deleted answers cannot be replayed"
+owned_file.write_bytes(original)
+(owned_run / "status").unlink()
+assert m.peer_result(read_args)[1], "incomplete runs cannot serve ranges"
+(owned_run / "status").write_text("0\n")
+
+# Cross-operation references and filesystem aliases never widen the read root.
+other_run = owned_run.with_name("ask-20260927T000000Z-eeff0011")
+(other_run / "answers").mkdir(parents=True)
+(other_run / "meta.json").write_text(json.dumps({"answer_storage": "operation"}))
+(other_run / "status").write_text("0\n")
+other_file = other_run / "answers" / owned_file.name
+other_file.write_bytes(original)
+assert m.peer_result(dict(read_args, operation=other_run.name))[1]
+import os
+for make_link in (os.symlink, os.link):
+    owned_file.unlink()
+    try:
+        make_link(other_file, owned_file)
+    except OSError:
+        pass  # Windows hosts may not grant link creation to the test user.
+    else:
+        assert m.peer_result(read_args)[1], "linked files must not cross operation ownership"
+        owned_file.unlink()
+    owned_file.write_bytes(original)
+saved_dir = owned_dir.with_name("saved-answers")
+owned_dir.rename(saved_dir)
+try:
+    os.symlink(other_run / "answers", owned_dir, target_is_directory=True)
+except OSError:
+    pass
+else:
+    assert m.peer_result(read_args)[1], "linked ancestor must be refused"
+    owned_dir.unlink()
+saved_dir.rename(owned_dir)
+owned_file.write_bytes(original.replace(b"## Exit\r\n0", b"## Exit\r\n1"))
+text, bad = m.peer_result(read_args)
+assert bad and json.loads(text)["artifact_exit"] == "1", "a failed seat cannot look successful"
 
 # Exercise the real thread preparation, mocking only the detached model launch.
 # A caller can post immediately, before the provider child has started at all.
@@ -1921,7 +2152,9 @@ test_mcp_tasks_extension_is_opt_in_and_reuses_peer_operations() {
   mkdir -p "$TMP/peer-bin" "$TMP/peer-home" "$TMP/peer-locks"
   cat > "$TMP/peer-bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}" in --version|--help) printf 'codex fixture\n'; exit 0 ;; esac
 cat > /dev/null
+printf '%s\n' "$$" > "$STUB_READY"
 tries=0
 while [ ! -f "$STUB_GATE" ] && [ "$tries" -lt 120 ]; do
   sleep 1
@@ -1942,6 +2175,8 @@ import time
 root, repo, gate = sys.argv[1:]
 env = dict(os.environ)
 env["OMS_MCP_TASKS_EXTENSION"] = "1"
+env["OMS_PEER_KILL_AFTER"] = "1"
+env["STUB_READY"] = os.path.join(repo, "provider-started")
 p = subprocess.Popen(
     [sys.executable, os.path.join(root, "scripts", "oms-mcp-server.py")],
     cwd=repo,
@@ -2029,6 +2264,11 @@ update = call({
 assert update["error"]["code"] == -32602, update
 assert "input" in update["error"]["message"], update
 
+deadline = time.monotonic() + 25
+while not os.path.isfile(env["STUB_READY"]) and time.monotonic() < deadline:
+    time.sleep(0.05)
+assert os.path.isfile(env["STUB_READY"]), "fixture provider did not start"
+provider_pid = int(open(env["STUB_READY"]).read())
 cancelled = call({
     "jsonrpc": "2.0", "id": 7, "method": "tasks/cancel",
     "params": {"taskId": task_id, "_meta": caps},
@@ -2038,17 +2278,26 @@ after = call({
     "jsonrpc": "2.0", "id": 8, "method": "tasks/get",
     "params": {"taskId": task_id, "_meta": caps},
 })
-assert after["result"]["status"] == "cancelled", after
-assert "result" not in after["result"] and "error" not in after["result"], after
+assert after["result"]["status"] in ("working", "cancelled"), after
+if after["result"]["status"] == "working":
+    assert after["result"]["cancellation_requested"], after
 
-# Cancellation is cooperative. Release the read-only fixture peer so no
-# process survives the test even if it had already entered the provider CLI.
-open(gate, "w", encoding="utf-8").close()
+# Do not release the gate: the owner must stop/prevent the provider itself.
 status_file = os.path.join(repo, ".oms", "artifacts", "mcp", task_id, "status")
-deadline = time.time() + 10
+deadline = time.time() + 25
 while time.time() < deadline and not os.path.isfile(status_file):
     time.sleep(0.05)
-assert os.path.isfile(status_file), "cancelled fixture peer did not exit after release"
+assert os.path.isfile(status_file), "cancelled fixture peer did not exit without release"
+after = call({"jsonrpc": "2.0", "id": 9, "method": "tasks/get",
+              "params": {"taskId": task_id, "_meta": caps}})
+assert after["result"]["status"] == "cancelled", after
+assert not os.path.exists(gate), "cancellation must not depend on the fixture gate"
+try:
+    os.kill(provider_pid, 0)
+except ProcessLookupError:
+    pass
+else:
+    raise AssertionError("cancelled provider survived cleanup")
 p.stdin.close()
 p.wait(timeout=10)
 assert p.returncode == 0, p.stderr.read()

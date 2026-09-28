@@ -6,6 +6,18 @@ loading the full source log. Peer calls that attach memory also attach a
 query-ranked "relevant recall" section keyed on the prompt — recency answers
 "what happened lately", recall answers "what do we know about this".
 
+Authorized delegation and MCP consultations use `relevant` mode by default when
+memory attachment is enabled: pinned facts plus query-ranked recall, without the
+unrelated recency summary. Explicit `OMS_AGENT_MEMORY_MODE=compact|full|relevant`
+overrides that choice; ordinary CLI consultation defaults stay compact. Relevant
+mode with no matching query emits only eligible pins, not arbitrary old notes.
+At handoff/resume, name the current goal in the prompt so recall selects evidence
+for that task. This does not silently enable memory attachment or add extraction.
+Recall reports selection reason, source, event id and recording time; existing
+cited-source validation still excludes stale source-backed entries by default.
+Project matches take precedence; when none survive selection, global recall is
+the fallback. Memory remains reference data and never widens worker authority.
+
 ```bash
 oms agent-memory --repo . context
 oms agent-memory --repo . search --text pgvector

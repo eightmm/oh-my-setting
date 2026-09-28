@@ -19,6 +19,7 @@ fail() {
 }
 
 REPO="$PWD"
+ARTIFACT_DIR=""
 TO="${OMS_ADVISOR_PROVIDER:-}"
 PROMPT=""
 PROMPT_FILE=""
@@ -62,6 +63,7 @@ Options:
                        Default: OMS_ADVISOR_PROVIDER, else the first
                        available provider that is not the caller (OMS_AGENT).
   --repo PATH          Repo for context and artifacts. Default: PWD.
+  --artifact-dir PATH  Answer artifacts. Default: REPO/.oms/artifacts/advise.
   --strategy NAME      Strategy/role profile (default: decision-advisor).
                        Alias: --role NAME.
   --model MODEL        Exact advisor model.
@@ -104,6 +106,11 @@ while [ "$#" -gt 0 ]; do
     --repo)
       [ "$#" -ge 2 ] || fail "--repo requires path"
       REPO="$2"
+      shift 2
+      ;;
+    --artifact-dir)
+      [ "$#" -ge 2 ] || fail "--artifact-dir requires path"
+      ARTIFACT_DIR="$2"
       shift 2
       ;;
     --strategy|--role)
@@ -296,7 +303,7 @@ status=0
 ma_call_read_peer "" "$PREVIEW" \
   --to "$TO" \
   --repo "$REPO" \
-  --artifact-dir "$REPO/.oms/artifacts/advise" \
+  --artifact-dir "${ARTIFACT_DIR:-$REPO/.oms/artifacts/advise}" \
   --prompt-file "$advisor_prompt" \
   ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"} || status=$?
 exit "$status"

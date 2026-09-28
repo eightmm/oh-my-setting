@@ -135,6 +135,17 @@ ma_run_bounded() {
   local helper="${OMS_RUN_BOUNDED_HELPER:-}"
   shift 2
 
+  if [ "$label" = provider ] && [ -n "${OMS_PEER_CANCEL_DIR:-}" ]; then
+    [ -n "$pybin" ] || pybin="$(command -v python3 2>/dev/null || true)"
+    [ -n "$helper" ] || helper="$(ma_scripts_dir)/lib/run-bounded.py"
+    if [ -z "$pybin" ] || [ ! -f "$helper" ]; then
+      echo "error: supervised cancellation requires Python and run-bounded.py; refusing unbounded provider call" >&2
+      return 127
+    fi
+    "$pybin" "$helper" "$wall" "${OMS_PEER_KILL_AFTER:-15}" "$label" "$@"
+    return $?
+  fi
+
   if command -v timeout >/dev/null 2>&1; then
     tbin=timeout
   elif command -v gtimeout >/dev/null 2>&1; then
@@ -316,7 +327,11 @@ ma_write_harness_context() {
   tmp="$(agent_memory_mktemp)" || return 0
   {
     if [ "$include_memory" -eq 1 ]; then
-      ma_write_shared_memory_context "$repo" "$recall_query"
+      if [ "${MA_KIND:-}" = delegate ]; then
+        OMS_AGENT_MEMORY_MODE="${OMS_AGENT_MEMORY_MODE:-relevant}" ma_write_shared_memory_context "$repo" "$recall_query"
+      else
+        ma_write_shared_memory_context "$repo" "$recall_query"
+      fi
     fi
     if [ "$include_task" -eq 1 ]; then
       ma_write_task_context "$repo"

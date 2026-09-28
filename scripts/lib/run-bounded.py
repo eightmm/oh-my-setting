@@ -10,6 +10,8 @@ import subprocess
 import sys
 import time
 from typing import Optional
+from pathlib import Path
+from peer_cancellation import observed, valid_receipt
 
 try:
     import resource
@@ -70,6 +72,21 @@ def main() -> int:
         return 127
     label = sys.argv[3]
     command = sys.argv[4:]
+    cancel_dir = os.environ.get("OMS_PEER_CANCEL_DIR", "") if label == "provider" else ""
+
+    def cancelled() -> bool:
+        return bool(cancel_dir) and valid_receipt(Path(cancel_dir), "cancel-request")
+
+    def acknowledge_cancellation() -> int:
+        try:
+            observed(Path(cancel_dir))
+        except OSError:
+            print("error: cancellation handled but its receipt could not be recorded", file=sys.stderr)
+            return 1
+        return 130
+
+    if cancelled():
+        return acknowledge_cancellation()
     def apply_limits() -> None:
         if max_memory is not None:
             assert resource is not None
@@ -129,12 +146,28 @@ def main() -> int:
     for forwarded in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
         signal.signal(forwarded, forward)
 
-    try:
-        return normalized_returncode(process.wait(timeout=wall))
-    except subprocess.TimeoutExpired:
-        print("error: %s call timed out after %s" % (label, sys.argv[1]), file=sys.stderr)
-        stop_group(signal.SIGTERM)
-        return 124
+    deadline = time.monotonic() + wall
+    while True:
+        # A completed call wins a late cancellation; only this live owner
+        # signals its Popen child, never a PID recovered from a stale file.
+        result = process.poll()
+        if result is not None:
+            return normalized_returncode(result)
+        if cancelled():
+            result = process.poll()
+            if result is not None:
+                return normalized_returncode(result)
+            stop_group(signal.SIGTERM)
+            return acknowledge_cancellation()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print("error: %s call timed out after %s" % (label, sys.argv[1]), file=sys.stderr)
+            stop_group(signal.SIGTERM)
+            return 124
+        try:
+            return normalized_returncode(process.wait(timeout=min(0.25, remaining) if cancel_dir else remaining))
+        except subprocess.TimeoutExpired:
+            pass
 
 
 if __name__ == "__main__":

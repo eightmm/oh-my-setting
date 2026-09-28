@@ -9155,9 +9155,10 @@ test_advise_dry_run_composes_advisor_prompt() {
     --repo "$project" \
     --to codex \
     --strategy repo-auditor \
+    --artifact-dir "$project/advisor answers" \
     --prompt "Decision: inspect only" \
     --dry-run >/dev/null
-  artifact="$(find "$project/.oms/artifacts/advise" -type f -name 'codex-*.md' | head -n 1)"
+  artifact="$(find "$project/advisor answers" -type f -name 'codex-*.md' | head -n 1)"
   assert_file_contains "$artifact" "REPO-AUDITOR-STRATEGY"
   assert_file_contains "$artifact" "VERDICT: proceed | revise | stop"
 
@@ -13672,6 +13673,31 @@ EOF
   done
   ! kill -0 "$parent" 2>/dev/null || fail "timed-out parent process survived"
   ! kill -0 "$child" 2>/dev/null || fail "timed-out child process survived"
+  python3 - "$ROOT" <<'PY'
+import importlib.util, sys
+from pathlib import Path
+from unittest.mock import patch
+lib = Path(sys.argv[1]) / "scripts/lib"
+sys.path.insert(0, str(lib))
+spec = importlib.util.spec_from_file_location("bounded_test", lib / "run-bounded.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+with patch.object(sys, "argv", ["run-bounded.py", "10", "1", "provider", "unused"]), \
+     patch.dict(m.os.environ, {"OMS_PEER_CANCEL_DIR": "/fixture-operation"}), \
+     patch.object(m, "memory_limit", return_value=None), \
+     patch.object(m, "observed") as observed, patch.object(m.subprocess, "Popen") as spawn, \
+     patch.object(m.os, "killpg") as signal_group:
+    with patch.object(m, "valid_receipt", return_value=True):
+        assert m.main() == 130
+    spawn.assert_not_called()
+    observed.assert_called_once()
+    observed.reset_mock()
+    spawn.return_value.poll.side_effect = [None, 0]
+    with patch.object(m, "valid_receipt", side_effect=[False, True]):
+        assert m.main() == 0, "completion observed before signalling wins a late cancel"
+    observed.assert_not_called()
+    signal_group.assert_not_called()
+PY
 }
 
 test_python_timeout_fallback_bounds_verifier() {
@@ -22437,6 +22463,16 @@ test_shared_memory_context_ranked_recall() {
     fail "query should add a ranked recall section: $out"
   printf '%s' "$out" | grep -Fq 'focused parser test' ||
     fail "recall should surface the matching lesson"
+  out="$(cd "$repo" && OMS_AGENT_MEMORY_MODE=relevant bash -c '. "$1"; ma_write_shared_memory_context "$2" "parser module tests"' \
+    _ "$ROOT/scripts/lib/agent-memory-common.sh" "$repo")"
+  printf '%s' "$out" | grep -Fq 'focused parser test' || fail "relevant mode lost matching evidence"
+  printf '%s' "$out" | grep -Fq '[selection: query relevance' || fail "recall selection reason missing"
+  if printf '%s' "$out" | grep -Fq 'staging flag'; then
+    fail "relevant mode included unrelated recent deployment memory"
+  fi
+  out="$(cd "$repo" && OMS_AGENT_MEMORY_MODE=relevant bash -c '. "$1"; ma_write_shared_memory_context "$2" "zzzxxyy no-match"' \
+    _ "$ROOT/scripts/lib/agent-memory-common.sh" "$repo")"
+  [ -z "$out" ] || fail "no-match relevant recall should not inject unrelated summaries"
   out="$(cd "$repo" && bash -c '. "$1"; ma_write_shared_memory_context "$2"' \
     _ "$ROOT/scripts/lib/agent-memory-common.sh" "$repo")"
   if printf '%s' "$out" | grep -Fq 'relevant recall'; then
