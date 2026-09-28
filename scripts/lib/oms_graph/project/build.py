@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from oms_graph import PARSER_VERSION, PROJECT_SCHEMA
-from oms_runtime.common import atomic_write_bytes, atomic_write_json, canonical_json, ensure_private_dir, read_json, sha256_bytes, sha256_file, utc_now
+from oms_runtime.common import atomic_write_bytes, atomic_write_json, canonical_json, ensure_private_dir, read_bytes, read_json, sha256_bytes, sha256_file, utc_now
 
 from ..errors import GraphError
 
@@ -170,7 +171,21 @@ def check(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
         outdated["parser_version"] = {"built": manifest.get("parser_version"), "current": PARSER_VERSION}
     if manifest.get("schema") != PROJECT_SCHEMA:
         outdated["schema"] = {"built": manifest.get("schema"), "current": PROJECT_SCHEMA}
-    return {"present": True, "fresh": not (stale or missing or new or outdated), "revision": manifest.get("revision", ""),
+    graph_path = directory / "graph.json"
+    graph = None
+    if graph_path.exists() or graph_path.is_symlink():
+        try:
+            graph = json.loads(read_bytes(graph_path, GRAPH_BYTES_LIMIT).decode("utf-8"))
+        except (ValueError, UnicodeError):
+            pass
+    graph_valid = (isinstance(graph, dict)
+                   and graph.get("schema") == PROJECT_SCHEMA
+                   and isinstance(graph.get("revision"), str)
+                   and bool(graph["revision"])
+                   and graph["revision"] == manifest.get("revision")
+                   and isinstance(graph.get("nodes"), list)
+                   and isinstance(graph.get("edges"), list))
+    return {"present": True, "fresh": not (stale or missing or new or outdated or not graph_valid), "revision": manifest.get("revision", ""),
             "stale": stale, "missing": missing, "new": new, "outdated": outdated,
             "coverage": _coverage(listed)}
 
