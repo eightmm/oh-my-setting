@@ -90,13 +90,13 @@ Options:
                        Use when the current agent may not send repo context to
                        another external provider. Import answers later with
                        `oms artifact-index import`.
-  --print-timeout DUR  Timeout for print mode wait. Default: 5m.
+  --print-timeout DUR  Antigravity print-mode wait. Default: the ask 15m wall.
   --dry-run            Write prompts as artifacts without CLI calls.
   -h, --help           Show this help.
 
 Environment:
   OH_MY_SETTING_ASK_DRY_RUN=1   Same as --dry-run.
-  OMS_PEER_TIMEOUT       Per-provider wall-clock timeout (default: 10m).
+  OMS_PEER_TIMEOUT       Per-provider wall-clock timeout (default: 15m).
   OMS_PEER_PRINT_TIMEOUT Timeout for print mode wait (agy); tracks the verb
                          wall default unless set.
 EOF

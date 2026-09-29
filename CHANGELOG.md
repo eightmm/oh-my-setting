@@ -64,6 +64,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Quoted peer bytes can no longer close their own fence. Synthesis and thread
+  replay blocks, the debate frame, delegated review findings, compiled context
+  and planner council evidence each carry a random id on both the open and the
+  end line, and the end line always starts a line, as Anthropic's Opus 5.5
+  prompting guide advises for pasted text. The ids are plain text:
+  mitigation, not a boundary.
+- One-shot and repair delegate prompts name the early stops an unattended
+  worker must not take (a summary that only announces the next step, an offer
+  to continue, non-blocking decisions); interactive delegation is unchanged.
+- `peer-ask`/`peer-review --print-timeout` help stated a 5m default; it is
+  Antigravity's print-mode wait and follows the verb wall (15m ask, 20m review),
+  and `peer-ask` listed a 10m `OMS_PEER_TIMEOUT` default instead of 15m.
 - Live hook delivery can pass through one validated thread row above its usual
   byte budget, preventing a large complete update from wedging that session's
   cursor. CLI byte limits remain strict. Thread text files now retain leading

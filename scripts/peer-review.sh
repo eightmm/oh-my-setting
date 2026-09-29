@@ -119,7 +119,7 @@ Options:
                        `oms artifact-index import`.
   --synthesize [P]     After provider reviews, run a synthesis pass with a
                        registered provider P. Default: claude.
-  --print-timeout DUR  Timeout for print mode wait. Default: 5m.
+  --print-timeout DUR  Antigravity print-mode wait. Default: the review 20m wall.
   --dry-run            Write prompts as artifacts without CLI calls.
   -h, --help           Show this help.
 
