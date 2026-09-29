@@ -64,6 +64,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Claude read seats no longer point plan mode at the owner's `~/.claude/plans`,
+  where 18 seat prompts' plan files had collected; each call gets a
+  project-relative `.oms/tmp/claude-plans-*` directory (a directory outside
+  the project is ignored for the home default) that is removed afterwards,
+  only at its physical spot inside the seat's directory.
+- A Claude refusal keeps its safeguard category: the stop-reason line of a
+  refusal gains `category=` (e.g. `reasoning_extraction`, read from the
+  refused message; a value that is not one token is recorded as
+  `unrecognized`), and a `reasoning_extraction` decline says to drop the
+  reasoning request instead of retrying. A refused stream without a result
+  envelope is now a refusal rather than a truncation, so like a refusal with
+  an envelope it is no longer re-sent along the safeguard model chain. Other
+  stop-reason lines are unchanged.
 - Quoted peer bytes can no longer close their own fence. Synthesis and thread
   replay blocks, the debate frame, delegated review findings, compiled context
   and planner council evidence each carry a random id on both the open and the

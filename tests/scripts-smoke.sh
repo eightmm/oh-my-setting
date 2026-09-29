@@ -8937,6 +8937,12 @@ test_claude_envelope_carries_stop_reason() {
   cat > "$bin_dir/claude" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$HOME/claude-argv"
+# Act like plan mode writing its plan file, so the test sees it removed.
+plans="$(printf '%s\n' "$@" | sed -n 's/^{"plansDirectory":"\(.*\)"}$/\1/p')"
+if [ -n "$plans" ]; then
+  mkdir -p "$plans" && printf 'seat plan\n' > "$plans/seat.md"
+  printf '%s/%s\n' "$(pwd -P)" "$plans" > "$HOME/claude-plans"
+fi
 cat > /dev/null
 printf '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"Envelope answer body: pong.","usage":{"input_tokens":12,"output_tokens":3,"cache_read_input_tokens":100,"cache_creation_input_tokens":50},"total_cost_usd":0.0123,"modelUsage":{"claude-opus-5":{"inputTokens":12,"outputTokens":3,"costUSD":0.0123}}}\n'
 EOF
@@ -8987,6 +8993,12 @@ PY
   # four tools -- and writes the parent's .oms while it judges.
   grep -Fxq -- '--setting-sources' "$home_dir/claude-argv" ||
     fail "a read seat must not inherit the user-scope hooks: $(cat "$home_dir/claude-argv")"
+  # Plan mode's plan file goes to a per-call project directory, not the
+  # owner's ~/.claude/plans, and does not outlive the call.
+  grep -Eqx '\{"plansDirectory":"\.oms/tmp/claude-plans-[0-9a-f]{8}"\}' "$home_dir/claude-argv" ||
+    fail "a read seat must keep plan files out of the owner's home: $(cat "$home_dir/claude-argv")"
+  [ -s "$home_dir/claude-plans" ] || fail 'the stub never saw a plans directory'
+  [ ! -e "$(cat "$home_dir/claude-plans")" ] || fail "the seat's plan directory outlived the call"
 
   # A closing remark must not replace the substantive preceding answer.
   cat > "$project/stream" <<'EOF'
@@ -8998,7 +9010,48 @@ PY
 {"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"The council answer above is my complete deliverable.","usage":{"input_tokens":12,"output_tokens":3}}
 EOF
   cp "$project/stream" "$project/cut-stream"
+  # A refusal keeps its safeguard category even without a result envelope,
+  # stays a policy decline, and leaves a clean end_turn line untouched.
+  printf '%s\n' '{"type":"system","subtype":"init"}' \
+    '{"type":"assistant","message":{"id":"r1","stop_reason":"refusal","stop_details":{"type":"refusal","category":"reasoning_extraction"},"content":[{"type":"text","text":"Declined."}]}}' > "$project/refused"
+  bash -c '. "$1/scripts/lib/peer-common.sh"; ma_claude_envelope_to_text "$2"' _ "$ROOT" "$project/refused"
+  [ "$(head -n 1 "$project/refused")" = 'stop-reason: provider=claude reason=refusal subtype=missing_result is_error=0 category=reasoning_extraction' ] ||
+    fail "a refused stream lost its reason or category: $(head -n 1 "$project/refused")"
+  bash -c '. "$1/scripts/lib/model-routing.sh"; oms_model_is_policy_decline_output "$2"' _ "$ROOT" "$project/refused" ||
+    fail 'a categorized refusal must stay a policy decline'
+  # The stop-reason parser still reads a line that carries a category.
+  printf '%s\n' 'stop-reason: provider=claude reason=refusal subtype=success is_error=1 category=bio' > "$project/refused-error"
+  [ "$(python3 "$ROOT/scripts/lib/answer-quality.py" "$project/refused-error")" = blocked ] ||
+    fail 'answer-quality must parse a categorized stop-reason line'
+  # An open category that is not one token is marked, not renamed.
+  printf '%s\n' '{"type":"assistant","message":{"id":"r2","stop_reason":"refusal","stop_details":{"category":"bio / cyber"},"content":[{"type":"text","text":"Declined."}]}}' > "$project/refused-odd"
+  bash -c '. "$1/scripts/lib/peer-common.sh"; ma_claude_envelope_to_text "$2"' _ "$ROOT" "$project/refused-odd"
+  [ "$(head -n 1 "$project/refused-odd")" = 'stop-reason: provider=claude reason=refusal subtype=missing_result is_error=0 category=unrecognized' ] ||
+    fail "an odd category was rewritten: $(head -n 1 "$project/refused-odd")"
+  # End to end: a reasoning_extraction decline is terminal after one call and
+  # says what to change instead of retrying.
+  mkdir -p "$project/refuse-bin"
+  cat > "$project/refuse-bin/claude" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in --version) echo 'claude 1.0'; exit 0 ;; esac
+printf 'call\n' >> "$HOME/refuse-calls"
+cat > /dev/null
+printf '%s\n' '{"type":"system","subtype":"init"}' \
+  '{"type":"assistant","message":{"id":"r1","stop_reason":"refusal","stop_details":{"category":"reasoning_extraction"},"content":[{"type":"text","text":"Declined."}]}}' \
+  '{"type":"result","subtype":"success","is_error":false,"stop_reason":"refusal","result":"Declined."}'
+EOF
+  chmod +x "$project/refuse-bin/claude"
+  refuse_status=0
+  HOME="$home_dir" PATH="$project/refuse-bin:/usr/bin:/bin" "$ROOT/scripts/agent-call.sh" \
+    --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+    --prompt "Refusal probe" >/dev/null 2>"$project/refuse.err" || refuse_status=$?
+  [ "$refuse_status" = 4 ] || fail "a Claude refusal must be a non-retryable decline, got $refuse_status"
+  [ "$(wc -l < "$home_dir/refuse-calls" | tr -d ' ')" = 1 ] || fail 'a Claude refusal was retried'
+  grep -Fq 'hint: the request asked the model to write out its internal reasoning' "$project/refuse.err" ||
+    fail "a reasoning_extraction decline lacks its hint: $(cat "$project/refuse.err")"
   bash -c '. "$1/scripts/lib/peer-common.sh"; ma_claude_envelope_to_text "$2"' _ "$ROOT" "$project/stream"
+  [ "$(head -n 1 "$project/stream")" = 'stop-reason: provider=claude reason=end_turn subtype=success is_error=0' ] ||
+    fail "a clean end_turn line must stay byte-identical: $(head -n 1 "$project/stream")"
   assert_file_contains "$project/stream" 'Answer: substantive evidence.'
   [ "$(grep -c 'complete deliverable' "$project/stream")" = 1 ] || fail 'terminal result was duplicated'
   if grep -Eq 'NOT-ANSWER|CHILD-NOT-SEAT|"type"' "$project/stream"; then fail 'non-answer events leaked'; fi
@@ -23736,6 +23789,7 @@ for index, call in enumerate(calls):
     if provider == "claude":
         assert "--permission-mode" not in args, "write worker must inherit the operator permission mode"
         assert "--setting-sources" not in args, args
+        assert "--settings" not in args, args
         assert "--dangerously-skip-permissions" not in args, args
     else:
         assert "--sandbox" in args and args[args.index("--add-dir") + 1] == call["cwd"], args

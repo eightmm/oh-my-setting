@@ -26,7 +26,7 @@ PAIRED_FOOTERS = ("served model", "configured model", "tokens used", "cost usd")
 
 STOP_REASON = re.compile(
     r"^stop-reason: provider=\S+ reason=(?P<reason>\S+) subtype=(?P<subtype>\S+)"
-    r" is_error=(?P<is_error>[01])$"
+    r" is_error=(?P<is_error>[01])(?: category=\S+)?$"
 )
 
 

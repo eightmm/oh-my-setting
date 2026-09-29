@@ -1722,7 +1722,7 @@ ma_claude_envelope_to_text() {
   local file="$1"
   [ -s "$file" ] || return 0
   python3 - "$file" "$(ma_scripts_dir)/lib" <<'PY' 2>/dev/null || true
-import json, sys
+import json, re, sys
 sys.path.insert(0, sys.argv[2])
 from peer_artifacts import usage_footer
 
@@ -1736,6 +1736,7 @@ envelope = None
 others = []
 messages = []
 stream_seen = False
+last_stop = None
 for line in raw.splitlines():
     candidate = line.strip()
     if candidate.startswith("{") and '"type"' in candidate:
@@ -1758,6 +1759,8 @@ for line in raw.splitlines():
             # user echoes or delegated messages. Partial deltas are not enabled.
             if doc.get("type") == "assistant" and not doc.get("parent_tool_use_id"):
                 message = doc.get("message")
+                if isinstance(message, dict) and message.get("stop_reason"):
+                    last_stop = message
                 content = message.get("content", []) if isinstance(message, dict) else []
                 if isinstance(content, list):
                     parts = [block["text"] for block in content if isinstance(block, dict)
@@ -1770,17 +1773,32 @@ for line in raw.splitlines():
 if envelope is None:
     if not stream_seen:
         raise SystemExit(0)
-    envelope = {"stop_reason": "stream_truncated", "subtype": "missing_result"}
+    # A refused message is still a refusal when the result envelope is lost.
+    refused = last_stop is not None and last_stop.get("stop_reason") == "refusal"
+    envelope = {"stop_reason": "refusal" if refused else "stream_truncated", "subtype": "missing_result"}
 
 reason = envelope.get("stop_reason") or envelope.get("terminal_reason") or "unknown"
 subtype = envelope.get("subtype") or "unknown"
 is_error = 1 if envelope.get("is_error") else 0
+# The safeguard category (cyber, bio, reasoning_extraction, ...) rides the
+# refused API message, not the result envelope (CLI 2.1.284). It is an open
+# string: a value that is not one bounded token is recorded as unrecognized
+# rather than rewritten into another name. Only a refusal line carries it,
+# which leaves every other stop-reason line byte-identical.
+category = ""
+for source in (envelope, last_stop or {}):
+    details = source.get("stop_details")
+    value = details.get("category") if isinstance(details, dict) else None
+    if isinstance(value, str) and value:
+        category = value if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", value) else "unrecognized"
+        break
 # Same rule as the codex transform: a clean end_turn's non-envelope lines are
 # merged stderr chatter, not answer; an errored or truncated stop keeps them
 # as evidence.
 if not is_error and reason == "end_turn":
     others = []
-out = ["stop-reason: provider=claude reason=%s subtype=%s is_error=%d" % (reason, subtype, is_error)]
+out = ["stop-reason: provider=claude reason=%s subtype=%s is_error=%d" % (reason, subtype, is_error)
+       + (" category=" + category if reason == "refusal" and category else "")]
 out.extend(others)
 out.extend(messages)
 result = envelope.get("result")
@@ -2009,6 +2027,7 @@ ma_provider_attempt() {
   local prompt_bytes=0
   local provider_stdin="$prompt_file"
   local provider_scratch=""
+  local seat_plans="" seat_plans_real="" workdir_real=""
   local -a cmd
 
   provider="$(oms_provider_normalize "$provider")" || {
@@ -2090,6 +2109,15 @@ ma_provider_attempt() {
       # selection degrades and none of the write/spawn tools belong in a
       # reviewer's hands anyway. Write workers keep the default set.
       [ "$access" = write ] || cmd+=(--tools "Read,Grep,Glob,Bash")
+      # Plan mode names a plan file in the owner's ~/.claude/plans, titled from
+      # the prompt's first line; 18 seat prompts' plans were found there.
+      # Probed 2026-09-29: --settings still applies under --setting-sources "",
+      # and a directory outside the project is ignored for the home default, so
+      # use a per-call directory relative to the seat's project, removed after.
+      if [ "$access" != write ]; then
+        seat_plans=".oms/tmp/claude-plans-$(ma_fence_id)"
+        cmd+=(--settings "{\"plansDirectory\":\"$seat_plans\"}")
+      fi
       # JSON is the only transport that carries WHY the model stopped. The
       # envelope is parsed back to plain text right after the run
       # (ma_claude_envelope_to_text), so every downstream reader keeps its
@@ -2407,6 +2435,17 @@ ma_provider_attempt() {
     if wait "$pid"; then status=0; else status=$?; fi
   fi
   [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
+  # Remove only a real directory at its physical spot inside this workdir: a
+  # symlinked .oms or .oms/tmp must not steer the removal anywhere else.
+  if [ -n "$seat_plans" ] && [ -d "$workdir/$seat_plans" ] && [ ! -L "$workdir/.oms" ] &&
+    [ ! -L "$workdir/.oms/tmp" ] && [ ! -L "$workdir/$seat_plans" ]; then
+    seat_plans_real="$(cd "$workdir/$seat_plans" 2>/dev/null && pwd -P)" || seat_plans_real=""
+    workdir_real="$(cd "$workdir" 2>/dev/null && pwd -P)" || workdir_real=""
+    if [ -n "$seat_plans_real" ] && [ -n "$workdir_real" ] &&
+      [ "$seat_plans_real" = "$workdir_real/$seat_plans" ]; then
+      rm -rf -- "$seat_plans_real"
+    fi
+  fi
   if [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
     if [ "$provider" = antigravity ] && grep -Eq '^\[agy\] print timeout after .+ with turn in progress; returning partial output[[:space:]]*$' "$output_file"; then
       printf '\nstop-reason: provider=antigravity reason=stream_truncated subtype=print_timeout is_error=0\n' >> "$output_file"
@@ -2768,6 +2807,9 @@ EOF
     printf '\nmodel-result: declined by %s (%s); not retried on another model\n' \
       "$provider" "$OMS_MODEL_SELECTED" >> "$artifact"
     echo "note: $provider declined this request on $OMS_MODEL_SELECTED; it was not re-sent to another model" >&2
+    if head -n 1 "$attempt_file" | tr -d '\r' | grep -Eq '^stop-reason: provider=claude reason=refusal .* category=reasoning_extraction$'; then
+      echo "hint: the request asked the model to write out its internal reasoning; drop that instruction instead of retrying" >&2
+    fi
     export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON OMS_REASONING_SELECTED
     [ "$access" != read ] || ! oms_provider_requires_read_isolation "$provider" ||
       ma_agy_read_cleanup "$state_repo" "$isolated_dir"
