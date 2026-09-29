@@ -1300,7 +1300,8 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
             return ""
         with thread_live.open_thread(repo, tid) as handle:
             first = handle.readline(thread_live.MAX_ROW + 1)
-        if len(first) > thread_live.MAX_ROW or json.loads(first).get("live") is not True:
+        head = json.loads(first) if len(first) <= thread_live.MAX_ROW else None
+        if not isinstance(head, dict) or head.get("live") is not True:
             return ""
         path = thread_live.safe_path(repo, ".oms/hooks/sessions/" + session_hash(payload) + ".thread.json", True)
         if path.exists() or path.is_symlink():

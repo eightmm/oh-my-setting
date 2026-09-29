@@ -1737,6 +1737,7 @@ others = []
 messages = []
 stream_seen = False
 last_stop = None
+tool_calls = 0
 for line in raw.splitlines():
     candidate = line.strip()
     if candidate.startswith("{") and '"type"' in candidate:
@@ -1763,6 +1764,7 @@ for line in raw.splitlines():
                     last_stop = message
                 content = message.get("content", []) if isinstance(message, dict) else []
                 if isinstance(content, list):
+                    tool_calls += sum(1 for block in content if isinstance(block, dict) and block.get("type") == "tool_use")
                     parts = [block["text"] for block in content if isinstance(block, dict)
                              and block.get("type") == "text" and isinstance(block.get("text"), str)]
                     text = "\n".join(parts)
@@ -1814,7 +1816,8 @@ for name in served:
     out.append(name)
 usage = envelope.get("usage")
 usage = usage if isinstance(usage, dict) else {}
-out.extend(usage_footer("claude", [usage], envelope.get("total_cost_usd")))
+out.extend(usage_footer("claude", [usage], envelope.get("total_cost_usd"),
+                        tool_calls=tool_calls if stream_seen else None))
 tmp = path + ".envelope"
 with open(tmp, "w", encoding="utf-8") as handle:
     handle.write("\n".join(out) + "\n")
@@ -1868,6 +1871,10 @@ texts = []
 errors = []
 completed = False
 usages = []
+tool_calls = 0
+# Only items that run something are tools; todo_list, error and untyped items
+# are not.
+CODEX_TOOL_ITEMS = ("command_execution", "file_change", "mcp_tool_call", "web_search")
 served = set()
 
 
@@ -1889,6 +1896,8 @@ for doc in events:
         item = doc.get("item") or {}
         if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
             texts.append(item["text"])
+        elif item.get("type") in CODEX_TOOL_ITEMS:
+            tool_calls += 1
     elif kind == "turn.completed":
         completed = True
         usage = doc.get("usage")
@@ -1915,7 +1924,7 @@ out.extend(errors)
 if served:
     out.append("served model")
     out.append("+".join(sorted(served)))
-out.extend(usage_footer("codex", usages))
+out.extend(usage_footer("codex", usages, tool_calls=tool_calls))
 tmp = path + ".envelope"
 with open(tmp, "w", encoding="utf-8") as handle:
     handle.write("\n".join(out) + "\n")

@@ -8979,6 +8979,7 @@ assert abs(row["cost_usd"] - 0.0123) < 1e-9, row
 assert row['provider_usage']['cache_read_tokens'] == 100, row
 assert row['provider_usage']['cache_write_tokens'] == 50, row
 assert row['provider_usage']['cache_in_input'] is False, row
+assert row['provider_usage'].get('tool_calls') is None, row  # no stream, no tool count
 PY
   grep -Fxq -- '--output-format' "$home_dir/claude-argv" ||
     fail "claude must be asked for the JSON envelope: $(cat "$home_dir/claude-argv")"
@@ -9006,7 +9007,7 @@ PY
   cat > "$project/stream" <<'EOF'
 {"type":"system","subtype":"init"}
 {"type":"user","message":{"content":"USER-CONTENT-NOT-ANSWER"}}
-{"type":"assistant","parent_tool_use_id":"child-tool","message":{"content":[{"type":"text","text":"CHILD-NOT-SEAT"}]}}
+{"type":"assistant","parent_tool_use_id":"child-tool","message":{"content":[{"type":"tool_use","name":"Read","input":{}},{"type":"text","text":"CHILD-NOT-SEAT"}]}}
 {"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":"THINKING-NOT-ANSWER"},{"type":"tool_use","name":"Bash","input":{"command":"TOOL-NOT-ANSWER"}},{"type":"text","text":"Answer: substantive evidence."}]}}
 {"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"The council answer above is my complete deliverable."}]}}
 {"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"The council answer above is my complete deliverable.","usage":{"input_tokens":12,"output_tokens":3}}
@@ -9056,6 +9057,8 @@ EOF
     fail "a clean end_turn line must stay byte-identical: $(head -n 1 "$project/stream")"
   assert_file_contains "$project/stream" 'Answer: substantive evidence.'
   [ "$(grep -c 'complete deliverable' "$project/stream")" = 1 ] || fail 'terminal result was duplicated'
+  grep -Eq '"tool_calls": 1[,}]' "$project/stream" ||
+    fail "the seat's own tool call, and not its child's, must be counted: $(tail -1 "$project/stream")"
   if grep -Eq 'NOT-ANSWER|CHILD-NOT-SEAT|"type"' "$project/stream"; then fail 'non-answer events leaked'; fi
   sed '/"type":"result"/d' "$project/cut-stream" > "$project/cut"
   bash -c '. "$1/scripts/lib/peer-common.sh"; ma_claude_envelope_to_text "$2"' _ "$ROOT" "$project/cut"
@@ -9079,6 +9082,10 @@ cat > /dev/null
 echo "ERROR rmcp::transport::worker: TRANSPORT-NOISE before the answer" >&2
 printf '%s\n' '{"type":"thread.started","thread_id":"t1"}'
 printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"item_c","type":"command_execution","command":"ls"}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"item_r","type":"reasoning","text":"thinking"}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"item_t","type":"todo_list","items":[]}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"item_e","type":"error","message":"warn"}}'
 printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"JSONL answer body: pong."}}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5,"cached_input_tokens":8}}'
 EOF
@@ -9105,6 +9112,7 @@ assert row["configured_model"] == "gpt-5.6-terra", row
 assert row["model_attribution"] == "configured-default", row
 assert row["tokens"] == 15, row
 assert row['provider_usage']['cache_read_tokens'] == 8, row
+assert row['provider_usage']['tool_calls'] == 1, row  # one command; messages, reasoning, todo and error are not tools
 assert row['provider_usage']['cache_write_tokens'] is None, row
 assert row['provider_usage']['cache_in_input'] is True, row
 PY

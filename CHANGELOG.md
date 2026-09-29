@@ -64,6 +64,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A live thread whose first row is valid JSON but not an object raised
+  `AttributeError` out of the prompt and edit hooks; it is now simply not a
+  live thread. An ask seat found this unprompted during an A/B round.
 - Live thread delivery no longer pours every peer answer into every session in
   the repository. A session that has not acked the thread gets `answer` turns
   as a 280-character preview with their byte size and the exact
@@ -153,6 +156,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   the installer's contract and fail on duplicate, retired or drifted rows.
 
 ### Changed
+- Seat usage records count the seat's own tool calls (`tool_calls` in the
+  usage detail and `provider_usage`): Codex non-message stream items and
+  Claude `tool_use` blocks. Seat exploration is most of a council's cost, and
+  this is its cheapest direct measure. Codex counts only items that run
+  something (commands, file changes, MCP tools, web search); rows written
+  before this change have no count.
 - Diff review seats are told to read the diff, the functions it changes or
   directly calls, and their existing tests, and to stop once each finding has
   line evidence. Seat exploration, not the prompt, is most of a review's cost:

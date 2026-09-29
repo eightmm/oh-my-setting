@@ -387,6 +387,12 @@ for invalid in invalid_rows:
         assert [row["text"] for row in json.loads(message.splitlines()[1])["turns"]] == [expected]
     assert not json.loads(state_path.read_text()).get("delivery_error"), "successful delivery must clear the error latch"
     assert not hook_state.live_thread_hint(payload("codex")), "recovered turns must not replay"
+# A first row that is valid JSON but not an object is not a live thread; it
+# must not raise out of the hook (found by an ask seat during an A/B round).
+original = path.read_bytes()
+path.write_bytes(b'["live"]\n' + original.split(b"\n", 1)[1])
+assert not hook_state.live_thread_hint(payload("new"))
+path.write_bytes(original)
 os.environ["OMS_LIVE_COLLAB"] = "0"
 assert not hook_state.live_thread_hint(payload("new"))
 os.environ.pop("OMS_LIVE_COLLAB")

@@ -139,7 +139,7 @@ def artifact_usage_metrics(repo: str, row: dict[str, object]) -> Optional[dict]:
     if not reports:
         return None
     result = {"reports": len(reports), "measurement": "provider-reported"}
-    for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
+    for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "tool_calls"):
         values = [integer(report.get(key)) for report in reports]
         result[key] = sum(values) if all(value is not None for value in values) else None
     flags = [report.get("cache_in_input") for report in reports]

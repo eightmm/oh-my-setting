@@ -186,8 +186,12 @@ def stage_context(source: Path, root: Path, relative: str) -> None:
             output.write(data)
 
 
-def usage_footer(provider: str, usages: list[dict], cost=None) -> list[str]:
-    """Provider-reported observation only; missing fields are not zero cost."""
+def usage_footer(provider: str, usages: list[dict], cost=None, tool_calls=None) -> list[str]:
+    """Provider-reported observation only; missing fields are not zero cost.
+
+    tool_calls counts the seat's own tool items in its stream: exploration,
+    not the prompt, is most of a seat's cost, and this is its cheapest proxy.
+    """
     def total(key):
         values = [row.get(key) for row in usages]
         if not values or any(type(value) is not int or value < 0 for value in values):
@@ -198,7 +202,8 @@ def usage_footer(provider: str, usages: list[dict], cost=None) -> list[str]:
            "output_tokens": total("output_tokens"),
            "cache_read_tokens": total("cached_input_tokens" if provider == "codex" else "cache_read_input_tokens"),
            "cache_write_tokens": total("cache_creation_input_tokens") if provider == "claude" else None,
-           "cache_in_input": provider == "codex", "reported_cost_usd": None}
+           "cache_in_input": provider == "codex", "reported_cost_usd": None,
+           "tool_calls": tool_calls if type(tool_calls) is int and tool_calls >= 0 else None}
     if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
         row["reported_cost_usd"] = cost
     # Retain the historical tokens-used field and its meaning for consumers.
