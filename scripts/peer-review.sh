@@ -426,6 +426,11 @@ write_prompt() {
     printf 'Find bugs, regressions, missing tests, unclear contracts, and unsafe operations.\n'
     printf 'Treat material unnecessary scope or complexity as a regression only when an existing repo, standard-library, portable native, or narrower behavior-equivalent solution replaces it; line count and style alone are not findings.\n'
     printf 'Tie every finding to file/line evidence, diff evidence, commands, or docs.\n'
+    # Seat exploration, not this prompt, is most of a review's cost. A/B on a
+    # seeded diff (gpt-6-sol, 2 runs each): this bound cut input 37%, output
+    # 56% and time 46% with the same recall; without the tests clause the
+    # bounded seat misreported existing coverage as missing.
+    [ "$NO_DIFF" -eq 1 ] || printf 'Scope: read the diff, the functions it changes or directly calls, and their existing tests; do not survey unrelated files; stop once each finding has line evidence.\n'
     printf 'If there are no actionable findings, say "No findings".\n\n'
     if [ "$ML_PRESET" -eq 1 ]; then
       printf 'This is an ML pre-training gate. Prioritize silent ML bugs and metric corruption:\n'

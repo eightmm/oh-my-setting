@@ -153,6 +153,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   the installer's contract and fail on duplicate, retired or drifted rows.
 
 ### Changed
+- Diff review seats are told to read the diff, the functions it changes or
+  directly calls, and their existing tests, and to stop once each finding has
+  line evidence. Seat exploration, not the prompt, is most of a review's cost:
+  on a seeded diff (gpt-6-sol, two runs each) the bound cut input tokens 37%,
+  output 56% and time 46% with the same recall. The tests clause is there
+  because a bounded seat without it misreported existing coverage as missing.
 - SubagentStop telemetry is no longer registered for Claude Code or the Codex
   plugin (Claude 11 hooks to 10, Codex 8 to 7); session boundary telemetry,
   which live peer discovery reads, stays. Install/update removes the old row

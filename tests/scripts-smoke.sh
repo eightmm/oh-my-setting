@@ -3507,6 +3507,8 @@ test_peer_review_dry_run_artifacts() {
   assert_one_artifact_contains "$artifact_dir" 'antigravity-review-current-diff-*.md' 'Diff:'
   assert_one_artifact_contains "$artifact_dir" 'codex-review-current-diff-*.md' \
     'material unnecessary scope or complexity'
+  assert_one_artifact_contains "$artifact_dir" 'codex-review-current-diff-*.md' \
+    'Scope: read the diff, the functions it changes or directly calls, and their existing tests'
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-current-diff-*.md' 'Peer review synthesis'
   assert_one_artifact_contains "$artifact_dir" '_synthesis-review-current-diff-*.md' '## codex'
 }
