@@ -68,23 +68,22 @@ Default: concise, scoped, evidence-driven.
 
 ## Verification
 
-- Reuse coverage; add only uncovered behavior, reproduced bugs or safety cases.
+- Reuse coverage and tests/fixtures; add only uncovered behavior, reproduced
+  bugs or safety cases, never speculative scaffolding.
 - Run syntax, affected and required checks. Prose needs reference checks;
   agent instructions are contracts; install/permission/state changes need
   broader coverage. Graph uncertainty is not proof of safety.
-- Keep CI small: reuse tests/fixtures, avoid duplicate push/PR runs and
-  speculative matrices. Expensive checks need
-  affected-risk, release, scheduled or explicit triggers; preserve required gates.
-- No speculative CI jobs or test scaffolding. Record CI
-  scope/runtime in PROJECT.md. Repeat only for changed inputs, failures or
-  unresolved risk; report failed/skipped checks.
+- Keep CI small: no speculative jobs, matrices or duplicate push/PR runs;
+  expensive checks need affected-risk, release, scheduled or explicit triggers;
+  preserve required gates and record CI scope/runtime in PROJECT.md. Repeat
+  only for changed inputs, failures or unresolved risk; report failed/skipped checks.
 
 ## Multi-Agent Work
 
 - Do not spawn subagents unless explicitly instructed by the user or applicable
-  instructions; otherwise work locally.
-- Run commands/tests directly. For authorized delegation, load
-  `oms-agent-harness`; the parent owns admission, verification and publication.
+  instructions; otherwise work locally and run commands/tests directly.
+- For authorized delegation, load `oms-agent-harness`; the parent owns
+  admission, verification and publication.
   Workers cannot widen authority or recursively delegate.
 - Delegate with scoped briefs; skip unchanged heartbeats, not user updates.
 
@@ -104,7 +103,3 @@ Default: concise, scoped, evidence-driven.
 - Commit as `<type>: <description>` (feat, fix, refactor, docs, test, chore,
   perf, ci). No attribution trailers. For a PR, read `git diff <base>...HEAD`
   whole, with a test plan.
-
-## Project Rules
-
-- Keep language/ML/data/HPC policy in templates/contracts.

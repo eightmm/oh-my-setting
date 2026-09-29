@@ -304,6 +304,27 @@ proc = subprocess.run(["bash", str(root / "scripts/syntax-guard-hook.sh")], cwd=
 message = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
 assert "backward compatibility" in message and "does not parse" in message
 assert not hook_state.live_thread_hint(payload("codex")), "edit and prompt delivery must share the cursor"
+# A session that has not acked the thread gets answers as a bounded preview and
+# every other role whole; acking makes it a participant that gets answers whole.
+call("ack", "--id", "live", "--after", first.rsplit("--after ", 1)[1].strip(),
+     "--consumer", hook_state.session_hash(payload("codex")))
+call("append", "--id", "live", "--role", "answer", "--text", "가" * 300 + "tail-of-answer")
+stray = repo.parent / "stray-repo"
+(stray / ".oms/threads").mkdir(parents=True)
+(stray / ".oms/threads/x.jsonl").write_text('["receipt"]\n{"receipt": "ack", "consumer": "c1", "after": "z"}\n')
+assert hook_state.thread_participant(stray, "x", "c1"), "a stray non-object row must not break the ack scan"
+assert not hook_state.thread_participant(stray, "x", "c2")
+real_participant = hook_state.thread_participant
+def broken(*args):
+    raise ValueError("thread identity changed")
+hook_state.thread_participant = broken
+assert not hook_state.live_thread_hint(payload("claude")), "a failed participation check delivers nothing"
+hook_state.thread_participant = real_participant
+glance = hook_state.live_thread_hint(payload("claude"))
+assert "backward compatibility" in glance, "a failed check must not advance the cursor; decisions arrive whole"
+assert "tail-of-answer" not in glance and '"text_bytes": 914' in glance, glance
+assert "--max-bytes 65536" in glance and "ack to receive answers whole" in glance, glance
+assert "tail-of-answer" in hook_state.live_thread_hint(payload("codex")), "a participant gets answers whole"
 large = "\\" * 3000
 for suffix in ("one", "two"):
     call("append", "--id", "live", "--role", "answer", "--text", large + suffix)

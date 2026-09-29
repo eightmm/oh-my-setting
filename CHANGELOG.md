@@ -64,6 +64,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Live thread delivery no longer pours every peer answer into every session in
+  the repository. A session that has not acked the thread gets `answer` turns
+  as a 280-character preview with their byte size and the exact
+  `oms thread updates ... --max-bytes 65536` call; questions, decisions and
+  notes still arrive whole, and acking restores full answers. The message is
+  now built before the delivery cursor moves, so a failed check no longer
+  drops a batch. One observed session received about 60 KB of another
+  session's council this way.
+- The global rules drop a duplicated CI bullet and move the templates-only
+  policy line into this repository's `AGENTS.md`; every requirement is kept.
 - `oms land --ci-wait N` could end with `ci timeout` without querying CI once
   when the clock crossed a second between setting and checking the deadline;
   with `--ci-wait 1` under CI load this skipped the install update. The wait

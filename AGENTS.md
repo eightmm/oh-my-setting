@@ -2,6 +2,8 @@
 
 - The install-wide policy source is `rules/global-AGENTS.md`; read it when the
   current agent has not already loaded the installed global rules.
+- Keep language/ML/data/HPC policy in templates/contracts, not in the global
+  rules every session loads.
 - This repository maintains a Bash harness shared by Codex, Claude Code, and
   Antigravity. Preserve behavior across all three providers.
 - Keep scripts compatible with Bash 3.2, GNU/BSD userlands, and Windows Git
