@@ -14971,6 +14971,7 @@ test_fail_ledger_hook_gives_failed_commands_a_memory() {
   out="$(cd "$plain" && printf '%s' "$payload" | bash "$SH")"
   [ -z "$out" ] || fail "an unadopted repo gets no ledger speech: $out"
   [ ! -d "$plain/.oms" ] || fail "the hook must not seed .oms"
+
 }
 
 # The edit-time syntax guard is feedback in the same turn: a file that does not
@@ -15049,6 +15050,29 @@ print(row["hookSpecificOutput"]["additionalContext"])
   out="$(cd "$plain" && printf '{"tool_name":"Write","tool_input":{"file_path":"%s"}}' "$plain/broken.sh" | bash "$SH")"
   [ -z "$out" ] || fail "an unadopted repo gets no guard speech: $out"
   [ ! -d "$plain/.oms" ] || fail "the hook must not seed .oms"
+
+  # Hook cwd, not the process cwd, selects the adopted repository. This
+  # catches valid payload repos when the provider launched the hook elsewhere.
+  local external="$TMP/syntax-guard-external"
+  mkdir -p "$external"
+  printf 'if true; then\n' > "$project/from-payload.sh"
+  out="$(cd "$external" && printf '{"tool_name":"Write","tool_input":{"file_path":"%s/from-payload.sh"},"cwd":"%s"}' "$project" "$project" | env -u OMS_STATE_REPO bash "$SH")"
+  out="$(context_of "$out")" || fail "an adopted payload cwd must be checked outside the process repo"
+  case "$out" in *"from-payload.sh"*"bash -n"*) ;; *) fail "payload cwd finding was lost: $out" ;; esac
+
+  out="$(cd "$external" && printf '{"tool_name":"Write","tool_input":{"file_path":"from-payload.sh"},"currentWorkingDirectory":"%s"}' "$project" | env -u OMS_STATE_REPO bash "$SH")"
+  out="$(context_of "$out")" || fail "cwd alias must also locate relative edited paths"
+  case "$out" in *"from-payload.sh"*"bash -n"*) ;; *) fail "cwd alias lost the edited file: $out" ;; esac
+
+  # An unadopted or invalid payload cwd must not borrow adoption from the
+  # process cwd and inspect files under another project.
+  local invalid="$TMP/syntax-guard-invalid-cwd"
+  out="$(cd "$project" && printf '{"tool_name":"Write","tool_input":{"file_path":"%s/from-payload.sh"},"cwd":"%s"}' "$project" "$invalid" | env -u OMS_STATE_REPO bash "$SH")"
+  [ -z "$out" ] || fail "an invalid explicit payload cwd must not fall back to process repo: $out"
+  out="$(cd "$project" && printf '{"tool_name":"Write","tool_input":{"file_path":"%s/from-payload.sh"},"cwd":7}' "$project" | env -u OMS_STATE_REPO bash "$SH")"
+  [ -z "$out" ] || fail "a non-string explicit payload cwd must not fall back to process repo: $out"
+  out="$(cd "$project" && printf '{broken json' | env -u OMS_STATE_REPO bash "$SH")"
+  [ -z "$out" ] || fail "malformed hook JSON must not fall back to process repo: $out"
 
   # Codex edits arrive as apply_patch with the patch text in tool_input.command
   # and no file_path: the files the patch names are the ones to check, each
@@ -17877,6 +17901,87 @@ EOF
     fail "precompact hook must exit 0 on capture"
   find "$repo/.oms/handoffs" -name '*.md' 2>/dev/null | grep -q . ||
     fail "precompact hook should write a handoff digest for an adopted repo"
+}
+
+test_precompact_handoff_nested_cwd_uses_adopted_root() {
+  local repo="$TMP/precompact-nested"
+  local nested="$TMP/precompact-nested/work/child"
+  local claude_home="$TMP/precompact-nested-home"
+  local shim_bin="$TMP/precompact-python-crlf"
+  local real_python
+  local project_dir
+
+  if command -v cygpath >/dev/null 2>&1; then
+    repo="$(cygpath -m "$repo")"
+    nested="$(cygpath -m "$nested")"
+    claude_home="$(cygpath -m "$claude_home")"
+  fi
+  git init -q "$repo"
+  mkdir -p "$repo/.oms" "$nested"
+  printf '*\n' > "$repo/.oms/.gitignore"
+  project_dir="$claude_home/projects/$(cd "$nested" && pwd | sed 's#/#-#g')"
+  mkdir -p "$project_dir"
+  cat > "$project_dir/nested-session.jsonl" <<EOF
+{"type":"user","cwd":"$nested","message":{"role":"user","content":"inspect the nested module"}}
+{"type":"assistant","message":{"role":"assistant","content":"The nested module is ready."}}
+{"type":"user","cwd":"$nested","message":{"role":"user","content":"connect it to the service"}}
+EOF
+
+  # Simulate Windows Python's CRLF text output for the hook's JSON scalars.
+  real_python="$(command -v python3)"
+  mkdir -p "$shim_bin"
+  cat > "$shim_bin/python3" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *hook_event_name*)
+    output="\$("$real_python" "\$@")" || exit \$?
+    printf '%s\\n' "\$output" | "$real_python" -c 'import sys; sys.stdout.write(sys.stdin.read().replace("\\r\\n", "\\n").replace("\\n", "\\r\\n"))'
+    ;;
+  *) exec "$real_python" "\$@" ;;
+esac
+EOF
+  chmod +x "$shim_bin/python3"
+
+  printf '{"session_id":"nested-session","cwd":"%s"}' "$nested" |
+    PATH="$shim_bin:$PATH" OMS_CLAUDE_HOME="$claude_home" "$ROOT/scripts/precompact-handoff.sh" ||
+    fail "precompact hook must exit 0 for nested cwd"
+  local digest
+  digest="$(find "$repo/.oms/handoffs" -type f -name '*.md' 2>/dev/null | head -n 1)"
+  [ -n "$digest" ] ||
+    fail "nested cwd should capture the explicit session into the adopted root"
+  grep -Fq "inspect the nested module" "$digest" ||
+    fail "nested cwd must capture the payload's explicit session"
+  [ ! -e "$nested/.oms" ] ||
+    fail "nested cwd must not become a separate handoff destination"
+}
+
+test_precompact_handoff_ignores_nested_decoy_oms() {
+  local repo="$TMP/precompact-decoy"
+  local nested="$TMP/precompact-decoy/work"
+  local claude_home="$TMP/precompact-decoy-home"
+  local project_dir
+
+  if command -v cygpath >/dev/null 2>&1; then
+    repo="$(cygpath -m "$repo")"
+    nested="$(cygpath -m "$nested")"
+    claude_home="$(cygpath -m "$claude_home")"
+  fi
+  git init -q "$repo"
+  mkdir -p "$nested/.oms"
+  project_dir="$claude_home/projects/$(cd "$nested" && pwd | sed 's#/#-#g')"
+  mkdir -p "$project_dir"
+  cat > "$project_dir/decoy-session.jsonl" <<EOF
+{"type":"user","cwd":"$nested","message":{"role":"user","content":"this must not be captured under the decoy"}}
+{"type":"user","cwd":"$nested","message":{"role":"user","content":"valid second turn for capture"}}
+EOF
+
+  printf '{"session_id":"decoy-session","cwd":"%s"}' "$nested" |
+    OMS_CLAUDE_HOME="$claude_home" "$ROOT/scripts/precompact-handoff.sh" ||
+    fail "precompact hook must fail open for an unadopted repository"
+  [ ! -d "$repo/.oms" ] ||
+    fail "a nested .oms decoy must not adopt the repository"
+  [ -z "$(find "$nested/.oms" -mindepth 1 -print -quit 2>/dev/null)" ] ||
+    fail "nested .oms decoy must not receive a handoff or failure ledger"
 }
 
 test_precompact_handoff_records_refusal_in_fail_ledger() {

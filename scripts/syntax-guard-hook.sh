@@ -10,8 +10,8 @@ set -euo pipefail
 # plain stdout line on this event reaches the transcript log rather than the
 # model, so the finding rides hookSpecificOutput.additionalContext. Silent on a
 # clean file, a tool that is not an edit, a file kind it cannot judge, and an
-# unadopted repo (the same gate as the other hooks: an edit outside the harness
-# costs a rev-parse, not a python spawn). OMS_SYNTAX_GUARD_HOOK=0 disables it.
+# unadopted repo. A small resolver checks the event before the syntax parser
+# starts. OMS_SYNTAX_GUARD_HOOK=0 disables it.
 
 case "${OMS_SYNTAX_GUARD_HOOK:-1}" in
   0|false|FALSE|no|NO|off|OFF) exit 0 ;;
@@ -20,11 +20,11 @@ esac
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
-repo="${OMS_STATE_REPO:-$PWD}"
-root="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$repo")"
-[ -d "$root/.oms" ] || exit 0
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+root="$(OMS_HOOK_PAYLOAD="$payload" python3 "$ROOT/scripts/lib/hook_repo.py" 2>/dev/null | tr -d '\r')" || root=""
+[ -n "$root" ] && [ -d "$root/.oms" ] || exit 0
 
-OMS_SGH_PAYLOAD="$payload" OMS_SGH_ROOT="$root" OMS_SGH_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)" python3 - <<'PY' 2>/dev/null || true
+OMS_SGH_PAYLOAD="$payload" OMS_SGH_ROOT="$root" python3 - "$ROOT/scripts/lib" <<'PY' 2>/dev/null || true
 import atexit
 import ast
 import json
@@ -47,7 +47,8 @@ except (ValueError, KeyError):
     raise SystemExit(0)
 if not isinstance(row, dict):
     raise SystemExit(0)
-sys.path.insert(0, os.environ["OMS_SGH_LIB"])
+sys.path.insert(0, sys.argv[1])
+from hook_repo import native_path
 from hook_state import live_thread_hint
 
 collaboration = live_thread_hint(row, Path(os.environ["OMS_SGH_ROOT"]))
@@ -68,11 +69,19 @@ tool_name = row.get("tool_name")
 tool_input = row.get("tool_input")
 if not isinstance(tool_input, dict):
     raise SystemExit(0)
-cwd = row.get("cwd") if isinstance(row.get("cwd"), str) and row.get("cwd") else os.getcwd()
+cwd = row.get("cwd") or row.get("currentWorkingDirectory")
+cwd = native_path(cwd if isinstance(cwd, str) and cwd else os.getcwd())
+if cwd is None:
+    raise SystemExit(0)
 
 
 def patch_path(name):
-    if not isinstance(name, str) or not name or "\0" in name or os.path.isabs(name):
+    if not isinstance(name, str) or not name or "\0" in name:
+        return None
+    # Python 3.13 no longer calls a single-slash Windows path absolute.
+    if name.startswith("/") or os.path.isabs(name):
+        return None
+    if os.name == "nt" and (name.startswith("\\") or os.path.splitdrive(name)[0]):
         return None
     normalized = os.path.normpath(name)
     if normalized in ("", os.curdir, os.pardir):
@@ -117,8 +126,8 @@ def patch_paths(command):
 
 
 if tool_name in EDIT_TOOLS:
-    path = tool_input.get("file_path")
-    paths = [path] if isinstance(path, str) and path else []
+    path = native_path(tool_input.get("file_path"))
+    paths = [path] if path else []
     if paths and not os.path.isabs(paths[0]):
         paths[0] = os.path.join(cwd, paths[0])
 elif tool_name == PATCH_TOOL:

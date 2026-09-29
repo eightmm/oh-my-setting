@@ -15,14 +15,21 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/work-journal.sh
 . "$ROOT/scripts/lib/work-journal.sh"
 
+payload="$(cat 2>/dev/null || true)"
+state_repo=""
+if command -v python3 >/dev/null 2>&1; then
+  state_repo="$(OMS_HOOK_PAYLOAD="$payload" python3 "$ROOT/scripts/lib/hook_repo.py" \
+    2>/dev/null | tr -d '\r')" || state_repo=""
+fi
+
 # Rollover/catch-up on each top-level agent prompt. This stays independent of
 # skill routing (which users may disable): local materialization runs first.
 # Deferred Stop publishing and periodic maintenance own network work. On the first
 # prompt of a local day it also prints a bounded journal digest — hook stdout
 # becomes agent context, which is what makes the journal self-referencing.
 if [ "${OMS_HARNESS_CHILD:-0}" != 1 ] &&
-  git -C "${OMS_STATE_REPO:-$PWD}" rev-parse --git-dir >/dev/null 2>&1; then
-  work_journal_prompt_tick "${OMS_STATE_REPO:-$PWD}"
+  [ -n "$state_repo" ] && git -C "$state_repo" rev-parse --git-dir >/dev/null 2>&1; then
+  work_journal_prompt_tick "$state_repo"
 fi
 
 # State-conditional hints: inject the one thing native skill matching cannot
@@ -118,8 +125,8 @@ PY
 }
 
 if [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_STATE_HINTS:-1}" = "1" ] &&
-  [ -d "${OMS_STATE_REPO:-$PWD}/.oms" ]; then
-  state_hint "${OMS_STATE_REPO:-$PWD}" || true
+  [ -n "$state_repo" ] && [ -d "$state_repo/.oms" ]; then
+  state_hint "$state_repo" || true
 fi
 
 [ "${OMS_SKILL_ROUTER_OFF:-0}" = "1" ] && exit 0
@@ -130,4 +137,5 @@ HELPER="$ROOT/scripts/lib/hook_state.py"
 command -v python3 >/dev/null 2>&1 || exit 0
 
 # The helper owns routing state and fail-opens on malformed hook payloads.
-OMS_HOOK_PAYLOAD="$(cat)" python3 "$HELPER" route --manifest "$MANIFEST" || exit 0
+OMS_HOOK_PAYLOAD="$payload" OMS_HOOK_RESOLVED_REPO="$state_repo" \
+  python3 "$HELPER" route --manifest "$MANIFEST" || exit 0

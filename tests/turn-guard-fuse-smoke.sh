@@ -238,10 +238,25 @@ assert path.read_bytes() == before, "disabled budget must not rewrite state"
 PY
 }
 
+test_budget_reads_the_prompt_override_repository() {
+  local payload_repo="$TMP/budget-payload" override_repo="$TMP/budget-override" out
+  make_dirty_repo "$payload_repo"
+  make_dirty_repo "$override_repo"
+  mkdir -p "$override_repo/.oms" "$payload_repo/.oms"
+  OMS_STATE_REPO="$override_repo" OMS_SESSION_BUDGET_TURNS=1 OMS_WORK_JOURNAL=0 \
+    OMS_CTX_CAPTURE=0 route_prompt "$payload_repo" override-budget ''
+  out="$(OMS_STATE_REPO="$override_repo" OMS_SESSION_BUDGET_TURNS=1 OMS_WORK_JOURNAL=0 \
+    OMS_CTX_CAPTURE=0 run_stop "$ROOT/scripts/turn-guard.sh" "$payload_repo" override-budget)"
+  assert_contains "$out" '"decision": "block"' 'override budget enforcement'
+  [ ! -d "$payload_repo/.oms/hooks" ] || fail "budget state leaked into payload repo"
+}
+
 test_unreadable_helper_reports_an_unguarded_turn
 test_unparseable_verdict_reports_an_unguarded_turn
 test_crashing_guard_command_reports_an_unguarded_turn
 test_default_hooks_skip_guard_state_and_keep_journal
 test_session_budget_survives_prompt_rewrites
+
+test_budget_reads_the_prompt_override_repository
 
 echo "turn-guard-fuse-smoke: ok"

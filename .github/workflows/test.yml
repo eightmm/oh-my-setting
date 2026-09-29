@@ -190,6 +190,13 @@ jobs:
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         timeout-minutes: 3
         run: bash tests/scripts-smoke.sh --only test_process_liveness_uses_non_destructive_windows_probe
+      - name: native hook routing and handoff
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        timeout-minutes: 3
+        run: |
+          python3 -c 'import os; assert os.name == "nt", os.name'
+          TMPDIR="$(cygpath -m /tmp)" bash tests/fail-ledger-hook-filter-smoke.sh
+          bash tests/scripts-smoke.sh --only test_syntax_guard_hook_reports_broken_edits --only test_precompact_handoff_nested_cwd_uses_adopted_root --only test_precompact_handoff_ignores_nested_decoy_oms
       - name: native reenter anchor
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         timeout-minutes: 3

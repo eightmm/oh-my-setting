@@ -12,6 +12,13 @@ HELPER="$ROOT/scripts/lib/hook_state.py"
 command -v python3 >/dev/null 2>&1 || exit 0
 
 payload="$(cat)"
+# An explicit state override must match the prompt's budget writer and journal
+# tick. Keep the normal payload-based Stop path when no override is configured.
+if [ -n "${OMS_STATE_REPO:-}" ]; then
+  OMS_HOOK_RESOLVED_REPO="$(OMS_HOOK_PAYLOAD="$payload" python3 "$ROOT/scripts/lib/hook_repo.py" \
+    2>/dev/null | tr -d '\r')" || OMS_HOOK_RESOLVED_REPO=""
+  export OMS_HOOK_RESOLVED_REPO
+fi
 guard_out=""
 guard_rc=0
 if [ "${OMS_TURN_GUARD_OFF:-0}" != "1" ] && {

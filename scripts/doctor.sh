@@ -1278,14 +1278,16 @@ events_path = os.environ["OMS_DOCTOR_EVENTS"]
 receipt_schema = os.environ["OMS_DOCTOR_RECEIPT_SCHEMA"].strip()
 days = int(os.environ["OMS_DOCTOR_EVIDENCE_DAYS"])
 
-# Which action in the harness event stream proves a given hook ran. A hook
-# that writes no event has nothing to check, and silence from one of those is
-# normal — so it is reported as an absent stream, never as a fault.
+# Shared event evidence is not provider-specific execution proof. Router and
+# guard actions are conditional (deduped hints / opt-in budgets); absence does
+# not mean their hooks failed to run. Do not add hook calls to measure silence.
 EVIDENCE = {
-    "skill-router.sh": "route",
-    "turn-guard.sh": "turn_guard",
-    "telemetry-hook.sh": "telemetry",
+    "skill-router.sh": ("presence", "peer_advisory", "context_pressure",
+                        "context_capture", "skill_hint"),
+    "turn-guard.sh": ("session_budget", "turn_guard"),
+    "telemetry-hook.sh": ("telemetry",),
 }
+CONDITIONAL = {"skill-router.sh", "turn-guard.sh"}
 
 hooks = {}
 if not os.path.isfile(settings_path):
@@ -1322,15 +1324,12 @@ if has_stream:
             action, ts = row.get("action"), row.get("ts")
             if not isinstance(action, str) or not isinstance(ts, str):
                 continue
-            keys = [action]
-            # Telemetry fires on four events from one script; the row names
-            # which, so this is per-surface evidence rather than "the script
-            # ran at some point".
-            if action == "telemetry" and isinstance(row.get("hook"), str):
-                keys.append("telemetry:%s" % row["hook"])
-            for key in keys:
-                if ts > last.get(key, ""):
-                    last[key] = ts
+            event = row.get("hook")
+            if not isinstance(event, str):
+                continue
+            key = (event, action)
+            if ts > last.get(key, ""):
+                last[key] = ts
 else:
     print("note: no harness event stream at %s; evidence unchecked" % events_path)
 
@@ -1351,16 +1350,20 @@ for surface in expected["surfaces"]:
     if issues:
         missing += 1
         continue
-    action = EVIDENCE.get(script)
-    if action is None:
+    actions = EVIDENCE.get(script)
+    if actions is None:
         print("ok: %s (registered; no evidence stream)" % label)
         continue
     if not has_stream:
         print("ok: %s (registered; evidence unavailable)" % label)
         continue
-    key = "telemetry:%s" % event if action == "telemetry" else action
-    seen = last.get(key)
-    if seen is None:
+    seen, action = max((last.get((event, action), ""), action) for action in actions)
+    if script in CONDITIONAL and (not seen or seen < cutoff):
+        detail = "last %s %s" % (action, seen) if seen else "no matching event recorded"
+        print("ok: %s (registered; conditional evidence only; %s; execution unverified)" % (
+            label, detail))
+        continue
+    if not seen:
         print("no-recent-evidence: %s (registered; no %s event recorded)" % (label, action))
         stale += 1
     elif seen < cutoff:
@@ -1397,6 +1400,7 @@ else:
 # schema stamp is a staleness hint, not a broken surface.
 if stale:
     print("note: %d registered surface(s) have no evidence within %d day(s)" % (stale, days))
+print("note: registration is checked for Claude Code; event evidence is shared across providers and cannot establish usage frequency")
 if missing:
     print("hint: run %s/scripts/install-claude-hooks.sh" % expected["root"])
     sys.exit(1)

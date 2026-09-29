@@ -29,13 +29,11 @@ esac
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
-# Adoption gating before the parse: PostToolUse fires on every successful Bash
-# call, so an unadopted repo must cost a rev-parse rather than a python spawn.
-# Only repos that already carry harness state get rows — a command in an
-# unadopted repo must not seed .oms as a hook side effect.
-repo="${OMS_STATE_REPO:-$PWD}"
-root="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$repo")"
-[ -d "$root/.oms" ] || exit 0
+# Resolve the event repo before parsing command details: only repos that
+# already carry harness state get rows, and an unadopted repo must not seed
+# .oms as a hook side effect.
+root="$(OMS_HOOK_PAYLOAD="$payload" python3 "$ROOT/scripts/lib/hook_repo.py" 2>/dev/null | tr -d '\r')" || root=""
+[ -n "$root" ] && [ -d "$root/.oms" ] || exit 0
 [ -x "$ROOT/scripts/fail-ledger.sh" ] || exit 0
 
 # One stat is the whole cost of the success side in a repo with no failure
@@ -191,6 +189,7 @@ print(exit_code)
 print(command)
 PY
 )"
+parsed="${parsed//$'\r'/}"
 [ -n "$parsed" ] || exit 0
 mode="$(printf '%s\n' "$parsed" | sed -n 1p)"
 

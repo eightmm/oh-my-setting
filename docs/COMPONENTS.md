@@ -943,10 +943,21 @@ chooses a connector or tracked summary.
   when its exact `bash <root>/scripts/<script>` command points at this or a
   verified earlier OMS checkout, so wrappers and same-named user scripts stay
   untouched and uninstall keeps user siblings in place. `oms doctor` and
-  `oms doctor --surfaces` audit the same contract read-only.
+  `oms doctor --surfaces` audit the same Claude Code registration contract
+  read-only. Its shared event evidence does not establish provider-specific
+  execution or usage frequency. Prompt hints and session-budget checks emit
+  events conditionally; silence alone is not evidence that their hooks are
+  unused. Lifecycle telemetry retains the recent-evidence window.
+  Keyword skill hints remain opt-in (`OMS_SKILL_HINTS=1`). The Stop hook
+  completes journal/relay work; its budget check runs only with an explicit
+  `OMS_SESSION_BUDGET_TURNS` or `OMS_SESSION_BUDGET_HOURS` limit.
   `OMS_SKILL_ROUTER_OFF=1` skips the routing helper, including context/peer/relay
   hints and turn-start tracking. The prompt hook still runs its journal/daily-state
   work and state hints first; `OMS_STATE_HINTS=0` disables the hints.
+  Prompt and tool state uses an explicit `OMS_STATE_REPO`, otherwise the
+  payload cwd, falling back to the process cwd only when the payload omits it.
+  Nested paths resolve to the repository root; handoff transcript selection
+  and relative edited paths retain the original session cwd.
 - Codex: local plugin hooks, including the edit-time syntax guard, plus a
   managed native status line when the user has not set one. On Python 3.9/3.10,
   arbitrary existing TOML requires `tomli` so

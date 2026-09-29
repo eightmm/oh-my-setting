@@ -1622,6 +1622,56 @@ test_router_state_hint_on_actionable_failures() {
   fi
 }
 
+test_router_resolves_payload_repo_before_process_cwd() {
+  local process_repo="$TMP/router-process-repo"
+  local payload_repo="$TMP/router-payload-repo"
+  local override_repo="$TMP/router-override-repo"
+  local invalid_process="$TMP/router-invalid-process"
+  local payload out
+
+  for repo in "$process_repo" "$payload_repo" "$override_repo" "$invalid_process"; do
+    make_repo "$repo"
+  done
+  for cmd in "make test" "python train.py"; do
+    ( cd "$payload_repo" && OMS_ADVISE_AFTER_FAILURES=0 \
+      bash "$ROOT/scripts/fail-ledger.sh" record --cmd "$cmd" --exit 1 >/dev/null )
+    ( cd "$override_repo" && OMS_ADVISE_AFTER_FAILURES=0 \
+      bash "$ROOT/scripts/fail-ledger.sh" record --cmd "$cmd" --exit 1 >/dev/null )
+  done
+
+  payload="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"repo-route","turn_id":"payload-turn","cwd":"%s"}' "$payload_repo")"
+  out="$(cd "$process_repo" && printf '%s' "$payload" | env -u OMS_STATE_REPO \
+    TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "actionable fail-ledger rows" ||
+    fail "the payload repository should own state hints when process cwd differs: $out"
+  [ -f "$payload_repo/.oms/hooks/state-hint.$(date +%Y-%m-%d)" ] ||
+    fail "the payload repo should receive the state hint marker"
+  [ ! -e "$process_repo/.oms/hooks/state-hint.$(date +%Y-%m-%d)" ] ||
+    fail "the process repo must not receive the payload repo's state marker"
+
+  cp "$payload_repo/.oms/hooks/events.jsonl" "$TMP/router-events-before-override"
+  payload="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"repo-override","turn_id":"override-turn","cwd":"%s"}' "$payload_repo")"
+  out="$(cd "$process_repo" && printf '%s' "$payload" | OMS_STATE_REPO="$override_repo" \
+    TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
+  printf '%s' "$out" | grep -Fq "actionable fail-ledger rows" ||
+    fail "OMS_STATE_REPO must override the payload cwd: $out"
+  [ -f "$override_repo/.oms/hooks/state-hint.$(date +%Y-%m-%d)" ] ||
+    fail "the explicit state repo should receive the marker"
+  [ -f "$override_repo/.oms/hooks/events.jsonl" ] ||
+    fail "the routing helper must use the same explicit state repo"
+  cmp -s "$TMP/router-events-before-override" "$payload_repo/.oms/hooks/events.jsonl" ||
+    fail "the routing helper must not write to the overridden payload repo"
+
+  local invalid="$TMP/router-no-such-cwd"
+  payload="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"repo-invalid","turn_id":"invalid-turn","cwd":"%s"}' "$invalid")"
+  out="$(cd "$invalid_process" && printf '%s' "$payload" | env -u OMS_STATE_REPO \
+    TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
+  [ ! -e "$invalid_process/.oms/hooks/state-hint.$(date +%Y-%m-%d)" ] ||
+    fail "an invalid explicit cwd must not fall back to the process repo"
+  [ ! -e "$invalid_process/.oms/hooks/events.jsonl" ] ||
+    fail "an invalid explicit cwd must not receive routing state"
+}
+
 test_router_state_hint_surfaces_parked_goal() {
   local repo="$TMP/hint-goal-repo"
   local payload out
@@ -2433,6 +2483,7 @@ test_agy_surfaces_are_certified_before_hooks_ship
 test_agy_surfaces_stay_mcp_only_when_hooks_never_fire
 test_update_probe_flag_reaches_the_probe
 test_router_state_hint_on_actionable_failures
+test_router_resolves_payload_repo_before_process_cwd
 test_router_state_hint_surfaces_parked_goal
 test_router_state_hint_skips_unadopted_repo
 test_router_keeps_resolved_repeats_quiet

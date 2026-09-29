@@ -38,11 +38,21 @@ except Exception:
 print(data.get("session_id", "") or "")
 print(data.get("cwd", "") or "")
 print(data.get("hook_event_name", "") or "")
-' 2>/dev/null)" || parsed=""
+' 2>/dev/null | tr -d '\r')" || parsed=""
 session="$(printf '%s\n' "$parsed" | sed -n 1p)"
 cwd="$(printf '%s\n' "$parsed" | sed -n 2p)"
 event="$(printf '%s\n' "$parsed" | sed -n 3p)"
 [ -n "$cwd" ] || cwd="$PWD"
+
+# Keep the payload cwd for transcript matching, but use the physical Git root
+# for adoption and all repository-scoped handoff state. A non-Git adopted
+# directory continues to work when the payload points at that directory.
+cwd_physical="$(cd "$cwd" 2>/dev/null && pwd -P)" || exit 0
+repo="$cwd_physical"
+git_root="$(git -C "$cwd_physical" rev-parse --show-toplevel 2>/dev/null | tr -d '\r')" || git_root=""
+if [ -n "$git_root" ]; then
+  repo="$(cd "$git_root" 2>/dev/null && pwd -P)" || exit 0
+fi
 
 # The payload's event names the capture; $1 stays the agent name. An absent or
 # unknown event keeps the original pre-compact wording, which is what the Codex
@@ -61,7 +71,7 @@ esac
 
 # Only a harness-adopted repo keeps handoffs; a random directory must not grow
 # a .oms tree because compaction happened to fire there.
-[ -d "$cwd/.oms" ] || exit 0
+[ -d "$repo/.oms" ] || exit 0
 
 # Recency, not existence: a later capture supersedes an earlier one — the tail
 # after a mid-session compaction is exactly what the next session needs — so
@@ -70,8 +80,8 @@ esac
 # The name mirrors session-handoff.sh's slug_id (tr, 24 chars, no trailing -).
 if [ -n "$session" ]; then
   slug="$(printf '%s' "$session" | tr -c 'A-Za-z0-9' '-' | cut -c1-24 | sed 's/-*$//')"
-  if [ -n "$slug" ] && [ -d "$cwd/.oms/handoffs" ]; then
-    recent="$(find "$cwd/.oms/handoffs" -maxdepth 1 -type f \
+  if [ -n "$slug" ] && [ -d "$repo/.oms/handoffs" ]; then
+    recent="$(find "$repo/.oms/handoffs" -maxdepth 1 -type f \
       -name "$AGENT-$slug-*.md" -mmin "-$DEDUPE_MIN" 2>/dev/null | head -n 1)"
     [ -z "$recent" ] || exit 0
   fi
@@ -99,7 +109,7 @@ if [ -z "$err" ]; then
 fi
 if ! "$ROOT/scripts/session-handoff.sh" "${args[@]}" >/dev/null 2>"$err"; then
   summary="$(head -c 160 "$err" 2>/dev/null | tr '\n' ' ')"
-  "$ROOT/scripts/fail-ledger.sh" record --repo "$cwd" --kind hook \
+  "$ROOT/scripts/fail-ledger.sh" record --repo "$repo" --kind hook \
     --cmd "session-handoff capture --agent $AGENT ($label)" --exit 1 \
     --summary "${summary:-capture failed}" \
     --next "run manually: oms session-handoff capture --agent $AGENT" \

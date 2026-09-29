@@ -730,6 +730,14 @@ work_journal_prompt_tick "$unadopted" >/dev/null 2>&1 || true
 [ -d "$unadopted/.oms/work-journal" ] ||
   fail "an adopted repo must still get its journal on the first tick"
 
+empty_override="$TMP/empty-hook-override"
+mkdir -p "$empty_override/.oms"
+git -C "$empty_override" init -q
+(cd "$lifecycle_repo" && OMS_STATE_REPO="$empty_override" OMS_SKILL_ROUTER_OFF=1 \
+  bash "$ROOT/scripts/skill-router.sh" </dev/null) >/dev/null
+[ -d "$empty_override/.oms/work-journal" ] ||
+  fail "empty prompt payload must retain explicit state repository journal work"
+
 exclusion_cfg="$XDG_CONFIG_HOME/oh-my-setting/work-journal.json"
 mkdir -p "$(dirname "$exclusion_cfg")"
 python3 - "$exclusion_cfg" "$unadopted" <<'PY'

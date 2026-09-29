@@ -476,22 +476,45 @@ test_evidence_window_marks_a_silent_registered_surface() {
   local out
 
   make_fixture "$home" rows 1
-  # A route from long before the window, and a fresh turn_guard: the router
-  # surface should read stale while the turn guard reads current.
+  # Real producers are conditional: routing uses presence rather than the
+  # retired route action, and budget blocks use session_budget.
   {
-    printf '%s\n' '{"action": "route", "ts": "2020-01-01T00:00:00Z"}'
-    printf '{"action": "turn_guard", "ts": "%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '%s\n' '{"action":"route","hook":"UserPromptSubmit","ts":"2020-01-01T00:00:00Z"}'
+    printf '{"action":"presence","hook":"UserPromptSubmit","ts":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '{"action":"session_budget","hook":"Stop","ts":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '%s\n' '{"action":"telemetry","hook":"SessionStart","ts":"2020-01-01T00:00:00Z"}'
   } > "$home/repo/.oms/hooks/events.jsonl"
 
   out="$(run_surfaces "$home")" ||
     { printf '%s\n' "$out"; fail "stale evidence must not fail the report"; }
   case "$out" in
-    *"no-recent-evidence: UserPromptSubmit -> skill-router.sh"*) ;;
-    *) printf '%s\n' "$out"; fail "an old route event should read as no-recent-evidence" ;;
+    *"ok: UserPromptSubmit -> skill-router.sh (registered; last presence"*) ;;
+    *) printf '%s\n' "$out"; fail "current prompt presence must count as router evidence" ;;
   esac
   case "$out" in
-    *"ok: Stop -> turn-guard.sh (registered; last turn_guard"*) ;;
-    *) printf '%s\n' "$out"; fail "a fresh turn_guard event should read ok" ;;
+    *"ok: Stop -> turn-guard.sh (registered; last session_budget"*) ;;
+    *) printf '%s\n' "$out"; fail "budget block must count as guard evidence" ;;
+  esac
+  case "$out" in
+    *"no-recent-evidence: SessionStart -> telemetry-hook.sh"*) ;;
+    *) printf '%s\n' "$out"; fail "stale lifecycle telemetry must remain visible" ;;
+  esac
+
+  # Other event types and ignored children cannot prove these surfaces ran.
+  {
+    printf '{"action":"presence","hook":"SessionStart","ts":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '{"action":"session_budget","hook":"UserPromptSubmit","ts":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '{"action":"ignored_child","hook":"UserPromptSubmit","status":"route","ts":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '%s\n' '{"action":"presence","hook":"UserPromptSubmit","ts":"2020-01-01T00:00:00Z"}'
+  } > "$home/repo/.oms/hooks/events.jsonl"
+  out="$(run_surfaces "$home")" || fail "conditional silence must not fail registration"
+  case "$out" in
+    *"ok: UserPromptSubmit -> skill-router.sh (registered; conditional evidence only;"*"ok: Stop -> turn-guard.sh (registered; conditional evidence only;"*) ;;
+    *) printf '%s\n' "$out"; fail "conditional silence must be distinguished from unused hooks" ;;
+  esac
+  case "$out" in
+    *"no-recent-evidence: UserPromptSubmit"*|*"no-recent-evidence: Stop"*)
+      printf '%s\n' "$out"; fail "conditional producers must not count as stale hook warnings" ;;
   esac
 }
 

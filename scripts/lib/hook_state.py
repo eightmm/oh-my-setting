@@ -194,6 +194,9 @@ def is_harness_child() -> bool:
 
 def hook_repo(payload: dict[str, Any]) -> Path | None:
     """Resolve child events to primary state, never the delegated worktree."""
+    if "OMS_HOOK_RESOLVED_REPO" in os.environ:
+        repo = os.environ["OMS_HOOK_RESOLVED_REPO"]
+        return repo_root(repo) if repo else None
     if is_harness_child():
         state_repo = os.environ.get("OMS_STATE_REPO", "")
         if state_repo:
@@ -1227,7 +1230,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 0
     scored.sort()
     fresh = fresh_skill_names(payload, [name for _, name in scored if name])
-    repo = repo_root(payload_cwd(payload))
+    repo = hook_repo(payload)
     if route["guard"]:
         append_event(
             repo,
