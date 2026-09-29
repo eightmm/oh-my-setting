@@ -15014,6 +15014,17 @@ print(row["hookSpecificOutput"]["additionalContext"])
   out="$(cd "$project" && payload_for Edit "$project/fine.sh" | bash "$SH")"
   [ -z "$out" ] || fail "a clean file must stay silent: $out"
 
+  # Python's executable search must not select another Bash installation.
+  local shadow="$TMP/syntax-guard-shadow"
+  mkdir -p "$shadow"
+  printf '#!/bin/sh\nexit 1\n' > "$shadow/bash"
+  chmod +x "$shadow/bash"
+  out="$(cd "$project" && payload_for Edit "$project/fine.sh" | PATH="$shadow:$PATH" "$BASH" "$SH")"
+  [ -z "$out" ] || fail "the parser must reuse the hook's Bash: $out"
+  out="$(cd "$project" && payload_for Write "$project/broken.sh" | PATH="$shadow:$PATH" "$BASH" "$SH")"
+  out="$(context_of "$out")" || fail "pinning Bash must preserve broken-file feedback"
+  case "$out" in *"broken.sh"*"unexpected"*) ;; *) fail "the parser must report an actual Bash diagnostic: $out" ;; esac
+
   printf 'def f(:\n    pass\n' > "$project/broken.py"
   out="$(cd "$project" && payload_for Edit "$project/broken.py" | bash "$SH")"
   out="$(context_of "$out")" || fail "a broken python file must come back as additionalContext"

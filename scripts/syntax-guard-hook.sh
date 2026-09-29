@@ -24,7 +24,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 root="$(OMS_HOOK_PAYLOAD="$payload" python3 "$ROOT/scripts/lib/hook_repo.py" 2>/dev/null | tr -d '\r')" || root=""
 [ -n "$root" ] && [ -d "$root/.oms" ] || exit 0
 
-OMS_SGH_PAYLOAD="$payload" OMS_SGH_ROOT="$root" python3 - "$ROOT/scripts/lib" <<'PY' 2>/dev/null || true
+OMS_SGH_PAYLOAD="$payload" OMS_SGH_ROOT="$root" python3 - "$ROOT/scripts/lib" "$BASH" <<'PY' 2>/dev/null || true
 import atexit
 import ast
 import json
@@ -185,8 +185,9 @@ def syntax_problem(path):
     problem = None
     if kind == "bash":
         try:
+            # Reuse the host shell; Windows executable search can find WSL Bash.
             proc = subprocess.run(
-                ["bash", "-n", path], capture_output=True, text=True, timeout=3
+                [sys.argv[2], "-n", path], capture_output=True, text=True, timeout=3
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
