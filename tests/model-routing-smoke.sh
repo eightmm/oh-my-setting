@@ -425,6 +425,19 @@ then
   fail 'capacity fallback policy decline was not recorded as policy-declined'
 fi
 
+# Claude's envelope line is authoritative: a clean end_turn answer that quotes
+# the decline patterns is an answer, while reason=refusal stays a decline and a
+# cleanly closed Codex turn is still read for text refusals.
+decline() { bash -c '. "$1/scripts/lib/model-routing.sh"; oms_model_is_policy_decline_output "$2"' _ "$ROOT" "$1"; }
+printf '%s\n' 'stop-reason: provider=claude reason=end_turn subtype=success is_error=0' \
+  'The pattern `stop-reason: .*reason=refusal` also matches "Unable to respond to this request".' > "$TMP/claude-answer.txt"
+if decline "$TMP/claude-answer.txt"; then fail 'a clean Claude end_turn answer quoting refusal patterns was read as a decline'; fi
+printf '%s\n' 'stop-reason: provider=claude reason=refusal subtype=success is_error=0' > "$TMP/claude-refusal.txt"
+decline "$TMP/claude-refusal.txt" || fail 'a Claude refusal envelope must stay a decline'
+printf '%s\n' 'stop-reason: provider=codex reason=turn_completed subtype=success is_error=0' \
+  'Unable to respond to this request.' > "$TMP/codex-refusal.txt"
+decline "$TMP/codex-refusal.txt" || fail 'a Codex text refusal in a closed turn must stay a decline'
+
 env -u NVM_DIR HOME="$TMP/home" PATH="$TMP/bin:$PATH" AGY_ARGV_OUT="$TMP/agy.argv" \
   OMS_CAPABILITY_DIR="$TMP/cap" OMS_LOCK_DIR="$TMP/locks" OMS_LOCK_FORCE_MKDIR=1 \
   bash "$ROOT/scripts/peer-review.sh" --repo "$TMP/invoke-repo" \

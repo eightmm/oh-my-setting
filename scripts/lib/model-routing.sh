@@ -371,6 +371,15 @@ oms_model_is_policy_decline_output() {
   local file="$1"
   local prompt="${2:-}"
   local pattern='violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering|"?stop_reason"?: *"?refusal|stop-reason: .*reason=refusal'
+  # Claude's envelope says why the turn stopped, and its converted line comes
+  # before any model text. A clean end_turn is an answer however much of it
+  # discusses refusals: quoting this pattern once made every Claude seat of a
+  # council a false decline. Codex/agy text refusals can close a turn cleanly,
+  # so only Claude's envelope is trusted here.
+  if head -n 1 "$file" 2>/dev/null | tr -d '\r' |
+    grep -Eqx 'stop-reason: provider=claude reason=end_turn subtype=success is_error=0'; then
+    return 1
+  fi
   if [ ! -f "$prompt" ]; then
     grep -Eiq "$pattern" "$file"
     return $?

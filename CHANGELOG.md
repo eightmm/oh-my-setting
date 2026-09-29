@@ -73,6 +73,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - One-shot and repair delegate prompts name the early stops an unattended
   worker must not take (a summary that only announces the next step, an offer
   to continue, non-blocking decisions); interactive delegation is unchanged.
+- A Claude seat whose clean `end_turn` answer quoted a refusal pattern was
+  recorded as a policy decline and dropped; all three Claude seats of one
+  council were lost this way. Claude's converted stop-reason line now settles
+  it; Codex and Antigravity text refusals are still detected in closed turns.
 - `peer-ask`/`peer-review --print-timeout` help stated a 5m default; it is
   Antigravity's print-mode wait and follows the verb wall (15m ask, 20m review),
   and `peer-ask` listed a 10m `OMS_PEER_TIMEOUT` default instead of 15m.
