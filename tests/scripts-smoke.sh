@@ -15096,7 +15096,7 @@ print(row["hookSpecificOutput"]["additionalContext"])
   }
   out="$(cd "$project" && patch_payload $'*** Begin Patch\n*** Add File: src/bad.py\n+def g(:\n+    pass\n*** Update File: src/good.sh\n@@\n-echo\n+echo ok\n*** End Patch' | bash "$SH")"
   out="$(context_of "$out")" || fail "a codex patch that leaves a broken file must come back as additionalContext"
-  case "$out" in *"src/bad.py"*"python:"*) ;; *) fail "the finding names the patched file: $out" ;; esac
+  case "$out" in *"src/bad.py"*"python:"*|*'src\bad.py'*"python:"*) ;; *) fail "the finding names the patched file: $out" ;; esac
   case "$out" in *"good.sh"*) fail "a clean patched file is not a finding: $out" ;; *) ;; esac
   out="$(cd "$project" && patch_payload $'*** Begin Patch\n*** Update File: notes.md\n@@\n-not code\n+still prose\n*** End Patch' | bash "$SH")"
   [ -z "$out" ] || fail "a patch touching only prose stays silent: $out"
