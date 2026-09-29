@@ -64,6 +64,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- `oms land --ci-wait N` could end with `ci timeout` without querying CI once
+  when the clock crossed a second between setting and checking the deadline;
+  with `--ci-wait 1` under CI load this skipped the install update. The wait
+  now always makes at least one query.
 - Claude read seats no longer point plan mode at the owner's `~/.claude/plans`,
   where 18 seat prompts' plan files had collected; each call gets a
   project-relative `.oms/tmp/claude-plans-*` directory (a directory outside

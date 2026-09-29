@@ -486,4 +486,25 @@ grep -rqs '"command": *"bash scripts/check.sh --parallel"' "$receipt_dir" ||
   grep -Fq 'verified:refs/heads/main' "$TMP/race-push" || fail "push uses mutable HEAD instead of verified SHA"
 ) || exit 1
 
+# A one-second CI wait still owes one query when the clock ticks between
+# setting and checking its deadline (CI run 36540685415 flaked on this).
+real_date="$(command -v date)"
+mkdir -p "$TMP/tick-bin"
+cat > "$TMP/tick-bin/date" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = +%s ]; then
+  n="\$(cat "$TMP/tick" 2>/dev/null || "$real_date" +%s)"
+  n=\$((n + 1)); printf '%s\n' "\$n" > "$TMP/tick"; printf '%s\n' "\$n"; exit 0
+fi
+exec "$real_date" "\$@"
+EOF
+chmod +x "$TMP/tick-bin/date"
+gate 'echo tick probe'
+if PATH="$TMP/tick-bin:$PATH" OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$TMP/install.json" \
+    "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/tick.out" 2>&1; then
+  fail "the tick probe's failing update was reported as success"
+fi
+grep -q 'install update exit 42' "$TMP/tick.out" ||
+  fail "a one-second CI wait skipped its query: $(cat "$TMP/tick.out")"
+
 echo "land-smoke: ok"

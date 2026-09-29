@@ -392,11 +392,17 @@ run_job() {
     conclusion=timeout
     rset ci.conclusion=pending
     deadline="$(( $(date +%s) + CI_WAIT ))"
-    while [ "$(date +%s)" -lt "$deadline" ]; do
+    local queried=0
+    # A budget that expires between two clock reads still owes one query.
+    while [ "$queried" = 0 ] || [ "$(date +%s)" -lt "$deadline" ]; do
       local workflow=""
       [ ! -f "$REPO/.github/workflows/test.yml" ] || workflow=test.yml
       remaining="$(( deadline - $(date +%s) ))"
-      [ "$remaining" -gt 0 ] || break
+      if [ "$remaining" -le 0 ]; then
+        [ "$queried" = 0 ] || break
+        remaining=1
+      fi
+      queried=1
       [ "$remaining" -le 30 ] || remaining=30
       rc=0
       query_result="$(python3 "$ROOT/scripts/lib/ci-query.py" \
