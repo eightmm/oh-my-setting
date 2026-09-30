@@ -5,6 +5,14 @@ set -euo pipefail
 # three agent CLIs.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# Judge the install with the interpreter that configured it: a host python3
+# of 3.9 or 3.10 cannot read the TOML the 3.12 runtime wrote and failed a
+# healthy install. install.sh already runs doctor this way.
+if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then
+  # shellcheck source=scripts/lib/python-runtime.sh
+  . "$ROOT/scripts/lib/python-runtime.sh"
+  oms_python_runtime_activate_if_present
+fi
 FAILED=0
 REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
 REPAIR=0

@@ -75,6 +75,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `answer` and `note` turns for that session only. One council launcher took
   about 50 KB of its own answers this way, one answer per prompt, long after
   reading the artifacts.
+- `oms doctor` reported a healthy install as failed on hosts whose
+  `python3` is 3.9 or 3.10 (Amazon Linux 2023, RHEL 9): the installer wrote
+  the Codex config with the 3.12 OMS runtime, but a standalone doctor read it
+  with the host Python, which has no TOML parser. Doctor now runs under the
+  OMS runtime when one matches the lock, as the installer's own doctor does.
 - A fresh Linux host with no `python3` (Debian, Ubuntu, Fedora and Arch
   images ship none) stopped the installer, although it installs uv and its
   own Python anyway. With neither `python3` nor uv, the installer now reads
