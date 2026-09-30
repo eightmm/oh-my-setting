@@ -721,6 +721,9 @@ run_as_root() {
 # and gzip that locked tool archives need; install only what is missing.
 install_system_packages_if_missing() {
   local missing=() package
+  # Git for Windows ships git, tar, gzip and find; its PATH may also reach
+  # System32's unrelated find.exe, so there is nothing to check or install.
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; esac
   # A musl libc host (Alpine) cannot run the pinned glibc uv, Python or Node;
   # stop before installing anything instead of leaving half an install.
   if [ "$(uname -s)" = Linux ] && ls /lib/ld-musl-* >/dev/null 2>&1; then
