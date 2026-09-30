@@ -85,10 +85,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   own Python anyway. With neither `python3` nor uv, the installer now reads
   the uv pin from `tools.lock.json` without Python, verifies the archive's
   sha256, builds the OMS runtime, and points the managed `python3` shim at
-  that runtime's stable launcher. Missing git, tar or gzip are installed
+  that runtime's stable launcher. Missing git, tar, gzip or find are installed
   through apt, dnf, microdnf, yum, zypper, pacman, apk or brew; on macOS
   without Command Line Tools the stub `git` is recognized and the error
-  names `xcode-select --install`.
+  names `xcode-select --install`. A musl libc host such as Alpine, where
+  the pinned glibc builds cannot run, now stops before installing anything.
 - Building the private OMS Python failed for users whose shell sets uv
   preferences for their own projects: `UV_PYTHON_PREFERENCE=only-system`
   made `uv venv --managed-python` refuse, and `UV_PYTHON_DOWNLOADS=never`

@@ -721,11 +721,19 @@ run_as_root() {
 # and gzip that locked tool archives need; install only what is missing.
 install_system_packages_if_missing() {
   local missing=() package
+  # A musl libc host (Alpine) cannot run the pinned glibc uv, Python or Node;
+  # stop before installing anything instead of leaving half an install.
+  if [ "$(uname -s)" = Linux ] && ls /lib/ld-musl-* >/dev/null 2>&1; then
+    echo "error: musl-based Linux (such as Alpine) is not supported: the pinned uv, Python and Node builds need glibc; use a glibc distribution or container" >&2
+    exit 1
+  fi
   for package in "$@"; do
     # Without Command Line Tools, macOS /usr/bin/git is a stub that only offers
     # to install them; it exists but cannot clone.
     if [ "$package" = git ]; then
       git --version >/dev/null 2>&1 || missing+=(git)
+    elif [ "$package" = find ]; then
+      command -v find >/dev/null 2>&1 || missing+=(findutils)
     else
       command -v "$package" >/dev/null 2>&1 || missing+=("$package")
     fi
@@ -874,7 +882,7 @@ ensure_python3() {
   echo "python3 shim: $shim -> $candidate"
 }
 
-install_system_packages_if_missing git tar gzip
+install_system_packages_if_missing git tar gzip find
 
 # Reinstall is also an update path. Refuse before fetch/checkout so a local
 # edit or untracked file in the managed checkout can never be hidden, collided

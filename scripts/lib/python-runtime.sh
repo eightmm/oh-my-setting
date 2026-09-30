@@ -286,8 +286,10 @@ oms_python_runtime_bootstrap() {  # REPO_ROOT; needs platform.sh and file-lock.s
     fi
     mkdir -p "$uv_dir"
     for name in uv uvx; do
-      src="$(find "$tmp" -type f -name "$name" -print | sed -n '1p')"
-      [ -n "$src" ] || { rm -rf "$tmp"; oms_python_runtime_fail "uv archive lacks $name" || return; }
+      # Release archives hold uv-<target>/uv; minimal images may lack find.
+      src=""
+      for src in "$tmp"/*/"$name" "$tmp/$name"; do [ -f "$src" ] && break; done
+      [ -f "$src" ] || { rm -rf "$tmp"; oms_python_runtime_fail "uv archive lacks $name" || return; }
       stage="$uv_dir/.$name.oh-my-setting-stage"
       cp "$src" "$stage" && chmod 0755 "$stage" && mv "$stage" "$uv_dir/$name" &&
         printf 'sha256=%s\n' "$(oms_sha256_file "$uv_dir/$name")" > "$uv_dir/$name.oh-my-setting-managed" ||
