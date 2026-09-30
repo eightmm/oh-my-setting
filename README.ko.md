@@ -75,9 +75,14 @@ fast-forward하며 dirty 또는 diverged checkout은 건너뛴다. uninstall은 
 
 | 호스트 | 필요 | 관리 파일 |
 |---|---|---|
-| Linux, WSL | Bash 3.2+, Git, Python 3.9+ (또는 uv) | symlink |
-| macOS | 기본 Bash 3.2, Git, Python 3.9+ (또는 uv) | symlink |
+| Linux, WSL (glibc) | Bash 3.2+, curl; Git·tar·gzip·find는 없으면 설치한다(그때 root나 sudo 필요). Python 불필요 | symlink |
+| macOS | 기본 Bash 3.2, curl, Command Line Tools(`xcode-select --install`; 없으면 `git`은 설치 안내 스텁뿐이다). Python 불필요 | symlink |
 | Windows Git Bash | Git, Python 3.9+; 선택 도구가 요구할 때 lock과 정확히 같은 네이티브 Node | 검증된 사본 |
+
+`python3` 3.9+와 uv가 모두 없으면 설치기는 고정 버전 uv를 받아 sha256을
+확인하고, `tools.lock.json`의 Python을 직접 만든 뒤 관리형 `python3` shim이
+그것을 가리키게 한다. Alpine 같은 musl 기반 Linux는 지원하지 않는다. 고정된
+빌드가 glibc를 요구하기 때문이다.
 
 예외 상황 — Windows 사본 모드, Antigravity headless 권한, Notion data source
 지정 — 은 [docs/COMPONENTS.md](docs/COMPONENTS.md)와

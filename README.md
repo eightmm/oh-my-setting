@@ -85,9 +85,14 @@ to `<file>.backup.<timestamp>` (announced at install time and reported by
 
 | Host | Needs | Managed files |
 |---|---|---|
-| Linux, WSL | Bash 3.2+, Git, Python 3.9+ (or uv) | symlinks |
-| macOS | stock Bash 3.2, Git, Python 3.9+ (or uv) | symlinks |
+| Linux, WSL (glibc) | Bash 3.2+, curl; Git, tar, gzip and find are installed if missing (root or sudo needed then). No Python needed | symlinks |
+| macOS | stock Bash 3.2, curl, Command Line Tools (`xcode-select --install`; without them `git` is only an installer stub). No Python needed | symlinks |
 | Windows Git Bash | Git, Python 3.9+; exact locked native Node when selected tools need it | verified copies |
+
+With no `python3` 3.9+ and no uv, the installer fetches the pinned uv
+(sha256-checked), builds its own Python from `tools.lock.json`, and points a
+managed `python3` shim at it. musl-based Linux such as Alpine is not
+supported: the pinned builds need glibc.
 
 The awkward cases — Windows copy mode, Antigravity's headless permissions,
 Notion data-source selection — live in
