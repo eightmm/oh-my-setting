@@ -8,6 +8,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- Experiment contracts take an optional noise band, the noise-adjusted
+  floor of RRSI (Regularized Recursive Self-Improvement of Agent Harnesses,
+  arXiv 2609.24972): `success.noise_band` is either a fixed `delta` or `z`
+  standard errors of the repeated baseline seeds, and a gain must clear the
+  larger of it and `min_improvement`. With too few seeds to estimate the band
+  the verdict stays inconclusive. Contracts without the field keep their
+  digest and verdicts. The OMS improvement-round skill adds RRSI's selection
+  discipline: measure the band before judging, pay for added cost with gain,
+  split winning bundles, confirm outside the tuned fixture, record rejected
+  hypotheses, and treat unused mechanisms as removal candidates.
+
 - The Claude settings installer pins Claude Opus 5.5 to `high` effort under
   `modelSettings` when no value is set. Opus 5.5 defaults to `medium` and
   thinks more per level than Opus 5, so a top-level `xhigh` would otherwise

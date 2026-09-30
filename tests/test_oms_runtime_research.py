@@ -97,6 +97,33 @@ class RuntimeFixture(RuntimeFixtureBase):
         results['invariants'] = {'equivariance': True}
         self.assertEqual(experiment.evaluate(contract, results)['verdict'], 'supported')
 
+    def test_noise_band_holds_gains_inside_measured_spread(self) -> None:
+        # RRSI's noise-adjusted floor: a gain within the band is not a gain.
+        contract = self._experiment()
+        results = {'baseline': {'score': [1.0], 'memory': [10.0]}, 'treatment': {'score': [1.2], 'memory': [10.3]}}
+        plain = experiment.evaluate(contract, results)
+        self.assertEqual(plain['verdict'], 'supported')
+        self.assertNotIn('noise_band', plain)
+        self.assertNotIn('noise_band', experiment.validate(contract)['success'])
+        contract['success']['noise_band'] = {'mode': 'fixed', 'delta': 0.3}
+        banded = experiment.evaluate(contract, results)
+        self.assertEqual((banded['verdict'], banded['noise_band']['delta']), ('not_supported', 0.3))
+        self.assertAlmostEqual(banded['delta'], plain['delta'])
+        # Derived from repeated baselines; one seed cannot estimate a spread.
+        contract['success']['noise_band'] = {'mode': 'baseline_stdev', 'z': 2.0}
+        self.assertEqual(experiment.evaluate(contract, results)['verdict'], 'inconclusive')
+        contract['seeds'] = [0, 1, 2]
+        base = {'score': [1.0, 1.2, 0.8], 'memory': [10.0] * 3}
+        near = experiment.evaluate(contract, {'baseline': base, 'treatment': {'score': [1.25, 1.3, 1.2], 'memory': [10.0] * 3}})
+        self.assertAlmostEqual(near['noise_band']['delta'], 2.0 * 0.2 * (2.0 / 3) ** 0.5)
+        self.assertEqual(near['verdict'], 'not_supported')
+        far = experiment.evaluate(contract, {'baseline': base, 'treatment': {'score': [1.4, 1.45, 1.35], 'memory': [10.0] * 3}})
+        self.assertEqual(far['verdict'], 'supported')
+        for bad in ({'mode': 'fixed'}, {'mode': 'guess', 'delta': 1}, {'mode': 'fixed', 'delta': -1}, [1]):
+            contract['success']['noise_band'] = bad
+            with self.assertRaises(CoreError):
+                experiment.validate(contract)
+
     def test_remote_adapter_must_bind_the_operation_id(self) -> None:
         adapter = Path(self.tmp.name) / 'bad-adapter.py'
         adapter.write_text("#!/usr/bin/env python3\nimport json,sys\nrequest=json.load(sys.stdin)\nprint(json.dumps({'schema': 1, 'operation_id': 'wrong-operation', 'accepted': True}))\n", encoding='utf-8')

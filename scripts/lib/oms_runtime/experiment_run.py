@@ -170,6 +170,22 @@ def _latest_invariant_result(repo: Path, contract_digest: str) -> Optional[Dict[
             latest = row
     return latest
 
+def _noise_floor(contract: Mapping[str, Any], baseline: Sequence[float]) -> Tuple[Optional[Dict[str, Any]], Optional[float]]:
+    """The contract's noise band as (report, delta). A gain must clear the larger
+    of min_improvement and delta; delta is None when repeated baselines are
+    too few to estimate it, which leaves the verdict inconclusive."""
+    band = contract['success'].get('noise_band')
+    if band is None:
+        return None, 0.0
+    if band['mode'] == 'fixed':
+        delta: Optional[float] = band['delta']
+    elif len(baseline) >= 2:
+        # Spread of a difference of two n-seed means under the baseline's variance.
+        delta = band['z'] * statistics.stdev(baseline) * math.sqrt(2.0 / len(baseline))
+    else:
+        delta = None
+    return dict(band, delta=delta), delta
+
 def summarize(repo: Path, experiment_id: str) -> Dict[str, Any]:
     contract = load_contract(repo, experiment_id)
     rows = [row for row in read_jsonl(run_index(repo), limit_rows=MAX_JSONL_ROWS) if row.get('experiment_id') == experiment_id and row.get('contract_digest') == contract['contract_digest']]
@@ -179,11 +195,14 @@ def summarize(repo: Path, experiment_id: str) -> Dict[str, Any]:
     data_complete = not arms['baseline']['missing_seeds'] and (not arms['treatment']['missing_seeds'])
     improvement: Optional[float] = None
     primary_pass: Optional[bool] = None
+    noise: Optional[Dict[str, Any]] = None
     if arms['baseline']['mean'] is not None and arms['treatment']['mean'] is not None:
         delta = float(arms['treatment']['mean']) - float(arms['baseline']['mean'])
         improvement = -delta if contract['metrics']['primary']['direction'] == 'minimize' else delta
         if data_complete:
-            primary_pass = improvement >= float(contract['success'].get('min_improvement', 0.0))
+            noise, band_delta = _noise_floor(contract, arms['baseline']['values'])
+            if band_delta is not None:
+                primary_pass = improvement >= max(float(contract['success'].get('min_improvement', 0.0)), band_delta)
     no_regression: Dict[str, Dict[str, Any]] = {}
     no_regression_complete = True
     no_regression_pass = True
@@ -210,7 +229,10 @@ def summarize(repo: Path, experiment_id: str) -> Dict[str, Any]:
         verdict = 'supported'
     else:
         verdict = 'not_supported'
-    return {'schema': RUNTIME_SCHEMA, 'experiment_id': experiment_id, 'contract_digest': contract['contract_digest'], 'metric': primary, 'direction': contract['metrics']['primary']['direction'], 'arms': arms, 'complete': complete, 'data_complete': data_complete, 'improvement': improvement, 'min_improvement': float(contract['success'].get('min_improvement', 0.0)), 'primary_pass': primary_pass, 'no_regression': no_regression, 'invariants': {'required': invariant_required, 'complete': invariant_complete, 'passed': invariant_pass, 'result': invariant_result}, 'verdict': verdict}
+    summary = {'schema': RUNTIME_SCHEMA, 'experiment_id': experiment_id, 'contract_digest': contract['contract_digest'], 'metric': primary, 'direction': contract['metrics']['primary']['direction'], 'arms': arms, 'complete': complete, 'data_complete': data_complete, 'improvement': improvement, 'min_improvement': float(contract['success'].get('min_improvement', 0.0)), 'primary_pass': primary_pass, 'no_regression': no_regression, 'invariants': {'required': invariant_required, 'complete': invariant_complete, 'passed': invariant_pass, 'result': invariant_result}, 'verdict': verdict}
+    if contract['success'].get('noise_band') is not None:
+        summary['noise_band'] = noise
+    return summary
 
 def _result_values(results: Mapping[str, Any], arm: str, metric: str, primary: str) -> List[float]:
     raw_arm = results.get(arm)
@@ -259,13 +281,17 @@ def evaluate(contract_raw: Mapping[str, Any], results: Mapping[str, Any]) -> Dic
             invariant_status[name] = None
     invariant_complete = all((value is not None for value in invariant_status.values()))
     invariant_pass = all((value is True for value in invariant_status.values()))
-    if not primary_complete or not regression_complete or (not invariant_complete):
+    noise, band_delta = _noise_floor(contract, baseline)
+    if not primary_complete or not regression_complete or (not invariant_complete) or band_delta is None:
         verdict = 'inconclusive'
-    elif improvement >= threshold and regression_pass and invariant_pass:
+    elif improvement >= max(threshold, band_delta) and regression_pass and invariant_pass:
         verdict = 'supported'
     else:
         verdict = 'not_supported'
-    return {'schema': RUNTIME_SCHEMA, 'metric': primary, 'baseline_mean': statistics.mean(baseline), 'treatment_mean': statistics.mean(treatment), 'delta': delta, 'improvement': improvement, 'expected_n': len(contract['seeds']), 'baseline_n': len(baseline), 'treatment_n': len(treatment), 'no_regression': checks, 'invariants': {'required': required_invariants, 'status': invariant_status, 'complete': invariant_complete, 'passed': invariant_pass}, 'verdict': verdict}
+    result = {'schema': RUNTIME_SCHEMA, 'metric': primary, 'baseline_mean': statistics.mean(baseline), 'treatment_mean': statistics.mean(treatment), 'delta': delta, 'improvement': improvement, 'expected_n': len(contract['seeds']), 'baseline_n': len(baseline), 'treatment_n': len(treatment), 'no_regression': checks, 'invariants': {'required': required_invariants, 'status': invariant_status, 'complete': invariant_complete, 'passed': invariant_pass}, 'verdict': verdict}
+    if noise is not None:
+        result['noise_band'] = noise
+    return result
 
 def run_invariant_pack(repo: Path, contract_raw: Mapping[str, Any], *, profile: str='trusted-local', image: str='', adapter: str='', timeout_seconds: int=1200) -> Dict[str, Any]:
     contract = validate(contract_raw)

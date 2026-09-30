@@ -18,6 +18,25 @@ failure or redundant mechanism, not a warning count or speculative feature.
 Keep a status or review request read-only. Clear local fixes need no council,
 formal plan, autopilot run, or new test merely to satisfy this skill.
 
+## Select a change by measurement
+
+For a change judged by a measured effect (tokens, recall, pass rate), follow
+the regularized selection of RRSI (arXiv 2609.24972):
+
+- Measure the noise band first: repeat the baseline, or run the same arm twice
+  as a control, before judging a treatment. Record the adoption rule before
+  reading results, and do not use a threshold the control itself cannot meet.
+- Adopt a gain only when it clears the band and any added cost is paid for by
+  that gain; inside the band, accept only a cost saving. `oms runtime
+  experiment` enforces the band through `success.noise_band`.
+- Bundle edits to explore, then split a winning bundle so each landed change
+  is attributable.
+- Reject a change whose only evidence is the fixture it was tuned on; confirm
+  it on a defect or task outside that fixture.
+- Before proposing, check the project's record of rejected hypotheses; after
+  measuring, record the hypothesis, the effect on score and cost, and the verdict.
+- Treat a mechanism with no recorded evidence of use as a removal candidate.
+
 ## Collaborate when explicitly authorized
 
 This skill does not grant permission to launch peers. When the user authorizes

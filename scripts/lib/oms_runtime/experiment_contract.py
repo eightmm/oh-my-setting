@@ -37,6 +37,25 @@ def _metric_spec(raw: Any, label: str, *, allow_observe: bool) -> Dict[str, str]
         raise CoreError('%s.direction must be %s' % (label, ' or '.join(sorted(allowed))))
     return {'name': name, 'direction': direction}
 
+def _noise_band(raw: Any) -> Optional[Dict[str, Any]]:
+    """Optional noise-adjusted floor (RRSI, arXiv 2609.24972): a gain inside
+    the measurement's own spread is not a gain. `fixed` states the band;
+    `baseline_stdev` derives it from repeated baseline seeds, which is itself
+    noisy with two or three seeds, so prefer a fixed band measured beforehand."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise CoreError('success.noise_band must be an object')
+    mode = raw.get('mode')
+    key = {'fixed': 'delta', 'baseline_stdev': 'z'}.get(mode)
+    if key is None:
+        raise CoreError('success.noise_band.mode must be fixed or baseline_stdev')
+    value = raw.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or float(value) < 0:
+        raise CoreError('success.noise_band.%s must be finite and non-negative' % key)
+    return {'mode': mode, key: float(value)}
+
+
 def validate(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise CoreError('experiment contract must be a JSON object')
@@ -116,6 +135,7 @@ def validate(raw: Any) -> Dict[str, Any]:
         if not math.isfinite(max_regression) or max_regression < 0:
             raise CoreError('no-regression max_regression must be finite and non-negative: %s' % name)
         no_regression[name] = {'direction': direction, 'max_regression': max_regression}
+    noise_band = _noise_band(success.get('noise_band'))
     invariant_pack = raw.get('invariant_pack', [])
     if not isinstance(invariant_pack, list):
         raise CoreError('invariant_pack must be a list')
@@ -142,6 +162,8 @@ def validate(raw: Any) -> Dict[str, Any]:
     source['seeds'] = normalized_seeds
     source['metrics'] = {'primary': primary, 'secondary': secondary}
     source['success'] = dict(success, min_improvement=float(threshold), no_regression=no_regression)
+    if noise_band is not None:
+        source['success']['noise_band'] = noise_band
     source['invariant_pack'] = normalized_invariants
     normalized = dict(source)
     normalized['primary_metric'] = primary['name']

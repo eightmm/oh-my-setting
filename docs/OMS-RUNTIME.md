@@ -469,6 +469,11 @@ A contract fixes:
 - exact seeds
 - primary and secondary metric directions
 - minimum primary improvement
+- optional noise band (`success.noise_band`): `{"mode": "fixed", "delta": D}`
+  or `{"mode": "baseline_stdev", "z": Z}`. A gain must clear the larger of the
+  minimum improvement and the band; `baseline_stdev` uses the spread of the
+  repeated baseline seeds, and with fewer than two seeds the verdict stays
+  inconclusive. This is the noise-adjusted floor of RRSI (arXiv 2609.24972).
 - no-regression tolerances
 - invariant commands
 
