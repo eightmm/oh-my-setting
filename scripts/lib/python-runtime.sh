@@ -167,6 +167,21 @@ EOF_LAUNCHER
   mv "$stage" "$target"
 }
 
+# The private runtime is always a uv-managed download into its own root. A
+# user's interpreter choices are for their projects: UV_PYTHON_PREFERENCE=
+# only-system made `uv venv --managed-python` refuse and UV_PYTHON_DOWNLOADS=
+# never refused the install. Network settings (proxy, mirror, offline, cache)
+# stay the user's. Certificates come from the system store, as curl's do, so a
+# network whose TLS proxy the host trusts also works for this download.
+oms_python_runtime_uv() {  # oms_python_runtime_uv ROOT UV ARGS...
+  local root="$1"
+  shift
+  env -u UV_PYTHON_PREFERENCE -u UV_NO_MANAGED_PYTHON -u UV_MANAGED_PYTHON \
+    -u UV_PYTHON -u UV_SYSTEM_PYTHON -u UV_CONFIG_FILE -u UV_PROJECT -u UV_WORKING_DIR \
+    UV_PYTHON_DOWNLOADS=manual UV_SYSTEM_CERTS="${UV_SYSTEM_CERTS:-1}" \
+    UV_PYTHON_INSTALL_DIR="$root/managed" "$@"
+}
+
 oms_python_runtime_ensure_locked() {
   local uv="$1" version="$2" root env_dir stage python current_stage
   [ -x "$uv" ] || oms_python_runtime_fail "uv is not executable: $uv" || return
@@ -195,10 +210,10 @@ oms_python_runtime_ensure_locked() {
   stage="$(mktemp -d "$root/envs/.stage.XXXXXX")" || return
 
   echo "installing OMS Python $version (private uv runtime)"
-  UV_PYTHON_INSTALL_DIR="$root/managed" \
+  oms_python_runtime_uv "$root" \
     "$uv" python install --install-dir "$root/managed" --no-bin --no-config \
       "$version" || { rmdir "$stage"; return 1; }
-  UV_PYTHON_INSTALL_DIR="$root/managed" \
+  oms_python_runtime_uv "$root" \
     "$uv" venv --managed-python --no-project --no-config --python "$version" \
       "$stage" || {
         rm -rf "$stage"

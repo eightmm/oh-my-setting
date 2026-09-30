@@ -165,6 +165,8 @@ cat > "$runtime_uv" <<EOF_UV
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "\$*" >> "$runtime_uv_log"
+printf 'env downloads=%s preference=%s managed=%s certs=%s\n' "\${UV_PYTHON_DOWNLOADS:-}" \
+  "\${UV_PYTHON_PREFERENCE:-}" "\${UV_NO_MANAGED_PYTHON:-}" "\${UV_SYSTEM_CERTS:-}" >> "$runtime_uv_log"
 case "\${1:-}" in
   --version) echo 'uv 0.12.3' ;;
   python) [ "\${OMS_TEST_UV_FAIL:-0}" != 1 ] ;;
@@ -180,6 +182,8 @@ EOF_UV
 chmod +x "$runtime_uv"
 (
   export OMS_PYTHON_RUNTIME_ROOT="$runtime_root"
+  # A user's project-side uv choices must not reach the private runtime build.
+  export UV_PYTHON_DOWNLOADS=never UV_PYTHON_PREFERENCE=only-system UV_NO_MANAGED_PYTHON=1
   # shellcheck source=scripts/lib/file-lock.sh
   . "$ROOT/scripts/lib/file-lock.sh"
   # shellcheck source=scripts/lib/python-runtime.sh
@@ -227,6 +231,8 @@ chmod +x "$runtime_uv"
 )
 grep -Fq -- "venv --managed-python --no-project --no-config --python $runtime_version" "$runtime_uv_log" ||
   fail "private runtime allowed project or system-Python fallback"
+! grep '^env ' "$runtime_uv_log" | grep -Fvxq 'env downloads=manual preference= managed= certs=1' ||
+  fail "user uv settings leaked into the private runtime build: $(grep '^env ' "$runtime_uv_log" | sort -u)"
 
 # A scheduled bootstrap failure replaces stale success, before any Git mutation.
 printf '%s\n' '#!/usr/bin/env bash' 'echo "error: fixture runtime unavailable" >&2' 'exit 9' \

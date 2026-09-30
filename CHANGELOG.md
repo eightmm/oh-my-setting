@@ -75,6 +75,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `answer` and `note` turns for that session only. One council launcher took
   about 50 KB of its own answers this way, one answer per prompt, long after
   reading the artifacts.
+- Building the private OMS Python failed for users whose shell sets uv
+  preferences for their own projects: `UV_PYTHON_PREFERENCE=only-system`
+  made `uv venv --managed-python` refuse, and `UV_PYTHON_DOWNLOADS=never`
+  refused the download. The runtime build now drops those interpreter
+  choices (and `UV_PYTHON`, `UV_NO_MANAGED_PYTHON`, `UV_CONFIG_FILE` and
+  similar) while keeping proxy, mirror, offline and cache settings, and it
+  trusts the system certificate store as `curl` does, so a TLS proxy the
+  host trusts no longer breaks only the Python download.
 - `oms land` no longer treats a GitHub run that GitHub itself skipped as
   passing CI: such a run verified nothing and now reports `ci run-skipped`.
   Only `--ci-wait 0` reports `skipped`. A commit without workflow files no
