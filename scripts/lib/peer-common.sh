@@ -2593,6 +2593,8 @@ ma_write_post_attempt_guard() {
 # (gpt-6-sol, three runs each) medium matched high recall (13/15 both) with
 # 60% less input, 42% fewer tool calls and 47% less time. An explicit
 # --reasoning-effort, including high, still wins; write workers are untouched.
+# Claude seats are left alone: on the same audit Fable at medium found 9/15
+# against 11/15 for only 17% less cost, and Opus 5.5 showed no saving.
 ma_default_read_effort() {  # ma_default_read_effort PROVIDER ACCESS
   local primary="${OMS_MODEL_PRIMARY:-}" fallback="${OMS_MODEL_FALLBACK:-}"
   [ "$1" = codex ] && [ "$2" = read ] && [ -z "${OMS_REASONING_RESOLVED:-}" ] || return 0

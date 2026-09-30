@@ -58,7 +58,9 @@ agent, a Grok/GLM route, or a custom adapter.
    five-defect audit (gpt-6-sol, three runs each) it matched `high` recall
    with 60% less input, 42% fewer tool calls and 47% less time. Pass
    `--reasoning-effort high` for high-risk judgment; write workers keep the
-   configured default.
+   configured default. Claude seats keep their default: on the same audit
+   Fable at `medium` found 9/15 against 11/15 for only 17% less cost, and
+   Opus 5.5 showed no saving.
 7. For high-risk review, run `oms model-doctor --strict-diversity`. Provider
    identity is not model-family independence: Antigravity using Claude and
    Claude Code using Anthropic remain one family.
