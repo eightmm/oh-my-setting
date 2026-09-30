@@ -1,8 +1,8 @@
 # Installing oh-my-setting
 
-The one-line install is in the [README](../README.md). This page holds the
-details: host requirements, capability profiles, updates and what the
-installer changes on your machine.
+The one-line install and what it changes are in the [README](../README.md).
+This page holds the details: host requirements, capability profiles and
+updates. [한국어](INSTALL.ko.md)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
@@ -19,7 +19,8 @@ The default installer selects the `core` capability: the harness, Bash, Git,
 Python, and one coding-agent provider. It does not make GitHub CLI, Notion CLI,
 all three providers, research tooling, or cluster tools mandatory. Use the
 `full` compatibility profile only on machines that should carry the historical
-all-provider/GitHub/Notion/research footprint. Nothing needs root; managed tool
+all-provider/GitHub/Notion/research footprint. Nothing needs root except
+installing a missing Git, tar, gzip or find; managed tool
 bootstrap versions, platform URLs, and integrity values are pinned in `tools.lock.json`.
 Codex, Claude, and agy resolve current stable releases during install/update,
 then verify downloaded bytes against their official release checksums. Scheduled

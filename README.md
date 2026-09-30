@@ -32,9 +32,30 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 | Windows (Git Bash) | Git, Python 3.9+, and native Node.js when a Node-based agent is selected |
 
 The default `core` profile installs the harness and one coding agent.
-Profiles, updates, Windows notes and what the installer changes on your
-machine are in [docs/INSTALL.md](docs/INSTALL.md). musl-based Linux such as
-Alpine is not supported.
+musl-based Linux such as Alpine is not supported. Profiles and Windows notes
+are in [docs/INSTALL.md](docs/INSTALL.md).
+
+### What the installer changes
+
+- **Global agent rules.** `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` and
+  `~/.gemini/AGENTS.md` become links to the OMS rules. An existing file is
+  moved to `<file>.backup.<timestamp>` and comes back on uninstall.
+- **Agent settings.** Claude Code gets hooks, a status-line HUD and a `high`
+  effort default for Opus 5.5 if you have none. Codex gets the OMS plugin, a
+  footer and a few usage defaults. Antigravity gets the OMS plugin. Both
+  Claude Code and Codex register the OMS MCP server.
+- **Files in your home.** `oms-*` skills for all three CLIs, the `oms`
+  command in `~/.local/bin` (added to your shell's PATH), and a private
+  Python under `~/.local/share/oh-my-setting`.
+- **A daily update.** Clean checkouts fast-forward once a day. To skip it,
+  end the install command with `| bash -s -- --no-auto-update`.
+
+### Update and uninstall
+
+Ask your agent to update or uninstall oh-my-setting; it runs `oms update` or
+`oms uninstall`. Uninstall restores what it replaced and leaves the agent
+CLIs installed. Release-specific changes are in the
+[migration notes](docs/MIGRATION-0.7.md).
 
 ## How it works
 

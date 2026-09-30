@@ -31,10 +31,30 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 | macOS | Bash, curl, Command Line Tools(`xcode-select --install`). **Python 불필요.** |
 | Windows (Git Bash) | Git, Python 3.9+, Node 기반 agent를 고르면 네이티브 Node.js |
 
-기본 `core` 프로필은 하네스와 코딩 agent 하나를 설치한다. 프로필, 업데이트,
-Windows 참고 사항, 설치기가 머신에서 바꾸는 것은
-[docs/INSTALL.md](docs/INSTALL.md)에 있다. Alpine 같은 musl 기반 Linux는
-지원하지 않는다.
+기본 `core` 프로필은 하네스와 코딩 agent 하나를 설치한다. Alpine 같은 musl
+기반 Linux는 지원하지 않는다. 프로필과 Windows 참고 사항은
+[docs/INSTALL.ko.md](docs/INSTALL.ko.md)에 있다.
+
+### 설치하면 바뀌는 것
+
+- **전역 agent 규칙.** `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
+  `~/.gemini/AGENTS.md`가 OMS 규칙을 가리키는 링크가 된다. 기존 파일은
+  `<파일>.backup.<타임스탬프>`로 옮겨지고 제거할 때 돌아온다.
+- **agent 설정.** Claude Code에는 훅, 상태 줄 HUD, Opus 5.5의 `high` effort
+  기본값(직접 정한 값이 없을 때만)이 들어간다. Codex에는 OMS 플러그인, 하단
+  표시줄, 몇 가지 사용량 기본값이 들어간다. Antigravity에는 OMS 플러그인이
+  들어간다. Claude Code와 Codex에는 OMS MCP 서버가 등록된다.
+- **홈 디렉터리의 파일.** 세 CLI용 `oms-*` 스킬, `~/.local/bin`의 `oms` 명령
+  (셸 PATH에 추가된다), `~/.local/share/oh-my-setting` 아래의 전용 Python.
+- **매일 업데이트.** 수정 사항이 없는 체크아웃은 하루 한 번 fast-forward된다.
+  원하지 않으면 설치 명령의 끝을 `| bash -s -- --no-auto-update`로 바꾼다.
+
+### 업데이트와 제거
+
+agent에게 oh-my-setting을 업데이트하거나 제거해 달라고 하면 된다. agent가
+`oms update`나 `oms uninstall`을 실행한다. 제거하면 바꿨던 파일이 복원되고
+agent CLI는 그대로 남는다. 릴리스별 변경은
+[마이그레이션 노트](docs/MIGRATION-0.7.md)에 있다.
 
 ## 동작 방식
 
