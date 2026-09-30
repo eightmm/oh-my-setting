@@ -2588,6 +2588,26 @@ ma_write_post_attempt_guard() {
 # Run one provider with a resolved model and at most one capacity-only fallback.
 # For write access the retry is allowed only when the first attempt left the
 # isolated worktree unchanged.
+# A Codex judging seat with no chosen effort runs at medium instead of the
+# user's configured default (often high). On a seeded five-defect audit
+# (gpt-6-sol, three runs each) medium matched high recall (13/15 both) with
+# 60% less input, 42% fewer tool calls and 47% less time. An explicit
+# --reasoning-effort, including high, still wins; write workers are untouched.
+ma_default_read_effort() {  # ma_default_read_effort PROVIDER ACCESS
+  local primary="${OMS_MODEL_PRIMARY:-}" fallback="${OMS_MODEL_FALLBACK:-}"
+  [ "$1" = codex ] && [ "$2" = read ] && [ -z "${OMS_REASONING_RESOLVED:-}" ] || return 0
+  # Validate against the model that will run, not only an explicit one.
+  [ "$primary" != provider-default ] || primary=""
+  oms_reasoning_provider_validate codex medium "$primary" >/dev/null 2>&1 || return 0
+  OMS_REASONING_RESOLVED=medium
+  OMS_REASONING_SELECTED=medium
+  # A capacity fallback runs on OMS_REASONING_FALLBACK; keep it at medium too.
+  if [ -z "${OMS_REASONING_FALLBACK:-}" ] && [ -n "$fallback" ] &&
+    oms_reasoning_provider_validate codex medium "$fallback" >/dev/null 2>&1; then
+    OMS_REASONING_FALLBACK=medium
+  fi
+}
+
 ma_run_routed_provider_inner() {
   local provider="$1"
   local access="$2"
@@ -2607,6 +2627,7 @@ ma_run_routed_provider_inner() {
   export OMS_WORKER_AUTHORITY_VIOLATION
   provider="$(oms_provider_normalize "$provider")" || return $?
   oms_model_prepare "$provider" || return $?
+  ma_default_read_effort "$provider" "$access"
   # After canonicalization: the ledger files seats under the canonical name.
   ma_warn_known_seat_failures "$provider" "$artifact"
   attempt_file="$(agent_memory_mktemp)" || return 1
@@ -3099,6 +3120,7 @@ run_provider() {
     export OMS_MODEL_EXPLICIT
   fi
   oms_model_prepare "$provider" || return $?
+  ma_default_read_effort "$provider" read
 
   if ! ma_validate_outbound_prompt "$prompt_file"; then
     {

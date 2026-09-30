@@ -370,7 +370,6 @@ oms_model_is_model_safeguard_output() {
 oms_model_is_policy_decline_output() {
   local file="$1"
   local prompt="${2:-}"
-  local pattern='violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering|"?stop_reason"?: *"?refusal|stop-reason: .*reason=refusal'
   # Claude's envelope says why the turn stopped, and its converted line comes
   # before any model text. A clean end_turn is an answer however much of it
   # discusses refusals: quoting this pattern once made every Claude seat of a
@@ -380,19 +379,34 @@ oms_model_is_policy_decline_output() {
     grep -Eqx 'stop-reason: provider=claude reason=end_turn subtype=success is_error=0'; then
     return 1
   fi
-  if [ ! -f "$prompt" ]; then
-    grep -Eiq "$pattern" "$file"
-    return $?
-  fi
+  [ -f "$prompt" ] || prompt=/dev/null
 
   # Some provider CLIs echo the full prompt before the answer. A quoted policy
   # sentence is input data, not a refusal. Subtract prompt lines as a multiset,
   # so an identical line emitted once more by the provider remains a refusal.
+  # A completed answer never quotes its own refusal either: in a turn that
+  # closed cleanly, a policy sentence inside backticks or double quotes is an
+  # answer discussing refusals (a Codex audit seat that quoted one was dropped
+  # as a decline). Failed turns and untyped output keep every quote, since an
+  # error is often JSON with the sentence in quotes. Structural stop-reason
+  # lines are matched as written. Curly quotes become control bytes first so
+  # multibyte text inside them is removed whole.
   LC_ALL=C awk '
-    FNR == NR { prompt[$0]++; next }
+    FILENAME == ARGV[1] { prompt[$0]++; next }
+    FNR == 1 { answered = ($0 ~ /^stop-reason: provider=[^ ]+ reason=(turn_completed|end_turn) subtype=success is_error=0\r?$/) }
     {
       lower = tolower($0)
-      if (lower ~ /violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering|"?stop_reason"?: *"?refusal|stop-reason: .*reason=refusal/) {
+      prose = lower
+      if (answered) {
+        gsub(/\342\200\234/, "\001", prose)
+        gsub(/\342\200\235/, "\002", prose)
+        gsub(/`[^`]*`/, "", prose)
+        gsub(/"[^"]*"/, "", prose)
+        while ((open = index(prose, "\001")) > 0 && (shut = index(substr(prose, open + 1), "\002")) > 0)
+          prose = substr(prose, 1, open - 1) substr(prose, open + shut + 1)
+      }
+      if (lower ~ /"?stop_reason"?: *"?refusal|stop-reason: .*reason=refusal/ ||
+          prose ~ /violate[sd]? (our|the) usage polic|unable to respond to this request|blocked by content filtering/) {
         if (prompt[$0] > 0) prompt[$0]--
         else declined = 1
       }

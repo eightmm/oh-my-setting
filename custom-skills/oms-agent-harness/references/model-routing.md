@@ -53,11 +53,12 @@ agent, a Grok/GLM route, or a custom adapter.
 6. Pass `--reasoning-effort` only after checking the selected model's cached
    scale. Supported values are `auto`, `low`, `medium`, `high`, `xhigh`, `max`,
    and `ultra`; each provider accepts only its reported subset.
-   `auto` inherits the provider's configured default, often `high` for Codex.
-   For a routine read-only council or review, `medium` is the cheapest
-   measured lever: on a seeded audit (gpt-6-sol, two runs each) it cut input
-   tokens 38%, output 49% and time 36% at the same recall. Keep the default
-   for high-risk judgment and when the user chose an effort.
+   `auto` inherits the provider's configured default, except that a Codex
+   read-only seat (council, review, consult) runs at `medium`: on a seeded
+   five-defect audit (gpt-6-sol, three runs each) it matched `high` recall
+   with 60% less input, 42% fewer tool calls and 47% less time. Pass
+   `--reasoning-effort high` for high-risk judgment; write workers keep the
+   configured default.
 7. For high-risk review, run `oms model-doctor --strict-diversity`. Provider
    identity is not model-family independence: Antigravity using Claude and
    Claude Code using Anthropic remain one family.

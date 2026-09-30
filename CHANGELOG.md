@@ -64,6 +64,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A seat answer that quoted a policy sentence (in quotes, curly quotes or
+  backticks) was recorded as a policy decline; the best-scoring Codex seat of
+  an audit was dropped this way. Quoted sentences no longer count, while a
+  bare refusal sentence and structural `stop_reason` fields still do.
 - A live thread whose first row is valid JSON but not an object raised
   `AttributeError` out of the prompt and edit hooks; it is now simply not a
   live thread. An ask seat found this unprompted during an A/B round.
@@ -156,6 +160,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   the installer's contract and fail on duplicate, retired or drifted rows.
 
 ### Changed
+- A Codex read-only seat (council, review, consult) with no chosen effort now
+  runs at `medium` instead of the user's configured default. On a seeded
+  five-defect audit (gpt-6-sol, three runs each) medium found 13/15 like
+  high, with 60% less input, 42% fewer tool calls and 47% less time. Any
+  explicit `--reasoning-effort`, including `high`, still wins; write workers
+  and other providers are unchanged.
 - Seat usage records count the seat's own tool calls (`tool_calls` in the
   usage detail and `provider_usage`): Codex non-message stream items and
   Claude `tool_use` blocks. Seat exploration is most of a council's cost, and

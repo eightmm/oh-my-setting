@@ -297,9 +297,24 @@ agy_invoke() {  # agy_invoke ARGS...
 
 invoke --to codex --prompt "argv probe" || fail 'auto-effort codex call failed'
 [ -s "$TMP/codex.argv" ] || fail 'codex recorder stub was not invoked'
-if grep -q 'model_reasoning_effort' "$TMP/codex.argv"; then
-  fail 'auto effort must omit the codex effort flag, not pass it empty'
+if grep -q 'model_reasoning_effort=""' "$TMP/codex.argv"; then
+  fail 'auto effort must never pass an empty codex effort'
 fi
+grep -q 'model_reasoning_effort="medium"' "$TMP/codex.argv" ||
+  fail 'a codex judging seat with no chosen effort must run at medium'
+# Only an unchosen effort on a Codex read seat moves; write workers, other
+# providers and any chosen effort keep their route.
+effort_after() {
+  OMS_REASONING_RESOLVED="$3" bash -c '. "$1/scripts/lib/peer-common.sh"; ma_default_read_effort "$2" "$3"; printf "%s" "$OMS_REASONING_RESOLVED"' \
+    _ "$ROOT" "$1" "$2"
+}
+[ "$(effort_after codex read "")" = medium ] || fail 'codex read seat default is not medium'
+[ -z "$(effort_after codex write "")" ] || fail 'a write worker must keep the provider default effort'
+[ -z "$(effort_after claude read "")" ] || fail 'only codex seats were measured; claude keeps its default'
+[ "$(effort_after codex read high)" = high ] || fail 'a chosen effort must win over the seat default'
+fallback_effort="$(OMS_MODEL_PRIMARY=provider-default OMS_MODEL_FALLBACK=gpt-6-luna OMS_REASONING_RESOLVED='' OMS_REASONING_FALLBACK='' \
+  bash -c '. "$1/scripts/lib/peer-common.sh"; ma_default_read_effort codex read; printf "%s|%s" "$OMS_REASONING_RESOLVED" "$OMS_REASONING_FALLBACK"' _ "$ROOT")"
+[ "$fallback_effort" = 'medium|medium' ] || fail "a capacity fallback must keep the seat's medium effort: $fallback_effort"
 invoke --to codex --reasoning-effort high --prompt "argv probe" ||
   fail 'high-effort codex call failed'
 grep -q 'model_reasoning_effort="high"' "$TMP/codex.argv" ||
@@ -437,6 +452,22 @@ decline "$TMP/claude-refusal.txt" || fail 'a Claude refusal envelope must stay a
 printf '%s\n' 'stop-reason: provider=codex reason=turn_completed subtype=success is_error=0' \
   'Unable to respond to this request.' > "$TMP/codex-refusal.txt"
 decline "$TMP/codex-refusal.txt" || fail 'a Codex text refusal in a closed turn must stay a decline'
+# A refusal never quotes itself: an answer that quotes the policy sentence in
+# curly quotes, straight quotes or backticks is an answer, while a bare
+# sentence and a JSON refusal field stay declines.
+printf '%s\n' 'stop-reason: provider=codex reason=turn_completed subtype=success is_error=0' \
+  '2. 실제 답변이 “Unable to respond to this request”이면 거절을 놓칩니다.' \
+  'The matcher looks for `unable to respond to this request` and "Unable to respond to this request".' > "$TMP/codex-quoted.txt"
+if decline "$TMP/codex-quoted.txt"; then fail 'an answer quoting the refusal sentence was read as a decline'; fi
+printf '%s\n' '{"type":"result","stop_reason": "refusal"}' > "$TMP/json-refusal.txt"
+decline "$TMP/json-refusal.txt" || fail 'a JSON refusal field must stay a decline despite its quotes'
+# Only a cleanly completed answer earns the quote exemption: a failed turn's
+# JSON error and untyped output keep quoted policy sentences as declines.
+printf '%s\n' 'stop-reason: provider=codex reason=turn_failed subtype=error is_error=1' \
+  '{"message": "Your request may violate our usage policy."}' > "$TMP/codex-failed.txt"
+decline "$TMP/codex-failed.txt" || fail 'a failed turn quoting a policy sentence in its JSON error must stay a decline'
+printf '%s\n' '"Unable to respond to this request."' > "$TMP/untyped-quoted.txt"
+decline "$TMP/untyped-quoted.txt" || fail 'untyped output keeps quoted refusal sentences as declines'
 
 env -u NVM_DIR HOME="$TMP/home" PATH="$TMP/bin:$PATH" AGY_ARGV_OUT="$TMP/agy.argv" \
   OMS_CAPABILITY_DIR="$TMP/cap" OMS_LOCK_DIR="$TMP/locks" OMS_LOCK_FORCE_MKDIR=1 \
