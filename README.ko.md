@@ -1,18 +1,23 @@
-# oh-my-setting
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="oh-my-setting — Codex, Claude Code, Antigravity를 위한 하나의 control plane" width="100%">
+</p>
 
-서로 다른 coding-agent CLI가 같은 프로젝트의 규칙, 상태, plan, evidence,
-lease와 handoff를 동일하게 읽고 이어서 작업하게 만드는 로컬 control plane.
-Codex, Claude Code, Antigravity는 managed core로 유지되고, optional provider도
-같은 capability-safe transport 계약으로 참여한다.
+<p align="center">
+  <a href="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml"><img src="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml/badge.svg?branch=main" alt="CI"></a>
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-0ea5e9" alt="Linux, macOS, Windows">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e" alt="MIT license"></a>
+</p>
 
-**직접 실행할 일은 없다.** 아래 호스트 사전 조건을 준비한 뒤에는 설치 명령
-하나만 직접 치고, 그 뒤로 하네스는 사용자 것이 아니라 agent 것이다.
-도구(`oms ...`)는 agent가 작업 중에 부르고, 상태(`.oms/`)는 agent가 쓰고,
-설정 작업 — 업데이트, 상태 점검, 다른 agent CLI에 필요한 권한까지 — 도
-agent에게 부탁하는 일이다. 이 문서에 명령이 보이면 그건 agent가 실행할 것을
-보여주는 것이다.
+<p align="center"><a href="README.md">English</a></p>
 
-[English](README.md)
+**oh-my-setting**은 Codex, Claude Code, Antigravity가 같은 규칙, 상태, plan,
+증거, handoff를 공유하며 한 프로젝트에서 일하게 한다. 누가 하던 일이든
+다른 agent가 이어받을 수 있다.
+
+**직접 실행할 일은 없다.** 한 번 설치하면 하네스는 agent의 것이 된다.
+`oms` 도구를 부르고 `.oms/` 상태를 쓰는 것도, 부탁받았을 때 업데이트와 상태
+점검을 하는 것도 agent다. 이 문서에 보이는 명령은 사용자가 칠 명령이 아니라
+agent가 실행할 명령이다.
 
 ## 설치
 
@@ -20,195 +25,68 @@ agent에게 부탁하는 일이다. 이 문서에 명령이 보이면 그건 age
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
-Windows에서 새 기본 Codex 설치 또는 Node 기반 도구를 선택한 profile은 먼저
-**npm을 포함한 네이티브 Node.js**가 필요하다. 설치기가 표시한 정확한 버전을
-[공식 Node.js archive](https://nodejs.org/dist/)에서 설치하고 PATH 옵션을 유지한
-뒤 Git Bash를 다시 연다. 설치기는 다른 Node 버전을 그대로 통과시키지 않는다.
-Antigravity만 쓰는 `core` profile에는 Node가 필요 없다.
+| 호스트 | 필요한 것 |
+|---|---|
+| Linux, WSL (glibc) | Bash, curl. Git·tar·gzip·find는 없으면 설치한다. **Python 불필요.** |
+| macOS | Bash, curl, Command Line Tools(`xcode-select --install`). **Python 불필요.** |
+| Windows (Git Bash) | Git, Python 3.9+, Node 기반 agent를 고르면 네이티브 Node.js |
 
-기본 설치는 `core` capability만 선택한다. 즉 하네스, Bash, Git, Python,
-그리고 coding-agent provider 하나만 필수다. GitHub CLI, Notion CLI, provider
-세 개 전부, 연구 도구, 클러스터 도구는 기본 필수 의존성이 아니다. 예전의
-all-provider/GitHub/Notion/research 구성이 필요한 머신에서만 `full` 호환
-profile을 사용한다. root 권한은 필요 없다. 관리 도구 버전·플랫폼 URL·무결성
-값 중 bootstrap 도구는 `tools.lock.json`에 고정된다. Codex·Claude·agy는 설치와
-업데이트 시 공식 최신 안정 버전을 조회하고 해당 checksum으로 검증한다.
-예약 apply는 OMS 커밋이 같아도 이미 설치된 provider를 갱신한다. `--no-tools`는
-수동 OMS 업데이트에서 도구 갱신을 생략한다. 명시적 `OH_MY_SETTING_TOOL_LOCK`만
-재현 가능한 버전 고정을 유지한다. provider 의존성도 함께 선택되므로 Codex와
-Claude에는 locked Node가 포함되고 Antigravity에는 포함되지 않는다. 새 다운로드는
-사용 전에 검증된다. 이미 있는 외부 CLI는 정확한 버전이면 재사용하고 doctor가
-version-only로 표시한다. install/update/repair/uninstall은 사용자 단위 lifecycle
-lock 하나를 공유한다. 인식 가능한 standalone Codex는 자체 updater와 launcher를
-유지하며 npm 설치로 바꾸지 않는다. 이 경로는 결과 버전을 검사하며 OMS가 직접
-payload digest를 검증했다고 표시하지 않는다.
+기본 `core` 프로필은 하네스와 코딩 agent 하나를 설치한다. 프로필, 업데이트,
+Windows 참고 사항, 설치기가 머신에서 바꾸는 것은
+[docs/INSTALL.md](docs/INSTALL.md)에 있다. Alpine 같은 musl 기반 Linux는
+지원하지 않는다.
 
-설치와 예약 자동업데이트는 `tools.lock.json`에 고정된 전용 uv Python을 쓴다.
-시스템·프로젝트 Python은 초기 bootstrap에만 사용하며 타이머 실행에는 쓰지 않는다.
-설치본의 로컬 수정은 덮어쓰지 않고 `blocked`로 알린다. 개인 지침은 추적되는
-설치 파일 대신 별도 사용자 스킬에 둔다. systemd 설치 시 로그아웃 후 실행 가능
-여부를 표시한다. 필요하면 trigger 설치에 `OH_MY_SETTING_AUTO_UPDATE_LINGER=1`을
-명시하거나 cron을 사용한다. Linger는 이 계정의 다른 user service에도 영향을 주며
-호스트 권한이 필요할 수 있어 기본으로 몰래 활성화하지 않는다.
+## 동작 방식
 
-capability profile은 `core`, `council`, `github`, `notion`, `research`, `hpc`,
-`container`, `remote`, `full`이다. 선택형 설치기는 기존 locked downloader와
-transaction을 그대로 재사용하고, 요청한 profile을 private receipt에 기록해
-업데이트 때도 그 도구 집합만 다시 적용한다. capability receipt가 없는 기존
-설치는 agent가 명시적으로 마이그레이션하기 전까지 legacy full-tool update
-경로를 유지한다. 자세한 내용은
-[docs/OMS-RUNTIME.md](docs/OMS-RUNTIME.md)에 있다.
+<p align="center">
+  <img src="docs/assets/how-it-works.svg" alt="사용자는 아무 코딩 agent에게 말하고, Codex·Claude Code·Antigravity는 규칙·상태·council·위임·검증된 착지를 담은 oms 층을 공유하며 저장소에서 일한다" width="100%">
+</p>
 
-GitHub 또는 Notion capability를 선택한 경우 대화형 설치기는 `gh auth login`과
-`ntn login`의 브라우저 로그인을 위임하고 Work Journal의 Notion 대상을 찾을 수
-있다. 비대화형 설치에서는 core runtime을 약화시키지 않고 누락된 capability를
-명시적으로 기록한다. Claude Code에는 메인·서브에이전트 HUD가
-설치되고 사용자가 정하지 않았다면 Opus 5.5 effort 기본값이 `high`로 설정되며, Codex에는 사용자가 직접 정한 footer가 없을 때 같은 목적의 내장
-footer가 기본 설정된다. 매일 실행되는 updater는 깨끗한 checkout만 기본적으로
-fast-forward하며 dirty 또는 diverged checkout은 건너뛴다. uninstall은 관리
-설정을 복원하지만 외부 CLI와 user-local PATH 항목은 남긴다.
-
-설치는 전역 에이전트 규칙 파일 세 개 — `~/.claude/CLAUDE.md`,
-`~/.codex/AGENTS.md`, `~/.gemini/AGENTS.md` — 를 관리한다. 기존 파일이 있으면
-`<파일>.backup.<타임스탬프>`로 이동되고, 설치가 유지되는 동안 적용되지 않으며,
-`oms uninstall`이 복원한다.
-
-| 호스트 | 필요 | 관리 파일 |
-|---|---|---|
-| Linux, WSL (glibc) | Bash 3.2+, curl; Git·tar·gzip·find는 없으면 설치한다(그때 root나 sudo 필요). Python 불필요 | symlink |
-| macOS | 기본 Bash 3.2, curl, Command Line Tools(`xcode-select --install`; 없으면 `git`은 설치 안내 스텁뿐이다). Python 불필요 | symlink |
-| Windows Git Bash | Git, Python 3.9+; 선택 도구가 요구할 때 lock과 정확히 같은 네이티브 Node | 검증된 사본 |
-
-`python3` 3.9+와 uv가 모두 없으면 설치기는 고정 버전 uv를 받아 sha256을
-확인하고, `tools.lock.json`의 Python을 직접 만든 뒤 관리형 `python3` shim이
-그것을 가리키게 한다. Alpine 같은 musl 기반 Linux는 지원하지 않는다. 고정된
-빌드가 glibc를 요구하기 때문이다.
-
-예외 상황 — Windows 사본 모드, Antigravity headless 권한, Notion data source
-지정 — 은 [docs/COMPONENTS.md](docs/COMPONENTS.md)와
-[docs/WORK-JOURNAL.md](docs/WORK-JOURNAL.md)에 있다. 기존 설치의 업그레이드는
-`oms update` 한 번이고, 릴리스마다 무엇이 바뀌는지는 마이그레이션 노트 —
-현재 [docs/MIGRATION-0.7.md](docs/MIGRATION-0.7.md) — 에 명시된다.
-
-## 시작
-
-코딩 agent를 아무 디렉터리에서든 열고 — 빈 디렉터리, 진행 중 프로젝트, 기존
-repo — 이렇게 말한다:
+코딩 agent를 아무 디렉터리에서나 열고(빈 디렉터리, 진행 중 프로젝트, 기존
+repo) 이렇게 말한다.
 
 ```text
 이 프로젝트 시작해줘.
 ```
 
-agent가 상태를 판별해 분기한다. 빈 디렉터리는 spec 인터뷰 → `PROJECT.md` →
-템플릿 → doctor로, 기존 repo는 코드를 먼저 읽고 빈 곳만 인터뷰하며, 진행 중
-프로젝트는 상태와 다음 할 일을 보고한다.
-
-`PROJECT.md`를 확정한 뒤에는 검토한 작업 제안 → 제한된 구현 → 합격 검사 →
-Draft PR까지 맡길 수 있다. 생성된 작업이 스스로 승인되지는 않으며 merge와
-release는 별도 권한으로 남는다.
-
-## Typed Runtime Core
-
-`oms runtime`은 기존 hardened execution plane 위에 놓인 표준 라이브러리 기반
-semantic layer다. 분산된 상태를 effective TaskEnvelope로 합쳐 읽고, 완료
-조건별 EvidenceCoverage를 계산하며, bounded ContextManifest를 만들고,
-capability profile을 선택하고, 여러 머신 사이에 sanitized capsule을 옮기고,
-로컬·container·remote backend를 정직한 receipt와 함께 실행하며, 비교 가능한
-연구 실험을 평가한다.
-
-다음 mutation 경로는 대체하지 않는다.
-
-```text
-peer-delegate -> patch-admit -> patch-land
-```
-
-plan lease, one-use approval, commit intent, Draft PR intent가
-계속 권위 경계다. runtime snapshot·capsule·context bundle·backend receipt는
-증거나 advisory state일 뿐 write authority가 아니다.
-
-간결한 기본 명령 목록은 `oms list`, 상세 core 명령은 `oms list --all`에서
-볼 수 있다.
+빈 디렉터리는 짧은 spec 인터뷰를 거쳐 `PROJECT.md`와 템플릿을 만든다. 기존
+repo는 먼저 코드를 읽고 빈 곳만 묻는다. 진행 중 프로젝트는 상태와 다음 할
+일을 보고한다. `PROJECT.md`를 확정하면 검토한 작업, 검사, Draft PR까지 맡길
+수 있다. 생성된 작업은 스스로 승인되지 않고, merge와 release는 사용자가
+정한다.
 
 ## 이렇게 말하면 된다
 
 ```text
 이 프로젝트 시작해줘.
-oh-my-setting ml 템플릿 적용해줘.                 # 또는 general, slurm
-지금 diff 피어 리뷰 돌려줘.
-세 모델에게 debate 한 라운드로 물어봐: vector DB냐 pgvector냐?
-이거 codex한테 위임해줘: scripts/train.py에 입력 검증 추가.
-확정된 PROJECT.md를 구현해서 Draft PR까지 만들어줘.
-현재 effective task contract와 증거가 없는 완료 조건을 보여줘.
-이 patch를 리뷰하는 데 필요한 최소 context만 만들어줘.
-이 머신에는 core와 research capability만 준비해줘.
-다른 워크스테이션으로 넘길 sanitized continuity capsule 만들어줘.
-고정 seed로 실험하고 invariant가 나빠지면 지지하지 않는 것으로 판정해줘.
-이 split 정책 다른 에이전트한테 물어보고 thread 유지해줘.
-학습 전에 이 데이터셋 group split leakage 확인해줘.
-런 돌리기 전에 가설 기반 실험으로 정리해줘.
-Slurm job 12345 끝나면 로그 digest해서 보고해줘.
+지금 diff를 peer review 해줘.
+세 모델에게 토론 1라운드로 물어봐: vector DB와 pgvector 중 뭐가 나아?
+codex에게 맡겨줘: scripts/train.py에 입력 검증 추가.
+확정된 PROJECT.md를 구현부터 Draft PR까지 진행해줘.
+학습 전에 이 데이터셋의 group split 누수를 확인해줘.
+Slurm job 12345가 끝나면 로그를 요약해서 알려줘.
 oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 ```
 
-## 구성 요소
+## 들어 있는 것
 
-전부 agent가 필요할 때 알아서 집어 쓴다. 간결한 agent catalog는
-`oms list`, 상세 core 명령은 `oms list --all`, 상세 문서는
-[docs/COMPONENTS.md](docs/COMPONENTS.md)다.
+| | |
+|---|---|
+| **공유 규칙** | 세 CLI가 함께 쓰는 전역 규칙 하나와 `general`·`ml`·`slurm` 프로젝트 템플릿 |
+| **Council** | 서로 독립적인 다중 모델 리뷰와 토론. 판정 좌석은 읽기 전용의 제한된 시야로 본다 |
+| **위임** | 격리된 worktree 작업자, 반영 전 심사, 하나의 착지 경로. 재귀 위임은 없다 |
+| **상태와 handoff** | Work Journal, attention inbox, compaction 전 handoff, 실패 ledger |
+| **검증된 착지** | 게이트 한 번, 트리가 그대로일 때만 push, CI 뒤 그 커밋으로 설치 갱신 |
+| **ML과 HPC** | 재현 가능한 실행, 누수 검사, Slurm과 GPU 대기열 도우미 |
+| **Typed runtime** | 작업 계약, 증거 범위, 제한된 context, 이식 가능한 capsule([docs/OMS-RUNTIME.md](docs/OMS-RUNTIME.md)) |
 
-- **Typed semantic runtime** — effective TaskEnvelope projection,
-  criterion-linked EvidenceCoverage, context manifest, 표준 failure recovery,
-  optional capability profile, portable capsule, execution receipt,
-  ExperimentContract v2, 내용 비저장형 harness 효과 telemetry
-- **프로젝트 설정** — start router, spec 인터뷰, `general`/`ml`/`slurm`
-  템플릿, 세 agent의 관리 규칙·설정 표면이 같은지 검증하는 doctor,
-  로컬에서만 숨겨지는 agent 파일
-- **다른 에이전트에게 묻기** — 이어지는 peer thread, 세 모델 council과
-  프로젝트 자체 검사가 뒤를 받치는 리뷰 게이트, 결정 시점 advisor, 발신 전
-  민감정보 scrub. 심사하는 자리는 일부러 덜 받는다: 읽기용 4개 툴, MCP 표면
-  없음, 작성자의 논리 없이 증거만 — 그리고 죽거나 잘린 시트는 합성에서
-  이름으로 표시될 뿐 하나의 의견처럼 인용되지 않는다
-- **쓰기 위임** — 격리 worktree 위임(patch를 만들면 안 되는 감사는
-  `--read-only`), admission 사다리, 단일 변이 경계,
-  워커 권한 지문, 위반 시 스냅샷 기반 권한 복구, primary 권한 환경변수
-  미전달, 그리고 재귀 위임 금지 — 워커가 다른 peer를 부르려 하면 서버 측에서
-  거부되고 필요를 답변으로 보고하라고 안내받는다
-- **Agent 상태와 핸드오프** — 일간 요약과 선택적 Notion mirror가 있는 Work
-  Journal, 우선순위 attention inbox, compaction 직전 세션 핸드오프, 출처를
-  재검증하는 공유 메모리, 되돌릴 수 있는 tracked-state checkpoint, 검증이
-  실제로 실행되는 task packet, 반복 실패 시 advisor를 지목하는 fail-ledger,
-  landing 뒤 중단돼도 provider 재호출 없이 이어지는 commit intent
-- **ML과 HPC** — run spine과 재현 캡슐, 사전등록 가설 run, 데이터셋 leakage
-  manifest, Slurm reconcile과 GPU 큐
-- **Provider와 모델** — 캐시된 capability 프로브, provider 기본값 또는 정확한
-  모델/effort 선택, 명시한 경우에만 한 번 쓰는 capacity fallback, family 다양성
-  진단, provider가 제공할 때만 기록하는 내용 비저장형 native telemetry,
-  그리고 provider 자신의 정지 사유를 실어 나르는 전송 — 토큰 한계에서 잘린
-  답은 완성된 것처럼 읽히는 대신 fail-closed로 떨어진다
-- **운영과 실행 경계** — 영속 attempt 이벤트와 child-attempt 재개, 제한된
-  supervisor, 한 번만 쓰는 승인, `trusted-local`/`isolated`/`remote` preflight와
-  실제 실행 backend, VS Code·Stably Orca·Codex 열기,
-  읽기 전용 cockpit, 로컬 OTLP JSONL, 기본 원격 쓰기
-  경로가 새 브랜치와 Draft PR 생성뿐인 제한 코딩 루프
-- **유지보수** — 롤백 가능한 트랜잭션 업데이트, stable/edge channel projection,
-  doctor, 하나의 전체 검증 게이트와 보호 브랜치용 빠른 pre-push 모드;
-  append-only 상태는 gc로 압축되고 agent에게 보이는 projection은 전부
-  경계가 있으며 생략은 침묵 대신 명시된다
-
-skill은 세 계층으로 붙는다: 어디서나 같은 범용 skill, 필요한 명령이 있는
-머신에만 링크되는 머신 조건 skill(`oms-slurm`, `oms-gpu-workstation`), 그리고
-저장소의 `.oms/skills/`에 포지되는 프로젝트 skill. 전역 skill 이름은 `oms-`로
-시작하며 새로 포지되는 프로젝트 skill도 `oms-*`를 쓴다. 저장된 legacy 이름은
-계속 읽을 수 있고 자동으로 바꾸지 않는다.
+agent가 알아서 골라 쓴다. 전체 목록은 [docs/COMPONENTS.md](docs/COMPONENTS.md)에 있다.
 
 ## 참고
 
-- 로컬 우선: connector는 명시적으로 요청했거나 로컬 자료로 답할 수 없을 때만.
-- 토큰, private data, cluster/머신 상세는 commit하지 않는다. portable runtime
-  capsule도 sanitized advisory state이며 raw `.oms`는 자동 동기화하지 않는다.
-- 스크립트는 `~/.oh-my-setting/scripts/`에 있고 `oms <tool>`로 부른다. 투명성과
-  복구용 문서화일 뿐 사용자가 직접 실행하는 명령 집합이 아니다.
+- **로컬 우선.** 기본은 로컬 파일과 CLI다. connector는 요청할 때만 쓴다.
+- **비공개 정보는 커밋하지 않는다.** 토큰, 개인 데이터, 머신 정보는 git에
+  들어가지 않고, 프로젝트별 agent 파일은 로컬에서만 무시 처리된다.
+- **되돌릴 수 있다.** `oms uninstall`이 바꿨던 파일을 복원한다.
 
-## Star
-
-도움이 됐다면: [github.com/eightmm/oh-my-setting](https://github.com/eightmm/oh-my-setting)
+도움이 됐다면 [GitHub](https://github.com/eightmm/oh-my-setting)에 ⭐ 하나 부탁드린다.

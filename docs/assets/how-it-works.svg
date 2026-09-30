@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="560" viewBox="0 0 1280 560" role="img" aria-labelledby="title desc">
+  <title id="title">How oh-my-setting works</title>
+  <desc id="desc">You talk to any coding agent. Codex, Claude Code and Antigravity share one OMS layer of rules, state, councils, delegation and verified landing, which works on your repository.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="1" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="1280" height="560" rx="24" fill="url(#bg)"/>
+  <g font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <!-- column headings -->
+    <g font-size="15" font-weight="600" fill="#94a3b8" letter-spacing="1.5">
+      <text x="140" y="60" text-anchor="middle">YOU</text>
+      <text x="445" y="60" text-anchor="middle">ANY CODING AGENT</text>
+      <text x="935" y="60" text-anchor="middle">SHARED BY ALL OF THEM</text>
+    </g>
+
+    <!-- you -->
+    <g transform="translate(40 150)">
+      <rect width="200" height="150" rx="18" fill="#1e293b" stroke="#334155" stroke-width="2"/>
+      <text x="100" y="48" text-anchor="middle" font-size="16" fill="#94a3b8">just say</text>
+      <text x="100" y="86" text-anchor="middle" font-size="19" font-weight="600" fill="#f8fafc">"Start this</text>
+      <text x="100" y="112" text-anchor="middle" font-size="19" font-weight="600" fill="#f8fafc">project."</text>
+    </g>
+    <line x1="248" y1="225" x2="322" y2="225" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+    <!-- agents -->
+    <g font-size="19" font-weight="600" text-anchor="middle">
+      <g transform="translate(335 100)">
+        <rect width="220" height="64" rx="32" fill="#0c4a6e" stroke="#38bdf8" stroke-width="2"/>
+        <text x="110" y="39" fill="#e0f2fe">Codex</text>
+      </g>
+      <g transform="translate(335 193)">
+        <rect width="220" height="64" rx="32" fill="#431407" stroke="#fb923c" stroke-width="2"/>
+        <text x="110" y="39" fill="#ffedd5">Claude Code</text>
+      </g>
+      <g transform="translate(335 286)">
+        <rect width="220" height="64" rx="32" fill="#2e1065" stroke="#a78bfa" stroke-width="2"/>
+        <text x="110" y="39" fill="#ede9fe">Antigravity</text>
+      </g>
+    </g>
+    <text x="445" y="392" text-anchor="middle" font-size="15" fill="#94a3b8">they ask each other,</text>
+    <text x="445" y="414" text-anchor="middle" font-size="15" fill="#94a3b8">delegate and hand off</text>
+    <g stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)">
+      <line x1="563" y1="132" x2="636" y2="190"/>
+      <line x1="563" y1="225" x2="636" y2="225"/>
+      <line x1="563" y1="318" x2="636" y2="260"/>
+    </g>
+
+    <!-- oms layer -->
+    <g transform="translate(650 90)">
+      <rect width="570" height="330" rx="20" fill="#0b1220" stroke="url(#accent)" stroke-width="2.5"/>
+      <text x="30" y="46" font-family="ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace" font-size="24" font-weight="700" fill="#e2e8f0">oms</text>
+      <text x="92" y="45" font-size="16" fill="#94a3b8">local control plane</text>
+      <g font-size="16">
+        <g transform="translate(30 76)">
+          <rect width="510" height="40" rx="10" fill="#1e293b"/>
+          <text x="18" y="26" font-weight="600" fill="#7dd3fc">Rules</text>
+          <text x="150" y="26" fill="#cbd5e1">one global rule set for all three CLIs</text>
+        </g>
+        <g transform="translate(30 124)">
+          <rect width="510" height="40" rx="10" fill="#1e293b"/>
+          <text x="18" y="26" font-weight="600" fill="#7dd3fc">State</text>
+          <text x="150" y="26" fill="#cbd5e1">tasks, plans, journal, handoffs in .oms/</text>
+        </g>
+        <g transform="translate(30 172)">
+          <rect width="510" height="40" rx="10" fill="#1e293b"/>
+          <text x="18" y="26" font-weight="600" fill="#c4b5fd">Councils</text>
+          <text x="150" y="26" fill="#cbd5e1">independent reviews and debates</text>
+        </g>
+        <g transform="translate(30 220)">
+          <rect width="510" height="40" rx="10" fill="#1e293b"/>
+          <text x="18" y="26" font-weight="600" fill="#c4b5fd">Delegation</text>
+          <text x="150" y="26" fill="#cbd5e1">isolated worktree → admit → land</text>
+        </g>
+        <g transform="translate(30 268)">
+          <rect width="510" height="40" rx="10" fill="#1e293b"/>
+          <text x="18" y="26" font-weight="600" fill="#fdba74">Landing</text>
+          <text x="150" y="26" fill="#cbd5e1">checks → push → CI → verified install</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- repository -->
+    <line x1="935" y1="428" x2="935" y2="466" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <g transform="translate(650 474)">
+      <rect width="570" height="54" rx="14" fill="#1e293b" stroke="#334155" stroke-width="2"/>
+      <text x="285" y="34" text-anchor="middle" font-size="17" fill="#e2e8f0">your repository · PROJECT.md · tests · Draft PR</text>
+    </g>
+  </g>
+</svg>

@@ -210,6 +210,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   the installer's contract and fail on duplicate, retired or drifted rows.
 
 ### Changed
+
+- The README is short again: a banner, badges, a one-line install, a
+  how-it-works diagram, what to say and a one-line-per-row feature table.
+  Install details moved to `docs/INSTALL.md`, and the skill-layer note to
+  `docs/COMPONENTS.md`; nothing was dropped.
 - A Codex read-only seat (council, review, consult) with no chosen effort now
   runs at `medium` instead of the user's configured default. On a seeded
   five-defect audit (gpt-6-sol, three runs each) medium found 13/15 like

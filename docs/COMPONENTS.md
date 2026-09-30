@@ -204,6 +204,13 @@ oms project-private --check
 
 ## Local skills and optional bundle operations
 
+Skills load in three layers: general-purpose skills everywhere,
+machine-conditional skills only where their command exists (`oms-slurm`,
+`oms-gpu-workstation`), and per-repo skills forged into `.oms/skills/`. Global
+skills are named `oms-*` so they cannot collide with your own skills in the
+shared skill roots. Newly forged project skills are also `oms-*`; stored legacy
+names remain readable and are not renamed automatically.
+
 Use `oms skill-forge add|validate|link` for ordinary local guidance. Neither
 external bundle management nor evaluation is required for a local edit.
 `oms skill-forge` remains the single project-skill authority. Local authored
