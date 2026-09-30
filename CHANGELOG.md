@@ -68,6 +68,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   backticks) was recorded as a policy decline; the best-scoring Codex seat of
   an audit was dropped this way. Quoted sentences no longer count, while a
   bare refusal sentence and structural `stop_reason` fields still do.
+- The session that asked a live thread question no longer receives the
+  answers a second time through the prompt and edit hooks: it already reads
+  them from its own `peer-ask` or `consult` output. The question turn records
+  a hash of the asking Claude Code or Codex session, and the hook skips
+  `answer` and `note` turns for that session only. One council launcher took
+  about 50 KB of its own answers this way, one answer per prompt, long after
+  reading the artifacts.
 - A live thread whose first row is valid JSON but not an object raised
   `AttributeError` out of the prompt and edit hooks; it is now simply not a
   live thread. An ask seat found this unprompted during an A/B round.

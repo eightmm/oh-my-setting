@@ -175,6 +175,11 @@ def append_from_env():
     for key in ("provider", "model", "artifact", "quality"):
         if env.get("OMS_TH_" + key.upper()):
             row[key] = env["OMS_TH_" + key.upper()]
+    # The asking session already holds the answers through its own command;
+    # the live hook skips them for it (hook_state.session_hash, same digest).
+    session = env.get("CLAUDE_CODE_SESSION_ID" if row["agent"] == "claude" else "CODEX_THREAD_ID")
+    if row["role"] == "question" and session:
+        row["origin"] = hashlib.sha256(session.encode("utf-8", "replace")).hexdigest()[:32]
     if env.get("OMS_TH_LIVE") == "1":
         row["live"] = True
     row.update(fields)

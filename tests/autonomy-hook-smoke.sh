@@ -314,17 +314,31 @@ stray = repo.parent / "stray-repo"
 (stray / ".oms/threads/x.jsonl").write_text('["receipt"]\n{"receipt": "ack", "consumer": "c1", "after": "z"}\n')
 assert hook_state.thread_participant(stray, "x", "c1"), "a stray non-object row must not break the ack scan"
 assert not hook_state.thread_participant(stray, "x", "c2")
-real_participant = hook_state.thread_participant
+real_relation = hook_state.thread_relation
 def broken(*args):
     raise ValueError("thread identity changed")
-hook_state.thread_participant = broken
+hook_state.thread_relation = broken
 assert not hook_state.live_thread_hint(payload("claude")), "a failed participation check delivers nothing"
-hook_state.thread_participant = real_participant
+hook_state.thread_relation = real_relation
 glance = hook_state.live_thread_hint(payload("claude"))
 assert "backward compatibility" in glance, "a failed check must not advance the cursor; decisions arrive whole"
 assert "tail-of-answer" not in glance and '"text_bytes": 914' in glance, glance
 assert "--max-bytes 65536" in glance and "ack to receive answers whole" in glance, glance
 assert "tail-of-answer" in hook_state.live_thread_hint(payload("codex")), "a participant gets answers whole"
+# The session that asked already holds the answers through its own command:
+# only other sessions receive them, and non-answer turns still reach it.
+asker = dict(os.environ, OMS_AGENT="claude", CLAUDE_CODE_SESSION_ID="asker")
+subprocess.run(thread + ["append", "--id", "live", "--role", "question", "--text", "Owner question?"],
+               env=asker, capture_output=True, text=True, check=True)
+hook_state.live_thread_hint(payload("asker"))
+call("append", "--id", "live", "--role", "answer", "--text", "owner-answer-body")
+call("append", "--id", "live", "--role", "note", "--text", "owner-seat-note")
+call("append", "--id", "live", "--role", "decision", "--text", "owner-sees-decisions")
+owned = hook_state.live_thread_hint(payload("asker"))
+assert "owner-sees-decisions" in owned and "owner-answer-body" not in owned and "owner-seat-note" not in owned, owned
+assert not hook_state.live_thread_hint(payload("asker")), "suppressed turns must not replay"
+assert "owner-answer-body" in hook_state.live_thread_hint(payload("codex")), "other sessions still get answers"
+hook_state.live_thread_hint(payload("claude"))
 large = "\\" * 3000
 for suffix in ("one", "two"):
     call("append", "--id", "live", "--role", "answer", "--text", large + suffix)

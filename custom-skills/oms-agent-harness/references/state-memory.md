@@ -123,7 +123,9 @@ id and repository. Do not join unrelated work through the global CURRENT pointer
   task approval, or evidence that the recipient changed code.
 - Existing prompt and edit hooks deliver new turns from the current **live**
   thread once per session. They never acknowledge on the agent's behalf or
-  block replies; `OMS_LIVE_COLLAB=0` disables this feedback. A hook must run for
+  block replies; `OMS_LIVE_COLLAB=0` disables this feedback. The session that
+  asked a thread question gets its answers and seat notes from its own command,
+  not again through the hook. A hook must run for
   delivery to happen: it cannot interrupt a model thinking or a long tool call.
   Clients without those hooks use the same explicit incremental read.
 - Reuse plan leases, isolated worktrees, change guards, and exact patch landing
