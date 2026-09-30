@@ -90,8 +90,19 @@ def marker_block(lines: List[str]) -> Optional[Tuple[int, int, bool]]:
     if len(begins) != 1 or len(ends) != 1 or ends[0] <= begins[0]:
         raise ConfigError("managed Codex HUD markers are incomplete or duplicated")
     start, finish = begins[0], ends[0]
-    managed = [body(line) for line in lines[start + 1 : finish]] == [STATUS_LINE]
+    inner = [body(line) for line in lines[start + 1 : finish]]
+    managed = inner == [STATUS_LINE] or displaced(lines, start, finish)
     return start, finish, managed
+
+
+def displaced(lines: List[str], start: int, finish: int) -> bool:
+    """Codex adds a table before the file's trailing comments; when END closed
+    the file, `codex mcp add` put [mcp_servers.*] inside our block."""
+    inner = [body(line) for line in lines[start + 1 : finish]]
+    rest = [line for line in inner[1:] if line.strip()]
+    return (bool(inner) and inner[0] == STATUS_LINE and bool(rest)
+            and ANY_TABLE_RE.match(rest[0]) is not None
+            and not any(body(line).strip() for line in lines[finish + 1 :]))
 
 
 def status_key(lines: List[str]) -> Tuple[bool, Optional[int]]:
@@ -154,7 +165,12 @@ def remove(lines: List[str]) -> Tuple[List[str], str, bool]:
     if not managed:
         return lines, "preserved customized status line", False
     updated = list(lines)
-    del updated[start : finish + 1]
+    if displaced(lines, start, finish):
+        # Keep the table Codex placed there; drop only our three lines.
+        for index in (finish, start + 1, start):
+            del updated[index]
+    else:
+        del updated[start : finish + 1]
     validate_toml("".join(updated))
     return updated, "removed", True
 

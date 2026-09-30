@@ -1219,12 +1219,21 @@ EOF
   done
 
   # No CLIs on PATH is non-fatal while installing, but removal cannot claim it
-  # cleaned state it had no command with which to inspect.
+  # cleaned state it had no command with which to inspect — unless each CLI's
+  # own config shows no entry under our name (a provider never installed).
   PATH="/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" > "$TMP/mcp-none" ||
     fail "missing CLIs must be notes, not failures"
   grep -Fq "claude CLI absent" "$TMP/mcp-none" || fail "missing claude should be noted"
+  mkdir -p "$TMP/mcp-clean-home"
+  HOME="$TMP/mcp-clean-home" CODEX_HOME="$TMP/mcp-clean-home/.codex" PATH="/usr/bin:/bin" \
+    bash "$ROOT/scripts/install-mcp.sh" --remove > "$TMP/mcp-clean" 2>&1 ||
+    fail "absent CLIs with no registration in their configs blocked removal: $(cat "$TMP/mcp-clean")"
+  mkdir -p "$TMP/mcp-held-home/.codex"
+  printf '{"mcpServers": {"oh-my-setting": {"command": "python3"}}}\n' > "$TMP/mcp-held-home/.claude.json"
+  printf '[mcp_servers.oh-my-setting]\ncommand = "python3"\n' > "$TMP/mcp-held-home/.codex/config.toml"
   status=0
-  out="$(PATH="/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" --remove 2>&1)" || status=$?
+  out="$(HOME="$TMP/mcp-held-home" CODEX_HOME="$TMP/mcp-held-home/.codex" PATH="/usr/bin:/bin" \
+    bash "$ROOT/scripts/install-mcp.sh" --remove 2>&1)" || status=$?
   [ "$status" -ne 0 ] || fail "missing MCP CLIs were accepted during removal"
   printf '%s' "$out" | grep -Fq "claude CLI is required" ||
     fail "missing claude removal did not explain its recovery requirement"
@@ -1346,10 +1355,14 @@ PY
     bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-absent" ||
     fail "absent agy in auto mode must be a note"
   grep -Fq "agy CLI absent" "$TMP/agy-absent" || fail "absent agy should be noted"
+  PATH="/usr/bin:/bin" HOME="$TMP/agy-home" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" --remove > "$TMP/agy-remove-clean" 2>&1 ||
+    fail "absent agy with no installed plugin copy blocked removal: $(cat "$TMP/agy-remove-clean")"
+  mkdir -p "$TMP/agy-home/.gemini/config/plugins/oh-my-setting"
   status=0
   PATH="/usr/bin:/bin" HOME="$TMP/agy-home" \
     bash "$ROOT/scripts/install-agy-plugin.sh" --remove > "$TMP/agy-remove-absent" 2>&1 || status=$?
-  [ "$status" -ne 0 ] || fail "missing agy CLI was accepted during removal"
+  [ "$status" -ne 0 ] || fail "missing agy CLI was accepted while its plugin copy remains"
 }
 
 # --- antigravity surface certification --------------------------------------

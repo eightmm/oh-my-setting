@@ -98,6 +98,24 @@ class CodexHudTomlFallbackTest(unittest.TestCase):
         with self.assertRaisesRegex(HUD.ConfigError, expected):
             HUD.validate_toml("[tui\nanimations = true\n")
 
+    @unittest.skipUnless(importlib.util.find_spec("tomllib") or importlib.util.find_spec("tomli"),
+                         "needs a TOML parser to validate the rewritten config")
+    def test_table_codex_inserted_inside_the_block_is_kept_on_remove(self):
+        # `codex mcp add` puts its table before the file's trailing comments,
+        # which lands it between our status line and END when END closed the file.
+        mcp = '[mcp_servers.oh-my-setting]\ncommand = "python3"\n'
+        text = "[tui]\n%s\n%s\n\n%s%s\n" % (HUD.BEGIN, HUD.STATUS_LINE, mcp, HUD.END)
+        with tempfile.TemporaryDirectory() as directory:
+            config = pathlib.Path(directory) / "config.toml"
+            config.write_text(text, encoding="utf-8")
+            self.assertEqual(self.run_helper("check", config)[1].strip(), "codex-hud: managed")
+            status, stdout, stderr = self.run_helper("remove", config)
+            self.assertEqual((status, stderr), (0, ""), stdout)
+            self.assertEqual(config.read_text(encoding="utf-8"), "[tui]\n\n" + mcp)
+            # Anything after END means it did not close the file: not ours to edit.
+            config.write_text(text + "[other]\n", encoding="utf-8")
+            self.assertIn("preserved customized", self.run_helper("remove", config)[1])
+
 
 if __name__ == "__main__":
     unittest.main()

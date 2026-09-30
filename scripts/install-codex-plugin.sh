@@ -282,9 +282,27 @@ install_plugin() {
 
 if [ "$REMOVE" = "1" ]; then
   remove_failed=0
-  if ! command -v codex >/dev/null 2>&1; then
-    echo "error: codex CLI is required to inspect and remove its plugin and marketplace" >&2
+  # Our marker blocks go first. Codex rewrites config.toml when it removes a
+  # table and drops the comments right above it, which took the end marker
+  # of the block before the marketplace table with it.
+  if ! configure_hud remove; then
+    echo "error: could not remove the managed Codex HUD" >&2
     remove_failed=1
+  fi
+  if ! configure_usage remove; then
+    echo "error: could not remove the managed Codex usage keys" >&2
+    remove_failed=1
+  fi
+  if ! command -v codex >/dev/null 2>&1; then
+    # With no plugin or marketplace entry in its config, an absent CLI holds
+    # nothing of ours; anything present still needs the CLI to remove.
+    if [ -e "$CODEX_CONFIG" ] && grep -Fq -e "$PLUGIN_NAME@$MARKETPLACE_NAME" \
+        -e "marketplaces.$MARKETPLACE_NAME" "$CODEX_CONFIG"; then
+      echo "error: codex CLI is required to inspect and remove its plugin and marketplace" >&2
+      remove_failed=1
+    else
+      echo "codex-plugin: codex CLI absent and its config holds no plugin or marketplace entry"
+    fi
   else
     plugin_state=0
     codex_plugin_state || plugin_state=$?
@@ -316,14 +334,6 @@ if [ "$REMOVE" = "1" ]; then
         remove_failed=1
         ;;
     esac
-  fi
-  if ! configure_hud remove; then
-    echo "error: could not remove the managed Codex HUD" >&2
-    remove_failed=1
-  fi
-  if ! configure_usage remove; then
-    echo "error: could not remove the managed Codex usage keys" >&2
-    remove_failed=1
   fi
   [ "$remove_failed" -eq 0 ] || exit 1
   echo "codex-plugin: removed $PLUGIN_NAME@$MARKETPLACE_NAME"

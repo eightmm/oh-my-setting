@@ -75,6 +75,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `answer` and `note` turns for that session only. One council launcher took
   about 50 KB of its own answers this way, one answer per prompt, long after
   reading the artifacts.
+- `oms uninstall` failed on every fresh default install, so nothing could be
+  removed. Removing the Codex marketplace table let Codex drop the comment
+  line above it, which was the end marker of an OMS usage block; the
+  managed Codex HUD and usage blocks are now removed before Codex rewrites
+  its config. A `codex mcp add` table that Codex placed inside the HUD block
+  at the end of the file is kept and no longer makes the HUD read as
+  customized. A provider CLI that was never installed no longer blocks
+  removal when its own config shows no OMS registration; a registration that
+  is present still requires the CLI. Uninstall also runs under the OMS
+  runtime so 3.9 and 3.10 hosts can read the TOML.
 - `oms doctor` reported a healthy install as failed on hosts whose
   `python3` is 3.9 or 3.10 (Amazon Linux 2023, RHEL 9): the installer wrote
   the Codex config with the 3.12 OMS runtime, but a standalone doctor read it

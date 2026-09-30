@@ -348,6 +348,13 @@ esac
 
 if ! command -v "$AGY_BIN" >/dev/null 2>&1; then
   if [ "$REMOVE" = "1" ]; then
+    # agy installs a plugin by copying it here; with no copy there is nothing
+    # an absent CLI could still hold.
+    if [ ! -e "$HOME/.gemini/config/plugins/oh-my-setting" ] &&
+       [ ! -L "$HOME/.gemini/config/plugins/oh-my-setting" ]; then
+      echo "agy-plugin: agy CLI absent and no installed plugin copy; nothing to remove"
+      exit 0
+    fi
     echo "error: agy CLI is required to inspect and remove the Antigravity plugin" >&2
     exit 1
   fi

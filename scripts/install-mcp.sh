@@ -72,9 +72,35 @@ mcp_registration_state() {  # CLI
   return 2
 }
 
+# Without the CLI, removal may still prove there is nothing to remove: the
+# CLI's own user config has no entry under our name (a core install that
+# never had this provider). Anything unreadable or present still fails.
+claude_config_lacks_registration() {
+  local config="$HOME/.claude.json"
+  [ -e "$config" ] || return 0
+  python3 - "$config" "$NAME" <<'PY'
+import json, sys
+try:
+    servers = json.load(open(sys.argv[1], encoding="utf-8")).get("mcpServers") or {}
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(1 if not isinstance(servers, dict) or sys.argv[2] in servers else 0)
+PY
+}
+
+codex_config_lacks_registration() {
+  local config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+  [ -e "$config" ] || return 0
+  ! grep -Eq "^[[:space:]]*\[mcp_servers\.(\"$NAME\"|'$NAME'|$NAME)[]. ]" "$config"
+}
+
 register_claude() {
   command -v claude >/dev/null 2>&1 || {
     if [ "$REMOVE" = "1" ]; then
+      if claude_config_lacks_registration; then
+        echo "mcp: claude CLI absent and its config holds no $NAME registration"
+        return 0
+      fi
       echo "error: claude CLI is required to inspect and remove its MCP registration" >&2
       return 1
     fi
@@ -120,6 +146,10 @@ register_claude() {
 register_codex() {
   command -v codex >/dev/null 2>&1 || {
     if [ "$REMOVE" = "1" ]; then
+      if codex_config_lacks_registration; then
+        echo "mcp: codex CLI absent and its config holds no $NAME registration"
+        return 0
+      fi
       echo "error: codex CLI is required to inspect and remove its MCP registration" >&2
       return 1
     fi

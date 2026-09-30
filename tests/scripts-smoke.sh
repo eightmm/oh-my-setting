@@ -18267,6 +18267,10 @@ case "$1 $2 $3" in
     ;;
   "plugin marketplace remove")
     [ -f "$CODEX_HOME/.test-marketplace-installed" ] || exit 25
+    # The real CLI rewrites config.toml and drops comments above the table it
+    # removes; a managed block must already be gone by then.
+    ! grep -q 'oh-my-setting managed Codex' "$CODEX_HOME/config.toml" 2>/dev/null ||
+      echo "markers-present-at-marketplace-remove" >> "$CODEX_LOG"
     rm -f "$CODEX_HOME/.test-marketplace-installed"
     ;;
 esac
@@ -18398,6 +18402,8 @@ EOF
   CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
     PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null ||
     fail "Codex plugin removal could not recover after a partial failure"
+  ! grep -Fq markers-present-at-marketplace-remove "$log" ||
+    fail "managed Codex blocks outlived the CLI rewrite that drops their markers"
   : > "$log"
   CODEX_HOME="$codex_home" CODEX_LOG="$log" OMS_TEST_MARKETPLACE_ROOT="$ROOT" \
     PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null ||
@@ -18420,19 +18426,28 @@ EOF
     PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/install-codex-plugin.sh" --remove >/dev/null ||
     fail "Codex removal could not recover after a state lookup failure"
 
-  cat > "$codex_home/config.toml" <<'EOF'
+  # Without the CLI, a config holding our marketplace still fails removal; one
+  # holding no plugin or marketplace entry of ours has nothing left to remove.
+  for held in 1 0; do
+    cat > "$codex_home/config.toml" <<'EOF'
 [tui]
 # >>> oh-my-setting managed Codex HUD >>>
 status_line = ["model-with-reasoning", "context-remaining", "five-hour-limit", "weekly-limit", "git-branch"]
 # <<< oh-my-setting managed Codex HUD <<<
 EOF
-  status=0
-  out="$(CODEX_HOME="$codex_home" CODEX_LOG="$log" PATH="/usr/bin:/bin" \
-    "$ROOT/scripts/install-codex-plugin.sh" --remove 2>&1)" || status=$?
-  [ "$status" -ne 0 ] || fail "missing codex CLI was accepted during plugin removal"
-  if grep -Fq 'oh-my-setting managed Codex HUD' "$codex_home/config.toml"; then
-    fail "missing codex CLI prevented independent managed HUD cleanup"
-  fi
+    [ "$held" = 0 ] || printf '\n[marketplaces.oh-my-setting-local]\nsource = "x"\n' >> "$codex_home/config.toml"
+    status=0
+    out="$(CODEX_HOME="$codex_home" CODEX_LOG="$log" PATH="/usr/bin:/bin" \
+      "$ROOT/scripts/install-codex-plugin.sh" --remove 2>&1)" || status=$?
+    if [ "$held" = 1 ]; then
+      [ "$status" -ne 0 ] || fail "missing codex CLI was accepted while its marketplace entry remains"
+    else
+      [ "$status" -eq 0 ] || fail "missing codex CLI with no entry of ours blocked removal: $out"
+    fi
+    if grep -Fq 'oh-my-setting managed Codex HUD' "$codex_home/config.toml"; then
+      fail "missing codex CLI prevented independent managed HUD cleanup"
+    fi
+  done
 }
 
 test_codex_plugin_has_no_vague_default_prompt() {
