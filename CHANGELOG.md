@@ -75,6 +75,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `answer` and `note` turns for that session only. One council launcher took
   about 50 KB of its own answers this way, one answer per prompt, long after
   reading the artifacts.
+- A fresh Linux host with no `python3` (Debian, Ubuntu, Fedora and Arch
+  images ship none) stopped the installer, although it installs uv and its
+  own Python anyway. With neither `python3` nor uv, the installer now reads
+  the uv pin from `tools.lock.json` without Python, verifies the archive's
+  sha256, builds the OMS runtime, and points the managed `python3` shim at
+  that runtime's stable launcher. Missing git, tar or gzip are installed
+  through apt, dnf, microdnf, yum, zypper, pacman, apk or brew; on macOS
+  without Command Line Tools the stub `git` is recognized and the error
+  names `xcode-select --install`.
 - Building the private OMS Python failed for users whose shell sets uv
   preferences for their own projects: `UV_PYTHON_PREFERENCE=only-system`
   made `uv venv --managed-python` refuse, and `UV_PYTHON_DOWNLOADS=never`

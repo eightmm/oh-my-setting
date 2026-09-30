@@ -717,26 +717,45 @@ run_as_root() {
   fi
 }
 
-install_git_if_missing() {
-  if command -v git >/dev/null 2>&1; then
-    return 0
-  fi
+# Minimal images (rocky-minimal, opensuse, alpine, arch) lack git or the tar
+# and gzip that locked tool archives need; install only what is missing.
+install_system_packages_if_missing() {
+  local missing=() package
+  for package in "$@"; do
+    # Without Command Line Tools, macOS /usr/bin/git is a stub that only offers
+    # to install them; it exists but cannot clone.
+    if [ "$package" = git ]; then
+      git --version >/dev/null 2>&1 || missing+=(git)
+    else
+      command -v "$package" >/dev/null 2>&1 || missing+=("$package")
+    fi
+  done
+  [ "${#missing[@]}" -gt 0 ] || return 0
 
-  echo "git missing; attempting install"
+  echo "${missing[*]} missing; attempting install"
 
   if command -v apt-get >/dev/null 2>&1; then
     run_as_root apt-get update
-    run_as_root apt-get install -y git
+    run_as_root apt-get install -y "${missing[@]}"
   elif command -v dnf >/dev/null 2>&1; then
-    run_as_root dnf install -y git
+    run_as_root dnf install -y "${missing[@]}"
+  elif command -v microdnf >/dev/null 2>&1; then
+    run_as_root microdnf install -y "${missing[@]}"
   elif command -v yum >/dev/null 2>&1; then
-    run_as_root yum install -y git
+    run_as_root yum install -y "${missing[@]}"
+  elif command -v zypper >/dev/null 2>&1; then
+    run_as_root zypper --non-interactive install "${missing[@]}"
   elif command -v pacman >/dev/null 2>&1; then
-    run_as_root pacman -Sy --noconfirm git
+    run_as_root pacman -Sy --noconfirm "${missing[@]}"
+  elif command -v apk >/dev/null 2>&1; then
+    run_as_root apk add "${missing[@]}"
   elif command -v brew >/dev/null 2>&1; then
-    brew install git
+    brew install "${missing[@]}"
+  elif [ "$(uname -s)" = Darwin ]; then
+    echo "error: ${missing[*]} required; run 'xcode-select --install', then rerun" >&2
+    exit 1
   else
-    echo "error: git is required; install it manually and rerun" >&2
+    echo "error: ${missing[*]} required; install manually and rerun" >&2
     exit 1
   fi
 }
@@ -799,11 +818,23 @@ ensure_python3() {
     fi
   fi
 
+  # Neither exists on a fresh host (Debian, Ubuntu, Fedora and Arch images ship
+  # no python3): build the OMS runtime from the pinned uv and expose it.
+  if [ -z "$candidate" ] && ! oms_platform_is_windows; then
+    # shellcheck disable=SC1091
+    . "$DEST/scripts/lib/file-lock.sh"
+    # shellcheck disable=SC1091
+    . "$DEST/scripts/lib/python-runtime.sh"
+    if oms_python_runtime_bootstrap "$DEST"; then
+      candidate=runtime
+    fi
+  fi
+
   if [ -z "$candidate" ]; then
     if oms_platform_is_windows; then
       echo "error: Python 3.9+ is required; install Python and rerun" >&2
     else
-      echo "error: a Python 3.9+ 'python3' command is required (installing uv also satisfies this)" >&2
+      echo "error: no Python 3.9+ 'python3' and the pinned uv could not build one; see the error above" >&2
     fi
     exit 1
   fi
@@ -830,6 +861,10 @@ ensure_python3() {
       printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
         'exec "$(uv python find)" "$@"' > "$shim"
       ;;
+    runtime)
+      printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
+        "exec \"$(oms_python_runtime_root)/bin/python3\" \"\$@\"" > "$shim"
+      ;;
     *)
       printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
         'exec python "$@"' > "$shim"
@@ -839,7 +874,7 @@ ensure_python3() {
   echo "python3 shim: $shim -> $candidate"
 }
 
-install_git_if_missing
+install_system_packages_if_missing git tar gzip
 
 # Reinstall is also an update path. Refuse before fetch/checkout so a local
 # edit or untracked file in the managed checkout can never be hidden, collided

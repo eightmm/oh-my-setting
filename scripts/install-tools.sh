@@ -76,11 +76,7 @@ activate_provider_paths() {
 }
 
 sha256_file() {
-  if has_cmd sha256sum; then sha256sum "$1" | awk '{print $1}'
-  elif has_cmd shasum; then shasum -a 256 "$1" | awk '{print $1}'
-  elif has_cmd openssl; then openssl dgst -sha256 "$1" | awk '{print $NF}'
-  else echo "error: sha256sum, shasum, or openssl is required" >&2; return 1
-  fi
+  oms_sha256_file "$1"
 }
 
 sha512_file() {
@@ -111,22 +107,7 @@ download_locked() {  # URL DEST
 }
 
 locked_platform() {
-  local os arch
-  if oms_platform_is_windows; then
-    os=windows
-  else
-    case "$(uname -s)" in
-      Linux) os=linux ;;
-      Darwin) os=darwin ;;
-      *) echo "error: unsupported tool platform: $(uname -s)" >&2; return 1 ;;
-    esac
-  fi
-  case "$(uname -m)" in
-    x86_64|amd64) arch=amd64 ;;
-    aarch64|arm64) arch=arm64 ;;
-    *) echo "error: unsupported tool architecture: $(uname -m)" >&2; return 1 ;;
-  esac
-  printf '%s-%s\n' "$os" "$arch"
+  oms_tool_platform
 }
 
 node_exact_version() {

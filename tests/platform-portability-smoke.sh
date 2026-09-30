@@ -234,6 +234,73 @@ grep -Fq -- "venv --managed-python --no-project --no-config --python $runtime_ve
 ! grep '^env ' "$runtime_uv_log" | grep -Fvxq 'env downloads=manual preference= managed= certs=1' ||
   fail "user uv settings leaked into the private runtime build: $(grep '^env ' "$runtime_uv_log" | sort -u)"
 
+# The bootstrap reads the lock before any Python exists; it must agree with
+# tool-lock.py on every key it can read, whatever the lock's formatting.
+for key in uv.version python.version $("$real_python3" - "$ROOT/tools.lock.json" <<'PY'
+import json, sys
+for platform, row in json.load(open(sys.argv[1], encoding="utf-8"))["uv"]["platforms"].items():
+    for field in ("url", "sha256", "archive"):
+        print("uv.platforms.%s.%s" % (platform, field))
+PY
+); do
+  [ "$(oms_lock_scalar "$ROOT/tools.lock.json" "$key")" = \
+    "$("$real_python3" "$ROOT/scripts/lib/tool-lock.py" --lock "$ROOT/tools.lock.json" get "$key" | tr -d '\r')" ] ||
+    fail "Python-free lock reader disagrees with tool-lock.py on $key"
+done
+
+# A host with neither python3 nor uv: the pinned uv is fetched and verified,
+# the runtime is built, and the managed shim names its stable launcher. No
+# step may run python3.
+boot="$TMP/bootstrap"
+mkdir -p "$boot/archive/uv-fixture" "$boot/bin"
+cp "$runtime_uv" "$boot/archive/uv-fixture/uv"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$boot/archive/uv-fixture/uvx"
+chmod +x "$boot/archive/uv-fixture/uvx"
+tar -czf "$boot/uv.tar.gz" -C "$boot/archive" uv-fixture
+boot_platform="$(oms_tool_platform)"
+"$real_python3" - "$runtime_repo/tools.lock.json" "$boot_platform" "$(oms_sha256_file "$boot/uv.tar.gz")" <<'PY'
+import json, sys
+path, platform, digest = sys.argv[1:]
+row = json.load(open(path, encoding="utf-8"))
+row["uv"]["platforms"][platform].update(url="https://example.invalid/uv.tar.gz", sha256=digest)
+json.dump(row, open(path, "w", encoding="utf-8"), indent=2)
+PY
+printf '#!/usr/bin/env bash\nwhile [ "$#" -gt 1 ]; do [ "$1" = -o ] && cp "%s" "$2"; shift; done\n' \
+  "$boot/uv.tar.gz" > "$boot/bin/curl"
+printf '#!/usr/bin/env bash\necho called >> "%s"\nexit 97\n' "$boot/python-called" > "$boot/bin/python3"
+chmod +x "$boot/bin/curl" "$boot/bin/python3"
+(
+  export PATH="$boot/bin:$PATH" OMS_PYTHON_RUNTIME_ROOT="$boot/runtime" \
+    OMS_PYTHON_RUNTIME_UV_BIN_DIR="$boot/uv/bin"
+  # shellcheck source=scripts/lib/file-lock.sh
+  . "$ROOT/scripts/lib/file-lock.sh"
+  # shellcheck source=scripts/lib/python-runtime.sh
+  . "$ROOT/scripts/lib/python-runtime.sh"
+  oms_python_runtime_bootstrap "$runtime_repo" > "$boot/out" 2>&1 ||
+    fail "Python-free bootstrap failed: $(cat "$boot/out")"
+  [ ! -e "$boot/python-called" ] || fail "the Python-free bootstrap ran python3"
+  [ "$(sed -n 1p "$boot/uv/bin/uv.oh-my-setting-managed")" = "sha256=$(oms_sha256_file "$boot/uv/bin/uv")" ] ||
+    fail "bootstrapped uv lacks the owner record doctor and ensure_uv read"
+  printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
+    "exec \"$OMS_PYTHON_RUNTIME_ROOT/bin/python3\" \"\$@\"" > "$boot/python3-shim"
+  chmod +x "$boot/python3-shim"
+  oms_install_python_shim_owned "$boot/python3-shim" || fail "runtime-backed shim was not recognized"
+  [ "$("$boot/python3-shim" -c 'print("runtime-shim-ok")')" = runtime-shim-ok ] ||
+    fail "runtime-backed shim did not run the OMS runtime"
+  "$real_python3" - "$runtime_repo/tools.lock.json" "$boot_platform" <<'PY'
+import json, sys
+path, platform = sys.argv[1:]
+row = json.load(open(path, encoding="utf-8"))
+row["uv"]["platforms"][platform]["sha256"] = "0" * 64
+json.dump(row, open(path, "w", encoding="utf-8"), indent=2)
+PY
+  rm -rf "$boot/uv" "$boot/runtime"
+  if oms_python_runtime_bootstrap "$runtime_repo" > "$boot/out" 2>&1; then
+    fail "a uv archive with the wrong sha256 was accepted"
+  fi
+  [ ! -e "$boot/uv/bin/uv" ] || fail "an unverified uv was installed"
+)
+
 # A scheduled bootstrap failure replaces stale success, before any Git mutation.
 printf '%s\n' '#!/usr/bin/env bash' 'echo "error: fixture runtime unavailable" >&2' 'exit 9' \
   > "$runtime_repo/scripts/python-runtime.sh"

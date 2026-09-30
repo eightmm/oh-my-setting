@@ -143,17 +143,19 @@ oms_python_runtime_locked_python() {
   printf '%s\n' "$python"
 }
 
-oms_python_runtime_write_launcher() {
-  local root="$1" version="$2" name="$3" target stage
-  target="$root/launchers/$version/$name"
-  [ ! -L "$root/launchers/$version" ] || return 1
-  mkdir -p "$root/launchers/$version"
-  stage="$(mktemp "$root/launchers/$version/.$name.XXXXXX")" || return
+oms_python_runtime_write_launcher() {  # ROOT VERSION NAME [DIR]
+  local root="$1" version="$2" name="$3" dir="${4:-launchers/$2}" up target stage
+  # bin/ holds the one version-free path a managed python3 shim can name.
+  case "$dir" in bin) up=.. ;; *) up=../.. ;; esac
+  target="$root/$dir/$name"
+  [ ! -L "$root/$dir" ] || return 1
+  mkdir -p "$root/$dir"
+  stage="$(mktemp "$root/$dir/.$name.XXXXXX")" || return
   {
-    printf '#!/usr/bin/env bash\nversion=%s\n' "$version"
+    printf '#!/usr/bin/env bash\nversion=%s\nup=%s\n' "$version" "$up"
     cat <<'EOF_LAUNCHER'
 set -euo pipefail
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/$up" && pwd -P)"
 unset PYTHONHOME
 for candidate in "$root/envs/$version/bin/python3" \
     "$root/envs/$version/bin/python" "$root/envs/$version/Scripts/python.exe"; do
@@ -199,6 +201,7 @@ oms_python_runtime_ensure_locked() {
       mv "$current_stage" "$root/current"
       oms_python_runtime_write_launcher "$root" "$version" python3
       oms_python_runtime_write_launcher "$root" "$version" python
+      oms_python_runtime_write_launcher "$root" "$version" python3 bin
       return 0
     fi
     oms_python_runtime_fail "existing environment is invalid; preserved for repair: $env_dir" || return
@@ -234,6 +237,7 @@ oms_python_runtime_ensure_locked() {
   mv "$current_stage" "$root/current"
   oms_python_runtime_write_launcher "$root" "$version" python3
   oms_python_runtime_write_launcher "$root" "$version" python
+  oms_python_runtime_write_launcher "$root" "$version" python3 bin
 }
 
 oms_python_runtime_ensure() {
@@ -243,6 +247,57 @@ oms_python_runtime_ensure() {
   root="$(cd "$(dirname "$root")" && pwd -P)/$(basename "$root")" || return
   OMS_PYTHON_RUNTIME_ROOT="$root" oms_with_file_lock "$root/current" \
     oms_python_runtime_ensure_locked "$@"
+}
+
+# A fresh host may have neither python3 nor uv, while everything that reads
+# tools.lock.json is Python. Fetch the pinned uv with curl, verify its sha256,
+# and build the runtime from the lock without any interpreter. The uv lands
+# where python-runtime.sh ensure keeps it, with the same owner record.
+oms_python_runtime_bootstrap() {  # REPO_ROOT; needs platform.sh and file-lock.sh
+  local lock="$1/tools.lock.json" platform uv_version url expected archive
+  local version root uv_dir tmp name src stage
+  platform="$(oms_tool_platform)" || return
+  case "$platform" in windows-*) return 1 ;; esac
+  uv_version="$(oms_lock_scalar "$lock" uv.version)" &&
+    url="$(oms_lock_scalar "$lock" "uv.platforms.$platform.url")" &&
+    expected="$(oms_lock_scalar "$lock" "uv.platforms.$platform.sha256")" &&
+    archive="$(oms_lock_scalar "$lock" "uv.platforms.$platform.archive")" &&
+    version="$(oms_lock_scalar "$lock" python.version)" ||
+    oms_python_runtime_fail "cannot read uv and Python pins from $lock" || return
+  [ "$archive" = tar.gz ] || oms_python_runtime_fail "unexpected uv archive: $archive" || return
+  root="$(oms_python_runtime_root)"
+  uv_dir="${OMS_PYTHON_RUNTIME_UV_BIN_DIR:-$(dirname "$root")/uv/bin}"
+  if ! "$uv_dir/uv" --version 2>/dev/null | grep -Fq "uv $uv_version"; then
+    command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 ||
+      oms_python_runtime_fail "curl and tar are required to fetch uv" || return
+    for name in uv uvx; do
+      if [ -e "$uv_dir/$name" ] || [ -L "$uv_dir/$name" ]; then
+        [ -f "$uv_dir/$name.oh-my-setting-managed" ] ||
+          oms_python_runtime_fail "refusing to replace unowned $uv_dir/$name" || return
+      fi
+    done
+    echo "fetching uv $uv_version ($platform) to build the OMS Python runtime"
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-uv.XXXXXX")" || return
+    if ! curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$tmp/uv.tar.gz" ||
+       [ "$(oms_sha256_file "$tmp/uv.tar.gz")" != "$expected" ] ||
+       ! tar -xzf "$tmp/uv.tar.gz" -C "$tmp"; then
+      rm -rf "$tmp"
+      oms_python_runtime_fail "uv $uv_version download or sha256 verification failed" || return
+    fi
+    mkdir -p "$uv_dir"
+    for name in uv uvx; do
+      src="$(find "$tmp" -type f -name "$name" -print | sed -n '1p')"
+      [ -n "$src" ] || { rm -rf "$tmp"; oms_python_runtime_fail "uv archive lacks $name" || return; }
+      stage="$uv_dir/.$name.oh-my-setting-stage"
+      cp "$src" "$stage" && chmod 0755 "$stage" && mv "$stage" "$uv_dir/$name" &&
+        printf 'sha256=%s\n' "$(oms_sha256_file "$uv_dir/$name")" > "$uv_dir/$name.oh-my-setting-managed" ||
+        { rm -rf "$tmp"; return 1; }
+    done
+    rm -rf "$tmp"
+    "$uv_dir/uv" --version 2>/dev/null | grep -Fq "uv $uv_version" ||
+      oms_python_runtime_fail "fetched uv does not report $uv_version" || return
+  fi
+  oms_python_runtime_ensure "$uv_dir/uv" "$version"
 }
 
 oms_python_runtime_activate() {
