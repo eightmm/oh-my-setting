@@ -54,7 +54,8 @@ def main(path: str) -> None:
         match = STOP_REASON.match(line.strip())
         if not match:
             continue
-        if match.group("is_error") == "1":
+        # A refusal can close with is_error=0; it is still no answer.
+        if match.group("is_error") == "1" or match.group("reason") == "refusal":
             print("blocked")
             return
         if match.group("reason") in ("max_tokens", "stream_truncated"):

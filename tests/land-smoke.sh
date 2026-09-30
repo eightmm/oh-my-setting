@@ -24,8 +24,10 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 git init -q --bare -b main "$TMP/remote.git"
 repo="$TMP/work.. tree"
 git clone -q "$TMP/remote.git" "$repo" 2>/dev/null
-mkdir -p "$repo/scripts" "$repo/.oms"
+mkdir -p "$repo/scripts" "$repo/.oms" "$repo/.github/workflows"
 printf '*\n' > "$repo/.oms/.gitignore"
+printf 'on: push\n' > "$repo/.github/workflows/test.yml"
+git -C "$repo" add .github/workflows/test.yml
 gate() {  # gate BODY -> commits scripts/check.sh with that body
   printf '#!/usr/bin/env bash\n%s\n' "$1" > "$repo/scripts/check.sh"
   git -C "$repo" add scripts/check.sh
@@ -351,6 +353,27 @@ for ci_result in failure skipped success; do
     ! grep -q update "$TMP/events" || fail "install ran without successful CI"
   fi
 done
+# A run GitHub skipped verified nothing; only the no-wait path may say skipped.
+gate 'echo run skipped probe'
+if OMS_TEST_CI_RESULT=skipped "$LAND" --repo "$repo" --wait --no-update --ci-wait 1 \
+    > "$TMP/run-skipped.out" 2>&1; then
+  fail "a skipped GitHub run passed as CI: $(cat "$TMP/run-skipped.out")"
+fi
+grep -q 'ci run-skipped' "$TMP/run-skipped.out" || fail "skipped run reason missing: $(cat "$TMP/run-skipped.out")"
+# A leading-zero budget is decimal, not an octal error after the push.
+gate 'echo zero padded wait probe'
+OMS_TEST_CI_RESULT=success "$LAND" --repo "$repo" --wait --no-update --ci-wait 08 \
+  > "$TMP/padded.out" 2>&1 || fail "--ci-wait 08 must mean eight seconds: $(cat "$TMP/padded.out")"
+# A commit without workflows has no run to wait for.
+git -C "$repo" rm -q .github/workflows/test.yml
+gate 'echo no workflow probe'
+: > "$TMP/events"
+OMS_TEST_CI_RESULT=missing "$LAND" --repo "$repo" --wait --no-update --ci-wait 30 \
+  > "$TMP/no-workflow.out" 2>&1 || fail "a repo without workflows must not wait for CI: $(cat "$TMP/no-workflow.out")"
+! grep -q ci "$TMP/events" || fail "CI was queried for a repo without workflows"
+mkdir -p "$repo/.github/workflows"
+printf 'on: push\n' > "$repo/.github/workflows/test.yml"
+git -C "$repo" add .github/workflows/test.yml
 gate 'echo update failure probe'
 if OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wait 1 \
   > "$TMP/update-failed.out" 2>&1; then

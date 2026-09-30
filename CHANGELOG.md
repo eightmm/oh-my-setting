@@ -75,6 +75,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `answer` and `note` turns for that session only. One council launcher took
   about 50 KB of its own answers this way, one answer per prompt, long after
   reading the artifacts.
+- `oms land` no longer treats a GitHub run that GitHub itself skipped as
+  passing CI: such a run verified nothing and now reports `ci run-skipped`.
+  Only `--ci-wait 0` reports `skipped`. A commit without workflow files no
+  longer waits the whole CI budget and then fails as a timeout. A
+  zero-padded `--ci-wait 08` is decimal instead of an octal error after the
+  push.
+- `answer-quality` classified a Claude refusal that closed with
+  `is_error=0` as an answer; a `reason=refusal` stop is now `blocked`.
+- Any unexpected error in live thread delivery is now contained like the
+  other prompt-hook advisories instead of stopping the prompt hook.
 - A live thread whose first row is valid JSON but not an object raised
   `AttributeError` out of the prompt and edit hooks; it is now simply not a
   live thread. An ask seat found this unprompted during an A/B round.

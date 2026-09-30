@@ -1356,7 +1356,7 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
                 )
             write_json_atomic(path, {"thread": tid, "cursor": delta["cursor"]})
         return message
-    except (OSError, ValueError, TypeError, RecursionError, TimeoutError, subprocess.SubprocessError):
+    except Exception:
         return ""  # Optional collaboration cannot block tools or ordinary replies.
 
 

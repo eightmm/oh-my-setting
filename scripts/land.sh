@@ -70,6 +70,8 @@ while [ "$#" -gt 0 ]; do
 done
 case "$CI_WAIT" in ''|*[!0-9]*) echo "error: --ci-wait must be seconds" >&2; exit 2 ;; esac
 case "$SIBLING_WAIT" in ''|*[!0-9]*) echo "error: --sibling-wait must be seconds" >&2; exit 2 ;; esac
+# A leading zero would make shell arithmetic read "08" as bad octal after push.
+CI_WAIT=$((10#$CI_WAIT)) SIBLING_WAIT=$((10#$SIBLING_WAIT))
 REPO="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)" ||
   { echo "error: --repo is not a git checkout: $REPO" >&2; exit 2; }
 REPO="$(oms_strip_cr "$REPO")"
@@ -388,6 +390,10 @@ run_job() {
   local conclusion=skipped run_id="" deadline remaining query_result
   if [ "$resume" -eq 1 ] && [ "$(receipt_value ci.conclusion)" = success ]; then
     conclusion=success
+  elif [ "$CI_WAIT" -gt 0 ] &&
+      ! git -C "$REPO" ls-tree -r --name-only "$SHA" -- .github/workflows | grep -Eq '\.ya?ml$'; then
+    # No workflow can ever report on this commit; waiting only ends in timeout.
+    rset ci.conclusion=skipped ci.reason=no-workflows
   elif [ "$CI_WAIT" -gt 0 ]; then
     conclusion=timeout
     rset ci.conclusion=pending
@@ -416,6 +422,9 @@ run_job() {
       fi
       query_result="$(oms_strip_cr "$query_result")"
       read -r run_id conclusion <<< "$query_result"
+      # GitHub's "skipped" means no job verified this commit; the bare word is
+      # this script's own no-wait result, which must not be spoofed by a run.
+      [ "$conclusion" != skipped ] || conclusion=run-skipped
       rset ci.run_id="$run_id" ci.conclusion="$conclusion"
       [ "$run_id" != 0 ] && [ "$conclusion" != pending ] && break
       conclusion=timeout

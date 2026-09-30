@@ -1019,6 +1019,8 @@ test_review_verdicts_subcommand() {
   [ "$rc" = "0" ] || fail "a prompt-quoted stop-reason must not void a healthy seat (got $rc): $out"
   q="$(printf '# a\n\n## Prompt\n\n stop-reason: provider=claude reason=max_tokens subtype=success is_error=0\n\n## Output\n\nstop-reason: provider=claude reason=end_turn subtype=success is_error=0\nA complete answer with plenty of body to clear the length floor easily.\n\n## Exit\n\n0\n' > "$dir/quoted/aq.md"; python3 "$ROOT/scripts/lib/answer-quality.py" "$dir/quoted/aq.md")"
   [ "$q" = "ok" ] || fail "answer-quality must read the stop reason from the Output region only (got $q)"
+  q="$(printf '# a\n\n## Output\n\nstop-reason: provider=claude reason=refusal subtype=success is_error=0 category=cyber\nI cannot help with that request, but here is a long enough sentence.\n\n## Exit\n\n0\n' > "$dir/quoted/refusal.md"; python3 "$ROOT/scripts/lib/answer-quality.py" "$dir/quoted/refusal.md")"
+  [ "$q" = "blocked" ] || fail "a refusal stop reason with is_error=0 is not an answer (got $q)"
 
   # Debate runs: judge each provider's FINAL round, not round 1; a slug that
   # contains "-r9" must not be parsed as a round suffix.
