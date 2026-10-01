@@ -58,8 +58,11 @@ provider_names_file="$tmp/providers"
 oms_provider_selection_discovered_names "$PROVIDERS" > "$provider_names_file" || exit $?
 PROVIDER_NAMES="$(cat "$provider_names_file")"
 rows="$tmp/rows.jsonl"; : > "$rows"
-while IFS= read -r provider; do
-  [ -n "$provider" ] || continue
+# Providers are independent and each probe waits on a CLI start (cursor-agent
+# takes ~0.45s per call), so they run at once. Rows and stderr are kept per
+# provider and replayed in list order, as the sequential loop printed them.
+probe_provider() {  # PROVIDER -> one JSON row
+  provider="$1"
   binary="$(oms_provider_binary "$provider")"; installed=false; usable=false; version=""; default_reachable=false
   oms_provider_cli_discovered "$provider" && installed=true
   oms_provider_cli_available "$provider" && usable=true
@@ -111,7 +114,7 @@ while IFS= read -r provider; do
   python3 - "$provider" "$binary" "$installed" "$usable" "$version" "$default_reachable" "$family" \
     "$(oms_capability_read_field "$file" effort_mechanism 2>/dev/null || true)" \
     "$(oms_capability_read_field "$file" effort_values 2>/dev/null || true)" \
-    "$configured" "$configured_standing" "$routable" >> "$rows" <<'PY'
+    "$configured" "$configured_standing" "$routable" <<'PY'
 import json, sys
 p,b,i,u,v,d,f,m,e,c,cs,r=sys.argv[1:]
 print(json.dumps({"provider":p,"binary":b,"installed":i=="true","usable":u=="true","version":v or None,
@@ -120,9 +123,27 @@ print(json.dumps({"provider":p,"binary":b,"installed":i=="true","usable":u=="tru
  "configured_default_routable":{"routable":True,"not-routable":False}.get(cs),
  "routable":r.split()}))
 PY
+}
+
+count=0
+pids=()
+while IFS= read -r provider; do
+  [ -n "$provider" ] || continue
+  count=$((count + 1))
+  probe_provider "$provider" > "$tmp/row.$count" 2> "$tmp/err.$count" &
+  pids+=("$!")
 done <<EOF
 $PROVIDER_NAMES
 EOF
+probe_status=0
+for pid in ${pids[@]+"${pids[@]}"}; do
+  wait "$pid" || probe_status=$?
+done
+for ((index = 1; index <= count; index++)); do
+  cat "$tmp/err.$index" >&2
+  cat "$tmp/row.$index" >> "$rows"
+done
+[ "$probe_status" -eq 0 ] || exit "$probe_status"
 result="$tmp/result.json"
 python3 - "$rows" "$LIVE" "$REQUIRE_ALL" "$STRICT" > "$result" <<'PY'
 import json, sys

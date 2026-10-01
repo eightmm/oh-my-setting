@@ -190,7 +190,9 @@ for tool in claude codex cursor-agent; do
   cat > "$bin/$tool" <<'EOF_STUB'
 #!/usr/bin/env bash
 tool="${0##*/}"
-{ printf '%s' "$tool"; printf ' <%s>' "$@"; printf '\n'; } >> "$TEST_PROBE_LOG"
+line="$tool"; for arg in "$@"; do line="$line <$arg>"; done
+# One write per line: providers probe concurrently and appends must not interleave.
+printf '%s\n' "$line" >> "$TEST_PROBE_LOG"
 case " $* " in
   *' --version '*) printf '%s 1.2.3\n' "$tool" ;;
   *) printf 'Usage: %s --help\n' "$tool" ;;
@@ -200,7 +202,8 @@ EOF_STUB
 done
 cat > "$bin/npm" <<'EOF_STUB'
 #!/usr/bin/env bash
-{ printf npm; printf ' <%s>' "$@"; printf '\n'; } >> "$TEST_PROBE_LOG"
+line=npm; for arg in "$@"; do line="$line <$arg>"; done
+printf '%s\n' "$line" >> "$TEST_PROBE_LOG"
 case " $* " in
   *' list '*)
     python3 - "$TEST_TOOL_LOCK" "$5" <<'PY'
@@ -259,7 +262,8 @@ run_logged_doctor "$TMP/probes-1.log" "$TMP/probes-1.out" "$TMP/probes-1.err" "$
 assert_probes_once "$TMP/probes-1.log"
 run_logged_doctor "$TMP/probes-2.log" "$TMP/probes-2.out" "$TMP/probes-2.err" "$TMP/probes-2.rc"
 assert_probes_once "$TMP/probes-2.log"
-cmp "$TMP/probes-1.log" "$TMP/probes-2.log" ||
+# Providers probe concurrently, so compare the runs as sets of commands.
+cmp <(sort "$TMP/probes-1.log") <(sort "$TMP/probes-2.log") ||
   fail 'a second doctor run did not probe the same commands anew'
 
 TEST_UNCACHED=1 run_logged_doctor "$TMP/probes-uncached.log" \
