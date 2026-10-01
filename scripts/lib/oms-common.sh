@@ -174,7 +174,29 @@ oms_git_assert_safe_execution_config() {  # REPO [diff-read]
   paths="$common_dir/config
 $worktree_dir/config.worktree"
 
-  OMS_GIT_CONFIG_PATHS="$paths" OMS_GIT_CONFIG_MODE="$mode" python3 - <<'PY'
+  # One process asks this up to nine times for the same repository (70% of
+  # 709 calls were repeats, 2026-10-01). Reuse a pass only for byte-identical
+  # config read by the read builtin, never across processes, and never for a
+  # file holding a NUL byte, which a shell variable cannot represent.
+  local cache_key="$mode|$paths" config_path config_text
+  for config_path in "$common_dir/config" "$worktree_dir/config.worktree"; do
+    if [ -e "$config_path" ] || [ -L "$config_path" ]; then
+      config_text=""
+      if IFS= read -r -d '' config_text < "$config_path" 2>/dev/null; then
+        cache_key=""  # stopped at a NUL byte: always inspect
+        break
+      fi
+      [ -r "$config_path" ] || { cache_key=""; break; }
+      cache_key="$cache_key|present:${#config_text}:$config_text"
+    else
+      cache_key="$cache_key|absent"
+    fi
+  done
+  if [ -n "$cache_key" ] && [ "${OMS_GIT_SAFE_CONFIG_PASSED:-}" = "$cache_key" ]; then
+    return 0
+  fi
+
+  OMS_GIT_CONFIG_PATHS="$paths" OMS_GIT_CONFIG_MODE="$mode" python3 - <<'PY' || return $?
 import configparser
 import os
 import re
@@ -260,6 +282,7 @@ for path in paths:
                 raise SystemExit(2)
 raise SystemExit(0)
 PY
+  [ -z "$cache_key" ] || OMS_GIT_SAFE_CONFIG_PASSED="$cache_key"
 }
 
 # Refuse index hints that deliberately make tracked work invisible to ordinary
@@ -727,7 +750,7 @@ PY
 # forged claim row would otherwise carry a weakened verifier or scope into
 # the next legitimate claim. Those always restore. The run still fails either
 # way: this repairs owner state, it never admits the worker's output.
-OMS_COMMON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OMS_COMMON_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
 oms_worker_operation_restore() {  # REPO SNAPSHOT EXPECTED_SHA
   local repo="$1"
   local snapshot="$2"

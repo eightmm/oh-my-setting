@@ -1,7 +1,15 @@
 # shellcheck shell=bash
 # Shared per-file inter-process locks. Sourced, not executed.
 
-OMS_FILE_LOCK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Libraries are always sourced by a path, so the directory needs no dirname
+# process; this file is sourced over a thousand times in one gate run.
+OMS_FILE_LOCK_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
+
+# The kernel name cannot change within a process; ask uname once. Not
+# exported, so a child started with a different PATH still asks its own.
+oms_lock_kernel() {
+  [ -n "${OMS_LOCK_KERNEL:-}" ] || OMS_LOCK_KERNEL="$(uname -s 2>/dev/null || true)"
+}
 if [ -f "$OMS_FILE_LOCK_LIB_DIR/poll.sh" ]; then
   # shellcheck source=scripts/lib/poll.sh
   . "$OMS_FILE_LOCK_LIB_DIR/poll.sh"
@@ -105,7 +113,8 @@ oms_process_native_pid() {  # LOGICAL_PID
   esac
   [ "$logical_pid" -gt 0 ] || return 75
 
-  case "$(uname -s 2>/dev/null || true)" in
+  oms_lock_kernel
+  case "$OMS_LOCK_KERNEL" in
     MINGW*|MSYS*|CYGWIN*)
       [ -r "/proc/$logical_pid/winpid" ] || return 75
       IFS= read -r native_pid < "/proc/$logical_pid/winpid" || return 75
@@ -126,7 +135,8 @@ oms_process_native_pid() {  # LOGICAL_PID
 # one pid namespace, but records its derivation too so newly written markers
 # stay self-describing without changing legacy-reader behavior.
 oms_process_native_pid_source() {
-  case "$(uname -s 2>/dev/null || true)" in
+  oms_lock_kernel
+  case "$OMS_LOCK_KERNEL" in
     MINGW*|MSYS*|CYGWIN*) printf 'msys-proc-v1\n' ;;
     *) printf 'logical-pid-v1\n' ;;
   esac

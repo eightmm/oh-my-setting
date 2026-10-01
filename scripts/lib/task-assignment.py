@@ -77,7 +77,11 @@ def main():
     parser.add_argument("--fallback-model", default="")
     parser.add_argument("--reasoning-effort", default="auto")
     parser.add_argument("--workload", default="standard")
+    # Unit-separated fields for the shell resolver: one interpreter start
+    # instead of a second one to pick fields out of the JSON.
+    parser.add_argument("--fields", action="store_true")
     args = vars(parser.parse_args())
+    fields = args.pop("fields")
     try:
         plan = args.pop("check_collaboration_plan")
         if plan:
@@ -89,7 +93,11 @@ def main():
         task = json.loads(args.pop("task_json"))
         if not isinstance(task, dict):
             raise ValueError("task must be an object")
-        print(json.dumps(resolve(task, args), sort_keys=True))
+        route = resolve(task, args)
+        if fields:
+            print("\x1f".join(route[k] for k in ("provider", "model", "fallback_model", "reasoning_effort", "workload")))
+        else:
+            print(json.dumps(route, sort_keys=True))
     except (OSError, KeyError, AttributeError, ValueError, TypeError) as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2

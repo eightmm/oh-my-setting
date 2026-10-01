@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-_OMS_PROJECT_STATE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_OMS_PROJECT_STATE_ROOT="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
 _OMS_PROJECT_STATE_HELPER="$_OMS_PROJECT_STATE_ROOT/project-state.py"
 
 # Pure PROJECT.md publication-state parser. Callers keep their own authority;

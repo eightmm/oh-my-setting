@@ -48,22 +48,18 @@ oms_reasoning_validate() {
 # All plan entrances hydrate the same reviewed route. A task assignment owns
 # every routing field so one carrier never inherits another carrier's model.
 oms_task_assignment_resolve() {
-  local route values
-  route="$(python3 "$OMS_MODEL_ROUTING_LIB_DIR/task-assignment.py" \
+  local values
+  # A non-whitespace separator keeps empty fields (no fallback model) in place.
+  values="$(python3 "$OMS_MODEL_ROUTING_LIB_DIR/task-assignment.py" \
     --task-json "$1" --provider "$2" --model "$3" --fallback-model "$4" \
-    --reasoning-effort "$5" --workload "${6:-standard}")" || return $?
-  values="$(printf '%s' "$route" | python3 -c '
-import json,sys
-d=json.load(sys.stdin)
-print("\t".join(d[k] for k in ("provider","model","fallback_model","reasoning_effort","workload")))')" || return $?
+    --reasoning-effort "$5" --workload "${6:-standard}" --fields)" || return $?
   values="${values//$'\r'/}"
-  OMS_TASK_PROVIDER="$(printf '%s' "$values" | cut -f1)"
+  # shellcheck disable=SC2034 # OMS_TASK_WORKLOAD is consumed by the callers.
+  IFS=$'\x1f' read -r OMS_TASK_PROVIDER OMS_TASK_MODEL OMS_TASK_FALLBACK_MODEL \
+    OMS_TASK_REASONING_EFFORT OMS_TASK_WORKLOAD <<EOF
+$values
+EOF
   OMS_TASK_PROVIDER="$(oms_provider_normalize "$OMS_TASK_PROVIDER")" || return $?
-  OMS_TASK_MODEL="$(printf '%s' "$values" | cut -f2)"
-  OMS_TASK_FALLBACK_MODEL="$(printf '%s' "$values" | cut -f3)"
-  OMS_TASK_REASONING_EFFORT="$(printf '%s' "$values" | cut -f4)"
-  # shellcheck disable=SC2034 # Result consumed by the plan/delegate callers.
-  OMS_TASK_WORKLOAD="$(printf '%s' "$values" | cut -f5)"
   oms_model_validate_name "$OMS_TASK_MODEL" || return $?
   oms_model_validate_name "$OMS_TASK_FALLBACK_MODEL" || return $?
   oms_reasoning_validate "$OMS_TASK_REASONING_EFFORT"

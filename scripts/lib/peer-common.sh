@@ -9,14 +9,15 @@
 #   MA_DEBATE_SECTIONS   newline-joined section list for debate replies
 # plus the per-run globals referenced inside each function.
 
+MA_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
 # shellcheck source=agent-memory-common.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-memory-common.sh"
+. "$MA_LIB_DIR/agent-memory-common.sh"
 # shellcheck source=agent-task-common.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-task-common.sh"
+. "$MA_LIB_DIR/agent-task-common.sh"
 # shellcheck source=harness-residue.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness-residue.sh"
+. "$MA_LIB_DIR/harness-residue.sh"
 # shellcheck source=model-routing.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/model-routing.sh"
+. "$MA_LIB_DIR/model-routing.sh"
 
 
 MA_SAFE_PATHS=(
@@ -53,7 +54,7 @@ fail() {
 }
 
 ma_scripts_dir() {
-  cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd
+  printf '%s\n' "${MA_LIB_DIR%/*}"
 }
 
 ma_repo_label() {

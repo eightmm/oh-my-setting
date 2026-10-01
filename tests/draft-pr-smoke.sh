@@ -1231,6 +1231,17 @@ EOF
   cs_case 'unsafe command-scope Git config: GIT_CONFIG_PARAMETERS|rc=2|' GIT_CONFIG_PARAMETERS=x
   cs_case 'unsafe command-scope Git config: GIT_CONFIG_PARAMETERS|rc=2|' \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_CONFIG_PARAMETERS=y
+  # A pass is reused within one process only for byte-identical config: an
+  # unsafe edit after a pass is caught, and a restored config passes again.
+  got="$(cd "$repo" && bash -c '. "$1/scripts/lib/oms-common.sh" >/dev/null 2>&1
+    oms_git_assert_safe_execution_config "$2" >/dev/null 2>&1; echo "first=$?"
+    cp "$2/.git/config" "$2/.git/config.safe"
+    printf "[core]\n\tfsmonitor = /x\n" >> "$2/.git/config"
+    oms_git_assert_safe_execution_config "$2" >/dev/null 2>&1; echo "edited=$?"
+    cp "$2/.git/config.safe" "$2/.git/config"
+    oms_git_assert_safe_execution_config "$2" >/dev/null 2>&1; echo "restored=$?"' _ "$ROOT" "$repo" | tr '\n' ' ')"
+  [ "$got" = "first=0 edited=2 restored=0 " ] ||
+    fail "a cached Git config pass must not survive a config edit: $got"
 
   # UI/task cancellation targets the publisher PID. It must synchronously
   # terminate the whole push group, including a descendant that ignores TERM,

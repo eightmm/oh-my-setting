@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Shared harness memory helpers. Sourced, not executed.
 
-AGENT_MEMORY_COMMON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AGENT_MEMORY_COMMON_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
 AGENT_MEMORY_DB_HELPER="$AGENT_MEMORY_COMMON_LIB_DIR/agent-memory-db.py"
 
 # shellcheck source=file-lock.sh
