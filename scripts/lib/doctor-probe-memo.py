@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 
 
@@ -41,55 +40,18 @@ def emit(path, stream):
         shutil.copyfileobj(handle, stream.buffer)
 
 
-def execute(command, entry):
-    """Run once, keeping each stream and the order its chunks arrived in, so a
-    2>&1 caller can be replayed without running the probe a second time."""
+def execute(command, entry, merged):
+    """Capture into files, never pipes: a descendant that keeps a pipe open
+    would outlive the probe's bound. A merged capture shares one file."""
     start = time.monotonic()
-    chunks = []
-    lock = threading.Lock()
-    try:
-        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except OSError as exc:
-        chunks.append((1, ("error: %s\n" % exc).encode("utf-8", "replace")))
-        result = 127 if isinstance(exc, FileNotFoundError) else 126
-    else:
-        def pump(pipe, index):
-            # Pipe threads, not select: native Windows Python selects sockets only.
-            for block in iter(lambda: os.read(pipe.fileno(), 65536), b""):
-                with lock:
-                    chunks.append((index, block))
-        threads = [threading.Thread(target=pump, args=(proc.stdout, 0)),
-                   threading.Thread(target=pump, args=(proc.stderr, 1))]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        proc.stdout.close()
-        proc.stderr.close()
-        result = proc.wait()
-    for index, name in enumerate(("stdout", "stderr")):
-        with open(entry / name, "wb") as handle:
-            handle.write(b"".join(block for i, block in chunks if i == index))
-    with open(entry / "order.json", "w", encoding="ascii") as handle:
-        json.dump([[index, len(block)] for index, block in chunks], handle)
+    with open(entry / "stdout", "wb") as stdout, open(entry / "stderr", "wb") as stderr:
+        try:
+            result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=stdout,
+                                    stderr=stdout if merged else stderr).returncode
+        except OSError as exc:
+            (stdout if merged else stderr).write(("error: %s\n" % exc).encode("utf-8", "replace"))
+            result = 127 if isinstance(exc, FileNotFoundError) else 126
     return (128 - result if result < 0 else result), time.monotonic() - start
-
-
-def replay(entry, mode):
-    if mode == "split":
-        emit(entry / "stdout", sys.stdout)
-        emit(entry / "stderr", sys.stderr)
-        return
-    with open(entry / "order.json", encoding="ascii") as handle:
-        order = json.load(handle)
-    streams = [open(entry / "stdout", "rb"), open(entry / "stderr", "rb")]
-    try:
-        for index, size in order:
-            sys.stdout.buffer.write(streams[index].read(size))
-    finally:
-        for stream in streams:
-            stream.close()
 
 
 def direct(command, merged):
@@ -103,6 +65,36 @@ def direct(command, merged):
     except OSError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 126
+
+
+def cached(entry, seconds):
+    try:
+        with open(entry / "result.json", encoding="ascii") as handle:
+            result = json.load(handle)
+        if ((seconds == 0 or result["elapsed"] <= seconds) and result["code"] not in (124, 137)
+                and (entry / "stdout").is_file() and (entry / "stderr").is_file()):
+            return result["code"]
+    except (OSError, KeyError, ValueError, TypeError):
+        pass
+    return None
+
+
+def capture(runner, cache, entry, merged):
+    """Run once; keep the result unless it timed out. Returns (code, dir, stage)."""
+    stage = Path(tempfile.mkdtemp(prefix=".probe-", dir=cache))
+    code, elapsed = execute(runner, stage, merged)
+    if code in (124, 137):
+        return code, stage, stage
+    with open(stage / "result.json", "w", encoding="ascii") as handle:
+        json.dump({"code": code, "elapsed": elapsed}, handle)
+    try:
+        # A fresh run may finish inside a tighter bound than the old one.
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        os.rename(stage, entry)
+        return code, entry, None
+    except OSError:
+        return code, stage, stage
 
 
 def main():
@@ -128,36 +120,36 @@ def main():
     if key_parts is None:
         return direct(runner, mode == "merged")
     key = hashlib.sha256(json.dumps(key_parts, ensure_ascii=True).encode("utf-8")).hexdigest()
-    entry = Path(cache) / key
+    stages = []
     try:
-        with open(entry / "result.json", encoding="ascii") as handle:
-            result = json.load(handle)
-        reusable = (seconds == 0 or result["elapsed"] <= seconds) and result["code"] not in (124, 137)
-        if reusable and all((entry / name).is_file() for name in ("stdout", "stderr", "order.json")):
-            replay(entry, mode)
-            return result["code"]
-    except (OSError, KeyError, ValueError, TypeError):
-        pass
-    stage = Path(tempfile.mkdtemp(prefix=".probe-", dir=cache))
-    try:
-        code, elapsed = execute(runner, stage)
-        if code not in (124, 137):
-            with open(stage / "result.json", "w", encoding="ascii") as handle:
-                json.dump({"code": code, "elapsed": elapsed}, handle)
-            try:
-                # A fresh run may finish inside a tighter bound than the old one.
-                if entry.is_dir():
-                    shutil.rmtree(entry)
-                os.rename(stage, entry)
-                source = entry
-            except OSError:
-                source = stage
-        else:
-            source = stage
-        replay(source, mode)
+        # Every caller shares one split capture. A 2>&1 caller replays it
+        # exactly while one stream is empty; only when both carry bytes is the
+        # probe run once more into a single file, the only way to keep the
+        # order of interleaved writes, and that capture is kept too.
+        entry = Path(cache) / key
+        code = cached(entry, seconds)
+        if code is None:
+            code, entry, stage = capture(runner, cache, entry, False)
+            stages.append(stage)
+        if mode == "split":
+            emit(entry / "stdout", sys.stdout)
+            emit(entry / "stderr", sys.stderr)
+            return code
+        if not (entry / "stdout").stat().st_size or not (entry / "stderr").stat().st_size:
+            emit(entry / "stdout", sys.stdout)
+            emit(entry / "stderr", sys.stdout)
+            return code
+        entry = Path(cache) / (key + "-merged")
+        code = cached(entry, seconds)
+        if code is None:
+            code, entry, stage = capture(runner, cache, entry, True)
+            stages.append(stage)
+        emit(entry / "stdout", sys.stdout)
         return code
     finally:
-        shutil.rmtree(stage, ignore_errors=True)
+        for stage in stages:
+            if stage is not None:
+                shutil.rmtree(stage, ignore_errors=True)
 
 
 if __name__ == "__main__":

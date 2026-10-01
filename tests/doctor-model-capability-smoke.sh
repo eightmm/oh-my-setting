@@ -191,8 +191,6 @@ for tool in claude codex cursor-agent; do
 #!/usr/bin/env bash
 tool="${0##*/}"
 { printf '%s' "$tool"; printf ' <%s>' "$@"; printf '\n'; } >> "$TEST_PROBE_LOG"
-# One probe writes both streams: a 2>&1 caller must still see it run once.
-[ "$tool" != cursor-agent ] || printf 'cursor-agent: notice on stderr\n' >&2
 case " $* " in
   *' --version '*) printf '%s 1.2.3\n' "$tool" ;;
   *) printf 'Usage: %s --help\n' "$tool" ;;
@@ -284,6 +282,27 @@ cmp "$TMP/json-cached.rc" "$TMP/json-uncached.rc" || fail 'cached JSON exit stat
 for residue in "$TMP"/oms-doctor-probe.*; do
   [ ! -e "$residue" ] || fail 'doctor left a probe cache after exit'
 done
+# The memo itself: interleaved streams replay in their native 2>&1 order,
+# and a descendant that keeps the probe's output open cannot hold the memo.
+memo_dir="$TMP/memo"
+mkdir -p "$memo_dir"
+printf '#!/usr/bin/env bash\necho run >> "%s"\nfor i in 1 2 3 4 5 6; do echo "o$i"; echo "e$i" >&2; done\n' \
+  "$TMP/interleave.runs" > "$bin/oms-interleave"
+printf '#!/usr/bin/env bash\nsleep 5 &\necho started\n' > "$bin/oms-linger"
+chmod +x "$bin/oms-interleave" "$bin/oms-linger"
+expected="$(PATH="$bin:$PATH" oms-interleave 2>&1)"
+for pass in 1 2; do
+  got="$(OMS_DOCTOR_PROBE_DIR="$memo_dir" PATH="$bin:$PATH" \
+    python3 "$ROOT/scripts/lib/doctor-probe-memo.py" 5 merged oms-interleave)"
+  [ "$got" = "$expected" ] || fail "merged probe replay changed the 2>&1 order (pass $pass): $got"
+done
+# One split capture, plus one merged capture because both streams carry bytes.
+[ "$(wc -l < "$TMP/interleave.runs" | tr -d ' ')" = 3 ] ||
+  fail "an interleaved probe ran $(wc -l < "$TMP/interleave.runs" | tr -d ' ') times, expected the control plus two"
+started=$SECONDS
+OMS_DOCTOR_PROBE_DIR="$memo_dir" PATH="$bin:$PATH" \
+  python3 "$ROOT/scripts/lib/doctor-probe-memo.py" 2 split oms-linger >/dev/null
+[ $((SECONDS - started)) -lt 4 ] || fail "a lingering probe descendant held the memo past its bound"
 echo 'doctor-probe-once: ok'
 
 echo 'doctor-model-capability-smoke: ok'
