@@ -172,11 +172,6 @@ oms_provider_binary() {
 oms_provider_run_bounded() { # SECONDS OUTPUT COMMAND...
   local seconds="$1" output="$2" helper
   shift 2
-  # Inside one doctor run an identical probe reuses its first result.
-  if [ -n "${OMS_DOCTOR_PROBE_DIR:-}" ] && declare -F oms_doctor_probe >/dev/null; then
-    oms_doctor_probe "$seconds" merged "$@" > "$output" 2>&1
-    return
-  fi
   if command -v timeout >/dev/null 2>&1 && timeout --version >/dev/null 2>&1; then
     timeout --kill-after=1 "$seconds" "$@" > "$output" 2>&1
   elif command -v gtimeout >/dev/null 2>&1 && gtimeout --version >/dev/null 2>&1; then
@@ -186,6 +181,18 @@ oms_provider_run_bounded() { # SECONDS OUTPUT COMMAND...
     command -v python3 >/dev/null 2>&1 && [ -f "$helper" ] || return 127
     python3 "$helper" "${seconds}s" 1s provider-probe "$@" > "$output" 2>&1
   fi
+}
+
+# An input-free usability probe: inside one doctor run an identical probe
+# reuses its first result. Stdin-fed calls (app-server RPC) never come here.
+oms_provider_probe_quiet() { # SECONDS COMMAND...
+  local seconds="$1"
+  shift
+  if [ -n "${OMS_DOCTOR_PROBE_DIR:-}" ] && declare -F oms_doctor_probe >/dev/null; then
+    oms_doctor_probe "$seconds" split "$@" >/dev/null 2>&1 </dev/null
+    return
+  fi
+  oms_provider_run_bounded "$seconds" /dev/null "$@" </dev/null
 }
 
 oms_provider_cli_discovered() {
@@ -221,12 +228,12 @@ oms_provider_cli_usable() {
     [ "$timeout_seconds" -gt 0 ] 2>/dev/null || timeout_seconds=5
     probe=("$binary")
     for arg in $(oms_provider_version_args "$provider"); do probe+=("$arg"); done
-    if oms_provider_run_bounded "$timeout_seconds" /dev/null "${probe[@]}" </dev/null; then
+    if oms_provider_probe_quiet "$timeout_seconds" "${probe[@]}"; then
       result=0
     else
       probe=("$binary")
       for arg in $(oms_provider_help_args "$provider"); do probe+=("$arg"); done
-      oms_provider_run_bounded "$timeout_seconds" /dev/null "${probe[@]}" </dev/null && result=0
+      oms_provider_probe_quiet "$timeout_seconds" "${probe[@]}" && result=0
     fi
   fi
   if [ "$result" -eq 0 ]; then

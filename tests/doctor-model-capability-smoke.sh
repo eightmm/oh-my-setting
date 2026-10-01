@@ -307,6 +307,12 @@ sleep 2
 got="$(OMS_DOCTOR_PROBE_DIR="$memo_dir" PATH="$bin:$PATH" \
   python3 "$ROOT/scripts/lib/doctor-probe-memo.py" 2 split oms-linger)"
 [ "$got" = started ] || fail "a descendant's late write changed a cached probe: $got"
+# Only input-free probes take the memo: a stdin-fed provider call inside a
+# doctor run (the app-server catalog RPC) must still receive its input.
+got="$(printf 'rpc-input\n' | OMS_DOCTOR_PROBE_DIR="$memo_dir" bash -c \
+  '. "$1/scripts/lib/doctor-probe-memo.sh"; . "$1/scripts/lib/provider-registry.sh"
+   oms_provider_run_bounded 5 "$2" cat; cat "$2"' _ "$ROOT" "$TMP/rpc.out")"
+[ "$got" = rpc-input ] || fail "a stdin-fed provider call lost its input inside a doctor run: $got"
 echo 'doctor-probe-once: ok'
 
 echo 'doctor-model-capability-smoke: ok'
