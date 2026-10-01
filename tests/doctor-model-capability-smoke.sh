@@ -256,7 +256,6 @@ assert_probes_once() { # LOG
   grep -Fq 'tool-lock.py ' "$1" || fail 'doctor did not exercise tool-lock get'
 }
 
-TEST_UNCACHED=0
 run_logged_doctor "$TMP/probes-1.log" "$TMP/probes-1.out" "$TMP/probes-1.err" "$TMP/probes-1.rc"
 assert_probes_once "$TMP/probes-1.log"
 run_logged_doctor "$TMP/probes-2.log" "$TMP/probes-2.out" "$TMP/probes-2.err" "$TMP/probes-2.rc"
