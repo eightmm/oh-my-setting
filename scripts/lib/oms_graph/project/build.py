@@ -149,6 +149,21 @@ def ensure(repo: Path, *, state: Optional[Path] = None, include: Sequence[str] =
             "stats": manifest["stats"], "skipped": len(manifest["skipped"])}
 
 
+# check() parses graph.json to validate it and a load_graph() in the same
+# process usually follows: hand that parse over once (popped, so no two
+# callers share one object) while the file is unchanged. The graph runs to
+# tens of MB, and each parse costs about 0.1s.
+_PARSED_GRAPH: Dict[Any, Any] = {}
+
+
+def _graph_key(path: Path) -> Any:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (str(path), info.st_ino, info.st_size, info.st_mtime_ns)
+
+
 def check(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
     """{"present","fresh","revision","stale":[...],"missing":[...],"new":[...]} from working-tree bytes."""
     directory = state_dir(Path(repo).resolve(), state)
@@ -174,10 +189,15 @@ def check(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
     graph_path = directory / "graph.json"
     graph = None
     if graph_path.exists() or graph_path.is_symlink():
+        key = _graph_key(graph_path)
         try:
             graph = json.loads(read_bytes(graph_path, GRAPH_BYTES_LIMIT).decode("utf-8"))
         except (ValueError, UnicodeError):
             pass
+        else:
+            _PARSED_GRAPH.clear()
+            if key is not None and key == _graph_key(graph_path):
+                _PARSED_GRAPH[key] = graph
     graph_valid = (isinstance(graph, dict)
                    and graph.get("schema") == PROJECT_SCHEMA
                    and isinstance(graph.get("revision"), str)
@@ -191,7 +211,11 @@ def check(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
 
 
 def load_graph(repo: Path, *, state: Optional[Path] = None) -> Dict[str, Any]:
-    graph = read_json(state_dir(Path(repo).resolve(), state) / "graph.json", None, limit=GRAPH_BYTES_LIMIT)
+    path = state_dir(Path(repo).resolve(), state) / "graph.json"
+    key = _graph_key(path)
+    graph = _PARSED_GRAPH.pop(key, None) if key is not None else None
+    if graph is None:
+        graph = read_json(path, None, limit=GRAPH_BYTES_LIMIT)
     if not isinstance(graph, dict):
         raise GraphError("project graph has not been built; run: oms graph project build")
     return graph
