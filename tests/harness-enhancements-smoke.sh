@@ -481,6 +481,8 @@ EOF
       --jobs 2 --only test_first --only test_selected_failure > "$out" 2>&1; then
     fail 'a failed selected worker must fail the parallel run'
   fi
+  grep -Fxq 'check: overlap-smoke.test_selected_failure FAILED' "$out" ||
+    fail "a failed smoke test must be named for the fail ledger: $(cat "$out")"
 
   local signal_suite="$TMP/signal-smoke.sh"
   local signal_tmp="$TMP/signal-tmp"

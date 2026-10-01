@@ -234,8 +234,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
     behavior they cover;
   - `oms land` and `check.sh --affected` print the change's net test and code
     lines;
-  - a failed land gate records its failing stages in the fail ledger, the
-    data a later round needs to retire tests that never catch anything.
+  - a failed land gate records its failing stages, and a failed smoke test by
+    name (`check: <suite>.<test> FAILED`), in the fail ledger: the data a
+    later round needs to retire tests that never catch anything. Each land
+    receipt keeps the push's test and code growth.
+  A five-seat council (2026-10-01) found the review gate still failed on a
+  "missing test" and that smoke failures went unnamed; both are fixed. It
+  rejected a hard test-ratio gate and deleting tests that never failed
+  without a targeted mutation check, and asked that shared fixture helpers
+  stay allowed.
 
 - The README is short again: a banner, badges, a one-line install, a
   how-it-works diagram, what to say and a one-line-per-row feature table.

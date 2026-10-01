@@ -353,6 +353,8 @@ run_job() {
     resume=1
   fi
   [ "$resume" -eq 1 ] || rset --reset
+  # Net test and code lines per push, kept to judge test growth by evidence.
+  rset growth="$(oms_test_growth "$REMOTE/$TARGET" "$SHA")"
   rset pid="$$" state=running started_at="$(now)" sha="$SHA" gate.command="$GATE" \
     remote="$REMOTE" target="$TARGET" log="$LOG" request="$STAMP" resumed="$resume"
   local t0 rc=0
@@ -368,9 +370,10 @@ run_job() {
     run_gate || rc=$?
     rset gate.rc="$rc" gate.seconds="$(( $(date +%s) - t0 ))"
     if [ "$rc" -ne 0 ]; then
-      # Name the failing stages: which tests ever catch anything is the input
-      # for retiring the ones that never do, and the log is gone in weeks.
-      failed_stages="$(sed -n 's/^check: \([A-Za-z0-9_.-]*\) FAILED.*/\1/p' "$LOG" | sort -u | tr '\n' ' ')"
+      # Name the failing stages and smoke tests: which tests ever catch
+      # anything is the input for retiring the ones that never do, and the
+      # ledger is queryable where scattered gate logs are not.
+      failed_stages="$(sed -n 's/^check: \([^ ]*\) FAILED.*/\1/p' "$LOG" | sort -u | tr '\n' ' ')"
       "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" record --kind verify --cmd "$GATE" \
         --exit "$rc" --summary "land: gate failed for $SHORT${failed_stages:+ in ${failed_stages% }} (see $LOG)" >/dev/null 2>&1 || true
       finish failed "gate exit $rc"; return 1

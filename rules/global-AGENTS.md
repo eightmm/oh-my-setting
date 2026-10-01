@@ -68,8 +68,8 @@ Default: concise, scoped, evidence-driven.
 
 ## Verification
 
-- Extend the nearest test; add one only if no test exercises the path.
-  No scaffolding; drop tests with the behavior they cover.
+- Extend the nearest test; add one only if no test runs the path. Share
+  fixtures; no scaffolding; drop tests with their behavior.
 - Run syntax, affected and required checks. Prose needs reference checks;
   agent instructions are contracts; install/permission/state changes need
   broader coverage. Graph uncertainty is not proof of safety.

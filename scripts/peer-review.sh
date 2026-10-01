@@ -139,7 +139,7 @@ Immediately before the final line, emit one line: CONFIDENCE: <value between 0.0
 End your response with exactly one final line: GATE: pass or GATE: fail.
 The final line must contain only that exact GATE text, with no punctuation or formatting.
 Use GATE: pass only if this change is ready to proceed with no blocking findings.
-Use GATE: fail if any blocking bug, regression, missing test, unclear contract, or unsafe operation remains.
+Use GATE: fail if any blocking bug, regression, unclear contract, or unsafe operation remains.
 Do not put any text after the final GATE line.
 EOF
 }

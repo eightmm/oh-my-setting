@@ -218,6 +218,8 @@ awk -v shard="$SHARD" -v total="$TOTAL" -v timings="$TIMINGS" -v only=" $ONLY " 
         if (index(only, " " names[i] " ") == 0) continue
       }
       if ((++selected - 1) % total != shard - 1) continue
+      # The marker names the test a failure belongs to.
+      print "printf \047smoke-test: %s\\n\047 " names[i]
       if (timings == "1") print "oms_smoke_run_test " names[i]
       else print names[i]
     }
@@ -258,6 +260,11 @@ OMS_SMOKE_RUNNER_ACTIVE=1 OMS_TEST_ROOT="$ROOT" \
 run_elapsed=$(( $(date +%s) - run_started ))
 if [ "$run_status" -ne 0 ] || [ "${OMS_VERBOSE:-0}" = "1" ]; then
   cat "$run_log"
+fi
+if [ "$run_status" -ne 0 ]; then
+  # Same shape as a check stage, so the land fail ledger records the test.
+  failed_test="$(sed -n 's/^smoke-test: //p' "$run_log" | tail -n 1)"
+  [ -z "$failed_test" ] || echo "check: $(basename "$SUITE" .sh).$failed_test FAILED"
 fi
 if [ -n "$timing_file" ] && [ -s "$timing_file" ]; then
   LC_ALL=C sort -rn "$timing_file" | sed -n "1,${TIMING_LIMIT}p" |

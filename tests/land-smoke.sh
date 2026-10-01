@@ -78,6 +78,8 @@ head="$(git -C "$peer" rev-parse HEAD)"
 "$LAND" --repo "$peer" --wait --ci-wait 0 > "$TMP/pass.out" || fail "green gate must land: $(cat "$TMP/pass.out")"
 grep -Fq 'land: this push changes tests +0 / code +1 lines' "$TMP/pass.out" ||
   fail "land must show the push's test and code growth: $(cat "$TMP/pass.out")"
+grep -Fq '"growth": "tests +0 / code +1 lines"' "$(find "$state_land" -type f -name '*.json' -print | sort | tail -n 1)" ||
+  fail "the land receipt must keep the push's test and code growth"
 [ "$(remote_tip)" = "$head" ] || fail "remote main must be the landed commit"
 receipt="$(find "$state_land" -type f -name '*.json' -print | sort | tail -n 1)"
 [ -n "$receipt" ] || fail "green gate must write an XDG-state receipt"
@@ -219,14 +221,14 @@ gate 'echo invalid sibling gate ok'
 git -C "$repo" worktree remove --force "$sibling"
 
 # --- 4. red gate: failure recorded, nothing pushed -----------------------------
-gate 'echo boom; echo "check: demo-smoke FAILED (1s)"; exit 3'
+gate 'echo boom; echo "check: affected:tests/demo-smoke.sh FAILED (1s)"; echo "check: scripts-smoke.test_demo FAILED"; exit 3'
 before="$(remote_tip)"
 if "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/fail.out" 2>&1; then
   fail "a red gate must exit nonzero: $(cat "$TMP/fail.out")"
 fi
 [ "$(remote_tip)" = "$before" ] || fail "a red gate must not push"
 grep -q 'gate exit 3' "$TMP/fail.out" || fail "the failure reason must be shown: $(cat "$TMP/fail.out")"
-"$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved | grep -q 'land: gate failed .* in demo-smoke' ||
+grep -Fq 'in affected:tests/demo-smoke.sh scripts-smoke.test_demo' "$repo/.oms/failures.jsonl" ||
   fail "a red gate must be recorded in the fail ledger with its failing stages"
 
 # --- 5. HEAD moves during the gate: nothing pushed -----------------------------
