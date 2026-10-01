@@ -83,7 +83,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   answers a second time through the prompt and edit hooks: it already reads
   them from its own `peer-ask` or `consult` output. The question turn records
   a hash of the asking Claude Code or Codex session, and the hook skips
-  `answer` and `note` turns for that session only. One council launcher took
+  `answer` and `note` turns for that session only, and its own question. One council launcher took
   about 50 KB of its own answers this way, one answer per prompt, long after
   reading the artifacts.
 - `oms uninstall` failed on every fresh default install, so nothing could be

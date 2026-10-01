@@ -330,7 +330,7 @@ assert "tail-of-answer" in hook_state.live_thread_hint(payload("codex")), "a par
 asker = dict(os.environ, OMS_AGENT="claude", CLAUDE_CODE_SESSION_ID="asker")
 subprocess.run(thread + ["append", "--id", "live", "--role", "question", "--text", "Owner question?"],
                env=asker, capture_output=True, text=True, check=True)
-hook_state.live_thread_hint(payload("asker"))
+assert "Owner question?" not in hook_state.live_thread_hint(payload("asker")), "the asker must not get its own question back"
 call("append", "--id", "live", "--role", "answer", "--text", "owner-answer-body")
 call("append", "--id", "live", "--role", "note", "--text", "owner-seat-note")
 call("append", "--id", "live", "--role", "decision", "--text", "owner-sees-decisions")

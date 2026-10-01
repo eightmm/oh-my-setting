@@ -1338,7 +1338,8 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
                 # A session that asked here reads answers and seat notes from its
                 # own command; replaying them doubled a council into its context.
                 if asked:
-                    rows = [row for row in rows if row.get("role") not in ("answer", "note")]
+                    rows = [row for row in rows if row.get("role") not in ("answer", "note")
+                            and row.get("origin") != consumer]
                 preview = not acked
                 if preview:
                     rows = [answer_preview(row) for row in rows]
