@@ -533,6 +533,30 @@ class JournalTestCase(unittest.TestCase):
         self.assertEqual("system-local", name)
         self.assertIsNone(timezone)
 
+    @unittest.skipUnless(hasattr(__import__("time"), "tzset"), "needs time.tzset")
+    def test_prompt_stamp_expires_at_system_local_midnight_across_dst(self):
+        import time
+        saved = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "America/New_York"
+            time.tzset()
+            with mock.patch.dict(os.environ, {"OMS_WORK_JOURNAL_TIMEZONE": ""}), \
+                    mock.patch.object(wj, "_zoneinfo_candidate", return_value=None):
+                # 00:30 EST on the spring-forward day: tomorrow's midnight is EDT.
+                store = wj.JournalStore(
+                    self.repo, clock=lambda: dt.datetime(2026, 3, 8, 5, 30, tzinfo=dt.timezone.utc))
+            self.assertIsNone(store.timezone_info)
+            store.last_head = "0" * 40
+            store.write_prompt_stamp("tick", False)
+            until = int((store.root / "prompt-tick").read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(int(dt.datetime(2026, 3, 9, 4, 0, tzinfo=dt.timezone.utc).timestamp()), until)
+        finally:
+            if saved is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = saved
+            time.tzset()
+
     def test_explicit_iana_without_timezone_database_falls_back_explicitly(self):
         with mock.patch.object(wj, "ZoneInfo", side_effect=RuntimeError("no tzdata")):
             name, timezone = wj.resolve_timezone("Asia/Seoul")

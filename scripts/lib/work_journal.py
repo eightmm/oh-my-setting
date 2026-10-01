@@ -2501,8 +2501,14 @@ class JournalStore:
         now = self.clock()
         if now.tzinfo is None:
             now = now.replace(tzinfo=dt.timezone.utc)
-        local = now.astimezone(self.timezone_info)
-        midnight = dt.datetime.combine(local.date() + dt.timedelta(days=1), dt.time(), local.tzinfo)
+        if self.timezone_info is None:
+            # System-local fallback: a naive midnight lets the OS apply the
+            # offset in force then, not today's (spring DST moves it an hour).
+            tomorrow = now.astimezone().date() + dt.timedelta(days=1)
+            midnight = dt.datetime.combine(tomorrow, dt.time())
+        else:
+            tomorrow = now.astimezone(self.timezone_info).date() + dt.timedelta(days=1)
+            midnight = dt.datetime.combine(tomorrow, dt.time(), self.timezone_info)
         sizes = [str(item.stat().st_size) if item.is_file() else ""
                  for item in (self.events_path, self.digest_state_path, self.distill_state_path)]
         atomic_write_text(path, "\n".join([str(int(midnight.timestamp())), head] + sizes + [signature]) + "\n")
