@@ -44,7 +44,8 @@ def execute(command, entry, merged):
     """Capture into files, never pipes: a descendant that keeps a pipe open
     would outlive the probe's bound. A merged capture shares one file."""
     start = time.monotonic()
-    with open(entry / "raw-stdout", "wb") as stdout, open(entry / "raw-stderr", "wb") as stderr:
+    raw = Path(tempfile.mkdtemp(prefix=".raw-", dir=entry.parent))
+    with open(raw / "stdout", "wb") as stdout, open(raw / "stderr", "wb") as stderr:
         try:
             result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=stdout,
                                     stderr=stdout if merged else stderr).returncode
@@ -52,10 +53,12 @@ def execute(command, entry, merged):
             (stdout if merged else stderr).write(("error: %s\n" % exc).encode("utf-8", "replace"))
             result = 127 if isinstance(exc, FileNotFoundError) else 126
     # A descendant may still hold the raw files: replay a snapshot it cannot
-    # write to, so later hits never see bytes the probe did not produce.
+    # write to, so later hits never see bytes the probe did not produce. The
+    # raw files live outside the entry because Windows refuses to delete a
+    # file in use; the doctor's cache cleanup takes what is left.
     for name in ("stdout", "stderr"):
-        shutil.copyfile(entry / ("raw-" + name), entry / name)
-        os.unlink(entry / ("raw-" + name))
+        shutil.copyfile(raw / name, entry / name)
+    shutil.rmtree(raw, ignore_errors=True)
     return (128 - result if result < 0 else result), time.monotonic() - start
 
 
