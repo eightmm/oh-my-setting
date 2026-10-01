@@ -9091,6 +9091,7 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"item_r","type":"reasoning"
 printf '%s\n' '{"type":"item.completed","item":{"id":"item_t","type":"todo_list","items":[]}}'
 printf '%s\n' '{"type":"item.completed","item":{"id":"item_e","type":"error","message":"warn"}}'
 printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"JSONL answer body: pong."}}'
+printf '%s\n' '{"type":"error","message":"Reconnecting... 2/5 (stream disconnected before completion: idle timeout waiting for websocket)"}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5,"cached_input_tokens":8}}'
 EOF
   chmod +x "$bin_dir/codex"

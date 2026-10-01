@@ -1871,6 +1871,7 @@ if not events:
 texts = []
 errors = []
 completed = False
+failed = False
 usages = []
 tool_calls = 0
 # Only items that run something are tools; todo_list, error and untyped items
@@ -1904,9 +1905,14 @@ for doc in events:
         usage = doc.get("usage")
         usages.append(usage if isinstance(usage, dict) else {})
     elif kind in ("turn.failed", "error"):
+        failed = failed or kind == "turn.failed"
         errors.append(json.dumps(doc.get("error") or doc.get("message") or doc, ensure_ascii=False))
 
-if errors:
+# A stream reconnect arrives as a top-level error event ("Reconnecting...
+# 2/5") and the turn still completes. Reading it as a failure discarded a
+# finished worker patch (2026-10-01); only turn.failed, or an error the turn
+# never closed after, fails the turn.
+if failed or (errors and not completed):
     stop = "stop-reason: provider=codex reason=turn_failed subtype=error is_error=1"
 elif completed:
     stop = "stop-reason: provider=codex reason=turn_completed subtype=success is_error=0"
@@ -1915,6 +1921,7 @@ elif completed:
     # auth noise ahead of every live answer), and quoting them forward buys
     # no verdict. A failed or cut turn keeps them — there they are evidence.
     others = []
+    errors = []
 else:
     stop = "stop-reason: provider=codex reason=stream_truncated subtype=incomplete is_error=0"
 
