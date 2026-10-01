@@ -122,7 +122,7 @@ oms_install_lifecycle_lock_path() {
     return 75
   fi
   mkdir -p "$parent" || return
-  parent="$(CDPATH= cd -P -- "$parent" && pwd -P)" || return
+  parent="$(CDPATH='' cd -P -- "$parent" && pwd -P)" || return
   printf '%s/%s\n' "$parent" "$name"
 }
 

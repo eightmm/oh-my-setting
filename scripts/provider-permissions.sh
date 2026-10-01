@@ -267,7 +267,7 @@ PY
       cursor="${cursor%/*}"
       [ -n "$cursor" ] || cursor=/
     done
-    physical="$(CDPATH= cd -P -- "$cursor" && pwd -P)" || return 1
+    physical="$(CDPATH='' cd -P -- "$cursor" && pwd -P)" || return 1
     physical="${physical//$'\r'/}"
     candidate="$(OMS_PP_PATH_B64="$(oms_pp_b64 "$physical$suffix/$leaf")" python3 - <<'PY'
 import base64
