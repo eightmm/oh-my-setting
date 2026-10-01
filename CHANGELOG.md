@@ -75,6 +75,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- `plan-from-spec` accepts a planner task that omits an empty `depends`
+  list; one such omission used to fail the whole autopilot proposal.
+
 - A seat answer that quoted a policy sentence (in quotes, curly quotes or
   backticks) was recorded as a policy decline; the best-scoring Codex seat of
   an audit was dropped this way. Quoted sentences no longer count, while a
@@ -221,6 +224,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   the installer's contract and fail on duplicate, retired or drifted rows.
 
 ### Changed
+
+- The runtime evidence envelope behind `oms state` and `oms inbox` resolves
+  each source file's path once instead of once per row: with 3,640 artifact
+  rows the build fell from 557ms to 156ms (profiled), and it no longer grows
+  with path resolutions per row.
 
 - Runtime activation (`doctor`, `update`, `auto-update`, and so `oms inbox`)
   reads the Python and Node pins with the awk lock reader instead of one
