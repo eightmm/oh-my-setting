@@ -225,6 +225,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- One `oms doctor` run, including its report child, model-doctor and other
+  descendants, starts each external probe (same resolved binary and argv)
+  once and replays the result through `scripts/lib/doctor-probe-memo.py`.
+  The doctor owns a per-run cache directory and removes it on exit. Repair
+  re-checks start fresh, and stdout, stderr and exit status stay
+  byte-identical to an uncached run. Before this, one run started
+  `claude --version` six times.
+
 - The runtime evidence envelope behind `oms state` and `oms inbox` resolves
   each source file's path once instead of once per row: with 3,640 artifact
   rows the build fell from 557ms to 156ms (profiled), and it no longer grows
