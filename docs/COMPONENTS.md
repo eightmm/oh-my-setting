@@ -632,7 +632,10 @@ trigger a GPT-6/Claude council with one rebuttal round (Codex defaults to Astra
 or the explicit Codex planner model). Both seats must
 finish and meet `--deliberation`'s per-seat response contract: alternatives,
 evidence, counterargument, verification and explicit deltas/disagreements.
-JSON-only task lists or empty sections fail closed. The council receives only
+JSON-only task lists or empty sections fail closed. A seat whose answer is
+otherwise complete but lacks required headings is asked once, in the same
+round, to restate its own answer under every heading; the restatement is used
+only if it passes, and both answers stay in the artifacts. The council receives only
 contract data; JSON decomposition instructions stay in the planner call.
 Structure is checked mechanically; reasoning still needs parent judgment.
 Planner reasoning effort applies only to decomposition; the council keeps

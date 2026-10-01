@@ -230,6 +230,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- A council seat that answers in full but misses required `--deliberation`
+  headings is re-asked once, in the same round, to restate its answer under
+  every heading, instead of being dropped as a non-answer. On 2026-10-01 a
+  planning seat that omitted only `Recommendation` failed a whole autopilot
+  proposal.
+
 - `oms state` (and so `oms inbox`) starts its independent read-only collectors
   at once instead of one after another (681ms to 305ms), and `state-verify`
   does the same for its engines (924ms to 355ms, part of `oms doctor`).
