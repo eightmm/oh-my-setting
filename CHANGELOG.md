@@ -230,6 +230,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms state` (and so `oms inbox`) starts its independent read-only collectors
+  at once instead of one after another (681ms to 305ms), and `state-verify`
+  does the same for its engines (924ms to 355ms, part of `oms doctor`).
+  Outputs and health verdicts are unchanged.
+
 - `model-doctor` probes its providers concurrently and replays their rows and
   stderr in list order (2.0s to 1.4s). The prompt hook's journal tick is
   skipped while the stamp the journal wrote for its last prompt tick still
