@@ -63,42 +63,56 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-state-verify.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 # Delegated engines. Their exit codes are data here, not verdicts: this
-# script re-reports their findings under one summary.
-RUN_VALIDATE_EXIT=0
-"$ROOT/scripts/run.sh" validate --dir "$REPO/.oms" \
-  > "$TMP/run-validate.out" 2>&1 || RUN_VALIDATE_EXIT=$?
-ARTIFACT_EXIT=0
+# script re-reports their findings under one summary. They read independent
+# state, so they run at once (about 1s in sequence, the slowest one now);
+# each leaves its exit code in TMP.
+sv_engine() {  # NAME COMMAND... (output redirected by the caller)
+  local name="$1" rc=0
+  shift
+  "$@" || rc=$?
+  printf '%s\n' "$rc" > "$TMP/$name.rc"
+}
+sv_engine run "$ROOT/scripts/run.sh" validate --dir "$REPO/.oms" \
+  > "$TMP/run-validate.out" 2>&1 &
 if [ -f "$REPO/.oms/artifacts/index.jsonl" ]; then
-  "$ROOT/scripts/artifact-index.sh" --repo "$REPO" validate \
-    > "$TMP/artifact.out" 2>&1 || ARTIFACT_EXIT=$?
+  sv_engine artifact "$ROOT/scripts/artifact-index.sh" --repo "$REPO" validate \
+    > "$TMP/artifact.out" 2>&1 &
 else
   : > "$TMP/artifact.out"
 fi
-LIFECYCLE_EXIT=0
 if [ -f "$REPO/.oms/lifecycle/events.jsonl" ]; then
-  "$ROOT/scripts/agent-events.sh" --repo "$REPO" validate \
-    > "$TMP/lifecycle.out" 2>&1 || LIFECYCLE_EXIT=$?
+  sv_engine lifecycle "$ROOT/scripts/agent-events.sh" --repo "$REPO" validate \
+    > "$TMP/lifecycle.out" 2>&1 &
 else
   : > "$TMP/lifecycle.out"
 fi
-APPROVAL_EXIT=0
-"$ROOT/scripts/approval-inbox.sh" --repo "$REPO" validate \
-  > "$TMP/approval.out" 2>&1 || APPROVAL_EXIT=$?
+sv_engine approval "$ROOT/scripts/approval-inbox.sh" --repo "$REPO" validate \
+  > "$TMP/approval.out" 2>&1 &
 # An absent task or unconfigured journal exits 0 with its own shape; a
 # nonzero exit is the engine failing. Falling back to {} silently skipped
 # every task/journal check while the summary still said clean — record the
 # engine failure as a finding instead, like every delegated engine above.
-TASK_STATUS_EXIT=0
-"$ROOT/scripts/agent-task.sh" --repo "$REPO" status --json \
-  > "$TMP/task.json" 2>/dev/null || TASK_STATUS_EXIT=$?
+sv_engine task "$ROOT/scripts/agent-task.sh" --repo "$REPO" status --json \
+  > "$TMP/task.json" 2>/dev/null &
+sv_engine journal "$ROOT/scripts/journal.sh" status --repo "$REPO" --json \
+  > "$TMP/journal.json" 2>/dev/null &
+sv_engine runtime "$ROOT/scripts/runtime.sh" --repo "$REPO" envelope show \
+  > "$TMP/runtime.json" 2>/dev/null &
+wait
+sv_rc() {  # NAME -> its exit code (0 when the engine was not started)
+  local rc=0
+  [ ! -f "$TMP/$1.rc" ] || IFS= read -r rc < "$TMP/$1.rc"
+  printf '%s\n' "${rc:-0}"
+}
+RUN_VALIDATE_EXIT="$(sv_rc run)"
+ARTIFACT_EXIT="$(sv_rc artifact)"
+LIFECYCLE_EXIT="$(sv_rc lifecycle)"
+APPROVAL_EXIT="$(sv_rc approval)"
+TASK_STATUS_EXIT="$(sv_rc task)"
 [ "$TASK_STATUS_EXIT" = 0 ] || printf '{}' > "$TMP/task.json"
-JOURNAL_STATUS_EXIT=0
-"$ROOT/scripts/journal.sh" status --repo "$REPO" --json \
-  > "$TMP/journal.json" 2>/dev/null || JOURNAL_STATUS_EXIT=$?
+JOURNAL_STATUS_EXIT="$(sv_rc journal)"
 [ "$JOURNAL_STATUS_EXIT" = 0 ] || printf '{}' > "$TMP/journal.json"
-RUNTIME_EXIT=0
-"$ROOT/scripts/runtime.sh" --repo "$REPO" envelope show \
-  > "$TMP/runtime.json" 2>/dev/null || RUNTIME_EXIT=$?
+RUNTIME_EXIT="$(sv_rc runtime)"
 [ "$RUNTIME_EXIT" = 0 ] || printf '{}' > "$TMP/runtime.json"
 
 OMS_SV_REPO="$REPO" OMS_SV_TMP="$TMP" OMS_SV_JSON="$AS_JSON" \
