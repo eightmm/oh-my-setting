@@ -312,6 +312,11 @@ got="$(printf 'rpc-input\n' | OMS_DOCTOR_PROBE_DIR="$memo_dir" bash -c \
   '. "$1/scripts/lib/doctor-probe-memo.sh"; . "$1/scripts/lib/provider-registry.sh"
    oms_provider_run_bounded 5 "$2" cat; cat "$2"' _ "$ROOT" "$TMP/rpc.out")"
 [ "$got" = rpc-input ] || fail "a stdin-fed provider call lost its input inside a doctor run: $got"
+# With no run cache (Windows) the probe runs in the calling shell, not through
+# Python's subprocess: a shell function is only reachable that way.
+got="$(env -u OMS_DOCTOR_PROBE_DIR bash -c '. "$1/scripts/lib/doctor-probe-memo.sh"
+  shell_only() { echo in-shell; }; oms_doctor_probe 0 split shell_only' _ "$ROOT")"
+[ "$got" = in-shell ] || fail "an uncached doctor probe left the shell: $got"
 echo 'doctor-probe-once: ok'
 
 echo 'doctor-model-capability-smoke: ok'

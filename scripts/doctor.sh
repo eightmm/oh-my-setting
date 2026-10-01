@@ -153,6 +153,8 @@ doctor_probe_cache_cleanup() {
 }
 
 doctor_probe_cache_start() {
+  # Windows Git Bash keeps the uncached shell path (see doctor-probe-memo.sh).
+  case "${OSTYPE:-}" in msys*|cygwin*|win32*) return 0 ;; esac
   if [ -z "${OMS_DOCTOR_PROBE_DIR:-}" ] || [ ! -d "$OMS_DOCTOR_PROBE_DIR" ]; then
     OMS_DOCTOR_PROBE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/oms-doctor-probe.XXXXXX")" || return 1
     OMS_DOCTOR_PROBE_OWNER_PID="$$"
