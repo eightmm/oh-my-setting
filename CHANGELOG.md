@@ -247,6 +247,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   also share. Gate wall time fell from 414-431s to 209-220s (two interleaved
   n=3 A/Bs: four lanes 422s median, eight lanes 317s, eight lanes plus the
   split 213s). Four dead helpers left by earlier changes are gone.
+  `graph-smoke` runs its unittest classes four at a time through
+  `tests/run-unittest-classes.py` (161s to 57s), and the lane order was
+  re-derived for it.
 
 - One `oms doctor` run, including its report child, model-doctor and other
   descendants, starts each external probe (same resolved binary and argv)

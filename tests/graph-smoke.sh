@@ -16,7 +16,8 @@ fail() {
   exit 1
 }
 
-PYTHONPATH="$ROOT/scripts/lib" python3 -m unittest discover -v -s "$ROOT/tests" -p "test_oms_graph_*.py"
+PYTHONPATH="$ROOT/scripts/lib" python3 "$ROOT/tests/run-unittest-classes.py" \
+  -s "$ROOT/tests" -p "test_oms_graph_*.py" --jobs 4
 
 # Three separate trees: the fixture repository stays pristine (captured output
 # would otherwise become discovered source), the work directory holds every
