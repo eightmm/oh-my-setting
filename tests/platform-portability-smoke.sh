@@ -252,6 +252,16 @@ PY
     "$("$real_python3" "$ROOT/scripts/lib/tool-lock.py" --lock "$ROOT/tools.lock.json" get "$key" | tr -d '\r')" ] ||
     fail "Python-free lock reader disagrees with tool-lock.py on $key"
 done
+# The two readers disagree on a repeated key (awk takes the first, json.loads
+# the last), so validation must refuse a lock that repeats one.
+"$real_python3" - "$ROOT/tools.lock.json" "$TMP/duplicate.lock.json" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+open(sys.argv[2], "w", encoding="utf-8").write(text.replace('"python": {', '"python": {"version": "0.0.1", ', 1))
+PY
+if "$real_python3" "$ROOT/scripts/lib/tool-lock.py" --lock "$TMP/duplicate.lock.json" validate >/dev/null 2>&1; then
+  fail "tool-lock validation accepted a lock that repeats a key"
+fi
 
 # Python decodes escaped JSON strings, but the bootstrap scalar reader cannot.
 # A valid lock with one must fail closed instead of returning a wrong value.

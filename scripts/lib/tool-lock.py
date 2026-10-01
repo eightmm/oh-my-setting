@@ -322,9 +322,18 @@ def validate(lock: Dict[str, Any]) -> None:
                 raise LockError("%s %s has invalid archive type" % (family, platform))
 
 
+def unique_keys(pairs):
+    # The Bash bootstrap reads pins with an awk scanner that takes the first of
+    # a repeated key, json.loads the last: a valid lock has one of each.
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise LockError("tool lock repeats a key")
+    return dict(pairs)
+
+
 def load(path: Path) -> Dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_keys)
     except (OSError, json.JSONDecodeError) as exc:
         raise LockError("cannot read tool lock: %s" % path) from exc
     value = mapping(value, "tool lock")
