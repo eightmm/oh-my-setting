@@ -132,6 +132,10 @@ EOF
 chmod +x "$bin/codex"
 ln -s codex "$bin/cursor-agent"
 
+# OMS_GDR_PART=1 or 2 runs one half so the gate can schedule this suite as two
+# stages; each half builds its own cases from the fixtures above.
+if [ "${OMS_GDR_PART:-}" != 2 ]; then
+
 # A delegated harness child has patch authority only. Calling the goal driver
 # would otherwise turn that patch authority into commit authority, so every
 # real drive (including one whose acceptance already passes) must refuse before
@@ -985,6 +989,12 @@ HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   fail "committed ancestor recovery published an unexpected commit"
 [ "$(wc -l < "$terminal_calls" | tr -d ' ')" = 1 ] ||
   fail "committed ancestor recovery called the provider"
+
+fi
+if [ "${OMS_GDR_PART:-}" = 1 ]; then
+  echo "goal-drive-recovery-smoke: ok (part 1)"
+  exit 0
+fi
 
 # A clean external base advance can leave the reviewed patch applicable. The
 # old prepared handle is legitimately abandoned before the same review is
