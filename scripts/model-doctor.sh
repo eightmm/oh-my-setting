@@ -9,9 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/provider-registry.sh
 . "$ROOT/scripts/lib/provider-registry.sh"
 # shellcheck source=scripts/lib/doctor-probe-memo.sh
-if [ -f "$ROOT/scripts/lib/doctor-probe-memo.sh" ]; then
-  . "$ROOT/scripts/lib/doctor-probe-memo.sh"
-fi
+. "$ROOT/scripts/lib/doctor-probe-memo.sh"
 
 model_doctor_run_bounded() { # SECONDS OUTPUT COMMAND...
   local seconds="$1" output="$2"

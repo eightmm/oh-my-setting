@@ -21,6 +21,8 @@ python3 "$HELPER" --lock "$LOCK" validate >/dev/null || fail "tool lock is inval
   unset OH_MY_SETTING_TOOL_LOCK
   export REQUIRE_TOOLS=0
   export OMS_TEST_GH_VERSION=2.99.0
+  # shellcheck source=scripts/lib/doctor-probe-memo.sh
+  . "$ROOT/scripts/lib/doctor-probe-memo.sh"
   for function_name in command_has_locked_version external_gh_is_newer check_locked_direct_version doctor_sha256_file; do
     eval "$(sed -n "/^${function_name}()/,/^}/p" "$ROOT/scripts/doctor.sh")"
   done

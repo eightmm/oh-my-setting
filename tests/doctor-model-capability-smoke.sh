@@ -16,7 +16,8 @@ mkdir -p "$fixture/scripts/lib" "$fixture/rules" "$fixture/.agents/plugins" \
   "$fixture/prompts" "$home/.codex/skills" "$home/.claude/skills" \
   "$home/.gemini/antigravity/skills" "$home/.local/bin" "$bin" "$project"
 cp "$ROOT/scripts/doctor.sh" "$fixture/scripts/doctor.sh"
-cp "$ROOT/scripts/lib/tool-lock.py" "$fixture/scripts/lib/tool-lock.py"
+cp "$ROOT/scripts/lib/tool-lock.py" "$ROOT/scripts/lib/doctor-probe-memo.sh" \
+  "$ROOT/scripts/lib/doctor-probe-memo.py" "$ROOT/scripts/lib/run-bounded.py" "$fixture/scripts/lib/"
 cp "$ROOT/tools.lock.json" "$fixture/tools.lock.json"
 chmod +x "$fixture/scripts/doctor.sh"
 
@@ -157,7 +158,7 @@ cmp "$TMP/damaged-ref" "$fixture/.git/refs/remotes/origin/main" ||
 # Use the real model-doctor here; the stub above verifies failure policy.
 rm -f "$fixture/.git/refs/remotes/origin/main"
 cp "$ROOT/scripts/model-doctor.sh" "$fixture/scripts/model-doctor.sh"
-for source in provider-registry.sh model-capability.sh doctor-probe-memo.sh run-bounded.py; do
+for source in provider-registry.sh model-capability.sh; do
   cp "$ROOT/scripts/lib/$source" "$fixture/scripts/lib/$source"
 done
 cp "$ROOT/scripts/lib/doctor-probe-memo.py" "$fixture/scripts/lib/doctor-probe-memo.actual.py"

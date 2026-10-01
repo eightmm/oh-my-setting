@@ -35,11 +35,7 @@ CONTRACT_ONLY=0
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 # shellcheck source=scripts/lib/doctor-probe-memo.sh
-if [ -f "$ROOT/scripts/lib/doctor-probe-memo.sh" ]; then
-  . "$ROOT/scripts/lib/doctor-probe-memo.sh"
-else
-  oms_doctor_probe() { shift 2; "$@"; }
-fi
+. "$ROOT/scripts/lib/doctor-probe-memo.sh"
 
 usage() {
   cat <<'EOF'
@@ -254,12 +250,10 @@ if [ "$SURFACES" = "0" ] && [ "$TOOL_LOCK_ONLY" = "0" ] &&
   echo "delegating doctor to canonical owner: $INSTALL_ROOT"
   # Plus-form: Bash 3.2 + set -u errors on an empty array expansion, and a
   # bare `doctor.sh` delegation carries no arguments at all.
-  if grep -Fq 'doctor_probe_cache_start()' "$INSTALL_ROOT/scripts/doctor.sh"; then
-    exec "$INSTALL_ROOT/scripts/doctor.sh" ${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}
-  fi
-  # An older canonical doctor cannot clean up the directory after exec.
-  "$INSTALL_ROOT/scripts/doctor.sh" ${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}
-  exit $?
+  # The canonical doctor owns its own probe cache; exec skips this one's trap.
+  doctor_probe_cache_cleanup
+  unset OMS_DOCTOR_PROBE_DIR OMS_DOCTOR_PROBE_OWNER_PID
+  exec "$INSTALL_ROOT/scripts/doctor.sh" ${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}
 fi
 
 check_tool_lock() {
