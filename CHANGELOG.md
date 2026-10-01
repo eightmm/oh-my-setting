@@ -222,6 +222,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Plan and git-guard hot paths start fewer processes. `agent-plan.sh` runs
+  its engine from `scripts/lib/agent_plan_core.py` through the bytecode cache
+  instead of recompiling a 1,326-line heredoc on every call; the safe Git
+  config guard reuses a pass within one process for byte-identical config;
+  task-assignment resolution needs one interpreter instead of two; shared
+  libraries no longer start `dirname` or repeat `uname`. Measured on
+  `tests/goal-drive-recovery-smoke.sh`, interleaved three runs each: 295s to
+  279s (-5.6%), against a run-to-run spread of 2-3s.
+
 - Tests had grown faster than code (0.54 to 0.70 test lines per code line
   from August to October; 128 of 191 commits since September added tests,
   8 removed any), with Claude and Codex alike. Each addition met the old
