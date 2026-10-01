@@ -230,6 +230,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `model-doctor` probes its providers concurrently and replays their rows and
+  stderr in list order (2.0s to 1.4s). The prompt hook's journal tick is
+  skipped when the local day, HEAD, event-log size and day markers match the
+  last tick, saving one Python start (about 70ms) on most prompts.
+
 - The install lifecycle smoke test counts `dirname`, `basename`, `readlink`
   and `uname` launches across its fixture, enforces a combined budget of 800,
   and checks that doctor launches no `tool-lock.py get` process.
