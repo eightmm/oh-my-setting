@@ -525,6 +525,17 @@ OMS_WORK_JOURNAL_PYTHON="$TMP/counting-journal.py" OMS_TEST_TICK_LOG="$TMP/tick.
   work_journal_prompt_tick "$auto_repo" >/dev/null
 [ "$(wc -l < "$TMP/tick.log" | tr -d ' ')" = 1 ] ||
   fail "a prompt tick after a new event did not run the journal"
+# The Stop tick is a subset of the prompt tick: skipped while the stamp holds,
+# run again once HEAD moves.
+OMS_WORK_JOURNAL_PYTHON="$TMP/counting-journal.py" OMS_TEST_TICK_LOG="$TMP/tick.log" \
+  work_journal_finish "$auto_repo"
+[ "$(wc -l < "$TMP/tick.log" | tr -d ' ')" = 1 ] ||
+  fail "a Stop tick covered by the prompt stamp still started the journal"
+git -C "$auto_repo" commit -q --allow-empty -m "test: move HEAD"
+OMS_WORK_JOURNAL_PYTHON="$TMP/counting-journal.py" OMS_TEST_TICK_LOG="$TMP/tick.log" \
+  work_journal_finish "$auto_repo"
+[ "$(wc -l < "$TMP/tick.log" | tr -d ' ')" = 2 ] ||
+  fail "a Stop tick after a new commit did not run the journal"
 
 # The first prompt of a local day injects one bounded digest; later prompts and
 # the opt-out stay silent. The earlier skill-router call may have consumed

@@ -132,14 +132,14 @@ work_journal_prompt_tick() {
   return 0
 }
 
-work_journal_prompt_stamp_current() {  # REPO SIGNATURE
+work_journal_prompt_stamp_current() {  # REPO SIGNATURE ('*' matches any)
   local store="$1/.oms/work-journal" until head events digest distill signature now file size
   [ -f "$store/prompt-tick" ] || return 1
   {
     IFS= read -r until && IFS= read -r head && IFS= read -r events &&
       IFS= read -r digest && IFS= read -r distill && IFS= read -r signature
   } < "$store/prompt-tick" || return 1
-  [ "$signature" = "$2" ] || return 1
+  [ "$2" = '*' ] || [ "$signature" = "$2" ] || return 1
   now="$(date +%s)"
   case "$until" in ''|*[!0-9]*) return 1 ;; esac
   [ "$now" -lt "$until" ] || return 1
@@ -163,6 +163,9 @@ work_journal_finish() {
   # Same adopted-repos-only rule as the prompt tick: a Stop in an unadopted
   # repo must not seed .oms.
   [ -d "$repo/.oms" ] || return 0
+  # A Stop tick captures HEAD and re-renders; a current prompt stamp already
+  # covers that HEAD and event log, so the tick would change nothing.
+  work_journal_prompt_stamp_current "$repo" '*' && return 0
   if ! work_journal_call_local "$repo" tick --repo "$repo" --local-only >/dev/null 2>&1; then
     echo "warning: Work Journal finish materialization degraded" >&2
     return 0
