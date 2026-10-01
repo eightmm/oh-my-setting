@@ -236,11 +236,16 @@ grep -Fq -- "venv --managed-python --no-project --no-config --python $runtime_ve
 
 # The bootstrap reads the lock before any Python exists; it must agree with
 # tool-lock.py on every key it can read, whatever the lock's formatting.
-for key in uv.version python.version $("$real_python3" - "$ROOT/tools.lock.json" <<'PY'
+for key in $("$real_python3" - "$ROOT/tools.lock.json" <<'PY'
 import json, sys
-for platform, row in json.load(open(sys.argv[1], encoding="utf-8"))["uv"]["platforms"].items():
-    for field in ("url", "sha256", "archive"):
-        print("uv.platforms.%s.%s" % (platform, field))
+def walk(value, path):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from walk(item, path + [key])
+    elif not isinstance(value, list):
+        yield ".".join(path)
+for key in walk(json.load(open(sys.argv[1], encoding="utf-8")), []):
+    print(key)
 PY
 ); do
   [ "$(oms_lock_scalar "$ROOT/tools.lock.json" "$key")" = \

@@ -702,8 +702,12 @@ grep -Fq '.oh-my-setting-complete' "$ROOT/scripts/install-tools.sh" ||
 if grep -Fq '. "$NVM_DIR/nvm.sh"' "$ROOT/install.sh"; then
   fail "the installer re-sources mutable nvm code after locked tools are installed"
 fi
-grep -Fq "get \"\$1\" | tr -d '\\r'" "$ROOT/scripts/install-tools.sh" ||
-  fail "Python-to-Bash tool lock scalars are not normalized for native Windows"
+# A Windows checkout can hand the installer a CRLF lock; no scalar may carry
+# the carriage return into a path, version, or digest.
+sed 's/$/\r/' "$ROOT/tools.lock.json" > "$TMP/crlf.lock.json"
+[ "$(bash -c '. "$1/scripts/lib/platform.sh"; oms_lock_scalar "$2" node.version' _ "$ROOT" "$TMP/crlf.lock.json")" = \
+  "$(python3 "$ROOT/scripts/lib/tool-lock.py" --lock "$ROOT/tools.lock.json" get node.version)" ] ||
+  fail "tool lock scalars from a CRLF lock are not normalized for native Windows"
 grep -Fq 'uv.platforms.$platform.sha256' "$ROOT/scripts/install-tools.sh" ||
   fail "uv still executes a verified installer that selects an unverified payload"
 if grep -En 'nvm[[:space:]]+install' "$ROOT/scripts/install-tools.sh" >/dev/null; then

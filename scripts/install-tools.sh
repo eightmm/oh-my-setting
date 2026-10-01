@@ -16,9 +16,12 @@ PROVIDERS_ONLY=0
 [ -x "$TOOL_LOCK_HELPER" ] || { echo "error: missing tool lock helper: $TOOL_LOCK_HELPER" >&2; exit 1; }
 python3 "$TOOL_LOCK_HELPER" --lock "$TOOL_LOCK" validate >/dev/null || exit $?
 tool_lock_get() {
-  # Native Windows Python writes CRLF; every scalar that crosses back into Bash
-  # is normalized here before it can become a path, version, or digest.
-  python3 "$TOOL_LOCK_HELPER" --lock "$TOOL_LOCK" get "$1" | tr -d '\r'
+  # The lock was validated above; the awk reader then serves each scalar
+  # without one Python start per field (about 40 per install).
+  oms_lock_scalar "$TOOL_LOCK" "$1" || {
+    echo "error: unknown tool lock field: $1" >&2
+    return 1
+  }
 }
 NODE_VERSION="$(tool_lock_get node.version)"
 NVM_VERSION="$(tool_lock_get nvm.version)"
