@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
@@ -40,16 +41,55 @@ def emit(path, stream):
         shutil.copyfileobj(handle, stream.buffer)
 
 
-def execute(command, out, err):
+def execute(command, entry):
+    """Run once, keeping each stream and the order its chunks arrived in, so a
+    2>&1 caller can be replayed without running the probe a second time."""
     start = time.monotonic()
-    with open(out, "wb") as stdout, open(err, "wb") as stderr:
-        try:
-            result = subprocess.run(command, stdin=subprocess.DEVNULL,
-                                    stdout=stdout, stderr=stderr).returncode
-        except OSError as exc:
-            stderr.write(("error: %s\n" % exc).encode("utf-8", "replace"))
-            result = 127 if isinstance(exc, FileNotFoundError) else 126
+    chunks = []
+    lock = threading.Lock()
+    try:
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as exc:
+        chunks.append((1, ("error: %s\n" % exc).encode("utf-8", "replace")))
+        result = 127 if isinstance(exc, FileNotFoundError) else 126
+    else:
+        def pump(pipe, index):
+            # Pipe threads, not select: native Windows Python selects sockets only.
+            for block in iter(lambda: os.read(pipe.fileno(), 65536), b""):
+                with lock:
+                    chunks.append((index, block))
+        threads = [threading.Thread(target=pump, args=(proc.stdout, 0)),
+                   threading.Thread(target=pump, args=(proc.stderr, 1))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        proc.stdout.close()
+        proc.stderr.close()
+        result = proc.wait()
+    for index, name in enumerate(("stdout", "stderr")):
+        with open(entry / name, "wb") as handle:
+            handle.write(b"".join(block for i, block in chunks if i == index))
+    with open(entry / "order.json", "w", encoding="ascii") as handle:
+        json.dump([[index, len(block)] for index, block in chunks], handle)
     return (128 - result if result < 0 else result), time.monotonic() - start
+
+
+def replay(entry, mode):
+    if mode == "split":
+        emit(entry / "stdout", sys.stdout)
+        emit(entry / "stderr", sys.stderr)
+        return
+    with open(entry / "order.json", encoding="ascii") as handle:
+        order = json.load(handle)
+    streams = [open(entry / "stdout", "rb"), open(entry / "stderr", "rb")]
+    try:
+        for index, size in order:
+            sys.stdout.buffer.write(streams[index].read(size))
+    finally:
+        for stream in streams:
+            stream.close()
 
 
 def direct(command, merged):
@@ -93,22 +133,14 @@ def main():
         with open(entry / "result.json", encoding="ascii") as handle:
             result = json.load(handle)
         reusable = (seconds == 0 or result["elapsed"] <= seconds) and result["code"] not in (124, 137)
-        if reusable and (entry / "stdout").is_file() and (entry / "stderr").is_file():
-            if mode == "split":
-                emit(entry / "stdout", sys.stdout)
-                emit(entry / "stderr", sys.stderr)
-                return result["code"]
-            if not (entry / "stdout").stat().st_size or not (entry / "stderr").stat().st_size:
-                emit(entry / "stdout", sys.stdout)
-                emit(entry / "stderr", sys.stdout)
-                return result["code"]
-            # Separate captures cannot reconstruct the order of a native 2>&1.
-            return direct(runner, True)
+        if reusable and all((entry / name).is_file() for name in ("stdout", "stderr", "order.json")):
+            replay(entry, mode)
+            return result["code"]
     except (OSError, KeyError, ValueError, TypeError):
         pass
     stage = Path(tempfile.mkdtemp(prefix=".probe-", dir=cache))
     try:
-        code, elapsed = execute(runner, stage / "stdout", stage / "stderr")
+        code, elapsed = execute(runner, stage)
         if code not in (124, 137):
             with open(stage / "result.json", "w", encoding="ascii") as handle:
                 json.dump({"code": code, "elapsed": elapsed}, handle)
@@ -122,15 +154,8 @@ def main():
                 source = stage
         else:
             source = stage
-        if mode == "split":
-            emit(source / "stdout", sys.stdout)
-            emit(source / "stderr", sys.stderr)
-            return code
-        if not (source / "stdout").stat().st_size or not (source / "stderr").stat().st_size:
-            emit(source / "stdout", sys.stdout)
-            emit(source / "stderr", sys.stdout)
-            return code
-        return direct(runner, True)
+        replay(source, mode)
+        return code
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 

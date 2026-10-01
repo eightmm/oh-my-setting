@@ -191,6 +191,8 @@ for tool in claude codex cursor-agent; do
 #!/usr/bin/env bash
 tool="${0##*/}"
 { printf '%s' "$tool"; printf ' <%s>' "$@"; printf '\n'; } >> "$TEST_PROBE_LOG"
+# One probe writes both streams: a 2>&1 caller must still see it run once.
+[ "$tool" != cursor-agent ] || printf 'cursor-agent: notice on stderr\n' >&2
 case " $* " in
   *' --version '*) printf '%s 1.2.3\n' "$tool" ;;
   *) printf 'Usage: %s --help\n' "$tool" ;;
