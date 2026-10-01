@@ -507,6 +507,23 @@ fi
   fail "the distill marker write was expected to fail in this fixture"
 rm -rf "$auto_marker"
 
+# A prompt tick that would repeat the last one (same day, HEAD, event log and
+# day markers) starts no journal process; a new event runs it again.
+real_journal="$ROOT/scripts/lib/work_journal.py"
+printf 'import os, runpy, sys\nopen(os.environ["OMS_TEST_TICK_LOG"], "a").write("tick\\n")\nsys.argv[0] = %s\nrunpy.run_path(%s, run_name="__main__")\n' \
+  "'$real_journal'" "'$real_journal'" > "$TMP/counting-journal.py"
+work_journal_prompt_tick "$auto_repo" >/dev/null
+: > "$TMP/tick.log"
+OMS_WORK_JOURNAL_PYTHON="$TMP/counting-journal.py" OMS_TEST_TICK_LOG="$TMP/tick.log" \
+  work_journal_prompt_tick "$auto_repo" >/dev/null
+[ "$(wc -l < "$TMP/tick.log" | tr -d ' ')" = 0 ] ||
+  fail "an unchanged prompt tick still started the journal"
+"$ROOT/scripts/agent-task.sh" --repo "$auto_repo" update --decision "a new event" >/dev/null
+OMS_WORK_JOURNAL_PYTHON="$TMP/counting-journal.py" OMS_TEST_TICK_LOG="$TMP/tick.log" \
+  work_journal_prompt_tick "$auto_repo" >/dev/null
+[ "$(wc -l < "$TMP/tick.log" | tr -d ' ')" = 1 ] ||
+  fail "a prompt tick after a new event did not run the journal"
+
 # The first prompt of a local day injects one bounded digest; later prompts and
 # the opt-out stay silent. The earlier skill-router call may have consumed
 # today's digest, and the marker is derived state, so reset it explicitly. That
