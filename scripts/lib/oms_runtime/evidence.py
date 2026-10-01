@@ -26,10 +26,11 @@ def artifact_rows(repo: Path) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     ordinal = 0
     for path in _artifact_paths(repo):
+        source = relative_path(path, repo)
         for row in read_jsonl(path, limit_rows=MAX_JSONL_ROWS):
             ordinal += 1
             copy = dict(row)
-            copy["_source"] = relative_path(path, repo)
+            copy["_source"] = source
             copy["_ordinal"] = ordinal
             result.append(copy)
     return result
