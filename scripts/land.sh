@@ -12,6 +12,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/lib/work-journal.sh"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
+# shellcheck source=scripts/lib/test-growth.sh
+. "$ROOT/scripts/lib/test-growth.sh"
 
 usage() {
   cat <<'EOF'
@@ -340,7 +342,7 @@ run_job() {
   [ "$STAMP" = "$(request_stamp "$SHA")" ] || {
     note "error: HEAD or destination changed before job started"; return 1;
   }
-  local resume=0 remote_sha
+  local resume=0 remote_sha failed_stages
   if can_resume; then
     remote_sha="$(git ls-remote --exit-code "$(git remote get-url --push "$REMOTE")" "refs/heads/$TARGET")" || return 1
     remote_sha="${remote_sha%%[[:space:]]*}"
@@ -366,8 +368,11 @@ run_job() {
     run_gate || rc=$?
     rset gate.rc="$rc" gate.seconds="$(( $(date +%s) - t0 ))"
     if [ "$rc" -ne 0 ]; then
+      # Name the failing stages: which tests ever catch anything is the input
+      # for retiring the ones that never do, and the log is gone in weeks.
+      failed_stages="$(sed -n 's/^check: \([A-Za-z0-9_.-]*\) FAILED.*/\1/p' "$LOG" | sort -u | tr '\n' ' ')"
       "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" record --kind verify --cmd "$GATE" \
-        --exit "$rc" --summary "land: gate failed for $SHORT (see $LOG)" >/dev/null 2>&1 || true
+        --exit "$rc" --summary "land: gate failed for $SHORT${failed_stages:+ in ${failed_stages% }} (see $LOG)" >/dev/null 2>&1 || true
       finish failed "gate exit $rc"; return 1
     fi
     if [ "$(git rev-parse HEAD)" != "$SHA" ] || ! clean_tree; then
@@ -522,6 +527,7 @@ if ! git -C "$REPO" merge-base --is-ancestor "$REMOTE/$TARGET" HEAD; then
   echo "error: $REMOTE/$TARGET is not an ancestor of HEAD; rebase first" >&2; exit 2
 fi
 SHA="$(git -C "$REPO" rev-parse HEAD)"
+echo "land: this push changes $(oms_test_growth "$REMOTE/$TARGET" "$SHA" "$REPO")"
 # Retries/worktrees share a receipt; different destinations/gates never share proof.
 STAMP="$(request_stamp "$SHA")"
 RECEIPT="$LAND_DIR/$STAMP.json"

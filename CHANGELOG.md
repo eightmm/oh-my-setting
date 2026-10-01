@@ -222,6 +222,21 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Tests had grown faster than code (0.54 to 0.70 test lines per code line
+  from August to October; 128 of 191 commits since September added tests,
+  8 removed any), with Claude and Codex alike. Each addition met the old
+  rule locally, so the changes act on the structure instead:
+  - review seats no longer hunt for missing tests; `Missing tests:` names an
+    existing test to extend for a finding no test exercises, and `none` is
+    the expected answer (the section had been filled in 54% of 93 seats);
+  - the global and repository rules prefer extending the nearest test, ask a
+    new test to name the path no test exercises, and drop tests with the
+    behavior they cover;
+  - `oms land` and `check.sh --affected` print the change's net test and code
+    lines;
+  - a failed land gate records its failing stages in the fail ledger, the
+    data a later round needs to retire tests that never catch anything.
+
 - The README is short again: a banner, badges, a one-line install, a
   how-it-works diagram, what to say and a one-line-per-row feature table.
   Install details moved to `docs/INSTALL.md`, and the skill-layer note to

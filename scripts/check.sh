@@ -643,6 +643,12 @@ if [ "$RUN_QUICK" = 1 ] || [ "$RUN_AFFECTED" = 1 ]; then
     echo "error: --changed-to is not a tree: $QUICK_TO" >&2
     exit 2
   }
+  # Informational; a project copy without the helper still checks.
+  if [ -f "$ROOT/scripts/lib/test-growth.sh" ]; then
+    # shellcheck source=scripts/lib/test-growth.sh
+    . "$ROOT/scripts/lib/test-growth.sh"
+    echo "changed: $(oms_test_growth "$QUICK_FROM" "$QUICK_TO")" >&2
+  fi
 fi
 if [ "$RUN_AFFECTED" = 1 ]; then
   prepare_affected_gate

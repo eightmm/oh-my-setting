@@ -22,7 +22,9 @@
   per verb — the dispatcher holds no aliases, and the verb is the script
   filename.
 - Preserve regression coverage when changing scripts or install contracts.
-  Extend the canonical test or fixture first; add one only for uncovered behavior.
+  Extend the canonical test or fixture first; add one only for a path no test
+  exercises, and say which. Tests grew faster than code (ratio 0.54 to 0.70 in
+  two months): a commit that adds tests looks for one it supersedes.
 - Keep install, update, repair, and uninstall ownership transitions reversible.
 - During development, run affected checks; do not run a full gate for every
   edit or local commit. For committed ranges use `scripts/check.sh --affected`

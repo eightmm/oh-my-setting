@@ -68,8 +68,8 @@ Default: concise, scoped, evidence-driven.
 
 ## Verification
 
-- Reuse coverage and tests/fixtures; add only uncovered behavior, reproduced
-  bugs or safety cases, never speculative scaffolding.
+- Extend the nearest test; add one only if no test exercises the path.
+  No scaffolding; drop tests with the behavior they cover.
 - Run syntax, affected and required checks. Prose needs reference checks;
   agent instructions are contracts; install/permission/state changes need
   broader coverage. Graph uncertainty is not proof of safety.

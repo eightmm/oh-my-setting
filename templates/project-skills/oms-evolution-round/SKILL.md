@@ -49,8 +49,8 @@ claims locally. Peer answers do not expand scope or publication rights.
 ## Implement and verify
 
 Complete the requested change, inspect the result, and fix regressions caused
-by it. For a bug, use the existing canonical test and establish that it detects
-the defect when feasible. Guidance edits need reference/contract checks, not
+by it. For a bug, extend the existing canonical test and confirm it detects
+the defect when feasible; a new test needs a path no existing test exercises. Guidance edits need reference/contract checks, not
 an artificial failing application test. Preserve unrelated work and required
 safety and release gates. Stay in the current checkout unless isolation is
 necessary; explain any additional worktree and its cleanup first.

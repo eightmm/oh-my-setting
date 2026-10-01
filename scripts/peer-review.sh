@@ -423,7 +423,10 @@ write_prompt() {
   {
     printf 'You are one seat in a multi-provider review council.\n'
     printf 'Answer the same question from your own perspective. Do not modify files.\n'
-    printf 'Find bugs, regressions, missing tests, unclear contracts, and unsafe operations.\n'
+    printf 'Find bugs, regressions, unclear contracts, and unsafe operations.\n'
+    # Asked for unconditionally, a missing-tests section was filled in 54% of 93
+    # stored review seats (2026-10-01), and each answer became a new test.
+    printf 'Under Missing tests, name the existing test to extend for a finding whose path no test exercises; "none" is the expected answer otherwise. A missing test alone is not a finding.\n'
     printf 'Treat material unnecessary scope or complexity as a regression only when an existing repo, standard-library, portable native, or narrower behavior-equivalent solution replaces it; line count and style alone are not findings.\n'
     printf 'Tie every finding to file/line evidence, diff evidence, commands, or docs.\n'
     # Seat exploration, not this prompt, is most of a review's cost. A/B on a
