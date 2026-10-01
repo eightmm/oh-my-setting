@@ -88,8 +88,9 @@ exit 0
 EOF_STUB
 chmod +x "$bin/claude"
 
+# An inherited NVM_DIR would put the host's real node bin ahead of the stubs.
 run_doctor() {
-  (cd "$project" && HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+  (cd "$project" && env -u NVM_DIR HOME="$home" XDG_CONFIG_HOME="$home/.config" \
     PATH="$bin:/usr/bin:/bin" OH_MY_SETTING_REQUIRE_TOOLS=0 \
     OH_MY_SETTING_CODEX_PLUGIN=0 "$fixture/scripts/doctor.sh" "$@")
 }
@@ -152,5 +153,134 @@ grep -Fq 'install Git HEAD or references are invalid' "$TMP/git-damaged.out" ||
   fail 'doctor did not identify damaged install Git refs'
 cmp "$TMP/damaged-ref" "$fixture/.git/refs/remotes/origin/main" ||
   fail 'doctor modified the damaged reference'
+
+# Use the real model-doctor here; the stub above verifies failure policy.
+rm -f "$fixture/.git/refs/remotes/origin/main"
+cp "$ROOT/scripts/model-doctor.sh" "$fixture/scripts/model-doctor.sh"
+for source in provider-registry.sh model-capability.sh doctor-probe-memo.sh run-bounded.py; do
+  cp "$ROOT/scripts/lib/$source" "$fixture/scripts/lib/$source"
+done
+cp "$ROOT/scripts/lib/doctor-probe-memo.py" "$fixture/scripts/lib/doctor-probe-memo.actual.py"
+cp "$ROOT/scripts/lib/doctor-report.py" "$fixture/scripts/lib/doctor-report.py"
+mv "$fixture/scripts/lib/tool-lock.py" "$fixture/scripts/lib/tool-lock.actual.py"
+cat > "$fixture/scripts/lib/tool-lock.py" <<'EOF_STUB'
+#!/usr/bin/env python3
+import json
+import os
+import runpy
+import sys
+if "get" in sys.argv[1:]:
+    with open(os.environ["TEST_PROBE_LOG"], "a", encoding="utf-8") as log:
+        log.write("tool-lock.py " + json.dumps(sys.argv[1:]) + "\n")
+runpy.run_path(os.path.join(os.path.dirname(__file__), "tool-lock.actual.py"), run_name="__main__")
+EOF_STUB
+cat > "$fixture/scripts/lib/doctor-probe-memo.py" <<'EOF_STUB'
+#!/usr/bin/env python3
+import os
+import sys
+if os.environ.get("TEST_UNCACHED") == "1":
+    os.environ.pop("OMS_DOCTOR_PROBE_DIR", None)
+os.execv(sys.executable, [sys.executable,
+    os.path.join(os.path.dirname(__file__), "doctor-probe-memo.actual.py"), *sys.argv[1:]])
+EOF_STUB
+chmod +x "$fixture/scripts/lib/tool-lock.py" "$fixture/scripts/model-doctor.sh"
+
+for tool in claude codex cursor-agent; do
+  cat > "$bin/$tool" <<'EOF_STUB'
+#!/usr/bin/env bash
+tool="${0##*/}"
+{ printf '%s' "$tool"; printf ' <%s>' "$@"; printf '\n'; } >> "$TEST_PROBE_LOG"
+case " $* " in
+  *' --version '*) printf '%s 1.2.3\n' "$tool" ;;
+  *) printf 'Usage: %s --help\n' "$tool" ;;
+esac
+EOF_STUB
+  chmod +x "$bin/$tool"
+done
+cat > "$bin/npm" <<'EOF_STUB'
+#!/usr/bin/env bash
+{ printf npm; printf ' <%s>' "$@"; printf '\n'; } >> "$TEST_PROBE_LOG"
+case " $* " in
+  *' list '*)
+    python3 - "$TEST_TOOL_LOCK" "$5" <<'PY'
+import json
+import sys
+lock = json.load(open(sys.argv[1], encoding="utf-8"))
+package = sys.argv[2]
+version = next((item["version"] for item in lock["npm"].values()
+                if item["package"] == package), "")
+print(json.dumps({"dependencies": {package: {"version": version}}}))
+PY
+    ;;
+  *' prefix '*) printf '%s/.npm-global\n' "$HOME" ;;
+  *' root '*) printf '%s/.npm-global/lib/node_modules\n' "$HOME" ;;
+  *) printf '10.0.0\n' ;;
+esac
+EOF_STUB
+chmod +x "$bin/npm"
+python3 - "$fixture/tools.lock.json" "$home/.npm-global/lib/node_modules" <<'PY'
+import json
+from pathlib import Path
+import sys
+lock = json.load(open(sys.argv[1], encoding="utf-8"))
+root = Path(sys.argv[2])
+for item in lock["npm"].values():
+    package = root / item["package"]
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "package.json").write_text(
+        json.dumps({"name": item["package"], "version": item["version"]}), encoding="utf-8")
+    for native in item.get("native", {}).values():
+        payload = package / "node_modules" / native["alias"]
+        payload.mkdir(parents=True, exist_ok=True)
+        (payload / "package.json").write_text(
+            json.dumps({"name": native["package"], "version": native["version"]}), encoding="utf-8")
+PY
+
+run_logged_doctor() { # LOG OUTPUT ERROR RC_FILE
+  local log="$1" output="$2" error="$3" rc_file="$4" rc=0
+  shift 4
+  : > "$log"
+  TEST_PROBE_LOG="$log" TEST_TOOL_LOCK="$fixture/tools.lock.json" \
+    TMPDIR="$TMP" run_doctor "$@" > "$output" 2> "$error" || rc=$?
+  printf '%s\n' "$rc" > "$rc_file"
+}
+assert_probes_once() { # LOG
+  [ -s "$1" ] || fail 'doctor ran no logged external probes'
+  awk 'seen[$0]++ { print "duplicate probe: " $0 > "/dev/stderr"; bad=1 }
+    END { exit bad }' "$1" || fail 'a doctor probe ran more than once in one run'
+  for probe in 'claude <--version>' 'codex <--version>' \
+    'cursor-agent <--version>' 'npm <prefix> <-g>' 'npm <root> <-g>'; do
+    grep -Fxq "$probe" "$1" || fail "doctor did not exercise $probe"
+  done
+  grep -Fq 'tool-lock.py ' "$1" || fail 'doctor did not exercise tool-lock get'
+}
+
+TEST_UNCACHED=0
+run_logged_doctor "$TMP/probes-1.log" "$TMP/probes-1.out" "$TMP/probes-1.err" "$TMP/probes-1.rc"
+assert_probes_once "$TMP/probes-1.log"
+run_logged_doctor "$TMP/probes-2.log" "$TMP/probes-2.out" "$TMP/probes-2.err" "$TMP/probes-2.rc"
+assert_probes_once "$TMP/probes-2.log"
+cmp "$TMP/probes-1.log" "$TMP/probes-2.log" ||
+  fail 'a second doctor run did not probe the same commands anew'
+
+TEST_UNCACHED=1 run_logged_doctor "$TMP/probes-uncached.log" \
+  "$TMP/probes-uncached.out" "$TMP/probes-uncached.err" "$TMP/probes-uncached.rc"
+[ "$(grep -Fxc 'codex <--version>' "$TMP/probes-uncached.log")" -gt 1 ] ||
+  fail 'uncached control did not disable memoization'
+cmp "$TMP/probes-1.out" "$TMP/probes-uncached.out" || fail 'cached stdout changed'
+cmp "$TMP/probes-1.err" "$TMP/probes-uncached.err" || fail 'cached stderr changed'
+cmp "$TMP/probes-1.rc" "$TMP/probes-uncached.rc" || fail 'cached exit status changed'
+run_logged_doctor "$TMP/json-cached.log" "$TMP/json-cached.out" \
+  "$TMP/json-cached.err" "$TMP/json-cached.rc" --json
+assert_probes_once "$TMP/json-cached.log"
+TEST_UNCACHED=1 run_logged_doctor "$TMP/json-uncached.log" \
+  "$TMP/json-uncached.out" "$TMP/json-uncached.err" "$TMP/json-uncached.rc" --json
+cmp "$TMP/json-cached.out" "$TMP/json-uncached.out" || fail 'cached JSON changed'
+cmp "$TMP/json-cached.err" "$TMP/json-uncached.err" || fail 'cached JSON stderr changed'
+cmp "$TMP/json-cached.rc" "$TMP/json-uncached.rc" || fail 'cached JSON exit status changed'
+for residue in "$TMP"/oms-doctor-probe.*; do
+  [ ! -e "$residue" ] || fail 'doctor left a probe cache after exit'
+done
+echo 'doctor-probe-once: ok'
 
 echo 'doctor-model-capability-smoke: ok'
