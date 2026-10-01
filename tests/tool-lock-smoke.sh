@@ -98,6 +98,21 @@ EOF
   load_user_tool_paths
   [ "$(command -v codex)" = "$HOME/.local/bin/codex" ] ||
     fail "verbose status shadows the active native Codex"
+  # Peer calls resolve the nvm default once and reuse the bin dir until an
+  # input of that resolution (alias files, installed versions) changes.
+  printf 'echo x >> "$NVM_DIR/sourced"\nnvm() { export NVM_BIN="%s" PATH="%s:$PATH"; }\n' \
+    "$node_bin" "$node_bin" > "$NVM_DIR/nvm.sh"
+  mkdir -p "$NVM_DIR/alias"
+  printf 'lts/*\n' > "$NVM_DIR/alias/default"
+  peer_node() {
+    bash -c '. "$1/scripts/lib/peer-common.sh"; load_user_tool_paths; command -v node' _ "$ROOT"
+  }
+  [ "$(peer_node)" = "$node_bin/node" ] || fail "peer tool paths missed the nvm default"
+  [ "$(peer_node)" = "$node_bin/node" ] || fail "cached peer tool paths missed the nvm default"
+  [ "$(wc -l < "$NVM_DIR/sourced" | tr -d ' ')" = 1 ] || fail "an unchanged nvm default was resolved twice"
+  printf 'node\n' > "$NVM_DIR/alias/default"
+  peer_node >/dev/null
+  [ "$(wc -l < "$NVM_DIR/sourced" | tr -d ' ')" = 2 ] || fail "a changed nvm alias reused a stale resolution"
   [ "$(provider_lock_path)" = "$LOCK" ] || fail "doctor lost bootstrap fallback"
   snapshot="$HOME/.local/share/oh-my-setting/provider-tools.lock.json"
   mkdir -p "$(dirname "$snapshot")"

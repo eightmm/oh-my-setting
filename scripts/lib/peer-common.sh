@@ -67,14 +67,37 @@ ma_repo_label() {
 }
 
 load_user_tool_paths() {
+  local cache key file line cached_key="" cached_bin=""
   export PATH="$HOME/.local/bin:$PATH"
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  [ -s "$NVM_DIR/nvm.sh" ] || return 0
 
-  if [ -s "$NVM_DIR/nvm.sh" ]; then
-    # shellcheck disable=SC1091
-    . "$NVM_DIR/nvm.sh"
-    nvm use default >/dev/null 2>&1 || true
+  # Sourcing nvm.sh and `nvm use default` cost about 200ms on every peer
+  # call. Reuse the bin dir it resolved while the inputs of that resolution
+  # (the alias files and the installed versions) are unchanged; read with
+  # builtins, so a hit starts no process.
+  key="$NVM_DIR"
+  for file in "$NVM_DIR"/alias/default "$NVM_DIR"/alias/lts/* "$NVM_DIR"/versions/node/*; do
+    [ -e "$file" ] || continue
+    line=""
+    [ ! -f "$file" ] || IFS= read -r line < "$file" || true
+    key="$key|${file#"$NVM_DIR"/}=$line"
+  done
+  cache="${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-setting/nvm-default-bin"
+  if [ -f "$cache" ]; then
+    { IFS= read -r cached_key; IFS= read -r cached_bin; } < "$cache" || true
   fi
+  if [ -n "$cached_bin" ] && [ "$cached_key" = "$key" ] && [ -x "$cached_bin/node" ]; then
+    export NVM_BIN="$cached_bin" PATH="$cached_bin:$PATH"
+    return 0
+  fi
+  # shellcheck disable=SC1091
+  . "$NVM_DIR/nvm.sh"
+  nvm use default >/dev/null 2>&1 || true
+  [ -n "${NVM_BIN:-}" ] || return 0
+  mkdir -p "${cache%/*}" 2>/dev/null &&
+    printf '%s\n%s\n' "$key" "$NVM_BIN" > "$cache.$$" 2>/dev/null &&
+    mv -f "$cache.$$" "$cache" 2>/dev/null || rm -f "$cache.$$" 2>/dev/null || true
 }
 
 slugify() {
