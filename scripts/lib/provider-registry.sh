@@ -172,6 +172,11 @@ oms_provider_binary() {
 oms_provider_run_bounded() { # SECONDS OUTPUT COMMAND...
   local seconds="$1" output="$2" helper
   shift 2
+  # Inside one doctor run an identical probe reuses its first result.
+  if [ -n "${OMS_DOCTOR_PROBE_DIR:-}" ] && declare -F oms_doctor_probe >/dev/null; then
+    oms_doctor_probe "$seconds" merged "$@" > "$output" 2>&1
+    return
+  fi
   if command -v timeout >/dev/null 2>&1 && timeout --version >/dev/null 2>&1; then
     timeout --kill-after=1 "$seconds" "$@" > "$output" 2>&1
   elif command -v gtimeout >/dev/null 2>&1 && gtimeout --version >/dev/null 2>&1; then
