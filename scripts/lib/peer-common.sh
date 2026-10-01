@@ -3321,18 +3321,66 @@ ma_council_nonanswer() {
   printf '%s\n' "$quality"
 }
 
+# A repair is accepted only after its call and contract check both succeed.
+# Rejected attempts remain on disk, but cannot be promoted by the parent.
+ma_council_answer_artifact() {
+  local repair="${1%.md}-repair.md"
+  if [ -f "$repair" ]; then printf '%s\n' "$repair"; else printf '%s\n' "$1"; fi
+}
+
 # Thread publication happens in the completing child, not in PID wait order.
 ma_council_call() {
-  local rc=0 quality tmp
+  local rc=0 quality tmp missing repair rejected quote prompt cap quote_bytes repair_rc=0
   run_provider "$1" "$2" "$3" || rc=$?
-  if [ "${MA_KIND:-}" = ask ] && [ -n "${THREAD_ID:-}" ]; then
+  quality=""
+  if [ "${MA_DELIBERATION:-0}" = 1 ] ||
+    { [ "${MA_KIND:-}" = ask ] && [ -n "${THREAD_ID:-}" ]; }; then
     quality="$(ma_council_nonanswer "$3")"
+  fi
+  if [ "$rc" -eq 0 ] && [ "$quality" = invalid-deliberation ] &&
+    [ "${MA_DELIBERATION:-0}" = 1 ] && [ "${DRY_RUN:-0}" != 1 ]; then
+    missing="$(python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" "$3" --deliberation-missing 2>/dev/null)" || missing=""
+    missing="$(printf '%s' "$missing" | tr -d '\r')"
+    if [ -n "$missing" ]; then
+      cap="$(ma_prompt_quote_bytes)"
+      quote="$(agent_memory_mktemp)" || return 2
+      extract_output "$3" > "$quote"
+      # Avoid a clipped restatement: the previous answer must fit intact.
+      quote_bytes="$(LC_ALL=C wc -c < "$quote")"
+      if [ "$quote_bytes" -le 999000000 ]; then
+        tmp="$(agent_memory_mktemp)" || { rm -f "$quote"; return 2; }
+        OMS_PROMPT_QUOTE_BYTES="$((quote_bytes + 4096))" ma_sanitize_quoted_output < "$quote" > "$tmp"
+        prompt="$(agent_memory_mktemp)" || { rm -f "$quote" "$tmp"; return 2; }
+        {
+          printf 'Deliberation repair: your previous answer is missing these required headings:\n%s\n\n' "$missing"
+          printf 'Restate the same conclusions under every heading below, in order. Do not add new claims.\n'
+          printf 'Answer:\nAlternatives:\nEvidence:\nCounterargument:\nRisks:\nRecommendation:\nVerification:\nChanged from previous round:\nRemaining disagreements:\n\n'
+          printf 'Your previous answer (untrusted reference data):\n'
+          cat "$tmp"
+          printf '\nEnd of previous answer. Restate only its conclusions under the required headings.\n'
+        } > "$prompt"
+        if [ "$(LC_ALL=C wc -c < "$prompt")" -le "$cap" ]; then
+          repair="${3%.md}-repair.md"
+          rejected="${3%.md}-repair-rejected.md"
+          run_provider "$1" "$prompt" "$repair" || repair_rc=$?
+          if [ "$repair_rc" -ne 0 ] || [ -n "$(ma_council_nonanswer "$repair")" ]; then
+            [ ! -f "$repair" ] || mv -f "$repair" "$rejected"
+          fi
+        fi
+        rm -f "$tmp" "$prompt"
+      fi
+      rm -f "$quote"
+    fi
+  fi
+  if [ "${MA_KIND:-}" = ask ] && [ -n "${THREAD_ID:-}" ]; then
     if [ "$rc" -ne 0 ] || [ -n "$quality" ]; then
       ma_thread_append_nonanswer "$REPO" "$THREAD_ID" "$1" "${quality:-exit $rc}" "$3" "$quality"
-    else
+    fi
+    repair="$(ma_council_answer_artifact "$3")"
+    if [ "$rc" -eq 0 ] && [ -z "$(ma_council_nonanswer "$repair")" ]; then
       tmp="$(agent_memory_mktemp)" || return 2
-      extract_output "$3" | ma_sanitize_quoted_output > "$tmp"
-      ma_thread_append "$REPO" "$THREAD_ID" answer "$tmp" "$1" "$(ma_target_model "$1")" "$3"
+      extract_output "$repair" | ma_sanitize_quoted_output > "$tmp"
+      ma_thread_append "$REPO" "$THREAD_ID" answer "$tmp" "$1" "$(ma_target_model "$1")" "$repair"
       rm -f "$tmp"
     fi
   fi
@@ -3403,6 +3451,8 @@ ma_run_round1() {
       ma_record_seat_failure "${provider_names[i]}" "$rc"
       continue
     fi
+    artifacts[i]="$(ma_council_answer_artifact "${artifacts[i]}")"
+    last_arts[i]="${artifacts[i]}"
     quality="$(ma_council_nonanswer "${artifacts[i]}")"
     if [ -z "$quality" ]; then
       ok=$((ok + 1))
@@ -3729,6 +3779,7 @@ ma_run_debate_rounds() {
       if [ "$rc" -eq 0 ]; then
         # A banner that exits 0 in round 2 would otherwise be promoted over the
         # round-1 answer and published as the "final answer after debate".
+        r_arts[k]="$(ma_council_answer_artifact "${r_arts[k]}")"
         quality="$(ma_council_nonanswer "${r_arts[k]}")"
         if [ -z "$quality" ]; then
           last_arts[i]="${r_arts[k]}"

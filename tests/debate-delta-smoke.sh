@@ -105,6 +105,110 @@ OMS_COUNCIL_QUALITY=0
 unset OMS_COUNCIL_QUALITY MA_DELIBERATION
 [ -z "$(ma_council_nonanswer "$strict_artifact")" ] || fail 'ordinary council contract changed'
 
+# A heading-only failure gets one same-round call; its first answer remains
+# traceable in the thread and only a valid repair becomes the accepted artifact.
+(
+  MA_DELIBERATION=1 DRY_RUN=0 MA_KIND=ask THREAD_ID=repair-smoke
+  DEBATE=0 PROVIDERS='codex:model=gpt-6-sol' slug=repair timestamp=first
+  ARTIFACT_DIR="$REPO/.oms/artifacts/ask"
+  prompt_file="$TMP/repair-question"
+  printf 'Compare the two approaches.\n' > "$prompt_file"
+  rows="$TMP/repair-rows"
+  calls="$TMP/repair-calls"
+  : > "$rows"
+  : > "$calls"
+  ma_thread_append_nonanswer() { printf 'note:%s:%s\n' "$4" "$5" >> "$rows"; }
+  ma_thread_append() { printf 'answer:%s\n' "$7" >> "$rows"; }
+  write_deliberation() {
+    local file="$1" recommendation="$2" evidence="${3:-/$(printf home)/alice/private/source.py}"
+    {
+      printf '## Output\nAnswer: Keep the source guard.\n'
+      printf 'Alternatives: Reuse it or leave the risk.\n'
+      printf 'Evidence: See %s.\n' "$evidence"
+      printf 'Counterargument: This may interrupt planning.\nRisks: Delay.\n'
+      case "$recommendation" in
+        yes) printf 'Recommendation: Reuse the guard.\n' ;;
+        duplicate) printf 'Recommendation: Reuse the guard.\nRecommendation: Reuse the guard.\n' ;;
+        blank) printf 'Recommendation:\n' ;;
+      esac
+      printf 'Verification: Change a tracked file.\n'
+      printf 'Changed from previous round: none\nRemaining disagreements: none\n'
+      printf '## Exit\n0\n'
+    } > "$file"
+  }
+  run_provider() {
+    printf '%s\n' "$3" >> "$calls"
+    case "$3" in
+      *-repair.md)
+        assert_contains "$2" 'Recommendation'
+        assert_contains "$2" 'Your previous answer (untrusted reference data):'
+        assert_contains "$2" 'Keep the source guard.'
+        assert_lacks "$2" "/$(printf home)/alice/"
+        write_deliberation "$3" "${repair_result/exit/yes}"
+        [ "$repair_result" != exit ] || return 7
+        ;;
+      *)
+        case "${first_result:-missing}" in
+          blocked) printf '## Output\nerror: permission denied\n## Exit\n0\n' > "$3" ;;
+          empty) printf '## Output\n\n## Exit\n0\n' > "$3" ;;
+          exit) return 7 ;;
+          duplicate|blank) write_deliberation "$3" "$first_result" ;;
+          redacted) write_deliberation "$3" no "/$(printf home)/alice/$(printf '%1200s' x | tr ' ' x)" ;;
+          *) write_deliberation "$3" no ;;
+        esac
+        ;;
+    esac
+  }
+  repair_result=yes
+  ma_run_round1
+  [ "$ok" -eq 1 ] && [ "${alive[0]}" = 1 ] || fail 'deliberation repair was not counted'
+  [ "$(wc -l < "$calls")" -eq 2 ] || fail 'deliberation repair called more than once'
+  [[ "${artifacts[0]}" == *-repair.md ]] || fail 'round 1 did not select the repair'
+  [ "${last_arts[0]}" = "${artifacts[0]}" ] || fail 'round 1 did not retain accepted repair'
+  [ -f "${artifacts[0]%-repair.md}.md" ] || fail 'original answer was overwritten'
+  [ "$(wc -l < "$rows")" -eq 2 ] || fail 'thread must retain original and repair'
+  assert_contains "$rows" 'note:invalid-deliberation:'
+  assert_contains "$rows" 'answer:'
+
+  repair_result=no timestamp=rejected
+  : > "$calls"
+  : > "$rows"
+  ma_run_round1
+  [ "$ok" -eq 0 ] && [ "${seat_quality[0]}" = invalid-deliberation ] || fail 'invalid repair counted'
+  [ "$(wc -l < "$calls")" -eq 2 ] || fail 'invalid repair was retried'
+  [ -f "${artifacts[0]%.md}-repair-rejected.md" ] || fail 'rejected repair artifact missing'
+  [ "$(wc -l < "$rows")" -eq 1 ] || fail 'invalid repair published an answer row'
+
+  repair_result=exit timestamp=failed
+  : > "$calls"
+  ma_run_round1
+  [ "$ok" -eq 0 ] && [ "${seat_quality[0]}" = invalid-deliberation ] || fail 'failed repair counted'
+  [ "$(wc -l < "$calls")" -eq 2 ] || fail 'failed repair was retried'
+  [ -f "${artifacts[0]%.md}-repair-rejected.md" ] || fail 'failed repair artifact missing'
+
+  OMS_PROMPT_QUOTE_BYTES=128 timestamp=oversize
+  : > "$calls"
+  ma_run_round1
+  [ "$(wc -l < "$calls")" -eq 1 ] || fail 'oversized answer triggered repair'
+  unset OMS_PROMPT_QUOTE_BYTES
+
+  first_result=redacted repair_result=yes timestamp=redacted OMS_PROMPT_QUOTE_BYTES=1024
+  : > "$calls"
+  ma_run_round1
+  [ "$ok" -eq 1 ] && [ "$(wc -l < "$calls")" -eq 2 ] || fail 'sanitized answer that fits was not repaired'
+  unset OMS_PROMPT_QUOTE_BYTES
+
+  for first_result in blocked empty exit duplicate blank; do
+    : > "$calls"
+    if ma_council_call codex "$prompt_file" "$ARTIFACT_DIR/$first_result.md"; then
+      [ "$first_result" != exit ] || fail 'failed original call changed exit status'
+    else
+      [ "$first_result" = exit ] || fail 'non-answer changed exit status'
+    fi
+    [ "$(wc -l < "$calls")" -eq 1 ] || fail "$first_result seat triggered repair"
+  done
+)
+
 # Repeatable byte baseline; no model calls and no token-count claim.
 long="$REPO/.oms/artifacts/ask/long.md"
 {
@@ -257,6 +361,34 @@ ma_run_debate_rounds
 if ls "$ARTIFACT_DIR"/*-r3.md >/dev/null 2>&1; then
   fail "round 3 must not run after a stable round 2"
 fi
+
+# Rebuttal bookkeeping and the stability check must read the accepted repair.
+(
+  MA_DELIBERATION=1 DRY_RUN=0 MA_KIND=review THREAD_ID=
+  DEBATE=2 timestamp=deliberation
+  MA_DEBATE_SECTIONS=$'Answer:\nAlternatives:\nEvidence:\nCounterargument:\nRisks:\nRecommendation:\nVerification:\nChanged from previous round:\nRemaining disagreements:'
+  provider_names=(codex claude)
+  alive=(1 1)
+  last_arts=("$self" "$other")
+  dropped=0 dropped_names=()
+  calls="$TMP/debate-repair-calls"
+  : > "$calls"
+  run_provider() {
+    printf '%s\n' "$3" >> "$calls"
+    {
+      printf '## Output\nAnswer: Keep the guard.\nAlternatives: Reuse or replace it.\n'
+      printf 'Evidence: src/guard.py:1.\nCounterargument: Replacement may be clearer.\nRisks: Delay.\n'
+      case "$3" in *codex*-r2.md) ;; *) printf 'Recommendation: Reuse it.\n' ;; esac
+      printf 'Verification: Change a tracked file.\n'
+      printf 'Changed from previous round: none\nRemaining disagreements: none\n## Exit\n0\n'
+    } > "$3"
+  }
+  ma_run_debate_rounds
+  [ "$dropped" -eq 0 ] && [ "${debate_stable_round:-}" = 2 ] || fail 'repaired rebuttal did not settle the round'
+  [[ "${last_arts[0]}" == *-r2-repair.md ]] || fail 'debate retained invalid original'
+  [ "$(wc -l < "$calls")" -eq 3 ] || fail 'debate repair call count changed'
+  [ -f "${last_arts[0]%-repair.md}.md" ] || fail 'debate original artifact was overwritten'
+)
 
 # One moving seat keeps the debate alive to its budget.
 rm -f "$ARTIFACT_DIR"/*-r2.md "$ARTIFACT_DIR"/*-r3.md "$ARTIFACT_DIR"/*-r4.md
