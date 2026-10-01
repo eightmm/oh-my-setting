@@ -117,17 +117,47 @@ def debate_sections(answer: str) -> tuple[str, list[tuple[str, str]]]:
     return body, sections
 
 
+_DELIBERATION_HEADINGS = ("Answer", "Alternatives", "Evidence", "Counterargument",
+                         "Risks", "Recommendation", "Verification", "Changed from previous round",
+                         "Remaining disagreements")
+_DELIBERATION_EMPTY_ALLOWED = ("Risks", "Changed from previous round", "Remaining disagreements")
+
+
 def valid_deliberation(answer: str) -> bool:
     """Check the response contract, not whether its reasoning is correct."""
     answer = re.split(r"(?m)^(?:model-result:|tokens used$|usage detail:|served model$|cost usd$)", answer)[0]
     _, sections = debate_sections(answer)
-    required = ("Answer", "Alternatives", "Evidence", "Counterargument",
-                "Risks", "Recommendation", "Verification", "Changed from previous round", "Remaining disagreements")
-    for key in required:
+    for key in _DELIBERATION_HEADINGS:
         bodies = [body for heading, body in sections if heading == key]
         if len(bodies) != 1 or not bodies[0].strip():
             return False
-        if key not in ("Risks", "Changed from previous round", "Remaining disagreements"):
+        if key not in _DELIBERATION_EMPTY_ALLOWED:
+            if bodies[0].strip().lower().rstrip(".! ") in ("none", "n/a", "unknown", "tbd"):
+                return False
+    return True
+
+
+def deliberation_missing_headings(answer: str) -> list[str]:
+    """Return required headings absent from the parsed answer, in contract order."""
+    answer = re.split(r"(?m)^(?:model-result:|tokens used$|usage detail:|served model$|cost usd$)", answer)[0]
+    _, sections = debate_sections(answer)
+    present = {heading for heading, _ in sections}
+    return [key for key in _DELIBERATION_HEADINGS if key not in present]
+
+
+def _repairable_deliberation_missing(answer: str) -> bool:
+    answer = re.split(r"(?m)^(?:model-result:|tokens used$|usage detail:|served model$|cost usd$)", answer)[0]
+    _, sections = debate_sections(answer)
+    missing = deliberation_missing_headings(answer)
+    if not missing:
+        return False
+    for key in _DELIBERATION_HEADINGS:
+        if key in missing:
+            continue
+        bodies = [body for heading, body in sections if heading == key]
+        if len(bodies) != 1 or not bodies[0].strip():
+            return False
+        if key not in _DELIBERATION_EMPTY_ALLOWED:
             if bodies[0].strip().lower().rstrip(".! ") in ("none", "n/a", "unknown", "tbd"):
                 return False
     return True
@@ -263,6 +293,10 @@ if __name__ == "__main__":
             answer = debate_excerpt(answer, min(4096, int(sys.argv[3])))
         elif len(sys.argv) == 3 and sys.argv[2] == "--deliberation-check":
             raise SystemExit(0 if valid_deliberation(answer) else 1)
+        elif len(sys.argv) == 3 and sys.argv[2] == "--deliberation-missing":
+            missing = deliberation_missing_headings(answer)
+            print("\n".join(missing))
+            raise SystemExit(0 if _repairable_deliberation_missing(answer) else 1)
         elif len(sys.argv) == 3 and sys.argv[2] == "--debate-unchanged":
             raise SystemExit(0 if debate_unchanged(answer) else 1)
         if answer:
