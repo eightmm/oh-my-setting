@@ -222,6 +222,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Prompt and Stop hooks run `hook_state.py` and `work_journal.py` through
+  `scripts/lib/cached-main.py`, which reuses their compiled bytecode instead
+  of recompiling them on every start: skill-router 197ms to 173ms and
+  turn-guard 165ms to 144ms (interleaved n=3, minimum of 9 runs each).
+
 - Plan and git-guard hot paths start fewer processes. `agent-plan.sh` runs
   its engine from `scripts/lib/agent_plan_core.py` through the bytecode cache
   instead of recompiling a 1,326-line heredoc on every call; the safe Git
