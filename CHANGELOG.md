@@ -222,6 +222,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Runtime activation (`doctor`, `update`, `auto-update`, and so `oms inbox`)
+  reads the Python and Node pins with the awk lock reader instead of one
+  `tool-lock.py` interpreter start per field: 256ms to 40ms per activation
+  (interleaved n=3, minimum of 7 runs each).
+
 - The Bash and edit tool hooks resolve the hook repo inside their one python
   pass, and the Stop hook relays the turn and resolves the repo in one helper
   call: fail-ledger 38ms to 28ms per Bash call, syntax-guard 91ms to 73ms per
