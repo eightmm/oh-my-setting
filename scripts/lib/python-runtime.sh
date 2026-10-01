@@ -4,6 +4,13 @@
 # remain untouched: activation only shadows python/python3 for the OMS process
 # tree and deliberately does not set VIRTUAL_ENV or UV_PROJECT_ENVIRONMENT.
 
+# Pins come from the awk lock reader: tool-lock.py cost one interpreter start
+# per field, nine Python starts per activation (350ms on `oms inbox`).
+if ! command -v oms_lock_scalar >/dev/null 2>&1 && [ -f "${BASH_SOURCE[0]%/*}/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "${BASH_SOURCE[0]%/*}/platform.sh"
+fi
+
 oms_python_runtime_root() {
   printf '%s\n' "${OMS_PYTHON_RUNTIME_ROOT:-$HOME/.local/share/oh-my-setting/python-runtime}"
 }
@@ -110,14 +117,9 @@ oms_python_runtime_current_python() {
 }
 
 oms_python_runtime_locked_version() {
-  local repo_root="$1" python version
-  [ -x "$repo_root/scripts/lib/tool-lock.py" ] && [ -f "$repo_root/tools.lock.json" ] ||
-    return 1
-  python="$(oms_python_runtime_current_python 2>/dev/null || command -v python3 2>/dev/null || true)"
-  [ -n "$python" ] || return 1
-  version="$("$python" -I "$repo_root/scripts/lib/tool-lock.py" \
-    --lock "$repo_root/tools.lock.json" get python.version 2>/dev/null | tr -d '\r')" ||
-    return 1
+  local version
+  [ -f "$1/tools.lock.json" ] || return 1
+  version="$(oms_lock_scalar "$1/tools.lock.json" python.version 2>/dev/null)" || return 1
   oms_python_runtime_version_valid "$version" || return 1
   printf '%s\n' "$version"
 }
@@ -316,7 +318,7 @@ oms_python_runtime_activate() {
       return 1
     }
   unset PYTHONHOME PYTHONPATH
-  node_version="$("$python" -I "$repo_root/scripts/lib/tool-lock.py" --lock "$repo_root/tools.lock.json" get node.version | tr -d '\r')" || return
+  node_version="$(oms_lock_scalar "$repo_root/tools.lock.json" node.version)" || return
   node_bin="${NVM_DIR:-$HOME/.nvm}/versions/node/v$node_version/bin"
   [ ! -x "$node_bin/node" ] || export PATH="$node_bin:$PATH"
   export OMS_PYTHON="$python"
