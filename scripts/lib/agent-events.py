@@ -1080,21 +1080,26 @@ def event_start(args: argparse.Namespace) -> int:
 def event_transition(args: argparse.Namespace) -> int:
     repo = repo_root(args.repo)
     attempt = safe_id(args.attempt, "attempt")
-    state = args.state
-    if state not in ALL_STATES:
-        raise OpsError("invalid lifecycle state: %s" % state)
-    event = new_event(
-        attempt,
-        0,
-        "attempt.state_changed",
-        from_state=None,
-        to_state=state,
-        reason_code=safe_reason(args.reason_code),
-        actor={"kind": safe_id(args.actor_kind, "actor kind"), "name": safe_id(args.actor, "actor")},
-        idempotency_key=safe_id(args.idempotency_key, "idempotency_key", optional=True),
-    )
-    row = append_lifecycle(repo, event)
-    print(row["event_id"])
+    # Each --then STATE[:KEY] appends the row a further `transition` with the
+    # same actor would, from this one process (see event_start).
+    steps = [(args.state, args.idempotency_key)] + [
+        (state, key) for state, _sep, key in (spec.partition(":") for spec in args.then)]
+    for state, _key in steps:
+        if state not in ALL_STATES:
+            raise OpsError("invalid lifecycle state: %s" % state)
+    for state, key in steps:
+        event = new_event(
+            attempt,
+            0,
+            "attempt.state_changed",
+            from_state=None,
+            to_state=state,
+            reason_code=safe_reason(args.reason_code),
+            actor={"kind": safe_id(args.actor_kind, "actor kind"), "name": safe_id(args.actor, "actor")},
+            idempotency_key=safe_id(key, "idempotency_key", optional=True),
+        )
+        row = append_lifecycle(repo, event)
+        print(row["event_id"])
     return 0
 
 
@@ -1947,6 +1952,7 @@ def add_event_parser(subparsers: argparse._SubParsersAction) -> None:
     transition.add_argument("--actor-kind", default="owner")
     transition.add_argument("--actor", default="agent-events")
     transition.add_argument("--idempotency-key", default="")
+    transition.add_argument("--then", action="append", default=[], metavar="STATE[:KEY]")
     transition.set_defaults(func=event_transition)
 
     heartbeat = subparsers.add_parser("heartbeat", help="append runner liveness")

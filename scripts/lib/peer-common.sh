@@ -2982,15 +2982,8 @@ PY
       if [ "$status" -eq 0 ]; then
         if [ "$access" = read ]; then
           "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
-            --state verifying --actor provider-router --idempotency-key routed-verifying >/dev/null || status=2
-        fi
-        if [ "$status" -eq 0 ] && [ "$access" = read ]; then
-          "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
-            --state review --actor provider-router --idempotency-key routed-review >/dev/null || status=2
-        fi
-        if [ "$status" -eq 0 ] && [ "$access" = read ]; then
-          "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \
-            --state "done" --actor provider-router --idempotency-key routed-done >/dev/null || status=2
+            --state verifying --idempotency-key routed-verifying --then review:routed-review \
+            --then done:routed-done --actor provider-router >/dev/null || status=2
         fi
       else
         "$events" --repo "$state_repo" transition --attempt "$OMS_ATTEMPT_ID" \

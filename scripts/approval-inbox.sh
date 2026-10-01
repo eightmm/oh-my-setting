@@ -4,4 +4,4 @@ set -euo pipefail
 # Request, decide, and consume durable approvals with compare-and-set fencing.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec python3 "$ROOT/scripts/lib/agent-events.py" approvals "$@"
+exec python3 "$ROOT/scripts/lib/cached-main.py" "$ROOT/scripts/lib/agent-events.py" approvals "$@"

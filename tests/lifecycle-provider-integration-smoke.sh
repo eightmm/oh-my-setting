@@ -44,6 +44,10 @@ assert attempt["usage_reports"]["duration_ms"] == 1, attempt
 
 rows = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
 assert rows[-1]["attempt_id"] == attempt["attempt_id"], rows[-1]
+events = [json.loads(line) for line in open(sys.argv[2].replace("artifacts/index.jsonl", "lifecycle/events.jsonl"), encoding="utf-8") if line.strip()]
+routed = [(e["to_state"], e.get("idempotency_key")) for e in events
+          if e.get("event_type") == "attempt.state_changed" and e.get("actor", {}).get("name") == "provider-router"]
+assert routed[-3:] == [("verifying", "routed-verifying"), ("review", "routed-review"), ("done", "routed-done")], routed
 PY
 
 # A supervisor owns its outer lifecycle. A provider invoked inside it reports
