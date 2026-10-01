@@ -44,13 +44,18 @@ def execute(command, entry, merged):
     """Capture into files, never pipes: a descendant that keeps a pipe open
     would outlive the probe's bound. A merged capture shares one file."""
     start = time.monotonic()
-    with open(entry / "stdout", "wb") as stdout, open(entry / "stderr", "wb") as stderr:
+    with open(entry / "raw-stdout", "wb") as stdout, open(entry / "raw-stderr", "wb") as stderr:
         try:
             result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=stdout,
                                     stderr=stdout if merged else stderr).returncode
         except OSError as exc:
             (stdout if merged else stderr).write(("error: %s\n" % exc).encode("utf-8", "replace"))
             result = 127 if isinstance(exc, FileNotFoundError) else 126
+    # A descendant may still hold the raw files: replay a snapshot it cannot
+    # write to, so later hits never see bytes the probe did not produce.
+    for name in ("stdout", "stderr"):
+        shutil.copyfile(entry / ("raw-" + name), entry / name)
+        os.unlink(entry / ("raw-" + name))
     return (128 - result if result < 0 else result), time.monotonic() - start
 
 

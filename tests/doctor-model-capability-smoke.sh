@@ -288,7 +288,7 @@ memo_dir="$TMP/memo"
 mkdir -p "$memo_dir"
 printf '#!/usr/bin/env bash\necho run >> "%s"\nfor i in 1 2 3 4 5 6; do echo "o$i"; echo "e$i" >&2; done\n' \
   "$TMP/interleave.runs" > "$bin/oms-interleave"
-printf '#!/usr/bin/env bash\nsleep 5 &\necho started\n' > "$bin/oms-linger"
+printf '#!/usr/bin/env bash\n(sleep 1; echo late) &\necho started\n' > "$bin/oms-linger"
 chmod +x "$bin/oms-interleave" "$bin/oms-linger"
 expected="$(PATH="$bin:$PATH" oms-interleave 2>&1)"
 for pass in 1 2; do
@@ -303,6 +303,10 @@ started=$SECONDS
 OMS_DOCTOR_PROBE_DIR="$memo_dir" PATH="$bin:$PATH" \
   python3 "$ROOT/scripts/lib/doctor-probe-memo.py" 2 split oms-linger >/dev/null
 [ $((SECONDS - started)) -lt 4 ] || fail "a lingering probe descendant held the memo past its bound"
+sleep 2
+got="$(OMS_DOCTOR_PROBE_DIR="$memo_dir" PATH="$bin:$PATH" \
+  python3 "$ROOT/scripts/lib/doctor-probe-memo.py" 2 split oms-linger)"
+[ "$got" = started ] || fail "a descendant's late write changed a cached probe: $got"
 echo 'doctor-probe-once: ok'
 
 echo 'doctor-model-capability-smoke: ok'
