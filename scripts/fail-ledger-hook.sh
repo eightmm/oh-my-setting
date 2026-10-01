@@ -29,41 +29,26 @@ esac
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
-# Resolve the event repo before parsing command details: only repos that
-# already carry harness state get rows, and an unadopted repo must not seed
-# .oms as a hook side effect.
-root="$(OMS_HOOK_PAYLOAD="$payload" python3 "$ROOT/scripts/lib/hook_repo.py" 2>/dev/null | tr -d '\r')" || root=""
-[ -n "$root" ] && [ -d "$root/.oms" ] || exit 0
 [ -x "$ROOT/scripts/fail-ledger.sh" ] || exit 0
 
-# One stat is the whole cost of the success side in a repo with no failure
-# history: an empty ledger has nothing to resolve, and the scan below never
-# opens it. Emptied here so the parse can bail before fingerprinting anything.
-ledger="${OMS_FAIL_LEDGER:-$root/.oms/failures.jsonl}"
-[ -s "$ledger" ] || ledger=""
-case "${OMS_FAIL_LEDGER_RESOLVE:-1}" in
-  0|false|FALSE|no|NO|off|OFF) ledger="" ;;
-esac
-
-# Content-free usage counter: rows carry a family name and a day, never the
-# command. Optional diagnostic telemetry; enable with OMS_USAGE_TRACK=1.
-usage_file="$root/.oms/usage.jsonl"
-case "${OMS_USAGE_TRACK:-0}" in
-  0|false|FALSE|no|NO|off|OFF) usage_file="" ;;
-esac
-
-# One python3 pass decides everything: which side of the ledger this event is,
-# and — on the success side — whether the fingerprint has an open failure at
-# all. Deliberately not a `check` call: resolving needs no git state
-# fingerprint, so this never computes one.
-parsed="$(OMS_FLH_PAYLOAD="$payload" OMS_FLH_LEDGER="$ledger" \
-  OMS_FLH_USAGE="$usage_file" OMS_FLH_FAMILIES="$ROOT/scripts/lib/usage-families.json" \
-  python3 - <<'PY' 2>/dev/null || true
+# One python3 pass resolves the event repo and decides everything: which side
+# of the ledger this event is, and — on the success side — whether the
+# fingerprint has an open failure at all. Deliberately not a `check` call:
+# resolving needs no git state fingerprint, so this never computes one.
+parsed="$(OMS_FLH_PAYLOAD="$payload" \
+  OMS_FLH_FAMILIES="$ROOT/scripts/lib/usage-families.json" \
+  python3 - "$ROOT/scripts/lib" <<'PY' 2>/dev/null || true
 import datetime
 import hashlib
 import json
 import os
 import re
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from hook_repo import resolve
+
+OFF = {"0", "false", "FALSE", "no", "NO", "off", "OFF"}
 
 try:
     row = json.loads(os.environ["OMS_FLH_PAYLOAD"])
@@ -77,13 +62,34 @@ if not isinstance(command, str) or not command.strip():
     raise SystemExit(0)
 command = command.replace("\n", " ")[:2000]
 
+# Only repos that already carry harness state get rows: an unadopted repo
+# must not seed .oms as a hook side effect.
+repo = resolve(row)
+if repo is None or not (repo / ".oms").is_dir():
+    raise SystemExit(0)
+
+# One stat is the whole cost of the success side in a repo with no failure
+# history: an empty ledger has nothing to resolve, and the scan below never
+# opens it.
+ledger = os.environ.get("OMS_FAIL_LEDGER") or str(repo / ".oms" / "failures.jsonl")
+try:
+    if not os.stat(ledger).st_size or (os.environ.get("OMS_FAIL_LEDGER_RESOLVE") or "1") in OFF:
+        ledger = ""
+except OSError:
+    ledger = ""
+
+# Content-free usage counter: rows carry a family name and a day, never the
+# command. Optional diagnostic telemetry; enable with OMS_USAGE_TRACK=1.
+usage_path = ""
+if (os.environ.get("OMS_USAGE_TRACK") or "0") not in OFF:
+    usage_path = str(repo / ".oms" / "usage.jsonl")
+
 # Usage counter, before any branch can bail: every Bash call in an adopted
 # repo is an observation. A read-only first token is a mention, not use —
 # `grep rdkit` must not count toward the chem family. Guarded so counter
 # trouble can never touch the resolve/record paths, and silent on stdout,
 # which belongs to the positional parse protocol below.
 try:
-    usage_path = os.environ.get("OMS_FLH_USAGE") or ""
     if usage_path:
         first = os.path.basename(re.split(r"\s+", command.strip())[0])
         readers = {"grep", "egrep", "fgrep", "rg", "sed", "awk", "cat",
@@ -141,7 +147,6 @@ def fingerprint(cmd):
 # deciding here keeps one failed command from being filed twice. A payload
 # with no event name and an explicit 0 is a success too: 0 is not a failure.
 if event == "PostToolUse" or (not event and exit_code == 0):
-    ledger = os.environ.get("OMS_FLH_LEDGER") or ""
     if exit_code != 0 or not ledger:
         raise SystemExit(0)
     fp = fingerprint(command)
@@ -169,6 +174,7 @@ if event == "PostToolUse" or (not event and exit_code == 0):
     #     shrinks the manual sweep burden, it does not end it.
     if fails <= 0:
         raise SystemExit(0)
+    print(repo.as_posix())
     print("resolve")
     print(command)
     raise SystemExit(0)
@@ -184,6 +190,7 @@ if re.search(r"/tmp/claude-\d+/", command):
     # other session can recompute: the row would be write-only from birth.
     # The deliberate `record` verb is unaffected — this gates only the hook.
     raise SystemExit(0)
+print(repo.as_posix())
 print("record")
 print(exit_code)
 print(command)
@@ -191,10 +198,11 @@ PY
 )"
 parsed="${parsed//$'\r'/}"
 [ -n "$parsed" ] || exit 0
-mode="$(printf '%s\n' "$parsed" | sed -n 1p)"
+root="$(printf '%s\n' "$parsed" | sed -n 1p)"
+mode="$(printf '%s\n' "$parsed" | sed -n 2p)"
 
 if [ "$mode" = "resolve" ]; then
-  cmd="$(printf '%s\n' "$parsed" | sed -n 2p)"
+  cmd="$(printf '%s\n' "$parsed" | sed -n 3p)"
   [ -n "$cmd" ] || exit 0
   # Silent on purpose: the resolve receipt is bookkeeping, and a command that
   # just passed is the last thing the agent needs narrated back to it.
@@ -203,8 +211,8 @@ if [ "$mode" = "resolve" ]; then
   exit 0
 fi
 
-exit_code="$(printf '%s\n' "$parsed" | sed -n 2p)"
-cmd="$(printf '%s\n' "$parsed" | sed -n 3p)"
+exit_code="$(printf '%s\n' "$parsed" | sed -n 3p)"
+cmd="$(printf '%s\n' "$parsed" | sed -n 4p)"
 case "$exit_code" in ''|*[!0-9]*) exit 0 ;; esac
 [ -n "$cmd" ] || exit 0
 

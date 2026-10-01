@@ -10,8 +10,8 @@ set -euo pipefail
 # plain stdout line on this event reaches the transcript log rather than the
 # model, so the finding rides hookSpecificOutput.additionalContext. Silent on a
 # clean file, a tool that is not an edit, a file kind it cannot judge, and an
-# unadopted repo. A small resolver checks the event before the syntax parser
-# starts. OMS_SYNTAX_GUARD_HOOK=0 disables it.
+# unadopted repo. The parse pass resolves the event repo before it imports the
+# routing helper. OMS_SYNTAX_GUARD_HOOK=0 disables it.
 
 case "${OMS_SYNTAX_GUARD_HOOK:-1}" in
   0|false|FALSE|no|NO|off|OFF) exit 0 ;;
@@ -21,10 +21,7 @@ payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-root="$(OMS_HOOK_PAYLOAD="$payload" python3 "$ROOT/scripts/lib/hook_repo.py" 2>/dev/null | tr -d '\r')" || root=""
-[ -n "$root" ] && [ -d "$root/.oms" ] || exit 0
-
-OMS_SGH_PAYLOAD="$payload" OMS_SGH_ROOT="$root" python3 - "$ROOT/scripts/lib" "$BASH" <<'PY' 2>/dev/null || true
+OMS_SGH_PAYLOAD="$payload" python3 - "$ROOT/scripts/lib" "$BASH" <<'PY' 2>/dev/null || true
 import atexit
 import ast
 import json
@@ -48,10 +45,14 @@ except (ValueError, KeyError):
 if not isinstance(row, dict):
     raise SystemExit(0)
 sys.path.insert(0, sys.argv[1])
-from hook_repo import native_path
+from hook_repo import native_path, resolve
+
+repo = resolve(row)
+if repo is None or not (repo / ".oms").is_dir():
+    raise SystemExit(0)
 from hook_state import live_thread_hint
 
-collaboration = live_thread_hint(row, Path(os.environ["OMS_SGH_ROOT"]))
+collaboration = live_thread_hint(row, repo)
 findings = []
 
 
