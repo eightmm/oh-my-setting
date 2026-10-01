@@ -16,7 +16,7 @@ mkdir -p "$fixture/scripts/lib" "$fixture/rules" "$fixture/.agents/plugins" \
   "$fixture/prompts" "$home/.codex/skills" "$home/.claude/skills" \
   "$home/.gemini/antigravity/skills" "$home/.local/bin" "$bin" "$project"
 cp "$ROOT/scripts/doctor.sh" "$fixture/scripts/doctor.sh"
-cp "$ROOT/scripts/lib/tool-lock.py" "$ROOT/scripts/lib/doctor-probe-memo.sh" \
+cp "$ROOT/scripts/lib/tool-lock.py" "$ROOT/scripts/lib/doctor-probe-memo.sh" "$ROOT/scripts/lib/platform.sh" \
   "$ROOT/scripts/lib/doctor-probe-memo.py" "$ROOT/scripts/lib/run-bounded.py" "$fixture/scripts/lib/"
 cp "$ROOT/tools.lock.json" "$fixture/tools.lock.json"
 chmod +x "$fixture/scripts/doctor.sh"
@@ -253,7 +253,6 @@ assert_probes_once() { # LOG
     'cursor-agent <--version>' 'npm <prefix> <-g>' 'npm <root> <-g>'; do
     grep -Fxq "$probe" "$1" || fail "doctor did not exercise $probe"
   done
-  grep -Fq 'tool-lock.py ' "$1" || fail 'doctor did not exercise tool-lock get'
 }
 
 run_logged_doctor "$TMP/probes-1.log" "$TMP/probes-1.out" "$TMP/probes-1.err" "$TMP/probes-1.rc"

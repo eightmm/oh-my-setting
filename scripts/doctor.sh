@@ -38,6 +38,8 @@ CONTRACT_ONLY=0
 . "$ROOT/scripts/lib/install-contract.sh"
 # shellcheck source=scripts/lib/doctor-probe-memo.sh
 . "$ROOT/scripts/lib/doctor-probe-memo.sh"
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
 
 usage() {
   cat <<'EOF'
