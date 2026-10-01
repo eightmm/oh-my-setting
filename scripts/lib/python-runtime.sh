@@ -135,7 +135,9 @@ oms_python_runtime_write_launcher() {  # ROOT VERSION NAME [DIR]
     printf '#!/usr/bin/env bash\nversion=%s\nup=%s\n' "$version" "$up"
     cat <<'EOF_LAUNCHER'
 set -euo pipefail
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/$up" && pwd -P)"
+# Every managed python3 call runs this: no dirname process per interpreter start.
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+root="$(cd "$here/$up" && pwd -P)"
 unset PYTHONHOME
 for candidate in "$root/envs/$version/bin/python3" \
     "$root/envs/$version/bin/python" "$root/envs/$version/Scripts/python.exe"; do
