@@ -3,7 +3,9 @@ set -euo pipefail
 
 # Inspect or install only the tools required by selected OMS capability
 # profiles, reusing the digest-verified transactional installers.
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
 ACTION=apply
 PRIMARY_PROVIDER="${OH_MY_SETTING_PRIMARY_PROVIDER:-auto}"
 UPGRADE_FLAG=0
@@ -216,7 +218,9 @@ if [ "$check_rc" -ne 0 ] && [ "$ALLOW_MISSING" -ne 1 ]; then
   exit "$check_rc"
 fi
 
-receipt_parent="$(dirname "$RECEIPT")"
+receipt_parent="${RECEIPT%/*}"
+[ "$receipt_parent" != "$RECEIPT" ] || receipt_parent=.
+[ -n "$receipt_parent" ] || receipt_parent=/
 [ ! -L "$receipt_parent" ] || fail "receipt directory must not be a symbolic link"
 umask 077
 mkdir -p "$receipt_parent"

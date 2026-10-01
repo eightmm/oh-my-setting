@@ -21,7 +21,7 @@ oms_strip_cr() {
   printf '%s\n' "${value//$'\r'/}"
 }
 
-OMS_INSTALL_CONTRACT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+OMS_INSTALL_CONTRACT_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)"
 if [ -f "$OMS_INSTALL_CONTRACT_LIB_DIR/platform.sh" ]; then
   # shellcheck source=scripts/lib/platform.sh
   . "$OMS_INSTALL_CONTRACT_LIB_DIR/platform.sh"
@@ -48,9 +48,20 @@ OMS_MANAGED_TARGET_HELPER="$OMS_INSTALL_CONTRACT_LIB_DIR/managed-target.py"
 
 oms_install_marker_path() {
   local target="$1"
+  local parent
+  local leaf
+
+  while [ "$target" != / ] && [ "${target%/}" != "$target" ]; do
+    target="${target%/}"
+  done
+  parent="${target%/*}"
+
+  [ "$parent" != "$target" ] || parent=.
+  [ -n "$parent" ] || parent=/
+  if [ "$target" = / ]; then leaf=/; else leaf="${target##*/}"; fi
 
   printf '%s/.%s.oh-my-setting-managed.json\n' \
-    "$(dirname "$target")" "$(basename "$target")"
+    "$parent" "$leaf"
 }
 
 oms_install_managed_target() {
@@ -407,7 +418,10 @@ oms_install_write_receipt() {
   plugin_version="$(oms_install_plugin_version "$root")"
   plugin_hash="$(oms_install_plugin_hash "$root")"
 
-  mkdir -p "$(dirname "$receipt")"
+  local receipt_parent="${receipt%/*}"
+  [ "$receipt_parent" != "$receipt" ] || receipt_parent=.
+  [ -n "$receipt_parent" ] || receipt_parent=/
+  mkdir -p "$receipt_parent"
   OMS_INSTALL_DIRTY="$dirty" \
     OMS_INSTALL_PROFILE="$profile" OMS_INSTALL_REF="$install_ref" \
     OMS_INSTALL_PREVIOUS="$previous_commit" OMS_INSTALL_LINK_MODE="$link_mode" python3 - \
@@ -734,7 +748,9 @@ oms_install_atomic_symlink() {
   local parent
   local temp
 
-  parent="$(dirname "$target")"
+  parent="${target%/*}"
+  [ "$parent" != "$target" ] || parent=.
+  [ -n "$parent" ] || parent=/
   mkdir -p "$parent"
   temp="$parent/.${target##*/}.oms-link.$$.$RANDOM"
   rm -f "$temp"
@@ -758,8 +774,11 @@ PY
 oms_install_atomic_text() {
   local value="$1"
   local target="$2"
+  local parent="${target%/*}"
 
-  mkdir -p "$(dirname "$target")"
+  [ "$parent" != "$target" ] || parent=.
+  [ -n "$parent" ] || parent=/
+  mkdir -p "$parent"
   python3 - "$target" "$value" <<'PY'
 import os
 import tempfile

@@ -4,7 +4,7 @@
 
 # Shared checks and cleanup for installed agent links/skills.
 if [ -z "${ROOT:-}" ]; then
-  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 fi
 
 # Exported state read by thin wrapper scripts.
@@ -66,8 +66,13 @@ oms_ops_latest_backup() {
   local dir
   local base
 
-  dir="$(dirname "$target")"
-  base="$(basename "$target")"
+  while [ "$target" != / ] && [ "${target%/}" != "$target" ]; do
+    target="${target%/}"
+  done
+  dir="${target%/*}"
+  [ "$dir" != "$target" ] || dir=.
+  [ -n "$dir" ] || dir=/
+  if [ "$target" = / ]; then base=/; else base="${target##*/}"; fi
   find "$dir" -maxdepth 1 -name "$base.backup.*" -print 2>/dev/null |
     LC_ALL=C sort |
     tail -n 1
@@ -149,7 +154,7 @@ oms_ops_clean_legacy_skill_links() {
   for skill in "$ROOT"/custom-skills/*; do
     [ -d "$skill" ] || continue
     [ -f "$skill/SKILL.md" ] || continue
-    name="$(basename "$skill")"
+    name="${skill##*/}"
     oms_ops_remove_legacy_link "$target_root/$name" "custom-skills/$name" "$dry_run"
   done
 

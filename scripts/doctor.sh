@@ -4,7 +4,9 @@ set -euo pipefail
 # Verify managed target identity, tools, skills, and manifest sync for all
 # three agent CLIs.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
 # Judge the install with the interpreter that configured it: a host python3
 # of 3.9 or 3.10 cannot read the TOML the 3.12 runtime wrote and failed a
 # healthy install. install.sh already runs doctor this way.
@@ -379,9 +381,9 @@ doctor_locked_platform() {
   local os arch
   if oms_platform_is_windows; then os=windows
   else
-    case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) return 1 ;; esac
+    case "$OMS_PLATFORM_KERNEL" in Linux) os=linux ;; Darwin) os=darwin ;; *) return 1 ;; esac
   fi
-  case "$(uname -m)" in
+  case "$OMS_PLATFORM_MACHINE" in
     x86_64|amd64) arch=amd64 ;;
     aarch64|arm64) arch=arm64 ;;
     *) return 1 ;;
@@ -413,7 +415,8 @@ provider_lock_path() {
     cursor="$snapshot"
     while :; do
       [ ! -L "$cursor" ] || { echo "error: redirected provider snapshot" >&2; return 1; }
-      parent="$(dirname "$cursor")"
+      parent="${cursor%/*}"
+      [ -n "$parent" ] || parent=/
       [ "$parent" != "$cursor" ] || break
       cursor="$parent"
     done
@@ -942,7 +945,7 @@ check_custom_skills() {
         ;;
     esac
     skill="$INSTALL_ROOT/$source"
-    name="$(basename "$skill")"
+    name="${skill##*/}"
     check_path "$target_root/$name" "$skill"
   done < <(python3 - "$INSTALL_ROOT/skills.manifest.json" <<'PY'
 import json

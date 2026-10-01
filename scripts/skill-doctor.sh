@@ -8,7 +8,9 @@ set -euo pipefail
 # every load, whether or not the task needs it. Progressive disclosure is the
 # fix — a short SKILL.md that points at references/ read only when relevant.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
 
 if [ "$#" -gt 0 ]; then
   case "$1" in
@@ -77,18 +79,19 @@ oversized=0
 if [ -d "$skills_dir" ]; then
   for skill_md in "$skills_dir"/*/SKILL.md; do
     [ -f "$skill_md" ] || continue
-    skill_name="$(basename "$(dirname "$skill_md")")"
+    skill_dir="${skill_md%/*}"
+    skill_name="${skill_dir##*/}"
     words="$(wc -w < "$skill_md" | tr -d ' ')"
     if [ "$words" -gt "$skill_budget" ]; then
       oversized=$((oversized + 1))
-      if [ -d "$(dirname "$skill_md")/references" ]; then
+      if [ -d "$skill_dir/references" ]; then
         printf 'warn: %s SKILL.md is %s words (budget %s); move detail into its references/\n' \
           "$skill_name" "$words" "$skill_budget"
       else
         printf 'warn: %s SKILL.md is %s words (budget %s); split it into references/ and link them\n' \
           "$skill_name" "$words" "$skill_budget"
       fi
-    elif [ -d "$(dirname "$skill_md")/references" ] &&
+    elif [ -d "$skill_dir/references" ] &&
       ! grep -q 'references/' "$skill_md"; then
       printf 'warn: %s has references/ that SKILL.md never links; they will not be read\n' \
         "$skill_name"

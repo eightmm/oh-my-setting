@@ -3,7 +3,9 @@ set -euo pipefail
 
 # Remove targets link.sh created and restore the backups they replaced.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
 DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
 # shellcheck source=scripts/lib/agent-install-state.sh
 . "$ROOT/scripts/lib/agent-install-state.sh"
@@ -62,7 +64,7 @@ unlink_skills() {
   for skill in "$ROOT"/custom-skills/*; do
     [ -d "$skill" ] || continue
     [ -f "$skill/SKILL.md" ] || continue
-    name="$(basename "$skill")"
+    name="${skill##*/}"
     unlink_and_restore "$target_root/$name" "$skill"
   done
 
@@ -91,7 +93,7 @@ case "${1:-}" in
 esac
 
 unlink_all() {
-  local receipt owner
+  local receipt owner receipt_parent
   local python_shim="$HOME/.local/bin/python3"
 
   # Pre-split installs linked the repository overlay directly. Accept that
@@ -130,7 +132,10 @@ unlink_all() {
   # The capability receipt lives beside the install receipt and belongs to the
   # same install: leaving it behind would steer the next install's updater at
   # a selection this checkout no longer owns.
-  capability_receipt="${OMS_CAPABILITY_RECEIPT:-$(dirname "$receipt")/capabilities.json}"
+  receipt_parent="${receipt%/*}"
+  [ "$receipt_parent" != "$receipt" ] || receipt_parent=.
+  [ -n "$receipt_parent" ] || receipt_parent=/
+  capability_receipt="${OMS_CAPABILITY_RECEIPT:-$receipt_parent/capabilities.json}"
   if [ -f "$capability_receipt" ] && [ ! -L "$capability_receipt" ]; then
     if [ "$DRY_RUN" = "1" ]; then
       echo "would remove capability receipt $capability_receipt"

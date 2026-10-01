@@ -4,7 +4,9 @@ set -euo pipefail
 # Install rules, skills, and the oms dispatcher into all three agent
 # CLIs. POSIX hosts use symlinks; Windows Git Bash uses ownership-marked copies.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
 STAMP="$(date +%Y%m%d%H%M%S)"
 
 usage() {
@@ -76,7 +78,7 @@ link_target() {
   local desired_mode
   local state
 
-  mkdir -p "$(dirname "$target")"
+  mkdir -p "${target%/*}"
   desired_mode="$(oms_install_link_mode)" || return
   state="$(oms_install_target_state "$source" "$target")" || return
   case "$desired_mode:$state" in
@@ -129,7 +131,7 @@ PY
   while IFS= read -r source; do
     [ -n "$source" ] || continue
     skill="$ROOT/$source"
-    name="$(basename "$skill")"
+    name="${skill##*/}"
     link_target "$skill" "$target_root/$name"
   done <<< "$enabled_sources"
 
@@ -141,7 +143,7 @@ PY
     # A `printf | grep -q` pipeline is racy under pipefail: grep closes on the
     # first match, printf gets EPIPE, and an enabled skill looks disabled.
     grep -Fxq "$source" <<< "$enabled_sources" && continue
-    name="$(basename "$skill")"
+    name="${skill##*/}"
     if oms_install_target_owned "$skill" "$target_root/$name"; then
       oms_install_remove_managed_target "$target_root/$name"
       echo "unlinked disabled skill $target_root/$name"

@@ -8,7 +8,8 @@ OMS_FILE_LOCK_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
 # The kernel name cannot change within a process; ask uname once. Not
 # exported, so a child started with a different PATH still asks its own.
 oms_lock_kernel() {
-  [ -n "${OMS_LOCK_KERNEL:-}" ] || OMS_LOCK_KERNEL="$(uname -s 2>/dev/null || true)"
+  [ -n "${OMS_LOCK_KERNEL:-}" ] ||
+    OMS_LOCK_KERNEL="${OMS_PLATFORM_KERNEL:-$(uname -s 2>/dev/null || true)}"
 }
 if [ -f "$OMS_FILE_LOCK_LIB_DIR/poll.sh" ]; then
   # shellcheck source=scripts/lib/poll.sh
@@ -47,13 +48,19 @@ oms_file_lock_path_for_file() {
   local file="$1"
   local abs
   local name
+  local leaf_path
   local sum
 
   case "$file" in
     /*) abs="$file" ;;
     *) abs="$PWD/$file" ;;
   esac
-  name="$(printf '%s' "$(basename "$abs")" | tr -c 'A-Za-z0-9._-' '_')"
+  leaf_path="$abs"
+  while [ "$leaf_path" != / ] && [ "${leaf_path%/}" != "$leaf_path" ]; do
+    leaf_path="${leaf_path%/}"
+  done
+  if [ "$leaf_path" = / ]; then name=/; else name="${leaf_path##*/}"; fi
+  name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
   sum="$(printf '%s' "$abs" | cksum | awk '{print $1 "-" $2}')"
   printf '%s/%s.%s.lock\n' "$(oms_file_lock_dir_for_path "$abs")" "$name" "$sum"
 }
@@ -317,7 +324,7 @@ oms_file_lock_reclaim_claim_live() {
   local remainder=""
 
   [ -d "$claim_dir" ] && [ ! -L "$claim_dir" ] || return 1
-  claim_name="$(basename "$claim_dir")"
+  claim_name="${claim_dir##*/}"
   pid="${claim_name%%.*}"
   remainder="${claim_name#*.}"
   [ "$remainder" != "$claim_name" ] || return 1
@@ -412,7 +419,7 @@ oms_file_lock_mkdir_reclaim() {
       *[!0-9]*|"") blocked=1; break ;;
     esac
     [ "$choosing" = 0 ] || { blocked=1; break; }
-    other_name="$(basename "$other")"
+    other_name="${other##*/}"
     other_pid="${other_name%%.*}"
     if [ "$other_ticket" -lt "$ticket" ] ||
        { [ "$other_ticket" -eq "$ticket" ] &&
@@ -599,7 +606,7 @@ oms_hold_file_lock() {
     return 2
   }
   lock_path="$(oms_file_lock_path_for_file "$state_file")"
-  mkdir -p "$(dirname "$lock_path")"
+  mkdir -p "${lock_path%/*}"
 
   if command -v flock >/dev/null 2>&1 && [ "${OMS_LOCK_FORCE_MKDIR:-0}" != "1" ]; then
     eval "exec $fd>\"\$lock_path\"" || return 75
@@ -640,7 +647,7 @@ oms_try_file_lock() {
 
   timeout="$(oms_file_lock_timeout)"
   lock_path="$(oms_file_lock_path_for_file "$state_file")"
-  lock_parent="$(dirname "$lock_path")"
+  lock_parent="${lock_path%/*}"
   mkdir -p "$lock_parent"
 
   if command -v flock >/dev/null 2>&1 && [ "${OMS_LOCK_FORCE_MKDIR:-0}" != "1" ]; then
@@ -676,7 +683,7 @@ oms_with_file_lock() {
 
   timeout="$(oms_file_lock_timeout)"
   lock_path="$(oms_file_lock_path_for_file "$state_file")"
-  lock_parent="$(dirname "$lock_path")"
+  lock_parent="${lock_path%/*}"
   mkdir -p "$lock_parent"
 
   if command -v flock >/dev/null 2>&1 && [ "${OMS_LOCK_FORCE_MKDIR:-0}" != "1" ]; then

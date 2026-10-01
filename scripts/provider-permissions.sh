@@ -9,10 +9,13 @@ set -euo pipefail
 # refusal — a peer that answers nothing, discovered only after a full call.
 # This is the one setup step that used to live in a person's head.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
-ROOT="$(cd "$ROOT" && pwd)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
+OMS_PP_KERNEL="$(uname -s 2>/dev/null || true)"
+OMS_PLATFORM_KERNEL="$OMS_PP_KERNEL"
 
 MODE=check
 PROFILE=consult
@@ -177,7 +180,7 @@ command -v python3 >/dev/null 2>&1 ||
 # mixed spelling (C:/...), which the absolute-path check below rightly
 # rejects — so every --apply and --check died before touching the settings.
 # Convert to the POSIX spelling the rule text wants before validating.
-case "$(uname -s 2>/dev/null || true)" in
+case "$OMS_PP_KERNEL" in
   MINGW*|MSYS*|CYGWIN*)
     if command -v cygpath >/dev/null 2>&1; then
       WORKTREE_PARENT="$(cygpath -u "$WORKTREE_PARENT" | tr -d '\r')"
@@ -253,16 +256,18 @@ print(posixpath.normpath("/" + raw.lstrip("/")))
 PY
 )" || return $?
     normalized="${normalized//$'\r'/}"
-    cursor="$(dirname "$normalized")"
-    leaf="$(basename "$normalized")"
+    cursor="${normalized%/*}"
+    [ -n "$cursor" ] || cursor=/
+    leaf="${normalized##*/}"
     suffix=""
     while [ ! -d "$cursor" ]; do
-      part="$(basename "$cursor")"
+      part="${cursor##*/}"
       suffix="/$part$suffix"
-      [ "$cursor" != "$(dirname "$cursor")" ] || return 1
-      cursor="$(dirname "$cursor")"
+      [ "$cursor" != / ] || return 1
+      cursor="${cursor%/*}"
+      [ -n "$cursor" ] || cursor=/
     done
-    physical="$(cd "$cursor" && pwd -P)" || return 1
+    physical="$(CDPATH= cd -P -- "$cursor" && pwd -P)" || return 1
     physical="${physical//$'\r'/}"
     candidate="$(OMS_PP_PATH_B64="$(oms_pp_b64 "$physical$suffix/$leaf")" python3 - <<'PY'
 import base64
@@ -283,7 +288,11 @@ PY
     target="${target//$'\r'/}"
     case "$target" in
       /*) raw="$target" ;;
-      *) raw="$(dirname "$candidate")/$target" ;;
+      *)
+        cursor="${candidate%/*}"
+        [ -n "$cursor" ] || cursor=/
+        raw="$cursor/$target"
+        ;;
     esac
   done
 }
@@ -300,7 +309,7 @@ fi
 # the real one stays untouched. The mixed form (C:/...) names the same file
 # to bash, MSYS python, and native python alike. After canonicalization on
 # purpose: the canonicalizer's cd/pwd walk expects the POSIX spelling.
-case "$(uname -s 2>/dev/null || true)" in
+case "$OMS_PP_KERNEL" in
   MINGW*|MSYS*|CYGWIN*)
     if command -v cygpath >/dev/null 2>&1; then
       SETTINGS="$(cygpath -m "$SETTINGS" | tr -d '\r')"

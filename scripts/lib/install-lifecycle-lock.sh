@@ -6,7 +6,7 @@
 # exec into a freshly cloned checkout, and a file descriptor is not a portable
 # cross-exec contract on Bash 3.2 and Windows Git Bash.
 
-OMS_INSTALL_LIFECYCLE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+OMS_INSTALL_LIFECYCLE_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$OMS_INSTALL_LIFECYCLE_LIB_DIR/file-lock.sh"
 
@@ -27,7 +27,7 @@ oms_install_lifecycle_recovery_claim_release() {
     if [ "$recorded" = "$OMS_INSTALL_LIFECYCLE_RECOVERY_CLAIM_LOCAL_OWNER" ]; then
       rm -f "$claim/pid" "$claim/pid-start" "$claim/started" "$claim/owner"
       rmdir "$claim" 2>/dev/null || return 75
-      rmdir "$(dirname "$claim")" 2>/dev/null || true
+      rmdir "${claim%/*}" 2>/dev/null || true
     fi
   fi
   OMS_INSTALL_LIFECYCLE_RECOVERY_CLAIM_LOCAL_PATH=""
@@ -77,7 +77,8 @@ oms_install_lifecycle_lock_process_start() {
   local rest=""
   local value=""
 
-  case "$(uname -s 2>/dev/null || true)" in
+  oms_lock_kernel
+  case "$OMS_LOCK_KERNEL" in
     MINGW*|MSYS*|CYGWIN*) return 0 ;;
   esac
 
@@ -110,14 +111,18 @@ oms_install_lifecycle_lock_path() {
     /*) ;;
     *) raw="$PWD/$raw" ;;
   esac
-  parent="$(dirname "$raw")"
-  name="$(basename "$raw")"
+  while [ "$raw" != / ] && [ "${raw%/}" != "$raw" ]; do
+    raw="${raw%/}"
+  done
+  parent="${raw%/*}"
+  [ -n "$parent" ] || parent=/
+  name="${raw##*/}"
   if [ "$name" != "install-lifecycle.lock.d" ]; then
     echo "error: invalid install lifecycle lock path: $raw" >&2
     return 75
   fi
   mkdir -p "$parent" || return
-  parent="$(cd "$parent" && pwd -P)" || return
+  parent="$(CDPATH= cd -P -- "$parent" && pwd -P)" || return
   printf '%s/%s\n' "$parent" "$name"
 }
 
@@ -149,7 +154,7 @@ oms_install_lifecycle_recovery_claim_stale() {  # CLAIM TIMEOUT NOW
     *[!0-9]*|"")
       case "$started" in
         *[!0-9]*|"")
-          started="$(basename "$claim")"
+          started="${claim##*/}"
           started="${started%%.*}"
           case "$started" in *[!0-9]*|"") return 1 ;; esac
           [ $((now - started)) -ge "$timeout" ]
@@ -215,7 +220,7 @@ oms_install_lifecycle_recovery_claim_acquire() {  # LOCK_PATH TIMEOUT OWNER STAR
           "$candidate/owner")" != "$tick_owner" ] || return 75
       fi
       [ -d "$candidate" ] || continue
-      candidate_name="$(basename "$candidate")"
+      candidate_name="${candidate##*/}"
       names+=("$candidate_name")
     done
     first="$(printf '%s\n' "${names[@]}" | LC_ALL=C sort | sed -n '1p')"

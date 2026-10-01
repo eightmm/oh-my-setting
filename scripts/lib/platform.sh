@@ -5,11 +5,18 @@
 # means a POSIX shell supplied by Git for Windows/MSYS2/Cygwin; WSL reports
 # Linux and follows the normal Linux path.
 
+# These values are process invariant. Initialize in the parent shell because
+# callers commonly invoke the functions below through command substitution.
+[ -n "${OMS_PLATFORM_KERNEL:-}" ] ||
+  OMS_PLATFORM_KERNEL="$(uname -s 2>/dev/null || printf unknown)"
+[ -n "${OMS_PLATFORM_MACHINE:-}" ] ||
+  OMS_PLATFORM_MACHINE="$(uname -m 2>/dev/null || printf unknown)"
+
 oms_platform_name() {
   local value="${OMS_PLATFORM_OVERRIDE:-}"
 
   if [ -z "$value" ]; then
-    value="$(uname -s 2>/dev/null || printf unknown)"
+    value="$OMS_PLATFORM_KERNEL"
   fi
   case "$value" in
     windows|Windows|WINDOWS|MINGW*|MSYS*|CYGWIN*) printf 'windows\n' ;;
@@ -72,16 +79,16 @@ oms_tool_platform() {
   if oms_platform_is_windows; then
     os=windows
   else
-    case "$(uname -s)" in
+    case "$OMS_PLATFORM_KERNEL" in
       Linux) os=linux ;;
       Darwin) os=darwin ;;
-      *) echo "error: unsupported tool platform: $(uname -s)" >&2; return 1 ;;
+      *) echo "error: unsupported tool platform: $OMS_PLATFORM_KERNEL" >&2; return 1 ;;
     esac
   fi
-  case "$(uname -m)" in
+  case "$OMS_PLATFORM_MACHINE" in
     x86_64|amd64) arch=amd64 ;;
     aarch64|arm64) arch=arm64 ;;
-    *) echo "error: unsupported tool architecture: $(uname -m)" >&2; return 1 ;;
+    *) echo "error: unsupported tool architecture: $OMS_PLATFORM_MACHINE" >&2; return 1 ;;
   esac
   printf '%s-%s\n' "$os" "$arch"
 }
