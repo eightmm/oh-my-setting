@@ -28,6 +28,36 @@ else
   fail "Python 3 is required"
 fi
 
+# Count external path tools across the lifecycle. Each shim appends one short
+# line, including when independent children run at the same time.
+path_tool_bin="$TMP/path-tool-bin"
+path_tool_log="$TMP/path-tool-spawns.log"
+mkdir -p "$path_tool_bin"
+: > "$path_tool_log"
+export OMS_TEST_PATH_TOOL_LOG="$path_tool_log"
+OMS_TEST_REAL_DIRNAME="$(command -v dirname)"
+OMS_TEST_REAL_BASENAME="$(command -v basename)"
+OMS_TEST_REAL_READLINK="$(command -v readlink)"
+OMS_TEST_REAL_UNAME="$(command -v uname)"
+export OMS_TEST_REAL_DIRNAME OMS_TEST_REAL_BASENAME
+export OMS_TEST_REAL_READLINK OMS_TEST_REAL_UNAME
+for tool in dirname basename readlink uname; do
+  cat > "$path_tool_bin/$tool" <<'EOF_PATH_TOOL'
+#!/usr/bin/env bash
+tool="${0##*/}"
+printf '%s\n' "$tool" >> "$OMS_TEST_PATH_TOOL_LOG"
+case "$tool" in
+  dirname) exec "$OMS_TEST_REAL_DIRNAME" "$@" ;;
+  basename) exec "$OMS_TEST_REAL_BASENAME" "$@" ;;
+  readlink) exec "$OMS_TEST_REAL_READLINK" "$@" ;;
+  uname) exec "$OMS_TEST_REAL_UNAME" "$@" ;;
+esac
+EOF_PATH_TOOL
+  chmod +x "$path_tool_bin/$tool"
+done
+export PATH="$path_tool_bin:$PATH"
+hash -r
+
 upstream="$TMP/upstream"
 "$PYTHON" - "$ROOT" "$upstream" <<'PY'
 import os
@@ -58,6 +88,37 @@ PY
 # All package payloads below are local fixtures, not a live registry mirror.
 # Exercise the explicit reproducible-install contract throughout this suite.
 export OH_MY_SETTING_TOOL_LOCK="$upstream/tools.lock.json"
+
+# Instrument the fixture helper and mark doctor processes, including the ones
+# started by install/update, without relying on which Python they choose.
+tool_lock_get_log="$TMP/tool-lock-get.log"
+: > "$tool_lock_get_log"
+export OMS_TEST_TOOL_LOCK_GET_LOG="$tool_lock_get_log"
+mv "$upstream/scripts/doctor.sh" "$upstream/scripts/doctor.actual.sh"
+cat > "$upstream/scripts/doctor.sh" <<'SH_DOCTOR'
+#!/usr/bin/env bash
+export OMS_TEST_DOCTOR_ACTIVE=1
+exec bash "${BASH_SOURCE[0]%/*}/doctor.actual.sh" "$@"
+SH_DOCTOR
+chmod +x "$upstream/scripts/doctor.sh"
+mv "$upstream/scripts/lib/tool-lock.py" "$upstream/scripts/lib/tool-lock.actual.py"
+cat > "$upstream/scripts/lib/tool-lock.py" <<'PY_TOOL_LOCK'
+#!/usr/bin/env python3
+import os
+import sys
+
+if os.environ.get("OMS_TEST_DOCTOR_ACTIVE") == "1" and "get" in sys.argv[1:]:
+    fd = os.open(os.environ["OMS_TEST_TOOL_LOCK_GET_LOG"],
+                 os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, b"get\n")
+    finally:
+        os.close(fd)
+source = os.path.join(os.path.dirname(__file__), "tool-lock.actual.py")
+with open(source, "rb") as handle:
+    exec(compile(handle.read(), __file__, "exec"))
+PY_TOOL_LOCK
+chmod +x "$upstream/scripts/lib/tool-lock.py"
 
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
@@ -858,4 +919,19 @@ grep -Fq 'tool version drift: uv (managed binary digest changed)' \
 sed -i.bak '$d' "$tools_bin/uv"
 rm -f "$tools_bin/uv.bak" "$tools_bin/uv.oh-my-setting-managed"
 
-echo "install-lifecycle: ok ($expected_mode)"
+if [ -s "$tool_lock_get_log" ]; then
+  fail "doctor called tool-lock.py get $(wc -l < "$tool_lock_get_log" | tr -d ' ') times"
+fi
+# Each spawn costs about 25ms on windows-latest, where this suite ran 384s.
+# 3905 dirname/basename/readlink/uname starts on 2026-10-01; 1220 after the
+# builtins. readlink stays: ownership compares a link's exact text, which no
+# builtin reads. Raise this only with a measured reason.
+OMS_LIFECYCLE_PATH_TOOL_BUDGET=1400
+path_tool_total="$(wc -l < "$path_tool_log" | tr -d ' ')"
+if [ "$path_tool_total" -gt "$OMS_LIFECYCLE_PATH_TOOL_BUDGET" ]; then
+  awk '{ count[$0]++ } END {
+    for (tool in count) printf "%s: %d\n", tool, count[tool]
+  }' "$path_tool_log" >&2
+  fail "path-tool spawns $path_tool_total exceed budget $OMS_LIFECYCLE_PATH_TOOL_BUDGET"
+fi
+echo "install-lifecycle: ok ($expected_mode; path-tool spawns $path_tool_total/$OMS_LIFECYCLE_PATH_TOOL_BUDGET; tool-lock get 0)"

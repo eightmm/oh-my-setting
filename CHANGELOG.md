@@ -230,6 +230,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- The install lifecycle smoke test counts `dirname`, `basename`, `readlink`
+  and `uname` launches across its fixture, enforces a combined budget of 800,
+  and checks that doctor launches no `tool-lock.py get` process.
+
 - A routed read call records its verifying, review and done transitions
   from one `agent-events transition --then STATE:KEY` process instead of three
   (the rows and idempotency keys are unchanged), and `agent-events.sh` and
