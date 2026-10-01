@@ -75,6 +75,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A Codex turn that completed after a stream-reconnect notice
+  ("Reconnecting... 2/5") is no longer read as a failed turn. Only
+  `turn.failed`, or an error the turn never closed after, fails it. The
+  misreading discarded a finished worker patch, about 1.07M tokens of work.
+
 - `plan-from-spec` accepts a planner task that omits an empty `depends`
   list; one such omission used to fail the whole autopilot proposal.
 
@@ -224,6 +229,24 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   the installer's contract and fail on duplicate, retired or drifted rows.
 
 ### Changed
+
+- A routed read call records its verifying, review and done transitions
+  from one `agent-events transition --then STATE:KEY` process instead of three
+  (the rows and idempotency keys are unchanged), and `agent-events.sh` and
+  `approval-inbox.sh` run through the bytecode cache.
+
+- Peer calls (`agent-call`, `peer-ask`, `peer-review`, `peer-delegate`) reuse
+  the nvm default bin dir they resolved last time while the alias files and
+  installed Node versions are unchanged, instead of sourcing nvm.sh and running
+  `nvm use default` (about 200ms) on every call.
+
+- The local parallel gate (`check.sh --parallel`, which `oms land` runs) splits
+  focused stages over eight lanes and scripts-smoke over six shards, and
+  `goal-drive-recovery` runs as two stages (`OMS_GDR_PART=1|2`); focused stages
+  are registered in an eight-lane longest-first order that CI's four lanes
+  also share. Gate wall time fell from 414-431s to 209-220s (two interleaved
+  n=3 A/Bs: four lanes 422s median, eight lanes 317s, eight lanes plus the
+  split 213s). Four dead helpers left by earlier changes are gone.
 
 - One `oms doctor` run, including its report child, model-doctor and other
   descendants, starts each external probe (same resolved binary and argv)
