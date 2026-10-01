@@ -230,6 +230,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- The current-thread rule (owner task, valid id, thread file, TTL) lives once,
+  in `thread_live.current_thread`; `thread.sh` calls it and the prompt and
+  edit hooks use it in process instead of starting `thread.sh current`.
+  `thread_live` loads its durable-jsonl helper through the bytecode cache.
+  While a thread is current, the edit hook fell from about 90ms to 37ms.
+- The project graph's freshness check hands its parse of `graph.json` (25MB
+  in this repository) to the `load_graph` that follows in the same process
+  instead of parsing it twice: `oms graph project context` 718ms to 601ms,
+  and `oms runtime context` gains the same.
+
 - A council seat that answers in full but misses required `--deliberation`
   headings is re-asked once, in the same round, to restate its answer under
   every heading, instead of being dropped as a non-answer. On 2026-10-01 a
