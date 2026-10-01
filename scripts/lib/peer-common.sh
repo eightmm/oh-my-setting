@@ -74,10 +74,11 @@ load_user_tool_paths() {
 
   # Sourcing nvm.sh and `nvm use default` cost about 200ms on every peer
   # call. Reuse the bin dir it resolved while the inputs of that resolution
-  # (the alias files and the installed versions) are unchanged; read with
+  # (every alias file, since default may name another, and the installed
+  # versions) are unchanged; read with
   # builtins, so a hit starts no process.
   key="$NVM_DIR"
-  for file in "$NVM_DIR"/alias/default "$NVM_DIR"/alias/lts/* "$NVM_DIR"/versions/node/*; do
+  for file in "$NVM_DIR"/alias/* "$NVM_DIR"/alias/lts/* "$NVM_DIR"/versions/node/*; do
     [ -e "$file" ] || continue
     line=""
     [ ! -f "$file" ] || IFS= read -r line < "$file" || true

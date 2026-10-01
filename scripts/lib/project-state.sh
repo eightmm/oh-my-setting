@@ -8,4 +8,3 @@ _OMS_PROJECT_STATE_HELPER="$_OMS_PROJECT_STATE_ROOT/project-state.py"
 oms_project_state() {  # FILE -> missing|draft|confirmed|legacy-active|invalid
   python3 "$_OMS_PROJECT_STATE_HELPER" state "$1" | tr -d '\r'
 }
-

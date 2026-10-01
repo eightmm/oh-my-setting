@@ -115,6 +115,13 @@ EOF
   printf 'node\n' > "$NVM_DIR/alias/default"
   peer_node >/dev/null
   [ "$(wc -l < "$NVM_DIR/sourced" | tr -d ' ')" = 2 ] || fail "a changed nvm alias reused a stale resolution"
+  printf 'work\n' > "$NVM_DIR/alias/default"
+  printf 'v22\n' > "$NVM_DIR/alias/work"
+  peer_node >/dev/null
+  printf 'v24\n' > "$NVM_DIR/alias/work"
+  peer_node >/dev/null
+  [ "$(wc -l < "$NVM_DIR/sourced" | tr -d ' ')" = 4 ] ||
+    fail "a changed alias that default names reused a stale resolution"
   [ "$(provider_lock_path)" = "$LOCK" ] || fail "doctor lost bootstrap fallback"
   snapshot="$HOME/.local/share/oh-my-setting/provider-tools.lock.json"
   mkdir -p "$(dirname "$snapshot")"
