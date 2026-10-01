@@ -641,26 +641,6 @@ oms_provider_normalize_list() {
   printf '%s\n' "$output"
 }
 
-# Expand a diagnostic/discovery selector to canonical names. Ordinary council
-# defaults remain explicit to avoid surprise spend; this selector is for local
-# no-model probes and for callers that explicitly ask for installed providers.
-oms_provider_selection_names() {
-  local selection="${1:-default}"
-  local normalized
-  case "$selection" in
-    default|'') oms_provider_default_names ;;
-    auto|installed) oms_provider_installed_names ;;
-    all)
-      oms_provider_supported_names
-      oms_provider_custom_names
-      ;;
-    *)
-      normalized="$(oms_provider_normalize_list "$selection")" || return $?
-      printf '%s\n' "$normalized" | tr ',' '\n'
-      ;;
-  esac
-}
-
 oms_provider_selection_discovered_names() {
   local selection="${1:-default}"
   local normalized

@@ -9,6 +9,3 @@ oms_project_state() {  # FILE -> missing|draft|confirmed|legacy-active|invalid
   python3 "$_OMS_PROJECT_STATE_HELPER" state "$1" | tr -d '\r'
 }
 
-oms_project_state_snapshot() {  # FILE -> typed JSON snapshot
-  python3 "$_OMS_PROJECT_STATE_HELPER" snapshot "$1" | tr -d '\r'
-}

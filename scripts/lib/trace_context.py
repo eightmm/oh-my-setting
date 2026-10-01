@@ -83,14 +83,3 @@ def attach_trace_context(
     row["parent_span_id"] = parent_span_id
     row["trace_flags"] = flags
     return row
-
-
-def child_traceparent(row: Mapping[str, Any]) -> str:
-    context = persisted_context(row)
-    if context is None:
-        return ""
-    return "00-%s-%s-%s" % (
-        context["trace_id"],
-        context["span_id"],
-        context["trace_flags"],
-    )

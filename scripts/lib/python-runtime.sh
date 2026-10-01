@@ -94,28 +94,6 @@ raise SystemExit(0 if sys.version_info[:3] == expected else 1)' "$expected" \
     >/dev/null 2>&1
 }
 
-oms_python_runtime_current_version() {
-  local root current version
-  root="$(oms_python_runtime_root)"
-  current="$root/current"
-  [ -f "$current" ] && [ ! -L "$current" ] || return 1
-  version="$(sed -n '1p' "$current" 2>/dev/null | tr -d '\r')"
-  oms_python_runtime_version_valid "$version" || return 1
-  printf '%s\n' "$version"
-}
-
-oms_python_runtime_current_python() {
-  local root version env_dir python
-  root="$(oms_python_runtime_root)"
-  oms_python_runtime_root_owned "$root" && [ ! -L "$root/envs" ] || return 1
-  version="$(oms_python_runtime_current_version)" || return 1
-  env_dir="$root/envs/$version"
-  oms_python_runtime_env_owned "$env_dir" "$version" || return 1
-  python="$(oms_python_runtime_env_python "$env_dir")" || return 1
-  oms_python_runtime_python_matches "$python" "$version" || return 1
-  printf '%s\n' "$python"
-}
-
 oms_python_runtime_locked_version() {
   local version
   [ -f "$1/tools.lock.json" ] || return 1
