@@ -505,6 +505,8 @@ if printf '%s\n' "$auto_err" | grep -Fq 'degraded'; then
 fi
 [ -d "$auto_marker" ] ||
   fail "the distill marker write was expected to fail in this fixture"
+[ ! -e "$auto_repo/.oms/work-journal/prompt-tick" ] ||
+  fail "a tick whose distill did not complete left a skip stamp, so no prompt retries it"
 rm -rf "$auto_marker"
 
 # A prompt tick that would repeat the last one (same day, HEAD, event log and

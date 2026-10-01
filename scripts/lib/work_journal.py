@@ -2040,6 +2040,7 @@ class JournalStore:
         if len(fields) != 3 or not fields[0] or not fields[1]:
             return False
         commit_sha, committed_at, subject = fields
+        self.last_head = commit_sha
         payload = {
             "event_type": "commit",
             "occurred_at": _utc_rfc3339(parse_rfc3339(committed_at)),
@@ -2479,6 +2480,32 @@ class JournalStore:
             },
         )
         return lessons, dropped, skipped, deduped
+
+    def write_prompt_stamp(self, signature: str, autodistill: bool) -> None:
+        """Record what this tick processed so the prompt hook can skip a repeat.
+
+        Written under the journal lock, from the HEAD this tick captured and
+        the files it left behind. Valid until the journal's next local
+        midnight; a distill that did not complete leaves no stamp, so the next
+        prompt retries it.
+        """
+
+        path = self.root / "prompt-tick"
+        head = getattr(self, "last_head", "")
+        if not head or (autodistill and self.distill_due_today()):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return
+        now = self.clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=dt.timezone.utc)
+        local = now.astimezone(self.timezone_info)
+        midnight = dt.datetime.combine(local.date() + dt.timedelta(days=1), dt.time(), local.tzinfo)
+        sizes = [str(item.stat().st_size) if item.is_file() else ""
+                 for item in (self.events_path, self.digest_state_path, self.distill_state_path)]
+        atomic_write_text(path, "\n".join([str(int(midnight.timestamp())), head] + sizes + [signature]) + "\n")
 
     def distill_due_today(self) -> bool:
         """True when no distill has completed in the current local day.
@@ -4104,6 +4131,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(digest)
     if args.command == "tick" and args.autodistill:
         _run_autodistill(store)
+    if args.command == "tick" and os.environ.get("OMS_JOURNAL_PROMPT_STAMP"):
+        store.write_prompt_stamp(os.environ["OMS_JOURNAL_PROMPT_STAMP"], args.autodistill)
     return 0
 
 

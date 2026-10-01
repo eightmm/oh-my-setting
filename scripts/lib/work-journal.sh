@@ -120,33 +120,35 @@ work_journal_prompt_tick() {
     0|false|FALSE|no|NO|off|OFF) ;;
     *) set -- "$@" --autodistill ;;
   esac
-  # Views render from the append-only event log alone, and the digest and the
-  # distill run once per local day, so a tick on the same day, HEAD and log
-  # size repeats the last one. Skipping it saves a Python start per prompt.
-  local stamp="$repo/.oms/work-journal/prompt-tick" key last=""
-  key="$(work_journal_prompt_key "$repo" "$@")"
-  [ ! -f "$stamp" ] || IFS= read -r last < "$stamp" || true
-  [ -z "$key" ] || [ "$key" != "$last" ] || return 0
-  if ! out="$(work_journal_call_local "$repo" "$@" 2>/dev/null)"; then
+  # The journal stamps each prompt tick with the HEAD it captured, the event
+  # log and day-marker sizes it left and its next local midnight; while all
+  # still hold, the tick would repeat itself, so the Python start is skipped.
+  work_journal_prompt_stamp_current "$repo" "$*" && return 0
+  if ! out="$(OMS_JOURNAL_PROMPT_STAMP="$*" work_journal_call_local "$repo" "$@" 2>/dev/null)"; then
     echo "warning: Work Journal materialization degraded; primary lifecycle result is unchanged" >&2
     return 0
   fi
   [ -z "$out" ] || printf '%s\n' "$out"
-  key="$(work_journal_prompt_key "$repo" "$@")"
-  [ -z "$key" ] || printf '%s\n' "$key" > "$stamp" 2>/dev/null || true
   return 0
 }
 
-work_journal_prompt_key() {  # REPO TICK-ARGS... -> one line, or nothing
-  local repo="$1" store head sizes
-  shift
-  store="$repo/.oms/work-journal"
-  [ -f "$store/events.jsonl" ] || return 0
-  head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || return 0
-  # The day markers count too: removing one asks for that run again.
-  sizes="$(cd "$store" && wc -c events.jsonl digest.json distill.json 2>/dev/null)"
-  sizes="${sizes//$'\r'/}"
-  printf '%s|%s|%s|%s\n' "$(date +%Y-%m-%d)" "${head//$'\r'/}" "${sizes//$'\n'/,}" "$*"
+work_journal_prompt_stamp_current() {  # REPO SIGNATURE
+  local store="$1/.oms/work-journal" until head events digest distill signature now file size
+  [ -f "$store/prompt-tick" ] || return 1
+  {
+    IFS= read -r until && IFS= read -r head && IFS= read -r events &&
+      IFS= read -r digest && IFS= read -r distill && IFS= read -r signature
+  } < "$store/prompt-tick" || return 1
+  [ "$signature" = "$2" ] || return 1
+  now="$(date +%s)"
+  case "$until" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$now" -lt "$until" ] || return 1
+  [ "$(git -C "$1" rev-parse HEAD 2>/dev/null | tr -d '\r')" = "$head" ] || return 1
+  for file in events.jsonl:"$events" digest.json:"$digest" distill.json:"$distill"; do
+    size=""
+    [ ! -f "$store/${file%%:*}" ] || size="$(wc -c < "$store/${file%%:*}")"
+    [ "${size//[!0-9]/}" = "${file#*:}" ] || return 1
+  done
 }
 
 # Top-level Stop captures the final HEAD locally before deferred publication.
