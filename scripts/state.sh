@@ -67,39 +67,76 @@ if [ "$REFRESH_CI" = 1 ]; then
   (cd "$REPO" && "$ROOT/scripts/ci-status.sh" record >/dev/null 2>&1) || true
 fi
 
-# Privacy state comes from project-private itself (one source of truth for what
-# counts as tracked/hidden/exposed) rather than a second copy of the rules here.
-PRIVATE_JSON="$("$ROOT/scripts/project-private.sh" --repo "$REPO" status --json 2>/dev/null || true)"
-
-# The shared auto-update verdict rides the state so inbox stays a pure
-# derivation of state while still surfacing a dying updater — the state
-# an agent resuming here most needs to distrust.
-AUTOUPDATE_ATTENTION="$("$ROOT/scripts/auto-update.sh" attention 2>/dev/null || true)"
-
 RS_TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-repo-state.XXXXXX")"
 trap 'rm -rf "$RS_TMP"' EXIT HUP INT TERM
-LIFECYCLE_HEALTHY=1
-"$ROOT/scripts/agent-events.sh" --repo "$REPO" list --json \
-  > "$RS_TMP/lifecycle.json" 2>/dev/null || {
-    LIFECYCLE_HEALTHY=0
-    printf '[]\n' > "$RS_TMP/lifecycle.json"
-  }
-APPROVAL_HEALTHY=1
-"$ROOT/scripts/approval-inbox.sh" --repo "$REPO" list --json \
-  > "$RS_TMP/approvals.json" 2>/dev/null || {
-    APPROVAL_HEALTHY=0
-    printf '[]\n' > "$RS_TMP/approvals.json"
-  }
-FAILURE_HEALTHY=1
+
+# The read-only collectors below are independent, so they run at once and the
+# state costs the slowest of them, not their sum. Each leaves its exit code.
+rs_collect() {  # NAME COMMAND... (stdout to RS_TMP/NAME.out)
+  local name="$1" rc=0
+  shift
+  "$@" > "$RS_TMP/$name.out" 2>/dev/null || rc=$?
+  printf '%s\n' "$rc" > "$RS_TMP/$name.rc"
+}
+rs_rc() {  # NAME -> exit code, or 1 when the collector never ran
+  local rc=1
+  [ ! -f "$RS_TMP/$1.rc" ] || IFS= read -r rc < "$RS_TMP/$1.rc"
+  printf '%s\n' "${rc:-1}"
+}
 FAILURE_PHYSICAL=0
 if [ -e "$REPO/.oms/failures.jsonl" ] || [ -L "$REPO/.oms/failures.jsonl" ]; then
   FAILURE_PHYSICAL=1
 fi
+TASK_PHYSICAL=0
+if [ -e "$REPO/.oms/task/current.md" ] || [ -L "$REPO/.oms/task/current.md" ]; then
+  TASK_PHYSICAL=1
+fi
+PLAN_PHYSICAL=0
+if [ -e "$REPO/.oms/plan/tasks.json" ] || [ -L "$REPO/.oms/plan/tasks.json" ]; then
+  PLAN_PHYSICAL=1
+fi
+# Privacy state comes from project-private itself (one source of truth for what
+# counts as tracked/hidden/exposed) rather than a second copy of the rules here.
+rs_collect private "$ROOT/scripts/project-private.sh" --repo "$REPO" status --json &
+# The shared auto-update verdict rides the state so inbox stays a pure
+# derivation of state while still surfacing a dying updater — the state
+# an agent resuming here most needs to distrust.
+rs_collect autoupdate "$ROOT/scripts/auto-update.sh" attention &
+rs_collect lifecycle "$ROOT/scripts/agent-events.sh" --repo "$REPO" list --json &
+rs_collect approvals "$ROOT/scripts/approval-inbox.sh" --repo "$REPO" list --json &
+if [ "$FAILURE_PHYSICAL" = 0 ] || [ -f "$REPO/.oms/failures.jsonl" ]; then
+  rs_collect failures "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" list --unresolved --json &
+fi
+if [ "$TASK_PHYSICAL" = 0 ] || { [ ! -L "$REPO/.oms/task/current.md" ] &&
+  [ -f "$REPO/.oms/task/current.md" ]; }; then
+  rs_collect task "$ROOT/scripts/agent-task.sh" --repo "$REPO" status --json &
+fi
+if [ "$PLAN_PHYSICAL" = 0 ] || { [ ! -L "$REPO/.oms/plan/tasks.json" ] &&
+  [ -f "$REPO/.oms/plan/tasks.json" ]; }; then
+  rs_collect plan "$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json &
+fi
+wait
+PRIVATE_JSON="$(cat "$RS_TMP/private.out" 2>/dev/null || true)"
+AUTOUPDATE_ATTENTION="$(cat "$RS_TMP/autoupdate.out" 2>/dev/null || true)"
+
+LIFECYCLE_HEALTHY=1
+mv "$RS_TMP/lifecycle.out" "$RS_TMP/lifecycle.json"
+[ "$(rs_rc lifecycle)" = 0 ] || {
+  LIFECYCLE_HEALTHY=0
+  printf '[]\n' > "$RS_TMP/lifecycle.json"
+}
+APPROVAL_HEALTHY=1
+mv "$RS_TMP/approvals.out" "$RS_TMP/approvals.json"
+[ "$(rs_rc approvals)" = 0 ] || {
+  APPROVAL_HEALTHY=0
+  printf '[]\n' > "$RS_TMP/approvals.json"
+}
+FAILURE_HEALTHY=1
 if [ "$FAILURE_PHYSICAL" = 1 ] && [ ! -f "$REPO/.oms/failures.jsonl" ]; then
   FAILURE_HEALTHY=0
 else
-  "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" list --unresolved --json \
-    > "$RS_TMP/failures.json" 2>/dev/null || FAILURE_HEALTHY=0
+  mv "$RS_TMP/failures.out" "$RS_TMP/failures.json" 2>/dev/null || FAILURE_HEALTHY=0
+  [ "$(rs_rc failures)" = 0 ] || FAILURE_HEALTHY=0
 fi
 if [ "$FAILURE_HEALTHY" = 1 ] && ! python3 -c \
   'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); failures=row.get("failures") if isinstance(row, dict) else None; invalid=row.get("invalid_rows") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(invalid, int) and not isinstance(invalid, bool) and invalid >= 0 and isinstance(failures, list) and all(isinstance(item, dict) and isinstance(item.get("attention"), str) and isinstance(item.get("actionable"), bool) and isinstance(item.get("retiring"), bool) for item in failures)' \
@@ -110,16 +147,12 @@ if [ "$FAILURE_HEALTHY" = 0 ]; then
   printf '{"schema":1,"failures":[]}\n' > "$RS_TMP/failures.json"
 fi
 TASK_HEALTHY=1
-TASK_PHYSICAL=0
-if [ -e "$REPO/.oms/task/current.md" ] || [ -L "$REPO/.oms/task/current.md" ]; then
-  TASK_PHYSICAL=1
-fi
 if [ "$TASK_PHYSICAL" = 1 ] && { [ -L "$REPO/.oms/task/current.md" ] ||
   [ ! -f "$REPO/.oms/task/current.md" ]; }; then
   TASK_HEALTHY=0
 else
-  "$ROOT/scripts/agent-task.sh" --repo "$REPO" status --json \
-    > "$RS_TMP/task.json" 2>/dev/null || TASK_HEALTHY=0
+  mv "$RS_TMP/task.out" "$RS_TMP/task.json" 2>/dev/null || TASK_HEALTHY=0
+  [ "$(rs_rc task)" = 0 ] || TASK_HEALTHY=0
 fi
 if [ "$TASK_HEALTHY" = 1 ] && ! python3 -c \
   'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); present=row.get("present") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(present, bool) and present == (sys.argv[2] == "1") and (not present or (isinstance(row.get("status"), str) and isinstance(row.get("verification"), str) and isinstance(row.get("stale"), bool)))' \
@@ -130,16 +163,12 @@ if [ "$TASK_HEALTHY" = 0 ]; then
   printf '{"schema":1,"present":false}\n' > "$RS_TMP/task.json"
 fi
 PLAN_HEALTHY=1
-PLAN_PHYSICAL=0
-if [ -e "$REPO/.oms/plan/tasks.json" ] || [ -L "$REPO/.oms/plan/tasks.json" ]; then
-  PLAN_PHYSICAL=1
-fi
 if [ "$PLAN_PHYSICAL" = 1 ] && { [ -L "$REPO/.oms/plan/tasks.json" ] ||
   [ ! -f "$REPO/.oms/plan/tasks.json" ]; }; then
   PLAN_HEALTHY=0
 else
-  "$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json \
-    > "$RS_TMP/plan.json" 2>/dev/null || PLAN_HEALTHY=0
+  mv "$RS_TMP/plan.out" "$RS_TMP/plan.json" 2>/dev/null || PLAN_HEALTHY=0
+  [ "$(rs_rc plan)" = 0 ] || PLAN_HEALTHY=0
 fi
 if [ "$PLAN_HEALTHY" = 1 ] && ! python3 -c \
   'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); present=row.get("present") if isinstance(row, dict) else None; count=row.get("task_count") if isinstance(row, dict) else None; by_state=row.get("by_state") if isinstance(row, dict) else None; contract=row.get("contract") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(present, bool) and present == (sys.argv[2] == "1") and isinstance(count, int) and not isinstance(count, bool) and count >= 0 and all(isinstance(row.get(key), bool) for key in ("nonempty", "all_done", "has_unfinished")) and row.get("nonempty") == (count > 0) and row.get("has_unfinished") == (count > 0 and not row.get("all_done")) and isinstance(by_state, dict) and all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in by_state.values()) and sum(by_state.values()) == count and all(isinstance(row.get(key), list) for key in ("actionable", "stale", "stale_review")) and isinstance(contract, dict) and all(isinstance(contract.get(key), bool) for key in ("bound", "satisfied", "project_present", "project_healthy")) and all(isinstance(contract.get(key), str) for key in ("project_state", "blocker", "expected_spec_sha256", "current_spec_sha256"))' \
