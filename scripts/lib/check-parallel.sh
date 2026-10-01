@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 
-# Run existing CI partitions; this is orchestration, not another gate.
+# Run existing CI partitions; this is orchestration, not another gate. CI
+# spreads four focused lanes over four runners. One host runs every lane at
+# once, so it splits the focused stages eight ways and scripts-smoke six: with
+# four of each, the longest lane, not the longest stage, set the gate's wall
+# time.
 oms_check_parallel() (
   set -euo pipefail
   local check="$1" logs="$2" skip_lint="${3:-0}"
@@ -27,11 +31,11 @@ oms_check_parallel() (
     bash "$check" --lint-only > "$logs/lint.log" 2>&1 &
     pids+=("$!"); names+=(lint)
   fi
-  for lane in 1 2 3 4; do
-    bash "$check" --focused-only --focused-lane "$lane/4" > "$logs/focused-$lane.log" 2>&1 &
+  for lane in 1 2 3 4 5 6 7 8; do
+    bash "$check" --focused-only --focused-lane "$lane/8" > "$logs/focused-$lane.log" 2>&1 &
     pids+=("$!"); names+=("focused-$lane")
   done
-  bash "$check" --scripts-smoke-only > "$logs/smoke.log" 2>&1 &
+  OMS_SMOKE_JOBS="${OMS_SMOKE_JOBS:-6}" bash "$check" --scripts-smoke-only > "$logs/smoke.log" 2>&1 &
   pids+=("$!"); names+=(smoke)
   for ((i=0; i<${#pids[@]}; i++)); do
     wait "${pids[$i]}" || rc=1

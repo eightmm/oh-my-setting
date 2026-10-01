@@ -111,7 +111,7 @@ EOF
   . "$ROOT/scripts/lib/check-parallel.sh"
   oms_check_parallel "$probe/check.sh" "$probe/logs" 0 > "$probe/pass.log" 2>&1 ||
     fail "parallel gate failed or ignored signals: $(cat "$probe/pass.log")"
-  [ "$(find "$probe" -name '*.ran' | wc -l | tr -d ' ')" = 6 ] || fail "parallel gate omitted a partition"
+  [ "$(find "$probe" -name '*.ran' | wc -l | tr -d ' ')" = 10 ] || fail "parallel gate omitted a partition"
   if OMS_PARALLEL_FAIL=1 oms_check_parallel "$probe/check.sh" "$probe/fail-logs" 0 > "$probe/fail.log" 2>&1; then
     fail "parallel gate swallowed a failing lane"
   fi
