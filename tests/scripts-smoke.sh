@@ -7159,7 +7159,7 @@ EOF
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
-printf 'plan follows.\n{"tasks":[{"id":"t1","title":"feat: greeting core","allowed":["src/"],"verify":"bash tests/run.sh","depends":[],"assignment":{"provider":"claude","workload":"routine"}},{"id":"t2","title":"test: greeting covered","allowed":["tests/"],"verify":"bash tests/run.sh","depends":["t1"]}]}\n'
+printf 'plan follows.\n{"tasks":[{"id":"t1","title":"feat: greeting core","allowed":["src/"],"verify":"bash tests/run.sh","assignment":{"provider":"claude","workload":"routine"}},{"id":"t2","title":"test: greeting covered","allowed":["tests/"],"verify":"bash tests/run.sh","depends":["t1"]}]}\n'
 EOF
   chmod +x "$bin_dir/codex"
 
@@ -7181,6 +7181,8 @@ EOF
   [ ! -f "$project/.oms/plan/tasks.json" ] || fail "propose must not touch the task board"
   proposal="$(find "$project/.oms/plan" -name 'proposal-*.json' | head -n 1)"
   [ -n "$proposal" ] || fail "proposal file missing"
+  python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["tasks"][0]["depends"] == []' \
+    "$proposal" || fail "a planner that omits an empty depends list must not fail the proposal"
 
   # Apply: plan initialized from PROJECT.md (goal + acceptance) plus the tasks.
   "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --apply "$proposal" >"$project/apply-out" 2>&1 ||

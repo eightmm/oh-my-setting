@@ -1061,6 +1061,11 @@ if best is None:
     sys.stderr.write("no tasks JSON object in the provider answer\n")
     sys.exit(3)
 allowed = [item for item in re.split(r"[,\s]+", os.environ.get("OMS_PLAN_ALLOWED", "")) if item]
+tasks = best.get("tasks")
+# Planners drop an empty depends list; absent means no dependencies.
+for task in tasks if isinstance(tasks, list) else []:
+    if isinstance(task, dict):
+        task.setdefault("depends", [])
 wrapped = {
     "schema": 1,
     "kind": "agent-plan-proposal",
@@ -1070,7 +1075,7 @@ wrapped = {
     "id_prefix": os.environ.get("OMS_PLAN_ID_PREFIX", ""),
     "allowed_envelope": allowed,
     "acceptance_files": [item for item in os.environ.get("OMS_PLAN_ACCEPT_FILES", "").split(",") if item],
-    "tasks": best.get("tasks"),
+    "tasks": tasks,
 }
 json.dump(wrapped, sys.stdout, ensure_ascii=False, indent=2)
 PY
