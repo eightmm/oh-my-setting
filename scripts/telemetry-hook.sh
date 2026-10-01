@@ -14,5 +14,5 @@ HELPER="$ROOT/scripts/lib/hook_state.py"
 [ -f "$HELPER" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-python3 "$HELPER" telemetry >/dev/null 2>&1 || true
+python3 "$ROOT/scripts/lib/cached-main.py" "$HELPER" telemetry >/dev/null 2>&1 || true
 exit 0

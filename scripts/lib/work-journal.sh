@@ -39,7 +39,7 @@ work_journal_run_locked() {
   local repo="$1"
   shift
 
-  OMS_WORK_JOURNAL_ACTIVE=1 python3 "$(work_journal_python)" "$@"
+  OMS_WORK_JOURNAL_ACTIVE=1 python3 "$WORK_JOURNAL_LIB_DIR/cached-main.py" "$(work_journal_python)" "$@"
 }
 
 work_journal_call_local() {

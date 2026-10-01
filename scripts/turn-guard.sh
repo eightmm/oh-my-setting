@@ -25,7 +25,7 @@ if [ "${OMS_TURN_GUARD_OFF:-0}" != "1" ] && {
   [ "${OMS_SESSION_BUDGET_TURNS:-0}" != "0" ] ||
   [ "${OMS_SESSION_BUDGET_HOURS:-0}" != "0" ];
 }; then
-  guard_out="$(printf '%s' "$payload" | python3 "$HELPER" guard 2>/dev/null)" || guard_rc=$?
+  guard_out="$(printf '%s' "$payload" | python3 "$ROOT/scripts/lib/cached-main.py" "$HELPER" guard 2>/dev/null)" || guard_rc=$?
 fi
 
 # The journal must not record a blocked answer as finished. Parse the guard
@@ -71,14 +71,14 @@ fi
 
 # The other CLI's next prompt shows this turn's completion card; stdout here
 # belongs to the Stop protocol, so the writer stays silent.
-printf '%s' "$payload" | python3 "$HELPER" relay >/dev/null 2>&1 || true
+printf '%s' "$payload" | python3 "$ROOT/scripts/lib/cached-main.py" "$HELPER" relay >/dev/null 2>&1 || true
 
 # shellcheck source=scripts/lib/work-journal.sh
 . "$ROOT/scripts/lib/work-journal.sh"
 if ! work_journal_enabled && [ "${OMS_CI_TICK:-1}" != "1" ]; then
   exit 0
 fi
-repo="$(printf '%s' "$payload" | python3 "$HELPER" repo 2>/dev/null || true)"
+repo="$(printf '%s' "$payload" | python3 "$ROOT/scripts/lib/cached-main.py" "$HELPER" repo 2>/dev/null || true)"
 [ -n "$repo" ] || exit 0
 git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || exit 0
 

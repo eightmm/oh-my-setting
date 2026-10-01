@@ -715,7 +715,7 @@ compact_hook_events() {
   local -a compact_args
   compact_args=(compact-events --path "$path" --cutoff "$cutoff")
   [ "$apply" = 0 ] || compact_args+=(--apply)
-  python3 "$ROOT_LIB/hook_state.py" "${compact_args[@]}"
+  python3 "$ROOT_LIB/cached-main.py" "$ROOT_LIB/hook_state.py" "${compact_args[@]}"
 }
 if [ -f "$hook_events" ] && [ ! -L "$hook_events" ]; then
   hook_counts="$(compact_hook_events "$hook_events" "$cutoff_epoch" "$((1 - DRY_RUN))")"

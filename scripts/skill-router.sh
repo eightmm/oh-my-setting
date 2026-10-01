@@ -138,4 +138,4 @@ command -v python3 >/dev/null 2>&1 || exit 0
 
 # The helper owns routing state and fail-opens on malformed hook payloads.
 OMS_HOOK_PAYLOAD="$payload" OMS_HOOK_RESOLVED_REPO="$state_repo" \
-  python3 "$HELPER" route --manifest "$MANIFEST" || exit 0
+  python3 "$ROOT/scripts/lib/cached-main.py" "$HELPER" route --manifest "$MANIFEST" || exit 0

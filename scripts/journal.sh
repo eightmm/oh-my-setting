@@ -118,6 +118,6 @@ case "${1:-}" in
     work_journal_call_local "$repo" "$@"
     ;;
   *)
-    exec python3 "$PYTHON_ENTRY" "$@"
+    exec python3 "$ROOT/scripts/lib/cached-main.py" "$PYTHON_ENTRY" "$@"
     ;;
 esac
