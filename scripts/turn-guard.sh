@@ -69,16 +69,16 @@ fi
 
 [ "$decision" != "block" ] || exit 0
 
-# The other CLI's next prompt shows this turn's completion card; stdout here
-# belongs to the Stop protocol, so the writer stays silent.
-printf '%s' "$payload" | python3 "$ROOT/scripts/lib/cached-main.py" "$HELPER" relay >/dev/null 2>&1 || true
+# The other CLI's next prompt shows this turn's completion card. The same pass
+# prints the state repo, so stdout lands here, never in the Stop protocol.
+repo="$(printf '%s' "$payload" | python3 "$ROOT/scripts/lib/cached-main.py" "$HELPER" relay 2>/dev/null || true)"
 
 # shellcheck source=scripts/lib/work-journal.sh
 . "$ROOT/scripts/lib/work-journal.sh"
 if ! work_journal_enabled && [ "${OMS_CI_TICK:-1}" != "1" ]; then
   exit 0
 fi
-repo="$(printf '%s' "$payload" | python3 "$ROOT/scripts/lib/cached-main.py" "$HELPER" repo 2>/dev/null || true)"
+repo="${repo//$'\r'/}"
 [ -n "$repo" ] || exit 0
 git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || exit 0
 

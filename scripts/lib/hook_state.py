@@ -1566,23 +1566,21 @@ def git_line(repo: Path, *args: str) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-def cmd_relay(_: argparse.Namespace) -> int:
+def relay_turn(payload: dict[str, Any], repo: Path | None) -> None:
     """Stop: notify the Codex app, and leave the latest-turn card for Codex to read."""
     if is_harness_child():
-        return 0
-    payload, _ = load_payload()
+        return
     if payload.get("stop_hook_active") or payload.get("stopHookActive"):
-        return 0
+        return
     message = str(payload.get("last_assistant_message") or "").strip()
     # Codex has no Stop event; its reader side scans the rollout instead.
     if not message or payload_agent(payload) != "claude":
-        return 0
-    repo = hook_repo(payload)
+        return
     if repo is not None:
         with contextlib.suppress(Exception):
             start_codex_notify(claude_session_project(payload) or repo, payload, message)
     if os.environ.get("OMS_RELAY", "1") != "1" or repo is None or not (repo / ".oms").is_dir():
-        return 0
+        return
     from work_journal import sanitize_text
 
     ensure_oms(repo)
@@ -1599,6 +1597,17 @@ def cmd_relay(_: argparse.Namespace) -> int:
         "branch": git_line(repo, "branch", "--show-current"),
         "message": sanitize_text(tail, env_int("OMS_RELAY_BYTES", 800, minimum=120, maximum=4000)),
     })
+
+
+def cmd_relay(_: argparse.Namespace) -> int:
+    """Relay the turn, then print the state repo for the Stop hook's journal tail."""
+    payload, _ = load_payload()
+    repo = hook_repo(payload)
+    # A relay failure must not cost the journal its repo.
+    with contextlib.suppress(Exception):
+        relay_turn(payload, repo)
+    if repo is not None:
+        print(repo)
     return 0
 
 
@@ -1726,14 +1735,6 @@ def session_budget_reason(repo: Path, payload: dict[str, Any], state: dict[str, 
             turns, hours, turns_cap, hours_cap, "was started" if captured else "was skipped"))
 
 
-def cmd_repo(_: argparse.Namespace) -> int:
-    payload, _ = load_payload()
-    repo = hook_repo(payload)
-    if repo is not None:
-        print(repo)
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="oh-my-setting hook state helper")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1749,8 +1750,6 @@ def main() -> int:
     compact.add_argument("--cutoff", required=True, type=int)
     compact.add_argument("--apply", action="store_true")
     compact.set_defaults(func=cmd_compact_events)
-    repo = sub.add_parser("repo")
-    repo.set_defaults(func=cmd_repo)
     sub.add_parser("relay").set_defaults(func=cmd_relay)
     sub.add_parser("relay-hint").set_defaults(func=cmd_relay_hint)
     args = parser.parse_args()

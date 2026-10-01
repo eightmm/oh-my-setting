@@ -160,7 +160,7 @@ test_default_hooks_skip_guard_state_and_keep_journal() (
   # The shell must not even launch the guard helper in the default path, yet
   # keep both journal callbacks and resolve the payload's repository.
   broken_helper_root "$fake"
-  printf 'import sys\nassert sys.argv[1] == "repo", sys.argv\nprint(%s)\n' \
+  printf 'import sys\nassert sys.argv[1] == "relay", sys.argv\nprint(%s)\n' \
     "\"$project\"" > "$fake/scripts/lib/hook_state.py"
   cat > "$fake/scripts/lib/work-journal.sh" <<'SH'
 work_journal_enabled() { return 0; }
