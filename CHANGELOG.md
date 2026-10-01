@@ -222,6 +222,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- The Bash and edit tool hooks resolve the hook repo inside their one python
+  pass, and the Stop hook relays the turn and resolves the repo in one helper
+  call: fail-ledger 38ms to 28ms per Bash call, syntax-guard 91ms to 73ms per
+  edit, turn-guard 138ms to 113ms (interleaved n=3, minimum of 9 runs each).
+
 - Prompt and Stop hooks run `hook_state.py` and `work_journal.py` through
   `scripts/lib/cached-main.py`, which reuses their compiled bytecode instead
   of recompiling them on every start: skill-router 197ms to 173ms and
