@@ -336,7 +336,9 @@ check_locked_command_version() {  # LABEL COMMAND LOCK_FIELD
 
 installed_npm_version_for_doctor() {  # PACKAGE
   local listing
-  listing="$(oms_doctor_probe 0 split npm list -g --depth=0 --json "$1" 2>/dev/null || true)"
+  # The whole global listing, not one filtered per package: the probe memo
+  # then serves every package from one npm start (~200ms each).
+  listing="$(oms_doctor_probe 0 split npm list -g --depth=0 --json 2>/dev/null || true)"
   printf '%s' "$listing" | python3 -c '
 import json, sys
 try:

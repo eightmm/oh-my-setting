@@ -211,9 +211,9 @@ import json
 import sys
 lock = json.load(open(sys.argv[1], encoding="utf-8"))
 package = sys.argv[2]
-version = next((item["version"] for item in lock["npm"].values()
-                if item["package"] == package), "")
-print(json.dumps({"dependencies": {package: {"version": version}}}))
+# Unfiltered, npm lists every global package; doctor asks for that once.
+rows = {item["package"]: {"version": item["version"]} for item in lock["npm"].values()}
+print(json.dumps({"dependencies": rows if not package else {package: rows.get(package, {"version": ""})}}))
 PY
     ;;
   *' prefix '*) printf '%s/.npm-global\n' "$HOME" ;;
