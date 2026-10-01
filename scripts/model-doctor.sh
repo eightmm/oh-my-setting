@@ -8,6 +8,21 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/lib/model-capability.sh"
 # shellcheck source=scripts/lib/provider-registry.sh
 . "$ROOT/scripts/lib/provider-registry.sh"
+# shellcheck source=scripts/lib/doctor-probe-memo.sh
+if [ -f "$ROOT/scripts/lib/doctor-probe-memo.sh" ]; then
+  . "$ROOT/scripts/lib/doctor-probe-memo.sh"
+fi
+
+model_doctor_run_bounded() { # SECONDS OUTPUT COMMAND...
+  local seconds="$1" output="$2"
+  shift 2
+  if [ -n "${OMS_DOCTOR_PROBE_DIR:-}" ] &&
+     type oms_doctor_probe >/dev/null 2>&1; then
+    oms_doctor_probe "$seconds" merged "$@" > "$output" 2>&1
+  else
+    oms_capability_run_bounded "$seconds" "$output" "$@"
+  fi
+}
 
 JSON=0 LIVE=0 REQUIRE_ALL=0 STRICT=0 PROVIDERS=default
 usage() { cat <<'EOF'
@@ -57,7 +72,7 @@ while IFS= read -r provider; do
     for version_arg in $(oms_provider_version_args "$provider"); do
       version_cmd+=("$version_arg")
     done
-    oms_capability_run_bounded 10 "$version_out" "${version_cmd[@]}" </dev/null || true
+    model_doctor_run_bounded 10 "$version_out" "${version_cmd[@]}" </dev/null || true
     version="$(sed -n '1p' "$version_out" 2>/dev/null || true)"
     help_cmd=("$binary")
     for help_arg in $(oms_provider_help_args "$provider"); do
@@ -65,7 +80,7 @@ while IFS= read -r provider; do
     done
     # A bounded help invocation confirms the CLI can start without forcing a
     # model, login, or inference request. Grok also suppresses update checks.
-    if oms_capability_run_bounded 10 "$help_out" "${help_cmd[@]}" </dev/null; then
+    if model_doctor_run_bounded 10 "$help_out" "${help_cmd[@]}" </dev/null; then
       default_reachable=true
     fi
     if [ "$LIVE" -eq 1 ]; then

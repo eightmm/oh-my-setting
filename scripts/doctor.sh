@@ -34,6 +34,12 @@ CONTRACT_ONLY=0
 . "$ROOT/scripts/lib/harness-residue.sh"
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
+# shellcheck source=scripts/lib/doctor-probe-memo.sh
+if [ -f "$ROOT/scripts/lib/doctor-probe-memo.sh" ]; then
+  . "$ROOT/scripts/lib/doctor-probe-memo.sh"
+else
+  oms_doctor_probe() { shift 2; "$@"; }
+fi
 
 usage() {
   cat <<'EOF'
@@ -138,6 +144,35 @@ if { [ "$REPORT_JSON" = 1 ] || [ "$REPORT_PLAN" = 1 ]; } &&
   exit 2
 fi
 
+if [ "$CONTRACT_ONLY" = 1 ]; then
+  exec bash "$ROOT/scripts/lib/provider-contract.sh" --check
+fi
+
+doctor_probe_cache_cleanup() {
+  [ "${OMS_DOCTOR_PROBE_OWNER_PID:-}" = "$$" ] || return 0
+  [ -n "${OMS_DOCTOR_PROBE_DIR:-}" ] || return 0
+  [ -f "$OMS_DOCTOR_PROBE_DIR/.owner" ] || return 0
+  [ "$(cat "$OMS_DOCTOR_PROBE_DIR/.owner")" = "$$" ] || return 0
+  rm -rf -- "$OMS_DOCTOR_PROBE_DIR"
+}
+
+doctor_probe_cache_start() {
+  if [ -z "${OMS_DOCTOR_PROBE_DIR:-}" ] || [ ! -d "$OMS_DOCTOR_PROBE_DIR" ]; then
+    OMS_DOCTOR_PROBE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/oms-doctor-probe.XXXXXX")" || return 1
+    OMS_DOCTOR_PROBE_OWNER_PID="$$"
+    printf '%s\n' "$$" > "$OMS_DOCTOR_PROBE_DIR/.owner"
+    export OMS_DOCTOR_PROBE_DIR OMS_DOCTOR_PROBE_OWNER_PID
+  fi
+  if [ "${OMS_DOCTOR_PROBE_OWNER_PID:-}" = "$$" ]; then
+    trap doctor_probe_cache_cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+  fi
+}
+
+doctor_probe_cache_start
+
 if { [ "$REPORT_JSON" = 1 ] || [ "$REPORT_PLAN" = 1 ]; } &&
    [ "${OMS_DOCTOR_REPORT_CHILD:-0}" != 1 ]; then
   report_tmp="$(mktemp "${TMPDIR:-/tmp}/oms-doctor-report.XXXXXX")"
@@ -152,10 +187,6 @@ if { [ "$REPORT_JSON" = 1 ] || [ "$REPORT_PLAN" = 1 ]; } &&
   rm -f "$report_tmp"
   [ "$report_parser_rc" = 0 ] || exit "$report_parser_rc"
   exit "$report_rc"
-fi
-
-if [ "$CONTRACT_ONLY" = 1 ]; then
-  exec bash "$ROOT/scripts/lib/provider-contract.sh" --check
 fi
 
 if [ "$SURFACES" = "1" ] && [ "$REPAIR" = "1" ]; then
@@ -187,6 +218,7 @@ doctor_lifecycle_exit() {
 
   trap - EXIT HUP INT TERM
   oms_install_lifecycle_lock_release
+  doctor_probe_cache_cleanup
   exit "$code"
 }
 if [ "$REPAIR" = 1 ]; then
@@ -222,7 +254,12 @@ if [ "$SURFACES" = "0" ] && [ "$TOOL_LOCK_ONLY" = "0" ] &&
   echo "delegating doctor to canonical owner: $INSTALL_ROOT"
   # Plus-form: Bash 3.2 + set -u errors on an empty array expansion, and a
   # bare `doctor.sh` delegation carries no arguments at all.
-  exec "$INSTALL_ROOT/scripts/doctor.sh" ${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}
+  if grep -Fq 'doctor_probe_cache_start()' "$INSTALL_ROOT/scripts/doctor.sh"; then
+    exec "$INSTALL_ROOT/scripts/doctor.sh" ${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}
+  fi
+  # An older canonical doctor cannot clean up the directory after exec.
+  "$INSTALL_ROOT/scripts/doctor.sh" ${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}
+  exit $?
 fi
 
 check_tool_lock() {
@@ -236,19 +273,19 @@ check_tool_lock() {
     echo "fail: tool lock: invalid schema or contract ($lock_path)" >&2
     return 1
   fi
-  schema="$(python3 "$helper" --lock "$lock_path" get schema | tr -d '\r')"
+  schema="$(oms_doctor_probe 0 split python3 "$helper" --lock "$lock_path" get schema | tr -d '\r')"
   echo "ok: tool lock: valid schema $schema"
 }
 
 tool_lock_value() {
-  python3 "$INSTALL_ROOT/scripts/lib/tool-lock.py" \
+  oms_doctor_probe 0 split python3 "$INSTALL_ROOT/scripts/lib/tool-lock.py" \
     --lock "${OH_MY_SETTING_TOOL_LOCK:-$INSTALL_ROOT/tools.lock.json}" get "$1" |
     tr -d '\r'
 }
 
 command_has_locked_version() {  # COMMAND EXPECTED
   local output
-  output="$("$1" --version 2>/dev/null | tr -d '\r' || true)"
+  output="$(oms_doctor_probe 0 split "$1" --version 2>/dev/null | tr -d '\r' || true)"
   printf '%s' "$output" | python3 -c '
 import re, sys
 expected = re.escape(sys.argv[1].lstrip("v"))
@@ -274,7 +311,7 @@ report_tool_drift() {  # LABEL DETAIL
 
 external_gh_is_newer() {  # COMMAND EXPECTED
   local output
-  output="$("$1" --version 2>/dev/null | tr -d '\r')" || return 1
+  output="$(oms_doctor_probe 0 split "$1" --version 2>/dev/null | tr -d '\r')" || return 1
   printf '%s' "$output" | python3 -c '
 import re, sys
 actual = re.match(r"gh version (\d+)\.(\d+)\.(\d+)(?:\s|$)", sys.stdin.read())
@@ -297,7 +334,7 @@ check_locked_command_version() {  # LABEL COMMAND LOCK_FIELD
 
 installed_npm_version_for_doctor() {  # PACKAGE
   local listing
-  listing="$(npm list -g --depth=0 --json "$1" 2>/dev/null || true)"
+  listing="$(oms_doctor_probe 0 split npm list -g --depth=0 --json "$1" 2>/dev/null || true)"
   printf '%s' "$listing" | python3 -c '
 import json, sys
 try:
@@ -325,7 +362,7 @@ normalize_doctor_npm_path() {  # PATH_FROM_NATIVE_NPM
 
 doctor_npm_global_bin() {
   local prefix
-  prefix="$(npm prefix -g 2>/dev/null | tr -d '\r')" || return 1
+  prefix="$(oms_doctor_probe 0 split npm prefix -g 2>/dev/null | tr -d '\r')" || return 1
   prefix="$(normalize_doctor_npm_path "$prefix")" || return 1
   if oms_platform_is_windows; then
     printf '%s\n' "$prefix"
@@ -336,7 +373,7 @@ doctor_npm_global_bin() {
 
 doctor_npm_global_root() {
   local value
-  value="$(npm root -g 2>/dev/null | tr -d '\r')" || return 1
+  value="$(oms_doctor_probe 0 split npm root -g 2>/dev/null | tr -d '\r')" || return 1
   normalize_doctor_npm_path "$value"
 }
 
@@ -654,7 +691,11 @@ repair_install() {
 if [ "$REPAIR" = "1" ]; then
   repair_install
   oms_install_lifecycle_lock_release
+  # Repair may replace a probed tool. The follow-up doctor must inspect it anew.
+  doctor_probe_cache_cleanup
+  unset OMS_DOCTOR_PROBE_DIR OMS_DOCTOR_PROBE_OWNER_PID
   trap - EXIT HUP INT TERM
+  doctor_probe_cache_start
   # Bash 3.2 + set -u treats an empty array expansion as unbound; the
   # plus-form keeps the re-exec working on stock macOS bash.
   exec "$ROOT/scripts/doctor.sh" ${MODEL_DOCTOR_ARGS[@]+"${MODEL_DOCTOR_ARGS[@]}"}
@@ -671,11 +712,11 @@ load_user_tool_paths() {
   # directly avoids executing a mutable, unrelated nvm.sh during diagnosis.
   if [ -x "$INSTALL_ROOT/scripts/lib/tool-lock.py" ] &&
      [ -f "$INSTALL_ROOT/tools.lock.json" ]; then
-    locked_node="$(python3 "$INSTALL_ROOT/scripts/lib/tool-lock.py" \
+    locked_node="$(oms_doctor_probe 0 split python3 "$INSTALL_ROOT/scripts/lib/tool-lock.py" \
       --lock "$INSTALL_ROOT/tools.lock.json" get node.version 2>/dev/null | tr -d '\r' || true)"
     managed_node_bin="$NVM_DIR/versions/node/v$locked_node/bin"
     if [ -n "$locked_node" ] && [ -x "$managed_node_bin/node" ] &&
-       [ "$("$managed_node_bin/node" --version 2>/dev/null | tr -d '\r')" = "v$locked_node" ]; then
+       [ "$(oms_doctor_probe 0 split "$managed_node_bin/node" --version 2>/dev/null | tr -d '\r')" = "v$locked_node" ]; then
       export PATH="$managed_node_bin:$PATH"
     fi
   fi
