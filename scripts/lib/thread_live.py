@@ -3,11 +3,11 @@
 import argparse
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
-import runpy
 import stat
 import time
 
@@ -15,7 +15,67 @@ import time
 ID = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,159}\Z")
 MAX_ROW = 65536
 MAX_FILE = 16 * 1024 * 1024
-DURABLE = runpy.run_path(str(Path(__file__).with_name("durable-jsonl.py")))
+def _load(name):
+    # Through the bytecode cache: runpy.run_path recompiles on every import,
+    # and the hooks import this module on every prompt and edit.
+    spec = importlib.util.spec_from_file_location("_oms_durable_jsonl", str(Path(__file__).with_name(name)))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return vars(module)
+
+
+DURABLE = _load("durable-jsonl.py")
+
+
+def current_task_id(repo):
+    """agent_task_metadata_value(.oms/task/current.md, task_id), or "".
+
+    The first match, as the awk reader that writes CURRENT's owner takes it;
+    only a non-empty regular file is read, so a FIFO cannot block a hook.
+    """
+    path = Path(repo) / ".oms" / "task" / "current.md"
+    try:
+        if not path.is_file() or not path.stat().st_size:
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            break
+        match = re.match(r"- task_id:[ \t\n\r\f\v]*(.*)\Z", line, re.S)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def current_thread(repo):
+    """The active thread id, or None.
+
+    The one rule for CURRENT: thread.sh and the hooks both call it. A pointer
+    left by another task, an invalid or missing thread, or one older than
+    OMS_THREAD_CURRENT_TTL (default 24h) is not current.
+    """
+    threads = Path(repo) / ".oms" / "threads"
+    try:
+        if not (threads / "CURRENT").is_file():
+            return None
+        first = (threads / "CURRENT").read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
+    except OSError:
+        return None
+    thread, minted, owner = (first.split() + ["", "", ""])[:3]
+    if not thread or (owner and owner != current_task_id(repo)):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", thread) or thread.startswith("."):
+        return None
+    if not (threads / (thread + ".jsonl")).is_file() or not re.fullmatch(r"[0-9]+", minted):
+        return None
+    ttl = os.environ.get("OMS_THREAD_CURRENT_TTL") or "86400"
+    if not re.fullmatch(r"[0-9]+", ttl):
+        ttl = "86400"
+    if int(time.time()) - int(minted) > int(ttl):
+        return None
+    return thread
 
 
 def safe_path(repo, path, create_parent=False):
@@ -192,7 +252,7 @@ def append_from_env():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("updates", "append", "check", "create"))
+    parser.add_argument("action", choices=("updates", "append", "check", "create", "current"))
     parser.add_argument("--repo", default=".")
     parser.add_argument("--id", default="")
     parser.add_argument("--after", default="")
@@ -201,7 +261,12 @@ def main():
     parser.add_argument("--wait", type=float, default=0)
     args = parser.parse_args()
     try:
-        if args.action == "append":
+        if args.action == "current":
+            thread = current_thread(args.repo)
+            if thread is None:
+                raise SystemExit(1)
+            print(thread)
+        elif args.action == "append":
             append_from_env()
         elif args.action == "check":
             thread_path(args.repo, args.id)

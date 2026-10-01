@@ -1298,12 +1298,8 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
 
         # Reuse the existing task ownership/TTL decision for CURRENT.
         thread_live.safe_path(repo, ".oms/threads/CURRENT")
-        current = subprocess.run(
-            ["bash", str(Path(__file__).parents[1] / "thread.sh"), "current", "--repo", str(repo)],
-            capture_output=True, text=True, timeout=2,
-        )
-        tid = current.stdout.strip()
-        if current.returncode:
+        tid = thread_live.current_thread(repo)
+        if not tid:
             return ""
         with thread_live.open_thread(repo, tid) as handle:
             first = handle.readline(thread_live.MAX_ROW + 1)

@@ -181,23 +181,10 @@ thread_file() { printf '%s/%s.jsonl\n' "$THREADS" "$1"; }
 
 # The pointer is advisory: an expired or dangling one is simply not current.
 read_current() {
-  local id minted now owner
-  [ -f "$CURRENT" ] || return 1
-  id="$(awk 'NR==1{print $1}' "$CURRENT")"
-  minted="$(awk 'NR==1{print $2}' "$CURRENT")"
-  owner="$(awk 'NR==1{print $3}' "$CURRENT")"
-  [ -n "$id" ] || return 1
-  # A pointer left by another task is not this task's conversation. Pointers
-  # written before this field existed carry no owner and stay usable.
-  if [ -n "$owner" ] && [ "$owner" != "$(current_task_id)" ]; then
-    return 1
-  fi
-  valid_id "$id" || return 1
-  [ -f "$(thread_file "$id")" ] || return 1
-  case "$minted" in *[!0-9]*|"") return 1 ;; esac
-  now="$(date +%s)"
-  [ $((now - minted)) -le "$TTL" ] || return 1
-  printf '%s\n' "$id"
+  # One rule for the active thread, shared with the hooks' in-process check.
+  local id
+  id="$(python3 "$HELPER" current --repo "$STATE_ROOT")" || return 1
+  printf '%s\n' "${id//$'\r'/}"
 }
 
 # The pointer records which task it belongs to: a thread is continuity for the

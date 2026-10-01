@@ -22871,6 +22871,32 @@ test_thread_pointer_does_not_cross_tasks() {
   first="$("$ROOT/scripts/thread.sh" --repo "$project" new --topic "first" )"
   [ "$("$ROOT/scripts/thread.sh" --repo "$project" current)" = "$first" ] ||
     fail "the thread should be current for the task that opened it"
+  # The owner check reads the first task_id, as the writer of CURRENT does.
+  python3 - "$project/.oms/task/current.md" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+open(path, "w", encoding="utf-8").write(re.sub(r"(?m)^(- task_id:.*)$", r"\1\n- task_id: shadow", text, count=1))
+PY
+  [ "$("$ROOT/scripts/thread.sh" --repo "$project" current)" = "$first" ] ||
+    fail "a second task_id line changed whose thread is current"
+  # Special files are refused, never read: a FIFO would block every hook.
+  if command -v mkfifo >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    cp "$project/.oms/task/current.md" "$TMP/thread-owner-task.md"
+    rm -f "$project/.oms/task/current.md"
+    mkfifo "$project/.oms/task/current.md"
+    timeout 5 python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import thread_live; thread_live.current_thread(sys.argv[2])' \
+      "$ROOT/scripts/lib" "$project" || fail "a FIFO task file blocked the current-thread check"
+    rm -f "$project/.oms/task/current.md"
+    cp "$TMP/thread-owner-task.md" "$project/.oms/task/current.md"
+    mv "$project/.oms/threads/CURRENT" "$TMP/thread-owner-current"
+    mkfifo "$project/.oms/threads/CURRENT"
+    if timeout 5 "$ROOT/scripts/thread.sh" --repo "$project" current >/dev/null 2>&1; then
+      fail "a FIFO CURRENT counted as a current thread"
+    fi
+    rm -f "$project/.oms/threads/CURRENT"
+    mv "$TMP/thread-owner-current" "$project/.oms/threads/CURRENT"
+  fi
 
   # A different task must not inherit the previous task's conversation.
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" close --reason "moving on" >/dev/null )
