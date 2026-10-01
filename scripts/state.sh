@@ -72,11 +72,16 @@ trap 'rm -rf "$RS_TMP"' EXIT HUP INT TERM
 
 # The read-only collectors below are independent, so they run at once and the
 # state costs the slowest of them, not their sum. Each leaves its exit code.
-rs_collect() {  # NAME COMMAND... (stdout to RS_TMP/NAME.out)
-  local name="$1" rc=0
+rs_collect() {  # NAME COMMAND... -> RS_TMP/NAME.out, started in the background
+  local name="$1"
   shift
-  "$@" > "$RS_TMP/$name.out" 2>/dev/null || rc=$?
-  printf '%s\n' "$rc" > "$RS_TMP/$name.rc"
+  # A collector killed before it reports reads as failed, never as clean.
+  printf '137\n' > "$RS_TMP/$name.rc"
+  {
+    rc=0
+    "$@" > "$RS_TMP/$name.out" 2>/dev/null || rc=$?
+    printf '%s\n' "$rc" > "$RS_TMP/$name.rc"
+  } &
 }
 rs_rc() {  # NAME -> exit code, or 1 when the collector never ran
   local rc=1
@@ -97,23 +102,23 @@ if [ -e "$REPO/.oms/plan/tasks.json" ] || [ -L "$REPO/.oms/plan/tasks.json" ]; t
 fi
 # Privacy state comes from project-private itself (one source of truth for what
 # counts as tracked/hidden/exposed) rather than a second copy of the rules here.
-rs_collect private "$ROOT/scripts/project-private.sh" --repo "$REPO" status --json &
+rs_collect private "$ROOT/scripts/project-private.sh" --repo "$REPO" status --json
 # The shared auto-update verdict rides the state so inbox stays a pure
 # derivation of state while still surfacing a dying updater — the state
 # an agent resuming here most needs to distrust.
-rs_collect autoupdate "$ROOT/scripts/auto-update.sh" attention &
-rs_collect lifecycle "$ROOT/scripts/agent-events.sh" --repo "$REPO" list --json &
-rs_collect approvals "$ROOT/scripts/approval-inbox.sh" --repo "$REPO" list --json &
+rs_collect autoupdate "$ROOT/scripts/auto-update.sh" attention
+rs_collect lifecycle "$ROOT/scripts/agent-events.sh" --repo "$REPO" list --json
+rs_collect approvals "$ROOT/scripts/approval-inbox.sh" --repo "$REPO" list --json
 if [ "$FAILURE_PHYSICAL" = 0 ] || [ -f "$REPO/.oms/failures.jsonl" ]; then
-  rs_collect failures "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" list --unresolved --json &
+  rs_collect failures "$ROOT/scripts/fail-ledger.sh" --repo "$REPO" list --unresolved --json
 fi
 if [ "$TASK_PHYSICAL" = 0 ] || { [ ! -L "$REPO/.oms/task/current.md" ] &&
   [ -f "$REPO/.oms/task/current.md" ]; }; then
-  rs_collect task "$ROOT/scripts/agent-task.sh" --repo "$REPO" status --json &
+  rs_collect task "$ROOT/scripts/agent-task.sh" --repo "$REPO" status --json
 fi
 if [ "$PLAN_PHYSICAL" = 0 ] || { [ ! -L "$REPO/.oms/plan/tasks.json" ] &&
   [ -f "$REPO/.oms/plan/tasks.json" ]; }; then
-  rs_collect plan "$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json &
+  rs_collect plan "$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json
 fi
 wait
 PRIVATE_JSON="$(cat "$RS_TMP/private.out" 2>/dev/null || true)"

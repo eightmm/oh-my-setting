@@ -24314,6 +24314,12 @@ test_state_verify_reports_unpublished_journal_summaries() {
 }
 
 test_state_verify_reports_cross_family_findings() {
+  # An engine whose wrapper dies before reporting must read as failed.
+  local launch_rc
+  launch_rc="$(bash -c 'TMP="$(mktemp -d)"; eval "$(sed -n "/^sv_launch()/,/^}/p" "$1")"
+    sv_launch killed "$TMP/out" quiet sh -c '"'"'kill -9 $PPID'"'"'; wait
+    cat "$TMP/killed.rc"; rm -rf "$TMP"' _ "$ROOT/scripts/state-verify.sh")"
+  case "$launch_rc" in ''|0) fail "a killed state-verify engine read as clean: '$launch_rc'" ;; esac
   local project="$TMP/sv-findings"
   local out rc
 

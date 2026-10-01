@@ -66,40 +66,43 @@ trap 'rm -rf "$TMP"' EXIT
 # script re-reports their findings under one summary. They read independent
 # state, so they run at once (about 1s in sequence, the slowest one now);
 # each leaves its exit code in TMP.
-sv_engine() {  # NAME COMMAND... (output redirected by the caller)
-  local name="$1" rc=0
-  shift
-  "$@" || rc=$?
-  printf '%s\n' "$rc" > "$TMP/$name.rc"
+sv_launch() {  # NAME OUTPUT merged|quiet COMMAND...
+  local name="$1" out="$2" mode="$3"
+  shift 3
+  # Started engines report failure until they finish: a wrapper killed before
+  # it writes its code must not read as a clean engine.
+  printf '137\n' > "$TMP/$name.rc"
+  {
+    rc=0
+    if [ "$mode" = merged ]; then
+      "$@" > "$out" 2>&1 || rc=$?
+    else
+      "$@" > "$out" 2>/dev/null || rc=$?
+    fi
+    printf '%s\n' "$rc" > "$TMP/$name.rc"
+  } &
 }
-sv_engine run "$ROOT/scripts/run.sh" validate --dir "$REPO/.oms" \
-  > "$TMP/run-validate.out" 2>&1 &
+sv_launch run "$TMP/run-validate.out" merged "$ROOT/scripts/run.sh" validate --dir "$REPO/.oms"
 if [ -f "$REPO/.oms/artifacts/index.jsonl" ]; then
-  sv_engine artifact "$ROOT/scripts/artifact-index.sh" --repo "$REPO" validate \
-    > "$TMP/artifact.out" 2>&1 &
+  sv_launch artifact "$TMP/artifact.out" merged "$ROOT/scripts/artifact-index.sh" --repo "$REPO" validate
 else
   : > "$TMP/artifact.out"
 fi
 if [ -f "$REPO/.oms/lifecycle/events.jsonl" ]; then
-  sv_engine lifecycle "$ROOT/scripts/agent-events.sh" --repo "$REPO" validate \
-    > "$TMP/lifecycle.out" 2>&1 &
+  sv_launch lifecycle "$TMP/lifecycle.out" merged "$ROOT/scripts/agent-events.sh" --repo "$REPO" validate
 else
   : > "$TMP/lifecycle.out"
 fi
-sv_engine approval "$ROOT/scripts/approval-inbox.sh" --repo "$REPO" validate \
-  > "$TMP/approval.out" 2>&1 &
+sv_launch approval "$TMP/approval.out" merged "$ROOT/scripts/approval-inbox.sh" --repo "$REPO" validate
 # An absent task or unconfigured journal exits 0 with its own shape; a
 # nonzero exit is the engine failing. Falling back to {} silently skipped
 # every task/journal check while the summary still said clean — record the
 # engine failure as a finding instead, like every delegated engine above.
-sv_engine task "$ROOT/scripts/agent-task.sh" --repo "$REPO" status --json \
-  > "$TMP/task.json" 2>/dev/null &
-sv_engine journal "$ROOT/scripts/journal.sh" status --repo "$REPO" --json \
-  > "$TMP/journal.json" 2>/dev/null &
-sv_engine runtime "$ROOT/scripts/runtime.sh" --repo "$REPO" envelope show \
-  > "$TMP/runtime.json" 2>/dev/null &
+sv_launch task "$TMP/task.json" quiet "$ROOT/scripts/agent-task.sh" --repo "$REPO" status --json
+sv_launch journal "$TMP/journal.json" quiet "$ROOT/scripts/journal.sh" status --repo "$REPO" --json
+sv_launch runtime "$TMP/runtime.json" quiet "$ROOT/scripts/runtime.sh" --repo "$REPO" envelope show
 wait
-sv_rc() {  # NAME -> its exit code (0 when the engine was not started)
+sv_rc() {  # NAME -> its exit code (0 only when the engine was not started)
   local rc=0
   [ ! -f "$TMP/$1.rc" ] || IFS= read -r rc < "$TMP/$1.rc"
   printf '%s\n' "${rc:-0}"
