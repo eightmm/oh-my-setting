@@ -232,8 +232,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 - `model-doctor` probes its providers concurrently and replays their rows and
   stderr in list order (2.0s to 1.4s). The prompt hook's journal tick is
-  skipped when the local day, HEAD, event-log size and day markers match the
-  last tick, saving one Python start (about 70ms) on most prompts.
+  skipped while the stamp the journal wrote for its last prompt tick still
+  holds: the same HEAD, event-log and day-marker sizes, and before the
+  journal timezone's next midnight. A distill that did not complete leaves
+  no stamp. That saves one Python start (about 50ms) on most prompts, and the
+  Stop hook's journal tick skips the same way (100ms to 56ms).
 
 - The install lifecycle smoke test counts `dirname`, `basename`, `readlink`
   and `uname` launches across its fixture, enforces a combined budget of 800,
