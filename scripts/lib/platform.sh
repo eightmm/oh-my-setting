@@ -101,6 +101,8 @@ oms_lock_scalar() {  # oms_lock_scalar LOCK DOTTED.PATH
   awk -v want="$2" '
     { text = text $0 "\n" }
     END {
+      # Escaped JSON strings need decoding that this bootstrap reader cannot do.
+      if (index(text, "\\") != 0) exit 1
       n = length(text); depth = 0; lists = 0; key = ""; value = 0
       for (i = 1; i <= n; i++) {
         c = substr(text, i, 1)

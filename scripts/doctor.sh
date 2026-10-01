@@ -269,13 +269,15 @@ check_tool_lock() {
     echo "fail: tool lock: invalid schema or contract ($lock_path)" >&2
     return 1
   fi
-  schema="$(oms_doctor_probe 0 split python3 "$helper" --lock "$lock_path" get schema | tr -d '\r')"
+  schema="$(oms_lock_scalar "$lock_path" schema | tr -d '\r')" || {
+    echo "fail: tool lock: unreadable schema ($lock_path)" >&2
+    return 1
+  }
   echo "ok: tool lock: valid schema $schema"
 }
 
 tool_lock_value() {
-  oms_doctor_probe 0 split python3 "$INSTALL_ROOT/scripts/lib/tool-lock.py" \
-    --lock "${OH_MY_SETTING_TOOL_LOCK:-$INSTALL_ROOT/tools.lock.json}" get "$1" |
+  oms_lock_scalar "${OH_MY_SETTING_TOOL_LOCK:-$INSTALL_ROOT/tools.lock.json}" "$1" |
     tr -d '\r'
 }
 
@@ -708,8 +710,8 @@ load_user_tool_paths() {
   # directly avoids executing a mutable, unrelated nvm.sh during diagnosis.
   if [ -x "$INSTALL_ROOT/scripts/lib/tool-lock.py" ] &&
      [ -f "$INSTALL_ROOT/tools.lock.json" ]; then
-    locked_node="$(oms_doctor_probe 0 split python3 "$INSTALL_ROOT/scripts/lib/tool-lock.py" \
-      --lock "$INSTALL_ROOT/tools.lock.json" get node.version 2>/dev/null | tr -d '\r' || true)"
+    locked_node="$(oms_lock_scalar "$INSTALL_ROOT/tools.lock.json" node.version \
+      2>/dev/null | tr -d '\r' || true)"
     managed_node_bin="$NVM_DIR/versions/node/v$locked_node/bin"
     if [ -n "$locked_node" ] && [ -x "$managed_node_bin/node" ] &&
        [ "$(oms_doctor_probe 0 split "$managed_node_bin/node" --version 2>/dev/null | tr -d '\r')" = "v$locked_node" ]; then

@@ -253,6 +253,42 @@ PY
     fail "Python-free lock reader disagrees with tool-lock.py on $key"
 done
 
+# Python decodes escaped JSON strings, but the bootstrap scalar reader cannot.
+# A valid lock with one must fail closed instead of returning a wrong value.
+escaped_lock="$TMP/escaped-tools.lock.json"
+escaped_value_lock="$TMP/escaped-value-tools.lock.json"
+"$real_python3" - "$ROOT/tools.lock.json" "$escaped_lock" "$escaped_value_lock" <<'PY'
+import pathlib, re, sys
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+assert '"schema"' in source
+pathlib.Path(sys.argv[2]).write_text(
+    source.replace('"schema"', '"\\u0073chema"', 1), encoding="utf-8"
+)
+value_source, count = re.subn(
+    r'("node"\s*:\s*\{\s*"version"\s*:\s*")([^"]+)',
+    lambda match: match.group(1) + match.group(2).replace(".", "\\u002e", 1),
+    source, count=1,
+)
+assert count == 1 and value_source != source
+pathlib.Path(sys.argv[3]).write_text(value_source, encoding="utf-8")
+PY
+"$real_python3" "$ROOT/scripts/lib/tool-lock.py" --lock "$escaped_lock" validate >/dev/null ||
+  fail "escaped lock fixture must remain valid JSON and contract"
+"$real_python3" "$ROOT/scripts/lib/tool-lock.py" --lock "$escaped_value_lock" validate >/dev/null ||
+  fail "escaped value fixture must remain valid JSON and contract"
+if oms_lock_scalar "$escaped_lock" schema >/dev/null 2>&1; then
+  fail "scalar reader accepted an escaped lock key"
+fi
+if oms_lock_scalar "$escaped_value_lock" node.version >/dev/null 2>&1; then
+  fail "scalar reader accepted an escaped lock value"
+fi
+if OH_MY_SETTING_TOOL_LOCK="$escaped_lock" bash "$ROOT/scripts/doctor.sh" --tool-lock \
+    >"$TMP/escaped-doctor.out" 2>&1; then
+  fail "doctor accepted a lock the scalar reader cannot decode"
+fi
+grep -Fq 'fail: tool lock: unreadable schema' "$TMP/escaped-doctor.out" ||
+  fail "doctor did not report the escaped lock read failure"
+
 # A host with neither python3 nor uv: the pinned uv is fetched and verified,
 # the runtime is built, and the managed shim names its stable launcher. No
 # step may run python3.
