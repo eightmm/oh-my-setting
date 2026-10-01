@@ -149,7 +149,9 @@ def _repairable_deliberation_missing(answer: str) -> bool:
     answer = re.split(r"(?m)^(?:model-result:|tokens used$|usage detail:|served model$|cost usd$)", answer)[0]
     _, sections = debate_sections(answer)
     missing = deliberation_missing_headings(answer)
-    if not missing:
+    # Repair restates a deliberation that slipped a few headings; an answer
+    # with no Answer section (a JSON task list, say) is not one and fails closed.
+    if not missing or "Answer" in missing or len(missing) > 3:
         return False
     for key in _DELIBERATION_HEADINGS:
         if key in missing:

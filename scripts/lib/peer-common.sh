@@ -3345,9 +3345,11 @@ ma_council_call() {
       cap="$(ma_prompt_quote_bytes)"
       quote="$(agent_memory_mktemp)" || return 2
       extract_output "$3" > "$quote"
-      # Avoid a clipped restatement: the previous answer must fit intact.
+      # Avoid a clipped restatement: the previous answer must fit intact. The
+      # sanitizer may shrink it (redacted paths), so up to four times the cap
+      # is walked, and nothing larger: its work stays bounded.
       quote_bytes="$(LC_ALL=C wc -c < "$quote")"
-      if [ "$quote_bytes" -le 999000000 ]; then
+      if [ "$quote_bytes" -le $((cap * 4)) ]; then
         tmp="$(agent_memory_mktemp)" || { rm -f "$quote"; return 2; }
         OMS_PROMPT_QUOTE_BYTES="$((quote_bytes + 4096))" ma_sanitize_quoted_output < "$quote" > "$tmp"
         prompt="$(agent_memory_mktemp)" || { rm -f "$quote" "$tmp"; return 2; }

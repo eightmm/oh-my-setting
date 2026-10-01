@@ -163,6 +163,11 @@ unset OMS_COUNCIL_QUALITY MA_DELIBERATION
   ma_run_round1
   [ "$ok" -eq 1 ] && [ "${alive[0]}" = 1 ] || fail 'deliberation repair was not counted'
   [ "$(wc -l < "$calls")" -eq 2 ] || fail 'deliberation repair called more than once'
+  # A JSON task list carries no deliberation to restate: it is never repaired.
+  printf '## Output\n\n{"tasks": [{"id": "t1"}]}\n\n## Exit\n\n0\n' > "$TMP/json-only.md"
+  if python3 "$ROOT/scripts/lib/peer_artifacts.py" "$TMP/json-only.md" --deliberation-missing >/dev/null 2>&1; then
+    fail 'a JSON-only answer was offered a deliberation repair'
+  fi
   [[ "${artifacts[0]}" == *-repair.md ]] || fail 'round 1 did not select the repair'
   [ "${last_arts[0]}" = "${artifacts[0]}" ] || fail 'round 1 did not retain accepted repair'
   [ -f "${artifacts[0]%-repair.md}.md" ] || fail 'original answer was overwritten'
