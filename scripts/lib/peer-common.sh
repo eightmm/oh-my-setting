@@ -2957,6 +2957,7 @@ ma_run_routed_provider() {
 
   if [ "$OMS_ATTEMPT_OWNED" = 1 ]; then
     case "$heartbeat_seconds" in ''|*[!0-9]*|0) heartbeat_seconds=60 ;; esac
+    [ "$heartbeat_seconds" -gt 0 ] 2>/dev/null || heartbeat_seconds=60
     # BASHPID is absent on stock Bash 3.2; exec inside the substitution makes
     # sh's parent the current caller, including a council's child shell.
     owner_pid="${BASHPID:-$(exec sh -c 'printf "%s" "$PPID"')}"

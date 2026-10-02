@@ -19,9 +19,18 @@ cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 if [ "${1:-}" = exec ] && [ -n "${OMS_TEST_OPERATOR_BLOCK:-}" ]; then
+  # The read worker correctly receives no owner's attempt capability. This
+  # fixture simulates an independent operator using the parent's local ledger.
+  attempt="$(python3 - "$OMS_TEST_OPERATOR_BLOCK/.oms/lifecycle/events.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    rows = [json.loads(line) for line in handle if line.strip()]
+print([row["attempt_id"] for row in rows if row["event_type"] == "attempt.created"][-1])
+PY
+)"
   "$OMS_TEST_ROOT/scripts/agent-events.sh" --repo "$OMS_TEST_OPERATOR_BLOCK" \
-    transition --attempt "$OMS_ATTEMPT_ID" --state blocked \
-    --actor operator --reason-code operator_hold >/dev/null
+    transition --attempt "$attempt" --state blocked \
+    --actor operator --reason-code operator_hold >/dev/null || exit 1
 fi
 if [ "${1:-}" = exec ] && [ -n "${OMS_TEST_RECONCILE_REPO:-}" ]; then
   python3 - "$OMS_TEST_RECONCILE_REPO/.oms/lifecycle/events.jsonl" <<'PY'
@@ -179,6 +188,7 @@ PY
 if env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
   OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/bin:/usr/bin:/bin" \
   OMS_TEST_OPERATOR_BLOCK="$TMP/repo" OMS_TEST_ROOT="$ROOT" \
+  OMS_ROUTED_HEARTBEAT_SECONDS=00 \
   "$ROOT/scripts/agent-call.sh" --repo "$TMP/repo" --to codex \
   --prompt 'operator blocked read' > "$TMP/operator-block.out" 2>&1; then
   fail "successful provider revived an operator block"
