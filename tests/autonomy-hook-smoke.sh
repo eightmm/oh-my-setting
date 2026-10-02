@@ -49,6 +49,26 @@ for prompt, expected in cases.items():
     actual = module.classify_prompt(prompt)["workflow"]
     if actual != expected:
         raise SystemExit(f"{prompt!r}: expected {expected}, got {actual}")
+
+import os, tempfile
+from pathlib import Path
+from unittest.mock import Mock, patch
+with tempfile.TemporaryDirectory() as directory:
+    repo = Path(directory).resolve()
+    other = repo / "other"
+    other.mkdir()
+    module.repo_root.cache_clear()
+    git = Mock(return_value=Mock(returncode=0, stdout=str(repo) + "\n"))
+    with patch.dict(os.environ, {"OMS_HOOK_RESOLVED_REPO": str(repo)}), patch.object(module.subprocess, "run", git):
+        assert module.hook_repo({"cwd": str(other)}) == repo
+        assert module.hook_repo({}) == repo
+        assert git.call_count == 1, "one hook process resolved the same root twice"
+        # Explicit missing and empty roots must not fall back to payload cwd.
+        os.environ["OMS_HOOK_RESOLVED_REPO"] = str(repo / "missing")
+        assert module.hook_repo({"cwd": str(other)}) is None
+        os.environ["OMS_HOOK_RESOLVED_REPO"] = ""
+        assert module.hook_repo({"cwd": str(other)}) is None
+    module.repo_root.cache_clear()
 PY
 }
 

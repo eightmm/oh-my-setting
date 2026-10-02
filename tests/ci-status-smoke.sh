@@ -314,6 +314,37 @@ test_completed_run_for_head_is_the_current_result() {
   [ -s "$repo/.oms/ci.jsonl" ] || fail "Stop did not publish CI without a timer"
   oms_with_file_lock "$repo/.oms/hooks/ci-tick" true
   [ "$(ci_json_state "$repo")" = current ] || fail "deferred CI should record HEAD"
+  (
+    local real_python launched="$TMP/ci-child-starts" ledger="$TMP/stop-ci-override.jsonl"
+    real_python="$(command -v python3)"
+    # Observe the child launch itself; gh would already be quiet for completed CI.
+    python3() {
+      "$real_python" -c '
+import os, subprocess, sys
+from pathlib import Path
+source = sys.stdin.read()
+sys.argv = sys.argv[1:]
+real = subprocess.Popen
+def observe(command, *args, **kwargs):
+    if command[0] == "bash":
+        with Path(os.environ["OMS_TEST_CI_CHILD_LOG"]).open("a") as f:
+            f.write("child\\n")
+        return None
+    return real(command, *args, **kwargs)
+subprocess.Popen = observe
+exec(compile(source, "stop-launcher", "exec"))
+' "$@"
+    }
+    # Compact/custom JSON and a malformed trailing row follow tick's semantics.
+    printf '{"sha":"%s","status":"completed"}\nmalformed\n' "$head" > "$ledger"
+    OMS_WORK_JOURNAL=0 OMS_GH_BIN="$gh" OMS_CI_LEDGER="$ledger" \
+      OMS_TEST_CI_CHILD_LOG="$launched" work_journal_defer_finish "$repo"
+    [ ! -e "$launched" ] || fail "completed CI still launched a child"
+    printf '{"sha":"%s","status":"queued"}\n' "$head" >> "$ledger"
+    OMS_WORK_JOURNAL=0 OMS_GH_BIN="$gh" OMS_CI_LEDGER="$ledger" \
+      OMS_TEST_CI_CHILD_LOG="$launched" work_journal_defer_finish "$repo"
+    [ -s "$launched" ] || fail "same-SHA queued rerun did not launch a child"
+  ) || fail "deferred CI completed/queued selection changed"
 }
 
 test_repo_without_upstream_keeps_the_recorded_vs_head_signal() {

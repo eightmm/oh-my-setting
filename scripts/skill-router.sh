@@ -29,7 +29,7 @@ fi
 # becomes agent context, which is what makes the journal self-referencing.
 if [ "${OMS_HARNESS_CHILD:-0}" != 1 ] &&
   [ -n "$state_repo" ] && git -C "$state_repo" rev-parse --git-dir >/dev/null 2>&1; then
-  work_journal_prompt_tick "$state_repo"
+  work_journal_prompt_tick "$state_repo" resolved
 fi
 
 # State-conditional hints: inject the one thing native skill matching cannot

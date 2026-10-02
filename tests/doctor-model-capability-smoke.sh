@@ -288,6 +288,56 @@ done
 # and a descendant that keeps the probe's output open cannot hold the memo.
 memo_dir="$TMP/memo"
 mkdir -p "$memo_dir"
+python3 - "$ROOT/scripts/lib/doctor-probe-memo.py" "$TMP" <<'PY'
+import concurrent.futures, importlib.util, io, os, subprocess, sys, time
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+helper, tmp = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("probe_memo", helper)
+memo = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(memo)
+cache = tmp / "parallel-memo"
+cache.mkdir()
+probe, runs = tmp / "parallel-probe.py", tmp / "parallel-runs"
+probe.write_text("import sys, time\nfrom pathlib import Path\n"
+                 "with Path(sys.argv[1]).open('a') as f: f.write('run\\n')\n"
+                 "time.sleep(float(sys.argv[2]))\nprint('probe-ok')\n")
+environment = dict(os.environ, OMS_DOCTOR_PROBE_DIR=str(cache))
+command = [sys.executable, str(probe), str(runs), ".3"]
+invoke = [sys.executable, str(helper), "5", "split", *command]
+if os.name != "nt":
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: subprocess.run(invoke, env=environment,
+                            capture_output=True, text=True), range(2)))
+    assert all((x.returncode, x.stdout, x.stderr) == (0, "probe-ok\n", "") for x in results), results
+    assert runs.read_text().splitlines() == ["run"], runs.read_text()
+    # A cached result cannot conceal a missing bound helper.
+    with patch.dict(os.environ, environment), patch.object(sys, "argv", [str(helper), "5", "split", *command]), \
+         patch.object(memo.shutil, "which", return_value=None), patch.object(sys, "stderr", io.StringIO()):
+        assert memo.main() == 127
+    # Hanging probes are not queued serially for every caller's full bound.
+    hanging = [sys.executable, str(helper), "1", "split", sys.executable, str(probe), str(runs), "3"]
+    started = time.monotonic()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(lambda _: subprocess.run(hanging, env=environment,
+                            capture_output=True, text=True), range(3)))
+    assert all(x.returncode in (124, 137) for x in results), results
+    assert time.monotonic() - started < 4, "timed-out probes queued all bounds"
+
+# Positive timeout capability is per doctor run and executable generation.
+fake_timeout = tmp / "timeout-binary"
+fake_timeout.write_text("first")
+version = Mock(return_value=Mock(returncode=0))
+with patch.object(memo.shutil, "which", side_effect=lambda name: str(fake_timeout) if name == "timeout" else None), \
+     patch.object(memo.subprocess, "run", version):
+    first = memo.bounded_command(5, command, cache)
+    assert memo.bounded_command(5, command, cache) == first
+    assert version.call_count == 1, version.call_count
+    fake_timeout.write_text("changed executable")
+    memo.bounded_command(5, command, cache)
+    assert version.call_count == 2, "changed executable reused a stale capability"
+PY
 printf '#!/usr/bin/env bash\necho run >> "%s"\nfor i in 1 2 3 4 5 6; do echo "o$i"; echo "e$i" >&2; done\n' \
   "$TMP/interleave.runs" > "$bin/oms-interleave"
 printf '#!/usr/bin/env bash\n(sleep 1; echo late) &\necho started\n' > "$bin/oms-linger"

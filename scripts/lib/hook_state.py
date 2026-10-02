@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import hashlib
 import json
 import os
@@ -163,6 +164,7 @@ def payload_cwd(payload: dict[str, Any]) -> str:
     return str(cwd) if cwd else ""
 
 
+@functools.lru_cache(maxsize=16)
 def repo_root(cwd: str) -> Path | None:
     if not cwd:
         return None

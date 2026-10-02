@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Per-doctor external probe memo. The caller owns OMS_DOCTOR_PROBE_DIR."""
 
+import contextlib
 import hashlib
 import json
 import os
@@ -12,18 +13,70 @@ import tempfile
 import time
 
 
-def bounded_command(seconds, command):
+def bounded_command(seconds, command, cache=None):
     if not seconds:
         return command
     for name in ("timeout", "gtimeout"):
         binary = shutil.which(name)
-        if binary and subprocess.run([binary, "--version"], stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL).returncode == 0:
+        if not binary:
+            continue
+        marker = None
+        if cache:
+            try:
+                info = os.stat(binary)
+                signature = [os.path.realpath(binary), info.st_dev, info.st_ino,
+                             info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+                digest = hashlib.sha256(json.dumps(signature).encode("ascii")).hexdigest()
+                marker = Path(cache) / (".timeout-" + digest)
+            except OSError:
+                pass
+        valid = marker is not None and marker.is_file()
+        if not valid:
+            valid = subprocess.run([binary, "--version"], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL).returncode == 0
+            if valid and marker is not None:
+                with contextlib.suppress(OSError):
+                    marker.touch()
+        if valid:
             return [binary, "--kill-after=1", str(seconds)] + command
     helper = Path(__file__).with_name("run-bounded.py")
     if shutil.which("python3") and helper.is_file():
         return [sys.executable, str(helper), "%ss" % seconds, "1s", "provider-probe"] + command
     return None
+
+
+@contextlib.contextmanager
+def probe_lock(cache, key, seconds):
+    """Hold through replay so a tighter-bound replacement cannot remove it.
+
+    The doctor's cache is disabled on Windows. Unsupported locks or a busy
+    timed-out probe fall back to direct execution, without queuing N bounds.
+    """
+    try:
+        import fcntl
+        handle = open(Path(cache) / (key + ".lock"), "a+b")
+    except (ImportError, OSError):
+        yield False
+        return
+    acquired = False
+    try:
+        deadline = time.monotonic() + seconds
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if seconds and time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
+            except OSError:
+                break
+        yield acquired
+    finally:
+        if acquired:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
 
 
 def identity(command):
@@ -118,16 +171,25 @@ def main():
         return 2
     mode, command = sys.argv[2], sys.argv[3:]
     cache = os.environ.get("OMS_DOCTOR_PROBE_DIR", "")
-    runner = bounded_command(seconds, command)
-    if runner is None:
-        print("error: bounded provider probe helper is unavailable", file=sys.stderr)
-        return 127
-    if not cache or not os.path.isdir(cache):
-        return direct(runner, mode == "merged")
-    key_parts = identity(command)
+    key_parts = identity(command) if cache and os.path.isdir(cache) else None
     if key_parts is None:
+        runner = bounded_command(seconds, command)
+        if runner is None:
+            print("error: bounded provider probe helper is unavailable", file=sys.stderr)
+            return 127
         return direct(runner, mode == "merged")
     key = hashlib.sha256(json.dumps(key_parts, ensure_ascii=True).encode("utf-8")).hexdigest()
+    with probe_lock(cache, key, seconds) as locked:
+        runner = bounded_command(seconds, command, cache if locked else None)
+        if runner is None:
+            print("error: bounded provider probe helper is unavailable", file=sys.stderr)
+            return 127
+        if not locked:
+            return direct(runner, mode == "merged")
+        return replay(runner, cache, key, mode, seconds)
+
+
+def replay(runner, cache, key, mode, seconds):
     stages = []
     try:
         # Every caller shares one split capture. A 2>&1 caller replays it

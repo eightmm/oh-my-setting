@@ -103,7 +103,9 @@ work_journal_prompt_tick() {
 
   work_journal_enabled || return 0
   [ "${OMS_WORK_JOURNAL_ACTIVE:-0}" != 1 ] || return 0
-  repo="$(oms_repo_root "$repo" 2>/dev/null || printf '%s' "$repo")"
+  if [ "${2:-}" != resolved ]; then
+    repo="$(oms_repo_root "$repo" 2>/dev/null || printf '%s' "$repo")"
+  fi
   repo="${repo//$'\r'/}"
   repo="$(cd "$repo" 2>/dev/null && pwd -P || printf '%s' "$repo")"
   # Passive observer: a prompt in a repo the harness was never adopted into
@@ -157,7 +159,9 @@ work_journal_finish() {
 
   work_journal_enabled || return 0
   [ "${OMS_WORK_JOURNAL_ACTIVE:-0}" != 1 ] || return 0
-  repo="$(oms_repo_root "$repo" 2>/dev/null || printf '%s' "$repo")"
+  if [ "${2:-}" != resolved ]; then
+    repo="$(oms_repo_root "$repo" 2>/dev/null || printf '%s' "$repo")"
+  fi
   repo="${repo//$'\r'/}"
   repo="$(cd "$repo" 2>/dev/null && pwd -P || printf '%s' "$repo")"
   # Same adopted-repos-only rule as the prompt tick: a Stop in an unadopted
@@ -191,8 +195,33 @@ work_journal_defer_finish() {
   fi
   [ "$journal" = 1 ] || [ "$ci" = 1 ] || return 0
   python3 - "$WORK_JOURNAL_LIB_DIR/work-journal.sh" "$repo" "$journal" "$ci" <<'PY' 2>/dev/null || true
+import json
+import os
 import subprocess
 import sys
+
+if sys.argv[4] == "1":
+    # Match tick's last valid row, including an explicit ledger override.
+    # No marker or new receipt: a subsequent pending row still schedules it.
+    try:
+        head = subprocess.check_output(
+            ["git", "-C", sys.argv[2], "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True, timeout=2,
+        ).strip()
+        latest = None
+        ledger = os.environ.get("OMS_CI_LEDGER") or os.path.join(sys.argv[2], ".oms", "ci.jsonl")
+        with open(ledger, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict):
+                    latest = row
+        if head and latest and latest.get("sha") == head and latest.get("status") == "completed":
+            sys.argv[4] = "0"
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 command = '''
 . "$1"
@@ -208,11 +237,12 @@ if [ "$4" = 1 ]; then
 fi
 '''
 try:
-    subprocess.Popen(
-        ["bash", "-c", command, "oms-stop-publish", *sys.argv[1:]],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, start_new_session=True,
-    )
+    if "1" in sys.argv[3:5]:
+        subprocess.Popen(
+            ["bash", "-c", command, "oms-stop-publish", *sys.argv[1:]],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
 except OSError:
     pass
 PY

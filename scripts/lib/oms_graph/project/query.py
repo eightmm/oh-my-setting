@@ -73,13 +73,13 @@ class Graph:
         return dict(self.nodes[node_id])
 
     def find(self, query: str, *, kinds: Sequence[str] = (), limit: int = 20, include_tests: bool = False) -> List[Dict[str, Any]]:
-        if not include_tests and "test" not in kinds:
-            return self.without_tests().find(query, kinds=kinds, limit=limit, include_tests=True)
+        skip_tests = not include_tests and "test" not in kinds
         needle = query.strip().casefold()
         normalized_needle = _normalized_identifier(query)
         tokens = _identifier_words(query)
         candidates = [node for node in self.nodes.values()
-                      if not kinds or node.get("kind") in kinds]
+                      if (not kinds or node.get("kind") in kinds)
+                      and not (skip_tests and self.is_test(node["id"]))]
         frequencies = {term: 0 for term in tokens}
         for node in candidates:
             metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}

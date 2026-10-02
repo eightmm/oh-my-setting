@@ -82,7 +82,7 @@ repo="${repo//$'\r'/}"
 [ -n "$repo" ] || exit 0
 git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || exit 0
 
-work_journal_finish "$repo"
+work_journal_finish "$repo" resolved
 work_journal_defer_finish "$repo"
 
 exit 0

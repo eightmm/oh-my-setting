@@ -516,6 +516,13 @@ printf 'import os, runpy, sys\nopen(os.environ["OMS_TEST_TICK_LOG"], "a").write(
   "'$real_journal'" "'$real_journal'" > "$TMP/counting-journal.py"
 work_journal_prompt_tick "$auto_repo" >/dev/null
 : > "$TMP/tick.log"
+# Internal callers skip root discovery, but still normalize symlinks and paths.
+ln -s "$auto_repo" "$TMP/auto-repo-link"
+(
+  oms_repo_root() { fail "resolved prompt/Stop root was rediscovered"; }
+  work_journal_prompt_tick "$TMP/auto-repo-link" resolved >/dev/null
+  work_journal_finish "$TMP/auto-repo-link" resolved
+) || fail "resolved journal callers did not preserve physical normalization"
 OMS_WORK_JOURNAL_PYTHON="$TMP/counting-journal.py" OMS_TEST_TICK_LOG="$TMP/tick.log" \
   work_journal_prompt_tick "$auto_repo" >/dev/null
 [ "$(wc -l < "$TMP/tick.log" | tr -d ' ')" = 0 ] ||

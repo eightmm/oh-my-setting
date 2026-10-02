@@ -666,9 +666,17 @@ class ProjectGraphTest(unittest.TestCase):
         graph = Graph(self.graph())
         self.assertNotIn("test", graph.without_tests().map_summary()["counts"]["kind"])
         self.assertIn("test", graph.map_summary()["counts"]["kind"])
-        self.assertNotIn("symbol:tests/test_a.py::test_f", [row["id"] for row in graph.find("test_f")])
-        self.assertIn("symbol:tests/test_a.py::test_f", [row["id"] for row in graph.find("test_f", include_tests=True)])
-        self.assertIn("symbol:tests/test_a.py::test_f", [row["id"] for row in graph.find("test_f", kinds=("test", "function"))])
+        from unittest.mock import patch
+        without_tests = graph.without_tests()
+        for query in ("f", "test f", "a.py", ""):
+            for kinds in ((), ("function",), ("test", "function")):
+                for include_tests in (False, True):
+                    reference = graph if include_tests or "test" in kinds else without_tests
+                    for limit in (0, 1, 20):
+                        expected = reference.find(query, kinds=kinds, limit=limit, include_tests=True)
+                        with patch.object(graph, "without_tests", side_effect=AssertionError("search rebuilt indexes")):
+                            self.assertEqual(graph.find(query, kinds=kinds, limit=limit,
+                                                        include_tests=include_tests), expected)
 
 if __name__ == "__main__":
     unittest.main()
