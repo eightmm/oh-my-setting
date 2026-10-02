@@ -25005,7 +25005,7 @@ assert task["error"] == "status-unavailable", task
 
   mkdir -p "$project/.oms/plan"
   printf '{malformed plan\n' > "$project/.oms/plan/tasks.json"
-  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+  state_json="$(PYTHONOPTIMIZE=1 "$ROOT/scripts/state.sh" --repo "$project" --json)" ||
     fail "state should return an explicit unhealthy plan projection"
   printf '%s' "$state_json" | python3 -c '
 import json, sys
@@ -25016,18 +25016,90 @@ assert plan["error"] == "status-unavailable", plan
 ' || fail "malformed physical plan was disguised as normal absence: $state_json"
 
   printf 'not-json evidence\n' > "$project/.oms/failures.jsonl"
-  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+  state_json="$(PYTHONOPTIMIZE=1 "$ROOT/scripts/state.sh" --repo "$project" --json)" ||
     fail "state should return explicit unhealthy failure-ledger health"
   printf '%s' "$state_json" | python3 -c '
 import json, sys
-failures = json.load(sys.stdin)["failures"]
+row = json.load(sys.stdin)
+failures = row["failures"]
 assert failures["present"] is True, failures
 assert failures["healthy"] is False, failures
 # Quarantine refined the tag: the projection stays available, the corrupt
 # row is counted, and health goes false — still never disguised as empty.
 assert failures["error"] == "invalid-rows", failures
 assert failures["invalid_rows"] == 1, failures
-' || fail "malformed physical failure ledger was disguised as empty: $state_json"
+assert row["plan"]["present"] is True and row["plan"]["healthy"] is False, row["plan"]
+' || fail "multiple malformed physical projections were disguised as healthy: $state_json"
+
+  # A failed validator process must invalidate every family, including a
+  # healthy projection, rather than accepting a partial verdict.
+  local python_fail_bin real_python
+  real_python="$(command -v python3)"
+  python_fail_bin="$TMP/state-python-fail"
+  mkdir -p "$python_fail_bin"
+  cat > "$python_fail_bin/python3" <<'PYTHON'
+#!/usr/bin/env bash
+set -u
+script=""
+for arg in "$@"; do
+  if [ "$arg" = - ]; then
+    script="$(cat)"
+    case "$script" in
+      *failure_path,\ failure_base,*)
+        case "${OMS_TEST_VALIDATOR_MODE:-fail}" in
+          fail) exit 91 ;;
+          short) printf '1\n'; exit 0 ;;
+          crlf) printf '1\r\n1\r\n1\r\n'; exit 0 ;;
+          shape) printf '{"schema":99,"failures":[],"invalid_rows":0}\n' > "$2" ;;
+        esac
+        ;;
+    esac
+    printf '%s' "$script" | "$OMS_TEST_REAL_PYTHON" "$@"
+    exit $?
+  fi
+done
+exec "$OMS_TEST_REAL_PYTHON" "$@"
+PYTHON
+  chmod +x "$python_fail_bin/python3"
+  state_json="$(PATH="$python_fail_bin:$PATH" OMS_TEST_REAL_PYTHON="$real_python" \
+    "$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+    fail "state should survive a projection validator process failure"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+for name in ("failures", "task", "plan"):
+    assert row[name]["healthy"] is False, row[name]
+' || fail "validator process failure did not default every projection unhealthy: $state_json"
+
+  state_json="$(PATH="$python_fail_bin:$PATH" OMS_TEST_REAL_PYTHON="$real_python" \
+    OMS_TEST_VALIDATOR_MODE=short "$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+    fail "state should survive a partial projection verdict"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert all(row[name]["healthy"] is False for name in ("failures", "task", "plan")), row
+' || fail "a partial validator verdict reopened authority: $state_json"
+  local validator_repo="$TMP/state-validator-control"
+  make_committed_repo "$validator_repo"
+  state_json="$(PATH="$python_fail_bin:$PATH" OMS_TEST_REAL_PYTHON="$real_python" \
+    OMS_TEST_VALIDATOR_MODE=crlf "$ROOT/scripts/state.sh" --repo "$validator_repo" --json)" ||
+    fail "state should accept Windows validator newlines"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert all(row[name]["healthy"] is True for name in ("failures", "task", "plan")), row
+' || fail "Windows validator newlines were treated as unhealthy: $state_json"
+  state_json="$(PATH="$python_fail_bin:$PATH" OMS_TEST_REAL_PYTHON="$real_python" \
+    OMS_TEST_VALIDATOR_MODE=shape PYTHONOPTIMIZE=1 \
+    "$ROOT/scripts/state.sh" --repo "$validator_repo" --json)" ||
+    fail "state should reject a wrong-shaped JSON projection in optimized Python"
+  printf '%s' "$state_json" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["failures"]["healthy"] is False, row["failures"]
+assert row["task"]["healthy"] is True and row["plan"]["healthy"] is True, row
+' || fail "optimized Python skipped projection validation: $state_json"
+
   inbox_json="$("$ROOT/scripts/inbox.sh" --repo "$project" --json)"
   printf '%s' "$inbox_json" | python3 -c '
 import json, sys

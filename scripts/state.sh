@@ -143,14 +143,6 @@ else
   mv "$RS_TMP/failures.out" "$RS_TMP/failures.json" 2>/dev/null || FAILURE_HEALTHY=0
   [ "$(rs_rc failures)" = 0 ] || FAILURE_HEALTHY=0
 fi
-if [ "$FAILURE_HEALTHY" = 1 ] && ! python3 -c \
-  'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); failures=row.get("failures") if isinstance(row, dict) else None; invalid=row.get("invalid_rows") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(invalid, int) and not isinstance(invalid, bool) and invalid >= 0 and isinstance(failures, list) and all(isinstance(item, dict) and isinstance(item.get("attention"), str) and isinstance(item.get("actionable"), bool) and isinstance(item.get("retiring"), bool) for item in failures)' \
-  "$RS_TMP/failures.json" 2>/dev/null; then
-  FAILURE_HEALTHY=0
-fi
-if [ "$FAILURE_HEALTHY" = 0 ]; then
-  printf '{"schema":1,"failures":[]}\n' > "$RS_TMP/failures.json"
-fi
 TASK_HEALTHY=1
 if [ "$TASK_PHYSICAL" = 1 ] && { [ -L "$REPO/.oms/task/current.md" ] ||
   [ ! -f "$REPO/.oms/task/current.md" ]; }; then
@@ -158,14 +150,6 @@ if [ "$TASK_PHYSICAL" = 1 ] && { [ -L "$REPO/.oms/task/current.md" ] ||
 else
   mv "$RS_TMP/task.out" "$RS_TMP/task.json" 2>/dev/null || TASK_HEALTHY=0
   [ "$(rs_rc task)" = 0 ] || TASK_HEALTHY=0
-fi
-if [ "$TASK_HEALTHY" = 1 ] && ! python3 -c \
-  'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); present=row.get("present") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(present, bool) and present == (sys.argv[2] == "1") and (not present or (isinstance(row.get("status"), str) and isinstance(row.get("verification"), str) and isinstance(row.get("stale"), bool)))' \
-  "$RS_TMP/task.json" "$TASK_PHYSICAL" 2>/dev/null; then
-  TASK_HEALTHY=0
-fi
-if [ "$TASK_HEALTHY" = 0 ]; then
-  printf '{"schema":1,"present":false}\n' > "$RS_TMP/task.json"
 fi
 PLAN_HEALTHY=1
 if [ "$PLAN_PHYSICAL" = 1 ] && { [ -L "$REPO/.oms/plan/tasks.json" ] ||
@@ -175,12 +159,116 @@ else
   mv "$RS_TMP/plan.out" "$RS_TMP/plan.json" 2>/dev/null || PLAN_HEALTHY=0
   [ "$(rs_rc plan)" = 0 ] || PLAN_HEALTHY=0
 fi
-if [ "$PLAN_HEALTHY" = 1 ] && ! python3 -c \
-  'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); present=row.get("present") if isinstance(row, dict) else None; count=row.get("task_count") if isinstance(row, dict) else None; by_state=row.get("by_state") if isinstance(row, dict) else None; contract=row.get("contract") if isinstance(row, dict) else None; assert row.get("schema") == 1 and isinstance(present, bool) and present == (sys.argv[2] == "1") and isinstance(count, int) and not isinstance(count, bool) and count >= 0 and all(isinstance(row.get(key), bool) for key in ("nonempty", "all_done", "has_unfinished")) and row.get("nonempty") == (count > 0) and row.get("has_unfinished") == (count > 0 and not row.get("all_done")) and isinstance(by_state, dict) and all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in by_state.values()) and sum(by_state.values()) == count and all(isinstance(row.get(key), list) for key in ("actionable", "stale", "stale_review")) and isinstance(contract, dict) and all(isinstance(contract.get(key), bool) for key in ("bound", "satisfied", "project_present", "project_healthy")) and all(isinstance(contract.get(key), str) for key in ("project_state", "blocker", "expected_spec_sha256", "current_spec_sha256"))' \
-  "$RS_TMP/plan.json" "$PLAN_PHYSICAL" 2>/dev/null; then
-  PLAN_HEALTHY=0
+# Validate the three independent projections in one interpreter start. Any
+# missing, partial, malformed, or non-exact verdict defaults all families to
+# unhealthy; a valid verdict can still mark each family independently.
+FAILURE_VALID=0 TASK_VALID=0 PLAN_VALID=0
+if python3 - "$RS_TMP/failures.json" "$FAILURE_HEALTHY" \
+  "$RS_TMP/task.json" "$TASK_HEALTHY" "$TASK_PHYSICAL" \
+  "$RS_TMP/plan.json" "$PLAN_HEALTHY" "$PLAN_PHYSICAL" \
+  > "$RS_TMP/projection-health" 2>/dev/null <<'PY'
+import json, sys
+
+def valid_failures(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            row = json.load(handle)
+        failures = row.get("failures") if isinstance(row, dict) else None
+        invalid = row.get("invalid_rows") if isinstance(row, dict) else None
+        return (row.get("schema") == 1 and isinstance(invalid, int) and
+                not isinstance(invalid, bool) and invalid >= 0 and
+                isinstance(failures, list) and
+                all(isinstance(item, dict) and
+                    isinstance(item.get("attention"), str) and
+                    isinstance(item.get("actionable"), bool) and
+                    isinstance(item.get("retiring"), bool)
+                    for item in failures))
+    except Exception:
+        return False
+
+def valid_task(path, physical):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            row = json.load(handle)
+        present = row.get("present") if isinstance(row, dict) else None
+        return (row.get("schema") == 1 and isinstance(present, bool) and
+                present == (physical == "1") and
+                (not present or
+                 (isinstance(row.get("status"), str) and
+                  isinstance(row.get("verification"), str) and
+                  isinstance(row.get("stale"), bool))))
+    except Exception:
+        return False
+
+def valid_plan(path, physical):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            row = json.load(handle)
+        present = row.get("present") if isinstance(row, dict) else None
+        count = row.get("task_count") if isinstance(row, dict) else None
+        by_state = row.get("by_state") if isinstance(row, dict) else None
+        contract = row.get("contract") if isinstance(row, dict) else None
+        return (row.get("schema") == 1 and isinstance(present, bool) and
+                present == (physical == "1") and isinstance(count, int) and
+                not isinstance(count, bool) and count >= 0 and
+                all(isinstance(row.get(key), bool) for key in
+                    ("nonempty", "all_done", "has_unfinished")) and
+                row.get("nonempty") == (count > 0) and
+                row.get("has_unfinished") ==
+                (count > 0 and not row.get("all_done")) and
+                isinstance(by_state, dict) and
+                all(isinstance(value, int) and not isinstance(value, bool) and
+                    value >= 0 for value in by_state.values()) and
+                sum(by_state.values()) == count and
+                all(isinstance(row.get(key), list) for key in
+                    ("actionable", "stale", "stale_review")) and
+                isinstance(contract, dict) and
+                all(isinstance(contract.get(key), bool) for key in
+                    ("bound", "satisfied", "project_present", "project_healthy")) and
+                all(isinstance(contract.get(key), str) for key in
+                    ("project_state", "blocker", "expected_spec_sha256",
+                     "current_spec_sha256")))
+    except Exception:
+        return False
+
+failure_path, failure_base, task_path, task_base, task_physical, \
+    plan_path, plan_base, plan_physical = sys.argv[1:]
+failure_ok = failure_base == "1" and valid_failures(failure_path)
+task_ok = task_base == "1" and valid_task(task_path, task_physical)
+plan_ok = plan_base == "1" and valid_plan(plan_path, plan_physical)
+print("%s\n%s\n%s" % (int(failure_ok), int(task_ok), int(plan_ok)))
+PY
+then
+  projection_parse_ok=1
+  validated_failure="" validated_task="" validated_plan=""
+  {
+    IFS= read -r validated_failure &&
+    IFS= read -r validated_task &&
+    IFS= read -r validated_plan &&
+    ! IFS= read -r projection_extra
+  } < "$RS_TMP/projection-health" || projection_parse_ok=0
+  validated_failure="${validated_failure//$'\r'/}"
+  validated_task="${validated_task//$'\r'/}"
+  validated_plan="${validated_plan//$'\r'/}"
+  if [ "$projection_parse_ok" = 1 ] &&
+    { [ "$validated_failure" = 0 ] || [ "$validated_failure" = 1 ]; } &&
+    { [ "$validated_task" = 0 ] || [ "$validated_task" = 1 ]; } &&
+    { [ "$validated_plan" = 0 ] || [ "$validated_plan" = 1 ]; }; then
+    FAILURE_VALID="$validated_failure"
+    TASK_VALID="$validated_task"
+    PLAN_VALID="$validated_plan"
+  fi
 fi
-if [ "$PLAN_HEALTHY" = 0 ]; then
+if [ "$FAILURE_VALID" != 1 ]; then
+  FAILURE_HEALTHY=0
+  printf '{"schema":1,"failures":[]}\n' > "$RS_TMP/failures.json"
+fi
+if [ "$TASK_VALID" != 1 ]; then
+  TASK_HEALTHY=0
+  printf '{"schema":1,"present":false}\n' > "$RS_TMP/task.json"
+fi
+if [ "$PLAN_VALID" != 1 ]; then
+  PLAN_HEALTHY=0
   printf '{"schema":1,"present":false}\n' > "$RS_TMP/plan.json"
 fi
 RUNTIME_HEALTHY=1

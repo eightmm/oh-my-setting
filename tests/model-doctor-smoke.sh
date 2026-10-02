@@ -50,6 +50,27 @@ grep -Fq 'model-doctor: ok' "$TMP/local.txt" || fail "local doctor should pass"
 
 # JSON is the same report, schema-versioned, with no tier vocabulary left.
 bash "$DOCTOR" --json > "$TMP/local.json" || fail "json doctor should exit 0"
+compare_text_json() {  # TEXT JSON -> assert exact human rendering of the JSON result
+  python3 - "$1" "$2" <<'CHECK' || fail "text rendering differs from JSON report"
+import json, sys
+text_path, json_path = sys.argv[1:]
+x = json.load(open(json_path))
+lines = ["# oh-my-setting model doctor", ""]
+for p in x["providers"]:
+    status = "installed" if p["usable"] else ("broken" if p["installed"] else "missing")
+    lines.append("%s: %s; default=%s; effort=%s" %
+                 (p["provider"], status, p["provider_default_reachable"],
+                  p["effort_mechanism"] or "unknown"))
+lines.extend("warning: " + w for w in x["warnings"])
+lines.extend("error: " + e for e in x["errors"])
+lines.append("model-doctor: ok" if x["ok"] else "model-doctor: FAILED")
+expected = "\n".join(lines) + "\n"
+actual = open(text_path).read()
+if actual != expected:
+    raise SystemExit("text report does not match JSON rendering")
+CHECK
+}
+compare_text_json "$TMP/local.txt" "$TMP/local.json"
 OMS_T_JSON="$TMP/local.json" python3 - <<'CHECK' || fail "json contract mismatch"
 import json, os
 x = json.load(open(os.environ["OMS_T_JSON"]))
@@ -89,6 +110,10 @@ bash "$DOCTOR" --require-all > "$TMP/require.txt" 2>&1 || rc=$?
 [ "$rc" -ne 0 ] || fail "--require-all should fail on a missing binary"
 grep -Fq 'model-doctor: FAILED' "$TMP/require.txt" ||
   fail "--require-all failure should print the failed line"
+rc=0
+bash "$DOCTOR" --require-all --json > "$TMP/require.json" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "--require-all JSON should return failure"
+compare_text_json "$TMP/require.txt" "$TMP/require.json"
 
 # Strict diversity needs two usable model families, not two binaries.
 rm "$bin/claude"

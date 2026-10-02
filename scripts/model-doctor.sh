@@ -144,11 +144,10 @@ for ((index = 1; index <= count; index++)); do
   cat "$tmp/row.$index" >> "$rows"
 done
 [ "$probe_status" -eq 0 ] || exit "$probe_status"
-result="$tmp/result.json"
-python3 - "$rows" "$LIVE" "$REQUIRE_ALL" "$STRICT" > "$result" <<'PY'
+python3 - "$rows" "$LIVE" "$REQUIRE_ALL" "$STRICT" "$JSON" <<'PY'
 import json, sys
 providers=[json.loads(x) for x in open(sys.argv[1]) if x.strip()]
-live, require, strict=(x=="1" for x in sys.argv[2:])
+live, require, strict=(x=="1" for x in sys.argv[2:5])
 errors=[]; warnings=[]
 for p in providers:
     if not p["installed"]: (errors if require else warnings).append("%s: provider binary '%s' is not installed" % (p["provider"],p["binary"]))
@@ -159,21 +158,17 @@ for p in providers:
                         % (p["provider"], p["configured_default"], ", ".join(p["routable"]) or "none"))
 families={p["family"] for p in providers if p["usable"] and p["provider_default_reachable"] and p["family"] != "unknown"}
 if strict and len(families)<2: errors.append("model-family diversity needs at least two usable families")
-print(json.dumps({"schema":2,"ok":not errors,"live_models":live,"require_all":require,"strict_diversity":strict,"providers":providers,"warnings":warnings,"errors":errors},sort_keys=True))
-PY
-if [ "$JSON" -eq 1 ]; then cat "$result"; else
-  python3 - "$result" <<'PY'
-import json,sys
-x=json.load(open(sys.argv[1])); print("# oh-my-setting model doctor\n")
-for p in x["providers"]:
-    status = "installed" if p["usable"] else ("broken" if p["installed"] else "missing")
-    print("%s: %s; default=%s; effort=%s"%(p["provider"],status,p["provider_default_reachable"],p["effort_mechanism"] or "unknown"))
-for w in x["warnings"]: print("warning: "+w)
-for e in x["errors"]: print("error: "+e)
-print("model-doctor: ok" if x["ok"] else "model-doctor: FAILED")
-PY
-fi
-python3 - "$result" <<'PY'
-import json,sys
-raise SystemExit(0 if json.load(open(sys.argv[1]))["ok"] else 1)
+result={"schema":2,"ok":not errors,"live_models":live,"require_all":require,"strict_diversity":strict,"providers":providers,"warnings":warnings,"errors":errors}
+if sys.argv[5] == "1":
+    print(json.dumps(result,sort_keys=True))
+else:
+    x=result
+    print("# oh-my-setting model doctor\n")
+    for p in x["providers"]:
+        status = "installed" if p["usable"] else ("broken" if p["installed"] else "missing")
+        print("%s: %s; default=%s; effort=%s"%(p["provider"],status,p["provider_default_reachable"],p["effort_mechanism"] or "unknown"))
+    for w in x["warnings"]: print("warning: "+w)
+    for e in x["errors"]: print("error: "+e)
+    print("model-doctor: ok" if x["ok"] else "model-doctor: FAILED")
+raise SystemExit(0 if result["ok"] else 1)
 PY
