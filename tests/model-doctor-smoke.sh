@@ -71,6 +71,15 @@ if actual != expected:
 CHECK
 }
 compare_text_json "$TMP/local.txt" "$TMP/local.json"
+python3 - "$DOCTOR" <<'CHECK' || fail "JSON closed-pipe behavior changed"
+import os, subprocess, sys
+if os.name != "nt":
+    process = subprocess.Popen(["bash", sys.argv[1], "--json"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process.stdout.close()
+    error = process.stderr.read()
+    assert process.wait() == 141 and not error, (process.returncode, error)
+CHECK
 OMS_T_JSON="$TMP/local.json" python3 - <<'CHECK' || fail "json contract mismatch"
 import json, os
 x = json.load(open(os.environ["OMS_T_JSON"]))

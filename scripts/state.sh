@@ -245,7 +245,7 @@ then
     IFS= read -r validated_failure &&
     IFS= read -r validated_task &&
     IFS= read -r validated_plan &&
-    ! IFS= read -r projection_extra
+    ! IFS= read -r _
   } < "$RS_TMP/projection-health" || projection_parse_ok=0
   validated_failure="${validated_failure//$'\r'/}"
   validated_task="${validated_task//$'\r'/}"

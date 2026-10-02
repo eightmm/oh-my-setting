@@ -160,6 +160,10 @@ families={p["family"] for p in providers if p["usable"] and p["provider_default_
 if strict and len(families)<2: errors.append("model-family diversity needs at least two usable families")
 result={"schema":2,"ok":not errors,"live_models":live,"require_all":require,"strict_diversity":strict,"providers":providers,"warnings":warnings,"errors":errors}
 if sys.argv[5] == "1":
+    # JSON used to be written by cat, which exits quietly on a closed pipe.
+    import signal
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     print(json.dumps(result,sort_keys=True))
 else:
     x=result
