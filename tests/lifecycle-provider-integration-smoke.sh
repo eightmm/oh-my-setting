@@ -18,6 +18,26 @@ git -C "$TMP/repo" commit -qm base
 cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
+if [ "${1:-}" = exec ] && [ -n "${OMS_TEST_OPERATOR_BLOCK:-}" ]; then
+  "$OMS_TEST_ROOT/scripts/agent-events.sh" --repo "$OMS_TEST_OPERATOR_BLOCK" \
+    transition --attempt "$OMS_ATTEMPT_ID" --state blocked \
+    --actor operator --reason-code operator_hold >/dev/null
+fi
+if [ "${1:-}" = exec ] && [ -n "${OMS_TEST_RECONCILE_REPO:-}" ]; then
+  python3 - "$OMS_TEST_RECONCILE_REPO/.oms/lifecycle/events.jsonl" <<'PY'
+import json, sys, time
+deadline = time.monotonic() + 8
+while time.monotonic() < deadline:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle if line.strip()]
+    if sum(row["event_type"] == "attempt.heartbeat" for row in rows) >= 2:
+        break
+    time.sleep(.05)
+PY
+  "$OMS_TEST_ROOT/scripts/agent-events.sh" --repo "$OMS_TEST_RECONCILE_REPO" \
+    reconcile --apply --stale-seconds 2 >/dev/null
+fi
+[ "${1:-}" != exec ] || [ -z "${OMS_TEST_PROVIDER_SLEEP:-}" ] || sleep "$OMS_TEST_PROVIDER_SLEEP"
 printf 'tokens used\n3\n'
 printf 'provider answer\n'
 printf 'tokens used\n17\n'
@@ -26,6 +46,7 @@ chmod +x "$TMP/bin/codex"
 
 env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
   OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/bin:/usr/bin:/bin" \
+  OMS_ROUTED_HEARTBEAT_SECONDS=1 OMS_TEST_RECONCILE_REPO="$TMP/repo" OMS_TEST_ROOT="$ROOT" \
   "$ROOT/scripts/agent-call.sh" --repo "$TMP/repo" --to codex \
   --prompt 'lifecycle probe' >/dev/null || fail "agent-call failed"
 
@@ -48,6 +69,9 @@ events = [json.loads(line) for line in open(sys.argv[2].replace("artifacts/index
 routed = [(e["to_state"], e.get("idempotency_key")) for e in events
           if e.get("event_type") == "attempt.state_changed" and e.get("actor", {}).get("name") == "provider-router"]
 assert routed[-3:] == [("verifying", "routed-verifying"), ("review", "routed-review"), ("done", "routed-done")], routed
+own_events = [row for row in events if row["attempt_id"] == attempt["attempt_id"]]
+assert sum(row["event_type"] == "attempt.heartbeat" for row in own_events) >= 2, own_events
+assert not any(row.get("reason_code") == "heartbeat_expired" for row in own_events), own_events
 PY
 
 # A supervisor owns its outer lifecycle. A provider invoked inside it reports
@@ -60,6 +84,7 @@ outer="$($ROOT/scripts/agent-events.sh --repo "$TMP/repo" start \
   --attempt "$outer" --state working >/dev/null
 env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
   OMS_LOCK_DIR="$TMP/locks" OMS_ATTEMPT_ID="$outer" OMS_ATTEMPT_SUPERVISED=1 \
+  OMS_ROUTED_HEARTBEAT_SECONDS=1 OMS_TEST_PROVIDER_SLEEP=2 \
   PATH="$TMP/bin:/usr/bin:/bin" "$ROOT/scripts/agent-call.sh" \
   --repo "$TMP/repo" --to codex --prompt 'nested lifecycle probe' >/dev/null ||
   fail "nested agent-call failed"
@@ -71,6 +96,10 @@ import json, sys
 
 outer = json.load(open(sys.argv[1], encoding="utf-8"))
 assert outer["state"] == "working", outer
+with open(sys.argv[2].replace("artifacts/index.jsonl", "lifecycle/events.jsonl"), encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+assert not any(row["attempt_id"] == outer["attempt_id"] and row["event_type"] == "attempt.heartbeat"
+               for row in events), events
 assert outer["usage"]["tokens"] == 20, outer
 assert outer["usage"]["duration_ms"] == 0, outer
 assert outer["usage_reports"]["duration_ms"] == 0, outer
@@ -144,6 +173,21 @@ assert attempt["state"] == "review", attempt
 events = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
 states = [row.get("to_state") for row in events if row.get("attempt_id") == attempt["attempt_id"]]
 assert states[-1] == "review" and "verifying" not in states, states
+PY
+
+# A successful provider response cannot revive an explicit operator block.
+if env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
+  OMS_LOCK_DIR="$TMP/locks" PATH="$TMP/bin:/usr/bin:/bin" \
+  OMS_TEST_OPERATOR_BLOCK="$TMP/repo" OMS_TEST_ROOT="$ROOT" \
+  "$ROOT/scripts/agent-call.sh" --repo "$TMP/repo" --to codex \
+  --prompt 'operator blocked read' > "$TMP/operator-block.out" 2>&1; then
+  fail "successful provider revived an operator block"
+fi
+"$ROOT/scripts/agent-events.sh" --repo "$TMP/repo" list --json > "$TMP/operator-block.json"
+python3 - "$TMP/operator-block.json" <<'PY' || fail "operator block was not preserved"
+import json, sys
+attempts = json.load(open(sys.argv[1]))
+assert attempts[-1]["state"] == "blocked", attempts[-1]
 PY
 
 # The aggregate verifier must include both the shared lifecycle stream and the

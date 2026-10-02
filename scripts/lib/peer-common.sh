@@ -2891,6 +2891,21 @@ EOF
   return "$status"
 }
 
+ma_routed_heartbeat() { # EVENTS REPO ATTEMPT OWNER_PID INTERVAL
+  local events="$1" repo="$2" attempt="$3" owner="$4" interval="$5" sleeper=""
+  # This runs only in its own child shell; leave the caller's traps untouched.
+  trap '[ -z "$sleeper" ] || { kill "$sleeper" 2>/dev/null || true; wait "$sleeper" 2>/dev/null || true; }' EXIT
+  trap 'exit 0' HUP INT TERM
+  while kill -0 "$owner" 2>/dev/null; do
+    sleep "$interval" & sleeper=$!
+    wait "$sleeper" || return 0
+    sleeper=""
+    kill -0 "$owner" 2>/dev/null || return 0
+    "$events" --repo "$repo" heartbeat --attempt "$attempt" \
+      --actor provider-router >/dev/null || true
+  done
+}
+
 # Put every real provider dispatch on the durable lifecycle stream. When a
 # supervisor already exported OMS_ATTEMPT_ID it remains the sole lifecycle
 # owner; this layer contributes measured usage but cannot terminalize the
@@ -2910,6 +2925,8 @@ ma_run_routed_provider() {
   local events
   local token_count=""
   local duration_ms=0
+  local heartbeat_pid="" owner_pid
+  local heartbeat_seconds="${OMS_ROUTED_HEARTBEAT_SECONDS:-60}"
   local -a start_args
   local -a usage_args
 
@@ -2938,7 +2955,20 @@ ma_run_routed_provider() {
     export OMS_ATTEMPT_ID
   fi
 
+  if [ "$OMS_ATTEMPT_OWNED" = 1 ]; then
+    case "$heartbeat_seconds" in ''|*[!0-9]*|0) heartbeat_seconds=60 ;; esac
+    # BASHPID is absent on stock Bash 3.2; exec inside the substitution makes
+    # sh's parent the current caller, including a council's child shell.
+    owner_pid="${BASHPID:-$(exec sh -c 'printf "%s" "$PPID"')}"
+    (ma_routed_heartbeat "$events" "$state_repo" "$OMS_ATTEMPT_ID" \
+      "$owner_pid" "$heartbeat_seconds") </dev/null >/dev/null 2>&1 &
+    heartbeat_pid=$!
+  fi
   ma_run_routed_provider_inner "$@" || status=$?
+  if [ -n "$heartbeat_pid" ]; then
+    kill "$heartbeat_pid" 2>/dev/null || true
+    wait "$heartbeat_pid" 2>/dev/null || true
+  fi
   # A zero exit is the liveness proof the no-answer rows claim is missing:
   # whatever the answer's quality, the CLI ran and returned. Clear the seat's
   # unresolved history here, at the same choke point every verb passes through.
