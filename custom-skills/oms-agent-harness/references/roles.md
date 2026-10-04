@@ -17,6 +17,25 @@ to generate instructions. Roles specialize the task, never its authority.
 Use `oms consult --to PROVIDER` for an independent read, or
 `oms peer-delegate --read-only --role repo-auditor` for a clean-HEAD audit.
 
+## Brief and return
+
+Exploration, implementation and research are task responsibilities, not a
+mandatory team. Reuse the standard roles where they fit; a bounded research
+question can live directly in a read-only brief. The parent chooses the model
+separately using [model-routing.md](model-routing.md).
+
+A brief identifies the missing fact or observable result, allowed paths and
+actions, relevant source references, constraints and verification criteria.
+Include only the context needed for that task. A worker returns:
+
+- Findings or changed paths, with source or patch evidence.
+- Checks actually run, their outcomes, and checks skipped or unavailable.
+- Unresolved decisions or blockers requiring the parent.
+
+The parent compares the return with the brief and verifies the integrated
+tree. Worker completion, patch admission and final acceptance are separate
+states; a worker's passing check does not establish final acceptance.
+
 Soul executors are retired. Old records remain evidence, not runnable contracts.
 Preserve their patches and approvals; create a fresh reviewed plan task rather
 than stripping the old executor binding. Normal plan leases, scoped admission,

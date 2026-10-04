@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Focused regressions for content-free OTLP
+# Focused regressions for the read-only collaboration dashboard, content-free OTLP
 # JSONL export, explicit editor launch adapters, and retired semantic-eval
 # migration. Every fixture lives below TMP; no real provider or GUI is called.
 
@@ -279,6 +279,194 @@ assert snapshot == original
 PY
 after="$(git -C "$repo" status --porcelain=v1 --untracked-files=all)"
 [ "$before" = "$after" ] || fail "attention queries mutated the fixture repository"
+
+# --- Collaboration dashboard ----------------------------------------------
+
+# .oms is gitignored, so read-only means every byte below .oms and the
+# private approval store, not just git status.
+tree_sums() {
+  (cd "$1" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do cksum "$f"; done)
+}
+dash() { COLUMNS=160 XDG_STATE_HOME="$TMP/state" bash "$ROOT/scripts/dashboard.sh" "$@"; }
+before="$(tree_sums "$repo/.oms"; tree_sums "$TMP/state")"
+dash --repo "$repo" > "$TMP/dash.txt" || fail "dashboard snapshot failed"
+dash --repo "$repo" --json > "$TMP/dash.json" || fail "dashboard JSON failed"
+XDG_STATE_HOME="$TMP/state" bash "$ROOT/scripts/inbox.sh" --repo "$repo" --json > "$TMP/dash-inbox.json"
+after="$(tree_sums "$repo/.oms"; tree_sums "$TMP/state")"
+[ "$before" = "$after" ] || fail "dashboard mutated .oms or the approval store"
+for line in 'coverage: OMS-managed records only; native provider subagents are not observed' \
+  'goal: operator fixture (plan)' 'plan: 2 task(s)  ready=1 review=1  actionable=ready_task' \
+  'model=gpt-test route=explicit fallback=other exit=0 success served=gpt-served tokens=120' \
+  'codex delegate model=unknown route=unrecorded exit=0 success served=unreported tokens=unknown' \
+  'review gate: none recorded in window (not a pass)  seat answers=1' \
+  'acceptance: 0/2 verified  missing=2  (worker completion is not acceptance)'; do
+  grep -Fq -- "$line" "$TMP/dash.txt" || fail "dashboard text lacks: $line"$'\n'"$(cat "$TMP/dash.txt")"
+done
+python3 - "$TMP/dash.json" "$TMP/dash.txt" "$TMP/dash-inbox.json" "$repo" <<'PY' || fail "dashboard projection contract failed"
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+inbox = json.load(open(sys.argv[3], encoding="utf-8"))
+raw = open(sys.argv[1], encoding="utf-8").read() + open(sys.argv[2], encoding="utf-8").read()
+for forbidden in ("PRIVATE GOAL", "SECRET FALLBACK CONTENT", "PRIVATE-VERIFY-EXIT",
+                  "PRIVATE LIFECYCLE CONTENT", "PRIVATE APPROVAL SUMMARY",
+                  "PRIVATE PATCH PATH", "change.patch", sys.argv[4]):
+    assert forbidden not in raw, forbidden
+assert report["schema"] == 1 and report["kind"] == "oms-dashboard", report
+assert report["collection"] == {"ok": True, "sources": {"state": "ok", "artifacts": "ok", "attempts": "ok"}}
+assert report["goal"] == {"text": "operator fixture", "source": "plan"}, report["goal"]
+assert report["plan"]["by_state"] == {"ready": 1, "review": 1}, report["plan"]
+attempt = report["attempts"]["recent"][0]
+assert (attempt["attempt_id"], attempt["state"], attempt["tokens"], attempt["cost_microusd"]) == (
+    "att_one", "cancelled", 12, 7), attempt
+ops = {row["event_id"]: row for row in report["operations"]["recent"]}
+call, subject, review = ops["evt_call"], ops["evt_subject"], ops["evt_review"]
+assert (call["selected_model"], call["served_model"], call["route_class"]) == (
+    "gpt-test", "gpt-served", "explicit"), call
+assert (call["model_attribution"], call["fallback_reason"], call["tokens"], call["cost_usd"]) == (
+    "transport", "other", 120, 0.25), call
+assert call["verify_exit"] is None and subject["verify_exit"] == 0, (call, subject)
+# Unknown model, tokens and cost stay unknown rather than turning into zero.
+for key in ("selected_model", "served_model", "route_class", "tokens", "cost_usd"):
+    assert subject[key] is None, (key, subject)
+assert subject["model_attribution"] == "unknown", subject
+assert (review["exit"], review["status"], review["tokens"]) == (1, "unresolved", None), review
+assert report["reviews"] == {"outcomes": 0, "passed": 0, "failed": 0, "unknown": 0, "seat_answers": 1}, report["reviews"]
+acceptance = report["acceptance"]
+assert (acceptance["total"], acceptance["counts"], acceptance["complete"]) == (2, {"missing": 2}, False), acceptance
+assert [item["code"] for item in report["attention"]["items"]] == [
+    item["code"] for item in inbox["items"]][:8], (report["attention"], inbox)
+assert len(report["delegations"]) == 2 and not report["delegations"][0]["live"], report["delegations"]
+PY
+
+# Untrusted labels must not drive the terminal: escapes, BEL, C1 controls and
+# bidi overrides are neutralized in both views.
+hostile="$TMP/dash-hostile"
+cp -R "$repo" "$hostile"
+python3 - "$hostile" <<'PY'
+import json, sys
+from pathlib import Path
+repo = Path(sys.argv[1])
+plan_path = repo / ".oms/plan/tasks.json"
+plan = json.loads(plan_path.read_text(encoding="utf-8"))
+plan["goal"] = "evil\x1b[2J\x1b]0;title\x07 ‮goal​ end"
+plan_path.write_text(json.dumps(plan), encoding="utf-8")
+index = repo / ".oms/artifacts/index.jsonl"
+rows = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
+rows[0]["provider"], rows[0]["selected_model"] = "co\x1bdex", "gpt\x1b[31mred\x9b"
+index.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+PY
+dash --repo "$hostile" > "$TMP/dash-hostile.txt" || fail "hostile labels broke the dashboard"
+dash --repo "$hostile" --json > "$TMP/dash-hostile.json" || fail "hostile labels broke dashboard JSON"
+python3 - "$TMP/dash-hostile.txt" "$TMP/dash-hostile.json" <<'PY' || fail "dashboard passed terminal control text through"
+import json, sys
+text = open(sys.argv[1], "rb").read()
+for raw in (text, open(sys.argv[2], "rb").read()):
+    for needle in (b"\x1b", b"\x07", b"\\u001b", "‮".encode(), "\x9b".encode(), b"\\u202e"):
+        assert needle not in raw, needle
+assert b"goal: evil?[2J?]0;title? ?goal? end (plan)" in text, text
+assert json.load(open(sys.argv[2], encoding="utf-8"))["operations"]["recent"][-1]["provider"] == "co?dex"
+PY
+
+# A source that cannot be read degrades the view loudly instead of showing an
+# empty healthy one.
+corrupt="$TMP/dash-corrupt"
+cp -R "$repo" "$corrupt"
+printf '{"schema":1,"event_id":"levt_torn' >> "$corrupt/.oms/lifecycle/events.jsonl"
+rc=0
+dash --repo "$corrupt" > "$TMP/dash-corrupt.txt" || rc=$?
+[ "$rc" = 1 ] || fail "corrupt lifecycle should degrade the dashboard with exit 1, got $rc"
+grep -Fq 'COLLECTION FAILED attempts: exit 2' "$TMP/dash-corrupt.txt" ||
+  fail "dashboard hid the failed lifecycle collection: $(cat "$TMP/dash-corrupt.txt")"
+grep -Fq 'attempts: UNAVAILABLE (lifecycle stream invalid)' "$TMP/dash-corrupt.txt" ||
+  fail "dashboard showed attempts from an invalid stream"
+! grep -Fq "$corrupt" "$TMP/dash-corrupt.txt" || fail "dashboard leaked the repo path"
+
+# Missing state and oversized listings, through the pure projection.
+snap="$TMP/dash-snap"
+mkdir -p "$snap"
+printf '1\n' > "$snap/state.rc"
+printf 'error: PRIVATE COLLECTOR CONTENT\n' > "$snap/state.err"
+printf '0\n' > "$snap/artifacts.rc"
+printf '0\n' > "$snap/attempts.rc"
+printf '[]\n' > "$snap/attempts.json"
+python3 - "$snap/artifacts.json" <<'PY'
+import json, sys
+rows = [{"event_id": "evt_%d" % n, "ts": "x" * 5000, "kind": "call", "provider": "codex", "exit": 0}
+        for n in range(30)]
+rows[-1]["cost_usd"] = float("nan")
+rows[-2]["cost_usd"] = float("inf")
+rows[-3].update(kind="review-outcome", exit="unrecorded")
+json.dump({"schema": 1, "action": "list", "rows": rows}, open(sys.argv[1], "w"))
+PY
+rc=0
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/lib/dashboard_projection.py" "$snap" --json \
+  > "$TMP/dash-snap.json" || rc=$?
+[ "$rc" = 1 ] || fail "missing state must exit 1, got $rc"
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/lib/dashboard_projection.py" "$snap" \
+  > "$TMP/dash-snap.txt" || true
+grep -Fq 'state: UNAVAILABLE' "$TMP/dash-snap.txt" || fail "missing state rendered as a healthy view"
+python3 - "$TMP/dash-snap.json" "$TMP/dash-snap.txt" <<'PY' || fail "unavailable/oversized projection failed"
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+assert report["collection"]["sources"]["state"] == "exit 1", report["collection"]
+assert "PRIVATE COLLECTOR CONTENT" not in json.dumps(report)
+assert all(row["cost_usd"] is None for row in report["operations"]["recent"])
+assert report["reviews"]["unknown"] == 1 and report["reviews"]["failed"] == 0, report["reviews"]
+assert report["operations"]["recent"][2]["status"] == "unknown"
+json.dumps(report, allow_nan=False)
+assert report["task"] is None and report["attention"] is None and report["acceptance"] is None, report
+assert report["attempts"]["available"] is False, report["attempts"]
+assert len(report["operations"]["recent"]) == 8 and report["operations"]["omitted"] == 22, report["operations"]
+assert all(len(row["ts"]) <= 40 for row in report["operations"]["recent"]), report["operations"]
+assert max(len(line) for line in open(sys.argv[2], encoding="utf-8").read().splitlines()) <= 120
+PY
+
+# A live view must fit a normal terminal without scrolling its goal away.
+# Keep route and acceptance information visible when old details are omitted.
+PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/scripts/lib/dashboard_projection.py" "$TMP/dash.json" "$snap" <<'PY' || fail "dashboard bounds/contract regression"
+import json, runpy, subprocess, sys
+from pathlib import Path
+module = runpy.run_path(sys.argv[1])
+report = json.load(open(sys.argv[2], encoding="utf-8"))
+report["operations"]["recent"] *= 4
+report["attempts"]["recent"] *= 4
+text = module["render"](report, 100, interval=5, height=24)
+assert len(text.splitlines()) <= 24, text
+assert "model=gpt-test route=explicit" in text, text
+assert "acceptance:" in text and "attention:" in text and "detail line(s) hidden" in text, text
+assert all(module["display_width"](line) <= 100 for line in text.splitlines())
+assert module["display_width"](module["fit"]("한글" * 30, 40)) <= 40
+snap = Path(sys.argv[3])
+original_artifacts = (snap / "artifacts.json").read_bytes()
+(snap / "artifacts.json").write_text('{"schema":1,"rows":{}}')
+bad = module["build"](snap, "fixture")
+assert bad["collection"]["sources"]["artifacts"] == "unsupported artifact-index contract"
+(snap / "artifacts.json").write_bytes(b" " * (module["MAX_SOURCE_BYTES"] + 1))
+assert "display limit" in module["load_source"](snap, "artifacts")[1]
+(snap / "artifacts.json").write_bytes(original_artifacts)
+(snap / "state.json").write_bytes((Path(sys.argv[2]).parent / "shared-state.json").read_bytes())
+(snap / "state.rc").write_text("0\n")
+cli = subprocess.run([sys.executable, "-B", sys.argv[1], str(snap), "--width", "80",
+                      "--height", "24", "--interval", "5"], capture_output=True, text=True)
+assert cli.returncode == 0, cli.stderr
+assert len(cli.stdout.splitlines()) <= 23, cli.stdout
+assert "acceptance:" in cli.stdout and "attention:" in cli.stdout
+PY
+
+# Arguments: watch-only options, a sensible interval floor, and no JSON stream.
+for bad in '--interval 5' '--count 1' '--json --watch' '--watch --interval 1' \
+  '--watch --interval abc' '--watch --count 0'; do
+  rc=0
+  # shellcheck disable=SC2086 # deliberate word splitting of the case
+  dash --repo "$repo" $bad >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "dashboard $bad should be a usage error, got $rc"
+done
+"$ROOT/scripts/oms" dashboard --help | grep -Fq 'Usage: dashboard.sh' || fail "oms dashboard --help failed"
+# A non-terminal stream is appended to, never cleared.
+dash --repo "$repo" --watch --interval 2 --count 2 > "$TMP/dash-watch.txt" || fail "dashboard watch failed"
+[ "$(grep -c '^OMS dashboard .* refresh=2s$' "$TMP/dash-watch.txt")" = 2 ] || fail "watch did not refresh twice"
+[ "$(grep -c '^----$' "$TMP/dash-watch.txt")" = 1 ] || fail "watch snapshots lack a separator"
+! grep -q "$(printf '\033')" "$TMP/dash-watch.txt" || fail "watch erased a non-terminal stream"
 
 # --- Content-free OTLP JSONL ----------------------------------------------
 
@@ -628,5 +816,265 @@ if bash "$ROOT/scripts/artifact-index.sh" --repo "$trace_repo" validate \
 fi
 grep -Fq 'persisted trace context' "$TMP/bad-trace.out" ||
   fail "artifact trace refusal was not explicit: $(cat "$TMP/bad-trace.out")"
+
+# --- Terminal panel and bidirectional orchestration ------------------------
+# Reuse this operator suite for the new front end. Providers are protocol
+# fixtures; the real consult/delegate/review and artifact writers run below.
+PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT" "$TMP" <<'PY' || fail "terminal panel regression failed"
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+
+root, temporary = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root / "scripts/lib"))
+import terminal_panel as panel
+
+project = temporary / "panel repo 'quoted'; dollar$"
+project.mkdir()
+home = temporary / "panel-home"
+home.mkdir()
+binary = temporary / "panel-bin"
+binary.mkdir()
+subprocess.run(["git", "init", "-q", str(project)], check=True)
+for key, value in (("user.email", "test@example.com"), ("user.name", "test")):
+    subprocess.run(["git", "-C", str(project), "config", key, value], check=True)
+(project / "value.txt").write_text("old\n")
+subprocess.run(["git", "-C", str(project), "add", "value.txt"], check=True)
+subprocess.run(["git", "-C", str(project), "commit", "-qm", "init"], check=True)
+brief = temporary / "panel-brief.md"
+brief.write_text("Task: append new to value.txt. No primary edits or recursive workers.\n")
+log = temporary / "panel-native-log.jsonl"
+for provider in panel.PROVIDERS:
+    executable = binary / provider
+    executable.write_text('''#!/usr/bin/env bash
+set -eu
+case "${1:-}:${2:-}" in
+  --version:|--help:|exec:--help) printf 'fixture CLI 1.0\\n'; exit 0 ;;
+esac
+if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
+  cat >/dev/null
+  if [ "${PANEL_TEST_MODE:-}" = write ]; then
+    printf 'new\\n' >> value.txt
+    if bash "$OMS_PANEL_ENTRYPOINT" panel --launch codex >/dev/null 2>&1; then
+      echo 'nested owner launch should have failed' >&2
+      exit 1
+    fi
+  fi
+  printf 'Answer: inspected the bounded repository task.\\nGATE: pass\\n'
+else
+  python3 - "$@" <<'INNER'
+import json, os, sys
+with open(os.environ["PANEL_TEST_LOG"], "a", encoding="utf-8") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "agent": os.environ["OMS_AGENT"],
+                        "repo": os.environ["OMS_PANEL_REPO"], "cwd": os.getcwd(),
+                        "entry": os.environ["OMS_PANEL_ENTRYPOINT"]}) + "\\n")
+print("NATIVE_FIXTURE_READY")
+INNER
+fi
+''')
+    executable.chmod(0o755)
+
+environment = dict(os.environ, HOME=str(home), NVM_DIR=str(home / ".nvm"),
+                   PATH=str(binary) + os.pathsep + os.environ["PATH"],
+                   XDG_STATE_HOME=str(temporary / "panel-state"),
+                   OMS_PANEL_ENTRYPOINT=str(panel.ENTRY), PANEL_TEST_LOG=str(log),
+                   OMS_PEER_TIMEOUT="30", OMS_ROLE_ROUTING="0")
+for key in ("OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH", "OMS_PANEL_SESSION", "TMUX",
+            "OH_MY_SETTING_CALL_DRY_RUN", "OH_MY_SETTING_REVIEW_DRY_RUN"):
+    environment.pop(key, None)
+
+def call(command, env=None):
+    result = subprocess.run(command, cwd=str(project), env=env or environment,
+                            capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, (command, result.returncode, result.stdout[-6000:], result.stderr[-6000:])
+    return result.stdout
+
+baseline = subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"])
+report = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--json"]))
+assert report["kind"] == "oms-panel" and report["schema"] == 1
+assert all(report["providers"][p]["installed"] for p in panel.PROVIDERS)
+assert report["dashboard"]["kind"] == "oms-dashboard"
+assert not (project / ".oms").exists(), "panel query created a state store"
+assert subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"]) == baseline
+assert shlex.split(panel.shell_command(["bash", str(panel.ENTRY), str(project)]))[1:] == ["bash", str(panel.ENTRY), str(project)]
+
+for owner in panel.PROVIDERS:
+    env = dict(environment, OMS_AGENT=owner)
+    peer = "claude" if owner == "codex" else "codex"
+    command = panel.peer_command("ask", owner, project, prompt="Inspect value.txt without edits.")
+    answer = call(command, env)
+    assert "inspected the bounded repository task" in answer
+    assert (project / "value.txt").read_text() == "old\n"
+    write_env = dict(env, PANEL_TEST_MODE="write")
+    command = panel.peer_command("delegate", owner, project, brief=brief,
+                                 verify="test \"$(tail -1 value.txt)\" = new")
+    answer = call(command, write_env)
+    patch = re.search(r"^patch: (.+)$", answer, re.M)
+    assert patch and "+new" in Path(patch.group(1)).read_text(), answer
+    assert (project / "value.txt").read_text() == "old\n", "worker edited primary"
+    answer = call(panel.peer_command("review", owner, project, prompt="Review value.txt.",
+                                     verify="test -f value.txt"), env)
+    assert "pass" in answer
+    turns = json.loads(call(["bash", str(panel.ENTRY), "thread", "--repo", str(project), "show", "--json"], env))["turns"]
+    assert any(t.get("provider") == peer and t["role"] == "answer" for t in turns)
+
+rows = json.loads(call(["bash", str(panel.ENTRY), "artifact-index", "--repo", str(project),
+                        "--json", "list", "30"]))["rows"]
+assert {r["provider"] for r in rows if r["kind"] == "delegate"} == set(panel.PROVIDERS)
+assert {r["provider"] for r in rows if r["kind"] == "review"} == set(panel.PROVIDERS)
+
+for owner in panel.PROVIDERS:
+    plan = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                           "--launch", owner, "--resume", "exact-session-id", "--dry-run"]))
+    assert plan["executes"] is False and "exact-session-id" in plan["argv"]
+    assert "--last" not in plan["argv"] and "--continue" not in plan["argv"]
+    assert "--dangerously" not in " ".join(plan["argv"])
+
+for arguments in (["--resume", "--last"], ["--launch", "codex", "--resume", "../bad"],
+                  ["--launch", "codex", "--resume=--last", "--dry-run"],
+                  ["--launch", "codex", "--json"], ["--model", "x"],
+                  ["--json", "--dry-run"], []):
+    result = subprocess.run(["bash", str(panel.ENTRY), "panel"] + arguments,
+                            cwd=str(project), env=environment, capture_output=True, text=True)
+    assert result.returncode == 2, (arguments, result)
+for guard in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_HARNESS_DELEGATE_DEPTH": "1"}):
+    result = subprocess.run(["bash", str(panel.ENTRY), "panel", "--launch", "codex"],
+                            cwd=str(project), env=dict(environment, **guard), capture_output=True, text=True)
+    assert result.returncode == 2 and "worker cannot" in result.stderr, result
+
+if os.name == "posix":
+    import fcntl
+    import pty
+    import select
+    import struct
+    import termios
+    import time
+
+    def terminal(command, inputs, expected):
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(project)
+            os.execvpe(command[0], command, dict(environment, TERM="xterm", OMS_AGENT="codex"))
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 110, 0, 0))
+        pending = inputs.splitlines(keepends=True)
+        prompts = 0
+        output = b""
+        deadline = time.monotonic() + 20
+        finished = False
+        try:
+            while time.monotonic() < deadline:
+                if select.select([fd], [], [], .2)[0]:
+                    try:
+                        output += os.read(fd, 65536)
+                    except OSError:
+                        pass
+                seen = output.count(b"oms> ")
+                if pending and seen > prompts:
+                    os.write(fd, pending.pop(0))
+                    prompts = seen
+                waited, status = os.waitpid(pid, os.WNOHANG)
+                if waited:
+                    finished = True
+                    assert os.waitstatus_to_exitcode(status) == 0, output
+                    break
+            if not finished:
+                waited, status = os.waitpid(pid, os.WNOHANG)
+                finished = bool(waited)
+                assert finished, output
+                assert os.waitstatus_to_exitcode(status) == 0, output
+            assert expected in output, output
+        finally:
+            if not finished:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+            os.close(fd)
+
+    terminal(["bash", str(panel.ENTRY), "panel", "--layout", "inline"], b"9\nq\n", b"OMS control panel")
+    for owner in panel.PROVIDERS:
+        terminal(["bash", str(panel.ENTRY), "panel", "--launch", owner, "--resume", "exact-session-id"],
+                 b"", b"NATIVE_FIXTURE_READY")
+    launched = [json.loads(line) for line in log.read_text().splitlines()]
+    assert {r["agent"] for r in launched} == set(panel.PROVIDERS)
+    for row in launched:
+        assert row["cwd"] == row["repo"] == str(project.resolve())
+        assert row["entry"] == str(panel.ENTRY)
+        assert "exact-session-id" in row["argv"]
+        assert "peer-delegate" in " ".join(row["argv"])
+    actual_tmux = shutil.which("tmux")
+    if actual_tmux:
+        socket = "oms-panel-fixture-" + str(os.getpid())
+        wrapper = binary / "tmux"
+        wrapper.write_text("#!/usr/bin/env bash\nexec %s -L %s \"$@\"\n" %
+                           (shlex.quote(actual_tmux), shlex.quote(socket)))
+        wrapper.chmod(0o755)
+        tmux = [actual_tmux, "-L", socket]
+        env = dict(environment, TERM="xterm")
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(project)
+            os.execvpe("bash", ["bash", str(panel.ENTRY)], env)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 110, 0, 0))
+        finished = False
+        client_output = bytearray()
+        try:
+            def tmux_wait(arguments, expected, timeout=15):
+                deadline = time.monotonic() + timeout
+                text = ""
+                while time.monotonic() < deadline:
+                    if select.select([fd], [], [], .1)[0]:
+                        try:
+                            client_output.extend(os.read(fd, 65536))
+                        except OSError:
+                            pass
+                    result = subprocess.run(tmux + arguments, capture_output=True, text=True, env=env)
+                    text = result.stdout
+                    if result.returncode == 0 and expected in text:
+                        return text
+                raise AssertionError((arguments, expected, text, bytes(client_output[-4000:])))
+
+            sessions = tmux_wait(["list-sessions", "-F", "#{session_name}"], "oms-panel-")
+            session = sessions.strip().splitlines()[0]
+            panes = tmux_wait(["list-panes", "-t", session, "-F", "#{pane_id}"], "%").splitlines()
+            control = panes[0]
+            tmux_wait(["capture-pane", "-p", "-t", control], "oms>")
+            for owner, key in (("codex", "1"), ("claude", "2")):
+                subprocess.run(tmux + ["send-keys", "-t", control, key, "Enter"], env=env, check=True)
+                tmux_wait(["list-windows", "-t", session, "-F", "#{window_name}"], owner)
+                listing = tmux_wait(["list-panes", "-t", session + ":" + owner,
+                                     "-F", "#{pane_id}"], "%").splitlines()
+                tmux_wait(["capture-pane", "-p", "-t", listing[0]], "NATIVE_FIXTURE_READY")
+                tmux_wait(["capture-pane", "-p", "-t", listing[1]], "OMS dashboard")
+            records = [json.loads(line) for line in log.read_text().splitlines()]
+            assert {r["agent"] for r in records[-2:]} == set(panel.PROVIDERS)
+            assert all(r["cwd"] == str(project.resolve()) for r in records[-2:])
+            subprocess.run(tmux + ["send-keys", "-t", control, "q", "Enter"], env=env, check=True)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if select.select([fd], [], [], .1)[0]:
+                    try:
+                        os.read(fd, 65536)
+                    except OSError:
+                        pass
+                waited, status = os.waitpid(pid, os.WNOHANG)
+                if waited:
+                    finished = True
+                    assert os.waitstatus_to_exitcode(status) == 0
+                    break
+            assert finished, "detaching hung the launcher"
+            assert subprocess.run(tmux + ["has-session", "-t", session], env=env).returncode == 0
+        finally:
+            subprocess.run(tmux + ["kill-server"], env=env, capture_output=True)
+            if not finished:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+            os.close(fd)
+print("terminal-panel: both directions, isolated patches, reviews, guards and PTY passed")
+PY
 
 echo 'operator-tools-smoke: ok'

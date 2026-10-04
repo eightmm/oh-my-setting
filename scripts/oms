@@ -60,6 +60,7 @@ fi
 usage() {
   cat <<'EOF_USAGE'
 Usage: oms <tool> [args...]
+       oms                         # terminal control panel (interactive TTY)
        oms list [--frontdoor|--all]
        oms help
 
@@ -69,8 +70,8 @@ reference selects intent variants behind those entries. Docs/COMPONENTS.md
 describes the existing subsystems and docs/OMS-RUNTIME.md explains the typed
 runtime projection.
 
-These tools are the agent's hands, not a human command set. If you are a person
-reading this, say what you want to your coding agent instead.
+The terminal panel is the human entrypoint. The other tools are the agent's
+hands; give your coding agent the goal instead of composing harness commands.
 EOF_USAGE
 }
 
@@ -139,6 +140,7 @@ checkpoint
 ci-status
 cleanup
 consult
+dashboard
 data-manifest
 doctor
 draft-pr
@@ -158,6 +160,7 @@ model-doctor
 models
 open-in
 otel-export
+panel
 patch-admit
 patch-land
 peer-ask
@@ -191,10 +194,12 @@ update
 OMS_FRONTDOOR_TOOLS="
 autopilot
 consult
+dashboard
 doctor
 inbox
 journal
 land
+panel
 patch-admit
 patch-land
 peer-delegate
@@ -231,7 +236,14 @@ cmd_list() {
 }
 
 case "${1:-}" in
-  ""|-h|--help)
+  "")
+    if [ -t 0 ] && [ -t 1 ]; then
+      exec bash "$SCRIPTS_DIR/panel.sh"
+    fi
+    usage
+    exit 0
+    ;;
+  -h|--help)
     usage
     exit 0
     ;;

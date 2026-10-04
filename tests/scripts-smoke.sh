@@ -14151,7 +14151,7 @@ test_oms_frontdoor_routes_primary_subsystems() {
   printf '%s\n' "$review_help" | grep -Fq 'With --gate, enforce and record the typed gate outcome.' ||
     fail "peer-review help should scope its typed outcome to gate mode"
 
-  for primary in autopilot consult doctor inbox journal land patch-admit patch-land \
+  for primary in autopilot consult dashboard doctor inbox journal land panel patch-admit patch-land \
     peer-delegate peer-review runtime tick update; do
     printf '%s\n' "$frontdoors" | grep -Eq "^${primary} " ||
       fail "frontdoor catalog should route the canonical workflow: $primary"
@@ -14906,7 +14906,7 @@ test_large_skills_use_progressive_disclosure() {
 
   skill="$ROOT/custom-skills/oms-agent-harness/SKILL.md"
   [ "$(wc -w < "$skill" | tr -d ' ')" -le 650 ] || fail "oms-agent-harness router is too large"
-  for ref in command-routing state-memory plans-recovery roles cross-agent-consultation \
+  for ref in command-routing state-memory plans-recovery roles model-routing cross-agent-consultation \
     delegation-artifacts review-gates session-handoff minimal-change; do
     assert_file_contains "$skill" "references/$ref.md"
     [ -f "$ROOT/custom-skills/oms-agent-harness/references/$ref.md" ] || fail "missing oms-agent-harness reference: $ref"

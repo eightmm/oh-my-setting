@@ -14,10 +14,13 @@
 project from the same rules, state, plans, evidence and handoffs, so any of
 them can pick up where another left off.
 
-**You never run any of it.** Install once; after that the harness belongs to
-your agent. It calls the `oms` tools, writes the `.oms/` state, and handles
-updates and health checks when you ask. A command shown here is what the
-agent will run, not something you type.
+Run **`oms` in a terminal for the shared control panel**. Open Codex or Claude
+Code, view shared state, or ask the other provider to investigate, implement or
+review. Installed tmux keeps status beside native conversations; the inline
+menu works without it. See [the panel guide](docs/TERMINAL-PANEL.md).
+
+Your agent manages the remaining harness tools, `.oms/` state, updates and
+health checks. Harness commands shown below are for the agent to run.
 
 ## Install
 

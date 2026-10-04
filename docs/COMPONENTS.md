@@ -368,7 +368,10 @@ counterparts remain available where applicable.
 
 Routing is deliberately small:
 
-- No `--model`: use the provider default.
+- No `--model`: judging calls use the provider default; write workers use the
+  second seeded price rank among routable models. An explicitly declared
+  `--workload routine` selects the lowest seeded routable rank. Unseeded
+  generations use the provider default; `OMS_ROLE_ROUTING=0` disables presets.
 - `--model NAME`: use that exact model with no implicit switch.
 - DeepSeek Harness and Vibe currently expose no documented per-invocation model
   selector on their OMS headless surfaces. An explicit `--model` for either is
@@ -390,6 +393,49 @@ discard listing banners, so labels cannot leak into automatic recovery routes.
 
 Artifacts record requested and selected models, reasoning effort, fallback use,
 and reason.
+
+The [model-routing contract](../custom-skills/oms-agent-harness/references/model-routing.md)
+separates parent judgment from bounded execution and defines decision-point
+reviews. Roles do not select a model or grant delegation authority. Native
+subagents remain outside the shell router.
+
+### Collaboration visibility
+
+The [terminal control panel](TERMINAL-PANEL.md) is the human entrypoint: bare
+`oms` on a TTY or `oms panel`. It opens Codex/Claude native sessions, resumes
+explicit session IDs, and connects either owner to the same consult/delegate/
+review paths. Optional installed tmux keeps native conversations beside shared
+status; the portable inline menu works without it. Provider workers do not gain
+owner or recursive delegation authority.
+
+Use compact status during ordinary work and drill down when coordination or a
+blocker needs explanation. `oms dashboard` composes existing state, lifecycle,
+artifact and inbox projections into a read-only terminal view. `--watch`
+refreshes the view and `--json` returns a bounded schema-1 projection. There is
+no second state store or model call to render it. The retired `ops-cockpit`
+remains retired. See [the dashboard guide](DASHBOARD.md) for coverage and controls.
+
+An illustrative layout, not a live run:
+
+```text
+Goal / requested scope
+Parent: planning | execution | integration | verification
+Task       Owner / selected model   Route reason        Observed state
+lookup     local tool               known path          evidence returned
+implement  worker / recorded model  routine assignment  ready for review
+Acceptance: required check / exact tree / pass, fail, missing or stale
+Attention: blocker / review finding / next decision
+```
+
+Display an owner, model or route reason only when recorded; otherwise mark it
+unknown. Identify snapshot time and evidence freshness. Distinguish agent
+completion from integrated verification, and review not requested from a
+passing review. Tokens, costs and durations need a measured source and scope;
+absent values are unknown, not zero. Do not expose raw prompts or transcripts.
+Session-native HUD data and OMS-managed attempt records have different
+coverage; a view must say which it observes rather than implying that every
+native agent is tracked. Viewing state grants no execution or publication
+authority.
 
 ## Delegating writes
 

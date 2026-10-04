@@ -6,6 +6,36 @@ Provider transport and model family are different identities. Load
 [provider-routing.md](provider-routing.md) when selecting an installed optional
 agent, a Grok/GLM route, or a custom adapter.
 
+## Separate judgment from execution
+
+The parent owns the plan, unresolved tradeoffs, patch admission and final
+acceptance. A role describes work; it does not select a model or authorize a
+call. Keep the current registry and explicit user model choices.
+
+Before an authorized delegation, choose from repository evidence:
+
+| Work | Handling |
+|---|---|
+| File existence, known lookup, syntax or a known small fix | Run the local tool directly. |
+| Exploration or documentation research | Bound a read-only brief to the missing fact and require source references; reuse existing findings. |
+| Implementation with known paths, constraints and verifier | Use the routine worker route when substantial enough to justify a worker. |
+| Bounded implementation needing further investigation | Keep the standard worker route; return unresolved decisions to the parent. |
+| Architecture, scientific assumptions or security tradeoffs | Resolve the uncertainty in the parent before assigning implementation. |
+
+Do not call a classifier to choose a tool, create three workers because three
+roles exist, or replay the whole conversation. See [roles.md](roles.md) for
+brief and return requirements.
+
+Review at decision points: before committing to a material unresolved plan,
+after the same unresolved failure recurs, and before accepting substantial work.
+First inspect source and existing evidence. A repeat needs a changed hypothesis
+and a discriminating probe; completion needs the requested scope matched to
+fresh verification. Consult a peer only when authorized and a specific missing
+judgment could change the next action. These checkpoints do not enable a
+background advisor or require another model call for routine completion.
+
+## Existing router contract
+
 1. Run `oms models` for cached catalogs and per-model effort scales. Use
    `--refresh` only when a live probe is needed.
 2. No `--model` means provider default — except for a write worker
