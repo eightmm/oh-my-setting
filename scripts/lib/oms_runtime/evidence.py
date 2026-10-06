@@ -6,7 +6,7 @@ import collections
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence
 
 from . import RUNTIME_SCHEMA
 from .common import MAX_JSONL_ROWS, CoreError, append_jsonl, bounded_line, git_head, install_root, parse_path_list, read_jsonl, relative_path, safe_id, sha256_file, utc_now
@@ -74,6 +74,10 @@ def outcome(row: Mapping[str, Any]) -> Optional[str]:
         if verifier != 0:
             return "failed"
         return "verified" if type(worker) is int and worker == 0 else "inconclusive"
+    if row.get("kind") == "delegate" and type(row.get("exit")) is int and row["exit"] != 0:
+        # Legacy delegate receipts: the worker's own failure outranks a zero
+        # verify_exit, which the generic loop below would read first.
+        return "failed"
     status = str(row.get("status", row.get("state", row.get("verdict", "")))).lower()
     if status in ("pass", "passed", "success", "succeeded", "verified", "done", "approved", "admit", "admitted"):
         return "verified"
@@ -97,6 +101,41 @@ def outcome(row: Mapping[str, Any]) -> Optional[str]:
         if isinstance(value, str) and value.lstrip("-").isdigit():
             return "verified" if int(value) == 0 else "failed"
     return None
+
+
+INDEX_SOURCE = ".oms/artifacts/index.jsonl"
+
+
+def resolved_event_ids(rows: Sequence[Mapping[str, Any]]) -> set:
+    """Failed index rows with a valid resolution row.
+
+    Mirrors the predicate in scripts/artifact-index.sh (artifact_index_view);
+    an invalid resolution leaves its target failed.
+    """
+    index = [row for row in rows if row.get("_source") == INDEX_SOURCE]
+    counts: collections.Counter = collections.Counter(row["event_id"] for row in index if isinstance(row.get("event_id"), str))
+    by_id = {row["event_id"]: row for row in index if isinstance(row.get("event_id"), str) and counts[row["event_id"]] == 1}
+    resolved = set()
+    for resolver in index:
+        if resolver.get("kind") != "artifact-resolution":
+            continue
+        target_id = resolver.get("resolves_event_id")
+        target = by_id.get(target_id) if isinstance(target_id, str) else None
+        if (target is None or resolver.get("schema") != 1 or
+                counts.get(resolver.get("event_id")) != 1 or
+                resolver.get("parent_event_id") != target_id or
+                resolver.get("resolution") != "resolved"):
+            continue
+        resolver_exit, target_exit = resolver.get("exit"), target.get("exit")
+        if (type(resolver_exit) is not int or type(target_exit) is not int):
+            continue
+        if (resolver_exit == 0 and target_exit > 0 and
+                target["_ordinal"] < resolver["_ordinal"] and target.get("schema") == 1 and
+                target.get("kind") != "artifact-resolution" and
+                resolver.get("operation_id") == target.get("operation_id") and
+                resolver.get("artifact_id") == target.get("artifact_id")):
+            resolved.add(target_id)
+    return resolved
 
 
 def _dependency_digests(repo: Path, paths: Sequence[str]) -> Dict[str, str]:
@@ -201,9 +240,11 @@ def bind(repo: Path, criterion_id: str, ref: str, status: str, *, evidence_type:
     return row
 
 
-def _evidence_item(row: Mapping[str, Any], repo: Path, *, support: str, head: str) -> Dict[str, Any]:
+def _evidence_item(row: Mapping[str, Any], repo: Path, *, support: str, head: str, resolved: Collection[str] = ()) -> Dict[str, Any]:
     status = outcome(row) or str(row.get("status", "inconclusive"))
     stale = _stale(row, repo, head)
+    if status == "failed" and row.get("_source") == INDEX_SOURCE and row.get("event_id") in resolved:
+        stale = True
     if stale:
         status = "stale"
     return {"evidence_ref": evidence_ref(row) or bounded_line(row.get("binding_id", ""), 160), "binding_id": bounded_line(row.get("binding_id", ""), 160), "kind": bounded_line(row.get("kind", row.get("evidence_type", "artifact")), 80), "provider": bounded_line(row.get("provider", ""), 80), "status": status, "stale": stale, "ts": bounded_line(row.get("ts", row.get("created_at", "")), 40), "scope_digest": bounded_line(row.get("scope_digest", row.get("reviewed_diff_sha256", row.get("patch_sha256", ""))), 80), "support": support, "source": bounded_line(row.get("_source", ""), 200), "_ordinal": int(row.get("_ordinal", 0)) if isinstance(row.get("_ordinal", 0), int) else 0}
@@ -239,6 +280,7 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
     by_criterion: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
     unbound: List[Dict[str, Any]] = []
     rows = artifact_rows(repo)
+    resolved = resolved_event_ids(rows)
     row_by_ref = {evidence_ref(row): row for row in rows if evidence_ref(row)}
     plan_criteria = {str(item.get("id")): str(item.get("command_digest", "")) for item in criteria if item.get("source") == "plan" and item.get("command_digest")}
     for row in rows:
@@ -289,7 +331,7 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
                     exit_code = row.get("exit")
                     judged = "verified" if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code == 0 else "failed"
                     row = dict(row, status=judged)
-        item = _evidence_item(row, repo, support=support, head=head)
+        item = _evidence_item(row, repo, support=support, head=head, resolved=resolved)
         if refs:
             for ref in refs:
                 by_criterion[ref].append(item)
@@ -319,7 +361,7 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
                 continue
         merged = dict(row_by_ref.get(str(binding.get("evidence_ref", "")), {}))
         merged.update(binding)
-        by_criterion[criterion_id].append(_evidence_item(merged, repo, support="explicit-binding", head=head))
+        by_criterion[criterion_id].append(_evidence_item(merged, repo, support="explicit-binding", head=head, resolved=resolved))
     task = base_envelope.get("task", {})
     if task.get("verification") == "fresh":
         task_ref = "task-verification:%s" % task.get("task_id", "")

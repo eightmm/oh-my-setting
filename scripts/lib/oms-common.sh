@@ -581,10 +581,73 @@ oms_worker_state_violations() {
 
   [ -f "$before" ] || return 0
   OMS_WG_REPO="$repo" OMS_WG_BEFORE="$before" python3 - <<'PY'
-import hashlib, os
+import hashlib, json, os
 
 root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
 problems = []
+
+# The artifact index store compacts by design (artifact-index-store.py keeps the
+# newest lineage groups once the row count passes its high-water mark), so a
+# shrink or changed prefix there is accepted only when it has that shape: every
+# surviving row is byte-identical and in order, new rows follow them, all
+# dropped rows are older than the oldest survivor that is not a retained
+# resolution target, and the row count had passed the keep floor.
+def index_compacted(path, size, expected):
+    try:
+        with open(os.environ["OMS_WG_BEFORE"] + ".artifact-index", "rb") as fh:
+            before = fh.read(size)
+        with open(path, "rb") as fh:
+            now = fh.read()
+    except OSError:
+        return False
+    if len(before) != size or hashlib.sha256(before).hexdigest() != expected:
+        return False
+
+    def rows(data):
+        out = []
+        for line in data.splitlines(True):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                return None
+            event_id = row.get("event_id") if isinstance(row, dict) else None
+            if not isinstance(event_id, str) or not event_id:
+                return None
+            out.append((event_id, line, row))
+        return out
+
+    old, new = rows(before), rows(now)
+    if old is None or new is None:
+        return False
+    position = {event_id: i for i, (event_id, _line, _row) in enumerate(old)}
+    if len(position) != len(old):
+        return False
+    retained, added = [], 0
+    for event_id, line, _row in new:
+        i = position.get(event_id)
+        if i is None:
+            added += 1
+            continue
+        if added or old[i][1] != line or (retained and i <= retained[-1]):
+            return False
+        retained.append(i)
+    dropped = set(range(len(old))) - set(retained)
+    if not dropped:
+        return False
+    try:
+        keep = int(os.environ.get("OMS_ARTIFACT_INDEX_KEEP", "1000"))
+    except ValueError:
+        keep = 1000
+    if len(old) + added <= keep:
+        return False
+    targets = {
+        position.get(row.get("resolves_event_id"))
+        for _event_id, _line, row in new
+        if row.get("kind") == "artifact-resolution"
+    }
+    anchors = [i for i in retained if i not in targets]
+    return max(dropped) < min(anchors, default=len(old))
+
 with open(os.environ["OMS_WG_BEFORE"], encoding="utf-8", errors="replace") as f:
     for line in f:
         parts = line.rstrip("\n").split(" ")
@@ -607,8 +670,10 @@ with open(os.environ["OMS_WG_BEFORE"], encoding="utf-8", errors="replace") as f:
         except OSError:
             problems.append("%s became unreadable" % rel)
             continue
+        compactable = rel == "artifacts/index.jsonl"
         if now < size:
-            problems.append("%s was truncated (%d -> %d bytes)" % (rel, size, now))
+            if not (compactable and index_compacted(path, size, expected)):
+                problems.append("%s was truncated (%d -> %d bytes)" % (rel, size, now))
             continue
         digest = hashlib.sha256()
         with open(path, "rb") as fh:
@@ -619,7 +684,8 @@ with open(os.environ["OMS_WG_BEFORE"], encoding="utf-8", errors="replace") as f:
                     break
                 remaining -= len(chunk)
                 digest.update(chunk)
-        if digest.hexdigest() != expected:
+        if digest.hexdigest() != expected and not (
+                compactable and index_compacted(path, size, expected)):
             problems.append("%s had existing rows rewritten" % rel)
 for problem in problems[:5]:
     print(problem)
@@ -908,6 +974,11 @@ oms_worker_surface_diff() {
         "$before_dir/gitmeta" "$current_worktree_physical"; then
         continue
       fi
+      if [ "$name" = gitmeta ] && oms_worker_gitmeta_only_kept_siblings "$repo" \
+        "$before_dir" "$current_worktree_physical"; then
+        changed="${changed:+$changed, }kept-sibling"
+        continue
+      fi
       changed="${changed:+$changed, }$name"
     fi
   done
@@ -938,10 +1009,11 @@ oms_worker_surface_diff() {
 # directory is that worktree's real Git backpointer. The current worker's own
 # registration is never ignored: a commit there moves its detached HEAD and
 # otherwise collapses into an empty successful patch.
-oms_worker_gitmeta_is_live_managed_worktree() {  # REPO ENTRY CURRENT_WORKTREE
+oms_worker_gitmeta_is_live_managed_worktree() {  # REPO ENTRY CURRENT_WORKTREE [kept]
   local repo="$1"
   local entry="$2"
   local current_worktree_physical="${3:-}"
+  local allow_kept="${4:-}"
   local metadata_dir
   local metadata_physical=""
   local gitdir_file
@@ -997,7 +1069,7 @@ oms_worker_gitmeta_is_live_managed_worktree() {  # REPO ENTRY CURRENT_WORKTREE
   marker_temporary="$(oms_harness_read_marker_value "$marker" temporary)"
   [ "$marker_kind" = oh-my-setting-temp ] && [ "$marker_temporary" = 1 ] || return 1
   case "$marker_pid" in *[!0-9]*|"") return 1 ;; esac
-  kill -0 "$marker_pid" 2>/dev/null || return 1
+  [ "$allow_kept" = kept ] || kill -0 "$marker_pid" 2>/dev/null || return 1
   repo_physical="$(oms_harness_physical_dir "$repo" 2>/dev/null || true)"
   [ -n "$repo_physical" ] || return 1
 
@@ -1084,6 +1156,54 @@ oms_worker_gitmeta_is_pending_managed_worktree() {  # REPO WT_PATH CURRENT_WORKT
 $(oms_harness_temp_bases)
 EOF
   return 1
+}
+
+# A sibling delegate that was live-exempt at the pre-provider snapshot and then
+# finished with its worktree kept (failure or rejection) loses its liveness and
+# reappears on the hard surface although nothing about it is the worker's. Name
+# it softly only when every changed line is an addition belonging to such an
+# entry and its checkout, backpointer and marker still pass the validator with
+# only the pid dead. A removed marker, an entry absent from the snapshot's
+# exempt list, or any other changed line keeps gitmeta hard.
+oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
+  local repo="$1"
+  local before_dir="$2"
+  local current_worktree_physical="${3:-}"
+  local git_dir
+  local line
+  local entry
+  local added
+
+  [ -s "$before_dir/gitmeta-exempt" ] || return 1
+  git_dir="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || printf '')"
+  case "$git_dir" in
+    "") return 1 ;;
+    /*) ;;
+    *) git_dir="$repo/$git_dir" ;;
+  esac
+  oms_worker_surface_capture_one "$repo" gitmeta "$current_worktree_physical" |
+    LC_ALL=C sort > "$before_dir/gitmeta-now" || return 1
+  LC_ALL=C sort "$before_dir/gitmeta" > "$before_dir/gitmeta-before" || return 1
+  [ -z "$(LC_ALL=C comm -23 "$before_dir/gitmeta-before" "$before_dir/gitmeta-now")" ] ||
+    return 1
+  added="$(LC_ALL=C comm -13 "$before_dir/gitmeta-before" "$before_dir/gitmeta-now")"
+  [ -n "$added" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree-dir worktrees/"*) entry="${line#worktree-dir worktrees/}" ;;
+      "worktree worktrees/"*/*)
+        entry="${line#worktree worktrees/}"
+        entry="${entry%%/*}"
+        ;;
+      *) return 1 ;;
+    esac
+    grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-exempt" || return 1
+    oms_worker_gitmeta_is_live_managed_worktree "$repo" \
+      "$git_dir/worktrees/$entry/gitdir" "$current_worktree_physical" kept || return 1
+  done <<EOF
+$added
+EOF
+  return 0
 }
 
 # Neither `git worktree add` nor `remove` is atomic: for a moment the registry
@@ -1334,9 +1454,12 @@ oms_worker_surface_capture_one() {
     remotes) git -C "$repo" remote -v 2>/dev/null | LC_ALL=C sort ;;
     refs)
       # Remote-tracking refs and stash may move while a sibling fetches or
-      # lands; every other ref remains a worker-attributable, hard surface.
+      # lands, and the Codex app records turn diffs under refs/codex/ on every
+      # turn in this repository; every other ref remains a worker-attributable,
+      # hard surface.
       (git -C "$repo" show-ref 2>/dev/null || true) |
-        LC_ALL=C awk '$2 != "refs/stash" && index($2, "refs/remotes/") != 1' |
+        LC_ALL=C awk '$2 != "refs/stash" && index($2, "refs/remotes/") != 1 &&
+          index($2, "refs/codex/") != 1' |
         LC_ALL=C sort
       git -C "$repo" rev-parse HEAD 2>/dev/null || printf 'unborn\n'
       ;;
@@ -1344,7 +1467,8 @@ oms_worker_surface_capture_one() {
       # Keep the allow-list anchored: refs merely containing "refs/remotes"
       # still belong to the hard `refs` surface above.
       (git -C "$repo" show-ref 2>/dev/null || true) |
-        LC_ALL=C awk '$2 == "refs/stash" || index($2, "refs/remotes/") == 1' |
+        LC_ALL=C awk '$2 == "refs/stash" || index($2, "refs/remotes/") == 1 ||
+          index($2, "refs/codex/") == 1' |
         LC_ALL=C sort
       ;;
     tracked)
@@ -1515,6 +1639,8 @@ PY
               fi
               if oms_worker_gitmeta_is_live_managed_worktree "$repo" "$wt/gitdir" \
                 "$current_worktree_physical"; then
+                [ -z "${OMS_WG_GITMETA_EXEMPT_OUT:-}" ] ||
+                  printf '%s\n' "${wt#"$git_dir"/}" >> "$OMS_WG_GITMETA_EXEMPT_OUT"
                 continue
               fi
               printf 'worktree-dir %s\n' "${wt#"$git_dir"/}"
@@ -1561,8 +1687,15 @@ oms_worker_surface_snapshot() {
   local name
 
   mkdir -p "$dir" || return 1
+  : > "$dir/gitmeta-exempt"
   for name in config remotes refs remote-refs tracked files gitmeta hooks omsstate; do
-    oms_worker_surface_capture_one "$repo" "$name" \
+    OMS_WG_GITMETA_EXEMPT_OUT="$dir/gitmeta-exempt" \
+      oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" > "$dir/$name" 2>/dev/null || true
   done
+  # Rows the index store may legitimately compact away; verified against the
+  # recorded prefix digest before use, so a later append here is harmless.
+  if [ -f "$repo/.oms/artifacts/index.jsonl" ] && [ ! -L "$repo/.oms/artifacts/index.jsonl" ]; then
+    cp "$repo/.oms/artifacts/index.jsonl" "$dir/omsstate.artifact-index" 2>/dev/null || true
+  fi
 }

@@ -67,6 +67,10 @@ def listing(value):
     return value if isinstance(value, list) else []
 
 
+def enum(value, allowed):
+    return value if isinstance(value, str) and value in allowed else None
+
+
 def counts(value):
     return {clean(key, 40): n for key, n in sorted(mapping(value).items()) if count(n) is not None}
 
@@ -91,6 +95,15 @@ def load_source(directory, name, repo_path=""):
         return None, "returned invalid JSON"
 
 
+def panel_metadata(row):
+    refs = mapping(row.get("refs"))
+    if refs.get("panel_role") not in ("main", "worker", "advisor", "reviewer"):
+        return {}
+    return {"panel": {key: clean(refs.get("panel_" + key), 160) or None for key in (
+        "role", "owner", "purpose", "workload", "model", "effort", "location", "access", "label", "room_id", "room_participant"
+    )}, "parent_attempt_id": clean(row.get("parent_attempt_id")) or None}
+
+
 def project_attempts(state, rows, error):
     ops = mapping(state.get("agent_operations")) if state is not None else {}
     block = {
@@ -100,11 +113,19 @@ def project_attempts(state, rows, error):
         "by_state": counts(ops.get("by_state")),
         "note": "a done attempt ended its work; acceptance is judged by evidence",
         "recent": [],
+        "active_recent": [],
     }
     if not block["available"]:
         block["error"] = ("lifecycle stream invalid" if ops.get("healthy") is False
                           else error or "state unavailable")
         return block
+    for row in reversed(listing(ops.get("active_latest"))[-MAX_ROWS:]):
+        if isinstance(row, dict):
+            projected = {key: clean(row.get(key), 160) or None for key in (
+                "attempt_id", "state", "provider", "tool", "task_id", "reason_code", "updated_at"
+            )}
+            projected.update(panel_metadata(row))
+            block["active_recent"].append(projected)
     for row in reversed(listing(rows)[-MAX_ROWS:]):
         if not isinstance(row, dict):
             continue
@@ -122,6 +143,7 @@ def project_attempts(state, rows, error):
             "updated_at": clean(row.get("updated_at"), 40),
             "tokens": reported("tokens"),
             "cost_microusd": reported("cost_microusd"),
+            **panel_metadata(row),
         })
     return block
 
@@ -145,7 +167,7 @@ def project_operations(rows, error):
     for row in reversed(outcomes[-MAX_ROWS:]):
         status = row.get("status")
         exit_code = count(row.get("exit"))
-        if status not in ARTIFACT_STATUSES:
+        if enum(status, ARTIFACT_STATUSES) is None:
             status = "unknown" if exit_code is None else "success" if exit_code == 0 else "unresolved"
         reason = row.get("fallback_reason")
         attribution = row.get("model_attribution")
@@ -159,13 +181,13 @@ def project_operations(rows, error):
             "exit": exit_code,
             "status": status,
             "verify_exit": count(row.get("verify_exit")),
-            "route_class": row.get("model_class") if row.get("model_class") in MODEL_CLASSES else None,
+            "route_class": enum(row.get("model_class"), MODEL_CLASSES),
             "requested_model": clean(row.get("requested_model"), 80) or None,
             "selected_model": clean(row.get("selected_model"), 80) or None,
             "served_model": clean(row.get("served_model"), 80) or None,
-            "model_attribution": attribution if attribution in ATTRIBUTIONS else "unknown",
+            "model_attribution": enum(attribution, ATTRIBUTIONS) or "unknown",
             "fallback_used": row.get("fallback_used") is True,
-            "fallback_reason": (reason if reason in FALLBACK_REASONS else "other") if reason else None,
+            "fallback_reason": (enum(reason, FALLBACK_REASONS) or "other") if reason else None,
             "tokens": count(row.get("tokens")),
             "cost_usd": number(row.get("cost_usd")),
         })
@@ -178,7 +200,7 @@ def project_acceptance(runtime):
     evidence = mapping(runtime.get("evidence"))
     criteria = [item for item in listing(runtime.get("criteria")) if isinstance(item, dict)]
     rank = {name: index for index, name in enumerate(CRITERION_ORDER)}
-    ordered = sorted(criteria, key=lambda item: rank.get(item.get("status"), len(rank)))
+    ordered = sorted(criteria, key=lambda item: rank.get(enum(item.get("status"), rank), len(rank)))
     return {
         "available": True,
         "total": len(criteria),
@@ -268,9 +290,14 @@ def build(directory, repo_name, repo_path="", now=None):
         "id": clean(row.get("id")),
         "provider": clean(row.get("provider"), 40) or None,
         "role": clean(row.get("role"), 40) or None,
+        "task_id": clean(row.get("task_id")) or None,
+        "requested_model": clean(row.get("model"), 80) or None,
+        "reasoning_effort": clean(row.get("reasoning_effort"), 40) or None,
+        "location": clean(row.get("location"), 160) or None,
         "live": row.get("live") is True,
         "started_at": clean(row.get("started_at"), 40),
-    } for row in listing(state.get("delegations"))[:5] if isinstance(row, dict)]
+    } for row in sorted((row for row in listing(state.get("delegations")) if isinstance(row, dict)),
+                        key=lambda row: row.get("live") is not True)[:5]]
     report["acceptance"] = project_acceptance(runtime)
     inbox = project_inbox(state, include_threads=os.environ.get("OMS_THREAD_ATTENTION") != "0")
     report["attention"] = {
@@ -303,6 +330,28 @@ def fit(text, width):
 
 def unknown(value, label="unknown"):
     return label if value is None else str(value)
+
+
+def wrap_label(text, width, limit):
+    """Wrap labels by terminal cells, including Korean and unbroken symbols."""
+    text, lines = clean(text, 400), []
+    width = max(1, width)
+    while text and len(lines) < limit:
+        end, used = 0, 0
+        for char in text:
+            if used + display_width(char) > width:
+                break
+            used += display_width(char)
+            end += 1
+        if not end:
+            return lines + [""]
+        if end < len(text) and " " in text[:end]:
+            end = text.rfind(" ", 0, end) or end
+        lines.append(text[:end].rstrip())
+        text = text[end:].lstrip()
+    if text:
+        lines[-1] = fit(lines[-1] + " " + text, width) if width >= 3 else lines[-1]
+    return lines or [""]
 
 
 def render(report, width, interval=None, height=None):
@@ -360,12 +409,24 @@ def render(report, width, interval=None, height=None):
         add("attempts (OMS lifecycle): %s total, %s active  %s" % (
             unknown(attempts["total"]), unknown(attempts["active"]),
             " ".join("%s=%d" % item for item in attempts["by_state"].items()) or "-"))
-        for row in attempts["recent"]:
+        recent_ids = {row["attempt_id"] for row in attempts["recent"]}
+        visible = [row for row in attempts.get("active_recent", []) if row["attempt_id"] not in recent_ids]
+        for row in visible + attempts["recent"]:
             add("  %s %s %s/%s task=%s tokens=%s cost_microusd=%s %s" % (
                 row["attempt_id"], row["state"], row["provider"] or "unknown", row["tool"] or "?",
-                row["task_id"] or "-", unknown(row["tokens"]), unknown(row["cost_microusd"]),
+                row["task_id"] or "-", unknown(row.get("tokens")), unknown(row.get("cost_microusd")),
                 row["updated_at"]), 1 if row["state"] in (
                     "working", "blocked", "waiting_input", "waiting_approval") else 2)
+            panel = mapping(row.get("panel"))
+            if panel:
+                add("    role=%s owner=%s parent=%s model=%s effort=%s" % (
+                    panel.get("role"), panel.get("owner"), row.get("parent_attempt_id") or "unattached",
+                    panel.get("model") or "unrecorded", panel.get("effort") or "auto"), 1)
+                add("    at=%s access=%s purpose=%s" % (
+                    panel.get("location") or "unrecorded", panel.get("access") or "native",
+                    panel.get("purpose") or "unrecorded"), 1)
+                for line in wrap_label("Task: " + (panel.get("label") or "unrecorded"), width - 4, 8):
+                    add("    " + line, 1)
     for row in report.get("delegations") or []:
         add("delegation: %s %s%s started=%s %s" % (
             row["id"], row["provider"] or "unknown", " role=" + row["role"] if row["role"] else "",

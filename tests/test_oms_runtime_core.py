@@ -647,6 +647,33 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(_completion_state({'present': True, 'status': 'active'}, incomplete), 'active')
         self.assertEqual(_completion_state({'present': False, 'status': ''}, incomplete), 'none')
 
+    def test_valid_resolution_downgrades_failure_to_stale_never_verified(self) -> None:
+        import hashlib
+        criterion = 'criterion-plan-acceptance-' + hashlib.sha256('python3 -m unittest'.encode('utf-8')).hexdigest()[:10]
+        index = self.repo / '.oms' / 'artifacts' / 'index.jsonl'
+        failed = {'schema': 1, 'event_id': 'evt-fail', 'kind': 'review-verify', 'exit': 1,
+                  'operation_id': 'op-1', 'artifact_id': 'art-1', 'covers': [criterion]}
+        good = {'schema': 1, 'event_id': 'evt-res', 'kind': 'artifact-resolution', 'exit': 0,
+                'resolves_event_id': 'evt-fail', 'parent_event_id': 'evt-fail',
+                'resolution': 'resolved', 'operation_id': 'op-1', 'artifact_id': 'art-1'}
+        for label, resolver, expected in (
+            ('unresolved', None, 'failed'),
+            ('valid', good, 'stale'),
+            ('operation mismatch', dict(good, operation_id='op-2'), 'failed'),
+            ('wrong parent', dict(good, parent_event_id='evt-other'), 'failed'),
+            ('not resolved', dict(good, resolution='superseded'), 'failed'),
+            ('resolver failed', dict(good, exit=1), 'failed'),
+        ):
+            index.write_text(''.join(json.dumps(row) + '\n' for row in (failed, resolver) if row), encoding='utf-8')
+            item = next(c for c in evidence.build_coverage(self.repo)['criteria'] if c['id'] == criterion)
+            self.assertEqual(item['status'], expected, label)
+            self.assertNotEqual(item['status'], 'verified', label)
+            self.assertEqual(item['evidence'][0]['evidence_ref'], 'evt-fail', label)
+        # Resolution must follow its target.
+        index.write_text(''.join(json.dumps(row) + '\n' for row in (good, failed)), encoding='utf-8')
+        item = next(c for c in evidence.build_coverage(self.repo)['criteria'] if c['id'] == criterion)
+        self.assertEqual(item['status'], 'failed')
+
     def test_plan_tasks_are_criteria_and_admission_is_their_evidence(self) -> None:
         # Every plan task projects as a criterion; the admission receipt that
         # carries its task lineage is the automatic evidence — verified on
@@ -1277,6 +1304,16 @@ class RuntimeFixture(RuntimeFixtureBase):
         matched = next(iter(result['matched_cohorts'].values()))
         self.assertEqual(set(matched), {'direct', 'graph'})
         self.assertEqual(matched['graph']['calls'], 1)
+
+        # Legacy delegate receipts have no context_verification: the worker
+        # exit still outranks a zero verify_exit.
+        legacy = dict(kind='delegate', provider='codex')
+        for fields, expected in (
+            (dict(exit=0, verify_exit=0), 'verified'),
+            (dict(exit=1, verify_exit=0), 'failed'),
+            (dict(exit=1), 'failed'),
+        ):
+            self.assertEqual(evidence.outcome(dict(legacy, **fields)), expected, fields)
 
         # A successful process is not verification when checks were skipped.
         for mode, worker, verifier, expected in (

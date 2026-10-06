@@ -63,6 +63,10 @@ if [ "${OMS_T_GH_MODE:-run}" = "authfail" ]; then
 fi
 case "${1:-} ${2:-}" in
   "run list")
+    if [ -n "${OMS_T_GH_BODY+x}" ]; then
+      printf '%s\n' "$OMS_T_GH_BODY"
+      exit 0
+    fi
     printf '[{"status":"%s","conclusion":"%s","workflowName":"test","headSha":"%s","url":"https://example.invalid/run/1"}]\n' \
       "${OMS_T_GH_STATUS:-completed}" "${OMS_T_GH_CONCLUSION:-success}" \
       "${OMS_T_GH_SHA:-0000000000000000000000000000000000000000}"
@@ -162,6 +166,41 @@ test_pr_lookup_distinguishes_no_pr_from_an_unusable_gh() {
     fail "the pr lookup failure should be reported: $out"
   grep -Fq "\"sha\": \"$head\"" "$repo/.oms/ci.jsonl" ||
     fail "the CI row should survive a failed PR lookup"
+}
+
+test_corrupt_run_list_is_a_lookup_error_not_no_runs() {
+  local repo="$TMP/corrupt"
+  local gh="$TMP/corrupt-bin/gh"
+  local body out rc
+
+  make_pushed_repo "$repo"
+  write_stub_gh "$gh"
+
+  # A genuinely empty list keeps its ordinary "no runs" answer and exit 0.
+  out="$( (cd "$repo" && OMS_T_GH_BODY='[]' OMS_GH_BIN="$gh" \
+    bash "$ROOT/scripts/ci-status.sh" record main) 2>&1 )" ||
+    fail "an empty run list is not an error: $out"
+  grep -Fq "no runs for main" <<<"$out" || fail "empty list should read as no runs: $out"
+
+  for body in 'not json{' '{"a":1}' ''; do
+    rc=0
+    out="$( (cd "$repo" && OMS_T_GH_BODY="$body" OMS_GH_BIN="$gh" \
+      bash "$ROOT/scripts/ci-status.sh" record main) 2>&1 )" || rc=$?
+    [ "$rc" -eq 2 ] || fail "corrupt body '$body' should exit 2, got $rc: $out"
+    grep -Fq "unreadable run list" <<<"$out" ||
+      fail "corrupt body '$body' should name the lookup failure: $out"
+    if grep -Fq "no runs for" <<<"$out"; then
+      fail "corrupt body '$body' must not read as 'no runs': $out"
+    fi
+    [ ! -f "$repo/.oms/ci.jsonl" ] ||
+      fail "corrupt body '$body' must not write a CI row"
+  done
+
+  out="$( (cd "$repo" && OMS_T_GH_BODY='not json{' OMS_GH_BIN="$gh" \
+    OMS_LOCK_DIR="$TMP/corrupt-locks" bash "$ROOT/scripts/ci-status.sh" tick main) 2>&1 )" ||
+    fail "tick must stay fail-open on a corrupt run list: $out"
+  [ -z "$out" ] || fail "tick must stay silent on a corrupt run list, got: $out"
+  [ ! -f "$repo/.oms/ci.jsonl" ] || fail "tick must not record a corrupt lookup"
 }
 
 # --- FIX 2: keyed by (branch, sha) ------------------------------------------
@@ -373,6 +412,7 @@ test_repo_without_upstream_keeps_the_recorded_vs_head_signal() {
 test_unauthenticated_gh_is_reported_on_the_explicit_surfaces
 test_unauthenticated_gh_leaves_the_tick_path_silent
 test_pr_lookup_distinguishes_no_pr_from_an_unusable_gh
+test_corrupt_run_list_is_a_lookup_error_not_no_runs
 test_run_for_a_prior_sha_is_history_not_a_current_result
 test_unpushed_head_is_named_as_unpushed_everywhere
 test_completed_run_for_head_is_the_current_result

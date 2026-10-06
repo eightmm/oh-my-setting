@@ -66,7 +66,48 @@ os.environ.pop("OMS_HARNESS_CHILD")
 text, bad = call("oms_peer_start", kind="message", thread="rejected", new_thread=True,
                  prompt="api_ke" + "y=s" + "k-abcdefghijklmnopqr")
 assert bad and not (repo / ".oms/threads/rejected.jsonl").exists(), text
+# Addressed room messaging reuses the same core tools, without starting a CLI.
+import room
+room.create(repo, "room", "MCP work room")
+room.join(repo, "room", "sol", "codex", model="gpt-6-sol")
+room.join(repo, "room", "opus", "claude", model="claude-opus-5-5")
+text, bad = call("oms_peer_start", kind="message", thread="room", participant="sol", to_participant="opus",
+                 message_kind="question", message_id="mcp-question", prompt="Inspect the signature")
+assert not bad and json.loads(text)["id"] == "mcp-question", text
+text, bad = call("oms_peer_result", thread="room", participant="opus")
+assert not bad, text
+delta = json.loads(text)
+assert len(delta["turns"]) == 1 and delta["turns"][0]["room_event"]["id"] == "mcp-question"
+assert not json.loads(call("oms_peer_result", thread="room", participant="sol")[0])["turns"]
+text, bad = call("oms_peer_start", kind="ack", thread="room", participant="opus", message_ids=["mcp-question"])
+assert not bad and json.loads(text)["approval"] is False, text
+room.join(repo, "room", "helper", "claude", "worker", "claude-sonnet-5-5", parent="opus")
+room.send(repo, "room", "opus", "helper", "Inspect the worker scope", "question", message_id="worker-question")
+os.environ.update(OMS_HARNESS_CHILD="1", OMS_ROOM_ID="room", OMS_ROOM_PARTICIPANT="helper")
+text, bad = call("oms_peer_start", kind="message", thread="room", participant="helper", to_participant="opus",
+                 message_kind="answer", reply_to="worker-question", prompt="Signature confirmed")
+assert not bad, text
+assert call("oms_peer_start", kind="message", thread="room", participant="sol", prompt="Forged identity")[1]
+assert call("oms_peer_start", kind="consult", prompt="Recursive peer call")[1]
+os.environ["OMS_ROOM_PARTICIPANT"] = "opus"
+assert call("oms_peer_start", kind="message", thread="room", participant="opus", prompt="Inherited main identity")[1]
+for key in ("OMS_HARNESS_CHILD", "OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT"):
+    os.environ.pop(key)
+assert not (repo / ".oms/artifacts/mcp").exists(), "room messages never start another model"
 assert len(m.tool_definitions()) == 12, "do not grow core tool discovery"
+if os.name != "nt":
+    # A leaf can change after path validation. Opening a replacement FIFO must
+    # reject it promptly rather than suspend the hook or mailbox reader.
+    import subprocess, tempfile
+    probe = ("import os,sys\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nimport thread_live as t\n"
+             "repo=Path(sys.argv[2]);t.create_thread(repo,'race')\noriginal=t.safe_path\n"
+             "def switch(*a,**k):\n p=original(*a,**k);p.unlink();os.mkfifo(p,0o600);return p\n"
+             "t.safe_path=switch\ntry: t.open_thread(repo,'race')\nexcept ValueError: sys.exit(0)\n"
+             "sys.exit(1)\n")
+    with tempfile.TemporaryDirectory(prefix="oms-thread-leaf-") as isolated:
+        checked = subprocess.run([sys.executable, "-c", probe, str(root / "scripts/lib"), isolated],
+                                 capture_output=True, text=True, timeout=5)
+        assert checked.returncode == 0, checked.stderr
 PY
 }
 

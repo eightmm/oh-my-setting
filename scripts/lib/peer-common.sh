@@ -348,6 +348,11 @@ ma_write_harness_context() {
   local warnings
 
   printf 'Use task constraints, source/callers, tests and decisive evidence; inspect missing context where authorized. Truncated input is incomplete evidence.\n'
+  if [ -n "${OMS_ROOM_ID:-}" ] && [ -n "${OMS_ROOM_PARTICIPANT:-}" ] &&
+    [ "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" = "$OMS_ROOM_PARTICIPANT" ]; then
+    printf 'OMS work room: %s; participant: %s. Environment binds the canonical room repository.\n' "$OMS_ROOM_ID" "$OMS_ROOM_PARTICIPANT"
+    printf 'At safe points use oms room updates; retain its cursor. Send addressed notes/questions with oms room send --to PARTICIPANT --text TEXT. After consuming use oms room ack --message MESSAGE_ID. Membership/ack grant no approval or new authority. Do not recursively delegate.\n\n'
+  fi
   printf 'Return concise conclusions, file/line evidence, verification and uncertainty. Preserve required schemas, complete code/patch and safety detail; omit repeated context.\n\n'
   tmp="$(agent_memory_mktemp)" || return 0
   {
@@ -449,6 +454,11 @@ ma_export_child_env() {
   # detect a direct reach-around. Read passes retain a read-only state pointer.
   unset OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
     OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_WORKER_AUTHORITY_EXCLUSIVE
+  # Generic calls must not impersonate the native main in a shared room.
+  if [ -z "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" ] ||
+    [ "$OMS_ROOM_ADMITTED_PARTICIPANT" != "${OMS_ROOM_PARTICIPANT:-}" ]; then
+    unset OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO OMS_ROOM_ADMITTED_PARTICIPANT
+  fi
   export OMS_HARNESS_CHILD=1
   export OMS_HARNESS_ORIGIN="$origin"
   export OMS_HARNESS_PARENT_AGENT="$parent_agent"
@@ -2939,6 +2949,32 @@ ma_run_routed_provider() {
       start_args=(--repo "$state_repo" start --provider "$provider" --tool "$origin")
       [ -z "${OMS_TASK_ID:-}" ] || start_args+=(--task-id "$OMS_TASK_ID")
       [ -z "${OMS_RUN_ID:-}" ] || start_args+=(--run-id "$OMS_RUN_ID")
+      if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ]; then
+        case "${OMS_PANEL_ROLE:-}" in worker|advisor|reviewer) ;; *)
+          echo 'error: invalid panel role' >&2; return 2 ;; esac
+        [ -z "${OMS_PANEL_MAIN_ATTEMPT:-}" ] ||
+          start_args+=(--parent-attempt-id "$OMS_PANEL_MAIN_ATTEMPT")
+        start_args+=(--ref "panel_role=$OMS_PANEL_ROLE"
+          --ref "panel_owner=${OMS_AGENT:-unknown}"
+          --ref "panel_purpose=${OMS_PANEL_PURPOSE:-investigate}"
+          --ref "panel_workload=${OMS_PANEL_WORKLOAD:-routine}"
+          --ref "panel_model=$OMS_MODEL_PRIMARY"
+          --ref "panel_access=$access"
+          --ref "panel_effort=${OMS_REASONING_SELECTED:-auto}")
+        [ -z "${OMS_PANEL_LABEL:-}" ] || start_args+=(--ref "panel_label=$OMS_PANEL_LABEL")
+        local panel_location
+        panel_location="$(python3 - "$state_repo" "$5" <<'PY'
+import sys
+from pathlib import Path
+repo, work = (Path(value).resolve() for value in sys.argv[1:])
+print("repository" if repo == work else "worktree:" + work.parent.name + "/" + work.name)
+PY
+)" || return 2
+        panel_location="${panel_location//$'\r'/}"
+        start_args+=(--ref "panel_location=$panel_location")
+        [ -z "${OMS_ROOM_ID:-}" ] || start_args+=(--ref "panel_room_id=$OMS_ROOM_ID")
+        [ -z "${OMS_ROOM_PARTICIPANT:-}" ] || start_args+=(--ref "panel_room_participant=$OMS_ROOM_PARTICIPANT")
+      fi
       [ -z "${OMS_ATTEMPT_MAX_WALL_SECONDS:-}" ] ||
         start_args+=(--max-wall-seconds "$OMS_ATTEMPT_MAX_WALL_SECONDS")
       [ -z "${OMS_ATTEMPT_MAX_TOKENS:-}" ] ||
@@ -3706,11 +3742,12 @@ write_debate_prompt() {
 }
 
 ma_refresh_council_answers() {
-  local i
+  local i current_base
   if [ -n "${MA_COUNCIL_CONTEXT_DIR:-}" ]; then
+    current_base="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" || current_base=unavailable
     if [ -n "$MA_COUNCIL_SOURCE_STATE" ] && {
         [ "$(oms_git_tracked_state_fingerprint "$REPO")" != "$MA_COUNCIL_SOURCE_STATE" ] ||
-        [ "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" != "$MA_COUNCIL_SOURCE_BASE" ]; }; then
+        [ "$current_base" != "$MA_COUNCIL_SOURCE_BASE" ]; }; then
       echo 'error: tracked source changed during council; do not mix revisions' >&2
       return 2
     fi

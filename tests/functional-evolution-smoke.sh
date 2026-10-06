@@ -282,6 +282,44 @@ PY
   fi
 }
 
+test_inbox_fix_safe_reports_ci_refresh_only_when_ledger_changed() {
+  local repo="$TMP/inbox-ci" bin="$TMP/inbox-ci-bin" sha mode out
+
+  make_repo "$repo"
+  sha="$(git -C "$repo" rev-parse HEAD)"
+  mkdir -p "$repo/.oms" "$bin"
+  # mode: fail = gh errors; success/failure = a completed run on HEAD.
+  for mode in fail success failure; do
+    cat > "$repo/.oms/ci.jsonl" <<'EOF'
+{"schema":1,"ts":"2026-08-01T00:00:00Z","branch":"main","sha":"oldsha","status":"completed","conclusion":"success","url":"https://example.invalid/old"}
+EOF
+    cp "$repo/.oms/ci.jsonl" "$TMP/ci-before"
+    cat > "$bin/gh" <<EOF
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "run list")
+    [ "$mode" != fail ] || exit 1
+    printf '%s\\n' '[{"status":"completed","conclusion":"$mode","workflowName":"t","headSha":"$sha","url":"https://example.invalid/r"}]' ;;
+  "pr view") [ "$mode" != fail ] || exit 1; printf '%s\\n' '{}' ;;
+  *) exit 2 ;;
+esac
+EOF
+    chmod +x "$bin/gh"
+    out="$(cd "$repo" && OMS_GH_BIN="$bin/gh" OMS_LOCK_DIR="$TMP/inbox-ci-locks" \
+      bash "$ROOT/scripts/inbox.sh" --repo . --fix-safe --json)" ||
+      fail "inbox --fix-safe failed in $mode mode"
+    if [ "$mode" = fail ]; then
+      cmp -s "$TMP/ci-before" "$repo/.oms/ci.jsonl" || fail "failed gh must not change the ledger"
+      case "$out" in *refreshed-ci*) fail "failed CI record reported refreshed-ci" ;; esac
+      case "$out" in *ci-refresh-failed*) ;; *) fail "failed CI record must report ci-refresh-failed" ;; esac
+    else
+      case "$out" in *refreshed-ci*) ;; *) fail "recorded $mode run must report refreshed-ci" ;; esac
+      case "$out" in *ci-refresh-failed*) fail "recorded $mode run reported ci-refresh-failed" ;; esac
+      grep -Fq "\"conclusion\": \"$mode\"" "$repo/.oms/ci.jsonl" || fail "$mode run not in ledger"
+    fi
+  done
+}
+
 test_unresolved_queue_triages_by_patch_bytes_and_clears_in_one_batch() {
   local repo="$TMP/artifact-queue"
   local index
@@ -877,6 +915,7 @@ test_native_hook_telemetry_is_content_free_and_correlated
 test_review_uptake_withholds_rates_until_both_cohorts_are_large_enough
 test_ci_tick_records_once_and_skips_a_fresh_sha
 test_inbox_ranks_state_and_applies_only_safe_repairs
+test_inbox_fix_safe_reports_ci_refresh_only_when_ledger_changed
 test_unresolved_queue_triages_by_patch_bytes_and_clears_in_one_batch
 test_memory_citations_revalidate_and_stay_out_of_default_context
 test_checkpoint_restores_staged_and_unstaged_content_with_a_backup

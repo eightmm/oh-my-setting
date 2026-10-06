@@ -1042,6 +1042,12 @@ def event_start(args: argparse.Namespace) -> int:
         "max_tokens": args.max_tokens,
         "max_cost_microusd": args.max_cost_microusd,
     }
+    refs = {}
+    for item in args.ref:
+        key, separator, value = item.partition("=")
+        if not separator or not key or key in refs:
+            raise OpsError("--ref requires a unique NAME=VALUE")
+        refs[key] = value
     attempt = create_attempt(
         repo,
         provider=args.provider,
@@ -1050,6 +1056,7 @@ def event_start(args: argparse.Namespace) -> int:
         run_id=args.run_id,
         parent_attempt_id=args.parent_attempt_id,
         budget=budget,
+        refs=refs,
         idempotency_key=args.idempotency_key,
     )
     # The routine lifecycle opening is create, starting, working: three
@@ -1933,6 +1940,8 @@ def add_event_parser(subparsers: argparse._SubParsersAction) -> None:
     start.add_argument("--task-id", default="")
     start.add_argument("--run-id", default="")
     start.add_argument("--parent-attempt-id", default="")
+    start.add_argument("--ref", action="append", default=[], metavar="NAME=VALUE",
+                       help="bounded relative reference metadata; never changes authority")
     start.add_argument("--max-wall-seconds", type=int)
     start.add_argument("--max-tokens", type=int)
     start.add_argument("--max-cost-microusd", type=int)

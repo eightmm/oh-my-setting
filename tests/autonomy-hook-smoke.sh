@@ -18,7 +18,8 @@ mkdir -p "$HOME" "$XDG_CACHE_HOME" "$TMPDIR"
 unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
   OMS_HARNESS_CALL_ID OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
   OMS_LEASE_ID OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_APPROVAL_ID \
-  OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE
+  OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE OMS_HARNESS_DELEGATE_DEPTH \
+  OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO OMS_ROOM_ADMITTED_PARTICIPANT
 
 fail() {
   echo "autonomy-hook-smoke: $*" >&2
@@ -291,6 +292,16 @@ test_route_is_hermetic_to_inherited_harness_session() {
     route_prompt "$repo" session-child turn-1 "Goal: Ship hermetic"
   [ -n "$(task_id "$repo")" ] ||
     fail "inherited harness-child identity suppressed the fixture's auto-task"
+  bash -s -- "$ROOT" "$repo" <<'SH' || fail "room identity leaked from parent into a generic call"
+. "$1/scripts/lib/peer-common.sh"
+export OMS_ROOM_ID=team OMS_ROOM_PARTICIPANT=sol OMS_ROOM_REPO="$2"
+unset OMS_ROOM_ADMITTED_PARTICIPANT
+ma_export_child_env codex consult "$2" fixture read
+[ -z "${OMS_ROOM_PARTICIPANT:-}" ] && [ -z "${OMS_ROOM_ID:-}" ] && [ -z "${OMS_ROOM_REPO:-}" ]
+export OMS_ROOM_ID=team OMS_ROOM_PARTICIPANT=worker OMS_ROOM_REPO="$2" OMS_ROOM_ADMITTED_PARTICIPANT=worker
+ma_export_child_env claude delegate "$2" fixture read
+[ "$OMS_ROOM_PARTICIPANT" = worker ] && [ "$OMS_ROOM_ID" = team ] && [ "$OMS_ROOM_REPO" = "$2" ]
+SH
 }
 
 test_live_thread_delivery_at_existing_safe_points() {
@@ -304,9 +315,12 @@ import hook_state
 thread = ["bash", str(root / "scripts/thread.sh"), "--repo", str(repo)]
 def call(*args):
     return subprocess.run(thread + list(args), capture_output=True, text=True, check=True).stdout
-def payload(session):
-    return {"cwd": str(repo), "session_id": session, "hook_event_name": "PostToolUse",
-            "tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Update File: a.py\n*** End Patch"}}
+def payload(session, provider=None):
+    result = {"cwd": str(repo), "session_id": session, "hook_event_name": "PostToolUse",
+              "tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Update File: a.py\n*** End Patch"}}
+    if provider == "codex":
+        result["turn_id"] = "fixture-codex-turn"
+    return result
 call("new", "--id", "ordinary", "--topic", "old discussion")
 assert not hook_state.live_thread_hint(payload("codex")), "ordinary threads are not subscriptions"
 call("new", "--id", "live", "--live", "--topic", "Caller contract")
@@ -436,6 +450,129 @@ os.environ.pop("OMS_HARNESS_CHILD")
 call("close", "--id", "live")
 assert not hook_state.live_thread_hint(payload("new"))
 assert not hook_state.live_thread_hint({"cwd": str(repo)}), "no shared nosession cursor"
+# Rooms deliver only to admitted native sessions, even when CURRENT changes.
+import room
+room.create(repo, "team", "Shared caller work")
+room.join(repo, "team", "sol", "codex", model="gpt-6-sol", native_session="room-sol")
+room.join(repo, "team", "opus", "claude", model="claude-opus-5-5", native_session="room-opus")
+room.send(repo, "team", "sol", "opus", "Inspect the caller signature", "question", message_id="caller-question")
+call("new", "--id", "different-room-topic", "--live", "--topic", "Separate task")
+message = hook_state.live_thread_hint(payload("room-opus"))
+assert "caller-question" in message and "different-room-topic" not in message, message
+assert not hook_state.live_thread_hint(payload("room-opus")), "room safe points share their cursor"
+assert "caller-question" not in hook_state.live_thread_hint(payload("room-sol", "codex")), "no sender echo"
+room.send(repo, "team", "sol", "opus", "Inspect the caller signature", "question", message_id="caller-question")
+assert room.status(repo, "team")["message_count"] == 1, "stable sends must deduplicate"
+assert room.status(repo, "team")["pending_count"] == 1, "delivery is not consumption"
+room.acknowledge(repo, "team", "opus", ["caller-question"])
+room.send(repo, "team", "opus", "sol", "Caller contract confirmed", "answer", reply_to="caller-question")
+assert room.status(repo, "team")["answered_count"] == 1
+assert "Caller contract confirmed" in hook_state.live_thread_hint(payload("room-sol", "codex"))
+room.join(repo, "team", "later", "grok", "worker", native_session="room-later", parent="sol")
+assert not room.updates(repo, "team", "later")["turns"], "joining does not replay earlier broadcasts or direct mail"
+room.send(repo, "team", "sol", "all", "Shared review note", message_id="shared-note")
+assert room.status(repo, "team")["pending_count"] == 3  # reply to Sol plus two broadcast recipients
+room.join(repo, "team", "after-note", "antigravity", native_session="room-after-note")
+assert not room.updates(repo, "team", "after-note")["turns"], "broadcast audience is fixed at send time"
+for who, to, text, kind, reply in [("stranger", "opus", "Forged", "note", None),
+                                   ("sol", "missing", "Missing recipient", "note", None),
+                                   ("later", "sol", "Unaddressed answer", "answer", "caller-question")]:
+    try:
+        room.send(repo, "team", who, to, text, kind, reply)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("room accepted invalid sender, recipient or reply")
+os.environ.update(OMS_HARNESS_CHILD="1", OMS_ROOM_ID="team", OMS_ROOM_PARTICIPANT="later")
+room.send(repo, "team", "later", "sol", "Scoped worker observation")
+for operation in (lambda: room.send(repo, "team", "opus", "sol", "Forged worker identity"),
+                  lambda: room.join(repo, "team", "escalated", "codex", "main")):
+    try:
+        operation()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("worker widened room identity")
+for key in ("OMS_HARNESS_CHILD", "OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT"):
+    os.environ.pop(key)
+room.create(repo, "isolation", "Unrelated task")
+assert not hook_state.live_thread_hint(payload("room-stranger")), "CURRENT does not enroll strangers into rooms"
+room.send(repo, "team", "opus", "sol", "Final scoped note")
+call("close", "--id", "team")
+call("new", "--id", "unrelated-ordinary", "--live", "--topic", "Unrelated legacy broadcast")
+assert not hook_state.live_thread_hint(payload("room-sol", "codex")), "closed room sessions never fall into unrelated legacy broadcasts"
+# Fresh native launches enroll before their session ID exists. Bind the first
+# real hook payload without moving the join boundary past waiting messages.
+room.create(repo, "binding-room", "Fresh native binding")
+room.join(repo, "binding-room", "fresh-main", "claude")
+room.join(repo, "binding-room", "fresh-peer", "codex")
+joined_seq = room.participant(room.status(repo, "binding-room"), "fresh-main")["seq"]
+room.send(repo, "binding-room", "fresh-peer", "fresh-main", "Mail queued before the first native hook", message_id="before-bind")
+os.environ.update(OMS_ROOM_ID="binding-room", OMS_ROOM_PARTICIPANT="fresh-main", OMS_ROOM_REPO=str(repo), OMS_HOOK_AGENT="claude")
+delivered = hook_state.live_thread_hint(payload("native-first-session"))
+assert "before-bind" in delivered, delivered
+bound = room.participant(room.status(repo, "binding-room"), "fresh-main")
+assert bound["seq"] == joined_seq and bound["consumer"] == hook_state.session_hash(payload("native-first-session"))
+assert room.status(repo, "binding-room")["pending_count"] == 1
+record_count = len(room.records(repo, "binding-room"))
+room.bind(repo, "binding-room", "fresh-main", "native-first-session")
+assert len(room.records(repo, "binding-room")) == record_count
+room.send(repo, "binding-room", "fresh-peer", "fresh-main", "Only the enrolled native session may read this", message_id="bound-only")
+assert not hook_state.live_thread_hint(payload("different-native")), "explicit environment bypassed the enrolled native identity"
+notice = hook_state.live_thread_hint(dict(payload("different-native"), hook_event_name="UserPromptSubmit"))
+assert "mail was withheld" in notice and "bound-only" not in notice
+assert "bound-only" in hook_state.live_thread_hint(payload("native-first-session"))
+for who, native in (("fresh-main", "different-native"), ("fresh-peer", "native-first-session")):
+    try:
+        room.bind(repo, "binding-room", who, native)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("native binding identity changed or was duplicated")
+os.environ["OMS_HARNESS_CHILD"] = "1"
+try:
+    room.bind(repo, "binding-room", "fresh-peer", "worker-native")
+except ValueError:
+    pass
+else:
+    raise AssertionError("worker gained native binding authority")
+os.environ.pop("OMS_HARNESS_CHILD")
+room.join(repo, "binding-room", "provider-mismatch", "codex")
+os.environ["OMS_ROOM_PARTICIPANT"] = "provider-mismatch"
+room.send(repo, "binding-room", "fresh-main", "provider-mismatch", "Only the enrolled provider may read this", message_id="provider-only")
+assert not hook_state.live_thread_hint(payload("not-a-codex-session")), "wrong provider consumed an explicitly addressed message"
+assert not room.participant(room.status(repo, "binding-room"), "provider-mismatch").get("consumer")
+for key in ("OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT", "OMS_ROOM_REPO", "OMS_HOOK_AGENT"):
+    os.environ.pop(key)
+room.append(repo, "binding-room", {"kind": "leave", "participant": "fresh-main"}, "Explicit subscription change")
+room.join(repo, "binding-room", "fresh-main", "claude", native_session="replacement-session")
+assert room.selected(repo, hook_state.session_hash(payload("native-first-session"))) == (None, None)
+assert not hook_state.live_thread_hint(payload("native-first-session")), "former receiver fell into unrelated CURRENT"
+# Ordinary discussions cannot hide a second enrollment or evict work rooms
+# from the bounded inventory. An incomplete scan never proves uniqueness.
+from unittest.mock import patch
+scan_repo = repo.parent / "scan-rooms"
+scan_repo.mkdir()
+for ident in ("000-first", "zzz-second"):
+    room.create(scan_repo, ident, "Discovery fixture")
+    room.join(scan_repo, ident, "main", "claude", native_session="scan-native")
+consumer = hook_state.session_hash(payload("scan-native"))
+for index in range(64):
+    ident = "middle-%03d" % index
+    (scan_repo / ".oms/threads" / (ident + ".jsonl")).write_text(json.dumps({"thread": ident, "seq": 0, "live": True}) + "\n")
+states, incomplete = room.discover(scan_repo)
+assert not incomplete and {state["id"] for state in states} == {"000-first", "zzz-second"}
+assert room.selected(scan_repo, consumer) == (None, None)
+for name, limit in (("MAX_ROOMS", 1), ("MAX_SCAN_ENTRIES", 1), ("MAX_SCAN_BYTES", 1)):
+    with patch.object(room, name, limit):
+        assert room.discover(scan_repo)[1]
+        assert room.selected(scan_repo, consumer) == (None, None), "partial scan selected a supposedly unique receiver"
+        assert room.selected(scan_repo, consumer, "zzz-second", "main") == ("zzz-second", "main")
+        assert not hook_state.live_thread_hint(payload("scan-native"), scan_repo), "partial discovery fell back to CURRENT"
+inventory = subprocess.run(["bash", str(root / "scripts/oms"), "room", "list", "--repo", str(scan_repo), "--json"],
+                           capture_output=True, text=True, check=True)
+report = json.loads(inventory.stdout)
+assert len(report["rooms"]) == 2 and report["incomplete"] is False
 PY
 }
 

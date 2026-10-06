@@ -393,23 +393,39 @@ for attempt in attempts:
     key = str(attempt.get("state") or "unknown")
     attempt_by_state[key] = attempt_by_state.get(key, 0) + 1
 attention_states = {"waiting_input", "waiting_approval", "blocked"}
+
+def attempt_summary(item):
+    summary = {key: item.get(key) for key in (
+        "attempt_id", "state", "provider", "tool", "task_id", "reason_code", "updated_at",
+        "parent_attempt_id"
+    ) if item.get(key) not in (None, "")}
+    refs = item.get("refs") or {}
+    if refs.get("panel_role") in ("main", "worker", "advisor", "reviewer"):
+        summary["refs"] = {key: refs[key] for key in (
+            "panel_role", "panel_owner", "panel_purpose", "panel_workload",
+            "panel_model", "panel_effort", "panel_location", "panel_access", "panel_label"
+        ) if key in refs}
+    return summary
+
 agent_operations = {
     "healthy": os.environ["OMS_RS_LIFECYCLE_HEALTHY"] == "1",
     "total": len(attempts),
     "active": sum(not bool(item.get("terminal")) for item in attempts),
     "by_state": attempt_by_state,
     "needs_attention": [
-        {key: item.get(key) for key in (
-            "attempt_id", "state", "provider", "tool", "task_id", "reason_code", "updated_at"
-        ) if item.get(key) not in (None, "")}
+        attempt_summary(item)
         for item in attempts if item.get("state") in attention_states
     ][-10:],
     "latest": [
-        {key: item.get(key) for key in (
-            "attempt_id", "state", "provider", "tool", "task_id", "reason_code", "updated_at"
-        ) if item.get(key) not in (None, "")}
+        attempt_summary(item)
         for item in attempts[-5:]
     ],
+    # Keep current work visible even when newer completed attempts fill latest.
+    "active_latest": [
+        attempt_summary(item)
+        for item in sorted(attempts, key=lambda row: row["updated_at"])
+        if not item.get("terminal")
+    ][-8:],
 }
 state["agent_operations"] = agent_operations
 
@@ -820,8 +836,17 @@ if os.path.isdir(deleg_dir):
         alive = pid_alive(
             d.get("pid"), d.get("native_pid"), d.get("native_pid_source")
         )
+        worktree = d.get("worktree")
+        location = None
+        if isinstance(worktree, str) and worktree:
+            from pathlib import Path
+            work = Path(worktree)
+            location = "worktree:" + work.parent.name + "/" + work.name
         delegations.append({"id": d.get("id"), "provider": d.get("provider"),
                             "role": d.get("role", ""), "executor_id": d.get("executor_id", ""),
+                            "task_id": d.get("task_id", ""), "model": d.get("model", ""),
+                            "reasoning_effort": d.get("reasoning_effort", ""),
+                            "location": location,
                             "soul_sha256": d.get("soul_sha256", ""), "started_at": d.get("started_at"),
                             "live": alive})
 state["delegations"] = delegations

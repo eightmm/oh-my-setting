@@ -8,6 +8,27 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms` in a terminal opens a control panel: the native Claude Code or Codex
+  conversation keeps its pane beside a read-only OMS sidebar (connected tree,
+  card graph or compact list) of joined mains and their advisor, reviewer and
+  worker calls, with clicks and keys that navigate without starting a model
+  turn. `oms panel --dispatch worker|advisor|reviewer` routes a bounded task by
+  an explicit role policy (Sol/Opus mains, Luna light and Sonnet routine
+  workers, Astra/Fable advisors) through the existing peer front doors;
+  `--council` runs the four-seat, two-family debate. `--finalize` records the
+  owner's outcome as an immutable indexed result, and `accepted` requires a
+  passing `--verify`, hashed `--evidence` and landed patches for every write
+  worker. `--results` reads them back, `--notify` delivers the summary to the
+  fixed Codex app receiver with a separate receipt, and `--retry-delivery`
+  never resends a persisted revision. Additional registered CLIs are listed with
+  `--providers` and reached only by an explicit `--dispatch --to`.
+- `oms room` adds task-scoped work rooms on the existing thread log:
+  participants join with a declared role and scope, send addressed questions,
+  answers and notes, and read and acknowledge them with a cursor. `publish`
+  delivers a room snapshot to an explicitly enrolled Codex app or Claude Code
+  session with its own receipts. A declared scope is not a write grant, and
+  acknowledgment is not approval.
+
 - Experiment contracts take an optional noise band, the noise-adjusted
   floor of RRSI (Regularized Recursive Self-Improvement of Agent Harnesses,
   arXiv 2609.24972): `success.noise_band` is either a fixed `delta` or `z`
@@ -74,6 +95,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   policy declines still never retry.
 
 ### Fixed
+
+- The delegated-worker guard no longer fails a run for concurrent activity it
+  cannot attribute to the worker: Codex app turn-diff refs under `refs/codex/`
+  join remote-tracking refs and stash on the soft surface; a sibling delegate
+  that was live at the snapshot and then finished with its worktree kept is
+  reported as `kept-sibling` instead of a `gitmeta` violation (a removed
+  marker or any other metadata change stays hard); and the artifact index
+  store's own compaction is accepted only in its exact shape (byte-identical
+  survivors in order, new rows last, oldest rows dropped, row count past the
+  keep floor). A rewritten survivor or an erased middle row still fails.
 
 - A Codex turn that completed after a stream-reconnect notice
   ("Reconnecting... 2/5") is no longer read as a failed turn. Only

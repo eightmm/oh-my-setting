@@ -4259,6 +4259,29 @@ PY
       --thread bounded-council --prompt 'Closed council' > "$project/closed.out" 2>&1; then
     fail 'closed council must not launch more provider calls'
   fi
+  # A tracked source snapshot can have no commits. Missing HEAD remains
+  # missing across rounds; it must not be mistaken for a changed revision.
+  local fresh="$TMP/ask-commitless-snapshot"
+  mkdir -p "$fresh"
+  git -C "$fresh" init -q
+  printf 'fixed source\n' > "$fresh/source.txt"
+  git -C "$fresh" add --intent-to-add source.txt
+  OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" --repo "$fresh" \
+    --repo-context --providers codex,claude --debate 1 --artifact-dir "$fresh/artifacts" \
+    --prompt 'Review a fixed commitless source snapshot' > "$fresh/council.out" 2>&1 ||
+    fail "commitless source was falsely classified as changed: $(cat "$fresh/council.out")"
+  assert_one_artifact_contains "$fresh/artifacts" '*-r2.md' 'Your previous answer:'
+  bash -c '
+    . "$1/scripts/lib/peer-common.sh"
+    REPO="$2"; INCLUDE_STATUS=1; MA_KIND=ask
+    ma_prepare_council_context
+    provider_names=(); last_arts=(); alive=()
+    ma_refresh_council_answers || exit 31
+    printf "changed source\n" > "$REPO/source.txt"
+    if ma_refresh_council_answers; then exit 32; fi
+  ' council-source-guard "$ROOT" "$fresh" > "$fresh/source-guard.out" 2>&1 ||
+    fail "commitless council source guard lost mutation protection: $(cat "$fresh/source-guard.out")"
+  assert_file_contains "$fresh/source-guard.out" 'tracked source changed during council'
 }
 
 test_peer_ask_debate_needs_two_providers() {
@@ -11679,6 +11702,21 @@ test_check_gate_is_hermetic_to_hook_git_env() {
   grep -Fq 'unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE' \
     "$ROOT/scripts/check.sh" ||
     fail "check.sh must unset the inherited hook git env (GIT_DIR family)"
+  # A native room is invoker state too; a verifier must not enroll fixtures in it.
+  local checker="$TMP/room-env-shellcheck"
+  cat > "$checker" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ -z "${OMS_ROOM_ID:-}" ] && [ -z "${OMS_ROOM_PARTICIPANT:-}" ] &&
+  [ -z "${OMS_ROOM_REPO:-}" ] && [ -z "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" ] &&
+  [ -z "${OMS_HARNESS_DELEGATE_DEPTH:-}" ]
+SH
+  chmod +x "$checker"
+  OMS_ROOM_ID=outer-room OMS_ROOM_PARTICIPANT=outer-main OMS_ROOM_REPO="$TMP/outer" \
+    OMS_ROOM_ADMITTED_PARTICIPANT=outer-main OMS_HARNESS_DELEGATE_DEPTH=1 \
+    OMS_SHELLCHECK_BIN="$checker" OMS_LINT_JOBS_MAX=1 \
+    bash "$ROOT/scripts/check.sh" --lint-only > "$TMP/room-env-gate.log" 2>&1 ||
+    fail "gate leaked the invoker's room identity into fixture tools"
 }
 
 # link.sh ignored its arguments and ran. `link.sh --help` therefore relinked a
@@ -14152,7 +14190,7 @@ test_oms_frontdoor_routes_primary_subsystems() {
     fail "peer-review help should scope its typed outcome to gate mode"
 
   for primary in autopilot consult dashboard doctor inbox journal land panel patch-admit patch-land \
-    peer-delegate peer-review runtime tick update; do
+    peer-delegate peer-review room runtime tick update; do
     printf '%s\n' "$frontdoors" | grep -Eq "^${primary} " ||
       fail "frontdoor catalog should route the canonical workflow: $primary"
   done
@@ -17411,12 +17449,14 @@ test_claude_hud_feeds_context_pressure() {
   make_committed_repo "$project"
   mkdir -p "$project/.oms"
   # Producer: the status line persists the authoritative reading...
-  printf '{"session_id":"ctxchain1","context_window":{"used_percentage":91.4,"total_input_tokens":182800,"context_window_size":200000}}' |
+  printf '{"session_id":"ctxchain1","context_window":{"used_percentage":91.4,"total_input_tokens":182800,"context_window_size":200000},"rate_limits":{"seven_day":{"used_percentage":42.2,"resets_at":2000000000}}}' |
     NO_COLOR=1 OMS_HUD_CACHE_DIR="$hud" python3 "$ROOT/scripts/claude-statusline.py" >/dev/null
   digest="$(ctx_cache_digest ctxchain1)"
   [ -f "$hud/ctx-$digest.json" ] || fail "status line must write the context cache"
   grep -Fq '"used_percentage": 91' "$hud/ctx-$digest.json" ||
     fail "context cache must carry the rounded used percentage"
+  grep -Fq '"seven_day": {"resets_at": 2000000000.0, "used_percentage": 42}' "$hud/ctx-$digest.json" ||
+    fail "the same cache must retain reported weekly usage for the panel"
   # ...consumer: the prompt hook turns it into one advisory line.
   out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxchain1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
@@ -17635,7 +17675,8 @@ test_codex_turn_notify_contract() {
 
 test_codex_app_notify_contract() {
   # Fake app-server socket: one reused chat, no model turn, file-borne text.
-  PYTHONDONTWRITEBYTECODE=1 python3 -W ignore::ResourceWarning "$ROOT/tests/codex_app_notify_test.py" >/dev/null 2>"$TMP/codex-notify.err" ||
+  # Native inbox fixtures require private ancestors even under a group-writable umask.
+  TMPDIR="$TMP" PYTHONDONTWRITEBYTECODE=1 python3 -W ignore::ResourceWarning "$ROOT/tests/codex_app_notify_test.py" >/dev/null 2>"$TMP/codex-notify.err" ||
     fail "codex app notification contract failed: $(cat "$TMP/codex-notify.err")"
 }
 
@@ -22348,6 +22389,26 @@ test_worker_guard_flags_a_sibling_whose_marker_died() {
     fail "a dead-marker sibling should be named as gitmeta: $result"
 }
 
+test_worker_guard_softens_a_sibling_that_finished_kept() {
+  local project="$TMP/guard-sibling-kept"
+  local managed_root="$TMP/guard-sibling-kept-root"
+  local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
+  local dead_pid
+  local result
+
+  make_guard_repo "$project"
+  make_live_managed_sibling "$project" "$sibling_parent"
+  dead_pid="$(sh -c 'echo $$')"
+  # A sibling that fails keeps its worktree and marker; only its pid dies.
+  # That is concurrent harness lifecycle, so the run reports it softly.
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
+    "printf 'kind=oh-my-setting-temp\\npid=$dead_pid\\nrepo=$project\\nworktree=$sibling_parent/wt\\ntemporary=1\\n' > $sibling_parent/.oh-my-setting-tmp")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a sibling that finished kept must not fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'during this run: kept-sibling' ||
+    fail "a kept sibling should be reported as a soft change: $result"
+}
+
 test_worker_guard_reports_a_bounded_scan() {
   local project="$TMP/guard-budget"
   local out
@@ -23390,6 +23451,64 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     oms_worker_surface_diff "$project" "$snap" )"
   [ "$changed" = "remote-refs" ] ||
     fail "stash should change only remote-refs, got: ${changed:-<none>}"
+
+  # The Codex app writes turn-diff refs on every turn in the shared repository;
+  # a branch merely named codex/ stays on the hard surface.
+  rm -rf "$snap"
+  ( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_snapshot "$project" "$snap" ) ||
+    fail "codex-ref snapshot failed"
+  git -C "$project" update-ref refs/codex/turn-diffs/captures/1/base \
+    "$(git -C "$project" rev-parse 'HEAD^{tree}')"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = "remote-refs" ] ||
+    fail "a Codex turn-diff ref should change only remote-refs, got: ${changed:-<none>}"
+  git -C "$project" update-ref refs/heads/codex/x "$(git -C "$project" rev-parse HEAD)"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = "refs, remote-refs" ] ||
+    fail "a codex/ branch must stay a hard ref change, got: ${changed:-<none>}"
+}
+
+test_worker_guard_accepts_only_artifact_index_compaction() {
+  local project="$TMP/guard-index-compaction"
+  local snap="$TMP/guard-index-compaction-snap"
+  local index="$project/.oms/artifacts/index.jsonl"
+  local changed
+  local i
+
+  make_committed_repo "$project"
+  mkdir -p "$project/.oms/artifacts"
+  : > "$index"
+  for i in 1 2 3 4 5 6; do
+    printf '{"event_id":"e%s","kind":"ask"}\n' "$i" >> "$index"
+  done
+  ( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_snapshot "$project" "$snap" ) || fail "index snapshot failed"
+
+  # The store's compaction: oldest rows dropped, survivors intact, new rows last.
+  { tail -n 4 "$index"; printf '{"event_id":"e7","kind":"ask"}\n'; } > "$index.new"
+  mv "$index.new" "$index"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
+  [ -z "$changed" ] || fail "store compaction must not be a violation, got: $changed"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    OMS_ARTIFACT_INDEX_KEEP=1000 oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = shared-state ] ||
+    fail "dropping rows below the keep floor must stay a violation, got: ${changed:-<none>}"
+
+  # A middle row erased, or a survivor rewritten, is not compaction.
+  { sed -n '1p;3,6p' "$snap/omsstate.artifact-index"; printf '{"event_id":"e7","kind":"ask"}\n'; } > "$index"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = shared-state ] ||
+    fail "erasing a middle row must stay a violation, got: ${changed:-<none>}"
+  { sed -n '3,5p' "$snap/omsstate.artifact-index"; printf '{"event_id":"e6","kind":"fixed"}\n'; } > "$index"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = shared-state ] ||
+    fail "rewriting a surviving row must stay a violation, got: ${changed:-<none>}"
 }
 
 test_worker_guard_keeps_local_branch_refs_hard() {

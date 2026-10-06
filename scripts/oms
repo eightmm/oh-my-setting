@@ -172,6 +172,7 @@ project-doctor
 project-private
 provider-permissions
 remove-project-template
+room
 run
 run-ledger
 run-reconcile
@@ -204,6 +205,7 @@ patch-admit
 patch-land
 peer-delegate
 peer-review
+room
 runtime
 tick
 update
@@ -282,6 +284,10 @@ TARGET="$SCRIPTS_DIR/$TOOL.sh"
 if [ ! -f "$TARGET" ]; then
   echo "error: unknown tool: $TOOL (run: oms list --all)" >&2
   exit 2
+fi
+if [ "$TOOL" = panel ]; then
+  # The interactive panel must own the caller's PID so signals reach its cleanup.
+  exec bash "$TARGET" "$@"
 fi
 RC=0
 bash "$TARGET" "$@" || RC=$?

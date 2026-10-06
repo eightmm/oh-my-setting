@@ -82,10 +82,18 @@ print(1 if ci.get("state") in ("stale", "pending") else 0)
 PY
 )"
   if [ "$ci_stale" = 1 ] && command -v "${OMS_GH_BIN:-gh}" >/dev/null 2>&1; then
-    # A completed red run makes record exit one by design; it still refreshed
-    # the ledger, so safe repair records the attempt and leaves the red item.
+    # Record's exit code cannot say whether it refreshed: a red run exits one
+    # after writing its row, a late PR-lookup error exits two after writing it.
+    # The ledger is append-only, so a changed fingerprint is the only proof.
+    ci_ledger="${OMS_CI_LEDGER:-$REPO/.oms/ci.jsonl}"
+    ci_before="$(cksum < "$ci_ledger" 2>/dev/null || echo none)"
     (cd "$REPO" && "$ROOT/scripts/ci-status.sh" record) >/dev/null 2>&1 || true
-    safe_actions="${safe_actions:+$safe_actions,}refreshed-ci"
+    ci_after="$(cksum < "$ci_ledger" 2>/dev/null || echo none)"
+    if [ "$ci_before" != "$ci_after" ]; then
+      safe_actions="${safe_actions:+$safe_actions,}refreshed-ci"
+    else
+      safe_actions="${safe_actions:+$safe_actions,}ci-refresh-failed"
+    fi
   fi
 
   # Mechanically resolvable by construction: a failed artifact row whose exact

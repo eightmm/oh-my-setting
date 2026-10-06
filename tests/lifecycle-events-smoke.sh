@@ -305,10 +305,10 @@ fi
 # A start request key is repository-scoped: retrying the same request returns
 # its original attempt, while reusing the key for another request fails.
 idem_attempt="$($EVENTS --repo "$REPO" start --provider codex --tool agent-call \
-  --task-id idem-task --idempotency-key idem-request)" ||
+  --task-id idem-task --ref panel_role=worker --ref panel_model=gpt-6-luna --idempotency-key idem-request)" ||
   fail "could not create idempotent attempt"
 idem_retry="$($EVENTS --repo "$REPO" start --provider codex --tool agent-call \
-  --task-id idem-task --idempotency-key idem-request)" ||
+  --task-id idem-task --ref panel_role=worker --ref panel_model=gpt-6-luna --idempotency-key idem-request)" ||
   fail "could not retry idempotent attempt"
 [ "$idem_retry" = "$idem_attempt" ] ||
   fail "start idempotency returned a different attempt id"
@@ -324,10 +324,22 @@ created = [row for row in rows if row.get("event_type") == "attempt.created"
            and row.get("idempotency_key") == "idem-request"]
 assert len(created) == 1, created
 assert created[0]["attempt_id"] == sys.argv[2], created
+assert created[0]["refs"] == {"panel_role": "worker", "panel_model": "gpt-6-luna"}, created
 PY
 then
   fail "start idempotency appended duplicate attempt.created rows"
 fi
+
+before_refs="$(cksum "$REPO/.oms/lifecycle/events.jsonl")"
+for ref in bad 'location=/tmp/private' 'location=../outside'; do
+  if $EVENTS --repo "$REPO" start --tool panel-test --ref "$ref" >/dev/null 2>&1; then
+    fail "invalid reference accepted: $ref"
+  fi
+done
+if $EVENTS --repo "$REPO" start --tool panel-test --ref role=worker --ref role=advisor >/dev/null 2>&1; then
+  fail "duplicate references accepted"
+fi
+[ "$before_refs" = "$(cksum "$REPO/.oms/lifecycle/events.jsonl")" ] || fail "invalid refs appended events"
 
 attempt="$($EVENTS --repo "$REPO" start --provider codex --tool agent-call \
   --task-id task-one --run-id run-one --max-wall-seconds 60)" ||

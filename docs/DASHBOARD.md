@@ -76,7 +76,10 @@ escapes, BEL, and C1 codes, are replaced with `?`, and so are format characters
 such as bidi overrides and zero-width characters. Labels are truncated, each
 list shows at most 8 rows plus an omitted count, and each line fits the
 terminal width. The view never includes artifact task goals, approval
-summaries, patch or artifact paths, prompts, or transcripts.
+summaries, patch or artifact paths, prompts, or transcripts. Panel-managed
+attempts can include a bounded descriptive task title and relative execution
+location; [the terminal panel](TERMINAL-PANEL.md) records explicit role and main
+relationships. Generic attempt parent IDs are not assumed to mean supervision.
 
 ## Sample
 
@@ -124,9 +127,11 @@ one requires a schema bump.
 | `scope` | `{allowed[], forbidden[], source}` or `null` | `source` is `unbounded` when nothing is recorded |
 | `task` | object or `null` | `present, healthy, task_id, status, verification, stale, next` |
 | `plan` | object or `null` | `present, healthy, task_count, by_state, actionable[], stale_claims, stale_reviews, contract_blocker` |
-| `attempts` | object | `available, total, active, by_state, recent[], note`, plus `error` when unavailable |
+| `attempts` | object | `available, total, active, by_state, recent[], active_recent[], note`, plus `error` when unavailable |
 | `attempts.recent[]` | object | `attempt_id, state, provider, tool, task_id, reason_code, updated_at, tokens, cost_microusd` |
-| `delegations` | array or `null` | `id, provider, role, live, started_at` |
+| `attempts.*[]` panel metadata | object, when explicitly recorded | Additive `parent_attempt_id` and `panel {role, owner, purpose, workload, model, effort, location, access, label}`. Locations are `repository` or a relative `worktree:` token; models are requested selections. |
+| `attempts.active_recent[]` | object | Up to eight current attempts, newest update first: `attempt_id, state, provider, tool, task_id, reason_code, updated_at`. Independent of the recent outcome window. |
+| `delegations` | array or `null` | Up to five markers, live first: `id, provider, role, task_id, requested_model, reasoning_effort, live, started_at, location`. Location is a relative worker worktree token. Requested model is marker configuration, not proof of the served model. |
 | `operations` | object | `available, recent[], omitted`, plus `error` when unavailable |
 | `operations.recent[]` | object | `event_id, ts, kind, provider, task_id, attempt_id, exit, status, verify_exit, route_class, requested_model, selected_model, served_model, model_attribution, fallback_used, fallback_reason, tokens, cost_usd` |
 | `reviews` | object or `null` | `outcomes, passed, failed, unknown, seat_answers` over the listed window |

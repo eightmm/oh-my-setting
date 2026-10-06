@@ -335,7 +335,41 @@ acceptance = report["acceptance"]
 assert (acceptance["total"], acceptance["counts"], acceptance["complete"]) == (2, {"missing": 2}, False), acceptance
 assert [item["code"] for item in report["attention"]["items"]] == [
     item["code"] for item in inbox["items"]][:8], (report["attention"], inbox)
-assert len(report["delegations"]) == 2 and not report["delegations"][0]["live"], report["delegations"]
+assert len(report["delegations"]) == 2 and report["delegations"][0]["live"], report["delegations"]
+PY
+
+# An old active attempt must survive a page full of newer terminal outcomes.
+cp -R "$repo" "$TMP/panel-active"
+python3 - "$TMP/panel-active" <<'PY'
+import json, sys
+from pathlib import Path
+ledger = Path(sys.argv[1]) / ".oms/lifecycle/events.jsonl"
+rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+created, cancelled = rows[0], rows[-1]
+rows.append(dict(created, attempt_id="att_still_active", event_id="levt_active", task_id="panel-ui"))
+for index in range(10):
+    identity = "att_new_%s" % index
+    rows.extend([dict(created, attempt_id=identity, event_id="levt_new_%s" % index,
+                      ts="2026-09-01T00:00:%02dZ" % (index * 2)),
+                 dict(cancelled, attempt_id=identity, event_id="levt_end_%s" % index,
+                      seq=2, ts="2026-09-01T00:00:%02dZ" % (index * 2 + 1))])
+ledger.write_text("".join(json.dumps(row) + "\n" for row in rows))
+marker = Path(sys.argv[1]) / ".oms/delegations/live.json"
+row = json.loads(marker.read_text())
+row.update(task_id="panel-ui", model="model-for-live-worker", reasoning_effort="high")
+marker.write_text(json.dumps(row))
+PY
+before="$(tree_sums "$TMP/panel-active/.oms")"
+dash --repo "$TMP/panel-active" --json > "$TMP/panel-active.json"
+[ "$before" = "$(tree_sums "$TMP/panel-active/.oms")" ] || fail "active panel mutated records"
+python3 - "$TMP/panel-active.json" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1]))
+assert all(row["attempt_id"] != "att_still_active" for row in report["attempts"]["recent"])
+assert report["attempts"]["active_recent"][0]["attempt_id"] == "att_still_active"
+marker = report["delegations"][0]
+assert (marker["task_id"], marker["requested_model"], marker["reasoning_effort"]) == (
+    "panel-ui", "model-for-live-worker", "high"), marker
 PY
 
 # Untrusted labels must not drive the terminal: escapes, BEL, C1 controls and
@@ -396,6 +430,10 @@ rows = [{"event_id": "evt_%d" % n, "ts": "x" * 5000, "kind": "call", "provider":
 rows[-1]["cost_usd"] = float("nan")
 rows[-2]["cost_usd"] = float("inf")
 rows[-3].update(kind="review-outcome", exit="unrecorded")
+rows[-4]["model_attribution"] = ["bad"]
+rows[-5]["fallback_reason"] = {"bad": 1}
+rows[-6]["model_class"] = []
+rows[-7]["status"] = {}
 json.dump({"schema": 1, "action": "list", "rows": rows}, open(sys.argv[1], "w"))
 PY
 rc=0
@@ -413,6 +451,10 @@ assert "PRIVATE COLLECTOR CONTENT" not in json.dumps(report)
 assert all(row["cost_usd"] is None for row in report["operations"]["recent"])
 assert report["reviews"]["unknown"] == 1 and report["reviews"]["failed"] == 0, report["reviews"]
 assert report["operations"]["recent"][2]["status"] == "unknown"
+assert report["operations"]["recent"][3]["model_attribution"] == "unknown"
+assert report["operations"]["recent"][4]["fallback_reason"] == "other"
+assert report["operations"]["recent"][5]["route_class"] is None
+assert report["operations"]["recent"][6]["status"] == "success"
 json.dumps(report, allow_nan=False)
 assert report["task"] is None and report["attention"] is None and report["acceptance"] is None, report
 assert report["attempts"]["available"] is False, report["attempts"]
@@ -834,6 +876,348 @@ import sys
 root, temporary = map(Path, sys.argv[1:])
 sys.path.insert(0, str(root / "scripts/lib"))
 import terminal_panel as panel
+from panel_routing import allocate
+from dashboard_projection import display_width
+from panel_view import render
+from panel_view import wrapped
+
+view = json.loads((temporary / "panel-active.json").read_text())
+view["goal"] = {"text": "패널 개선 / show workers and verify results"}
+original = json.dumps(view, sort_keys=True)
+wide = render(view, "claude", 100, 32, menu=True, previous="ready")
+assert "MAIN / Claude Code" in wide and "[queued] Codex" in wide, wide
+assert "panel-ui" in wide and "requested: model-for-live-worker" in wide, wide
+assert "not acceptance" in wide and "ACCEPT" in wide, wide
+assert wide.index("MAIN") < wide.index("OMS activity") < wide.index("[queued]"), wide
+assert json.dumps(view, sort_keys=True) == original, "render changed its input records"
+for width, height in ((100, 28), (38, 28), (24, 18), (12, 10), (2, 8)):
+    for menu in (False, True):
+        plain = render(view, "codex", width, height, menu=menu)
+        assert "\033" not in plain and len(plain.splitlines()) <= height - int(menu), plain
+        assert all(display_width(line) <= width for line in plain.splitlines()), plain
+assert "1 Codex" in render(view, "codex", 38, 28, menu=True)
+hostile = json.loads(json.dumps(view))
+hostile["delegations"][0]["requested_model"] = "bad\033[2J\u202eforged"
+assert "\033" not in render(hostile, "claude", 100, 32)
+assert "\u202e" not in render(hostile, "claude", 100, 32)
+assert "\033[" in render(view, "claude", 100, 32, color=True)
+# A model from a different attempt/provider is never copied into a worker card.
+view["delegations"] = []
+view["operations"]["recent"] = [{"attempt_id": "unrelated", "kind": "ask", "selected_model": "DO_NOT_ATTRIBUTE"}]
+attributed_view = render(view, "codex", 100, 32)
+assert "DO_NOT_ATTRIBUTE" in attributed_view.split("OMS activity", 1)[0]
+assert "DO_NOT_ATTRIBUTE" not in attributed_view.split("OMS activity", 1)[1]
+assert "model: unrecorded" in render(view, "codex", 100, 32)
+view["attempts"]["recent"] = [{"state": "timed_out", "provider": "claude", "tool": "review"}]
+assert "[timed_out]" in render(view, "codex", 100, 32)
+assert "Worker state unavailable" in render({}, "codex", 100, 32)
+assert "Collection degraded" in render({}, "codex", 100, 32)
+# Titles occupy their own bright lines; metadata never competes for that space.
+title = "작업 내용을 여러 줄로 읽기 쉽게 보여 주고 모델별 호출 흐름을 확인합니다"
+parts = wrapped(title, 28, 4)
+assert len(parts) > 1 and all(display_width(line) <= 28 for line in parts), parts
+assert "..." not in " ".join(parts), parts
+from copy import deepcopy
+live = deepcopy(view)
+live["attempts"]["recent"] = []
+live["attempts"]["active_recent"] = [{"attempt_id": "att_display_live", "parent_attempt_id": "att_main",
+    "state": "working", "provider": "claude", "tool": "peer-delegate", "task_id": "readable-title",
+    "panel": {"role": "worker", "model": "claude-sonnet-5-5", "label": title,
+              "access": "write", "location": "worktree:example/wt", "effort": "medium"}}]
+first = render(live, "codex", 42, 34, frame=0)
+second = render(live, "codex", 42, 34, frame=1)
+assert first != second and "작업 내용을 여러 줄로" in first and "worktree example/wt" in first, first
+# Display hierarchy follows explicit ownership; generic parent links are not
+# native-main relationships. Compact and attention views never alter records.
+from panel_view import hierarchy, worker_rows, render_results
+tree = deepcopy(live)
+tree["attempts"]["active_recent"] = [
+    {"attempt_id": "att_main", "state": "working", "provider": "codex", "tool": "panel-main",
+     "panel": {"role": "main", "model": "gpt-6-sol", "label": "Sol main task"}},
+    {"attempt_id": "att_opus", "state": "working", "provider": "claude", "tool": "panel-main",
+     "panel": {"role": "main", "model": "claude-opus-5-5", "label": "Opus main task"}},
+    *tree["attempts"]["active_recent"],
+    {"attempt_id": "att_adv", "parent_attempt_id": "att_main", "state": "working", "provider": "codex",
+     "panel": {"role": "advisor", "model": "gpt-6-astra", "label": "Architecture advice"}},
+    {"attempt_id": "att_rev", "parent_attempt_id": "att_main", "state": "review", "provider": "claude",
+     "panel": {"role": "reviewer", "model": "claude-fable-5-1", "label": "Pending review"}},
+    {"attempt_id": "att_other", "parent_attempt_id": "att_opus", "state": "blocked", "provider": "codex",
+     "panel": {"role": "worker", "model": "gpt-6-luna", "label": "Opus child blocked"}},
+    {"attempt_id": "att_legacy", "parent_attempt_id": "att_main", "state": "working", "provider": "codex",
+     "tool": "legacy-unlinked"}]
+saved_tree = json.dumps(tree, sort_keys=True)
+forest = hierarchy(tree, worker_rows(tree))
+assert {r["title"] for r in forest} == {"MAIN / Sol", "MAIN / Opus 5.5", "UNLINKED"}, forest
+full_tree = render(tree, "codex", 100, 60, view="detail")
+assert full_tree.index("MAIN / Sol /") < full_tree.index("ADVISORS (1)") < full_tree.index("Architecture advice"), full_tree
+assert "REVIEWERS (1)" in full_tree and "Opus child blocked" in full_tree and "UNLINKED" in full_tree
+assert re.search(r"^│.*\[working\] Astra.*│$", full_tree, re.M), full_tree
+# A running council groups its seats as one visible debate, not loose advisors.
+debate = deepcopy(tree)
+seat = {"parent_attempt_id": "att_main", "provider": "claude", "tool": "ask", "task_id": "decide",
+        "panel": {"role": "advisor", "model": "claude-fable-5-1", "label": "Pick next work"}}
+debate["attempts"]["active_recent"] = debate["attempts"]["active_recent"][:2] + [
+    {"attempt_id": "att_council", "parent_attempt_id": "att_main", "state": "working", "provider": "codex",
+     "tool": "panel-council", "task_id": "decide", "panel": {"role": "advisor", "label": "Pick next work"}},
+    dict(seat, attempt_id="att_seat", state="working")]
+debate["attempts"]["recent"] = [dict(seat, attempt_id="att_seat_done", state="done")]
+debate_tree = render(debate, "codex", 100, 60, view="detail")
+assert "COUNCIL (2)" in debate_tree and "Debate: Pick next work" in debate_tree, debate_tree
+assert "1 seat(s) answering" in debate_tree and "ADVISORS" not in debate_tree, debate_tree
+empty_calls = deepcopy(tree)
+empty_calls["attempts"]["active_recent"] = empty_calls["attempts"]["active_recent"][:2]
+idle_mains = render(empty_calls, "codex", 100, 40)
+assert "MAIN / Sol / working" in idle_mains and "MAIN / Opus 5.5 / working" in idle_mains
+assert "No active child calls" in idle_mains
+own_tree = render(tree, "codex", 100, 60, main_attempt="att_main", view="detail")
+assert "Sol main task" in own_tree and "Opus child blocked" not in own_tree and "legacy-unlinked" not in own_tree
+compact_tree = render(tree, "codex", 100, 60, view="compact")
+assert "Architecture advice" in compact_tree and "worktree example/wt" not in compact_tree
+assert len(compact_tree.splitlines()) < len(full_tree.splitlines())
+attention_tree = render(tree, "codex", 100, 60, attention_only=True)
+assert "Pending review" in attention_tree and "Opus child blocked" in attention_tree
+assert "Architecture advice" not in attention_tree and "filtered" in attention_tree
+assert json.dumps(tree, sort_keys=True) == saved_tree
+# Closed root cards replace deep indentation; role counts and attention titles
+# stay readable in the short menu, with stable roots as child states change.
+short_tree = render(tree, "codex", 100, 28, menu=True)
+assert "Opus child blocked" in short_tree and "REVIEWERS (1)" in short_tree, short_tree
+assert "WORKERS (1)" in short_tree and "UNLINKED" in short_tree, short_tree
+assert "2 advisor" not in short_tree
+changed_tree = deepcopy(tree)
+changed_tree["attempts"]["active_recent"][4]["state"] = "blocked"
+changed_text = render(changed_tree, "codex", 100, 60, view="detail")
+assert full_tree.index("MAIN / Sol /") < full_tree.index("MAIN / Opus") < full_tree.index("UNLINKED")
+assert changed_text.index("MAIN / Sol /") < changed_text.index("MAIN / Opus") < changed_text.index("UNLINKED")
+missing_model = deepcopy(tree)
+missing_model["attempts"]["active_recent"][0]["panel"].pop("model")
+missing_text = render(missing_model, "codex", 42, 34, main_attempt="att_main")
+assert "model unrecorded" in missing_text and "Sol / high / working" not in missing_text, missing_text
+
+# Usage is the recent artifact window, never an account total or an overlapping
+# lifecycle sum. Mixed routes and selected-only identities stay separate.
+from dashboard_projection import project_acceptance
+malformed_acceptance = project_acceptance({"healthy": True, "criteria": [
+    {"id": "malformed", "status": ["bad"]}, {"id": "valid", "status": "failed"}]})
+assert [c["id"] for c in malformed_acceptance["criteria"]] == ["valid", "malformed"]
+from panel_view import model_usage, usage_labels
+usage_view = deepcopy(tree)
+usage_view["operations"] = {"available": True, "recent": [
+    {"event_id": "use1", "kind": "ask", "provider": "codex", "selected_model": "gpt-6-astra",
+     "served_model": "gpt-6-sol", "tokens": 120, "cost_usd": .25},
+    {"event_id": "use2", "kind": "ask", "provider": "codex", "served_model": "gpt-6-sol"},
+    {"event_id": "use3", "kind": "ask", "provider": "codex", "selected_model": "gpt-6-sol", "tokens": 0},
+    {"event_id": "use4", "kind": "review", "provider": "claude", "selected_model": "claude-fable-5-1",
+     "tokens": 7, "cost_usd": .5, "model_attribution": "ambiguous"},
+    {"event_id": "use5", "kind": "delegate", "provider": "claude", "selected_model": "claude-opus-5-5",
+     "tokens": 9, "cost_usd": .1, "fallback_used": True},
+    {"event_id": "owner", "kind": "owner-finalize", "tokens": 99999, "cost_usd": 100},
+    {"event_id": "gate", "kind": "review-outcome", "tokens": 99999, "cost_usd": 100}]}
+usage_view["operations"]["recent"].append(deepcopy(usage_view["operations"]["recent"][0]))
+usage_view["attempts"]["recent"] = [{"attempt_id": "use1", "tokens": 50000, "state": "done"}]
+groups = model_usage(usage_view)
+assert len(groups) == 3 and sum(g["records"] for g in groups) == 5, groups
+served, selected, mixed = groups
+assert (served["name"], served["tokens"], served["token_reports"], served["records"]) == ("Sol", 120, 1, 2), groups
+assert selected["attribution"] == "selected" and selected["tokens"] == 0 and selected["token_reports"] == 1
+assert mixed["name"] == "Mixed models" and mixed["tokens"] == 16 and abs(mixed["cost"] - .6) < .000001
+labels = " | ".join(usage_labels(usage_view, costs=True))
+assert "120+? tok" in labels and "$0.25+?" in labels and "Sol(sel) 0 tok" in labels, labels
+assert "Astra" not in labels and "Opus" not in labels and "$?" in labels, labels
+assert "USAGE" in render(usage_view, "codex", 100, 28, menu=True)
+assert "USAGE" in render(usage_view, "claude", 42, 34, main_attempt="att_main")
+assert model_usage(usage_view) == model_usage({**usage_view, "attempts": {}})
+bad_usage = {"operations": {"recent": [{"kind": "ask", "tokens": True, "cost_usd": float("nan")}]}}
+assert "? tok" in usage_labels(bad_usage, costs=True)[0] and "$?" in usage_labels(bad_usage, costs=True)[0]
+assert model_usage(bad_usage)[0]["token_reports"] == 0
+assert "Usage unavailable" in render({"operations": {"available": False}}, "codex", 42, 34)
+crowded_scope = render(tree, "codex", 42, 24, main_attempt="att_main", view="detail", attention_only=True,
+                       menu=True, managed=True, previous="ready")
+overflow_row = next(line for line in crowded_scope.splitlines() if "Details" in line)
+assert "+1" in overflow_row and "f2" in overflow_row and "out2" in overflow_row and "..." not in overflow_row, crowded_scope
+
+# Wide compact rows use one line per call. Tall detail retains the same titles
+# and metadata; narrow cards preserve title space without tree indentation.
+many_calls = deepcopy(tree)
+many_calls["attempts"]["active_recent"] = [many_calls["attempts"]["active_recent"][0]]
+for n in range(8):
+    call_row = deepcopy(tree["attempts"]["active_recent"][2])
+    call_row.update(attempt_id="many_%s" % n, task_id="many_%s" % n)
+    call_row["panel"]["label"] = "Distinct task %s" % n
+    many_calls["attempts"]["active_recent"].append(call_row)
+many_text = render(many_calls, "codex", 100, 28, menu=True)
+assert all("Distinct task %s" % n in many_text for n in range(8)), many_text
+assert "more" not in many_text, many_text
+
+def closed_cards(text, width, unicode=True):
+    opened = False
+    for line in text.splitlines():
+        if unicode and line.startswith("╭"):
+            assert not opened and line.endswith("╮") and display_width(line) == width, text
+            opened = True
+        elif unicode and line.startswith("╰"):
+            assert opened and line.endswith("╯") and display_width(line) == width, text
+            opened = False
+        elif unicode and line.startswith(("│", "├")):
+            assert opened and line.endswith("│" if line.startswith("│") else "┤"), text
+            assert display_width(line) == width, text
+        elif not unicode and line.startswith("+") and line.endswith("+"):
+            assert display_width(line) == width, text
+            if set(line[1:-1]) == {"-"}:
+                assert opened, text
+                opened = False
+            elif not opened:
+                opened = True
+        elif not unicode and line.startswith("|"):
+            assert opened and line.endswith("|") and display_width(line) == width, text
+    assert not opened, text
+
+for width, height in ((100, 28), (42, 34), (24, 18), (12, 10), (2, 8)):
+    for density in ("auto", "compact", "detail"):
+        for filtered in (False, True):
+            for glyphs in (False, True):
+                text = render(tree, "codex", width, height, view=density, attention_only=filtered, unicode=glyphs, menu=True)
+                assert len(text.splitlines()) <= height - 1 and all(display_width(line) <= width for line in text.splitlines()), text
+                closed_cards(text, width, glyphs)
+for width, height in ((80, 28), (90, 28), (30, 20), (42, 24), (100, 24)):
+    for density in ("auto", "compact", "detail"):
+        for glyphs in (False, True):
+            text = render(usage_view, "codex", width, height, view=density, unicode=glyphs,
+                          menu=True, managed=True, previous="ready")
+            closed_cards(text, width, glyphs)
+idle = deepcopy(live)
+idle["attempts"]["active_recent"][0]["state"] = "blocked"
+assert render(idle, "codex", 42, 34, frame=0) == render(idle, "codex", 42, 34, frame=1)
+for width, height in ((100, 32), (42, 34), (24, 18), (12, 10), (2, 8)):
+    for frame in (None, 0, 1):
+        text = render(live, "codex", width, height, frame=frame)
+        assert len(text.splitlines()) <= height and all(display_width(line) <= width for line in text.splitlines()), text
+# Frames use one cached snapshot. --count still counts collections, and resize
+# triggers one complete redraw rather than leaving stale lines in the pane.
+import io
+from unittest.mock import patch
+with patch.dict(os.environ, {"OMS_CODEX_NOTIFY": "0", "OMS_CLAUDE_NOTIFY": "0"}, clear=True):
+    assert "OMS_CLAUDE_NOTIFY=0" in panel.panel_environment()
+for mode in ("animated", "static", "environment", "interrupt"):
+    clock = [0.0]
+    output = io.StringIO()
+    def sleep(seconds):
+        if mode == "interrupt":
+            raise KeyboardInterrupt
+        clock[0] += seconds
+    with patch.object(panel, "snapshot", return_value=(live, 0)) as collect, \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "terminal_style", return_value=(True, False, True)), \
+            patch.object(panel.sys, "stdout", output), \
+            patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((42, 34))), \
+            patch.object(panel.time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(panel.time, "sleep", side_effect=sleep), \
+            patch.dict(os.environ, {"OMS_PANEL_NO_ANIMATION": "1" if mode == "environment" else "0"}):
+        try:
+            assert panel.watch(Path("."), "codex", count=2, no_animation=mode == "static") == 0
+            assert mode != "interrupt", "watch swallowed the interrupt"
+        except KeyboardInterrupt:
+            assert mode == "interrupt"
+    assert collect.call_count == (1 if mode == "interrupt" else 2)
+    assert clock[0] == (0 if mode == "interrupt" else 5.0), clock
+    assert output.getvalue().count("\033[2J") == 1 and "\033[?25h" in output.getvalue(), output.getvalue()
+    assert ("\033[2K" in output.getvalue()) == (mode == "animated")
+# Window controls can change between snapshots. Explicit CLI choices persist;
+# rendered text must never overwrite the density option on later refreshes.
+for requested, forced in ((None, False), ("compact", True)):
+    clock = [0.0]
+    def pane_value(name):
+        return {"@oms_panel_owner": "codex", "@oms_panel_main_attempt": "att_main",
+                "@oms_panel_view": "compact" if clock[0] < 5 else "detail",
+                "@oms_panel_attention": "0" if clock[0] < 5 else "1"}.get(name, "")
+    with patch.object(panel, "snapshot", return_value=(tree, 0)), \
+            patch.object(panel, "managed_session", return_value=True), \
+            patch.object(panel, "pane_option", side_effect=pane_value), \
+            patch.object(panel, "terminal_style", return_value=(False, False, True)), \
+            patch.object(panel.sys, "stdout", io.StringIO()), \
+            patch.object(panel, "frame_view", wraps=panel.frame_view) as display, \
+            patch.object(panel.time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(panel.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0]+seconds)):
+        assert panel.watch(Path("."), "codex", count=2, view=requested, attention_only=forced) == 0
+    assert [c.kwargs["view"] for c in display.call_args_list] == (["compact", "compact"] if requested else ["compact", "detail"])
+    assert [c.kwargs["attention_only"] for c in display.call_args_list] == ([True, True] if forced else [False, True])
+with patch.object(panel.sys, "stdout", io.StringIO()) as output:
+    last = panel.draw_frame("first\nsecond", (42, 34), True)
+    panel.draw_frame("first\nchanged", (42, 34), True, last)
+    panel.draw_frame("small", (24, 18), True, last)
+    assert output.getvalue().count("\033[2J") == 2 and "\033[2;1H\033[2Kchanged" in output.getvalue()
+from unittest.mock import patch
+with patch.object(panel.subprocess, "run", side_effect=subprocess.TimeoutExpired("tmux", 5)):
+    assert panel.pane_option("@oms_panel_view") == ""
+# A failed collection remains visible and the same watcher recovers on its next
+# refresh. Invalid window selection must not display another room as selected.
+import thread_live
+import room
+for failure in (([], 0), subprocess.TimeoutExpired("dashboard", 5)):
+    clock = [0.0]
+    responses = [failure, (live, 0)]
+    with patch.object(panel, "dashboard", side_effect=responses), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "terminal_style", return_value=(False, False, True)), \
+            patch.object(panel.sys, "stdout", io.StringIO()), \
+            patch.object(panel, "frame_view", wraps=panel.frame_view) as displayed, \
+            patch.object(panel.time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(panel.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0]+seconds)), \
+            patch.dict(os.environ, {}, clear=True), patch.object(thread_live, "current_thread", return_value=None):
+        assert panel.watch(Path("."), "codex", count=2, no_animation=True) == 0
+    assert displayed.call_args_list[0].args[2]["collection"]["ok"] is False
+    assert displayed.call_args_list[1].args[2] == live
+with patch.object(panel, "snapshot", return_value=(live, 0)), \
+        patch.object(panel, "managed_session", return_value=True), \
+        patch.object(panel, "pane_option", side_effect=lambda name: "invalid room" if name == "@oms_panel_room" else ""), \
+        patch.object(panel, "terminal_style", return_value=(False, False, True)), \
+        patch.object(panel.sys, "stdout", io.StringIO()), \
+        patch.object(panel, "frame_view", wraps=panel.frame_view) as displayed:
+    assert panel.watch(Path("."), "codex", count=1, no_animation=True) == 1
+assert "invalid window room selection" in displayed.call_args.args[2]["room"]["error"]
+clock = [0.0]
+with patch.object(panel, "dashboard", side_effect=[(deepcopy(live), 0), (deepcopy(live), 0)]), \
+        patch.object(room, "status", side_effect=lambda repo, ident: {"id": ident}), \
+        patch.object(thread_live, "current_thread", return_value="unrelated-current") as current, \
+        patch.object(panel, "managed_session", return_value=True), \
+        patch.object(panel, "pane_option", side_effect=lambda name: "selected-room" if name == "@oms_panel_room" and clock[0] < 5 else ""), \
+        patch.object(panel, "terminal_style", return_value=(False, False, True)), \
+        patch.object(panel.sys, "stdout", io.StringIO()), \
+        patch.object(panel, "frame_view", wraps=panel.frame_view) as displayed, \
+        patch.object(panel.time, "monotonic", side_effect=lambda: clock[0]), \
+        patch.object(panel.time, "sleep", side_effect=lambda s: clock.__setitem__(0, clock[0]+s)), \
+        patch.dict(os.environ, {}, clear=True):
+    assert panel.watch(Path("."), "codex", count=2, no_animation=True) == 0
+    assert displayed.call_args_list[0].args[2]["room"]["id"] == "selected-room"
+    assert "room" not in displayed.call_args_list[1].args[2]
+    assert current.call_count == 0
+# Choose an actual result by number. Only its task ID is used for the detail
+# query; returning to the list does not call or retry a model or app receiver.
+sample_rows = [{"task_id": "one", "title": "First result", "summary": "FIRST DETAIL"},
+               {"task_id": "two", "title": "Second result", "summary": "SECOND DETAIL"}]
+def result_query(repo, task_id=None):
+    return {"rows": [r for r in sample_rows if not task_id or r["task_id"] == task_id]}
+with patch.object(panel, "results", side_effect=result_query) as query, \
+        patch.object(panel, "read_field", side_effect=["0", "2", "", ""]), \
+        patch.object(panel.sys, "stdout", io.StringIO()) as output:
+    panel.browse_results(Path("."))
+    assert query.call_args_list[2].args == (Path("."), "two"), query.call_args_list
+    assert "SECOND DETAIL" in output.getvalue() and "FIRST DETAIL" not in output.getvalue()
+with patch.object(panel, "managed_session", return_value=False), \
+        patch.object(panel, "show") as display, \
+        patch.object(panel, "read_field", side_effect=["v", "b", "v", "v", "q"]):
+    assert panel.interactive(Path(".")) == 0
+    assert [c.kwargs["view"] for c in display.call_args_list] == ["auto", "compact", "compact", "detail", "auto"]
+    assert [c.kwargs["attention_only"] for c in display.call_args_list] == [False, False, True, True, True]
+for setting in ({"TERM": "dumb"}, {"TERM": "xterm", "NO_COLOR": ""}):
+    saved = dict(os.environ)
+    try:
+        os.environ.update(setting)
+        with patch.object(panel.sys.stdout, "isatty", return_value=True):
+            assert panel.terminal_style()[1] is False
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
 
 project = temporary / "panel repo 'quoted'; dollar$"
 project.mkdir()
@@ -850,14 +1234,24 @@ subprocess.run(["git", "-C", str(project), "commit", "-qm", "init"], check=True)
 brief = temporary / "panel-brief.md"
 brief.write_text("Task: append new to value.txt. No primary edits or recursive workers.\n")
 log = temporary / "panel-native-log.jsonl"
-for provider in panel.PROVIDERS:
+worker_log = temporary / "panel-worker-log.jsonl"
+for provider in (*panel.PROVIDERS, "grok", "agy", "vibe", "oms-agent-adapter-muse"):
     executable = binary / provider
     executable.write_text('''#!/usr/bin/env bash
 set -eu
 case "${1:-}:${2:-}" in
-  --version:|--help:|exec:--help) printf 'fixture CLI 1.0\\n'; exit 0 ;;
+  --version:|--help:|exec:--help|--no-auto-update:version|--no-auto-update:--help) printf 'fixture CLI 1.0 --effort low medium high --config\\n'; exit 0 ;;
 esac
 if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
+  python3 - "$@" <<'WORKER'
+import json, os, sys
+with open(os.environ["PANEL_TEST_WORKER_LOG"], "a", encoding="utf-8") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(),
+                        "role": os.environ.get("OMS_PANEL_ROLE"),
+                        "parent": os.environ.get("OMS_PANEL_MAIN_ATTEMPT"),
+                        "room": os.environ.get("OMS_ROOM_ID"),
+                        "participant": os.environ.get("OMS_ROOM_PARTICIPANT")}) + "\\n")
+WORKER
   cat >/dev/null
   if [ "${PANEL_TEST_MODE:-}" = write ]; then
     printf 'new\\n' >> value.txt
@@ -865,6 +1259,10 @@ if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
       echo 'nested owner launch should have failed' >&2
       exit 1
     fi
+  fi
+  if [ "${OMS_PANEL_PURPOSE:-}" = advise ]; then
+    printf 'Answer: inspected source.\nAlternatives: separate panels.\nEvidence: value.txt exists.\nCounterargument: retained history is bounded.\nRisks: delivery can fail.\nRecommendation: owner records evidence.\nVerification: inspect source.\nChanged from previous round: none.\nRemaining disagreements: none.\n'
+    exit 0
   fi
   printf 'Answer: inspected the bounded repository task.\\nGATE: pass\\n'
 else
@@ -876,6 +1274,7 @@ with open(os.environ["PANEL_TEST_LOG"], "a", encoding="utf-8") as f:
                         "entry": os.environ["OMS_PANEL_ENTRYPOINT"]}) + "\\n")
 print("NATIVE_FIXTURE_READY")
 INNER
+  if [ "${PANEL_TEST_NATIVE_HOLD:-0}" = 1 ]; then read -r reply || :; fi
 fi
 ''')
     executable.chmod(0o755)
@@ -884,8 +1283,10 @@ environment = dict(os.environ, HOME=str(home), NVM_DIR=str(home / ".nvm"),
                    PATH=str(binary) + os.pathsep + os.environ["PATH"],
                    XDG_STATE_HOME=str(temporary / "panel-state"),
                    OMS_PANEL_ENTRYPOINT=str(panel.ENTRY), PANEL_TEST_LOG=str(log),
+                   PANEL_TEST_WORKER_LOG=str(worker_log), OMS_CAPABILITY_SKIP_MODELS="1",
                    OMS_PEER_TIMEOUT="30", OMS_ROLE_ROUTING="0")
 for key in ("OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH", "OMS_PANEL_SESSION", "TMUX",
+            "OMS_PANEL_MAIN_ATTEMPT", "OMS_PANEL_DISPATCH", "OMS_ATTEMPT_ID",
             "OH_MY_SETTING_CALL_DRY_RUN", "OH_MY_SETTING_REVIEW_DRY_RUN"):
     environment.pop(key, None)
 
@@ -902,7 +1303,35 @@ assert all(report["providers"][p]["installed"] for p in panel.PROVIDERS)
 assert report["dashboard"]["kind"] == "oms-dashboard"
 assert not (project / ".oms").exists(), "panel query created a state store"
 assert subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"]) == baseline
+# Discovery is registry-driven and does not execute even marked adapters.
+inventory = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--providers", "--json"]))
+registered = {row["provider"]: row for row in inventory["providers"]}
+assert inventory["executes"] is False and inventory["kind"] == "oms-panel-providers"
+assert not log.exists() and not worker_log.exists() and not (project / ".oms").exists()
+for name in ("grok", "antigravity", "muse"):
+    assert registered[name]["installed"] and not registered[name]["native_launch"], registered[name]
+    assert registered[name]["session_messaging"] == "room_polling"
+    assert registered[name]["native_hook_wiring"] == "unverified"
+assert registered["muse"]["access"] == ["read"]
+assert registered["codex"]["native_launch"] and registered["claude"]["native_launch"]
 assert shlex.split(panel.shell_command(["bash", str(panel.ENTRY), str(project)]))[1:] == ["bash", str(panel.ENTRY), str(project)]
+assert allocate("claude", workload="light")["model"] == "gpt-6-luna"
+assert allocate("codex", workload="routine")["model"] == "claude-sonnet-5-5"
+assert allocate("codex", workload="main")["model"] == "gpt-6-sol"
+assert allocate("claude", workload="main")["model"] == "claude-opus-5-5"
+assert allocate("claude", role="advisor")["model"] == "gpt-6-astra"
+assert allocate("codex", role="advisor")["model"] == "claude-fable-5-1"
+assert allocate("codex", role="advisor", seat="astra")["model"] == "gpt-6-astra"
+assert allocate("claude", role="advisor", seat="fable")["model"] == "claude-fable-5-1"
+for owner in panel.PROVIDERS:
+    arguments = panel.native_command(owner, project)
+    expected = "gpt-6-sol" if owner == "codex" else "claude-opus-5-5"
+    assert arguments[arguments.index("--model") + 1] == expected, arguments
+    assert "--dispatch worker" in panel.bootstrap(owner, project)
+    assert "--dispatch advisor" in panel.bootstrap(owner, project)
+option_text = "--dangerously-skip-permissions"
+assert panel.native_command("claude", project, task=option_text)[-2:] == ["--", option_text]
+assert option_text not in panel.native_command("codex", project, task=option_text)[:-1]
 
 for owner in panel.PROVIDERS:
     env = dict(environment, OMS_AGENT=owner)
@@ -915,8 +1344,8 @@ for owner in panel.PROVIDERS:
     command = panel.peer_command("delegate", owner, project, brief=brief,
                                  verify="test \"$(tail -1 value.txt)\" = new")
     answer = call(command, write_env)
-    patch = re.search(r"^patch: (.+)$", answer, re.M)
-    assert patch and "+new" in Path(patch.group(1)).read_text(), answer
+    patch_match = re.search(r"^patch: (.+)$", answer, re.M)
+    assert patch_match and "+new" in Path(patch_match.group(1)).read_text(), answer
     assert (project / "value.txt").read_text() == "old\n", "worker edited primary"
     answer = call(panel.peer_command("review", owner, project, prompt="Review value.txt.",
                                      verify="test -f value.txt"), env)
@@ -929,6 +1358,387 @@ rows = json.loads(call(["bash", str(panel.ENTRY), "artifact-index", "--repo", st
 assert {r["provider"] for r in rows if r["kind"] == "delegate"} == set(panel.PROVIDERS)
 assert {r["provider"] for r in rows if r["kind"] == "review"} == set(panel.PROVIDERS)
 
+# Exercise exact role routes through the real provider runner, with one
+# recorded main per caller and read/write authority tested independently.
+main_attempts = {}
+for owner in panel.PROVIDERS:
+    main_attempts[owner] = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
+                               "start", "--provider", owner, "--tool", "panel-main", "--ref", "panel_role=main",
+                               "--then", "starting", "--then", "working"]).strip()
+cases = [("claude", "worker", "light", "read", "explain", "gpt-6-luna"),
+         ("codex", "worker", "routine", "read", "explain", "claude-sonnet-5-5"),
+         ("codex", "worker", "main", "read", "investigate", "gpt-6-sol"),
+         ("claude", "worker", "main", "write", "implement", "claude-opus-5-5"),
+         ("claude", "advisor", "routine", "read", "advise", "gpt-6-astra"),
+         ("codex", "advisor", "routine", "read", "advise", "claude-fable-5-1"),
+         ("claude", "reviewer", "routine", "read", "review", "gpt-6-astra")]
+for index, (owner, role, workload, access, purpose, expected) in enumerate(cases):
+    request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", role,
+               "--owner", owner, "--workload", workload, "--access", access, "--purpose", purpose,
+               "--task-id", "panel-route-%s" % index, "--label", "Inspect fixture source %s" % index]
+    if access == "write":
+        request += ["--brief-file", str(brief), "--verify", "test \"$(tail -1 value.txt)\" = new"]
+    else:
+        request += ["--prompt", "Explain value.txt; judge only the supplied source evidence."]
+        if role == "reviewer":
+            request += ["--verify", "test -f value.txt"]
+    before = subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"])
+    route = json.loads(call(request + ["--dry-run"]))
+    assert route["route"]["model"] == expected and route["executes"] is False, route
+    env = dict(environment, OMS_AGENT=owner, OMS_PANEL_MAIN_ATTEMPT=main_attempts[owner])
+    if access == "write":
+        env["PANEL_TEST_MODE"] = "write"
+    answer = call(request, env)
+    if access == "write":
+        assert "patch:" in answer, answer
+        write_patch = re.search(r"^patch: (.+)$", answer, re.M).group(1)
+    assert (project / "value.txt").read_text() == "old\n", "role task edited primary"
+    assert subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"]) == before
+    attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
+    attempt = next(row for row in attempts if row.get("task_id") == "panel-route-%s" % index)
+    refs = attempt["refs"]
+    assert refs["panel_role"] == role and refs["panel_model"] == expected, attempt
+    assert refs["panel_effort"] == route["route"]["effort"], refs
+    assert refs["panel_access"] == access and refs["panel_label"] == "Inspect fixture source %s" % index, refs
+    assert attempt["parent_attempt_id"] == main_attempts[owner], attempt
+    assert attempt["state"] == ("review" if access == "write" else "done"), attempt
+    assert refs["panel_location"].startswith("worktree:") if role == "worker" else refs["panel_location"] == "repository", refs
+    assert str(home) not in json.dumps(refs) and str(project) not in json.dumps(refs), refs
+    if role == "advisor":
+        retained = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
+                                    "--task-id", "panel-route-%s" % index, "--json"]))["rows"][0]
+        assert any(c.get("kind") == "call" and "inspected source" in c.get("answer", "") for c in retained["calls"]), retained
+        assert retained["acceptance"] is False
+    observed = json.loads(worker_log.read_text().splitlines()[-1])
+    assert expected in observed["argv"], observed
+    if route["route"]["provider"] == "claude":
+        assert observed["argv"][observed["argv"].index("--effort") + 1] == route["route"]["effort"], observed
+    else:
+        assert any("model_reasoning_effort" in arg and route["route"]["effort"] in arg
+                   for arg in observed["argv"]), observed
+    assert observed["parent"] == main_attempts[owner], observed
+    if role == "worker":
+        assert observed["cwd"] != str(project), observed
+    else:
+        assert observed["cwd"] == str(project), observed
+
+# Registered transports join the same task tree without a native launcher or
+# changes to preset allocation. Muse is a synthetic custom-adapter fixture.
+external_base = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "worker",
+                 "--owner", "codex", "--purpose", "investigate", "--prompt", "Inspect value.txt without edits."]
+for target, expected in (("grok", "grok"), ("agy", "antigravity"), ("muse", "muse")):
+    request = external_base + ["--to", target, "--model", target + "-fixture",
+                               "--task-id", "external-" + target, "--label", "Inspect with " + target]
+    planned = json.loads(call(request + ["--dry-run"]))
+    assert planned["route"]["provider"] == expected and planned["route"]["effort"] is None
+    assert "--reasoning-effort" not in planned["argv"] and planned["executes"] is False
+    before = (project / "value.txt").read_bytes()
+    env = dict(environment, OMS_AGENT="codex", OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"])
+    answer = call(request, env)
+    artifact = re.search(r"^artifact: (.+)$", answer, re.M)
+    assert artifact and "inspected the bounded repository task" in Path(artifact.group(1)).read_text(), (target, answer)
+    assert (project / "value.txt").read_bytes() == before
+    attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
+    attempt = next(row for row in attempts if row.get("task_id") == "external-" + target)
+    assert attempt["provider"] == expected and attempt["parent_attempt_id"] == main_attempts["codex"]
+    assert attempt["refs"]["panel_model"] == target + "-fixture" and attempt["state"] == "done"
+    execution = json.loads(worker_log.read_text().splitlines()[-1])
+    assert execution["cwd"] != str(project) and execution["parent"] == main_attempts["codex"]
+    if target == "muse":
+        assert execution["argv"][0] == "run" and "--access" in execution["argv"]
+        assert execution["argv"][execution["argv"].index("--model") + 1] == "muse-fixture"
+
+for options in (["--to", "muse"], ["--to", "muse", "--model", "provider-default"],
+                ["--to", "muse,grok", "--model", "fixture"], ["--to", "unregistered", "--model", "fixture"],
+                ["--to", "deepseek", "--model", "fixture"], ["--to", "codex", "--model", "gpt-5.6-sol"],
+                ["--to", "grok", "--model", "fixture", "--seat", "astra"],
+                ["--model", "fixture"], ["--reasoning-effort", "high"],
+                ["--to", "muse", "--model", "fixture", "--access", "write", "--purpose", "implement",
+                 "--brief-file", str(brief), "--verify", "test -f value.txt"]):
+    before = worker_log.read_bytes()
+    failure = subprocess.run(external_base + options + ["--dry-run"], cwd=project,
+                             env=environment, capture_output=True, text=True)
+    assert failure.returncode != 0, (options, failure.stdout)
+    if "--access" in options:
+        assert "OMS_PROVIDER_WRITE_ADAPTERS" in failure.stderr, failure.stderr
+    assert worker_log.read_bytes() == before
+profile_route = json.loads(call(external_base + ["--to", "vibe", "--dry-run"]))
+assert profile_route["route"]["model"] == "provider-default" and "--model" not in profile_route["argv"]
+answer = call(external_base + ["--to", "vibe", "--task-id", "external-profile", "--label", "Inspect native profile"],
+              dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
+assert "artifact:" in answer
+for role, target in (("advisor", "grok"), ("reviewer", "muse")):
+    request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", role,
+               "--owner", "codex", "--to", target, "--model", target + "-fixture", "--prompt", "Inspect source.",
+               "--task-id", "external-" + role, "--label", "Inspect with " + role]
+    if role == "reviewer":
+        request += ["--verify", "test -f value.txt"]
+    planned = json.loads(call(request + ["--dry-run"]))
+    assert planned["argv"][2] == ("advise" if role == "advisor" else "peer-review")
+    assert "--reasoning-effort" not in planned["argv"]
+    call(request, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
+opted_in = dict(environment, OMS_PROVIDER_WRITE_ADAPTERS="muse")
+write_request = [a for a in external_base[:external_base.index("--purpose")]] + [
+    "--to", "muse", "--model", "muse-fixture", "--access", "write", "--purpose", "implement",
+    "--brief-file", str(brief), "--verify", 'test "$(tail -1 value.txt)" = new', "--task-id", "external-muse-write",
+    "--label", "Implement with adapter"]
+assert json.loads(call(write_request + ["--dry-run"], opted_in))["route"]["access"] == "write"
+write_env = dict(opted_in, PANEL_TEST_MODE="write", OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"])
+assert "patch:" in call(write_request, write_env)
+assert (project / "value.txt").read_text() == "old\n"
+with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show"), \
+        patch.object(panel, "provider_catalog", return_value=list(registered.values())), \
+        patch.object(panel, "dispatch", return_value=0) as routed, \
+        patch.object(panel.sys, "stdout", io.StringIO()), \
+        patch.object(panel, "read_field", side_effect=["p", "muse", "5", "muse-fixture", "", "Inspect source", "", "q"]):
+    assert panel.interactive(project) == 0
+    assert routed.call_args.kwargs == {"target": "muse", "model": "muse-fixture", "effort": None}
+snapshot = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--json"]))["dashboard"]
+panel_rows = [row for row in snapshot["attempts"]["recent"] if row.get("panel")]
+assert {row["panel"]["role"] for row in panel_rows} >= {"worker", "advisor", "reviewer"}, panel_rows
+assert all(row.get("parent_attempt_id") in main_attempts.values() for row in panel_rows
+           if row["panel"]["role"] != "main")
+assert all(row["panel"]["label"] and row["panel"]["access"] for row in panel_rows
+           if row["panel"]["role"] != "main")
+# An exact native main filters both live children and recent outcomes. Its
+# supplied title must never be replaced by an unrelated repository goal.
+from copy import deepcopy
+from panel_view import render
+scoped = deepcopy(snapshot)
+scoped["goal"] = {"text": "Unrelated repository goal"}
+main_id = main_attempts["claude"]
+for row in scoped["attempts"]["active_recent"] + scoped["attempts"]["recent"]:
+    if row["attempt_id"] == main_id:
+        row["panel"].update(model="claude-opus-5-5", label="Refine panel routing")
+own_text = render(scoped, "claude", width=150, height=45, main_attempt=main_id)
+assert "Refine panel routing" in own_text and "Unrelated repository goal" not in own_text, own_text
+assert "selected: claude-fable-5-1" not in own_text and "selected: claude-sonnet-5-5" not in own_text, own_text
+for title in ("".join(("api", "_key", "=", "fixture-value")), "/private/absolute", "../escaping"):
+    try:
+        panel.safe_label(title)
+        raise AssertionError("unsafe task label accepted")
+    except ValueError:
+        pass
+assert panel.safe_label("설명 \033[31m source") == "설명 ?[31m source"
+
+# The council reuses the peer front door: four exact seats, explicit rounds,
+# bounded repairs, and the owning main's child links rather than a new task DB.
+council_args = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--council",
+                "--owner", "codex", "--task-id", "panel-council-test", "--label", "Decide readable results",
+                "--prompt", "Inspect value.txt and compare the result presentation."]
+before_index = (project / ".oms/artifacts/index.jsonl").read_bytes()
+for rounds in (1, 2):
+    planned = json.loads(call(council_args + ["--rounds", str(rounds), "--dry-run"]))
+    assert planned["primary_calls"] == 4 * (rounds + 1) and planned["max_calls"] == 8 * (rounds + 1)
+    assert planned["families"] == 2 and planned["executes"] is False
+    assert planned["argv"][planned["argv"].index("--providers") + 1] == \
+        "codex:model=gpt-6-sol,claude:model=claude-opus-5-5,codex:model=gpt-6-astra,claude:model=claude-fable-5-1"
+assert (project / ".oms/artifacts/index.jsonl").read_bytes() == before_index
+call(council_args, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
+council_attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
+council_attempts = [a for a in council_attempts if a.get("task_id") == "panel-council-test"]
+assert any(a["tool"] == "panel-council" and a["state"] == "done" for a in council_attempts)
+assert {a["refs"].get("panel_model") for a in council_attempts if a["tool"] != "panel-council"} == \
+    {"gpt-6-sol", "claude-opus-5-5", "gpt-6-astra", "claude-fable-5-1"}, council_attempts
+assert all(a.get("parent_attempt_id") == main_attempts["codex"] for a in council_attempts)
+
+import panel_results as saved
+from panel_view import render_results
+summary = temporary / "panel-result-summary.txt"
+summary.write_text("결과 화면을 읽기 쉽게 정리했습니다.\n검증 근거는 value.txt에서 확인합니다.\n", encoding="utf-8")
+final_args = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--finalize", "--owner", "codex",
+              "--task-id", "panel-council-test", "--summary-file", str(summary), "--outcome", "accepted",
+              "--verify", "test -f value.txt", "--evidence", "value.txt"]
+first = json.loads(call(final_args))
+second = json.loads(call(final_args))
+assert first["revision"] == second["revision"] and first["verification"]["status"] == "passed"
+reopened = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
+                            "--task-id", "panel-council-test", "--json"]))
+row = reopened["rows"][0]
+assert row["acceptance"] and row["summary"].startswith("결과 화면") and row["delivery"] == "not_requested"
+assert any(c.get("answer", "").startswith("Answer:") for c in row["calls"]), row
+assert all("--prompt" not in c.get("answer", "") for c in row["calls"])
+for width in (24, 42, 100):
+    readable = render_results(reopened, width)
+    assert "\033" not in readable and all(display_width(line) <= width for line in readable.splitlines())
+    assert "Outcome:" in readable and "결과 화면" in readable
+failure = subprocess.run(final_args[:-4] + ["--verify", "false", "--evidence", "value.txt"],
+                         cwd=project, env=environment, capture_output=True, text=True)
+assert failure.returncode != 0 and "verifier failed" in failure.stderr
+write_finalize = list(final_args)
+write_finalize[write_finalize.index("--task-id") + 1] = "panel-route-3"
+failure = subprocess.run(write_finalize, cwd=project, env=environment, capture_output=True, text=True)
+assert failure.returncode != 0 and "matching landed patch" in failure.stderr
+whole_finalize = list(final_args)
+whole_finalize[whole_finalize.index("--task-id") + 1] = "whole-main-result"
+whole_finalize[whole_finalize.index("--owner") + 1] = "claude"
+owner_env = dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["claude"])
+failure = subprocess.run(whole_finalize, cwd=project, env=owner_env, capture_output=True, text=True)
+assert failure.returncode != 0 and "matching landed patch" in failure.stderr, failure
+call(["bash", str(panel.ENTRY), "patch-land", "--repo", str(project), "--patch", write_patch,
+      "--verify", "test \"$(tail -1 value.txt)\" = new"])
+write_finalize[write_finalize.index("--verify") + 1] = "test \"$(tail -1 value.txt)\" = new"
+whole_finalize[whole_finalize.index("--verify") + 1] = "test \"$(tail -1 value.txt)\" = new"
+assert json.loads(call(write_finalize))["outcome"] == "accepted"
+whole = json.loads(call(whole_finalize, owner_env))
+assert whole["main_attempt_id"] == main_attempts["claude"] and whole["admission_event_ids"]
+joined = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
+                         "--task-id", "whole-main-result", "--json"]))["rows"][0]
+assert any(c.get("kind") == "delegate" for c in joined["calls"]), joined
+# A task with its own attempts never adopts its main's other children.
+call(final_args, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
+own = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
+                       "--task-id", "panel-council-test", "--json"]))["rows"][0]
+assert own["calls"] and all(c.get("kind") != "delegate" for c in own["calls"]), own
+subprocess.run(["git", "-C", str(project), "restore", "value.txt"], check=True)
+patch_file = project / ".oms/artifacts/test-result.patch"
+patch_file.write_text("fixture patch bytes\n")
+digest = saved._relative(project, ".oms/artifacts/test-result.patch")["sha256"]
+delegated = {"kind": "delegate", "task_id": "test-land", "attempt_id": "att_worker",
+             "patch": ".oms/artifacts/test-result.patch", "patch_sha256": digest, "plan_id": "fixture-plan", "exit": 0}
+landed = {"kind": "patch-land", "task_id": "test-land", "patch_sha256": digest,
+          "plan_id": "fixture-plan", "exit": 0}
+assert saved._admission(project, [delegated, landed], "test-land", {"attempt_id": "att_worker"}) == landed
+assert saved._admission(project, [delegated, dict(landed, plan_id="other")], "test-land", {"attempt_id": "att_worker"}) is None
+patch_file.write_text("changed patch bytes\n")
+assert saved._admission(project, [delegated, landed], "test-land", {"attempt_id": "att_worker"}) is None
+
+# Test retry fencing and durable reopen using the transport boundary alone.
+# The production artifact/lifecycle writers still run; no app socket is used.
+with patch.dict(os.environ, environment, clear=True):
+    unlanded = {"attempt_id": "att_hidden_write", "task_id": "hidden-write", "state": "review",
+                "refs": {"panel_role": "worker", "panel_access": "write"}}
+    recent = [{"attempt_id": "att_other_%s" % n, "task_id": "other-%s" % n} for n in range(301)]
+    def windowed_query(repo, verb, *args):
+        if verb == "artifact-index":
+            return {"rows": []}
+        values = [unlanded] + recent
+        return values[-int(args[args.index("--limit") + 1]):] if "--limit" in args else values
+    with patch.object(saved, "_query", side_effect=windowed_query):
+        try:
+            saved.finalize(project, "codex", "hidden-write", str(summary), "accepted", "true", ["value.txt"])
+            raise AssertionError("old unlanded write worker escaped acceptance")
+        except ValueError as error:
+            assert "matching landed patch" in str(error)
+    history = ([{"task_id": "history-%s" % n, "ts": "2026-01-%02d" % (n + 1)} for n in range(21)] +
+               [{"task_id": "history-0", "ts": "2026-02-01"}])
+    with patch.object(saved, "_records", return_value=([], history)):
+        assert saved.results(project)["rows"][0]["task_id"] == "history-0"
+    uncertain = {"status": "timeout", "persisted": False, "delivery_unknown": True}
+    with patch.object(saved.codex_app_notify, "deliver", return_value=uncertain) as transport:
+        delivered = saved.finalize(project, "codex", "result-retry", str(summary), "completed", notify=True)
+        saved.finalize(project, "codex", "result-retry", str(summary), "completed", notify=True)
+        assert transport.call_count == 1
+    summary.unlink()
+    with patch.object(saved.codex_app_notify, "deliver", return_value={"status": "persisted", "persisted": True}) as transport:
+        assert saved.retry_delivery(project, "result-retry")["receipt"]["persisted"]
+        assert saved.retry_delivery(project, "result-retry")["receipt"]["persisted"]
+        assert transport.call_count == 1
+    summary.write_text("A completed result.\n")
+    with patch.object(saved.codex_app_notify, "deliver", side_effect=RuntimeError("lost after submission")):
+        try:
+            saved.finalize(project, "codex", "result-crash", str(summary), "completed", notify=True)
+            raise AssertionError("crash fixture did not fire")
+        except RuntimeError:
+            pass
+    with patch.object(saved.codex_app_notify, "deliver") as transport:
+        crash = saved.finalize(project, "codex", "result-crash", str(summary), "completed", notify=True)
+        assert crash["delivery"]["receipt"]["status"] == "pending" and not transport.called
+    for unsafe in ("/private/file", "../value.txt"):
+        try:
+            saved.finalize(project, "codex", "bad-result", str(summary), "completed", evidence=[unsafe])
+            raise AssertionError("unsafe evidence accepted")
+        except ValueError:
+            pass
+    for text in ("/private/absolute", "".join(("api", "_key", "=", "fixture-value"))):
+        summary.write_text(text)
+        try:
+            saved.finalize(project, "codex", "bad-result", str(summary), "completed")
+            raise AssertionError("unsafe summary accepted")
+        except ValueError:
+            pass
+    summary.write_text("Safe result.\n")
+    link = temporary / "panel-result-linked.txt"
+    try:
+        link.symlink_to(summary)
+        try:
+            saved.finalize(project, "codex", "bad-result", str(link), "completed")
+            raise AssertionError("linked summary accepted")
+        except ValueError:
+            pass
+    except (OSError, NotImplementedError):
+        if os.name != "nt":
+            raise
+    linked_result = project / saved.results(project, "panel-council-test")["rows"][0]["artifact"]
+    linked_result.write_text("changed\n")
+    assert saved.results(project, "panel-council-test")["rows"][0]["missing_result"]
+
+for owner, attempt in main_attempts.items():
+    call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "transition",
+          "--attempt", attempt, "--state", "cancelled"])
+closed_parent = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                               "--dispatch", "worker", "--owner", "codex", "--prompt", "Inspect source"],
+                              env=dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]),
+                              capture_output=True, text=True)
+assert closed_parent.returncode != 0 and "identity" in closed_parent.stderr
+
+# Task bodies keep native admission while only their shared display title is withheld.
+for task in ("/review", "../scripts inspect", "Explain " + "/" + "home" + "/fixture/private.py", "x" * 160):
+    with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show"), \
+            patch.object(panel, "read_field", side_effect=["t", task, "q"]), \
+            patch.object(panel, "ensure_room", return_value="fixture-room") as chosen_room, \
+            patch.object(panel, "open_native", return_value=0) as task_open, \
+            patch.dict(os.environ, environment, clear=True):
+        assert panel.interactive(project) == 0
+        assert task_open.call_args.kwargs["task"] == task
+        expected_title = "x" * 160 if task == "x" * 160 else "Shared work"
+        assert chosen_room.call_args.kwargs["title"] == expected_title
+
+# A lifecycle writer failure cannot kill a running native main or mask its exit.
+from unittest.mock import Mock
+with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show"), \
+        patch.object(panel, "read_field", return_value="1"), patch.object(panel, "ensure_room", return_value="fixture-room"), \
+        patch.object(panel, "open_native", side_effect=panel.NativeShutdown(15)), patch.dict(os.environ, environment, clear=True):
+    try:
+        panel.interactive(project)
+    except panel.NativeShutdown as error:
+        assert error.exit_code == 143
+    else:
+        raise AssertionError("interactive panel swallowed native termination")
+uncertain_child = Mock()
+uncertain_child.wait.side_effect = KeyboardInterrupt
+uncertain_child.poll.return_value = None
+uncertain_child.terminate.side_effect = OSError("fixture shutdown unavailable")
+with patch.object(panel, "events", return_value="att_fixture") as event_log, \
+        patch.object(panel, "safe_label", return_value="Inspect source"), \
+        patch.object(panel, "managed_session", return_value=False), \
+        patch.object(panel, "ensure_room", return_value="fixture-room"), patch.object(panel.room, "join"), \
+        patch.object(panel.subprocess, "Popen", return_value=uncertain_child), patch.dict(os.environ, environment, clear=True):
+    try:
+        panel.run_native("codex", project)
+    except KeyboardInterrupt:
+        pass
+    assert any("native_shutdown_unconfirmed" in row.args and "blocked" in row.args for row in event_log.call_args_list)
+    assert not any("cancelled" in row.args or "done" in row.args for row in event_log.call_args_list)
+for action in ("native", "council"):
+    process = Mock()
+    process.wait.side_effect = [subprocess.TimeoutExpired("fixture", 60), 0]
+    process.poll.return_value = 0
+    def broken_events(repo, operation, *args, **kwargs):
+        if operation == "start":
+            return "att_fixture"
+        raise ValueError("fixture ledger is unavailable")
+    with patch.object(panel, "events", side_effect=broken_events), \
+            patch.object(panel, "safe_label", return_value="Inspect source"), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "ensure_room", return_value="fixture-room"), \
+            patch.object(panel.room, "join"), \
+            patch.object(panel.subprocess, "Popen", return_value=process), \
+            patch.dict(os.environ, environment, clear=True):
+        status = panel.run_native("codex", project) if action == "native" else \
+            panel.council(project, "codex", "heartbeat-council", "Inspect source", "Compare options")
+        assert status == 0 and not process.terminate.called and not process.kill.called
+
 for owner in panel.PROVIDERS:
     plan = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                            "--launch", owner, "--resume", "exact-session-id", "--dry-run"]))
@@ -939,6 +1749,17 @@ for owner in panel.PROVIDERS:
 for arguments in (["--resume", "--last"], ["--launch", "codex", "--resume", "../bad"],
                   ["--launch", "codex", "--resume=--last", "--dry-run"],
                   ["--launch", "codex", "--json"], ["--model", "x"],
+                  ["--watch", "--launch", "codex"], ["--watch", "--json"],
+                  ["--owner", "claude"], ["--count", "1"], ["--watch", "--count", "0"],
+                  ["--no-animation"],
+                  ["--json", "--view", "compact"], ["--results", "--attention-only"],
+                  ["--launch", "codex", "--view", "detail"],
+                  ["--finalize", "--dry-run"], ["--retry-delivery"], ["--results", "--notify"],
+                  ["--council", "--rounds", "3"],
+                  ["--dispatch", "advisor", "--access", "write", "--prompt", "change source"],
+                  ["--dispatch", "worker", "--access", "write", "--purpose", "implement", "--prompt", "change source"],
+                  ["--dispatch", "worker", "--seat", "fable", "--prompt", "explain"],
+                  ["--dispatch", "advisor", "--purpose", "explain", "--prompt", "explain"],
                   ["--json", "--dry-run"], []):
     result = subprocess.run(["bash", str(panel.ENTRY), "panel"] + arguments,
                             cwd=str(project), env=environment, capture_output=True, text=True)
@@ -947,6 +1768,15 @@ for guard in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_HARNESS_DELEGATE_DEPTH": "1"}):
     result = subprocess.run(["bash", str(panel.ENTRY), "panel", "--launch", "codex"],
                             cwd=str(project), env=dict(environment, **guard), capture_output=True, text=True)
     assert result.returncode == 2 and "worker cannot" in result.stderr, result
+    result = subprocess.run(["bash", str(panel.ENTRY), "panel", "--dispatch", "worker", "--prompt", "explain"],
+                            cwd=str(project), env=dict(environment, **guard), capture_output=True, text=True)
+    assert result.returncode == 2 and "worker cannot" in result.stderr, result
+snapshot = call(["bash", str(panel.ENTRY), "panel", "--watch", "--count", "1", "--owner", "claude"],
+                dict(environment, OMS_HARNESS_CHILD="1", NO_COLOR=""))
+assert "MAIN / Claude Code" in snapshot and "\033" not in snapshot, snapshot
+filtered = call(["bash", str(panel.ENTRY), "panel", "--watch", "--count", "1", "--view", "compact", "--attention-only"],
+                dict(environment, OMS_HARNESS_CHILD="1", NO_COLOR=""))
+assert "compact" in filtered and "\033" not in filtered, filtered
 
 if os.name == "posix":
     import fcntl
@@ -956,12 +1786,13 @@ if os.name == "posix":
     import termios
     import time
 
-    def terminal(command, inputs, expected):
+    def terminal(command, inputs, expected, trigger=None, signal_after=None, expected_exit=0):
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(project)
             os.execvpe(command[0], command, dict(environment, TERM="xterm", OMS_AGENT="codex"))
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 110, 0, 0))
+        initial_tty = termios.tcgetattr(fd) if signal_after is not None else None
         pending = inputs.splitlines(keepends=True)
         prompts = 0
         output = b""
@@ -975,20 +1806,39 @@ if os.name == "posix":
                     except OSError:
                         pass
                 seen = output.count(b"oms> ")
-                if pending and seen > prompts:
+                if pending and trigger is not None and trigger in output and not prompts:
+                    os.write(fd, b"".join(pending))
+                    pending = []
+                    prompts = 1
+                elif pending and seen > prompts:
                     os.write(fd, pending.pop(0))
                     prompts = seen
+                if signal_after is not None and trigger in output and not prompts:
+                    os.kill(pid, signal_after)
+                    prompts = 1
                 waited, status = os.waitpid(pid, os.WNOHANG)
                 if waited:
                     finished = True
-                    assert os.waitstatus_to_exitcode(status) == 0, output
+                    assert os.waitstatus_to_exitcode(status) == expected_exit, output
                     break
             if not finished:
                 waited, status = os.waitpid(pid, os.WNOHANG)
                 finished = bool(waited)
                 assert finished, output
-                assert os.waitstatus_to_exitcode(status) == 0, output
+                assert os.waitstatus_to_exitcode(status) == expected_exit, output
+            for unused in range(4):
+                if not select.select([fd], [], [], 0)[0]:
+                    break
+                try:
+                    chunk = os.read(fd, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output += chunk
             assert expected in output, output
+            if initial_tty is not None:
+                assert termios.tcgetattr(fd) == initial_tty, "watch shutdown did not restore the tty"
         finally:
             if not finished:
                 os.kill(pid, 9)
@@ -996,16 +1846,46 @@ if os.name == "posix":
             os.close(fd)
 
     terminal(["bash", str(panel.ENTRY), "panel", "--layout", "inline"], b"9\nq\n", b"OMS control panel")
+    motion_attempt = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "start",
+                           "--provider", "claude", "--tool", "panel-motion-fixture",
+                           "--ref", "panel_role=worker", "--ref", "panel_model=claude-sonnet-5-5",
+                           "--ref", "panel_label=Explain the active fixture task", "--then", "starting",
+                           "--then", "working"]).strip()
+    ledger = project / ".oms/lifecycle/events.jsonl"
+    before_motion = ledger.read_bytes()
+    terminal(["bash", str(panel.ENTRY), "panel", "--watch", "--count", "2"], b"", b"\033[2K")
+    assert ledger.read_bytes() == before_motion, "animation wrote lifecycle state"
+    call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "transition",
+          "--attempt", motion_attempt, "--state", "cancelled"])
     for owner in panel.PROVIDERS:
-        terminal(["bash", str(panel.ENTRY), "panel", "--launch", owner, "--resume", "exact-session-id"],
+        terminal(["bash", str(panel.ENTRY), "panel", "--launch", owner, "--resume", "exact-session-id",
+                  "--task", "Explain fixture parser"],
                  b"", b"NATIVE_FIXTURE_READY")
+    length_room = room.create(project, "native-label-length", "Native title length")
+    for length in (120, 121, 160):
+        terminal(["bash", str(panel.ENTRY), "panel", "--launch", "codex", "--room", length_room,
+                  "--resume", "exact-session-id", "--task", "x" * length], b"", b"NATIVE_FIXTURE_READY")
+    assert all(len(p["label"]) <= 120 for p in room.status(project, length_room)["participants"])
+    private_task = "Explain " + "/" + "home" + "/fixture-private/input.py"
+    terminal(["bash", str(panel.ENTRY), "panel", "--launch", "codex", "--resume", "exact-session-id",
+              "--task", private_task], b"", b"NATIVE_FIXTURE_READY")
     launched = [json.loads(line) for line in log.read_text().splitlines()]
     assert {r["agent"] for r in launched} == set(panel.PROVIDERS)
+    for length in (120, 121, 160):
+        assert any(("x" * length) in " ".join(row["argv"]) for row in launched)
     for row in launched:
         assert row["cwd"] == row["repo"] == str(project.resolve())
         assert row["entry"] == str(panel.ENTRY)
         assert "exact-session-id" in row["argv"]
         assert "peer-delegate" in " ".join(row["argv"])
+    native_attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
+    assert all(row["state"] == "done" for row in native_attempts
+               if row["tool"] == "panel-main" and row["attempt_id"] not in main_attempts.values()), native_attempts
+    titles = [row["refs"]["panel_label"] for row in native_attempts
+              if row["tool"] == "panel-main" and row["attempt_id"] not in main_attempts.values()]
+    assert titles.count("Explain fixture parser") == 2 and "Native task not recorded" in titles, titles
+    assert private_task not in json.dumps(native_attempts), "private native task leaked into lifecycle metadata"
+    assert private_task in " ".join(launched[-1]["argv"]), "native task was lost instead of hiding its title"
     actual_tmux = shutil.which("tmux")
     if actual_tmux:
         socket = "oms-panel-fixture-" + str(os.getpid())
@@ -1014,7 +1894,9 @@ if os.name == "posix":
                            (shlex.quote(actual_tmux), shlex.quote(socket)))
         wrapper.chmod(0o755)
         tmux = [actual_tmux, "-L", socket]
-        env = dict(environment, TERM="xterm")
+        subprocess.run(tmux + ["new-session", "-d", "-s", "fixture-existing", "sleep 60"],
+                       env=dict(environment, TERM="xterm"), check=True)
+        env = dict(environment, TERM="xterm", OMS_PANEL_NO_ANIMATION="1", NO_COLOR="")
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(project)
@@ -1039,17 +1921,48 @@ if os.name == "posix":
                 raise AssertionError((arguments, expected, text, bytes(client_output[-4000:])))
 
             sessions = tmux_wait(["list-sessions", "-F", "#{session_name}"], "oms-panel-")
-            session = sessions.strip().splitlines()[0]
+            session = next(s for s in sessions.splitlines() if s.startswith("oms-panel-"))
+            subprocess.run(tmux + ["set-environment", "-t", session, "PANEL_TEST_NATIVE_HOLD", "1"], env=env, check=True)
             panes = tmux_wait(["list-panes", "-t", session, "-F", "#{pane_id}"], "%").splitlines()
             control = panes[0]
             tmux_wait(["capture-pane", "-p", "-t", control], "oms>")
+            subprocess.run(tmux + ["send-keys", "-t", control, "v", "Enter", "b", "Enter"], env=env, check=True)
+            tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_view"], "compact")
+            tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_attention"], "1")
             for owner, key in (("codex", "1"), ("claude", "2")):
                 subprocess.run(tmux + ["send-keys", "-t", control, key, "Enter"], env=env, check=True)
                 tmux_wait(["list-windows", "-t", session, "-F", "#{window_name}"], owner)
                 listing = tmux_wait(["list-panes", "-t", session + ":" + owner,
-                                     "-F", "#{pane_id}"], "%").splitlines()
+                                     "-F", "#{pane_id}"], "\n%").splitlines()
                 tmux_wait(["capture-pane", "-p", "-t", listing[0]], "NATIVE_FIXTURE_READY")
-                tmux_wait(["capture-pane", "-p", "-t", listing[1]], "OMS dashboard")
+                sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]],
+                                    "MAIN / " + ("Codex" if owner == "codex" else "Claude Code"))
+                assert "MAIN / " + ("Codex" if owner == "codex" else "Claude Code") in sidebar, sidebar
+                assert "OMS activity" in sidebar, sidebar
+                assert "OMS activity / attention / compact" in sidebar, sidebar
+                pane_cmd = subprocess.check_output(tmux + ["display-message", "-p", "-t", listing[1],
+                                                           "#{pane_start_command}"], env=env, text=True)
+                assert "OMS_PANEL_NO_ANIMATION=1" in pane_cmd and "NO_COLOR=" in pane_cmd, pane_cmd
+                captured = subprocess.check_output(tmux + ["capture-pane", "-e", "-p", "-t", listing[1]],
+                                                   env=env, text=True)
+                assert "\033" not in captured, captured
+                # Select tree in the watcher and click its own current main.
+                # The existing native pane is focused, with no second launch.
+                subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "t"], env=env, check=True)
+                tree_sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], " / current")
+                clicked_row = next(n + 1 for n, line in enumerate(tree_sidebar.splitlines()) if " / current" in line)
+                subprocess.run(tmux + ["select-pane", "-t", listing[1]], env=env, check=True)
+                subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "\033[<0;8;%sM" % clicked_row], env=env, check=True)
+                tmux_wait(["display-message", "-p", "-t", session + ":" + owner, "#{pane_id}"], listing[0])
+                assert subprocess.check_output(tmux + ["show-option", "-g", "-v", "mouse"], env=env, text=True).strip() == "off"
+                assert subprocess.check_output(tmux + ["show-option", "-t", session, "-v", "mouse"], env=env, text=True).strip() == "on"
+                subprocess.run(tmux + ["send-keys", "-t", listing[0], "Enter"], env=env, check=True)
+            control_sidebar = tmux_wait(["list-panes", "-t", session + ":control", "-F", "#{pane_id}"], "\n%").splitlines()[1]
+            tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_owner"], "claude")
+            tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "Claude | week")
+            subprocess.run(tmux + ["send-keys", "-t", control, "4", "Enter", "codex", "Enter"], env=env, check=True)
+            tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_owner"], "codex")
+            tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "Codex | week")
             records = [json.loads(line) for line in log.read_text().splitlines()]
             assert {r["agent"] for r in records[-2:]} == set(panel.PROVIDERS)
             assert all(r["cwd"] == str(project.resolve()) for r in records[-2:])
@@ -1074,6 +1987,773 @@ if os.name == "posix":
                 os.kill(pid, 9)
                 os.waitpid(pid, 0)
             os.close(fd)
+# The canonical operator suite also covers the room front door and native open contract.
+import room
+import codex_app_notify
+shared = room.create(project, "operator-room", "Shared parser task")
+room.join(project, shared, main_attempts["codex"], "codex", model="gpt-6-sol", label="Sol main")
+room.join(project, shared, main_attempts["claude"], "claude", model="claude-opus-5-5", label="Opus main")
+room_env = dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_PARTICIPANT=main_attempts["claude"],
+                OMS_ROOM_REPO=str(project), OMS_PANEL_MAIN_ATTEMPT=main_attempts["claude"])
+# Parent identities were intentionally closed by earlier negative cases; use a fresh owner here.
+room_owner = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "start",
+                   "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+                   "--ref", "panel_model=claude-opus-5-5", "--then", "starting", "--then", "working"]).strip()
+room.join(project, shared, room_owner, "claude", model="claude-opus-5-5", label="Active Opus")
+room_env.update(OMS_PANEL_MAIN_ATTEMPT=room_owner, OMS_ROOM_PARTICIPANT=room_owner)
+answer = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+               "--dispatch", "worker", "--owner", "claude", "--purpose", "investigate",
+               "--workload", "light", "--prompt", "Inspect value.txt without edits.",
+               "--task-id", "room-inspection", "--label", "Inspect the shared parser"], room_env)
+assert "artifact:" in answer, answer
+state = room.status(project, shared)
+child = next(p for p in state["participants"] if p["role"] == "worker")
+assert child["parent"] == room_owner and child["model"] == "gpt-6-luna", child
+handoff = next(m for m in state["messages"] if m["sender"] == child["participant"])
+assert handoff["recipient"] == room_owner and "parent acceptance pending" in handoff["text"], handoff
+assert "inspected the bounded repository task" in handoff["text"], handoff
+assert (project / "value.txt").read_text() == "old\n", "room cannot widen worker write access"
+# Control-window dispatch resolves the chosen provider's active main, rather
+# than the first main ever joined, and refuses zero or ambiguous ownership.
+control_env = dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project))
+with patch.dict(os.environ, control_env, clear=True), patch.object(panel.subprocess, "call", return_value=0):
+    assert panel.dispatch(project, "claude", "worker", "light", "auto", "read", "investigate",
+                          prompt="Inspect the bounded source", task_id="control-owner", label="Control dispatch") == 0
+    newest = room.status(project, shared)["participants"][-1]
+    assert newest["parent"] == room_owner
+    for owner in ("codex",):
+        try:
+            panel.dispatch(project, owner, "worker", "light", "auto", "read", "investigate", prompt="Inspect source")
+        except ValueError as error:
+            assert "unique active main" in str(error)
+        else:
+            raise AssertionError("control dispatch chose an exited owner")
+    second_owner = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+                                "--ref", "panel_room_id=" + shared, "--then", "starting", "--then", "working", output=True)
+    room.join(project, shared, second_owner, "claude")
+    try:
+        panel.dispatch(project, "claude", "worker", "light", "auto", "read", "investigate", prompt="Inspect source")
+    except ValueError as error:
+        assert "unique active main" in str(error)
+    else:
+        raise AssertionError("control dispatch silently chose between two mains")
+    panel.events(project, "transition", "--attempt", second_owner, "--state", "cancelled")
+    room.append(project, shared, {"kind": "leave", "participant": second_owner}, "Fixture owner stopped")
+recorded = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--limit", "300", "--json"]))
+room_attempt = next(a for a in recorded if a.get("refs", {}).get("panel_room_participant") == child["participant"])
+assert room_attempt["refs"]["panel_room_id"] == shared
+observed = json.loads(worker_log.read_text().splitlines()[-1])
+assert observed["room"] == shared and observed["participant"] == child["participant"], observed
+# Same task reuse cannot return another participant's artifact as the result.
+assert not panel.results(project, "room-inspection", "unrelated-participant")["rows"][0]["calls"]
+participant_results = panel.results(project, room_participant=child["participant"])
+assert any("Answer:" in c.get("answer", "") for r in participant_results["rows"] for c in r["calls"]), participant_results
+room_view = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared, "--json"], room_env))["dashboard"]
+assert room_view["room"]["id"] == shared
+room_view["attempts"]["active_recent"].append({"attempt_id": "graph-example-child", "state": "working",
+    "task_id": "graph-sample", "panel": {"role": "worker", "room_id": shared,
+    "room_participant": child["participant"], "model": "gpt-6-luna", "label": "긴 작업 설명을 분리해서 표시",
+    "location": "worktree:example/wt"}})
+immutable = json.dumps(room_view, sort_keys=True)
+graph = render(room_view, "claude", 100, 44, view="graph", frame=0)
+assert "MAILBOX" in graph and "MAINS" in graph and "NOT LOCKS" in graph and "Luna" in graph, graph
+degraded = deepcopy(room_view)
+degraded["collection"] = {"ok": False}
+degraded["room"]["error"] = "Room evidence unavailable"
+for width, height in ((100, 44), (76, 36), (35, 24), (35, 23), (35, 12)):
+    for density in ("graph", "compact"):
+        for menu in (False, True):
+            drawn = render(degraded, "claude", width, height, view=density, menu=menu)
+            assert "Collection degraded" in drawn and "Room evidence unavailable" in drawn, drawn
+            assert len(drawn.splitlines()) <= height - int(menu)
+            assert all(display_width(line) <= width for line in drawn.splitlines())
+assert graph != render(room_view, "claude", 100, 44, view="graph", frame=1)
+assert json.dumps(room_view, sort_keys=True) == immutable
+fallback = render(room_view, "claude", 35, 23, view="graph")
+assert "Joined mains" in fallback and "Graph needs 76x36" in fallback and "MAILBOX" in fallback, fallback
+for columns, rows in ((100, 44), (76, 36), (60, 36), (36, 28), (2, 8)):
+    for ascii_only in (False, True):
+        drawn = render(room_view, "claude", columns, rows, view="graph", unicode=not ascii_only, menu=True)
+        assert len(drawn.splitlines()) <= rows - 1 and all(display_width(line) <= columns for line in drawn.splitlines()), drawn
+        assert "\033" not in drawn
+        if ascii_only:
+            assert "╭" not in drawn and "─" not in drawn
+# The tree exposes every joined main, maps cells from the drawn frame, and
+# never manufactures a parent or changes room data while folding/scrolling.
+from panel_input import TerminalInput, choose
+from panel_metrics import cached, collect, pane_reading, percent
+tree_room = deepcopy(room_view)
+tree_room["room"]["participants"].extend([
+    {"participant": "extra-main", "provider": "codex", "model": "gpt-6-sol", "role": "main",
+     "label": "Third main", "joined": True, "seq": 100},
+    {"participant": "unlinked-worker", "provider": "codex", "model": "gpt-6-luna", "role": "worker",
+     "label": "연결 근거 없는 작업", "joined": True, "seq": 101, "parent": "outside-room"}])
+before_tree = json.dumps(tree_room, sort_keys=True)
+navigation = {}
+connected = render(tree_room, "codex", 91, 99, view="tree", navigation=navigation)
+assert connected.count("Claude |") == connected.count("Codex |") == 1, connected
+assert "Third main" in connected and "연결 근거 없는 작업" in connected and "UNLINKED" in connected
+assert "No joined worker" not in connected and "participants outside graph" not in connected
+assert len([i for i in navigation["items"] if i[0] == "chat"]) == 4, navigation
+target = next(hit for hit in navigation["hits"] if hit["action"][0] == "result")
+assert choose(("click", 8, target["y"]), navigation) == target["action"]
+assert choose(("click", 92, target["y"]), navigation) is None
+assert choose(("click", 1, 100), navigation) is None
+navigation["selected"] = ("result", "gone")
+assert choose(("enter",), navigation) is None
+owner_hit = next(hit for hit in navigation["hits"] if hit.get("fold"))
+assert choose(("click", 1, owner_hit["y"]), navigation) == ("fold", owner_hit["action"][1])
+navigation["collapsed"] = {owner_hit["action"][1]}
+folded = render(tree_room, "codex", 91, 99, view="tree", navigation=navigation)
+assert "calls" in folded and owner_hit["action"] in navigation["items"]
+for columns, rows in ((91, 99), (42, 24), (28, 12), (2, 8)):
+    for ascii_only in (False, True):
+        for menu in (False, True):
+            nav = {}
+            drawn = render(tree_room, "codex", columns, rows, view="tree", unicode=not ascii_only,
+                           menu=menu, navigation=nav)
+            assert len(drawn.splitlines()) <= rows - int(menu), drawn
+            assert all(display_width(line) <= columns for line in drawn.splitlines()), drawn
+            assert all(1 <= hit["y"] <= len(drawn.splitlines()) for hit in nav["hits"])
+            if ascii_only:
+                assert "─" not in drawn and "│" not in drawn and "▾" not in drawn
+            choose(("end",), nav)
+            render(tree_room, "codex", columns, rows, view="tree", navigation=nav)
+            if nav["viewport"] and nav["selected"]:
+                assert any(h["action"] == nav["selected"] for h in nav["hits"])
+assert json.dumps(tree_room, sort_keys=True) == before_tree
+decoder = TerminalInput()
+assert decoder.decode(b"\033[<0;8;") == []
+assert decoder.decode(b"7M\033[<0;8;7m\033[<65;8;7M\033[A\r") == [
+    ("click", 8, 7), ("scroll", 3), ("up",), ("enter",)]
+assert decoder.decode(b"\033[<32;1;1M") == []
+assert percent(True) is None and percent(float("nan")) is None and percent(10**1000) is None
+assert percent(0) == 0 and percent(100) == 100
+hud = temporary / "panel-hud"
+hud.mkdir()
+consumer = "a" * 32
+cache = hud / ("ctx-" + consumer[:24] + ".json")
+cache.write_text(json.dumps({"schema": 1, "used_percentage": 25, "ts": 1000,
+                            "seven_day": {"used_percentage": 0, "resets_at": 2000}}))
+with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": str(hud)}):
+    assert cached(consumer, 1000)["context_left"] == 75
+    assert cached(consumer, 1000)["weekly_used"] == 0
+    assert cached(consumer, 1601) == {"source": "cache stale"}
+    assert cached(consumer, 999) == {}
+    cache.write_text(json.dumps({"used_percentage": True, "ts": 1000,
+        "seven_day": {"used_percentage": 50, "resets_at": 900}}))
+    assert cached(consumer, 1000)["context_left"] is None and cached(consumer, 1000)["weekly_used"] is None
+    cache.unlink()
+    if os.name != "nt":
+        cache.symlink_to(project / "value.txt")
+        assert cached(consumer, 1000) == {}
+with patch("panel_chats.windows", return_value={}), patch("panel_chats.native_index", side_effect=AssertionError("render scan")):
+    reading = collect(tree_room)
+    assert reading["codex"]["source"] == "main ambiguous", reading
+    reading = collect(tree_room, main_attempt=main_attempts["codex"])
+    assert reading["codex"]["participant"] == main_attempts["codex"], reading
+with patch("panel_metrics.subprocess.run", side_effect=[
+        subprocess.CompletedProcess([], 0, "99\t0\n"),
+        subprocess.CompletedProcess([], 0, "GPT-6-Sol · Context 83% left · weekly 61% left\n")]) as pane_probe:
+    assert pane_reading({"pane": "%42"}, "codex") == {"context_left": 83, "weekly_used": 39, "source": "TUI"}
+    assert pane_probe.call_args.args[0][-4:] == ["-S", "91", "-E", "98"]
+with patch.object(panel, "managed_session", return_value=False), \
+        patch.object(room, "status", return_value=tree_room["room"]), \
+        patch("panel_chats.open_chat", return_value={"method": "existing-terminal"}) as opened:
+    nav = {"room_id": shared}
+    panel.navigate(project, ("chat", main_attempts["codex"]), tree_room, nav, 91)
+    assert opened.call_args.kwargs == {"allowed_methods": {"existing-terminal", "app-uri", "windows-uri"}}, opened.call_args
+    left = deepcopy(tree_room["room"])
+    for member in left["participants"]:
+        member["joined"] = False
+    with patch.object(room, "status", return_value=left):
+        try:
+            panel.navigate(project, ("chat", main_attempts["codex"]), tree_room, nav, 91)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("left participant was navigated")
+    assert opened.call_count == 1
+with patch("panel_chats.plan", return_value={"method": "claude-desktop"}), \
+        patch("panel_chats.subprocess.run") as launched:
+    import panel_chats
+    try:
+        panel_chats.open_chat(project, shared, main_attempts["claude"], allowed_methods={"existing-terminal", "app-uri", "windows-uri"})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("tree navigation started a desktop CLI")
+    launched.assert_not_called()
+if os.name != "nt":
+    master, slave = pty.openpty()
+    original = termios.tcgetattr(slave)
+    try:
+        with os.fdopen(os.dup(slave), "r") as input_tty, os.fdopen(os.dup(slave), "w") as output_tty, \
+                patch.object(sys, "stdin", input_tty), patch.object(sys, "stdout", output_tty), \
+                patch.dict(os.environ, {"OMS_PANEL_SESSION": "oms-panel-abcdef012345"}), \
+                patch("panel_input.subprocess.run") as mouse_setting:
+            with TerminalInput(active=False) as passive:
+                assert passive.fd is None and termios.tcgetattr(slave) == original
+            mouse_setting.assert_not_called()
+            try:
+                with TerminalInput(managed=True) as listener:
+                    assert listener.fd is not None
+                    changed = termios.tcgetattr(slave)
+                    assert not changed[3] & termios.ICANON and not changed[3] & termios.ECHO
+                    assert changed[3] & termios.ISIG == original[3] & termios.ISIG
+                    os.write(master, b"\033[<0;8;7M")
+                    assert listener.wait(.2) == [("click", 8, 7)]
+                    raise KeyboardInterrupt
+            except KeyboardInterrupt:
+                pass
+            assert termios.tcgetattr(slave) == original
+            argv = mouse_setting.call_args.args[0]
+            assert argv == ["tmux", "set-option", "-t", "oms-panel-abcdef012345", "mouse", "on"]
+        output = b""
+        deadline = time.monotonic() + 1
+        while b"\033[?1000l" not in output and time.monotonic() < deadline:
+            if select.select([master], [], [], max(0, deadline - time.monotonic()))[0]:
+                output += os.read(master, 4096)
+        assert b"\033[?1000h" in output and b"\033[?1000l" in output, output
+    finally:
+        os.close(master)
+        os.close(slave)
+    actual = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared, "--json"], room_env))["dashboard"]
+    nav = {}
+    render(actual, "codex", 110, 28, view="tree", navigation=nav)
+    hit = next(h for h in nav["hits"] if h["action"][0] == "result")
+    input_bytes = ("\033[<0;8;%sMq" % hit["y"]).encode()
+    before_click = ledger.read_bytes()
+    terminal(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+              "--watch", "--view", "tree", "--count", "2", "--no-animation"],
+             input_bytes, b"RECORDED RESULTS", trigger=b"OMS activity / room / tree")
+    assert ledger.read_bytes() == before_click, "clicking a result wrote lifecycle state"
+    import signal
+    for signum in (signal.SIGHUP, signal.SIGTERM):
+        terminal(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+                  "--watch", "--view", "tree", "--count", "2", "--no-animation"], b"", b"\033[?1000l",
+                 trigger=b"OMS activity / room / tree", signal_after=signum, expected_exit=128 + signum)
+# Publishing uses the saved receiver contract and persists intent before the call.
+with patch.object(codex_app_notify, "deliver", return_value={"status": "persisted", "turn_id": "fixture-app-turn",
+        "delivery_unknown": False}) as delivered:
+    output = room.publish(project, shared)
+    assert output["receipt"]["status"] == "persisted"
+    assert room.publish(project, shared)["deduplicated"] and delivered.call_count == 1
+room.send(project, shared, room_owner, main_attempts["codex"], "New bounded result")
+with patch.object(codex_app_notify, "deliver", return_value={"status": "timeout", "delivery_unknown": True}) as delivered:
+    room.publish(project, shared)
+    assert room.publish(project, shared)["deduplicated"] and delivered.call_count == 1
+    room.publish(project, shared, retry=True)
+    assert delivered.call_count == 2
+assert room.status(project, shared)["publication"]["status"] == "timeout"
+# Native Claude app/terminal delivery has its own receiver and durable intent.
+import hashlib
+import claude_app_notify
+room.join(project, shared, "opus-app", "claude", native_session="fixture-claude-app", label="Opus app")
+before = room.records(project, shared)
+with patch.object(claude_app_notify, "deliver", side_effect=AssertionError("wakeup was not authorized")):
+    blocked = room.publish(project, shared, app="claude", recipient="opus-app")
+    assert blocked["receipt"]["status"] == "wakeup_required"
+    assert room.records(project, shared) == before
+blocked = json.loads(call(["bash", str(panel.ENTRY), "room", "publish", "--repo", str(project),
+                          "--id", shared, "--app", "claude", "--to", "opus-app"]))
+assert blocked["receipt"]["status"] == "wakeup_required"
+def claude_post(*args):
+    pending = room.status(project, shared)["publications"]["claude.opus-app"]
+    assert pending["status"] == "pending" and pending["delivery_unknown"], pending
+    assert args[2] == hashlib.sha256(b"fixture-claude-app").hexdigest()[:32] and args[3] is True
+    return {"status": "submitted", "submitted": True, "delivery_unknown": True}
+with patch.object(claude_app_notify, "deliver", side_effect=claude_post) as delivered:
+    sent = room.publish(project, shared, app="claude", recipient="opus-app", allow_wakeup=True)
+    assert sent["target"] == "claude.opus-app" and sent["receipt"]["status"] == "submitted"
+    room.send(project, shared, room_owner, "opus-app", "New result must not silently resend an uncertain app post")
+    assert room.publish(project, shared, app="claude", recipient="opus-app", allow_wakeup=True)["deduplicated"]
+    assert delivered.call_count == 1
+    room.publish(project, shared, retry=True, app="claude", recipient="opus-app", allow_wakeup=True)
+    assert delivered.call_count == 2
+with patch.object(codex_app_notify, "deliver", side_effect=AssertionError("Codex uncertainty must remain independent")):
+    assert room.publish(project, shared)["deduplicated"]
+for recipient in (main_attempts["claude"], main_attempts["codex"], "missing"):
+    with patch.object(claude_app_notify, "deliver", side_effect=AssertionError("unbound receiver")):
+        try:
+            room.publish(project, shared, app="claude", recipient=recipient, allow_wakeup=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unbound or foreign app receiver accepted")
+with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}):
+    try:
+        room.publish(project, shared, app="claude", recipient="opus-app", allow_wakeup=True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("worker could publish")
+# The current shortcut stores a native session hash, never the exported token/socket.
+with patch.object(claude_app_notify, "current_session", return_value="fixture-current-app"):
+    bound = room.join(project, shared, "current-app", "claude", native_session="current")
+assert bound["consumer"] == hashlib.sha256(b"fixture-current-app").hexdigest()[:32]
+assert "socket" not in bound and "token" not in bound
+room_view["room"] = room.status(project, shared)
+for view in ("graph", "compact"):
+    drawn = render(room_view, "claude", 100, 48, view=view)
+    assert "APP DELIVERY" in drawn and "submitted" in drawn, drawn
+    assert all(display_width(line) <= 100 for line in drawn.splitlines()) and len(drawn.splitlines()) <= 47
+# Old target-less receipts continue to protect the original Codex receiver.
+legacy_app = room.create(project, "legacy-app-room", "Legacy delivery")
+intent = {"kind": "publication", "id": "old-app-intent", "digest": "a" * 64,
+          "status": "pending", "delivery_unknown": True}
+room.append(project, legacy_app, intent, "Old app intent")
+room.append(project, legacy_app, dict(intent, status="timeout"), "Old app receipt")
+assert room.status(project, legacy_app)["publications"]["codex"]["status"] == "timeout"
+with patch.object(codex_app_notify, "deliver", side_effect=AssertionError("old logs must not resend")):
+    assert room.publish(project, legacy_app)["deduplicated"]
+# Native chat lookup is explicit, private and read-only. A malformed enrolled
+# record must not hide a different valid chat in the same directory.
+import panel_chats
+chat_codex = "11111111-1111-4111-8111-111111111111"
+bad_codex = "22222222-2222-4222-8222-222222222222"
+chat_claude = "33333333-3333-4333-8333-333333333333"
+for who, provider, native in (("chat-sol", "codex", chat_codex), ("bad-sol", "codex", bad_codex),
+                               ("chat-opus", "claude", chat_claude)):
+    room.join(project, shared, who, provider)
+    room.bind(project, shared, who, native)
+codex_home = home / "chat-codex"
+codex_day = codex_home / "sessions/2026/10/05"
+codex_day.mkdir(parents=True)
+(codex_day / ("rollout-x-" + bad_codex + ".jsonl")).write_text("bad metadata\n")
+chat_file = codex_day / ("rollout-x-" + chat_codex + ".jsonl")
+chat_file.write_text(json.dumps({"type": "session_meta", "payload": {"id": chat_codex, "cwd": str(project)}})
+                     + "\nPRIVATE_TRANSCRIPT_BODY_MUST_NOT_BE_READ_OR_SHARED\n")
+claude_home = home / "chat-claude"
+claude_project = claude_home / "projects/local-project"
+claude_project.mkdir(parents=True)
+(claude_project / (chat_claude + ".jsonl")).write_text(json.dumps({"type": "user", "sessionId": chat_claude}) + "\n")
+chat_env = dict(environment, CODEX_HOME=str(codex_home), CLAUDE_CONFIG_DIR=str(claude_home),
+                OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project), TMUX="fixture-tmux")
+room_before_chats = room.records(project, shared)
+navigation_calls = []
+chat_attempt = panel.events(project, "start", "--provider", "codex", "--tool", "panel-main",
+    "--ref", "panel_role=main", "--ref", "panel_room_id=" + shared,
+    "--ref", "panel_room_participant=chat-sol", "--then", "starting", "--then", "working", output=True)
+navigation_run = subprocess.run
+def tmux_navigation(command, **kwargs):
+    if command[0] == "bash":
+        return navigation_run(command, **kwargs)
+    if command[1] == "list-windows":
+        return subprocess.CompletedProcess(command, 0, "@42\t" + chat_attempt + "\t" + shared + "\t%42\tchat-sol\t" + str(project.resolve()) + "\n"
+            + "@99\tchat-opus\tforeign-room\t%99\tchat-opus\t" + str(project.resolve()) + "\n", "")
+    if command[1] == "list-panes":
+        return subprocess.CompletedProcess(command, 0, "%42\t@42\n%99\t@99\n", "")
+    navigation_calls.append(command)
+    return subprocess.CompletedProcess(command, 0, "", "")
+with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats.shutil, "which", return_value="/fixture/launcher"), \
+        patch.object(panel_chats.subprocess, "run", side_effect=tmux_navigation):
+    chats = panel_chats.catalog(project, shared)
+    assert "PRIVATE_TRANSCRIPT_BODY" not in json.dumps(chats)
+    native = next(r for r in chats["rows"] if r["participant"] == "chat-sol")
+    assert native["uri"] == "codex://threads/" + chat_codex and native["terminal"]["pane"] == "%42", native
+    assert next(r for r in chats["rows"] if r["participant"] == "bad-sol")["status"] == "unresolved"
+    assert next(r for r in chats["rows"] if r["participant"] == "chat-opus")["session_id"] == chat_claude
+    assert next(r for r in chats["rows"] if r["participant"] == child["participant"])["status"] == "artifacts"
+    dry = panel_chats.open_chat(project, shared, "chat-sol", dry_run=True)
+    assert dry["method"] == "existing-terminal" and not navigation_calls
+    opened = panel_chats.open_chat(project, shared, "chat-sol")
+    assert opened["status"] == "navigation_requested" and not opened["ui_observed"]
+    assert navigation_calls == [["tmux", "select-window", "-t", "@42"], ["tmux", "select-pane", "-t", "%42"]]
+    app = panel_chats.open_chat(project, shared, "chat-sol", "app", dry_run=True)
+    assert app["uri"] == native["uri"] and len(navigation_calls) == 2
+    with patch.object(panel_chats.sys, "platform", "linux"):
+        try:
+            panel_chats.open_chat(project, shared, "chat-opus", "app", dry_run=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invented a Claude Code app deep link")
+    with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}):
+        try:
+            panel_chats.catalog(project, shared)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("worker navigated owner chats")
+    with patch.object(panel, "read_field", side_effect=["1", "", ""]), \
+            patch.object(panel_chats, "catalog", return_value={"room": shared, "rows": [native]}), \
+            patch.object(panel_chats, "open_chat", return_value=opened) as selected, \
+            patch.object(panel.sys, "stdout", io.StringIO()):
+        panel.browse_chats(project)
+    assert selected.call_args.args[2] == "chat-sol"
+# Navigation needs this repo's active main provenance; copied identifiers are insufficient.
+valid_window = "@42\t" + chat_attempt + "\t" + shared + "\t%42\tchat-sol\t" + str(project.resolve()) + "\n"
+for bad_window in (valid_window.replace(str(project.resolve()), str(temporary / "foreign-repo")),
+                   valid_window.replace(chat_attempt, "att_" + "f" * 32),
+                   "@42\tchat-sol\t" + shared + "\t%42\n"):
+    def invalid_navigation(command, **kwargs):
+        if command[0] == "bash":
+            return navigation_run(command, **kwargs)
+        return subprocess.CompletedProcess(command, 0,
+            bad_window if command[1] == "list-windows" else "%42\t@42\n", "")
+    with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats.shutil, "which", return_value="/fixture/tmux"), \
+            patch.object(panel_chats.subprocess, "run", side_effect=invalid_navigation):
+        assert panel_chats.windows(project, shared) == {}
+with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats.shutil, "which", return_value="/fixture/tmux"), \
+        patch.object(panel_chats.subprocess, "run", side_effect=tmux_navigation):
+    mismatched = deepcopy(room.status(project, shared))
+    next(p for p in mismatched["participants"] if p["participant"] == "chat-sol")["provider"] = "claude"
+    assert panel_chats.windows(project, shared, mismatched) == {}
+    wrong_room = deepcopy(mismatched)
+    wrong_room["participants"] = [dict(wrong_room["participants"][0], participant="chat-sol", provider="codex", role="worker")]
+    assert panel_chats.windows(project, shared, wrong_room) == {}
+# A first launch has no native binding or stable-participant reference yet.
+initial_room = room.create(project, "first-native-navigation", "First native navigation")
+initial_attempt = panel.events(project, "start", "--provider", "codex", "--tool", "panel-main",
+    "--ref", "panel_role=main", "--ref", "panel_room_id=" + initial_room,
+    "--then", "starting", "--then", "working", output=True)
+room.join(project, initial_room, initial_attempt, "codex")
+def initial_navigation(command, **kwargs):
+    if command[0] == "bash":
+        return navigation_run(command, **kwargs)
+    text = ("@42\t" + initial_attempt + "\t" + initial_room + "\t%42\t" + initial_attempt + "\t" + str(project.resolve()) + "\n"
+            if command[1] == "list-windows" else "%42\t@42\n")
+    return subprocess.CompletedProcess(command, 0, text, "")
+with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats.shutil, "which", return_value="/fixture/tmux"), \
+        patch.object(panel_chats.subprocess, "run", side_effect=initial_navigation):
+    first_chat = panel_chats.catalog(project, initial_room)["rows"][0]
+    assert first_chat["status"] == "native" and first_chat["session_id"] is None and first_chat["terminal"]["pane"] == "%42"
+    call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "transition", "--attempt", initial_attempt, "--state", "cancelled"])
+    assert panel_chats.windows(project, initial_room) == {}
+# Explicit worker bindings retain routing, but are not owner app-navigation grants.
+legacy_room = room.create(project, "legacy-native-worker", "Legacy role binding")
+legacy_sid = "44444444-4444-4444-8444-444444444444"
+legacy_hash = hashlib.sha256(legacy_sid.encode()).hexdigest()[:32]
+legacy_rows = room.records(project, legacy_room)
+legacy_row = dict(room.records(project, shared)[-1], thread=legacy_room, seq=legacy_rows[-1]["seq"] + 1,
+                  text="Legacy fixture", room_event={"kind": "join", "participant": "legacy-worker",
+                  "provider": "codex", "role": "worker", "label": "Legacy worker", "consumer": legacy_hash, "owns": []})
+with (project / ".oms/threads" / (legacy_room + ".jsonl")).open("a") as output:
+    output.write(json.dumps(legacy_row) + "\n")
+(codex_day / ("rollout-x-" + legacy_sid + ".jsonl")).write_text(
+    json.dumps({"type": "session_meta", "payload": {"id": legacy_sid}}) + "\n")
+assert room.selected(project, legacy_hash) == (legacy_room, "legacy-worker")
+assert room.selected(project, legacy_hash, legacy_room, "legacy-worker") == (legacy_room, "legacy-worker")
+assert room.selected(project, legacy_hash, shared, child["participant"]) == (shared, child["participant"])
+with patch.dict(os.environ, chat_env, clear=True):
+    legacy_chats = panel_chats.catalog(project, legacy_room)
+    assert legacy_chats["rows"][0]["status"] == "artifacts" and legacy_chats["rows"][0]["uri"] is None
+    assert panel_chats.open_chat(project, legacy_room, "legacy-worker", "app", dry_run=True)["method"] == "artifacts"
+room.join(project, legacy_room, "explicit-worker", "codex", role="worker", native_session="explicit-worker-session")
+explicit_hash = hashlib.sha256(b"explicit-worker-session").hexdigest()[:32]
+assert room.selected(project, explicit_hash) == (legacy_room, "explicit-worker")
+reason_report = deepcopy(chats)
+reason_report["rows"][0].update(joined=False, reason="ambiguous native identity")
+assert " / left" in panel_chats.text(reason_report) and "ambiguous native identity" in panel_chats.text(reason_report)
+
+# Desktop navigation uses the exact session and only an advertised native
+# flag. Inspecting a plan must not run a model or force-close a live session.
+for platform in ("darwin", "win32"):
+    for supported in (True, False):
+        with patch.dict(os.environ, chat_env, clear=True), \
+                patch.object(panel_chats.sys, "platform", platform), \
+                patch.object(panel_chats, "catalog", return_value=chats), \
+                patch.object(panel_chats.shutil, "which", return_value="/fixture/claude"), \
+                patch.object(panel_chats.subprocess, "run", return_value=subprocess.CompletedProcess(
+                    [], 0, "--desktop" if supported else "--resume", "")) as probe:
+            try:
+                destination = panel_chats.open_chat(project, shared, "chat-opus", "app", dry_run=True)
+                assert supported and destination["commands"] == [["/fixture/claude", "--desktop", "--resume", chat_claude]]
+                assert not destination["ui_observed"]
+            except ValueError:
+                assert not supported
+            assert probe.call_count == 1 and probe.call_args.args[0] == ["/fixture/claude", "--help"]
+with patch.dict(os.environ, chat_env, clear=True), \
+        patch.object(panel_chats.shutil, "which", return_value="/fixture/launcher"), \
+        patch.object(panel_chats.subprocess, "run", side_effect=lambda command, **kwargs:
+            subprocess.CompletedProcess(command, 0, "@42\tchat-sol\t" + shared + "\t%42\n" if command[1] == "list-windows" else "", "")):
+    assert not next(r for r in panel_chats.catalog(project, shared)["rows"] if r["participant"] == "chat-sol")["terminal"]
+with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats, "catalog", return_value=chats), \
+        patch.object(panel_chats.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)):
+    try:
+        panel_chats.open_chat(project, shared, "chat-sol")
+    except ValueError as error:
+        assert "session was preserved" in str(error)
+    else:
+        raise AssertionError("failed navigation was reported as successful")
+assert room.records(project, shared) == room_before_chats, "chat navigation cannot mutate shared history"
+chat_cli_env = dict(chat_env)
+chat_cli_env.pop("TMUX")
+listed = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+                        "--chats", "--json"], chat_cli_env))
+assert listed["kind"] == "oms-panel-chats" and any(r["uri"] for r in listed["rows"])
+planned = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+                         "--open-chat", "chat-sol", "--chat-surface", "app", "--dry-run", "--json"], chat_cli_env))
+assert planned["uri"] == "codex://threads/" + chat_codex and not planned["ui_observed"]
+unselected_env = dict(chat_cli_env)
+unselected_env.pop("OMS_ROOM_ID")
+unselected = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--chats", "--json"],
+                            env=unselected_env, capture_output=True, text=True)
+assert unselected.returncode != 0 and "select an existing room first" in unselected.stderr
+# Symlinked metadata must not become an app navigation target.
+chat_file.unlink()
+chat_file.symlink_to(codex_day / ("rollout-x-" + bad_codex + ".jsonl"))
+with patch.dict(os.environ, chat_cli_env, clear=True):
+    assert next(r for r in panel_chats.catalog(project, shared)["rows"] if r["participant"] == "chat-sol")["status"] == "unresolved"
+# A new adapter opts into native open without changing a provider-specific panel branch.
+open_log = temporary / "native-open.json"
+open_context = temporary / "native-context.txt"
+native_adapter = binary / "oms-agent-adapter-roomtest"
+native_adapter.write_text("#!/usr/bin/env python3\n" +
+    "import json, os, pathlib, signal, sys, time\na=sys.argv[1:]\nassert a[0]=='open'\n" +
+    "p=pathlib.Path(a[a.index('--context-file')+1])\n" +
+    "pathlib.Path(os.environ['OMS_OPEN_CONTEXT']).write_text(p.read_text())\n" +
+    "pathlib.Path(os.environ['OMS_OPEN_LOG']).write_text(json.dumps({'argv':a,'room':os.environ['OMS_ROOM_ID'],"
+    "'participant':os.environ['OMS_ROOM_PARTICIPANT'],'attempt':os.environ['OMS_PANEL_MAIN_ATTEMPT'],'context':str(p)}))\n" +
+    "if os.environ.get('OMS_OPEN_APPEND_LOG'):\n" +
+    " with open(os.environ['OMS_OPEN_APPEND_LOG'],'a') as f: f.write(str(os.getpid())+'\\n')\n" +
+    "if os.environ.get('OMS_OPEN_HOLD'): time.sleep(float(os.environ['OMS_OPEN_HOLD']))\n" +
+    "if os.environ.get('OMS_OPEN_INT_LOG'):\n" +
+    " signal.signal(signal.SIGINT, lambda n,f: pathlib.Path(os.environ['OMS_OPEN_INT_LOG']).write_text('interrupted turn'))\n" +
+    " os.killpg(os.getpgrp(),signal.SIGINT)\n time.sleep(1)\n" +
+    "if os.environ.get('OMS_OPEN_SIGNAL'):\n" +
+    " os.kill(os.getppid(), getattr(signal, os.environ['OMS_OPEN_SIGNAL']))\n time.sleep(300)\n")
+native_adapter.chmod(0o755)
+with patch.dict(os.environ, dict(environment, OMS_ROOM_ID=shared, OMS_OPEN_LOG=str(open_log),
+                                OMS_OPEN_CONTEXT=str(open_context), OMS_PROVIDER_NATIVE_ADAPTERS="roomtest"), clear=True):
+    inventory = panel.provider_catalog("roomtest")[0]
+    assert inventory["native_launch"] and not open_log.exists(), "discovery must not execute open"
+    assert panel.run_native("roomtest", project, task="Inspect source; no unrelated work") == 0
+opened = json.loads(open_log.read_text())
+assert opened["room"] == shared and opened["participant"]
+assert not Path(opened["context"]).exists(), "native context lifetime ends with its process"
+assert "OMS room" in open_context.read_text() and "Inspect source; no unrelated work" in open_context.read_text()
+assert "--dangerously" not in " ".join(opened["argv"])
+recovery_env = dict(environment, OMS_ROOM_ID=shared, OMS_OPEN_LOG=str(open_log),
+                    OMS_OPEN_CONTEXT=str(open_context), OMS_PROVIDER_NATIVE_ADAPTERS="roomtest")
+with patch.dict(os.environ, recovery_env, clear=True):
+    assert panel.run_native("roomtest", project, resume="fixture-stable-session") == 0
+    original_main = json.loads(open_log.read_text())
+    member = original_main["participant"]
+    room.send(project, shared, room_owner, member, "Mail while the native main was offline", message_id="offline-mail")
+    before_resume = room.records(project, shared)
+    first_delta = room.updates(project, shared, member)
+    delivered = list(first_delta["turns"])
+    for _ in range(len(before_resume)):
+        if not first_delta["has_more"]:
+            break
+        first_delta = room.updates(project, shared, member, first_delta["cursor"])
+        delivered += first_delta["turns"]
+    assert not first_delta["has_more"]
+    assert any(row["room_event"]["id"] == "offline-mail" for row in delivered)
+    with patch.object(room, "MAX_PARTICIPANTS", len(room.status(project, shared)["participants"])):
+        assert panel.run_native("roomtest", project, resume="fixture-stable-session", model="fixture-model") == 0
+    resumed = json.loads(open_log.read_text())
+    assert resumed["participant"] == member and resumed["attempt"] != original_main["attempt"]
+    assert room.records(project, shared) == before_resume, "resume cannot reset the subscription or consume a participant slot"
+    assert room.status(project, shared)["pending_count"] > 0, "read does not acknowledge offline mail"
+    assert not room.updates(project, shared, member, first_delta["cursor"])["turns"], "resume preserves cursor anchors"
+    # An existing active successor blocks another resume even though the
+    # original participant-named attempt was terminal.
+    active = panel.events(project, "start", "--provider", "roomtest", "--tool", "panel-main", "--ref", "panel_role=main",
+                          "--ref", "panel_room_id=" + shared, "--ref", "panel_room_participant=" + member,
+                          "--then", "starting", "--then", "working", output=True)
+    with patch.object(panel, "native_command", side_effect=AssertionError("unknown owner must not launch")):
+        try:
+            panel.run_native("roomtest", project, resume="fixture-stable-session")
+        except ValueError as error:
+            assert "terminal owner" in str(error)
+        else:
+            raise AssertionError("active successor was ignored")
+    panel.events(project, "transition", "--attempt", active, "--state", "cancelled")
+    with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}):
+        try:
+            panel.run_native("roomtest", project, resume="fixture-stable-session")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("worker opened a native main")
+    for bad_tool, bad_provider in (("consult", "roomtest"), ("panel-main", "codex")):
+        bad_room = room.create(project, "bad-owner-" + bad_tool, "Ownership evidence fixture")
+        impostor = panel.events(project, "start", "--provider", bad_provider, "--tool", bad_tool, "--ref", "panel_role=main",
+                                  "--ref", "panel_room_id=" + bad_room,
+                                  "--then", "starting", "--then", "working", output=True)
+        panel.events(project, "transition", "--attempt", impostor, "--state", "cancelled")
+        room.join(project, bad_room, impostor, "roomtest", native_session="fixture-bad-owner")
+        try:
+            with patch.dict(os.environ, {"OMS_ROOM_ID": bad_room}), \
+                    patch.object(panel, "native_command", side_effect=AssertionError("bad provenance must not launch")):
+                panel.run_native("roomtest", project, resume="fixture-bad-owner")
+        except ValueError as error:
+            assert "terminal owner" in str(error)
+        else:
+            raise AssertionError("resume accepted unrelated ownership evidence")
+# Two independent processes requesting the same resumed address must not both
+# launch. The first fake native stays active beyond the existing lock wait.
+race_log = temporary / "native-resume-race.txt"
+race_env = dict(recovery_env, OMS_OPEN_HOLD="14", OMS_OPEN_APPEND_LOG=str(race_log))
+race_script = ("import sys\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nimport terminal_panel as p\n"
+               "try: p.run_native('roomtest',Path(sys.argv[2]),resume='fixture-stable-session')\n"
+               "except ValueError as e: print(str(e));sys.exit(75)\n")
+other_race_room = room.create(project, "parallel-resume-room", "Concurrent resume fixture")
+racers = [subprocess.Popen([sys.executable, "-c", race_script, str(root / "scripts/lib"), str(project)],
+                           env=dict(race_env, OMS_ROOM_ID=ident), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+          for ident in (shared, other_race_room)]
+try:
+    outcomes = [r.communicate(timeout=35) for r in racers]
+    assert sorted(r.returncode for r in racers) == [0, 75], outcomes
+    assert len(race_log.read_text().splitlines()) == 1, "concurrent resumes launched two native owners"
+finally:
+    for racer in racers:
+        if racer.poll() is None:
+            racer.kill(); racer.wait(timeout=5)
+# Native references link the stable participant even when attempt ids differ,
+# and an unrelated room's same spelling cannot override it.
+import room_view as graph_view
+native_report = {"room": room.status(project, shared), "attempts": {"active_recent": [
+    {"attempt_id": "unqualified-attempt", "state": "failed", "panel": {"role": "main", "room_participant": member}},
+    {"attempt_id": "fresh-attempt", "state": "working", "panel": {"role": "main", "room_id": shared,
+     "room_participant": member, "model": "fixture-model"}},
+    {"attempt_id": "foreign-attempt", "state": "failed", "panel": {"role": "main", "room_id": "foreign-room",
+     "room_participant": member}}], "recent": []}}
+linked = next(row for row in graph_view.nodes(native_report) if row["participant"] == member)
+assert linked["state"] == "working" and linked["model"] == "fixture-model"
+# A council's seats inherit the main's participant; the graph shows the debate
+# beside the main instead of relabeling the main card as a seat.
+council_meta = {"role": "advisor", "label": "Pick next work", "room_id": shared, "room_participant": member}
+native_report["attempts"]["active_recent"][:0] = [
+    {"attempt_id": "seat-attempt", "parent_attempt_id": "fresh-attempt", "state": "working", "tool": "ask",
+     "task_id": "decide", "panel": dict(council_meta, model="claude-fable-5-1")},
+    {"attempt_id": "council-attempt", "parent_attempt_id": "fresh-attempt", "state": "working",
+     "tool": "panel-council", "task_id": "decide", "panel": council_meta}]
+linked = next(row for row in graph_view.nodes(native_report) if row["participant"] == member)
+assert linked["attempt"] == "fresh-attempt" and linked["model"] == "fixture-model", linked
+debate_graph = graph_view.render_graph(native_report, 110, 40)
+assert "DEBATE / ADVISORS" in debate_graph and "Debate: Pick next work" in debate_graph, debate_graph
+assert "● 1 seat(s) answering" in debate_graph, debate_graph
+debate_navigation = {}
+debate_connected = render(native_report, "claude", 91, 40, view="tree", main_attempt="fresh-attempt",
+                          navigation=debate_navigation)
+assert "COUNCIL (1)" in debate_connected and "Debate: Pick next work" in debate_connected, debate_connected
+assert "1 seat(s) answering" in debate_connected and "/ current" in debate_connected, debate_connected
+assert ("debate", ("decide", member)) in debate_navigation["items"]
+resumed_lifecycle = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
+                                      "show", "--attempt", resumed["attempt"], "--json"]))
+resumed_lifecycle.update(terminal=False, state="blocked")
+def resumed_navigation(command, **kwargs):
+    data = (json.dumps([resumed_lifecycle]) if command[0] == "bash" else
+            "@42\t" + resumed["attempt"] + "\t" + shared + "\t%42\t" + member + "\t" + str(project.resolve()) + "\n"
+            if command[1] == "list-windows" else "%42\t@42\n")
+    return subprocess.CompletedProcess(command, 0, data, "")
+with patch.dict(os.environ, dict(recovery_env, TMUX="fixture-tmux"), clear=True), \
+        patch.object(panel_chats.shutil, "which", return_value="/fixture/tmux"), \
+        patch.object(panel_chats.subprocess, "run", side_effect=resumed_navigation):
+    assert panel_chats.windows(project, shared)[member][0]["pane"] == "%42"
+    resumed_lifecycle["terminal"] = True
+    assert panel_chats.windows(project, shared) == {}
+if os.name != "nt":
+    import signal
+    int_log = temporary / "native-turn-interrupt.txt"
+    int_env = dict(recovery_env, OMS_OPEN_INT_LOG=str(int_log))
+    int_script = ("import sys,signal\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nimport terminal_panel as p\n"
+                  "before=signal.getsignal(signal.SIGINT)\nassert p.run_native('roomtest',Path(sys.argv[2]))==0\n"
+                  "assert signal.getsignal(signal.SIGINT)==before\n")
+    interrupted = subprocess.run([sys.executable, "-c", int_script, str(root / "scripts/lib"), str(project)],
+                                 env=int_env, capture_output=True, text=True, start_new_session=True, timeout=20)
+    assert interrupted.returncode == 0 and int_log.read_text() == "interrupted turn", interrupted.stderr
+    for name in ("SIGTERM", "SIGHUP"):
+        if not hasattr(signal, name):
+            continue
+        signal_env = dict(environment, OMS_ROOM_ID=shared, OMS_OPEN_LOG=str(open_log),
+                          OMS_OPEN_CONTEXT=str(open_context), OMS_OPEN_SIGNAL=name,
+                          OMS_PROVIDER_NATIVE_ADAPTERS="roomtest")
+        script = ("import sys, signal\nfrom pathlib import Path\n"
+                  "sys.path.insert(0,sys.argv[1])\nimport terminal_panel as p\n"
+                  "before={n:signal.getsignal(getattr(signal,n)) for n in ('SIGTERM','SIGHUP')}\n"
+                  "try: p.run_native('roomtest',Path(sys.argv[2]))\n"
+                  "except KeyboardInterrupt: pass\n"
+                  "else: raise AssertionError('native signal was not handled')\n"
+                  "assert all(signal.getsignal(getattr(signal,n))==v for n,v in before.items())\n")
+        finished = subprocess.run([sys.executable, "-c", script, str(root / "scripts/lib"), str(project)],
+                                  env=signal_env, capture_output=True, text=True, timeout=25)
+        assert finished.returncode == 0, finished.stderr
+        signalled = json.loads(open_log.read_text())
+        status = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
+                                 "show", "--attempt", signalled["participant"], "--json"]))
+        assert status["terminal"] and status["state"] == "cancelled", status
+        assert not Path(signalled["context"]).exists()
+if os.name != "nt":
+    import time, signal
+    stop_log = temporary / "panel-stop-watch.log"
+    with stop_log.open("w") as output:
+        watcher = subprocess.Popen(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                    "--room", shared, "--watch", "--no-animation"],
+                                   env=recovery_env, stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 10
+            while "MAILBOX" not in stop_log.read_text() and time.monotonic() < deadline:
+                assert watcher.poll() is None
+                time.sleep(0.1)
+            assert "MAILBOX" in stop_log.read_text(), "watcher did not become ready"
+            watcher.send_signal(signal.SIGINT)
+            assert watcher.wait(timeout=10) == 130, "public panel did not receive SIGINT"
+        finally:
+            if watcher.poll() is None:
+                watcher.kill()
+                watcher.wait(timeout=5)
+soak_seconds = int(os.environ.get("OMS_PANEL_SOAK_SECONDS", "0"))
+if soak_seconds:
+    assert os.name != "nt" and 30 <= soak_seconds <= 3600
+    import time, signal
+    watch_log = temporary / "panel-soak-watch.log"
+    log_path = project / ".oms/threads" / (shared + ".jsonl")
+    displaced = log_path.with_suffix(".soak-backup")
+    started = time.monotonic()
+    cycles = 0
+    cursor = first_delta["cursor"]
+    with watch_log.open("w") as output:
+        watcher = subprocess.Popen(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                    "--room", shared, "--watch", "--no-animation"],
+                                   env=recovery_env, stdout=output, stderr=subprocess.STDOUT)
+        try:
+            while time.monotonic() - started < soak_seconds:
+                assert watcher.poll() is None, "watcher exited during sustained polling"
+                mid = "soak-%s" % cycles
+                with patch.dict(os.environ, recovery_env, clear=True):
+                    room.send(project, shared, room_owner, member, "Controlled soak delivery", message_id=mid)
+                    received = []
+                    for _ in range(len(room.records(project, shared))):
+                        delta = room.updates(project, shared, member, cursor)
+                        cursor = delta["cursor"]
+                        received.extend(row["room_event"]["id"] for row in delta["turns"])
+                        if not delta["has_more"]:
+                            break
+                    assert mid in received
+                    room.acknowledge(project, shared, member, [mid])
+                    if cycles % 25 == 0:
+                        try:
+                            room.updates(project, shared, member, "invalid-cursor")
+                        except ValueError:
+                            pass
+                        else:
+                            raise AssertionError("invalid cursor was accepted")
+                    if cycles % 50 == 0:
+                        log_path.rename(displaced)
+                        try:
+                            time.sleep(7)
+                            assert watcher.poll() is None
+                        finally:
+                            displaced.rename(log_path)
+                cycles += 1
+                time.sleep(5)
+        finally:
+            watcher.send_signal(signal.SIGINT)
+            try:
+                watcher.wait(timeout=45)
+            except subprocess.TimeoutExpired:
+                watcher.kill(); watcher.wait(timeout=5)
+    assert watcher.returncode == 130
+    observed = watch_log.read_text()
+    assert "room evidence unavailable" in observed and "MAILBOX" in observed
+    print("panel-soak: %s cycles / %.1fs / addressed delivery, explicit ack, invalid cursors and room-loss recovery" %
+          (cycles, time.monotonic() - started), flush=True)
+print("room: addressed handoff, graph bounds, saved receiver intents and native adapter passed")
 print("terminal-panel: both directions, isolated patches, reviews, guards and PTY passed")
 PY
 

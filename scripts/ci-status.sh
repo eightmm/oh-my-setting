@@ -157,6 +157,21 @@ if [ "$gh_rc" -ne 0 ]; then
   echo "ci-status: gh not authenticated or unreachable (try: gh auth login)" >&2
   exit 2
 fi
+# Exit 0 with a body that is not a run list is a broken lookup, not "no runs":
+# only a literal `[]` may read as an empty branch. Checked before any ledger or
+# PR work so a corrupt answer is never recorded as a successful lookup.
+shape="$(OMS_JSON="$json" python3 -c '
+import json, os
+try:
+    ok = isinstance(json.loads(os.environ["OMS_JSON"]), list)
+except ValueError:
+    ok = False
+print("ok" if ok else "bad")
+' | tr -d '\r')"
+if [ "$shape" != ok ]; then
+  echo "ci-status: gh returned an unreadable run list (lookup failed)" >&2
+  exit 2
+fi
 
 LEDGER=""
 PR_JSON=""
@@ -200,12 +215,7 @@ raw = os.environ.get("OMS_JSON", "").strip()
 head = os.environ.get("OMS_CI_HEAD", "")
 ahead_raw = os.environ.get("OMS_CI_AHEAD", "")
 ahead = int(ahead_raw) if ahead_raw.isdigit() else None
-try:
-    runs = json.loads(raw) if raw else []
-except Exception:
-    runs = []
-if not isinstance(runs, list):
-    runs = []
+runs = json.loads(raw)
 runs = [r for r in runs if isinstance(r, dict)]
 latest = runs[0] if runs else None
 match = None

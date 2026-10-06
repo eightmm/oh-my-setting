@@ -13,6 +13,11 @@ primitives and intent variants remain in `oms list --all`. Use
 [command-routing reference](../custom-skills/oms-agent-harness/references/command-routing.md)
 when two commands appear to overlap.
 
+Task-scoped [work rooms and the moving terminal graph](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph) reuse the canonical thread log and existing MCP peer tools.
+Room snapshots also support an explicitly enrolled
+[Claude Desktop Code or terminal inbox](TERMINAL-PANEL.md#claude-desktop-code-and-claude-code-terminal-delivery),
+with separate delivery receipts and an explicit opt-in to possible model wakeup.
+
 ### Consolidated paths
 
 Agent guidance groups discovery into state, collaboration, implementation,
@@ -355,6 +360,11 @@ worktree. Write is refused unless `ID` appears in
 delegation and patch gate. The adapter remains a trusted host executable, not
 an OS sandbox, and carries no landing, commit, push, or publication authority.
 
+The [terminal panel](TERMINAL-PANEL.md#additional-clis-and-adapters) reuses this
+registry for its read-only CLI inventory and explicit `--dispatch --to` routes.
+Installing an adapter does not require panel-specific provider code and does
+not opt it into preset routing or native session messaging.
+
 A provider subprocess is a harness child, not a new owner. Child-marked
 processes may inspect saved review verdicts, but every peer-call and delegation
 front door refuses a recursive start. The child reports that another opinion or
@@ -396,7 +406,7 @@ and reason.
 
 The [model-routing contract](../custom-skills/oms-agent-harness/references/model-routing.md)
 separates parent judgment from bounded execution and defines decision-point
-reviews. Roles do not select a model or grant delegation authority. Native
+reviews. Generic role prompts do not select a model or grant delegation authority. Native
 subagents remain outside the shell router.
 
 ### Collaboration visibility
@@ -406,7 +416,12 @@ The [terminal control panel](TERMINAL-PANEL.md) is the human entrypoint: bare
 explicit session IDs, and connects either owner to the same consult/delegate/
 review paths. Optional installed tmux keeps native conversations beside shared
 status; the portable inline menu works without it. Provider workers do not gain
-owner or recursive delegation authority.
+owner or recursive delegation authority. The panel adds an explicit role policy:
+Sol/Opus mains, Luna light workers, Sonnet routine implementation or explanation,
+and Astra/Fable advisors. The native main judges the workload and dispatches
+through existing front doors. Separate advisor/worker sections show recorded
+model, task, authority and execution location, bound to the native main's
+lifecycle attempt. Generic provider defaults stay separate from this policy.
 
 Use compact status during ordinary work and drill down when coordination or a
 blocker needs explanation. `oms dashboard` composes existing state, lifecycle,
@@ -883,6 +898,8 @@ Host ancestry aliases remain supported. This is not a same-user filesystem sandb
 | `init` | Creates repo-local `.oms` state and its ignore guard, then registers the canonical repo root with `oms tick`. The non-fatal summary says `registered`, `already registered`, or `not registered`; an unavailable tick helper or unwritable registry never prevents local initialization. |
 | `tick` | Hourly unattended sweep of registered repos: `oms init` registers a newly initialized repo automatically, while `oms tick register` remains available for an adopted repo. The sweep performs journal sync, attempt reconcile, threads idle over 7d closed, active goal-less task packets closed after 7d, idle all-done plans retired after 14d, mechanically recovered or exactly superseded artifact failures resolved, and single stale failure-ledger rows retired after `OMS_TICK_FAILURE_STALE_DAYS` (14d). `OMS_TICK_RETIRE=0` opts out of task/plan/failure retirement but not artifact resolution; gc remains opt-in with `OMS_TICK_GC=1`. Each receipt and `swept` line reports `tasks_closed`, `plans_retired`, `artifacts_resolved`, `artifacts_superseded`, and `failures_retired`; a stale Codex plugin cache is refreshed. `install` wires a systemd user timer or a cron line this checkout owns. |
 | `open-in` | Probed VS Code/Stably Orca/Codex launch plans. The redundant `ops-cockpit` aggregate was retired; use `inbox`, then the relevant state, approval, or artifact telemetry query. Historical records are unchanged. |
+| `panel` | Native Sol/Opus main plus OMS activity sidebar; scoped role dispatch and four-seat council reuse peer front doors. Owner summaries and app delivery receipts are immutable indexed artifacts. `--results` reads retained evidence; `--finalize` preserves owner acceptance authority; `--retry-delivery` never resends a persisted revision. See [terminal panel](TERMINAL-PANEL.md). |
+| `room` | Task-scoped work rooms on the canonical thread log: `new`, `join`/`bind`/`leave` with a declared role and scope, addressed `send`, cursor-based `updates` and `ack`, and `publish` to an explicitly enrolled Codex app or Claude Code session. Declared scope is not a write grant; acknowledgment is not approval. See [shared work rooms](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph). |
 | `otel-export` | Local content-free OTLP JSONL linking lifecycle, approval, landing, artifact, and hook metadata with opaque IDs and usage-trust labels; opt-in `--gen-ai` standard semantic attributes. |
 | `autopilot`, `draft-pr` | Confirmed spec to reviewed plan, bounded landing, acceptance and semantic review; optional exact create-only GitHub branch plus Draft PR. No merge, release, ready, tag, or branch-update authority. |
 

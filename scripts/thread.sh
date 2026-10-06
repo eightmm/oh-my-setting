@@ -34,6 +34,7 @@ CONSUMER=""
 LIVE=0
 NOTES_ONLY=0
 REQUIRE_OPEN=0
+EVENT_JSON=""
 HELPER="$ROOT/scripts/lib/thread_live.py"
 
 usage() {
@@ -96,6 +97,7 @@ Options:
   --after CURSOR   updates/ack: cursor from a previous updates response.
   --wait SECONDS   updates: bounded wait for a change (default 0, maximum 30).
   --consumer NAME  ack: caller's session identifier, not an authenticated identity.
+  --room-event JSON append: typed room metadata; validated under the thread lock.
   --stale         list: only stale open threads, each with its close command.
   --json          Machine-readable output (show, list, stats).
   -h, --help      Show help.
@@ -149,6 +151,7 @@ while [ "$#" -gt 0 ]; do
     --after) [ "$#" -ge 2 ] || fail "--after requires a cursor"; AFTER="$2"; shift 2 ;;
     --wait) [ "$#" -ge 2 ] || fail "--wait requires seconds"; WAIT="$2"; shift 2 ;;
     --consumer) [ "$#" -ge 2 ] || fail "--consumer requires a name"; CONSUMER="$2"; shift 2 ;;
+    --room-event) [ "$#" -ge 2 ] || fail "--room-event requires JSON"; EVENT_JSON="$2"; shift 2 ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -156,6 +159,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 ACTION="${ACTION:-list}"
+[ -z "$EVENT_JSON" ] || [ "$ACTION" = append ] || fail "--room-event applies to append"
 [ "$STALE" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--stale applies to list"
 [ "$LIVE" -eq 0 ] || [ "$ACTION" = new ] || fail "--live applies to new"
 case "$ACTION" in updates|ack) ;; *)
@@ -254,6 +258,7 @@ append_row_unlocked() {
   OMS_TH_TEXT_FILE="$text_file" OMS_TH_AGENT="$(oms_detect_agent)" \
   OMS_TH_PROVIDER="$PROVIDER" OMS_TH_MODEL="$MODEL" OMS_TH_ARTIFACT="$ARTIFACT" \
   OMS_TH_QUALITY="$QUALITY" \
+  OMS_TH_ROOM_EVENT="$EVENT_JSON" \
   OMS_TH_LIVE="$LIVE" OMS_TH_ACK="$AFTER" OMS_TH_CONSUMER="$CONSUMER" \
   OMS_TH_MAX="${OMS_THREAD_TURN_BYTES:-4000}" \
   python3 "$HELPER" append

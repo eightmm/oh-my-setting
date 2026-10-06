@@ -93,7 +93,8 @@ def thread_path(repo, thread):
 
 def open_thread(repo, thread):
     path = thread_path(repo, thread)
-    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+                 | getattr(os, "O_NONBLOCK", 0))
     handle = os.fdopen(fd, "rb")
     info = os.fstat(fd)
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
@@ -229,6 +230,12 @@ def append_from_env():
         budget = 4000
     if len(text.encode()) > budget:
         text = "[earlier output truncated: see artifact]\n" + text.encode()[-budget:].decode("utf-8", "ignore")
+    if env.get("OMS_TH_ROOM_EVENT"):
+        from room import validate_event
+        event = json.loads(env["OMS_TH_ROOM_EVENT"])
+        if not validate_event(rows, event, text):
+            return
+        fields["room_event"] = event
     row = {"schema": 1, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
            "thread": thread, "seq": max((r.get("seq", 0) for r in rows), default=0) + 1,
            "role": env["OMS_TH_ROLE"], "agent": env.get("OMS_TH_AGENT") or "agent", "text": text}

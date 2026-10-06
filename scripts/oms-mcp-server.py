@@ -449,6 +449,13 @@ TOOLS = [
             },
             "after": {"type": "string", "description": "ack: exact consumed thread cursor."},
             "consumer": {"type": "string", "description": "ack: self-reported session identifier."},
+            "participant": {"type": "string", "description": "Joined OMS room participant; enables addressed delivery."},
+            "to_participant": {"type": "string", "description": "Room message recipient, or all."},
+            "message_kind": {"type": "string", "enum": ["question", "answer", "note", "decision", "handoff", "status"]},
+            "reply_to": {"type": "string", "description": "Room message id being answered."},
+            "message_id": {"type": "string", "description": "Optional stable room message id for idempotent sends."},
+            "message_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 200,
+                            "description": "Room ack: exact consumed message ids; no approval."},
         },
         "required": ["kind"],
         "annotations": START_PEER,
@@ -483,6 +490,7 @@ TOOLS = [
                 "description": "Operation id returned by oms_peer_start.",
             },
             "thread": {"type": "string", "description": "Existing thread id for incremental delivery."},
+            "participant": {"type": "string", "description": "Joined OMS room participant; returns only addressed messages, excluding own sends."},
             "after": {"type": "string", "description": "Cursor from the previous read of this operation or thread; omit for initial delivery."},
             "wait_seconds": {
                 "type": "integer", "minimum": 0, "maximum": 50,
@@ -1048,7 +1056,8 @@ def start_peer(arguments: dict) -> tuple[str, bool]:
     # provider CLI offers a per-invocation switch to withhold this tool
     # (codex loads plugin MCP servers unconditionally; probed 2026-08-18).
     # Refusing here covers every provider at once, server-side.
-    if os.environ.get("OMS_HARNESS_CHILD") == "1":
+    if (os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0") and not (
+            arguments.get("kind") in ("message", "ack") and arguments.get("participant")):
         return (
             "error: a delegated worker cannot start peer consultations;"
             " recursive delegation is the owner's decision — report the need"
@@ -1813,7 +1822,36 @@ def thread_exchange(arguments: dict, action: str) -> tuple[str, bool]:
         return "error: new_thread is a boolean for message only", True
     if arguments.get("providers"):
         return "error: live messages do not invoke or select providers", True
-    if action == "updates":
+    member, err = text_argument(arguments, "participant", 160)
+    if err:
+        return err, True
+    if member:
+        if not THREAD_RE.fullmatch(member) or new:
+            return "error: use an existing room and a valid joined participant", True
+        argv = ["bash", str(ROOT / "scripts/room.sh"), "--repo", str(repo), "--id", thread,
+                "--participant", member]
+        if action == "updates":
+            command = ["updates", "--after", after]
+        elif action == "ack":
+            mids = arguments.get("message_ids")
+            if not isinstance(mids, list) or not 1 <= len(mids) <= 200 or any(
+                    not isinstance(mid, str) or not THREAD_RE.fullmatch(mid) for mid in mids):
+                return "error: room ack needs exact bounded message_ids", True
+            command = ["ack"] + [arg for mid in mids for arg in ("--message", mid)]
+        else:
+            prompt, err = text_argument(arguments, "prompt", 4000)
+            if err or not prompt.strip():
+                return err or "error: room message requires a nonempty prompt", True
+            command = ["send", "--text", prompt]
+            for key, flag, default in (("to_participant", "--to", "all"), ("message_kind", "--kind", "note"),
+                                       ("reply_to", "--reply-to", ""), ("message_id", "--message-id", "")):
+                value, err = text_argument(arguments, key, 160)
+                if err:
+                    return err, True
+                value = value or default
+                if value:
+                    command += [flag, value]
+    elif action == "updates":
         command = ["updates", "--after", after, "--max-bytes", "8192", "--json"]
     elif action == "ack":
         consumer, err = text_argument(arguments, "consumer", 160)
@@ -1833,7 +1871,7 @@ def thread_exchange(arguments: dict, action: str) -> tuple[str, bool]:
         return "error: %s" % exc, True
     if proc.returncode:
         return (proc.stderr or proc.stdout).strip()[:OUTPUT_LIMIT], True
-    if action == "updates":
+    if action == "updates" or member:
         return proc.stdout.strip(), False
     return json.dumps({"thread": thread, "status": "recorded", "kind": action}), False
 
