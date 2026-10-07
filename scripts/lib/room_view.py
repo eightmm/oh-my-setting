@@ -116,6 +116,14 @@ MACHINE = re.compile(r"^(stop-reason:|model-route:|model-result:|usage detail:|t
                      r"##\s*(output|exit|verify)\b|---\s*(begin|end) )", re.I)
 
 
+def who(member):
+    """A participant named with its role, so a Sol worker never reads like the Sol main."""
+    if not member:
+        return "someone"
+    name = MODEL_NAMES.get(member.get("model"), member.get("model")) or member.get("provider", "unknown")
+    return name + " " + ROLES.get(member.get("role"), "Worker").lower()
+
+
 def said(state):
     return WORDS.get(state, str(state or "unknown").replace("_", " "))
 
@@ -139,8 +147,7 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
     """Selected block content in plain words; reading mail here never acknowledges it."""
     from panel_view import ATTENTION_STATES
     room = room or {}
-    names = {m["participant"]: MODEL_NAMES.get(m.get("model"), m.get("model")) or m.get("provider", "unknown")
-             for m in members}
+    names = {m["participant"]: who(m) for m in members}
     name = MODEL_NAMES.get(member.get("model"), member.get("model")) or member.get("provider", "unknown")
     state = "exited" if member.get("role") == "main" and member.get("state") == "done" else member.get("state")
     title = clean(member.get("title")) or ""
@@ -152,7 +159,7 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
                                                  " · " + title if title else " · no task title yet"), width, 3)
         inbox = [m for m in listing(room.get("messages")) if member["participant"] in listing(m.get("targets"))]
         unread = sum(member["participant"] in listing(m.get("pending_for")) for m in inbox)
-        lines.append("Messages to %s: %s%s" % (name, len(inbox), " (%s unread)" % unread if unread else ""))
+        lines.append("Messages to %s: %s%s" % (who(member), len(inbox), " (%s unread)" % unread if unread else ""))
         for m in inbox[-5:]:
             lines += wrapped("  From %s: %s" % (names.get(m.get("sender"), clean(m.get("sender"))),
                                                 readable(m.get("text"), " ") or "(empty)"), width, 3)
@@ -172,8 +179,8 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         lines.append("Works %s%s" % (where, " · effort " + member["effort"] if member.get("effort") else ""))
         return lines + ["Click a team row to see it here · click the main again to open its chat"], targets
     owner = names.get(member.get("parent"), "")
-    lines = wrapped("%s · %s%s · %s%s" % (name, ROLES.get(member.get("role"), "Worker"), " for " + owner if owner else "",
-                                          said(state), " · " + title if title else ""), width, 3)
+    lines = wrapped("%s%s · %s%s" % (who(member), " for " + owner if owner else "",
+                                     said(state), " · " + title if title else ""), width, 3)
     access = "can edit" if member.get("access") == "write" else "read-only"
     lines.append("%s %s%s" % (access.capitalize(), where, " · effort " + member["effort"] if member.get("effort") else ""))
     loaded = preview.get("report")
@@ -702,7 +709,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     messages = listing(room.get("messages"))
     if spare >= 3 and messages:
         def person(ident):
-            return next((name_of(m) for m in members if m["participant"] == ident), "everyone" if ident == "all" else "someone")
+            return "everyone" if ident == "all" else who(next((m for m in members if m["participant"] == ident), None))
         logs = [clipped("%s → %s: %s" % (person(m.get("sender")), person((listing(m.get("targets")) or ["all"])[0]),
                                         readable(m.get("text"), " ") or "(empty)"), width - 4)
                 for m in messages[-min(3, spare - 2):]]

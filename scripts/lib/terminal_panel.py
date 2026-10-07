@@ -148,7 +148,7 @@ def selected_route(owner, role, workload, seat, access, purpose, target=None, mo
     if access not in peer["access"]:
         raise ValueError("custom write providers require explicit OMS_PROVIDER_WRITE_ADAPTERS opt-in")
     if peer["provider"] == "codex" and model not in MODEL_IDS["codex"]:
-        raise ValueError("Codex workers require gpt-6-sol, gpt-6-luna or gpt-6-astra")
+        raise ValueError("Codex workers require gpt-6.1-sol, gpt-6-sol, gpt-6-luna or gpt-6-astra")
     return dict(route, provider=peer["provider"], binary=peer["binary"], model=model, effort=effort)
 
 

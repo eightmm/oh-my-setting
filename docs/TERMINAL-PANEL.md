@@ -190,7 +190,7 @@ deliver. Membership is a routing record, not authentication or an OS sandbox.
 
 ```bash
 oms room join --repo . --id team --participant sol-main --provider codex \
-  --role main --model gpt-6-sol --native-session EXACT_SESSION_ID
+  --role main --model gpt-6.1-sol --native-session EXACT_SESSION_ID
 oms room join --repo . --id team --participant opus-main --provider claude \
   --role main --model claude-opus-5-5 --native-session EXACT_SESSION_ID
 oms room send --repo . --id team --participant sol-main --to opus-main \
@@ -390,7 +390,7 @@ model selection; omit preset `--workload` and
 provider capability checks. Omitting effort retains the front door's native
 settings. For profile-controlled transports such as Vibe/DeepSeek Harness,
 omit `--model`; the native profile selects it and an exact override is refused.
-Default role allocation remains Sol/Opus, Luna/Sonnet and Astra/Fable.
+Default role allocation remains Sol 6.1/Opus, Luna/Sonnet and Astra/Fable.
 Codex delegated routes accept only the three GPT-6 models in the panel policy.
 
 ```bash
@@ -448,7 +448,7 @@ The launcher does not autonomously fan out before the main has a task.
 
 | Role / workload | Exact selected model | Effort | Authority |
 | --- | --- | --- | --- |
-| Codex main | `gpt-6-sol` | high | Native main permissions |
+| Codex main | `gpt-6.1-sol` (shown as Sol 6.1) | high | Native main permissions |
 | Claude main | `claude-opus-5-5` | high | Native main permissions |
 | Light, clear worker | `gpt-6-luna` | low | Bounded read or isolated write |
 | Routine implementation / long straightforward explanation | `claude-sonnet-5-5` | medium | Bounded read or isolated write |

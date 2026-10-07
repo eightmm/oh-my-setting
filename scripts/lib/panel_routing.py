@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-MODEL_IDS = {"codex": {"gpt-6-sol", "gpt-6-luna", "gpt-6-astra"},
+MODEL_IDS = {"codex": {"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra"},
              "claude": {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"}}
 
 

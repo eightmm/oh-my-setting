@@ -12,7 +12,7 @@ TERMINAL_STATES = {"done", "failed", "cancelled", "timed_out", "abandoned"}
 TASK_NAMES = {"peer-delegate": "Implement patch", "delegate": "Implement patch",
               "ask": "Investigate / advise", "consult": "Investigate / advise",
               "review": "Review changes", "peer-review": "Review changes"}
-MODEL_NAMES = {"gpt-6-sol": "Sol", "gpt-6-luna": "Luna", "gpt-6-astra": "Astra",
+MODEL_NAMES = {"gpt-6.1-sol": "Sol 6.1", "gpt-6-sol": "Sol", "gpt-6-luna": "Luna", "gpt-6-astra": "Astra",
                "claude-opus-5-5": "Opus 5.5", "claude-sonnet-5-5": "Sonnet 5.5",
                "claude-fable-5-1": "Fable 5.1"}
 PURPOSE_NAMES = {"implement": "Implement patch", "explain": "Explain code",

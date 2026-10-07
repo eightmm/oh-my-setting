@@ -1397,7 +1397,7 @@ assert registered["codex"]["native_launch"] and registered["claude"]["native_lau
 assert shlex.split(panel.shell_command(["bash", str(panel.ENTRY), str(project)]))[1:] == ["bash", str(panel.ENTRY), str(project)]
 assert allocate("claude", workload="light")["model"] == "gpt-6-luna"
 assert allocate("codex", workload="routine")["model"] == "claude-sonnet-5-5"
-assert allocate("codex", workload="main")["model"] == "gpt-6-sol"
+assert allocate("codex", workload="main")["model"] == "gpt-6.1-sol"
 assert allocate("claude", workload="main")["model"] == "claude-opus-5-5"
 assert allocate("claude", role="advisor")["model"] == "gpt-6-astra"
 assert allocate("codex", role="advisor")["model"] == "claude-fable-5-1"
@@ -1405,7 +1405,7 @@ assert allocate("codex", role="advisor", seat="astra")["model"] == "gpt-6-astra"
 assert allocate("claude", role="advisor", seat="fable")["model"] == "claude-fable-5-1"
 for owner in panel.PROVIDERS:
     arguments = panel.native_command(owner, project)
-    expected = "gpt-6-sol" if owner == "codex" else "claude-opus-5-5"
+    expected = "gpt-6.1-sol" if owner == "codex" else "claude-opus-5-5"
     assert arguments[arguments.index("--model") + 1] == expected, arguments
     assert "--dispatch worker" in panel.bootstrap(owner, project)
     assert "--dispatch advisor" in panel.bootstrap(owner, project)
@@ -1447,7 +1447,7 @@ for owner in panel.PROVIDERS:
                                "--then", "starting", "--then", "working"]).strip()
 cases = [("claude", "worker", "light", "read", "explain", "gpt-6-luna"),
          ("codex", "worker", "routine", "read", "explain", "claude-sonnet-5-5"),
-         ("codex", "worker", "main", "read", "investigate", "gpt-6-sol"),
+         ("codex", "worker", "main", "read", "investigate", "gpt-6.1-sol"),
          ("claude", "worker", "main", "write", "implement", "claude-opus-5-5"),
          ("claude", "advisor", "routine", "read", "advise", "gpt-6-astra"),
          ("codex", "advisor", "routine", "read", "advise", "claude-fable-5-1"),
@@ -1612,14 +1612,14 @@ for rounds in (1, 2):
     assert planned["primary_calls"] == 4 * (rounds + 1) and planned["max_calls"] == 8 * (rounds + 1)
     assert planned["families"] == 2 and planned["executes"] is False
     assert planned["argv"][planned["argv"].index("--providers") + 1] == \
-        "codex:model=gpt-6-sol,claude:model=claude-opus-5-5,codex:model=gpt-6-astra,claude:model=claude-fable-5-1"
+        "codex:model=gpt-6.1-sol,claude:model=claude-opus-5-5,codex:model=gpt-6-astra,claude:model=claude-fable-5-1"
 assert (project / ".oms/artifacts/index.jsonl").read_bytes() == before_index
 call(council_args, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
 council_attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
 council_attempts = [a for a in council_attempts if a.get("task_id") == "panel-council-test"]
 assert any(a["tool"] == "panel-council" and a["state"] == "done" for a in council_attempts)
 assert {a["refs"].get("panel_model") for a in council_attempts if a["tool"] != "panel-council"} == \
-    {"gpt-6-sol", "claude-opus-5-5", "gpt-6-astra", "claude-fable-5-1"}, council_attempts
+    {"gpt-6.1-sol", "claude-opus-5-5", "gpt-6-astra", "claude-fable-5-1"}, council_attempts
 assert all(a.get("parent_attempt_id") == main_attempts["codex"] for a in council_attempts)
 
 import panel_results as saved
@@ -2832,6 +2832,16 @@ talking = deepcopy(flow)
 talking["room"]["pairs"] = [{"sender": "flow-main", "recipient": "flow-other", "sent": 2, "pending": 1}]
 picture = render(talking, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation={})
 assert "Between mains: Sol → Opus 5.5: 2 messages (1 unread)" in picture, picture
+# Messages and details name each participant with its role, so a Sol worker never reads like the Sol main.
+same_model = deepcopy(flow)
+same_model["room"]["participants"].append({"participant": "sol-worker", "role": "worker", "model": "gpt-6-sol",
+                                           "joined": True, "parent": "flow-attempt", "label": "Same model worker"})
+same_model["room"]["messages"] = [{"sender": "sol-worker", "targets": ["flow-main"], "text": "Call exit=1; parent acceptance pending."}]
+picture = render(same_model, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
+                 navigation={"preview": {"target": ("chat", "flow-main"), "report": {}}})
+assert "From Sol worker: Failed (exit 1)." in picture and "Messages to Sol main" in picture, picture
+assert "Sol worker → Sol main: Failed (exit 1)." in render(same_model, "codex", 110, 40, view="graph",
+                                                          main_attempt="flow-attempt", navigation={"dismissed": True})
 # A finished call stays reachable from its main's detail: its team row selects it.
 done_flow = deepcopy(flow)
 for attempt in done_flow["attempts"]["active_recent"]:
