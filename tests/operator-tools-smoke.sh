@@ -3956,6 +3956,12 @@ picture = render(counted, "codex", 157, 34, view="graph", main_attempt="flow-att
                  navigation={"overview": True, "dismissed": True})
 first_line = picture.splitlines()[1]  # row 1 is the goal banner
 assert "1 unread for live participants" in first_line and re.search(r"\d\d:\d\d$", first_line), first_line
+# Calls in review or blocked have ended; broadcasts still pending for them are not unread anyone can act on.
+ended_members = [{"participant": "um", "role": "main"}, {"participant": "ur", "role": "worker", "parent": "um", "state": "review"},
+                 {"participant": "ub", "role": "worker", "parent": "um", "state": "blocked"},
+                 {"participant": "uw", "role": "worker", "parent": "um", "state": "working"}]
+ended_pairs = {"room": {"pairs": [{"recipient": who, "pending": n} for who, n in (("ur", 40), ("ub", 7), ("uw", 2), ("um", 1))]}}
+assert graph_text.live_unread(ended_pairs, ended_members, lambda m: False) == 3
 assert "no status yet" in picture and "Latest sent" not in picture, picture
 assert "explorer" not in picture and "Past work (1)" in picture and "last message 3m ago" in picture, picture
 assert picture.splitlines()[0].startswith("◎ No shared goal · oms agent-plan init --goal TEXT"), picture
@@ -4222,14 +4228,17 @@ words["plan"] = {"present": True, "goal": "Ship the shared plan board", "task_co
 banner_nav = {}
 active = graph_text.render_graph(words, 120, 40, navigation=banner_nav)
 top = active.splitlines()[0]
-assert top.startswith("◎ GOAL  Ship the shared plan board") and top.endswith("▕██████░░░░▏ 6/9 verified · 1 review · 2 running"), top
+assert top.startswith("◎ GOAL  Ship the shared plan board") and top.endswith("▕██████░░░░▏ 6/9 verified · 1 review · 2 claimed"), top
 assert "Plan:" not in active and "Task: t7 · running" in active, active
 assert {"y": 1, "x1": 1, "x2": 120, "action": ("tab", "plan")} in banner_nav["hits"], banner_nav["hits"][:3]
 assert "OMS · " in active.splitlines()[1]
 long_goal = deepcopy(words)
 long_goal["plan"]["goal"] = "Ship the shared plan board with every main claiming work from it " * 2
 wrapped_top = graph_text.render_graph(long_goal, 80, 40).splitlines()
-assert wrapped_top[0].endswith("6/9 verified · 1 review · 2 running") and wrapped_top[1].startswith("        ") and "OMS · " in wrapped_top[2], wrapped_top[:3]
+assert wrapped_top[0].endswith("6/9 verified · 1 review · 2 claimed") and wrapped_top[1].startswith("        ") and "OMS · " in wrapped_top[2], wrapped_top[:3]
+# On a narrow board the claimed count goes first; work waiting for review stays visible next to the bar.
+narrow_top = graph_text.render_graph(words, 60, 40).splitlines()[0]
+assert narrow_top.endswith("6/9 verified · 1 review") and "claimed" not in narrow_top, narrow_top
 plain_board = graph_text.render_graph(words, 100, 40, unicode=False)
 assert plain_board.splitlines()[0].startswith("@ GOAL  Ship") and "[######....] 6/9 verified" in plain_board.splitlines()[0]
 assert all(ord(ch) < 128 for ch in plain_board.splitlines()[0]), plain_board.splitlines()[0]

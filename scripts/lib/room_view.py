@@ -333,7 +333,8 @@ def live_unread(report, members, settled):
     still read its mail counts."""
     mains = [m for m in members if m.get("role") == "main"]
     owners = {key for m in mains for key in (m["participant"], m.get("attempt")) if key}
-    reading = LIVE_STATES | {"waiting_input", "waiting_approval", "review", "blocked"}
+    # A call in review or blocked has ended its process; broadcasts that keep arriving for it are never read.
+    reading = LIVE_STATES | {"waiting_input", "waiting_approval"}
     ids = {m["participant"] for m in mains} | {m["participant"] for m in members if m.get("role") != "main"
                                               and m.get("parent") in owners and m.get("state") in reading
                                               and not settled(m)}
@@ -346,7 +347,7 @@ def plan_idle(report):
 
 
 def plan_summary(report):
-    """(goal, verified, total, review, running) of the active plan; None when there is no goal or it idled a week."""
+    """(goal, verified, total, review, claimed) of the active plan; None when there is no goal or it idled a week."""
     plan = mapping(report.get("plan"))
     goal = clean(plan.get("goal"), 200)
     if not plan.get("present") or not goal or (plan_idle(report) or 0) >= 7:
@@ -364,13 +365,15 @@ def goal_banner(report, width, unicode):
     sep = " · " if unicode else " / "
     if summary is None:
         return [(clipped(("◎ " if unicode else "@ ") + "No shared goal" + sep + "oms agent-plan init --goal TEXT", width), "dim")]
-    goal, done, total, review, running = summary
+    goal, done, total, review, claimed = summary
     filled = min(10, 10 * done // total) if total else 0
     bar = ("▕" + "█" * filled + "░" * (10 - filled) + "▏") if unicode else "[" + "#" * filled + "." * (10 - filled) + "]"
     prefix = ("◎ " if unicode else "@ ") + "GOAL  "
     counts = "%s/%s verified" % (done, total)
-    options = [bar + " " + counts + sep + "%s review" % review + sep + "%s running" % running,
-               bar + " " + counts, bar + " %s/%s" % (done, total), "%s/%s" % (done, total)]
+    # A claim is not proof of running work, and work waiting for review is progress: review outlives the bar.
+    reviewing = sep + "%s review" % review if review else ""
+    options = [bar + " " + counts + reviewing + sep + "%s claimed" % claimed, bar + " " + counts + reviewing,
+               counts + reviewing, "%s/%s%s" % (done, total, reviewing), "%s/%s" % (done, total)]
     right = next((o for o in options if width - display_width(o) - 2 - display_width(prefix) >= 12), options[-1])
     room = max(1, width - display_width(right) - 2)
     if display_width(prefix + goal) <= room:
