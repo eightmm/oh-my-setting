@@ -2157,7 +2157,8 @@ if os.name == "posix":
     import termios
     import time
 
-    def terminal(command, inputs, expected, trigger=None, signal_after=None, expected_exit=0, timeout=20):
+    def terminal(command, inputs, expected, trigger=None, signal_after=None, expected_exit=0, timeout=20, then=None):
+        # then=(marker, bytes): sent once marker is drawn after the first inputs, so a later click meets its hit map.
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(project)
@@ -2165,7 +2166,7 @@ if os.name == "posix":
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 110, 0, 0))
         initial_tty = termios.tcgetattr(fd) if signal_after is not None else None
         pending = inputs.splitlines(keepends=True)
-        prompts = 0
+        prompts = sent_at = 0
         output = b""
         deadline = time.monotonic() + timeout
         finished = False
@@ -2181,6 +2182,10 @@ if os.name == "posix":
                     os.write(fd, b"".join(pending))
                     pending = []
                     prompts = 1
+                    sent_at = len(output)
+                elif then and prompts and then[0] in output[sent_at:]:
+                    os.write(fd, then[1])
+                    then = None
                 elif pending and seen > prompts:
                     os.write(fd, pending.pop(0))
                     prompts = seen
@@ -4908,11 +4913,11 @@ if os.name != "nt":
     render(actual, "codex", 110, 28, view="tree", navigation=nav)
     hit = next(h for h in nav["hits"] if h["action"][0] == "result")
     # The result opens from a background read; the watcher exits on its own after three snapshots, so a slow background read still lands.
-    input_bytes = ("\033[<0;8;%sM\033[<0;8;%sM" % (group_hit["y"], hit["y"])).encode()
+    group_click, result_click = [("\033[<0;8;%sM" % y).encode() for y in (group_hit["y"], hit["y"])]
     before_click = ledger.read_bytes()
     terminal(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
               "--watch", "--view", "tree", "--count", "3", "--no-animation"],
-             input_bytes, b"RECORDED RESULTS", trigger=b"Activity", timeout=60)
+             group_click, b"RECORDED RESULTS", trigger=b"Activity", timeout=60, then=("▾ Past work".encode(), result_click))
     assert ledger.read_bytes() == before_click, "clicking a result wrote lifecycle state"
     import signal
     for signum in (signal.SIGHUP, signal.SIGTERM):
