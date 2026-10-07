@@ -282,6 +282,7 @@ def build(directory, repo_name, repo_path="", now=None):
         "actionable": [clean(item, 80) for item in listing(plan.get("actionable"))[:5]],
         "stale_claims": len(listing(plan.get("stale"))),
         "stale_reviews": len(listing(plan.get("stale_review"))),
+        "idle_days": count(plan.get("idle_days")),
         "contract_blocker": (clean(contract.get("blocker") or "unknown", 80)
                              if contract.get("bound") and not contract.get("satisfied") else None),
     }
@@ -315,17 +316,26 @@ def display_width(text):
     return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
 
 
+ELLIPSIS = ["..."]
+
+
+def use_unicode(flag):
+    """Board renders truncate with one-column "…"; ASCII output and CLI snapshots keep "..."."""
+    ELLIPSIS[0] = "…" if flag else "..."
+
+
 def fit(text, width):
     if display_width(text) <= width:
         return text
+    mark = ELLIPSIS[0]
     out, used = [], 0
     for ch in text:
         step = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
-        if used + step > width - 3:
+        if used + step > width - len(mark):
             break
         out.append(ch)
         used += step
-    return "".join(out) + "..."
+    return "".join(out) + mark
 
 
 def unknown(value, label="unknown"):

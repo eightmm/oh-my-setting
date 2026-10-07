@@ -160,6 +160,8 @@ def project(rows):
         elif kind == "message":
             targets = ([p for p, member in members.items() if member["joined"] and p != event["sender"]]
                        if event["recipient"] == "all" else [event["recipient"]])
+            if event["message_kind"] == "status":
+                targets = []
             messages.append(dict(event, targets=targets, text=row.get("text", ""), seq=row["seq"], ts=row.get("ts")))
         elif kind == "publication":
             publication = dict(event, seq=row["seq"])
@@ -425,7 +427,8 @@ def bind(repo, ident, who, native_session):
 
 def visible(row, who, joined_seq=0):
     event = row.get("room_event", {})
-    return (event.get("kind") == "message" and row.get("seq", 0) > joined_seq and event.get("sender") != who
+    return (event.get("kind") == "message" and event.get("message_kind") != "status"
+            and row.get("seq", 0) > joined_seq and event.get("sender") != who
             and event.get("recipient") in ("all", who))
 
 
@@ -471,7 +474,10 @@ def selected(repo, consumer=None, preferred=None, who=None):
 def status(repo, room):
     state = project(records(repo, room))
     state["message_count"] = len(state["messages"])
-    state["pending_count"] = sum(len(m["pending_for"]) for m in state["messages"])
+    live = {p["participant"] for p in state["participants"] if p["joined"]}
+    state["pending_count"] = sum(len(live.intersection(m["pending_for"])) for m in state["messages"])
+    state["statuses"] = {m["sender"]: {"text": m["text"], "ts": m["ts"], "seq": m["seq"]}
+                         for m in state["messages"] if m["message_kind"] == "status"}
     state["received_count"] = sum(len(m["received_by"]) for m in state["messages"])
     state["answered_count"] = sum(m["answered"] for m in state["messages"])
     pairs = {}

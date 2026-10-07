@@ -14,6 +14,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/lib/file-lock.sh"
 # shellcheck source=scripts/lib/test-growth.sh
 . "$ROOT/scripts/lib/test-growth.sh"
+# shellcheck source=scripts/lib/harness-residue.sh
+. "$ROOT/scripts/lib/harness-residue.sh"
 
 usage() {
   cat <<'EOF'
@@ -311,23 +313,33 @@ print(sys.argv[1] + "-" + hashlib.sha256(json.dumps(
 # could also sway a verdict the push then attributes to the commit.
 # The job's EXIT trap belongs to the landing lock, so a tree a killed job left
 # behind is swept by the next job for this repository, which holds that lock.
+# The tree is harness residue (<tmp>/oh-my-setting-land.*/wt beside a marker
+# owned by this job) so write workers running meanwhile see a live sibling, not
+# an unattributable registration; dead-job residue cleanup removes it too.
 drop_gate_tree() {  # PATH
   git -C "$REPO" worktree remove --force "$1" >/dev/null 2>&1 || rm -rf "$1"
+  case "$1" in */oh-my-setting-land.*/wt) rm -rf "${1%/wt}" ;; esac
 }
 run_gate() {
-  local rc=0 listing line tree
+  local rc=0 listing line parent tree
   listing="$(git -C "$REPO" worktree list --porcelain 2>/dev/null)" || listing=""
   while IFS= read -r line || [ -n "$line" ]; do
     line="$(oms_strip_cr "$line")"
-    case "$line" in "worktree "*/oms-land-gate.*) drop_gate_tree "${line#worktree }" ;; esac
+    case "$line" in
+      "worktree "*/oh-my-setting-land.*/wt|"worktree "*/oms-land-gate.*) drop_gate_tree "${line#worktree }" ;;
+    esac
   done <<EOF
 $listing
 EOF
   git -C "$REPO" worktree prune >/dev/null 2>&1 || true
-  tree="$(mktemp -d "${TMPDIR:-/tmp}/oms-land-gate.XXXXXX")" || return 1
+  parent="$(mktemp -d "$(oms_harness_tmp_base)/oh-my-setting-land.XXXXXX")" || return 1
+  parent="$(cd "$parent" && pwd -P)" || return 1
+  tree="$parent/wt"
+  # Marker first: a guard capture between it and the add sees a vouched entry.
+  oms_harness_mark_tmpdir "$parent" "$REPO" "$tree"
   if ! git -C "$REPO" -c core.fsmonitor=false worktree add --quiet --detach \
       "$tree" "$SHA" >> "$LOG" 2>&1; then
-    rm -rf "$tree"; return 1
+    rm -rf "$parent"; return 1
   fi
   (cd "$tree" && bash -c "$GATE") >> "$LOG" 2>&1 || rc=$?
   drop_gate_tree "$tree"

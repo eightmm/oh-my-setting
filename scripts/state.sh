@@ -543,6 +543,15 @@ if plan_healthy and plan["present"] and os.path.isfile(pf):
     except Exception:
         pdata = {}
     plan["goal"] = (pdata.get("goal") or "")[:200]
+    stamps = []
+    rows = pdata.get("tasks") or {}
+    for t in (rows.values() if isinstance(rows, dict) else rows):
+        try:
+            stamps.append(calendar.timegm(time.strptime(str(t.get("updated")), "%Y-%m-%dT%H:%M:%SZ")))
+        except (AttributeError, ValueError):
+            pass
+    if stamps:
+        plan["idle_days"] = max(0, int((time.time() - max(stamps)) // 86400))
 retirements = [row for row in read_jsonl(oms("plan", "retirements.jsonl"))
                if row.get("schema") == 1 and row.get("kind") == "plan-retirement"]
 if retirements:

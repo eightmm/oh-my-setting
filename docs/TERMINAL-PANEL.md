@@ -5,6 +5,20 @@ keeps the conversation pane; the OMS sidebar shows recorded main, advisor and
 worker activity. `oms --help` and bare `oms` with redirected input/output retain
 command help. The panel uses existing OMS state, authentication and front doors.
 
+## Quick start
+
+1. Run `oms` in a terminal: window 0 is the control window, an inbox for you.
+2. Press `1` (Codex) or `2` (Claude), no Enter. Each main opens its own window with a board.
+3. `F6`/`F7` step between mains; `Ctrl-b 0` returns to the control window; `Ctrl-b d` detaches.
+4. The control window's **Needs you** lists failed or timed-out calls, calls and mains
+   waiting for approval or input, broadcasts from mains and patches awaiting admission.
+5. Arrow keys or a click select a row; Enter or a second click opens that main's chat
+   or the call's result. Without a raw-key terminal the menu takes key + Enter.
+6. On a board, click or Enter on a main or call opens it; Esc backs out, `q` returns to chat.
+7. Results: `t` on a board opens the tree and a call's retained answer; `r` in the control
+   menu browses recorded results. Debates: the `COUNCIL` branch of a main, or `c` to start one.
+8. `?` in the control menu lists every other shortcut.
+
 ```bash
 oms panel --repo . --layout inline         # portable menu, no tmux needed
 oms panel --repo . --layout split          # uses an already-installed tmux
@@ -68,7 +82,8 @@ The selection is shown before a chat or result opens.
 Mouse support is enabled only in the OMS tmux session, never globally. Hold
 Shift for the terminal's own text selection. The watcher restores mouse
 reporting, echo, canonical input and the cursor on exit, interrupt and
-HUP/TERM. Redirected output stays plain and passive. Unsupported terminals
+HUP/TERM; the OMS session's tmux `mouse` option stays on afterwards. Redirected
+output stays plain and passive. Unsupported terminals
 retain the existing control-menu chat/result selection.
 
 The graph shows joined mains, advisors/reviewers, workers, a mailbox, the
@@ -90,8 +105,10 @@ coordination role. Advisors/reviewers sit above it and join its top edge;
 workers branch from its bottom edge. Each child connects to the main itself,
 so workers do not appear to report to an advisor. In lanes, advisors and
 reviewers sit above their main and each running worker has its own box below
-it. Finished calls (`done`, `cancelled`) leave the board and are counted as
-`✓N done`; their results stay in the main's detail and the tree (`t`).
+it. Finished calls (`done`, `cancelled`) leave the board; their results stay in
+the main's detail (`· N finished` in its team line) and the tree (`t`). Only the
+lane view, with two or more mains, adds a `✓ N done` note under each lane; a
+single-main graph shows no count.
 Failed and waiting calls stay visible. Wires attach at the card
 edges, and a particle on a live edge moves toward its consumer. Child status
 names its main. Cards stay bounded in width instead of stretching a lone worker
@@ -99,8 +116,20 @@ across the terminal.
 
 Main tabs show each main's state, model, a distinguishing title, worker and
 advisor counts (`W3 A2`), attention count (`!1`) and unread mail addressed to
-that main (`M2`), including mail from other mains. A `Between mains` line counts the
-messages each main sent another and how many are unread. Board text is written for
+that main (`M2`), including mail from other mains; zero counts are omitted. A
+long title keeps its tail, which tells mains apart, and gives up the shared
+prefix first. A `Between mains` block under the tabs lists one
+`Sol 6.1 → Opus 5.5 · 36 messages · 1 unread` line per sender and recipient (unread
+pairs first, then most recent; at most four plus `+N more pairs`); a board shorter
+than 32 rows shows `Between mains: N pairs · M unread`. The header holds one usage
+line (`Claude 66% week · ctx 73% │ Codex 2% week · ctx 84%`; the model-call totals
+stay in the control/tree USAGE card). Truncation reads `…` (`...` in ASCII mode).
+`⚑` (ASCII `A`) marks a call waiting for approval, `?` one waiting for input.
+When a call of a main fails, times out, is blocked or waits for a person, that
+main's tmux window name gets a `! ` prefix, set and cleared only by the watcher in
+that window. Numeric usage readings from a native pane count only when they are
+whole fields of its last two status lines. A notice shows on a short board in place
+of the key hints. Board text is written for
 people: states read `running`, `finished` or `needs approval`, call exits and
 provider status lines are dropped from messages, and the detail says whether its
 main reviewed a result instead of showing internal fields. Clicking another main's
@@ -129,7 +158,8 @@ pointer.
 
 The footer packs whole hints in priority order (click, calls, mains, Enter,
 `a Ask`, `w Worktree` when it applies, pins, expand, tree, Esc) and always keeps
-the quit or return-to-chat key.
+the quit or return-to-chat key. A hint that does not fit is skipped, so `Esc`, the
+lowest priority, vanishes first: at about 100 columns or fewer with several mains.
 
 `a` in the watcher asks an advisor for the selected main (or the shown one).
 In tmux it opens a popup that takes one question and runs
@@ -566,10 +596,24 @@ totals; call totals appear once and are not account quotas. Narrow cards use
 `W` for weekly used percentage and `C` for main context left. Activity keeps
 main/role branches, wraps task titles, separates repository tasks, and closes
 the viewport border even while scrolling. Empty declared scopes are omitted.
-The control menu shows start, chat/result and view shortcuts first. Enter `?`
-for all actions in ordinary scrollable help; existing shortcuts still work.
-Use `j`/`k` plus Enter to page through overflowing activity in the control menu;
-the watcher retains its arrow, mouse and page-key navigation.
+The control menu is an inbox. **Needs you** lists up to 12 items, newest first,
+each as glyph, who (`Sol 6.1 worker for Opus 5.5`), what and age: failed or
+timed-out calls with their title, calls or mains waiting for approval or input,
+unanswered room messages that a main sent to `all`, and finished write workers
+whose patch has no admission or landing record. Arrow keys or a click select a
+row; Enter (or a second click) opens that main's chat or shows the call's result,
+and Esc returns. An empty list says `Nothing needs you right now`; a room with no
+main shows `Press 1 (Codex) or 2 (Claude) to start a main`. The menu keeps
+start (`1` Codex, `2` Claude, `3` Resume, `t` Task), `o` rooms, `9` refresh and
+quit/detach; board keys are not repeated. Enter `?` for all other actions in
+ordinary scrollable help (chats, results, views, advisor, review, council,
+finalize); existing shortcuts still work.
+Menu keys act at once, without Enter, on a POSIX terminal with raw input; the
+board's key handling is reused. Text prompts (a task title, a provider) stay
+line-based inside that prompt only. Elsewhere, such as Windows Git Bash or
+redirected input, the menu reads `oms> ` and needs key + Enter. The inbox
+refreshes every five seconds. The watcher retains its arrow, mouse and page-key
+navigation.
 In a managed tmux control pane the quit key is labelled `Detach`; it preserves
 the native sessions. In a coupled tmux board, `q` returns focus to the lower
 input pane and keeps the board alive; an expanded board collapses first.
@@ -717,8 +761,8 @@ only in the OMS panel even when its environment inherits `NO_COLOR`;
 `OMS_PANEL_THEME=light` (or a light `COLORFGBG` background) uses darker shades for light
 terminal themes; `dark` forces the default shades. Redirected
 output and `TERM=dumb` stay plain in every mode. The watch restores the terminal cursor
-on exit or interruption. The control menu redraws on actions rather than
-animating over an input prompt.
+on exit or interruption. The control menu redraws in place on keys and every five
+seconds rather than animating.
 
 A native window binds children by its recorded main attempt ID. Other mains'
 activity is counted separately and available in Details. The control view shows
@@ -771,6 +815,15 @@ Format repair can add one call per primary call. `--dry-run` exposes both counts
 without executing a model. Four seats must complete to report council success;
 failed seats remain visible and the owner still decides the outcome. All seats
 are read-only. There is no model fallback or additional synthesis-model call.
+
+Key `d` on the board opens the debate reader in place: this room's debates
+(newest first, at most ten) with owner main, state and time. Up/Down selects,
+Enter or a click opens one, PgUp/PgDn or the wheel scrolls it, Esc returns to
+the list and then the graph, and `d` returns to the graph at once. An opened
+debate shows the question, each seat's stance (its VERDICT or first Answer
+sentence, with what changed after round 1), Agreement/Disagreement only when
+the synthesis has such headings, the owner's recorded decision, and the
+synthesis artifact path. Evidence is read in the background.
 
 The owning main records a result through `--finalize`. Native process exit and
 worker completion never create accepted results by themselves. `completed`

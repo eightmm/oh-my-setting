@@ -22334,14 +22334,18 @@ test_worker_guard_exempts_a_live_sibling_mid_removal() {
   local project="$TMP/guard-sibling-removal"
   local managed_root="$TMP/guard-sibling-removal-root"
   local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
+  local scratch_parent="$managed_root/oh-my-setting-scratch.sibling"
   local result
 
   make_guard_repo "$project"
   make_live_managed_sibling "$project" "$sibling_parent"
+  make_live_managed_sibling "$project" "$scratch_parent"
   # `git worktree remove` deletes the checkout before the registry entry, so a
   # final capture inside that window sees a registered worktree with no
-  # checkout while the sibling's marker is still live.
-  result="$(run_delegate_beside_sibling "$project" "$managed_root" "rm -rf $sibling_parent/wt")"
+  # checkout while the sibling's marker is still live. A parent's
+  # `oms scratch-worktree remove` passes through the same window.
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
+    "rm -rf $sibling_parent/wt $scratch_parent/wt")"
   [ "${result%%	*}" = 0 ] ||
     fail "a live sibling mid-removal must not fail the run: $result"
   if printf '%s' "$result" | grep -Fq 'outside the worktree'; then
@@ -22353,6 +22357,7 @@ test_worker_guard_exempts_a_live_sibling_mid_creation() {
   local project="$TMP/guard-sibling-creation"
   local managed_root="$TMP/guard-sibling-creation-root"
   local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
+  local scratch_parent="$managed_root/oh-my-setting-scratch.sibling"
   local result
 
   make_guard_repo "$project"
@@ -22361,13 +22366,76 @@ test_worker_guard_exempts_a_live_sibling_mid_creation() {
   # before the checkout exists: the pre-provider snapshot sees a registered
   # worktree with no checkout, the final capture sees the same entry live.
   mv "$sibling_parent/wt" "$sibling_parent/pending"
+  # A parent's `oms scratch-worktree add` orders marker and add the same way;
+  # here the final capture lands inside that window of an add begun mid-run.
   result="$(run_delegate_beside_sibling "$project" "$managed_root" \
-    "mv $sibling_parent/pending $sibling_parent/wt")"
+    'case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
+mv $sibling_parent/pending $sibling_parent/wt && mkdir -p $scratch_parent && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$project\\nworktree=$scratch_parent/wt\\ntemporary=1\\n' > $scratch_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $scratch_parent/wt HEAD && mv $scratch_parent/wt $scratch_parent/pending")"
   [ "${result%%	*}" = 0 ] ||
     fail "a live sibling mid-creation must not fail the run: $result"
   if printf '%s' "$result" | grep -Fq 'outside the worktree'; then
     fail "a live sibling mid-creation should not be reported as a change: $result"
   fi
+}
+
+# The incident: a parent made a scratch worktree with plain `git worktree add`
+# while a write worker ran, and the worker failed on gitmeta. The front door
+# marks its registrations, so a parent add and remove mid-run pass; a worker
+# calling it is refused (the plain-add failure is in
+# test_worker_guard_sees_submodule_and_worktree_metadata).
+test_worker_guard_exempts_parent_scratch_worktrees() {
+  local project="$TMP/guard-scratch"
+  local managed_root="$TMP/guard-scratch-root"
+  local parent_cmd="env -u OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH=0 OMS_DELEGATE_WORKTREE_ROOT=$managed_root $ROOT/scripts/scratch-worktree.sh"
+  local bin="$TMP/guard-scratch-oms"
+  local existing marker_pid result
+
+  make_guard_repo "$project"
+  mkdir -p "$bin"
+  ln -sfn "$ROOT/scripts/oms" "$bin/oms"
+  # Through the dispatcher and without --owner-pid, the marker must name a
+  # process that outlives the command, or the exemption dies on return.
+  existing="$(env -u OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH=0 \
+    OMS_DELEGATE_WORKTREE_ROOT="$managed_root" "$bin/oms" scratch-worktree add --repo "$project")" ||
+    fail "parent scratch add failed: $existing"
+  marker_pid="$(sed -n 's/^pid=//p' "${existing%/wt}/.oh-my-setting-tmp")"
+  kill -0 "$marker_pid" 2>/dev/null ||
+    fail "a scratch marker must outlive the add command (pid $marker_pid)"
+  $parent_cmd list --repo "$project" | grep -Fq "$existing" ||
+    fail "list must show the live scratch worktree"
+  # Only the worker turn acts; capability probes reach the same stub.
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
+    'case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
+$parent_cmd add --repo $project --owner-pid $$ >/dev/null && $parent_cmd remove $existing >/dev/null && if $ROOT/scripts/scratch-worktree.sh add --repo $project --owner-pid $$ 2>$project-refused; then echo refusal-missing; fi")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a parent scratch add/remove during a run must not fail the worker: $result"
+  if printf '%s' "$result" | grep -Eq 'outside the worktree|refusal-missing'; then
+    fail "parent scratch lifecycle must be silent and workers refused: $result"
+  fi
+  grep -Fq 'parent-only' "$project-refused" ||
+    fail "a worker's scratch add must say why it was refused: $(cat "$project-refused")"
+  [ ! -e "$existing" ] || fail "scratch remove must delete the checkout"
+  [ "$(git -C "$project" worktree list --porcelain | grep -c 'oh-my-setting-scratch\.')" = 1 ] ||
+    fail "only the scratch worktree added mid-run must remain: $(git -C "$project" worktree list)"
+  if $parent_cmd remove "$project" >/dev/null 2>&1; then
+    fail "scratch remove must refuse a path it did not create"
+  fi
+
+  # Once its owner exits, a scratch worktree is ordinary harness residue.
+  local owner dead
+  sleep 30 &
+  owner=$!
+  dead="$($parent_cmd add --repo "$project" --owner-pid "$owner")" || fail "scratch add for a dying owner failed"
+  kill "$owner"
+  wait "$owner" 2>/dev/null || true
+  OMS_DELEGATE_WORKTREE_ROOT="$managed_root" bash -c '. "$1"; oms_harness_cleanup_temp_dirs 0' _ \
+    "$ROOT/scripts/lib/harness-residue.sh" > "$project-cleanup.out"
+  [ ! -e "${dead%/wt}" ] || fail "residue cleanup must remove a dead-owner scratch worktree"
+  if git -C "$project" worktree list --porcelain | grep -Fq "$dead"; then
+    fail "residue cleanup must unregister a dead-owner scratch worktree"
+  fi
+  [ "$(git -C "$project" worktree list --porcelain | grep -c 'oh-my-setting-scratch\.')" = 1 ] ||
+    fail "residue cleanup must keep a live-owner scratch worktree"
 }
 
 test_worker_guard_flags_a_sibling_whose_marker_died() {
@@ -22736,11 +22804,38 @@ test_worker_guard_sees_submodule_and_worktree_metadata() {
   # common git dir.
   local wt="$TMP/guard-worktree"
   make_guard_repo "$wt"
-  result="$(run_guarded_worker "$wt" \
+  result="$(OMS_TASK_ID=guard-worktree run_guarded_worker "$wt" \
     "git -C $wt worktree add --detach $wt/../guard-worktree-extra HEAD")"
   [ "${result%%	*}" != 0 ] || fail "registering a worktree should fail the run: $result"
   printf '%s' "$result" | grep -Fq 'gitmeta' ||
     fail "a new worktree registration should be named: $result"
+  # The room and panel relay the artifact's closing Output, not stderr.
+  python3 - "$wt" "$ROOT/scripts/lib" <<'PY' || fail "a guard failure must leave a readable reason"
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from peer_artifacts import artifact_sections
+import panel_results
+repo = Path(sys.argv[1])
+row = [json.loads(line) for line in (repo / ".oms/artifacts/index.jsonl").read_text().splitlines()][-1]
+answer, code = artifact_sections(repo / row["artifact"])
+reason = "The worker guard stopped this run: protected state changed outside the worker's worktree (gitmeta)."
+assert code == "1" and answer.startswith(reason) and "nothing was landed" in answer, (code, answer)
+assert str(repo) not in answer, answer
+calls = panel_results.results(repo, "guard-worktree")["rows"][0]["calls"]
+assert any(reason in call.get("answer", "") for call in calls), calls
+PY
+
+  # A scratch-shaped marker outside the managed roots vouches for nothing.
+  local forged="$TMP/guard-worktree-forged"
+  local forged_parent="$TMP/guard-worktree-forged-dir/oh-my-setting-scratch.forged"
+  make_guard_repo "$forged"
+  mkdir -p "$forged_parent"
+  result="$(run_guarded_worker "$forged" \
+    "printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$forged\\nworktree=$forged_parent/wt\\ntemporary=1\\n' > $forged_parent/.oh-my-setting-tmp && git -C $forged worktree add --detach $forged_parent/wt HEAD")"
+  [ "${result%%	*}" != 0 ] || fail "a forged scratch marker must not exempt a worker's add: $result"
+  printf '%s' "$result" | grep -Fq 'gitmeta' ||
+    fail "a forged scratch registration should be named: $result"
 }
 
 test_shared_memory_context_ranked_recall() {

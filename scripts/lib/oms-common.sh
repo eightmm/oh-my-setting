@@ -1122,7 +1122,7 @@ oms_worker_gitmeta_is_pending_managed_worktree() {  # REPO WT_PATH CURRENT_WORKT
   case "$wt_path" in /*/wt) ;; *) return 1 ;; esac
   residue_dir="${wt_path%/wt}"
   case "$(basename "$residue_dir")" in
-    oh-my-setting-delegate.*|oh-my-setting-admit.*) ;;
+    oh-my-setting-delegate.*|oh-my-setting-admit.*|oh-my-setting-scratch.*|oh-my-setting-land.*) ;;
     *) return 1 ;;
   esac
   residue_physical="$(oms_harness_physical_dir "$residue_dir" 2>/dev/null || true)"

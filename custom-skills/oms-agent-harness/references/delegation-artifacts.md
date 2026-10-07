@@ -82,6 +82,9 @@ snapshot reports support.
 Consultation and `agent-call` cannot produce a source patch, though they append
 their local artifacts. Write delegation uses an isolated worktree and returns
 an artifact log plus patch; workers cannot commit or push.
+While workers run, create scratch worktrees with `oms scratch-worktree add`
+(and `remove PATH`), never plain `git worktree add` in the shared repository:
+an unmarked registration fails every running worker's guard.
 `peer-delegate --read-only` uses the isolated worker boundary for an audit
 report and returns no patch. Outbound context is scanned and sensitive-looking
 content blocks the call.

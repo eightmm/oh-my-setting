@@ -128,7 +128,8 @@ def _advisor_label(home):
 
 
 def native_advisors(members):
-    """Claude Code's built-in advisor calls still unanswered, per main participant; in memory only.
+    """Claude Code's built-in advisor per main participant: the call still unanswered, else the newest
+    one answered within ADVISOR_MAX_AGE; in memory only.
 
     Reads only tool names, ids and timestamps from the tail of each main's own transcript."""
     mains = {m["consumer"]: m["participant"] for m in members
@@ -153,7 +154,7 @@ def native_advisors(members):
                                 break
                 if path is None:
                     continue
-            calls, answered = [], set()
+            calls, answered = [], {}
             try:
                 data = _read_owned(path, TAIL_BYTES, tail=True)
             except OSError:
@@ -173,14 +174,20 @@ def native_advisors(members):
                     if part.get("type") == "server_tool_use" and part.get("name") == "advisor" and isinstance(part.get("id"), str):
                         calls.append((part["id"], row.get("timestamp")))
                     elif part.get("type") == "advisor_tool_result" and isinstance(part.get("tool_use_id"), str):
-                        answered.add(part["tool_use_id"])
-            if not calls or calls[-1][0] in answered:
+                        answered[part["tool_use_id"]] = row.get("timestamp")
+            if not calls:
                 continue
-            started = datetime.fromisoformat(str(calls[-1][1]).replace("Z", "+00:00")).astimezone()
-            if abs(datetime.now(started.tzinfo).timestamp() - started.timestamp()) > ADVISOR_MAX_AGE:
+            call = calls[-1]
+            running = call[0] not in answered
+            started = datetime.fromisoformat(str(call[1]).replace("Z", "+00:00")).astimezone()
+            finished = None if running else datetime.fromisoformat(
+                str(answered[call[0]]).replace("Z", "+00:00")).astimezone()
+            if abs(datetime.now(started.tzinfo).timestamp() - (finished or started).timestamp()) > ADVISOR_MAX_AGE:
                 continue
             label = label or _advisor_label(home)
-            found[participant] = {"model": label, "started": started.strftime("%H:%M")}
+            found[participant] = {"model": label, "started": started.strftime("%H:%M"), "running": running}
+            if finished:
+                found[participant]["finished"] = finished.strftime("%H:%M")
         except (OSError, ValueError, TypeError, RecursionError):
             continue
     return found

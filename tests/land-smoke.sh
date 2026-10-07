@@ -13,7 +13,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-land.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 export OMS_WORK_JOURNAL_SUPPRESS=1 XDG_STATE_HOME="$TMP/state" GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
-  GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+  GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t TMPDIR="$TMP/tmp" OMS_LAND_SMOKE_ROOT="$ROOT"
+mkdir -p "$TMPDIR"
 log_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["log"])' "$1"; }
 LAND="$ROOT/scripts/land.sh"
 AUTOPILOT_RECEIPT="$ROOT/scripts/lib/autopilot-receipt.py"
@@ -112,14 +113,22 @@ git -C "$repo" pull -q --ff-only origin main
 # A session driving the checkout writes its own .oms during the gate, and an
 # untracked file must not sway a verdict the push attributes to the commit.
 echo scratch > "$repo/untracked-scratch"
-gate 'test ! -e untracked-scratch || exit 9; mkdir -p .oms; touch .oms/gate-wrote; echo isolated gate ok'
+# The gate tree is harness residue owned by the live job, so a write worker's
+# guard running meanwhile exempts its registration instead of failing.
+OMS_LAND_SMOKE_REPO="$(cd "$repo" && pwd -P)"
+export OMS_LAND_SMOKE_REPO
+gate 'test ! -e untracked-scratch || exit 9; mkdir -p .oms; touch .oms/gate-wrote
+. "$OMS_LAND_SMOKE_ROOT/scripts/lib/harness-residue.sh"; . "$OMS_LAND_SMOKE_ROOT/scripts/lib/oms-common.sh"
+case "$(basename "$(dirname "$PWD")")" in oh-my-setting-land.*) ;; *) exit 8 ;; esac
+oms_worker_gitmeta_is_live_managed_worktree "$OMS_LAND_SMOKE_REPO" "$(git rev-parse --git-dir)/gitdir" "" || exit 8
+echo isolated gate ok'
 repo_oms_before="$(find "$repo/.oms" -print | sort)"
 "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/isolated.out" 2>&1 ||
   fail "the gate must run in a tree without untracked files: $(cat "$TMP/isolated.out")"
 [ "$repo_oms_before" = "$(find "$repo/.oms" -print | sort)" ] ||
   fail "a gate's .oms writes must not reach the landing checkout"
-git -C "$repo" worktree list --porcelain | grep -q 'oms-land-gate\.' &&
-  fail "the gate worktree must be removed after the gate"
+gate_tree_left() { git -C "$repo" worktree list --porcelain | grep -q 'oh-my-setting-land\.' || ls -d "$TMPDIR"/oh-my-setting-land.* >/dev/null 2>&1; }
+gate_tree_left && fail "the gate worktree and its marker directory must be removed after the gate"
 rm -f "$repo/untracked-scratch"
 
 # --- 3. live siblings are recorded, waited for, or explicitly ignored ---------
@@ -228,6 +237,7 @@ if "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/fail.out" 2>&1; then
 fi
 [ "$(remote_tip)" = "$before" ] || fail "a red gate must not push"
 grep -q 'gate exit 3' "$TMP/fail.out" || fail "the failure reason must be shown: $(cat "$TMP/fail.out")"
+gate_tree_left && fail "a red gate must remove its gate worktree and marker directory"
 grep -Fq 'in affected:tests/demo-smoke.sh scripts-smoke.test_demo' "$repo/.oms/failures.jsonl" ||
   fail "a red gate must be recorded in the fail ledger with its failing stages"
 

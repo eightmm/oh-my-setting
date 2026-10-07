@@ -2155,6 +2155,10 @@ if [ -n "$worker_guard_dir" ]; then
       --cmd "peer-delegate --to $TO worker-authority" --exit 1 \
       --summary "worker changed protected state: $worker_guard_changed") >/dev/null 2>&1 ||
       echo "warning: worker-authority breach was NOT recorded in the fail ledger; later commands will not remember it" >&2
+    # Result readers relay the last Output before the last Exit, and the worker's
+    # Output above was never closed. Paths stay in the local bullets above.
+    printf "\n\n## Output\n\nThe worker guard stopped this run: protected state changed outside the worker's worktree (%s). The worktree was kept for inspection; nothing was landed.\n\n## Exit\n\n1\n" \
+      "$worker_guard_changed" >> "$artifact"
     ma_append_artifact_index "$REPO" delegate "$TO" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" ||
       echo "warning: worker-authority breach receipt was NOT indexed; inbox and recovery will not see it" >&2
     plan_failure_transition

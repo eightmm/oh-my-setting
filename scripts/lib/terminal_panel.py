@@ -19,9 +19,10 @@ import tempfile
 import room
 import uuid
 import panel_host
+import panel_debate
 
 from dashboard_projection import clean
-from panel_view import menu_rows, render, render_results
+from panel_view import INBOX_LIMIT, menu_rows, render, render_results
 from panel_routing import allocate, command as routed_command, policy, MODEL_IDS
 from panel_results import _lock, finalize, results, retry_delivery
 
@@ -86,6 +87,9 @@ def room_instructions(ident, member):
             " --to PARTICIPANT --kind question|answer|note --text TEXT "
             "and --reply-to MESSAGE_ID for answers. After consuming, use oms room ack "
             "--id " + ident + " --participant " + member + " --message MESSAGE_ID. "
+            "When starting or switching a user task, record it with oms room send --id " + ident +
+            " --participant " + member + " --to all --kind status --text \"short task\"; "
+            "it is shown on the board and is not delivered as mail. "
             "Include --room " + ident + " in every oms panel --dispatch or --council command. "
             "Use the explicit identifiers above when a tool environment does not inherit the room binding. "
             "A resumed main retains this participant; its current attempt comes from verified room evidence. "
@@ -1290,18 +1294,52 @@ def frame_view(repo, provider, state, previous=None, menu=True, main_attempt=Non
     return text, size, capable
 
 
+ADMISSION_CHECKS = {}
+
+
+def awaiting_admission(repo, state):
+    """Finished write workers whose recorded patch has no admission or landing record yet."""
+    from room_view import nodes
+    found = []
+    for member in nodes(state):
+        task = member.get("task_id")
+        if member.get("role") != "worker" or member.get("access") != "write" or member["state"] != "done" or not task:
+            continue
+        checked = ADMISSION_CHECKS.get((str(repo), task))
+        if not checked or time.monotonic() - checked[0] > 30:
+            try:
+                calls = [call for row in results(repo, task_id=task).get("rows", []) for call in row.get("calls", [])]
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
+                continue
+            checked = ADMISSION_CHECKS[(str(repo), task)] = (time.monotonic(), any(call.get("patch") for call in calls)
+                and not any(call.get("kind") in ("patch-admit", "patch-land") for call in calls))
+        if checked[1]:
+            found.append(member["participant"])
+    return found[:INBOX_LIMIT]
+
+
 def show(repo, provider, previous=None, menu=True, clear=True, main_attempt=None,
-         view="auto", attention_only=False, navigation=None):
-    state, status = snapshot(repo)
-    from panel_metrics import collect
-    if state.get("room", {}).get("participants"):
-        state = dict(state, provider_status=collect(state, main_attempt, repo=repo))
+         view="auto", attention_only=False, navigation=None, cache=None):
+    # A cache lets key presses redraw the last snapshot instead of collecting a new one.
+    if cache is not None and "state" in cache:
+        state, status = cache["state"], cache["status"]
+    else:
+        state, status = snapshot(repo)
+        from panel_metrics import collect
+        if state.get("room", {}).get("participants"):
+            state = dict(state, provider_status=collect(state, main_attempt, repo=repo))
+            if menu:
+                state["awaiting_admission"] = awaiting_admission(repo, state)
+        if cache is not None:
+            cache.update(state=state, status=status)
     text, size, capable = frame_view(repo, provider, state, previous, menu, main_attempt,
                                     view=view, attention_only=attention_only, navigation=navigation)
     # Finish collection/rendering before clearing, so errors never blank the pane.
     if capable and clear:
-        print("\033[H\033[2J", end="")
-    print(text, flush=True)
+        # Repaint in place: lines are overwritten and the rest erased, so a refresh never blanks the pane.
+        print("\033[H" + text.replace("\n", "\033[K\n") + "\033[K\033[J", flush=True)
+    else:
+        print(text, flush=True)
     return status
 
 
@@ -1485,6 +1523,8 @@ def refreshed_navigation(navigation, state, saved_pins=None):
         navigation = {"collapsed": set(), "offset": 0}
     elif navigation.get("preview"):
         navigation["preview"]["refresh"] = True
+    if (navigation.get("debate_view") or {}).get("open"):
+        navigation["debate_view"]["refresh"] = True
     # The session's saved pins apply when they change, so a pin made in one window reaches every board.
     if saved_pins and saved_pins != navigation.get("saved_pins"):
         navigation["saved_pins"] = saved_pins
@@ -1582,6 +1622,44 @@ def read_panel(repo, provider, view, attention_only):
     return state, status, provider, main_attempt, density, filtered, selected_room
 
 
+WINDOW_ATTENTION = {"failed", "timed_out", "waiting_input", "waiting_approval", "blocked"}
+
+
+def main_needs_attention(state, main_attempt):
+    """Whether any call of this window's main is failed, timed out, blocked or waiting on a person."""
+    from room_view import nodes
+    from dashboard_projection import listing, mapping
+    members = nodes(state)
+    ids = {key for m in members if main_attempt in (m.get("participant"), m.get("attempt")) and m.get("role") == "main"
+           for key in (m.get("participant"), m.get("attempt")) if key}
+    room, finalized = mapping(state.get("room")), mapping(state.get("finalized"))
+    read = {mapping(x).get("id") for x in listing(room.get("messages"))
+            if str(mapping(x).get("id", "")).startswith("result-") and not listing(mapping(x).get("pending_for"))}
+    return any(m.get("role") != "main" and m.get("parent") in ids and m["state"] in WINDOW_ATTENTION
+               and not (m["state"] in {"failed", "timed_out"}
+                        and ("result-" + str(m.get("participant")) in read
+                             or finalized.get(m.get("task_id")) in {"completed", "accepted"}))
+               for m in members)
+
+
+def mark_window(attention):
+    """Prefix this watcher's own OMS window with "! " while its main needs attention; None when unchanged/unsafe."""
+    pane = os.environ.get("TMUX_PANE", "")
+    if not managed_session() or not re.fullmatch(r"%[0-9]+", pane):
+        return
+    try:
+        result = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{window_name}"),
+                                capture_output=True, text=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
+        name = result.stdout.rstrip("\n") if result.returncode == 0 else ""
+        base = name[2:] if name.startswith("! ") else name
+        if base not in PROVIDERS or name == ("! " if attention else "") + base:
+            return
+        subprocess.run(tmux_command("rename-window", "-t", pane, ("! " if attention else "") + base),
+                       capture_output=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def watch(repo, provider, count=0, no_animation=False, view=None, attention_only=False):
     from panel_input import TerminalInput, choose
     n, frame, last = 0, 0, None
@@ -1604,6 +1682,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
     saved_handlers = {}
     expanded = False
     stamps = source_stamps()
+    flagged = None
 
     def expand(enabled):
         nonlocal expanded
@@ -1634,6 +1713,12 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             print("\033[?25l", end="", flush=True)
         with TerminalInput(managed_session(), active=capable) as inputs:
             background = BackgroundRead() if inputs.fd is not None else None
+            if inputs.fd is not None and managed_session() and os.environ.get("OMS_PANEL_POSITION", "auto") == "auto":
+                # A board started (or restarted) in an already wide or tall window takes that shape at once.
+                try:
+                    relayout_board()
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    pass
             previews = BackgroundRead()
             state, status, main_attempt = {"repo": {"name": repo.name}, "collection": {"ok": False, "pending": True}}, 0, None
             density, filtered = view or board_view("auto"), attention_only
@@ -1659,10 +1744,17 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         read_density = navigation.get("view") or read_density
                     if not managed_session():
                         read_filtered = attention_only or navigation.get("attention", False)
+                    if density == "debate":
+                        read_density = density  # a refresh never leaves the debate reader
                     if not background or revision == submitted_revision:
                         density, filtered = read_density, read_filtered
                     navigation = refreshed_navigation(navigation, state, managed_session() and
                                                       session_option("@oms_panel_pins"))
+                    if managed_session() and state.get("collection", {}).get("ok") is True and main_attempt:
+                        alert = main_needs_attention(state, main_attempt)
+                        if alert != flagged:
+                            mark_window(alert)
+                            flagged = alert
                     if n and not sys.stdout.isatty():
                         print("----")
                     n += 1
@@ -1740,7 +1832,25 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             return status
                         if resized and event[0] == "click":
                             continue
-                        if event[0] == "escape":
+                        if event[0] == "escape" and density == "debate":
+                            if (navigation.get("debate_view") or {}).get("open"):
+                                navigation["debate_view"]["open"] = None
+                            else:
+                                density = navigation.pop("debate_from", "graph")
+                                navigation["view"] = density
+                            navigation["offset"] = 0
+                        elif event[0] == "d":
+                            navigation.pop("detail", None)
+                            navigation["offset"] = 0
+                            if density == "debate":
+                                density = navigation.pop("debate_from", "graph")
+                            else:
+                                navigation["debate_from"], density = density, "debate"
+                            navigation["view"] = density
+                        elif density == "debate" and not navigation.get("detail") and event[0] != "q" and \
+                                panel_debate.handle(event, navigation):
+                            pass
+                        elif event[0] == "escape":
                             if not navigation.pop("detail", None):
                                 navigation.pop("preview", None)
                                 navigation["dismissed"] = True
@@ -1830,6 +1940,20 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         preview.update(report=report[1] if report else {},
                                        error=report[2] if report else "Result evidence unavailable")
                         size = redraw()
+                    reader = navigation.get("debate_view") or {}
+                    if loaded and reader.get("open") and report and report[0] == ("debate", reader["open"]):
+                        reader.update(report=report[1] or {}, error=report[2])
+                        size = redraw()
+                    if density == "debate" and reader.get("open") and not previews.pending and (
+                            "report" not in reader or reader.pop("refresh", False)):
+                        target = ("debate", reader["open"])
+
+                        def debate_read(target=target):
+                            try:
+                                return target, panel_debate.read(repo, target, call_results), None
+                            except (OSError, ValueError, KeyError, TypeError) as error:
+                                return target, {}, clean(str(error), 120) or "Debate evidence unavailable"
+                        previews.start(debate_read)
                     if preview and preview["target"][0] == "chat":
                         # Main detail is drawn from the room snapshot; no evidence read is needed.
                         preview.setdefault("report", {})
@@ -1848,6 +1972,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         size = redraw()
                         next_frame = time.monotonic() + .25
     finally:
+        if flagged:
+            mark_window(False)
         if expanded:
             try:
                 expand(False)
@@ -1911,8 +2037,78 @@ def browse_chats(repo):
         read_field("Press Enter to return to chats: ", required=False)
 
 
-def interactive(repo, view="auto", attention_only=False):
+def raw_keys():
+    return terminal_style()[0] and os.name == "posix" and sys.stdin.isatty()
+
+
+def menu_input():
+    from panel_input import TerminalInput
+
+    class MenuInput(TerminalInput):
+        """The board's input model plus every printable key, so the control menu needs no Enter."""
+
+        def decode(self, data):
+            events, index = [], 0
+            while index < len(data):
+                byte = data[index]
+                sequence = (re.match(rb"\x1b(?:\[[0-9;<]*[A-Za-z~]|O.)", data[index:])
+                            if byte == 27 and not self.pending else None)
+                if not self.pending and 33 <= byte < 127:
+                    events.append((chr(byte),))
+                    index += 1
+                elif sequence:
+                    events += super().decode(sequence.group())
+                    index += sequence.end()
+                else:
+                    events += super().decode(data[index:index + 1] if byte != 27 else data[index:])
+                    index = len(data) if byte == 27 else index + 1
+            return events
+    return MenuInput(managed_session())
+
+
+def read_choice(repo, provider, previous, view, attention_only, navigation, cache):
+    """One control key without Enter; arrows, clicks and Enter act on the Needs-you list. A line elsewhere."""
     from panel_input import choose
+    # Raw mode starts before the first frame, so keys typed while it loads are kept.
+    with menu_input() as inputs:
+        show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
+        if inputs.fd is None:
+            return read_field("oms> ")
+        deadline = time.monotonic() + 5
+        queued = navigation.pop("queued", [])
+        while True:
+            events, queued = queued or inputs.wait(max(0, min(.25, deadline - time.monotonic()))), []
+            for position, event in enumerate(events):
+                if event[0] == "eof":
+                    raise EOFError
+                if len(event) == 1 and len(event[0]) == 1 and event[0] != " ":
+                    # Keys typed ahead run on the next read, not lost with this one.
+                    navigation["queued"] = events[position + 1:]
+                    if navigation.get("detail"):
+                        if event[0] == "q":
+                            navigation.pop("detail", None)
+                            navigation["offset"] = 0
+                            return "9"
+                        continue
+                    return event[0]
+                if event[0] == "escape":
+                    if navigation.pop("detail", None) is None:
+                        continue
+                    navigation["offset"] = 0
+                    show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
+                    continue
+                navigation.pop("notice", None)
+                action = None if navigation.get("detail") and event[0] in ("enter", "click") else choose(event, navigation)
+                if action:
+                    width = max(1, shutil.get_terminal_size().columns)
+                    navigate(repo, action, cache.get("state", {}), navigation, width)
+                show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
+            navigation.pop("queued", None)
+            if time.monotonic() >= deadline:
+                return "9"
+
+
+def interactive(repo, view="auto", attention_only=False):
     provider = os.environ.get("OMS_AGENT", "codex")
     if provider not in PROVIDERS:
         provider = "codex"
@@ -1933,15 +2129,16 @@ def interactive(repo, view="auto", attention_only=False):
                                         "@oms_panel_room", os.environ.get("OMS_ROOM_ID", "")), check=True)
             subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
                                         "@oms_panel_attention", "1" if attention_only else "0"), check=True)
-        show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation)
+        cache = {}
+        navigation["line_input"] = not raw_keys()
         try:
-            choice = read_field("oms> ")
+            choice = read_choice(repo, provider, previous, view, attention_only, navigation, cache)
+            if choice != "9":
+                # Keys typed ahead only follow a refresh; any other choice may open a text prompt.
+                navigation.pop("queued", None)
             if choice == "z":
                 report = reopen_panel(repo)
                 previous = "panel " + report["status"] + "; input session preserved"
-                continue
-            if choice in ("j", "k"):
-                choose(("pagedown" if choice == "j" else "pageup",), navigation)
                 continue
             if choice == "?":
                 width = max(1, shutil.get_terminal_size().columns)

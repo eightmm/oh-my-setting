@@ -40,15 +40,18 @@ oms_harness_temp_bases() {
   esac
 }
 
-oms_harness_mark_tmpdir() {
+# The marker's pid is the process whose life bounds the directory: the creating
+# shell by default, or an explicit OWNER_PID for a command that outlives it.
+oms_harness_mark_tmpdir() {  # DIR REPO WORKTREE [OWNER_PID]
   local dir="$1"
   local repo="$2"
   local worktree="$3"
+  local owner_pid="${4:-$$}"
 
   [ -d "$dir" ] || return 0
   {
     printf 'kind=oh-my-setting-temp\n'
-    printf 'pid=%s\n' "$$"
+    printf 'pid=%s\n' "$owner_pid"
     printf 'repo=%s\n' "$repo"
     printf 'worktree=%s\n' "$worktree"
     printf 'temporary=1\n'
@@ -95,8 +98,8 @@ OMS_HARNESS_SAFE_RESIDUE_WORKTREE=""
 
 # Resolve a marker only as evidence. The removal target itself is derived from
 # the managed residue shape and can therefore never be an arbitrary marker
-# path. Production creates delegate/admission worktrees as <residue>/wt and
-# Antigravity read worktrees as <residue>/tree.
+# path. Production creates delegate/admission/scratch/land-gate worktrees as
+# <residue>/wt and Antigravity read worktrees as <residue>/tree.
 oms_harness_safe_residue_worktree() {
   local base="$1"
   local dir="$2"
@@ -133,7 +136,7 @@ oms_harness_safe_residue_worktree() {
   esac
   case "$relative" in
     */*) return 1 ;;
-    oh-my-setting-delegate.*|oh-my-setting-admit.*) child=wt ;;
+    oh-my-setting-delegate.*|oh-my-setting-admit.*|oh-my-setting-scratch.*|oh-my-setting-land.*) child=wt ;;
     oh-my-setting-agy-read.*) child=tree ;;
     *) return 1 ;;
   esac

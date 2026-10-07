@@ -177,6 +177,7 @@ run
 run-ledger
 run-reconcile
 runtime
+scratch-worktree
 session-handoff
 skill-doctor
 skill-forge

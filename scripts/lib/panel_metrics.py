@@ -88,17 +88,23 @@ def pane_reading(target, provider):
 
 
 def numeric_reading(text, provider):
+    # Only whole fields of the pane's last status lines count; chat text quoting "Context 5% left" does not.
+    lines = [line for line in text.splitlines() if line.strip()][-2:]
+    fields = [f.strip() for line in lines for f in re.split(r"\s[·|/]\s", line)]
+
+    def found(pattern):
+        hits = [re.fullmatch(pattern, f, re.I if provider == "codex" else 0) for f in fields]
+        return [int(m.group(1)) for m in hits if m]
+
     if provider == "codex":
-        context = re.findall(r"\bContext\s+(\d{1,3})%\s+left\b", text, re.I)
-        weekly = re.findall(r"\bweekly\s+(\d{1,3})%\s+left\b", text, re.I)
-        reading = {"context_left": percent(int(context[-1])) if context else None,
-                   "weekly_used": 100 - int(weekly[-1]) if weekly and int(weekly[-1]) <= 100 else None}
+        context, weekly = found(r"Context\s+(\d{1,3})%\s+left"), found(r"weekly\s+(\d{1,3})%\s+left")
+        reading = {"context_left": percent(context[-1]) if context else None,
+                   "weekly_used": 100 - weekly[-1] if weekly and weekly[-1] <= 100 else None}
     else:
-        context = re.findall(r"\bctx\s+\[[#-]+\]\s+(\d{1,3})%", text)
-        weekly = re.findall(r"\b7d\s+(\d{1,3})%", text)
-        used = percent(int(context[-1])) if context else None
+        context, weekly = found(r"ctx\s+\[[#-]+\]\s+(\d{1,3})%(?:\s.*)?"), found(r"7d\s+(\d{1,3})%(?:\s.*)?")
+        used = percent(context[-1]) if context else None
         reading = {"context_left": None if used is None else 100 - used,
-                   "weekly_used": percent(int(weekly[-1])) if weekly else None}
+                   "weekly_used": percent(weekly[-1]) if weekly else None}
     return dict(reading, source="TUI") if any(v is not None for v in reading.values()) else {}
 
 

@@ -2,9 +2,10 @@
 
 from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import header_rows
-from panel_view import (ATTENTION_STATES, MODEL_NAMES, PALETTE, activity, box_edge, box_row, clipped,
-                        menu_rows, status_alerts, tone, usage_labels, worker_rows, wrapped)
-from room_view import nodes, readable, said, window_order
+from panel_view import (ATTENTION_STATES, PALETTE, activity, box_edge, box_row, clipped,
+                        menu_rows, status_alerts, tone, usage_words, worker_rows, wrapped)
+from room_view import (joined_seconds, live_unread, main_names, model_name, nodes, plan_idle, readable, said,
+                       settler, window_order)
 
 
 def render_tree(report, width, height, color=False, unicode=True, frame=None, menu=False,
@@ -18,6 +19,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         navigation.update(hits=[], items=[], offset=0, viewport=0, positions={}, room_id=room.get("id"))
         return ""
     members = nodes(report)
+    names = main_names(report, members)
+    settled, aged = settler(report)
     current = next((m["participant"] for m in members if main_attempt and
                     (m["participant"] == main_attempt or m.get("attempt") == main_attempt)), None)
     # This window's main leads so its team stays on screen; the rest keep the F6/F7 window order.
@@ -45,22 +48,29 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         if action:
             items.append(action)
 
+    def phrase(call):
+        if call["state"] != "presence unknown":
+            return said(call["state"])
+        seconds = joined_seconds(call)
+        return "no lifecycle record" + (sep + "joined %sm ago" % int(seconds // 60) if seconds is not None else "")
+
     roots = set(owners)
     for n, main in enumerate(mains):
-        last_main = n == len(mains) - 1
-        root_stem = "  " + ("   " if last_main else stem)
+        root_stem = "  "
         attached = [m for m in calls if m.get("parent") and
                     m["parent"] in {main["participant"], main.get("attempt")}]
+        # A call with no lifecycle record that has outlived the board's ten minutes folds into one note.
+        lapsed = sum(m["state"] == "presence unknown" and aged(m) for m in attached)
+        attached = [m for m in attached if not (m["state"] == "presence unknown" and aged(m))]
         action = ("chat", main["participant"])
         folded = main["participant"] in collapsed
         toggle = ("▸" if folded else "▾") if unicode else (">" if folded else "v")
-        toggle = toggle if attached else " "
-        model = MODEL_NAMES.get(main.get("model"), main.get("model")) or main.get("provider", "unknown")
         state = "exited" if main["state"] == "done" else main["state"]
         said_state = state if state == "exited" else said(state)
-        label = "%s %s%s %s%s" % (toggle, "" if summary or width < 60 else end if last_main else prefix,
-            activity(state, frame, unicode), "this window" + sep if main["participant"] == current else "", model,
-        )
+        model = names.get(main["participant"]) or model_name(main)
+        # The node carries one mark: the fold arrow, or its state where there is nothing to fold.
+        label = "%s %s%s" % (toggle if attached else activity(state, frame, unicode),
+                             "this window" + sep if main["participant"] == current else "", model)
         status = said_state + (sep + "%s calls" % len(attached) if folded else "")
         add(label if width < 60 else label + sep + status, "codex" if main.get("provider") == "codex" else "main",
             action, bool(attached))
@@ -70,6 +80,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         if title and title != "Native task not recorded":
             for line in wrapped(title, max(1, content_width - 7), 2):
                 add(root_stem + "  " + line, None, action)
+        if lapsed:
+            add(root_stem + "%s earlier call%s with no lifecycle record" % (lapsed, "" if lapsed == 1 else "s"), "dim")
         if not folded:
             groups = [(role, [m for m in attached if m.get("role") == role])
                       for role in ("council", "advisor", "reviewer", "worker")]
@@ -82,23 +94,20 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 indent = root_stem + ("   " if last_group else stem)
                 for child_index, child in enumerate(children):
                     branch = end if child_index == len(children) - 1 else prefix
-                    model = MODEL_NAMES.get(child.get("model"), child.get("model")) or child.get("provider", "unknown")
+                    model = model_name(child)
                     label = child.get("title") or child["participant"]
                     child_action = child.get("_action") or ("result", child["participant"])
-                    add(indent + branch + "%s %s%s%s" % (
-                        activity(child["state"], frame, unicode), model, sep, said(child["state"])),
+                    add(indent + branch + "%s %s%s%s" % (activity(child["state"], frame, unicode), model, sep, phrase(child)),
                         tone(child["state"]), child_action)
                     for line in wrapped(label, max(1, content_width - display_width(indent) - 3), 2):
                         add(indent + "   " + line, None, child_action)
-        if n < len(mains) - 1:
-            add("  │" if unicode else "  |", "dim")
     unlinked = [m for m in calls if m.get("parent") not in roots]
     if unlinked:
         add("Calls with no known main", "alert")
         for n, child in enumerate(unlinked):
             add((end if n == len(unlinked) - 1 else prefix) + "%s %s%s%s" % (
                 activity(child["state"], frame, unicode), child.get("title") or child["participant"], sep,
-                said(child["state"])),
+                phrase(child)),
                 tone(child["state"]), ("result", child["participant"]))
     if not mains and not calls:
         add("No main connected" if room.get("id") else "Select a work room", "dim")
@@ -113,8 +122,13 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 tone(task.get("state")), action)
     acceptance = mapping(report.get("acceptance"))
     if acceptance.get("available"):
-        add("Plan: %s of %s tasks verified" % (mapping(acceptance.get("counts")).get("verified", 0),
-            acceptance.get("total", "?")), "good" if acceptance.get("complete") else "alert")
+        verified = "%s of %s tasks verified" % (mapping(acceptance.get("counts")).get("verified", 0),
+                                                acceptance.get("total", "?"))
+        idle = plan_idle(report) or 0
+        if idle >= 7:
+            add(sep.join(["Old plan", "idle %s days" % idle, verified]), "dim")
+        else:
+            add("Plan: " + verified, "good" if acceptance.get("complete") else "alert")
     for message in listing(room.get("messages"))[-2:]:
         add("Room log" + sep + (readable(message.get("text"), " ") or ""), "dim")
     if any(main.get("owns") for main in mains):
@@ -135,7 +149,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     head = [{"text": clipped(heading, width), "style": "main"}]
     head += [{"text": clipped(alert, width), "style": "bad"} for alert in status_alerts(report)]
     if boxed and height >= 20:
-        usage = usage_labels(report)
+        usage = usage_words(report, unicode)
         labels = usage[:2] if summary else usage
         if summary and len(usage) > 2:
             labels += ["+%s models / expand for more" % (len(usage) - 2)]
@@ -148,7 +162,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         metric_lines = header_rows(report, left if wide else content_width)
         content = []
         if wide:
-            content.append(("PROVIDER LIMITS".ljust(left) + "  MODEL CALLS / recent 8", "dim"))
+            content.append(("Usage limits".ljust(left) + "  Model use, last 8 calls", "dim"))
             for index in range(max(len(metric_lines), len(labels))):
                 metric = metric_lines[index] if index < len(metric_lines) else ""
                 label = labels[index] if index < len(labels) else ""
@@ -156,18 +170,18 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 content.append((metric + " " * (left - display_width(metric)) + "  " + label, None))
         else:
             content = [(line, None) for line in metric_lines]
-            content += [("MODEL CALLS / recent 8", "dim")] + [(line, None) for line in labels]
+            content += [("Model use, last 8 calls", "dim")] + [(line, None) for line in labels]
         head.append({"text": box_edge("USAGE / W used, C left" if content_width < 40 else "USAGE", width, unicode), "style": "dim"})
         head += [{"text": box_row(line, width, unicode), "style": style} for line, style in content]
         head.append({"text": box_edge("", width, unicode, "bottom"), "style": "dim"})
     elif budget - len(head) >= 5:
         head += [{"text": clipped(line, width), "style": "dim"} for line in header_rows(report, width)]
     if budget - len(head) >= 5:
-        mailbox = "Messages: %s unread" % room.get("pending_count", 0)
+        unread = live_unread(report, members, settled)
+        mailbox = "Messages: %s unread for live participants" % unread
         if not summary:
-            mailbox += " · %s read · %s answered" % (room.get("received_count", 0), room.get("answered_count", 0))
-        head.append({"text": clipped(mailbox, width),
-            "style": "alert" if room.get("pending_count") else "dim"})
+            mailbox += sep + "%s read" % room.get("received_count", 0) + sep + "%s answered" % room.get("answered_count", 0)
+        head.append({"text": clipped(mailbox, width), "style": "alert" if unread else "dim"})
     # The viewport owns its borders, so scrolling never leaves an open card.
     if boxed and budget - len(head) < 3:
         head = head[:1 + len(status_alerts(report))]
