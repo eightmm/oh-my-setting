@@ -233,6 +233,7 @@ def bootstrap(provider, repo):
         "main itself, such as integrating into a shared tree another main has frozen. "
         "Panel mains work from the shared plan (oms agent-plan): claim a ready task, delegate it, verify it, "
         "mark it reviewed/verified; propose new tasks with oms agent-plan add instead of starting unplanned work. "
+        "To know whether a land is running, use oms land status --repo PATH (active: true) - never pgrep. "
         "Before editing shared files, declare your scope with oms room scope --owns PATH, and pass "
         "--scope PATH to write workers; overlaps warn, they never lock. "
         "Refer to other mains by tmux window and model, such as #1 Opus 5.5 or #2 Sol 6.1, never by participant id. "
@@ -1654,6 +1655,16 @@ def snapshot(repo, room_id=None):
             raise ValueError("invalid dashboard response")
         ident = os.environ.get("OMS_ROOM_ID") if room_id is None else room_id
         state.pop("room", None)
+        state.pop("land", None)
+        try:
+            # A receipt that says running proves nothing; only the probed lock (active) does.
+            run = subprocess.run(["bash", str(ENTRY), "land", "status", "--repo", str(repo), "--json"],
+                                 capture_output=True, text=True, timeout=5, check=False, stdin=subprocess.DEVNULL)
+            found = json.loads(run.stdout) if run.returncode == 0 else {}
+            if found.get("active") is True:
+                state["land"] = {key: found.get(key) for key in ("active", "sha", "step", "minutes")}
+        except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
+            pass
         if ident:
             try:
                 state["room"] = room.status(repo, ident)

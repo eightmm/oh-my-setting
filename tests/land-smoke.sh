@@ -472,6 +472,20 @@ for lock_kind in 0 1; do
   first_pid=$!
   for _ in $(seq 1 100); do [ ! -f "$OMS_TEST_LAND_COUNT" ] || break; sleep 0.05; done
   [ -f "$OMS_TEST_LAND_COUNT" ] || fail "first landing did not start: $(cat "$TMP/first.out")"
+  # The probe sees the held lock without taking, truncating or removing it.
+  for _ in $(seq 1 100); do
+    OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json 2>/dev/null | grep -q '"active": true' && break
+    sleep 0.05
+  done
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json > "$TMP/active.json" ||
+    fail "status failed while a land was active"
+  python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["active"] is True and r["step"]=="gate" and r["minutes"]>=0, r' "$TMP/active.json" ||
+    fail "status must report the active gate step: $(cat "$TMP/active.json")"
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep -q '^land .*: running (lock held)' ||
+    fail "text status must say the lock is held"
+  active_rc=0
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --active-exit >/dev/null || active_rc=$?
+  [ "$active_rc" = 3 ] || fail "--active-exit must exit 3 while a land is active: $active_rc"
   second_rc=0
   OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" --repo "$repo" --no-update --ci-wait 0 \
     > "$TMP/second.out" 2>&1 || second_rc=$?
@@ -480,6 +494,17 @@ for lock_kind in 0 1; do
   [ "$second_rc" = 75 ] || fail "duplicate landing did not report lock contention: $(cat "$TMP/second.out")"
   ! grep -q '^receipt:' "$TMP/second.out" || fail "rejected background launch advertised a receipt"
   [ "$(wc -l < "$OMS_TEST_LAND_COUNT" | tr -d ' ')" = 1 ] || fail "duplicate landing repeated the gate"
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json | grep -q '"active": false' ||
+    fail "a released lock must read inactive"
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --active-exit >/dev/null ||
+    fail "--active-exit must exit 0 when no land is active"
+  # A receipt that says running without a lock holder is stale.
+  stale_receipt="$(ls -t "$receipt_dir"/*.json | head -n 1)"
+  cp "$stale_receipt" "$TMP/stale-backup.json"
+  sed 's/"state": "[a-z]*"/"state": "running"/' "$TMP/stale-backup.json" > "$stale_receipt"
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep -q 'no land holds the lock (stale receipt)' ||
+    fail "a running receipt without a lock must read stale"
+  cp "$TMP/stale-backup.json" "$stale_receipt"
 done
 
 gate 'echo successful CI and update probe'

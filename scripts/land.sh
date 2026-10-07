@@ -22,7 +22,7 @@ usage() {
 Usage: land.sh [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD]
                [--wait] [--no-update] [--ci-wait SECONDS]
                [--sibling-wait SECONDS] [--ignore-siblings]
-       land.sh status [--repo PATH] [--json]
+       land.sh status [--repo PATH] [--json] [--active-exit]
 
 Preconditions: a clean tracked tree, HEAD ahead of REMOTE/TARGET with the
 remote tip as an ancestor (rebase first otherwise), and a gate command
@@ -44,6 +44,9 @@ outside the repo:
           worktrees are reported at intake and waited for before push, up to
           --sibling-wait seconds (default 1800; 0 checks once and blocks at
           once, it does not skip: --ignore-siblings skips)
+Status probes the land lock without taking it and reports active true|false|
+null (null: cannot tell). A receipt that says running proves nothing; active
+does. With --active-exit, status exits 3 while a land is active.
 Without --wait the job detaches (setsid) and this prints the receipt path.
 Retrying the same commit/destination/gate reuses successful push evidence and
 resumes CI/install only. Concurrent jobs for this repository exit 75.
@@ -52,7 +55,7 @@ EOF
 
 REPO="$PWD" REMOTE=origin TARGET=main GATE="" WAIT=0 UPDATE=1 CI_WAIT=1500
 SIBLING_WAIT=1800 IGNORE_SIBLINGS=0
-MODE=start JSON=0 STAMP="" READY_FILE=""
+MODE=start JSON=0 ACTIVE_EXIT=0 STAMP="" READY_FILE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     status) MODE=status; shift ;;
@@ -68,6 +71,7 @@ while [ "$#" -gt 0 ]; do
     --sibling-wait) SIBLING_WAIT="$2"; shift 2 ;;
     --ignore-siblings) IGNORE_SIBLINGS=1; shift ;;
     --json) JSON=1; shift ;;
+    --active-exit) ACTIVE_EXIT=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -485,16 +489,43 @@ run_job() {
   finish passed "pushed $SHORT to $REMOTE/$TARGET; ci $conclusion"
 }
 
+land_active() {  # true | false | null, from a read-only probe of the land lock
+  case "$(oms_file_lock_probe "$LAND_DIR/active" 2>/dev/null)" in
+    held) echo true ;;
+    free) echo false ;;
+    *) echo null ;;
+  esac
+}
+
 show_status() {  # show_status [RECEIPT]; default: the most recently written one
-  local newest="${1:-}"
+  local newest="${1:-}" active rc=0
+  active="$(land_active)"
+  [ "$ACTIVE_EXIT" -eq 1 ] && [ "$active" = true ] && rc=3
   [ -n "$newest" ] || newest="$(ls -t "$LAND_DIR"/*.json 2>/dev/null | head -n 1)" || true
-  [ -n "$newest" ] || { echo "no landing recorded under $LAND_DIR"; return 1; }
-  if [ "$JSON" -eq 1 ]; then cat "$newest"; return 0; fi
-  python3 - "$newest" <<'PY'
-import json, sys
+  [ -n "$newest" ] || { echo "no landing recorded under $LAND_DIR"; [ "$rc" -ne 0 ] || rc=1; return "$rc"; }
+  python3 - "$newest" "$active" "$JSON" <<'PY'
+import calendar, json, sys, time
 r = json.load(open(sys.argv[1], encoding="utf-8"))
+active = {"true": True, "false": False}.get(sys.argv[2])
 g, p, u, c = r.get("gate", {}), r.get("push", {}), r.get("update", {}), r.get("ci", {})
-print("land %s: %s" % (str(r.get("sha", ""))[:7], r.get("state")))
+if sys.argv[3] == "1":
+    r["active"] = active
+    if active:
+        r["step"] = ("gate" if g.get("rc") == "pending" else "push" if p.get("rc") == "pending"
+                     else "ci" if c.get("conclusion") == "pending" else "update")
+        try:
+            r["minutes"] = max(0, int((time.time() - calendar.timegm(time.strptime(
+                r["started_at"], "%Y-%m-%dT%H:%M:%SZ"))) // 60))
+        except (KeyError, ValueError, TypeError):
+            pass
+    print(json.dumps(r, ensure_ascii=False, sort_keys=True))
+    sys.exit(0)
+state = r.get("state")
+if state == "running" and active is True:
+    state = "running (lock held)"
+elif state == "running" and active is False:
+    state = "receipt says running, but no land holds the lock (stale receipt)"
+print("land %s: %s" % (str(r.get("sha", ""))[:7], state))
 print("  gate: %s (%ss)  push: %s  update: %s  ci: %s%s" % (
     "ok" if g.get("rc") == 0 else g.get("rc", "-"), g.get("seconds", "-"),
     "ok" if p.get("rc") == 0 else p.get("rc", "-"), "ok" if u.get("rc") == 0 else u.get("rc", "-"),
@@ -508,6 +539,7 @@ elif s.get("live"):
     print("  siblings: %s (waited %ss)" % (s["live"], p.get("sibling_wait_seconds", "-")))
 print("  log: %s" % r.get("log", ""))
 PY
+  return "$rc"
 }
 
 run_ready_job() {
@@ -516,7 +548,7 @@ run_ready_job() {
 }
 
 case "$MODE" in
-  status) show_status; exit ;;
+  status) rc=0; show_status || rc=$?; exit "$rc" ;;
   job)
     rc=0
     oms_try_file_lock "$LAND_DIR/active" run_ready_job || rc=$?

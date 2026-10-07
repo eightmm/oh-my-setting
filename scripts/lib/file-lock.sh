@@ -661,6 +661,40 @@ oms_try_file_lock() {
   fi
 }
 
+# Read-only probe: prints held, free or unknown and always returns 0. It never
+# takes, creates, truncates, reclaims or removes a lock: even an instant flock
+# would make a land starting at that moment fail as a concurrent job. Linux
+# reports flock holders in /proc/locks; elsewhere a flock lock reads unknown. A
+# mkdir lock is judged by the live-owner check a contender would use, without
+# the reclaim step.
+oms_file_lock_probe() {  # STATE_FILE
+  local lock_path
+
+  lock_path="$(oms_file_lock_path_for_file "$1")"
+  if command -v flock >/dev/null 2>&1 && [ "${OMS_LOCK_FORCE_MKDIR:-0}" != "1" ]; then
+    [ -e "$lock_path" ] || { echo free; return 0; }
+    python3 - "$lock_path" <<'PY' 2>/dev/null || echo unknown
+import os, sys
+try:
+    st = os.stat(sys.argv[1])
+    rows = open("/proc/locks", encoding="ascii", errors="replace").read().splitlines()
+except OSError:
+    print("unknown")
+    sys.exit(0)
+key = "%02x:%02x:%d" % (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
+held = any(len(f) > 5 and f[1] == "FLOCK" and f[5] == key for f in (row.split() for row in rows))
+print("held" if held else "free")
+PY
+    return 0
+  fi
+  [ -d "$lock_path" ] || { [ ! -e "$lock_path" ] && echo free || echo unknown; return 0; }
+  if oms_file_lock_mkdir_stale "$lock_path" "$(oms_file_lock_timeout)" "$(date +%s)"; then
+    echo free
+  else
+    echo held
+  fi
+}
+
 oms_with_file_lock() {
   local state_file="$1"
   local timeout

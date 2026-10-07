@@ -361,6 +361,17 @@ def plan_summary(report):
 
 def goal_banner(report, width, unicode):
     """The goal rows at the top of every board as [(text, style)]; the progress always stays on the first row."""
+    rows = goal_rows(report, width, unicode)
+    land = mapping(report.get("land"))
+    if land.get("active") is True:
+        sep = " · " if unicode else " / "
+        minutes = valid_count(land.get("minutes"))
+        text = "LANDING " + clean(str(land.get("sha") or ""))[:7] + sep + clean(str(land.get("step") or "land"))[:12]
+        rows.append((clipped(text + (sep + "%sm" % minutes if minutes is not None else ""), width), "head"))
+    return rows
+
+
+def goal_rows(report, width, unicode):
     summary = plan_summary(report)
     sep = " · " if unicode else " / "
     if summary is None:

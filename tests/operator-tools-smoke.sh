@@ -3965,6 +3965,16 @@ assert graph_text.live_unread(ended_pairs, ended_members, lambda m: False) == 3
 assert "no status yet" in picture and "Latest sent" not in picture, picture
 assert "explorer" not in picture and "Past work (1)" in picture and "last message 3m ago" in picture, picture
 assert picture.splitlines()[0].startswith("◎ No shared goal · oms agent-plan init --goal TEXT"), picture
+assert "LANDING" not in picture, picture
+for land in ({"active": True, "sha": "abcdef0123", "step": "ci", "minutes": 7},):
+    landing = deepcopy(counted)
+    landing["land"] = land
+    shown = render(landing, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
+                   navigation={"overview": True, "dismissed": True})
+    assert "LANDING abcdef0 · ci · 7m" in shown.splitlines()[1], shown
+    landing["land"]["active"] = False
+    assert "LANDING" not in render(landing, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
+                                   navigation={"overview": True, "dismissed": True})
 declared_board = deepcopy(counted)
 declared_board["room"]["statuses"] = {"flow-other": {"text": "Fixing the parser", "ts": "2026-10-07T09:05:00Z", "seq": 3}}
 declared_picture = render(declared_board, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
@@ -4187,6 +4197,8 @@ listed = [event("a-old", "working", "2026-01-01T00:00:00Z"), event("a-new", "rev
 members = [{"participant": "gone-review", "role": "worker", "joined": True},
            {"participant": "flow-main", "role": "main", "joined": True}]
 def fake_run(command, **kwargs):
+    if command[2:3] == ["land"]:
+        return subprocess.CompletedProcess(command, 0, json.dumps({"active": True, "sha": "abc1234", "step": "gate", "minutes": 2}), "")
     assert command[2:3] == [str(panel.ENTRY)] or "agent-events" in command, command
     return subprocess.CompletedProcess(command, 0, json.dumps(listed), "")
 with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \
@@ -4194,6 +4206,7 @@ with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0))
         patch.object(panel, "managed_session", return_value=False), \
         patch.object(panel.subprocess, "run", side_effect=fake_run):
     got, _ = panel.snapshot(Path("."), "flow-room")
+assert got["land"] == {"active": True, "sha": "abc1234", "step": "gate", "minutes": 2}, got.get("land")
 assert got["room_attempts"] == {"gone-review": {"state": "review", "attempt_id": "a-new",
     "updated_at": "2026-01-02T00:00:00Z", "task_id": "t-a-new"}}, got.get("room_attempts")
 with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \

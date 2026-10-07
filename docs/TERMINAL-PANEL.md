@@ -187,7 +187,7 @@ progress bar and counts right-aligned (`▕██████░░░░▏ 6/9
 `@ GOAL` and `[######....]`). A goal too long for the row wraps to a second row before it is cut, and
 the progress never leaves row 1. Clicking the banner selects the `("tab", "plan")` target. Without an
 active plan (none, no goal, or idle for 7 days) it reads `◎ No shared goal · oms agent-plan init --goal
-TEXT` in dim style. The `OMS · …` header moves to row 2. `oms agent-plan claim` run by a panel main
+TEXT` in dim style. While `oms land status --json` reports `active: true` (a probe of the land lock, never the receipt), one more row reads `LANDING <sha7> · <step> · <N>m`. The `OMS · …` header moves to row 2. `oms agent-plan claim` run by a panel main
 also records its room participant (`claimed_by_participant`), so two mains of one provider differ; a
 main's lane card then shows `Task: <id> · <state>`, `Now: <declared status>` and an activity line
 (`2 workers running · 1 needs you · last message 3m ago`), or a dim `no status yet`; it is six rows
