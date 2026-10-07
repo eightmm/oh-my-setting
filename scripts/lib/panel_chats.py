@@ -1,5 +1,6 @@
 """Explicit native-chat navigation; never mix transcripts into shared room state."""
 
+from contextlib import closing
 from datetime import datetime
 import hashlib
 import json
@@ -7,13 +8,16 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
+import time
 from urllib.parse import quote
 
 import room
 from dashboard_projection import clean
+from panel_view import TERMINAL_STATES
 
 SESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,159}\Z")
 UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
@@ -191,6 +195,76 @@ def native_advisors(members):
         except (OSError, ValueError, TypeError, RecursionError):
             continue
     return found
+
+
+def current_models(repo, members):
+    """Read model rows without SQL writes; SQLite coordinates existing WAL reader locks."""
+    candidates = [m for m in members if m.get("role") == "main" and m.get("provider") == "codex"
+                  and m.get("state") not in TERMINAL_STATES
+                  and re.fullmatch(r"[0-9a-f]{32}", str(m.get("consumer") or ""))]
+    if not candidates or repo is None:
+        return {}
+    identities = native_index({m["consumer"] for m in candidates}).get("codex", {})
+    bound = [(m, next(iter(identities[m["consumer"]]))) for m in candidates
+             if len(identities.get(m["consumer"], ())) == 1]
+    if not bound:
+        return {}
+    home = Path(os.environ.get("CODEX_HOME") or os.environ.get("OMS_CODEX_HOME") or Path.home() / ".codex")
+    try:
+        databases = []
+        with os.scandir(home) as entries:
+            for number, entry in enumerate(entries):
+                if number >= 512:
+                    return {}
+                version = re.fullmatch(r"state_([1-9][0-9]*)\.sqlite", entry.name)
+                if version:
+                    databases.append((int(version[1]), Path(entry.path)))
+        if not databases:
+            return {}
+        # An unreadable newer database must not revive an older model setting.
+        path = max(databases)[1]
+        before = path.lstat()
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or hasattr(os, "getuid") and before.st_uid != os.getuid()):
+            return {}
+        header = _read_owned(path, 20)
+        wal_mode = header[18:20] == b"\x02\x02"
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(path) + suffix)
+            try:
+                info = sidecar.lstat()
+            except FileNotFoundError:
+                if wal_mode:
+                    return {}
+                continue
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or hasattr(os, "getuid") and info.st_uid != os.getuid()):
+                return {}
+        deadline = time.monotonic() + .2
+        readings = {}
+        with closing(sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=.05)) as database:
+            database.execute("PRAGMA query_only=ON")
+            database.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+            for member, sid in bound[:32]:
+                if time.monotonic() > deadline:
+                    break
+                row = database.execute("SELECT substr(model,1,161), substr(reasoning_effort,1,16), "
+                                       "substr(cwd,1,4097) FROM threads WHERE id=?", (sid,)).fetchone()
+                if not row:
+                    continue
+                model, effort, cwd = row
+                if (not isinstance(model, str) or len(model) > 160
+                        or not re.fullmatch(r"[A-Za-z0-9_./:-]+", model)
+                        or not isinstance(cwd, str) or len(cwd) > 4096
+                        or Path(cwd).resolve() != Path(repo).resolve()):
+                    continue
+                readings[member["participant"]] = {"model": model, "consumer": member["consumer"],
+                    "effort": effort if effort in {"low", "medium", "high", "xhigh", "max", "ultra"} else None,
+                    "source": "native state"}
+        after = path.lstat()
+        return readings if (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino) else {}
+    except (OSError, ValueError, sqlite3.Error):
+        return {}
 
 
 def windows(repo, ident, state=None):

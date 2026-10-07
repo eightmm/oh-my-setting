@@ -5,7 +5,7 @@ import re
 import time
 
 from dashboard_projection import clean, count as valid_count, display_width, fit, listing, mapping
-from panel_view import (ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, PALETTE, activity, box_edge, box_row,
+from panel_view import (ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
                         clipped, location_label, status_alerts, worker_rows, wrapped)
 
 
@@ -35,13 +35,57 @@ def nodes(report):
         attempt = next((row for row in linked.get(member.get("participant"), [])
                         if mapping(row.get("panel")).get("role") == member.get("role")), {})
         meta = mapping(attempt.get("panel"))
-        output.append(dict(member, attempt=attempt.get("attempt_id"), state=attempt.get("state") or "presence unknown",
-                           model=meta.get("model") or member.get("model"),
+        status = mapping(mapping(report.get("provider_status")).get("codex"))
+        native = mapping(status.get("native_models"))
+        reading = mapping(native.get(member.get("participant")))
+        live_native = (member.get("role") == "main" and member.get("provider") == "codex"
+                       and attempt.get("state") not in TERMINAL_STATES
+                       and member.get("consumer"))
+        current = (live_native and reading.get("consumer") == member.get("consumer")
+                   and reading.get("source") == "native state" and reading.get("model"))
+        model = meta.get("model") or member.get("model")
+        effort = meta.get("effort")
+        if live_native and status.get("native_model_checked"):
+            model, effort = (reading.get("model"), reading.get("effort")) if current else (None, None)
+        # Attempt evidence wins; a call's result message is the fallback once its attempt left the projection.
+        result = mapping(mapping(room.get("call_results")).get(member.get("participant")))
+        code = result.get("exit")
+        derived = "presence unknown" if member.get("role") == "main" or type(code) is not int else \
+            "done" if code == 0 else "failed"
+        output.append(dict(member, attempt=attempt.get("attempt_id"), state=attempt.get("state") or derived,
+                           ended=result.get("ts"), exit=code if type(code) is int else None,
+                           model=model, model_at_launch=meta.get("model") or member.get("model"),
                            task_id=attempt.get("task_id"), location=meta.get("location"),
-                           effort=meta.get("effort"), access=meta.get("access"),
+                           effort=effort, access=meta.get("access"),
+                           started_by=mapping(report.get("main_starters")).get(member.get("participant")),
                            title=meta.get("label") or member.get("label")))
     rank = lambda member: (0 if member["state"] in LIVE_STATES else 2 if member["state"] in {"done", "cancelled"} else 1, -member.get("seq", 0))
     return sorted(output, key=rank)
+
+
+def spawn_bar(width, navigation):
+    """The board's fixed last row as (text, [(x1, x2, provider)]); None where the board has no live input."""
+    installed = navigation.get("installed")
+    if installed is None:
+        return None
+    if not navigation.get("spawn_managed"):
+        return "Start a main: needs the tmux panel (oms panel)", []
+    if navigation.get("spawn_armed"):
+        return "Start a main: 1 Codex  2 Claude  Esc cancel", []
+    if navigation.get("spawn_busy"):
+        return "Starting a main...", []
+    if not installed:
+        return "No Codex or Claude CLI is installed to start a main", []
+    for suffix in (" main", ""):
+        labels = ["[+ %s%s]" % (name.capitalize(), suffix) for name in installed]
+        if len("  ".join(labels)) <= width:
+            break
+    x, spots = 0, []
+    for name, label in zip(installed, labels):
+        if x < width:
+            spots.append((x + 1, min(width, x + len(label)), name))
+        x += len(label) + 2
+    return "  ".join(labels), spots
 
 
 def window_order(report, mains):
@@ -56,24 +100,41 @@ def model_name(member):
 
 
 def main_names(report, members):
-    """Display name per main: the model, plus its tmux window index (else the id tail) when another main shares it."""
+    """Display name per main: its tmux window number first, the F6/F7 and Ctrl-b N order, then the model.
+
+    Without a known window, a model another main shares gets the id tail instead."""
     mains = [m for m in members if m.get("role") == "main"]
     windows = mapping(report.get("main_windows"))
     plain = [model_name(m) for m in mains]
     names = {}
     for m, name in zip(mains, plain):
         slot = windows.get(m["participant"])
-        names[m["participant"]] = name if plain.count(name) == 1 else "%s #%s" % (
-            name, slot if type(slot) is int else m["participant"][-4:])
+        names[m["participant"]] = ("#%s %s" % (slot, name) if type(slot) is int else
+                                   name if plain.count(name) == 1 else "%s #%s" % (name, m["participant"][-4:]))
     return names
+
+
+def result_handoff(room, message):
+    """A result-<call> message counts only as that call's own handoff."""
+    message = mapping(message)
+    sender = str(message.get("sender"))
+    # The room refuses any other result-<call> message at write time; messages kept from before that rule are
+    # read the same way, so a handoff addressed to some other main than the call's parent is ignored.
+    # Fail closed: a sender, parent or recipient that cannot be proven never marks a failure handled.
+    parent = next((mapping(p).get("parent") for p in listing(room.get("participants"))
+                   if mapping(p).get("participant") == sender and mapping(p).get("role") != "main"), None)
+    return (str(message.get("id", "")) == "result-" + sender and message.get("message_kind") == "handoff"
+            and bool(parent) and message.get("recipient") == parent)
 
 
 def settler(report):
     """(settled, aged) for calls: finished, aged-out or handled calls leave the board; shared with the tree."""
     room = mapping(report.get("room"))
     # Only the call's own result handoff, read by its main, counts as a handled failure.
-    read_results = {mapping(m).get("id") for m in listing(room.get("messages"))
-                    if str(mapping(m).get("id", "")).startswith("result-") and not listing(mapping(m).get("pending_for"))}
+    read_results = {mapping(m).get("id") for m in listing(room.get("messages")) if result_handoff(room, m)
+                    and not listing(mapping(m).get("pending_for"))}
+    read_results |= {"result-" + str(who) for who, r in mapping(room.get("call_results")).items()
+                     if mapping(r).get("read") is True}
     finalized = mapping(report.get("finalized"))
     attempts_seen = mapping(report.get("attempts"))
     # Only a complete active list proves a missing call has ended; the projection keeps at most 8 active rows.
@@ -91,6 +152,42 @@ def settler(report):
                                              and ("result-" + str(call.get("participant")) in read_results
                                                   or finalized.get(call.get("task_id")) in {"completed", "accepted"}))
     return settled, aged
+
+
+def call_order(call):
+    """Finished calls first in completion order, then calls needing attention, running calls last."""
+    state = call["state"]
+    group = 0 if state in FINISHED else 2 if state in LIVE_STATES else 1
+    stamp = (call.get("ended") if group == 0 else None) or call.get("joined_at") or ""
+    return (group, str(stamp), str(call.get("joined_at") or ""), call.get("seq", 0), str(call.get("participant")))
+
+
+def clock_stamp(ts, today=None):
+    """Local "HH:MM", or "MM-DD HH:MM" when the day is not today."""
+    try:
+        local = time.localtime(calendar.timegm(time.strptime(str(ts), "%Y-%m-%dT%H:%M:%SZ")))
+    except ValueError:
+        return ""
+    same = time.strftime("%m-%d", local) == time.strftime("%m-%d", today or time.localtime())
+    return time.strftime("%H:%M" if same else "%m-%d %H:%M", local)
+
+
+def call_span(call, arrow="->"):
+    """"14:02 -> 14:31 finished" / "14:05 -> running"; the times come from the room, the end state from the call."""
+    state = call["state"]
+    words = "no record" if state == "presence unknown" else said(state)
+    if state == "failed" and call.get("exit") is not None:
+        words = "failed (exit %s)" % call["exit"]
+    if state in LIVE_STATES or not call.get("ended"):
+        end = ""
+    else:
+        end = clock_stamp(call["ended"])
+    start = clock_stamp(call.get("joined_at"))
+    if state == "presence unknown":
+        return (start + " " + arrow + " " if start else "") + words
+    if not start:
+        return (words + " " + end).strip()
+    return "%s %s %s%s" % (start, arrow, end + " " if end else "", words)
 
 
 def joined_seconds(call):
@@ -214,6 +311,7 @@ def layout(width, count, centered=False):
 WORDS = {"working": "running", "live marker": "running", "verifying": "checking", "done": "finished",
          "timed_out": "timed out", "orphaned": "lost", "waiting_input": "needs input",
          "waiting_approval": "needs approval", "review": "in review", "presence unknown": "status unknown"}
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 ROLES = {"main": "Main", "advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate", "worker": "Worker"}
 MACHINE = re.compile(r"^(stop-reason:|model-route:|model-result:|usage detail:|tokens used|served model|cost usd|"
                      r"##\s*(output|exit|verify)\b|---\s*(begin|end) )", re.I)
@@ -231,7 +329,7 @@ def said(state):
     return WORDS.get(state, str(state or "unknown").replace("_", " "))
 
 
-def readable(text, joiner="\n"):
+def readable(text, joiner="\n", paragraphs=False):
     """Text for people: machine status lines and markdown marks are dropped, call exits become words."""
     output = []
     for line in str(text or "").splitlines():
@@ -239,11 +337,15 @@ def readable(text, joiner="\n"):
         exited = re.match(r"Call exit=(\d+); parent acceptance pending\.?\s*(.*)", line)
         if exited:
             line = (("Finished. " if exited.group(1) == "0" else "Failed (exit %s). " % exited.group(1)) + exited.group(2)).strip()
-        if not line or MACHINE.match(line):
+        if not line:
+            if paragraphs and output and output[-1]:
+                output.append("")
+            continue
+        if MACHINE.match(line):
             continue
         line = re.sub(r"\*\*|__|`", "", re.sub(r"^#+\s*", "", line))
         output.append(line)
-    return joiner.join(output)
+    return joiner.join(output).strip()
 
 
 def declared_status(room, participant, width):
@@ -268,33 +370,54 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
     where = "in the repository" if member.get("location") in (None, "repository") else "in its own worktree"
     targets = {}
     if member.get("role") == "main":
-        lines = wrapped("%s · %s main · %s%s" % (name, (member.get("provider") or "").capitalize(), said(state),
-                                                 " · " + title if title else " · no task title yet"), width, 3)
+        lines = wrapped("%s · %s main · %s" % (name, (member.get("provider") or "").capitalize(), said(state)), width, 2)
+        lines += wrapped("Task: " + (title or "no task title yet"), width, 2)
+        lines += declared_status(room, member["participant"], width)
+        if not member.get("model") and member.get("model_at_launch"):
+            lines += wrapped("Current model unavailable · launch setting: " +
+                             MODEL_NAMES.get(member["model_at_launch"], member["model_at_launch"]), width, 2)
         inbox = [m for m in listing(room.get("messages")) if member["participant"] in listing(m.get("targets"))]
         unread = sum(member["participant"] in listing(m.get("pending_for")) for m in inbox)
-        lines += declared_status(room, member["participant"], width)
-        lines.append("Messages to %s: %s%s" % (who(member, labels), len(inbox), " (%s unread)" % unread if unread else ""))
+        calls = sorted((everyone or teams or {}).get(member["participant"], []), key=call_order)
+        attention = [c for c in calls if c["state"] in ATTENTION_STATES]
+        active = [c for c in calls if c["state"] in LIVE_STATES]
+        finished = [c for c in calls if c["state"] in FINISHED]
+        unknown = [c for c in calls if c["state"] not in ATTENTION_STATES | LIVE_STATES | FINISHED]
+        counts = [(len(group), label) for group, label in ((active, "active"), (attention, "need attention"),
+                  (finished, "finished"), (unknown, "no record")) if group]
+        lines += ["", "Team: " + (" · ".join("%s %s" % pair for pair in counts) or "no calls recorded")]
+
+        def team_rows(heading, group):
+            if group:
+                lines.append("  " + heading)
+            for c in group:
+                label = MODEL_NAMES.get(c.get("model"), c.get("model")) or "unknown"
+                # Every wrapped team line keeps its exact result target, including finished calls.
+                for part in wrapped("- %s%s %s · %s · %s" % ("! " if c["state"] in ATTENTION_STATES else "", ROLES.get(c.get("role"), "Worker"),
+                                                           label, call_span(c, "→") if c.get("joined_at") or c.get("ended") else said(c["state"]),
+                                                           clean(c.get("title")) or "no task title"), width - 2, 2):
+                    targets[len(lines)] = action(c)
+                    lines.append("  " + part)
+        if member.get("started_by"):
+            starter = next((m for m in members if m["participant"] == member["started_by"]), {})
+            lines.append("Started by %s·%s" % (model_name(starter) if starter else "another main", member["started_by"][-4:]))
+        lines += ["", "Messages to %s: %s%s" % (who(member, labels), len(inbox), " (%s unread)" % unread if unread else "")]
         for m in inbox[-3:]:
             lines += wrapped("  From %s: %s" % (names.get(m.get("sender"), clean(m.get("sender"))),
-                                                readable(m.get("text"), " ") or "(empty)"), width, 2)
-        calls = (everyone or teams or {}).get(member["participant"], [])
-        running = [c for c in calls if c["state"] not in FINISHED]
-        lines.append("Team: %s advisor%s, %s worker%s%s" % (
-            sum(c.get("role") != "worker" for c in calls), "" if sum(c.get("role") != "worker" for c in calls) == 1 else "s",
-            sum(c.get("role") == "worker" for c in calls), "" if sum(c.get("role") == "worker" for c in calls) == 1 else "s",
-            " · %s finished" % (len(calls) - len(running)) if len(calls) > len(running) else ""))
-        for c in calls:
-            label = MODEL_NAMES.get(c.get("model"), c.get("model")) or "unknown"
-            # Team rows are click targets, so finished calls stay reachable from their main.
-            for part in wrapped("  %s%s %s · %s · %s" % ("! " if c["state"] in ATTENTION_STATES else "", ROLES.get(c.get("role"), "Worker"),
-                                                       label, said(c["state"]), clean(c.get("title")) or "no task title"), width, 2):
-                targets[len(lines)] = action(c)
-                lines.append(part)
+                                                readable(m.get("text"), " ") or "(empty)"), width, 1)
+        if not inbox:
+            lines.append("  No messages received")
+        lines.append("")
+        # The team reads like a log: finished calls on top, then what needs attention, live work last.
+        team_rows("Finished", finished)
+        team_rows("Needs attention", attention)
+        team_rows("No record", unknown)
+        team_rows("Active", active)
+        lines += ["", "Works %s%s" % (where, " · effort " + member["effort"] if member.get("effort") else "")]
         native = next((c for c in calls if c.get("_native")), None)
         if native:
             lines.append("Built-in advisor: " + ("asked %s · running" % native["_native"] if native["state"] != "done"
                                                  else "last answered %s" % (native.get("_finished") or native["_native"])))
-        lines.append("Works %s%s" % (where, " · effort " + member["effort"] if member.get("effort") else ""))
         return lines + ["Click a team row to see it here · click the main again to open its chat"], targets
     if member.get("_native"):
         done = member["state"] == "done"
@@ -305,35 +428,58 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
     owner = names.get(member.get("parent"), "")
     lines = wrapped("%s%s · %s%s" % (who(member), " for " + owner if owner else "",
                                      said(state), " · " + title if title else ""), width, 3)
-    access = "can edit" if member.get("access") == "write" else "read-only"
-    lines.append("%s %s%s" % (access.capitalize(), where, " · effort " + member["effort"] if member.get("effort") else ""))
+    access = {"write": "can edit", "read": "read-only"}.get(member.get("access"), "permissions unrecorded")
+    metadata = "%s %s%s" % (access.capitalize(), where, " · effort " + member["effort"] if member.get("effort") else "")
     loaded = preview.get("report")
     if preview.get("error"):
-        return lines + [readable(preview["error"], " ")], targets
+        return lines + ["", readable(preview["error"], " "), "", metadata], targets
     if loaded is None:
-        return lines + ["Loading its recorded result..."], targets
+        return lines + ["", "Loading its recorded result...", "", metadata], targets
     if not listing(loaded.get("rows")):
-        return lines + ["No result recorded yet (%s)" % said(state)], targets
+        return lines + ["", "No result recorded yet (%s)" % said(state), "", metadata], targets
     row = listing(loaded.get("rows"))[0]
-    answer = readable(latest_answer(loaded))
+    answer = readable(latest_answer(loaded), paragraphs=True)
     outcome = {"accepted": "Accepted by its main", "completed": "Completed; the main recorded a summary",
                "failed": "Marked failed by its main"}.get(row.get("outcome"), "Not reviewed by its main yet")
     check = mapping(row.get("verification")).get("status")
-    lines.append(outcome + " · " + ("checks %s" % check if check else "no checks run"))
-    if answer:
-        lines += ["Answer:"] + [part for paragraph in answer.splitlines() if paragraph.strip()
-                                for part in wrapped("  " + paragraph, width, 40, max_chars=4000)]
+    lines += ["", outcome + " · " + ("checks %s" % str(check).replace("_", " ") if check else "no checks run")]
+    summary = readable(row.get("summary"), paragraphs=True)
+
+    def result_text(heading, text, limit):
+        body, more = [], False
+        for paragraph in text.splitlines():
+            if len(body) == limit:
+                more = True
+                break
+            if not paragraph.strip():
+                if body and body[-1]:
+                    body.append("")
+                continue
+            cut = len(paragraph) > 4000
+            for part in wrapped(paragraph, width - 2, limit + 1, max_chars=4000):
+                if len(body) == limit:
+                    more = True
+                    break
+                body.append("  " + part)
+            more = more or cut
+            if more:
+                break
+        lines.extend(["", heading] + body)
+        if more:
+            lines.append("  More in the full recorded result · f opens it")
+
+    if summary:
+        result_text("Main's summary:", summary, 24)
+    if answer and answer != summary:
+        result_text("Worker's answer:" if summary else "Answer:", answer, 12 if summary else 40)
     changes = next((c["changes"] for c in reversed(listing(row.get("calls"))) if c.get("changes")), None)
     if changes and changes.get("issue"):
-        lines.append("Changed files: unavailable (" + changes["issue"] + ")")
+        lines += ["", "Changed files: unavailable (" + changes["issue"] + ")"]
     elif changes and changes.get("count"):
-        lines.append("Changed files: %s (+%s -%s)" % (changes["count"], changes["added"], changes["removed"]))
+        lines += ["", "Changed files: %s (+%s -%s)" % (changes["count"], changes["added"], changes["removed"])]
         lines += ["  %s +%s -%s" % tuple(f) for f in changes["files"][:12]]
         lines += ["  and %s more files" % (changes["count"] - 12)] if changes["count"] > 12 else []
-    summary = readable(row.get("summary"))
-    if summary and summary != answer:
-        lines += ["Main's summary:"] + [part for paragraph in summary.splitlines() if paragraph.strip()
-                                        for part in wrapped("  " + paragraph, width, 8)]
+    lines += ["", metadata]
     if str(member.get("location") or "").startswith("worktree:") and member.get("state") in FINISHED | {"failed"}:
         lines.append("w opens its worktree in a shell")
     return lines, targets
@@ -383,7 +529,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         calls += [m for m in members if m.get("role") != "main" and m.get("parent") in ids]
         calls = [m for m in calls if m["state"] in ATTENTION_STATES] if attention_only and not every else calls
         # Judges precede workers so keyboard order follows the drawing.
-        return sorted(calls, key=lambda m: (m.get("role") == "worker", m["state"] not in ATTENTION_STATES))
+        return sorted(calls, key=lambda m: (m.get("role") == "worker",) + call_order(m))
 
     teams = {m["participant"]: team(m) for m in mains}
     linked_children = team(primary, every=True) if primary else []
@@ -425,35 +571,33 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     preview = mapping(navigation.get("preview"))
     previewed = next((m for m in mains + [c for calls in everyone.values() for c in calls]
                       if action(m) == preview.get("target")), None)
+    navigation.pop("full_result", None)
+    if previewed and previewed.get("role") != "main" and not previewed.get("_native"):
+        navigation["full_result"] = action(previewed)
     if menu:
         footer = ["[1] Codex  [2] Claude  [h] Chats  [?] More  [q] " + ("Detach" if managed else "Quit")]
     else:
-        # Whole hint fragments in priority order; the quit/return key always stays visible.
-        quit_hint = "q " + ("Chat" if managed else "Quit")
         from panel_debate import debates as room_debates
-        has_debates = bool(room_debates(report))
-        hints = ["Click: show below", "F6/F7 Main" if managed else "", ("^v" if not unicode else "↑↓") + " Move",
-                 ("<>" if not unicode else "←→") + " Main" if len(mains) > 1 else "", "Enter Chat", "a Ask advisor",
-                 "w Worktree" if previewed and str(previewed.get("location") or "").startswith("worktree:") else "",
-                 "Space Pin" if len(mains) > 1 else "", "v Expand", "t Tree",
-                 "d Debates" if has_debates else "", "Esc Back"]
-        packed = ""
-        for hint in [h for h in hints if h]:
-            if display_width(packed + hint + "  " + quit_hint) <= width:
-                packed += hint + "  "
-        footer = [packed + quit_hint]
+        chosen_member = next((m for m in mains + [c for calls in everyone.values() for c in calls]
+                              if action(m) == selected), None)
+        footer = footer_hints(navigation, width, managed, unicode, chosen_member, len(mains), True,
+                              bool(room_debates(report)))
     if navigation.get("notice"):
         if height >= 20 or menu:
             footer.append(clean(navigation["notice"], 180))
         else:
             # A short board shows the notice in place of the hints, never silently.
-            footer = [clipped(clean(navigation["notice"], 180), max(1, width - display_width(quit_hint) - 2)) + "  " + quit_hint]
+            fixed = "  ".join(footer_hints({}, width, managed, unicode, None, 0, True)[-1].split("  ")[-2:])
+            footer = [clipped(clean(navigation["notice"], 180), max(1, width - display_width(fixed) - 2)) + "  " + fixed]
     publications = mapping(room.get("publications"))
     if publications:
         footer.append("APP DELIVERY / " + " | ".join("%s: %s%s" % (
             target, mapping(receipt).get("status", "unknown"),
             " (unconfirmed)" if mapping(receipt).get("delivery_unknown") else "")
             for target, receipt in list(publications.items())[-3:]))
+    bar = None if menu else spawn_bar(width, navigation)
+    if bar:
+        footer.append(bar[0])
     lines, hits, bands_hit = [], [], []
 
     def add(value, style=None):
@@ -496,7 +640,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     heading_text = "OMS · " + (clean(room.get("title") or room.get("id")) or "Work room") + " · %s main%s · %s" % (
         len(mains), "" if len(mains) == 1 else "s",
         "%s unread for live participants" % unread_total if unread_total else "no unread messages")
-    clock = time.strftime("%H:%M")
+    clock = time.strftime("%m-%d ") + WEEKDAYS[time.localtime().tm_wday] + time.strftime(" %H:%M")
     if display_width(heading_text) + len(clock) + 2 <= width:
         heading_text += " " * (width - display_width(heading_text) - len(clock)) + clock
     add(heading_text, "head")
@@ -516,6 +660,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if height >= 20 and mains:
         # Tabs select a main locally; only the already-shown main's tab opens its chat.
         y, x, value = len(lines) + 1, 0, ""
+        tab_ids = {m["participant"] for m in mains}
         multiple = len(mains) > 1
         if multiple:
             every = len(pinned) == len(mains)
@@ -544,7 +689,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             pin = ("[x]" if m in pinned else "[+]") if multiple else ""
             mark = ("▸" if unicode else ">") if m == primary else " "
             room_left = max(4, tab_width - (len(badge) + 1 if badge else 0) - len(pin) - 2)
-            lead, model = "%s%s " % (mark, activity(state_of(m), frame, unicode)), name_of(m)
+            lead, model = "%s%s %s" % (mark, activity(state_of(m), frame, unicode),
+                                       ("↳" if unicode else "^") if m.get("started_by") in tab_ids else ""), name_of(m)
             label = lead + model + ("·" if unicode else "/") + nickname
             if display_width(label) > room_left:
                 # The tail tells mains apart; keep it and shorten the shared model prefix first.
@@ -861,9 +1007,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
             def judge_text(c):
                 return "%s %s %s · %s · %s" % (activity(c["state"], frame, unicode), tag_of.get(c.get("role"), "Advisor"),
-                                               name_of(c), said(c["state"]), task_of(c)) if unicode else \
+                                               name_of(c), call_span(c, "→"), task_of(c)) if unicode else \
                     "%s %s %s / %s / %s" % (activity(c["state"], frame, unicode), tag_of.get(c.get("role"), "Advisor"),
-                                            name_of(c), said(c["state"]), task_of(c))
+                                            name_of(c), call_span(c), task_of(c))
 
             def judge_style(c):
                 return tone(c["state"]) if c["state"] in ATTENTION_STATES else "review"
@@ -908,7 +1054,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             hidden = len(workers_here) - len(shown)
             for n, c in enumerate(shown):
                 last = n == len(shown) - 1 and not hidden
-                box = card("Worker %s %s %s" % (name_of(c), activity(c["state"], frame, unicode), said(c["state"])),
+                box = card("Worker %s %s %s" % (name_of(c), activity(c["state"], frame, unicode),
+                                                call_span(c, "→" if unicode else "->")),
                            [task_of(c)], lane_width - 3, 3, unicode)
                 rails = (("└", " ", " ") if last else ("├", "│", "│")) if unicode else (("`", " ", " ") if last else ("|", "|", "|"))
                 style = tone(c["state"]) if c["state"] in ATTENTION_STATES else "worker"
@@ -938,6 +1085,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     root_top = root_bottom
     if lanes:
         lane_view(budget - used - reserve)
+        for band in bands_hit:
+            if band["name"].startswith("lane:"):
+                band["y2"] = min(band["y2"], len(lines))
     else:
         if shown_judges:
             band(shown_judges, "review", "judge", True)
@@ -971,9 +1121,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         title = "DETAIL / %s / %s%s" % (role, name_of(previewed), " / auto" if automatic else "")
         if len(body) > capacity:
             title += " / %s-%s of %s / wheel" % (first + 1, min(len(body), first + capacity), len(body))
-        shown = body[first:first + capacity] if reserve > 3 else body[:1]
-        for line in card(title, shown, width, reserve, unicode):
-            add(line, hue(previewed) if role == "MAIN" else "review" if role != "WORKER" else "worker")
+        shown = body[first:first + capacity]
+        style = hue(previewed) if role == "MAIN" else "review" if role != "WORKER" else "worker"
+        for row, line in enumerate(card(title, shown, width, reserve, unicode)):
+            add(line, style if row in (0, reserve - 1) else None)
         for row in range(reserve):
             line = first + row - 1  # border row 0; body rows follow
             hits.append({"y": top + row, "x1": 1, "x2": width, "preview": True,
@@ -1007,6 +1158,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         for line in card("REPOSITORY TASKS", body, width, len(body) + 2, unicode):
             add(line, "dim")
     lines += [clipped(line, width) for line in footer]
+    if bar:
+        lines[-1] = paint(lines[-1], "main" if bar[1] else "dim")
+        hits += [{"y": len(lines), "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
     visible = [m for lane in lanes for m in teams[lane["participant"]]] if lanes else shown_judges + shown_workers
     items = [("chat", m["participant"]) for m in mains] + [action(m) for m in visible]
     items += [action(m) for m in children] + [action(m) for calls in everyone.values() for m in calls]
@@ -1022,3 +1176,44 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
 def action(member):
     return member.get("_action") or ("chat" if member.get("role") == "main" else "result", member["participant"])
+
+
+def footer_hints(navigation, width, managed, unicode, member, mains, graph, debates=False):
+    """At most five hints for what is selected; `?` swaps in the full list of working keys."""
+    selected = navigation.get("selected")
+    kind = selected[0] if selected else "chat"
+    arrows, move = ("←→", "↑↓") if unicode else ("<>", "^v")
+    toggle = "F9 Chat⇄Board" if unicode else "F9 Chat<>Board"
+    worktree = bool(member and kind == "result" and str(member.get("location") or "").startswith("worktree:"))
+    if navigation.get("keys_help"):
+        keys = ["Enter Open", move + " Move", arrows + " Main" if mains > 1 else "",
+                "Space " + ("Pin" if graph else "Fold") if mains else "", "a Ask advisor",
+                "w Worktree" if worktree else "", "f Full result" if navigation.get("full_result") else "",
+                "g Graph", "t Tree", "d Debates" if debates else "",
+                "v " + ("Collapse" if navigation.get("expanded") else "Expand"), "b Attention", "Esc Back",
+                "F6/F7 Main" if managed else "", toggle if managed else "q Quit", "? Hide"]
+        lines = [""]
+        for key in [k for k in keys if k]:
+            if lines[-1] and display_width(lines[-1] + "  " + key) > width:
+                lines.append("")
+            lines[-1] += ("  " if lines[-1] else "") + key
+        return lines[:4]
+    contextual = ["f Full result" if navigation.get("full_result") else "",
+                  "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
+                  "Enter Chat" if kind == "chat" else "Enter Show",
+                  "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
+                  "d Debates" if debates else "",
+                  ("Space Pin" if graph else "Space Fold") if kind == "chat" and (mains > 1 or not graph) else ""]
+    # The panel-wide F-keys stay fixed at the end of every board; board keys fill what is left.
+    reserved = ["F6/F7 Main", toggle, "F5 Control", "F12 Keys"] if managed else ["q Quit", "? Keys"]
+    packed = []
+    tail = "  ".join(reserved)
+    for hint in [h for h in contextual if h]:
+        if len(packed) < 3 and display_width("  ".join(packed + [hint] + reserved)) <= width:
+            packed.append(hint)
+    if display_width(tail) > width and managed:
+        # Narrow boards keep every panel key visible in short form.
+        reserved = ["F6/F7 F9 F5", "F12 Keys"]
+        tail = "  ".join(reserved)
+        packed = []
+    return ["  ".join(packed + reserved)] if display_width(tail) <= width else [clipped(tail, width)]

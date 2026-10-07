@@ -61,7 +61,7 @@ def validate_collaboration(task, worker):
     if task.get("provider") and task["provider"] != worker:
         raise ValueError("auto collaboration plan contains another implementation provider")
     if assignment and worker == "codex":
-        allowed = {"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}
+        allowed = {"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}
         if (assignment.get("model") not in allowed or
                 assignment.get("fallback_model", "") not in allowed | {""}):
             raise ValueError("auto collaboration assignment requires an exact GPT-6 route")

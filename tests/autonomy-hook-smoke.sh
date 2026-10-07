@@ -19,7 +19,7 @@ unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
   OMS_HARNESS_CALL_ID OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
   OMS_LEASE_ID OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_APPROVAL_ID \
   OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE OMS_HARNESS_DELEGATE_DEPTH \
-  OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO OMS_ROOM_ADMITTED_PARTICIPANT
+  OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO OMS_ROOM_ADMITTED_PARTICIPANT OMS_HOOK_AGENT
 
 fail() {
   echo "autonomy-hook-smoke: $*" >&2
@@ -529,6 +529,30 @@ for who, native in (("fresh-main", "different-native"), ("fresh-peer", "native-f
         pass
     else:
         raise AssertionError("native binding identity changed or was duplicated")
+# /clear starts a new native session in the same main: only Claude Code's own
+# SessionStart "clear" moves the binding, and it keeps the join boundary and mail.
+def cleared(session, source="clear"):
+    return dict(payload(session), hook_event_name="SessionStart", source=source)
+before = room.participant(room.status(repo, "binding-room"), "fresh-main")
+assert not hook_state.rebind_cleared_session(cleared("after-startup", "startup")), "a fresh start took over a bound main"
+assert not hook_state.rebind_cleared_session(dict(payload("after-prompt"), source="clear")), "a non-SessionStart event rebound"
+os.environ["OMS_HARNESS_CHILD"] = "1"
+assert not hook_state.rebind_cleared_session(cleared("child-clear")), "a worker rebound its parent main"
+os.environ.pop("OMS_HARNESS_CHILD")
+try:
+    room.bind(repo, "binding-room", "fresh-main", "stale-native", replaces="0" * 32)
+except ValueError:
+    pass
+else:
+    raise AssertionError("a rebind naming a stale identity moved the binding")
+room.send(repo, "binding-room", "fresh-peer", "fresh-main", "Mail sent while the main cleared", message_id="during-clear")
+assert hook_state.rebind_cleared_session(cleared("after-clear"))
+after = room.participant(room.status(repo, "binding-room"), "fresh-main")
+assert after["consumer"] == hook_state.session_hash(payload("after-clear")) and after["seq"] == before["seq"], after
+assert after["initial_consumer"] == before["initial_consumer"], after
+assert not hook_state.rebind_cleared_session(cleared("after-clear")), "a repeated clear event rebound twice"
+assert "during-clear" in hook_state.live_thread_hint(payload("after-clear"))
+assert not hook_state.live_thread_hint(payload("native-first-session")), "the cleared session kept reading the main's mail"
 os.environ["OMS_HARNESS_CHILD"] = "1"
 try:
     room.bind(repo, "binding-room", "fresh-peer", "worker-native")

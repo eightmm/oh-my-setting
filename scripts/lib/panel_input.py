@@ -34,8 +34,12 @@ class TerminalInput:
             if self.managed:
                 session = os.environ.get("OMS_PANEL_SESSION", "")
                 if re.fullmatch(r"oms-panel-[a-f0-9]{12}", session):
-                    subprocess.run(["tmux", "set-option", "-t", session, "mouse", "on"],
-                                   capture_output=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
+                    try:
+                        # Best effort: keyboard input works without tmux mouse reporting.
+                        subprocess.run(["tmux", "set-option", "-t", session, "mouse", "on"],
+                                       capture_output=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
+                    except (OSError, subprocess.SubprocessError):
+                        pass
             sys.stdout.write("\033[?1000h\033[?1006h")
             sys.stdout.flush()
         except (ImportError, OSError, ValueError, subprocess.SubprocessError):
@@ -60,7 +64,9 @@ class TerminalInput:
         output = []
         keys = {b"\033[A": "up", b"\033[B": "down", b"\033[C": "right", b"\033[D": "left",
                 b"\033OA": "up", b"\033OB": "down", b"\033OC": "right", b"\033OD": "left",
-                b"\033[H": "home", b"\033[F": "end", b"\033[5~": "pageup", b"\033[6~": "pagedown"}
+                b"\033[H": "home", b"\033[F": "end", b"\033OH": "home", b"\033OF": "end",
+                b"\033[1~": "home", b"\033[4~": "end", b"\033[7~": "home", b"\033[8~": "end",
+                b"\033[5~": "pageup", b"\033[6~": "pagedown"}
         while self.pending:
             mouse = re.match(rb"\x1b\[<(\d{1,4});(\d{1,4});(\d{1,4})([Mm])", self.pending)
             if mouse:
@@ -78,6 +84,11 @@ class TerminalInput:
                 self.pending = self.pending[len(key):]
                 continue
             if self.pending.startswith(b"\033"):
+                # A complete sequence nobody binds (Delete, F-keys, Shift-Tab, Ctrl-arrows) is dropped, never Esc.
+                unknown = re.match(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|O[@-~])", self.pending)
+                if unknown:
+                    self.pending = self.pending[unknown.end():]
+                    continue
                 if self.pending == b"\033" or self.pending.startswith((b"\033[", b"\033O")) and len(self.pending) < 32:
                     self.escape_since = self.escape_since or time.monotonic()
                     break
@@ -89,7 +100,7 @@ class TerminalInput:
                 output.append(("enter",))
             elif value == b"\t":
                 output.append(("down",))
-            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"d"):
+            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"d", b"f", b"?", b"n", b"1", b"2"):
                 output.append((value.decode(),))
         if not self.pending:
             self.escape_since = None
@@ -108,9 +119,10 @@ class TerminalInput:
             data = os.read(self.fd, 1024)
             return self.decode(data) if data else [("eof",)]
         if self.escape_since is not None and time.monotonic() - self.escape_since >= .1:
+            bare = self.pending == b"\033"
             self.pending = b""
             self.escape_since = None
-            return [("escape",)]
+            return [("escape",)] if bare else []
         return []
 
     def discard_clicks(self):
@@ -172,6 +184,12 @@ def choose(event, navigation):
             navigation["preview"] = {"target": selected}
             return None
         return selected if selected in items else None
+    elif kind == "f":
+        target = navigation.get("full_result")
+        if (navigation.get("surface") == "graph" and target in items
+                and target[0] in ("result", "debate")
+                and (navigation.get("preview") or {}).get("target") == target):
+            return target
     elif kind in ("left", "right"):
         mains = [item for item in items if item[0] == "chat"]
         current = next((item for item in (selected, navigation.get("primary")) if item in mains), None)

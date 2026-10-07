@@ -1704,8 +1704,35 @@ def relay_hint(payload: dict[str, Any]) -> str | None:
     return "\n".join(lines)
 
 
+def rebind_cleared_session(payload: dict[str, Any]) -> bool:
+    """Move a panel main's room binding to the session its /clear started.
+
+    The enrolled environment alone never transfers a binding: Claude Code's own
+    SessionStart "clear" event in that main's process must name the new session,
+    and the rebind replaces only the identity recorded at that moment."""
+    if ((payload.get("hook_event_name") or payload.get("hookEventName")) != "SessionStart"
+            or payload.get("source") != "clear" or is_harness_child() or payload_agent(payload) != "claude"):
+        return False
+    session = payload.get("session_id") or payload.get("sessionId")
+    ident, member_id = os.environ.get("OMS_ROOM_ID"), os.environ.get("OMS_ROOM_PARTICIPANT")
+    repo = Path(os.environ["OMS_ROOM_REPO"]) if os.environ.get("OMS_ROOM_REPO") else hook_repo(payload)
+    if not (session and ident and member_id and repo):
+        return False
+    import room
+
+    member = room.participant(room.status(repo.resolve(), ident), member_id)
+    if (member["role"] != "main" or member["provider"] != "claude" or not member["joined"]
+            or not member.get("consumer") or member["consumer"] == session_hash(payload)):
+        return False
+    room.bind(repo.resolve(), ident, member_id, session, replaces=member["consumer"])
+    return True
+
+
 def cmd_relay_hint(_: argparse.Namespace) -> int:
     payload, _ = load_payload()
+    # SessionStart's only hook_state call; a failed rebind leaves the old binding and its withheld-mail notice.
+    with contextlib.suppress(Exception):
+        rebind_cleared_session(payload)
     try:
         hint = relay_hint(payload)
     except Exception:

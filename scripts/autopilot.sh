@@ -1088,7 +1088,7 @@ fi
 REVIEWER="$(oms_normalize_provider "$REVIEWER")" || fail "unknown reviewer provider"
 if [ "$COLLABORATION" = auto ]; then
   [ "$PLANNER" != codex ] || [ -n "$PLANNER_MODEL" ] || PLANNER_MODEL=gpt-6-astra
-  [ "$WORKER" != codex ] || [ -n "$WORKER_MODEL" ] || WORKER_MODEL=gpt-6-sol
+  [ "$WORKER" != codex ] || [ -n "$WORKER_MODEL" ] || WORKER_MODEL=gpt-6.1-sol
   [ "$REVIEWER" != codex ] || [ -n "$REVIEWER_MODEL" ] || REVIEWER_MODEL=gpt-6-astra
   oms_collaboration_route_validate "$PLANNER" "$PLANNER_MODEL" "$PLANNER_FALLBACK_MODEL" || exit $?
   oms_collaboration_route_validate "$WORKER" "$WORKER_MODEL" "$WORKER_FALLBACK_MODEL" || exit $?

@@ -155,6 +155,12 @@ out="$(role_prepare codex delegate implementation-worker "$TMP/role-g6.err")"
 [ "$out" = 'gpt-6-sol|role-default|role:worker|gpt-6-luna' ] || fail "a GPT-6 write worker takes sol: $out"
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine-g6.err")"
 case "$out" in 'gpt-6-luna|role-default|role:routine-worker|'*) ;; *) fail "GPT-6 routine work takes luna: $out" ;; esac
+# The only listed 6.1 tier keeps both worker ranks on the exact current Sol.
+printf 'gpt-6-astra\ngpt-6-sol\ngpt-6.1-sol\ngpt-6-luna\n' > "$gen/codex.models"
+for workload in standard routine; do
+  out="$(OMS_MODEL_WORKLOAD="$workload" role_prepare codex delegate implementation-worker "$TMP/role-g61.err")"
+  case "$out" in 'gpt-6.1-sol|role-default|'*) ;; *) fail "6.1 routing selected another generation: $out" ;; esac
+done
 printf 'gpt-5.6-sol\ngpt-5.10-nova\n' > "$gen/codex.models"
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine-new.err")"
 case "$out" in 'provider-default|provider-default|'*) ;; *) fail "routine must not invent unseeded generation models: $out" ;; esac
@@ -628,7 +634,7 @@ for operation in delegate plan; do
     OMS_AUTOPILOT_COLLABORATION=auto OMS_MODEL_EXPLICIT='' \
     OMS_MODEL_OPERATION="$operation" OMS_MODEL_FALLBACK_EXPLICIT='' \
     bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex || exit; printf "%s|%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_DISTINCT_CHAIN" "$OMS_MODEL_SAFEGUARD_CHAIN"')"
-  case "$operation" in delegate) expected=gpt-6-sol ;; *) expected=gpt-6-astra ;; esac
+  case "$operation" in delegate) expected=gpt-6.1-sol ;; *) expected=gpt-6-astra ;; esac
   [ "$out" = "$expected||" ] || fail "collaboration recovered to a legacy model: $out"
 done
 for bad in gpt-5.5 gpt-5.6-sol provider-default; do

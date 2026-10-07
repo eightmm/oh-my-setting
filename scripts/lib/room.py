@@ -113,7 +113,7 @@ def event_shape(event):
         return
     if kind not in required or any(not isinstance(event.get(key), str) for key in required[kind]):
         raise ValueError("invalid persisted room event")
-    for key in ("model", "consumer", "parent", "reply_to", "task_id", "turn_id", "target"):
+    for key in ("model", "consumer", "previous", "parent", "reply_to", "task_id", "turn_id", "target"):
         if event.get(key) is not None and not isinstance(event[key], str):
             raise ValueError("invalid room event field")
     for key in ("owns", "messages"):
@@ -200,7 +200,7 @@ def validate_event(rows, event, text):
     kind = event["kind"]
     keys = {"created": {"kind", "task_id"},
             "join": {"kind", "participant", "provider", "model", "role", "label", "consumer", "owns", "parent"},
-            "bind": {"kind", "participant", "consumer"},
+            "bind": {"kind", "participant", "consumer", "previous"},
             "leave": {"kind", "participant"},
             "message": {"kind", "id", "sender", "recipient", "message_kind", "reply_to"},
             "received": {"kind", "participant", "messages"},
@@ -242,7 +242,9 @@ def validate_event(rows, event, text):
         if member.get("consumer"):
             if member["consumer"] == consumer:
                 return False
-            raise ValueError("native identity is already bound; leave and rejoin before changing it")
+            # Only a rebind naming the identity it replaces moves a binding; a stale or blind one is refused.
+            if event.get("previous") != member["consumer"]:
+                raise ValueError("native identity is already bound; leave and rejoin before changing it")
         if any(p.get("consumer") == consumer and p["joined"] for p in state["participants"]):
             raise ValueError("native session already has a participant in this room")
     elif kind == "publication":
@@ -327,6 +329,11 @@ def validate_event(rows, event, text):
             raise ValueError("a message needs another participant or all")
         if event.get("message_kind") not in KINDS:
             raise ValueError("invalid message kind")
+        if str(event["id"]).startswith("result-") and (
+                event["id"] != "result-" + event["sender"] or event["message_kind"] != "handoff"
+                or participant(state, event["sender"]).get("parent") != recipient):
+            # result-<call> ids are reserved for a call's own handoff to its parent, which settles it on the board.
+            raise ValueError("result-<participant> ids are reserved for that participant's handoff to its parent")
         old = next((m for m in state["messages"] if m["id"] == event["id"]), None)
         if not old and len(state["messages"]) >= 1024:
             raise ValueError("room message limit reached; start a new bounded room")
@@ -412,7 +419,8 @@ def send(repo, room, who, recipient, text, kind="note", reply_to=None, message_i
     return event
 
 
-def bind(repo, ident, who, native_session):
+def bind(repo, ident, who, native_session, replaces=None):
+    """Bind a main to its native session; replaces names the consumer hash a rebind moves away from."""
     if native_session == "current":
         if participant(status(repo, ident), who)["provider"] != "claude":
             raise ValueError("current shortcut is for the calling Claude session")
@@ -421,7 +429,9 @@ def bind(repo, ident, who, native_session):
     identifier(native_session, "native session")
     event = {"kind": "bind", "participant": who,
              "consumer": hashlib.sha256(native_session.encode()).hexdigest()[:32]}
-    append(repo, ident, event, "Native session bound")
+    if replaces:
+        event["previous"] = replaces
+    append(repo, ident, event, "Native session rebound" if replaces else "Native session bound")
     return event
 
 
@@ -478,6 +488,17 @@ def status(repo, room):
     state["pending_count"] = sum(len(live.intersection(m["pending_for"])) for m in state["messages"])
     state["statuses"] = {m["sender"]: {"text": m["text"], "ts": m["ts"], "seq": m["seq"]}
                          for m in state["messages"] if m["message_kind"] == "status"}
+    state["call_results"] = {}
+    parents = {p["participant"]: p.get("parent") for p in state["participants"] if p.get("role") != "main"}
+    for m in state["messages"]:
+        found = re.match(r"result-(.+)\Z", str(m["id"]))
+        # Only a call's own handoff to its declared parent counts; another sender cannot settle it.
+        if (found and m["sender"] == found.group(1) and m["message_kind"] == "handoff"
+                and found.group(1) in parents and parents[found.group(1)] == m["recipient"]):
+            exited = re.match(r"Call exit=(\d{1,4})\b", str(m["text"]))
+            state["call_results"][found.group(1)] = {"exit": int(exited.group(1)) if exited else None,
+                                                     "ts": m["ts"], "seq": m["seq"],
+                                                     "read": not m["pending_for"]}
     state["received_count"] = sum(len(m["received_by"]) for m in state["messages"])
     state["answered_count"] = sum(m["answered"] for m in state["messages"])
     pairs = {}

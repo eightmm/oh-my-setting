@@ -1158,13 +1158,17 @@ EOF
   return 1
 }
 
-# A sibling delegate that was live-exempt at the pre-provider snapshot and then
-# finished with its worktree kept (failure or rejection) loses its liveness and
-# reappears on the hard surface although nothing about it is the worker's. Name
-# it softly only when every changed line is an addition belonging to such an
-# entry and its checkout, backpointer and marker still pass the validator with
-# only the pid dead. A removed marker, an entry absent from the snapshot's
-# exempt list, or any other changed line keeps gitmeta hard.
+# A sibling delegate that finishes with its worktree kept (failure or rejection)
+# loses its liveness and appears on the hard surface although nothing about it
+# is the worker's. That holds both for a sibling live-exempt at the
+# pre-provider snapshot and for one started after it. Name it softly only when
+# every changed line is an addition belonging to such an entry and its
+# checkout, backpointer and marker still pass the validator with only the pid
+# dead; an entry started after the snapshot must also be absent from the
+# baseline and sit on a detached HEAD. This is false-positive relief for
+# cooperative parallel runs, not attribution: a same-UID worker can forge the
+# same shape (SECURITY.md). A removed marker, any other changed line, or
+# OMS_WORKER_GUARD_STRICT=1 keeps gitmeta hard.
 oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   local repo="$1"
   local before_dir="$2"
@@ -1173,8 +1177,8 @@ oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   local line
   local entry
   local added
+  local head
 
-  [ -s "$before_dir/gitmeta-exempt" ] || return 1
   git_dir="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || printf '')"
   case "$git_dir" in
     "") return 1 ;;
@@ -1197,7 +1201,17 @@ oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
         ;;
       *) return 1 ;;
     esac
-    grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-exempt" || return 1
+    if ! grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-exempt" 2>/dev/null; then
+      ! awk -v e="worktrees/$entry" '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
+        "$before_dir/gitmeta-before" || return 1
+      [ -f "$git_dir/worktrees/$entry/HEAD" ] && [ ! -L "$git_dir/worktrees/$entry/HEAD" ] || return 1
+      head="$(sed -n '1p' "$git_dir/worktrees/$entry/HEAD" 2>/dev/null || true)"
+      head="${head//$'\r'/}"
+      case "$head" in
+        *[!0-9a-f]*|"") return 1 ;;
+      esac
+      [ "${#head}" -ge 40 ] || return 1
+    fi
     oms_worker_gitmeta_is_live_managed_worktree "$repo" \
       "$git_dir/worktrees/$entry/gitdir" "$current_worktree_physical" kept || return 1
   done <<EOF

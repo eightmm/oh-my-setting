@@ -706,7 +706,7 @@ even when the child did not emit its own summary.
 The bounded synthesis feeds the planner as untrusted evidence before
 normal exact parent proposal review. The durable contract retains this mode
 through resume and enforces gated opposite-provider review. Codex routes are
-pinned to GPT-6 Astra/Sol/Luna, including reviewed assignments and optional
+pinned to GPT-6 Astra, GPT-6.1 Sol and GPT-6 Luna, including reviewed assignments and optional
 capacity fallbacks. Claude Code can implement with `--worker claude`, leaving
 Codex as the reviewer; each campaign keeps one implementation transport to
 preserve independent review. The existing provider-neutral behavior is unchanged

@@ -22477,6 +22477,41 @@ test_worker_guard_softens_a_sibling_that_finished_kept() {
     fail "a kept sibling should be reported as a soft change: $result"
 }
 
+# The incident that serialized every main's launches: sibling B starts after
+# worker A's snapshot and finishes kept before A's final check. A detached kept
+# sibling new to the baseline is reported softly; strict mode and a sibling on
+# a branch stay hard. A same-UID worker could forge this shape too, so it is
+# false-positive relief for cooperative runs, not attribution.
+test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
+  local project="$TMP/guard-sibling-late"
+  local managed_root="$TMP/guard-sibling-late-root"
+  local sibling_parent="$managed_root/oh-my-setting-delegate.late"
+  local dead_pid
+  local body
+  local result
+
+  make_guard_repo "$project"
+  dead_pid="$(sh -c 'echo $$')"
+  body="mkdir -p $sibling_parent && git -C $project worktree add --quiet --detach $sibling_parent/wt HEAD >/dev/null 2>&1 && printf 'kind=oh-my-setting-temp\\npid=$dead_pid\\nrepo=$project\\nworktree=$sibling_parent/wt\\ntemporary=1\\n' > $sibling_parent/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" "$body")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a sibling started and kept mid-run must not fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'during this run: kept-sibling' ||
+    fail "a late kept sibling should be reported as a soft change: $result"
+
+  make_guard_repo "$project-strict"
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-strict" "$managed_root" \
+    "${body//$project/$project-strict}")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "strict mode must keep a late kept sibling hard: $result"
+
+  make_guard_repo "$project-branch"
+  body="mkdir -p $sibling_parent-b && git -C $project-branch worktree add --quiet -b late $sibling_parent-b/wt HEAD >/dev/null 2>&1 && printf 'kind=oh-my-setting-temp\\npid=$dead_pid\\nrepo=$project-branch\\nworktree=$sibling_parent-b/wt\\ntemporary=1\\n' > $sibling_parent-b/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$project-branch" "$managed_root" "$body")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "a late sibling on a branch must stay a hard violation: $result"
+}
+
 test_worker_guard_reports_a_bounded_scan() {
   local project="$TMP/guard-budget"
   local out

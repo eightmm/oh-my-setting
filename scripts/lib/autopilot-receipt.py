@@ -306,7 +306,7 @@ def validate_receipt(row: dict[str, Any]) -> None:
             if providers[role] not in {"codex", "claude"}:
                 raise ReceiptError("auto collaboration transport is not authorized")
             if providers[role] == "codex":
-                allowed_models = {"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}
+                allowed_models = {"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}
                 if (routing[role]["model"] not in allowed_models or
                         routing[role]["fallback_model"] not in allowed_models | {""}):
                     raise ReceiptError("auto collaboration requires GPT-6 Codex routes")

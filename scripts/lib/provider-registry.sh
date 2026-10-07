@@ -579,6 +579,7 @@ oms_provider_price_order() {
   local provider generation="${2:-}"
   provider="$(oms_provider_normalize "$1")" || return $?
   case "$provider:$generation" in
+    codex:6.1) printf 'gpt-6.1-sol\n' ;;
     codex:6.0) printf 'gpt-6-astra gpt-6-sol gpt-6-luna\n' ;;
     codex:5.6) printf 'gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna\n' ;;
     antigravity:3.7) printf 'gemini-3.7-flash-high gemini-3.7-flash-medium gemini-3.7-flash-low\n' ;;

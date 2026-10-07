@@ -4,8 +4,9 @@ from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import header_rows
 from panel_view import (ATTENTION_STATES, PALETTE, activity, box_edge, box_row, clipped,
                         menu_rows, status_alerts, tone, usage_words, worker_rows, wrapped)
-from room_view import (joined_seconds, live_unread, main_names, model_name, nodes, plan_idle, readable, said,
-                       settler, window_order)
+from room_view import (action as member_action, call_order, call_span, footer_hints, joined_seconds, live_unread,
+                       main_names, model_name, nodes, plan_idle, readable, said,
+                       settler, spawn_bar, window_order)
 
 
 def render_tree(report, width, height, color=False, unicode=True, frame=None, menu=False,
@@ -26,8 +27,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     # This window's main leads so its team stays on screen; the rest keep the F6/F7 window order.
     mains = sorted(window_order(report, [m for m in members if m.get("role") == "main"]),
                    key=lambda m: m["participant"] != current)
-    calls = sorted([m for m in members if m.get("role") != "main"],
-                   key=lambda m: (m.get("seq", 0), m["participant"]))
+    calls = [m for m in members if m.get("role") != "main"]
     owners = {ident: m for m in mains for ident in (m["participant"], m.get("attempt")) if ident}
     for row in worker_rows(report):
         if row["source"] == "council" and row["parent"] in owners:
@@ -35,6 +35,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             calls.append({"role": "council", "parent": row["parent"], "state": row["state"],
                           "title": row["work"], "model": row["name"],
                           "_action": ("debate", (row["task"], owner["participant"]))})
+    calls.sort(key=call_order)
     if attention_only:
         calls = [m for m in calls if m["state"] in ATTENTION_STATES]
     prefix, end, stem = ("├─ ", "└─ ", "│  ") if unicode else ("|- ", "`- ", "|  ")
@@ -49,10 +50,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             items.append(action)
 
     def phrase(call):
-        if call["state"] != "presence unknown":
-            return said(call["state"])
-        seconds = joined_seconds(call)
-        return "no lifecycle record" + (sep + "joined %sm ago" % int(seconds // 60) if seconds is not None else "")
+        return call_span(call, "→" if unicode else "->")
 
     roots = set(owners)
     for n, main in enumerate(mains):
@@ -139,11 +137,17 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     footer = menu_rows(width, height, unicode, navigation.get("menu_help", False), managed) if menu else []
     if navigation.get("notice"):
         footer.append(clean(navigation["notice"], 200))
+    def hints(help_open):
+        chosen = next((m for m in members if member_action(m) == selected), None)
+        return footer_hints(dict(navigation, keys_help=help_open), width, managed, unicode, chosen, len(mains), False)
+
     if not menu:
-        footer.append(("[v] Expand  [q] " + ("Chat" if managed else "Quit")) if summary else
-                      "[v] Collapse  Esc Back / arrows / Enter  [q] " + ("Chat" if managed else "Quit"))
+        footer += hints(navigation.get("keys_help", False))
     if len(footer) > height - int(menu) - 4:
-        footer = [clipped("1 Codex  2 Claude  ? More  q Quit" if menu else "v Expand  q Quit", width)]
+        footer = [clipped("1 Codex  2 Claude  ? More  q Quit", width)] if menu else hints(False)
+    bar = None if menu or height < 8 else spawn_bar(width, navigation)
+    if bar:
+        footer.append(bar[0])
     budget = max(0, height - int(menu) - len(footer))
     heading = "OMS / " + (clean(room.get("title") or room.get("id")) or "Work room")
     head = [{"text": clipped(heading, width), "style": "main"}]
@@ -235,12 +239,15 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     output += [PALETTE["dim"] + clipped(line, width) + "\033[0m" if color and
                line.startswith(("╭", "╰", "+", "OMS records")) else clipped(line, width)
                for line in footer]
+    if bar:
+        output[-1] = PALETTE["main" if bar[1] else "dim"] + output[-1] + "\033[0m" if color else output[-1]
+        hits += [{"y": len(output), "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
     navigation.update(hits=hits, items=unique, offset=offset, body_rows=len(body), viewport=room_budget,
                       room_id=room.get("id"), positions=positions, geometry=geometry)
     return "\n".join(output)
 
 
-def render_detail(report, detail, width, height, navigation):
+def render_detail(report, detail, width, height, navigation, managed=False):
     heading = ["OMS / " + detail["title"]] + header_rows(report, width)
     if "report" in detail:
         from panel_view import render_results
@@ -254,5 +261,5 @@ def render_detail(report, detail, width, height, navigation):
     navigation.update(hits=[], items=[], offset=offset, viewport=budget, bands=[])
     lines = heading[:max(0, height - 2)] + body[offset:offset + budget]
     lines += ["%s-%s / %s rows" % (offset + 1, min(len(body), offset + budget), len(body)),
-              "Esc: tree  wheel / PgUp / PgDn: scroll  q: quit watcher"]
+              "Esc Back  PgUp/PgDn Scroll" + ("  F9 Chat/Board" if managed else "  q Quit")]
     return "\n".join(clipped(line, width) for line in lines[-height:])

@@ -28,9 +28,9 @@ oms_collaboration_route_validate() {
   case "$provider" in
     claude) return 0 ;;
     codex)
-      case "$model" in gpt-6-astra|gpt-6-sol|gpt-6-luna) ;; *)
+      case "$model" in gpt-6-astra|gpt-6.1-sol|gpt-6-sol|gpt-6-luna) ;; *)
         echo 'error: auto collaboration requires an exact GPT-6 Codex model' >&2; return 2 ;; esac
-      case "$fallback" in ''|gpt-6-astra|gpt-6-sol|gpt-6-luna) return 0 ;; esac
+      case "$fallback" in ''|gpt-6-astra|gpt-6.1-sol|gpt-6-sol|gpt-6-luna) return 0 ;; esac
       echo 'error: auto collaboration forbids a non-GPT-6 fallback' >&2 ;;
     *) echo 'error: auto collaboration authorizes only codex and claude' >&2 ;;
   esac
@@ -234,7 +234,7 @@ oms_model_prepare() {
   if [ "${OMS_AUTOPILOT_COLLABORATION:-off}" = auto ]; then
     if [ "$provider" = codex ] && [ -z "$explicit" ]; then
       case "${OMS_MODEL_OPERATION:-}" in
-        delegate) explicit=gpt-6-sol ;;
+        delegate) explicit=gpt-6.1-sol ;;
         *) explicit=gpt-6-astra ;;
       esac
       OMS_MODEL_EXPLICIT="$explicit"

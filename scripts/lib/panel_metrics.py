@@ -10,6 +10,7 @@ import tempfile
 import time
 
 from dashboard_projection import mapping, number
+from panel_view import TERMINAL_STATES
 
 
 def percent(value):
@@ -109,12 +110,13 @@ def numeric_reading(text, provider):
 
 
 def collect(report, main_attempt=None, now=None, repo=None):
-    from panel_chats import windows
+    from panel_chats import current_models, windows
     from room_view import nodes
     room = mapping(report.get("room"))
     mains = [m for m in nodes(report) if m.get("role") == "main"]
     panes = windows(repo, room["id"], room) if repo is not None and room.get("id") else {}
     now = time.time() if now is None else now
+    current = current_models(repo, mains)
     output = {}
     for provider in ("claude", "codex"):
         candidates = [m for m in mains if m.get("provider") == provider]
@@ -125,9 +127,15 @@ def collect(report, main_attempt=None, now=None, repo=None):
             selected = live if live else candidates
         row = {"main_count": len(candidates), "context_left": None, "weekly_used": None,
                "source": "main ambiguous" if len(selected) > 1 else "unavailable"}
+        if provider == "codex":
+            row.update(native_models=current, native_model_checked=repo is not None)
         if len(selected) == 1:
             main = selected[0]
-            row.update(participant=main["participant"], model=main.get("model"))
+            native = current.get(main["participant"], {})
+            bound_live = (provider == "codex" and repo is not None and main.get("consumer")
+                          and main["state"] not in TERMINAL_STATES)
+            row.update(participant=main["participant"],
+                       model=native.get("model") if bound_live else main.get("model"))
             reading = cached(main.get("consumer"), now) if provider == "claude" else {}
             targets = panes.get(main["participant"], [])
             if len(targets) == 1:

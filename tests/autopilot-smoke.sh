@@ -2805,7 +2805,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in --prompt) printf '%s\n' "$2" > "$OMS_T_CALLS/planner-prompt"; shift 2 ;; *) shift ;; esac
 done
 artifact="$OMS_T_CALLS/planner-artifact.md"
-printf '## Output\n\n%s\n' '{"tasks":[{"id":"t1","title":"feat: bounded change","allowed":["src/"],"verify":"true","depends":[],"assignment":{"provider":"codex","model":"gpt-6-sol"}}]}' > "$artifact"
+printf '## Output\n\n%s\n' '{"tasks":[{"id":"t1","title":"feat: bounded change","allowed":["src/"],"verify":"true","depends":[],"assignment":{"provider":"codex","model":"gpt-6.1-sol"}}]}' > "$artifact"
 echo "artifact: $artifact"
 EOF
   chmod +x "$bin"/*
@@ -2835,14 +2835,14 @@ rules = runpy.run_path(sys.argv[2] + '/autopilot-receipt.py')
 row, _ = rules['load_receipt'](Path(sys.argv[1]))
 assert row['contract']['collaboration'] == 'auto'
 assert row['contract']['review_mode'] == 'gate'
-assert row['routing']['worker']['model'] == 'gpt-6-sol'
+assert row['routing']['worker']['model'] == 'gpt-6.1-sol'
 args = rules['option_args'](row)
 assert args[args.index('--collaboration')+1] == 'auto'
 PYTEST
   proposal="$(sed -n 's/^plan-from-spec: proposed .* -> //p' "$repo/propose.out")"
   sha="$(sha256_file "$proposal")"
   rc=0
-  run_autopilot "$repo" --planner codex --worker-model gpt-6-sol \
+  run_autopilot "$repo" --planner codex --worker-model gpt-6.1-sol \
     --planner-model gpt-6-astra --review-mode gate --allowed src,tests --base main \
     run --proposal "$proposal" --expected-proposal-sha256 "$sha" > "$repo/drop-mode.out" 2>&1 || rc=$?
   [ "$rc" != 0 ] || fail 'resume silently dropped collaboration'
@@ -2907,7 +2907,7 @@ PYTEST
   make_repo "$rejected"
   for assignment in '{"provider":"codex","model":"gpt-5.5"}' \
     '{"provider":"codex","workload":"routine"}' \
-    '{"provider":"codex","model":"gpt-6-sol","fallback_model":"gpt-5.6-sol"}' \
+    '{"provider":"codex","model":"gpt-6.1-sol","fallback_model":"gpt-5.6-sol"}' \
     '{"provider":"claude","model":"claude-opus-5-5"}'; do
     write_proposal "$rejected/proposal.json"
     python3 - "$rejected/proposal.json" "$assignment" <<'PYTEST'

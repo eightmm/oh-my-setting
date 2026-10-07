@@ -40,7 +40,7 @@ background advisor or require another model call for routine completion.
    `--refresh` only when a live probe is needed.
 2. No `--model` means provider default — except for a write worker
    (`peer-delegate`, `plan-run`, autopilot), which takes the second price
-   rank of the routable set (`gpt-6-sol`, the seeded Claude worker, the medium Gemini
+   rank of the routable set (`gpt-6.1-sol`, the seeded Claude worker, the medium Gemini
    line). This is a stable worker preset; it is not computed relative to an
    account-specific provider default. Judging calls keep that provider
    default. Recovery tries cheaper seeded candidates before higher ones. The

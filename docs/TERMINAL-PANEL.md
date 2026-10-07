@@ -9,12 +9,12 @@ command help. The panel uses existing OMS state, authentication and front doors.
 
 1. Run `oms` in a terminal: window 0 is the control window, an inbox for you.
 2. Press `1` (Codex) or `2` (Claude), no Enter. Each main opens its own window with a board.
-3. `F6`/`F7` step between mains; `Ctrl-b 0` returns to the control window; `Ctrl-b d` detaches.
+3. Panel-wide keys are F-keys only: `F6`/`F7` step between mains, `F9` swaps focus between a main's chat and its board, `F5` opens the control window, `F12` shows every key; `Ctrl-b d` detaches.
 4. The control window's **Needs you** lists failed or timed-out calls, calls and mains
    waiting for approval or input, broadcasts from mains and patches awaiting admission.
 5. Arrow keys or a click select a row; Enter or a second click opens that main's chat
    or the call's result. Without a raw-key terminal the menu takes key + Enter.
-6. On a board, click or Enter on a main or call opens it; Esc backs out, `q` returns to chat.
+6. On a board, click or Enter on a main or call opens it; Esc backs out, `F9` returns to chat.
 7. Results: `t` on a board opens the tree and a call's retained answer; `r` in the control
    menu browses recorded results. Debates: the `COUNCIL` branch of a main, or `c` to start one.
 8. `?` in the control menu lists every other shortcut.
@@ -42,7 +42,46 @@ oms panel --repo . --room team --open-chat sol-main --chat-surface app --dry-run
 oms panel --repo . --council --owner codex --task-id ID --label 'Decision' --prompt 'Compare options' --dry-run
 ```
 
+## Starting more mains
+
+The last row of every board (graph and tree) reads `[+ Codex main]  [+ Claude main]`
+for the installed CLIs. A click, or `n` then `1` (Codex) or `2` (Claude), adds a main window
+to this panel and room without leaving the current window; the board answers
+"Started Claude main in window 4". The start runs beside the board, and a second request
+while one is starting is ignored. Boards outside tmux show the row disabled with the reason.
+
+A main starts another one from its shell, without a terminal:
+
+```bash
+oms panel --repo . --spawn-main claude --task 'short task' [--model ID] --json
+```
+
+It needs this checkout's panel session to be open, never creates a session, attaches a client or
+moves focus, joins the panel's room by the same rules as `--launch`, and prints
+`{"window": N, "provider": ..., "room": ...}`. It refuses inside workers and when the room
+already has six live mains. The caller's room participant (`OMS_ROOM_PARTICIPANT`) is recorded as
+`panel_started_by` on the new main's attempt and on its window; the board marks that main's tab
+with `↳` (`^` in ASCII mode) and its detail starts with "Started by Opus 5.5·1cb4". The bootstrap
+tells mains to use this only for a separate long line of work, not for ordinary subtasks.
+
 ## Shared work rooms and the graph
+
+A bound live Codex main shows its current model and effort from its exact native
+session's read-only state, matched to this repository. A missing or unreadable
+native state (including WAL state without its reader files) shows the current
+model as unavailable; the launch setting stays
+separate in its detail. Historical Sol 6 calls retain their original identity,
+while current Sol defaults and Sol 6.1 calls are labelled accordingly. GPT
+labels include their model version (Sol 6, Luna 6, Astra 6 and Sol 6.1). Native
+chat rows are never updated; SQLite may coordinate its existing reader locks.
+
+Expanded main details group calls by attention, active and finished state; every
+team row opens that call's recorded result. Recent messages precede historical
+and status-unavailable calls, whose identities and result links stay separate. Result details put the main's decision
+and verification before the worker's answer. Long excerpts remain scrollable and
+point to the full retained result rather than filling the board with raw output.
+Press `f` in a call preview to open that complete scrollable reader; Enter keeps
+the existing preview selection. The reader revalidates the exact recorded target.
 
 A native main launched from the menu joins the selected work room. Opening a
 second native main from the menu or with `--launch` keeps the panel's recorded
@@ -74,15 +113,18 @@ tree opens recorded results directly. Repository tasks show the
 displayed snapshot's title, dependencies and declared paths. Escape closes the
 detail or a results screen. Click a main's left chevron or press Space to fold its calls;
 the wheel and PageUp/PageDown scroll. `t`, `g`, and `b` select tree, graph and
-attention views in the watcher; `q` returns focus to chat in a managed tmux
-board and quits a standalone watcher. Resize discards pending coordinate
+attention views in the watcher; `Home`/`End` jump to the first/last item and keys
+the board does not bind are ignored. `q` quits a standalone watcher and does
+nothing on a managed tmux board (use `F9`). Resize discards pending coordinate
 clicks; a refresh discards them only when it changes the drawn hit map.
 The selection is shown before a chat or result opens.
 
 Mouse support is enabled only in the OMS tmux session, never globally. Hold
 Shift for the terminal's own text selection. The watcher restores mouse
 reporting, echo, canonical input and the cursor on exit, interrupt and
-HUP/TERM; the OMS session's tmux `mouse` option stays on afterwards. Redirected
+HUP/TERM; the OMS session's tmux `mouse` option is set best effort (the watcher keeps
+keyboard input if tmux refuses) and stays on afterwards, so it also applies to the
+session's native chat windows. Redirected
 output stays plain and passive. Unsupported terminals
 retain the existing control-menu chat/result selection.
 
@@ -156,10 +198,12 @@ Terminals attached to the same panel session share its current window, so
 navigating from one client also moves the other. The wheel scrolls only the band, lane or detail under the
 pointer.
 
-The footer packs whole hints in priority order (click, calls, mains, Enter,
-`a Ask`, `w Worktree` when it applies, pins, expand, tree, Esc) and always keeps
-the quit or return-to-chat key. A hint that does not fit is skipped, so `Esc`, the
-lowest priority, vanishes first: at about 100 columns or fewer with several mains.
+The footer shows at most five hints chosen by the selection (a main: `Enter Chat`,
+`a Ask advisor`, `Space Pin`; a call: `Enter Show`, `w Worktree` when it applies;
+`Esc Close` while a preview or detail is open) and always ends with the fixed panel keys
+`F6/F7 Main  F9 Chat⇄Board  F5 Control  F12 Keys` (`q Quit` and `? Keys` on a standalone watcher). `?` swaps in the full list of keys
+that work in that view, with `v Expand` or `v Collapse` following the board's state.
+Notices disappear on the next input or after ten seconds.
 
 `a` in the watcher asks an advisor for the selected main (or the shown one).
 In tmux it opens a popup that takes one question and runs
@@ -615,8 +659,9 @@ redirected input, the menu reads `oms> ` and needs key + Enter. The inbox
 refreshes every five seconds. The watcher retains its arrow, mouse and page-key
 navigation.
 In a managed tmux control pane the quit key is labelled `Detach`; it preserves
-the native sessions. In a coupled tmux board, `q` returns focus to the lower
-input pane and keeps the board alive; an expanded board collapses first.
+the native sessions. In a coupled tmux board, `F9` swaps focus between the
+chat and the board and keeps both alive; `q` does nothing there, and Esc or `v`
+un-zoom the board only while it is zoomed.
 Standalone watchers retain `q` to exit. If a board was explicitly removed,
 `oms panel --reopen` restores it without restarting the native CLI. Repeating
 the operation preserves an existing board. Inside an OMS window, bare
@@ -651,8 +696,8 @@ has participant/message headroom; otherwise, or when `--room` is given, the
 existing room rules apply. Rooms stay bounded and task-scoped; the panel
 outlives them. Separate tmux servers are separate scopes. Each native conversation gets
 its own sidebar with state refreshed every five seconds. Existing windows and tmux settings
-are preserved, with one addition: `F6`/`F7` move to the previous/next main window without the
-prefix, and the board lays its main columns out in that window order. tmux key bindings are server-wide, so the binding acts only in `oms-panel-*` sessions,
+are preserved, with one addition: `F6`/`F7` move to the previous/next main window, `F9` selects the other pane
+of the window, `F5` opens the control window and `F12` shows the key list, all without the prefix (F8 is Codex's voice key and F10/F11 belong to terminal menus), and the board lays its main columns out in that window order. tmux key bindings are server-wide, so the binding acts only in `oms-panel-*` sessions,
 passes the key through unchanged in every other session, and is not installed when the key is
 already bound. With default bindings, `Ctrl-b w` picks a window and `Ctrl-b d`
 detaches while work continues. Quit in the control pane also detaches. Failed

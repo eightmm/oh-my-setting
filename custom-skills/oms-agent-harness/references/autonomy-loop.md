@@ -53,7 +53,7 @@ claims against source/tests, and reviews the resulting exact proposal bytes.
 Agreement never substitutes for the acceptance command.
 
 Choose the implementation transport from the task and repository evidence:
-Codex defaults to GPT-6 Sol; `--worker claude` lets Claude Code implement and
+Codex defaults to GPT-6.1 Sol; `--worker claude` lets Claude Code implement and
 selects GPT-6 Astra for final review. Keep one implementation transport per run
 so the opposite transport remains an independent reviewer. Do not force mixed
 assignments that would make the reviewer an author. Codex assignments may name
