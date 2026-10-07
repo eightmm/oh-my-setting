@@ -158,7 +158,7 @@ def hierarchy(report, rows, main_attempt=None, include_empty=True):
         model = metadata.get("model")
         title = ("MAIN / " + (MODEL_NAMES.get(model, model) or
                  PROVIDER_NAMES.get(main.get("provider"), "recorded owner")) if main else
-                 "LINKED OWNER / metadata unavailable" if ident else "UNLINKED")
+                 "LINKED OWNER / metadata unavailable" if ident else "No known main")
         groups = [(role, [r for r in children if r["role"] == key]) for role, key in
                   (("COUNCIL", "council"), ("ADVISORS", "advisor"), ("REVIEWERS", "reviewer"),
                    ("WORKERS", "worker"))]
@@ -243,7 +243,8 @@ def menu_rows(width, height, unicode=True, expanded=False, managed=False):
         groups += [("WORK", "[5] Explain  [6] Implement  [a] Advisor  [7] Review  [c] Council"),
                    ("SETUP", "[4] Main provider  [p] CLIs  [b] Attention  [8] Dashboard"),
                    ("RESULT", "[f] Finalize  [n] Retry delivery")]
-    lines = [box_edge("ACTIONS" + (" / all shortcuts" if expanded else " / key + Enter"), width, unicode)]
+    lines = [box_edge("Actions" + (" · all shortcuts" if expanded else " · key + Enter") if unicode else
+                         "Actions" + (" / all shortcuts" if expanded else " / key + Enter"), width, unicode)]
     if width < 60 and not expanded:
         for keys in ("[1] Codex  [2] Claude", "[t] Task  [h] Chats  [r] Results", "[o] Rooms  [?] More  [q] " + quit_label):
             lines += [box_row(line, width, unicode) for line in wrapped(keys, width - 4, 2)]

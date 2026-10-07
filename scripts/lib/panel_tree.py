@@ -4,12 +4,13 @@ from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import header_rows
 from panel_view import (ATTENTION_STATES, MODEL_NAMES, PALETTE, activity, box_edge, box_row, clipped,
                         menu_rows, status_alerts, tone, usage_labels, worker_rows, wrapped)
-from room_view import nodes
+from room_view import nodes, readable, said
 
 
 def render_tree(report, width, height, color=False, unicode=True, frame=None, menu=False,
                 attention_only=False, main_attempt=None, navigation=None, summary=False, managed=False):
     navigation = navigation if navigation is not None else {}
+    sep = " · " if unicode else " / "
     selected = navigation.get("selected")
     collapsed = navigation.get("collapsed", set())
     room = mapping(report.get("room"))
@@ -55,11 +56,12 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         toggle = toggle if attached else " "
         model = MODEL_NAMES.get(main.get("model"), main.get("model")) or main.get("provider", "unknown")
         state = "exited" if main["state"] == "done" else main["state"]
+        said_state = state if state == "exited" else said(state)
         label = "%s %s%s %s%s" % (toggle, "" if summary or width < 60 else end if last_main else prefix,
-            activity(state, frame, unicode), "current / " if main["participant"] == current else "", model,
+            activity(state, frame, unicode), "this window" + sep if main["participant"] == current else "", model,
         )
-        status = state + (" / %s calls" % len(attached) if folded else "")
-        add(label if width < 60 else label + " / " + status, "main", action, bool(attached))
+        status = said_state + (sep + "%s calls" % len(attached) if folded else "")
+        add(label if width < 60 else label + sep + status, "main", action, bool(attached))
         if width < 60:
             add("  " + status, tone(state), action)
         title = main.get("title")
@@ -81,8 +83,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                     model = MODEL_NAMES.get(child.get("model"), child.get("model")) or child.get("provider", "unknown")
                     label = child.get("title") or child["participant"]
                     child_action = child.get("_action") or ("result", child["participant"])
-                    add(indent + branch + "%s %s / %s" % (
-                        activity(child["state"], frame, unicode), model, child["state"]),
+                    add(indent + branch + "%s %s%s%s" % (
+                        activity(child["state"], frame, unicode), model, sep, said(child["state"])),
                         tone(child["state"]), child_action)
                     for line in wrapped(label, max(1, content_width - display_width(indent) - 3), 2):
                         add(indent + "   " + line, None, child_action)
@@ -90,10 +92,11 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             add("  │" if unicode else "  |", "dim")
     unlinked = [m for m in calls if m.get("parent") not in roots]
     if unlinked:
-        add("UNLINKED / parent outside shown room mains", "alert")
+        add("Calls with no known main", "alert")
         for n, child in enumerate(unlinked):
-            add((end if n == len(unlinked) - 1 else prefix) + "%s %s / %s" % (
-                activity(child["state"], frame, unicode), child.get("title") or child["participant"], child["state"]),
+            add((end if n == len(unlinked) - 1 else prefix) + "%s %s%s%s" % (
+                activity(child["state"], frame, unicode), child.get("title") or child["participant"], sep,
+                said(child["state"])),
                 tone(child["state"]), ("result", child["participant"]))
     if not mains and not calls:
         add("No main connected" if room.get("id") else "Select a work room", "dim")
@@ -101,20 +104,19 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             add("Start with [1] Codex or [2] Claude", "main")
     tasks = listing(room.get("repo_tasks"))
     if tasks:
-        add("TASKS / repository", "worker", divider=True)
+        add("Repository tasks", "worker", divider=True)
         for task in tasks:
             action = ("task", task.get("id"))
-            add("%s  [%s]" % (task.get("id"), task.get("state")), tone(task.get("state")), action)
-            for line in wrapped(task.get("title") or "title unrecorded", max(1, content_width - 2), 1 if summary else 2):
-                add("  " + line, None, action)
+            add("%s%s%s" % (said(task.get("state")), sep, task.get("title") or task.get("id")),
+                tone(task.get("state")), action)
     acceptance = mapping(report.get("acceptance"))
     if acceptance.get("available"):
-        add("ACCEPTANCE / %s/%s verified" % (mapping(acceptance.get("counts")).get("verified", 0),
+        add("Plan: %s of %s tasks verified" % (mapping(acceptance.get("counts")).get("verified", 0),
             acceptance.get("total", "?")), "good" if acceptance.get("complete") else "alert")
     for message in listing(room.get("messages"))[-2:]:
-        add("ROOM LOG / " + (clean(message.get("text")) or ""), "dim")
+        add("Room log" + sep + (readable(message.get("text"), " ") or ""), "dim")
     if any(main.get("owns") for main in mains):
-        add("SCOPES / declared, not locks", "dim", divider=True)
+        add("Scopes" + sep + "declared, not locks", "dim", divider=True)
     for main in mains:
         if main.get("owns"):
             add("  " + (main.get("provider") or "main") + ": " + ", ".join(main["owns"]), "dim")
@@ -124,7 +126,6 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     if not menu:
         footer.append(("[v] Expand  [q] " + ("Chat" if managed else "Quit")) if summary else
                       "[v] Collapse  Esc Back / arrows / Enter  [q] " + ("Chat" if managed else "Quit"))
-    footer.append("OMS records; exits are not acceptance")
     if len(footer) > height - int(menu) - 4:
         footer = [clipped("1 Codex  2 Claude  ? More  q Quit" if menu else "v Expand  q Quit", width)]
     budget = max(0, height - int(menu) - len(footer))
@@ -189,8 +190,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             offset = position - room_budget + 1
     shown = list(head)
     if boxed:
-        shown.append({"text": box_edge("ACTIVITY / %s mains / %s calls%s" % (
-            len(mains), len(calls), " / attention" if attention_only else ""), width, unicode), "style": "main"})
+        shown.append({"text": box_edge("Activity%s%s mains%s%s calls%s" % (
+            sep, len(mains), sep, len(calls), sep + "attention" if attention_only else ""), width, unicode), "style": "main"})
     shown += body[offset:offset + room_budget]
     if len(body) > room_budget and budget > len(head):
         shown.append({"text": clipped("%s-%s / %s rows / %s" % (offset + 1, min(len(body), offset + room_budget), len(body),

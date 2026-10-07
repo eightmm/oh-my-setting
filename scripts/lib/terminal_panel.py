@@ -1504,6 +1504,19 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
     capable = terminal_style()[0]
     motion = capable and not no_animation and os.environ.get("OMS_PANEL_NO_ANIMATION") != "1"
     navigation = {"collapsed": set(), "offset": 0}
+    try:
+        kept = json.loads(os.environ.pop("OMS_PANEL_RESUME", "") or "{}")
+    except ValueError:
+        kept = {}
+    def as_tuple(value):
+        return tuple(as_tuple(item) for item in value) if isinstance(value, list) else value
+    if isinstance(kept, dict) and kept.get("room_id"):
+        navigation.update({key: as_tuple(value) for key, value in kept.items()
+                           if key in ("room_id", "selected", "pinned", "dismissed") and value is not None})
+        if isinstance(navigation.get("pinned"), tuple):
+            navigation["pinned"] = list(navigation["pinned"])
+        if kept.get("preview"):
+            navigation["preview"] = {"target": as_tuple(kept["preview"])}
     saved_handlers = {}
     expanded = False
     stamps = source_stamps()
@@ -1570,6 +1583,10 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     n += 1
                     next_read = time.monotonic() + 5
                     if inputs.fd is not None and not count and reload_ready(stamps):
+                        # The re-executed watcher keeps what the person selected, so a reload never moves it.
+                        os.environ["OMS_PANEL_RESUME"] = json.dumps({key: navigation.get(key) for key in (
+                            "room_id", "selected", "pinned", "dismissed")} | {
+                            "preview": (navigation.get("preview") or {}).get("target")})
                         raise ReloadWatcher()
 
                 def redraw():

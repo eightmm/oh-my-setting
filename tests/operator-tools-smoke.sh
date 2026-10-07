@@ -2,6 +2,10 @@
 set -euo pipefail
 unset HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID \
   OMS_PANEL_HOST OMS_PANEL_VIEW OMS_PANEL_POSITION OMS_PANEL_COLOR
+# The suite runs as a top-level operator even inside a panel window or a write worker, whose
+# child/room bindings would otherwise turn its room fixtures into refusals.
+unset TMUX TMUX_PANE OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
+for oms_inherited in $(compgen -e | grep -E '^OMS_(PANEL|ROOM)_' || true); do unset "$oms_inherited"; done
 
 # Focused regressions for the read-only collaboration dashboard, content-free OTLP
 # JSONL export, explicit editor launch adapters, and retired semantic-eval
@@ -952,10 +956,10 @@ tree["attempts"]["active_recent"] = [
      "tool": "legacy-unlinked"}]
 saved_tree = json.dumps(tree, sort_keys=True)
 forest = hierarchy(tree, worker_rows(tree))
-assert {r["title"] for r in forest} == {"MAIN / Sol", "MAIN / Opus 5.5", "UNLINKED"}, forest
+assert {r["title"] for r in forest} == {"MAIN / Sol", "MAIN / Opus 5.5", "No known main"}, forest
 full_tree = render(tree, "codex", 100, 60, view="detail")
 assert full_tree.index("MAIN / Sol /") < full_tree.index("ADVISORS (1)") < full_tree.index("Architecture advice"), full_tree
-assert "REVIEWERS (1)" in full_tree and "Opus child blocked" in full_tree and "UNLINKED" in full_tree
+assert "REVIEWERS (1)" in full_tree and "Opus child blocked" in full_tree and "No known main" in full_tree
 assert re.search(r"^│.*\[working\] Astra.*│$", full_tree, re.M), full_tree
 # A running council groups its seats as one visible debate, not loose advisors.
 debate = deepcopy(tree)
@@ -987,13 +991,13 @@ assert json.dumps(tree, sort_keys=True) == saved_tree
 # stay readable in the short menu, with stable roots as child states change.
 short_tree = render(tree, "codex", 100, 28, menu=True)
 assert "Opus child blocked" in short_tree and "REVIEWERS (1)" in short_tree, short_tree
-assert "WORKERS (1)" in short_tree and "UNLINKED" in short_tree, short_tree
+assert "WORKERS (1)" in short_tree and "No known main" in short_tree, short_tree
 assert "2 advisor" not in short_tree
 changed_tree = deepcopy(tree)
 changed_tree["attempts"]["active_recent"][4]["state"] = "blocked"
 changed_text = render(changed_tree, "codex", 100, 60, view="detail")
-assert full_tree.index("MAIN / Sol /") < full_tree.index("MAIN / Opus") < full_tree.index("UNLINKED")
-assert changed_text.index("MAIN / Sol /") < changed_text.index("MAIN / Opus") < changed_text.index("UNLINKED")
+assert full_tree.index("MAIN / Sol /") < full_tree.index("MAIN / Opus") < full_tree.index("No known main")
+assert changed_text.index("MAIN / Sol /") < changed_text.index("MAIN / Opus") < changed_text.index("No known main")
 missing_model = deepcopy(tree)
 missing_model["attempts"]["active_recent"][0]["panel"].pop("model")
 missing_text = render(missing_model, "codex", 42, 34, main_attempt="att_main")
@@ -2090,8 +2094,8 @@ if os.name == "posix":
                 # Select tree in the watcher and click its own current main.
                 # The existing native pane is focused, with no second launch.
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "t"], env=env, check=True)
-                tree_sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "current / ")
-                clicked_row = next(n + 1 for n, line in enumerate(tree_sidebar.splitlines()) if "current / " in line)
+                tree_sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "this window · ")
+                clicked_row = next(n + 1 for n, line in enumerate(tree_sidebar.splitlines()) if "this window · " in line)
                 subprocess.run(tmux + ["select-pane", "-t", listing[1]], env=env, check=True)
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "\033[<0;8;%sM" % clicked_row], env=env, check=True)
                 tmux_wait(["display-message", "-p", "-t", session + ":" + owner, "#{pane_id}"], listing[0])
@@ -2426,6 +2430,35 @@ flow = {"collection": {"ok": True}, "room": {"id": "flow-room", "title": "Visual
             for m in flow_members]}, "operations": {"recent": [{"kind": "call", "event_id": model,
                 "served_model": model, "tokens": 10} for model in ("gpt-6-sol", "gpt-6-astra", "gpt-6-luna")]}}
 flow_before = json.dumps(flow, sort_keys=True)
+# Long headings leave the true midpoint free for a wire in either glyph set.
+geometry_flow = deepcopy(flow)
+for attempt in geometry_flow["attempts"]["active_recent"]:
+    if attempt["attempt_id"] == "builder":
+        attempt["state"] = "waiting_approval"
+for columns, rows, menu in ((76, 16, False), (76, 16, True), (76, 24, False), (100, 24, False), (157, 66, False)):
+    for glyphs in (False, True):
+        geometry_nav = {"dismissed": True, "selected": ("result", "builder")}
+        geometry_picture = render(geometry_flow, "codex", columns, rows, view="graph", unicode=glyphs,
+                                  main_attempt="flow-attempt", navigation=geometry_nav, menu=menu)
+        geometry_lines = geometry_picture.splitlines()
+        assert len(geometry_lines) <= rows - int(menu) and all(display_width(line) <= columns for line in geometry_lines)
+        assert "Sonnet 5.5" in geometry_picture and "approval" in geometry_picture, geometry_picture
+        if geometry_nav.get("surface") != "graph":
+            assert any(hit["action"] == ("result", "builder") for hit in geometry_nav["hits"]), geometry_nav
+            continue
+        for ident in ("researcher", "explorer", "builder"):
+            edges = [hit for hit in geometry_nav["hits"] if hit["action"] == ("result", ident)]
+            edge = min(edges, key=lambda hit: hit["y"])
+            middle = edge["x1"] - 1 + (edge["x2"] - edge["x1"] + 1) // 2
+            assert geometry_lines[edge["y"] - 1][middle] == ("┴" if glyphs else "+"), geometry_picture
+            if ident == "builder":
+                card_text = "\n".join(geometry_lines[hit["y"] - 1][edge["x1"] - 1:edge["x2"]] for hit in edges)
+                assert "Sonnet 5.5" in card_text and "needs approval" in card_text, card_text
+                assert "한글 작업 제목" in card_text and "builder" in card_text, card_text
+            geometry_click = dict(geometry_nav, selected=None, preview={})
+            assert choose(("click", middle + 1, edge["y"] + 1), geometry_click) is None
+            assert geometry_click["selected"] == ("result", ident)
+            assert geometry_click["preview"]["target"] == ("result", ident)
 import panel_chats
 fast_room = deepcopy(flow["room"])
 fast_room["participants"][0].update(consumer="enrolled-main-hash", provider="codex")
@@ -2579,6 +2612,24 @@ with patch.dict(os.environ, {"OMS_PANEL_POSITION": "auto", "TMUX_PANE": "%7"}), 
         subprocess.CompletedProcess([], 0, "", ""), subprocess.CompletedProcess([], 0, "", "")]) as moved:
     assert panel.relayout_board() == "left"
     assert moved.call_args_list[2].args[0][1:3] == ["join-pane", "-h"], moved.call_args_list
+# A watcher restart keeps the person's selection: watch() restores what the reload saved.
+resumed_nav = {}
+class StopWatch(Exception):
+    pass
+def capture_frame(*args, **kwargs):
+    resumed_nav.update(kwargs["navigation"])
+    raise StopWatch()
+with patch.dict(os.environ, {"OMS_PANEL_RESUME": json.dumps({"room_id": "r1", "selected": ["chat", "m2"], "dismissed": True,
+                                                            "preview": ["debate", ["t1", "m2"]]})}), \
+        patch.object(panel, "terminal_style", return_value=(False, False, True)), \
+        patch.object(panel, "read_panel", return_value=({"room": {"id": "r1"}}, 0, "codex", None, "graph", False, "r1")), \
+        patch.object(panel, "frame_view", side_effect=capture_frame):
+    try:
+        panel.watch(Path("."), "codex", count=1)
+    except StopWatch:
+        pass
+assert resumed_nav["selected"] == ("chat", "m2") and resumed_nav["dismissed"] is True, resumed_nav
+assert resumed_nav["preview"]["target"] == ("debate", ("t1", "m2")), resumed_nav
 # A watcher restarts only for changed sources that still compile.
 stamps_now = panel.source_stamps()
 assert panel.reload_ready(stamps_now) is False
@@ -2826,8 +2877,8 @@ assert "DETAIL /" not in render(flow, "codex", 100, 26, view="graph", main_attem
 # People read the board: call exits become words, machine status lines and markdown marks are dropped.
 import room_view as graph_text
 assert graph_text.readable("Call exit=0; parent acceptance pending.\nstop-reason: provider=codex is_error=0\n**Verification:** `ok`", " ") \
-    == "Finished.  Verification: ok"
-assert graph_text.readable("Call exit=2; parent acceptance pending.", " ") == "Failed (exit 2). "
+    == "Finished. Verification: ok"
+assert graph_text.readable("Call exit=2; parent acceptance pending.", " ") == "Failed (exit 2)."
 talking = deepcopy(flow)
 talking["room"]["pairs"] = [{"sender": "flow-main", "recipient": "flow-other", "sent": 2, "pending": 1}]
 picture = render(talking, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation={})
@@ -2853,6 +2904,31 @@ row = next(h for h in team_nav["hits"] if h["action"] == ("result", "builder"))
 assert choose(("click", row["x1"], row["y"]), team_nav) is None and team_nav["preview"] == {"target": ("result", "builder")}
 assert "DETAIL / WORKER / Sonnet 5.5" in render(done_flow, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                                                   navigation=team_nav)
+# The header counts unread mail to mains only, shows the time, and a main without a task title shows its
+# latest message; failed calls whose result their main already read fold into the finished count.
+counted = deepcopy(flow)
+counted["room"]["pairs"] = [{"sender": "flow-main", "recipient": "flow-other", "sent": 1, "pending": 1},
+                            {"sender": "flow-main", "recipient": "done-call", "sent": 2, "pending": 2}]
+counted["room"]["participants"][1]["label"] = "Native task not recorded"
+counted["room"]["messages"] = [{"sender": "flow-other", "targets": ["flow-main"], "text": "Call exit=0; parent acceptance pending.\nRebasing the parser"},
+                               {"id": "result-explorer", "sender": "explorer", "targets": ["flow-main"], "pending_for": [], "text": "Call exit=1;"}]
+for attempt in counted["attempts"]["active_recent"]:
+    if attempt["attempt_id"] == "explorer":
+        attempt["state"] = "failed"
+picture = render(counted, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
+                 navigation={"overview": True, "dismissed": True})
+first_line = picture.splitlines()[0]
+assert "1 unread message" in first_line and re.search(r"\d\d:\d\d$", first_line), first_line
+assert "Latest sent: Finished. Rebasing the parser" in picture and "explorer" not in picture and "1 finished" in picture, picture
+assert "Advisor · none active" in picture, picture
+idle_other = deepcopy(flow)
+idle_other["room"]["participants"] = [p for p in idle_other["room"]["participants"] if p["participant"] != "foreign-child"]
+empty_lane = render(idle_other, "codex", 160, 34, view="graph", navigation={"dismissed": True})
+assert "Worker · none running" in empty_lane, empty_lane
+lonely = deepcopy(flow)
+lonely["room"]["participants"] = [p for p in lonely["room"]["participants"] if p["participant"] == "flow-main"]
+alone = render(lonely, "codex", 120, 30, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
+assert "Advisors: none active" in alone and "Workers: none running" in alone, alone
 navigate_state = {"mains": ["flow-main", "flow-other"], "pinned": ["flow-main"]}
 panel.navigate(Path("."), ("pin", "*"), {}, navigate_state, 80)
 assert navigate_state["pinned"] == ["flow-main", "flow-other"]
@@ -2896,7 +2972,7 @@ for columns, rows in ((76, 16), (100, 22), (100, 48)):
 navigation = {}
 connected = render(tree_room, "codex", 91, 99, view="tree", navigation=navigation)
 assert connected.count("Claude |") == connected.count("Codex |") == 1, connected
-assert "Third main" in connected and "연결 근거 없는 작업" in connected and "UNLINKED" in connected
+assert "Third main" in connected and "연결 근거 없는 작업" in connected and "Calls with no known main" in connected
 assert "No joined worker" not in connected and "participants outside graph" not in connected
 assert len([i for i in navigation["items"] if i[0] == "chat"]) == 4, navigation
 target = next(hit for hit in navigation["hits"] if hit["action"][0] == "result")
@@ -3260,13 +3336,13 @@ if os.name != "nt":
     before_click = ledger.read_bytes()
     terminal(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
               "--watch", "--view", "tree", "--count", "2", "--no-animation"],
-             input_bytes, b"RECORDED RESULTS", trigger=b"ACTIVITY /")
+             input_bytes, b"RECORDED RESULTS", trigger=b"Activity")
     assert ledger.read_bytes() == before_click, "clicking a result wrote lifecycle state"
     import signal
     for signum in (signal.SIGHUP, signal.SIGTERM):
         terminal(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
                   "--watch", "--view", "tree", "--count", "2", "--no-animation"], b"", b"\033[?1000l",
-                 trigger=b"ACTIVITY /", signal_after=signum, expected_exit=128 + signum)
+                 trigger=b"Activity", signal_after=signum, expected_exit=128 + signum)
 # Publishing uses the saved receiver contract and persists intent before the call.
 with patch.object(codex_app_notify, "deliver", return_value={"status": "persisted", "turn_id": "fixture-app-turn",
         "delivery_unknown": False}) as delivered:
@@ -3686,7 +3762,7 @@ debate_navigation = {}
 debate_connected = render(native_report, "claude", 91, 40, view="tree", main_attempt="fresh-attempt",
                           navigation=debate_navigation)
 assert "COUNCIL (1)" in debate_connected and "Debate: Pick next work" in debate_connected, debate_connected
-assert "1 seat(s) answering" in debate_connected and "current /" in debate_connected, debate_connected
+assert "1 seat(s) answering" in debate_connected and "this window" in debate_connected, debate_connected
 assert ("debate", ("decide", member)) in debate_navigation["items"]
 resumed_lifecycle = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
                                       "show", "--attempt", resumed["attempt"], "--json"]))
