@@ -668,6 +668,51 @@ held = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPr
 assert "yours: t2 (running)" in held and "next ready: t3" in held and "before starting new work" not in held, held
 room.send(repo, "binding-room", os.environ["OMS_ROOM_PARTICIPANT"], "all", "Wiring the banner", kind="status")
 assert "set your status" not in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
+# Context pressure: a panel main is told to compact in place at each band; any other session keeps the fresh-session advice.
+hud = repo.parent / "ctx-hud"
+hud.mkdir(exist_ok=True)
+os.environ["OMS_HUD_CACHE_DIR"] = str(hud)
+def pressure(session, left):
+    (hud / ("ctx-%s.json" % hook_state.sha256_text(session)[:24])).write_text(json.dumps({"used_percentage": 100 - left}))
+    return hook_state.context_pressure_hint(payload(session))
+for session, panel in (("ctx-panel", True), ("ctx-plain", False)):
+    if not panel:
+        os.environ.pop("OMS_PANEL_MAIN_ATTEMPT")
+    said = [pressure(session, left) for left in (29, 25, 14, 14, 7)]
+    assert said[1] is None and said[3] is None, said
+    if panel:
+        assert said[0].startswith("[oms] ~29% context left — a handoff digest was saved; plan to compact at the next step boundary"), said
+        assert "compact in place (Claude: /compact; Codex: /compact) — the panel keeps your room and task." in said[2], said
+        assert "context low (~14% left)" in said[2] and "context low, compact now (~7% left)" in said[4], said
+    else:
+        assert said[0] is None and "migrate" not in said[2] and "continue in a fresh session" in said[2], said
+        assert "migrate to a fresh session" in said[4] and "compact in place" not in said[2] + said[4], said
+os.environ["OMS_PANEL_MAIN_ATTEMPT"] = "fresh-main"
+# After compact or clear the panel main gets one line of ids and counts; mail text never appears.
+room.send(repo, "binding-room", "fresh-peer", os.environ["OMS_ROOM_PARTICIPANT"], "SECRET QUESTION BODY", kind="question")
+resumed = hook_state.panel_resume_line(dict(payload("tower"), hook_event_name="SessionStart", source="compact"))
+assert resumed.startswith("[oms panel] resumed after compact: you are ") and "in room binding-room" in resumed, resumed
+assert "your plan task: t2 (running); 1 open question to you; 0 workers running for you; status: Wiring the banner." in resumed, resumed
+assert "SECRET" not in resumed and "\n" not in resumed, resumed
+plan_file([{"id": "t1", "state": "done"}])
+assert "your plan task: none;" in hook_state.panel_resume_line(dict(payload("tower"), source="clear"))
+def start(source, **env):
+    return subprocess.run(["python3", str(root / "scripts/lib/hook_state.py"), "relay-hint"], capture_output=True, text=True,
+                          input=json.dumps(dict(payload("resume-" + source), hook_event_name="SessionStart", source=source)),
+                          env=dict(os.environ, **env)).stdout
+# (A "clear" start would rebind the fixture main; its wording is covered by the direct call above.)
+assert "[oms panel] resumed after compact" in start("compact")
+assert "resumed after" not in start("startup") and "resumed after" not in start("compact", OMS_PANEL_MAIN_ATTEMPT="")
+# Codex may not show SessionStart output to the model: its first prompt repeats the line once.
+start("compact", OMS_HOOK_AGENT="codex")
+first = subprocess.run(["python3", str(root / "scripts/lib/hook_state.py"), "route", "--manifest", str(repo / "manifest.json")],
+                       capture_output=True, text=True, env=dict(os.environ, OMS_HOOK_AGENT="codex"),
+                       input=json.dumps(dict(payload("resume-compact"), hook_event_name="UserPromptSubmit", prompt="/x"))).stdout
+assert first.count("resumed after compact") == 1, first
+again = subprocess.run(["python3", str(root / "scripts/lib/hook_state.py"), "route", "--manifest", str(repo / "manifest.json")],
+                       capture_output=True, text=True, env=dict(os.environ, OMS_HOOK_AGENT="codex"),
+                       input=json.dumps(dict(payload("resume-compact"), hook_event_name="UserPromptSubmit", prompt="/x"))).stdout
+assert "resumed after" not in again, again
 os.environ.pop("OMS_PANEL_MAIN_ATTEMPT")
 assert not hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 os.environ.pop("OMS_PANEL_SESSION")

@@ -114,6 +114,18 @@ def open_count(room, participant):
     return sum(mapping(q).get("recipient") == participant for q in listing(mapping(room).get("open_questions")))
 
 
+def context_note(report, member):
+    """(percent, 'dim'|None|'alert') of the context left for this main, from the reading the board already collected."""
+    if member.get("role") != "main":
+        return None
+    row = mapping(mapping(report.get("provider_status")).get(member.get("provider")))
+    if row.get("participant") != member.get("participant"):
+        return None
+    from panel_metrics import percent
+    left = percent(row.get("context_left"))
+    return None if left is None else (left, "dim" if left > 30 else "alert" if left <= 15 else None)
+
+
 def main_names(report, members):
     """Display name per main: its tmux window number first, the F6/F7 and Ctrl-b N order, then the model.
 
@@ -940,6 +952,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 ("W", sum(c.get("role") == "worker" for c in calls)),
                 ("A", sum(c.get("role") != "worker" for c in calls)), ("!", alerts), ("M", unread),
                 ("?", open_count(room, m["participant"]))) if n)
+            ctx = context_note(report, m)
+            if ctx:
+                badge += (" " if badge else "") + "c%s%%" % ctx[0]
             pin = ("[x]" if m in pinned else "[+]") if multiple else ""
             mark = ("▸" if unicode else ">") if m == primary else " "
             room_left = max(4, tab_width - (len(badge) + 1 if badge else 0) - len(pin) - 2)
@@ -958,7 +973,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             if pin:
                 hits.append({"y": y, "x1": x + display_width(body) + 1, "x2": x + display_width(body) + 3,
                              "action": ("pin", m["participant"])})
-            style = "alert" if alerts else hue(m)
+            style = "alert" if alerts or (ctx and ctx[1] == "alert") else hue(m)
             cell = (chosen(body, style) if m == primary else paint(body, style)) + paint(pin, "dim")
             value += cell + " "
             x += display_width(body) + len(pin) + 1
@@ -1332,6 +1347,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             status = "%s %s" % (activity(state_of(m), frame, unicode), said(state_of(m)))
             if open_count(room, m["participant"]):
                 status += (" · " if unicode else " / ") + "? %s open" % open_count(room, m["participant"])
+            ctx = context_note(report, m)
+            if ctx:
+                note = "ctx %s%%" % ctx[0] + (" · compact soon" if ctx[1] == "alert" and unicode else
+                                             " / compact soon" if ctx[1] == "alert" else "")
+                status += (" · " if unicode else " / ") + note
             texts = lane_text(m, calls, head - 3) if head > 3 else []
             content = [status] + [line for line, _ in texts] if head > 3 else [status + " · " + task_of(m)]
             block = card(title + "MAIN / " + name_of(m), content, lane_width, head, unicode)
@@ -1344,6 +1364,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 if row in dim_rows:
                     line = paint(line[0], style) + paint(line[1:-1], "dim") + paint(line[-1], style)
                     cells.append(line)
+                elif row == 1 and ctx and note in line:
+                    # Only the context reading takes its band's tone; the rest of the status line keeps the card's.
+                    at = line.index(note)
+                    cells.append(paint(line[:at], style) + paint(note, ctx[1] or style) + paint(line[at + len(note):], style))
                 else:
                     cells.append(chosen(line, style) if m == primary and row == 0 else paint(line, style))
                 hits.append({"y": top + lift + row, "x1": x0 + 1, "x2": x0 + lane_width,

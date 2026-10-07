@@ -3506,6 +3506,17 @@ control_nav = {}
 overview = render(flow, "codex", 110, 30, view="graph", navigation=control_nav)
 assert "MAIN / Opus" in overview and "ONLY OTHER OWNER" in overview and "[x All]" in overview, overview
 assert control_nav["auto_pins"] == ["flow-main", "flow-other"]
+# The context left rides on the shown main's card and tab in three bands; only the proven main carries it.
+claude_main = next(m for m in flow["room"]["participants"] if m.get("role") == "main" and m.get("provider") == "claude")["participant"]
+for left, words in ((42, "ctx 42%"), (22, "ctx 22%"), (12, "ctx 12% · compact soon")):
+    metered = dict(flow, provider_status={"claude": {"participant": claude_main, "context_left": left}})
+    picture = render(metered, "codex", 110, 30, view="graph", navigation={})
+    # The usage row already says "ctx N%"; the card is the second place.
+    assert picture.count(words) == 1 + (left > 15) and "c%s%%" % left in picture, (left, picture)
+    plain = render(metered, "codex", 110, 30, view="graph", unicode=False, navigation={})
+    assert plain.count(words.replace("·", "/")) == 1 + (left > 15) and not any(g in plain for g in "─│·"), (left, plain)
+assert "c42%" not in render(dict(flow, provider_status={"claude": {"participant": "someone-else", "context_left": 42}}),
+                            "codex", 110, 30, view="graph", navigation={})
 panel.navigate(Path("."), ("pin", "*"), {}, control_nav, 110)
 assert control_nav["pinned"] == []
 focused = render(flow, "codex", 110, 30, view="graph", navigation=control_nav)

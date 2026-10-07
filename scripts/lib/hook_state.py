@@ -1122,6 +1122,7 @@ def context_pressure_hint(payload: dict[str, Any]) -> str | None:
             },
         )
 
+    tower = is_panel_main()
     if left > rearm:
         # Compaction or a fresh reading recovered the window; re-arm.
         if stage or state.get("captured"):
@@ -1136,6 +1137,9 @@ def context_pressure_hint(payload: dict[str, Any]) -> str | None:
             append_event(repo, payload, action="context_capture", status="early",
                          percent_left=round(left, 1), source=agent,
                          capture="started" if started else "skipped")
+            if tower:
+                return ("[oms] ~%d%% context left — a handoff digest was saved; plan to compact at the next"
+                        " step boundary." % int(left))
         # Between bands, or a band this session already announced; only an
         # escalation (warn -> urgent) speaks again before re-arming.
         return None
@@ -1150,6 +1154,10 @@ def context_pressure_hint(payload: dict[str, Any]) -> str | None:
         source=agent,
         capture="started" if captured else "skipped",
     )
+    if tower:
+        return ("[oms] context %s (~%d%% left) — finish the current step, set your status, then compact in place"
+                " (Claude: /compact; Codex: /compact) — the panel keeps your room and task."
+                % ("low" if new_stage == "warn" else "low, compact now", int(left)))
     if new_stage == "urgent":
         return (
             "[oms] context nearly exhausted (~%d%% left) — wrap up now: finish or"
@@ -1164,6 +1172,10 @@ def context_pressure_hint(payload: dict[str, Any]) -> str | None:
     )
 
 
+def is_panel_main() -> bool:
+    return bool(os.environ.get("OMS_PANEL_MAIN_ATTEMPT")) and os.environ.get("OMS_PANEL_SESSION", "").startswith("oms-")
+
+
 def panel_main_hint(payload: dict[str, Any]) -> str:
     """Restate a panel main's control-tower role on every prompt.
 
@@ -1172,7 +1184,7 @@ def panel_main_hint(payload: dict[str, Any]) -> str:
     line reaches every live panel main from the current checkout's hook."""
     if (payload.get("hook_event_name") or payload.get("hookEventName")) != "UserPromptSubmit":
         return ""
-    if not os.environ.get("OMS_PANEL_MAIN_ATTEMPT") or not os.environ.get("OMS_PANEL_SESSION", "").startswith("oms-"):
+    if not is_panel_main():
         return ""
     room = os.environ.get("OMS_ROOM_ID", "")
     return panel_main_base(payload, room) + panel_plan_hint(payload) + panel_status_hint(payload, room)
@@ -1183,18 +1195,22 @@ def plain_line(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+def plan_tasks(repo: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    try:
+        data = json.loads((repo / ".oms" / "plan" / "tasks.json").read_text(encoding="utf-8"))
+        rows = data.get("tasks") or {}
+        return data, [t for t in (rows.values() if isinstance(rows, dict) else rows) if isinstance(t, dict) and t.get("id")]
+    except (OSError, ValueError, AttributeError):
+        return {}, []
+
+
 def panel_plan_hint(payload: dict[str, Any]) -> str:
     """The shared plan as one bounded sentence: progress, the task this main holds, the next ready one."""
     repo = Path(os.environ["OMS_ROOM_REPO"]) if os.environ.get("OMS_ROOM_REPO") else hook_repo(payload)
     if repo is None:
         return ""
-    try:
-        data = json.loads((repo / ".oms" / "plan" / "tasks.json").read_text(encoding="utf-8"))
-        rows = data.get("tasks") or {}
-        tasks = [t for t in (rows.values() if isinstance(rows, dict) else rows) if isinstance(t, dict) and t.get("id")]
-        goal = plain_line(data.get("goal"), 80)
-    except (OSError, ValueError, AttributeError):
-        return ""
+    data, tasks = plan_tasks(repo)
+    goal = plain_line(data.get("goal"), 80)
     if not tasks:
         return ""
     stamps = []
@@ -1282,6 +1298,11 @@ def cmd_route(args: argparse.Namespace) -> int:
     with contextlib.suppress(Exception):
         tower = panel_main_hint(payload)
         if tower:
+            pending = resume_pending_path(payload)
+            if pending and pending.is_file():
+                source = load_state(pending).get("source") or "compact"
+                pending.unlink()
+                print(panel_resume_line(dict(payload, source=source)))
             print(tower)
     collaboration = live_thread_hint(payload)
     if collaboration:
@@ -1985,6 +2006,45 @@ def rebind_lineage_session(payload: dict[str, Any]) -> bool:
     return True
 
 
+def panel_resume_line(payload: dict[str, Any]) -> str:
+    """Who a compacted or cleared panel main is and what it holds: ids, counts and names from repository state."""
+    import room
+    from panel_view import MODEL_NAMES
+
+    me, room_id = os.environ.get("OMS_ROOM_PARTICIPANT", ""), os.environ.get("OMS_ROOM_ID", "")
+    repo = Path(os.environ["OMS_ROOM_REPO"]) if os.environ.get("OMS_ROOM_REPO") else hook_repo(payload)
+    if not (me and room_id and repo):
+        return ""
+    state = room.status(repo.resolve(), room_id)
+    member = next((p for p in state.get("participants") or [] if p.get("participant") == me), {})
+    model = MODEL_NAMES.get(member.get("model"), member.get("model")) or payload_agent(payload)
+    number = ""
+    if os.environ.get("TMUX_PANE"):
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            out = subprocess.run(["tmux", "display-message", "-p", "-t", os.environ["TMUX_PANE"], "#{window_index}"],
+                                 capture_output=True, text=True, check=False, timeout=2,
+                                 stdin=subprocess.DEVNULL).stdout.replace("\r", "").strip()
+            number = "#%s " % out if out.isdigit() else ""
+    mine = next((t for t in plan_tasks(repo)[1] if t.get("claimed_by_participant") == me
+                 and t.get("state") in ("claimed", "running", "review", "landing")), None)
+    done = state.get("call_results") or {}
+    workers = sum(1 for p in state.get("participants") or []
+                  if p.get("role") == "worker" and p.get("parent") == me and p.get("participant") not in done)
+    questions = sum(1 for q in state.get("open_questions") or [] if q.get("recipient") == me)
+    declared = ((state.get("statuses") or {}).get(me) or {}).get("text")
+    return ("[oms panel] resumed after %s: you are %s%s in room %s; your plan task: %s; %d open question%s to you;"
+            " %d worker%s running for you; status: %s." % (
+                payload.get("source"), number, plain_line(model, 40), plain_line(room_id, 60),
+                "%s (%s)" % (plain_line(mine["id"], 40), plain_line(mine.get("state"), 12)) if mine else "none",
+                questions, "" if questions == 1 else "s", workers, "" if workers == 1 else "s",
+                plain_line(declared, 80) if declared else "not set — set it"))
+
+
+def resume_pending_path(payload: dict[str, Any]) -> Path | None:
+    repo = hook_repo(payload)
+    return repo / ".oms" / "hooks" / "sessions" / f"{session_hash(payload)}.resume.json" if repo else None
+
+
 def cmd_relay_hint(_: argparse.Namespace) -> int:
     payload, _ = load_payload()
     # SessionStart's only hook_state call; a failed rebind leaves the old binding and its withheld-mail notice.
@@ -2000,6 +2060,16 @@ def cmd_relay_hint(_: argparse.Namespace) -> int:
         hint = None
     if hint:
         print(hint)
+    if (is_panel_main() and (payload.get("hook_event_name") or payload.get("hookEventName")) == "SessionStart"
+            and payload.get("source") in ("compact", "clear")):
+        with contextlib.suppress(Exception):
+            line = panel_resume_line(payload)
+            if line:
+                print(line)
+                # Codex may drop SessionStart output; the first prompt repeats the line until it has been shown there.
+                path = resume_pending_path(payload)
+                if path and payload_agent(payload) == "codex":
+                    write_json_atomic(path, {"schema": 1, "updated_at": utc_now(), "source": payload.get("source")})
     return 0
 
 

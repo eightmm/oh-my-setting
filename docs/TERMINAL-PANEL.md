@@ -696,6 +696,20 @@ The `t Auto task` menu follows the same rule. Participant labels are bounded to
 arguments, starts no process and writes no state. Its arguments can contain the
 supplied task, so keep the launch plan private when that task is private.
 
+## Context limits for mains
+
+A main's context left is read from the statusline cache (Claude) or the
+transcript (Codex). At 30% left a handoff digest is saved silently
+(`OMS_CTX_CAPTURE_PCT`), at 15% a warning is shown once (`OMS_CTX_WARN_PCT`)
+and at 8% once more (`OMS_CTX_URGENT_PCT`); the latch re-arms above 30%
+(`OMS_CTX_REARM_PCT`). A panel main is bound to its window, room participant
+and plan claim, so it is advised to compact in place (`/compact`) instead of
+migrating to a fresh session; nothing is compacted for it. After a compact or
+clear it gets one `[oms panel] resumed after ...` line with its window, model,
+room, plan task, open questions, running workers and declared status (ids,
+counts and names only). The board shows `ctx N%` on each main's card and tab
+when known, with `compact soon` at 15% or less.
+
 ## Layout and activity
 
 `--host auto|inline|tmux|herdr` selects the terminal host independently of
