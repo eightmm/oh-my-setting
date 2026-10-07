@@ -61,7 +61,7 @@ def nodes(report):
                            task_id=attempt.get("task_id"), location=meta.get("location"),
                            effort=effort, access=meta.get("access"),
                            started_by=mapping(report.get("main_starters")).get(member.get("participant")),
-                           title=meta.get("label") or member.get("label")))
+                           title=member.get("label_override") or meta.get("label") or member.get("label")))
     # A continued worker shares its task with the earlier rounds of the same main.
     rounds = {}
     for member in sorted(output, key=lambda m: m.get("seq", 0)):
@@ -236,12 +236,12 @@ def settler(report):
                      if mapping(r).get("read") is True}
     finalized = mapping(report.get("finalized"))
     attempts_seen = mapping(report.get("attempts"))
-    # Only a complete active list proves a missing call has ended; the projection keeps at most 8 active rows.
+    # Only complete active evidence permits hiding an old unknown; it does not prove completion.
     complete = attempts_seen.get("available") is True and valid_count(attempts_seen.get("active")) is not None and (
         valid_count(attempts_seen.get("active")) <= len(listing(attempts_seen.get("active_recent"))))
 
     def aged(call):
-        # A call missing from a complete active list for ten minutes has ended.
+        # The existing ten-minute display cutoff never changes the unknown lifecycle state.
         return complete and (joined_seconds(call) or 0) > 600
 
     def settled(call):
@@ -251,6 +251,21 @@ def settler(report):
                                              and ("result-" + str(call.get("participant")) in read_results
                                                   or finalized.get(call.get("task_id")) in {"completed", "accepted"}))
     return settled, aged
+
+
+def call_classifier(report):
+    """Display buckets only; admission and lifecycle evidence retain their own authority."""
+    settled, _ = settler(report)
+    awaiting = set(listing(report.get("awaiting_admission")))
+
+    def classify(call):
+        if call["state"] == "review" or (call["state"] == "done" and call.get("participant") in awaiting):
+            return "review"
+        return "past" if settled(call) else "live"
+    return classify
+
+
+CALL_GROUPS = (("review", "Needs review"), ("past", "Past work"))
 
 
 def call_order(call):
@@ -274,7 +289,7 @@ def clock_stamp(ts, today=None):
 def call_span(call, arrow="->"):
     """"14:02 -> 14:31 finished" / "14:05 -> running"; the times come from the room, the end state from the call."""
     state = call["state"]
-    words = "no record" if state == "presence unknown" else said(state)
+    words = said(state)
     if state == "failed" and call.get("exit") is not None:
         words = "timed out · c continue" if call["exit"] == 124 and call.get("role") == "worker" \
             else "failed (exit %s)" % call["exit"]
@@ -713,13 +728,25 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         # Judges precede workers so keyboard order follows the drawing.
         return sorted(calls, key=lambda m: (m.get("role") == "worker",) + call_order(m))
 
-    teams = {m["participant"]: team(m) for m in mains}
+    classify = call_classifier(report)
+    teams = {m["participant"]: team(m, every=True) for m in mains}
+    if attention_only:
+        teams = {key: [c for c in calls if c["state"] in ATTENTION_STATES or classify(c) == "review"]
+                 for key, calls in teams.items()}
+    grouped = {key: {kind: [c for c in calls if classify(c) == kind] for kind, _ in CALL_GROUPS}
+               for key, calls in teams.items()}
+    if navigation.get("group_tree"):
+        if any(grouped.get(owner, {}).get(kind) for kind, owner in navigation.get("expanded_groups", set())):
+            from panel_tree import render_tree
+            return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
+                               main_attempt, navigation, managed=managed)
+        navigation.pop("group_tree", None)
     linked_children = team(primary, every=True) if primary else []
     # Finished calls leave the board (results stay in the main's detail and the tree); attention stays.
     settled, _ = settler(report)
-    finished = {key: sum(settled(c) for c in calls) for key, calls in teams.items()}
+    finished = {key: len(groups["past"]) for key, groups in grouped.items()}
     everyone = teams
-    teams = {key: [c for c in calls if not settled(c)] for key, calls in teams.items()}
+    teams = {key: [c for c in calls if classify(c) == "live"] for key, calls in teams.items()}
     children = teams[primary["participant"]] if primary else []
     judges = [m for m in children if m.get("role") in {"advisor", "reviewer", "council"}]
     workers = [m for m in children if m.get("role") == "worker"]
@@ -846,6 +873,15 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 or "no status yet"
         return "no task title yet"
 
+    def task_lines(m, span, limit):
+        title = task_of(m)
+        now = declared_status(room, m["participant"], span) if m.get("role") == "main" else []
+        if now and clean(m.get("title")) not in (None, "", "Native task not recorded", "Task unrecorded"):
+            if limit == 1:
+                return [clipped(title, max(1, span // 2 - 2)) + " / " + clipped(now[0], max(1, span // 2 - 1))]
+            return wrapped(title, span, 1) + now[:limit - 1]
+        return wrapped(title, span, limit)
+
     # Mail to finished calls is never read again; unread mail to mains and running calls is counted.
     unread_total = live_unread(report, members, settled)
     heading_text = "OMS · " + (clean(room.get("title") or room.get("id")) or "Work room") + " · %s main%s · %s" % (
@@ -894,7 +930,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             calls = teams[m["participant"]]
             title = clean(m.get("title"))
             nickname = m["participant"][-4:] if not title or title == "Native task not recorded" else title
-            alerts = sum(c["state"] in ATTENTION_STATES for c in calls)
+            alerts = sum(c["state"] in ATTENTION_STATES for c in calls) + len(grouped[m["participant"]]["review"])
             # Unread mail addressed to this main, including messages from other mains.
             unread = sum(valid_count(mapping(p).get("pending")) or 0 for p in listing(room.get("pairs"))
                          if mapping(p).get("recipient") == m["participant"])
@@ -926,12 +962,27 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             x += display_width(body) + len(pin) + 1
         rest = len(mains) - first - per_page
         if rest > 0:
-            hidden = sum(c["state"] in ATTENTION_STATES for m in mains[first + per_page:] for c in teams[m["participant"]])
+            hidden = sum(sum(c["state"] in ATTENTION_STATES for c in teams[m["participant"]]) +
+                         len(grouped[m["participant"]]["review"]) for m in mains[first + per_page:])
             marker = "+%s %s" % (rest, "▸" if unicode else ">") + (" !%s" % hidden if hidden else "")
             hits.append({"y": y, "x1": x + 1, "x2": min(width, x + len(marker)), "select": True,
                          "action": ("chat", mains[first + per_page]["participant"])})
             value += paint(marker, "alert" if hidden else "dim")
         lines.append(value)
+    group_actions = []
+    if primary:
+        for kind, title in CALL_GROUPS:
+            calls = grouped[primary["participant"]][kind]
+            if not calls:
+                continue
+            target = ("group", (kind, primary["participant"]))
+            group_actions.append(target)
+            unknown = sum(c["state"] == "presence unknown" for c in calls)
+            label = "%s %s (%s) / %s" % ("▸" if unicode else ">", title, len(calls), name_of(primary))
+            if unknown:
+                label += " / %s earlier unknown" % unknown
+            hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": target})
+            add(label, "review" if kind == "review" else "dim")
     pair_at = len(lines)
     mains_by_id = {m["participant"] for m in mains}
     latest = next((m for m in map(mapping, reversed(listing(room.get("messages")))) if m.get("sender") in mains_by_id
@@ -977,7 +1028,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
     def minimum_rows(group):
         span = layout(width, len(group), group == [primary])[0]
-        return 4 + max(len(wrapped(task_of(m), span - 4, 2)) for m in group) if compact(group, span) else 3
+        return 4 + max(len(task_lines(m, span - 4, 2)) for m in group) if compact(group, span) else 3
 
     minimum_total = sum(minimum_rows(g) for g in shown_groups)
     embedded = {}
@@ -1040,7 +1091,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     def needed(group, centered=False):
         span = layout(width, len(group), centered)[0]
         reflow = int(compact(group, span))
-        return max(3 + extras(m) + reflow + len(wrapped(task_of(m), span - 4, 2)) for m in group)
+        return max(3 + extras(m) + reflow + len(task_lines(m, span - 4, 2)) for m in group)
 
     # Cards never keep blank rows; rows they do not need go to the detail area.
     def drawn_rows(card_height):
@@ -1078,7 +1129,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             if m.get("role") != "main" and primary:
                 status += " · for " + clean(name_of(primary))
             task = task_of(m)
-            content = [status + " / " + task] if rows_h == 3 else [status] + wrapped(task, span - 4, rows_h - 3)
+            content = [status + " / " + task] if rows_h == 3 else [status] + task_lines(m, span - 4, rows_h - 3)
             if rows_h >= 4:
                 where = " / ".join(v for v in ("@ " + location_label(m["location"]) if m.get("location") else "",
                                                 m.get("effort") or "") if v)
@@ -1088,10 +1139,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                         sum(c.get("role") == "worker" for c in calls), sum(c.get("role") != "worker" for c in calls),
                         " / !%s attention" % sum(c["state"] in ATTENTION_STATES for c in calls)
                         if any(c["state"] in ATTENTION_STATES for c in calls) else "")
-                task_rows = len(wrapped(task, span - 4, 2))
+                task_rows = len(task_lines(m, span - 4, 2))
                 tail = [where] if where and rows_h >= 4 + task_rows + int(reflow) else []
-                content = ([full_title(m)] if reflow else []) + [status] + wrapped(
-                    task, span - 4, max(1, min(2, rows_h - 3 - len(tail) - int(reflow)))) + tail
+                content = ([full_title(m)] if reflow else []) + [status] + task_lines(
+                    m, span - 4, max(1, min(2, rows_h - 3 - len(tail) - int(reflow)))) + tail
             block = card(title, content, span, rows_h, unicode)
             column = span // 2
             if top:
@@ -1316,7 +1367,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             if hidden:
                 notes.append("%s more workers (scroll)" % hidden)
             if finished.get(m["participant"]):
-                notes.append("%s %s done" % ("✓" if unicode else "+", finished[m["participant"]]))
+                notes.append("Past work (%s)" % finished[m["participant"]])
             if not workers_here and capacity:
                 cells.extend([paint(padded("  └ no workers" if unicode else "  ` no workers", lane_width), "dim")]
                              + [" " * lane_width] * 2)
@@ -1473,7 +1524,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     visible = [m for lane in lanes for m in teams[lane["participant"]]] if lanes else shown_judges + shown_workers
     items = [("chat", m["participant"]) for m in mains] + [action(m) for m in pair_members]
     items += [action(m) for m in visible]
-    items += [action(m) for m in children] + [action(m) for calls in everyone.values() for m in calls]
+    items += [action(m) for calls in everyone.values() for m in calls if classify(m) == "live"] + group_actions
+    items += [hit["action"] for hit in hits if hit["action"][0] in {"result", "debate"}]
     navigation.update(hits=hits, items=list(dict.fromkeys(items)), offset=offset, viewport=3,
                       body_rows=len(children), positions={item: i for i, item in enumerate(items)},
                       room_id=room.get("id"), graph_selected=selected, surface="graph",
@@ -1528,12 +1580,12 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph):
                 lines.append("")
             lines[-1] += ("  " if lines[-1] else "") + key
         return lines[:4]
-    contextual = ["f Full result" if navigation.get("full_result") else "",
+    contextual = (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + ["f Full result" if navigation.get("full_result") else "",
                   "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
-                  "Enter Chat" if kind == "chat" else "Enter Show",
+                  "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "Enter Show",
                   "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
                   "Tab Next tab",
-                  ("Space Pin" if graph else "Space Fold") if kind == "chat" and (mains > 1 or not graph) else ""]
+                  ("Space Pin" if graph else "Space Fold") if kind == "chat" and (mains > 1 or not graph) else "Space Fold" if kind == "group" else ""]
     # The panel-wide F-keys stay fixed at the end of every board; board keys fill what is left.
     reserved = ["F6/F7 Main", toggle, "F5 Control", "F12 Keys"] if managed else ["q Quit", "? Keys"]
     packed = []

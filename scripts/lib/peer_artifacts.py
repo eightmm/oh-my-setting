@@ -190,11 +190,12 @@ def bounded_answer(answer: str, limit: int) -> str:
 def stage_context(source: Path, root: Path, relative: str) -> None:
     """Copy only the run's bounded, sanitized evidence, never parent state."""
     rel = Path(relative)
-    if not re.fullmatch(r"\.oms/artifacts/council-context\.[A-Za-z0-9]+", relative):
+    if not re.fullmatch(r"\.oms/(?:delegations|artifacts)/council-context\.[A-Za-z0-9]+", relative):
         raise ValueError("invalid council context destination")
     if any(path.is_symlink() for path in (source, *source.parents)):
         raise ValueError("symlinked council context")
-    files = list(source.iterdir())
+    # The ownership marker binds the source to its run; it is not evidence.
+    files = [path for path in source.iterdir() if path.name != ".oh-my-setting-council"]
     if not 1 <= len(files) <= 16:
         raise ValueError("invalid council context size")
     for path in files:

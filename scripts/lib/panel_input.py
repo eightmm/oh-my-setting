@@ -148,12 +148,25 @@ def choose(event, navigation):
     kind = event[0]
     items = navigation.get("items", [])
     selected = navigation.get("selected")
-    if kind == "click":
+    if navigation.get("detail") and kind in ("up", "down", "home", "end"):
+        last = max(0, navigation.get("body_rows", 0) - max(1, navigation.get("viewport", 0)))
+        offset = navigation.get("offset", 0)
+        navigation["offset"] = (0 if kind == "home" else last if kind == "end" else
+                                min(last, max(0, offset + (1 if kind == "down" else -1))))
+    elif navigation.get("surface") == "inbox" and not navigation.get("detail") and kind in ("scroll", "pageup", "pagedown"):
+        if items:
+            index = items.index(selected) if selected in items else 0
+            step = event[1] if kind == "scroll" else max(1, navigation.get("viewport", 0)) * (
+                -1 if kind == "pageup" else 1)
+            navigation["selected"] = items[min(len(items) - 1, max(0, index + step))]
+    elif kind == "click":
         hit = next((h for h in navigation.get("hits", [])
                     if h["y"] == event[2] and h["x1"] <= event[1] <= h["x2"]), None)
         if hit:
             target = hit["action"]
-            if target[0] in ("pin", "tab", "message", "seat"):
+            if target[0] in ("pin", "tab", "message", "seat", "group"):
+                if target[0] == "group":
+                    navigation["selected"] = target
                 return target
             navigation["selected"] = target
             if hit.get("fold") and event[1] <= 2:
@@ -174,7 +187,7 @@ def choose(event, navigation):
         index = items.index(selected) if selected in items else (-1 if kind == "down" else 0)
         index = 0 if kind == "home" else len(items) - 1 if kind == "end" else (index + (1 if kind == "down" else -1)) % len(items)
         navigation["selected"] = items[index]
-        if navigation.get("surface") == "graph":
+        if navigation.get("surface") == "graph" and items[index][0] != "group":
             navigation["preview"] = {"target": items[index]}
         visible = any(h["action"] == items[index] for h in navigation.get("hits", []))
         if not visible:
@@ -203,6 +216,8 @@ def choose(event, navigation):
                 # The detail follows an explicit main change and starts at its top.
                 navigation["preview"] = {"target": navigation["selected"]}
                 navigation.setdefault("band_offsets", {})["detail"] = 0
+    elif kind == " " and selected in items and selected[0] == "group":
+        return selected
     elif kind == " " and selected in items and selected[0] == "chat":
         return ("pin" if navigation.get("surface") == "graph" else "fold", selected[1])
     elif kind == "scroll" and len(event) > 3 and not navigation.get("detail") and any(

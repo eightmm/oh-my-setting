@@ -3864,13 +3864,19 @@ case "\$prompt" in
   *"This is debate round 2."*) round=2 ;;
   *"This is debate round 3."*) round=3 ;;
 esac
-if [ "$provider" = antigravity ] && [ "\${OMS_TEST_READ_CONTEXT:-0}" = 1 ]; then
-  context="\$(find .oms/artifacts -maxdepth 1 -type d -name 'council-context.*' | head -1)"
+if [ "\${OMS_TEST_READ_CONTEXT:-0}" = 1 ]; then
+  # Read exactly what the prompt references, from this seat's own cwd.
+  context="\$(printf '%s\n' "\$prompt" | grep -o '\.oms/delegations/council-context\.[A-Za-z0-9]*' | head -1)"
   [ -n "\$context" ] && [ -r "\$context/request.md" ] && [ -r "\$context/source.txt" ] || exit 51
-  [ ! -e .oms/threads/private.txt ] || exit 52
+  case "\$prompt" in *"\${OMS_TEST_FORBID:-/nonexistent-forbid}"*) exit 55 ;; esac
   if [ "\$round" = 2 ]; then
     grep -q 'CODEX ROUND1 ANSWER' "\$context/answer-0.md" || exit 53
+    grep -q 'ANTIGRAVITY ROUND1 ANSWER' "\$context/answer-2.md" || exit 53
   fi
+  printf '%s READ CONTEXT ROUND%s\n' "$label" "\$round"
+fi
+if [ "$provider" = antigravity ] && [ "\${OMS_TEST_READ_CONTEXT:-0}" = 1 ]; then
+  [ ! -e .oms/threads/private.txt ] || exit 52
   printf 'SHARED EVIDENCE READABLE\n'
 fi
 if [ "$fail_round1" = "1" ] && [ "\$round" = "1" ]; then
@@ -3939,7 +3945,11 @@ test_peer_ask_debate_tracks_dropout() {
   write_fake_debate_provider "$bin_dir" claude 1
   write_fake_debate_provider "$bin_dir" antigravity 0
 
-  OMS_TEST_READ_CONTEXT=1 HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+  # A HOME-based, spaced TMPDIR hosts the isolated seat's tree; the prompt
+  # must never carry it.
+  mkdir -p "$home_dir/tmp dir"
+  OMS_TEST_READ_CONTEXT=1 OMS_TEST_FORBID="$home_dir/tmp dir" TMPDIR="$home_dir/tmp dir" \
+    HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-ask.sh" \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
@@ -3955,9 +3965,20 @@ test_peer_ask_debate_tracks_dropout() {
     fail 'isolated participant did not reach round two'
   fi
   assert_one_artifact_contains "$artifact_dir" 'antigravity-debate-dropout-coverage-*-r2.md' 'SHARED EVIDENCE READABLE'
-  if find "$project/.oms/artifacts" -maxdepth 1 -name 'council-context.*' | grep -q .; then
+  if find "$project/.oms" "$home_dir/tmp dir" -name 'council-context.*' | grep -q .; then
     fail 'temporary council evidence was not removed'
   fi
+  # Every seat, not only the isolated one, read the request and source in
+  # round one and the shared answers in round two.
+  find "$artifact_dir" -name 'codex-debate-dropout-coverage-*.md' ! -name '*-r2.md' -exec cat {} + |
+    grep -Fq 'CODEX READ CONTEXT ROUND1' || fail 'codex did not read the shared context in round one'
+  find "$artifact_dir" -name 'claude-debate-dropout-coverage-*.md' ! -name '*-r2.md' -exec cat {} + |
+    grep -Fq 'CLAUDE READ CONTEXT ROUND1' || fail 'claude did not read the shared context in round one'
+  find "$artifact_dir" -name 'antigravity-debate-dropout-coverage-*.md' ! -name '*-r2.md' -exec cat {} + |
+    grep -Fq 'ANTIGRAVITY READ CONTEXT ROUND1' || fail 'antigravity did not read the shared context in round one'
+  assert_one_artifact_contains "$artifact_dir" 'codex-debate-dropout-coverage-*-r2.md' 'CODEX READ CONTEXT ROUND2'
+  assert_one_artifact_contains "$artifact_dir" 'claude-debate-dropout-coverage-*-r2.md' 'CLAUDE READ CONTEXT ROUND2'
+  assert_one_artifact_contains "$artifact_dir" 'antigravity-debate-dropout-coverage-*-r2.md' 'ANTIGRAVITY READ CONTEXT ROUND2'
   assert_one_artifact_contains "$artifact_dir" 'codex-debate-dropout-coverage-*-r2.md' 'CODEX ROUND2 ANSWER'
   assert_one_artifact_contains "$artifact_dir" 'antigravity-debate-dropout-coverage-*-r2.md' 'ANTIGRAVITY ROUND2 ANSWER'
   assert_one_artifact_contains "$artifact_dir" 'claude-debate-dropout-coverage-*-r2.md' 'CLAUDE ROUND2 FAILURE'

@@ -2664,7 +2664,7 @@ assert foreign.returncode != 0 and "no worker" in foreign.stderr, foreign
 # A status message is a declaration: no mail, no unread, latest per sender kept past the 12-message window;
 # unread counts ignore participants who left.
 declared = room.create(project, title="Declared status")
-room.join(project, declared, "decl-main", "claude", model="claude-opus-5-5")
+room.join(project, declared, "decl-main", "claude", model="claude-opus-5-5", owns=["value.txt"])
 room.join(project, declared, "decl-peer", "codex", role="worker", parent="decl-main")
 room.join(project, declared, "decl-other", "codex", role="worker", parent="decl-main")
 room.send(project, declared, "decl-main", "all", "Parsing the config", kind="status")
@@ -2693,6 +2693,159 @@ declared_state = room.status(project, declared)
 assert declared_state["pending_count"] == 0 and declared_state["statuses"]["decl-main"]["text"] == "Parsing the config", declared_state
 assert all(not m["targets"] for m in declared_state["messages"] if m["message_kind"] == "status") and declared_state["statuses"]["decl-main"]["seq"], declared_state
 assert not any(t.get("room_event", {}).get("message_kind") == "status" for t in room.updates(project, declared, "decl-peer")["turns"])
+room.send(project, declared, "decl-peer", "decl-main", "unread before title change", message_id="before-title")
+# Updating a live work title does not rejoin, consume mail or change native identity.
+room.bind(project, declared, "decl-main", "declared-title-native")
+before_description = room.status(project, declared)
+main_before = deepcopy(room.participant(before_description, "decl-main"))
+assert "label_override" not in main_before  # New code still reads logs written before describe existed.
+mail_before = room.records(project, declared)
+cursor_before = room.updates(project, declared, "decl-main", budget=65536, limit=200)["cursor"]
+unbound_room_env = dict(environment, OMS_ROOM_ID="", OMS_ROOM_PARTICIPANT="")
+with patch.dict(os.environ, unbound_room_env, clear=True):
+    room.describe(project, declared, "decl-main", "Improve result navigation")
+    after_description = room.status(project, declared)
+    main_after = room.participant(after_description, "decl-main")
+    assert {key: value for key, value in main_after.items() if key not in {"label", "label_override"}} == {
+        key: value for key, value in main_before.items() if key != "label"}
+    assert main_after["label"] == main_after["label_override"] == "Improve result navigation"
+    assert main_after["seq"] == main_before["seq"] and main_after["joined_at"] == main_before["joined_at"]
+    assert main_after["initial_seq"] == main_before["initial_seq"]
+    assert after_description["pending_count"] == before_description["pending_count"] == 1
+    assert after_description["statuses"] == before_description["statuses"]
+    assert after_description["messages"] == before_description["messages"]
+    assert after_description["statuses"]["decl-main"]["text"] == "Parsing the config"
+    assert [room.visible(r, "decl-main", main_before["seq"]) for r in mail_before] == [
+        room.visible(r, "decl-main", main_after["seq"]) for r in mail_before]
+    delta_after_description = room.updates(project, declared, "decl-main", cursor_before,
+                                           budget=65536, limit=200)
+    assert not delta_after_description["turns"] and delta_after_description["cursor"] != cursor_before
+    written_description = room.records(project, declared)[-1]["room_event"]
+    assert written_description == {"kind": "describe", "participant": "decl-main",
+                                   "label": "Improve result navigation"}
+    repeated_rows = len(room.records(project, declared))
+    room.describe(project, declared, "decl-main", "Improve result navigation")
+    assert len(room.records(project, declared)) == repeated_rows
+    title_args = ["bash", str(panel.ENTRY), "room", "describe", "--repo", str(project), "--id", declared,
+                  "--participant", "decl-main", "--label", "Review result navigation"]
+    bound_main_env = dict(environment, OMS_ROOM_ID=declared, OMS_ROOM_PARTICIPANT="decl-main")
+    call(title_args, bound_main_env)
+    assert room.participant(room.status(project, declared), "decl-main")["label"] == "Review result navigation"
+    cli_rows = len(room.records(project, declared))
+    call(title_args, bound_main_env)
+    assert len(room.records(project, declared)) == cli_rows
+    for extra in (["--owns", "scripts/lib"], ["--native-session", "native-id"],
+                  ["--model", "gpt-6-astra"], ["--parent", "other-main"]):
+        rejected = subprocess.run(title_args + extra, env=unbound_room_env, capture_output=True, text=True)
+        assert rejected.returncode != 0, (extra, rejected.stdout, rejected.stderr)
+    for wrong_binding in (dict(environment, OMS_ROOM_ID=declared, OMS_ROOM_PARTICIPANT="decl-peer"),
+                          dict(environment, OMS_ROOM_ID="another-room", OMS_ROOM_PARTICIPANT="decl-main"),
+                          dict(environment, OMS_ROOM_ID=declared),
+                          dict(environment, OMS_ROOM_PARTICIPANT="decl-main")):
+        rejected = subprocess.run(title_args, env=wrong_binding, capture_output=True, text=True)
+        assert rejected.returncode != 0, (wrong_binding, rejected.stdout, rejected.stderr)
+    rows_for_description = room.records(project, declared)
+    description = {"kind": "describe", "participant": "decl-main", "label": "New title"}
+    sensitive_label = "pass" + "word=fixture-value"
+    for altered in (dict(description, label=""), dict(description, label="x" * 121),
+                    dict(description, label="bad\nlabel"), dict(description, label=None),
+                    dict(description, consumer="0" * 32), dict(description, owns=[]),
+                    dict(description, model="gpt-6-astra"), dict(description, parent="other-main"),
+                    dict(description, initial_seq="1"), dict(description, label=sensitive_label),
+                    dict(description, participant="decl-peer"), dict(description, participant="missing")):
+        try:
+            room.validate_event(rows_for_description, altered, "Work description updated")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid description accepted: %r" % altered)
+    for malformed in (dict(description, label=None), dict(description, owns=[]),
+                       dict(description, label="x" * 121),
+                       {"kind": "describe", "participant": "decl-main"}):
+        try:
+            room.project(rows_for_description + [{"seq": rows_for_description[-1]["seq"] + 1, "room_event": malformed}])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("malformed persisted description accepted")
+    left_rows = deepcopy(rows_for_description)
+    left_rows.append({"seq": left_rows[-1]["seq"] + 1, "role": "note",
+                      "room_event": {"kind": "leave", "participant": "decl-main"}})
+    closed_rows = deepcopy(rows_for_description)
+    closed_rows.append({"seq": closed_rows[-1]["seq"] + 1, "role": "closed", "text": "closed"})
+    for invalid_rows in (left_rows, closed_rows):
+        try:
+            room.validate_event(invalid_rows, description, "Work description updated")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("describe accepted a left main or closed room")
+    for actor in ({"OMS_HARNESS_CHILD": "1", "OMS_HARNESS_DELEGATE_DEPTH": "0",
+                   "OMS_ROOM_PARTICIPANT": "decl-peer", "OMS_ROOM_ID": declared},
+                  {"OMS_HARNESS_DELEGATE_DEPTH": "1", "OMS_ROOM_PARTICIPANT": "decl-peer",
+                   "OMS_ROOM_ID": declared},
+                  {"OMS_ROOM_PARTICIPANT": "decl-peer", "OMS_ROOM_ID": declared},
+                  {"OMS_ROOM_PARTICIPANT": "decl-main", "OMS_ROOM_ID": "another-room"},
+                  {"OMS_ROOM_PARTICIPANT": "decl-main"}, {"OMS_ROOM_ID": declared}):
+        with patch.dict(os.environ, actor):
+            try:
+                room.validate_event(rows_for_description, description, "Work description updated")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("description widened actor authority")
+    with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1", "OMS_ROOM_PARTICIPANT": "decl-peer",
+                                 "OMS_ROOM_ID": declared}):
+        try:
+            room.validate_event(rows_for_description, dict(description, participant="decl-peer"),
+                                "Work description updated")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("worker described itself")
+    with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": "decl-main", "OMS_ROOM_ID": declared}):
+        assert room.validate_event(rows_for_description, description, "Work description updated") is True
+    before_bad_append = len(room.records(project, declared))
+    try:
+        room.append(project, declared, dict(description, consumer="0" * 32), "Work description updated")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("locked append accepted identity injection")
+    assert len(room.records(project, declared)) == before_bad_append
+    closed_room = room.create(project, "describe-closed", "Closed title fixture")
+    room.join(project, closed_room, "closed-main", "codex")
+    room.command(project, "close", "--id", closed_room)
+    try:
+        room.describe(project, closed_room, "closed-main", "Closed update")
+    except ValueError as error:
+        assert "closed" in str(error)
+    else:
+        raise AssertionError("describe appended to a closed room")
+    title_state = {"room": after_description, "attempts": {"recent": [{"attempt_id": "decl-attempt", "state": "working",
+        "panel": {"role": "main", "room_id": declared, "room_participant": "decl-main",
+                  "label": "Stale launch label", "model": "claude-opus-5-5"}}]}}
+    from room_view import nodes
+    shown_main = next(m for m in nodes(title_state) if m["participant"] == "decl-main")
+    assert shown_main["title"] == "Improve result navigation" and shown_main["consumer"] == main_before["consumer"]
+    assert shown_main["model"] == shown_main["model_at_launch"] == "claude-opus-5-5"
+    legacy_title = deepcopy(title_state)
+    legacy_member = room.participant(legacy_title["room"], "decl-main")
+    legacy_member.pop("label_override")
+    legacy_member["owns"] = ["scope-only-update"]
+    assert next(m for m in nodes(legacy_title) if m["participant"] == "decl-main")["title"] == "Stale launch label"
+    for title_view in ("tree", "graph"):
+        titled = render(title_state, "claude", 120, 40, view=title_view, navigation={"dismissed": True})
+        assert "Improve result navigation" in titled and "Now: Parsing the config" in titled and "Opus" in titled, titled
+        long_title = deepcopy(title_state)
+        room.participant(long_title["room"], "decl-main")["label_override"] = "Now: " + "work title " * 10
+        for columns, rows in ((120, 40), (76, 40), (28, 16)):
+            bounded = render(long_title, "claude", columns, rows, view=title_view, navigation={"dismissed": True})
+            assert all(display_width(line) <= columns for line in bounded.splitlines()) and len(bounded.splitlines()) <= rows
+            if columns >= 76:
+                assert "Now: Parsing the config" in bounded, bounded
+# Finish the title fixture's extra unread mail before the original leave/count checks.
+room.acknowledge(project, declared, "decl-main", ["before-title"])
 declared_results = room.status(project, declared)["call_results"]
 assert declared_results["decl-peer"]["exit"] == 3 and set(declared_results["decl-peer"]) == {"exit", "ts", "seq", "read"}, declared_results
 assert "decl-other" not in declared_results, declared_results
@@ -3400,8 +3553,27 @@ choose(("pagedown",), page_nav)
 assert page_nav["band_offsets"]["worker"] == 3, page_nav["band_offsets"]
 # A results screen opened from the graph scrolls itself, not the graph's stale bands.
 from panel_tree import render_detail
+page_nav["surface"] = "inbox"  # A reader opened from the inbox must still receive page and wheel events.
 page_nav["detail"] = {"title": "RECORDED RESULTS", "text": "\n".join("line %s" % n for n in range(300))}
 render_detail(flow, page_nav["detail"], 110, 30, page_nav)
+bands_before = dict(page_nav["band_offsets"])
+choose(("down",), page_nav)
+assert page_nav["offset"] == 1 and page_nav["band_offsets"] == bands_before
+choose(("end",), page_nav)
+assert "line 299" in render_detail(flow, page_nav["detail"], 110, 30, page_nav)
+choose(("down",), page_nav)
+assert "line 299" in render_detail(flow, page_nav["detail"], 110, 30, page_nav)
+choose(("home",), page_nav)
+choose(("up",), page_nav)
+assert page_nav["offset"] == 0
+page_nav["detail"]["text"] = "\n".join("long result line %s with retained information" % n for n in range(300))
+render_detail(flow, page_nav["detail"], 110, 30, page_nav)
+wide_rows = page_nav["body_rows"]
+render_detail(flow, page_nav["detail"], 24, 20, page_nav)
+assert page_nav["body_rows"] > wide_rows
+choose(("end",), page_nav)
+assert "information" in render_detail(flow, page_nav["detail"], 24, 20, page_nav)
+choose(("home",), page_nav)
 choose(("pagedown",), page_nav)
 choose(("scroll", 3, 5, 10), page_nav)
 assert page_nav["offset"] > 0 and page_nav["bands"] == [], page_nav["offset"]
@@ -3486,13 +3658,13 @@ marker = next(h for h in hidden_nav["hits"] if h["action"] == ("chat", "third-ma
 assert choose(("click", marker["x1"], marker["y"]), hidden_nav) is None and hidden_nav["selected"] == ("chat", "third-main")
 lane_picture = render(alarmed, "codex", 120, 30, view="graph", navigation={})
 assert "Worker Luna 6 ! failed" in lane_picture, lane_picture
-# Finished calls leave the board; their count remains as "N done", with results in the main's detail.
+# Finished calls leave the live drawing; their past-work count and inspection remain.
 finished_flow = deepcopy(flow)
 for attempt in finished_flow["attempts"]["active_recent"]:
     if attempt["attempt_id"] == "builder":
         attempt["state"] = "done"
 finished_picture = render(finished_flow, "codex", 120, 34, view="graph", navigation={"dismissed": True})
-assert "Worker Sonnet" not in finished_picture and "1 done" in finished_picture, finished_picture
+assert "Worker Sonnet" not in finished_picture and "Past work (1)" in finished_picture, finished_picture
 lines_of = finished_picture.splitlines()
 assert next(i for i, l in enumerate(lines_of) if "Advisor Astra" in l) < next(i for i, l in enumerate(lines_of) if "MAIN / Sol 6" in l) \
     < next(i for i, l in enumerate(lines_of) if "Worker Luna" in l), finished_picture
@@ -3772,7 +3944,7 @@ picture = render(counted, "codex", 157, 34, view="graph", main_attempt="flow-att
 first_line = picture.splitlines()[1]  # row 1 is the goal banner
 assert "1 unread for live participants" in first_line and re.search(r"\d\d:\d\d$", first_line), first_line
 assert "no status yet" in picture and "Latest sent" not in picture, picture
-assert "explorer" not in picture and "1 done" in picture and "last message 3m ago" in picture, picture
+assert "explorer" not in picture and "Past work (1)" in picture and "last message 3m ago" in picture, picture
 assert picture.splitlines()[0].startswith("◎ No shared goal · oms agent-plan init --goal TEXT"), picture
 declared_board = deepcopy(counted)
 declared_board["room"]["statuses"] = {"flow-other": {"text": "Fixing the parser", "ts": "2026-10-07T09:05:00Z", "seq": 3}}
@@ -3938,7 +4110,7 @@ assert "Model use, last 8 calls" in speech and "Sol 6 1.1m tokens ×1" in speech
 assert "unread for live participants" in speech, speech
 for stale in ("PROVIDER LIMITS", "(sel)", " tok / ", "Plan:"):
     assert stale not in speech, (stale, speech)
-assert "no record" in speech and "no lifecycle record" not in speech, speech
+assert "status unknown" in speech and "no lifecycle record" not in speech, speech
 # Calls whose attempts left the projection take their end state from the result messages: finished above, running below.
 def minutes_ago(minutes):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - minutes * 60))
@@ -3951,8 +4123,9 @@ for n in range(14):
         "joined_at": minutes_ago(300 - n * 10)})
     ended["room"]["call_results"][ident] = {"exit": 1 if n == 0 else 0, "ts": minutes_ago(290 - n * 10), "seq": 100 + n}
 ended["room"]["call_results"]["old-03"]["exit"] = None
-ended_text = render(ended, "codex", 120, 120, view="tree", navigation={})
-assert "status unknown" not in ended_text and "failed (exit 1)" in ended_text, ended_text
+ended_text = render(ended, "codex", 120, 120, view="tree",
+                    navigation={"expanded_groups": {("past", "flow-main")}})
+assert "status unknown" in ended_text and "failed (exit 1)" in ended_text, ended_text
 assert "Old job 03" in ended_text and ended_text.count("finished") == 12, ended_text
 # A worker that hit its wall clock says how to continue; later rounds of one task are numbered.
 timed = deepcopy(ended)
@@ -3968,7 +4141,8 @@ numbered = {m["participant"]: m for m in room_nodes(rounded)}
 assert numbered["old-00"]["round"] == 1 and numbered["old-01"]["round"] == 2 and numbered["old-01"]["continues"] == "old-00", numbered
 rows = [line for line in ended_text.splitlines() if ("Luna" in line or "Sonnet" in line) and ("finished" in line or "failed" in line or "running" in line or "no record" in line)]
 order = [0 if "finished" in r else 2 if "running" in r else 1 for r in rows]
-assert order == sorted(order) and order[0] == 0 and order[-1] == 2 and 1 in order, rows
+first_finished = order.index(0)
+assert order[first_finished:first_finished + 12] == [0] * 12 and 1 in order[:first_finished] and 2 in order[:first_finished], rows
 # A call outside the projection takes its real state from room_attempts, ahead of any exit code.
 gone = deepcopy(ended)
 for ident in ("gone-review", "gone-blocked"):
@@ -4009,16 +4183,16 @@ with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0))
         patch.object(panel.subprocess, "run", side_effect=subprocess.TimeoutExpired("agent-events", 5)):
     got, _ = panel.snapshot(Path("."), "flow-room")
 assert "room_attempts" not in got and got["room"]["participants"] == members, got
-ended_nav = {}
+ended_nav = {"expanded_groups": {("past", "flow-main")}}
 render(ended, "codex", 120, 120, view="tree", navigation=ended_nav)
 shown = list(dict.fromkeys(h["action"][1] for h in sorted(ended_nav["hits"], key=lambda h: h["y"]) if h["action"][0] == "result"))
-assert shown == [i[1] for i in ended_nav["items"] if i[0] == "result"] and shown.index("old-13") < shown.index("builder"), shown
+assert shown == [i[1] for i in ended_nav["items"] if i[0] == "result"] and shown.index("old-13") > shown.index("builder"), shown
 team_lines, _ = graph_text.detail(next(m for m in graph_text.nodes(ended) if m["participant"] == "flow-main"), {}, 120,
     graph_text.nodes(ended), ended["room"], everyone={"flow-main": [m for m in graph_text.nodes(ended)
                                                                   if m.get("parent") == "flow-attempt"]})
 team_rows = [line for line in team_lines if "Old job" in line or "한글 작업 제목 / builder" in line]
 assert "finished" in team_rows[0] and "running" in team_rows[-1] and "failed (exit 1)" in team_rows[-3], team_rows
-assert not any("status unknown" in line for line in team_lines) and "failed (exit 1)" in "\n".join(team_lines), team_lines
+assert any("status unknown" in line for line in team_lines) and "failed (exit 1)" in "\n".join(team_lines), team_lines
 # Attempt evidence beats the result message, and the header clock carries date and weekday.
 beaten = deepcopy(ended)
 beaten["attempts"]["active_recent"].append({"attempt_id": "old-00", "state": "working",
@@ -4153,6 +4327,29 @@ assert [h["action"] for h in nav["hits"]] == [("result", "w2"), ("result", "w1")
 assert nav["items"][0] == ("result", "w2") and nav["selected"] == ("result", "w2")
 choose(("down",), nav)
 assert nav["selected"] == nav["items"][1]
+small_nav = {}
+small_inbox = render(inbox_room, "codex", 100, 8, menu=True, navigation=small_nav)
+assert choose(("scroll", 1, 5, 5), small_nav) is None
+assert small_nav["selected"] == small_nav["items"][1]
+choose(("pagedown",), small_nav)
+assert small_nav["selected"] == small_nav["items"][-1]
+scrolled_inbox = render(inbox_room, "codex", 100, 8, menu=True, navigation=small_nav)
+assert scrolled_inbox != small_inbox and small_nav["selected"] in [hit["action"] for hit in small_nav["hits"]]
+assert render(inbox_room, "codex", 100, 8, menu=True, navigation=small_nav) == scrolled_inbox
+choose(("pagedown",), small_nav)
+choose(("scroll", 3, 5, 5), small_nav)
+assert small_nav["selected"] == small_nav["items"][-1]
+choose(("pageup",), small_nav)
+assert small_nav["selected"] == small_nav["items"][1]
+choose(("scroll", -20, 5, 5), small_nav)
+choose(("pageup",), small_nav)
+assert small_nav["selected"] == small_nav["items"][0]
+render(inbox_room, "codex", 100, 28, menu=True, navigation=small_nav)
+assert small_nav["selected"] == small_nav["items"][0]
+empty_nav = {}
+render(empty_room, "codex", 100, 8, menu=True, navigation=empty_nav)
+for event in (("scroll", 3, 5, 5), ("pageup",), ("pagedown",)):
+    assert choose(event, empty_nav) is None and empty_nav["selected"] is None and empty_nav["offset"] == 0
 for width, height in ((100, 28), (42, 24), (24, 18), (12, 10)):
     for glyphs in (True, False):
         drawn = render(inbox_room, "codex", width, height, unicode=glyphs, menu=True, navigation={})
@@ -5121,7 +5318,7 @@ pair_board = dict(board, room={"id": "adv-room", "participants": [claude_main, d
                                                                                     provider="codex", seq=2)]})
 finished_board = graph_view.render_graph(dict(pair_board, native_advisors=answered_call), 120, 34,
                                          navigation={"overview": True, "dismissed": True})
-assert "Fable 5.1" not in finished_board and "1 done" in finished_board, finished_board
+assert "Fable 5.1" not in finished_board and "Past work (1)" in finished_board, finished_board
 finished_nav = {"selected": ("chat", "adv-main"), "preview": {"target": ("chat", "adv-main"), "report": {}}}
 finished_detail = graph_view.render_graph(dict(board, native_advisors=answered_call), 100, 40, navigation=finished_nav)
 assert "Built-in advisor: last answered " + answered_call["adv-main"]["finished"] in finished_detail, finished_detail
@@ -5191,7 +5388,7 @@ failed_board = dict(board, room={"id": "adv-room", "participants": [claude_main,
 assert "Broken patch" in graph_view.render_graph(failed_board, 100, 40)
 assert "Broken patch" in graph_view.render_graph(dict(failed_board, finalized={"other": "accepted"}), 100, 40)
 assert "Broken patch" not in graph_view.render_graph(dict(failed_board, finalized={"adv-task": "accepted"}), 100, 40)
-# A call missing from a complete active list for ten minutes has ended; a just-joined one stays,
+# A call missing from a complete active list for ten minutes may be folded as unknown; a just-joined one stays,
 # and a truncated active list (the projection keeps 8 rows) proves nothing.
 untracked = dict(board, attempts={"available": True, "active": 0, "active_recent": [], "recent": []},
                  room={"id": "adv-room", "participants": [claude_main, dict(
@@ -5200,6 +5397,155 @@ assert "Old patch" not in graph_view.render_graph(untracked, 100, 40)
 assert "Old patch" in graph_view.render_graph(dict(untracked, attempts=dict(untracked["attempts"], active=9)), 100, 40)
 untracked["room"]["participants"][1]["joined_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 assert "Old patch" in graph_view.render_graph(untracked, 100, 40)
+# Review and history grouping shares settler evidence and changes no report/ledger state.
+grouped_board = deepcopy(failed_board)
+grouped_board["collection"] = {"ok": True}
+grouped_board["awaiting_admission"] = ["pending-patch"]
+grouped_board["attempts"].update(available=True, active=0)
+for ident, phase in (("review-call", "review"), ("pending-patch", "done"), ("past-call", "cancelled"),
+                     ("blocked-call", "blocked"), ("waiting-call", "waiting_input"), ("live-call", "working")):
+    grouped_board["room"]["participants"].append(dict(failed_worker, participant=ident, label=ident))
+    grouped_board["attempts"]["recent"].append({"attempt_id": ident, "state": phase, "panel": {
+        "room_id": "adv-room", "room_participant": ident, "role": "worker"}})
+grouped_board["room"]["participants"].append(dict(failed_worker, participant="old-unknown", label="old-unknown",
+                                               joined_at=minutes_ago(20)))
+grouped_board["room"]["participants"].append(dict(failed_worker, participant="fresh-unknown", label="fresh-unknown",
+                                               joined_at=minutes_ago(1)))
+frozen_grouped = json.dumps(grouped_board, sort_keys=True)
+classify = graph_view.call_classifier(grouped_board)
+classified = {m["participant"]: classify(m) for m in graph_view.nodes(grouped_board) if m["role"] != "main"}
+assert classified == {"adv-worker": "live", "review-call": "review", "pending-patch": "review", "past-call": "past",
+                      "blocked-call": "live", "waiting-call": "live", "live-call": "live",
+                      "old-unknown": "past", "fresh-unknown": "live"}, classified
+# A stale admission flag cannot hide current work, uncertainty or an urgent failure.
+mixed = deepcopy(grouped_board)
+mixed["awaiting_admission"] = list(classified)
+mixed_classify = graph_view.call_classifier(mixed)
+assert {m["participant"]: mixed_classify(m) for m in graph_view.nodes(mixed) if m["role"] != "main"} == classified
+from panel_view import inbox_items
+mixed_inbox = {item["action"]: item["what"] for item in inbox_items(mixed)}
+assert "failed" in mixed_inbox[("result", "adv-worker")]
+assert ("result", "blocked-call") not in mixed_inbox  # No stale patch-review alert replaces its live board state.
+assert "input" in mixed_inbox[("result", "waiting-call")]
+assert ("result", "live-call") not in mixed_inbox and ("result", "fresh-unknown") not in mixed_inbox
+for phase in ("working", "verifying", "waiting_input", "waiting_approval", "blocked", "failed", "timed_out", "orphaned"):
+    candidate = dict(next(m for m in graph_view.nodes(mixed) if m["participant"] == "live-call"), state=phase)
+    assert mixed_classify(candidate) == "live", phase
+for evidence in ({"available": False, "active": 0}, {"available": True, "active": 9}, {"available": True, "active": None}):
+    uncertain = dict(grouped_board, attempts=dict(grouped_board["attempts"], **evidence))
+    unknown = next(m for m in graph_view.nodes(uncertain) if m["participant"] == "old-unknown")
+    assert graph_view.call_classifier(uncertain)(unknown) == "live"
+for mode in ("tree", "graph"):
+    nav = {"dismissed": True}
+    picture = render(grouped_board, "codex", 120, 80, view=mode, navigation=nav)
+    assert "Needs review (2)" in picture and "Past work (2)" in picture and "1 earlier unknown" in picture, picture
+    for ident in ("review-call", "pending-patch", "past-call", "old-unknown"):
+        assert ("result", ident) not in nav["items"], (mode, ident, nav)
+    for ident in ("adv-worker", "blocked-call", "waiting-call", "live-call", "fresh-unknown"):
+        assert ("result", ident) in nav["items"], (mode, ident, nav)
+    mixed_nav = {"dismissed": True}
+    mixed_picture = render(mixed, "codex", 120, 80, view=mode, navigation=mixed_nav)
+    assert "Needs review (2)" in mixed_picture and "Past work (2)" in mixed_picture
+    assert mixed_nav["items"] == nav["items"], (mode, mixed_nav)
+    for kind in ("review", "past"):
+        target = ("group", (kind, "adv-main"))
+        hit = next(h for h in nav["hits"] if h["action"] == target)
+        assert choose(("click", hit["x1"], hit["y"]), nav) == target
+        assert choose(("enter",), nav) == choose((" ",), nav) == target
+        with patch.object(panel.room, "status", side_effect=AssertionError("group read room")), \
+                patch.object(panel_chats, "open_chat", side_effect=AssertionError("group opened chat")):
+            panel.navigate(project, target, grouped_board, nav, 120)
+        picture = render(grouped_board, "codex", 120, 80, view=mode, navigation=nav)
+        assert ("result", "pending-patch" if kind == "review" else "old-unknown") in nav["items"]
+    assert "patch awaits admission" in picture and "status unknown" in picture
+    result_target = ("result", "pending-patch")
+    result_hit = next(h for h in nav["hits"] if h["action"] == result_target)
+    assert choose(("click", result_hit["x1"], result_hit["y"]), nav) == result_target
+    assert choose(("enter",), nav) == result_target
+    with patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel.room, "status", return_value=grouped_board["room"]):
+        panel.navigate(project, result_target, grouped_board, nav, 120)
+        assert nav.pop("opening") == result_target
+    departed = deepcopy(grouped_board["room"])
+    next(m for m in departed["participants"] if m["participant"] == "pending-patch")["joined"] = False
+    with patch.object(panel, "managed_session", return_value=False), patch.object(panel.room, "status", return_value=departed):
+        try:
+            panel.navigate(project, result_target, grouped_board, nav, 120)
+            raise AssertionError("departed history result was opened")
+        except ValueError as error:
+            assert "participant left" in str(error)
+    assert nav["expanded_groups"] == {("review", "adv-main"), ("past", "adv-main")}
+    if mode == "graph":
+        assert "Esc Back to graph" in picture and "g Graph" in picture
+        closing = dict(nav, opening=result_target)
+        panel.reset_group_view(closing)
+        assert "opening" not in closing and "expanded_groups" not in closing
+    kept = panel.refreshed_navigation(nav, grouped_board)
+    assert kept["expanded_groups"] == nav["expanded_groups"]
+    reset = panel.refreshed_navigation(dict(nav), {"room": {"id": "different-room"}})
+    assert not reset.get("expanded_groups")
+    for columns, rows in ((120, 80), (76, 16), (28, 12), (2, 8)):
+        for glyphs in (True, False):
+            small = render(grouped_board, "codex", columns, rows, view=mode, unicode=glyphs, navigation=nav)
+            assert len(small.splitlines()) <= rows and all(display_width(line) <= columns for line in small.splitlines())
+    render(grouped_board, "codex", 120, 80, view=mode, navigation=nav)
+    for kind in ("review", "past"):
+        panel.navigate(project, ("group", (kind, "adv-main")), grouped_board, nav, 120)
+    render(grouped_board, "codex", 120, 80, view=mode, navigation=nav)
+    assert not nav["expanded_groups"] and nav["surface"] == mode
+# Both existing return controls exit inspection; room data and other local preferences stay intact.
+for back_key in ("escape", "g"):
+    clock = [0.0]
+    inspected = []
+    real_frame = panel.frame_view
+    def group_frame(*args, **kwargs):
+        nav = kwargs["navigation"]
+        if not inspected:
+            nav.update(group_tree=True, expanded_groups={("review", "adv-main")}, pinned=["adv-main"],
+                       collapsed={"unrelated-main"}, selected=("group", ("review", "adv-main")))
+        picture = real_frame(*args, **kwargs)
+        inspected.append(deepcopy(nav))
+        return picture
+    def return_graph(seconds):
+        clock[0] += 5
+        return [(back_key,)]
+    with patch.object(panel, "BackgroundRead", ImmediateRead), \
+            patch.object(panel, "read_panel", return_value=(grouped_board, 0, "codex", None, "graph", False, "")), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "terminal_style", return_value=(True, False, True)), \
+            patch.object(panel.sys, "stdout", io.StringIO()), \
+            patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((120, 80))), \
+            patch.object(panel.time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(panel, "frame_view", side_effect=group_frame), \
+            patch.object(ResponsiveInput, "wait", side_effect=return_graph), \
+            patch("panel_input.TerminalInput", ResponsiveInput):
+        assert panel.watch(project, "codex", count=2, view="graph", no_animation=True) == 0
+    assert inspected[0]["surface"] == "tree" and inspected[-1]["surface"] == "graph"
+    assert not inspected[-1].get("group_tree") and not inspected[-1].get("expanded_groups")
+    assert inspected[-1]["pinned"] == ["adv-main"] and inspected[-1]["collapsed"] == {"unrelated-main"}
+keyboard_nav = {"surface": "graph", "items": [("chat", "adv-main"), ("group", ("review", "adv-main"))],
+                "selected": ("chat", "adv-main")}
+choose(("down",), keyboard_nav)
+assert choose(("enter",), keyboard_nav) == ("group", ("review", "adv-main")) and "preview" not in keyboard_nav
+for columns, rows in ((120, 80), (76, 16)):
+    published = dict(grouped_board, room=dict(grouped_board["room"], publications={"claude": {
+        "status": "submitted", "delivery_unknown": True}}))
+    shown = render(published, "codex", columns, rows, view="graph", navigation={
+        "group_tree": True, "expanded_groups": {("review", "adv-main")}})
+    assert "APP DELIVERY" in shown and "unconfirmed" in shown, shown
+native_inspection = render(dict(grouped_board, native_advisors=open_call), "claude", 120, 80, view="graph",
+                          navigation={"group_tree": True, "expanded_groups": {("review", "adv-main")}})
+assert "Fable 5.1" in native_inspection and "answer stays in the main transcript" in native_inspection
+attention_nav = {}
+attention = render(grouped_board, "codex", 120, 80, view="tree", attention_only=True, navigation=attention_nav)
+assert "Needs review (2)" in attention and "Past work" not in attention
+from panel_view import inbox_items
+assert {item["action"] for item in inbox_items(grouped_board)} >= {("result", "review-call"), ("result", "pending-patch")}
+for mark in ("completed", "accepted"):
+    handled = dict(grouped_board, finalized={"adv-task": mark})
+    failed = next(m for m in graph_view.nodes(handled) if m["participant"] == "adv-worker")
+    assert graph_view.call_classifier(handled)(failed) == "past"
+assert json.dumps(grouped_board, sort_keys=True) == frozen_grouped
 resumed_lifecycle = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
                                       "show", "--attempt", resumed["attempt"], "--json"]))
 resumed_lifecycle.update(terminal=False, state="blocked")

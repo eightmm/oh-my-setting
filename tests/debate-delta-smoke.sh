@@ -631,6 +631,69 @@ assert_contains "$MA_COUNCIL_CONTEXT_DIR/source.txt" "Diff base tree: $(git -C "
 ma_cleanup_council_context
 unset MA_KIND NO_DIFF BASE_REF
 
+# Temporary context is guard-neutral and removed only by its owning run. A
+# sibling's snapshot may straddle this run's whole lifecycle, while a protected
+# artifact deleted in the same window stays a hard shared-state failure.
+mkdir -p "$REPO/.oms/artifacts"
+printf 'protected\n' > "$REPO/.oms/artifacts/protected.md"
+guard_snap="$TMP/council-guard-snap"
+ma_prepare_council_context
+(oms_worker_surface_snapshot "$REPO" "$guard_snap") || fail 'sibling snapshot failed'
+ma_cleanup_council_context
+ma_prepare_council_context
+ma_cleanup_council_context
+[ -z "$(oms_worker_surface_diff "$REPO" "$guard_snap")" ] ||
+  fail 'council temporary context must not trip a sibling shared-state guard'
+rm "$REPO/.oms/artifacts/protected.md"
+case "$(oms_worker_surface_diff "$REPO" "$guard_snap")" in
+  *shared-state*) ;;
+  *) fail 'a deleted protected artifact must stay a hard shared-state failure' ;;
+esac
+
+# Cleanup refuses anything this run cannot prove it owns.
+victim="$TMP/council-victim"
+mkdir -p "$victim"
+printf 'keep\n' > "$victim/keep.txt"
+ma_prepare_council_context
+context_dir="$MA_COUNCIL_CONTEXT_DIR"
+nonce="$MA_COUNCIL_CONTEXT_NONCE"
+sed -i.bak 's/^nonce=.*/nonce=forged/' "$context_dir/.oh-my-setting-council"
+ma_cleanup_council_context 2> "$TMP/forged.err"
+[ -d "$context_dir" ] || fail 'a forged ownership marker must not be removed'
+assert_contains "$TMP/forged.err" 'does not own'
+mv "$context_dir/.oh-my-setting-council.bak" "$context_dir/.oh-my-setting-council"
+MA_COUNCIL_CONTEXT_DIR="$context_dir" MA_COUNCIL_CONTEXT_NONCE="$nonce"
+mv "$context_dir" "$context_dir.real"
+ln -s "$victim" "$context_dir"
+ma_cleanup_council_context 2>/dev/null
+[ -f "$victim/keep.txt" ] && [ -L "$context_dir" ] || fail 'a symlinked context must not be followed or removed'
+rm "$context_dir"
+mv "$context_dir.real" "$context_dir"
+MA_COUNCIL_CONTEXT_DIR="$context_dir" MA_COUNCIL_CONTEXT_NONCE="$nonce"
+mv "$REPO/.oms/delegations" "$REPO/.oms/delegations.real"
+ln -s "$REPO/.oms/delegations.real" "$REPO/.oms/delegations"
+ma_cleanup_council_context 2>/dev/null
+[ -d "$REPO/.oms/delegations.real/${context_dir##*/}" ] || fail 'a symlinked namespace must refuse removal'
+rm "$REPO/.oms/delegations"
+mv "$REPO/.oms/delegations.real" "$REPO/.oms/delegations"
+MA_COUNCIL_CONTEXT_DIR="$context_dir" MA_COUNCIL_CONTEXT_NONCE="$nonce"
+ma_cleanup_council_context
+[ ! -e "$context_dir" ] || fail 'the owning run must remove its own context'
+
+# A dangling .oms/.gitignore link must be refused, not followed to create a
+# file outside the repository.
+ignore_outside="$TMP/council-ignore-outside"
+saved_ignore=""
+[ -e "$REPO/.oms/.gitignore" ] && { saved_ignore="$TMP/council-ignore.saved"; mv "$REPO/.oms/.gitignore" "$saved_ignore"; }
+ln -s "$ignore_outside" "$REPO/.oms/.gitignore"
+if (ma_prepare_council_context) 2> "$TMP/ignore-link.err"; then
+  fail 'a symlinked .oms/.gitignore must refuse council preparation'
+fi
+assert_contains "$TMP/ignore-link.err" 'symlinked .oms/.gitignore'
+[ ! -e "$ignore_outside" ] && [ ! -L "$ignore_outside" ] || fail 'council preparation followed a dangling .gitignore link'
+rm "$REPO/.oms/.gitignore"
+[ -z "$saved_ignore" ] || mv "$saved_ignore" "$REPO/.oms/.gitignore"
+
 # No partially launched round even when a later seat's preparation fails.
 eval "$(declare -f write_debate_prompt | sed '1s/write_debate_prompt/real_write_debate_prompt/')"
 write_debate_prompt() {
@@ -689,11 +752,13 @@ with tempfile.TemporaryDirectory() as tmp:
     (source / 'request.md').write_text('sanitized question', encoding='utf-8')
     (source / 'answer-0.md').write_text('F1 refuted', encoding='utf-8')
     (root / 'isolated').mkdir()
+    stage_context(source, root / 'isolated', '.oms/delegations/council-context.test')
+    assert (root / 'isolated/.oms/delegations/council-context.test/answer-0.md').read_text() == 'F1 refuted'
     stage_context(source, root / 'isolated', '.oms/artifacts/council-context.test')
     assert (root / 'isolated/.oms/artifacts/council-context.test/answer-0.md').read_text() == 'F1 refuted'
     (source / 'answer-1.md').symlink_to(source / 'request.md')
     try:
-        stage_context(source, root / 'rejected', '.oms/artifacts/council-context.test')
+        stage_context(source, root / 'rejected', '.oms/delegations/council-context.test')
     except ValueError:
         pass
     else:

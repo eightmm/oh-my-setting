@@ -160,11 +160,24 @@ coordination role. Advisors/reviewers sit above it and join its top edge;
 workers branch from its bottom edge. Each child connects to the main itself,
 so workers do not appear to report to an advisor. In lanes, advisors and
 reviewers sit above their main and each running worker has its own box below
-it. Finished calls (`done`, `cancelled`) leave the board; their results stay in
-the main's detail (`· N finished` in its team line) and the tree (`t`). Only the
-lane view, with two or more mains, adds a `✓ N done` note under each lane; a
-single-main graph shows no count.
-Failed and waiting calls stay visible. Wires attach at the card
+it. Per-main `Needs review (N)` groups contain lifecycle `review` calls and
+completed write calls awaiting patch admission. `Past work (N)` contains
+`done`/`cancelled` calls, failures already handled under the existing read or
+finalization rules, and old unknown calls eligible for the existing display
+cutoff. Both groups default collapsed. Click a group or select it with Up/Down
+and press Enter or Space to expand it. Graph groups for the selected main open
+the scrollable tree; Esc Back or `g` Graph returns directly to the graph and
+resets local group expansion. Collapsing all inspected groups also returns. Expansion
+survives refresh and resize, but resets on a room change. The tree keeps each
+group under its explicit main, with participant-scoped result actions.
+Unknown calls retain `status unknown` and an `earlier unknown` count; neither
+age nor process exit establishes acceptance. The unknown cutoff requires a
+complete active list and ten minutes of age. Unproven unknowns, unhandled
+failures, blocked and waiting calls remain visible. Review counts remain in
+attention-only mode and the inbox includes actual review requests. Group
+actions only change local display state; result activation retains existing
+fresh participant/result validation. No records, acknowledgments or lifecycle
+states change. Wires attach at the card
 edges, and a particle on a live edge moves toward its consumer. Child status
 names its main. Cards stay bounded in width instead of stretching a lone worker
 across the terminal.
@@ -318,7 +331,16 @@ oms room updates --repo . --id team --participant opus-main --json
 oms room send --repo . --id team --participant opus-main --to sol-main \
   --kind answer --reply-to api-question --text 'Caller contract confirmed.'
 oms room ack --repo . --id team --participant opus-main --message api-question
+oms room describe --repo . --id team --participant sol-main --label 'Improve result navigation'
 ```
+
+`describe` updates an enrolled main's work title without leaving the room or
+moving its native session, join time, mailbox anchor or unread messages. An
+explicit title takes precedence over its launch title; existing `status` messages
+continue to supply the `Now` line. Identical title updates append nothing. Only
+the title changes: declared paths use the separate scope workflow, and workers
+cannot use `describe`. A session bound to a room can describe only its own main.
+Legacy room logs remain readable; the new event kind requires a current reader.
 
 The canonical thread log records participant roles, addressed message IDs,
 reply links and explicit consumption. Stable message IDs deduplicate identical
@@ -732,7 +754,8 @@ each as glyph, who (`Sol 6.1 worker for Opus 5.5`), what and age: failed or
 timed-out calls with their title, calls or mains waiting for approval or input,
 unanswered room messages that a main sent to `all`, and finished write workers
 whose patch has no admission or landing record. Arrow keys or a click select a
-row; Enter (or a second click) opens that main's chat or shows the call's result,
+row; the wheel moves by lines and page keys by the visible item count, stopping
+at either end. Enter (or a second click) opens that main's chat or shows the call's result,
 and Esc returns. An empty list says `Nothing needs you right now`; a room with no
 main shows `Press 1 (Codex) or 2 (Claude) to start a main`. The menu keeps
 start (`1` Codex, `2` Claude, `3` Resume, `t` Task), `o` rooms, `9` refresh and
@@ -1017,7 +1040,8 @@ reports an incomplete window. Bounded normalized answer sections retain up to
 logs and native conversation histories are not exported. Missing, changed or
 linked evidence is reported as unavailable. Oversized answers show a preview
 notice and their source artifact reference. The reader retains answer lines
-and reflows them when resized; scrolling exposes the complete retained preview.
+and reflows them when resized; Up/Down moves one line and Home/End goes to the
+first/last page. Page keys and the wheel expose the complete retained preview.
 The registered result and source artifacts retain their full bounded content.
 The menu's numbered list shows titles, outcome, verifier and app status before
 loading any normalized answers. Select a number to open that task's detail and

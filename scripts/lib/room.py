@@ -112,7 +112,8 @@ def event_shape(event):
         raise ValueError("invalid persisted room event")
     kind = event.get("kind")
     required = {"created": (), "join": ("participant", "provider", "role", "label"), "bind": ("participant", "consumer"),
-                "scope": ("participant",), "leave": ("participant",), "message": ("id", "sender", "recipient", "message_kind"),
+                "scope": ("participant",), "describe": ("participant", "label"),
+                "leave": ("participant",), "message": ("id", "sender", "recipient", "message_kind"),
                 "received": ("participant",), "publication": ("id", "digest", "status")}
     if not event:
         return
@@ -132,6 +133,11 @@ def event_shape(event):
         raise ValueError("invalid room delivery receipt")
     if kind == "publication" and "target" in event and not isinstance(event["target"], str):
         raise ValueError("invalid room delivery target")
+    if kind == "describe":
+        if set(event) - {"kind", "participant", "label"}:
+            raise ValueError("describe changes only the participant label")
+        if not event["label"] or event["label"] != clean(event["label"], 120):
+            raise ValueError("use a bounded plain participant label")
 
 
 def project(rows):
@@ -157,6 +163,12 @@ def project(rows):
                 owner = event["participant"]
         elif kind == "leave" and event["participant"] in members:
             members[event["participant"]]["joined"] = False
+        elif kind == "describe":
+            member = members.get(event["participant"])
+            if not member or not member["joined"] or member["role"] != "main":
+                raise ValueError("describe requires an enrolled main")
+            member["label"] = event["label"]
+            member["label_override"] = event["label"]
         elif kind == "bind":
             if event["participant"] not in members:
                 raise ValueError("native binding has no participant")
@@ -220,7 +232,7 @@ def declared_scopes(role, scopes):
 
 def validate_event(rows, event, text):
     """Validate while thread.sh holds its existing file lock; no membership grants authority."""
-    if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "bind", "scope", "leave", "message", "received", "publication"}:
+    if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "bind", "scope", "describe", "leave", "message", "received", "publication"}:
         raise ValueError("invalid room event")
     event_shape(event)
     kind = event["kind"]
@@ -228,6 +240,7 @@ def validate_event(rows, event, text):
             "join": {"kind", "participant", "provider", "model", "role", "label", "consumer", "owns", "parent"},
             "bind": {"kind", "participant", "consumer", "previous"},
             "scope": {"kind", "participant", "owns"},
+            "describe": {"kind", "participant", "label"},
             "leave": {"kind", "participant"},
             "message": {"kind", "id", "sender", "recipient", "message_kind", "reply_to"},
             "received": {"kind", "participant", "messages"},
@@ -259,7 +272,18 @@ def validate_event(rows, event, text):
         raise ValueError("a worker cannot speak as a native main")
     if state["closed"]:
         raise ValueError("room is closed")
-    if kind == "bind":
+    if kind == "describe":
+        member = participant(state, event["participant"])
+        if member["role"] != "main":
+            raise ValueError("describe requires an enrolled main")
+        bound_room = os.environ.get("OMS_ROOM_ID")
+        bound_participant = os.environ.get("OMS_ROOM_PARTICIPANT")
+        if ((bound_room or bound_participant)
+                and (bound_room != rows[0].get("thread") or bound_participant != event["participant"])):
+            raise ValueError("describe must name this session's main and room")
+        if member.get("label_override") == event["label"]:
+            return False
+    elif kind == "bind":
         member = participant(state, event.get("participant"))
         consumer = event.get("consumer")
         if member["role"] != "main" or member["provider"] not in {"codex", "claude"}:
@@ -434,6 +458,13 @@ def join(repo, room, who, provider, role="main", model=None, label=None, native_
     if parent:
         event["parent"] = parent
     append(repo, room, event, "Joined: " + event["label"])
+    return event
+
+
+def describe(repo, room, who, label):
+    """Change declared work without moving native identity or the mailbox anchor."""
+    event = {"kind": "describe", "participant": identifier(who, "participant"), "label": label}
+    append(repo, room, event, "Work description updated")
     return event
 
 
@@ -651,7 +682,7 @@ def publish(repo, ident, retry=False, app="codex", recipient=None, allow_wakeup=
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="OMS work rooms: shared threads, addressed messages and explicit consumption.")
-    parser.add_argument("action", choices=("new", "join", "bind", "scope", "leave", "send", "updates", "ack", "show", "list", "publish"))
+    parser.add_argument("action", choices=("new", "join", "bind", "scope", "describe", "leave", "send", "updates", "ack", "show", "list", "publish"))
     parser.add_argument("--repo", default=os.environ.get("OMS_ROOM_REPO") or os.getcwd())
     parser.add_argument("--id", default=os.environ.get("OMS_ROOM_ID"))
     parser.add_argument("--participant", default=os.environ.get("OMS_ROOM_PARTICIPANT"))
@@ -677,15 +708,31 @@ def main(argv=None):
     parser.add_argument("--retry", action="store_true", help="publish only: explicitly retry an uncertain snapshot; may duplicate output")
     parser.add_argument("--app", choices=("codex", "claude"), help="publish target; default Codex fixed receiver")
     parser.add_argument("--allow-wakeup", action="store_true", help="Claude publish only: authorize a native inbox post which can spend model usage")
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
+    if args.action == "describe":
+        allowed_values = {"--repo", "--id", "--participant", "--label"}
+        index = 0
+        while index < len(raw_argv):
+            word = raw_argv[index]
+            if word == "describe" or word == "--json":
+                index += 1
+            elif word in allowed_values:
+                index += 2
+            elif any(word.startswith(option + "=") for option in allowed_values):
+                index += 1
+            else:
+                parser.error("describe accepts only --repo, --id, --participant, --label and --json")
     if args.action not in {"new", "list"} and not args.id:
         parser.error("this operation needs a room id")
-    if args.action in {"join", "bind", "scope", "leave", "send", "updates", "ack"} and not args.participant:
+    if args.action in {"join", "bind", "scope", "describe", "leave", "send", "updates", "ack"} and not args.participant:
         parser.error("this operation needs a participant")
     if args.action == "scope" and bool(args.owns) == args.clear:
         parser.error("scope needs --owns PATH (repeatable) or --clear")
     if args.clear and args.action != "scope":
         parser.error("--clear applies to scope only")
+    if args.action == "describe" and args.label is None:
+        parser.error("describe requires --label")
     if args.retry and args.action != "publish":
         parser.error("--retry applies to publish only")
     if args.app and args.action != "publish" or args.allow_wakeup and (args.action != "publish" or args.app != "claude"):
@@ -711,6 +758,8 @@ def main(argv=None):
             result = bind(repo, args.id, args.participant, args.native_session)
         elif args.action == "scope":
             result = scope(repo, args.id, args.participant, args.owns or [])
+        elif args.action == "describe":
+            result = describe(repo, args.id, args.participant, args.label)
         elif args.action == "leave":
             append(repo, args.id, {"kind": "leave", "participant": args.participant}, "Participant left")
             result = {"status": "left"}

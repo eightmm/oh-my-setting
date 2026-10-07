@@ -2700,8 +2700,7 @@ ma_run_routed_provider_inner() {
     fi
     workdir="$isolated_dir"
     if [ -n "${MA_COUNCIL_CONTEXT_DIR:-}" ]; then
-      if ! python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" --stage-context \
-          "$MA_COUNCIL_CONTEXT_DIR" "$workdir" "$MA_COUNCIL_CONTEXT_REL"; then
+      if ! ma_stage_council_context "$workdir"; then
         ma_agy_read_cleanup "$state_repo" "$isolated_dir"
         rm -f "$attempt_file"
         return 2
@@ -2853,9 +2852,7 @@ EOF
         printf '\nmodel-fallback: skipped; could not recreate pristine provider isolation\n' >> "$artifact"
       else
         workdir="$isolated_dir"
-        if [ -n "${MA_COUNCIL_CONTEXT_DIR:-}" ] && ! python3 \
-            "$(ma_scripts_dir)/lib/peer_artifacts.py" --stage-context \
-            "$MA_COUNCIL_CONTEXT_DIR" "$workdir" "$MA_COUNCIL_CONTEXT_REL"; then
+        if [ -n "${MA_COUNCIL_CONTEXT_DIR:-}" ] && ! ma_stage_council_context "$workdir"; then
           ma_agy_read_cleanup "$state_repo" "$isolated_dir"
           rm -f "$attempt_file"
           return 2
@@ -3632,11 +3629,50 @@ ma_debate_output_contract() {
   printf 'Agreement is not verification. Identify retractions by finding ID; never repeat a refuted claim as confirmed without new evidence. Retain unresolved objections.\n'
 }
 
+# The context lives in the repo-local delegations namespace: shared-state
+# snapshots skip it as ephemeral liveness, so this run's create/remove cannot
+# read as deleted state to a sibling worker, and it stays repo-relative for
+# provider reads and isolated staging. It is evidence, never authority; the
+# marker binds the directory to this run before anything is removed.
+MA_COUNCIL_MARKER=.oh-my-setting-council
+
+ma_council_context_owned() {  # DIR
+  local dir="$1" root parent marker
+  root="$(cd "$REPO" 2>/dev/null && pwd -P | tr -d '\r')" || return 1
+  [ -n "${MA_COUNCIL_CONTEXT_NONCE:-}" ] || return 1
+  [ ! -L "$REPO/.oms" ] && [ ! -L "$REPO/.oms/delegations" ] && [ ! -L "$dir" ] &&
+    [ -d "$dir" ] || return 1
+  parent="$(cd "$dir/.." 2>/dev/null && pwd -P | tr -d '\r')" || return 1
+  [ "$parent" = "$root/.oms/delegations" ] || return 1
+  marker="$dir/$MA_COUNCIL_MARKER"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  [ "$(oms_harness_read_marker_value "$marker" kind | tr -d '\r')" = oms-council-context ] &&
+    [ "$(oms_harness_read_marker_value "$marker" pid | tr -d '\r')" = "$$" ] &&
+    [ "$(oms_harness_read_marker_value "$marker" nonce | tr -d '\r')" = "$MA_COUNCIL_CONTEXT_NONCE" ]
+}
+
+# Stage the bounded context into a seat's private isolated tree under the
+# prompt's path and the legacy artifacts path older seat tooling reads.
+ma_stage_council_context() {  # ROOT
+  local leaf="${MA_COUNCIL_CONTEXT_REL##*/}" rel
+  for rel in "$MA_COUNCIL_CONTEXT_REL" ".oms/artifacts/$leaf"; do
+    python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" --stage-context \
+      "$MA_COUNCIL_CONTEXT_DIR" "$1" "$rel" || return 1
+  done
+}
+
 ma_cleanup_council_context() {
   case "${MA_COUNCIL_CONTEXT_DIR:-}" in
-    "$REPO"/.oms/artifacts/council-context.*) rm -rf "$MA_COUNCIL_CONTEXT_DIR" ;;
+    "$REPO"/.oms/delegations/council-context.*)
+      if ma_council_context_owned "$MA_COUNCIL_CONTEXT_DIR"; then
+        rm -rf "$MA_COUNCIL_CONTEXT_DIR"
+      else
+        echo "warning: kept council context that this run does not own: $MA_COUNCIL_CONTEXT_DIR" >&2
+      fi
+      ;;
   esac
   MA_COUNCIL_CONTEXT_DIR=""
+  MA_COUNCIL_CONTEXT_NONCE=""
 }
 
 ma_debate_answer_reference() {
@@ -3654,9 +3690,26 @@ ma_debate_answer_reference() {
 
 ma_prepare_council_context() {
   local base=unavailable diff_base=unavailable
-  mkdir -p "$REPO/.oms/artifacts" || return 2
-  MA_COUNCIL_CONTEXT_DIR="$(mktemp -d "$REPO/.oms/artifacts/council-context.XXXXXX")" || return 2
+  if [ -L "$REPO/.oms" ] || [ -L "$REPO/.oms/delegations" ]; then
+    echo 'error: refusing symlinked .oms for council context' >&2
+    return 2
+  fi
+  # The shared initializer tests -e then redirects, so a dangling .gitignore
+  # link would be followed to create a file outside the repository.
+  if [ -L "$REPO/.oms/.gitignore" ]; then
+    echo 'error: refusing symlinked .oms/.gitignore for council context' >&2
+    return 2
+  fi
+  mkdir -p "$REPO/.oms/delegations" || return 2
+  agent_memory_ensure_oms_ignore_for_path "$REPO/.oms/delegations/x" 2>/dev/null || true
+  MA_COUNCIL_CONTEXT_DIR="$(mktemp -d "$REPO/.oms/delegations/council-context.XXXXXX")" || return 2
   MA_COUNCIL_CONTEXT_REL="$(ma_repo_rel "$MA_COUNCIL_CONTEXT_DIR")"
+  MA_COUNCIL_CONTEXT_NONCE="$(ma_fence_id)"
+  {
+    printf 'kind=oms-council-context\n'
+    printf 'pid=%s\n' "$$"
+    printf 'nonce=%s\n' "$MA_COUNCIL_CONTEXT_NONCE"
+  } > "$MA_COUNCIL_CONTEXT_DIR/$MA_COUNCIL_MARKER" || return 2
   MA_COUNCIL_SOURCE_STATE=""
   if [ "${INCLUDE_DIFF:-0}" = 1 ] || [ "${INCLUDE_STATUS:-0}" = 1 ] ||
       { [ "${MA_KIND:-}" = review ] && [ "${NO_DIFF:-0}" = 0 ]; }; then

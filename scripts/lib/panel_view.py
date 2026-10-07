@@ -359,6 +359,8 @@ def inbox_items(report, unicode=True):
             what, shown, style = WAITING_WORDS[state], state, "alert"
         elif state == "done" and member["participant"] in awaiting:
             what, shown, style = "patch awaits admission", "review", "review"
+        elif state == "review":
+            what, shown, style = "needs review", "review", "review"
         else:
             continue
         title = clean(member.get("title"), 80)
@@ -457,7 +459,7 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
         body.append((text, item["style"], item["action"]))
     more = len(shown) - len(window) + hidden
     if shown and more and available > len(window):
-        body.append(("+%s more%s" % (more, sep + "Up/Down to scroll" if len(shown) > len(window) else ""), "dim", None))
+        body.append(("+%s more%s" % (more, sep + "arrows, wheel or page keys" if len(shown) > len(window) else ""), "dim", None))
     lines, hits = [], []
     for text, style in zip(head, styles):
         lines.append(clipped(text, width))
@@ -484,6 +486,7 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
         lines.append(box_edge("", width, unicode, "bottom"))
     lines += [clipped(line, width) for line in footer]
     navigation.update(hits=hits, items=[item["action"] for item in shown], offset=0, viewport=capacity,
+                      surface="inbox",
                       room_id=room.get("id"), positions={}, geometry=(width, height, True, False))
     return "\n".join(lines[:height - 1])
 

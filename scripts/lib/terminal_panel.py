@@ -1851,8 +1851,29 @@ def pane_option(name):
         return ""
 
 
+def reset_group_view(navigation):
+    """Leave graph inspection without touching the room or native session."""
+    if navigation.pop("group_tree", None):
+        navigation.pop("opening", None)
+    navigation.pop("expanded_groups", None)
+    navigation.pop("geometry", None)
+    if (navigation.get("selected") or (None,))[0] == "group":
+        navigation.pop("selected", None)
+    navigation["offset"] = 0
+
+
 def navigate(repo, action, state, navigation, width):
     kind, ident = action
+    if kind == "group":
+        if action not in navigation.get("items", []):
+            return
+        expanded = navigation.setdefault("expanded_groups", set())
+        expanded.discard(ident) if ident in expanded else expanded.add(ident)
+        if navigation.get("surface") == "graph":
+            navigation["group_tree"] = True
+        navigation["offset"] = 0
+        navigation.pop("geometry", None)
+        return
     if kind == "fold":
         folded = navigation.setdefault("collapsed", set())
         folded.discard(ident) if ident in folded else folded.add(ident)
@@ -2456,6 +2477,10 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                 navigate(repo, ("debate", navigation["debate_view"]["shown"]), state, navigation, size.columns)
                             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                                 navigation["notice"] = clean(str(error), 160)
+                        elif event[0] == "escape" and navigation.get("group_tree") and not navigation.get("detail"):
+                            reset_group_view(navigation)
+                            density = "graph"
+                            navigation["view"] = density
                         elif event[0] == "escape":
                             navigation.pop("opening", None)
                             if not navigation.pop("detail", None):
@@ -2485,6 +2510,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             except (OSError, ValueError, subprocess.SubprocessError) as error:
                                 navigation["notice"] = clean(str(error), 160)
                         elif event[0] in {"g", "t", "b", "v"}:
+                            if event[0] in {"g", "t"}:
+                                reset_group_view(navigation)
                             navigation.pop("detail", None)
                             navigation["offset"] = 0
                             if event[0] == "b":
