@@ -143,6 +143,22 @@ class TerminalInput:
             self.escape_since = None
 
 
+def preview_target(navigation, target):
+    """A loaded preview of the same target keeps its report; only a new target starts one."""
+    if (navigation.get("preview") or {}).get("target") != target:
+        navigation["preview"] = {"target": target}
+
+
+def hit_at(event, navigation):
+    return next((h for h in navigation.get("hits", [])
+                 if h["y"] == event[2] and h["x1"] <= event[1] <= h["x2"]), None)
+
+
+def passive_click(event, navigation):
+    """A click on plain Detail text selects text in the terminal; it changes and repaints nothing."""
+    return event[0] == "click" and (hit_at(event, navigation) or {}).get("passive", False)
+
+
 def choose(event, navigation):
     """Use only the last rendered hit map, never row numbers from a new snapshot."""
     kind = event[0]
@@ -160,9 +176,8 @@ def choose(event, navigation):
                 -1 if kind == "pageup" else 1)
             navigation["selected"] = items[min(len(items) - 1, max(0, index + step))]
     elif kind == "click":
-        hit = next((h for h in navigation.get("hits", [])
-                    if h["y"] == event[2] and h["x1"] <= event[1] <= h["x2"]), None)
-        if hit:
+        hit = hit_at(event, navigation)
+        if hit and not hit.get("passive"):
             target = hit["action"]
             if target[0] in ("pin", "tab", "message", "seat", "group"):
                 if target[0] == "group":
@@ -173,14 +188,14 @@ def choose(event, navigation):
                 return ("fold", target[1])
             # A first click selects a main tab or previews a call; repeating it opens.
             if hit.get("select") and navigation.get("primary") != target:
-                navigation["preview"] = {"target": target}
+                preview_target(navigation, target)
                 return None
             if hit.get("preview") and target[0] != "chat":
                 # A call's content stays in the board's detail area; no separate screen opens.
-                navigation["preview"] = {"target": target}
+                preview_target(navigation, target)
                 return None
             if hit.get("preview") and (navigation.get("preview") or {}).get("target") != target:
-                navigation["preview"] = {"target": target}
+                preview_target(navigation, target)
                 return None
             return target
     elif kind in ("up", "down", "home", "end") and items:
@@ -197,7 +212,7 @@ def choose(event, navigation):
             navigation["offset"] = row if row < offset else max(0, row - max(1, navigation.get("viewport", 1)) + 1)
     elif kind == "enter":
         if navigation.get("surface") == "graph" and selected in items and selected[0] in ("result", "debate"):
-            navigation["preview"] = {"target": selected}
+            preview_target(navigation, selected)
             return None
         return selected if selected in items else None
     elif kind == "f":

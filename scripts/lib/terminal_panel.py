@@ -2738,7 +2738,7 @@ def menu_input():
 
 def read_choice(repo, provider, previous, view, attention_only, navigation, cache):
     """One control key without Enter; arrows, clicks and Enter act on the Needs-you list. A line elsewhere."""
-    from panel_input import choose
+    from panel_input import choose, passive_click
     # Raw mode starts before the first frame, so keys typed while it loads are kept.
     with menu_input() as inputs:
         show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
@@ -2772,7 +2772,9 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                     continue
                 navigation.pop("notice", None)
                 navigation.pop("close_armed", None)
-                action = None if navigation.get("detail") and event[0] in ("enter", "click") else choose(event, navigation)
+                if (navigation.get("detail") and event[0] in ("enter", "click")) or passive_click(event, navigation):
+                    continue  # Ignored input; repainting would only flicker text the person is selecting.
+                action = choose(event, navigation)
                 if action:
                     width = max(1, shutil.get_terminal_size().columns)
                     navigate(repo, action, cache.get("state", {}), navigation, width)

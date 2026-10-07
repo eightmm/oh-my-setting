@@ -948,60 +948,105 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             text = ("[x All] " if every else "[+ All] ")
             hits.append({"y": y, "x1": 1, "x2": len(text) - 1, "action": ("pin", "*")})
             value, x = paint(text, "dim"), len(text)
-        room_width = width - x - 14  # "◂ " plus the widest "+NN ▸ !NN" marker
-        per_page = max(1, min(len(mains), room_width // 24))
-        tab_width = min(44, room_width // per_page)
-        first = mains.index(primary) // per_page * per_page if primary in mains else 0
-        if first:
-            hits.append({"y": y, "x1": x + 1, "x2": x + 1, "action": ("chat", mains[first - 1]["participant"]),
-                         "select": True})
-            value, x = value + "◂ " if unicode else value + "< ", x + 2
-        for m in mains[first:first + per_page]:
+        room_width = width - x
+        pieces = []
+        for number, m in enumerate(mains, 1):
             calls = teams[m["participant"]]
             title = clean(m.get("title"))
-            nickname = m["participant"][-4:] if not title or title == "Native task not recorded" else title
+            task = "" if not title or title == "Native task not recorded" else title
             alerts = sum(c["state"] in ATTENTION_STATES for c in calls) + len(grouped[m["participant"]]["review"])
             # Unread mail addressed to this main, including messages from other mains.
             unread = sum(valid_count(mapping(p).get("pending")) or 0 for p in listing(room.get("pairs"))
                          if mapping(p).get("recipient") == m["participant"])
+            asked = open_count(room, m["participant"])
             badge = " ".join("%s%s" % (mark, n) for mark, n in (
                 ("W", sum(c.get("role") == "worker" for c in calls)),
                 ("A", sum(c.get("role") != "worker" for c in calls)), ("!", alerts), ("M", unread),
-                ("?", open_count(room, m["participant"]))) if n)
+                ("?", asked)) if n)
             ctx = context_note(report, m)
             if ctx:
                 badge += (" " if badge else "") + "c%s%%" % ctx[0]
-            pin = ("[x]" if m in pinned else "[+]") if multiple else ""
+            name = name_of(m)
+            pieces.append({
+                "m": m, "task": task, "badge": badge, "alerts": alerts, "ctx": ctx, "name": name,
+                "ident": name.split(" ", 1)[0] if re.match(r"#\d+ ", name) else "#%s" % number,
+                "need": bool(alerts or unread or asked or state_of(m) in ("waiting_input", "waiting_approval")),
+                "pin": ("[x]" if m in pinned else "[+]") if multiple else ""})
+
+        def cell(p, step, cap):
+            """The tab's body text for one shrink step; (a)/(b) clip the task to cap, (c) drops it, (d) one marker, (e) the number."""
+            m = p["m"]
             mark = ("▸" if unicode else ">") if m == primary else " "
-            room_left = max(4, tab_width - (len(badge) + 1 if badge else 0) - len(pin) - 2)
-            lead, model = "%s%s %s" % (mark, activity(state_of(m), frame, unicode),
-                                       ("↳" if unicode else "^") if m.get("started_by") in tab_ids else ""), name_of(m)
-            label = lead + model + ("·" if unicode else "/") + nickname
-            if display_width(label) > room_left:
-                # The tail tells mains apart; keep it and shorten the shared model prefix first.
-                left = room_left - display_width(lead) - 1
-                keep = min(display_width(nickname), max(6, left - display_width(model)))
-                label = lead + (fit(model, max(1, left - keep)) if left - keep < display_width(model) else model) + (
-                    "·" if unicode else "/") + tail(nickname, keep)
-            body = padded(label, room_left) + (" " + badge if badge else "") + " "
+            lead = "%s%s %s" % (mark, activity(state_of(m), frame, unicode),
+                                ("↳" if unicode else "^") if m.get("started_by") in tab_ids else "")
+            if step == 4:
+                return lead + p["ident"] + " "
+            text = lead + p["name"]
+            if step < 2 and p["task"]:
+                text += ("·" if unicode else "/") + tail(p["task"], cap)
+            if step < 3 and p["badge"]:
+                text += " " + p["badge"]
+            if step == 3 and p["need"]:
+                text += " " + ("•" if unicode else "*")
+            return text + " "
+
+        def cells(step, cap=0):
+            return [(cell(p, step, cap), "" if step == 4 else p["pin"]) for p in pieces]
+
+        def total(row):
+            return sum(display_width(body) + len(pin) + 1 for body, pin in row) - 1
+
+        chosen_row = None
+        longest = max(display_width(p["task"]) for p in pieces)
+        for cap in range(max(4, min(36, longest)), 3, -1):
+            if total(cells(1, cap)) <= room_width:
+                chosen_row = cells(1, cap)
+                break
+        for step in (() if chosen_row else (2, 3, 4)):
+            if total(cells(step)) <= room_width:
+                chosen_row = cells(step)
+                break
+        if chosen_row is None:
+            chosen_row = cells(4)
+        lo, hi = 0, len(mains)
+        if total(chosen_row) > room_width:
+            at = mains.index(primary) if primary in mains else 0
+            marks = len(str(len(mains)))
+
+            def span(a, b):
+                return total(chosen_row[a:b]) + (marks + 3 if a else 0) + (marks + 3 if b < len(mains) else 0)
+            lo, hi = at, at + 1
+            while True:
+                grew = False
+                for a, b in ((lo - 1, hi), (lo, hi + 1)):
+                    if a >= 0 and b <= len(mains) and span(a, b) <= room_width:
+                        lo, hi, grew = a, b, True
+                        break
+                if not grew:
+                    break
+        if lo:
+            label = ("‹ %s" if unicode else "< %s") % lo
+            hits.append({"y": y, "x1": x + 1, "x2": min(width, x + len(label)), "action": ("chat", mains[lo - 1]["participant"]),
+                         "select": True})
+            hold = any(pieces[i]["need"] for i in range(lo))
+            value, x = value + paint(label, "alert" if hold else "dim") + " ", x + len(label) + 1
+        for p, (body, pin) in zip(pieces[lo:hi], chosen_row[lo:hi]):
+            m = p["m"]
             hits.append({"y": y, "x1": x + 1, "x2": x + display_width(body), "action": ("chat", m["participant"]),
                          "select": True})
             if pin:
                 hits.append({"y": y, "x1": x + display_width(body) + 1, "x2": x + display_width(body) + 3,
                              "action": ("pin", m["participant"])})
-            style = "alert" if alerts or (ctx and ctx[1] == "alert") else hue(m)
-            cell = (chosen(body, style) if m == primary else paint(body, style)) + paint(pin, "dim")
-            value += cell + " "
+            style = "alert" if p["alerts"] or (p["ctx"] and p["ctx"][1] == "alert") else hue(m)
+            value += (chosen(body, style) if m == primary else paint(body, style)) + paint(pin, "dim") + " "
             x += display_width(body) + len(pin) + 1
-        rest = len(mains) - first - per_page
-        if rest > 0:
-            hidden = sum(sum(c["state"] in ATTENTION_STATES for c in teams[m["participant"]]) +
-                         len(grouped[m["participant"]]["review"]) for m in mains[first + per_page:])
-            marker = "+%s %s" % (rest, "▸" if unicode else ">") + (" !%s" % hidden if hidden else "")
-            hits.append({"y": y, "x1": x + 1, "x2": min(width, x + len(marker)), "select": True,
-                         "action": ("chat", mains[first + per_page]["participant"])})
-            value += paint(marker, "alert" if hidden else "dim")
-        lines.append(value)
+        if hi < len(mains):
+            label = ("%s ›" if unicode else "%s >") % (len(mains) - hi)
+            hits.append({"y": y, "x1": x + 1, "x2": min(width, x + len(label)), "select": True,
+                         "action": ("chat", mains[hi]["participant"])})
+            hold = any(pieces[i]["need"] for i in range(hi, len(mains)))
+            value += paint(label, "alert" if hold else "dim")
+        lines.append(value if hi < len(mains) else value[:-1])
     group_actions = []
     if primary:
         for kind, title in CALL_GROUPS:
@@ -1516,12 +1561,13 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         style = (hue(previewed) if role == "MAIN" else "review" if role != "WORKER" else "worker") if previewed else "dim"
         lines.append(paint(edge, style) if span is None or not color else
                      paint(edge[:span[0]], style) + chosen(edge[span[0]:span[1]], style) + paint(edge[span[1]:], style))
-        first = 0
+        first, plain = 0, set()
         if active == "detail" and capacity == 1 and previewed and body:
             # One row holds the content line itself; a title there would leave nothing to scroll.
             first = min(scrolled.get("detail", 0), len(body) - 1)
             scrolled_now["detail"] = first
             rows = [(body[first], targets.get(first, action(previewed)), False)]
+            plain = {0} if first not in targets else set()
         elif active == "detail":
             first = min(scrolled.get("detail", 0), max(0, len(body) - (capacity - 1)))
             scrolled_now["detail"] = first
@@ -1531,6 +1577,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             rows = [(head, action(previewed) if previewed else None, False)] + [
                 (text, targets.get(first + i, action(previewed)) if previewed else None, False)
                 for i, text in enumerate(body[first:first + capacity - 1])]
+            plain = {i + 1 for i in range(capacity - 1) if first + i not in targets}
         elif active == "plan":
             plan = plan_rows(report, labels, width - 4, unicode)
             first = min(scrolled.get("detail", 0), max(0, len(plan) - capacity))
@@ -1545,8 +1592,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             line = box_row(text, width, unicode)
             lines.append("\033[7m" + line + "\033[0m" if color and picked else line)
             if target:
+                # Body text without its own link is passive, so a click that selects text changes nothing.
                 hits.append({"y": top + 1 + n, "x1": 1, "x2": width, "action": target,
-                             **({"preview": True} if active == "detail" else {})})
+                             **({"preview": True, "passive": n in plain} if active == "detail" else {})})
         lines.extend([box_row("", width, unicode)] * (rows_high - 2 - capacity))
         lines.append(paint(box_edge("", width, unicode, "bottom"), style))
         bands_hit.append({"name": "detail", "y1": top, "y2": top + rows_high - 1, "x1": 1, "x2": width, "step": 3})
@@ -1554,9 +1602,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         spare -= rows_high
     if spare and (omitted or unlinked):
         parts = ["%s more calls (scroll)" % omitted] if omitted else []
+        open_unlinked = [m for m in unlinked if classify(m) != "past"]
         if unlinked:
-            parts.append("%s call%s with no known main · t shows them" % (len(unlinked), "" if len(unlinked) == 1 else "s"))
-        add(" / ".join(parts), "alert" if unlinked else "dim")
+            parts.append("%s call%s with no known main%s · t shows them" % (
+                len(open_unlinked), "" if len(open_unlinked) == 1 else "s",
+                " (+%s past)" % (len(unlinked) - len(open_unlinked)) if len(open_unlinked) < len(unlinked) else ""))
+        add(" / ".join(parts), "alert" if open_unlinked else "dim")
         spare -= 1
     lines += [""] * max(0, height - int(menu) - len(lines) - len(footer))
     lines += [clipped(line, width) for line in footer]
@@ -1616,7 +1667,7 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph):
                 "w Worktree" if worktree else "", "f Full result" if navigation.get("full_result") else "",
                 "Tab Next tab", "g Graph", "t Tree",
                 "v " + ("Collapse" if navigation.get("expanded") else "Expand"), "b Attention", "Esc Back",
-                "F6/F7 Main" if managed else "", toggle if managed else "q Quit", "? Hide"]
+                "Shift-drag Copy" if managed else "", "F6/F7 Main" if managed else "", toggle if managed else "q Quit", "? Hide"]
         lines = [""]
         for key in [k for k in keys if k]:
             if lines[-1] and display_width(lines[-1] + "  " + key) > width:

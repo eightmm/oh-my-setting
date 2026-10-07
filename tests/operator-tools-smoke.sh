@@ -912,6 +912,7 @@ import terminal_panel as panel
 from panel_routing import allocate
 from dashboard_projection import display_width
 from panel_view import render
+from room_view import render_graph
 from panel_view import wrapped
 
 view = json.loads((temporary / "panel-active.json").read_text())
@@ -3233,6 +3234,12 @@ assert json.dumps(mailed, sort_keys=True) == mail_before, "reading main detail c
 detail_band = next(b for b in detail_nav["bands"] if b["name"] == "detail")
 choose(("scroll", 3, 5, detail_band["y1"] + 1), detail_nav)
 assert detail_nav["band_offsets"]["detail"] == 3, detail_nav["band_offsets"]
+# Plain Detail text is passive: repeated clicks neither navigate nor reset; a border row still activates the card.
+body = next(h for h in detail_nav["hits"] if h.get("passive"))
+for unused in range(2):
+    assert choose(("click", body["x1"], body["y"]), detail_nav) is None
+assert detail_nav["preview"]["target"] == ("chat", "flow-main") and "report" in detail_nav["preview"], detail_nav["preview"]
+assert not any(h.get("passive") for h in detail_nav["hits"] if h["y"] in (detail_band["y1"], detail_band["y2"]))
 tab = next(h for h in detail_nav["hits"] if h["action"] == ("chat", "flow-other") and h.get("select"))
 assert choose(("click", tab["x1"], tab["y"]), detail_nav) is None
 assert detail_nav["preview"] == {"target": ("chat", "flow-other")}
@@ -3659,14 +3666,12 @@ alarmed["attempts"]["active_recent"] += [
     {"attempt_id": "third-fail", "state": "failed", "panel": {"room_id": "flow-room", "room_participant": "third-fail", "role": "worker"}}]
 hidden_nav = {}
 narrow = render(alarmed, "codex", 80, 24, view="graph", main_attempt="flow-attempt", navigation=hidden_nav)
-assert "+1 ▸ !1" in narrow, narrow
+assert "!1" in narrow and "Opus 5.5 #main" in narrow, narrow
 for columns in range(76, 90):
     sweep_nav = {}
     swept = render(alarmed, "codex", columns, 24, view="graph", main_attempt="flow-attempt", navigation=sweep_nav)
     assert all(display_width(line) <= columns for line in swept.splitlines()), (columns, swept)
     assert all(hit["x2"] <= columns for hit in sweep_nav["hits"]), columns
-marker = next(h for h in hidden_nav["hits"] if h["action"] == ("chat", "third-main") and h.get("select"))
-assert choose(("click", marker["x1"], marker["y"]), hidden_nav) is None and hidden_nav["selected"] == ("chat", "third-main")
 lane_picture = render(alarmed, "codex", 120, 30, view="graph", navigation={})
 assert "Worker Luna 6 ! failed" in lane_picture, lane_picture
 # Finished calls leave the live drawing; their past-work count and inspection remain.
@@ -3781,6 +3786,43 @@ crowded_tabs["room"]["participants"][1]["label"] = "Shared prefix for every main
 narrow = next(line for line in render(crowded_tabs, "codex", 90, 30, view="graph", main_attempt="flow-attempt",
                                       navigation={}).splitlines() if "[+ All]" in line)
 assert narrow.count("-tail") == 2, narrow
+# Six mains stay readable at any width: tabs shrink together, then the row scrolls with counted markers.
+six = deepcopy(flow)
+six["main_windows"] = {"flow-main": 1, "flow-other": 2}
+for n in range(3, 7):
+    ident = "six-main-%s" % n
+    six["room"]["participants"].append({"participant": ident, "role": "main", "joined": True, "provider": "claude",
+                                        "model": "claude-opus-5-5", "label": "Sixth fixture task number %s" % n})
+    six["attempts"]["active_recent"].append({"attempt_id": ident, "state": "working", "panel": {
+        "room_id": "flow-room", "room_participant": ident, "role": "main"}})
+    six["main_windows"][ident] = n
+for glyphs in (True, False):
+    for columns in (44, 60, 80, 100, 140):
+        for chosen_main in ("flow-main", "six-main-4", "six-main-6"):
+            six_nav = {"selected": ("chat", chosen_main), "preview": {"target": ("chat", chosen_main)}}
+            # The graph board proper draws from 76 columns; calling it directly exercises the scrolling row too.
+            picture = render_graph(six, columns, 30, False, glyphs, None, False, False, "flow-attempt", six_nav, False)
+            assert all(display_width(line) <= columns for line in picture.splitlines()), (columns, picture)
+            lines_out = picture.splitlines()
+            row = next((line for line in lines_out if "[+ All]" in line), None)
+            assert row, (columns, glyphs, picture)
+            tab_hits = [h for h in six_nav["hits"] if h["y"] == lines_out.index(row) + 1 and h.get("select")]
+            assert six_nav["primary"] == ("chat", chosen_main), six_nav["primary"]
+            assert any(h["action"][1] == chosen_main for h in tab_hits), (columns, row)
+            counted = sum(int(left or right) for left, right in re.findall(r"(?:‹|<) (\d+)|(\d+) (?:›|>)", row))
+            assert len(set(re.findall(r"#(\d)", row))) + counted >= 6, (columns, glyphs, row)
+            assert (glyphs or row.isascii()) and all(h["x2"] <= columns for h in six_nav["hits"]), row
+            # A hit covers exactly the cells drawn for its tab or marker, and tab hits never overlap.
+            for h in tab_hits:
+                drawn = row[h["x1"] - 1:h["x2"]]
+                if re.fullmatch(r"(?:‹|<) \d+|\d+ (?:›|>)", drawn):
+                    continue
+                assert "#%s" % six["main_windows"][h["action"][1]] in drawn and drawn.endswith(" "), (row, h)
+            spans = sorted((h["x1"], h["x2"]) for h in tab_hits)
+            assert all(a[1] < b[0] for a, b in zip(spans, spans[1:])), spans
+            ends = [h for h in tab_hits if h["x2"] - h["x1"] <= 3 and h["action"][1] != chosen_main]
+            for h in ends:
+                assert choose(("click", h["x1"], h["y"]), dict(six_nav)) is None
 # A failed call marks its own main's window with "! "; a handled failure or another main's call does not.
 alarm = deepcopy(flow)
 assert not panel.main_needs_attention(alarm, "flow-attempt")
@@ -3883,7 +3925,12 @@ preview_screen = render(done_flow, "codex", 110, 40, view="graph", navigation=fu
 assert "FINAL RETAINED LINE" not in preview_screen and "f Full result" in preview_screen, preview_screen
 full_action = choose(("f",), full_nav)
 assert full_action == ("result", "builder"), full_nav
-assert choose(("enter",), full_nav) is None
+assert choose(("enter",), full_nav) is None and full_nav["preview"]["report"] is full_recorded
+same_hit = {"y": 1, "x1": 1, "x2": 9, "action": ("result", "builder"), "preview": True}
+same_nav = dict(full_nav, hits=[same_hit])
+assert choose(("click", 2, 1), same_nav) is None and same_nav["preview"]["report"] is full_recorded
+assert choose(("click", 2, 1), dict(same_nav, hits=[dict(same_hit, action=("result", "other"))],
+                                    items=[("result", "other")])) is None
 with patch.object(panel.room, "status", return_value=done_flow["room"]), \
         patch.object(panel, "call_results", return_value=deepcopy(full_recorded)) as fetch:
     # Opening is asynchronous: navigate only asks, the watcher's background read completes it.
@@ -4405,6 +4452,33 @@ for glyphs in (True, False):
     assert ("Closed 14:20 by the person" in drawn and "\033" not in drawn and (glyphs or drawn.isascii())), drawn
     assert ("close", "m1") in nav["items"], nav
 assert panel.menu_input().decode(b"1\033[B2q ") == [("1",), ("down",), ("2",), ("q",), (" ",)]
+# A full reader ignores clicks and Enter without repainting; a wheel step still redraws.
+class ReaderInput:
+    fd, batches = 0, [[("click", 3, 3), ("enter",)], [("scroll", 3)], [("q",)]]
+    def __enter__(self): return self
+    def __exit__(self, *exc): return False
+    def wait(self, seconds): return self.batches.pop(0)
+reader_nav = {"detail": {"target": ("result", "builder")}, "offset": 2}
+with patch.object(panel, "menu_input", return_value=ReaderInput()), patch.object(panel, "show") as painted, \
+        patch("panel_input.choose", wraps=choose) as chosen:
+    assert panel.read_choice(Path("."), "codex", "ready", "auto", False, reader_nav, {}) == "9"
+assert painted.call_count == 2 and reader_nav["offset"] == 0 and not any(
+    c.args[0][0] in ("click", "enter") for c in chosen.call_args_list), (painted.call_count, reader_nav)
+# A rendered graph preview: a click on plain Detail text repaints nothing; a card click and the wheel still do.
+graph_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
+render(mailed, "codex", 100, 30, view="graph", main_attempt="flow-attempt", navigation=graph_nav)
+text_hit = next(h for h in graph_nav["hits"] if h.get("passive"))
+card_hit = next(h for h in graph_nav["hits"] if h["action"] == ("chat", "flow-main") and not h.get("passive") and h.get("preview"))
+box = next(b for b in graph_nav["bands"] if b["name"] == "detail")
+class GraphInput(ReaderInput):
+    batches = [[("click", text_hit["x1"], text_hit["y"])], [("click", card_hit["x1"], card_hit["y"])],
+               [("scroll", 3, 5, box["y1"] + 1)], [("q",)]]
+with patch.object(panel, "menu_input", return_value=GraphInput()), patch.object(panel, "show") as painted, \
+        patch.object(panel, "navigate") as moved:
+    assert panel.read_choice(Path("."), "codex", "ready", "auto", False, graph_nav, {}) == "q"
+# The first frame, the card click and the wheel paint; the plain-text click does not.
+assert painted.call_count == 3 and graph_nav["preview"].get("report") == {} and moved.call_count == 1, (
+    painted.call_count, moved.call_args_list)
 assert TerminalInput().decode(b"v\033[A") == [("v",), ("up",)]
 # Keys the board does not bind are ignored, never read as Esc; Home/End work in every encoding tmux sends.
 for sequence, expected in ((b"\033[1~", "home"), (b"\033[4~", "end"), (b"\033[7~", "home"), (b"\033[8~", "end"),
@@ -4689,9 +4763,13 @@ if os.name != "nt":
     actual = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared, "--json"], room_env))["dashboard"]
     nav = {}
     render(actual, "codex", 110, 28, view="tree", navigation=nav)
+    # The recorded result sits in the collapsed unlinked "Past work" group: open it first, then click the result.
+    group_hit = next(h for h in nav["hits"] if h["action"] == ("group", ("past", "unlinked")))
+    nav["expanded_groups"] = {("past", "unlinked")}
+    render(actual, "codex", 110, 28, view="tree", navigation=nav)
     hit = next(h for h in nav["hits"] if h["action"][0] == "result")
     # The result opens from a background read; the watcher exits on its own after three snapshots, so a slow background read still lands.
-    input_bytes = ("\033[<0;8;%sM" % hit["y"]).encode()
+    input_bytes = ("\033[<0;8;%sM\033[<0;8;%sM" % (group_hit["y"], hit["y"])).encode()
     before_click = ledger.read_bytes()
     terminal(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
               "--watch", "--view", "tree", "--count", "3", "--no-animation"],
@@ -5476,6 +5554,26 @@ for evidence in ({"available": False, "active": 0}, {"available": True, "active"
     uncertain = dict(grouped_board, attempts=dict(grouped_board["attempts"], **evidence))
     unknown = next(m for m in graph_view.nodes(uncertain) if m["participant"] == "old-unknown")
     assert graph_view.call_classifier(uncertain)(unknown) == "live"
+# Calls whose main is gone group like linked ones; the graph counts only the open ones.
+orphans = deepcopy(grouped_board)
+orphans["room"]["participants"] = [claude_main] + [dict(m, parent="gone-main") for m in grouped_board["room"]["participants"]
+                                                  if m["participant"] in {"pending-patch", "past-call", "review-call", "live-call"}]
+for mode in ("tree", "graph"):
+    for glyphs in (True, False):
+        nav = {"dismissed": True}
+        picture = render(orphans, "codex", 120, 80, view=mode, unicode=glyphs, navigation=nav)
+        if mode == "tree":
+            assert ("result", "live-call") in nav["items"] and ("result", "past-call") not in nav["items"], nav
+            assert "Past work (1)" in picture and "Needs review (2)" in picture, picture
+            for kind in ("review", "past"):
+                target = ("group", (kind, "unlinked"))
+                hit = next(h for h in nav["hits"] if h["action"] == target)
+                assert choose(("click", hit["x1"], hit["y"]), nav) == target
+                panel.navigate(project, target, orphans, nav, 120)
+            render(orphans, "codex", 120, 80, view=mode, unicode=glyphs, navigation=nav)
+            assert ("result", "past-call") in nav["items"] and ("result", "review-call") in nav["items"], nav
+        else:
+            assert "3 calls with no known main (+1 past)" in picture, picture
 for mode in ("tree", "graph"):
     nav = {"dismissed": True}
     picture = render(grouped_board, "codex", 120, 80, view=mode, navigation=nav)

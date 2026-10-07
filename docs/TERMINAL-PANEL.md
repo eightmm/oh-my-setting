@@ -131,8 +131,11 @@ nothing on a managed tmux board (use `F9`). Resize discards pending coordinate
 clicks; a refresh discards them only when it changes the drawn hit map.
 The selection is shown before a chat or result opens.
 
-Mouse support is enabled only in the OMS tmux session, never globally. Hold
-Shift for the terminal's own text selection. The watcher restores mouse
+Mouse support is enabled only in the OMS tmux session, never globally. To copy
+text, hold Shift while dragging for the terminal's own selection (emulators
+differ), or use tmux copy-mode (`prefix [`). Clicking plain Detail text, or a
+full result's text, neither navigates nor repaints; nothing is copied to the
+OS clipboard automatically. The watcher restores mouse
 reporting, echo, canonical input and the cursor on exit, interrupt and
 HUP/TERM; the OMS session's tmux `mouse` option is set best effort (the watcher keeps
 keyboard input if tmux refuses) and stays on afterwards, so it also applies to the

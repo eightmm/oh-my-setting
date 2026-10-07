@@ -54,6 +54,42 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     def phrase(call):
         return call_span(call, "→" if unicode else "->")
 
+    def call_groups(attached, owner, root_stem):
+        groups = [(role, [m for m in attached if m.get("role") == role and classify(m) == "live"])
+                  for role in ("council", "advisor", "reviewer", "worker")]
+        groups += [(kind, [m for m in attached if classify(m) == kind]) for kind, _ in CALL_GROUPS]
+        groups = [(role, children) for role, children in groups if children]
+        for group_index, (role, children) in enumerate(groups):
+            last_group = group_index == len(groups) - 1
+            group_title = dict(CALL_GROUPS).get(role)
+            group_key = (role, owner)
+            heading = group_title or ("COUNCIL" if role == "council" else role.upper() + "S")
+            if group_title:
+                mark = ("▾" if group_key in expanded else "▸") if unicode else ("v" if group_key in expanded else ">")
+                unknown = sum(c["state"] == "presence unknown" for c in children)
+                add(root_stem + (end if last_group else prefix) + "%s %s (%s)%s" % (
+                    mark, heading, len(children), " / %s earlier unknown" % unknown if unknown else ""),
+                    "review" if role == "review" else "dim", ("group", group_key))
+                if group_key not in expanded:
+                    continue
+            else:
+                add(root_stem + (end if last_group else prefix) + heading + " (%s)" % len(children),
+                    "worker" if role == "worker" else "review")
+            indent = root_stem + ("   " if last_group else stem)
+            for child_index, child in enumerate(children):
+                branch = end if child_index == len(children) - 1 else prefix
+                model = model_name(child)
+                label = child.get("title") or child["participant"]
+                child_action = child.get("_action") or ("result", child["participant"])
+                if child.get("_native"):
+                    child_action = None
+                    label += sep + "answer stays in the main transcript"
+                add(indent + branch + "%s %s%s%s" % (activity(child["state"], frame, unicode), model, sep, phrase(child) + (sep + "patch awaits admission"
+                        if child["state"] == "done" and child.get("participant") in listing(report.get("awaiting_admission")) else "")),
+                    tone(child["state"]), child_action)
+                for line in wrapped(label, max(1, content_width - display_width(indent) - 3), 2):
+                    add(indent + "   " + line, None, child_action)
+
     roots = set(owners)
     for n, main in enumerate(mains):
         root_stem = "  "
@@ -84,48 +120,11 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         for line in declared_status(room, main["participant"], max(1, content_width - 4)):
             add(root_stem + "  " + line, None, action)
         if not folded:
-            groups = [(role, [m for m in attached if m.get("role") == role and classify(m) == "live"])
-                      for role in ("council", "advisor", "reviewer", "worker")]
-            groups += [(kind, [m for m in attached if classify(m) == kind]) for kind, _ in CALL_GROUPS]
-            groups = [(role, children) for role, children in groups if children]
-            for group_index, (role, children) in enumerate(groups):
-                last_group = group_index == len(groups) - 1
-                group_title = dict(CALL_GROUPS).get(role)
-                group_key = (role, main["participant"])
-                heading = group_title or ("COUNCIL" if role == "council" else role.upper() + "S")
-                if group_title:
-                    mark = ("▾" if group_key in expanded else "▸") if unicode else ("v" if group_key in expanded else ">")
-                    unknown = sum(c["state"] == "presence unknown" for c in children)
-                    add(root_stem + (end if last_group else prefix) + "%s %s (%s)%s" % (
-                        mark, heading, len(children), " / %s earlier unknown" % unknown if unknown else ""),
-                        "review" if role == "review" else "dim", ("group", group_key))
-                    if group_key not in expanded:
-                        continue
-                else:
-                    add(root_stem + (end if last_group else prefix) + heading + " (%s)" % len(children),
-                        "worker" if role == "worker" else "review")
-                indent = root_stem + ("   " if last_group else stem)
-                for child_index, child in enumerate(children):
-                    branch = end if child_index == len(children) - 1 else prefix
-                    model = model_name(child)
-                    label = child.get("title") or child["participant"]
-                    child_action = child.get("_action") or ("result", child["participant"])
-                    if child.get("_native"):
-                        child_action = None
-                        label += sep + "answer stays in the main transcript"
-                    add(indent + branch + "%s %s%s%s" % (activity(child["state"], frame, unicode), model, sep, phrase(child) + (sep + "patch awaits admission"
-                            if child["state"] == "done" and child.get("participant") in listing(report.get("awaiting_admission")) else "")),
-                        tone(child["state"]), child_action)
-                    for line in wrapped(label, max(1, content_width - display_width(indent) - 3), 2):
-                        add(indent + "   " + line, None, child_action)
+            call_groups(attached, main["participant"], root_stem)
     unlinked = [m for m in calls if m.get("parent") not in roots]
     if unlinked:
         add("Calls with no known main", "alert")
-        for n, child in enumerate(unlinked):
-            add((end if n == len(unlinked) - 1 else prefix) + "%s %s%s%s" % (
-                activity(child["state"], frame, unicode), child.get("title") or child["participant"], sep,
-                phrase(child)),
-                tone(child["state"]), ("result", child["participant"]))
+        call_groups(unlinked, "unlinked", "")
     if not mains and not calls:
         add("No main connected" if room.get("id") else "Select a work room", "dim")
         if menu:
