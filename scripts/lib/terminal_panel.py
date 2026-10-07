@@ -215,13 +215,17 @@ def bootstrap(provider, repo):
         "--verify COMMAND (write). Light, clear tasks use GPT-6 Luna; routine "
         "implementation and long explanations use Sonnet 5.5; main-level work "
         "uses this owner's Sol/Opus preset without promoting the worker. "
-        "When implementation is long or spans several separable files or steps, do not write it all "
-        "yourself: split it into bounded, non-overlapping write workers (scoped brief with paths, constraints, "
-        "success criteria and a --verify command), run independent ones in parallel, and keep architecture, "
-        "integration, review and patch admission in the main; small or tightly coupled edits stay with the main. "
+        "Act as the control tower: by default delegate implementation, investigation and test repair to "
+        "bounded workers (scoped brief with paths, constraints, success criteria and a --verify command), split "
+        "separable files or steps into non-overlapping workers run in parallel, and keep scope, briefs, "
+        "architecture, integration, review, patch admission and coordination with other mains in the main. "
+        "Work directly only when writing the brief would take longer than the edit, or when the step needs the "
+        "main itself, such as integrating into a shared tree another main has frozen. "
         "At material decisions use oms panel --dispatch advisor --owner %s "
-        "--seat auto|astra|fable --repo . --prompt TEXT. Auto selects Astra "
-        "for a Claude owner and Fable for a Codex owner. Advisors are read-only. "
+        "--seat astra|fable|auto --repo . --prompt TEXT, choosing the seat by need: astra (GPT-6 Astra) "
+        "for source-level correctness, code paths, tooling and test evidence; fable (Fable 5.1) for design, "
+        "user-facing wording and UX, architecture trade-offs and judgment calls; ask both for an irreversible "
+        "or contested decision. Auto picks the family other than the owner's. Advisors are read-only. "
         "For a gate use --dispatch reviewer with --verify COMMAND. "
         "Give every subtask a short descriptive --task-id ID and --label TITLE; reuse the exact "
         "reviewed plan task ID when one exists. These calls record "
@@ -759,7 +763,8 @@ def watch_shell(repo, provider=None, session=None):
 def panel_environment():
     return ["env"] + [name + "=" + os.environ[name] for name in
                       ("OMS_PANEL_NO_ANIMATION", "OMS_PANEL_COLOR", "NO_COLOR", "OMS_CODEX_NOTIFY", "OMS_CLAUDE_NOTIFY",
-                       "OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_PANEL_HOST", "OMS_PANEL_VIEW", "OMS_PANEL_POSITION") if name in os.environ]
+                       "OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_PANEL_HOST", "OMS_PANEL_VIEW", "OMS_PANEL_POSITION",
+                       "OMS_PANEL_THEME", "COLORFGBG") if name in os.environ]
 
 
 def board_view(view):
@@ -1000,6 +1005,27 @@ def bind_window(pane, launch, view, attention_only):
         subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_" + key, value), check=True)
 
 
+# F6/F7 are unbound in Claude Code and Codex 0.160 keymaps; Alt/Shift arrows edit or queue input there.
+MAIN_KEYS = (("F7", "next-window"), ("F6", "previous-window"))
+# Windows without a native chat pane (control, worktree shells) are stepped over, up to two in a row.
+NOT_MAIN = "#{==:#{@oms_panel_native_pane},}"
+
+
+def bind_main_keys():
+    """No-prefix main switching in OMS panel sessions; elsewhere the key reaches the pane unchanged.
+
+    tmux root bindings are server-wide, so a key the user already bound is left alone.
+    """
+    quiet = dict(capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+    for key, command in MAIN_KEYS:
+        found = subprocess.run(tmux_command("list-keys", "-T", "root", key), **quiet)
+        if found.returncode == 0 and "oms-panel-" not in found.stdout:
+            continue
+        skip = " ; if-shell -F '%s' %s" % (NOT_MAIN, command)
+        subprocess.run(tmux_command("bind-key", "-n", key, "if-shell", "-F", "#{m:oms-panel-*,#{session_name}}",
+                                    command + skip * 2, "send-keys " + key), **quiet)
+
+
 def legacy_session(repo):
     """A single pre-existing random-named panel proven for this checkout is adopted, never several."""
     try:
@@ -1046,6 +1072,7 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
     env = os.environ.copy()
     env["OMS_PANEL_SESSION"] = session
     created = pane = None
+    bind_main_keys()
     try:
         if owner is not None:
             # The project's panel already exists: add the requested native window, then attach.
@@ -1208,6 +1235,34 @@ def snapshot(repo, room_id=None):
                 if ident:
                     state["room"] = {"id": ident, "error": "room evidence unavailable"}
                     status = 1
+            if state["room"].get("participants"):
+                # Board-only extras, kept in memory; any failure leaves the board as the room alone draws it.
+                state.pop("native_advisors", None)
+                state.pop("finalized", None)
+                state.pop("main_windows", None)
+                if managed_session():
+                    # The board lays mains out in window order so F6/F7 step to the neighbouring column.
+                    try:
+                        found = subprocess.run(tmux_command("list-windows", "-t", "=" + os.environ["OMS_PANEL_SESSION"], "-F",
+                                                            "#{window_index}\t#{@oms_panel_room_participant}"),
+                                               capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+                        rows = [line.replace("\r", "").split("\t") for line in found.stdout.splitlines()]
+                        state["main_windows"] = {row[1]: int(row[0]) for row in reversed(rows)
+                                                 if len(row) == 2 and row[0].isdigit() and row[1]}
+                    except (OSError, subprocess.SubprocessError):
+                        pass
+                try:
+                    import panel_chats
+                    state["native_advisors"] = panel_chats.native_advisors(state["room"]["participants"])
+                except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+                    pass
+                try:
+                    if any(row.get("state") in {"failed", "timed_out", "abandoned", "orphaned"} for key in ("active_recent", "recent")
+                           for row in state.get("attempts", {}).get(key) or []):
+                        state["finalized"] = {row["task_id"]: row["outcome"] for row in results(repo).get("rows", [])
+                                              if row.get("outcome") in {"completed", "accepted"}}
+                except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
+                    pass
         return state, status
     except (OSError, ValueError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
         return {"repo": {"name": repo.name}, "collection": {"ok": False}}, 1
@@ -1264,6 +1319,32 @@ def draw_frame(view, size, capable, last=None):
     return view, size
 
 
+def session_option(name):
+    """A user option of this panel's tmux session ("" when unset or unknown)."""
+    session = os.environ.get("OMS_PANEL_SESSION", "")
+    if not session:
+        return ""
+    try:
+        # tmux 3.4 option commands reject "=name"; the panel session name is exact and OMS-owned.
+        result = subprocess.run(tmux_command("show-options", "-v", "-t", session, name),
+                                capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def window_active():
+    """Whether this pane's window is the one its tmux session shows; None when unknown."""
+    try:
+        result = subprocess.run(tmux_command("display-message", "-p", "-t", os.environ.get("TMUX_PANE", ""),
+                                             "#{window_active}"),
+                                capture_output=True, text=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = result.stdout.strip() if result.returncode == 0 else ""
+    return value == "1" if value in ("0", "1") else None
+
+
 def pane_option(name):
     try:
         result = subprocess.run(tmux_command("show-option", "-w", "-v", "-t",
@@ -1285,7 +1366,8 @@ def navigate(repo, action, state, navigation, width):
         pinned = navigation.get("pinned")
         pinned = navigation.get("auto_pins") or [] if pinned is None else pinned
         if ident == "*":
-            navigation["pinned"] = [] if set(mains) <= set(pinned) else list(mains)
+            # All means automatic, so a main that joins later is shown too, not a frozen list.
+            navigation["pinned"] = [] if set(mains) <= set(pinned) else None
         else:
             navigation["pinned"] = [m for m in pinned if m != ident] + ([] if ident in pinned else [ident])
         return
@@ -1302,8 +1384,8 @@ def navigate(repo, action, state, navigation, width):
         import panel_chats
         opened = panel_chats.open_chat(repo, room_id, ident,
             allowed_methods={"existing-terminal", "app-uri", "windows-uri"})
-        navigation["notice"] = "Opened the chat " + {"existing-terminal": "in its window", "app-uri": "in the app",
-                                                      "windows-uri": "in the app"}.get(opened["method"], "")
+        navigation["notice"] = "Chat navigation requested " + {"existing-terminal": "in its window", "app-uri": "in the app",
+                                                                  "windows-uri": "in the app"}.get(opened["method"], "")
     elif kind in {"result", "debate"}:
         # The full screen re-reads and re-verifies evidence; the preview cache is only for the board.
         report = call_results(repo, action)
@@ -1403,8 +1485,10 @@ def refreshed_navigation(navigation, state, saved_pins=None):
         navigation = {"collapsed": set(), "offset": 0}
     elif navigation.get("preview"):
         navigation["preview"]["refresh"] = True
-    if saved_pins and "pinned" not in navigation:
-        navigation["pinned"] = [] if saved_pins == "-" else [
+    # The session's saved pins apply when they change, so a pin made in one window reaches every board.
+    if saved_pins and saved_pins != navigation.get("saved_pins"):
+        navigation["saved_pins"] = saved_pins
+        navigation["pinned"] = [] if saved_pins == "-" else None if saved_pins == "*" else [
             ident for ident in saved_pins.split(",") if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", ident)]
     return navigation
 
@@ -1554,6 +1638,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             state, status, main_attempt = {"repo": {"name": repo.name}, "collection": {"ok": False, "pending": True}}, 0, None
             density, filtered = view or board_view("auto"), attention_only
             next_read, next_frame, revision = 0, 0, 0
+            next_focus, was_active = 0, None
             while True:
                 collected = False
                 if background:
@@ -1577,7 +1662,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     if not background or revision == submitted_revision:
                         density, filtered = read_density, read_filtered
                     navigation = refreshed_navigation(navigation, state, managed_session() and
-                                                      "pinned" not in navigation and pane_option("@oms_panel_pins"))
+                                                      session_option("@oms_panel_pins"))
                     if n and not sys.stdout.isatty():
                         print("----")
                     n += 1
@@ -1617,6 +1702,17 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         resized = os.get_terminal_size(sys.stdout.fileno()) != size
                     except (OSError, ValueError):
                         resized = False
+                    if managed_session() and inputs.fd is not None and time.monotonic() >= next_focus:
+                        # Arriving at this window (F6/F7, Ctrl-b n, a click elsewhere) shows its own main again;
+                        # a pick made earlier on this board must not keep another main selected.
+                        next_focus = time.monotonic() + 1
+                        active = window_active()
+                        if active and was_active is False and navigation.get("selected"):
+                            for key in ("selected", "preview", "detail"):
+                                navigation.pop(key, None)
+                            navigation["band_offsets"] = {}
+                            size = redraw()
+                        was_active = active if active is not None else was_active
                     if resized:
                         if (managed_session() and not expanded and
                                 os.environ.get("OMS_PANEL_POSITION", "auto") == "auto"):
@@ -1702,8 +1798,11 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                     try:
                                         navigate(repo, action, state, navigation, size.columns)
                                         if managed_session():
-                                            subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
-                                                "@oms_panel_pins", ",".join(navigation["pinned"]) or "-"),
+                                            # Pins are one choice for the whole panel session, so every window's board agrees.
+                                            navigation["saved_pins"] = ("*" if navigation["pinned"] is None
+                                                                        else ",".join(navigation["pinned"]) or "-")
+                                            subprocess.run(tmux_command("set-option", "-t", os.environ.get("OMS_PANEL_SESSION", ""),
+                                                "@oms_panel_pins", navigation["saved_pins"]),
                                                 check=False, timeout=2, stdin=subprocess.DEVNULL)
                                     except (OSError, ValueError, subprocess.SubprocessError) as error:
                                         navigation["notice"] = clean(str(error), 160)
@@ -1785,25 +1884,30 @@ def browse_chats(repo):
     while True:
         report = panel_chats.catalog(repo, ident)
         print(panel_chats.text(report))
-        choice = read_field("Chat number (Enter to return): ", required=False)
+        choice = read_field("Chat number (a<number> for Codex app, Enter to return): ", required=False)
         if not choice:
             return
-        if not choice.isascii() or not choice.isdigit() or not 1 <= int(choice) <= len(report["rows"]):
+        app = choice.startswith("a")
+        number = choice[1:] if app else choice
+        if not number.isascii() or not number.isdigit() or not 1 <= int(number) <= len(report["rows"]):
             print("Choose a listed chat number.")
             continue
-        row = report["rows"][int(choice) - 1]
-        if row["status"] == "artifacts":
+        row = report["rows"][int(number) - 1]
+        if app and (row["provider"] != "codex" or row["role"] != "main" or not row["uri"]):
+            print("Codex app navigation requires an enrolled native Codex main.")
+        elif row["status"] == "artifacts":
             evidence = results(repo, room_participant=row["participant"])
             evidence["rows"] = [r for r in evidence["rows"] if r.get("calls")]
             print(render_results(evidence, shutil.get_terminal_size().columns))
         else:
             try:
-                request = panel_chats.open_chat(repo, ident, row["participant"])
+                request = panel_chats.open_chat(repo, ident, row["participant"], surface="app" if app else "auto")
                 print("Chat navigation requested: " + request["method"])
             except ValueError as error:
                 print(clean(str(error), 180))
                 if row.get("session_id"):
-                    print("Native session: " + row["session_id"] + " / choose it in the Claude app sidebar")
+                    hint = "Claude app sidebar" if row["provider"] == "claude" else "Codex app"
+                    print("Native session: " + row["session_id"] + " / choose it in the " + hint)
         read_field("Press Enter to return to chats: ", required=False)
 
 

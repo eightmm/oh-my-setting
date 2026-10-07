@@ -1,5 +1,6 @@
 """Explicit native-chat navigation; never mix transcripts into shared room state."""
 
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -18,6 +19,10 @@ SESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,159}\Z")
 UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 MAX_ENTRIES = 8192
 MAX_FILES = 4096
+TAIL_BYTES = 512 * 1024
+ADVISOR_MAX_AGE = 1800
+ADVISOR_MODELS = (("fable", "Fable 5.1"), ("opus", "Opus 5.5"), ("sonnet", "Sonnet 5.5"))
+_transcripts = {}
 
 
 def parent_only():
@@ -88,6 +93,96 @@ def native_index(wanted):
                         found[provider].setdefault(consumer, set()).add(sid)
             except (OSError, ValueError, RecursionError):
                 continue
+    return found
+
+
+def _claude_home():
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def _read_owned(path, limit, tail=False):
+    """Bytes from an own-uid regular file without following links; the last `limit` bytes when `tail`."""
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise OSError("unsafe native file")
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb") as handle:
+        actual = os.fstat(handle.fileno())
+        if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (info.st_dev, info.st_ino):
+            raise OSError("native file changed")
+        start = max(0, actual.st_size - limit) if tail else 0
+        handle.seek(start)
+        data = handle.read(limit)
+    if start and b"\n" in data:
+        data = data.split(b"\n", 1)[1]  # the cut may land mid-line
+    return data
+
+
+def _advisor_label(home):
+    try:
+        value = json.loads(_read_owned(home / "settings.json", 1024 * 1024)).get("advisorModel")
+    except (OSError, ValueError, AttributeError, RecursionError):
+        return "Advisor"
+    value = str(value).lower() if isinstance(value, str) else ""
+    return next((label for key, label in ADVISOR_MODELS if key in value), "Advisor")
+
+
+def native_advisors(members):
+    """Claude Code's built-in advisor calls still unanswered, per main participant; in memory only.
+
+    Reads only tool names, ids and timestamps from the tail of each main's own transcript."""
+    mains = {m["consumer"]: m["participant"] for m in members
+             if m.get("provider") == "claude" and m.get("role") == "main" and m.get("joined")
+             and isinstance(m.get("consumer"), str) and len(m["consumer"]) == 32}
+    found = {}
+    if not mains:
+        return found
+    home = _claude_home()
+    label = None
+    for consumer, participant in list(mains.items())[:8]:
+        try:
+            path = _transcripts.get(consumer)
+            if path is None:
+                sids = native_index({consumer})["claude"].get(consumer) or ()
+                for sid in sorted(sids)[:1]:
+                    with os.scandir(home / "projects") as slugs:
+                        for slug in list(slugs)[:MAX_FILES]:
+                            candidate = Path(slug.path) / (sid + ".jsonl")
+                            if slug.is_dir(follow_symlinks=False) and candidate.is_file() and not candidate.is_symlink():
+                                path = _transcripts[consumer] = candidate
+                                break
+                if path is None:
+                    continue
+            calls, answered = [], set()
+            try:
+                data = _read_owned(path, TAIL_BYTES, tail=True)
+            except OSError:
+                _transcripts.pop(consumer, None)
+                continue
+            for line in data.split(b"\n"):
+                if b"advisor" not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    content = row["message"]["content"]
+                except (ValueError, KeyError, TypeError, RecursionError):
+                    continue
+                for part in content if isinstance(content, list) else ():
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "server_tool_use" and part.get("name") == "advisor" and isinstance(part.get("id"), str):
+                        calls.append((part["id"], row.get("timestamp")))
+                    elif part.get("type") == "advisor_tool_result" and isinstance(part.get("tool_use_id"), str):
+                        answered.add(part["tool_use_id"])
+            if not calls or calls[-1][0] in answered:
+                continue
+            started = datetime.fromisoformat(str(calls[-1][1]).replace("Z", "+00:00")).astimezone()
+            if abs(datetime.now(started.tzinfo).timestamp() - started.timestamp()) > ADVISOR_MAX_AGE:
+                continue
+            label = label or _advisor_label(home)
+            found[participant] = {"model": label, "started": started.strftime("%H:%M")}
+        except (OSError, ValueError, TypeError, RecursionError):
+            continue
     return found
 
 
@@ -227,6 +322,20 @@ def plan(repo, ident, who, surface="auto"):
         if os.name == "nt":
             method = "windows-uri"
         elif shutil.which(launcher):
+            if sys.platform == "linux":
+                if not shutil.which("xdg-mime"):
+                    raise ValueError("Codex app handler cannot be verified: xdg-mime is unavailable")
+                try:
+                    handler = subprocess.run(
+                        ["xdg-mime", "query", "default", "x-scheme-handler/codex"],
+                        capture_output=True, text=True, check=False, timeout=3,
+                        stdin=subprocess.DEVNULL)
+                except (OSError, UnicodeError, subprocess.SubprocessError):
+                    raise ValueError("Codex app handler cannot be verified")
+                value = handler.stdout if isinstance(handler.stdout, str) else ""
+                if (handler.returncode or len(value) > 256
+                        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,239}\.desktop\r?\n?", value)):
+                    raise ValueError("Codex app handler is unavailable or invalid")
             commands.append([launcher, row["uri"]])
             method = "app-uri"
         else:

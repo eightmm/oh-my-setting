@@ -1413,6 +1413,7 @@ for owner in panel.PROVIDERS:
     assert arguments[arguments.index("--model") + 1] == expected, arguments
     assert "--dispatch worker" in panel.bootstrap(owner, project)
     assert "--dispatch advisor" in panel.bootstrap(owner, project)
+    assert "control tower: by default delegate" in panel.bootstrap(owner, project)
 option_text = "--dangerously-skip-permissions"
 assert panel.native_command("claude", project, task=option_text)[-2:] == ["--", option_text]
 assert option_text not in panel.native_command("codex", project, task=option_text)[:-1]
@@ -1927,7 +1928,7 @@ if os.name == "posix":
     import termios
     import time
 
-    def terminal(command, inputs, expected, trigger=None, signal_after=None, expected_exit=0):
+    def terminal(command, inputs, expected, trigger=None, signal_after=None, expected_exit=0, timeout=20):
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(project)
@@ -1937,7 +1938,7 @@ if os.name == "posix":
         pending = inputs.splitlines(keepends=True)
         prompts = 0
         output = b""
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + timeout
         finished = False
         try:
             while time.monotonic() < deadline:
@@ -1994,7 +1995,8 @@ if os.name == "posix":
                            "--then", "working"]).strip()
     ledger = project / ".oms/lifecycle/events.jsonl"
     before_motion = ledger.read_bytes()
-    terminal(["bash", str(panel.ENTRY), "panel", "--watch", "--count", "2"], b"", b"\033[2K")
+    # Two collections sit five seconds apart and each can take seconds under a parallel gate.
+    terminal(["bash", str(panel.ENTRY), "panel", "--watch", "--count", "2"], b"", b"\033[2K", timeout=60)
     assert ledger.read_bytes() == before_motion, "animation wrote lifecycle state"
     call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "transition",
           "--attempt", motion_attempt, "--state", "cancelled"])
@@ -2065,6 +2067,8 @@ if os.name == "posix":
 
             sessions = tmux_wait(["list-sessions", "-F", "#{session_name}"], "oms-panel-")
             session = next(s for s in sessions.splitlines() if s.startswith("oms-panel-"))
+            # F6/F7 switch windows only in OMS panel sessions; other sessions receive the key itself.
+            tmux_wait(["list-keys", "-T", "root", "F7"], "#{m:oms-panel-*,#{session_name}}")
             subprocess.run(tmux + ["set-environment", "-t", session, "PANEL_TEST_NATIVE_HOLD", "1"], env=env, check=True)
             panes = tmux_wait(["list-panes", "-t", session, "-F", "#{pane_id}"], "%").splitlines()
             control = panes[0]
@@ -2105,7 +2109,8 @@ if os.name == "posix":
                 tmux_wait(["display-message", "-p", "-t", listing[1], "#{window_zoomed_flag}"], "1")
                 enlarged = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "MAIN / ")
                 main_row, main_text = next((n + 1, line) for n, line in enumerate(enlarged.splitlines()) if "MAIN / " in line)
-                main_col = main_text.index("MAIN / ") + 2
+                # Cards sit in window order, the F6/F7 order: codex opened first, so claude's card is second.
+                main_col = main_text.index("MAIN / ", main_text.index("MAIN / ") + 1 if owner == "claude" else 0) + 2
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "\033[<0;%s;%sM" % (main_col, main_row)], env=env, check=True)
                 tmux_wait(["display-message", "-p", "-t", listing[1], "#{window_zoomed_flag}"], "0")
                 tmux_wait(["display-message", "-p", "-t", session + ":" + owner, "#{pane_id}"], listing[0])
@@ -2512,6 +2517,15 @@ choose(("right",), nav)
 assert nav["selected"] == ("chat", "flow-main")
 choose(("left",), nav)
 assert nav["selected"] == ("chat", "flow-other")
+# Mains follow tmux window order, the order F6/F7 step through; the tree leads with this window's main.
+windowed = dict(flow, main_windows={"flow-other": 1, "flow-main": 2})
+tabs = next(line for line in render(windowed, "codex", 110, 30, view="graph", main_attempt="flow-attempt",
+                                    navigation={}).splitlines() if "All]" in line)
+assert tabs.index("Opus 5.5·Other") < tabs.index("Sol·Main native chat"), tabs
+tree = render(windowed, "codex", 110, 40, view="tree")
+assert tree.index("Other native chat") < tree.index("Main native chat"), tree
+tree = render(windowed, "codex", 110, 40, view="tree", main_attempt="flow-attempt")
+assert tree.index("Main native chat") < tree.index("Other native chat"), tree
 # Wheel input scrolls only the band under the pointer.
 crowded = deepcopy(flow)
 crowded["room"]["participants"] += [{"participant": "extra-%s" % n, "role": "worker", "model": "gpt-6-luna",
@@ -2856,13 +2870,13 @@ marker = next(h for h in hidden_nav["hits"] if h["action"] == ("chat", "third-ma
 assert choose(("click", marker["x1"], marker["y"]), hidden_nav) is None and hidden_nav["selected"] == ("chat", "third-main")
 lane_picture = render(alarmed, "codex", 120, 30, view="graph", navigation={})
 assert "Worker Luna ! failed" in lane_picture, lane_picture
-# Finished calls leave the board; their count remains, with results in the main's detail.
+# Finished calls leave the board; their count remains as "N done", with results in the main's detail.
 finished_flow = deepcopy(flow)
 for attempt in finished_flow["attempts"]["active_recent"]:
     if attempt["attempt_id"] == "builder":
         attempt["state"] = "done"
 finished_picture = render(finished_flow, "codex", 120, 34, view="graph", navigation={"dismissed": True})
-assert "Worker Sonnet" not in finished_picture and "1 finished" in finished_picture, finished_picture
+assert "Worker Sonnet" not in finished_picture and "1 done" in finished_picture, finished_picture
 lines_of = finished_picture.splitlines()
 assert next(i for i, l in enumerate(lines_of) if "Advisor Astra" in l) < next(i for i, l in enumerate(lines_of) if "MAIN / Sol" in l) \
     < next(i for i, l in enumerate(lines_of) if "Worker Luna" in l), finished_picture
@@ -2919,19 +2933,36 @@ picture = render(counted, "codex", 157, 34, view="graph", main_attempt="flow-att
                  navigation={"overview": True, "dismissed": True})
 first_line = picture.splitlines()[0]
 assert "1 unread message" in first_line and re.search(r"\d\d:\d\d$", first_line), first_line
-assert "Latest sent: Finished. Rebasing the parser" in picture and "explorer" not in picture and "1 finished" in picture, picture
-assert "Advisor · none active" in picture, picture
+assert "Latest sent: Finished. Rebasing the parser" in picture and "explorer" not in picture and "1 done" in picture, picture
+# Advisors and reviewers sit in their own box above each main, which shows its work over several rows.
+assert "ADVISORS / REVIEWS / none active" in picture, picture
+lane_rows = picture.splitlines()
+main_top = next(i for i, l in enumerate(lane_rows) if "MAIN / " in l)
+assert next(i for i, l in enumerate(lane_rows) if "ADVISORS / REVIEWS" in l) < main_top, picture
+assert next(i for i, l in enumerate(lane_rows) if i > main_top and l.startswith("╰─┬")) - main_top > 3, picture
 idle_other = deepcopy(flow)
 idle_other["room"]["participants"] = [p for p in idle_other["room"]["participants"] if p["participant"] != "foreign-child"]
 empty_lane = render(idle_other, "codex", 160, 34, view="graph", navigation={"dismissed": True})
-assert "Worker · none running" in empty_lane, empty_lane
+assert "└ no workers" in empty_lane, empty_lane
 lonely = deepcopy(flow)
 lonely["room"]["participants"] = [p for p in lonely["room"]["participants"] if p["participant"] == "flow-main"]
 alone = render(lonely, "codex", 120, 30, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
 assert "Advisors: none active" in alone and "Workers: none running" in alone, alone
 navigate_state = {"mains": ["flow-main", "flow-other"], "pinned": ["flow-main"]}
 panel.navigate(Path("."), ("pin", "*"), {}, navigate_state, 80)
-assert navigate_state["pinned"] == ["flow-main", "flow-other"]
+# Selecting a main that is not pinned still gives it a lane, so the tab marker never points at nothing.
+trio = deepcopy(flow)
+trio["room"]["participants"].append({"participant": "flow-third", "role": "main", "joined": True, "provider": "claude",
+                                     "model": "claude-sonnet-5-5", "label": "Third native chat"})
+trio["attempts"]["active_recent"].append({"attempt_id": "flow-third", "state": "working", "panel": {
+    "room_id": "flow-room", "room_participant": "flow-third", "role": "main"}})
+partial = render(trio, "codex", 160, 40, view="graph", navigation={"pinned": ["flow-main", "flow-third"],
+                                                                  "selected": ("chat", "flow-other")})
+assert "▸ MAIN / Opus 5.5" in partial, partial
+# All is automatic, not a frozen list: a main that joins later is shown as well.
+assert navigate_state["pinned"] is None
+assert panel.refreshed_navigation({"room_id": "flow-room"}, flow, "*")["pinned"] is None
+navigate_state["auto_pins"] = ["flow-main", "flow-other"]
 panel.navigate(Path("."), ("pin", "flow-main"), {}, navigate_state, 80)
 assert navigate_state["pinned"] == ["flow-other"]
 assert json.dumps(flow, sort_keys=True) == flow_before
@@ -2960,7 +2991,19 @@ for columns in (139, 140, 141, 200):
         assert "PRIVATE OTHER MAIL" not in mailbox, mailbox
     else:
         assert "WORK STATUS" not in drawn
-assert "\033[36m" in render(wide_flow, "codex", 200, 44, view="graph", color=True)
+from panel_view import PALETTE
+colored = render(wide_flow, "codex", 200, 44, view="graph", color=True)
+# Each provider keeps its own hue, and a selection is a coloured block, never a bare white inversion.
+assert PALETTE["worker"] in colored and PALETTE["codex"] in colored, colored
+assert colored.count("\033[7m") == colored.count(PALETTE["main"] + "\033[7m") + colored.count(PALETTE["codex"] + "\033[7m") + sum(
+    colored.count(PALETTE[k] + "\033[7m") for k in ("worker", "review", "alert", "bad", "dim")), colored
+# Light terminal themes get darker shades of the same hues.
+for theme_env, shade in (({"OMS_PANEL_THEME": "light"}, "166"), ({"COLORFGBG": "0;15"}, "166"),
+                         ({"COLORFGBG": "15;0"}, "209"), ({"OMS_PANEL_THEME": "dark", "COLORFGBG": "0;15"}, "209")):
+    picked = subprocess.run([sys.executable, "-c", "import panel_view; print(repr(panel_view.PALETTE['main']))"],
+                            env=dict(os.environ, PYTHONPATH=str(Path(panel.__file__).parent), **theme_env),
+                            capture_output=True, text=True, check=True).stdout
+    assert "38;5;" + shade + "m" in picked, (theme_env, picked)
 flow_publication = deepcopy(flow)
 flow_publication["room"]["publications"] = {"claude": {"status": "submitted", "delivery_unknown": True}}
 for columns, rows in ((76, 16), (100, 22), (100, 48)):
@@ -3273,6 +3316,7 @@ with patch.object(panel, "managed_session", return_value=False), \
     nav = {"room_id": shared}
     panel.navigate(project, ("chat", main_attempts["codex"]), tree_room, nav, 91)
     assert opened.call_args.kwargs == {"allowed_methods": {"existing-terminal", "app-uri", "windows-uri"}}, opened.call_args
+    assert nav["notice"] == "Chat navigation requested in its window"
     left = deepcopy(tree_room["room"])
     for member in left["participants"]:
         member["joined"] = False
@@ -3492,8 +3536,17 @@ with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats.shut
     assert navigation_calls == before_ambiguous
     current_session[0] = "$1"
     navigation_calls[:] = navigation_calls[:2]
-    app = panel_chats.open_chat(project, shared, "chat-sol", "app", dry_run=True)
-    assert app["uri"] == native["uri"] and len(navigation_calls) == 2
+    with patch.object(panel_chats.sys, "platform", "linux"), \
+            patch.object(panel_chats.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, "codex.desktop\n", "")) as handler_probe:
+        app = panel_chats.open_chat(project, shared, "chat-sol", "app", dry_run=True)
+    assert app["uri"] == native["uri"]
+    assert len(navigation_calls) == 2
+    if os.name != "nt":
+        assert app["commands"] == [["xdg-open", native["uri"]]]
+        assert handler_probe.call_args.args[0] == ["xdg-mime", "query", "default", "x-scheme-handler/codex"]
+    else:
+        assert app["method"] == "windows-uri" and not handler_probe.called
     with patch.object(panel_chats.sys, "platform", "linux"):
         try:
             panel_chats.open_chat(project, shared, "chat-opus", "app", dry_run=True)
@@ -3514,6 +3567,34 @@ with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats.shut
             patch.object(panel.sys, "stdout", io.StringIO()):
         panel.browse_chats(project)
     assert selected.call_args.args[2] == "chat-sol"
+    assert selected.call_args.kwargs == {"surface": "auto"}
+    with patch.object(panel, "read_field", side_effect=["a1", "", ""]), \
+            patch.object(panel_chats, "catalog", return_value={"room": shared, "rows": [native]}), \
+            patch.object(panel_chats, "open_chat", return_value=app) as selected, \
+            patch.object(panel.sys, "stdout", io.StringIO()):
+        panel.browse_chats(project)
+    assert selected.call_args.kwargs == {"surface": "app"}
+    assert selected.call_args.args[2] == "chat-sol"
+    with patch.object(panel, "read_field", side_effect=["", "a1", "", ""]), \
+            patch.object(panel_chats, "catalog", return_value={"room": shared, "rows": [native]}), \
+            patch.object(panel_chats, "open_chat") as selected:
+        panel.browse_chats(project)
+    selected.assert_not_called()
+    claude_row = next(r for r in chats["rows"] if r["participant"] == "chat-opus")
+    with patch.object(panel, "read_field", side_effect=["a1", "", ""]), \
+            patch.object(panel_chats, "catalog", return_value={"room": shared, "rows": [claude_row]}), \
+            patch.object(panel_chats, "open_chat") as selected, \
+            patch.object(panel.sys, "stdout", io.StringIO()) as output:
+        panel.browse_chats(project)
+    selected.assert_not_called()
+    assert "requires an enrolled native Codex main" in output.getvalue()
+    for row, hint in ((native, "Codex app"), (claude_row, "Claude app sidebar")):
+        with patch.object(panel, "read_field", side_effect=["1", "", ""]), \
+                patch.object(panel_chats, "catalog", return_value={"room": shared, "rows": [row]}), \
+                patch.object(panel_chats, "open_chat", side_effect=ValueError("navigation unavailable")), \
+                patch.object(panel.sys, "stdout", io.StringIO()) as output:
+            panel.browse_chats(project)
+        assert hint in output.getvalue(), output.getvalue()
 # Navigation needs this repo's active main provenance; copied identifiers are insufficient.
 valid_window = "@42\t" + chat_attempt + "\t" + shared + "\t%42\tchat-sol\t" + str(project.resolve()) + "\t$1\n"
 for bad_window in (valid_window.replace(str(project.resolve()), str(temporary / "foreign-repo")),
@@ -3581,6 +3662,66 @@ assert " / left" in panel_chats.text(reason_report) and "ambiguous native identi
 
 # Desktop navigation uses the exact session and only an advertised native
 # flag. Inspecting a plan must not run a model or force-close a live session.
+if os.name != "nt":
+  with patch.dict(os.environ, chat_env, clear=True), \
+          patch.object(panel_chats.sys, "platform", "linux"), \
+          patch.object(panel_chats, "catalog", return_value=chats):
+    mime_command = ["xdg-mime", "query", "default", "x-scheme-handler/codex"]
+    app_command = ["xdg-open", "codex://threads/" + chat_codex]
+    for missing in ("xdg-open", "xdg-mime"):
+        with patch.object(panel_chats.shutil, "which", side_effect=lambda tool: None if tool == missing else "/fixture/" + tool), \
+                patch.object(panel_chats.subprocess, "run") as launched:
+            try:
+                panel_chats.open_chat(project, shared, "chat-sol", "app")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("missing Linux app tool was accepted")
+            launched.assert_not_called()
+    failures = (subprocess.CompletedProcess(mime_command, 0, "", ""),
+                subprocess.CompletedProcess(mime_command, 1, "codex.desktop\n", ""),
+                subprocess.CompletedProcess(mime_command, 0, "../codex.desktop\n", ""),
+                subprocess.CompletedProcess(mime_command, 0, "codex.desktop\nextra.desktop\n", ""),
+                subprocess.CompletedProcess(mime_command, 0, "x" * 257, ""),
+                subprocess.TimeoutExpired(mime_command, 3))
+    for failure in failures:
+        with patch.object(panel_chats.shutil, "which", return_value="/fixture/tool"), \
+                patch.object(panel_chats.subprocess, "run", side_effect=(failure if isinstance(failure, Exception) else None),
+                             return_value=(None if isinstance(failure, Exception) else failure)) as launched:
+            try:
+                panel_chats.open_chat(project, shared, "chat-sol", "app")
+            except ValueError as error:
+                assert "handler" in str(error)
+            else:
+                raise AssertionError("unverified Linux handler was accepted")
+            assert launched.call_count == 1 and launched.call_args.args[0] == mime_command
+    with patch.object(panel_chats.shutil, "which", return_value="/fixture/tool"), \
+            patch.object(panel_chats.subprocess, "run", side_effect=[
+                subprocess.CompletedProcess(mime_command, 0, "codex.desktop\n", ""),
+                subprocess.CompletedProcess(app_command, 0, "", "")]) as launched:
+        requested = panel_chats.open_chat(project, shared, "chat-sol", "app")
+        assert requested["status"] == "navigation_requested" and not requested["ui_observed"]
+        assert requested["commands"] == [app_command]
+        assert [call.args[0] for call in launched.call_args_list] == [mime_command, app_command]
+    with patch.object(panel_chats.shutil, "which", return_value="/fixture/tool"), \
+            patch.object(panel_chats.subprocess, "run", side_effect=[
+                subprocess.CompletedProcess(mime_command, 0, "codex.desktop\n", ""),
+                subprocess.CompletedProcess(mime_command, 0, "", "")]) as launched:
+        assert panel_chats.open_chat(project, shared, "chat-sol", "app", dry_run=True)["method"] == "app-uri"
+        try:
+            panel_chats.open_chat(project, shared, "chat-sol", "app")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a stale app plan launched without a current handler")
+        assert [call.args[0] for call in launched.call_args_list] == [mime_command, mime_command]
+    with patch.object(panel_chats, "terminal_commands", return_value=[]), \
+            patch.object(panel_chats.shutil, "which", return_value="/fixture/tool"), \
+            patch.object(panel_chats.subprocess, "run", return_value=subprocess.CompletedProcess(
+                mime_command, 0, "codex.desktop\n", "")) as launched:
+        preferred = panel_chats.open_chat(project, shared, "chat-sol", dry_run=True)
+        assert preferred["method"] == "existing-terminal"
+        launched.assert_not_called()
 for platform in ("darwin", "win32"):
     for supported in (True, False):
         with patch.dict(os.environ, chat_env, clear=True), \
@@ -3612,6 +3753,14 @@ with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats, "ca
 assert room.records(project, shared) == room_before_chats, "chat navigation cannot mutate shared history"
 chat_cli_env = dict(chat_env)
 chat_cli_env.pop("TMUX")
+mime_fixture = binary / "xdg-mime"
+mime_fixture.write_text("#!/usr/bin/env bash\n" +
+                        "test \"$1 $2 $3\" = 'query default x-scheme-handler/codex' || exit 1\n" +
+                        "printf 'codex.desktop\\n'\n")
+mime_fixture.chmod(0o755)
+opener_fixture = binary / "xdg-open"
+opener_fixture.write_text("#!/usr/bin/env bash\nexit 0\n")
+opener_fixture.chmod(0o755)
 listed = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
                         "--chats", "--json"], chat_cli_env))
 assert listed["kind"] == "oms-panel-chats" and any(r["uri"] for r in listed["rows"])
@@ -3764,6 +3913,51 @@ debate_connected = render(native_report, "claude", 91, 40, view="tree", main_att
 assert "COUNCIL (1)" in debate_connected and "Debate: Pick next work" in debate_connected, debate_connected
 assert "1 seat(s) answering" in debate_connected and "this window" in debate_connected, debate_connected
 assert ("debate", ("decide", member)) in debate_navigation["items"]
+# Claude Code's built-in advisor shows above its main only while unanswered, read from the
+# main's own transcript tail; finalized failed calls leave the board.
+from datetime import datetime, timezone
+advisor_home = temporary / "advisor-claude"
+(advisor_home / "projects" / "slug").mkdir(parents=True)
+(advisor_home / "settings.json").write_text('{"advisorModel": "fable"}')
+advisor_sid = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
+advisor_consumer = hashlib.sha256(advisor_sid.encode()).hexdigest()[:32]
+advisor_log = advisor_home / "projects" / "slug" / (advisor_sid + ".jsonl")
+advisor_use = {"timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"), "message": {"content": [
+    {"type": "server_tool_use", "name": "advisor", "id": "srvtoolu_1"}]}}
+advisor_log.write_text("partial{\n" + json.dumps(advisor_use) + "\nnot json advisor\n")
+claude_main = {"participant": "adv-main", "provider": "claude", "role": "main", "joined": True, "label": "Claude",
+               "consumer": advisor_consumer, "seq": 1}
+with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
+    open_call = panel_chats.native_advisors([claude_main])
+    assert open_call["adv-main"]["model"] == "Fable 5.1" and len(open_call["adv-main"]["started"]) == 5, open_call
+    assert panel_chats.native_advisors([dict(claude_main, provider="codex")]) == {}
+    advisor_log.write_text(advisor_log.read_text() + json.dumps({"timestamp": advisor_use["timestamp"], "message": {"content": [
+        {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_1", "content": "ciphertext"}]}}) + "\n")
+    assert panel_chats.native_advisors([claude_main]) == {}
+board = {"room": {"id": "adv-room", "participants": [claude_main]}, "attempts": {"active_recent": [], "recent": []}}
+plain_board = graph_view.render_graph(board, 100, 40)
+assert "Fable 5.1" not in plain_board and "Built-in advisor" not in plain_board, plain_board
+advisor_board = graph_view.render_graph(dict(board, native_advisors=open_call), 100, 40)
+assert "Fable 5.1" in advisor_board and "Built-in advisor" in advisor_board, advisor_board
+nav = {"selected": ("result", "native-advisor-adv-main"), "preview": {"target": ("result", "native-advisor-adv-main"), "report": {}}}
+assert "answer stays inside the main" in graph_view.render_graph(dict(board, native_advisors=open_call), 100, 40, navigation=nav)
+failed_worker = {"participant": "adv-worker", "provider": "codex", "role": "worker", "joined": True, "label": "Worker",
+                 "parent": "adv-main", "seq": 2}
+failed_board = dict(board, room={"id": "adv-room", "participants": [claude_main, failed_worker]}, attempts={"active_recent": [
+    {"attempt_id": "adv-attempt", "state": "failed", "task_id": "adv-task", "panel": {"role": "worker", "room_id": "adv-room",
+     "room_participant": "adv-worker", "label": "Broken patch"}}], "recent": []})
+assert "Broken patch" in graph_view.render_graph(failed_board, 100, 40)
+assert "Broken patch" in graph_view.render_graph(dict(failed_board, finalized={"other": "accepted"}), 100, 40)
+assert "Broken patch" not in graph_view.render_graph(dict(failed_board, finalized={"adv-task": "accepted"}), 100, 40)
+# A call missing from a complete active list for ten minutes has ended; a just-joined one stays,
+# and a truncated active list (the projection keeps 8 rows) proves nothing.
+untracked = dict(board, attempts={"available": True, "active": 0, "active_recent": [], "recent": []},
+                 room={"id": "adv-room", "participants": [claude_main, dict(
+    failed_worker, label="Old patch", joined_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 900)))]})
+assert "Old patch" not in graph_view.render_graph(untracked, 100, 40)
+assert "Old patch" in graph_view.render_graph(dict(untracked, attempts=dict(untracked["attempts"], active=9)), 100, 40)
+untracked["room"]["participants"][1]["joined_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+assert "Old patch" in graph_view.render_graph(untracked, 100, 40)
 resumed_lifecycle = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
                                       "show", "--attempt", resumed["attempt"], "--json"]))
 resumed_lifecycle.update(terminal=False, state="blocked")

@@ -1,12 +1,26 @@
 """Bounded terminal presentation of the existing read-only dashboard contract."""
 
+import os
 import unicodedata
 
 from dashboard_projection import clean, count, display_width, fit, listing, mapping, number, wrap_label as wrapped
 from panel_routing import policy
 
-PALETTE = {"main": "\033[1;38;5;173m", "worker": "\033[36m", "review": "\033[35m",
-           "good": "\033[32m", "alert": "\033[33m", "bad": "\033[31m", "dim": "\033[90m"}
+
+
+def light_theme():
+    """OMS_PANEL_THEME=light|dark wins; else a light COLORFGBG background (7 or 15) means light."""
+    chosen = os.environ.get("OMS_PANEL_THEME", "").lower()
+    if chosen in ("light", "dark"):
+        return chosen == "light"
+    return os.environ.get("COLORFGBG", "").rpartition(";")[2] in ("7", "15")
+
+
+# 256-colour hues: Claude warm, Codex blue, workers teal, advisors lavender; darker shades on light themes.
+PALETTE = {name: "\033[%s38;5;%sm" % ("1;" if name in ("main", "codex", "head") else "", shade[light_theme()])
+           for name, shade in {"main": (209, 166), "codex": (75, 25), "worker": (80, 30), "review": (141, 97),
+                               "head": (117, 24), "good": (114, 28), "alert": (221, 130), "bad": (203, 160),
+                               "dim": (245, 242)}.items()}
 PROVIDER_NAMES = {"codex": "Codex", "claude": "Claude Code"}
 TERMINAL_STATES = {"done", "failed", "cancelled", "timed_out", "abandoned"}
 TASK_NAMES = {"peer-delegate": "Implement patch", "delegate": "Implement patch",
@@ -332,7 +346,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     if menu:
         footer = menu_rows(width, height, unicode, mapping(navigation).get("menu_help", False), managed)
         if managed:
-            footer.append("tmux: window picker / next / detach")
+            footer.append("F6/F7 previous/next main / Ctrl-b 0 control / Ctrl-b d detach")
     footer.extend(["OMS exits not acceptance; native subagents unobserved"] if width >= 54
                   else ["OMS records only; not acceptance", "Native subagents unobserved"])
     if height < 20:
@@ -343,7 +357,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     budget = max(0, height - len(footer) - int(menu))
     repo = mapping(report.get("repo"))
     add(("✳ " if unicode else "* ") + "OMS " + ("control panel" if menu else "dashboard") +
-        " / " + (repo.get("name") or "repository"), "main")
+        " / " + (repo.get("name") or "repository"), "head")
     for alert in alerts:
         add(alert, "bad")
     if height >= 20:

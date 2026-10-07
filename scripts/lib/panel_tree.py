@@ -4,7 +4,7 @@ from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import header_rows
 from panel_view import (ATTENTION_STATES, MODEL_NAMES, PALETTE, activity, box_edge, box_row, clipped,
                         menu_rows, status_alerts, tone, usage_labels, worker_rows, wrapped)
-from room_view import nodes, readable, said
+from room_view import nodes, readable, said, window_order
 
 
 def render_tree(report, width, height, color=False, unicode=True, frame=None, menu=False,
@@ -20,8 +20,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     members = nodes(report)
     current = next((m["participant"] for m in members if main_attempt and
                     (m["participant"] == main_attempt or m.get("attempt") == main_attempt)), None)
-    mains = sorted([m for m in members if m.get("role") == "main"],
-                   key=lambda m: (m["participant"] != current, m.get("seq", 0), m["participant"]))
+    # This window's main leads so its team stays on screen; the rest keep the F6/F7 window order.
+    mains = sorted(window_order(report, [m for m in members if m.get("role") == "main"]),
+                   key=lambda m: m["participant"] != current)
     calls = sorted([m for m in members if m.get("role") != "main"],
                    key=lambda m: (m.get("seq", 0), m["participant"]))
     owners = {ident: m for m in mains for ident in (m["participant"], m.get("attempt")) if ident}
@@ -61,7 +62,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             activity(state, frame, unicode), "this window" + sep if main["participant"] == current else "", model,
         )
         status = said_state + (sep + "%s calls" % len(attached) if folded else "")
-        add(label if width < 60 else label + sep + status, "main", action, bool(attached))
+        add(label if width < 60 else label + sep + status, "codex" if main.get("provider") == "codex" else "main",
+            action, bool(attached))
         if width < 60:
             add("  " + status, tone(state), action)
         title = main.get("title")
@@ -210,7 +212,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         if inner:
             value = box_edge(value, width, unicode, "divider") if row.get("divider") else box_row(value, width, unicode)
         if color and row.get("action") and row["action"] == selected:
-            value = "\033[7m" + value + "\033[0m"
+            value = PALETTE[style or "head"] + "\033[7m" + value + "\033[0m"
         elif color and style:
             value = PALETTE[style] + value + "\033[0m"
         output.append(value)

@@ -458,11 +458,20 @@ The launcher does not autonomously fan out before the main has a task.
 
 [The panel policy](../config/panel-routing.json) is separate from generic OMS
 provider defaults. An explicit native `--model` override preserves native effort
-settings; main-level workers still use the policy preset. Advisor `--seat auto`
-selects Astra for a Claude main and Fable for a Codex main. Explicit seats allow
-either advisor. Advisors are useful at material decisions; the bootstrap does
+settings; main-level workers still use the policy preset. Mains choose the advisor
+seat by need: Astra for source-level correctness, code paths, tooling and test
+evidence; Fable for design, user-facing wording and UX, architecture trade-offs and
+judgment; both for an irreversible or contested decision. `--seat auto` selects the
+other family (Astra for a Claude main, Fable for a Codex main). Advisors are useful at material decisions; the bootstrap does
 not ask the main to call both on every turn. A missing provider or unsupported
 model fails that route without silently selecting another model.
+
+A panel main acts as the control tower: its bootstrap delegates implementation,
+investigation and test repair to bounded workers by default and keeps scope,
+briefs, integration, review, patch admission and coordination with other mains.
+It works directly only when a brief would cost more than the edit or the step
+needs the main itself. Outside the panel, the global rule still requires an
+explicit request before spawning subagents.
 
 Task complexity and write authority are independent. A write worker needs an
 implementation purpose, scoped brief file and mechanical verifier. Read workers
@@ -598,12 +607,15 @@ has participant/message headroom; otherwise, or when `--room` is given, the
 existing room rules apply. Rooms stay bounded and task-scoped; the panel
 outlives them. Separate tmux servers are separate scopes. Each native conversation gets
 its own sidebar with state refreshed every five seconds. Existing windows and tmux settings
-are preserved. With default bindings, `Ctrl-b w` picks a window and `Ctrl-b d`
+are preserved, with one addition: `F6`/`F7` move to the previous/next main window without the
+prefix, and the board lays its main columns out in that window order. tmux key bindings are server-wide, so the binding acts only in `oms-panel-*` sessions,
+passes the key through unchanged in every other session, and is not installed when the key is
+already bound. With default bindings, `Ctrl-b w` picks a window and `Ctrl-b d`
 detaches while work continues. Quit in the control pane also detaches. Failed
 construction rolls back only the new OMS session or added window. Inline returns to the menu
 when the native CLI exits and refreshes then; it has no permanent sidebar.
 
-Each recorded MAIN has a closed orange card. ADVISORS, REVIEWERS and WORKERS
+Each recorded MAIN has a closed card, orange for Claude and blue for Codex; workers are teal and advisors lavender, and a selection is a block in its own colour. ADVISORS, REVIEWERS and WORKERS
 share that card's borders, with separate labelled role dividers. Individual
 calls keep their title and metadata inside the role section without nested
 boxes. The repository control view shows `NEXT MAIN` as a one-line preset;
@@ -701,7 +713,9 @@ Use `oms panel --watch --no-animation` for a motion-free view, or set
 opened sidebars. Redirected output and `TERM=dumb` are static plain snapshots.
 `NO_COLOR` controls color independently. `OMS_PANEL_COLOR=always` enables color
 only in the OMS panel even when its environment inherits `NO_COLOR`;
-`OMS_PANEL_COLOR=never` disables it, and `auto` preserves the default. Redirected
+`OMS_PANEL_COLOR=never` disables it, and `auto` preserves the default.
+`OMS_PANEL_THEME=light` (or a light `COLORFGBG` background) uses darker shades for light
+terminal themes; `dark` forces the default shades. Redirected
 output and `TERM=dumb` stay plain in every mode. The watch restores the terminal cursor
 on exit or interruption. The control menu redraws on actions rather than
 animating over an input prompt.
