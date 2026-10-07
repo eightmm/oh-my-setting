@@ -98,7 +98,7 @@ OMS_HARNESS_SAFE_RESIDUE_WORKTREE=""
 
 # Resolve a marker only as evidence. The removal target itself is derived from
 # the managed residue shape and can therefore never be an arbitrary marker
-# path. Production creates delegate/admission/scratch/land-gate worktrees as
+# path. Production creates delegate, admission, scratch and land-gate worktrees as
 # <residue>/wt and Antigravity read worktrees as <residue>/tree.
 oms_harness_safe_residue_worktree() {
   local base="$1"

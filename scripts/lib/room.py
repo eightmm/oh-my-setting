@@ -481,6 +481,11 @@ def selected(repo, consumer=None, preferred=None, who=None):
     return candidates[0][2:] if len(candidates) == 1 else (None, None) if enrolled else None
 
 
+def messages(repo, room):
+    """Every projected message of the room, oldest first; reads nothing else and writes nothing."""
+    return project(records(repo, room))["messages"]
+
+
 def status(repo, room):
     state = project(records(repo, room))
     state["message_count"] = len(state["messages"])

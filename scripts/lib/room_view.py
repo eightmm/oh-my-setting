@@ -35,6 +35,9 @@ def nodes(report):
         attempt = next((row for row in linked.get(member.get("participant"), [])
                         if mapping(row.get("panel")).get("role") == member.get("role")), {})
         meta = mapping(attempt.get("panel"))
+        if not attempt:
+            # Outside the projection window: the full-projection row for this call, when the snapshot found one.
+            attempt = mapping(mapping(report.get("room_attempts")).get(member.get("participant")))
         status = mapping(mapping(report.get("provider_status")).get("codex"))
         native = mapping(status.get("native_models"))
         reading = mapping(native.get(member.get("participant")))
@@ -486,6 +489,7 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
 
 
 FINISHED = {"done", "cancelled"}
+MAX_LANES = 6
 
 
 def latest_answer(report):
@@ -558,16 +562,32 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     pins = navigation.get("pinned")
     if pins and not any(m["participant"] in pins for m in mains):
         pins = navigation["pinned"] = None  # pins saved for another room do not apply here
+    cap = width // 30
+
+    def grid_columns(count):
+        # Four to six mains fill two rows when each lane keeps 30 columns and the board is tall enough.
+        cols = (count + 1) // 2
+        return cols if 4 <= count <= MAX_LANES and height >= 30 and (width - cols + 1) // cols >= 30 else 0
+
     if (pins is None and (not main_attempt or navigation.get("expanded") or navigation.get("overview"))
-            and 2 <= len(mains) <= width // 30):
+            and (2 <= len(mains) <= cap or grid_columns(len(mains)))):
         # The live board, the control window or an expanded board overviews every main that fits.
         pins = [m["participant"] for m in mains]
     navigation["auto_pins"] = pins if navigation.get("pinned") is None else None
     pinned = [m for m in mains if m["participant"] in (pins or ())]
-    lanes = pinned[:width // 30] if len(pinned) >= 2 and height >= 20 else []
-    if lanes and primary in mains and primary not in lanes:
-        # The selected main always has a lane, so the tab marker never points at an undrawn main.
-        lanes = [m for m in mains if m in lanes[:width // 30 - 1] or m is primary]
+
+    def lane_set(limit):
+        chosen = pinned[:limit] if len(pinned) >= 2 and height >= 20 else []
+        if chosen and primary in mains and primary not in chosen:
+            # The selected main always has a lane, so the tab marker never points at an undrawn main.
+            chosen = [m for m in mains if m in chosen[:limit - 1] or m is primary]
+        return chosen
+
+    grid_cols = grid_columns(min(len(pinned), MAX_LANES))
+    lanes = lane_set(MAX_LANES if grid_cols else cap)
+    if grid_cols and len(lanes) != len(pinned):
+        grid_cols = grid_columns(len(lanes))
+    grid = bool(grid_cols)
     preview = mapping(navigation.get("preview"))
     previewed = next((m for m in mains + [c for calls in everyone.values() for c in calls]
                       if action(m) == preview.get("target")), None)
@@ -582,6 +602,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                               if action(m) == selected), None)
         footer = footer_hints(navigation, width, managed, unicode, chosen_member, len(mains), True,
                               bool(room_debates(report)))
+    hint_rows = len(footer)
     if navigation.get("notice"):
         if height >= 20 or menu:
             footer.append(clean(navigation["notice"], 180))
@@ -589,6 +610,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             # A short board shows the notice in place of the hints, never silently.
             fixed = "  ".join(footer_hints({}, width, managed, unicode, None, 0, True)[-1].split("  ")[-2:])
             footer = [clipped(clean(navigation["notice"], 180), max(1, width - display_width(fixed) - 2)) + "  " + fixed]
+            hint_rows = 1
     publications = mapping(room.get("publications"))
     if publications:
         footer.append("APP DELIVERY / " + " | ".join("%s: %s%s" % (
@@ -598,6 +620,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     bar = None if menu else spawn_bar(width, navigation)
     if bar:
         footer.append(bar[0])
+    if not menu:
+        # The key hints are always the board's last rows; notices, delivery and the start bar sit just above.
+        footer = footer[hint_rows:] + footer[:hint_rows]
     lines, hits, bands_hit = [], [], []
 
     def add(value, style=None):
@@ -800,19 +825,25 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         wires -= wire_rows * len(embedded)
 
     def fits(extra):
-        return budget - used - extra >= 6 if lanes else budget - used - wires - extra >= minimum_total
+        return budget - used - extra >= (20 if grid else 6) if lanes else budget - used - wires - extra >= minimum_total
 
     def detail_rows():
         # The overview keeps one-line cards so the selected block's detail gets the rest.
         if not previewed:
             return 0
-        room_left = budget - used - (max(6, (budget - used) // 2) if lanes else wires + minimum_total) - 1
+        room_left = budget - used - (max(20 if grid else 6, (budget - used) // 2) if lanes else wires + minimum_total) - 1
         return room_left if room_left >= 5 else 3 if fits(3) else 0
 
     reserve = detail_rows()
     if lanes and not fits(reserve):
-        lanes = []
-        reserve = detail_rows()
+        if grid:
+            # Two rows do not fit: one row, as when the board is too narrow for a grid.
+            grid = False
+            lanes = lane_set(cap) if navigation.get("pinned") or len(mains) <= cap else []
+            reserve = detail_rows()
+        if lanes and not fits(reserve):
+            lanes = []
+            reserve = detail_rows()
     if not lanes and not fits(0):
         from panel_view import render
         navigation.update(hits=[], items=[], viewport=0, positions={})
@@ -843,7 +874,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     card_height = next((candidate for candidate in range(6, 2, -1)
                         if drawn_rows(candidate) <= available_cards), 3)
     if reserve > 3 and height < 9 * band_count + 20:
-        card_height, reserve = 3, budget - used - wires - (3 * band_count if lanes else minimum_total) - 1
+        card_height, reserve = 3, budget - used - wires - (3 * band_count * (1 + grid) if lanes else minimum_total) - 1
     automatic = False
     if (interactive and not previewed and primary and not lanes and height >= 24
             and not navigation.get("dismissed")):
@@ -973,11 +1004,20 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
     def lane_view(rows):
         """One lane per main: its advisors and reviewers above it, one box per running worker below it."""
-        count = len(lanes)
-        lane_width = (width - count + 1) // count
+        per_row = grid_cols if grid else len(lanes)
+        lane_width = (width - per_row + 1) // per_row
+        if grid:
+            # Row 2 starts below row 1's tallest lane; each row gets half the rows.
+            for start in range(0, len(lanes), grid_cols):
+                lane_row(lanes[start:start + grid_cols], rows // 2, lane_width)
+        else:
+            lane_row(lanes, rows, lane_width)
+
+    def lane_row(group, rows, lane_width):
+        first_band = len(bands_hit)
         tag_of = {"advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate"}
         columns = []
-        judge_sets = {m["participant"]: [c for c in teams[m["participant"]] if c.get("role") != "worker"][:3] for m in lanes}
+        judge_sets = {m["participant"]: [c for c in teams[m["participant"]] if c.get("role") != "worker"][:3] for m in group}
         most = max(1, max(len(judges) for judges in judge_sets.values()))
         # With room, each main's advisors and reviewers share one box above it; boxes and mains line up across lanes.
         boxed = rows >= 16
@@ -994,7 +1034,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         # Spare rows grow every main card alike, up to three task lines, keeping one worker box below.
         body = max(1, min(3, rows - lift - 3 - 3 - 1)) if rows >= 12 else 0
         head = 3 + body if body else 3
-        for i, m in enumerate(lanes):
+        for i, m in enumerate(group):
             x0 = i * (lane_width + 1)
             top = len(lines) + 1
             calls = teams[m["participant"]]
@@ -1078,6 +1118,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         depth = max(len(cells) for cells in columns)
         for row in range(depth):
             lines.append(" ".join(cells[row] if row < len(cells) else " " * lane_width for cells in columns).rstrip())
+        for band in bands_hit[first_band:]:
+            band["y2"] = min(band["y2"], len(lines))
 
     scrolled_now = {"judge": judge_start, "worker": worker_start}
     main_width, main_left = layout(width, 1, True)
@@ -1150,6 +1192,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         logs = [clipped("%s → %s: %s" % (person(m.get("sender")), person((listing(m.get("targets")) or ["all"])[0]),
                                         readable(m.get("text"), " ") or "(empty)"), width - 4)
                 for m in messages[-min(3, spare - 2):]]
+        first = len(lines) + 2
+        shown = messages[-min(3, spare - 2):]
+        hits += [{"y": first + i, "x1": 1, "x2": width, "action": ("message", str(m.get("id")))}
+                 for i, m in enumerate(shown)]
         for line in card("RECENT MESSAGES", logs, width, len(logs) + 2, unicode):
             add(line, "dim")
     elif spare >= 3 and listing(room.get("repo_tasks")):
@@ -1157,10 +1203,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         body = ["%s · %s" % (t.get("title") or t.get("id"), said(t.get("state"))) for t in tasks[:spare - 2]]
         for line in card("REPOSITORY TASKS", body, width, len(body) + 2, unicode):
             add(line, "dim")
+    lines += [""] * max(0, height - int(menu) - len(lines) - len(footer))
     lines += [clipped(line, width) for line in footer]
     if bar:
-        lines[-1] = paint(lines[-1], "main" if bar[1] else "dim")
-        hits += [{"y": len(lines), "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
+        row = len(lines) - (hint_rows + 1 if not menu else 1)
+        lines[row] = paint(lines[row], "main" if bar[1] else "dim")
+        hits += [{"y": row + 1, "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
     visible = [m for lane in lanes for m in teams[lane["participant"]]] if lanes else shown_judges + shown_workers
     items = [("chat", m["participant"]) for m in mains] + [action(m) for m in visible]
     items += [action(m) for m in children] + [action(m) for calls in everyone.values() for m in calls]
@@ -1189,7 +1237,7 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph, deba
         keys = ["Enter Open", move + " Move", arrows + " Main" if mains > 1 else "",
                 "Space " + ("Pin" if graph else "Fold") if mains else "", "a Ask advisor",
                 "w Worktree" if worktree else "", "f Full result" if navigation.get("full_result") else "",
-                "g Graph", "t Tree", "d Debates" if debates else "",
+                "g Graph", "t Tree", "d Debates" if debates else "", "m Messages",
                 "v " + ("Collapse" if navigation.get("expanded") else "Expand"), "b Attention", "Esc Back",
                 "F6/F7 Main" if managed else "", toggle if managed else "q Quit", "? Hide"]
         lines = [""]
@@ -1202,7 +1250,7 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph, deba
                   "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
                   "Enter Chat" if kind == "chat" else "Enter Show",
                   "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
-                  "d Debates" if debates else "",
+                  "d Debates" if debates else "", "m Messages",
                   ("Space Pin" if graph else "Space Fold") if kind == "chat" and (mains > 1 or not graph) else ""]
     # The panel-wide F-keys stay fixed at the end of every board; board keys fill what is left.
     reserved = ["F6/F7 Main", toggle, "F5 Control", "F12 Keys"] if managed else ["q Quit", "? Keys"]

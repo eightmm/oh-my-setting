@@ -96,6 +96,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Mains can work in parallel on their own `oms/*` branches and worktrees
+  while another main's workers run: a running worker's guard reports another
+  main's `oms/*` work branch moving as soft `work-branches` (the branch checked
+  out in the shared repository and HEAD stay hard), and a detached sibling
+  delegate that started after the worker's snapshot and finished with its
+  worktree kept is reported as `kept-sibling` too. `OMS_WORKER_GUARD_STRICT=1`
+  keeps both hard.
 - The delegated-worker guard no longer fails a run for concurrent activity it
   cannot attribute to the worker: Codex app turn-diff refs under `refs/codex/`
   join remote-tracking refs and stash on the soft surface; a sibling delegate

@@ -120,11 +120,12 @@ guarantees no sibling state writer, `OMS_WORKER_AUTHORITY_EXCLUSIVE=1`
 additionally compares and restores the full owner-authority surface. Enabling
 that mode during parallel work can discard legitimate sibling writes. Neither
 mode can detect a write restored before exit or contain a process that escapes
-the monitored lifetime. Live-sibling worktree exclusion, and the soft report of a
-detached sibling that finished kept (including one started after the worker's
-snapshot), is cooperative: an adversarial same-UID process can imitate its
-marker and PID while forging Git metadata; `OMS_WORKER_GUARD_STRICT=1` keeps
-kept siblings hard. Use an OS sandbox for that threat model.
+the monitored lifetime. Three exemptions are cooperative: live-sibling worktree
+exclusion, the soft report of a detached sibling that finished kept (including
+one started after the worker's snapshot), and the soft report of other mains'
+`oms/*` work-branch moves. An adversarial same-UID process can imitate a
+sibling's marker and PID, forge Git metadata, or move a work branch;
+`OMS_WORKER_GUARD_STRICT=1` keeps kept siblings and work branches hard. Use an OS sandbox for that threat model.
 
 The delegated checkout is also bound to its physical directory identity, Git
 directory/common-directory, and both regular Git backpointers. Those receipts

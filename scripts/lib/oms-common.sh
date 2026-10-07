@@ -966,7 +966,7 @@ oms_worker_surface_diff() {
   local changed=""
   local name
 
-  for name in config remotes refs remote-refs tracked files gitmeta hooks; do
+  for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks; do
     [ -f "$before_dir/$name" ] || continue
     if ! oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" | cmp -s - "$before_dir/$name"; then
@@ -1472,10 +1472,21 @@ oms_worker_surface_capture_one() {
       # turn in this repository; every other ref remains a worker-attributable,
       # hard surface.
       (git -C "$repo" show-ref 2>/dev/null || true) |
-        LC_ALL=C awk '$2 != "refs/stash" && index($2, "refs/remotes/") != 1 &&
-          index($2, "refs/codex/") != 1' |
+        LC_ALL=C awk -v current="$(git -C "$repo" symbolic-ref -q HEAD 2>/dev/null || true)" \
+          '$2 != "refs/stash" && index($2, "refs/remotes/") != 1 &&
+          index($2, "refs/codex/") != 1 &&
+          (index($2, "refs/heads/oms/") != 1 || $2 == current)' |
         LC_ALL=C sort
       git -C "$repo" rev-parse HEAD 2>/dev/null || printf 'unborn\n'
+      ;;
+    work-branches)
+      # Other mains branch, commit and merge their own oms/* work branches in
+      # sibling worktrees while a worker runs. The branch checked out here and
+      # HEAD stay on the hard refs surface above.
+      (git -C "$repo" show-ref 2>/dev/null || true) |
+        LC_ALL=C awk -v current="$(git -C "$repo" symbolic-ref -q HEAD 2>/dev/null || true)" \
+          'index($2, "refs/heads/oms/") == 1 && $2 != current' |
+        LC_ALL=C sort
       ;;
     remote-refs)
       # Keep the allow-list anchored: refs merely containing "refs/remotes"
@@ -1702,7 +1713,7 @@ oms_worker_surface_snapshot() {
 
   mkdir -p "$dir" || return 1
   : > "$dir/gitmeta-exempt"
-  for name in config remotes refs remote-refs tracked files gitmeta hooks omsstate; do
+  for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks omsstate; do
     OMS_WG_GITMETA_EXEMPT_OUT="$dir/gitmeta-exempt" \
       oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" > "$dir/$name" 2>/dev/null || true

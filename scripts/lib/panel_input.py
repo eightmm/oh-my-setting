@@ -100,7 +100,7 @@ class TerminalInput:
                 output.append(("enter",))
             elif value == b"\t":
                 output.append(("down",))
-            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"d", b"f", b"?", b"n", b"1", b"2"):
+            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"d", b"m", b"f", b"?", b"n", b"1", b"2"):
                 output.append((value.decode(),))
         if not self.pending:
             self.escape_since = None

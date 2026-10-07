@@ -141,13 +141,18 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         chosen = next((m for m in members if member_action(m) == selected), None)
         return footer_hints(dict(navigation, keys_help=help_open), width, managed, unicode, chosen, len(mains), False)
 
+    hint_rows = 0
     if not menu:
-        footer += hints(navigation.get("keys_help", False))
+        shown_hints = hints(navigation.get("keys_help", False))
+        footer += shown_hints
+        hint_rows = len(shown_hints)
     if len(footer) > height - int(menu) - 4:
         footer = [clipped("1 Codex  2 Claude  ? More  q Quit", width)] if menu else hints(False)
+        hint_rows = 0 if menu else len(footer)
     bar = None if menu or height < 8 else spawn_bar(width, navigation)
     if bar:
-        footer.append(bar[0])
+        # The start bar sits just above the key hints, which stay the last rows.
+        footer.insert(len(footer) - hint_rows, bar[0])
     budget = max(0, height - int(menu) - len(footer))
     heading = "OMS / " + (clean(room.get("title") or room.get("id")) or "Work room")
     head = [{"text": clipped(heading, width), "style": "main"}]
@@ -236,12 +241,15 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         output.append(value)
         if row.get("action"):
             hits.append({"y": y + 1, "x1": 1, "x2": width, "action": row["action"], "fold": row.get("fold", False)})
+    if not menu:
+        output += [""] * max(0, height - len(output) - len(footer))
     output += [PALETTE["dim"] + clipped(line, width) + "\033[0m" if color and
                line.startswith(("╭", "╰", "+", "OMS records")) else clipped(line, width)
                for line in footer]
     if bar:
-        output[-1] = PALETTE["main" if bar[1] else "dim"] + output[-1] + "\033[0m" if color else output[-1]
-        hits += [{"y": len(output), "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
+        row = len(output) - hint_rows - 1
+        output[row] = PALETTE["main" if bar[1] else "dim"] + output[row] + "\033[0m" if color else output[row]
+        hits += [{"y": row + 1, "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
     navigation.update(hits=hits, items=unique, offset=offset, body_rows=len(body), viewport=room_budget,
                       room_id=room.get("id"), positions=positions, geometry=geometry)
     return "\n".join(output)

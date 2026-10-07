@@ -64,6 +64,18 @@ already has six live mains. The caller's room participant (`OMS_ROOM_PARTICIPANT
 with `↳` (`^` in ASCII mode) and its detail starts with "Started by Opus 5.5·1cb4". The bootstrap
 tells mains to use this only for a separate long line of work, not for ordinary subtasks.
 
+A main never closes another main, because closing ends a native chat and its running work. It
+may only ask: `oms panel --request-close PARTICIPANT --reason "..." [--json]` (refused inside
+workers, for a target that is not a joined main of the caller's room, and without a dry-run)
+records a `question` room message from the caller to that main whose text starts with
+`Close requested: `. The control window lists each open request under "Needs you" as
+"Close #3 Opus 5.5 · requested by #1 Opus 5.5 · reason · running calls 1 · unread 2 · 14:20".
+With the row selected, `x` asks "Close #3 Opus 5.5? running calls 1 — press x again to confirm,
+Esc to cancel"; the second `x` records the main leaving the room and kills its tmux window, only
+when `@oms_panel_main_attempt` and `@oms_panel_room_participant` prove the window is that main's
+in this checkout's panel session. The row is replaced by "Closed 14:20 by the person" until the next
+refresh. The native CLI keeps its history where it already stores it.
+
 ## Shared work rooms and the graph
 
 A bound live Codex main shows its current model and effort from its exact native
@@ -136,6 +148,7 @@ The default tree keeps the same evidence in a `COUNCIL` branch; clicking it
 reads that task's results scoped to its main participant.
 Only explicit parent IDs draw call connections. Lifecycle state drives moving
 particles/spinners; joining without lifecycle evidence says `presence unknown`.
+A call that fell out of the dashboard's recent-attempt rows still shows its real state (`review`, `blocked`, ...) from the full attempt projection; its result message's exit code is only the fallback after that.
 At 140 columns or wider, when the graph has room for five-row cards, the main
 has two information cards beside it: linked worker/advisor counts and mail
 addressed to that exact main. Mail counts use recorded recipient pairs; the
@@ -183,7 +196,10 @@ main when clicked. Within advisors and within workers, attention states sort
 first, and lane rows name the state (`! failed REV ...`). Lane heads select
 first, like tabs. `[+]` on a tab, or Space on a selected main, pins it; with two or
 more pins the board shows side-by-side lanes, one per main with its calls on
-single lines. `[+ All]` pins every main. Every live watcher board (control and
+single lines. A panel holds at most six live mains (`--launch` into an open
+panel refuses a seventh, like `--spawn-main`). Four to six mains fill two rows of lanes
+(2+2, 3+2, 3+3, window order left to right, then the next row) when each lane keeps
+30 columns and the board is tall enough; otherwise lanes stay in one row. `[+ All]` pins every main. Every live watcher board (control and
 native windows) shows every main as lanes until pins are chosen, when they all
 fit (about 30 columns each); `[x All]` returns a window to its focused graph,
 and `v` keeps the overview when the board is expanded. Pins are kept per window in
@@ -869,6 +885,17 @@ debate shows the question, each seat's stance (its VERDICT or first Answer
 sentence, with what changed after round 1), Agreement/Disagreement only when
 the synthesis has such headings, the owner's recorded decision, and the
 synthesis artifact path. Evidence is read in the background.
+
+Key `m` on the board opens the messages reader: the room's last 200 messages,
+oldest first, one row each with local time (date when from another day), sender
+and recipient by the board's main names, an `unread` mark while a recipient has
+not consumed it, and the question/answer/handoff/status kind. Left/Right cycles
+the filter (all, to/from the selected main, to/from this window's main),
+Up/Down selects, Enter or a click expands the message in place to its full
+wrapped text (PgUp/PgDn or the wheel scrolls) and again collapses it, and `m` or
+Esc returns. A click on a RECENT MESSAGES row opens the reader with that message
+expanded. Reading never acknowledges a message; the full log is read in the
+background and re-read only when the room's message counts change.
 
 The owning main records a result through `--finalize`. Native process exit and
 worker completion never create accepted results by themselves. `completed`

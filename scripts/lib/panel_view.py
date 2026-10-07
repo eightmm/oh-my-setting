@@ -300,6 +300,39 @@ def age_label(stamp, now=None):
             else "%sh" % (seconds // 3600) if seconds < 86400 else "%sd" % (seconds // 86400))
 
 
+CLOSE_PREFIX = "Close requested: "
+
+
+def close_requests(report, unicode=True):
+    """Open requests from a main to close a main, one per target; only the person acts on them."""
+    from room_view import clock_stamp, nodes
+    members = nodes(report)
+    mains = {m["participant"]: m for m in members if m.get("role") == "main"}
+    windows = mapping(report.get("main_windows"))
+    pending = listing(mapping(report.get("room")).get("messages"))
+
+    def name(member):
+        label = MODEL_NAMES.get(member.get("model"), member.get("model")) or member.get("provider") or "unknown"
+        return ("#%s " % windows[member["participant"]] if windows.get(member["participant"]) else "") + label
+    found = {}
+    for message in pending:
+        target = mains.get(message.get("recipient"))
+        text = str(message.get("text") or "")
+        if (target is None or message.get("message_kind") != "question" or message.get("answered")
+                or not text.startswith(CLOSE_PREFIX)):
+            continue
+        sender = mains.get(message.get("sender"))
+        calls = sum(1 for m in members if m.get("parent") == target["participant"] and m["state"] in LIVE_STATES)
+        unread = sum(1 for m in pending if target["participant"] in listing(m.get("pending_for"))
+                     and not str(m.get("text") or "").startswith(CLOSE_PREFIX))
+        found[target["participant"]] = {
+            "participant": target["participant"], "label": name(target),
+            "by": name(sender) if sender else clean(message.get("sender"), 40) or "unknown",
+            "reason": clean(text[len(CLOSE_PREFIX):], 80) or "no reason given", "calls": calls, "unread": unread,
+            "ts": message.get("ts") or "", "clock": clock_stamp(message.get("ts"))}
+    return list(found.values())
+
+
 def inbox_items(report, unicode=True):
     """What the person must act on, newest first: failures, waits, broadcasts from mains, patches to admit."""
     from room_view import nodes, readable
@@ -340,7 +373,16 @@ def inbox_items(report, unicode=True):
             items.append({"stamp": message.get("ts") or "", "glyph": ">" if not unicode else "»",
                           "who": who(sender), "what": "to all: " + clean(text, 80),
                           "style": "alert", "action": ("chat", sender["participant"])})
+    for request in close_requests(report, unicode):
+        items.append({"stamp": request["ts"], "glyph": "✕" if unicode else "x", "who": "Close " + request["label"],
+                      "what": sep_join(unicode, "requested by " + request["by"], request["reason"],
+                                       "running calls %s" % request["calls"], "unread %s" % request["unread"]),
+                      "tail": request["clock"], "style": "alert", "action": ("close", request["participant"])})
     return sorted(items, key=lambda item: item["stamp"], reverse=True)
+
+
+def sep_join(unicode, *parts):
+    return (" · " if unicode else " / ").join(parts)
 
 
 def render_inbox(report, width, height, color, unicode, managed, previous, navigation):
@@ -384,17 +426,19 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
     selected = navigation.get("selected")
     if selected not in [item["action"] for item in shown]:
         selected = navigation["selected"] = shown[0]["action"] if shown else None
+    note = clean(navigation.get("closed_note"), 120)
+    available -= bool(note)
     capacity = available - (1 if len(shown) + bool(hidden) > available else 0) if shown else 1
     capacity = max(0, capacity)
     index = next((n for n, item in enumerate(shown) if item["action"] == selected), 0)
     start = min(max(0, index - capacity + 1), max(0, len(shown) - capacity))
     window = shown[start:start + capacity]
     content_width = width - 4 if boxed else width
-    body = []
+    body = [(note, "dim", None)] if note else []
     if not shown:
         body.append(("Nothing needs you right now", "dim", None))
     for item in window:
-        tail = age_label(item["stamp"])
+        tail = item["tail"] if "tail" in item else age_label(item["stamp"])
         tail = sep + tail if tail else ""
         text = clipped("%s %s%s%s" % (item["glyph"], item["who"], sep, item["what"]),
                        max(1, content_width - display_width(tail) - 2)) + tail
@@ -490,6 +534,13 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         lines, hits = render_debate(report, width, height, navigation, color, unicode)
         navigation.update(hits=hits, items=[], bands=[])
         return "\n".join(lines)
+    if view == "messages" and navigation is not None:
+        from panel_messages import render_messages
+        navigation["main_attempt"] = main_attempt
+        lines, hits = render_messages(report, width, height, navigation, color, unicode)
+        navigation.update(hits=hits, items=[], bands=[])
+        text = "\n".join(lines)
+        return text if unicode else text.translate({ord("·"): "/", ord("→"): ">", ord("▸"): ">", ord("▾"): "v"})
     if menu and view != "graph":
         return render_inbox(report, width, height, color, unicode, managed, previous, navigation)
     if view in ("tree", "summary") or (view == "auto" and mapping(report.get("room")).get("participants")

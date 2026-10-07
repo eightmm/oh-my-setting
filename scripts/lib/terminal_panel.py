@@ -20,9 +20,10 @@ import room
 import uuid
 import panel_host
 import panel_debate
+import panel_messages
 
 from dashboard_projection import clean
-from panel_view import INBOX_LIMIT, menu_rows, render, render_results
+from panel_view import CLOSE_PREFIX, INBOX_LIMIT, close_requests, menu_rows, render, render_results
 from panel_routing import allocate, command as routed_command, policy, MODEL_IDS
 from panel_results import _lock, finalize, results, retry_delivery
 
@@ -131,16 +132,17 @@ def selected_route(owner, role, workload, seat, access, purpose, target=None, mo
     if owner not in PROVIDERS:
         owner = provider_catalog(owner)[0]["provider"]
     route = allocate(owner, role, workload, seat, access, purpose)
+    if effort not in (None, "low", "medium", "high"):
+        raise ValueError("invalid reasoning effort")
     if not target:
-        if model or effort:
-            raise ValueError("explicit peer model/effort requires --to")
-        return route
+        if model:
+            raise ValueError("explicit peer model requires --to")
+        # A role route keeps its tier's model; the main may raise or lower effort for one harder or simpler subtask.
+        return dict(route, effort=effort) if effort else route
     if seat != "auto" or workload != "routine":
         raise ValueError("--to is an explicit route; omit preset workload and advisor seat")
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", target) or ".." in target:
         raise ValueError("--to selects one registered provider")
-    if effort not in (None, "low", "medium", "high"):
-        raise ValueError("invalid reasoning effort")
     peer = provider_catalog(target)[0]
     if model is None and not peer["exact_model_override"]:
         model = "provider-default"
@@ -219,6 +221,7 @@ def bootstrap(provider, repo):
         "--verify COMMAND (write). Light, clear tasks use GPT-6 Luna; routine "
         "implementation and long explanations use Sonnet 5.5; main-level work "
         "uses this owner's Sol/Opus preset without promoting the worker. "
+        "Add --reasoning-effort low|medium|high to one dispatch when that subtask is easier or harder than its tier. "
         "Act as the control tower: by default delegate implementation, investigation and test repair to "
         "bounded workers (scoped brief with paths, constraints, success criteria and a --verify command), split "
         "separable files or steps into non-overlapping workers run in parallel, and keep scope, briefs, "
@@ -252,6 +255,8 @@ def bootstrap(provider, repo):
         "When a separate long line of work needs its own main (another provider, or work that must run "
         "alongside this one), start it with oms panel --spawn-main PROVIDER --task \"short task\" instead of "
         "asking the person; it appears on the panel. Ordinary subtasks stay with workers. "
+        "Only the person closes mains: one that finished its line of work, or that started a main no longer needed, "
+        "may request a close with oms panel --request-close PARTICIPANT --reason \"...\". "
         "If no task has been supplied, report "
         "readiness and wait."
     ) % (provider, json.dumps(str(repo)), json.dumps(str(ENTRY)), peer, peer, peer, peer, provider, provider)
@@ -840,7 +845,7 @@ def source_stamps():
 
 
 REJECTED_RELOAD = {}
-RELOAD_MODULES = "terminal_panel, room_view, panel_view, panel_tree, panel_input, panel_debate"
+RELOAD_MODULES = "terminal_panel, room_view, panel_view, panel_tree, panel_input, panel_debate, panel_messages"
 
 
 def reload_ready(stamps, settle=1.0):
@@ -1039,7 +1044,7 @@ def bind_window(pane, launch, view, attention_only):
 # (F9 appears there only in a test remap); Alt/Shift arrows edit or queue input there.
 # F9 selects the other pane of the window: the native chat from its board and back.
 KEYS_HELP = ("OMS panel keys: F6/F7 previous/next main · F9 chat/board · F5 control window · F12 this help · "
-             "on a board: Enter open · a advisor · d debates · f full result · t tree · v expand · n new main · ? all")
+             "on a board: Enter open · a advisor · d debates · m messages · f full result · t tree · v expand · n new main · ? all")
 # F5/F9/F12 are unbound in Codex 0.160 and Claude Code; F8 is Codex voice, F10/F11 belong to terminal menus.
 MAIN_KEYS = (("F7", "next-window", 2), ("F6", "previous-window", 2), ("F9", "select-pane -t :.+", 0),
              ("F5", "select-window -t :=control", 0), ("F12", 'display-message -d 8000 "%s"' % KEYS_HELP, 0))
@@ -1135,6 +1140,63 @@ def spawn_main(repo, provider, task=None, model=None, started_by=None):
     return {"window": int(index) if index.isdigit() else None, "provider": provider, "room": ident}
 
 
+def request_close(repo, target, reason=None):
+    """Record a main's request that the person close a main; nothing is closed here."""
+    sender, ident = os.environ.get("OMS_ROOM_PARTICIPANT"), os.environ.get("OMS_ROOM_ID")
+    if not sender or not ident:
+        raise ValueError("a close request must come from a main joined to a room")
+    room.identifier(target, "participant")
+    joined = {p["participant"]: p for p in room.status(repo, ident)["participants"] if p["joined"]}
+    if joined.get(sender, {}).get("role") != "main":
+        raise ValueError("only a joined main can request a close")
+    if joined.get(target, {}).get("role") != "main":
+        raise ValueError("%s is not a joined main of room %s" % (target, ident))
+    room.send(repo, ident, sender, target, CLOSE_PREFIX + (clean(reason, 300) or "no reason given"), kind="question")
+    return {"requested": target, "by": sender, "room": ident}
+
+
+def close_main(repo, ident, participant):
+    """Close one main at the person's key press: record it leaving, then kill only the window proven to be its own."""
+    session = os.environ.get("OMS_PANEL_SESSION", "")
+    if not managed_session() or session != panel_session(repo) or session_owner(session) != str(repo):
+        raise ValueError("closing a main needs this checkout's open tmux panel")
+    if not any(p["participant"] == participant and p["joined"] and p["role"] == "main"
+               for p in room.status(repo, ident)["participants"]):
+        raise ValueError("that main already left this room")
+    found = subprocess.run(tmux_command("list-windows", "-t", "=" + session, "-F",
+                                        "#{window_id}\t#{@oms_panel_main_attempt}\t#{@oms_panel_room_participant}\t#{@oms_panel_room}"),
+                           capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+    tagged = [r for r in (line.replace("\r", "").split("\t") for line in found.stdout.splitlines())
+              if len(r) == 4 and r[2] == participant]
+    attempts = {row.get("attempt_id") for row in main_history(repo, ident, participant) if row.get("tool") == "panel-main"}
+    proven = [r for r in tagged if r[1] and r[1] in attempts and r[3] == ident]
+    if len(tagged) != len(proven) or len(proven) > 1:
+        raise ValueError("no single window is proven to be that main's; nothing closed")
+    room.append(repo, ident, {"kind": "leave", "participant": participant}, "Participant left")
+    if proven:
+        subprocess.run(tmux_command("kill-window", "-t", proven[0][0]), check=True, timeout=5, stdin=subprocess.DEVNULL)
+
+
+def close_selected(repo, navigation, state, unicode):
+    """The x key: the first press on a Close row asks, the second (within 10s) closes; returns the status line."""
+    selected = navigation.get("selected") or ("",)
+    request = next((r for r in close_requests(state, unicode) if ("close", r["participant"]) == selected), None)
+    if request is None:
+        return "Select a Close request in Needs you first"
+    armed = navigation.pop("close_armed", None)
+    if armed is None or armed[0] != request["participant"] or time.monotonic() - armed[1] > 10:
+        navigation["close_armed"] = (request["participant"], time.monotonic())
+        navigation["notice"] = "Close %s? running calls %s %s press x again to confirm, Esc to cancel" % (
+            request["label"], request["calls"], "—" if unicode else "-")
+        return "close not confirmed"
+    ident = navigation.get("room_id") or os.environ.get("OMS_ROOM_ID")
+    close_main(repo, ident, request["participant"])
+    stamp = time.strftime("%H:%M")
+    navigation["closed_note"] = "Closed %s by the person · %s" % (stamp, request["label"]) if unicode else \
+        "Closed %s by the person / %s" % (stamp, request["label"])
+    return "closed %s" % request["label"]
+
+
 def split_panel(repo, view="auto", attention_only=False, launch=None, resume=None, model=None, task=None, retry=True):
     chosen_room = os.environ.get("OMS_ROOM_ID")
     session = panel_session(repo)
@@ -1161,6 +1223,8 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
             if launch:
                 # An explicit --room wins; otherwise new mains default to the panel's open room.
                 os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
+                if live_mains(repo, session, os.environ["OMS_ROOM_ID"]) >= MAX_LIVE_MAINS:
+                    raise ValueError("this room already has %s live mains; finish one before starting another" % MAX_LIVE_MAINS)
                 created = "window"
                 pane = add_main_window(repo, session, launch, view, attention_only, env, resume, model, task)
                 subprocess.run(tmux_command("select-window", "-t", pane), check=True)
@@ -1323,6 +1387,7 @@ def snapshot(repo, room_id=None):
                 state.pop("finalized", None)
                 state.pop("main_windows", None)
                 state.pop("main_starters", None)
+                state.pop("room_attempts", None)
                 if managed_session():
                     # The board lays mains out in window order so F6/F7 step to the neighbouring column.
                     try:
@@ -1336,6 +1401,26 @@ def snapshot(repo, room_id=None):
                         state["main_starters"] = {row[1]: row[2] for row in rows if row[1] and row[2]}
                     except (OSError, subprocess.SubprocessError):
                         pass
+                try:
+                    # Calls outside the 8 + 8 row dashboard projection keep their real state from the full projection.
+                    found = subprocess.run(["bash", str(ENTRY), "agent-events", "--repo", str(repo), "list", "--json"],
+                                           capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
+                    if found.returncode == 0:
+                        calls = {m["participant"]: m.get("role") for m in state["room"]["participants"]
+                                 if m.get("joined") and m.get("role") != "main"}
+                        linked = {}
+                        for row in json.loads(found.stdout):
+                            # The ledger keeps panel identity in refs; the dashboard projection lifts it into "panel".
+                            refs = row.get("refs") or {}
+                            who = refs.get("panel_room_participant")
+                            if (refs.get("panel_room_id") == ident and who in calls and refs.get("panel_role") == calls[who]
+                                    and row.get("attempt_id") and row.get("state")
+                                    and str(row.get("updated_at") or "") >= str(linked.get(who, {}).get("updated_at") or "")):
+                                linked[who] = {"state": row["state"], "attempt_id": row["attempt_id"],
+                                               "updated_at": row.get("updated_at"), "task_id": row.get("task_id")}
+                        state["room_attempts"] = linked
+                except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
+                    pass
                 try:
                     import panel_chats
                     state["native_advisors"] = panel_chats.native_advisors(state["room"]["participants"])
@@ -1499,6 +1584,9 @@ def navigate(repo, action, state, navigation, width):
             navigation["pinned"] = [] if set(mains) <= set(pinned) else None
         else:
             navigation["pinned"] = [m for m in pinned if m != ident] + ([] if ident in pinned else [ident])
+        return
+    if kind == "close":
+        navigation["notice"] = "Press x to close this main (asks once more)"
         return
     room_id = navigation.get("room_id")
     if not room_id or managed_session() and pane_option("@oms_panel_room") != room_id:
@@ -1936,8 +2024,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     if "attention" in navigation:
                         # The `b` key overrides a flag or window option that would turn the filter back on.
                         read_filtered = navigation["attention"]
-                    if density == "debate":
-                        read_density = density  # a refresh never leaves the debate reader
+                    if density in {"debate", "messages"}:
+                        read_density = density  # a refresh never leaves the debate or messages reader
                     if not background or revision == submitted_revision:
                         density, filtered = read_density, read_filtered
                     navigation = refreshed_navigation(navigation, state, managed_session() and
@@ -2043,7 +2131,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                 density = navigation.pop("debate_from", "graph")
                                 navigation["view"] = density
                             navigation["offset"] = 0
-                        elif event[0] == "d":
+                        elif event[0] == "d" and density != "messages":
                             navigation.pop("detail", None)
                             navigation["offset"] = 0
                             if density == "debate":
@@ -2051,6 +2139,20 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             else:
                                 navigation["debate_from"], density = density, "debate"
                             navigation["view"] = density
+                        elif event[0] == "m" or event[0] == "escape" and density == "messages" or \
+                                density != "messages" and panel_messages.clicked(event, navigation):
+                            opened = panel_messages.clicked(event, navigation)
+                            navigation.pop("detail", None)
+                            navigation["offset"] = 0
+                            if density == "messages":
+                                density = navigation.pop("messages_from", "graph")
+                            else:
+                                navigation["messages_from"], density = density, "messages"
+                                if opened:
+                                    panel_messages.open_message(navigation, opened)
+                            navigation["view"] = density
+                        elif density == "messages" and event[0] != "q" and panel_messages.handle(event, navigation):
+                            pass
                         elif density == "debate" and not navigation.get("detail") and event[0] != "q" and \
                                 panel_debate.handle(event, navigation):
                             pass
@@ -2171,6 +2273,22 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             except Exception as error:
                                 return target, {}, clean(str(error), 120) or "Debate evidence unavailable"
                         previews.start(debate_read)
+                    log = navigation.get("messages_view") or {}
+                    if loaded and report and report[0][0] == "messages":
+                        log.update(log=report[1] or log.get("log"), rev=report[0][1])
+                        size = redraw()
+                    if density == "messages" and state and not previews.pending and \
+                            log.get("rev") != panel_messages.signature(state):
+                        stale = panel_messages.signature(state)
+                        room_id = stale[0]
+
+                        def messages_read(stale=stale, room_id=room_id):
+                            try:
+                                return ("messages", stale), panel_messages.read(repo, room_id), None
+                            except Exception as error:
+                                return ("messages", stale), None, clean(str(error), 120)
+                        if room_id:
+                            previews.start(messages_read)
                     if navigation.get("opening") and not previews.pending:
                         previews.start(lambda target=navigation["opening"]: read_evidence(repo, target))
                     elif preview and preview["target"][0] == "chat":
@@ -2306,12 +2424,16 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                         continue
                     return event[0]
                 if event[0] == "escape":
-                    if navigation.pop("detail", None) is None:
+                    cancelled = navigation.pop("close_armed", None)
+                    if cancelled:
+                        navigation.pop("notice", None)
+                    if navigation.pop("detail", None) is None and not cancelled:
                         continue
                     navigation["offset"] = 0
                     show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
                     continue
                 navigation.pop("notice", None)
+                navigation.pop("close_armed", None)
                 action = None if navigation.get("detail") and event[0] in ("enter", "click") else choose(event, navigation)
                 if action:
                     width = max(1, shutil.get_terminal_size().columns)
@@ -2350,6 +2472,13 @@ def interactive(repo, view="auto", attention_only=False):
             if choice != "9":
                 # Keys typed ahead only follow a refresh; any other choice may open a text prompt.
                 navigation.pop("queued", None)
+            if choice not in ("x", "9"):
+                navigation.pop("close_armed", None)
+            if choice == "9":
+                navigation.pop("closed_note", None)
+            if choice == "x":
+                previous = close_selected(repo, navigation, cache.get("state", {}), terminal_style()[2])
+                continue
             if choice == "z":
                 report = reopen_panel(repo)
                 previous = "panel " + report["status"] + "; input session preserved"
@@ -2526,11 +2655,14 @@ def main(argv=None):
     parser.add_argument("--launch", help="open one top-level native session")
     parser.add_argument("--spawn-main", metavar="PROVIDER",
                         help="add a main window to this checkout's open panel without attaching; works without a terminal")
+    parser.add_argument("--request-close", metavar="PARTICIPANT",
+                        help="ask the person to close a main of this room; a main cannot close another main itself")
+    parser.add_argument("--reason", help="why --request-close asks for the close")
     parser.add_argument("--reopen", action="store_true", help="restore an existing tmux board without restarting its input CLI")
     parser.add_argument("--resume", help="resume an exact native session ID (requires --launch)")
     parser.add_argument("--model", help="exact model for --launch or --dispatch --to")
     parser.add_argument("--to", help="explicit registered CLI target for --dispatch")
-    parser.add_argument("--reasoning-effort", choices=("low", "medium", "high"), help="effort for --dispatch --to")
+    parser.add_argument("--reasoning-effort", choices=("low", "medium", "high"), help="effort for this dispatch; a role route keeps its model")
     parser.add_argument("--providers", action="store_true", help="read registered CLI capabilities without running providers")
     parser.add_argument("--json", action="store_true", help="read-only availability and shared OMS state")
     parser.add_argument("--watch", action="store_true", help="read-only activity tree, refreshed every five seconds")
@@ -2568,7 +2700,7 @@ def main(argv=None):
     parser.add_argument("--label", help="short task title for the role board")
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
     args = parser.parse_args(argv)
-    if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.reopen, args.dispatch, args.routes,
+    if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.request_close, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.finalize, args.retry_delivery, args.providers,
                                      args.chats, args.open_chat)) > 1:
         parser.error("choose one panel operation")
@@ -2590,6 +2722,10 @@ def main(argv=None):
         parser.error("--count requires --watch")
     if args.no_animation and not args.watch:
         parser.error("--no-animation requires --watch")
+    if args.reason is not None and not args.request_close:
+        parser.error("--reason requires --request-close")
+    if args.request_close and args.dry_run:
+        parser.error("--request-close records a request; it has no dry-run")
     if args.spawn_main and args.dry_run:
         parser.error("--spawn-main starts a main; it has no dry-run")
     if (args.view or args.attention_only) and (args.launch or args.spawn_main or args.reopen or args.json or args.dry_run or args.routes
@@ -2662,7 +2798,7 @@ def main(argv=None):
                        or not re.fullmatch(r"[A-Za-z0-9_./:-]+", args.model)):
         parser.error("invalid model ID")
     if (args.dispatch or args.council or args.finalize or args.retry_delivery or args.chats or args.open_chat
-            or args.spawn_main or not (
+            or args.spawn_main or args.request_close or not (
             args.json or args.dry_run or args.watch or args.routes or args.results or args.providers)) and (
             os.environ.get("OMS_HARNESS_CHILD") == "1"
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
@@ -2709,6 +2845,13 @@ def main(argv=None):
                 print(json.dumps(report))
             else:
                 print("Started %s main in window %s of room %s" % (report["provider"].capitalize(), report["window"], report["room"]))
+            return 0
+        if args.request_close:
+            report = request_close(repo, args.request_close, args.reason)
+            if args.json:
+                print(json.dumps(report))
+            else:
+                print("Requested the person to close %s (room %s)" % (report["requested"], report["room"]))
             return 0
         if args.providers:
             rows = provider_catalog()

@@ -81,7 +81,8 @@ Default: concise, scoped, evidence-driven.
 ## Multi-Agent Work
 
 - Do not spawn subagents unless explicitly instructed by the user or applicable
-  instructions; otherwise work locally and run commands/tests directly.
+  instructions (an OMS panel main's bootstrap and `[oms panel]` prompt line are
+  such instructions); otherwise work locally and run commands/tests directly.
 - For authorized delegation, load `oms-agent-harness`; the parent owns
   admission, verification and publication.
   Workers cannot widen authority or recursively delegate.

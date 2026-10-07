@@ -19,7 +19,8 @@ unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
   OMS_HARNESS_CALL_ID OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
   OMS_LEASE_ID OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_APPROVAL_ID \
   OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE OMS_HARNESS_DELEGATE_DEPTH \
-  OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO OMS_ROOM_ADMITTED_PARTICIPANT OMS_HOOK_AGENT
+  OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO OMS_ROOM_ADMITTED_PARTICIPANT OMS_HOOK_AGENT \
+  OMS_PANEL_MAIN_ATTEMPT OMS_PANEL_SESSION
 
 fail() {
   echo "autonomy-hook-smoke: $*" >&2
@@ -497,6 +498,26 @@ for key in ("OMS_HARNESS_CHILD", "OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT"):
     os.environ.pop(key)
 room.create(repo, "isolation", "Unrelated task")
 assert not hook_state.live_thread_hint(payload("room-stranger")), "CURRENT does not enroll strangers into rooms"
+# The hook skips mail its participant already consumed, yet moves its cursor past it.
+room.create(repo, "acked", "Consumed mail")
+room.join(repo, "acked", "writer", "codex", model="gpt-6-sol", native_session="ack-writer")
+room.join(repo, "acked", "reader", "claude", model="claude-opus-5-5", native_session="ack-reader")
+def ack_turns(*mids, ack=()):
+    for mid in mids:
+        room.send(repo, "acked", "writer", "reader", "text " + mid, "note", message_id=mid)
+    if ack:
+        room.acknowledge(repo, "acked", "reader", list(ack))
+    out = hook_state.live_thread_hint(payload("ack-reader"))
+    return [row["room_event"]["id"] for row in json.loads(out.splitlines()[1])["turns"]] if out else []
+assert ack_turns("old-1", "new-1", ack=["old-1"]) == ["new-1"], "acked mail is not re-shown before the first delivery"
+assert ack_turns() == [], "the cursor moved past consumed rows"
+assert ack_turns("part-1", "part-2", "part-3", ack=["part-2"]) == ["part-1", "part-3"], "partial batch shows the unconsumed rows"
+assert ack_turns("all-1", ack=["all-1"]) == [], "a fully consumed batch prints nothing"
+assert ack_turns("next-1") == ["next-1"], "mail after consumed rows still arrives"
+# A backlog older than status()'s newest-12 window is filtered too.
+backlog = ["deep-%02d" % n for n in range(20)]
+assert ack_turns(*backlog, ack=backlog[:18]) == backlog[18:], "an acked backlog beyond the newest 12 was re-shown"
+assert room.status(repo, "acked")["pending_count"] == 6, "delivery still acks nothing"
 room.send(repo, "team", "opus", "sol", "Final scoped note")
 call("close", "--id", "team")
 call("new", "--id", "unrelated-ordinary", "--live", "--topic", "Unrelated legacy broadcast")
@@ -553,6 +574,14 @@ assert after["initial_consumer"] == before["initial_consumer"], after
 assert not hook_state.rebind_cleared_session(cleared("after-clear")), "a repeated clear event rebound twice"
 assert "during-clear" in hook_state.live_thread_hint(payload("after-clear"))
 assert not hook_state.live_thread_hint(payload("native-first-session")), "the cleared session kept reading the main's mail"
+# A panel main is reminded on each prompt that it delegates; other events and sessions are not.
+os.environ.update(OMS_PANEL_MAIN_ATTEMPT="fresh-main", OMS_PANEL_SESSION="oms-fixture")
+tower = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
+assert "control-tower main" in tower and "--owner claude --room binding-room" in tower, tower
+assert not hook_state.panel_main_hint(payload("tower")), "only prompts carry the reminder"
+os.environ.pop("OMS_PANEL_MAIN_ATTEMPT")
+assert not hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
+os.environ.pop("OMS_PANEL_SESSION")
 os.environ["OMS_HARNESS_CHILD"] = "1"
 try:
     room.bind(repo, "binding-room", "fresh-peer", "worker-native")

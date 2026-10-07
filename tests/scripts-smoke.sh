@@ -23599,6 +23599,29 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     oms_worker_surface_diff "$project" "$snap" )"
   [ "$changed" = "refs, remote-refs" ] ||
     fail "a codex/ branch must stay a hard ref change, got: ${changed:-<none>}"
+
+  # Another main's oms/* work branch moves softly; the branch checked out here
+  # stays hard, so a commit on the shared branch still fails a running worker.
+  rm -rf "$snap"
+  ( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_snapshot "$project" "$snap" ) ||
+    fail "work-branch snapshot failed"
+  git -C "$project" update-ref refs/heads/oms/other-main "$(git -C "$project" rev-parse HEAD)"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = "work-branches" ] ||
+    fail "another main's oms/ branch should change only work-branches, got: ${changed:-<none>}"
+  git -C "$project" checkout -q oms/other-main
+  rm -rf "$snap"
+  ( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_snapshot "$project" "$snap" ) ||
+    fail "current-branch snapshot failed"
+  git -C "$project" update-ref refs/heads/oms/other-main \
+    "$(git -C "$project" commit-tree -p HEAD -m next 'HEAD^{tree}')"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = "refs" ] ||
+    fail "the checked-out oms/ branch must stay a hard ref change, got: ${changed:-<none>}"
 }
 
 test_worker_guard_accepts_only_artifact_index_compaction() {

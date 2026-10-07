@@ -1164,6 +1164,26 @@ def context_pressure_hint(payload: dict[str, Any]) -> str | None:
     )
 
 
+def panel_main_hint(payload: dict[str, Any]) -> str:
+    """Restate a panel main's control-tower role on every prompt.
+
+    The launch bootstrap reaches Codex only as a first user turn, compaction
+    fades it, and a main started before a policy change never saw it; this
+    line reaches every live panel main from the current checkout's hook."""
+    if (payload.get("hook_event_name") or payload.get("hookEventName")) != "UserPromptSubmit":
+        return ""
+    if not os.environ.get("OMS_PANEL_MAIN_ATTEMPT") or not os.environ.get("OMS_PANEL_SESSION", "").startswith("oms-"):
+        return ""
+    room = os.environ.get("OMS_ROOM_ID", "")
+    return ("[oms panel] You are a control-tower main. Delegate implementation, investigation and test repair: "
+            "oms panel --dispatch worker --owner %s%s --workload light|routine|main --purpose implement|investigate|explain "
+            "--access write --brief-file PATH --verify COMMAND (or --access read --prompt TEXT), with --task-id and --label "
+            "and --reasoning-effort low|medium|high when a subtask is easier or harder than its tier; "
+            "run independent workers in parallel. Keep scope, briefs, review, patch admission, integration and "
+            "coordination with other mains yourself. Edit directly only when the brief would take longer than the edit "
+            "or the step needs the main itself." % (payload_agent(payload), " --room " + room if room else ""))
+
+
 def cmd_route(args: argparse.Namespace) -> int:
     payload, _ = load_payload()
     if is_harness_child():
@@ -1187,6 +1207,10 @@ def cmd_route(args: argparse.Namespace) -> int:
         peers = None
     if peers:
         print(peers)
+    with contextlib.suppress(Exception):
+        tower = panel_main_hint(payload)
+        if tower:
+            print(tower)
     collaboration = live_thread_hint(payload)
     if collaboration:
         print(collaboration)
@@ -1366,6 +1390,13 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
             if delta["cursor"] == after:
                 return ""
             rows = [row for row in delta["turns"] if row.get("receipt") != "ack"]
+            if room_member:
+                # Mail this participant already consumed (oms room ack) is not
+                # re-shown; the cursor still moves past it below.
+                # The full projection: status() keeps only the newest 12 messages, the backlog is older.
+                consumed = {m["id"] for m in room.project(room.records(repo, tid))["messages"]
+                            if room_member in m["received_by"]}
+                rows = [row for row in rows if row["room_event"]["id"] not in consumed]
             # Build the whole message before the cursor moves: a failure here
             # must leave these turns to the next safe point, not drop them.
             message = ""
