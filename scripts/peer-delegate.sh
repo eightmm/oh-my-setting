@@ -1480,20 +1480,85 @@ delegate_attempt_finish_without_verify() {
 # directory; a continuation runs in a new worktree, so the session file is
 # copied to where --resume will look for it.
 prepare_resume_session() {
-  local config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" found="" target real
+  local config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" real
   case "$TO" in
     codex) return 0 ;;
     claude) ;;
     *) echo "error: $TO cannot resume a session" >&2; return 1 ;;
   esac
-  for found in "$config"/projects/*/"$RESUME_SESSION".jsonl; do
-    [ -f "$found" ] && break
-    found=""
-  done
-  [ -n "$found" ] || { echo "error: no claude session $RESUME_SESSION to resume" >&2; return 1; }
   real="$(cd "$worktree" && pwd -P)" || return 1
-  target="$config/projects/$(printf '%s' "$real" | sed 's/[^A-Za-z0-9]/-/g')"
-  mkdir -p "$target" && cp "$found" "$target/$RESUME_SESSION.jsonl"
+  # The newest regular copy wins; links and equal-age differing copies refuse.
+  python3 -I - "$config" "$RESUME_SESSION" "$(printf '%s' "$real" | sed 's/[^A-Za-z0-9]/-/g')" <<'PY'
+import os, stat, sys, tempfile
+
+config, session, target_name = sys.argv[1:4]
+NF = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+
+
+def fail(msg):
+    print("error: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def real_dir(path):
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode):
+        fail("%s is not a plain directory" % path)
+
+
+projects = os.path.join(config, "projects")
+try:
+    real_dir(projects)
+    names = sorted(os.listdir(projects))
+except OSError:
+    fail("no claude session %s to resume" % session)
+found = []
+for name in names:
+    path = os.path.join(projects, name, session + ".jsonl")
+    try:
+        st = os.lstat(path)
+    except OSError:
+        continue
+    if stat.S_ISREG(st.st_mode) and not stat.S_ISLNK(os.lstat(os.path.dirname(path)).st_mode):
+        found.append((st.st_mtime_ns, name, path))
+if not found:
+    fail("no claude session %s to resume" % session)
+found.sort()
+best = found[-1]
+if len(found) > 1 and found[-2][0] == best[0]:
+    contents = set()
+    for _, _, p in found[-2:]:
+        with open(p, "rb") as f:
+            contents.add(f.read())
+    if len(contents) > 1:
+        fail("ambiguous claude session %s: newest copies share a timestamp" % session)
+if best[1] == target_name:
+    sys.exit(0)
+
+target = os.path.join(projects, target_name)
+os.makedirs(target, exist_ok=True)
+real_dir(target)
+dest = os.path.join(target, session + ".jsonl")
+fd = os.open(best[2], os.O_RDONLY | NF | getattr(os, "O_NONBLOCK", 0))
+with os.fdopen(fd, "rb") as src:
+    if not stat.S_ISREG(os.fstat(src.fileno()).st_mode):
+        fail("claude session source is not a regular file")
+    tmp = tempfile.mkstemp(prefix=".resume-", dir=target)
+    try:
+        with os.fdopen(tmp[0], "wb") as out:
+            while True:
+                chunk = src.read(1 << 20)
+                if not chunk:
+                    break
+                out.write(chunk)
+        os.replace(tmp[1], dest)
+    except BaseException:
+        try:
+            os.unlink(tmp[1])
+        except OSError:
+            pass
+        raise
+PY
 }
 
 run_worker() {

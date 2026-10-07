@@ -706,6 +706,63 @@ assert "[oms plan]" not in tower, tower
 assert "set your status: oms room send" in tower and "--kind status" in tower, tower
 plan_dir = repo / ".oms" / "plan"
 plan_dir.mkdir(parents=True)
+from dashboard_projection import MAX_SOURCE_BYTES, plan_tasks as dashboard_tasks
+plan_path = plan_dir / "tasks.json"
+def refused_plan():
+    assert hook_state.plan_tasks(repo) == ({}, [])
+    assert dashboard_tasks(str(repo)) == []
+    assert not hook_state.panel_plan_hint(payload("tower"))
+
+for malformed in ({"tasks": 1}, {"tasks": "task"}, [],
+                  {"tasks": [{"id": ["bad"], "state": "done"}]},
+                  {"tasks": [{"id": "bad", "state": "ready", "depends": 1}]},
+                  {"tasks": [{"id": "bad", "state": "ready", "depends": [{}]}]}):
+    plan_path.write_text(json.dumps(malformed))
+    refused_plan()
+plan_path.write_bytes(b'{"tasks": [{"id": "oversized", "state": "ready"}]}' + b" " * MAX_SOURCE_BYTES)
+refused_plan()
+plan_path.unlink()
+plan_path.mkdir()
+refused_plan()
+plan_path.rmdir()
+if os.name != "nt":
+    outside = repo.parent / "external-plan.json"
+    outside.write_text(json.dumps({"goal": "EXTERNAL PLAN", "tasks": [{"id": "external", "state": "ready"}]}))
+    plan_path.symlink_to(outside)
+    refused_plan()
+    plan_path.unlink()
+    plan_dir.rmdir()
+    plan_dir.symlink_to(outside.parent)
+    (outside.parent / "tasks.json").write_text(outside.read_text())
+    refused_plan()
+    plan_dir.unlink()
+    plan_dir.mkdir()
+    probe = '''
+import os, sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import hook_state, dashboard_projection
+repo = Path(sys.argv[2])
+path = repo / '.oms/plan/tasks.json'
+original = os.open
+def raced(filename, flags, *args, **kwargs):
+    if str(filename) == str(path):
+        path.unlink()
+        os.mkfifo(path)
+    return original(filename, flags, *args, **kwargs)
+for reader, empty in ((hook_state.plan_tasks, ({}, [])), (dashboard_projection.plan_tasks, [])):
+    if path.exists():
+        path.unlink()
+    os.mkfifo(path)
+    assert reader(repo) == empty
+    path.unlink()
+    path.write_text('{"tasks": []}')
+    with patch.object(os, 'open', side_effect=raced):
+        assert reader(repo) == empty
+path.unlink()
+'''
+    subprocess.run([sys.executable, "-c", probe, str(root / "scripts/lib"), str(repo)], check=True, timeout=5)
 stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 def plan_file(tasks):
     (plan_dir / "tasks.json").write_text(json.dumps({"goal": "Ship the shared plan board " * 5, "tasks": {
@@ -902,6 +959,40 @@ room.create(repo, "twin-room", "Twin mains")
 room.join(repo, "twin-room", "twin-one", "claude", native_session=twin)
 room.join(repo, "twin-room", "twin-two", "claude", native_session=transcript("root-c"))
 assert not hook_state.rebind_lineage_session(moved(transcript("root-c")))
+assert room.participant(room.status(repo, "twin-room"), "twin-one")["consumer"] == hook_state.session_hash(moved(twin))
+# Missing, unreadable, truncated and ambiguous comparisons cannot establish uniqueness.
+import panel_chats
+states, incomplete = room.discover(repo)
+assert not incomplete
+enrolled = {m["consumer"] for state in states for m in state["participants"]
+            if m["joined"] and m["role"] == "main" and m["provider"] == "claude"}
+complete_index = panel_chats.native_index(enrolled)
+missing = dict(complete_index["claude"])
+other = room.participant(room.status(repo, "twin-room"), "twin-two")["consumer"]
+missing.pop(other)
+with patch.object(panel_chats, "native_index", return_value={"claude": missing}):
+    assert not hook_state.rebind_lineage_session(moved(transcript("root-c"))), "partial native index rebound a twin main"
+old_path = projects / (next(iter(complete_index["claude"][other])) + ".jsonl")
+old_text = old_path.read_text()
+for damaged in ("", " " * hook_state.LINEAGE_READ + old_text):
+    old_path.write_text(damaged)
+    assert not hook_state.rebind_lineage_session(moved(transcript("root-c"))), "unresolved root was treated as a nonmatch"
+old_path.write_text(old_text)
+real_root = hook_state.transcript_root
+def unreadable_root(path, background=False):
+    if path == old_path:
+        raise OSError("unreadable")
+    return real_root(path, background)
+with patch.object(hook_state, "transcript_root", side_effect=unreadable_root):
+    assert not hook_state.rebind_lineage_session(moved(transcript("root-c")))
+with patch.object(panel_chats, "MAX_FILES", 0):
+    assert not hook_state.rebind_lineage_session(moved(transcript("root-c"))), "truncated project scan rebound a main"
+duplicate_slug = projects.parent / "duplicate-slug"
+duplicate_slug.mkdir()
+(duplicate_slug / old_path.name).write_text(old_text)
+assert not hook_state.rebind_lineage_session(moved(transcript("root-c"))), "ambiguous transcript copies rebound a main"
+(duplicate_slug / old_path.name).unlink()
+duplicate_slug.rmdir()
 assert room.participant(room.status(repo, "twin-room"), "twin-one")["consumer"] == hook_state.session_hash(moved(twin))
 # A negative result is cached for ten minutes; a prompt then heals the moved session.
 room.create(repo, "late-room", "Late main")

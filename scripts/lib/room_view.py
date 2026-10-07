@@ -933,10 +933,13 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         text = declared_of(m)
         stamp = mapping(mapping(room.get("statuses")).get(m["participant"])).get("ts")
         try:
-            old = time.time() - calendar.timegm(time.strptime(str(stamp), "%Y-%m-%dT%H:%M:%SZ")) > 1800
+            seconds = time.time() - calendar.timegm(time.strptime(str(stamp), "%Y-%m-%dT%H:%M:%SZ"))
         except ValueError:
-            old = False
-        return ("Now: " + text + ((" · " if unicode else " / ") + ago(stamp) if old else ""), old) if text else ("", False)
+            seconds = 0
+        old = seconds > 1800
+        # Past an hour the main's own words no longer describe the live counts beside them.
+        return ("Now: " + text + ((" · " if unicode else " / ") + ago(stamp) + (" (stale)" if seconds > 3600 else "") if old else ""),
+                old) if text else ("", False)
 
     def task_of(m):
         task = clean(m.get("title")) or "Task unrecorded"
@@ -1624,11 +1627,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         else:
             body_drawn = True
             first, plain = 0, set()
-            if active == "detail" and capacity == 1 and previewed and body:
+            if active == "detail" and capacity == 1 and body:
                 # One row holds the content line itself; a title there would leave nothing to scroll.
                 first = min(scrolled.get("detail", 0), len(body) - 1)
                 scrolled_now["detail"] = first
-                rows = [(body[first], targets.get(first, action(previewed)), False)]
+                rows = [(body[first], targets.get(first, action(previewed)) if previewed else None, False)]
                 plain = {0} if first not in targets else set()
             elif active == "detail":
                 first = min(scrolled.get("detail", 0), max(0, len(body) - (capacity - 1)))
@@ -1656,6 +1659,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                         rows[0] = ("%s rows hidden / wheel | %s" % (len(plan) - page_size, rows[0][0]), None, False)
             elif active == "debate":
                 rows = debate_body(report, shown_main, width - 4, capacity, navigation, labels, unicode)
+                if navigation["debate_view"].get("shown") is None and not menu and not navigation.get("keys_help") \
+                        and footer[-hint_rows:] == hints:
+                    # Nothing to pick or open: the seat and target keys would do nothing.
+                    footer[-hint_rows:] = hints = footer_hints(dict(navigation, debate_empty=True), width, managed,
+                                                               unicode, chosen_member, len(mains), True)
             else:
                 rows = messages_body(report, width - 4, capacity, navigation, unicode)
             for n in range(capacity):
@@ -1722,10 +1730,11 @@ def plan_rows(report, labels, width, unicode):
         age = t.get("claim_age_s")
         if t.get("claim_expired") and isinstance(age, (int, float)) and age >= 0:
             word += " %d%s stale" % ((age // 86400, "d") if age >= 86400 else (age // 3600, "h") if age >= 3600 else (age // 60, "m"))
-        rows.append(("%s %s · %s · %s · %s · %s" % (
-            glyphs.get(t.get("state"), "?"), clean(t.get("id"), 40), word, clean(t.get("title"), 120) or "untitled",
-            clean(labels.get(by) or by, 40) if by else "unclaimed", clean(t.get("verify"), 80) or "no verify"),
-            ("task", t.get("id")) if t.get("id") else None))
+        # A finished task has no owner or check left to act on, so those columns would only read as warnings.
+        parts = [glyphs.get(t.get("state"), "?") + " " + clean(t.get("id"), 40), word, clean(t.get("title"), 120) or "untitled"]
+        if t.get("state") != "done":
+            parts += [clean(labels.get(by) or by, 40) if by else "unclaimed", clean(t.get("verify"), 80) or "no verify"]
+        rows.append((" · ".join(parts), ("task", t.get("id")) if t.get("id") else None))
     return rows or [("No repository plan recorded", None)]
 
 
@@ -1737,6 +1746,9 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph):
     """At most three hints for what is selected, then the fixed panel keys; `?` swaps in the full list of working keys."""
     selected = navigation.get("selected")
     kind = selected[0] if selected else "chat"
+    if mapping(navigation.get("preview")).get("target", ("",))[0] == "pair":
+        # The open detail is a link between two mains; chatting or asking would address neither.
+        kind = "pair"
     arrows, move = ("←→", "↑↓") if unicode else ("<>", "^v")
     toggle = "F9 Chat⇄Board" if unicode else "F9 Chat<>Board"
     worktree = bool(member and kind == "result" and str(member.get("location") or "").startswith("worktree:"))
@@ -1755,11 +1767,12 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph):
         return lines[:4] + (["Tab badges: W workers  A advisors  ! needs you  M mail  ? open questions  c context left"] if graph else [])
     tab = navigation.get("tab") if graph and not navigation.get("detail") else None
     contextual = ([move + " Message", "Enter Open", arrows + " Filter"] if tab == "messages"
-                  else [move + " Seat", "Enter Open", arrows + " Target"] if tab == "debate"
+                  else [move + " Seat", "Enter Open", arrows + " Target"] if tab == "debate" and not navigation.get("debate_empty")
+                  else ["Tab Next tab"] if tab == "debate"
                   else ["wheel Scroll", "Tab Next tab"] if tab == "plan" else None)
     contextual = contextual or (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + ["f Full result" if navigation.get("full_result") else "",
                   "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
-                  "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "Enter Show",
+                  "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "" if kind == "pair" else "Enter Show",
                   "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
                   "Tab Next tab" if graph and not navigation.get("detail") else "",
                   ("Space Pin" if graph else "Space Fold") if kind == "chat" and (mains > 1 or not graph) else "Space Fold" if kind == "group" else ""]

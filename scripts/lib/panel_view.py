@@ -336,8 +336,9 @@ def close_requests(report, unicode=True):
 
 def inbox_items(report, unicode=True):
     """What the person must act on, newest first: failures, waits, broadcasts from mains, patches to admit."""
-    from room_view import failure_handled, handled_results, nodes, readable
+    from room_view import failure_handled, handled_results, main_names, nodes, readable
     members = nodes(report)
+    titles = main_names(report, members)
     name = lambda m: MODEL_NAMES.get(m.get("model"), m.get("model")) or m.get("provider") or "unknown"
     mains = {ident: m for m in members if m.get("role") == "main"
              for ident in (m["participant"], m.get("attempt")) if ident}
@@ -349,9 +350,10 @@ def inbox_items(report, unicode=True):
 
     def who(member):
         if member.get("role") == "main":
-            return name(member) + " main"
+            return titles.get(member["participant"], name(member)) + " main"
         parent = mains.get(member.get("parent"))
-        return "%s %s" % (name(member), member.get("role")) + (" for " + name(parent) if parent else "")
+        return "%s %s" % (name(member), member.get("role")) + (
+            " for " + titles.get(parent["participant"], name(parent)) if parent else "")
     items = []
     for member in members:
         state = member["state"]
@@ -377,9 +379,7 @@ def inbox_items(report, unicode=True):
             items.append({"stamp": message.get("ts") or "", "glyph": ">" if not unicode else "»",
                           "who": who(sender), "what": "to all: " + clean(text, 80),
                           "style": "alert", "action": ("chat", sender["participant"])})
-    from room_view import main_names
     import room as room_module
-    titles = main_names(report, members)
     byid = {m["participant"]: m for m in members}
     for question in listing(mapping(report.get("room")).get("open_questions")):
         question, minutes = mapping(question), room_module.age(mapping(question).get("ts")) // 60
@@ -387,7 +387,7 @@ def inbox_items(report, unicode=True):
         if minutes * 60 >= room_module.PERSON_AFTER and asker and target and target.get("role") == "main":
             label = lambda m: titles.get(m["participant"]) or name(m)
             items.append({"stamp": question.get("ts") or "", "glyph": "?", "who": "Question from " + label(asker),
-                          "what": "to %s open %d min" % (label(target), minutes), "style": "alert",
+                          "what": "to " + label(target), "style": "alert",
                           "action": ("chat", target["participant"])})
     for request in close_requests(report, unicode):
         items.append({"stamp": request["ts"], "glyph": "✕" if unicode else "x", "who": "Close " + request["label"],

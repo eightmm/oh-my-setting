@@ -19,6 +19,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from inbox_projection import project_inbox  # noqa: E402
+from thread_live import DURABLE, _load, safe_path  # noqa: E402
+
+PLAN_READER = _load("plan-retire.py")["bounded_regular"]
 
 SCHEMA = 1
 MAX_ROWS = 8
@@ -217,21 +220,46 @@ def project_acceptance(runtime):
     }
 
 
+def read_plan(repo_path):
+    """Read a bounded repo-local plan without following links or blocking on special files."""
+    if not repo_path:
+        return {}, []
+    try:
+        path = safe_path(repo_path, ".oms/plan/tasks.json")
+        if not path.exists():
+            return {}, []
+        ancestry = DURABLE["component_snapshot"](str(repo_path), str(path), "plan")
+        raw, _ = PLAN_READER(str(path), "plan", MAX_SOURCE_BYTES)
+        DURABLE["components_unchanged"](ancestry, "plan")
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return {}, []
+        rows = data.get("tasks", {})
+        if not isinstance(rows, (dict, list)):
+            return {}, []
+    except (OSError, ValueError, RecursionError, SystemExit):
+        return {}, []
+    rows = list(rows.values()) if isinstance(rows, dict) else rows if isinstance(rows, list) else []
+    tasks = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        depends = row.get("depends")
+        if (not isinstance(row["id"], str) or not re.fullmatch(r"[A-Za-z0-9._-]+", row["id"])
+                or depends is not None and (not isinstance(depends, list)
+                    or any(not isinstance(item, str) for item in depends))):
+            return {}, []
+        tasks.append(row)
+    return data, tasks
+
+
 def plan_tasks(repo_path):
     """Bounded id/title/state/claimant rows of the repository plan; empty when it cannot be read."""
-    if not repo_path:
-        return []
-    try:
-        with open(os.path.join(repo_path, ".oms", "plan", "tasks.json"), "rb") as handle:
-            raw = handle.read(MAX_SOURCE_BYTES + 1)
-        rows = json.loads(raw).get("tasks") if len(raw) <= MAX_SOURCE_BYTES else None
-    except (OSError, ValueError, RecursionError, AttributeError):
-        return []
-    rows = list(rows.values()) if isinstance(rows, dict) else rows if isinstance(rows, list) else []
+    _, rows = read_plan(repo_path)
     return [{"id": clean(row.get("id"), 40), "title": clean(row.get("title"), 80),
              "state": clean(row.get("state"), 20),
              "claimed_by": clean(row.get("claimed_by_participant"), 80) or None}
-            for row in rows if isinstance(row, dict) and row.get("id")]
+            for row in rows]
 
 
 def build(directory, repo_name, repo_path="", now=None):

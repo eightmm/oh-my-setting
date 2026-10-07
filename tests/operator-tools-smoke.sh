@@ -934,6 +934,10 @@ entry = json.loads(path.read_text())
 entry['value'] = {'number': 999}
 path.write_text(json.dumps(entry), encoding='utf-8')
 assert board() == {'number': 6}, 'damaged payload was reused'
+entry = json.loads(path.read_text())
+entry['created'] = 10 ** 400
+path.write_text(json.dumps(entry), encoding='utf-8')
+assert board() == {'number': 7}, 'overflowing cache timestamp did not trigger recollection'
 
 # The board still selects its own room, and result queries share the same
 # generation without retaining scoped answer text or skipping digest checks.
@@ -1207,7 +1211,7 @@ nav, plan = board("plan")
 plan_rows = [line for line in plan.split("\n") if "Goal:" in line or " t-" in line]
 assert "Goal: Ship the tabbed panel" in plan_rows[0], plan
 assert [row.split(" · ")[0].split()[-1] for row in plan_rows[1:]] == ["t-ver", "t-rev", "t-run", "t-rdy", "t-blk"], plan_rows
-assert "t-ver · done · Verified one · unclaimed · make d" in plan and "t-run · running 9h stale · Running one · #1 Opus 5.5 · make c" in plan, plan
+assert "t-ver · done · Verified one" in plan and "Verified one · unclaimed" not in plan and "make d" not in plan and "t-run · running 9h stale · Running one · #1 Opus 5.5 · make c" in plan, plan
 assert "t-rev · review · Review one · unclaimed ·" in plan and "codex ·" not in plan and "claude ·" not in plan, plan
 task_hits = [h["action"] for h in nav["hits"] if h["action"][0] == "task"]
 assert task_hits == [("task", t) for t in ("t-ver", "t-rev", "t-run", "t-rdy", "t-blk")], task_hits
@@ -1241,6 +1245,8 @@ for glyphs in (True, False):
 # Debate: opener and time by board name and local clock, question, one line per seat, stance cut, choice changes only.
 nav, text = board("debate")
 assert "No debate opened by #1 Opus 5.5 · a main opens one with oms panel --council" in board("debate", nav={"selected": ("chat", "m1")})[1]
+empty_foot = board("debate", nav={"selected": ("chat", "m1")})[1].split("\n")[-1]
+assert "Tab Next tab" in empty_foot and "Seat" not in empty_foot and "Target" not in empty_foot, empty_foot
 render(msg_report, "codex", 80, 60, view="graph", navigation=nav, main_attempt="a2")
 nav["debate_view"]["report"] = deepcopy(debate_rows)
 nav, text = board("debate", nav=nav)
@@ -1347,7 +1353,14 @@ for ascii_only in (False, True):
     assert not ascii_only or asked_board.isascii(), asked_board
 assert "? 1 open" not in render(msg_report, "codex", 140, 40, view="graph", navigation={"dismissed": True})
 waiting = [i for i in question_view.inbox_items(asked_report) if i["glyph"] == "?"]
-assert [(i["who"], i["what"], i["action"]) for i in waiting] == [("Question from #1 Opus 5.5", "to #2 Sol 6.1 open 25 min", ("chat", "m2"))], waiting
+assert [(i["who"], i["what"], i["action"]) for i in waiting] == [("Question from #1 Opus 5.5", "to #2 Sol 6.1", ("chat", "m2"))], waiting
+# Two mains on one model stay apart in the control window, which reuses the board's names.
+twin = deepcopy(asked_report)
+twin["main_windows"] = {}
+twin["room"]["participants"][1]["model"] = twin["room"]["participants"][0]["model"]
+twin["room"]["messages"] = [{"id": "bc", "sender": "m1", "recipient": "all", "text": "heads up", "pending_for": ["m2"], "ts": "2026-10-07T10:00:00Z"}]
+twin_who = [i["who"] for i in question_view.inbox_items(twin) if i["what"].startswith("to all")]
+assert twin_who == ["Opus 5.5 #m1 main"], twin_who
 asked_report["room"]["open_questions"][0]["ts"] = question_time.strftime("%Y-%m-%dT%H:%M:%SZ", question_time.gmtime(question_time.time() - 19 * 60))
 assert not [i for i in question_view.inbox_items(asked_report) if i["glyph"] == "?"], "under twenty minutes the person is not pulled in"
 empty_calls = deepcopy(tree)
@@ -4005,6 +4018,11 @@ picture = render(talking, "codex", 110, 30, view="graph", main_attempt="flow-att
 assert "Between mains: 1 pair · 1 unread" in picture, picture
 tall = render(talking, "codex", 157, 65, view="graph", main_attempt="flow-attempt", navigation={})
 assert "BETWEEN MAINS · 1 pair · 1 unread" in tall and "Sol 6 ⇄ Opus 5.5  →2 · 1 new" in tall, tall
+pair_nav = {}
+render(talking, "codex", 157, 65, view="graph", main_attempt="flow-attempt", navigation=pair_nav)
+pair_nav["preview"] = {"target": next(h["action"] for h in pair_nav["hits"] if h["action"][0] == "pair")}
+pair_foot = render(talking, "codex", 157, 65, view="graph", main_attempt="flow-attempt", navigation=pair_nav).split("\n")[-1]
+assert "Esc Close" in pair_foot and "Enter Chat" not in pair_foot and "Ask advisor" not in pair_foot, pair_foot
 assert "Model use, last calls" not in tall and "W0 A0" not in tall and "Click any block" not in tall, tall
 assert "..." not in tall and sum("week" in line for line in tall.splitlines()) <= 1, tall
 ascii_tall = render(talking, "codex", 157, 65, view="graph", unicode=False, main_attempt="flow-attempt", navigation={})
@@ -4091,6 +4109,7 @@ for glyphs, dot, ending in ((True, "·", "→"), (False, "/", "->")):
     board = render(truth, "codex", 157, 40, view="graph", unicode=glyphs, navigation={"overview": True})
     assert "Now: 방 범위 선언 %s 6h ago" % dot in board and "Now: Now:" not in board, board
     assert "Now: fresh work" in board and "fresh work %s" % dot not in board, board
+    assert "6h ago (stale)" in board and "fresh work" in board and board.count("(stale)") == 1, board
     assert "guard stop" in board and "failed (exit 1)" not in board, board
     assert "1 call + 2 reviews need you" in board, board
     assert re.search(r"!3\b", board), board

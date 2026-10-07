@@ -8403,6 +8403,7 @@ encoded="$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')"
 {
   printf 'argv: %s\n' "$*"
   [ -f "$HOME/.claude/projects/$encoded/$FIXTURE_SESSION.jsonl" ] && printf 'session-in-new-cwd\n'
+  printf 'session-body: %s\n' "$(cat "$HOME/.claude/projects/$encoded/$FIXTURE_SESSION.jsonl" 2>/dev/null)"
   cat
 } > "$FIXTURE_LOG"
 printf '{"type":"result","subtype":"success","is_error":false,"result":"resumed","session_id":"%s","stop_reason":"end_turn"}\n' "$FIXTURE_SESSION"
@@ -8423,6 +8424,28 @@ EOF
       --resume-session '../x' --prompt p >/dev/null 2>&1; then
     fail "an unsafe session id must be rejected"
   fi
+
+  # A newer copy of the session wins over the original; links never copy.
+  local projects="$home_dir/.claude/projects" outside="$TMP/delegate-resume-outside"
+  mkdir -p "$projects/-newer-worktree"
+  printf 'round2\n' > "$projects/-newer-worktree/$session.jsonl"
+  touch -t 202001010000 "$projects/-old-worktree/$session.jsonl"
+  resume_for_test() {
+    : > "$log"
+    HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      FIXTURE_LOG="$log" FIXTURE_SESSION="$session" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
+      "$ROOT/scripts/peer-delegate.sh" --to claude --repo "$project" \
+      --artifact-dir "$project/artifacts" --no-verify --resume-session "$session" \
+      --prompt p >/dev/null 2>&1
+  }
+  resume_for_test || fail "resume with two copies failed"
+  assert_file_contains "$log" "session-body: round2"
+  rm -f "$projects/-newer-worktree/$session.jsonl"
+  printf 'keep\n' > "$outside"
+  ln -s "$outside" "$projects/-newer-worktree/$session.jsonl"
+  resume_for_test || true
+  [ "$(cat "$outside")" = keep ] || fail "resume must not write through a symlink"
+  if grep -q 'session-body: keep' "$log"; then fail "a symlinked source must not be copied"; fi
 }
 
 test_delegate_missing_cli_writes_exit_and_index() {

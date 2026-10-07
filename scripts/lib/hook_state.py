@@ -7,6 +7,7 @@ import argparse
 import contextlib
 import functools
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -1198,12 +1199,9 @@ def plain_line(value: Any, limit: int) -> str:
 
 
 def plan_tasks(repo: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    try:
-        data = json.loads((repo / ".oms" / "plan" / "tasks.json").read_text(encoding="utf-8"))
-        rows = data.get("tasks") or {}
-        return data, [t for t in (rows.values() if isinstance(rows, dict) else rows) if isinstance(t, dict) and t.get("id")]
-    except (OSError, ValueError, AttributeError):
-        return {}, []
+    from dashboard_projection import read_plan
+
+    return read_plan(repo)
 
 
 def panel_plan_hint(payload: dict[str, Any]) -> str:
@@ -1973,7 +1971,10 @@ def rebind_lineage_session(payload: dict[str, Any]) -> bool:
     transcript = Path(str(transcript))
     if transcript.name != str(session) + ".jsonl" or transcript.resolve().parent.parent != projects:
         return False
-    root = transcript_root(transcript, background=True)
+    try:
+        root = transcript_root(transcript, background=True)
+    except OSError:
+        return False
     if not root:
         return False  # no evidence yet, or not a background move, which is not a negative result
     consumer = session_hash(payload)
@@ -1995,19 +1996,32 @@ def rebind_lineage_session(payload: dict[str, Any]) -> bool:
     mains = [(state["id"], member) for state in states if not state["closed"] for member in state["participants"]
              if member["joined"] and member["role"] == "main" and member["provider"] == "claude"
              and isinstance(member.get("consumer"), str) and member["consumer"] != consumer]
-    if len(mains) > LINEAGE_MAINS:
+    if not mains or len(mains) > LINEAGE_MAINS:
         return False  # a partial comparison never proves a unique lineage
     index = panel_chats.native_index({member["consumer"] for _, member in mains})["claude"]
-    with os.scandir(projects) as entries:
-        slugs = [Path(entry.path) for entry in list(entries)[:panel_chats.MAX_FILES] if entry.is_dir(follow_symlinks=False)]
     matches = []
-    for ident, member in mains:
-        for sid in sorted(index.get(member["consumer"]) or ())[:1]:
-            old = next((slug / (sid + ".jsonl") for slug in slugs if (slug / (sid + ".jsonl")).is_file()
-                        and not (slug / (sid + ".jsonl")).is_symlink()), None)
-            with contextlib.suppress(OSError):
-                if old and transcript_root(old) == root:
-                    matches.append((ident, member))
+    try:
+        with os.scandir(projects) as entries:
+            scanned = list(itertools.islice(entries, panel_chats.MAX_FILES + 1))
+        if len(scanned) > panel_chats.MAX_FILES:
+            return False
+        slugs = [Path(entry.path) for entry in scanned if entry.is_dir(follow_symlinks=False)]
+        for ident, member in mains:
+            sessions = index.get(member["consumer"]) or ()
+            if len(sessions) != 1:
+                return False
+            sid = next(iter(sessions))
+            copies = [slug / (sid + ".jsonl") for slug in slugs if (slug / (sid + ".jsonl")).exists()
+                      or (slug / (sid + ".jsonl")).is_symlink()]
+            if len(copies) != 1:
+                return False
+            old_root = transcript_root(copies[0])
+            if not old_root:
+                return False
+            if old_root == root:
+                matches.append((ident, member))
+    except OSError:
+        return False
     if len(matches) != 1:
         return False
     ident, member = matches[0]

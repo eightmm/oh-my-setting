@@ -268,6 +268,11 @@ other_dir="$(sed -n 's/^no landing recorded under //p' "$TMP/other-status.out" |
 if [ -z "$other_dir" ] || [ "$other_dir" = "$receipt_dir" ]; then
   fail "distinct clones with the same basename must have separate state directories"
 fi
+printf '{broken' > "$receipt_dir/zzzz-broken.json"
+if "$LAND" status --repo "$repo" >/dev/null 2>&1; then
+  fail "a malformed receipt must fail land status"
+fi
+rm -f "$receipt_dir/zzzz-broken.json"
 echo other > "$other/other"; git -C "$other" add other
 git -C "$other" commit -q -m other; git -C "$other" push -q origin HEAD:main
 "$LAND" --repo "$repo" --wait --ci-wait 0 2>"$TMP/diverged.err" && fail "a diverged remote must be refused"

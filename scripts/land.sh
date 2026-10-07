@@ -503,7 +503,7 @@ show_status() {  # show_status [RECEIPT]; default: the most recently written one
   [ "$ACTIVE_EXIT" -eq 1 ] && [ "$active" = true ] && rc=3
   [ -n "$newest" ] || newest="$(ls -t "$LAND_DIR"/*.json 2>/dev/null | head -n 1)" || true
   [ -n "$newest" ] || { echo "no landing recorded under $LAND_DIR"; [ "$rc" -ne 0 ] || rc=1; return "$rc"; }
-  python3 - "$newest" "$active" "$JSON" <<'PY'
+  python3 - "$newest" "$active" "$JSON" <<'PY' || return $?
 import calendar, json, sys, time
 r = json.load(open(sys.argv[1], encoding="utf-8"))
 active = {"true": True, "false": False}.get(sys.argv[2])

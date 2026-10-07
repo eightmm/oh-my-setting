@@ -88,7 +88,7 @@ def _load(repo, relative, identity, stamp):
                 and isinstance(data['created'], (int, float)) and math.isfinite(data['created'])
                 and data['sha256'] == hashlib.sha256(_body(data['value'])).hexdigest()):
             return data
-    except (OSError, ValueError, TypeError, KeyError, RecursionError, SystemExit):
+    except (OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError, SystemExit):
         pass
     return None
 
