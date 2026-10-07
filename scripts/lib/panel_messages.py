@@ -90,7 +90,7 @@ def tab_body(report, width, cap, navigation, unicode=True):
     room = mapping(report.get("room"))
     name_of, mains, me, chosen = _people(report, navigation)
     log = state.get("log")
-    loading = log is None and (room.get("message_count") or 0) > len(listing(room.get("messages")))
+    loading = log is None and bool(state.get("reading")) and (room.get("message_count") or 0) > len(listing(room.get("messages")))
     messages = (log if log is not None else listing(room.get("messages")))[-MAX_MESSAGES:]
     filters = [("all", None)] + ([("to/from " + name_of(chosen), chosen)] if chosen else []) + \
               ([("to/from me", me)] if me else [])

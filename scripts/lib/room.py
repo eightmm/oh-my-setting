@@ -30,6 +30,7 @@ MAX_SCAN_BYTES = 8 * 1024 * 1024
 # Seconds an unanswered question must stay open before each escalation tier.
 ACK_AFTER = REPEAT_AFTER = 300
 ASKER_AFTER, OVERDUE_AFTER, PERSON_AFTER, SECOND_REMINDER_AFTER = 600, 900, 1200, 1800
+MAX_REMINDERS = 3
 
 
 def identifier(value, label="identifier"):
@@ -489,21 +490,35 @@ def open_questions(state, recipient=None, asker=None):
             and (recipient is None or recipient in m["targets"]) and (asker is None or m["sender"] == asker)]
 
 
+def reminder_id(question, tier):
+    legacy = "remind-%s-%s" % (question, tier)
+    if len(legacy) <= 160:
+        return legacy
+    return "reminder-%s-%s" % (hashlib.sha256(question.encode("utf-8")).hexdigest(), tier)
+
+
 def remind(repo, room, who, state=None):
     """Record the asker's own reminder note for its open question; one per tier, ids make a repeat a no-op."""
     state = state or project(records(repo, room))
     seen, sent = {m["id"] for m in state["messages"]}, []
+    attempts = 0
+    if len(state["messages"]) >= 1024:
+        return sent
     for question in open_questions(state, asker=who):
         tier = 2 if question["age"] >= SECOND_REMINDER_AFTER else 1 if question["age"] >= ASKER_AFTER else 0
-        reminder = "remind-%s-%s" % (question["id"], tier)
+        reminder = reminder_id(question["id"], tier)
         if not tier or question["recipient"] == "all" or reminder in seen:
             continue
+        if attempts >= MAX_REMINDERS:
+            break
+        attempts += 1
         try:
             send(repo, room, who, question["recipient"], "Reminder: open question %s (%d min)" % (
                 question["id"], question["age"] // 60), "note", message_id=reminder, linked=False)
             sent.append(question | {"reminder": reminder})
+            seen.add(reminder)
         except ValueError:
-            pass  # a lost race or an over-long id leaves the question to the next safe point
+            pass  # A lost race or a full room remains pending for the next safe point.
     return sent
 
 
@@ -558,11 +573,27 @@ def visible(row, who, joined_seq=0):
             and event.get("recipient") in ("all", who))
 
 
-def updates(repo, room, who, after="", budget=8192, limit=50):
-    state = project(records(repo, room))
+def updates(repo, room, who, after="", budget=8192, limit=50, *, state=None):
+    state = state if state is not None else project(records(repo, room))
     if state["closed"]:
         raise ValueError("room is closed")
     member = participant(state, who)
+    if not after:
+        # Preserve the native cursor's identity and digest; only its first position changes.
+        with thread_live.open_thread(repo, room) as handle:
+            scanned = 0
+            while scanned <= thread_live.MAX_FILE:
+                line = handle.readline(thread_live.MAX_ROW + 1)
+                scanned += len(line)
+                if not line or not line.endswith(b"\n") or len(line) > thread_live.MAX_ROW or scanned > thread_live.MAX_FILE:
+                    raise ValueError("room enrollment turn is unavailable")
+                row = json.loads(line)
+                if row.get("seq") == member["seq"]:
+                    if (row.get("thread") != room or row.get("room_event", {}).get("kind") != "join"
+                            or row["room_event"].get("participant") != who):
+                        raise ValueError("room enrollment turn changed")
+                    after = thread_live.cursor_for(handle, room, handle.tell())
+                    break
     delta = thread_live.updates(repo, room, after, budget, limit, allow_first_row_over_budget=True)
     return dict(delta, turns=[r for r in delta["turns"] if visible(r, who, member["seq"])])
 
@@ -573,28 +604,33 @@ def acknowledge(repo, room, who, mids):
 
 def selected(repo, consumer=None, preferred=None, who=None):
     """Explicit binding wins; otherwise match a native session to its latest join."""
+    return _selected(repo, consumer, preferred, who)[0]
+
+
+def _selected(repo, consumer=None, preferred=None, who=None):
+    """Retain the selected projection for a hook's delivery and reminder checks."""
     if preferred:
         state = project(records(repo, identifier(preferred, "room")))
         if state["closed"]:
-            return None
+            return None, state
         member = participant(state, who) if who else next((p for p in state["participants"]
                      if p.get("consumer") == consumer and p["joined"]), None)
-        return (state["id"], member["participant"]) if member else None
+        return ((state["id"], member["participant"]) if member else None), state
     folder = Path(repo) / ".oms/threads"
     if not consumer or not folder.is_dir():
-        return None
+        return None, None
     candidates, enrolled = [], False
     states, incomplete = discover(repo)
     if incomplete:
-        return None, None
+        return (None, None), None
     for state in states:
         enrolled = enrolled or any(consumer in (p.get("consumer"), p.get("initial_consumer")) for p in state["participants"])
         if state["closed"]:
             continue
         for member in state["participants"]:
             if member.get("consumer") == consumer and member["joined"]:
-                candidates.append((member["joined_at"], member["seq"], state["id"], member["participant"]))
-    return candidates[0][2:] if len(candidates) == 1 else (None, None) if enrolled else None
+                candidates.append((member["joined_at"], member["seq"], state["id"], member["participant"], state))
+    return (candidates[0][2:4], candidates[0][4]) if len(candidates) == 1 else ((None, None) if enrolled else None, None)
 
 
 def messages(repo, room):

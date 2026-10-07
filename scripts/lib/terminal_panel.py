@@ -26,7 +26,7 @@ from dashboard_projection import clean
 from panel_view import CLOSE_PREFIX, INBOX_LIMIT, close_requests, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
 from panel_routing import allocate, command as routed_command, policy, MODEL_IDS
-from panel_results import _lock, finalize, results, retry_delivery
+from panel_results import _lock, finalize, results, retry_delivery, verified_patch
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "scripts" / "oms"
@@ -603,7 +603,8 @@ def continuation(repo, owner, main, task_id, route, brief, env):
         raise ValueError("this main has no worker for task %s to continue" % task_id)
     last = earlier[-1]
     session = last.get("refs", {}).get("native_session")
-    call = next((c for c in reversed(results(repo, task_id)["rows"][0].get("calls", []))
+    found = results(repo, task_id)["rows"]
+    call = next((c for c in reversed(found[0].get("calls", []) if found else [])
                  if c.get("attempt_id") == last["attempt_id"]), {})
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"], capture_output=True,
                           text=True, check=False, stdin=subprocess.DEVNULL).stdout.strip()
@@ -614,11 +615,13 @@ def continuation(repo, owner, main, task_id, route, brief, env):
         # Absolute machine paths never leave in a prompt (the outbound scrubber refuses them), and the new
         # worktree has no .oms artifacts, so the earlier patch travels inline while it fits.
         try:
-            body = (Path(repo) / patch).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            body = ""
+            body = verified_patch(repo, call).decode("utf-8", errors="replace")
+        except (OSError, ValueError, TypeError):
+            body = None
         name = os.path.relpath(Path(repo) / patch, repo)
-        if body and len(body.encode("utf-8")) + len(Path(brief).read_bytes()) + 8192 <= MAX_PROMPT:
+        if body is None:
+            where = " The previous patch could not be verified and is not included."
+        elif body and len(body.encode("utf-8")) + len(Path(brief).read_bytes()) + 8192 <= MAX_PROMPT:
             where = " Your previous patch (%s) follows; apply what still fits.\n```diff\n%s```\n" % (name, body)
         else:
             where = " Your previous patch is %s in the main checkout (apply what still fits)." % name
@@ -1025,13 +1028,15 @@ def panel_geometry():
     try:
         result = subprocess.run(tmux_command("display-message", "-p", "-t", os.environ.get("TMUX_PANE", ""),
                                              "#{window_active} #{window_zoomed_flag} #{window_panes} #{window_width} "
-                                             "#{window_height} #{pane_width} #{pane_height} #{window_name} #{@oms_panel_split}"),
+                                             "#{window_height} #{pane_width} #{pane_height}\t#{window_name}\t#{@oms_panel_split}"),
                                 capture_output=True, text=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
-        fields = result.stdout.split() if result.returncode == 0 else []
-        if len(fields) < 8 or fields[7] == "control" or fields[0] not in ("0", "1") or fields[1] not in ("0", "1"):
+        # Tabs keep a window name with spaces (an attention mark "! ") from shifting the split text.
+        parts = result.stdout.replace("\r", "").rstrip("\n").split("\t") if result.returncode == 0 else []
+        fields = parts[0].split() if len(parts) >= 2 else []
+        if len(fields) < 7 or parts[1] == "control" or fields[0] not in ("0", "1") or fields[1] not in ("0", "1"):
             return None
         return (fields[0] == "1", fields[1] == "1", int(fields[2]), (int(fields[3]), int(fields[4])),
-                (int(fields[5]), int(fields[6])), fields[8] if len(fields) > 8 else "")
+                (int(fields[5]), int(fields[6])), parts[2].strip() if len(parts) > 2 else "")
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
@@ -1329,7 +1334,8 @@ def bind_window(pane, launch, view, attention_only):
 # (F9 appears there only in a test remap); Alt/Shift arrows edit or queue input there.
 # F9 selects the other pane of the window: the native chat from its board and back.
 KEYS_HELP = ("OMS panel keys: F6/F7 previous/next main · F9 chat/board · F5 control window · F12 this help · "
-             "on a board: Enter open · Tab next tab · a advisor · f full result · t tree · v expand · n new main · ? all")
+             "on a board: Enter open · Tab next tab · a advisor · f full result · t tree · v expand · n new main · ? all · "
+             "tab badges: W workers, A advisors, ! needs you, M mail, ? open questions, c context left")
 # F5/F9/F12 are unbound in Codex 0.160 and Claude Code; F8 is Codex voice, F10/F11 belong to terminal menus.
 MAIN_KEYS = (("F7", "next-window", 2), ("F6", "previous-window", 2), ("F9", "select-pane -t :.+", 0),
              ("F5", "select-window -t :=control", 0), ("F12", 'display-message -d 8000 "%s"' % KEYS_HELP, 0))
@@ -1732,8 +1738,9 @@ def snapshot(repo, room_id=None):
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
                     pass
                 try:
-                    if any(row.get("state") in {"failed", "timed_out", "abandoned", "orphaned", "review", "blocked"} for key in ("active_recent", "recent")
-                           for row in state.get("attempts", {}).get(key) or []):
+                    if any(row.get("state") in {"failed", "timed_out", "abandoned", "orphaned", "review", "blocked"}
+                           for row in [r for key in ("active_recent", "recent") for r in state.get("attempts", {}).get(key) or []]
+                           + list((state.get("room_attempts") or {}).values())):
                         state["finalized"] = {row["task_id"]: row["outcome"] for row in results(repo).get("rows", [])
                                               if row.get("outcome") in {"completed", "accepted"}}
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
@@ -2206,14 +2213,13 @@ WINDOW_ATTENTION = {"failed", "timed_out", "waiting_input", "waiting_approval", 
 
 def main_needs_attention(state, main_attempt):
     """Whether any call of this window's main is failed, timed out, blocked or waiting on a person."""
-    from room_view import nodes, result_handoff
-    from dashboard_projection import listing, mapping
+    from room_view import nodes, handled_results
+    from dashboard_projection import mapping
     members = nodes(state)
     ids = {key for m in members if main_attempt in (m.get("participant"), m.get("attempt")) and m.get("role") == "main"
            for key in (m.get("participant"), m.get("attempt")) if key}
     room, finalized = mapping(state.get("room")), mapping(state.get("finalized"))
-    read = {mapping(x).get("id") for x in listing(room.get("messages"))
-            if result_handoff(room, x) and not listing(mapping(x).get("pending_for"))}
+    read = handled_results(room)
     return any(m.get("role") != "main" and m.get("parent") in ids and m["state"] in WINDOW_ATTENTION
                and not (m["state"] in {"failed", "timed_out"} and "result-" + str(m.get("participant")) in read
                         or m["state"] in {"failed", "timed_out", "review", "blocked"}
@@ -2611,9 +2617,9 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             except Exception as error:
                                 return target, {}, clean(str(error), 120) or "Debate evidence unavailable"
                         previews.start(debate_read)
-                    log = navigation.get("messages_view") or {}
+                    log = navigation.setdefault("messages_view", {"selected": None, "open": None, "filter": 0, "scroll": 0})
                     if loaded and report and report[0][0] == "messages":
-                        log.update(log=report[1] or log.get("log"), rev=report[0][1])
+                        log.update(log=report[1] or log.get("log"), rev=report[0][1], reading=False)
                         size = redraw()
                     if navigation.get("tab") == "messages" and state and not previews.pending and \
                             log.get("rev") != panel_messages.signature(state):
@@ -2626,6 +2632,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             except Exception as error:
                                 return ("messages", stale), None, clean(str(error), 120)
                         if room_id:
+                            log["reading"] = True
                             previews.start(messages_read)
                     if navigation.get("opening") and not previews.pending:
                         previews.start(lambda target=navigation["opening"]: read_evidence(repo, target))

@@ -181,7 +181,14 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
               for text, style in goal_banner(report, width, unicode)] if height >= 10 else []
     head = banner + [{"text": clipped(heading, width), "style": "main"}]
     head += [{"text": clipped(alert, width), "style": "bad"} for alert in status_alerts(report)]
-    if boxed and height >= 20:
+    readings = mapping(report.get("provider_status"))
+    blank = not usage_words(report, unicode) and not any(
+        mapping(readings.get(key)).get(field) is not None for key in ("claude", "codex")
+        for field in ("weekly_used", "context_left"))
+    if blank and boxed and height >= 20 and budget - len(head) >= 5:
+        # Nothing to read: one line says so instead of a box of dashes.
+        head.append({"text": clipped("Usage readings unavailable (Claude, Codex)", width), "style": "dim"})
+    elif boxed and height >= 20:
         usage = usage_words(report, unicode)
         labels = usage[:2] if summary else usage
         if summary and len(usage) > 2:

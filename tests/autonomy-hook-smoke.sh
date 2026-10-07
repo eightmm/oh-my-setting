@@ -550,7 +550,7 @@ assert not asker(), "the asker hears nothing before ten minutes"
 at(11)
 told = asker()
 assert told == "Your question ask-q1 to Opus 5.5 has no answer for 11 min; it was re-sent as a reminder.", told
-assert asker() == told and [m["id"] for m in room.messages(repo, "asks")].count("remind-ask-q1-1") == 1, "one reminder, ever per tier"
+assert "reminder already recorded" in asker() and [m["id"] for m in room.messages(repo, "asks")].count("remind-ask-q1-1") == 1, "one reminder, ever per tier"
 again = target().splitlines()
 assert any("Reminder: open question ask-q1 (11 min)" in l for l in again) and any("ask-q1 from Sol 6.1 (11 min)" in l for l in again), again
 at(16)
@@ -583,6 +583,37 @@ room.send(repo, "asks", "target", "asker", "second", "answer", reply_to="ask-q2"
 with contextlib.redirect_stderr(captured):
     room.send(repo, "asks", "target", "asker", "third", "answer")
 assert not room.status(repo, "asks")["open_questions"]
+# One hook reuses a single room projection, and a reminder burst budgets attempts, including failures.
+from unittest.mock import patch
+bulk = room.project(room.records(repo, "asks"))
+question = next(m for m in bulk["messages"] if m["message_kind"] == "question")
+bulk["messages"] = [dict(question, id="bulk-%d" % n, answered=False) for n in range(300)]
+for failure in (None, ValueError("room message limit reached")):
+    with patch.object(room, "send", side_effect=failure) as sends:
+        room.remind(repo, "asks", "asker", bulk)
+        assert 0 < sends.call_count <= 3, "reminder work was not bounded per hook"
+bulk["messages"] = [dict(question, id="full-%d" % n, answered=False) for n in range(1024)]
+with patch.object(room, "send") as sends:
+    assert not room.remind(repo, "asks", "asker", bulk) and not sends.called, "a full room retried doomed sends"
+with patch.dict(os.environ, {"OMS_ROOM_ID": "asks", "OMS_ROOM_PARTICIPANT": "asker"}), \
+        patch.object(room, "records", wraps=room.records) as reads:
+    asker()
+    assert reads.call_count == 1, "hook re-read its room projection"
+# The longest valid question ID can receive both reminder tiers; failed sends cannot claim success.
+long_id = "q" * 160
+room.send(repo, "asks", "asker", "target", "PRIVATE LONG QUESTION", "question", message_id=long_id)
+at(11)
+assert "it was re-sent as a reminder" in asker()
+assert "reminder already recorded" in asker()
+at(31)
+assert "it was re-sent as a reminder" in asker()
+long_reminders = [m for m in room.messages(repo, "asks") if m["message_kind"] == "note" and long_id in m["text"]]
+assert len(long_reminders) == 2 and len({room.identifier(m["id"]) for m in long_reminders}) == 2
+room.send(repo, "asks", "target", "asker", "done", "answer", reply_to=long_id)
+room.send(repo, "asks", "asker", "target", "PRIVATE FAILED QUESTION", "question", message_id="failed-reminder")
+with patch.object(room, "send", side_effect=ValueError("room full")):
+    failed = asker()
+assert "reminder pending" in failed and "re-sent" not in failed and "PRIVATE" not in failed, failed
 room.now = real_now
 room.send(repo, "team", "opus", "sol", "Final scoped note")
 call("close", "--id", "team")
@@ -642,6 +673,28 @@ assert "during-clear" in hook_state.live_thread_hint(payload("after-clear"))
 assert not hook_state.live_thread_hint(payload("native-first-session")), "the cleared session kept reading the main's mail"
 # A panel main is reminded on each prompt that it delegates; other events and sessions are not.
 os.environ.update(OMS_PANEL_MAIN_ATTEMPT="fresh-main", OMS_PANEL_SESSION="oms-fixture")
+# A launch attempt cannot prove a saved digest, and skipped captures remain retryable.
+pressure_payload = payload("capture-main")
+capture_path = hook_state.ctx_state_path(hook_state.ensure_oms(repo), pressure_payload)
+with patch.object(hook_state, "percent_left_from_cache", return_value=25), \
+        patch.object(hook_state, "start_handoff_capture", return_value=False) as launch:
+    notice = hook_state.context_pressure_hint(pressure_payload)
+    assert notice and "skipped" in notice and "saved" not in notice, notice
+    assert json.loads(capture_path.read_text())["captured"] is False, "failed capture latched success"
+    hook_state.context_pressure_hint(pressure_payload)
+    assert launch.call_count == 2, "failed early capture suppressed retry"
+with patch.object(hook_state, "percent_left_from_cache", return_value=25), \
+        patch.object(hook_state, "start_handoff_capture", return_value=True) as launch:
+    notice = hook_state.context_pressure_hint(pressure_payload)
+    assert "started" in notice and "saved" not in notice, notice
+    assert json.loads(capture_path.read_text())["captured"] is True
+    assert not hook_state.context_pressure_hint(pressure_payload) and launch.call_count == 1
+with patch.object(hook_state, "percent_left_from_cache", return_value=40):
+    assert not hook_state.context_pressure_hint(pressure_payload)
+with patch.object(hook_state, "percent_left_from_cache", return_value=10), \
+        patch.object(hook_state, "start_handoff_capture", return_value=False):
+    assert "context low" in hook_state.context_pressure_hint(pressure_payload)
+    assert json.loads(capture_path.read_text())["captured"] is False, "warning band latched a skipped capture"
 tower = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 assert "control-tower main" in tower and "--owner claude --room binding-room" in tower, tower
 assert "#1 Opus 5.5" in tower and "trust boundaries" in tower, tower
@@ -681,7 +734,7 @@ for session, panel in (("ctx-panel", True), ("ctx-plain", False)):
     said = [pressure(session, left) for left in (29, 25, 14, 14, 7)]
     assert said[1] is None and said[3] is None, said
     if panel:
-        assert said[0].startswith("[oms] ~29% context left — a handoff digest was saved; plan to compact at the next step boundary"), said
+        assert said[0].startswith("[oms] ~29% context left — handoff digest capture started; check capture completion"), said
         assert "compact in place (Claude: /compact; Codex: /compact) — the panel keeps your room and task." in said[2], said
         assert "context low (~14% left)" in said[2] and "context low, compact now (~7% left)" in said[4], said
     else:

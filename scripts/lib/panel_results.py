@@ -90,14 +90,20 @@ def _indexed(repo, row, maximum=MAX_RESULT):
     return data
 
 
-def _diffstat(repo, row):
-    """Changed files of a recorded patch, read only while its digest still matches."""
+def verified_patch(repo, row, maximum=4 * 1024 * 1024):
+    """Bytes of a recorded patch, read bounded and without following links, only while its digest matches."""
     path = row.get('patch', '')
     if not isinstance(path, str) or not path.startswith('.oms/artifacts/'):
         raise ValueError('patch is outside OMS evidence')
-    data = _read(repo, path, 4 * 1024 * 1024)
+    data = _read(repo, path, maximum)
     if hashlib.sha256(data).hexdigest() != row.get('patch_sha256'):
         raise ValueError('patch digest mismatch')
+    return data
+
+
+def _diffstat(repo, row):
+    """Changed files of a recorded patch, read only while its digest still matches."""
+    data = verified_patch(repo, row)
     files, header = [], False
     for line in data.decode('utf-8', 'replace').splitlines():
         if line.startswith('diff --git '):

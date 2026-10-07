@@ -1133,18 +1133,20 @@ def context_pressure_hint(payload: dict[str, Any]) -> str | None:
     if new_stage is None or (stage and rank[new_stage] <= rank[stage]):
         if new_stage is None and left <= capture and not state.get("captured"):
             started = start_handoff_capture(repo, payload, agent, left)
-            save(stage, captured=True)
+            # A failed launch stays retryable; a capture the operator turned off latches like a done one.
+            save(stage, captured=started or os.environ.get("OMS_CTX_CAPTURE", "1") != "1")
             append_event(repo, payload, action="context_capture", status="early",
                          percent_left=round(left, 1), source=agent,
                          capture="started" if started else "skipped")
             if tower:
-                return ("[oms] ~%d%% context left — a handoff digest was saved; plan to compact at the next"
-                        " step boundary." % int(left))
+                return ("[oms] ~%d%% context left — handoff digest capture %s; check capture completion with"
+                        " oms session-handoff list before compacting at the next step boundary."
+                        % (int(left), "started" if started else "was skipped"))
         # Between bands, or a band this session already announced; only an
         # escalation (warn -> urgent) speaks again before re-arming.
         return None
-    save(new_stage, captured=True)
     captured = start_handoff_capture(repo, payload, agent, left)
+    save(new_stage, captured=bool(state.get("captured") or captured))
     append_event(
         repo,
         payload,
@@ -1410,10 +1412,11 @@ def room_binding_notice(payload: dict[str, Any], reason: str) -> str:
     return "[oms room] " + reason + "; room mail was withheld. Preserve task scope and reconnect explicitly before relying on peer messages."
 
 
-def room_reminders(repo: Path, tid: str, me: str, shown: list[str], reach: int | None, injected: bool, prompt: bool) -> str:
+def room_reminders(repo: Path, tid: str, me: str, shown: list[str], reach: int | None, injected: bool, prompt: bool,
+                   state: dict[str, Any] | None = None) -> str:
     """Open questions to and from this main, plus unacknowledged delivered mail: ids and names only, never message text."""
     import room
-    state = room.project(room.records(repo, tid))
+    state = state if state is not None else room.project(room.records(repo, tid))
     try:
         from panel_view import MODEL_NAMES
     except ImportError:
@@ -1424,11 +1427,16 @@ def room_reminders(repo: Path, tid: str, me: str, shown: list[str], reach: int |
     lines = []
     asked = room.open_questions(state, asker=me)
     if any(q["age"] >= room.ASKER_AFTER for q in asked):
-        room.remind(repo, tid, me, state)
+        sent = {q["id"] for q in room.remind(repo, tid, me, state)}
+        recorded = {m["id"] for m in state["messages"]}
         for q in [q for q in asked if q["age"] >= room.ASKER_AFTER][:3]:
+            tier = 2 if q["age"] >= room.SECOND_REMINDER_AFTER else 1
+            reminder = ("it was re-sent as a reminder" if q["id"] in sent else
+                        "reminder already recorded" if room.reminder_id(q["id"], tier) in recorded else
+                        "reminder pending")
             lines.append("Your question %s to %s has no answer for %d min; %s." % (
                 q["id"], names.get(q["recipient"], q["recipient"]), q["age"] // 60,
-                "it was re-sent as a reminder" if q["recipient"] != "all" else "ask the person to nudge it"))
+                reminder if q["recipient"] != "all" else "ask the person to nudge it"))
     open_q = room.open_questions(state, recipient=me)
     if open_q and (injected or prompt or any(q["age"] >= room.REPEAT_AFTER for q in open_q)):
         first = open_q[0]
@@ -1459,19 +1467,19 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
         import room
 
         room_repo = Path(os.environ.get("OMS_ROOM_REPO", str(repo))).resolve()
-        binding = room.selected(room_repo, session_hash(payload), os.environ.get("OMS_ROOM_ID"),
-                                os.environ.get("OMS_ROOM_PARTICIPANT"))
+        binding, room_state = room._selected(room_repo, session_hash(payload), os.environ.get("OMS_ROOM_ID"),
+                                             os.environ.get("OMS_ROOM_PARTICIPANT"))
         if (binding is None and not os.environ.get("OMS_ROOM_ID")
                 and (payload.get("hook_event_name") or payload.get("hookEventName")) == "UserPromptSubmit"):
             # A main already moved to the background service heals on its next prompt.
             with contextlib.suppress(Exception):
                 if rebind_lineage_session(payload):
-                    binding = room.selected(room_repo, session_hash(payload))
+                    binding, room_state = room._selected(room_repo, session_hash(payload))
         room_member = None
         if binding:
             repo, (tid, room_member) = room_repo, binding
             if tid and room_member:
-                member = room.participant(room.status(repo, tid), room_member)
+                member = room.participant(room_state, room_member)
                 if member.get("consumer") and member["consumer"] != session_hash(payload):
                     return room_binding_notice(payload, "Current native session differs from the enrolled receiver")
                 if member["provider"] in RELAY_AGENTS and member["provider"] != payload_agent(payload):
@@ -1514,7 +1522,7 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
             state = load_state(path)
             after = state.get("cursor", "") if state.get("thread") == tid and state.get("participant") == room_member else ""
             try:
-                delta = (room.updates(repo, tid, room_member, after) if room_member else
+                delta = (room.updates(repo, tid, room_member, after, state=room_state) if room_member else
                          thread_live.updates(repo, tid, after, allow_first_row_over_budget=True))
             except (ValueError, OSError, RecursionError):
                 if state.get("thread") == tid and state.get("delivery_error"):
@@ -1528,8 +1536,8 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
             if room_member:
                 # Mail this participant already consumed (oms room ack) is not
                 # re-shown; the cursor still moves past it below.
-                # The full projection: status() keeps only the newest 12 messages, the backlog is older.
-                consumed = {m["id"] for m in room.project(room.records(repo, tid))["messages"]
+                # The full projection includes consumed mail beyond status()'s newest-12 window.
+                consumed = {m["id"] for m in room_state["messages"]
                             if room_member in m["received_by"]}
                 rows = [row for row in rows if row["room_event"]["id"] not in consumed]
             # Build the whole message before the cursor moves: a failure here
@@ -1573,7 +1581,7 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
                 try:
                     reminders = room_reminders(repo, tid, room_member, [row["room_event"]["id"] for row in rows], reach,
                                                bool(message), (payload.get("hook_event_name") or payload.get("hookEventName"))
-                                               == "UserPromptSubmit" and bool(os.environ.get("OMS_ROOM_PARTICIPANT")))
+                                               == "UserPromptSubmit" and bool(os.environ.get("OMS_ROOM_PARTICIPANT")), room_state)
                 except (ValueError, OSError):
                     reminders = ""  # reminders are advisory; the delivered turns still go out
                 message = "\n".join(part for part in (message, reminders) if part)
