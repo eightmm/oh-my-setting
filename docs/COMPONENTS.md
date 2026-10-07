@@ -660,6 +660,15 @@ prevent cleanup. Legacy plans without a reviewed contract keep their existing
 claim behavior. Runtime, state, and inbox consume this decision rather than
 reconstructing readiness from stored task states.
 
+For reviewed tasks integrated together by commit, use `oms agent-plan finish
+--id ID --landed-commit SHA [--repo PATH]`. This requires retained review
+artifact/patch evidence, an exact-SHA `oms land` receipt with state `passed`,
+successful gate/push/CI, and SHA reachable from the receipt's recorded local
+remote/target ref; it performs no fetch. The task retains the commit and receipt
+file SHA-256 as landing proof and counts as done in plan status and the panel.
+The typed `patch-land` path with `--expected-landing-receipt-sha256` remains the
+default for single patches.
+
 The change guard sends its sorted changed-path stream through the canonical
 scope engine once. The engine loads and validates the stored allow/deny rules,
 compiles each bounded Bash-compatible glob once, and emits one deny-first

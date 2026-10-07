@@ -112,6 +112,59 @@ def read_regular_bytes(filename, label, maximum):
     finally:
         os.close(fd)
 
+def commit_landing_proof(sha):
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+        die("--landed-commit must be a full lowercase commit SHA")
+    directory = env("OMS_LAND_RECEIPTS_DIR")
+    try:
+        candidates = sorted(os.listdir(directory))
+    except FileNotFoundError:
+        candidates = []
+    except OSError as exc:
+        die("cannot read oms land receipts: %s" % exc)
+    passed = False
+    for name in candidates:
+        if not name.startswith(sha + "-") or not name.endswith(".json"):
+            continue
+        raw = read_regular_bytes(os.path.join(directory, name), "oms land receipt", 1024 * 1024)
+        try:
+            receipt = json.loads(raw)
+        except (ValueError, UnicodeError):
+            continue
+        if not isinstance(receipt, dict) or receipt.get("schema") != 1:
+            continue
+        if receipt.get("sha") != sha or receipt.get("state") != "passed":
+            continue
+        gate, push, ci = (receipt.get(key) for key in ("gate", "push", "ci"))
+        if not all(isinstance(stage, dict) for stage in (gate, push, ci)):
+            continue
+        if (type(gate.get("rc")) is not int or gate["rc"] != 0 or
+                type(push.get("rc")) is not int or push["rc"] != 0 or
+                ci.get("conclusion") != "success"):
+            continue
+        passed = True
+        remote, target = receipt.get("remote"), receipt.get("target")
+        if not isinstance(remote, str) or not remote or not isinstance(target, str) or not target:
+            continue
+        ref = "refs/remotes/%s/%s" % (remote, target)
+        # An ancestry read in a partial clone must not lazily fetch objects.
+        git_env = dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="")
+        try:
+            valid = subprocess.run(["git", "check-ref-format", ref],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            reachable = valid.returncode == 0 and subprocess.run(
+                ["git", "-C", env("OMS_REPO"), "merge-base", "--is-ancestor", sha, ref],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=git_env, timeout=10).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            reachable = False
+        if reachable:
+            return {"kind": "commit", "sha": sha,
+                    "receipt_sha256": hashlib.sha256(raw).hexdigest()}
+    if passed:
+        die("landed commit %s is not reachable from a passed receipt's local pushed target ref" % sha)
+    die("no passed oms land receipt for %s with gate/push ok and CI success" % sha)
+
 def reject_controls(value, label):
     if any(unicodedata.category(ch) in ("Cc", "Cf", "Cs") for ch in value):
         die("%s contains a control or format character" % label)
@@ -957,6 +1010,18 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
                 t.get("executor_soul_sha256", "") != expected_soul):
             die("task %s executor review receipt changed during admission" % i)
         t["state"] = "landing"
+    elif act == "finish" and env("OMS_LANDED_COMMIT"):
+        if t["state"] != "review":
+            die("task %s is %s; --landed-commit finish requires review" % (i, t["state"]))
+        if not t.get("artifact") or not t.get("patch"):
+            die("task %s review is missing artifact/patch evidence" % i)
+        history = t.get("history", [])
+        if not isinstance(history, list):
+            die("task %s history must be a list" % i)
+        landing = commit_landing_proof(env("OMS_LANDED_COMMIT"))
+        history.append({"schema": 1, "kind": "finish", "ts": ts,
+                        "state": "done", "landing": landing})
+        t.update(state="done", landing=landing, history=history)
     elif act == "finish":
         # Done is a landing receipt, not a worker self-report. patch-land owns
         # the review -> landing fence after mechanical admission succeeds.

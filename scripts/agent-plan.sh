@@ -39,6 +39,8 @@ EXPECTED_REVIEW_EXECUTOR_ID=""
 EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256=""
 EXPECTED_REVIEW_LEASE_ID=""
 EXPECTED_LANDING_RECEIPT_SHA256=""
+LANDED_COMMIT=""
+LAND_RECEIPTS_DIR=""
 EXPECTED_REVIEW_PATCH_SET=0
 EXPECTED_REVIEW_PATCH_SHA256_SET=0
 EXPECTED_REVIEW_VERIFY_SET=0
@@ -134,6 +136,12 @@ Commands:
                                      recomputed from the landed tree; all
                                      other entries keep their frozen hashes,
                                      and each refreeze appends a typed row.
+         --id ID --landed-commit SHA  Complete reviewed work integrated by
+                                     commit. Requires an exact-SHA oms land
+                                     receipt with passed gate/push/CI and
+                                     reachability from its local target ref.
+                                     Typed patch-land remains the default
+                                     for single patches.
   lint-verify --verify CMD --allowed "p1,p2"
                                      Lint a verify/acceptance command against
                                      the admission floor: content reads of
@@ -229,6 +237,7 @@ while [ "$#" -gt 0 ]; do
     --reason) [ "$#" -ge 2 ] || fail "--reason requires text"; REASON="$2"; shift 2 ;;
     --artifact) [ "$#" -ge 2 ] || fail "--artifact requires path"; ARTIFACT="$2"; shift 2 ;;
     --patch) [ "$#" -ge 2 ] || fail "--patch requires path"; PATCH="$2"; shift 2 ;;
+    --landed-commit) [ "$#" -ge 2 ] && [ -n "$2" ] || fail "--landed-commit requires SHA"; LANDED_COMMIT="$2"; shift 2 ;;
     --executor-id) [ "$#" -ge 2 ] || fail "--executor-id requires id"; EXECUTOR_ID="$2"; shift 2 ;;
     --executor-soul-sha256) [ "$#" -ge 2 ] || fail "--executor-soul-sha256 requires hash"; EXECUTOR_SOUL_SHA256="$2"; shift 2 ;;
     --expected-review-patch)
@@ -303,6 +312,11 @@ done
 [ "$APPLY" = 0 ] || [ "$ACTION" = retire ] || fail "--apply is valid only with retire"
 [ "$APPLY" = 0 ] || [ "$CHECK_ONLY" = 0 ] || fail "retire --apply and --check are mutually exclusive"
 [ -z "$REUSE_PASS_RUN" ] || [ "$ACTION" = accept ] || fail "--reuse-pass requires accept"
+if [ -n "$LANDED_COMMIT" ]; then
+  [ "$ACTION" = finish ] || fail "--landed-commit requires finish"
+  [ "$EXPECTED_LANDING_RECEIPT_SHA256_SET" = 0 ] && [ "$REFREEZE_ACCEPTANCE" = 0 ] ||
+    fail "--landed-commit cannot be combined with typed patch-land finish options"
+fi
 PLAN_READ_ONLY=0
 case "$ACTION" in
   show|evidence-snapshot|list|ready|status|brief) PLAN_READ_ONLY=1 ;;
@@ -338,6 +352,25 @@ python_path_for_host() {  # PATH
 }
 
 PY_REPO="$(python_path_for_host "$REPO")" || fail "cannot normalize repository path for Python"
+if [ -n "$LANDED_COMMIT" ]; then
+  # Match land.sh's shared-worktree state directory using shell path spelling;
+  # native Windows Python paths must not change the cksum repository identity.
+  common_dir="$(git -C "$REPO" rev-parse --git-common-dir | tr -d '\r')" || fail "cannot resolve land state directory"
+  case "$common_dir" in
+    /*|[A-Za-z]:/*) ;;
+    *) common_dir="$REPO/$common_dir" ;;
+  esac
+  common_dir="$(cd "$common_dir" && pwd -P)" || fail "cannot resolve land common directory"
+  common_root="$(cd "$common_dir/.." && pwd -P)" || fail "cannot resolve land common root"
+  land_name="$(basename "$common_root")"
+  land_name="$(printf '%s' "$land_name" | tr -c 'A-Za-z0-9._-' '_')"
+  land_name="${land_name//../_}"
+  case "$land_name" in ''|.|..) land_name=repo ;; esac
+  land_digest="$(printf '%s' "$common_root" | cksum | awk '{print $1 "-" $2}')"
+  case "$land_digest" in ''|*[!0-9-]*) fail "cannot resolve land state digest" ;; esac
+  LAND_RECEIPTS_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/oh-my-setting/land/$land_name-$land_digest"
+  LAND_RECEIPTS_DIR="$(python_path_for_host "$LAND_RECEIPTS_DIR")" || fail "cannot normalize land state path for Python"
+fi
 PY_PLAN_FILE="$(python_path_for_host "$PLAN_FILE")" || fail "cannot normalize plan path for Python"
 PY_MARKERS_DIR=""
 if [ -n "$MARKERS_DIR" ]; then
@@ -464,6 +497,7 @@ export OMS_PLAN_FILE="$PY_PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_ID="$ID" OMS_TITLE="$TITLE" OMS_GOAL="$GOAL" OMS_PROVIDER="$PROVIDER" \
   OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
   OMS_REFREEZE_ACCEPTANCE="$REFREEZE_ACCEPTANCE" \
+  OMS_LANDED_COMMIT="$LANDED_COMMIT" OMS_LAND_RECEIPTS_DIR="$LAND_RECEIPTS_DIR" \
   OMS_EXECUTOR_ID="$EXECUTOR_ID" OMS_EXECUTOR_SOUL_SHA256="$EXECUTOR_SOUL_SHA256" \
   OMS_EXPECTED_REVIEW_PATCH="$EXPECTED_REVIEW_PATCH" \
   OMS_EXPECTED_REVIEW_PATCH_SHA256="$EXPECTED_REVIEW_PATCH_SHA256" \

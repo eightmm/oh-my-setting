@@ -5606,6 +5606,104 @@ test_agent_plan_lifecycle() {
   if "$SH" --repo "$d" claim --id P1 --provider codex >/dev/null 2>&1; then
     fail "claiming a blocked task must be rejected"
   fi
+
+  # Integration by commit consumes land's shared-worktree receipts, with no
+  # fetch or remote process. A later local tip may contain the exact landed SHA.
+  local XDG_STATE_HOME="$TMP/agent-plan-land-state"
+  export XDG_STATE_HOME
+  local sha receipt_dir receipt mode linked before
+  git -C "$d" commit --allow-empty -qm base
+  git -C "$d" commit --allow-empty -qm integrated
+  sha="$(git -C "$d" rev-parse HEAD)"
+  git -C "$d" commit --allow-empty -qm later
+  "$SH" --repo "$d" add --id integrated --title integrated >/dev/null
+  "$SH" --repo "$d" claim --id integrated --provider codex >/dev/null
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then
+    fail "commit finish from claimed must be rejected"
+  fi
+  assert_file_contains "$d/err" 'requires review'
+  "$SH" --repo "$d" review --id integrated --artifact artifact.md --patch change.patch >/dev/null
+  before="$(cat "$d/.oms/plan/tasks.json")"
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then
+    fail "commit finish without receipt must be rejected"
+  fi
+  assert_file_contains "$d/err" 'no passed oms land receipt'
+  [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "missing proof changed plan"
+
+  # Obtain the directory from land status itself, rather than duplicate its
+  # identity calculation in a fixture that could hide a lookup mismatch.
+  out="$("$ROOT/scripts/land.sh" status --repo "$d" 2>/dev/null || true)"
+  case "$out" in 'no landing recorded under '*) receipt_dir="${out#no landing recorded under }" ;;
+    *) fail "cannot resolve fixture receipt directory: $out" ;;
+  esac
+  mkdir -p "$receipt_dir"
+  receipt="$receipt_dir/$sha-fixture.json"
+  for mode in failed gate push ci skipped foreign passed; do
+    python3 - "$receipt" "$sha" "$mode" <<'PY'
+import json, sys
+path, sha, mode = sys.argv[1:]
+r = {"schema": 1, "state": "passed", "sha": sha, "remote": "origin", "target": "main",
+     "gate": {"rc": 0}, "push": {"rc": 0}, "ci": {"conclusion": "success"}}
+if mode == "failed": r["state"] = "failed"
+if mode in ("gate", "push"): r[mode]["rc"] = 1
+if mode == "ci": r["ci"]["conclusion"] = "failure"
+if mode == "skipped": r["ci"]["conclusion"] = "skipped"
+if mode == "foreign": r["sha"] = "0" * len(sha)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(r, handle)
+PY
+    if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then
+      fail "commit finish accepted $mode proof without a reachable target"
+    fi
+    if [ "$mode" = passed ]; then
+      assert_file_contains "$d/err" 'not reachable'
+    else
+      assert_file_contains "$d/err" 'no passed oms land receipt'
+    fi
+    [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "invalid proof changed plan"
+  done
+  git -C "$d" update-ref refs/remotes/origin/main "$sha^"
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then
+    fail "commit finish accepted a target that predates the landed SHA"
+  fi
+  assert_file_contains "$d/err" 'not reachable'
+  [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "unreachable proof changed plan"
+  git -C "$d" update-ref refs/remotes/origin/main HEAD
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" \
+    --expected-landing-receipt-sha256 invalid >"$d/err" 2>&1; then
+    fail "commit finish accepted mixed patch-land options"
+  fi
+  assert_file_contains "$d/err" 'cannot be combined'
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "${sha:0:7}" >"$d/err" 2>&1; then
+    fail "commit finish accepted abbreviated SHA"
+  fi
+  assert_file_contains "$d/err" 'full lowercase commit SHA'
+  # A newer unrelated receipt must not shadow the exact-SHA proof.
+  printf '{"schema":1,"state":"failed"}\n' > "$receipt_dir/unrelated.json"
+  linked="$TMP/agent-plan-linked"
+  git -C "$d" worktree add -q --detach "$linked" HEAD
+  "$SH" --repo "$linked" --file "$d/.oms/plan/tasks.json" finish \
+    --id integrated --landed-commit "$sha" >/dev/null || fail "passed commit proof must finish from linked worktree"
+  "$SH" --repo "$d" show --id integrated > "$d/done.json"
+  python3 - "$d/done.json" "$sha" "$receipt" <<'PY' || fail "commit landing evidence was not retained"
+import hashlib, json, sys
+t = json.load(open(sys.argv[1], encoding="utf-8"))
+landing = {"kind": "commit", "sha": sys.argv[2],
+           "receipt_sha256": hashlib.sha256(open(sys.argv[3], "rb").read()).hexdigest()}
+assert t["state"] == "done" and t["landing"] == landing, t
+assert t["artifact"] == "artifact.md" and t["patch"] == "change.patch", t
+assert t["history"][-1]["kind"] == "finish" and t["history"][-1]["landing"] == landing, t
+PY
+  "$SH" --repo "$d" status --json | python3 -c '
+import json, sys
+s = json.load(sys.stdin)
+assert s["by_state"] == {"blocked": 1, "done": 1}, s
+assert s["stale_review"] == [], s
+' || fail "status did not count commit finish as done"
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then
+    fail "commit finish accepted done instead of review"
+  fi
+  assert_file_contains "$d/err" 'requires review'
 }
 
 test_agent_plan_retire_is_cas_fenced_and_evidence_honest() {
