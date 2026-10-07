@@ -1107,7 +1107,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             add(label, "review" if kind == "review" else "dim")
     pair_at = len(lines)
     mains_by_id = {m["participant"] for m in mains}
-    latest = next((m for m in map(mapping, reversed(listing(room.get("messages")))) if m.get("sender") in mains_by_id
+    latest = next((m for m in map(mapping, reversed(listing(room.get("main_messages")) or listing(room.get("messages")))) if m.get("sender") in mains_by_id
                    and any(t in mains_by_id and t != m["sender"] for t in listing(m.get("targets")))), None)
     box_height = 2 + len(links[:4]) + (len(links) > 4) + bool(latest)
     if links and height >= 32:
@@ -1224,7 +1224,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     available_cards = budget - used - wires - reserve
     card_height = next((candidate for candidate in range(6, 2, -1)
                         if drawn_rows(candidate) <= available_cards), 3)
-    if reserve > 3 and height < 9 * band_count + 20:
+    if reserve > 3 and (height < 9 * band_count + 20 or navigation.get("tab") in ("plan", "debate", "messages")):
+        # Reading tabs get the rows: the cards shrink to one line.
         card_height, reserve = 3, budget - used - wires - (3 * band_count * (1 + grid) if lanes else minimum_total) - 1
     automatic = False
     if (interactive and not previewed and primary and not lanes and height >= 24
@@ -1642,11 +1643,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             elif active == "plan":
                 plan = plan_rows(report, labels, width - 4, unicode)
                 if capacity == 1 and len(plan) > 1:
-                    plan.append("Full plan: oms agent-plan list")
+                    plan.append(("Full plan: oms agent-plan list", None))
                 page_size = max(1, capacity - int(len(plan) > capacity))
                 first = min(scrolled.get("detail", 0), max(0, len(plan) - page_size))
                 scrolled_now["detail"] = first
-                rows = [(text, None, False) for text in plan[first:first + page_size]]
+                rows = [(text, target, False) for text, target in plan[first:first + page_size]]
                 if len(plan) > capacity:
                     notice = "%s rows hidden / wheel; full: oms agent-plan list" % (len(plan) - page_size)
                     if capacity > 1:
@@ -1714,14 +1715,18 @@ def plan_rows(report, labels, width, unicode):
     tasks = listing(mapping(report.get("room")).get("repo_tasks"))
     glyphs = (dict(done="✓", review="◐", landing="◐", running="●", claimed="●", ready="○", blocked="✗") if unicode else
               dict(done="+", review="~", landing="~", running="*", claimed="*", ready="o", blocked="x"))
-    rows = wrapped("Goal: " + goal, width, 2) if goal else []
+    rows = [(line, None) for line in wrapped("Goal: " + goal, width, 2)] if goal else []
     for t in sorted((mapping(t) for t in tasks), key=lambda t: PLAN_ORDER.get(t.get("state"), 5)):
         by = t.get("claimed_by_participant")
-        claimant = (clean(labels.get(by) or by, 40) if by else clean(t.get("provider"), 20)) or "unclaimed"
-        rows.append("%s %s · %s · %s · %s" % (glyphs.get(t.get("state"), "?"), clean(t.get("id"), 40),
-                                              clean(t.get("title"), 120) or "untitled", claimant,
-                                              clean(t.get("verify"), 80) or "no verify"))
-    return rows or ["No repository plan recorded"]
+        word = clean(t.get("state"), 20) or "unknown"
+        age = t.get("claim_age_s")
+        if t.get("claim_expired") and isinstance(age, (int, float)) and age >= 0:
+            word += " %d%s stale" % ((age // 86400, "d") if age >= 86400 else (age // 3600, "h") if age >= 3600 else (age // 60, "m"))
+        rows.append(("%s %s · %s · %s · %s · %s" % (
+            glyphs.get(t.get("state"), "?"), clean(t.get("id"), 40), word, clean(t.get("title"), 120) or "untitled",
+            clean(labels.get(by) or by, 40) if by else "unclaimed", clean(t.get("verify"), 80) or "no verify"),
+            ("task", t.get("id")) if t.get("id") else None))
+    return rows or [("No repository plan recorded", None)]
 
 
 def action(member):
@@ -1750,7 +1755,8 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph):
         return lines[:4] + (["Tab badges: W workers  A advisors  ! needs you  M mail  ? open questions  c context left"] if graph else [])
     tab = navigation.get("tab") if graph and not navigation.get("detail") else None
     contextual = ([move + " Message", "Enter Open", arrows + " Filter"] if tab == "messages"
-                  else [move + " Seat", "Enter Open", arrows + " Target"] if tab == "debate" else None)
+                  else [move + " Seat", "Enter Open", arrows + " Target"] if tab == "debate"
+                  else ["wheel Scroll", "Tab Next tab"] if tab == "plan" else None)
     contextual = contextual or (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + ["f Full result" if navigation.get("full_result") else "",
                   "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
                   "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "Enter Show",

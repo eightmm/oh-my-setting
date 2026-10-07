@@ -4,6 +4,7 @@ Run `oms` in a terminal to open the control panel. Native Claude Code or Codex
 keeps the conversation pane; the OMS sidebar shows recorded main, advisor and
 worker activity. `oms --help` and bare `oms` with redirected input/output retain
 command help. The panel uses existing OMS state, authentication and front doors.
+Boards of one repository share atomic dashboard and result-query caches in `.oms/hooks/panel-cache`, invalidated by input file stats or five-second expiry, while room selection and terminal reads stay per window.
 
 ## Quick start
 
@@ -18,7 +19,8 @@ command help. The panel uses existing OMS state, authentication and front doors.
    or the call's result. Without a raw-key terminal the menu takes key + Enter.
 6. On a board, click or Enter on a main or call opens it; Esc backs out, `F9` returns to chat.
 7. Results: `t` on a board opens the tree and a call's retained answer; `r` in the control
-   menu browses recorded results. Debates: the `COUNCIL` branch of a main, or `c` to start one.
+   menu browses recorded results. Debates: the Debate tab of the board's bottom box (`Tab`, `←→`, `Enter`, `f`), the
+   `COUNCIL` branch of a main in the tree, or `c` to start one.
 8. `?` in the control menu lists every other shortcut.
 
 ```bash
@@ -148,7 +150,7 @@ retain the existing control-menu chat/result selection.
 The graph shows joined mains, advisors/reviewers, workers, a mailbox, the
 repository's canonical task board, declared scopes and the latest room log.
 A running council launched by a shown main appears in the advisor card as
-`DEBATE` with its answering seat count; its seats never stand in for the main.
+`Debate` (`DEB` in a narrow lane) with its answering seat count; its seats never stand in for the main.
 The default tree keeps the same evidence in a `COUNCIL` branch; clicking it
 reads that task's results scoped to its main participant.
 Only explicit parent IDs draw call connections. Lifecycle state drives moving
@@ -188,7 +190,7 @@ names its main. Cards stay bounded in width instead of stretching a lone worker
 across the terminal.
 
 Row 1 of the graph and the tree is the goal banner: `◎ GOAL  <plan goal>` in the head colour with a
-progress bar and counts right-aligned (`▕██████░░░░▏ 6/9 verified · 1 review · 2 running`; ASCII
+progress bar and counts right-aligned (`▕██████░░░░▏ 6/9 verified · 1 review · 2 claimed`; ASCII
 `@ GOAL` and `[######....]`). A goal too long for the row wraps to a second row before it is cut, and
 the progress never leaves row 1. Clicking the banner selects the `("tab", "plan")` target. Without an
 active plan (none, no goal, or idle for 7 days) it reads `◎ No shared goal · oms agent-plan init --goal
@@ -237,9 +239,10 @@ provider status lines are dropped from messages, and the detail says whether its
 main reviewed a result instead of showing internal fields. Clicking another main's
 tab selects it and shows its detail; clicking the tab of the main already shown
 (or its card) opens its proven original conversation. Left/right arrows move
-between mains and move the detail with them. Tabs that do not fit collapse to
-`+N ▸`, which carries their attention count (`!k`) and selects the first hidden
-main when clicked. Within advisors and within workers, attention states sort
+between mains and move the detail with them. Tabs that do not fit shrink in steps (task text, counts, names, one marker, the
+number), then scroll: `‹ N` and `N ›` count the hidden tabs on each side, are drawn in
+the alert colour when a hidden main needs you, and select the nearest hidden main when
+clicked. Calls with no known main are grouped under `unlinked`. Within advisors and within workers, attention states sort
 first, and lane rows name the state (`! failed REV ...`). Lane heads select
 first, like tabs. `[+]` on a tab, or Space on a selected main, pins it; with two or
 more pins the board shows side-by-side lanes, one per main with its calls on
@@ -287,7 +290,8 @@ patch. Outside tmux the board shows the path.
 
 The board is an overview above and a detail area below. Cards keep only the
 rows their content needs (an unrecorded location stays in the detail), and an
-unavailable provider reading collapses to one `USAGE unavailable` line. On a
+unavailable provider reading collapses to one `Usage readings unavailable (Claude, Codex)`
+line (the tree keeps its USAGE box where model-use data exists). On a
 board of 24 rows or more, rows the overview leaves free show the shown main's
 detail, marked `auto`; it never replaces a chosen block, and Esc dismisses it for
 that watcher. While a block is selected, overview cards shrink to one line and
@@ -973,8 +977,10 @@ records remain unobserved.
 | r Results | Numbered result list; choose a number to read summaries, evidence and model answers |
 | f Finalize | Record owner outcome, summary and evidence; request app delivery |
 | n Retry delivery | Explicitly retry a saved result; an uncertain earlier send may duplicate |
-| 8 Details / 9 Refresh | Read shared dashboard; no model call |
-| v Density / b Attention | Cycle auto / compact / detail; toggle action-needed calls |
+| 8 Dashboard / 9 Refresh | Read shared dashboard; no model call |
+| v Detail / b Attention | Cycle auto / compact / detail; toggle action-needed calls |
+| h Chats / o Rooms | Browse the room's chats; list rooms and switch or create one |
+| p CLIs / z Panel | Show provider CLIs and pick a target; reopen the panel session |
 | q Quit | Exit inline or detach the owned split session |
 
 `NO_COLOR` disables color unless the panel explicitly selects
@@ -1000,7 +1006,14 @@ Debate and Messages. The selected tab is bracketed; a `•` after Debate marks a
 debate running or finished since the tab was last opened, and a number after
 Messages counts the unread mail for live participants. A click on a tab name or
 Tab (Detail, Plan, Debate, Messages, then around) switches; a tab never changes
-by itself, and the box stays after Esc.
+by itself, and the box stays after Esc. The box takes every row the cards above leave;
+on a board too short for that it shrinks to its tab strip alone, and the tabs stay
+clickable.
+
+The tree shows a main's `? N open` questions and `cN%` context left on its status line,
+like the graph. When the tree is taller than the screen, mains other than this window's
+and the selected one fold to that line so every main stays visible; selecting one
+(arrows or click) unfolds it.
 
 Detail is the selected call's detail. Plan shows the shared repository plan:
 the goal, then one row per task (state glyph, id, title, claimant by the board's

@@ -26,7 +26,8 @@ from dashboard_projection import clean
 from panel_view import CLOSE_PREFIX, INBOX_LIMIT, close_requests, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
 from panel_routing import allocate, command as routed_command, policy, MODEL_IDS
-from panel_results import _lock, finalize, results, retry_delivery, verified_patch
+from panel_results import _lock, finalize, outcomes, results, retry_delivery, verified_patch
+from panel_cache import read_shared
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "scripts" / "oms"
@@ -872,10 +873,15 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=
         if len(found) != 1:
             raise ValueError("select a unique active main in this room before starting a council")
         parent = next(iter(found.values()))["attempt_id"]
+    where = {}
     if parent:
         record = json.loads(events(repo, "show", "--attempt", parent, "--json", output=True))
         if record.get("tool") != "panel-main" or record.get("provider") != owner or record.get("terminal"):
             raise ValueError("panel main identity does not match an active owner")
+        refs_ = record.get("refs") or {}
+        where = {k: refs_[k] for k in ("panel_room_id", "panel_room_participant") if refs_.get(k)}
+    where.setdefault("panel_room_id", room_id or "")
+    where.setdefault("panel_room_participant", env.get("OMS_ROOM_PARTICIPANT") or "")
     env.pop("OMS_ATTEMPT_ID", None)
     env.update(OMS_TASK_ID=task_id, OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE="advisor",
                OMS_PANEL_PURPOSE="advise", OMS_PANEL_WORKLOAD="main",
@@ -887,6 +893,9 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=
             "--ref", "panel_label=" + safe_label(label), "--ref", "panel_purpose=advise",
             "--ref", "panel_location=repository", "--ref", "panel_thread=" + argv[-1],
             "--then", "starting", "--then", "working"]
+    for key, value in where.items():
+        if value:
+            refs += ["--ref", key + "=" + value]
     if parent:
         refs += ["--parent-attempt-id", parent]
     attempt = events(repo, *refs, output=True)
@@ -1690,7 +1699,12 @@ def managed_session():
 
 def snapshot(repo, room_id=None):
     try:
-        state, status = dashboard(repo, as_json=True)
+        def collect_dashboard():
+            state, status = dashboard(repo, as_json=True)
+            if not isinstance(state, dict):
+                raise ValueError("invalid dashboard response")
+            return state, status
+        state, status = read_shared(repo, 'dashboard', collect_dashboard, cacheable=lambda value: value[1] == 0)
         if not isinstance(state, dict):
             raise ValueError("invalid dashboard response")
         ident = os.environ.get("OMS_ROOM_ID") if room_id is None else room_id
@@ -1748,13 +1762,18 @@ def snapshot(repo, room_id=None):
                         pass
                 try:
                     # Calls outside the 8 + 8 row dashboard projection keep their real state from the full projection.
-                    found = subprocess.run(["bash", str(ENTRY), "agent-events", "--repo", str(repo), "list", "--json"],
-                                           capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
-                    if found.returncode == 0:
+                    def collect_attempts():
+                        found = subprocess.run(["bash", str(ENTRY), "agent-events", "--repo", str(repo), "list", "--json"],
+                                               capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
+                        if found.returncode:
+                            raise ValueError("attempt evidence unavailable")
+                        return json.loads(found.stdout)
+                    rows = read_shared(repo, 'attempts', collect_attempts)
+                    if isinstance(rows, list):
                         calls = {m["participant"]: m.get("role") for m in state["room"]["participants"]
                                  if m.get("joined") and m.get("role") != "main"}
                         linked = {}
-                        for row in json.loads(found.stdout):
+                        for row in rows:
                             # The ledger keeps panel identity in refs; the dashboard projection lifts it into "panel".
                             refs = row.get("refs") or {}
                             who = refs.get("panel_room_participant")
@@ -1772,11 +1791,14 @@ def snapshot(repo, room_id=None):
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
                     pass
                 try:
-                    if any(row.get("state") in {"failed", "timed_out", "abandoned", "orphaned", "review", "blocked"}
-                           for row in [r for key in ("active_recent", "recent") for r in state.get("attempts", {}).get(key) or []]
-                           + list((state.get("room_attempts") or {}).values())):
-                        state["finalized"] = {row["task_id"]: row["outcome"] for row in results(repo).get("rows", [])
-                                              if row.get("outcome") in {"completed", "accepted"}}
+                    # Each waiting call's own task is looked up, so an old decision is not lost past results()' window.
+                    waiting = {row.get("task_id") for row in [r for key in ("active_recent", "recent")
+                                                              for r in state.get("attempts", {}).get(key) or []]
+                               + list((state.get("room_attempts") or {}).values())
+                               if row.get("state") in {"failed", "timed_out", "abandoned", "orphaned", "review", "blocked"}}
+                    if waiting:
+                        state["finalized"] = {ident: outcome for ident, outcome in outcomes(repo, waiting, _shared=True).items()
+                                              if outcome in {"completed", "accepted"}}
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
                 state["awaiting_admission"] = awaiting_admission(repo, state)
@@ -1817,9 +1839,6 @@ def frame_view(repo, provider, state, previous=None, menu=True, main_attempt=Non
     return text, size, capable
 
 
-ADMISSION_CHECKS = {}
-
-
 def awaiting_admission(repo, state):
     """Finished write workers whose recorded patch has no admission or landing record yet."""
     from room_view import nodes
@@ -1828,15 +1847,12 @@ def awaiting_admission(repo, state):
         task = member.get("task_id")
         if member.get("role") != "worker" or member.get("access") != "write" or member["state"] != "done" or not task:
             continue
-        checked = ADMISSION_CHECKS.get((str(repo), task))
-        if not checked or time.monotonic() - checked[0] > 30:
-            try:
-                calls = [call for row in results(repo, task_id=task).get("rows", []) for call in row.get("calls", [])]
-            except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
-                continue
-            checked = ADMISSION_CHECKS[(str(repo), task)] = (time.monotonic(), any(call.get("patch") for call in calls)
-                and not any(call.get("kind") in ("patch-admit", "patch-land") for call in calls))
-        if checked[1]:
+        try:
+            calls = [call for row in results(repo, task_id=task, _shared=True).get("rows", []) for call in row.get("calls", [])]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
+            continue
+        if any(call.get("patch") for call in calls) and not any(
+                call.get("kind") in ("patch-admit", "patch-land") for call in calls):
             found.append(member["participant"])
     return found[:INBOX_LIMIT]
 

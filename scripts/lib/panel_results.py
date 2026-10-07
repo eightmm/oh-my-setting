@@ -146,7 +146,7 @@ def _admission(repo, rows, task_id, worker):
 
 
 @contextlib.contextmanager
-def _lock(repo, name='panel-results'):
+def _lock(repo, name='panel-results', timeout=10):
     if not isinstance(name, str) or not ID.fullmatch(name):
         raise ValueError('invalid panel lock name')
     try:
@@ -174,7 +174,7 @@ def _lock(repo, name='panel-results'):
             import fcntl
             acquire = lambda: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             release = lambda: fcntl.flock(handle, fcntl.LOCK_UN)
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + timeout
         while True:
             try:
                 acquire(); break
@@ -330,10 +330,35 @@ def retry_delivery(repo, task_id, revision=None):
     raise ValueError('saved result not found in retained evidence')
 
 
-def results(repo, task_id=None, room_participant=None):
+def outcomes(repo, task_ids, _shared=False):
+    """The owner's recorded outcome for each of these tasks, beyond the twenty-task window results() pages."""
+    wanted = {i for i in task_ids if isinstance(i, str) and ID.fullmatch(i)}
+    if not wanted:
+        return {}
+    if _shared:
+        from panel_cache import read_shared
+        _, rows = read_shared(repo, 'result-records', lambda: _records(repo))
+    else:
+        _, rows = _records(repo)
+    found = {}
+    for ident in wanted:
+        result_rows = [r for r in rows if r.get('task_id') == ident and r.get('kind') == 'panel-result']
+        if result_rows:
+            try:
+                found[ident] = _load_result(repo, result_rows[-1]).get('outcome')
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+    return found
+
+
+def results(repo, task_id=None, room_participant=None, _shared=False):
     if task_id and not ID.fullmatch(task_id):
         raise ValueError('invalid task ID')
-    attempts, rows = _records(repo)
+    if _shared:
+        from panel_cache import read_shared
+        attempts, rows = read_shared(repo, 'result-records', lambda: _records(repo))
+    else:
+        attempts, rows = _records(repo)
     latest = {}
     for row in sorted(attempts + rows, key=lambda r: r.get('updated_at') or r.get('ts') or ''):
         ident = row.get('task_id')

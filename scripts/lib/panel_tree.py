@@ -4,7 +4,7 @@ from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import header_rows
 from panel_view import (ATTENTION_STATES, PALETTE, activity, box_edge, box_row, clipped,
                         menu_rows, status_alerts, tone, usage_words, worker_rows, wrapped)
-from room_view import (action as member_action, call_order, call_span, footer_hints, live_unread,
+from room_view import (action as member_action, call_order, context_note, open_count, call_span, footer_hints, live_unread,
                        goal_banner, main_names, model_name, native_advisors, nodes, plan_idle, readable, said,
                        settler, spawn_bar, window_order, call_classifier, CALL_GROUPS, declared_status)
 
@@ -105,6 +105,11 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         label = "%s %s%s" % (toggle if attached else activity(state, frame, unicode),
                              "this window" + sep if main["participant"] == current else "", model)
         status = said_state + (sep + "%s calls" % len(attached) if folded else "")
+        if open_count(room, main["participant"]):
+            status += sep + "? %s open" % open_count(room, main["participant"])
+        context = context_note(report, main)
+        if context:
+            status += sep + "c%s%%" % context[0]
         if folded:
             reviews = sum(classify(m) == "review" for m in attached)
             if reviews:
@@ -228,6 +233,21 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     head = head[:budget]
     room_budget = max(0, budget - len(head) - (2 if boxed else 0))
     body = rows
+    if len(body) > room_budget > 0 and not navigation.get("_auto_fold"):
+        # Too short for everything: mains other than this window's and the selected one drop to their status line, kept only if that puts every main on screen and leaves a call to select.
+        keep = {current} | {m["participant"] for m in mains if selected and (
+            selected == ("chat", m["participant"]) or any(
+                member_action(c) == selected for c in calls
+                if c.get("parent") in {m["participant"], m.get("attempt")}))}
+        keep = keep if keep - {None} else {m["participant"] for m in mains[:1]}
+        extra = {m["participant"] for m in mains} - keep
+        inner = dict(navigation, collapsed=collapsed | extra, _auto_fold=True)
+        text = render_tree(report, width, height, color, unicode, frame, menu, attention_only,
+                           main_attempt, inner, summary, managed)
+        reachable = any(i[0] == "result" for i in inner["items"]) or not any(i[0] == "result" for i in items)
+        if reachable and all(inner["positions"].get(("chat", m["participant"]), 0) < inner["viewport"] for m in mains):
+            navigation.update({k: v for k, v in inner.items() if k not in ("collapsed", "_auto_fold")})
+            return text
     positions = {}
     for index, row in enumerate(body):
         if row.get("action"):

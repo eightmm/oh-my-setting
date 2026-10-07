@@ -869,6 +869,125 @@ grep -Fq 'persisted trace context' "$TMP/bad-trace.out" ||
 # --- Terminal panel and bidirectional orchestration ------------------------
 # Reuse this operator suite for the new front end. Providers are protocol
 # fixtures; the real consult/delegate/review and artifact writers run below.
+PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/scripts/lib" "$TMP" <<'PY' || fail "shared panel cache regression"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+from unittest.mock import patch
+
+sys.path.insert(0, sys.argv[1])
+import panel_cache as cache
+import panel_results
+import terminal_panel as panel
+
+project = Path(sys.argv[2]) / 'shared-panel'
+(project / '.oms/hooks').mkdir(parents=True)
+(project / '.oms/artifacts').mkdir()
+(project / '.oms/plan').mkdir()
+plan = project / '.oms/plan/tasks.json'
+plan.write_text('first', encoding='utf-8')
+counter = project / 'computations'
+worker = '''
+import json, sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import panel_cache as cache
+repo, counter = Path(sys.argv[2]), Path(sys.argv[3])
+def compute():
+    number = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(number))
+    return {'number': number}
+if len(sys.argv) > 4:
+    cache.time.time = lambda: float(sys.argv[4])
+try:
+    print(json.dumps(cache.read_shared(repo, 'dashboard', compute)))
+except ValueError:
+    print(json.dumps({'pending': True}))
+'''
+def board(now=None):
+    command = [sys.executable, '-c', worker, sys.argv[1], str(project), str(counter)]
+    if now is not None:
+        command.append(str(now))
+    return json.loads(subprocess.check_output(command, text=True, timeout=5))
+
+assert board() == board() == {'number': 1}, counter.read_text()
+path = project / cache.DIRECTORY / 'dashboard.json'
+created = json.loads(path.read_text())['created']
+with panel_results._lock(project, 'panel-cache-dashboard', timeout=0):
+    start = time.monotonic()
+    assert board(created + cache.INTERVAL + 1) == {'number': 1}
+    assert time.monotonic() - start < 2, 'contending board blocked'
+    plan.write_text('second generation', encoding='utf-8')
+    assert board() == {'pending': True}, 'replayed a different input generation'
+assert counter.read_text() == '1'
+assert board() == {'number': 2}
+assert board(json.loads(path.read_text())['created'] + cache.INTERVAL + 1) == {'number': 3}
+path.write_text('{"schema":1,', encoding='utf-8')
+assert board() == {'number': 4}, 'corrupt cache was reused'
+path.write_text('{"schema":1}', encoding='utf-8')
+assert board() == {'number': 5}, 'partial cache was reused'
+entry = json.loads(path.read_text())
+entry['value'] = {'number': 999}
+path.write_text(json.dumps(entry), encoding='utf-8')
+assert board() == {'number': 6}, 'damaged payload was reused'
+
+# The board still selects its own room, and result queries share the same
+# generation without retaining scoped answer text or skipping digest checks.
+path.unlink()
+with patch.object(panel, 'dashboard', return_value=({'repo': {'name': 'fixture'}}, 0)) as dashboard, \
+        patch.object(panel.room, 'status', side_effect=lambda repo, ident: {'id': ident}), \
+        patch.object(panel.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{}', '')):
+    assert panel.snapshot(project, 'one')[0]['room']['id'] == 'one'
+    assert panel.snapshot(project, 'two')[0]['room']['id'] == 'two'
+    assert dashboard.call_count == 1
+    with panel_results._lock(project, 'panel-cache-dashboard', timeout=0):
+        plan.write_text('third generation', encoding='utf-8')
+        state, status = panel.snapshot(project, 'two')
+        assert status == 1 and state['collection']['ok'] is False and 'room' not in state
+    assert panel.snapshot(project, 'two')[0]['room']['id'] == 'two'
+    assert dashboard.call_count == 2
+with patch.object(panel_results, '_records', return_value=([], [])) as queries:
+    assert panel_results.results(project, _shared=True)['rows'] == []
+    assert panel_results.results(project, _shared=True)['rows'] == []
+    assert queries.call_count == 1
+    plan.write_text('fourth generation', encoding='utf-8')
+    panel_results.results(project, _shared=True)
+    assert queries.call_count == 2
+
+# An owner decision older than results()' twenty-task window still reaches the board through outcomes().
+many = [{'kind': 'panel-result', 'task_id': 'task-%02d' % n} for n in range(30)]
+with patch.object(panel_results, '_records', return_value=([], many)), \
+        patch.object(panel_results, '_load_result', side_effect=lambda repo, row: {'outcome': 'completed'}):
+    assert panel_results.outcomes(project, {'task-00', 'task-29', 'missing', '../bad'}) == {'task-00': 'completed', 'task-29': 'completed'}
+    assert panel_results.outcomes(project, set()) == {}
+
+def changing():
+    plan.write_text('changed while collecting', encoding='utf-8')
+    return {'number': 42}
+try:
+    cache.read_shared(project, 'race', changing)
+except ValueError:
+    pass
+else:
+    raise AssertionError('published data collected across input generations')
+assert not (project / cache.DIRECTORY / 'race.json').exists()
+for relative in ('.oms/lifecycle/events.jsonl', '.oms/hooks/events.jsonl', '.oms/threads/room.jsonl'):
+    source = project / relative
+    source.parent.mkdir(exist_ok=True)
+    before = cache.fingerprint(project)
+    source.write_text('record', encoding='utf-8')
+    assert cache.fingerprint(project) != before, relative
+git_dir = project / 'worktree-git'
+git_dir.mkdir()
+(project / '.git').write_text('gitdir: worktree-git\n', encoding='utf-8')
+before = cache.fingerprint(project)
+(git_dir / 'HEAD').write_text('ref: refs/heads/fixture\n', encoding='utf-8')
+assert cache.fingerprint(project) != before, 'worktree HEAD was omitted'
+PY
 # A panel board restarts after a crash instead of closing its pane; outside a
 # panel session the same failure still exits.
 board_bin="$TMP/board-bin"
@@ -904,6 +1023,7 @@ import subprocess
 import sys
 
 root, temporary = map(Path, sys.argv[1:])
+os.chdir(temporary)
 # A run started inside an OMS panel must not inherit that panel's tmux or room binding.
 for name in [n for n in os.environ if n in ("TMUX", "TMUX_PANE") or n.startswith(("OMS_PANEL_", "OMS_ROOM_"))]:
     del os.environ[name]
@@ -1027,20 +1147,20 @@ msg_report = {"collection": {"ok": True}, "attempts": {"active_recent": [
                        "repo_tasks": [{"id": "t-blk", "title": "Blocked one", "state": "blocked", "provider": "codex", "verify": "make a"},
                                       {"id": "t-rdy", "title": "Ready one", "state": "ready", "provider": "", "verify": "make b"},
                                       {"id": "t-run", "title": "Running one", "state": "running", "provider": "claude",
-                                       "claimed_by_participant": "m1", "verify": "make c"},
+                                       "claimed_by_participant": "m1", "verify": "make c", "claim_expired": True, "claim_age_s": 32428},
                                       {"id": "t-ver", "title": "Verified one", "state": "done", "provider": "codex", "verify": "make d"},
                                       {"id": "t-rev", "title": "Review one", "state": "review", "provider": "claude", "verify": "make e"}]}}
 seat_calls = [{"kind": "ask", "selected_model": model, "artifact": ask + "%s-%s-s-1%s.md" % (family, model, suffix), "answer": text}
               for suffix, texts in (("", ("Answer: 저는 (a)를 고릅니다. 이유는 단순합니다.", "Answer: I pick (c) first. Reasons follow.",
                                           "Answer: (b) is safest. More.", "VERDICT: proceed")),
-                                    ("-r2", ("Answer: 저는 (a)를 고릅니다. 그대로 유지합니다.\nFULLTEXT-SOL second line",
-                                             "Answer: I'm keeping (a), the `!` marker is cheaper. More.",
+                                    ("-r2", ("Answer: **저는 (a)를 고릅니다.** 그대로 유지합니다.\nFULLTEXT-SOL second line",
+                                             "Answer: I keep my main point. I'm keeping (a), the `!` marker is cheaper. More.",
                                              "Answer: (b) stays safest. Still.", "VERDICT: revise\nAnswer: x")))
               for (family, model), text in zip((("codex", "gpt-6-sol"), ("claude", "claude-opus-5-5"), ("claude", "claude-fable-5-1"),
                                                 ("codex", "gpt-6-astra")), texts)]
 debate_rows = {"rows": [{"title": "Panel attention signal", "summary": "Ship (a)", "outcome": "accepted", "calls": seat_calls}],
-               "synthesis": {"path": ask + "_synthesis-s-1.md", "text": "## Prompt\nShould the panel flag attention with a color or a glyph? Pick one. Third.\n"
-                             "## Output\n### Agreement\nTests first.\n### Dissent\nOrder differs.\n"}}
+               "synthesis": {"path": ask + "_synthesis-s-1.md", "text": "## Prompt\n```\n--- begin conversation context (prior turns) ---\nold turn\n--- end conversation context ---\n```\nQuestion: Should the panel flag attention with a color or a glyph? Pick one. Third.\n"
+                             "## Output\n### Agreement\nTests first.\n### Dissent\n- **With Astra:** Order differs.\n- **With Sol:** Scope differs.\n"}}
 before = deepcopy(msg_report)
 BOX_CHARS = "╭╮│─╰╯•→—▸▾·"
 
@@ -1087,7 +1207,21 @@ nav, plan = board("plan")
 plan_rows = [line for line in plan.split("\n") if "Goal:" in line or " t-" in line]
 assert "Goal: Ship the tabbed panel" in plan_rows[0], plan
 assert [row.split(" · ")[0].split()[-1] for row in plan_rows[1:]] == ["t-ver", "t-rev", "t-run", "t-rdy", "t-blk"], plan_rows
-assert "· Verified one · codex · make d" in plan and "· Running one · #1 Opus 5.5 · make c" in plan and "· Review one · claude ·" in plan, plan
+assert "t-ver · done · Verified one · unclaimed · make d" in plan and "t-run · running 9h stale · Running one · #1 Opus 5.5 · make c" in plan, plan
+assert "t-rev · review · Review one · unclaimed ·" in plan and "codex ·" not in plan and "claude ·" not in plan, plan
+task_hits = [h["action"] for h in nav["hits"] if h["action"][0] == "task"]
+assert task_hits == [("task", t) for t in ("t-ver", "t-rev", "t-run", "t-rdy", "t-blk")], task_hits
+foot = plan.split("\n")[-1]
+assert "wheel Scroll" in foot and "Tab Next tab" in foot and "Enter Chat" not in foot and "Ask advisor" not in foot, foot
+# Four pinned mains on a 34-row board: the cards shrink so the Plan tab shows rows, not just its strip.
+wide = deepcopy(msg_report)
+wide["room"]["participants"] = msg_members + [dict(msg_members[0], participant="m4", seq=4, attempt="a4")]
+wide["main_windows"]["m4"] = 4
+wide["attempts"]["active_recent"].append(dict(wide["attempts"]["active_recent"][0], attempt_id="a4"))
+wide["attempts"]["active_recent"][-1]["panel"] = dict(wide["attempts"]["active_recent"][0]["panel"], room_participant="m4")
+wide["room"]["repo_tasks"] = [{"id": "w-%02d" % i, "title": "Wide %d" % i, "state": "review"} for i in range(12)]
+picture = render(wide, "codex", 120, 34, view="graph", navigation={"selected": ("chat", "m1"), "tab": "plan"})
+assert picture.count(" · review · ") >= 8, picture
 assert "✓ t-ver" in plan and "○ t-rdy" in plan and "✗ t-blk" in plan, plan
 assert board("plan", unicode=False)[1].isascii()
 # Long plans count off-screen rows and reach the last actionable task through the existing wheel band.
@@ -1117,14 +1251,15 @@ for needle in ("Panel attention signal · opened by #2 Sol 6.1 · " + stamp + " 
                "Question: Should the panel flag attention with a color or a glyph? Pick one. Third.",
                "Sol 6 — 저는 (a)를 고릅니다.", "Opus 5.5 — I'm keeping (a), the `!` marker is cheaper.", "Fable 5.1 — (b) stays safest.",
                "Astra 6 — revise", "(changed in round 2: (c) → (a))", "(changed in round 2: proceed → revise)",
-               "Agreement: Tests first.", "Disagreement: Order differs.", "Decision: Ship (a) (outcome: accepted)"):
+               "Agreement: Tests first.", "Disagreement: With Astra: Order differs.", "With Sol: Scope differs.", "Decision: Ship (a) (outcome: accepted)"):
     assert needle in flat, (needle, flat)
 assert text.count("changed in round") == 2 and "Changed after" not in text and "opened by m2" not in text and "2026-10-07T" not in text, text
 assert "FULLTEXT-SOL" not in text and "\x1b" not in text and "Debate •" not in text and "[ Debate ]" in text, text
 nav["debate_view"]["report"]["synthesis"]["text"] = "## Output\nplain prose"
 nav["debate_view"]["report"]["rows"][0].update(summary=None, outcome=None)
 bare = board("debate", nav=nav)[1]
-assert "Agreement" not in bare and "Disagreement" not in bare and "Decision: No decision recorded yet" in bare, bare
+assert "Agreement" not in bare and "Disagreement" not in bare and "Decision: not finalized" in " ".join(bare.replace("│", " ").split()) and "oms panel --finalize" in bare, bare
+assert "**" not in text and "begin conversation context" not in text, text
 assert "Question: Panel attention signal" in bare
 # Enter on a seat shows its full answer in the tab, Esc returns to the summary.
 assert panel_debate.handle(("down",), nav) and panel_debate.handle(("up",), nav) and panel_debate.handle(("enter",), nav)
@@ -1182,6 +1317,19 @@ assert "Tab Next tab" not in tree_text, tree_text
 assert not tab_event(("tab",), tree_nav) and not tab_event(("tab",), dict(tree_nav, surface="graph", detail={"target": ("chat", "m2")}))
 helped = render_tree(msg_report, 110, 40, navigation=dict(tree_nav, keys_help=True))
 assert "Tab Next tab" not in helped and "Tab badges" not in helped and "n New main" not in render_tree(msg_report, 110, 40, navigation={"keys_help": True}), helped
+# On a short tree every main stays on screen: mains other than this window's and the selected one drop to their status line, which carries ? and context badges.
+short_tree = deepcopy(msg_report)
+short_tree["room"]["open_questions"] = [{"id": "q1", "sender": "m1", "recipient": "m3", "ts": "2026-10-07T10:00:00Z"}]
+short_tree["room"]["participants"] = msg_members + [
+    {"participant": "w%d" % n, "role": "worker", "joined": True, "model": "claude-opus-5-5", "seq": 9 + n, "provider": "claude",
+     "parent": "m3" if n == 5 else "m1", "state": "working"} for n in range(6)]
+for ascii_only in (False, True):
+    short_nav = {"selected": ("chat", "m3")}
+    short_text = render_tree(short_tree, 90, 18, navigation=short_nav, unicode=not ascii_only)
+    assert "#1 Opus 5.5" in short_text and "? 1 open" in short_text and (not ascii_only or short_text.isascii()), short_text
+    assert {("chat", m) for m in ("m1", "m2", "m3")} <= {h["action"] for h in short_nav["hits"]}, short_text
+    plain = render_tree(short_tree, 90, 18, navigation={"selected": ("chat", "m3"), "_auto_fold": True}, unicode=not ascii_only)
+    assert "#1 Opus 5.5" not in plain, "the fold is what brings every main on screen"
 # Detail keeps its content after Esc dismissed the preview: the box stays so every tab remains reachable.
 nav, dismissed = board("plan", 110, 40, nav={"dismissed": True, "tab": "plan"})
 assert "t-ver" in dismissed and "[ Plan ]" in dismissed and "RECENT MESSAGES" not in dismissed, dismissed
@@ -1931,6 +2079,7 @@ with patch.dict(os.environ, menu_env), patch.object(panel.room, "records", retur
         panel.council(project, "codex", "menu-council", "Menu council", "Compare options.")
     except CouncilBound as bound:
         assert "--parent-attempt-id" in bound.args[0] and "att_m1" in bound.args[0], bound.args
+        assert "panel_room_id=council-room" in bound.args[0], bound.args
     else:
         raise AssertionError("council did not start")
 for none in ({}, {"m1": {"attempt_id": "a1"}, "m2": {"attempt_id": "a2"}}):
@@ -3909,6 +4058,11 @@ older["room"]["main_messages"] = [{"id": "old-%s" % n, "sender": "flow-third", "
 older_nav = dict(trio_nav, preview={"target": ("pair", ("flow-other", "flow-third")), "report": {}})
 older_detail = render(older, "codex", 157, 40, view="graph", navigation=older_nav)
 assert "OLDER PAIR 2" in older_detail, older_detail
+# `last:` reads that same window, so a room whose newest twelve are all worker mail still shows it.
+older["room"]["messages"] = [{"id": "w%s" % n, "sender": "worker-%s" % n, "targets": ["flow-other"], "ts": stamp, "text": "WORKER MAIL"}
+                             for n in range(12)]
+assert any(l.startswith("│ last: ") and "OLDER PAIR 2" in l for l in
+           render(older, "codex", 157, 40, view="graph", navigation={"overview": True}).splitlines())
 # Without lanes the pair is a text row; ASCII mode keeps every glyph plain.
 single = render(trio, "codex", 157, 40, view="graph", main_attempt="flow-attempt", navigation={}).splitlines()
 assert any("#1 Opus 5.5 ⇄ #2 Sol 6  →16 ←85 · 7 new" in l for l in single) and any("#1 Opus 5.5 ⇄ #3 Fable 5.1  ←4" in l for l in single), single
@@ -4495,6 +4649,7 @@ with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0))
         patch.object(room_module, "status", return_value={"id": "flow-room", "participants": members}), \
         patch.object(panel, "managed_session", return_value=False), \
         patch.object(panel, "results", return_value={"rows": []}), \
+        patch.object(panel, "outcomes", return_value={}), \
         patch.object(panel.subprocess, "run", side_effect=fake_run):
     got, _ = panel.snapshot(Path("."), "flow-room")
 assert got["land"] == {"active": True, "sha": "abc1234", "step": "gate", "minutes": 2}, got.get("land")
@@ -4504,7 +4659,7 @@ assert got["room_attempts"] == {"gone-review": {"state": "review", "attempt_id":
 with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \
         patch.object(room_module, "status", return_value={"id": "flow-room", "participants": members}), \
         patch.object(panel, "managed_session", return_value=False), \
-        patch.object(panel, "results", return_value={"rows": [{"task_id": "t-a-new", "outcome": "accepted"}]}), \
+        patch.object(panel, "outcomes", side_effect=lambda repo, ids, _shared=False: {"t-a-new": "accepted"} if "t-a-new" in ids else {}), \
         patch.object(panel.subprocess, "run", side_effect=fake_run):
     got, _ = panel.snapshot(Path("."), "flow-room")
 assert got.get("finalized") == {"t-a-new": "accepted"}, got.get("finalized")
@@ -4522,7 +4677,6 @@ admission_state = {"repo": {"name": "x"}, "attempts": {"recent": [{
     "attempt_id": "admission-worker", "task_id": "admission-task", "state": "done",
     "panel": {"room_id": "admission-room", "room_participant": "admission-worker", "role": "worker", "access": "write"}}]}}
 for recorded in ([{"patch": "change.patch"}], [{"patch": "change.patch"}, {"kind": "patch-admit"}]):
-    panel.ADMISSION_CHECKS.clear()
     with patch.object(panel, "dashboard", side_effect=lambda *a, **k: (deepcopy(admission_state), 0)), \
             patch.object(room_module, "status", side_effect=lambda *a: deepcopy(admission_room)), \
             patch.object(panel, "managed_session", return_value=False), \

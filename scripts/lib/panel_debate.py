@@ -87,18 +87,33 @@ def choice(text):
     return None
 
 
+RESTATES = re.compile(r"\b(?:I|We)\s+(?:changed|keep|kept|revised)\b|유지합니다|바꿨|변경했", re.I)
+BULLET = re.compile(r"^\s*(?:[-*>]|\d+[.)])\s+")
+
+
+def _plain(text):
+    """Markdown markers dropped: emphasis, list bullets."""
+    return " ".join(BULLET.sub("", line).replace("**", "").replace("__", "") for line in text.splitlines()).strip()
+
+
 def _stance(answer):
-    """(verdict or None, stance text): the VERDICT line, else the Answer section's first sentence."""
+    """(verdict or None, stance text): the VERDICT or Recommendation line, else the Answer's first sentence that states a position."""
     from peer_artifacts import debate_sections
     verdict = re.search(r"(?im)^[\s*#>_-]*VERDICT\b[\s*_]*[:\-]?[\s*_]*(.+)$", answer)
     if verdict:
         text = clean(verdict[1].strip("*_ "), 400)
         return text, text
+    advice = re.search(r"(?im)^[\s*#>_-]*Recommendation\b[\s*_]*[:\-]?[\s*_]*(.+)$", answer)
+    if advice:
+        return None, clean(_plain(advice[1]), 400)
     _, sections = debate_sections(answer)
     body = next((b for h, b in sections if h == "Answer" and b.strip()), None)
     if body is None:
-        return None, clean(" ".join(answer.split("\n")[:4]), 400)
-    return None, _sentence(clean(body, 800))
+        return None, clean(_plain(" ".join(answer.split("\n")[:4])), 400)
+    text = clean(_plain(body), 800)
+    first = _sentence(text)
+    rest = text[len(first):].strip()
+    return None, _sentence(rest) if RESTATES.search(first) and rest else first
 
 
 def _seats(calls):
@@ -132,7 +147,16 @@ def _sections(text):
                 found[current] = []
         elif current and not skip and line.strip():
             found[current].append(line)
-    return {k: clean(" ".join(v), 600) for k, v in found.items() if v}
+    items = {}
+    for kind, lines in found.items():
+        rows = []
+        for line in lines:
+            if BULLET.match(line) or not rows:
+                rows.append(line)
+            else:
+                rows[-1] += " " + line
+        items[kind] = [t for t in (clean(_plain(r), 300) for r in rows[:5]) if t]
+    return {k: v for k, v in items.items() if v}
 
 
 def _prompt(text):
@@ -145,6 +169,13 @@ def _prompt(text):
             inside = line[3:].strip().lower() == "prompt"
         elif inside and line.strip():
             lines.append(line.strip())
+    asked = [n for n, line in enumerate(lines) if line.startswith("Question:")]
+    if asked:
+        lines[asked[-1]] = lines[asked[-1]][len("Question:"):].strip()
+        lines = lines[asked[-1]:]
+    elif lines and lines[0].startswith("```"):
+        ended = [n for n, line in enumerate(lines) if line.startswith("--- end conversation context")]
+        lines = lines[ended[-1] + 1:] if ended else lines
     return clean(" ".join(lines[:12]), 600)
 
 
@@ -232,12 +263,16 @@ def tab_body(report, main, width, cap, navigation, labels, unicode=True):
                          ("seat", i), i == state["cursor"]))
     if not seats:
         body.append(("No seat answers recorded yet", None, False))
-    for title, text in _sections(synthesis.get("text") or "").items():
-        for n, part in enumerate(wrapped(title + ": " + text, width, 2)):
-            body.append((part, None, False))
+    for title, texts in _sections(synthesis.get("text") or "").items():
+        for i, text in enumerate(texts):
+            lead = title + ": " if not i else "  " + dash + " "
+            for part in wrapped(lead + text, width, 2):
+                body.append((part, None, False))
     summary = clean(row.get("summary"), 800) or ""
     outcome = ("(outcome: %s)" % clean(row.get("outcome"), 40)) if row.get("outcome") else ""
-    decision = (summary + " " + outcome).strip() or "No decision recorded yet"
+    decision = (summary + " " + outcome).strip() or (
+        "not finalized " + dash + " the owner records one with oms panel --finalize"
+        if seats and answered == len(seats) and done else "No decision recorded yet")
     body += [(part, None, False) for part in wrapped("Decision: " + decision, width, 3)]
     if state.pop("reveal", False) and state["cursor"] in starts:
         first_row = starts[state["cursor"]]
