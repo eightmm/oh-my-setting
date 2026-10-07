@@ -1247,10 +1247,13 @@ def panel_main_base(payload: dict[str, Any], room: str) -> str:
     return ("[oms panel] You are a control-tower main. Delegate implementation, investigation and test repair: "
             "oms panel --dispatch worker --owner %s%s --workload light|routine|main --purpose implement|investigate|explain "
             "--access write --brief-file PATH --verify COMMAND (or --access read --prompt TEXT), with --task-id and --label "
-            "and --reasoning-effort low|medium|high when a subtask is easier or harder than its tier; "
+            "and --reasoning-effort high for trust boundaries, cross-file integration or unclear failures, low for lookups "
+            "and mechanical edits, otherwise the tier default; "
             "run independent workers in parallel. Keep scope, briefs, review, patch admission, integration and "
-            "coordination with other mains yourself. Edit directly only when the brief would take longer than the edit "
-            "or the step needs the main itself." % (payload_agent(payload), " --room " + room if room else ""))
+            "coordination with other mains yourself; declare your scope with oms room scope --owns PATH before editing shared files "
+            "and pass --scope PATH to write workers. Edit directly only when the brief would take longer than the edit "
+            "or the step needs the main itself. Call other mains by window and model, such as #1 Opus 5.5 or #2 Sol 6.1."
+            % (payload_agent(payload), " --room " + room if room else ""))
 
 
 def cmd_route(args: argparse.Namespace) -> int:
@@ -1436,6 +1439,12 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
         room_repo = Path(os.environ.get("OMS_ROOM_REPO", str(repo))).resolve()
         binding = room.selected(room_repo, session_hash(payload), os.environ.get("OMS_ROOM_ID"),
                                 os.environ.get("OMS_ROOM_PARTICIPANT"))
+        if (binding is None and not os.environ.get("OMS_ROOM_ID")
+                and (payload.get("hook_event_name") or payload.get("hookEventName")) == "UserPromptSubmit"):
+            # A main already moved to the background service heals on its next prompt.
+            with contextlib.suppress(Exception):
+                if rebind_lineage_session(payload):
+                    binding = room.selected(room_repo, session_hash(payload))
         room_member = None
         if binding:
             repo, (tid, room_member) = room_repo, binding
@@ -1850,14 +1859,20 @@ def relay_hint(payload: dict[str, Any]) -> str | None:
     return "\n".join(lines)
 
 
+# SessionStart sources that start another native session in the same process.
+# Codex also starts a new thread for /resume and /fork; "startup" is a fresh
+# process and "compact" keeps the id, so neither may move a binding.
+REBIND_SOURCES = {"claude": ("clear",), "codex": ("clear", "resume", "fork")}
+
+
 def rebind_cleared_session(payload: dict[str, Any]) -> bool:
     """Move a panel main's room binding to the session its /clear started.
 
-    The enrolled environment alone never transfers a binding: Claude Code's own
-    SessionStart "clear" event in that main's process must name the new session,
-    and the rebind replaces only the identity recorded at that moment."""
+    The enrolled environment alone never transfers a binding: the provider's own
+    SessionStart event in that main's process must name the new session, and the
+    rebind replaces only the identity recorded at that moment."""
     if ((payload.get("hook_event_name") or payload.get("hookEventName")) != "SessionStart"
-            or payload.get("source") != "clear" or is_harness_child() or payload_agent(payload) != "claude"):
+            or is_harness_child()):
         return False
     session = payload.get("session_id") or payload.get("sessionId")
     ident, member_id = os.environ.get("OMS_ROOM_ID"), os.environ.get("OMS_ROOM_PARTICIPANT")
@@ -1867,10 +1882,106 @@ def rebind_cleared_session(payload: dict[str, Any]) -> bool:
     import room
 
     member = room.participant(room.status(repo.resolve(), ident), member_id)
-    if (member["role"] != "main" or member["provider"] != "claude" or not member["joined"]
-            or not member.get("consumer") or member["consumer"] == session_hash(payload)):
+    provider = member["provider"]
+    if (member["role"] != "main" or payload.get("source") not in REBIND_SOURCES.get(provider, ())
+            or not member["joined"] or not member.get("consumer") or member["consumer"] == session_hash(payload)):
+        return False
+    # A SessionStart payload has no turn_id and Codex may omit its transcript,
+    # so payload_agent would default to claude: only a proven provider counts.
+    if provider == "codex" and not (os.environ.get("OMS_HOOK_AGENT") == "codex" or Path(str(
+            payload.get("transcript_path") or payload.get("transcriptPath") or "")).name.startswith("rollout-")):
+        return False
+    if payload_agent(payload) != provider:
         return False
     room.bind(repo.resolve(), ident, member_id, session, replaces=member["consumer"])
+    return True
+
+
+LINEAGE_READ = 256 * 1024
+LINEAGE_RETRY_SEC = 600
+LINEAGE_MAINS = 32
+
+
+def transcript_root(path: Path, background: bool = False) -> str | None:
+    """uuid of the first user/assistant record in a Claude transcript's first 256 KiB.
+
+    With background, only a record Claude Code's background service wrote (sessionKind "bg") counts:
+    a conversation the person forks into another terminal shares the root but is no move."""
+    import panel_chats
+
+    for line in panel_chats._read_owned(path, LINEAGE_READ).split(b"\n"):
+        try:
+            row = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(row, dict) and row.get("type") in ("user", "assistant"):
+            if background and row.get("sessionKind") != "bg":
+                return None
+            return row["uuid"] if isinstance(row.get("uuid"), str) and row["uuid"] else None
+    return None
+
+
+def rebind_lineage_session(payload: dict[str, Any]) -> bool:
+    """Move a Claude main's room binding to the session its conversation continued in.
+
+    Claude Code's background service continues a conversation under a new
+    session id without the panel environment; the new transcript replays the
+    old one, so a shared root record uuid is cooperative, same-UID lineage
+    evidence. Only a unique match rebinds, through the compare-and-swap bind."""
+    session = payload.get("session_id") or payload.get("sessionId")
+    transcript = payload.get("transcript_path") or payload.get("transcriptPath")
+    if is_harness_child() or payload_agent(payload) != "claude" or not (session and transcript):
+        return False
+    repo = hook_repo(payload)
+    if repo is None or not (repo / ".oms/threads").is_dir():
+        return False
+    import panel_chats
+    import room
+    import thread_live
+
+    projects = (panel_chats._claude_home() / "projects").resolve()
+    transcript = Path(str(transcript))
+    if transcript.name != str(session) + ".jsonl" or transcript.resolve().parent.parent != projects:
+        return False
+    root = transcript_root(transcript, background=True)
+    if not root:
+        return False  # no evidence yet, or not a background move, which is not a negative result
+    consumer = session_hash(payload)
+    path = thread_live.safe_path(repo, ".oms/hooks/sessions/" + consumer + ".lineage.json", True)
+    if path.exists() or path.is_symlink():
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
+            return False
+    with event_file_lock(path, timeout=0.1):
+        checked = event_epoch(load_state(path).get("checked_at"))
+        if checked is not None and 0 <= time.time() - checked < LINEAGE_RETRY_SEC:
+            return False
+        write_json_atomic(path, {"schema": 1, "checked_at": utc_now()})
+    if room.selected(repo, consumer) is not None:
+        return False
+    states, incomplete = room.discover(repo)
+    if incomplete:
+        return False
+    mains = [(state["id"], member) for state in states if not state["closed"] for member in state["participants"]
+             if member["joined"] and member["role"] == "main" and member["provider"] == "claude"
+             and isinstance(member.get("consumer"), str) and member["consumer"] != consumer]
+    if len(mains) > LINEAGE_MAINS:
+        return False  # a partial comparison never proves a unique lineage
+    index = panel_chats.native_index({member["consumer"] for _, member in mains})["claude"]
+    with os.scandir(projects) as entries:
+        slugs = [Path(entry.path) for entry in list(entries)[:panel_chats.MAX_FILES] if entry.is_dir(follow_symlinks=False)]
+    matches = []
+    for ident, member in mains:
+        for sid in sorted(index.get(member["consumer"]) or ())[:1]:
+            old = next((slug / (sid + ".jsonl") for slug in slugs if (slug / (sid + ".jsonl")).is_file()
+                        and not (slug / (sid + ".jsonl")).is_symlink()), None)
+            with contextlib.suppress(OSError):
+                if old and transcript_root(old) == root:
+                    matches.append((ident, member))
+    if len(matches) != 1:
+        return False
+    ident, member = matches[0]
+    room.bind(repo, ident, member["participant"], str(session), replaces=member["consumer"])
     return True
 
 
@@ -1879,6 +1990,10 @@ def cmd_relay_hint(_: argparse.Namespace) -> int:
     # SessionStart's only hook_state call; a failed rebind leaves the old binding and its withheld-mail notice.
     with contextlib.suppress(Exception):
         rebind_cleared_session(payload)
+    if ((payload.get("hook_event_name") or payload.get("hookEventName")) == "SessionStart"
+            and payload.get("source") in ("fork", "resume")):
+        with contextlib.suppress(Exception):
+            rebind_lineage_session(payload)
     try:
         hint = relay_hint(payload)
     except Exception:

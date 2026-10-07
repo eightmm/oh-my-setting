@@ -1845,7 +1845,7 @@ conversation_boundary_check() {
     "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")" || return 2
   for surface in $(printf '%s' "$changed" | tr ',' ' '); do
     case "$surface" in
-      files|tracked|remote-refs|work-branches|kept-sibling) [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] || return 2 ;;
+      files|tracked|remote-refs|work-branches|kept-sibling|sibling-cleanup) [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] || return 2 ;;
       *) echo "error: conversation changed owner surface: $surface" >&2; return 2 ;;
     esac
   done
@@ -2112,15 +2112,16 @@ if [ -n "$worker_guard_dir" ]; then
   # the hard local-ref/HEAD surface, hooks, object-store metadata, or rewrites
   # append-only state while a delegation runs, so those are the worker.
   # Untracked/ignored files, tracked content, remote-tracking refs, stash,
-  # other mains' oms/* work branches, and a sibling delegate finishing with its
-  # worktree kept can change during ordinary concurrent repository activity. Reporting those
+  # other mains' oms/* work branches, a sibling delegate finishing with its
+  # worktree kept, and residue cleanup unregistering a sibling that was already
+  # dead and kept can change during ordinary concurrent repository activity. Reporting those
   # is useful, but failing on them would make the guard fire on ordinary days.
   # OMS_WORKER_GUARD_STRICT fails on everything for unattended runs.
   worker_guard_hard=""
   worker_guard_soft=""
   for guard_surface in $(printf '%s' "$worker_guard_changed" | tr ',' ' '); do
     case "$guard_surface" in
-      files|tracked|remote-refs|work-branches|kept-sibling)
+      files|tracked|remote-refs|work-branches|kept-sibling|sibling-cleanup)
         if [ "${OMS_WORKER_GUARD_STRICT:-0}" = "1" ]; then
           worker_guard_hard="${worker_guard_hard:+$worker_guard_hard, }$guard_surface"
         else

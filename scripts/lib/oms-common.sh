@@ -976,7 +976,7 @@ oms_worker_surface_diff() {
       fi
       if [ "$name" = gitmeta ] && oms_worker_gitmeta_only_kept_siblings "$repo" \
         "$before_dir" "$current_worktree_physical"; then
-        changed="${changed:+$changed, }kept-sibling"
+        changed="${changed:+$changed, }$OMS_WG_GITMETA_SOFT"
         continue
       fi
       changed="${changed:+$changed, }$name"
@@ -1000,6 +1000,22 @@ oms_worker_surface_diff() {
       changed="${changed:+$changed, }current-operation"
   fi
   printf '%s\n' "$changed"
+}
+
+# A marker records the checkout that made it; land or scratch may run from a
+# linked worktree of the same repository. Same repository means the same Git
+# common directory, not the same checkout path.
+oms_worker_same_repository() {  # REPO_PHYSICAL OTHER
+  local other_physical=""
+  local repo_common=""
+  local other_common=""
+
+  other_physical="$(oms_harness_physical_dir "$2" 2>/dev/null || true)"
+  [ -n "$other_physical" ] || return 1
+  [ "$other_physical" != "$1" ] || return 0
+  repo_common="$(oms_harness_git_path_physical "$1" --git-common-dir 2>/dev/null || true)"
+  other_common="$(oms_harness_git_path_physical "$other_physical" --git-common-dir 2>/dev/null || true)"
+  [ -n "$repo_common" ] && [ "$repo_common" = "$other_common" ]
 }
 
 # A parallel delegate owns a temporary linked worktree in the same repository.
@@ -1077,7 +1093,7 @@ oms_worker_gitmeta_is_live_managed_worktree() {  # REPO ENTRY CURRENT_WORKTREE [
     [ -n "$base" ] || continue
     if oms_harness_safe_residue_worktree "$base" "$residue_dir" \
         "$marker_repo" "$marker_worktree" &&
-      [ "$OMS_HARNESS_SAFE_RESIDUE_REPO" = "$repo_physical" ] &&
+      oms_worker_same_repository "$repo_physical" "$OMS_HARNESS_SAFE_RESIDUE_REPO" &&
       [ "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" = "$wt_physical" ]; then
       return 0
     fi
@@ -1141,8 +1157,7 @@ oms_worker_gitmeta_is_pending_managed_worktree() {  # REPO WT_PATH CURRENT_WORKT
   kill -0 "$marker_pid" 2>/dev/null || return 1
   repo_physical="$(oms_harness_physical_dir "$repo" 2>/dev/null || true)"
   [ -n "$repo_physical" ] || return 1
-  [ "$(oms_harness_physical_dir "$marker_repo" 2>/dev/null || true)" = "$repo_physical" ] ||
-    return 1
+  oms_worker_same_repository "$repo_physical" "$marker_repo" || return 1
   case "$marker_worktree" in /*/wt) ;; *) return 1 ;; esac
   marker_parent="$(oms_harness_physical_dir "${marker_worktree%/wt}" 2>/dev/null || true)"
   [ -n "$marker_parent" ] && [ "$marker_parent" = "$residue_physical" ] || return 1
@@ -1161,14 +1176,19 @@ EOF
 # A sibling delegate that finishes with its worktree kept (failure or rejection)
 # loses its liveness and appears on the hard surface although nothing about it
 # is the worker's. That holds both for a sibling live-exempt at the
-# pre-provider snapshot and for one started after it. Name it softly only when
-# every changed line is an addition belonging to such an entry and its
+# pre-provider snapshot and for one started after it. Name it softly
+# (`kept-sibling`) only when every added line belongs to such an entry and its
 # checkout, backpointer and marker still pass the validator with only the pid
 # dead; an entry started after the snapshot must also be absent from the
-# baseline and sit on a detached HEAD. This is false-positive relief for
-# cooperative parallel runs, not attribution: a same-UID worker can forge the
-# same shape (SECURITY.md). A removed marker, any other changed line, or
-# OMS_WORKER_GUARD_STRICT=1 keeps gitmeta hard.
+# baseline and sit on a detached HEAD. Conversely, residue cleanup run by
+# another main may unregister a sibling that was already dead and kept at the
+# snapshot (`gitmeta-residue`); name that softly (`sibling-cleanup`) only when
+# every removed line belongs to such an entry and none of its lines remain.
+# This is false-positive relief for cooperative parallel runs, not
+# attribution: a same-UID worker can forge the same shape (SECURITY.md). A
+# removed marker, a partial removal, any other changed line, or
+# OMS_WORKER_GUARD_STRICT=1 keeps gitmeta hard. The soft names are returned in
+# OMS_WG_GITMETA_SOFT.
 oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   local repo="$1"
   local before_dir="$2"
@@ -1176,9 +1196,11 @@ oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   local git_dir
   local line
   local entry
+  local removed
   local added
   local head
 
+  OMS_WG_GITMETA_SOFT=""
   git_dir="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || printf '')"
   case "$git_dir" in
     "") return 1 ;;
@@ -1188,10 +1210,28 @@ oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   oms_worker_surface_capture_one "$repo" gitmeta "$current_worktree_physical" |
     LC_ALL=C sort > "$before_dir/gitmeta-now" || return 1
   LC_ALL=C sort "$before_dir/gitmeta" > "$before_dir/gitmeta-before" || return 1
-  [ -z "$(LC_ALL=C comm -23 "$before_dir/gitmeta-before" "$before_dir/gitmeta-now")" ] ||
-    return 1
+  removed="$(LC_ALL=C comm -23 "$before_dir/gitmeta-before" "$before_dir/gitmeta-now")"
   added="$(LC_ALL=C comm -13 "$before_dir/gitmeta-before" "$before_dir/gitmeta-now")"
-  [ -n "$added" ] || return 1
+  [ -n "$removed" ] || [ -n "$added" ] || return 1
+  if [ -n "$removed" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree-dir worktrees/"*) entry="${line#worktree-dir worktrees/}" ;;
+        "worktree worktrees/"*/*)
+          entry="${line#worktree worktrees/}"
+          entry="${entry%%/*}"
+          ;;
+        *) return 1 ;;
+      esac
+      grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-residue" 2>/dev/null || return 1
+      ! awk -v e="worktrees/$entry" '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
+        "$before_dir/gitmeta-now" || return 1
+    done <<EOF
+$removed
+EOF
+    OMS_WG_GITMETA_SOFT=sibling-cleanup
+  fi
+  [ -n "$added" ] || return 0
   while IFS= read -r line; do
     case "$line" in
       "worktree-dir worktrees/"*) entry="${line#worktree-dir worktrees/}" ;;
@@ -1217,6 +1257,7 @@ oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   done <<EOF
 $added
 EOF
+  OMS_WG_GITMETA_SOFT="${OMS_WG_GITMETA_SOFT:+$OMS_WG_GITMETA_SOFT, }kept-sibling"
   return 0
 }
 
@@ -1668,6 +1709,13 @@ PY
                   printf '%s\n' "${wt#"$git_dir"/}" >> "$OMS_WG_GITMETA_EXEMPT_OUT"
                 continue
               fi
+              # Dead harness residue stays on the surface; the snapshot only
+              # notes it so a later cleanup of the whole entry can read softly.
+              if [ -n "${OMS_WG_GITMETA_RESIDUE_OUT:-}" ] &&
+                oms_worker_gitmeta_is_live_managed_worktree "$repo" "$wt/gitdir" \
+                  "$current_worktree_physical" kept; then
+                printf '%s\n' "${wt#"$git_dir"/}" >> "$OMS_WG_GITMETA_RESIDUE_OUT"
+              fi
               printf 'worktree-dir %s\n' "${wt#"$git_dir"/}"
               for meta in "$wt/gitdir" "$wt/HEAD"; do
                 if [ -L "$meta" ]; then
@@ -1713,8 +1761,10 @@ oms_worker_surface_snapshot() {
 
   mkdir -p "$dir" || return 1
   : > "$dir/gitmeta-exempt"
+  : > "$dir/gitmeta-residue"
   for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks omsstate; do
     OMS_WG_GITMETA_EXEMPT_OUT="$dir/gitmeta-exempt" \
+      OMS_WG_GITMETA_RESIDUE_OUT="$dir/gitmeta-residue" \
       oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" > "$dir/$name" 2>/dev/null || true
   done

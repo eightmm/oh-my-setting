@@ -194,10 +194,18 @@ minutes on every hook and `overdue` from fifteen; the asker's own hook records o
 `Needs you` list shows the question from twenty minutes. A `--kind answer` without
 `--reply-to` links the one open question from that recipient, or is refused with the ids.
 
-A `Between mains` block under the tabs lists one
-`Sol 6.1 → Opus 5.5 · 36 messages · 1 unread` line per sender and recipient (unread
-pairs first, then most recent; at most four plus `+N more pairs`); a board shorter
-than 32 rows shows `Between mains: N pairs · M unread`. The header holds one usage
+A `BETWEEN MAINS · N pairs · M unread` box under the tabs, with its own border,
+holds one row per pair of mains that exchanged mail, named like the tabs
+(`#2 Sol 6.1`). With lanes the row is a link between the two lane columns:
+`◀`/`▶` mark each direction that has mail, the counts sit on the line
+(`→85 ←16 · 7 new`, relative to the left main) and a main in between shows `┼`;
+without lanes, or when both ends share a lane column, the row is text
+(`#1 Opus 5.5 ⇄ #2 Sol 6.1  →16 ←85 · 7 new`). Unread pairs come first, then the most
+recent; at most four rows plus `+N more pairs`. A dim `last:` line shows the newest
+message between mains. Clicking a pair row (or moving onto it with the arrow keys)
+shows the pair's last six messages in DETAIL, oldest first, from the room snapshot,
+which keeps only the room's latest 12 messages. A board shorter than 32 rows shows
+`Between mains: N pairs · M unread` instead. The header holds one usage
 line (`Claude 66% week · ctx 73% │ Codex 2% week · ctx 84%`; the model-call totals
 stay in the control/tree USAGE card). Truncation reads `…` (`...` in ASCII mode).
 `⚑` (ASCII `A`) marks a call waiting for approval, `?` one waiting for input.
@@ -343,6 +351,21 @@ resolve the verified active main; missing or ambiguous ownership is refused.
 A standalone dispatch without room/main binding remains available and reports
 that its relationship is unrecorded.
 
+Mains declare what they are editing so other mains and their dispatches can
+see it: `oms room scope --id team --participant opus-main --owns scripts/lib
+--owns docs/TERMINAL-PANEL.md` replaces that participant's declared scopes and
+`--clear` empties them. Only the participant itself may declare (the inherited
+`OMS_ROOM_PARTICIPANT` must match; workers cannot); at most sixteen normalized
+repo-relative scopes; advisors and reviewers own none. A write dispatch takes
+repeatable `--scope PATH`; the worker joins with those scopes, and before launch
+the panel compares them with every other joined main's scopes and every live
+write call's (no result handoff, no terminal attempt). Two scopes overlap when
+one equals the other or is a path-component prefix of it (`scripts/lib`
+overlaps `scripts/lib/room.py`, not `scripts/li`; `.` overlaps everything;
+globs compare literally). Overlaps print one stderr warning and appear as
+`overlaps` in `--dry-run` JSON. The launch is never refused: declarations
+coordinate work, they are not locks. The main detail view shows `Scope: …`.
+
 ### Original chats and recovery
 
 `h Chats` lists the selected room's participants. Selecting a native main focuses
@@ -386,9 +409,22 @@ can also be bound by its own agent with
 `oms room bind --repo . --id team --participant opus-main --native-session current`.
 An already bound identity cannot silently change; a different native session
 requires explicit leave/rejoin. Closed or left membership does not auto-resume.
+A main's own SessionStart moves its binding when the provider starts another native session in that process (Claude `clear`; Codex `clear`, `resume` or `fork`), replacing only the identity bound at that moment; `startup` and `compact` never do.
 Later hooks compare both enrolled provider and native identity before reading or
 advancing a cursor. A mismatched user prompt receives a short reconnection notice;
 tool hooks withhold the room mail without repeating that notice.
+
+A Claude main moved to Claude Code's background service continues under a new
+session id without the panel environment. Its SessionStart `fork`/`resume` hook,
+or else its next prompt, re-attaches it by transcript lineage: when exactly one
+joined Claude main's transcript shares the new transcript's first user/assistant
+record uuid and the new records carry Claude Code's background `sessionKind`, the
+binding moves with the same compare-and-swap, keeping the join boundary and mail.
+A conversation forked by hand into another terminal shares the root but is not a
+background session, so it never takes the main's binding. This is cooperative, same-UID evidence, not authentication;
+zero or several matches change nothing, and a miss is retried at most every ten
+minutes. `oms panel --dispatch --owner claude` from that session then finds its
+main through `CLAUDE_CODE_SESSION_ID`; workers never take this fallback.
 
 An exact resume of a still-joined, proven-terminal panel owner reuses its logical
 participant while starting a distinct execution attempt. Join boundary, queued
@@ -731,8 +767,12 @@ Outside Herdr, `auto` chooses split on POSIX when tmux is installed, including
 `--launch` and runs started inside another tmux session (the client switches to
 the panel instead of nesting); otherwise it uses inline. `--host inline` or
 `--layout inline` keeps a run in the current terminal. Each checkout has one OMS panel
-session, `oms-panel-` plus the first 12 hex digits of the SHA-256 of its resolved
-path. The first `split` creates it with a control window and records the
+session, `oms-<project>`: the checkout's directory name lowercased, runs of other
+characters turned into `-`, at most 32 characters (`project` when nothing is left). When that
+name is held by another checkout or by a session OMS did not create, the panel uses
+`oms-<project>-` plus the first 6 hex digits of the SHA-256 of the resolved path, and neither
+session is taken over. A live legacy `oms-panel-<12 hex>` session proven for the checkout stays in use
+under its name, because its processes carry that name; new panels use the new name. The first `split` creates it with a control window and records the
 checkout on the session. A new panel opened without `--launch` also opens every
 installed main CLI (Codex, Claude) in its own window, sharing one new room;
 `OMS_PANEL_MAINS=claude` (comma list, in that order, first one selected) or an
@@ -748,9 +788,9 @@ existing room rules apply. Rooms stay bounded and task-scoped; the panel
 outlives them. Separate tmux servers are separate scopes. Each native conversation gets
 its own sidebar with state refreshed every five seconds. Existing windows and tmux settings
 are preserved, with one addition: `F6`/`F7` move to the previous/next main window, `F9` selects the other pane
-of the window, `F5` opens the control window and `F12` shows the key list, all without the prefix (F8 is Codex's voice key and F10/F11 belong to terminal menus), and the board lays its main columns out in that window order. tmux key bindings are server-wide, so the binding acts only in `oms-panel-*` sessions,
+of the window, `F5` opens the control window and `F12` shows the key list, all without the prefix (F8 is Codex's voice key and F10/F11 belong to terminal menus), and the board lays its main columns out in that window order. tmux key bindings are server-wide, so the binding acts only in sessions that carry the panel's `@oms_panel_repo` marker,
 passes the key through unchanged in every other session, and is not installed when the key is
-already bound. With default bindings, `Ctrl-b w` picks a window and `Ctrl-b d`
+already bound by the user (a binding OMS installed earlier under the old session-name test is replaced). With default bindings, `Ctrl-b w` picks a window and `Ctrl-b d`
 detaches while work continues. Quit in the control pane also detaches. Failed
 construction rolls back only the new OMS session or added window. Inline returns to the menu
 when the native CLI exits and refreshes then; it has no permanent sidebar.

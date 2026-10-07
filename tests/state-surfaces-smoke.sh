@@ -10,6 +10,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-state-surfaces.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
+# Run as a top-level operator even inside a panel main or worker shell.
+unset TMUX TMUX_PANE OMS_HOOK_AGENT OMS_AGENT OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN \
+  OMS_HARNESS_PARENT_AGENT OMS_HARNESS_CALL_ID OMS_HARNESS_DELEGATE_DEPTH OMS_STATE_REPO \
+  OMS_ATTEMPT_ID OMS_WORKER_AUTHORITY_EXCLUSIVE
+for oms_inherited in $(compgen -e | grep -E '^OMS_(PANEL|ROOM)_' || true); do unset "$oms_inherited"; done
+
 fail() {
   echo "FAIL: $*" >&2
   exit 1

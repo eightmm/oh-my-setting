@@ -19,8 +19,8 @@ unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
   OMS_HARNESS_CALL_ID OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
   OMS_LEASE_ID OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_APPROVAL_ID \
   OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE OMS_HARNESS_DELEGATE_DEPTH \
-  OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO OMS_ROOM_ADMITTED_PARTICIPANT OMS_HOOK_AGENT \
-  OMS_PANEL_MAIN_ATTEMPT OMS_PANEL_SESSION
+  OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO OMS_ROOM_ADMITTED_PARTICIPANT OMS_HOOK_AGENT OMS_AGENT TMUX TMUX_PANE
+for oms_inherited in $(compgen -e | grep -E '^OMS_(PANEL|ROOM)_' || true); do unset "$oms_inherited"; done
 
 fail() {
   echo "autonomy-hook-smoke: $*" >&2
@@ -644,6 +644,7 @@ assert not hook_state.live_thread_hint(payload("native-first-session")), "the cl
 os.environ.update(OMS_PANEL_MAIN_ATTEMPT="fresh-main", OMS_PANEL_SESSION="oms-fixture")
 tower = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 assert "control-tower main" in tower and "--owner claude --room binding-room" in tower, tower
+assert "#1 Opus 5.5" in tower and "trust boundaries" in tower, tower
 assert not hook_state.panel_main_hint(payload("tower")), "only prompts carry the reminder"
 # The shared plan rides on the same line: no plan, no plan sentence; then progress, the main's own task and the next ready one.
 assert "[oms plan]" not in tower, tower
@@ -670,6 +671,47 @@ assert "set your status" not in hook_state.panel_main_hint(dict(payload("tower")
 os.environ.pop("OMS_PANEL_MAIN_ATTEMPT")
 assert not hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 os.environ.pop("OMS_PANEL_SESSION")
+# Codex mains switch threads on clear/resume/fork only; provider must be proven.
+room.join(repo, "binding-room", "codex-main", "codex")
+room.bind(repo, "binding-room", "codex-main", "codex-thread-0")
+os.environ["OMS_ROOM_PARTICIPANT"] = "codex-main"
+os.environ.pop("OMS_HOOK_AGENT")
+def codex_start(session, source, transcript="/h/.codex/sessions/rollout-1.jsonl"):
+    return dict(cleared(session, source), transcript_path=transcript)
+def codex_bound():
+    return room.participant(room.status(repo, "binding-room"), "codex-main")
+codex_before = codex_bound()
+for case, source in (("startup", "startup"), ("compact", "compact")):
+    assert not hook_state.rebind_cleared_session(codex_start("codex-" + case, source)), source + " rebound a Codex main"
+assert not hook_state.rebind_cleared_session(cleared("codex-as-claude")), "a Claude payload rebound a Codex main"
+assert not hook_state.rebind_cleared_session(codex_start("codex-unproven", "clear", None)), "an unproven provider rebound"
+assert codex_bound()["consumer"] == codex_before["consumer"]
+room.send(repo, "binding-room", "fresh-peer", "codex-main", "Mail sent while Codex switched", message_id="during-codex-switch")
+last = "codex-thread-0"
+for source in ("clear", "resume", "fork"):
+    prior = codex_bound()["consumer"]
+    nxt = "codex-" + source
+    assert hook_state.rebind_cleared_session(codex_start(nxt, source)), source
+    now = codex_bound()
+    assert now["consumer"] == hook_state.session_hash(payload(nxt)) != prior
+    assert now["seq"] == codex_before["seq"] and now["initial_consumer"] == codex_before["initial_consumer"], now
+    last = nxt
+assert "during-codex-switch" in hook_state.live_thread_hint(payload(last, "codex"))
+try:
+    hook_state.rebind_cleared_session(codex_start("after-clear", "resume"))
+except ValueError:
+    pass  # cmd_relay_hint suppresses this at SessionStart
+else:
+    raise AssertionError("resume took a thread another participant holds")
+assert codex_bound()["consumer"] == hook_state.session_hash(payload(last))
+assert room.participant(room.status(repo, "binding-room"), "fresh-main")["consumer"] == hook_state.session_hash(payload("after-clear"))
+os.environ["OMS_ROOM_PARTICIPANT"] = "fresh-main"
+assert not hook_state.rebind_cleared_session(codex_start("claude-as-codex", "clear")), "a Codex payload rebound a Claude main"
+os.environ["OMS_HOOK_AGENT"] = "codex"
+os.environ["OMS_ROOM_PARTICIPANT"] = "codex-main"
+assert hook_state.rebind_cleared_session(codex_start("codex-env-proven", "clear", None)), "OMS_HOOK_AGENT should prove Codex"
+os.environ["OMS_HOOK_AGENT"] = "claude"
+os.environ["OMS_ROOM_PARTICIPANT"] = "fresh-main"
 os.environ["OMS_HARNESS_CHILD"] = "1"
 try:
     room.bind(repo, "binding-room", "fresh-peer", "worker-native")
@@ -714,6 +756,66 @@ inventory = subprocess.run(["bash", str(root / "scripts/oms"), "room", "list", "
                            capture_output=True, text=True, check=True)
 report = json.loads(inventory.stdout)
 assert len(report["rooms"]) == 2 and report["incomplete"] is False
+# Claude Code's background service continues a main under a new session id
+# without the panel environment; a shared root record uuid re-attaches it.
+import time, uuid
+projects = pathlib.Path.home() / ".claude/projects/fixture-slug"
+projects.mkdir(parents=True)
+def transcript(root_uuid, sid=None, kind="bg"):
+    sid = sid or str(uuid.uuid4())
+    rows = [{"type": "summary", "summary": "x"}, dict({"type": "user", "uuid": root_uuid, "sessionId": sid},
+                                                      **({"sessionKind": kind} if kind else {}))]
+    (projects / (sid + ".jsonl")).write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return sid
+def moved(sid, event="SessionStart", source="fork"):
+    return {"cwd": str(repo), "session_id": sid, "transcript_path": str(projects / (sid + ".jsonl")),
+            "hook_event_name": event, "source": source}
+def run_relay(sid, **env):
+    subprocess.run(["python3", str(root / "scripts/lib/hook_state.py"), "relay-hint"], input=json.dumps(moved(sid)),
+                   env=dict(os.environ, **env), capture_output=True, text=True, check=True)
+lineage = repo.parent / "lineage-repo"
+lineage.mkdir()
+subprocess.run(["git", "init", "-q", str(lineage)], check=True)
+repo = lineage
+old_sid = transcript("root-a")
+room.create(repo, "moved-room", "Moved main")
+room.join(repo, "moved-room", "moved-main", "claude", native_session=old_sid)
+room.join(repo, "moved-room", "moved-peer", "codex")
+before = room.participant(room.status(repo, "moved-room"), "moved-main")
+room.send(repo, "moved-room", "moved-peer", "moved-main", "Mail sent before the move", message_id="before-move")
+for sid, env in ((transcript("root-b"), {}), (transcript("root-a"), {"OMS_HARNESS_CHILD": "1"}),
+                 (transcript("root-a"), {"OMS_HOOK_AGENT": "codex"})):
+    run_relay(sid, **env)
+    assert room.participant(room.status(repo, "moved-room"), "moved-main")["consumer"] == before["consumer"], env
+# A conversation forked by hand into another terminal (no background sessionKind) keeps its hands off.
+run_relay(transcript("root-a", kind=None))
+assert room.participant(room.status(repo, "moved-room"), "moved-main")["consumer"] == before["consumer"]
+new_sid = transcript("root-a")
+run_relay(new_sid)
+after = room.participant(room.status(repo, "moved-room"), "moved-main")
+assert after["consumer"] == hook_state.session_hash(moved(new_sid)), after
+assert (after["seq"], after["initial_consumer"]) == (before["seq"], before["initial_consumer"]), after
+assert "before-move" in hook_state.live_thread_hint(moved(new_sid, "UserPromptSubmit"))
+# Two mains sharing the root are no unique lineage.
+twin = transcript("root-c")
+room.create(repo, "twin-room", "Twin mains")
+room.join(repo, "twin-room", "twin-one", "claude", native_session=twin)
+room.join(repo, "twin-room", "twin-two", "claude", native_session=transcript("root-c"))
+assert not hook_state.rebind_lineage_session(moved(transcript("root-c")))
+assert room.participant(room.status(repo, "twin-room"), "twin-one")["consumer"] == hook_state.session_hash(moved(twin))
+# A negative result is cached for ten minutes; a prompt then heals the moved session.
+room.create(repo, "late-room", "Late main")
+late_sid = transcript("root-d")
+healed = transcript("root-d")
+cache = repo / ".oms/hooks/sessions" / (hook_state.session_hash(moved(healed)) + ".lineage.json")
+assert not hook_state.rebind_lineage_session(moved(healed)) and cache.is_file()
+room.join(repo, "late-room", "late-main", "claude", native_session=late_sid)
+room.join(repo, "late-room", "late-peer", "codex")
+room.send(repo, "late-room", "late-peer", "late-main", "Mail for the late main", message_id="late-mail")
+assert not hook_state.live_thread_hint(moved(healed, "UserPromptSubmit")), "the negative cache was rescanned"
+cache.write_text(json.dumps({"schema": 1, "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 660))}))
+assert "late-mail" in hook_state.live_thread_hint(moved(healed, "UserPromptSubmit"))
+assert room.participant(room.status(repo, "late-room"), "late-main")["consumer"] == hook_state.session_hash(moved(healed))
 PY
 }
 

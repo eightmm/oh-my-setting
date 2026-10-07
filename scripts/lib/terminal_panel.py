@@ -24,6 +24,7 @@ import panel_messages
 
 from dashboard_projection import clean
 from panel_view import CLOSE_PREFIX, INBOX_LIMIT, close_requests, menu_rows, render, render_results
+from panel_input import PANEL_SESSION
 from panel_routing import allocate, command as routed_command, policy, MODEL_IDS
 from panel_results import _lock, finalize, results, retry_delivery
 
@@ -222,7 +223,8 @@ def bootstrap(provider, repo):
         "--verify COMMAND (write). Light, clear tasks use GPT-6 Luna; routine "
         "implementation and long explanations use Sonnet 5.5; main-level work "
         "uses this owner's Sol/Opus preset without promoting the worker. "
-        "Add --reasoning-effort low|medium|high to one dispatch when that subtask is easier or harder than its tier. "
+        "Add --reasoning-effort high to one dispatch for trust-boundary, cross-file integration or unclear-failure "
+        "work and low for lookups and mechanical edits; otherwise keep the tier default. "
         "Act as the control tower: by default delegate implementation, investigation and test repair to "
         "bounded workers (scoped brief with paths, constraints, success criteria and a --verify command), split "
         "separable files or steps into non-overlapping workers run in parallel, and keep scope, briefs, "
@@ -231,6 +233,9 @@ def bootstrap(provider, repo):
         "main itself, such as integrating into a shared tree another main has frozen. "
         "Panel mains work from the shared plan (oms agent-plan): claim a ready task, delegate it, verify it, "
         "mark it reviewed/verified; propose new tasks with oms agent-plan add instead of starting unplanned work. "
+        "Before editing shared files, declare your scope with oms room scope --owns PATH, and pass "
+        "--scope PATH to write workers; overlaps warn, they never lock. "
+        "Refer to other mains by tmux window and model, such as #1 Opus 5.5 or #2 Sol 6.1, never by participant id. "
         "At material decisions use oms panel --dispatch advisor --owner %s "
         "--seat astra|fable|auto --repo . --prompt TEXT, choosing the seat by need: astra (GPT-6 Astra) "
         "for source-level correctness, code paths, tooling and test evidence; fable (Fable 5.1) for design, "
@@ -637,11 +642,50 @@ def continuation(repo, owner, main, task_id, route, brief, env):
     with handle:
         handle.write(text)
     return Path(handle.name), resume, note
+def moved_main(repo, owner, env):
+    """(room, participant) of the Claude main this session continues, when its panel identity is gone.
+
+    Claude Code's background service drops the panel environment but keeps
+    CLAUDE_CODE_SESSION_ID, which the hook lineage rebind bound to the main."""
+    session = env.get("CLAUDE_CODE_SESSION_ID")
+    if (owner != "claude" or not session or env.get("OMS_PANEL_MAIN_ATTEMPT") or env.get("OMS_ROOM_PARTICIPANT")
+            or env.get("OMS_HARNESS_CHILD") == "1" or env.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
+        return None
+    try:
+        found = room.selected(repo, hashlib.sha256(session.encode()).hexdigest()[:32], env.get("OMS_ROOM_ID") or None)
+        if not found or not found[0]:
+            return None
+        member = room.participant(room.status(repo, found[0]), found[1])
+    except (OSError, ValueError):
+        return None
+    return found if member["role"] == "main" and member["provider"] == "claude" else None
+
+
+def scope_overlaps(repo, room_id, state, caller, scopes):
+    """Other mains' and live write calls' declared scopes that overlap these; coordination, not a lock."""
+    calls = [p for p in state["participants"] if p["joined"] and p.get("parent") and p.get("owns")]
+    finished = room.status(repo, room_id)["call_results"] if calls else {}
+    history = main_history(repo, room_id) if calls else []
+    found = []
+    for other in state["participants"]:
+        if not other["joined"] or other["participant"] == caller or not other.get("owns"):
+            continue
+        if other.get("parent"):
+            # Live means no result handoff and no terminal attempt; a call with no attempt row yet counts as live.
+            rows = [row for row in history if row.get("refs", {}).get("panel_room_participant") == other["participant"]
+                    and row.get("refs", {}).get("panel_role") == other["role"]]
+            if other["participant"] in finished or rows and all(row.get("terminal") is True for row in rows):
+                continue
+        elif other["role"] != "main":
+            continue
+        found += [{"participant": other["participant"], "role": other["role"], "scope": theirs}
+                  for theirs in other["owns"] if any(room.overlaps(mine, theirs) for mine in scopes)]
+    return found
 
 
 def dispatch(repo, owner, role, workload, seat, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
-             main=None, continue_task=None):
+             main=None, continue_task=None, scopes=None):
     route = selected_route(owner, role, workload, seat, access, purpose, target, model, effort)
     label = safe_label(label)
     resume = None
@@ -654,20 +698,25 @@ def dispatch(repo, owner, role, workload, seat, access, purpose, prompt=None, br
         print(note, file=sys.stderr)
     try:
         return run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, brief, verify, task_id,
-                            dry_run, label, route, main, resume)
+                            dry_run, label, route, main, resume, scopes)
     finally:
         if temporary:
             temporary.unlink()
 
 
 def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, brief, verify, task_id,
-                 dry_run, label, route, main, resume):
+                 dry_run, label, route, main, resume, scopes):
     argv = routed_command(ENTRY, repo, route, prompt, brief, verify, task_id, resume)
-    if dry_run:
-        print(json.dumps({"schema": 1, "kind": "oms-panel-route", "route": route,
-                          "argv": argv, "executes": False}))
+    plan = {"schema": 1, "kind": "oms-panel-route", "route": route, "argv": argv, "executes": False}
+    if scopes:
+        if role != "worker" or access != "write":
+            raise ValueError("--scope declares a write worker's files; use it with --dispatch worker --access write")
+        scopes = list(dict.fromkeys(room.normalize_scope(scope) for scope in scopes))
+        room.declared_scopes(role, scopes)
+    if dry_run and not (scopes and os.environ.get("OMS_ROOM_ID")):
+        print(json.dumps(dict(plan, overlaps=[]) if scopes else plan))
         return 0
-    if not shutil.which(route.get("binary", route["provider"])):
+    if not dry_run and not shutil.which(route.get("binary", route["provider"])):
         raise ValueError("%s is not installed; this exact role route cannot run" % route["provider"])
     env = child_environment(owner, repo)
     parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
@@ -675,6 +724,9 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
         record = json.loads(events(repo, "show", "--attempt", parent, "--json", output=True))
         if record.get("tool") != "panel-main" or record.get("provider") != owner or record.get("terminal"):
             raise ValueError("panel main identity does not match this owner")
+    moved = moved_main(repo, owner, env)
+    if moved:
+        env["OMS_ROOM_ID"] = moved[0]
     env.pop("OMS_ATTEMPT_ID", None)
     env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE=role,
                OMS_PANEL_PURPOSE=purpose, OMS_PANEL_WORKLOAD=workload)
@@ -698,6 +750,11 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
         if not caller:
             if parent:
                 caller = record.get("refs", {}).get("panel_room_participant", parent)
+            elif moved:
+                caller = moved[1]
+                record = active_mains(repo, room_id, state, owner).get(caller)
+                if record:
+                    parent = env["OMS_PANEL_MAIN_ATTEMPT"] = record["attempt_id"]
             else:
                 candidates = active_mains(repo, room_id, state, owner)
                 if main:
@@ -718,8 +775,17 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
             raise ValueError("panel main and room caller identities disagree")
         if parent and record.get("refs", {}).get("panel_room_id", room_id) != room_id:
             raise ValueError("panel main and selected room identities disagree")
+        if scopes:
+            found = scope_overlaps(repo, room_id, state, caller, scopes)
+            if found:
+                print("Scope overlap (coordinate before editing): " + ", ".join(
+                    "%s %s" % (item["participant"], item["scope"]) for item in found), file=sys.stderr)
+            if dry_run:
+                print(json.dumps(dict(plan, overlaps=found)))
+                return 0
         member = "call-" + uuid.uuid4().hex[:16]
-        room.join(repo, room_id, member, route["provider"], role, route["model"], label or purpose, parent=caller)
+        room.join(repo, room_id, member, route["provider"], role, route["model"], label or purpose,
+                  owns=scopes, parent=caller)
         room.send(repo, room_id, caller, member, "Assigned: " + (label or purpose), "handoff")
         env.update(OMS_ROOM_ID=room_id, OMS_ROOM_PARTICIPANT=member, OMS_ROOM_REPO=str(repo),
                    OMS_ROOM_ADMITTED_PARTICIPANT=member)
@@ -1086,7 +1152,7 @@ def panel_panes(repo):
         if len(fields) != 5:
             continue
         session, window, pane, dead, command = fields
-        if (not re.fullmatch(r"oms-panel-[a-f0-9]{12}", session) or dead != "0" or
+        if (not re.fullmatch(PANEL_SESSION, session) or dead != "0" or
                 not re.fullmatch(r"@[0-9]+", window) or not re.fullmatch(r"%[0-9]+", pane)):
             continue
         try:
@@ -1151,9 +1217,35 @@ def reopen_panel(repo):
             "window": base["window"], "input_pane": base["pane"], "native_restarted": False}
 
 
+def session_candidates(repo):
+    """Deterministic session names for a checkout: the project slug, then the slug plus a path hash."""
+    path = Path(repo).resolve()
+    slug = re.sub(r"[^a-z0-9]+", "-", path.name.lower()).strip("-")[:32].strip("-") or "project"
+    return ["oms-" + slug, "oms-%s-%s" % (slug, hashlib.sha256(str(path).encode()).hexdigest()[:6])]
+
+
 def panel_session(repo):
-    """One OMS tmux session per checkout, named from its resolved path."""
-    return "oms-panel-" + hashlib.sha256(str(Path(repo).resolve()).encode()).hexdigest()[:12]
+    """One OMS tmux session per checkout: the first candidate free or proven to belong to it."""
+    return resolve_session(repo, wait=False)[0]
+
+
+def resolve_session(repo, wait=True):
+    """(session, owner) for a checkout; a name held by another checkout or a non-OMS session is never taken."""
+    names = session_candidates(repo)
+    for name in names:
+        try:
+            owner = session_owner(name)
+            for unused in range(20 if owner == "" and wait else 0):
+                # A session created a moment ago records its owner last; wait briefly before skipping it.
+                time.sleep(.1)
+                owner = session_owner(name)
+                if owner != "":
+                    break
+        except (OSError, subprocess.SubprocessError):
+            owner = None
+        if owner is None or owner == str(repo):
+            return name, owner
+    return names[-1], owner
 
 
 def session_owner(session):
@@ -1253,10 +1345,11 @@ def bind_main_keys():
     try:
         for key, command, steps in MAIN_KEYS:
             found = subprocess.run(tmux_command("list-keys", "-T", "root", key), **quiet)
-            if found.returncode == 0 and "oms-panel-" not in found.stdout:
+            # An earlier OMS binding matched the session name; replace it with the marker test.
+            if found.returncode == 0 and "oms-panel-*" not in found.stdout and "@oms_panel_repo" not in found.stdout:
                 continue
             skip = " ; if-shell -F '%s' %s" % (NOT_MAIN, command)
-            subprocess.run(tmux_command("bind-key", "-n", key, "if-shell", "-F", "#{m:oms-panel-*,#{session_name}}",
+            subprocess.run(tmux_command("bind-key", "-n", key, "if-shell", "-F", "#{@oms_panel_repo}",
                                         command + skip * steps, "send-keys " + key), **quiet)
     except (OSError, subprocess.SubprocessError):
         # Keys are a convenience: a missing or unresponsive tmux leaves the panel's own flow to report it.
@@ -1269,7 +1362,7 @@ def legacy_session(repo):
         found = {row["session"] for row in panel_panes(repo)}
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
-    found.discard(panel_session(repo))
+    found.difference_update(session_candidates(repo))
     return found.pop() if len(found) == 1 else None
 
 
@@ -1322,8 +1415,11 @@ def spawn_main(repo, provider, task=None, model=None, started_by=None):
         raise ValueError("starting a main needs tmux and the %s CLI on PATH" % provider)
     if started_by is not None and not re.fullmatch(PARTICIPANT, started_by):
         raise ValueError("invalid starting participant")
-    session = panel_session(repo)
-    if session_owner(session) != str(repo):
+    session, owner = resolve_session(repo, wait=False)
+    if owner != str(repo):
+        legacy = legacy_session(repo)
+        session, owner = (legacy, str(repo)) if legacy and session_owner(legacy) == str(repo) else (session, owner)
+    if owner != str(repo):
         raise ValueError("no OMS panel is open for this checkout; open one with oms panel")
     env = os.environ.copy()
     env["OMS_PANEL_SESSION"] = session
@@ -1395,14 +1491,7 @@ def close_selected(repo, navigation, state, unicode):
 
 def split_panel(repo, view="auto", attention_only=False, launch=None, resume=None, model=None, task=None, retry=True):
     chosen_room = os.environ.get("OMS_ROOM_ID")
-    session = panel_session(repo)
-    owner = session_owner(session)
-    for unused in range(20 if owner == "" and retry else 0):
-        # A session created a moment ago records its owner last; wait briefly before refusing it.
-        time.sleep(.1)
-        owner = session_owner(session)
-        if owner != "":
-            break
+    session, owner = resolve_session(repo, wait=retry)
     legacy = legacy_session(repo) if owner is None else None
     if legacy and session_owner(legacy) in ("", str(repo)):
         session, owner = legacy, str(repo)
@@ -1500,7 +1589,7 @@ def open_native(provider, repo, resume=None, model=None, task=None, view="auto",
             watcher.append("--attention-only")
         panel_host.open_native(repo, provider, native, watcher)
         return 0
-    if os.environ.get("TMUX") and re.fullmatch(r"oms-panel-[a-f0-9]{12}", session):
+    if os.environ.get("TMUX") and re.fullmatch(PANEL_SESSION, session):
         command = panel_environment() + ["bash", str(ROOT / "scripts" / "panel.sh"), "--repo", str(repo),
                    "--layout", "inline", "--launch", provider]
         if resume:
@@ -1555,7 +1644,7 @@ def terminal_style():
 
 def managed_session():
     return bool(os.environ.get("TMUX") and re.fullmatch(
-        r"oms-panel-[a-f0-9]{12}", os.environ.get("OMS_PANEL_SESSION", "")))
+        PANEL_SESSION, os.environ.get("OMS_PANEL_SESSION", "")))
 
 
 def snapshot(repo, room_id=None):
@@ -1568,6 +1657,15 @@ def snapshot(repo, room_id=None):
         if ident:
             try:
                 state["room"] = room.status(repo, ident)
+                try:
+                    # status() keeps the newest twelve messages; the Between-mains detail reads the mail between mains.
+                    mains = {p["participant"] for p in state["room"].get("participants", []) if p.get("role") == "main"}
+                    state["room"]["main_messages"] = [
+                        {key: m.get(key) for key in ("id", "sender", "recipient", "targets", "ts", "text", "message_kind")}
+                        for m in room.project(room.records(repo, ident))["messages"]
+                        if m.get("sender") in mains and mains.intersection(m.get("targets") or [])][-60:]
+                except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+                    pass
                 if state.get("plan", {}).get("present"):
                     run = subprocess.run(["bash", str(ENTRY), "agent-plan", "--repo", str(repo), "list", "--json"],
                                          capture_output=True, text=True, timeout=5, check=False)
@@ -1768,6 +1866,9 @@ def navigate(repo, action, state, navigation, width):
             navigation["pinned"] = [] if set(mains) <= set(pinned) else None
         else:
             navigation["pinned"] = [m for m in pinned if m != ident] + ([] if ident in pinned else [ident])
+        return
+    if kind == "pair":
+        navigation["preview"] = {"target": action}
         return
     if kind == "close":
         navigation["notice"] = "Press x to close this main (asks once more)"
@@ -2490,8 +2591,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             previews.start(messages_read)
                     if navigation.get("opening") and not previews.pending:
                         previews.start(lambda target=navigation["opening"]: read_evidence(repo, target))
-                    elif preview and preview["target"][0] == "chat":
-                        # Main detail is drawn from the room snapshot; no evidence read is needed.
+                    elif preview and preview["target"][0] in ("chat", "pair"):
+                        # Main and pair detail are drawn from the room snapshot; no evidence read is needed.
                         preview.setdefault("report", {})
                         preview.pop("refresh", None)
                     elif preview and ("report" not in preview or preview.pop("refresh", False)) and not previews.pending:
@@ -2689,7 +2790,7 @@ def interactive(repo, view="auto", attention_only=False):
                 continue
             if choice == "q":
                 session = os.environ.get("OMS_PANEL_SESSION", "")
-                if os.environ.get("TMUX") and re.fullmatch(r"oms-panel-[a-f0-9]{12}", session):
+                if os.environ.get("TMUX") and re.fullmatch(PANEL_SESSION, session):
                     subprocess.run(tmux_command("detach-client", "-s", session), check=True)
                     previous = "detached; existing sessions preserved"
                     continue
@@ -2874,6 +2975,8 @@ def main(argv=None):
     parser.add_argument("--task", help="task for the native main (requires --launch)")
     parser.add_argument("--dispatch", choices=("worker", "advisor", "reviewer"), help="run one bounded role task")
     parser.add_argument("--main", help="room participant of the active main that owns this dispatch")
+    parser.add_argument("--scope", action="append", metavar="PATH",
+                        help="repeatable repo-relative scope a write worker declares; overlaps warn, never lock")
     parser.add_argument("--council", action="store_true", help="run the four-seat, two-family debate")
     parser.add_argument("--rounds", type=int, default=1, help="council debate rounds, 1 or 2")
     parser.add_argument("--thread", help="council thread ID")
@@ -2946,6 +3049,8 @@ def main(argv=None):
         parser.error("--main requires --dispatch")
     if args.continue_task and (args.dispatch != "worker" or not args.brief_file or args.prompt or args.task_id):
         parser.error("--continue requires --dispatch worker with --brief-file, and takes no --prompt or --task-id")
+    if args.scope and (args.dispatch != "worker" or args.access != "write"):
+        parser.error("--scope requires --dispatch worker --access write")
     if args.main:
         try:
             room.identifier(args.main, "main participant")
@@ -3109,7 +3214,7 @@ def main(argv=None):
             status = dispatch(repo, owner, args.dispatch, args.workload, args.seat, args.access, purpose,
                               args.prompt, brief, args.verify, args.task_id, args.dry_run, args.label,
                               args.to, args.model, args.reasoning_effort, main=args.main,
-                              continue_task=args.continue_task)
+                              continue_task=args.continue_task, scopes=args.scope)
             if asked:
                 read_field("Exit %s; the answer is in the main's room mail. Press Enter to close: " % status,
                            required=False)

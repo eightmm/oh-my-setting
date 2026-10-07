@@ -7,6 +7,9 @@ import subprocess
 import sys
 import time
 
+# Panel sessions: oms-<project>[-<hash>] and the legacy oms-panel-<12 hex>.
+PANEL_SESSION = r"oms-[a-z0-9][a-z0-9-]{0,47}"
+
 
 class TerminalInput:
     def __init__(self, managed=False, active=True):
@@ -33,7 +36,7 @@ class TerminalInput:
             termios.tcsetattr(self.fd, termios.TCSANOW, changed)
             if self.managed:
                 session = os.environ.get("OMS_PANEL_SESSION", "")
-                if re.fullmatch(r"oms-panel-[a-f0-9]{12}", session):
+                if re.fullmatch(PANEL_SESSION, session):
                     try:
                         # Best effort: keyboard input works without tmux mouse reporting.
                         subprocess.run(["tmux", "set-option", "-t", session, "mouse", "on"],

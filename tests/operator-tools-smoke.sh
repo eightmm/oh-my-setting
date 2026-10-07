@@ -1628,6 +1628,8 @@ for owner in panel.PROVIDERS:
     assert "--dispatch worker" in panel.bootstrap(owner, project)
     assert "--dispatch advisor" in panel.bootstrap(owner, project)
     assert "control tower: by default delegate" in panel.bootstrap(owner, project)
+    assert "#1 Opus 5.5" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
+    assert "oms room scope" in panel.bootstrap(owner, project) and "--scope PATH" in panel.bootstrap(owner, project)
 option_text = "--dangerously-skip-permissions"
 assert panel.native_command("claude", project, task=option_text)[-2:] == ["--", option_text]
 assert option_text not in panel.native_command("codex", project, task=option_text)[:-1]
@@ -2291,9 +2293,9 @@ if os.name == "posix":
             sessions = tmux_wait(["list-sessions", "-F", "#{session_name}"], "oms-panel-")
             session = next(s for s in sessions.splitlines() if s.startswith("oms-panel-"))
             # F6/F7 switch windows only in OMS panel sessions; other sessions receive the key itself.
-            tmux_wait(["list-keys", "-T", "root", "F7"], "#{m:oms-panel-*,#{session_name}}")
+            tmux_wait(["list-keys", "-T", "root", "F7"], "#{@oms_panel_repo}")
             tmux_wait(["list-keys", "-T", "root", "F9"], "select-pane")
-            tmux_wait(["list-keys", "-T", "root", "F9"], "#{m:oms-panel-*,#{session_name}}")
+            tmux_wait(["list-keys", "-T", "root", "F9"], "#{@oms_panel_repo}")
             tmux_wait(["list-keys", "-T", "root", "F5"], "select-window -t :=control")
             tmux_wait(["list-keys", "-T", "root", "F12"], "OMS panel keys")
             subprocess.run(tmux + ["set-environment", "-t", session, "PANEL_TEST_NATIVE_HOLD", "1"], env=env, check=True)
@@ -2744,6 +2746,28 @@ with patch.dict(os.environ, control_env, clear=True), patch.object(panel.subproc
             assert "different main" in str(error)
         else:
             raise AssertionError("--main silently kept the inherited caller")
+    # A main moved to Claude Code's background service keeps only its session id;
+    # its room binding names the caller, with or without a selected room.
+    moved_sid = "3f0c2a4e-9b1d-4c6e-8a7f-1d2e3c4b5a69"
+    room.bind(project, shared, second_owner, moved_sid)
+    assert not room.discover(project)[1]
+    for selected in (shared, None):
+        with patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": moved_sid}):
+            if not selected:
+                os.environ.pop("OMS_ROOM_ID")
+            assert panel.dispatch(project, "claude", "advisor", "routine", "auto", "read", "advise",
+                                  prompt="Advise the moved main") == 0
+        assert room.status(project, shared)["participants"][-1]["parent"] == second_owner
+        assert panel.subprocess.call.call_args.kwargs["env"]["OMS_PANEL_MAIN_ATTEMPT"] == second_owner
+    for refused in ({"CLAUDE_CODE_SESSION_ID": "0d9e8f7a-6b5c-4d3e-2f1a-0b9c8d7e6f5a"},
+                    {"CLAUDE_CODE_SESSION_ID": moved_sid, "OMS_HARNESS_CHILD": "1"}):
+        with patch.dict(os.environ, refused):
+            try:
+                panel.dispatch(project, "claude", "advisor", "routine", "auto", "read", "advise", prompt="Advise nobody")
+            except ValueError as error:
+                assert "unique active main" in str(error)
+            else:
+                raise AssertionError("dispatch resolved an unbound or worker session to a main")
     # Calls have their own cap: a room whose member slots are full still admits calls.
     cap_rows = room.records(project, shared)
     members_now = sum(not p.get("parent") for p in room.status(project, shared)["participants"])
@@ -2774,6 +2798,62 @@ assert room_attempt["refs"]["panel_room_id"] == shared
 observed = next(row for row in map(json.loads, reversed(worker_log.read_text().splitlines()))
                 if row["participant"] == child["participant"])
 assert observed["room"] == shared, observed
+# Declared scopes: only the participant replaces or clears its own; overlap is a path-component prefix.
+assert room.overlaps("scripts/lib", "scripts/lib/room.py") and room.overlaps("scripts/lib/room.py", "scripts/lib")
+assert room.overlaps("docs", "docs") and room.overlaps(".", "docs") and not room.overlaps("scripts/li", "scripts/lib")
+other_main = main_attempts["codex"]
+room.join(project, shared, "scope-advisor", "codex", role="advisor", parent=room_owner)
+with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": room_owner}):
+    room.scope(project, shared, room_owner, ["docs", "scripts/lib"])
+    assert room.participant(room.status(project, shared), room_owner)["owns"] == ["docs", "scripts/lib"]
+    room.scope(project, shared, room_owner, [])
+    assert room.participant(room.status(project, shared), room_owner)["owns"] == []
+for who, scopes, reason in ((room_owner, ["s%d" % n for n in range(17)], "sixteen"), (room_owner, ["./docs"], "normalized"),
+                            ("scope-advisor", ["docs"], "advisors and reviewers"), (other_main, ["docs"], "its own scope")):
+    with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": room_owner if reason == "its own scope" else who}):
+        try:
+            room.scope(project, shared, who, scopes)
+        except ValueError as error:
+            assert reason in str(error), (reason, error)
+        else:
+            raise AssertionError("scope was not refused: " + reason)
+scope_cli = subprocess.run(["bash", str(panel.ENTRY), "room", "scope", "--repo", str(project), "--id", shared,
+                            "--participant", other_main, "--owns", "scripts/lib/room.py"],
+                           env=dict(environment, OMS_ROOM_PARTICIPANT=other_main), capture_output=True, text=True, timeout=30)
+assert scope_cli.returncode == 0 and json.loads(scope_cli.stdout)["owns"] == ["scripts/lib/room.py"], scope_cli
+with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": room_owner}):
+    room.scope(project, shared, room_owner, ["scripts/lib"])
+room.join(project, shared, "scope-live", "codex", role="worker", parent=room_owner, owns=["scripts"])
+room.join(project, shared, "scope-done", "codex", role="worker", parent=room_owner, owns=["scripts/lib/panel_view.py"])
+room.send(project, shared, "scope-done", room_owner, "Call exit=0; parent acceptance pending.", kind="handoff",
+          message_id="result-scope-done")
+scoped_dispatch = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+                                  "--dispatch", "worker", "--owner", "claude", "--access", "write", "--purpose", "implement",
+                                  "--brief-file", str(brief), "--verify", "test -f value.txt", "--scope", "./scripts/lib/",
+                                  "--scope", "docs", "--dry-run"], env=room_env, capture_output=True, text=True, timeout=60)
+assert scoped_dispatch.returncode == 0, scoped_dispatch
+scoped_plan = json.loads(scoped_dispatch.stdout)
+assert sorted((o["participant"], o["scope"]) for o in scoped_plan["overlaps"]) == sorted(
+    [(other_main, "scripts/lib/room.py"), ("scope-live", "scripts")]), scoped_plan
+assert scoped_dispatch.stderr.count("Scope overlap") == 1 and other_main in scoped_dispatch.stderr, scoped_dispatch.stderr
+assert not any(p["participant"].startswith("call-") and p.get("owns") for p in room.status(project, shared)["participants"])
+unscoped = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared, "--dispatch", "worker",
+                            "--owner", "claude", "--access", "write", "--purpose", "implement", "--brief-file", str(brief),
+                            "--verify", "test -f value.txt", "--dry-run"], room_env))
+assert "overlaps" not in unscoped, unscoped
+scoped_run = subprocess.run(scoped_dispatch.args[:-1], env=dict(room_env, PANEL_TEST_MODE="write"),
+                            capture_output=True, text=True, timeout=90)
+assert scoped_run.returncode == 0 and "Scope overlap" in scoped_run.stderr, scoped_run
+scoped_call = [p for p in room.status(project, shared)["participants"] if p["participant"].startswith("call-")][-1]
+assert scoped_call["owns"] == ["scripts/lib", "docs"] and scoped_call["parent"] == room_owner, scoped_call
+room.append(project, shared, {"kind": "leave", "participant": scoped_call["participant"]}, "Left")
+with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": room_owner}):
+    room.scope(project, shared, room_owner, [])
+for who in ("scope-advisor", "scope-live", "scope-done"):
+    room.append(project, shared, {"kind": "leave", "participant": who}, "Left")
+import hook_state
+with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": room_owner, "OMS_PANEL_SESSION": "oms-fixture"}):
+    assert "oms room scope" in hook_state.panel_main_hint({"hook_event_name": "UserPromptSubmit"})
 # Same task reuse cannot return another participant's artifact as the result.
 assert not panel.results(project, "room-inspection", "unrelated-participant")["rows"][0]["calls"]
 participant_results = panel.results(project, room_participant=child["participant"])
@@ -3240,7 +3320,34 @@ with patch.object(panel, "panel_panes", return_value=legacy_rows):
     assert panel.legacy_session(Path("/tmp/project-a")) == "oms-panel-aaaaaaaaaaaa"
 with patch.object(panel, "panel_panes", return_value=legacy_rows + [{"session": "oms-panel-bbbbbbbbbbbb"}]):
     assert panel.legacy_session(Path("/tmp/project-a")) is None
-assert re.fullmatch(r"oms-panel-[a-f0-9]{12}", panel.panel_session(Path("/tmp/project-a")))
+assert panel.panel_session(Path("/tmp/project-a")) == "oms-project-a"
+# The slug is lowercase [a-z0-9-]; a taken name falls to the hashed one, never over another checkout or a non-OMS session.
+import tempfile
+with tempfile.TemporaryDirectory() as slug_root:
+    odd = Path(slug_root) / "  My.Project_X v2  "
+    odd.mkdir()
+    plain, hashed = panel.session_candidates(odd)
+    assert plain == "oms-my-project-x-v2" and re.fullmatch(r"oms-my-project-x-v2-[a-f0-9]{6}", hashed), (plain, hashed)
+    long_name = Path(slug_root) / ("A" * 40)
+    long_name.mkdir()
+    assert panel.session_candidates(long_name)[0] == "oms-" + "a" * 32
+    bare = Path(slug_root) / "..."
+    bare.mkdir()
+    assert panel.session_candidates(bare)[0] == "oms-project"
+    assert re.fullmatch(panel.PANEL_SESSION, hashed) and re.fullmatch(panel.PANEL_SESSION, "oms-panel-abcdef012345")
+    for held, expected in ((None, plain), (str(odd.resolve()), plain), ("/elsewhere", hashed), ("", hashed)):
+        with patch.object(panel, "session_owner", side_effect=lambda n, h=held: h if n == plain else None):
+            assert panel.resolve_session(odd, wait=False) == (expected, held if expected == plain else None), held
+    with patch.object(panel, "session_owner", return_value="/elsewhere"):
+        assert panel.resolve_session(odd, wait=False) == (hashed, "/elsewhere")
+    # A live legacy panel proven for this checkout is adopted while the new name is free.
+    with patch.object(panel, "session_owner", side_effect=lambda n: None if n == plain else str(odd)), \
+            patch.object(panel, "legacy_session", return_value="oms-panel-aaaaaaaaaaaa"), \
+            patch.object(panel, "bind_main_keys"), patch.object(panel.subprocess, "run") as adopted, \
+            patch.object(panel.subprocess, "call", return_value=0):
+        assert panel.split_panel(odd) == 0
+        assert ["tmux", "set-option", "-t", "oms-panel-aaaaaaaaaaaa", "@oms_panel_repo", str(odd)] in \
+            [c.args[0] for c in adopted.call_args_list]
 # A control window (no own main) overviews every main as lanes until pins are chosen.
 control_nav = {}
 overview = render(flow, "codex", 110, 30, view="graph", navigation=control_nav)
@@ -3414,11 +3521,67 @@ talking["room"]["pairs"] = [{"sender": "flow-main", "recipient": "flow-other", "
 picture = render(talking, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation={})
 assert "Between mains: 1 pair · 1 unread" in picture, picture
 tall = render(talking, "codex", 157, 65, view="graph", main_attempt="flow-attempt", navigation={})
-assert "Between mains\n  Sol 6 → Opus 5.5 · 2 messages · 1 unread\n" in tall, tall
+assert "BETWEEN MAINS · 1 pair · 1 unread" in tall and "Sol 6 ⇄ Opus 5.5  →2 · 1 new" in tall, tall
 assert "Model use, last calls" not in tall and "W0 A0" not in tall and "Click any block" not in tall, tall
 assert "..." not in tall and sum("week" in line for line in tall.splitlines()) <= 1, tall
 ascii_tall = render(talking, "codex", 157, 65, view="graph", unicode=False, main_attempt="flow-attempt", navigation={})
-assert not any(g in ascii_tall for g in "…│·→⚑") and "Between mains\n  Sol 6 > Opus 5.5 / 2 messages / 1 unread\n" in ascii_tall, ascii_tall
+assert not any(g in ascii_tall for g in "…│·→⚑") and "BETWEEN MAINS / 1 pair / 1 unread" in ascii_tall \
+    and "Sol 6 <> Opus 5.5  >2 / 1 new" in ascii_tall, ascii_tall
+# Between mains is a box of its own; with lanes each pair is drawn as a link between the two lane columns.
+import time as pair_clock
+stamp = pair_clock.strftime("%Y-%m-%dT%H:%M:%SZ", pair_clock.gmtime())
+trio = deepcopy(flow)
+trio["room"]["participants"].append({"participant": "flow-third", "role": "main", "joined": True,
+    "provider": "claude", "model": "claude-fable-5-1", "label": "Third native chat"})
+trio["attempts"]["active_recent"].append({"attempt_id": "flow-third", "state": "working", "panel": {
+    "room_id": "flow-room", "room_participant": "flow-third", "role": "main"}})
+trio["main_windows"] = {"flow-other": 1, "flow-main": 2, "flow-third": 3}
+trio["room"]["pairs"] = [{"sender": "flow-main", "recipient": "flow-other", "sent": 85, "pending": 7},
+                         {"sender": "flow-other", "recipient": "flow-main", "sent": 16, "pending": 0},
+                         {"sender": "flow-third", "recipient": "flow-other", "sent": 4, "pending": 0}]
+trio["room"]["messages"] = [{"id": "t1", "sender": "flow-main", "targets": ["flow-other"], "ts": stamp, "text": "SOL TO OPUS"},
+                            {"id": "t2", "sender": "flow-third", "targets": ["flow-other"], "ts": "2020-01-02T03:04:05Z",
+                             "text": "THIRD ASKS OPUS"},
+                            {"id": "t3", "sender": "flow-other", "targets": ["flow-third"], "ts": stamp, "text": "OPUS ANSWERS THIRD"}]
+trio_nav = {"overview": True}
+linked = render(trio, "codex", 157, 40, view="graph", navigation=trio_nav).splitlines()
+assert "BETWEEN MAINS · 2 pairs · 7 unread" in linked[4], linked[4]  # row 1 is the goal banner
+both = next(l for l in linked if "→16 ←85 · 7 new" in l)
+assert "◀" in both and "▶" in both and both.index("#1") < both.index("→16") < both.index("#2"), both
+far = next(l for l in linked if "←4" in l)
+assert "◀" in far and "▶" not in far and far.index("#1") < far.index("←4") < far.index("#3"), far
+# The pair that skips the middle main crosses its column; the counts move to the longer free stretch.
+assert 52 <= far.index("┼") < 103 and "┼" not in both, far
+last = next(l for l in linked if l.startswith("│ last: "))
+assert "last: #1 Opus 5.5 → #3 Fable 5.1 · %s · OPUS ANSWERS THIRD" % graph_text.clock_stamp(stamp) in last, last
+# A click on a pair row shows that pair's messages in DETAIL, oldest first, both directions.
+row = next(h for h in trio_nav["hits"] if h["action"] == ("pair", ("flow-other", "flow-third")))
+assert row["preview"] and "◀" in linked[row["y"] - 1], (row, linked[row["y"] - 1])
+assert trio_nav["items"].index(("chat", "flow-third")) < trio_nav["items"].index(("pair", ("flow-other", "flow-third")))
+assert choose(("click", 10, row["y"]), trio_nav) is None
+clicked = render(trio, "codex", 157, 40, view="graph", navigation=trio_nav)
+detail_text = clicked.split("[ Detail ]")[1]
+assert "│ PAIR / #1 Opus 5.5 ⇄ #3 Fable 5.1" in clicked and "SOL TO OPUS" not in detail_text, clicked
+assert "%s #3 Fable 5.1 → #1 Opus 5.5: THIRD ASKS OPUS" % graph_text.clock_stamp("2020-01-02T03:04:05Z") in detail_text \
+    and detail_text.index("THIRD ASKS OPUS") < detail_text.index("%s #1 Opus 5.5 → #3 Fable 5.1: OPUS ANSWERS THIRD" % graph_text.clock_stamp(stamp)), clicked
+# The snapshot's mail between mains reaches past the room's newest-twelve window.
+older = deepcopy(trio)
+older["room"]["main_messages"] = [{"id": "old-%s" % n, "sender": "flow-third", "recipient": "flow-other",
+                                   "targets": ["flow-other"], "ts": "2020-01-01T00:00:0%sZ" % n, "text": "OLDER PAIR %s" % n}
+                                  for n in range(3)]
+older_nav = dict(trio_nav, preview={"target": ("pair", ("flow-other", "flow-third")), "report": {}})
+older_detail = render(older, "codex", 157, 40, view="graph", navigation=older_nav)
+assert "OLDER PAIR 2" in older_detail, older_detail
+# Without lanes the pair is a text row; ASCII mode keeps every glyph plain.
+single = render(trio, "codex", 157, 40, view="graph", main_attempt="flow-attempt", navigation={}).splitlines()
+assert any("#1 Opus 5.5 ⇄ #2 Sol 6  →16 ←85 · 7 new" in l for l in single) and any("#1 Opus 5.5 ⇄ #3 Fable 5.1  ←4" in l for l in single), single
+ascii_lanes = render(trio, "codex", 157, 40, view="graph", unicode=False, navigation={"overview": True})
+assert "BETWEEN MAINS / 2 pairs / 7 unread" in ascii_lanes and not any(g in ascii_lanes for g in "─│╭╮╰╯◀▶┼⇄→←·"), ascii_lanes
+ascii_far = next(l for l in ascii_lanes.splitlines() if "<4" in l)
+assert "<" in ascii_far and "+" in ascii_far, ascii_far
+# A short board keeps the one-line summary.
+short = render(trio, "codex", 157, 31, view="graph", navigation={"overview": True})
+assert "Between mains: 2 pairs · 7 unread" in short and "BETWEEN MAINS" not in short, short
 from dashboard_projection import fit, use_unicode
 use_unicode(True)
 assert fit("abcdefghij", 6) == "abcde…"
@@ -3504,6 +3667,9 @@ for columns in (28, 76, 110):
     for row, target in targets.items():
         assert 0 <= row < len(lines) and target[1] in {m["participant"] for m in team}
     assert any("Team:" in line for line in lines) and any("Messages to" in line for line in lines)
+assert not any(line.startswith("Scope:") for line in lines)
+scoped_main = graph_text.detail(dict(main, owns=["scripts/lib", "docs"]), {}, 76, people, {}, everyone={"flow-main": team})[0]
+assert "Scope: scripts/lib, docs" in scoped_main, scoped_main
 unknown_call = dict(team[2], state="presence unknown")
 lines, targets = graph_text.detail(main, {}, 76, people, {}, everyone={"flow-main": [unknown_call]})
 assert "Team: 1 no record" in lines and "  Active" not in lines and "  Finished" not in lines

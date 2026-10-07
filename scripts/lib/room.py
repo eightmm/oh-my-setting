@@ -112,7 +112,7 @@ def event_shape(event):
         raise ValueError("invalid persisted room event")
     kind = event.get("kind")
     required = {"created": (), "join": ("participant", "provider", "role", "label"), "bind": ("participant", "consumer"),
-                "leave": ("participant",), "message": ("id", "sender", "recipient", "message_kind"),
+                "scope": ("participant",), "leave": ("participant",), "message": ("id", "sender", "recipient", "message_kind"),
                 "received": ("participant",), "publication": ("id", "digest", "status")}
     if not event:
         return
@@ -124,6 +124,8 @@ def event_shape(event):
     for key in ("owns", "messages"):
         if key in event and (not isinstance(event[key], list) or any(not isinstance(value, str) for value in event[key])):
             raise ValueError("invalid room event list")
+    if kind == "scope" and "owns" not in event:
+        raise ValueError("missing declared scopes")
     if kind == "received" and "messages" not in event:
         raise ValueError("missing room receipt ids")
     if kind == "publication" and type(event.get("delivery_unknown")) is not bool:
@@ -162,6 +164,10 @@ def project(rows):
             if (not members[event["participant"]].get("initial_consumer")
                     and members[event["participant"]]["seq"] == members[event["participant"]]["initial_seq"]):
                 members[event["participant"]]["initial_consumer"] = event["consumer"]
+        elif kind == "scope":
+            if event["participant"] not in members:
+                raise ValueError("declared scope has no participant")
+            members[event["participant"]]["owns"] = list(event["owns"])
         elif kind == "message":
             targets = ([p for p, member in members.items() if member["joined"] and p != event["sender"]]
                        if event["recipient"] == "all" else [event["recipient"]])
@@ -197,15 +203,31 @@ def participant(state, value):
     return found
 
 
+def overlaps(a, b):
+    """Declared scopes overlap when equal or one is a path-component prefix of the other; globs compare literally."""
+    return a == b or "." in (a, b) or b.startswith(a + "/") or a.startswith(b + "/")
+
+
+def declared_scopes(role, scopes):
+    if not isinstance(scopes, list) or len(scopes) > 16:
+        raise ValueError("at most sixteen declared scopes")
+    if role in {"advisor", "reviewer"} and scopes:
+        raise ValueError("advisors and reviewers own no write scope")
+    for scope in scopes:
+        if normalize_scope(scope) != scope:
+            raise ValueError("use normalized repository-relative scopes")
+
+
 def validate_event(rows, event, text):
     """Validate while thread.sh holds its existing file lock; no membership grants authority."""
-    if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "bind", "leave", "message", "received", "publication"}:
+    if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "bind", "scope", "leave", "message", "received", "publication"}:
         raise ValueError("invalid room event")
     event_shape(event)
     kind = event["kind"]
     keys = {"created": {"kind", "task_id"},
             "join": {"kind", "participant", "provider", "model", "role", "label", "consumer", "owns", "parent"},
             "bind": {"kind", "participant", "consumer", "previous"},
+            "scope": {"kind", "participant", "owns"},
             "leave": {"kind", "participant"},
             "message": {"kind", "id", "sender", "recipient", "message_kind", "reply_to"},
             "received": {"kind", "participant", "messages"},
@@ -252,6 +274,15 @@ def validate_event(rows, event, text):
                 raise ValueError("native identity is already bound; leave and rejoin before changing it")
         if any(p.get("consumer") == consumer and p["joined"] for p in state["participants"]):
             raise ValueError("native session already has a participant in this room")
+    elif kind == "scope":
+        # Harness children never reach here (message/ack only); an inherited caller identity must match.
+        caller = os.environ.get("OMS_ROOM_PARTICIPANT")
+        if caller and caller != event["participant"]:
+            raise ValueError("only a participant can declare its own scope")
+        member = participant(state, event["participant"])
+        declared_scopes(member["role"], event["owns"])
+        if member.get("owns", []) == event["owns"]:
+            return False
     elif kind == "publication":
         identifier(event.get("id"), "publication")
         identifier(event.get("status"), "delivery status")
@@ -299,14 +330,7 @@ def validate_event(rows, event, text):
         if consumer and any(p.get("consumer") == consumer and p["joined"]
                             and p["participant"] != event["participant"] for p in state["participants"]):
             raise ValueError("native session already has a participant in this room")
-        scopes = event.get("owns", [])
-        if not isinstance(scopes, list) or len(scopes) > 16:
-            raise ValueError("at most sixteen declared scopes")
-        if event["role"] in {"advisor", "reviewer"} and scopes:
-            raise ValueError("advisors and reviewers own no write scope")
-        for scope in scopes:
-            if normalize_scope(scope) != scope:
-                raise ValueError("use normalized repository-relative scopes")
+        declared_scopes(event["role"], event.get("owns", []))
         if event.get("parent"):
             participant(state, event["parent"])
         prior = next((p for p in state["participants"] if p["participant"] == event["participant"]), None)
@@ -489,6 +513,13 @@ def bind(repo, ident, who, native_session, replaces=None):
     return event
 
 
+def scope(repo, ident, who, owns):
+    """Replace who's declared scopes; an empty list clears them. Declarations coordinate, they never lock."""
+    event = {"kind": "scope", "participant": identifier(who, "participant"), "owns": list(owns)}
+    append(repo, ident, event, "Scope: " + (", ".join(owns) or "cleared"))
+    return event
+
+
 def visible(row, who, joined_seq=0):
     event = row.get("room_event", {})
     return (event.get("kind") == "message" and event.get("message_kind") != "status"
@@ -620,7 +651,7 @@ def publish(repo, ident, retry=False, app="codex", recipient=None, allow_wakeup=
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="OMS work rooms: shared threads, addressed messages and explicit consumption.")
-    parser.add_argument("action", choices=("new", "join", "bind", "leave", "send", "updates", "ack", "show", "list", "publish"))
+    parser.add_argument("action", choices=("new", "join", "bind", "scope", "leave", "send", "updates", "ack", "show", "list", "publish"))
     parser.add_argument("--repo", default=os.environ.get("OMS_ROOM_REPO") or os.getcwd())
     parser.add_argument("--id", default=os.environ.get("OMS_ROOM_ID"))
     parser.add_argument("--participant", default=os.environ.get("OMS_ROOM_PARTICIPANT"))
@@ -630,6 +661,7 @@ def main(argv=None):
     parser.add_argument("--label")
     parser.add_argument("--native-session", help="native session id, or current inside Claude; stored only as a hash")
     parser.add_argument("--owns", action="append", help="declared relative scope, not a write grant or file lock")
+    parser.add_argument("--clear", action="store_true", help="scope only: clear the declared scopes")
     parser.add_argument("--parent")
     parser.add_argument("--topic", default="Shared work")
     parser.add_argument("--task-id")
@@ -648,8 +680,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.action not in {"new", "list"} and not args.id:
         parser.error("this operation needs a room id")
-    if args.action in {"join", "bind", "leave", "send", "updates", "ack"} and not args.participant:
+    if args.action in {"join", "bind", "scope", "leave", "send", "updates", "ack"} and not args.participant:
         parser.error("this operation needs a participant")
+    if args.action == "scope" and bool(args.owns) == args.clear:
+        parser.error("scope needs --owns PATH (repeatable) or --clear")
+    if args.clear and args.action != "scope":
+        parser.error("--clear applies to scope only")
     if args.retry and args.action != "publish":
         parser.error("--retry applies to publish only")
     if args.app and args.action != "publish" or args.allow_wakeup and (args.action != "publish" or args.app != "claude"):
@@ -673,6 +709,8 @@ def main(argv=None):
                           args.native_session, args.owns, args.parent)
         elif args.action == "bind":
             result = bind(repo, args.id, args.participant, args.native_session)
+        elif args.action == "scope":
+            result = scope(repo, args.id, args.participant, args.owns or [])
         elif args.action == "leave":
             append(repo, args.id, {"kind": "leave", "participant": args.participant}, "Participant left")
             result = {"status": "left"}

@@ -129,6 +129,90 @@ def main_names(report, members):
     return names
 
 
+def main_links(room, mains):
+    """One link per unordered pair of mains that exchanged mail, left main first in window order.
+
+    Unread pairs lead, then the most recent exchange."""
+    order = {m["participant"]: i for i, m in enumerate(mains)}
+    spoken = listing(room.get("messages"))
+    found = {}
+    for index, pair in enumerate(map(mapping, listing(room.get("pairs")))):
+        sender, recipient = pair.get("sender"), pair.get("recipient")
+        if sender in order and recipient in order and sender != recipient:
+            left, right = sorted((sender, recipient), key=order.get)
+            link = found.setdefault((left, right), {"left": left, "right": right, "forward": 0, "back": 0,
+                                                    "new": 0, "seen": index})
+            link["forward" if sender == left else "back"] += valid_count(pair.get("sent")) or 0
+            link["new"] += valid_count(pair.get("pending")) or 0
+            link["seen"] = index
+    for link in found.values():
+        link["last"] = max((i for i, x in enumerate(spoken) if pair_message(x, link["left"], link["right"])), default=-1)
+    return sorted(found.values(), key=lambda l: (not l["new"], -l["last"], -l["seen"]))
+
+
+def pair_message(message, first, second):
+    message = mapping(message)
+    targets = listing(message.get("targets"))
+    return (message.get("sender") == first and second in targets) or (message.get("sender") == second and first in targets)
+
+
+def link_counts(link, unicode):
+    right, left = ("→", "←") if unicode else (">", "<")
+    parts = [mark + str(link[key]) for mark, key in ((right, "forward"), (left, "back")) if link[key]]
+    return " ".join(parts) + (" · %s new" % link["new"] if link["new"] else "")
+
+
+def link_row(link, centres, labels, width, unicode):
+    """The pair drawn between its lane columns: the line crosses mains in between and the counts sit on it.
+
+    None when an end has no lane or both ends share a column, so the caller writes the pair as text."""
+    start, end = centres.get(link["left"]), centres.get(link["right"])
+    if start is None or end is None or end - start < 12:
+        return None
+    cells = [" "] * width
+    cells[0] = cells[-1] = "│" if unicode else "|"
+    bar, cross = ("─", "┼") if unicode else ("-", "+")
+    cells[start:end + 1] = [bar] * (end - start + 1)
+    cells[start] = ("◀" if unicode else "<") if link["back"] else bar
+    cells[end] = ("▶" if unicode else ">") if link["forward"] else bar
+    stops = {start, end}
+    for column in set(centres.values()):
+        if start < column < end:
+            cells[column] = cross
+            stops.add(column)
+    stops = sorted(stops)
+    text = link_counts(link, unicode)
+    gap = max(((a + 1, b - 1) for a, b in zip(stops, stops[1:])), key=lambda g: g[1] - g[0])
+    if gap[1] - gap[0] + 1 < len(text) + 2:
+        return None
+    first = gap[0] + (gap[1] - gap[0] + 1 - len(text)) // 2
+    cells[first - 1:first + len(text) + 1] = list(" " + text + " ")
+    for ident, edge, step in ((link["left"], start - 1, -1), (link["right"], end + 1, 1)):
+        label = labels[ident]
+        tag = label.split()[0] if label.startswith("#") else fit(label, 8)
+        place = edge - len(tag) if step < 0 else edge + 1
+        if 0 < place and place + len(tag) < width - 1:
+            cells[place:place + len(tag)] = list(tag)
+    return "".join(cells)
+
+
+def pair_detail(member, room, width, labels):
+    """The last six messages between two mains, oldest first, from the snapshot's mail between mains."""
+    link = member["_link"]
+    left, right = link["left"], link["right"]
+    lines = wrapped("%s · %s" % (member["model"], link_counts(link, True)), width, 2)
+    found = [m for m in listing(room.get("main_messages")) or listing(room.get("messages"))
+             if pair_message(m, left, right)][-6:]
+    for m in found:
+        sender = m.get("sender")
+        line = "%s %s → %s: %s" % (clock_stamp(m.get("ts")), labels[sender], labels[right if sender == left else left],
+                                   readable(m.get("text"), " ") or "(empty)")
+        lines += ["  " * (n > 0) + part for n, part in enumerate(wrapped(line.strip(), width, 3))]
+    if len(found) < min(6, link["forward"] + link["back"]):
+        lines.append("Older messages are not in this snapshot")
+    return lines or ["No messages recorded"]
+
+
 def result_handoff(room, message):
     """A result-<call> message counts only as that call's own handoff."""
     message = mapping(message)
@@ -450,6 +534,8 @@ def declared_status(room, participant, width):
 def detail(member, preview, width, members=(), room=None, teams=None, everyone=None, labels=None):
     """Selected block content in plain words; reading mail here never acknowledges it."""
     room = room or {}
+    if member.get("role") == "pair":
+        return pair_detail(member, room, width, labels), {}
     names = {m["participant"]: who(m, labels) for m in members}
     name = mapping(labels).get(member.get("participant")) or model_name(member)
     state = "exited" if member.get("role") == "main" and member.get("state") == "done" else member.get("state")
@@ -461,6 +547,8 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         lines = wrapped("%s · %s main · %s" % (name, (member.get("provider") or "").capitalize(), said(state)), width, 2)
         lines += wrapped("Task: " + (title or "no task title yet"), width, 2)
         lines += declared_status(room, member["participant"], width)
+        if member.get("owns"):
+            lines += wrapped("Scope: " + ", ".join(clean(scope) for scope in listing(member["owns"])), width, 2)
         if not member.get("model") and member.get("model_at_launch"):
             lines += wrapped("Current model unavailable · launch setting: " +
                              MODEL_NAMES.get(member["model_at_launch"], member["model_at_launch"]), width, 2)
@@ -679,10 +767,15 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         grid_cols = grid_columns(len(lanes))
     grid = bool(grid_cols)
     preview = mapping(navigation.get("preview"))
-    previewed = next((m for m in mains + [c for calls in everyone.values() for c in calls]
+    links = main_links(room, mains)
+    joiner = " ⇄ " if unicode else " <> "
+    pair_members = [{"participant": "pair:%s:%s" % (l["left"], l["right"]), "role": "pair", "_link": l,
+                     "_action": ("pair", (l["left"], l["right"])),
+                     "model": labels[l["left"]] + joiner + labels[l["right"]]} for l in links[:4] if height >= 32]
+    previewed = next((m for m in mains + [c for calls in everyone.values() for c in calls] + pair_members
                       if action(m) == preview.get("target")), None)
     navigation.pop("full_result", None)
-    if previewed and previewed.get("role") != "main" and not previewed.get("_native"):
+    if previewed and previewed.get("role") not in ("main", "pair") and not previewed.get("_native"):
         navigation["full_result"] = action(previewed)
     if menu:
         footer = ["[1] Codex  [2] Claude  [h] Chats  [?] More  [q] " + ("Detach" if managed else "Quit")]
@@ -839,30 +932,17 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                          "action": ("chat", mains[first + per_page]["participant"])})
             value += paint(marker, "alert" if hidden else "dim")
         lines.append(value)
-    peers = {m["participant"]: name_of(m) for m in mains}
-    pairs = [mapping(p) for p in listing(room.get("pairs"))]
-    spoken = listing(room.get("messages"))
-    between = [(p, i) for i, p in enumerate(pairs) if p.get("sender") in peers and p.get("recipient") in peers]
-    if between and height >= 20:
-        # Mains call on each other through room messages; unread pairs lead, then the most recent.
-        def recent(p):
-            return max((i for i, x in enumerate(spoken) if mapping(x).get("sender") == p.get("sender")
-                        and p.get("recipient") in listing(mapping(x).get("targets"))), default=-1)
-        between = [p for p, i in sorted(between, key=lambda t: (
-            not valid_count(t[0].get("pending")), -recent(t[0]), -t[1]))]
-        unread_pairs = sum(valid_count(p.get("pending")) or 0 for p in between)
-        if height < 32:
-            add("Between mains: %s pair%s · %s unread" % (len(between), "" if len(between) == 1 else "s", unread_pairs),
-                "review")
-        else:
-            add("Between mains", "review")
-            for p in between[:4]:
-                sent, pending = valid_count(p.get("sent")) or 0, valid_count(p.get("pending"))
-                add("  %s → %s · %s message%s%s" % (
-                    peers[p["sender"]], peers[p["recipient"]], sent, "" if sent == 1 else "s",
-                    " · %s unread" % pending if pending else ""), "review")
-            if len(between) > 4:
-                add("  +%s more pair%s" % (len(between) - 4, "" if len(between) == 5 else "s"), "dim")
+    pair_at = len(lines)
+    mains_by_id = {m["participant"] for m in mains}
+    latest = next((m for m in map(mapping, reversed(listing(room.get("messages")))) if m.get("sender") in mains_by_id
+                   and any(t in mains_by_id and t != m["sender"] for t in listing(m.get("targets")))), None)
+    box_height = 2 + len(links[:4]) + (len(links) > 4) + bool(latest)
+    if links and height >= 32:
+        # Placeholder rows keep the budget honest; the box is drawn once the lanes are final.
+        lines.extend([""] * box_height)
+    elif links and height >= 20:
+        add("Between mains: %s pair%s · %s unread" % (len(links), "" if len(links) == 1 else "s",
+                                                     sum(l["new"] for l in links)), "review")
     others = listing(room.get("other_rooms"))
     if room.get("other_rooms_incomplete") and height >= 20 and not others:
         add("OTHER ROOMS / scan incomplete; mains in other rooms may be missing", "alert")
@@ -1250,6 +1330,32 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         for band in bands_hit[first_band:]:
             band["y2"] = min(band["y2"], len(lines))
 
+    if links and height >= 32:
+        per_row = grid_cols if grid else len(lanes)
+        lane_wide = (width - per_row + 1) // per_row if lanes else 0
+        centres = {m["participant"]: i % per_row * (lane_wide + 1) + lane_wide // 2 for i, m in enumerate(lanes)}
+        unread = sum(l["new"] for l in links)
+        box = [box_edge("BETWEEN MAINS · %s pair%s · %s unread" % (len(links), "" if len(links) == 1 else "s", unread),
+                        width, unicode)]
+        for n, link in enumerate(links[:4]):
+            drawn = link_row(link, centres, labels, width, unicode)
+            if drawn is None:
+                drawn = box_row("%s%s%s  %s" % (labels[link["left"]], joiner, labels[link["right"]],
+                                                 link_counts(link, unicode)), width, unicode)
+            box.append(drawn)
+            hits.append({"y": pair_at + 2 + n, "x1": 1, "x2": width, "preview": True,
+                         "action": ("pair", (link["left"], link["right"]))})
+        if len(links) > 4:
+            box.append(box_row("+%s more pair%s" % (len(links) - 4, "" if len(links) == 5 else "s"), width, unicode))
+        if latest:
+            target = [t for t in listing(latest.get("targets")) if t in mains_by_id and t != latest["sender"]]
+            stamp = clock_stamp(latest.get("ts"))
+            box.append(box_row("last: %s → %s · %s%s" % (
+                labels[latest["sender"]], ", ".join(labels[t] for t in target), stamp + " · " if stamp else "",
+                clipped(readable(latest.get("text"), " ") or "(empty)", 60)), width, unicode))
+        box.append(box_edge("", width, unicode, "bottom"))
+        lines[pair_at:pair_at + box_height] = [
+            paint(line, "dim" if latest and n == len(box) - 2 else "review") for n, line in enumerate(box)]
     scrolled_now = {"judge": judge_start, "worker": worker_start}
     main_width, main_left = layout(width, 1, True)
     root_bottom = main_left + main_width // 2
@@ -1365,7 +1471,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         lines[row] = paint(lines[row], "main" if bar[1] else "dim")
         hits += [{"y": row + 1, "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
     visible = [m for lane in lanes for m in teams[lane["participant"]]] if lanes else shown_judges + shown_workers
-    items = [("chat", m["participant"]) for m in mains] + [action(m) for m in visible]
+    items = [("chat", m["participant"]) for m in mains] + [action(m) for m in pair_members]
+    items += [action(m) for m in visible]
     items += [action(m) for m in children] + [action(m) for calls in everyone.values() for m in calls]
     navigation.update(hits=hits, items=list(dict.fromkeys(items)), offset=offset, viewport=3,
                       body_rows=len(children), positions={item: i for i, item in enumerate(items)},

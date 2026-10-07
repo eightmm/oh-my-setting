@@ -96,6 +96,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- A running worker's guard no longer fails on `gitmeta` when another main's
+  residue cleanup unregisters a sibling worktree that was already dead and kept
+  at the worker's snapshot: removing that whole entry is reported as soft
+  `sibling-cleanup`. A partial removal, any other removed worktree, or
+  `OMS_WORKER_GUARD_STRICT=1` stays hard.
 - Mains can work in parallel on their own `oms/*` branches and worktrees
   while another main's workers run: a running worker's guard reports another
   main's `oms/*` work branch moving as soft `work-branches` (the branch checked

@@ -160,6 +160,7 @@ class CodexAppNotifyTest(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {"OMS_CODEX_NOTIFY": "1", "OMS_CODEX_NOTIFY_SOCK": self.sock,
                                                 "XDG_STATE_HOME": str(self.dir / "state")})
         self.env.start()
+        os.environ.pop("OMS_PANEL_RESULTS", None)
         # A plain folder: the notification covers every project, adopted or not.
         self.repo = self.dir / "repo"
         self.repo.mkdir()

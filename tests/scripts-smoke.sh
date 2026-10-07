@@ -22570,6 +22570,87 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
     fail "a late sibling on a branch must stay a hard violation: $result"
 }
 
+# The incident: another main's residue cleanup removed a sibling that was
+# already dead and kept at the worker's snapshot. Removing that whole entry is
+# reported softly; strict mode, a plain worktree and a partial removal stay hard.
+# oms land and scratch can run from a linked worktree; their marker then names
+# that checkout, not the primary one. Same Git common dir is the same repository.
+test_worker_guard_exempts_a_sibling_marked_from_a_linked_worktree() {
+  local project="$TMP/guard-sibling-linked"
+  local managed_root="$TMP/guard-sibling-linked-root"
+  local linked="$TMP/guard-sibling-linked-checkout"
+  local sibling_parent="$managed_root/oh-my-setting-land.linked"
+  local result
+
+  make_guard_repo "$project"
+  git -C "$project" worktree add --quiet --detach "$linked" HEAD >/dev/null 2>&1 ||
+    fail "could not create the linked checkout fixture"
+  mkdir -p "$managed_root"
+  # The linked checkout predates the run; only the sibling added mid-run is in question.
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
+    "mkdir -p $sibling_parent && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$linked\\nworktree=$sibling_parent/wt\\ntemporary=1\\n' > $sibling_parent/.oh-my-setting-tmp && git -C $linked worktree add --quiet --detach $sibling_parent/wt HEAD >/dev/null 2>&1")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a live sibling marked from a linked worktree must not fail the run: $result"
+  if printf '%s' "$result" | grep -Fq 'outside its worktree'; then
+    fail "a linked-worktree marker should vouch for its sibling: $result"
+  fi
+}
+
+test_worker_guard_softens_cleanup_of_a_dead_kept_sibling() {
+  local project="$TMP/guard-sibling-cleanup"
+  local managed_root="$TMP/guard-sibling-cleanup-root"
+  local sibling_parent="$managed_root/oh-my-setting-delegate.residue"
+  local dead_pid
+  local common_dir
+  local p
+  local result
+  # Only the worker turn acts; capability probes reach the same stub.
+  local probe='case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'
+
+  dead_pid="$(sh -c 'echo $$')"
+  for p in "$project" "$project-strict" "$project-partial"; do
+    make_guard_repo "$p"
+    make_live_managed_sibling "$p" "$sibling_parent${p#"$project"}"
+    printf 'kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s\ntemporary=1\n' \
+      "$dead_pid" "$p" "$sibling_parent${p#"$project"}/wt" \
+      > "$sibling_parent${p#"$project"}/.oh-my-setting-tmp"
+  done
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
+    "$probe
+git -C $project worktree remove --force $sibling_parent/wt && rm -rf $sibling_parent")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "cleanup of a dead kept sibling must not fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'during this run: sibling-cleanup' ||
+    fail "cleanup of a dead kept sibling should be reported softly: $result"
+
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-strict" "$managed_root" \
+    "$probe
+git -C $project-strict worktree remove --force $sibling_parent-strict/wt && rm -rf $sibling_parent-strict")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "strict mode must keep sibling cleanup hard: $result"
+
+  common_dir="$(git -C "$project-partial" rev-parse --git-common-dir)"
+  case "$common_dir" in /*) ;; *) common_dir="$project-partial/$common_dir" ;; esac
+  result="$(run_delegate_beside_sibling "$project-partial" "$managed_root" \
+    "$probe
+rm -f $common_dir/worktrees/wt/HEAD")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "a partial removal of a residue entry must stay hard: $result"
+  printf '%s' "$result" | grep -Fq 'outside its worktree: gitmeta' ||
+    fail "a partial residue removal should be named as gitmeta: $result"
+
+  make_guard_repo "$project-plain"
+  git -C "$project-plain" worktree add --quiet --detach "$project-plain-wt" HEAD >/dev/null 2>&1 ||
+    fail "could not create the plain worktree fixture"
+  result="$(run_delegate_beside_sibling "$project-plain" "$managed_root" \
+    "$probe
+git -C $project-plain worktree remove --force $project-plain-wt")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "removing a plain worktree must stay a hard violation: $result"
+  printf '%s' "$result" | grep -Fq 'outside its worktree: gitmeta' ||
+    fail "a removed plain worktree should be named as gitmeta: $result"
+}
+
 test_worker_guard_reports_a_bounded_scan() {
   local project="$TMP/guard-budget"
   local out
