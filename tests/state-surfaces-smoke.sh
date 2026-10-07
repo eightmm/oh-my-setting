@@ -1581,14 +1581,16 @@ PY
   out="$(printf '{"conversationId":"c1","workspacePaths":["%s"],"invocationNum":7}' "$repo" |
     TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation)"
   [ "$out" = "{}" ] || fail "only the first invocation of a turn should route: $out"
-  out="$(printf '{"conversationId":"c1","workspacePaths":["%s"],"invocationNum":1}' "$repo" |
-    OH_MY_SETTING_AGY_HOOKS=0 TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation)"
+  # A kill switch answers before reading stdin; a here-string cannot die of SIGPIPE under pipefail.
+  out="$(OH_MY_SETTING_AGY_HOOKS=0 TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation \
+    <<< "$(printf '{"conversationId":"c1","workspacePaths":["%s"],"invocationNum":1}' "$repo")")"
   [ "$out" = "{}" ] || fail "OH_MY_SETTING_AGY_HOOKS=0 should silence the adapter: $out"
   out="$(printf '{"conversationId":"c1","workspacePaths":["%s"],"invocationNum":1}' "$repo" |
     OMS_SKILL_ROUTER_OFF=1 TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation)"
   [ "$out" = "{}" ] || fail "OMS_SKILL_ROUTER_OFF=1 should silence the router path: $out"
-  out="$(printf '{"conversationId":"c1","workspacePaths":["%s"],"invocationNum":1}' "$repo" |
-    OMS_HARNESS_CHILD=1 TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation)"
+  # A kill switch answers before reading stdin; a here-string cannot die of SIGPIPE under pipefail.
+  out="$(OMS_HARNESS_CHILD=1 TMPDIR="$TMP" bash "$plugin/agy-hook.sh" preinvocation \
+    <<< "$(printf '{"conversationId":"c1","workspacePaths":["%s"],"invocationNum":1}' "$repo")")"
   [ "$out" = "{}" ] || fail "a harness child must not route: $out"
 
   # 4. A different binary is a different question. Changing the mock changes
