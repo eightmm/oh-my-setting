@@ -19,6 +19,9 @@ ENTRY = ROOT / "scripts" / "oms"
 ROLES = {"main", "worker", "advisor", "reviewer"}
 KINDS = {"question", "answer", "note", "decision", "handoff", "status"}
 MAX_PARTICIPANTS = 32
+# Dispatched calls join with a parent and never free their slot; the message cap
+# (two messages per call) bounds them as well.
+MAX_CALLS = 480
 MAX_ROOMS = 64
 MAX_SCAN_ENTRIES = 1024
 MAX_SCAN_BYTES = 8 * 1024 * 1024
@@ -304,8 +307,12 @@ def validate_event(rows, event, text):
             return False
         if prior and prior["joined"]:
             raise ValueError("leave before changing participant metadata")
-        if prior is None and len(state["participants"]) >= MAX_PARTICIPANTS:
-            raise ValueError("room participant limit reached")
+        if prior is None:
+            called = bool(event.get("parent"))
+            peers = sum(bool(p.get("parent")) == called for p in state["participants"])
+            if peers >= (MAX_CALLS if called else MAX_PARTICIPANTS):
+                raise ValueError("room call limit reached; start a new bounded room" if called
+                                 else "room participant limit reached")
     elif kind == "leave":
         participant(state, event.get("participant"))
     elif kind == "message":

@@ -332,9 +332,9 @@ def unknown(value, label="unknown"):
     return label if value is None else str(value)
 
 
-def wrap_label(text, width, limit):
+def wrap_label(text, width, limit, max_chars=400):
     """Wrap labels by terminal cells, including Korean and unbroken symbols."""
-    text, lines = clean(text, 400), []
+    text, lines = clean(text, max_chars), []
     width = max(1, width)
     while text and len(lines) < limit:
         end, used = 0, 0

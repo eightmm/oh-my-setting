@@ -231,6 +231,29 @@ def box_row(text, width, unicode=True):
     return edge + " " + text + " " * max(0, width - display_width(text) - 3) + edge
 
 
+def menu_rows(width, height, unicode=True, expanded=False, managed=False):
+    """Keep the frequent actions visible; legacy shortcuts remain available."""
+    quit_label = "Detach" if managed else "Quit"
+    if height < 20 or width < 28:
+        return [clipped("1 Codex  2 Claude  ? More  q " + quit_label, width)]
+    groups = [("START", "[1] Codex  [2] Claude  [3] Resume  [t] Task"),
+              ("OPEN", "[h] Chats  [r] Results  [o] Rooms"),
+              ("VIEW", "[v] Detail  [j/k] Scroll  [g] Graph  [z] Panel  [9] Refresh  [?] More  [q] " + quit_label)]
+    if expanded:
+        groups += [("WORK", "[5] Explain  [6] Implement  [a] Advisor  [7] Review  [c] Council"),
+                   ("SETUP", "[4] Main provider  [p] CLIs  [b] Attention  [8] Dashboard"),
+                   ("RESULT", "[f] Finalize  [n] Retry delivery")]
+    lines = [box_edge("ACTIONS" + (" / all shortcuts" if expanded else " / key + Enter"), width, unicode)]
+    if width < 60 and not expanded:
+        for keys in ("[1] Codex  [2] Claude", "[t] Task  [h] Chats  [r] Results", "[o] Rooms  [?] More  [q] " + quit_label):
+            lines += [box_row(line, width, unicode) for line in wrapped(keys, width - 4, 2)]
+        return lines + [box_edge("", width, unicode, "bottom")]
+    for label, keys in groups:
+        for index, line in enumerate(wrapped(keys, max(1, width - 12), 5)):
+            lines.append(box_row((label.ljust(7) if index == 0 else " " * 7) + line, width, unicode))
+    return lines + [box_edge("", width, unicode, "bottom")]
+
+
 def call_groups(groups, width, slots, compact, frame, unicode, limit):
     """Reserve each role's separator before distributing title space."""
     result, shown = [], 0
@@ -279,14 +302,23 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
            previous=None, availability=None, menu=False, managed=False, main_attempt=None, frame=None,
            view="auto", attention_only=False, navigation=None):
     width, height = max(1, min(200, width)), max(1, height)
-    if view == "tree" or (view == "auto" and mapping(report.get("room")).get("participants")
+    if navigation is not None:
+        # Graph-only targets must not leak into a tree drawn from the same navigation.
+        for key in ("surface", "bands", "primary"):
+            navigation.pop(key, None)
+    if view in ("tree", "summary") or (view == "auto" and mapping(report.get("room")).get("participants")
                           and width >= 28 and height >= 12):
         from panel_tree import render_tree
         return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
-                           main_attempt, navigation)
-    if view == "graph" and mapping(report.get("room")).get("participants") and width >= 76 and height >= 36:
+                           main_attempt, navigation, summary=view == "summary", managed=managed)
+    if view == "graph" and width >= 76 and height >= 16 and not status_alerts(report):
         from room_view import render_graph
-        return render_graph(report, width, height, color, unicode, frame, menu, attention_only)
+        return render_graph(report, width, height, color, unicode, frame, menu, attention_only, main_attempt, navigation, managed)
+    if (view == "graph" and navigation is not None and mapping(report.get("room")).get("participants")
+            and width >= 28 and height >= 8):
+        from panel_tree import render_tree
+        return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
+                           main_attempt, navigation, managed=managed)
     lines = []
 
     def add(text="", style=None):
@@ -297,17 +329,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
 
     footer = []
     if menu:
-        if width >= 54:
-            footer = ["MAIN    1 Codex/Sol  2 Claude/Opus  3 Resume  4 Main",
-                      "TASK    t Auto task  5 Explain  6 Implement  p CLIs",
-                      "JUDGE   a Advisor    7 Review    c Council",
-                      "RESULT  r Read  h Chats  f Finalize  n Retry delivery",
-                      "VIEW    o Rooms     g Graph     v Density  b Attention  9 Refresh  q Quit/detach"]
-        else:
-            footer = ["1 Codex/Sol  2 Claude/Opus", "3 Resume  4 Main  t Auto task", "5 Explain  6 Implement",
-                      "a Advisor  7 Review  c Council  p CLI peers",
-                      "r Results  h Chats  f Finalize  n Retry app",
-                      "o Rooms  g Graph  v Density  b Attention", "9 Refresh  q Quit"]
+        footer = menu_rows(width, height, unicode, mapping(navigation).get("menu_help", False), managed)
         if managed:
             footer.append("tmux: window picker / next / detach")
     footer.extend(["OMS exits not acceptance; native subagents unobserved"] if width >= 54
@@ -399,8 +421,8 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
             add("Joined mains %s / %s%s" % (len(mains), ", ".join(names),
                 " +%s" % (len(mains) - 2) if len(mains) > 2 else ""), "dim")
         if view == "graph":
-            add("Graph needs 76x36 / showing list", "dim")
-        add("MAILBOX / pending %s / consumed %s / answered %s" % (room.get("pending_count", "?"),
+            add("Graph needs 76x16 / showing list", "dim")
+        add("Messages: %s unread · %s read · %s answered" % (room.get("pending_count", "?"),
             room.get("received_count", "?"), room.get("answered_count", "?")), "dim")
         publications = mapping(room.get("publications"))
         if publications:
@@ -544,12 +566,15 @@ def render_results(report, width=100, compact=False):
     """Scroll ordinary text: summaries first, then retained answers and evidence."""
     width = max(8, min(200, width))
     lines = [clipped("OMS / Results", width)]
-    def add(text, indent="", limit=12):
-        for line in wrapped(str(text), width - len(indent), limit):
+    def add(text, indent="", limit=None):
+        text = str(text)
+        for line in wrapped(text, width - len(indent), limit or max(1, len(text)),
+                            max_chars=max(400, len(text))):
             lines.append(indent + line)
     rows = listing(report.get("rows"))
     if not rows:
-        add("No retained results. Finalize a task to record its owner summary.")
+        add("No result in the retained evidence window." if report.get("truncated") else
+            "No retained results. Finalize a task to record its owner summary.")
     for number, row in enumerate(rows, 1):
         lines.append("")
         if compact:
@@ -568,8 +593,8 @@ def render_results(report, width=100, compact=False):
         if row.get("issue"):
             add(row["issue"])
         if row.get("summary"):
-            for paragraph in row["summary"].splitlines()[:24]:
-                add(paragraph, "  ", 6)
+            for paragraph in row["summary"].splitlines():
+                add(paragraph, "  ")
         else:
             add("Owner summary pending. Model exit does not establish acceptance.", "  ")
         for call in listing(row.get("calls")):
@@ -577,8 +602,13 @@ def render_results(report, width=100, compact=False):
             add("%s / %s / exit %s" % (MODEL_NAMES.get(model, model) or "unrecorded model",
                 call.get("kind") or "call", call.get("exit", "unknown")), "  ", 3)
             if call.get("answer"):
-                for paragraph in call["answer"].splitlines()[:12]:
-                    add(paragraph, "    ", 6)
+                for paragraph in call["answer"].splitlines():
+                    add(paragraph, "    ")
+                if call.get("answer_truncated"):
+                    add("Answer exceeds the retained preview limit; full source: " +
+                        str(call.get("artifact") or "unavailable"), "    ")
+            if call.get("artifact"):
+                add("Answer artifact: " + call["artifact"], "    ")
         if row.get("artifact"):
             add("Result: " + row["artifact"], limit=4)
         for ref in listing(row.get("evidence")):

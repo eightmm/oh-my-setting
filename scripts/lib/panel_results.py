@@ -90,6 +90,34 @@ def _indexed(repo, row, maximum=MAX_RESULT):
     return data
 
 
+def _diffstat(repo, row):
+    """Changed files of a recorded patch, read only while its digest still matches."""
+    path = row.get('patch', '')
+    if not isinstance(path, str) or not path.startswith('.oms/artifacts/'):
+        raise ValueError('patch is outside OMS evidence')
+    data = _read(repo, path, 4 * 1024 * 1024)
+    if hashlib.sha256(data).hexdigest() != row.get('patch_sha256'):
+        raise ValueError('patch digest mismatch')
+    files, header = [], False
+    for line in data.decode('utf-8', 'replace').splitlines():
+        if line.startswith('diff --git '):
+            # Fallback name; the header's +++/--- lines name the file without ' b/' ambiguity.
+            files.append([clean(line.split(' b/', 1)[-1], 160), 0, 0])
+            header = True
+        elif files and header and line.startswith(('+++ ', '--- ')):
+            name = line[4:].strip().strip('"')
+            if name != '/dev/null' and (line.startswith('+++ ') or files[-1][0] == ''):
+                files[-1][0] = clean(name[2:] if name[:2] in ('a/', 'b/') else name, 160)
+        elif files and line.startswith('@@'):
+            header = False
+        elif files and not header and line.startswith('+'):
+            files[-1][1] += 1
+        elif files and not header and line.startswith('-'):
+            files[-1][2] += 1
+    return {'files': files[:20], 'count': len(files), 'added': sum(f[1] for f in files),
+            'removed': sum(f[2] for f in files)}
+
+
 def _admission(repo, rows, task_id, worker):
     patches = [r for r in rows if r.get('kind') == 'delegate' and r.get('task_id') == task_id
                and r.get('attempt_id') == worker.get('attempt_id') and r.get('patch_sha256')]
@@ -307,8 +335,19 @@ def results(repo, task_id=None, room_participant=None):
             latest.pop(ident, None)
             latest[ident] = None
     ids = list(latest)
-    chosen = [task_id] if task_id in ids else [] if task_id else ids[-20:]
+    scoped = bool(room_participant and not task_id)
+    if scoped:
+        # Select within this participant's retained tasks before the 20-task cap;
+        # a task with no attempt of its own may only adopt a main's children.
+        mine = [a for a in attempts if a.get('refs', {}).get('panel_room_participant') == room_participant]
+        own = {a.get('task_id') for a in mine}
+        adopting = any(a.get('parent_attempt_id') for a in mine)
+        owned = {a.get('task_id') for a in attempts}
+        has_result = {r.get('task_id') for r in rows if r.get('kind') == 'panel-result'}
+        ids = [i for i in ids if i in own or (adopting and i not in owned and i in has_result)]
+    chosen = [task_id] if task_id in ids else [] if task_id else list(ids)
     output = []
+    capped = False
     for ident in reversed(chosen):
         matching = [a for a in attempts if a.get('task_id') == ident]
         indexed = [r for r in rows if r.get('task_id') == ident]
@@ -332,6 +371,11 @@ def results(repo, task_id=None, room_participant=None):
             matching = [a for a in matching if a.get("refs", {}).get("panel_room_participant") == room_participant]
             linked = {a.get("attempt_id") for a in matching}
             indexed = [r for r in indexed if r.get("attempt_id") in linked]
+        if scoped and not matching:
+            continue
+        if len(output) >= 20:
+            capped = True
+            break
         last = matching[-1] if matching else {}
         metadata = last.get('refs', {})
         calls = []
@@ -343,12 +387,24 @@ def results(repo, task_id=None, room_participant=None):
             if (task_id or room_participant) and row.get('artifact') and row.get('kind') in ('ask', 'call', 'consult', 'delegate', 'review'):
                 try:
                     answer, _ = artifact_sections_stream(io.BytesIO(_indexed(repo, row, 1024 * 1024)))
-                    answer = re.split(r'(?m)^(?:model-result:|tokens used$|usage detail:|served model$|cost usd$)', answer)[0]
+                    answer = re.split(r'(?m)^(?:model-result:|tokens used$|usage detail:|served model$|cost usd$|## Verify\s*$)', answer)[0]
                     answer = re.sub(r'(?m)^model-route:.*\n?', '', answer)
-                    answer, _ = debate_sections(answer)
-                    call['answer'] = codex_app_notify._safe_message(answer, repo).strip()
+                    # Only a deliberation (Answer/Findings sections) drops the prompt echo before it;
+                    # an ordinary report keeps its body ahead of a Verification heading.
+                    trimmed, sections = debate_sections(answer)
+                    if any(heading in ('Answer', 'Findings') for heading, _ in sections):
+                        answer = trimmed
+                    safe = codex_app_notify._safe_message(answer, repo, maximum=MAX_RESULT + 1).strip()
+                    call['answer_truncated'] = (len(answer) > MAX_RESULT + 1 or
+                                                len(safe.encode('utf-8')) > MAX_RESULT)
+                    call['answer'] = sanitize_multiline(safe, MAX_RESULT, MAX_RESULT).strip()
                 except (OSError, ValueError, TypeError):
                     call['answer'] = 'Answer evidence unavailable'
+            if (task_id or room_participant) and row.get('patch') and row.get('patch_sha256'):
+                try:
+                    call['changes'] = _diffstat(repo, row)
+                except (OSError, ValueError, TypeError):
+                    call['changes'] = {'issue': 'patch evidence unavailable'}
             calls.append(call)
         output.append({'task_id': ident, 'title': clean(metadata.get('panel_label') or
                        ((result or {}).get('summary') or '').split('\n')[0], 160),
@@ -365,4 +421,4 @@ def results(repo, task_id=None, room_participant=None):
                        'issue': issue, 'missing_result': result is None})
     return {'schema': 1, 'kind': 'oms-panel-results', 'rows': output,
             'coverage': 'latest 300 attempts and 1000 artifact events',
-            'truncated': len(ids) > len(chosen) if not task_id else False}
+            'truncated': capped or (bool(task_id) and not chosen)}

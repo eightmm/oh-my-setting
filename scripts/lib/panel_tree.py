@@ -1,18 +1,21 @@
 """Connected room tree and a frame-local map of navigation targets."""
 
-from dashboard_projection import clean, listing, mapping
+from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import header_rows
-from panel_view import (ATTENTION_STATES, MODEL_NAMES, PALETTE, activity, clipped,
-                        status_alerts, tone, usage_labels, worker_rows, wrapped)
+from panel_view import (ATTENTION_STATES, MODEL_NAMES, PALETTE, activity, box_edge, box_row, clipped,
+                        menu_rows, status_alerts, tone, usage_labels, worker_rows, wrapped)
 from room_view import nodes
 
 
 def render_tree(report, width, height, color=False, unicode=True, frame=None, menu=False,
-                attention_only=False, main_attempt=None, navigation=None):
+                attention_only=False, main_attempt=None, navigation=None, summary=False, managed=False):
     navigation = navigation if navigation is not None else {}
     selected = navigation.get("selected")
     collapsed = navigation.get("collapsed", set())
     room = mapping(report.get("room"))
+    if height <= int(menu):
+        navigation.update(hits=[], items=[], offset=0, viewport=0, positions={}, room_id=room.get("id"))
+        return ""
     members = nodes(report)
     current = next((m["participant"] for m in members if main_attempt and
                     (m["participant"] == main_attempt or m.get("attempt") == main_attempt)), None)
@@ -31,22 +34,15 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         calls = [m for m in calls if m["state"] in ATTENTION_STATES]
     prefix, end, stem = ("├─ ", "└─ ", "│  ") if unicode else ("|- ", "`- ", "|  ")
     rows, items = [], []
+    boxed = width >= 28 and height >= 16
+    content_width = width - 4 if boxed else width
 
-    def add(text, style=None, action=None, fold=False):
-        rows.append({"text": clipped(text, width), "style": style, "action": action, "fold": fold})
+    def add(text, style=None, action=None, fold=False, divider=False):
+        rows.append({"text": clipped(text, content_width), "style": style, "action": action,
+                     "fold": fold, "divider": divider})
         if action:
             items.append(action)
 
-    add("OMS / WORK ROOM / " + (clean(room.get("title") or room.get("id")) or "select a room"), "main")
-    for index, text in enumerate(header_rows(report, width)):
-        add(text, "review" if index == 0 else "main")
-    for alert in status_alerts(report):
-        add(alert, "bad")
-    add("MAILBOX / pending %s / consumed %s / answered %s" % (
-        room.get("pending_count", 0), room.get("received_count", 0), room.get("answered_count", 0)),
-        "alert" if room.get("pending_count") else "dim")
-    add("OMS activity / " + ("attention" if attention_only else "room") + " / tree", "dim")
-    header = len(rows)
     roots = set(owners)
     for n, main in enumerate(mains):
         last_main = n == len(mains) - 1
@@ -58,14 +54,18 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         toggle = ("▸" if folded else "▾") if unicode else (">" if folded else "v")
         toggle = toggle if attached else " "
         model = MODEL_NAMES.get(main.get("model"), main.get("model")) or main.get("provider", "unknown")
-        add("%s %s%s %s / %s%s%s" % (toggle, end if last_main else prefix,
-            activity(main["state"], frame, unicode), model,
-            main["state"], " / current" if main["participant"] == current else "",
-            " / %s calls" % len(attached) if folded else ""), "main", action, bool(attached))
+        state = "exited" if main["state"] == "done" else main["state"]
+        label = "%s %s%s %s%s" % (toggle, "" if summary or width < 60 else end if last_main else prefix,
+            activity(state, frame, unicode), "current / " if main["participant"] == current else "", model,
+        )
+        status = state + (" / %s calls" % len(attached) if folded else "")
+        add(label if width < 60 else label + " / " + status, "main", action, bool(attached))
+        if width < 60:
+            add("  " + status, tone(state), action)
         title = main.get("title")
         if title and title != "Native task not recorded":
-            for line in wrapped(title, max(1, width - 7), 2):
-                add(root_stem + "  " + line, "dim", action)
+            for line in wrapped(title, max(1, content_width - 7), 2):
+                add(root_stem + "  " + line, None, action)
         if not folded:
             groups = [(role, [m for m in attached if m.get("role") == role])
                       for role in ("council", "advisor", "reviewer", "worker")]
@@ -73,15 +73,19 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             for group_index, (role, children) in enumerate(groups):
                 last_group = group_index == len(groups) - 1
                 heading = "COUNCIL" if role == "council" else role.upper() + "S"
-                add(root_stem + (end if last_group else prefix) + heading + " (%s)" % len(children), "dim")
+                add(root_stem + (end if last_group else prefix) + heading + " (%s)" % len(children),
+                    "worker" if role == "worker" else "review")
                 indent = root_stem + ("   " if last_group else stem)
                 for child_index, child in enumerate(children):
                     branch = end if child_index == len(children) - 1 else prefix
                     model = MODEL_NAMES.get(child.get("model"), child.get("model")) or child.get("provider", "unknown")
                     label = child.get("title") or child["participant"]
-                    add(indent + branch + "%s %s / %s / %s" % (
-                        activity(child["state"], frame, unicode), model, label, child["state"]),
-                        tone(child["state"]), child.get("_action") or ("result", child["participant"]))
+                    child_action = child.get("_action") or ("result", child["participant"])
+                    add(indent + branch + "%s %s / %s" % (
+                        activity(child["state"], frame, unicode), model, child["state"]),
+                        tone(child["state"]), child_action)
+                    for line in wrapped(label, max(1, content_width - display_width(indent) - 3), 2):
+                        add(indent + "   " + line, None, child_action)
         if n < len(mains) - 1:
             add("  │" if unicode else "  |", "dim")
     unlinked = [m for m in calls if m.get("parent") not in roots]
@@ -92,81 +96,145 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 activity(child["state"], frame, unicode), child.get("title") or child["participant"], child["state"]),
                 tone(child["state"]), ("result", child["participant"]))
     if not mains and not calls:
-        add("No joined participants" if room.get("id") else "Select a work room to navigate its participants", "dim")
+        add("No main connected" if room.get("id") else "Select a work room", "dim")
+        if menu:
+            add("Start with [1] Codex or [2] Claude", "main")
     tasks = listing(room.get("repo_tasks"))
     if tasks:
-        add("REPO TASK BOARD / repository scope", "dim")
-        for n, task in enumerate(tasks):
-            add((end if n == len(tasks) - 1 else prefix) + "%s / %s / %s" % (
-                task.get("id"), task.get("state"), task.get("title") or "title unrecorded"),
-                "dim", ("task", task.get("id")))
+        add("TASKS / repository", "worker", divider=True)
+        for task in tasks:
+            action = ("task", task.get("id"))
+            add("%s  [%s]" % (task.get("id"), task.get("state")), tone(task.get("state")), action)
+            for line in wrapped(task.get("title") or "title unrecorded", max(1, content_width - 2), 1 if summary else 2):
+                add("  " + line, None, action)
     acceptance = mapping(report.get("acceptance"))
     if acceptance.get("available"):
-        add("REPO ACCEPT / %s/%s verified" % (mapping(acceptance.get("counts")).get("verified", 0),
+        add("ACCEPTANCE / %s/%s verified" % (mapping(acceptance.get("counts")).get("verified", 0),
             acceptance.get("total", "?")), "good" if acceptance.get("complete") else "alert")
     for message in listing(room.get("messages"))[-2:]:
         add("ROOM LOG / " + (clean(message.get("text")) or ""), "dim")
-    usage = usage_labels(report)
-    if usage and height >= 30:
-        add("USAGE recent8 / " + " | ".join(usage), "dim")
-    add("DECLARED SCOPES / labels, not locks", "dim")
+    if any(main.get("owns") for main in mains):
+        add("SCOPES / declared, not locks", "dim", divider=True)
     for main in mains:
         if main.get("owns"):
             add("  " + (main.get("provider") or "main") + ": " + ", ".join(main["owns"]), "dim")
-    footer = (["MAIN  1 Codex  2 Claude  3 Resume  4 Main  t Task",
-               "TASK  5 Explain  6 Implement  p CLIs",
-               "JUDGE a Advisor  7 Review  c Council",
-               "RESULT r Read  h Chats  f Finalize  n Retry delivery",
-               "VIEW  o Rooms  g Graph  v Density  b Attention  9 Refresh  q Quit"] if menu else [])
+    footer = menu_rows(width, height, unicode, navigation.get("menu_help", False), managed) if menu else []
     if navigation.get("notice"):
         footer.append(clean(navigation["notice"], 200))
     if not menu:
-        footer.append("Click: chat/result  arrows + Enter  Space: fold  wheel: scroll")
-    footer.append("OMS records; call exits are not acceptance")
-    footer_space = max(0, height - int(menu) - 1)
-    footer = footer[-footer_space:] if footer_space else []
+        footer.append(("[v] Expand  [q] " + ("Chat" if managed else "Quit")) if summary else
+                      "[v] Collapse  Esc Back / arrows / Enter  [q] " + ("Chat" if managed else "Quit"))
+    footer.append("OMS records; exits are not acceptance")
+    if len(footer) > height - int(menu) - 4:
+        footer = [clipped("1 Codex  2 Claude  ? More  q Quit" if menu else "v Expand  q Quit", width)]
     budget = max(0, height - int(menu) - len(footer))
-    head = rows[:min(header, budget)]
-    room_budget = max(0, budget - len(head))
-    body = rows[header:]
-    offset = min(max(0, navigation.get("offset", 0)), max(0, len(body) - room_budget))
-    if len(body) > room_budget and room_budget:
-        room_budget -= 1
-        offset = min(offset, max(0, len(body) - room_budget))
-    shown = head + body[offset:offset + room_budget]
-    if len(body) > room_budget and budget > len(head):
-        shown.append({"text": clipped("%s-%s / %s rows / scroll for more" % (offset + 1, min(len(body), offset + room_budget), len(body)), width),
-                      "style": "dim", "action": None})
-    output, hits = [], []
-    unique = list(dict.fromkeys(items))
+    heading = "OMS / " + (clean(room.get("title") or room.get("id")) or "Work room")
+    head = [{"text": clipped(heading, width), "style": "main"}]
+    head += [{"text": clipped(alert, width), "style": "bad"} for alert in status_alerts(report)]
+    if boxed and height >= 20:
+        usage = usage_labels(report)
+        labels = usage[:2] if summary else usage
+        if summary and len(usage) > 2:
+            labels += ["+%s models / expand for more" % (len(usage) - 2)]
+        labels = labels or ["No reported calls"]
+        maximum = max(2, budget - len(head) - 9)
+        if len(labels) > maximum:
+            labels = labels[:maximum - 1] + ["+%s models / expand for more" % (len(labels) - maximum + 1)]
+        wide = width >= 84 and not summary
+        left = (content_width + 8) // 2
+        metric_lines = header_rows(report, left if wide else content_width)
+        content = []
+        if wide:
+            content.append(("PROVIDER LIMITS".ljust(left) + "  MODEL CALLS / recent 8", "dim"))
+            for index in range(max(len(metric_lines), len(labels))):
+                metric = metric_lines[index] if index < len(metric_lines) else ""
+                label = labels[index] if index < len(labels) else ""
+                metric = clipped(metric, left)
+                content.append((metric + " " * (left - display_width(metric)) + "  " + label, None))
+        else:
+            content = [(line, None) for line in metric_lines]
+            content += [("MODEL CALLS / recent 8", "dim")] + [(line, None) for line in labels]
+        head.append({"text": box_edge("USAGE / W used, C left" if content_width < 40 else "USAGE", width, unicode), "style": "dim"})
+        head += [{"text": box_row(line, width, unicode), "style": style} for line, style in content]
+        head.append({"text": box_edge("", width, unicode, "bottom"), "style": "dim"})
+    elif budget - len(head) >= 5:
+        head += [{"text": clipped(line, width), "style": "dim"} for line in header_rows(report, width)]
+    if budget - len(head) >= 5:
+        mailbox = "Messages: %s unread" % room.get("pending_count", 0)
+        if not summary:
+            mailbox += " · %s read · %s answered" % (room.get("received_count", 0), room.get("answered_count", 0))
+        head.append({"text": clipped(mailbox, width),
+            "style": "alert" if room.get("pending_count") else "dim"})
+    # The viewport owns its borders, so scrolling never leaves an open card.
+    if boxed and budget - len(head) < 3:
+        head = head[:1 + len(status_alerts(report))]
+    head = head[:budget]
+    room_budget = max(0, budget - len(head) - (2 if boxed else 0))
+    body = rows
     positions = {}
     for index, row in enumerate(body):
         if row.get("action"):
             positions.setdefault(row["action"], index)
+    offset = min(max(0, navigation.get("offset", 0)), max(0, len(body) - room_budget))
+    if len(body) > room_budget and room_budget:
+        room_budget -= 1
+        offset = min(offset, max(0, len(body) - room_budget))
+    geometry = (width, height, menu, summary)
+    if room_budget and selected in positions and (navigation.get("geometry") != geometry or
+                                                 navigation.get("viewport") != room_budget):
+        position = positions[selected]
+        if position < offset:
+            offset = position
+        elif position >= offset + room_budget:
+            offset = position - room_budget + 1
+    shown = list(head)
+    if boxed:
+        shown.append({"text": box_edge("ACTIVITY / %s mains / %s calls%s" % (
+            len(mains), len(calls), " / attention" if attention_only else ""), width, unicode), "style": "main"})
+    shown += body[offset:offset + room_budget]
+    if len(body) > room_budget and budget > len(head):
+        shown.append({"text": clipped("%s-%s / %s rows / %s" % (offset + 1, min(len(body), offset + room_budget), len(body),
+                      "j/k to scroll" if menu else "scroll for more"), content_width),
+                      "style": "dim", "action": None})
+    if boxed:
+        shown.append({"text": box_edge("", width, unicode, "bottom"), "style": "main"})
+    output, hits = [], []
+    unique = list(dict.fromkeys(items))
     for y, row in enumerate(shown):
         value = row["text"]
         style = row.get("style")
+        inner = boxed and len(head) < y < len(shown) - 1
+        if not color and row.get("action") and row["action"] == selected:
+            value = clipped(value, max(0, content_width - 2)) + " <" if content_width >= 2 else "<"
+        if inner:
+            value = box_edge(value, width, unicode, "divider") if row.get("divider") else box_row(value, width, unicode)
         if color and row.get("action") and row["action"] == selected:
             value = "\033[7m" + value + "\033[0m"
         elif color and style:
             value = PALETTE[style] + value + "\033[0m"
-        elif row.get("action") and row["action"] == selected:
-            value = clipped(value, max(0, width - 2)) + " <" if width >= 2 else "<"
         output.append(value)
         if row.get("action"):
             hits.append({"y": y + 1, "x1": 1, "x2": width, "action": row["action"], "fold": row.get("fold", False)})
-    output += [clipped(line, width) for line in footer]
+    output += [PALETTE["dim"] + clipped(line, width) + "\033[0m" if color and
+               line.startswith(("╭", "╰", "+", "OMS records")) else clipped(line, width)
+               for line in footer]
     navigation.update(hits=hits, items=unique, offset=offset, body_rows=len(body), viewport=room_budget,
-                      room_id=room.get("id"), positions=positions)
+                      room_id=room.get("id"), positions=positions, geometry=geometry)
     return "\n".join(output)
 
 
 def render_detail(report, detail, width, height, navigation):
     heading = ["OMS / " + detail["title"]] + header_rows(report, width)
-    body = [clipped(line, width) for line in detail["text"].splitlines()]
+    if "report" in detail:
+        from panel_view import render_results
+        text = render_results(detail["report"], width)
+    else:
+        text = detail["text"]
+    body = [part for line in text.splitlines()
+            for part in wrapped(line, width, max(1, len(line)), max_chars=max(400, len(line)))]
     budget = max(0, height - len(heading) - 2)
     offset = min(max(0, navigation.get("offset", 0)), max(0, len(body) - budget))
-    navigation.update(hits=[], items=[], offset=offset, viewport=budget)
+    navigation.update(hits=[], items=[], offset=offset, viewport=budget, bands=[])
     lines = heading[:max(0, height - 2)] + body[offset:offset + budget]
     lines += ["%s-%s / %s rows" % (offset + 1, min(len(body), offset + budget), len(body)),
               "Esc: tree  wheel / PgUp / PgDn: scroll  q: quit watcher"]

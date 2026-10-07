@@ -64,7 +64,7 @@ provenance boundaries; remove duplicated routing and generated boilerplate.
 | Skill selection and onboarding | ASCII trigger boundaries prevent `oom` matching `room`; generic continuation/model questions no longer force the harness. Keep specific collaboration/graph/autopilot triggers. Store ordinary build/test facts in the existing contract. |
 | Generic keyword skill hints | Off by default; native skill discovery remains. `OMS_SKILL_HINTS=1` restores keyword hints without changing live collaboration or journal delivery. |
 | Stop session budgets | Answer-format blocking is removed, including legacy opt-ins. Positive `OMS_SESSION_BUDGET_TURNS` or `OMS_SESSION_BUDGET_HOURS` enables a session cap. Journal finalization remains. |
-| External adapters | Removed Herdr pane control and the standalone A2A HTTP bridge/card. Native peer calls, live threads, and CLI/MCP state reads remain; external clients of the removed adapters must migrate. No extras dispatcher remains. |
+| External adapters | Removed the old Herdr pane-control command and standalone A2A HTTP bridge/card. The panel has a separate optional local Herdr terminal host for wrapper launch, identity-checked navigation and reported footer values; it grants no landing authority. Native peer calls, live threads and CLI/MCP state reads remain. No extras dispatcher remains. |
 | Standalone semantic evaluation | Retired executable engine; use current-HEAD `patch-admit` checks and `peer-review` with the minimal-change rubric. Historical reports remain readable. |
 
 The seven skills retain distinct installation, coordination, specification,

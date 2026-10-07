@@ -93,6 +93,9 @@ def native_index(wanted):
 
 def windows(repo, ident, state=None):
     found = {}
+    import panel_host
+    if panel_host.herdr_active():
+        return panel_host.targets(repo, ident, state if state is not None else room.status(repo, ident))
     if not os.environ.get("TMUX") or not shutil.which("tmux"):
         return found
     try:
@@ -102,7 +105,7 @@ def windows(repo, ident, state=None):
             return found
         members = {p["participant"]: p for p in state["participants"] if p["role"] == "main"}
         result = subprocess.run(["tmux", "list-windows", "-a", "-F",
-            "#{window_id}\t#{@oms_panel_main_attempt}\t#{@oms_panel_room}\t#{@oms_panel_native_pane}\t#{@oms_panel_room_participant}\t#{@oms_panel_repo}"],
+            "#{window_id}\t#{@oms_panel_main_attempt}\t#{@oms_panel_room}\t#{@oms_panel_native_pane}\t#{@oms_panel_room_participant}\t#{@oms_panel_repo}\t#{session_id}"],
             capture_output=True, text=True, check=False, timeout=3)
         if result.returncode:
             return found
@@ -114,7 +117,8 @@ def windows(repo, ident, state=None):
         candidates = []
         for line in result.stdout.splitlines():
             fields = line.replace("\r", "").split("\t")
-            if (len(fields) == 6 and fields[2] == ident and re.fullmatch(r"@[0-9]+", fields[0])
+            if (len(fields) == 7 and fields[2] == ident and re.fullmatch(r"@[0-9]+", fields[0])
+                    and re.fullmatch(r"\$[0-9]+", fields[6])
                     and re.fullmatch(r"%[0-9]+", fields[3]) and fields[3] + "\t" + fields[0] in native_panes):
                 member = fields[4] or fields[1]
                 if (member not in members or not room.thread_live.ID.fullmatch(fields[1])
@@ -142,19 +146,22 @@ def windows(repo, ident, state=None):
                     or refs.get("panel_room_id") != ident
                     or refs.get("panel_room_participant", fields[1]) != member):
                 continue
-            found.setdefault(member, []).append({"window": fields[0], "pane": fields[3]})
+            found.setdefault(member, []).append({"window": fields[0], "pane": fields[3], "session": fields[6]})
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
     return found
 
 
-def catalog(repo, ident):
+def catalog(repo, ident, who=None, terminal_first=False):
     parent_only()
     state = room.status(repo, ident)
-    wanted = {p["consumer"] for p in state["participants"] if p.get("consumer") and p["role"] == "main"}
-    index, panes = native_index(wanted), windows(repo, ident, state)
+    members = [p for p in state["participants"] if who is None or p["participant"] == who]
+    panes = windows(repo, ident, state)
+    wanted = {p["consumer"] for p in members if p.get("consumer") and p["role"] == "main"
+              and not (terminal_first and len(panes.get(p["participant"], [])) == 1)}
+    index = native_index(wanted) if wanted else {}
     rows = []
-    for member in state["participants"]:
+    for member in members:
         who, provider = member["participant"], member["provider"]
         native = index.get(provider, {}).get(member.get("consumer"), set()) if member["role"] == "main" else set()
         sid = next(iter(native)) if len(native) == 1 else None
@@ -170,8 +177,39 @@ def catalog(repo, ident):
             "authority": "navigation only; no prompt submission or transcript forwarding"}
 
 
+def terminal_commands(target):
+    caller = os.environ.get("TMUX_PANE", "")
+    if not re.fullmatch(r"%[0-9]+", caller):
+        raise ValueError("current tmux pane is unavailable; select the original terminal")
+    current = subprocess.run(["tmux", "display-message", "-p", "-t", caller, "#{session_id}"],
+                             capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+    if current.returncode or not isinstance(current.stdout, str):
+        raise ValueError("current tmux session is unavailable; native session was preserved")
+    session = current.stdout.replace("\r", "").strip()
+    if not re.fullmatch(r"\$[0-9]+", session):
+        raise ValueError("current tmux session is unavailable; native session was preserved")
+    commands = [["tmux", "select-window", "-t", target["window"]],
+                ["tmux", "select-pane", "-t", target["pane"]]]
+    if session != target["session"]:
+        result = subprocess.run(["tmux", "list-clients", "-F", "#{client_name}\t#{session_id}"],
+                                capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+        if result.returncode or len(result.stdout) > 65536:
+            raise ValueError("tmux client evidence is unavailable; select the original terminal")
+        clients = []
+        for line in result.stdout.replace("\r", "").splitlines():
+            fields = line.split("\t")
+            if (len(fields) == 2 and fields[1] == session and fields[0]
+                    and len(fields[0]) <= 256 and not fields[0].startswith("-")
+                    and clean(fields[0], 256) == fields[0]):
+                clients.append(fields[0])
+        if len(clients) != 1:
+            raise ValueError("current tmux client is missing or ambiguous; select the original terminal")
+        commands.append(["tmux", "switch-client", "-c", clients[0], "-t", target["session"]])
+    return commands
+
+
 def plan(repo, ident, who, surface="auto"):
-    report = catalog(repo, ident)
+    report = catalog(repo, ident, who=who, terminal_first=surface != "app")
     row = next((r for r in report["rows"] if r["participant"] == who), None)
     if row is None:
         raise ValueError("choose a participant in the selected room")
@@ -180,9 +218,9 @@ def plan(repo, ident, who, surface="auto"):
     commands = []
     if surface in {"auto", "terminal"} and row["terminal"]:
         target = row["terminal"]
-        commands.append(["tmux", "select-window", "-t", target["window"]])
-        if target["pane"]:
-            commands.append(["tmux", "select-pane", "-t", target["pane"]])
+        if target.get("host") == "herdr":
+            return dict(row, method="existing-terminal", host="herdr", target=target, commands=[])
+        commands = terminal_commands(target)
         method = "existing-terminal"
     elif surface != "terminal" and row["uri"]:
         launcher = "open" if sys.platform == "darwin" else "xdg-open"
@@ -218,6 +256,10 @@ def open_chat(repo, ident, who, surface="auto", dry_run=False, allowed_methods=N
         raise ValueError("no existing terminal or exact app link; choose the original chat in its app")
     if dry_run or request["method"] == "artifacts":
         return request
+    if request.get("host") == "herdr":
+        import panel_host
+        panel_host.focus(request["target"])
+        return dict(request, status="navigation_requested")
     if request["method"] == "windows-uri":
         os.startfile(request["uri"])
     else:

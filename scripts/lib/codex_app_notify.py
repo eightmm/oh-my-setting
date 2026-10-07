@@ -28,7 +28,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-from work_journal import sanitize_multiline
+from work_journal import MAX_TEXT_BYTES, sanitize_multiline
 
 THREAD_NAME = "Claude 알림"
 MAX_FRAME = 1024 * 1024
@@ -205,8 +205,8 @@ def send(repo: Path, text: str) -> int:
     return 0
 
 
-def _safe_message(text: str, repo: Path) -> str:
-    text = text[:8192]
+def _safe_message(text: str, repo: Path, maximum: int = 2399) -> str:
+    text = text[:max(8192, maximum)]
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
     text = "".join(c if c == "\n" or not unicodedata.category(c).startswith("C") else " " for c in text)
     text = re.sub(r"(?i)\b(password|token|api[_-]?key|secret)\s*[:=]\s*\S+", "[redacted]", text)
@@ -216,7 +216,8 @@ def _safe_message(text: str, repo: Path) -> str:
     for path in (str(Path.home()), str(repo.resolve())):
         if path and path != "/":
             text = text.replace(path, "[path]")
-    return sanitize_multiline(text, 2399).rstrip("\n") + "\n"
+    return sanitize_multiline(text, maximum,
+                              maximum if maximum > 2399 else MAX_TEXT_BYTES).rstrip("\n") + "\n"
 
 
 @contextlib.contextmanager

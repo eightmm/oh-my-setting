@@ -315,6 +315,16 @@ class CodexAppNotifyTest(unittest.TestCase):
         text = codex_app_notify._safe_message(sample + "\n" + "한" * 2000, self.repo)
         self.assertNotIn(sample, text)
         self.assertLessEqual(len(text.encode("utf-8")), 2400)
+        answer = sample + "\n" + "\n".join("한" * 80 + str(i) for i in range(20)) + "\nSAFE_RESULT_TAIL"
+        self.assertNotIn("SAFE_RESULT_TAIL", codex_app_notify._safe_message(answer, self.repo))
+        local = codex_app_notify._safe_message(answer, self.repo, maximum=32768)
+        self.assertIn("SAFE_RESULT_TAIL", local)
+        self.assertNotIn(sample, local)
+        self.assertLessEqual(len(local.encode("utf-8")), 32769)
+        long_line = sample + " " + "x" * 9000 + " SAFE_RESULT_TAIL"
+        local = codex_app_notify._safe_message(long_line, self.repo, maximum=32768)
+        self.assertIn("SAFE_RESULT_TAIL", local)
+        self.assertNotIn(sample, local)
 
     def test_deliver_disabled_does_not_contact_receiver(self):
         self.saved_receiver()

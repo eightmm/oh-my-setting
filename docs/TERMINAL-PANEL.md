@@ -8,6 +8,10 @@ command help. The panel uses existing OMS state, authentication and front doors.
 ```bash
 oms panel --repo . --layout inline         # portable menu, no tmux needed
 oms panel --repo . --layout split          # uses an already-installed tmux
+oms panel --repo . --host tmux --launch codex   # team graph above native chat
+oms panel --repo . --host tmux --launch claude
+oms panel --repo . --host tmux --position side # optional side board
+oms panel --repo . --reopen                # restore only a missing tmux board
 oms panel --repo . --json                  # read-only status and role policy
 oms panel --repo . --routes                # read-only role policy
 oms panel --repo . --providers --json      # registered CLI peers; no provider execution
@@ -27,8 +31,10 @@ oms panel --repo . --council --owner codex --task-id ID --label 'Decision' --pro
 ## Shared work rooms and the graph
 
 A native main launched from the menu joins the selected work room. Opening a
-second native main from that menu keeps the same room; independent panel
-launches create separate rooms unless an existing `--room ID` is selected.
+second native main from the menu or with `--launch` keeps the panel's recorded
+room while it is open and has headroom; a full or closed room makes the next
+main start a new room, and an explicit `--room ID` or `o Rooms` choice wins.
+A bare control window shows the panel's recorded room.
 The `o Rooms` menu selects or creates a task-scoped room. It does not enroll
 other sessions merely because they share a repository. Auto uses a connected
 vertical tree for a selected room at 28 columns and 12 rows or larger. All
@@ -36,20 +42,28 @@ joined mains have rows; empty role cards are omitted. Explicit parent IDs
 connect advisors, reviewers and workers under their own main. Calls whose
 parent is outside the shown mains stay in `UNLINKED`. Scrolling exposes rows
 outside the viewport. `--view tree` selects this layout directly. `g Graph`
-retains the card graph at 76 columns and 36 rows; smaller graph panes explain
-the fallback. `--view compact|detail` keeps the list at any size.
+retains the card graph at 76 columns and 16 rows. When an interactive graph
+cannot fit or collection warnings are present, panes of at least 28 columns
+and 8 rows retain the tree's chat/result navigation and warnings. Passive
+output retains its list fallback. `--view compact|detail` keeps the list at any size.
 
 On a POSIX terminal, the right watcher accepts clicks, arrow keys/Tab and
 Enter. Clicking a main focuses its proven existing tmux conversation pane;
 if no terminal exists, a proven exact Codex app link can open its original chat.
 An unresolved or departed participant shows a reason. These clicks do not
-start or resume CLI sessions, send a prompt or call a model. Workers,
-advisors and reviewers open recorded results; repository tasks show the
-displayed snapshot's title, dependencies and declared paths. Escape returns
-from details. Click a main's left chevron or press Space to fold its calls;
+start or resume CLI sessions, send a prompt or call a model. In the graph, the
+click (or Enter) on a worker, advisor or reviewer shows its retained answer,
+review state and changed files in the board's detail area, which scrolls; no
+separate screen opens from the graph. A main's detail lists its whole team,
+finished calls included, and clicking a team row shows that call there. The
+tree opens recorded results directly. Repository tasks show the
+displayed snapshot's title, dependencies and declared paths. Escape closes the
+detail or a results screen. Click a main's left chevron or press Space to fold its calls;
 the wheel and PageUp/PageDown scroll. `t`, `g`, and `b` select tree, graph and
-attention views in the watcher; `q` closes only that watcher. Resize and
-collection discard pending coordinate clicks before drawing a new map.
+attention views in the watcher; `q` returns focus to chat in a managed tmux
+board and quits a standalone watcher. Resize discards pending coordinate
+clicks; a refresh discards them only when it changes the drawn hit map.
+The selection is shown before a chat or result opens.
 
 Mouse support is enabled only in the OMS tmux session, never globally. Hold
 Shift for the terminal's own text selection. The watcher restores mouse
@@ -65,6 +79,87 @@ The default tree keeps the same evidence in a `COUNCIL` branch; clicking it
 reads that task's results scoped to its main participant.
 Only explicit parent IDs draw call connections. Lifecycle state drives moving
 particles/spinners; joining without lifecycle evidence says `presence unknown`.
+At 140 columns or wider, when the graph has room for five-row cards, the main
+has two information cards beside it: linked worker/advisor counts and mail
+addressed to that exact main. Mail counts use recorded recipient pairs; the
+preview covers only the recent room-message window. These cards add no call
+connections or click targets. An unspecified native task says `Task title
+unrecorded`; OMS does not infer a task from the native chat. `WORK STATUS` is
+a summary, not another agent. The main is the central card and shows its
+coordination role. Advisors/reviewers sit above it and join its top edge;
+workers branch from its bottom edge. Each child connects to the main itself,
+so workers do not appear to report to an advisor. In lanes, advisors and
+reviewers sit above their main and each running worker has its own box below
+it. Finished calls (`done`, `cancelled`) leave the board and are counted as
+`✓N done`; their results stay in the main's detail and the tree (`t`).
+Failed and waiting calls stay visible. Wires attach at the card
+edges, and a particle on a live edge moves toward its consumer. Child status
+names its main. Cards stay bounded in width instead of stretching a lone worker
+across the terminal.
+
+Main tabs show each main's state, model, a distinguishing title, worker and
+advisor counts (`W3 A2`), attention count (`!1`) and unread mail addressed to
+that main (`M2`), including mail from other mains. A `Between mains` line counts the
+messages each main sent another and how many are unread. Board text is written for
+people: states read `running`, `finished` or `needs approval`, call exits and
+provider status lines are dropped from messages, and the detail says whether its
+main reviewed a result instead of showing internal fields. Clicking another main's
+tab selects it and shows its detail; clicking the tab of the main already shown
+(or its card) opens its proven original conversation. Left/right arrows move
+between mains and move the detail with them. Tabs that do not fit collapse to
+`+N ▸`, which carries their attention count (`!k`) and selects the first hidden
+main when clicked. Within advisors and within workers, attention states sort
+first, and lane rows name the state (`! failed REV ...`). Lane heads select
+first, like tabs. `[+]` on a tab, or Space on a selected main, pins it; with two or
+more pins the board shows side-by-side lanes, one per main with its calls on
+single lines. `[+ All]` pins every main. Every live watcher board (control and
+native windows) shows every main as lanes until pins are chosen, when they all
+fit (about 30 columns each); `[x All]` returns a window to its focused graph,
+and `v` keeps the overview when the board is expanded. Pins are kept per window in
+`@oms_panel_pins`; pins naming no main of the current room are ignored. PageUp/PageDown scroll the detail
+when one is shown, otherwise every call band by one page. When another open room of the checkout has a live main (for
+example after a full room made a new main start a new room), an `OTHER ROOMS`
+line names it with its live-main (resumed mains count by their participant) and
+pending counts, and an incomplete room scan says so; graphs of different rooms
+are never merged, and `o Rooms` in the control window switches. Room scans for
+that line are cached for 30 seconds; liveness comes from the current snapshot.
+Terminals attached to the same panel session share its current window, so
+navigating from one client also moves the other. The wheel scrolls only the band, lane or detail under the
+pointer.
+
+The footer packs whole hints in priority order (click, calls, mains, Enter,
+`a Ask`, `w Worktree` when it applies, pins, expand, tree, Esc) and always keeps
+the quit or return-to-chat key.
+
+`a` in the watcher asks an advisor for the selected main (or the shown one).
+In tmux it opens a popup that takes one question and runs
+`oms panel --dispatch advisor --main PARTICIPANT --seat auto` without the
+watcher's inherited caller identity; the dispatch re-proves that main is live,
+and the answer returns to that main's room mail. Outside tmux the board shows
+the command instead. Popups need tmux 3.2 or newer; when the popup cannot open,
+the board says so and the control menu's `a Advisor` remains. A failed call keeps
+the popup open with its exit status. Selecting or clicking never calls a model. A prompt-less
+`--dispatch advisor` on a terminal asks its question interactively.
+
+`w` on a selected, finished worker opens a plain shell window at its kept
+worktree. The recorded `worktree:PARENT/NAME` label must match exactly one entry
+of `git worktree list`; a running worker, a cleaned-up or ambiguous worktree
+and repository-local calls are refused, and recorded results stay available.
+The shell has no worker authority; edits there are not part of the recorded
+patch. Outside tmux the board shows the path.
+
+The board is an overview above and a detail area below. Cards keep only the
+rows their content needs (an unrecorded location stays in the detail), and an
+unavailable provider reading collapses to one `USAGE unavailable` line. On a
+board of 24 rows or more, rows the overview leaves free show the shown main's
+detail, marked `auto`; it never replaces a chosen block, and Esc dismisses it for
+that watcher. While a block is selected, overview cards shrink to one line and
+the detail area shows its content, starting with outcome and verification: for a worker or advisor the latest retained answer, the changed files
+of a recorded patch (summarized only while its SHA-256 still matches, so it
+survives worktree cleanup), outcome, verification and artifact references (read
+in the background, refreshed with each snapshot); for a main its addressed mail
+and team. Reading mail there never
+acknowledges it. The native CLI pane is never used for detail.
 A CLI exit never changes a task to accepted. The board is repository-wide, not
 a claim that every displayed task belongs to this room. Declared scopes are
 labels, not file locks or authority; write workers still use isolated patches,
@@ -112,8 +207,9 @@ sends; conflicting reuse fails. Broadcast recipients are fixed at send time.
 A new join does not replay earlier messages. Reads exclude sender echoes and
 other participants' direct mail, advance a checked cursor and do not acknowledge.
 Delivery/consumption/answer/acceptance are separate states. Rooms are bounded
-to 32 participants and 1024 messages; start a new room when those limits are
-reached. History is retained, not silently discarded.
+to 32 members (mains and other unparented participants), 480 dispatched calls
+(participants with a parent, which keep their slot after finishing) and 1024
+messages; start a new room when those limits are reached. History is retained, not silently discarded.
 
 Installed prompt/edit hooks deliver at the next safe point. Idle sessions must
 poll or reach a safe point; there is no vendor-independent push/wakeup promise.
@@ -130,6 +226,11 @@ participant in lifecycle refs, supplies the room interface in the scoped
 context, and returns a bounded artifact-backed handoff to its caller. A handoff
 reports the call exit and pending parent acceptance. It does not merge native
 histories or write source files in another main's worktree.
+Native instructions include explicit room and participant arguments for tools
+that do not inherit the CLI environment. Role dispatch uses `--room ID` to
+resolve the verified active main; missing or ambiguous ownership is refused.
+A standalone dispatch without room/main binding remains available and reports
+that its relationship is unrecorded.
 
 ### Original chats and recovery
 
@@ -138,8 +239,14 @@ its existing tmux conversation pane when that pane still exists and its canonica
 repository, provider, room and active main attempt match the enrolled participant.
 First launches and resumed stable participants both qualify; blocked but
 nonterminal attempts remain navigable. Old or unprovable window markers do not
-establish a destination. Otherwise,
-Codex uses the exact local session's `codex://threads/<thread-id>` app link.
+establish a destination. When that destination is in another tmux session, navigation selects its window
+and pane and switches the single client attached to the caller's verified
+session. Missing or multiple current clients require selecting the original
+terminal; another attached client is never chosen by recency. Herdr pane lookup
+failures affect their participant while other proven targets remain available.
+An unqueried duplicate candidate cannot establish unique ownership, and socket
+failures continue to make host evidence unavailable. Without a proven terminal
+destination, Codex uses the exact local session's `codex://threads/<thread-id>` app link.
 Claude Desktop navigation uses `claude --desktop --resume <session-id>` on
 macOS/native Windows when the installed CLI advertises `--desktop`; native
 platform, authentication and live-session restrictions still apply. It never
@@ -152,7 +259,8 @@ original chats remain available as history; this does not rejoin them or resume 
 Room views and chat navigation require an explicit selection from `o Rooms`,
 `--room` or the room environment; another session's `CURRENT` pointer does not
 select a work room. Narrow panes retain joined main names and mailbox totals;
-an explicitly requested graph explains the 76x36 requirement when using the list.
+an explicitly requested graph uses the 76x16 requirement, retaining tree
+navigation when the interactive card layout cannot fit.
 
 `--chats` is read-only. `--open-chat PARTICIPANT --dry-run --json` previews the
 destination without navigation; an explicit open submits no new prompt. Local
@@ -375,7 +483,15 @@ oms panel --repo . --dispatch advisor --owner claude --seat fable \
   --label 'Review architecture options' --prompt 'Compare these bounded design options.'
 oms panel --repo . --dispatch reviewer --owner codex --seat astra \
   --prompt 'Review the changed parser.' --verify 'bash tests/affected.sh'
+oms panel --repo . --room team --dispatch advisor --owner claude --main opus-main \
+  --prompt 'Advise on the parser plan of the second main.'
 ```
+
+From the control window, a dispatch belongs to the provider's single active
+main in the room. When several mains of that provider are live, the control
+menu lists them by number and `--main PARTICIPANT` names one; either choice only
+narrows the same live-main proof and is refused for a departed, exited or
+unknown main. A native main always dispatches as itself.
 
 Give each dispatched subtask a descriptive task ID and short `--label`; reuse
 the exact reviewed plan task ID where one exists. Labels are optional for direct
@@ -391,13 +507,100 @@ supplied task, so keep the launch plan private when that task is private.
 
 ## Layout and activity
 
-`auto` chooses split on POSIX when tmux is installed and the terminal is not
-already inside tmux; otherwise it uses inline. `split` creates an independent
-`oms-panel-*` tmux session with a control window. Each native conversation gets
+`--host auto|inline|tmux|herdr` selects the terminal host independently of
+the activity view. Auto reuses an existing local POSIX Herdr pane; otherwise
+the existing layout selection applies. `--host inline` disables host automation;
+`--host tmux` explicitly selects split. Herdr requires the running pane's
+`HERDR_ENV`, `HERDR_PANE_ID` and owned `HERDR_SOCKET_PATH`. It is optional,
+never installed or started by OMS, and its Windows named-pipe transport is not
+implemented here. Ordinary Windows/inline OMS remains available.
+
+In a Herdr repository pane, the menu opens a fresh tab containing the native
+OMS launch wrapper and a task panel. It does not type into an existing
+agent. The API uses bounded local JSON requests and never retries a mutation
+whose outcome is uncertain. Original-chat navigation reconciles active OMS
+main ownership and exact pane/terminal/socket identity; reused panes and
+unproven sessions are rejected. Numeric footer readings retain their reported
+scope and unknown values. A socket error does not stop the native sibling.
+
+New native boards default to `--position auto`: a window that is visually wider
+than tall (columns more than twice the rows) gets a left board (40 percent),
+otherwise the graph is above the original CLI, with each taking half the window.
+When a watcher's window is resized across that boundary, the board moves itself
+(with a small hysteresis band); `--position top|left|side` fixes the placement.
+A watcher whose OMS sources change re-executes itself once they compile, so
+updated boards need no manual restart. `--position side` retains a 28 percent
+tmux sidebar (26 percent in Herdr), defaulting to `summary`. Select `v` in the
+task panel to expand its graph; `Esc` collapses it,
+and closing the watcher restores its own zoom. Native input and permission
+prompts stay in the original CLI. The room's detailed tree and graph remain
+available. A successfully exited native main is labelled `exited`, independently
+of a worker result, verifier or owner acceptance.
+
+The graph fits from 76 columns by 16 rows. Advisors/reviewers sit above their
+exact main, and its workers sit below, with activity moving on verified parent
+connections. A selected main controls this view; arrow/Tab navigation reaches
+additional mains and calls. Unlinked calls stay unlinked and are available in
+the tree (`t`). Model-call usage stays at the top, while taller views show
+provider readings, recorded messages or repository tasks. Missing router,
+progress, locks or billing data is never invented. Smaller interactive panes
+retain tree navigation; passive output shows the list.
+Clicking a main requests navigation to its original chat; workers show their
+content in the detail area. The lower pane remains the provider's native interactive terminal,
+including editing, pasted input and permission prompts. `--launch` opens this
+layout in the checkout's panel when tmux is available, while `--host inline
+--launch` runs the CLI alone.
+
+The room's default tree uses closed usage, activity and action cards. Wide
+usage cards put provider quota/context readings beside the retained model-call
+totals; call totals appear once and are not account quotas. Narrow cards use
+`W` for weekly used percentage and `C` for main context left. Activity keeps
+main/role branches, wraps task titles, separates repository tasks, and closes
+the viewport border even while scrolling. Empty declared scopes are omitted.
+The control menu shows start, chat/result and view shortcuts first. Enter `?`
+for all actions in ordinary scrollable help; existing shortcuts still work.
+Use `j`/`k` plus Enter to page through overflowing activity in the control menu;
+the watcher retains its arrow, mouse and page-key navigation.
+In a managed tmux control pane the quit key is labelled `Detach`; it preserves
+the native sessions. In a coupled tmux board, `q` returns focus to the lower
+input pane and keeps the board alive; an expanded board collapses first.
+Standalone watchers retain `q` to exit. If a board was explicitly removed,
+`oms panel --reopen` restores it without restarting the native CLI. Repeating
+the operation preserves an existing board. Inside an OMS window, bare
+`oms panel` does the same; the control menu also provides `z` for this action.
+Restore accepts only this checkout's front door with a matching repository,
+refuses ambiguous/replaced input panes, and does not restart a terminated CLI.
+
+Client detach retains the host's live processes. A Herdr server restart is
+different: bare vendor auto-restore is not an OMS resume and cannot prove
+fresh OMS ownership. Continue through the OMS wrapper's existing exact-resume
+checks after its previous execution is confirmed terminal. An unknown shutdown
+remains blocked; pane IDs or a Herdr `done` badge cannot authorize takeover.
+This adapter does not change Herdr's global configuration or restore policy.
+
+Outside Herdr, `auto` chooses split on POSIX when tmux is installed, including
+`--launch` and runs started inside another tmux session (the client switches to
+the panel instead of nesting); otherwise it uses inline. `--host inline` or
+`--layout inline` keeps a run in the current terminal. Each checkout has one OMS panel
+session, `oms-panel-` plus the first 12 hex digits of the SHA-256 of its resolved
+path. The first `split` creates it with a control window and records the
+checkout on the session. A new panel opened without `--launch` also opens every
+installed main CLI (Codex, Claude) in its own window, sharing one new room;
+`OMS_PANEL_MAINS=claude` (comma list, in that order, first one selected) or an
+empty value limits this. Reattaching never opens mains again; later launches attach to it (or switch the current
+tmux client), and `--launch` adds a native window there instead of opening a
+second session. A session with that name recorded for another checkout is
+refused. A launch that loses a creation race, or arrives before a just-created
+session has recorded its checkout, waits up to two seconds and joins it; the
+owner marker is written after the session's room, so a joining launch follows
+that room. New mains default to the panel's recorded room while it is open and
+has participant/message headroom; otherwise, or when `--room` is given, the
+existing room rules apply. Rooms stay bounded and task-scoped; the panel
+outlives them. Separate tmux servers are separate scopes. Each native conversation gets
 its own sidebar with state refreshed every five seconds. Existing windows and tmux settings
 are preserved. With default bindings, `Ctrl-b w` picks a window and `Ctrl-b d`
 detaches while work continues. Quit in the control pane also detaches. Failed
-construction rolls back only the new OMS session. Inline returns to the menu
+construction rolls back only the new OMS session or added window. Inline returns to the menu
 when the native CLI exits and refreshes then; it has no permanent sidebar.
 
 Each recorded MAIN has a closed orange card. ADVISORS, REVIEWERS and WORKERS
@@ -483,12 +686,23 @@ states stay still. The motion means recorded activity, not token streaming,
 progress percentage or a new dispatch event. The native main's explicit child
 links determine the call tree. Rendering frames makes no state writes or model
 calls; state collection remains every five seconds, plus collection time.
+Interactive watch collects state and quota readings in one background read
+at a time. It keeps the last frame available for input while a read is pending,
+and applies completed reads within a 50 ms polling interval. Redirected or
+noninteractive watch retains synchronous snapshots and `--count` semantics.
+Snapshots that change the hit map discard stale coordinate clicks; navigation still validates
+the current room, participant and terminal before focusing it. A proven terminal
+destination does not require scanning unrelated native chat histories; app
+navigation and the full chat catalog keep their bounded identity lookup.
 `--count` counts collected snapshots rather than animation frames.
 
 Use `oms panel --watch --no-animation` for a motion-free view, or set
 `OMS_PANEL_NO_ANIMATION=1` in the launching environment to cover automatically
 opened sidebars. Redirected output and `TERM=dumb` are static plain snapshots.
-`NO_COLOR` controls color independently. The watch restores the terminal cursor
+`NO_COLOR` controls color independently. `OMS_PANEL_COLOR=always` enables color
+only in the OMS panel even when its environment inherits `NO_COLOR`;
+`OMS_PANEL_COLOR=never` disables it, and `auto` preserves the default. Redirected
+output and `TERM=dumb` stay plain in every mode. The watch restores the terminal cursor
 on exit or interruption. The control menu redraws on actions rather than
 animating over an input prompt.
 
@@ -526,7 +740,8 @@ records remain unobserved.
 | v Density / b Attention | Cycle auto / compact / detail; toggle action-needed calls |
 | q Quit | Exit inline or detach the owned split session |
 
-`NO_COLOR` disables color; `TERM=dumb` uses ASCII without screen clearing. The
+`NO_COLOR` disables color unless the panel explicitly selects
+`OMS_PANEL_COLOR=always`; `TERM=dumb` uses ASCII without screen clearing. The
 view fits the current pane width/height. Redirected watch output appends plain
 snapshots; `--count N` bounds it. Native launch needs an installed, authenticated
 provider. `installed` means executable found on PATH, not verified login or model
@@ -570,10 +785,15 @@ oms panel --retry-delivery --task-id ID
 
 Results lists the latest twenty retained tasks from at most 300 lifecycle
 attempts and 1000 artifact events. Selecting a task shows up to eight recent
-call records, with bounded normalized answer sections; raw prompts, provider
+call records. Participant browsing selects that participant's tasks before
+applying the recent-20-task limit. An explicit query outside retained evidence
+reports an incomplete window. Bounded normalized answer sections retain up to
+32 KiB per answer; raw prompts, provider
 logs and native conversation histories are not exported. Missing, changed or
-linked evidence is reported as unavailable. Display bounds can truncate long
-text; the registered result and source artifacts retain their full bounded content.
+linked evidence is reported as unavailable. Oversized answers show a preview
+notice and their source artifact reference. The reader retains answer lines
+and reflows them when resized; scrolling exposes the complete retained preview.
+The registered result and source artifacts retain their full bounded content.
 The menu's numbered list shows titles, outcome, verifier and app status before
 loading any normalized answers. Select a number to open that task's detail and
 return to the list afterward. Browsing performs read-only queries; it does not

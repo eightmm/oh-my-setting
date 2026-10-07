@@ -70,7 +70,7 @@ class TerminalInput:
                     if code == 0:
                         output.append(("click", x, y))
                     elif code in (64, 65):
-                        output.append(("scroll", -3 if code == 64 else 3))
+                        output.append(("scroll", -3 if code == 64 else 3, x, y))
                 continue
             key = next((sequence for sequence in keys if self.pending.startswith(sequence)), None)
             if key:
@@ -89,7 +89,7 @@ class TerminalInput:
                 output.append(("enter",))
             elif value == b"\t":
                 output.append(("down",))
-            elif value in (b" ", b"q", b"g", b"t", b"b"):
+            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w"):
                 output.append((value.decode(),))
         if not self.pending:
             self.escape_since = None
@@ -137,14 +137,30 @@ def choose(event, navigation):
         hit = next((h for h in navigation.get("hits", [])
                     if h["y"] == event[2] and h["x1"] <= event[1] <= h["x2"]), None)
         if hit:
-            navigation["selected"] = hit["action"]
+            target = hit["action"]
+            if target[0] == "pin":
+                return target
+            navigation["selected"] = target
             if hit.get("fold") and event[1] <= 2:
-                return ("fold", hit["action"][1])
-            return hit["action"]
+                return ("fold", target[1])
+            # A first click selects a main tab or previews a call; repeating it opens.
+            if hit.get("select") and navigation.get("primary") != target:
+                navigation["preview"] = {"target": target}
+                return None
+            if hit.get("preview") and target[0] != "chat":
+                # A call's content stays in the board's detail area; no separate screen opens.
+                navigation["preview"] = {"target": target}
+                return None
+            if hit.get("preview") and (navigation.get("preview") or {}).get("target") != target:
+                navigation["preview"] = {"target": target}
+                return None
+            return target
     elif kind in ("up", "down", "home", "end") and items:
         index = items.index(selected) if selected in items else (-1 if kind == "down" else 0)
         index = 0 if kind == "home" else len(items) - 1 if kind == "end" else (index + (1 if kind == "down" else -1)) % len(items)
         navigation["selected"] = items[index]
+        if navigation.get("surface") == "graph":
+            navigation["preview"] = {"target": items[index]}
         visible = any(h["action"] == items[index] for h in navigation.get("hits", []))
         if not visible:
             positions = navigation.get("positions", {})
@@ -152,9 +168,35 @@ def choose(event, navigation):
             offset = navigation.get("offset", 0)
             navigation["offset"] = row if row < offset else max(0, row - max(1, navigation.get("viewport", 1)) + 1)
     elif kind == "enter":
+        if navigation.get("surface") == "graph" and selected in items and selected[0] in ("result", "debate"):
+            navigation["preview"] = {"target": selected}
+            return None
         return selected if selected in items else None
+    elif kind in ("left", "right"):
+        mains = [item for item in items if item[0] == "chat"]
+        current = next((item for item in (selected, navigation.get("primary")) if item in mains), None)
+        if mains:
+            index = mains.index(current) + (1 if kind == "right" else -1) if current else 0
+            navigation["selected"] = mains[index % len(mains)]
+            if navigation.get("surface") == "graph":
+                # The detail follows an explicit main change and starts at its top.
+                navigation["preview"] = {"target": navigation["selected"]}
+                navigation.setdefault("band_offsets", {})["detail"] = 0
     elif kind == " " and selected in items and selected[0] == "chat":
-        return ("fold", selected[1])
+        return ("pin" if navigation.get("surface") == "graph" else "fold", selected[1])
+    elif kind == "scroll" and len(event) > 3 and not navigation.get("detail") and any(
+            b["y1"] <= event[3] <= b["y2"] and b["x1"] <= event[2] <= b["x2"] for b in navigation.get("bands", [])):
+        band = next(b for b in navigation["bands"] if b["y1"] <= event[3] <= b["y2"] and b["x1"] <= event[2] <= b["x2"])
+        offsets = navigation.setdefault("band_offsets", {})
+        step = band.get("step", 1)
+        offsets[band["name"]] = max(0, offsets.get(band["name"], 0) + (step if event[1] > 0 else -step))
+    elif kind in ("pageup", "pagedown") and navigation.get("bands") and not navigation.get("detail"):
+        # Graph pages: the detail scrolls when shown, otherwise every call band moves one page.
+        names = [b["name"] for b in navigation["bands"]]
+        offsets = navigation.setdefault("band_offsets", {})
+        for name in ["detail"] if "detail" in names else names:
+            step = 6 if name == "detail" else 3
+            offsets[name] = max(0, offsets.get(name, 0) + (step if kind == "pagedown" else -step))
     elif kind in ("scroll", "pageup", "pagedown"):
         step = event[1] if kind == "scroll" else max(1, navigation.get("viewport", 1)) * (-1 if kind == "pageup" else 1)
         navigation["offset"] = max(0, navigation.get("offset", 0) + step)

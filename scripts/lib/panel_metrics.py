@@ -57,6 +57,12 @@ def cached(consumer, now):
 def pane_reading(target, provider):
     """Mirror only numeric fields in the proven pane's visible native footer."""
     pane = mapping(target).get("pane")
+    if mapping(target).get("host") == "herdr":
+        try:
+            import panel_host
+            return numeric_reading(panel_host.read(target), provider)
+        except (OSError, ValueError, KeyError, TypeError):
+            return {}
     if not isinstance(pane, str) or not re.fullmatch(r"%[0-9]+", pane):
         return {}
     try:
@@ -76,20 +82,24 @@ def pane_reading(target, provider):
         if result.returncode or len(result.stdout) > 16384:
             return {}
         text = result.stdout
-        if provider == "codex":
-            context = re.findall(r"\bContext\s+(\d{1,3})%\s+left\b", text, re.I)
-            weekly = re.findall(r"\bweekly\s+(\d{1,3})%\s+left\b", text, re.I)
-            reading = {"context_left": percent(int(context[-1])) if context else None,
-                       "weekly_used": 100 - int(weekly[-1]) if weekly and int(weekly[-1]) <= 100 else None}
-        else:
-            context = re.findall(r"\bctx\s+\[[#-]+\]\s+(\d{1,3})%", text)
-            weekly = re.findall(r"\b7d\s+(\d{1,3})%", text)
-            used = percent(int(context[-1])) if context else None
-            reading = {"context_left": None if used is None else 100 - used,
-                       "weekly_used": percent(int(weekly[-1])) if weekly else None}
-        return dict(reading, source="TUI") if any(v is not None for v in reading.values()) else {}
+        return numeric_reading(text, provider)
     except (OSError, ValueError, subprocess.SubprocessError):
         return {}
+
+
+def numeric_reading(text, provider):
+    if provider == "codex":
+        context = re.findall(r"\bContext\s+(\d{1,3})%\s+left\b", text, re.I)
+        weekly = re.findall(r"\bweekly\s+(\d{1,3})%\s+left\b", text, re.I)
+        reading = {"context_left": percent(int(context[-1])) if context else None,
+                   "weekly_used": 100 - int(weekly[-1]) if weekly and int(weekly[-1]) <= 100 else None}
+    else:
+        context = re.findall(r"\bctx\s+\[[#-]+\]\s+(\d{1,3})%", text)
+        weekly = re.findall(r"\b7d\s+(\d{1,3})%", text)
+        used = percent(int(context[-1])) if context else None
+        reading = {"context_left": None if used is None else 100 - used,
+                   "weekly_used": percent(int(weekly[-1])) if weekly else None}
+    return dict(reading, source="TUI") if any(v is not None for v in reading.values()) else {}
 
 
 def collect(report, main_attempt=None, now=None, repo=None):
@@ -135,6 +145,11 @@ def header_rows(report, width=100):
     for provider, title in (("claude", "Claude"), ("codex", "Codex")):
         row = mapping(mapping(report.get("provider_status")).get(provider))
         week, context = percent(row.get("weekly_used")), percent(row.get("context_left"))
+        if width < 40:
+            output.append("%s | W %s / C %s" % (title,
+                "--" if week is None else "%s%%" % week,
+                "--" if context is None else "%s%%" % context))
+            continue
         text = "%s | week %s | main ctx %s" % (title,
             "--" if week is None else "%s%% used" % week,
             "--" if context is None else "%s%% left" % context)

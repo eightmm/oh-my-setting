@@ -422,7 +422,8 @@ def sanitize_text(value: str, maximum: int = MAX_TEXT_BYTES) -> str:
     return _truncate_utf8(clean, maximum)
 
 
-def sanitize_multiline(value: str, maximum: int = MAX_EXPORT_BYTES) -> str:
+def sanitize_multiline(value: str, maximum: int = MAX_EXPORT_BYTES,
+                       line_maximum: int = MAX_TEXT_BYTES) -> str:
     """Sanitize rendered Markdown without collapsing its line structure.
 
     sanitize_text() folds newlines into spaces, which turns a summary into one
@@ -436,7 +437,7 @@ def sanitize_multiline(value: str, maximum: int = MAX_EXPORT_BYTES) -> str:
     for line in str(value).splitlines():
         leading = re.match(r"^[ \t]*", line)
         prefix = (leading.group(0) if leading else "")[:8]
-        clean = sanitize_text(line[len(leading.group(0)) :] if leading else line)
+        clean = sanitize_text(line[len(leading.group(0)) :] if leading else line, line_maximum)
         lines.append((prefix + clean) if clean else "")
     return _truncate_utf8("\n".join(lines), maximum)
 
