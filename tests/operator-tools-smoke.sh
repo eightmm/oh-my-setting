@@ -4779,12 +4779,16 @@ assert graph_view.render_graph(starter_board, 100, 40, navigation=armed_nav).spl
 # --spawn-main needs no terminal, refuses workers, an absent panel and a full room, and never attaches.
 for spawn_env, expected in (({"OMS_HARNESS_CHILD": "1"}, "worker cannot open owner sessions"),
                             ({"OMS_HARNESS_DELEGATE_DEPTH": "1"}, "worker cannot open owner sessions"),
-                            ({}, "no OMS panel is open for this checkout")):
+                            # Without tmux or the CLI (CI hosts) the tool check refuses first.
+                            ({}, "no OMS panel is open for this checkout" if shutil.which("tmux") and shutil.which("claude")
+                             else "starting a main needs tmux")):
     refused = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--spawn-main", "claude", "--json"],
                              cwd=str(project), env=dict(environment, OMS_PANEL_SESSION="", **spawn_env),
                              capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
     assert refused.returncode != 0 and expected in refused.stderr, (spawn_env, refused.stdout, refused.stderr)
+# The cap is checked after the tool check, so hosts without tmux or a CLI (CI) still reach it.
 with patch.object(panel, "session_owner", return_value=str(project)), patch.object(panel, "panel_room", return_value="r1"), \
+        patch.object(panel.shutil, "which", return_value="/usr/bin/true"), \
         patch.object(panel, "live_mains", return_value=panel.MAX_LIVE_MAINS), patch.object(panel, "add_main_window") as opened_window:
     try:
         panel.spawn_main(project, "claude")

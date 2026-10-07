@@ -1058,13 +1058,17 @@ def bind_main_keys():
     tmux root bindings are server-wide, so a key the user already bound is left alone.
     """
     quiet = dict(capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
-    for key, command, steps in MAIN_KEYS:
-        found = subprocess.run(tmux_command("list-keys", "-T", "root", key), **quiet)
-        if found.returncode == 0 and "oms-panel-" not in found.stdout:
-            continue
-        skip = " ; if-shell -F '%s' %s" % (NOT_MAIN, command)
-        subprocess.run(tmux_command("bind-key", "-n", key, "if-shell", "-F", "#{m:oms-panel-*,#{session_name}}",
-                                    command + skip * steps, "send-keys " + key), **quiet)
+    try:
+        for key, command, steps in MAIN_KEYS:
+            found = subprocess.run(tmux_command("list-keys", "-T", "root", key), **quiet)
+            if found.returncode == 0 and "oms-panel-" not in found.stdout:
+                continue
+            skip = " ; if-shell -F '%s' %s" % (NOT_MAIN, command)
+            subprocess.run(tmux_command("bind-key", "-n", key, "if-shell", "-F", "#{m:oms-panel-*,#{session_name}}",
+                                        command + skip * steps, "send-keys " + key), **quiet)
+    except (OSError, subprocess.SubprocessError):
+        # Keys are a convenience: a missing or unresponsive tmux leaves the panel's own flow to report it.
+        return
 
 
 def legacy_session(repo):
