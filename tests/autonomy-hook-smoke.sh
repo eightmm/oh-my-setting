@@ -692,9 +692,11 @@ with patch.object(hook_state, "percent_left_from_cache", return_value=25), \
 with patch.object(hook_state, "percent_left_from_cache", return_value=40):
     assert not hook_state.context_pressure_hint(pressure_payload)
 with patch.object(hook_state, "percent_left_from_cache", return_value=10), \
-        patch.object(hook_state, "start_handoff_capture", return_value=False):
+        patch.object(hook_state, "start_handoff_capture", return_value=False) as launch:
     assert "context low" in hook_state.context_pressure_hint(pressure_payload)
     assert json.loads(capture_path.read_text())["captured"] is False, "warning band latched a skipped capture"
+    hook_state.context_pressure_hint(pressure_payload)
+    assert launch.call_count == 2, "an announced band suppressed the failed capture retry"
 tower = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 assert "control-tower main" in tower and "--owner claude --room binding-room" in tower, tower
 assert "#1 Opus 5.5" in tower and "trust boundaries" in tower, tower

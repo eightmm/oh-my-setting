@@ -231,7 +231,7 @@ def plan_tasks(repo_path):
     return [{"id": clean(row.get("id"), 40), "title": clean(row.get("title"), 80),
              "state": clean(row.get("state"), 20),
              "claimed_by": clean(row.get("claimed_by_participant"), 80) or None}
-            for row in rows[:40] if isinstance(row, dict) and row.get("id")]
+            for row in rows if isinstance(row, dict) and row.get("id")]
 
 
 def build(directory, repo_name, repo_path="", now=None):

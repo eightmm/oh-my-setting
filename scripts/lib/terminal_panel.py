@@ -833,7 +833,24 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1):
     return argv
 
 
-def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=False):
+def pick_main(repo, provider):
+    """The control menu's live main for a call: the only one, or the person's numbered choice; None outside a room."""
+    room_id = os.environ.get("OMS_ROOM_ID")
+    if not room_id or os.environ.get("OMS_ROOM_PARTICIPANT"):
+        return None
+    mains = active_mains(repo, room_id, room.project(room.records(repo, room_id)), provider)
+    if len(mains) <= 1:
+        return None
+    names = sorted(mains)
+    for number, ident in enumerate(names, 1):
+        print("%s. %s / %s" % (number, ident, clean(mains[ident].get("refs", {}).get("panel_label"), 80)))
+    picked = read_field("Main for this call (number): ")
+    if not picked.isdigit() or not 1 <= int(picked) <= len(names):
+        raise ValueError("choose a listed main")
+    return names[int(picked) - 1]
+
+
+def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=False, main=None):
     if owner not in PROVIDERS:
         raise ValueError("choose a supported council owner")
     argv = council_command(repo, prompt, task_id, label, thread, rounds)
@@ -846,6 +863,15 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=
         return 0
     env = child_environment(owner, repo)
     parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
+    room_id = env.get("OMS_ROOM_ID")
+    if not parent and room_id and not env.get("OMS_ROOM_PARTICIPANT"):
+        # The control window has no inherited identity: bind the debate to a live main so Debate shows it.
+        found = active_mains(repo, room_id, room.project(room.records(repo, room_id)), owner)
+        if main:
+            found = {main: found[main]} if main in found else {}
+        if len(found) != 1:
+            raise ValueError("select a unique active main in this room before starting a council")
+        parent = next(iter(found.values()))["attempt_id"]
     if parent:
         record = json.loads(events(repo, "show", "--attempt", parent, "--json", output=True))
         if record.get("tool") != "panel-main" or record.get("provider") != owner or record.get("terminal"):
@@ -1396,22 +1422,29 @@ PARTICIPANT = r"[A-Za-z0-9._-]{1,128}"
 
 
 def live_mains(repo, session, room_id):
-    """Joined mains with a live panel-main attempt, plus windows opened but not yet enrolled."""
-    joined = {p["participant"] for p in room.status(repo, room_id)["participants"]
-              if p["joined"] and p["role"] == "main"}
-    live = set()
-    for row in main_history(repo, room_id):
-        refs = row.get("refs", {})
-        ident = refs.get("panel_room_participant", row.get("attempt_id"))
-        if (ident in joined and row.get("tool") == "panel-main" and row.get("terminal") is not True
-                and row.get("state") in {"starting", "working", "verifying", "review", "waiting_input", "waiting_approval"}):
-            live.add(ident)
+    """Panel-wide: joined mains with a live panel-main attempt in any room this panel's windows belong to, plus windows opened but not yet enrolled."""
     found = subprocess.run(tmux_command("list-windows", "-t", "=" + session, "-F",
                                         "#{@oms_panel_owner}\t#{@oms_panel_room}\t#{@oms_panel_room_participant}"),
                            capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
-    pending = [r for r in (line.replace("\r", "").split("\t") for line in found.stdout.splitlines())
-               if len(r) == 3 and r[0] in PROVIDERS and r[1] == room_id and not r[2]]
-    return len(live) + len(pending)
+    windows = [r for r in (line.replace("\r", "").split("\t") for line in found.stdout.splitlines())
+               if len(r) == 3 and r[0] in PROVIDERS]
+    live = set()
+    for ident in sorted({room_id} | {r[1] for r in windows if r[1]}):
+        try:
+            joined = {p["participant"] for p in room.status(repo, ident)["participants"]
+                      if p["joined"] and p["role"] == "main"}
+            history = main_history(repo, ident)
+        except (ValueError, OSError):
+            if ident == room_id:
+                raise
+            continue
+        for row in history:
+            refs = row.get("refs", {})
+            who = refs.get("panel_room_participant", row.get("attempt_id"))
+            if (who in joined and row.get("tool") == "panel-main" and row.get("terminal") is not True
+                    and row.get("state") in {"starting", "working", "verifying", "review", "waiting_input", "waiting_approval"}):
+                live.add((ident, who))
+    return len(live) + sum(1 for r in windows if not r[2])
 
 
 def spawn_main(repo, provider, task=None, model=None, started_by=None):
@@ -1432,7 +1465,7 @@ def spawn_main(repo, provider, task=None, model=None, started_by=None):
     env["OMS_PANEL_SESSION"] = session
     ident = os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
     if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
-        raise ValueError("this room already has %s live mains; finish one before starting another" % MAX_LIVE_MAINS)
+        raise ValueError("this panel already has %s live mains; finish one before starting another" % MAX_LIVE_MAINS)
     pane = add_main_window(repo, session, provider, board_view("auto"), False, env, None, model, task, started_by)
     index = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{window_index}"),
                            capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL).stdout.strip()
@@ -1469,11 +1502,12 @@ def close_main(repo, ident, participant):
               if len(r) == 4 and r[2] == participant]
     attempts = {row.get("attempt_id") for row in main_history(repo, ident, participant) if row.get("tool") == "panel-main"}
     proven = [r for r in tagged if r[1] and r[1] in attempts and r[3] == ident]
-    if len(tagged) != len(proven) or len(proven) > 1:
+    if len(tagged) != len(proven):
         raise ValueError("no single window is proven to be that main's; nothing closed")
+    if len(proven) != 1:
+        raise ValueError("no single window is proven to be that main's; nothing closed")
+    subprocess.run(tmux_command("kill-window", "-t", proven[0][0]), check=True, timeout=5, stdin=subprocess.DEVNULL)
     room.append(repo, ident, {"kind": "leave", "participant": participant}, "Participant left")
-    if proven:
-        subprocess.run(tmux_command("kill-window", "-t", proven[0][0]), check=True, timeout=5, stdin=subprocess.DEVNULL)
 
 
 def close_selected(repo, navigation, state, unicode):
@@ -1516,7 +1550,7 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
                 # An explicit --room wins; otherwise new mains default to the panel's open room.
                 os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
                 if live_mains(repo, session, os.environ["OMS_ROOM_ID"]) >= MAX_LIVE_MAINS:
-                    raise ValueError("this room already has %s live mains; finish one before starting another" % MAX_LIVE_MAINS)
+                    raise ValueError("this panel already has %s live mains; finish one before starting another" % MAX_LIVE_MAINS)
                 created = "window"
                 pane = add_main_window(repo, session, launch, view, attention_only, env, resume, model, task)
                 subprocess.run(tmux_command("select-window", "-t", pane), check=True)
@@ -1687,7 +1721,7 @@ def snapshot(repo, room_id=None):
                     run = subprocess.run(["bash", str(ENTRY), "agent-plan", "--repo", str(repo), "list", "--json"],
                                          capture_output=True, text=True, timeout=5, check=False)
                     if run.returncode == 0:
-                        state["room"]["repo_tasks"] = json.loads(run.stdout).get("tasks", [])[:20]
+                        state["room"]["repo_tasks"] = json.loads(run.stdout).get("tasks", [])
             except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
                 if ident:
                     state["room"] = {"id": ident, "error": "room evidence unavailable"}
@@ -1745,6 +1779,7 @@ def snapshot(repo, room_id=None):
                                               if row.get("outcome") in {"completed", "accepted"}}
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
+                state["awaiting_admission"] = awaiting_admission(repo, state)
         return state, status
     except (OSError, ValueError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
         return {"repo": {"name": repo.name}, "collection": {"ok": False}}, 1
@@ -1816,8 +1851,6 @@ def show(repo, provider, previous=None, menu=True, clear=True, main_attempt=None
         from panel_metrics import collect
         if state.get("room", {}).get("participants"):
             state = dict(state, provider_status=collect(state, main_attempt, repo=repo))
-            if menu:
-                state["awaiting_admission"] = awaiting_admission(repo, state)
         if cache is not None:
             cache.update(state=state, status=status)
     text, size, capable = frame_view(repo, provider, state, previous, menu, main_attempt,
@@ -2300,6 +2333,14 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
     capable = terminal_style()[0]
     motion = capable and not no_animation and os.environ.get("OMS_PANEL_NO_ANIMATION") != "1"
     navigation = {"collapsed": set(), "offset": 0}
+    if os.environ.get("TMUX"):
+        # A --launch panel has no control window; F5 then has nowhere to go, so the board does not offer it.
+        try:
+            names = subprocess.run(tmux_command("list-windows", "-F", "#{window_name}"), capture_output=True,
+                                   text=True, check=False, timeout=3, stdin=subprocess.DEVNULL).stdout.split()
+            navigation["control_window"] = "control" in names
+        except (OSError, subprocess.SubprocessError):
+            pass
     try:
         kept = json.loads(os.environ.pop("OMS_PANEL_RESUME", "") or "{}")
     except ValueError:
@@ -2457,7 +2498,10 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             except (OSError, ValueError, subprocess.SubprocessError):
                                 navigation["notice"] = "Board placement unchanged; window resize could not move it"
                         size = redraw()
+                    batch_hits = navigation.get("hits")
                     for event in events:
+                        if event[0] == "click" and navigation.get("hits") != batch_hits:
+                            continue  # The board was redrawn after this batch was read; the click names the old map.
                         revision += 1
                         navigation.pop("notice", None)
                         armed = navigation.pop("spawn_armed", False)
@@ -2498,6 +2542,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             reset_group_view(navigation)
                             density = "graph"
                             navigation["view"] = density
+                        elif event[0] == "escape" and navigation.get("keys_help"):
+                            navigation["keys_help"] = False
                         elif event[0] == "escape":
                             navigation.pop("opening", None)
                             if not navigation.pop("detail", None):
@@ -2785,6 +2831,9 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                 if action:
                     width = max(1, shutil.get_terminal_size().columns)
                     navigate(repo, action, cache.get("state", {}), navigation, width)
+                    if navigation.get("opening"):
+                        # No watch loop reads in the background here; read now so the row opens.
+                        finish_opening(navigation, read_evidence(repo, navigation["opening"]))
                 show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
             navigation.pop("queued", None)
             if time.monotonic() >= deadline:
@@ -2915,18 +2964,7 @@ def interactive(repo, view="auto", attention_only=False):
                             if role == "worker" and not explicit else "routine")
                 seat = (read_field("Seat (auto/astra/fable) [auto]: ", required=False) or "auto"
                         if role != "worker" and not explicit else "auto")
-                main = None
-                room_id = os.environ.get("OMS_ROOM_ID")
-                if room_id and not os.environ.get("OMS_ROOM_PARTICIPANT"):
-                    mains = active_mains(repo, room_id, room.project(room.records(repo, room_id)), provider)
-                    if len(mains) > 1:
-                        names = sorted(mains)
-                        for number, ident in enumerate(names, 1):
-                            print("%s. %s / %s" % (number, ident, clean(mains[ident].get("refs", {}).get("panel_label"), 80)))
-                        picked = read_field("Main for this call (number): ")
-                        if not picked.isdigit() or not 1 <= int(picked) <= len(names):
-                            raise ValueError("choose a listed main")
-                        main = names[int(picked) - 1]
+                main = pick_main(repo, provider)
                 status = dispatch(repo, provider, role, workload, seat, "write" if choice == "6" else "read",
                                   purpose, prompt, brief, verify, target=target, model=model, effort=effort, main=main)
                 previous = "%s %s exit=%s (not acceptance)" % (provider, role, status)
@@ -2961,7 +2999,7 @@ def interactive(repo, view="auto", attention_only=False):
                 task_id = read_field("Discussion task ID: ")
                 label = read_field("Task title: ")
                 prompt = read_field("Question for the four seats: ")
-                status = council(repo, provider, task_id, label, prompt)
+                status = council(repo, provider, task_id, label, prompt, main=pick_main(repo, provider))
                 previous = "council exit=%s / owner decision pending" % status
                 read_field("Press Enter to return: ", required=False)
             elif choice == "f":

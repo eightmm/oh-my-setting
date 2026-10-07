@@ -264,6 +264,14 @@ def handled_results(room):
                    if mapping(r).get("read") is True}
 
 
+def failure_handled(report, call, read_results=None):
+    """Only consumed result handoffs or an owner's accepted/completed task decision settle failures."""
+    read_results = handled_results(mapping(report.get("room"))) if read_results is None else read_results
+    return (call["state"] in ATTENTION_STATES - {"waiting_input", "waiting_approval", "review", "blocked"}
+            and ("result-" + str(call.get("participant")) in read_results
+                 or mapping(report.get("finalized")).get(call.get("task_id")) in {"completed", "accepted"}))
+
+
 def settler(report):
     """(settled, aged) for calls: finished, aged-out or handled calls leave the board; shared with the tree."""
     room = mapping(report.get("room"))
@@ -282,10 +290,8 @@ def settler(report):
         # Finished or aged-out calls, and failed ones whose result its main has read or finalized, leave the board.
         # A review or a block ends only with the owner's recorded decision on the task, never by reading a result.
         closed = finalized.get(call.get("task_id")) in {"completed", "accepted"}
-        return call["state"] in FINISHED or call["state"] == "presence unknown" and aged(call) or (
-            call["state"] in ATTENTION_STATES - {"waiting_input", "waiting_approval", "review", "blocked"}
-                                             and ("result-" + str(call.get("participant")) in read_results or closed)
-        ) or call["state"] in {"review", "blocked"} and closed
+        return (call["state"] in FINISHED or call["state"] == "presence unknown" and aged(call)
+                or failure_handled(report, call, read_results) or call["state"] in {"review", "blocked"} and closed)
     return settled, aged
 
 
@@ -329,7 +335,7 @@ def call_span(call, arrow="->"):
     if state == "failed" and call.get("guard"):
         words = "guard stop"
     elif state == "failed" and call.get("exit") is not None:
-        words = ("timed out" + (" · c continue" if call.get("role") == "worker" else "")) if call["exit"] == 124 \
+        words = ("timed out" + (" · continue with --continue" if call.get("role") == "worker" else "")) if call["exit"] == 124 \
             else "failed (exit %s)" % call["exit"]
     if state in LIVE_STATES or not call.get("ended"):
         end = ""
@@ -678,7 +684,7 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
     if member.get("round", 1) > 1:
         lines += wrapped("Round %s of this task, continuing %s" % (member["round"], names.get(member.get("continues"), "its earlier worker")), width, 2)
     if member.get("exit") == 124 and member.get("task_id"):
-        lines += wrapped("Timed out. Continue it from its main: oms panel --dispatch worker --continue %s --brief-file PATH --verify COMMAND"
+        lines += wrapped("Timed out. Continue it from its main: oms panel --dispatch worker --continue %s --access write --purpose implement --brief-file PATH --verify COMMAND"
                          % clean(member["task_id"]), width, 3)
     access = {"write": "can edit", "read": "read-only"}.get(member.get("access"), "permissions unrecorded")
     metadata = "%s %s%s" % (access.capitalize(), where, " · effort " + member["effort"] if member.get("effort") else "")
@@ -1635,9 +1641,18 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 plain = {i + 1 for i in range(capacity - 1) if first + i not in targets}
             elif active == "plan":
                 plan = plan_rows(report, labels, width - 4, unicode)
-                first = min(scrolled.get("detail", 0), max(0, len(plan) - capacity))
+                if capacity == 1 and len(plan) > 1:
+                    plan.append("Full plan: oms agent-plan list")
+                page_size = max(1, capacity - int(len(plan) > capacity))
+                first = min(scrolled.get("detail", 0), max(0, len(plan) - page_size))
                 scrolled_now["detail"] = first
-                rows = [(text, None, False) for text in plan[first:first + capacity]]
+                rows = [(text, None, False) for text in plan[first:first + page_size]]
+                if len(plan) > capacity:
+                    notice = "%s rows hidden / wheel; full: oms agent-plan list" % (len(plan) - page_size)
+                    if capacity > 1:
+                        rows.insert(0, (notice, None, False))
+                    else:
+                        rows[0] = ("%s rows hidden / wheel | %s" % (len(plan) - page_size, rows[0][0]), None, False)
             elif active == "debate":
                 rows = debate_body(report, shown_main, width - 4, capacity, navigation, labels, unicode)
             else:
@@ -1714,7 +1729,7 @@ def action(member):
 
 
 def footer_hints(navigation, width, managed, unicode, member, mains, graph):
-    """At most five hints for what is selected; `?` swaps in the full list of working keys."""
+    """At most three hints for what is selected, then the fixed panel keys; `?` swaps in the full list of working keys."""
     selected = navigation.get("selected")
     kind = selected[0] if selected else "chat"
     arrows, move = ("←→", "↑↓") if unicode else ("<>", "^v")
@@ -1724,7 +1739,7 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph):
         keys = ["Enter Open", move + " Move", arrows + " Main" if mains > 1 else "",
                 "Space " + ("Pin" if graph else "Fold") if mains else "", "a Ask advisor",
                 "w Worktree" if worktree else "", "f Full result" if navigation.get("full_result") else "",
-                "Tab Next tab", "g Graph", "t Tree",
+                "Tab Next tab" if graph else "", "g Graph", "t Tree", "n New main" if managed else "",
                 "v " + ("Collapse" if navigation.get("expanded") else "Expand"), "b Attention", "Esc Back",
                 "Shift-drag Copy" if managed else "", "F6/F7 Main" if managed else "", toggle if managed else "q Quit", "? Hide"]
         lines = [""]
@@ -1732,15 +1747,19 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph):
             if lines[-1] and display_width(lines[-1] + "  " + key) > width:
                 lines.append("")
             lines[-1] += ("  " if lines[-1] else "") + key
-        return lines[:4] + ["Tab badges: W workers  A advisors  ! needs you  M mail  ? open questions  c context left"]
-    contextual = (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + ["f Full result" if navigation.get("full_result") else "",
+        return lines[:4] + (["Tab badges: W workers  A advisors  ! needs you  M mail  ? open questions  c context left"] if graph else [])
+    tab = navigation.get("tab") if graph and not navigation.get("detail") else None
+    contextual = ([move + " Message", "Enter Open", arrows + " Filter"] if tab == "messages"
+                  else [move + " Seat", "Enter Open", arrows + " Target"] if tab == "debate" else None)
+    contextual = contextual or (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + ["f Full result" if navigation.get("full_result") else "",
                   "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
                   "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "Enter Show",
                   "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
-                  "Tab Next tab",
+                  "Tab Next tab" if graph and not navigation.get("detail") else "",
                   ("Space Pin" if graph else "Space Fold") if kind == "chat" and (mains > 1 or not graph) else "Space Fold" if kind == "group" else ""]
     # The panel-wide F-keys stay fixed at the end of every board; board keys fill what is left.
-    reserved = ["F6/F7 Main", toggle, "F5 Control", "F12 Keys"] if managed else ["q Quit", "? Keys"]
+    control = navigation.get("control_window", True)
+    reserved = ["F6/F7 Main", toggle] + (["F5 Control"] if control else []) + ["F12 Keys"] if managed else ["q Quit", "? Keys"]
     packed = []
     tail = "  ".join(reserved)
     for hint in [h for h in contextual if h]:
@@ -1748,7 +1767,7 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph):
             packed.append(hint)
     if display_width(tail) > width and managed:
         # Narrow boards keep every panel key visible in short form.
-        reserved = ["F6/F7 F9 F5", "F12 Keys"]
+        reserved = ["F6/F7 F9 F5" if control else "F6/F7 F9", "F12 Keys"]
         tail = "  ".join(reserved)
         packed = []
     return ["  ".join(packed + reserved)] if display_width(tail) <= width else [clipped(tail, width)]

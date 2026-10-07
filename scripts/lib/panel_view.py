@@ -7,6 +7,7 @@ import unicodedata
 from dashboard_projection import (clean, count, display_width, fit, listing, mapping, number, use_unicode,
                                   wrap_label as wrapped)
 from panel_routing import policy
+from room import CLOSE_PREFIX
 
 
 
@@ -300,16 +301,16 @@ def age_label(stamp, now=None):
             else "%sh" % (seconds // 3600) if seconds < 86400 else "%sd" % (seconds // 86400))
 
 
-CLOSE_PREFIX = "Close requested: "
-
-
 def close_requests(report, unicode=True):
     """Open requests from a main to close a main, one per target; only the person acts on them."""
     from room_view import clock_stamp, nodes
     members = nodes(report)
     mains = {m["participant"]: m for m in members if m.get("role") == "main"}
     windows = mapping(report.get("main_windows"))
-    pending = listing(mapping(report.get("room")).get("messages"))
+    room_state = mapping(report.get("room"))
+    pending = listing(room_state.get("messages"))
+    shown = {m.get("id") for m in pending if isinstance(m, dict)}
+    pending = [m for m in listing(room_state.get("close_requests")) if m.get("id") not in shown] + pending
 
     def name(member):
         label = MODEL_NAMES.get(member.get("model"), member.get("model")) or member.get("provider") or "unknown"
@@ -335,7 +336,7 @@ def close_requests(report, unicode=True):
 
 def inbox_items(report, unicode=True):
     """What the person must act on, newest first: failures, waits, broadcasts from mains, patches to admit."""
-    from room_view import nodes, readable
+    from room_view import failure_handled, handled_results, nodes, readable
     members = nodes(report)
     name = lambda m: MODEL_NAMES.get(m.get("model"), m.get("model")) or m.get("provider") or "unknown"
     mains = {ident: m for m in members if m.get("role") == "main"
@@ -344,6 +345,7 @@ def inbox_items(report, unicode=True):
     stamps = {row.get("attempt_id"): row.get("updated_at") for key in ("recent", "active_recent")
               for row in listing(attempts.get(key))}
     finalized, awaiting = mapping(report.get("finalized")), set(listing(report.get("awaiting_admission")))
+    read_results = handled_results(mapping(report.get("room")))
 
     def who(member):
         if member.get("role") == "main":
@@ -353,7 +355,7 @@ def inbox_items(report, unicode=True):
     items = []
     for member in members:
         state = member["state"]
-        if state in FAILED_WORDS and member.get("task_id") not in finalized:
+        if state in FAILED_WORDS and not failure_handled(report, member, read_results):
             what, shown, style = FAILED_WORDS[state], state, "bad"
         elif state in WAITING_WORDS:
             what, shown, style = WAITING_WORDS[state], state, "alert"
@@ -465,7 +467,7 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
         lines.append(clipped(text, width))
         lines[-1] = (PALETTE[style] + lines[-1] + "\033[0m") if color else lines[-1]
     if boxed:
-        title = "Needs you" + (sep + "%s" % len(items) if items else "") + (sep + "Up/Down, Enter opens"
+        title = "Needs you" + (sep + "%s" % len(items) if items else "") + (sep + "Up/Down, Enter opens" + (", x closes" if any(i["action"][0] == "close" for i in items) else "")
                                                                           if items and not navigation.get("line_input") else "")
         lines.append((PALETTE["alert" if items else "dim"] if color else "") + box_edge(title, width, unicode) + ("\033[0m" if color else ""))
     for text, style, action in body:

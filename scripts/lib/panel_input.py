@@ -221,6 +221,8 @@ def choose(event, navigation):
                 and target[0] in ("result", "debate")
                 and (navigation.get("preview") or {}).get("target") == target):
             return target
+    elif navigation.get("surface") == "inbox" and kind in (" ", "left", "right"):
+        pass  # The control list has no folds or main tabs; these keys must not silently move or record anything.
     elif kind in ("left", "right"):
         mains = [item for item in items if item[0] == "chat"]
         current = next((item for item in (selected, navigation.get("primary")) if item in mains), None)

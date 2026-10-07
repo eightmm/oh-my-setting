@@ -1090,6 +1090,20 @@ assert [row.split(" · ")[0].split()[-1] for row in plan_rows[1:]] == ["t-ver", 
 assert "· Verified one · codex · make d" in plan and "· Running one · #1 Opus 5.5 · make c" in plan and "· Review one · claude ·" in plan, plan
 assert "✓ t-ver" in plan and "○ t-rdy" in plan and "✗ t-blk" in plan, plan
 assert board("plan", unicode=False)[1].isascii()
+# Long plans count off-screen rows and reach the last actionable task through the existing wheel band.
+long_report = deepcopy(msg_report)
+long_report["room"]["repo_tasks"] = [{"id": "long-%02d" % i, "title": "Plan task %s" % i,
+                                       "state": "ready" if i == 44 else "done"} for i in range(45)]
+for glyphs in (True, False):
+    long_nav = {"selected": ("chat", "m2"), "tab": "plan"}
+    picture = render(long_report, "codex", 100, 36, view="graph", navigation=long_nav, unicode=glyphs)
+    assert "hidden" in picture and "oms agent-plan list" in picture, picture
+    band = next(b for b in long_nav["bands"] if b["name"] == "detail")
+    for unused in range(15):
+        choose(("scroll", 3, 5, band["y1"] + 1), long_nav)
+    picture = render(long_report, "codex", 100, 36, view="graph", navigation=long_nav, unicode=glyphs)
+    assert "long-44" in picture and "hidden" in picture and "oms agent-plan list" in picture, picture
+    assert len(picture.splitlines()) == 36 and all(display_width(line) <= 100 for line in picture.splitlines())
 # Debate: opener and time by board name and local clock, question, one line per seat, stance cut, choice changes only.
 nav, text = board("debate")
 assert "No debate opened by #1 Opus 5.5 · a main opens one with oms panel --council" in board("debate", nav={"selected": ("chat", "m1")})[1]
@@ -1140,6 +1154,9 @@ assert tab_event(("up",), nav) and tab_event(("enter",), nav)
 opened_message = board("messages", 80, 60, nav=nav)[1]
 assert "END" in opened_message and "paragraph two" in opened_message and opened_message.count("word") > 70, opened_message
 assert tab_event(("enter",), nav) and nav["messages_view"]["open"] is None
+# Esc closes an open message and nothing else; with none open it is left to the board.
+assert tab_event(("enter",), nav) and nav["messages_view"]["open"] is not None
+assert tab_event(("escape",), nav) and nav["messages_view"]["open"] is None and not tab_event(("escape",), nav)
 nav["selected"] = ("chat", "m3")
 assert tab_event(("right",), nav)
 narrowed = board("messages", 110, 40, nav=nav)[1]
@@ -1149,6 +1166,22 @@ nav, listed = board("messages", 110, 40)
 hit = next(h for h in nav["hits"] if h["action"][0] == "message")
 assert listed.split("\n")[hit["y"] - 1].lstrip().startswith("│") and "line" in listed.split("\n")[hit["y"] - 1], listed
 assert tab_event(("click", 5, hit["y"]), nav) and nav["messages_view"]["open"] == hit["action"][1]
+# The footer lists keys that work: Messages/Debate show their own keys; the tree has no tabs, so no Tab hint or badge line.
+for name, hint in (("messages", "Message"), ("debate", "Seat")):
+    nav, text = board(name, 110, 40, managed=True)
+    foot = text.split("\n")[-1]
+    assert hint in foot and "Enter Open" in foot and "Ask advisor" not in foot and "Space Pin" not in foot, foot
+    assert tab_event(("tab",), nav) and nav["tab"] != name
+nav, text = board("detail", 110, 40, managed=True)
+assert "Tab Next tab" in text.split("\n")[-1] and "Tab badges" in render(msg_report, "codex", 110, 40, view="graph", navigation=dict(nav, keys_help=True), main_attempt="a2")
+from panel_tree import render_tree
+tree_nav = {"selected": ("chat", "m2")}
+tree_text = render_tree(msg_report, 110, 40, navigation=tree_nav)
+assert "Tab Next tab" not in tree_text, tree_text
+# The watch loop turns an unconsumed Tab into Down, so on the tree it is only a selection move.
+assert not tab_event(("tab",), tree_nav) and not tab_event(("tab",), dict(tree_nav, surface="graph", detail={"target": ("chat", "m2")}))
+helped = render_tree(msg_report, 110, 40, navigation=dict(tree_nav, keys_help=True))
+assert "Tab Next tab" not in helped and "Tab badges" not in helped and "n New main" not in render_tree(msg_report, 110, 40, navigation={"keys_help": True}), helped
 # Detail keeps its content after Esc dismissed the preview: the box stays so every tab remains reachable.
 nav, dismissed = board("plan", 110, 40, nav={"dismissed": True, "tab": "plan"})
 assert "t-ver" in dismissed and "[ Plan ]" in dismissed and "RECENT MESSAGES" not in dismissed, dismissed
@@ -1368,6 +1401,38 @@ for pressed, shown in [("t", "tree")]:
       finally:
           released.set()
           assert finished_read.wait(1)
+
+# Keys run against the board that was drawn: Esc closes ? help alone, and a click after a redraw in the same read is dropped.
+class BatchInput:
+    fd = 0
+    def __init__(self, batches):
+        self.batches = list(batches)
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def discard_clicks(self): pass
+    def wait(self, seconds): return self.batches.pop(0) if self.batches else [("q",)]
+def drive(batches, view="graph"):
+    seen, kept = [], []
+    def record(*args, **kwargs):
+        seen.append(kwargs["navigation"])
+        return panel_frame_view(*args, **kwargs)
+    with patch.object(panel, "snapshot", return_value=(live, 0)), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "terminal_style", return_value=(True, False, True)), \
+            patch.object(panel.sys, "stdout", io.StringIO()), \
+            patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((100, 40))), \
+            patch.object(panel, "frame_view", side_effect=record), \
+            patch("panel_input.choose", side_effect=lambda event, nav: kept.append(event) or choose(event, nav)), \
+            patch("panel_input.TerminalInput", lambda *a, **k: BatchInput(batches)):
+        assert panel.watch(Path("."), "codex", view=view, no_animation=True) == 0
+    return seen[-1], kept
+panel_frame_view = panel.frame_view
+helped, unused = drive([[("?",)], [("escape",)]])
+assert not helped.get("keys_help") and not helped.get("dismissed"), helped
+unused, kept = drive([[("t",), ("click", 99, 39)]])
+assert not any(event[0] == "click" for event in kept), kept
+unused, kept = drive([[("click", 99, 39)]])
+assert [event[0] for event in kept] == ["click"], kept
 
 # A completed refresh must preserve standalone view choices made with keys.
 class ImmediateRead:
@@ -1851,6 +1916,33 @@ assert any(a["tool"] == "panel-council" and a["state"] == "done" for a in counci
 assert {a["refs"].get("panel_model") for a in council_attempts if a["tool"] != "panel-council"} == \
     {"gpt-6.1-sol", "claude-opus-5-5", "gpt-6-astra", "claude-fable-5-1"}, council_attempts
 assert all(a.get("parent_attempt_id") == main_attempts["codex"] for a in council_attempts)
+# A control-menu council has no inherited main: it binds the room's one live main, or refuses, so Debate can show it.
+class CouncilBound(Exception):
+    pass
+def council_events(repo, *args, **kwargs):
+    if args[0] == "show":
+        return json.dumps({"tool": "panel-main", "provider": "codex", "terminal": False})
+    raise CouncilBound(list(args))
+menu_env = {"OMS_ROOM_ID": "council-room", "OMS_ROOM_PARTICIPANT": ""}
+with patch.dict(os.environ, menu_env), patch.object(panel.room, "records", return_value=[]), \
+        patch.object(panel.room, "project", return_value={}), patch.object(panel, "events", council_events), \
+        patch.object(panel, "active_mains", return_value={"m1": {"attempt_id": "att_m1"}}):
+    try:
+        panel.council(project, "codex", "menu-council", "Menu council", "Compare options.")
+    except CouncilBound as bound:
+        assert "--parent-attempt-id" in bound.args[0] and "att_m1" in bound.args[0], bound.args
+    else:
+        raise AssertionError("council did not start")
+for none in ({}, {"m1": {"attempt_id": "a1"}, "m2": {"attempt_id": "a2"}}):
+    with patch.dict(os.environ, menu_env), patch.object(panel.room, "records", return_value=[]), \
+            patch.object(panel.room, "project", return_value={}), patch.object(panel, "events", council_events), \
+            patch.object(panel, "active_mains", return_value=none):
+        try:
+            panel.council(project, "codex", "menu-council", "Menu council", "Compare options.")
+        except ValueError as refused:
+            assert "unique active main" in str(refused)
+        else:
+            raise AssertionError("a council without a unique main started")
 
 import panel_results as saved
 from panel_view import render_results
@@ -3691,6 +3783,11 @@ for view_name in ("graph", "tree"):
                 assert footer_line.endswith("F12 Keys" if managed_board else "? Keys"), (view_name, columns, footer_line)
             assert ("F9" in footer_line) == managed_board and ("q Quit" in footer_line) == (not managed_board), footer_line
             assert len(re.split(r"  +", footer_line)) <= 7 and "Esc Back" not in footer_line and "q Chat" not in footer_line, footer_line
+    # A --launch panel has no control window: its boards do not offer F5.
+    for control, offered in ((True, True), (False, False)):
+        launched = render(flow, "codex", 120, 24, view="graph", main_attempt="flow-attempt",
+                          navigation={"control_window": control}, managed=True).splitlines()[-1]
+        assert ("F5 Control" in launched) == offered and launched.endswith("F12 Keys"), launched
     open_nav = {"preview": {"target": ("chat", "flow-main")}}
     assert "Esc Close" in render(flow, "codex", 157, 24, view=view_name, main_attempt="flow-attempt",
                                  navigation=open_nav, managed=True).splitlines()[-1]
@@ -3927,10 +4024,20 @@ assert panel.main_needs_attention(alarm, "flow-attempt") and not panel.main_need
 alarm["room"]["messages"] = [{"id": "result-builder", "sender": "builder", "recipient": "flow-attempt", "message_kind": "handoff", "pending_for": []}]
 assert not panel.main_needs_attention(alarm, "flow-attempt")
 # A handled failure stays handled once later mail evicts its handoff from the message window.
+from panel_view import inbox_items
+assert not any(i["action"] == ("result", "builder") for i in inbox_items(alarm))
 alarm["room"]["messages"] = []
 assert panel.main_needs_attention(alarm, "flow-attempt")
+assert any(i["action"] == ("result", "builder") for i in inbox_items(alarm))
 alarm["room"]["call_results"] = {"builder": {"exit": 1, "read": True}}
 assert not panel.main_needs_attention(alarm, "flow-attempt")
+assert not any(i["action"] == ("result", "builder") for i in inbox_items(alarm))
+for state in ("failed", "timed_out", "abandoned", "orphaned", "review", "blocked", "waiting_approval"):
+    failure = deepcopy(alarm)
+    next(a for a in failure["attempts"]["active_recent"] if a["attempt_id"] == "builder")["state"] = state
+    assert any(i["action"] == ("result", "builder") for i in inbox_items(failure)) == (state in {"review", "waiting_approval"}), state
+    member = next(m for m in graph_text.nodes(failure) if m["participant"] == "builder")
+    assert (graph_text.call_classifier(failure)(member) == "past") == (state not in {"review", "blocked", "waiting_approval"}), state
 # An attention-marked window name keeps the geometry fields and the split text apart.
 with patch.object(panel, "tmux_command", side_effect=lambda *a: ["x"]), patch.object(panel.subprocess, "run",
         return_value=subprocess.CompletedProcess([], 0, "1 0 2 100 50 100 25\t! codex\ttop:30\n", "")):
@@ -4341,7 +4448,8 @@ assert "Old job 03" in ended_text and ended_text.count("finished") == 12, ended_
 # A worker that hit its wall clock says how to continue; later rounds of one task are numbered.
 timed = deepcopy(ended)
 timed["room"]["call_results"]["old-00"]["exit"] = 124
-assert "timed out · c continue" in render(timed, "codex", 120, 120, view="tree", navigation={})
+timed_text = render(timed, "codex", 120, 120, view="tree", navigation={})
+assert "timed out · continue with --continue" in timed_text and "c continue" not in timed_text, timed_text
 from room_view import nodes as room_nodes
 rounded = deepcopy(ended)
 rounded["attempts"] = {"active_recent": [], "recent": [
@@ -4406,6 +4514,46 @@ with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0))
         patch.object(panel.subprocess, "run", side_effect=subprocess.TimeoutExpired("agent-events", 5)):
     got, _ = panel.snapshot(Path("."), "flow-room")
 assert "room_attempts" not in got and got["room"]["participants"] == members, got
+# Admission belongs to the shared snapshot, including watch reads, not only the control menu.
+admission_room = {"id": "admission-room", "participants": [
+    {"participant": "admission-main", "role": "main", "joined": True},
+    {"participant": "admission-worker", "role": "worker", "parent": "admission-main", "joined": True}]}
+admission_state = {"repo": {"name": "x"}, "attempts": {"recent": [{
+    "attempt_id": "admission-worker", "task_id": "admission-task", "state": "done",
+    "panel": {"room_id": "admission-room", "room_participant": "admission-worker", "role": "worker", "access": "write"}}]}}
+for recorded in ([{"patch": "change.patch"}], [{"patch": "change.patch"}, {"kind": "patch-admit"}]):
+    panel.ADMISSION_CHECKS.clear()
+    with patch.object(panel, "dashboard", side_effect=lambda *a, **k: (deepcopy(admission_state), 0)), \
+            patch.object(room_module, "status", side_effect=lambda *a: deepcopy(admission_room)), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": recorded}]}), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "[]", "")), \
+            patch("panel_metrics.collect", return_value={}), \
+            patch.object(panel, "other_rooms", return_value=([], False)), \
+            patch.dict(os.environ, {"OMS_ROOM_ID": "admission-room"}):
+        watched = panel.read_panel(Path("."), "codex", "graph", False)[0]
+        collected, _ = panel.snapshot(Path("."), "admission-room")
+    expected = ["admission-worker"] if len(recorded) == 1 else []
+    for report in (watched, collected):
+        assert report.get("awaiting_admission") == expected, report
+        worker = next(m for m in graph_text.nodes(report) if m["participant"] == "admission-worker")
+        assert graph_text.call_classifier(report)(worker) == ("review" if expected else "past")
+# Both plan collectors retain tasks beyond their former 20/40 caps for pagination.
+long_tasks = [{"id": "long-%02d" % i, "title": "Plan task %s" % i,
+               "state": "ready" if i == 44 else "done"} for i in range(45)]
+long_plan_repo = Path(sys.argv[2]) / "long-plan"
+(long_plan_repo / ".oms/plan").mkdir(parents=True)
+(long_plan_repo / ".oms/plan/tasks.json").write_text(json.dumps({"tasks": long_tasks}), encoding="utf-8")
+from dashboard_projection import plan_tasks
+assert len(plan_tasks(str(long_plan_repo))) == 45
+def long_plan_run(command, **kwargs):
+    data = {"tasks": long_tasks} if "agent-plan" in command else []
+    return subprocess.CompletedProcess(command, 0, json.dumps(data), "")
+with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}, "plan": {"present": True}}, 0)), \
+        patch.object(room_module, "status", return_value={"id": "long-plan", "participants": []}), \
+        patch.object(panel.subprocess, "run", side_effect=long_plan_run):
+    long_report, _ = panel.snapshot(long_plan_repo, "long-plan")
+assert long_report["room"]["repo_tasks"] == long_tasks
 ended_nav = {"expanded_groups": {("past", "flow-main")}}
 render(ended, "codex", 120, 120, view="tree", navigation=ended_nav)
 shown = list(dict.fromkeys(h["action"][1] for h in sorted(ended_nav["hits"], key=lambda h: h["y"]) if h["action"][0] == "result"))
@@ -4553,6 +4701,10 @@ assert [h["action"] for h in nav["hits"]] == [("result", "w2"), ("result", "w1")
 assert nav["items"][0] == ("result", "w2") and nav["selected"] == ("result", "w2")
 choose(("down",), nav)
 assert nav["selected"] == nav["items"][1]
+# The control list has no folds or main tabs: Space, Left and Right change nothing there.
+nav["selected"] = ("chat", "m1")
+for key in (" ", "left", "right"):
+    assert choose((key,), nav) is None and nav["selected"] == ("chat", "m1") and "collapsed" not in nav, key
 small_nav = {}
 small_inbox = render(inbox_room, "codex", 100, 8, menu=True, navigation=small_nav)
 assert choose(("scroll", 1, 5, 5), small_nav) is None
@@ -4595,7 +4747,25 @@ for glyphs in (True, False):
     assert ("Close #3 Opus 5.5" + sep + "requested by #1 Opus 5.5" + sep + "done?[2J here" + sep + "running calls 0" + sep + "unread 0") in drawn, drawn
     assert ("Closed 14:20 by the person" in drawn and "\033" not in drawn and (glyphs or drawn.isascii())), drawn
     assert ("close", "m1") in nav["items"], nav
+    assert "Up/Down, Enter opens, x closes" in drawn, drawn
+assert "x closes" not in render(inbox_room, "codex", 120, 30, menu=True, navigation={})
 assert panel.menu_input().decode(b"1\033[B2q ") == [("1",), ("down",), ("2",), ("q",), (" ",)]
+# Enter on a result row in the control window opens its recorded result; no watch loop is there to read it.
+class OpenInput:
+    fd, batches = 0, [[("enter",)], [("q",)]]
+    def __enter__(self): return self
+    def __exit__(self, *exc): return False
+    def wait(self, seconds): return self.batches.pop(0)
+open_nav = {"items": [("result", "w1")], "selected": ("result", "w1")}
+def request_open(repo, action, state, navigation, width):
+    navigation["opening"] = action
+shown_detail = []
+with patch.object(panel, "menu_input", return_value=OpenInput()), \
+        patch.object(panel, "show", side_effect=lambda *a, **k: shown_detail.append((open_nav.get("detail") or {}).get("title"))), \
+        patch.object(panel, "navigate", side_effect=request_open), \
+        patch.object(panel, "read_evidence", side_effect=lambda repo, target: (target, {"rows": [{"calls": [1]}]}, None)):
+    panel.read_choice(Path("."), "codex", "ready", "auto", False, open_nav, {})
+assert shown_detail[-1] == "RECORDED RESULTS" and "opening" not in open_nav, (shown_detail, open_nav)
 # A full reader ignores clicks and Enter without repainting; a wheel step still redraws.
 class ReaderInput:
     fd, batches = 0, [[("click", 3, 3), ("enter",)], [("scroll", 3)], [("q",)]]
@@ -5637,6 +5807,49 @@ with patch.object(panel, "session_owner", return_value=str(project)), patch.obje
         except ValueError as error:
             assert "already has 6 live mains" in str(error)
     assert not opened_window.called
+# The cap counts the whole panel, not the selected room; a close needs exactly one proven window and records the leave only after the kill.
+def fake_status(repo, ident):
+    return {"participants": [{"participant": "%s-m%s" % (ident, n), "joined": True, "role": "main"} for n in range(4)]}
+def fake_history(repo, ident, member=None):
+    return [{"attempt_id": "%s-m%s" % (ident, n), "tool": "panel-main", "state": "working",
+             "refs": {"panel_room_participant": "%s-m%s" % (ident, n)}} for n in range(4)]
+two_rooms = "\n".join("claude\t%s\t%s-m%s" % (ident, ident, n) for ident in ("ra", "rb") for n in range(3)) + "\nclaude\trb\t"
+with patch.object(panel, "tmux_command", return_value=["true"]), patch.object(panel.room, "status", fake_status), \
+        patch.object(panel, "main_history", fake_history), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, two_rooms, "")):
+    assert panel.live_mains(project, "s", "ra") == 9 and panel.live_mains(project, "s", "rb") == 9, "cap counted one room"
+with patch.object(panel, "managed_session", return_value=True), patch.object(panel, "panel_session", return_value="s"), \
+        patch.object(panel, "session_owner", return_value=str(project)), patch.dict(os.environ, {"OMS_PANEL_SESSION": "s"}), \
+        patch.object(panel, "tmux_command", return_value=["true"]), patch.object(panel.room, "append") as left_room, \
+        patch.object(panel.room, "status", return_value={"participants": [{"participant": "mx", "joined": True, "role": "main"}]}), \
+        patch.object(panel, "main_history", return_value=[]):
+    with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+        try:
+            panel.close_main(project, "r1", "mx")
+            raise AssertionError("a main with no window closed")
+        except ValueError as error:
+            assert "proven" in str(error)
+    with patch.object(panel, "main_history", return_value=[{"attempt_id": "a1", "tool": "panel-main"}]), \
+            patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0, "@1\ta1\tmx\tr1", ""),
+                                                                subprocess.CalledProcessError(1, "kill-window")]):
+        try:
+            panel.close_main(project, "r1", "mx")
+            raise AssertionError("a failed kill was accepted")
+        except subprocess.CalledProcessError:
+            pass
+    assert not left_room.called, "leave was recorded without a closed window"
+# An unanswered close request survives twelve newer messages in the projected status.
+with patch.object(room, "records", return_value=[]), patch.object(room, "project", return_value={
+        "participants": [], "publications": {}, "closed": False, "id": "r1", "messages": [
+            {"id": "c0", "sender": "a", "recipient": "b", "message_kind": "question", "text": "Close requested: x",
+             "pending_for": ["b"], "answered": False, "targets": ["b"], "received_by": [], "ts": "2026-10-07T05:20:00Z", "seq": 1}] + [
+            {"id": "n%s" % n, "sender": "a", "recipient": "b", "message_kind": "note", "text": "hi", "pending_for": [],
+             "answered": False, "targets": ["b"], "received_by": [], "ts": "2026-10-07T05:21:00Z", "seq": n + 2} for n in range(14)]}):
+    crowded = room.status(project, "r1")
+assert all(m["id"] != "c0" for m in crowded["messages"]) and [m["id"] for m in crowded["close_requests"]] == ["c0"], crowded
+crowded_view = dict(close_room, room=dict(crowded, participants=close_room["room"]["participants"]))
+crowded_view["room"]["close_requests"] = [dict(crowded["close_requests"][0], sender="m0", recipient="m1")]
+assert [r["participant"] for r in panel.close_requests(crowded_view)] == ["m1"]
 failed_worker = {"participant": "adv-worker", "provider": "codex", "role": "worker", "joined": True, "label": "Worker",
                  "parent": "adv-main", "seq": 2}
 failed_board = dict(board, room={"id": "adv-room", "participants": [claude_main, failed_worker]}, attempts={"active_recent": [

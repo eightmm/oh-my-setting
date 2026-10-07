@@ -8,11 +8,13 @@ command help. The panel uses existing OMS state, authentication and front doors.
 ## Quick start
 
 1. Run `oms` in a terminal: window 0 is the control window, an inbox for you.
-2. Press `1` (Codex) or `2` (Claude), no Enter. Each main opens its own window with a board.
-3. Panel-wide keys are F-keys only: `F6`/`F7` step between mains, `F9` swaps focus between a main's chat and its board, `F5` opens the control window, `F12` shows every key; `Ctrl-b d` detaches.
+2. A new panel opens one main window per installed provider at once and selects the
+   first; `OMS_PANEL_MAINS=claude` (comma list, empty for none) chooses them. Add
+   another main from the control window with `1` (Codex) or `2` (Claude), no Enter.
+3. Panel-wide keys are F-keys only: `F6`/`F7` step between mains, `F9` swaps focus between a main's chat and its board, `F5` opens the control window, `F12` shows the panel keys (`?` on a board lists the board keys); `Ctrl-b d` detaches.
 4. The control window's **Needs you** lists failed or timed-out calls, calls and mains
    waiting for approval or input, broadcasts from mains and patches awaiting admission.
-5. Arrow keys or a click select a row; Enter or a second click opens that main's chat
+5. Arrow keys or a click select a row; Enter or a click opens that main's chat
    or the call's result. Without a raw-key terminal the menu takes key + Enter.
 6. On a board, click or Enter on a main or call opens it; Esc backs out, `F9` returns to chat.
 7. Results: `t` on a board opens the tree and a call's retained answer; `r` in the control
@@ -70,7 +72,7 @@ workers, for a target that is not a joined main of the caller's room, and withou
 records a `question` room message from the caller to that main whose text starts with
 `Close requested: `. The control window lists each open request under "Needs you" as
 "Close #3 Opus 5.5 · requested by #1 Opus 5.5 · reason · running calls 1 · unread 2 · 14:20".
-With the row selected, `x` asks "Close #3 Opus 5.5? running calls 1 — press x again to confirm,
+With the row selected (the inbox title then ends `x closes`), `x` asks "Close #3 Opus 5.5? running calls 1 — press x again to confirm,
 Esc to cancel"; the second `x` records the main leaving the room and kills its tmux window, only
 when `@oms_panel_main_attempt` and `@oms_panel_room_participant` prove the window is that main's
 in this checkout's panel session. The row is replaced by "Closed 14:20 by the person" until the next
@@ -241,7 +243,7 @@ main when clicked. Within advisors and within workers, attention states sort
 first, and lane rows name the state (`! failed REV ...`). Lane heads select
 first, like tabs. `[+]` on a tab, or Space on a selected main, pins it; with two or
 more pins the board shows side-by-side lanes, one per main with its calls on
-single lines. A panel holds at most six live mains (`--launch` into an open
+single lines. A panel holds at most six live mains across all its rooms (`--launch` into an open
 panel refuses a seventh, like `--spawn-main`). Four to six mains fill two rows of lanes
 (2+2, 3+2, 3+3, window order left to right, then the next row) when each lane keeps
 30 columns and the board is tall enough; otherwise lanes stay in one row. `[+ All]` pins every main. Every live watcher board (control and
@@ -259,9 +261,9 @@ Terminals attached to the same panel session share its current window, so
 navigating from one client also moves the other. The wheel scrolls only the band, lane or detail under the
 pointer.
 
-The footer shows at most five hints chosen by the selection (a main: `Enter Chat`,
+The footer shows at most three hints chosen by the selection (a main: `Enter Chat`,
 `a Ask advisor`, `Space Pin`; a call: `Enter Show`, `w Worktree` when it applies;
-`Esc Close` while a preview or detail is open) and always ends with the fixed panel keys
+`Esc Close` while a preview or detail is open; on the Messages and Debate tabs the arrows, `Enter` and the filter or target keys) and always ends with the fixed panel keys
 `F6/F7 Main  F9 Chat⇄Board  F5 Control  F12 Keys` (`q Quit` and `? Keys` on a standalone watcher). `?` swaps in the full list of keys
 that work in that view, with `v Expand` or `v Collapse` following the board's state.
 Notices disappear on the next input or after ten seconds.
@@ -676,7 +678,7 @@ unknown main. A native main always dispatches as itself.
 
 Continue a timed-out or reviewed worker with `--continue TASK_ID` instead of
 re-dispatching from scratch: `oms panel --repo . --dispatch worker --owner codex
---continue TASK_ID --brief-file next.md --verify COMMAND` takes the same role,
+--continue TASK_ID --access write --purpose implement --brief-file next.md --verify COMMAND` takes the same role,
 workload and access checks, finds the latest worker of that task owned by this
 main, and starts a new run in a new worktree at the current HEAD that resumes
 the worker's native session (recorded as `refs.native_session` in the attempt,
@@ -685,7 +687,8 @@ the repository is now at NEW. Your previous patch is at PATH (apply what still
 fits). New instructions follow." A session that is missing, or from a provider
 without resume, falls back to a fresh worker given the previous patch and
 summary, and says so on stderr. A worker that ended by timeout (exit 124) shows
-"timed out · c continue" on its card; later rounds of one task show "round N".
+"timed out · continue with --continue" on its card; there is no `c` key for it, and
+a continued implementation needs `--access write --purpose implement` (the default is read-only); later rounds of one task show "round N".
 
 Give each dispatched subtask a descriptive task ID and short `--label`; reuse
 the exact reviewed plan task ID where one exists. Labels are optional for direct
@@ -772,7 +775,7 @@ timed-out calls with their title, calls or mains waiting for approval or input,
 unanswered room messages that a main sent to `all`, and finished write workers
 whose patch has no admission or landing record. Arrow keys or a click select a
 row; the wheel moves by lines and page keys by the visible item count, stopping
-at either end. Enter (or a second click) opens that main's chat or shows the call's result,
+at either end. Enter (or a click) opens that main's chat or shows the call's result,
 and Esc returns. An empty list says `Nothing needs you right now`; a room with no
 main shows `Press 1 (Codex) or 2 (Claude) to start a main`. The menu keeps
 start (`1` Codex, `2` Claude, `3` Resume, `t` Task), `o` rooms, `9` refresh and

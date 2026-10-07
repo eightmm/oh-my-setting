@@ -638,6 +638,9 @@ def messages(repo, room):
     return project(records(repo, room))["messages"]
 
 
+CLOSE_PREFIX = "Close requested: "
+
+
 def status(repo, room):
     state = project(records(repo, room))
     state["message_count"] = len(state["messages"])
@@ -668,6 +671,9 @@ def status(repo, room):
             pair["sent"] += 1
             pair["pending"] += int(target in message["pending_for"])
     state["pairs"] = list(pairs.values())
+    # Outstanding close requests outlive the twelve-message window: the person still has to act on them.
+    state["close_requests"] = [m for m in state["messages"] if m["message_kind"] == "question" and not m["answered"]
+                               and str(m["text"]).startswith(CLOSE_PREFIX)][-32:]
     state["messages"] = state["messages"][-12:]
     return state
 

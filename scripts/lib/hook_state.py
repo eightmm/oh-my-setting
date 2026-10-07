@@ -1131,7 +1131,7 @@ def context_pressure_hint(payload: dict[str, Any]) -> str | None:
     rank = {"warn": 1, "urgent": 2}
     new_stage = "urgent" if left <= urgent else "warn" if left <= warn else None
     if new_stage is None or (stage and rank[new_stage] <= rank[stage]):
-        if new_stage is None and left <= capture and not state.get("captured"):
+        if left <= capture and not state.get("captured"):
             started = start_handoff_capture(repo, payload, agent, left)
             # A failed launch stays retryable; a capture the operator turned off latches like a done one.
             save(stage, captured=started or os.environ.get("OMS_CTX_CAPTURE", "1") != "1")

@@ -157,6 +157,10 @@ def handle(event, navigation):
     elif kind in {"left", "right"}:
         state["filter"] = state.get("filter", 0) + (1 if kind == "right" else -1)
         state["selected"] = state["open"] = None
+    elif kind == "escape" and state.get("open"):
+        state["open"] = None
+        state["reveal"] = True
+        return True
     elif kind == "enter" and state.get("selected") in ids:
         state["open"] = None if state.get("open") == state["selected"] else state["selected"]
         state["reveal"] = True
