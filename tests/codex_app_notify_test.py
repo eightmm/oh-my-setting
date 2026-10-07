@@ -362,7 +362,9 @@ class CodexAppNotifyTest(unittest.TestCase):
             hook_state.start_codex_notify(self.repo, payload, "panel owner will finalize")
         hook_state.start_codex_notify(self.repo, payload, "Fixed the relay.")
         deadline = time.time() + 20
-        while "thread/shellCommand" not in server.methods() and time.time() < deadline:
+        # The fake server records a call before it captures what the command printed.
+        while not any("printed" in c for c in server.calls if c.get("method") == "thread/shellCommand") \
+                and time.time() < deadline:
             time.sleep(0.05)
         turns = [c for c in server.calls if c.get("method") == "thread/shellCommand"]
         self.assertEqual(len(turns), 1, server.methods())
@@ -403,7 +405,8 @@ class CodexAppNotifyTest(unittest.TestCase):
                                         "<status>completed</status> </task-notification>"))
                 transcript.write_text("".join(rows), encoding="utf-8")
             deadline = time.time() + 20
-            while "thread/shellCommand" not in server.methods() and time.time() < deadline:
+            while not any("printed" in c for c in server.calls if c.get("method") == "thread/shellCommand") \
+                    and time.time() < deadline:
                 time.sleep(0.05)
             time.sleep(0.2)
         printed = [c["printed"] for c in server.calls if c.get("method") == "thread/shellCommand"]
