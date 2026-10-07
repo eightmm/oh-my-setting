@@ -258,10 +258,12 @@ def settler(report):
 
     def settled(call):
         # Finished or aged-out calls, and failed ones whose result its main has read or finalized, leave the board.
+        # A review or a block ends only with the owner's recorded decision on the task, never by reading a result.
+        closed = finalized.get(call.get("task_id")) in {"completed", "accepted"}
         return call["state"] in FINISHED or call["state"] == "presence unknown" and aged(call) or (
             call["state"] in ATTENTION_STATES - {"waiting_input", "waiting_approval", "review", "blocked"}
-                                             and ("result-" + str(call.get("participant")) in read_results
-                                                  or finalized.get(call.get("task_id")) in {"completed", "accepted"}))
+                                             and ("result-" + str(call.get("participant")) in read_results or closed)
+        ) or call["state"] in {"review", "blocked"} and closed
     return settled, aged
 
 
@@ -271,7 +273,7 @@ def call_classifier(report):
     awaiting = set(listing(report.get("awaiting_admission")))
 
     def classify(call):
-        if call["state"] == "review" or (call["state"] == "done" and call.get("participant") in awaiting):
+        if call["state"] == "review" and not settled(call) or (call["state"] == "done" and call.get("participant") in awaiting):
             return "review"
         return "past" if settled(call) else "live"
     return classify

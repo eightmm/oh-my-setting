@@ -1721,7 +1721,7 @@ def snapshot(repo, room_id=None):
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
                     pass
                 try:
-                    if any(row.get("state") in {"failed", "timed_out", "abandoned", "orphaned"} for key in ("active_recent", "recent")
+                    if any(row.get("state") in {"failed", "timed_out", "abandoned", "orphaned", "review", "blocked"} for key in ("active_recent", "recent")
                            for row in state.get("attempts", {}).get(key) or []):
                         state["finalized"] = {row["task_id"]: row["outcome"] for row in results(repo).get("rows", [])
                                               if row.get("outcome") in {"completed", "accepted"}}
@@ -2204,9 +2204,9 @@ def main_needs_attention(state, main_attempt):
     read = {mapping(x).get("id") for x in listing(room.get("messages"))
             if result_handoff(room, x) and not listing(mapping(x).get("pending_for"))}
     return any(m.get("role") != "main" and m.get("parent") in ids and m["state"] in WINDOW_ATTENTION
-               and not (m["state"] in {"failed", "timed_out"}
-                        and ("result-" + str(m.get("participant")) in read
-                             or finalized.get(m.get("task_id")) in {"completed", "accepted"}))
+               and not (m["state"] in {"failed", "timed_out"} and "result-" + str(m.get("participant")) in read
+                        or m["state"] in {"failed", "timed_out", "review", "blocked"}
+                        and finalized.get(m.get("task_id")) in {"completed", "accepted"})
                for m in members)
 
 

@@ -5430,6 +5430,12 @@ classified = {m["participant"]: classify(m) for m in graph_view.nodes(grouped_bo
 assert classified == {"adv-worker": "live", "review-call": "review", "pending-patch": "review", "past-call": "past",
                       "blocked-call": "live", "waiting-call": "live", "live-call": "live",
                       "old-unknown": "past", "fresh-unknown": "live"}, classified
+# The owner's recorded decision on a task closes its review and its block; a failed decision does not.
+for outcome, expected in (("completed", "past"), ("accepted", "past"), ("failed", None)):
+    decided = graph_view.call_classifier(dict(grouped_board, finalized={"decided-task": outcome}))
+    for ident in ("review-call", "blocked-call"):
+        node = dict(next(m for m in graph_view.nodes(grouped_board) if m["participant"] == ident), task_id="decided-task")
+        assert decided(node) == (expected or classified[ident]), (outcome, ident, decided(node))
 # A stale admission flag cannot hide current work, uncertainty or an urgent failure.
 mixed = deepcopy(grouped_board)
 mixed["awaiting_admission"] = list(classified)
