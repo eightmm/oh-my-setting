@@ -862,7 +862,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         return "Task: %s · %s" % (held[0].get("id"), held[0].get("state")) + (" +%s" % (len(held) - 1) if len(held) > 1 else "")
 
     def declared_of(m):
-        return readable(mapping(mapping(room.get("statuses")).get(m["participant"])).get("text"), " ")
+        # The card already labels it "Now:"; a status written as "Now: ..." would read twice.
+        text = readable(mapping(mapping(room.get("statuses")).get(m["participant"])).get("text"), " ")
+        return re.sub(r"^(?:now\s*[:·-]\s*)+", "", text, flags=re.I)
 
     def task_of(m):
         task = clean(m.get("title")) or "Task unrecorded"
@@ -1450,8 +1452,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             ["No call selected · click a main or a call to see it here"], {})
         # A short detail does not stretch an empty box over the rest of the board; the other tabs need room too.
         room_rows = max(0, spare - below)
-        rows_high = max(min(reserve, max(3, len(body) + 3)), min(7, room_rows))
-        rows_high = min(rows_high, room_rows) if room_rows >= 3 else rows_high
+        # The box is the board's reading area: it takes every row the cards above leave, so a tab switch
+        # never resizes it and long Messages or Plan tabs have room.
+        rows_high = room_rows if room_rows >= 3 else max(min(reserve, max(3, len(body) + 3)), min(7, room_rows))
         capacity = max(1, rows_high - 2)
         seen = navigation.setdefault("debate_seen", {})
         shown_main = primary["participant"] if primary else None

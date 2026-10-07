@@ -3678,8 +3678,10 @@ roomy = render(flow, "codex", 100, 60, view="graph", main_attempt="flow-attempt"
 roomy_lines = roomy.splitlines()
 detail_top = next(i for i, line in enumerate(roomy_lines) if "[ Detail ]" in line)
 detail_end = next(i for i in range(detail_top + 1, len(roomy_lines)) if roomy_lines[i].startswith("╰"))
-# The board fills the pane (key hints pinned to the last row), but a short detail keeps a short box.
-assert detail_end - detail_top < 20 and len(roomy_lines) == 60, "a short detail stretched over the board"
+# The board fills the pane (key hints pinned to the last row) and the tab box takes the rows the cards leave,
+# so switching tabs never resizes it and no blank band sits under it.
+assert detail_end - detail_top >= 20 and len(roomy_lines) == 60, roomy
+assert not any(line.strip() for line in roomy_lines[detail_end + 1:-3]) or roomy_lines[detail_end + 1].strip(), roomy
 closed_board = render(flow, "codex", 100, 26, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
 assert "MAIN / Sol 6 / auto" not in closed_board and "No call selected" in closed_board, closed_board
 # People read the board: call exits become words, machine status lines and markdown marks are dropped.
