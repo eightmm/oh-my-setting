@@ -8,7 +8,7 @@ import calendar
 import time
 
 from dashboard_projection import clean, listing, mapping
-from panel_view import PALETTE, clipped, wrapped
+from panel_view import wrapped
 
 MAX_MESSAGES, MAX_TEXT, MAX_BODY_LINES = 200, 8000, 400
 KINDS = ("question", "answer", "handoff", "status")
@@ -54,7 +54,11 @@ def _people(report, navigation):
     def name_of(ident):
         if ident == "all":
             return "everyone"
-        return clean(labels.get(ident) or who(index[ident], labels), 60) if ident in index else clean(ident, 40) or "unknown"
+        if ident not in index:
+            return clean(ident, 40) or "unknown"
+        # A numbered main is unique; any other name carries its role, so a Sol worker never reads like the Sol main.
+        label = labels.get(ident) or ""
+        return clean(label if label.startswith("#") else who(index[ident], labels), 60)
     return name_of, mains, me, selected
 
 
@@ -65,7 +69,9 @@ def _rows(messages, name_of, now=None):
         text = readable_text(m.get("text"))
         kind = m.get("message_kind")
         pending = bool(listing(m.get("pending_for")))
-        head = "%s  %s → %s" % (stamp(m.get("ts"), now), name_of(m.get("sender")), name_of(m.get("recipient") or "all"))
+        targets = listing(m.get("targets"))
+        head = "%s  %s → %s" % (stamp(m.get("ts"), now), name_of(m.get("sender")),
+                                name_of(m.get("recipient") or (targets[0] if len(targets) == 1 else "all")))
         head += ("  · unread" if pending else "") + ("  · " + kind if kind in KINDS else "")
         first = next((line for line in text.splitlines() if line.strip()), "")
         rows.append({"id": str(m.get("id")), "line": head + "  · " + (clean(first, 300) or "(empty)"),
@@ -78,8 +84,8 @@ def readable_text(text):
     return readable(str(text or "")[:MAX_TEXT], "\n", True)
 
 
-def render_messages(report, width, height, navigation, color=False, unicode=True):
-    """(lines, hits): the message list, the selected message expanded to its full wrapped text."""
+def tab_body(report, width, cap, navigation, unicode=True):
+    """Rows (text, action, selected) for the Messages tab: the filter line, then the log window."""
     state = navigation.setdefault("messages_view", {"selected": None, "open": None, "filter": 0, "scroll": 0})
     room = mapping(report.get("room"))
     name_of, mains, me, chosen = _people(report, navigation)
@@ -98,10 +104,8 @@ def render_messages(report, width, height, navigation, color=False, unicode=True
         state["reveal"] = True
     if state.get("open") not in ids:
         state["open"] = None
-    head = "OMS / Messages / " + clean(room.get("title") or room.get("id") or "room", 60)
-    lines, hits = [clipped(head, width), clipped("Filter: %s (%d)%s" % (label, len(rows), "  · loading earlier messages..."
-                                                                     if loading else ""), width)], []
-    budget = max(1, height - len(lines) - 1)
+    budget = max(1, cap - 1)
+    state["viewport"] = budget
     body, starts = [], {}
     for r in rows:
         starts[r["id"]] = len(body)
@@ -119,32 +123,19 @@ def render_messages(report, width, height, navigation, color=False, unicode=True
         elif first >= state["scroll"] + budget:
             state["scroll"] = first - budget + 1
     scroll = state["scroll"] = min(max(0, state["scroll"]), max(0, len(body) - budget))
-    navigation["viewport"] = budget
+    head = "Filter: %s (%d)%s%s" % (label, len(rows), "  · loading earlier messages..." if loading else "",
+                                    "  · %d-%d of %d" % (scroll + 1, min(len(body), scroll + budget), len(body))
+                                    if len(body) > budget else "")
+    out = [(head, None, False)]
     if not rows:
-        lines.append(clipped("Reading messages..." if loading else "No messages in this room yet", width))
-    for ident, text, header in body[scroll:scroll + budget]:
-        lines.append(clipped(text, width))
-        if header:
-            hits.append({"y": len(lines), "x1": 1, "x2": width, "action": ("message", ident)})
-        if color and header and ident == state["selected"]:
-            lines[-1] = "\033[7m" + lines[-1] + "\033[0m"
-    arrows = ("↑↓", "←→") if unicode else ("^v", "<>")
-    footer = "%s%s Move  %s Filter  Enter %s  PgUp/PgDn Scroll  m/Esc Back" % (
-        "%d-%d/%d  " % (scroll + 1, min(len(body), scroll + budget), len(body)) if len(body) > budget else "",
-        arrows[0], arrows[1], "Collapse" if state["open"] else "Expand")
-    lines = lines[:height - 1] + [clipped(footer, width)]
-    if color:
-        lines = [PALETTE["head"] + lines[0] + "\033[0m"] + lines[1:-1] + [PALETTE["dim"] + lines[-1] + "\033[0m"]
-    return lines[:height], hits
-
-
-def open_message(navigation, ident):
-    state = navigation.setdefault("messages_view", {"selected": None, "open": None, "filter": 0, "scroll": 0})
-    state.update(selected=ident, open=ident, reveal=True)
+        out.append(("Reading messages..." if loading else "No messages in this room yet", None, False))
+    out += [(text, ("message", ident) if header else None, header and ident == state["selected"])
+            for ident, text, header in body[scroll:scroll + budget]]
+    return out[:cap]
 
 
 def clicked(event, navigation):
-    """The message id under a click on the board's RECENT MESSAGES card, else None."""
+    """The message id under a click on a Messages tab row, else None."""
     if event[0] != "click":
         return None
     hit = next((h for h in navigation.get("hits", []) if h["y"] == event[2] and h["x1"] <= event[1] <= h["x2"]), None)
@@ -152,10 +143,10 @@ def clicked(event, navigation):
 
 
 def handle(event, navigation):
-    """Messages-view keys; True when the event belongs to this view."""
+    """Messages-tab keys; True when the event belongs to the tab."""
     state = navigation.setdefault("messages_view", {"selected": None, "open": None, "filter": 0, "scroll": 0})
     ids, kind = navigation.get("message_ids", []), event[0]
-    step = max(1, navigation.get("viewport", 1))
+    step = max(1, state.get("viewport", 1))
     if kind in {"up", "down"} and ids:
         at = ids.index(state["selected"]) if state.get("selected") in ids else len(ids) - 1
         state["selected"] = ids[min(len(ids) - 1, max(0, at + (1 if kind == "down" else -1)))]

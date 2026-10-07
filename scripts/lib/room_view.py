@@ -4,7 +4,7 @@ import calendar
 import re
 import time
 
-from dashboard_projection import clean, count as valid_count, display_width, fit, listing, mapping
+from dashboard_projection import ELLIPSIS, clean, count as valid_count, display_width, fit, listing, mapping
 from panel_view import (ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
                         clipped, location_label, status_alerts, worker_rows, wrapped)
 
@@ -62,6 +62,13 @@ def nodes(report):
                            effort=effort, access=meta.get("access"),
                            started_by=mapping(report.get("main_starters")).get(member.get("participant")),
                            title=meta.get("label") or member.get("label")))
+    # A continued worker shares its task with the earlier rounds of the same main.
+    rounds = {}
+    for member in sorted(output, key=lambda m: m.get("seq", 0)):
+        if member.get("role") == "worker" and member.get("task_id") and member.get("parent"):
+            earlier = rounds.setdefault((member["parent"], member["task_id"]), [])
+            member.update(round=len(earlier) + 1, continues=earlier[-1] if earlier else None)
+            earlier.append(member["participant"])
     rank = lambda member: (0 if member["state"] in LIVE_STATES else 2 if member["state"] in {"done", "cancelled"} else 1, -member.get("seq", 0))
     return sorted(output, key=rank)
 
@@ -100,6 +107,11 @@ def window_order(report, mains):
 
 def model_name(member):
     return MODEL_NAMES.get(member.get("model"), member.get("model")) or member.get("provider", "unknown")
+
+
+def open_count(room, participant):
+    """Questions to this participant that have no linked answer yet."""
+    return sum(mapping(q).get("recipient") == participant for q in listing(mapping(room).get("open_questions")))
 
 
 def main_names(report, members):
@@ -180,7 +192,8 @@ def call_span(call, arrow="->"):
     state = call["state"]
     words = "no record" if state == "presence unknown" else said(state)
     if state == "failed" and call.get("exit") is not None:
-        words = "failed (exit %s)" % call["exit"]
+        words = "timed out · c continue" if call["exit"] == 124 and call.get("role") == "worker" \
+            else "failed (exit %s)" % call["exit"]
     if state in LIVE_STATES or not call.get("ended"):
         end = ""
     else:
@@ -217,6 +230,78 @@ def live_unread(report, members, settled):
 
 def plan_idle(report):
     return valid_count(mapping(report.get("plan")).get("idle_days"))
+
+
+def plan_summary(report):
+    """(goal, verified, total, review, running) of the active plan; None when there is no goal or it idled a week."""
+    plan = mapping(report.get("plan"))
+    goal = clean(plan.get("goal"), 200)
+    if not plan.get("present") or not goal or (plan_idle(report) or 0) >= 7:
+        return None
+    by_state = mapping(plan.get("by_state"))
+    number = lambda *names: sum(valid_count(by_state.get(name)) or 0 for name in names)
+    total = valid_count(plan.get("task_count"))
+    return (goal, number("done"), total if total is not None else sum(valid_count(v) or 0 for v in by_state.values()),
+            number("review", "landing"), number("claimed", "running"))
+
+
+def goal_banner(report, width, unicode):
+    """The goal rows at the top of every board as [(text, style)]; the progress always stays on the first row."""
+    summary = plan_summary(report)
+    sep = " · " if unicode else " / "
+    if summary is None:
+        return [(clipped(("◎ " if unicode else "@ ") + "No shared goal" + sep + "oms agent-plan init --goal TEXT", width), "dim")]
+    goal, done, total, review, running = summary
+    filled = min(10, 10 * done // total) if total else 0
+    bar = ("▕" + "█" * filled + "░" * (10 - filled) + "▏") if unicode else "[" + "#" * filled + "." * (10 - filled) + "]"
+    prefix = ("◎ " if unicode else "@ ") + "GOAL  "
+    counts = "%s/%s verified" % (done, total)
+    options = [bar + " " + counts + sep + "%s review" % review + sep + "%s running" % running,
+               bar + " " + counts, bar + " %s/%s" % (done, total), "%s/%s" % (done, total)]
+    right = next((o for o in options if width - display_width(o) - 2 - display_width(prefix) >= 12), options[-1])
+    room = max(1, width - display_width(right) - 2)
+    if display_width(prefix + goal) <= room:
+        text = prefix + goal
+        return [(text + " " * max(2, width - display_width(text) - display_width(right)) + right, "head")]
+    first, used = "", 0
+    words = goal.split(" ")
+    for index, word in enumerate(words):
+        gap = 1 if first else 0
+        if used + gap + display_width(word) > room - display_width(prefix):
+            break
+        first += " " * gap + word
+        used += gap + display_width(word)
+    else:
+        index = len(words)
+    rest = " ".join(words[index:])
+    if not first:
+        # One unbroken word wider than the row: cut it by cells and carry the remainder down.
+        cut = fit(rest, room - display_width(prefix)).rstrip(ELLIPSIS[0])
+        first, rest = cut, rest[len(cut):]
+    head = prefix + first
+    rows = [(head + " " * max(2, width - display_width(head) - display_width(right)) + right, "head")]
+    if rest:
+        rows.append((clipped(" " * display_width(prefix) + rest, width), "head"))
+    return rows
+
+
+def claims_by_main(report):
+    """Plan tasks a main holds, by its room participant; the plan is repository-owned data."""
+    held = {}
+    for task in listing(mapping(report.get("plan")).get("tasks")):
+        task = mapping(task)
+        if task.get("claimed_by") and task.get("state") not in ("done", "ready"):
+            held.setdefault(task["claimed_by"], []).append(task)
+    return held
+
+
+def ago(ts):
+    try:
+        seconds = max(0, time.time() - calendar.timegm(time.strptime(str(ts), "%Y-%m-%dT%H:%M:%SZ")))
+    except ValueError:
+        return ""
+    return "just now" if seconds < 60 else "%dm ago" % (seconds // 60) if seconds < 3600 else \
+        "%dh ago" % (seconds // 3600) if seconds < 86400 else "%dd ago" % (seconds // 86400)
 
 
 def native_advisors(report, members):
@@ -431,6 +516,11 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
     owner = names.get(member.get("parent"), "")
     lines = wrapped("%s%s · %s%s" % (who(member), " for " + owner if owner else "",
                                      said(state), " · " + title if title else ""), width, 3)
+    if member.get("round", 1) > 1:
+        lines += wrapped("Round %s of this task, continuing %s" % (member["round"], names.get(member.get("continues"), "its earlier worker")), width, 2)
+    if member.get("exit") == 124 and member.get("task_id"):
+        lines += wrapped("Timed out. Continue it from its main: oms panel --dispatch worker --continue %s --brief-file PATH --verify COMMAND"
+                         % clean(member["task_id"]), width, 3)
     access = {"write": "can edit", "read": "read-only"}.get(member.get("access"), "permissions unrecorded")
     metadata = "%s %s%s" % (access.capitalize(), where, " · effort " + member["effort"] if member.get("effort") else "")
     loaded = preview.get("report")
@@ -506,11 +596,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                  attention_only=False, main_attempt=None, navigation=None, managed=False):
     """Page real parent relationships without inventing routers or progress."""
     from panel_view import tone
-    from panel_metrics import header_rows
     from dashboard_projection import use_unicode
     use_unicode(unicode)
     interactive = navigation is not None
     navigation = navigation if interactive else {}
+    navigation.pop("box", None)
     room = mapping(report.get("room"))
     members = nodes(report)
     members += native_advisors(report, members)
@@ -597,11 +687,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if menu:
         footer = ["[1] Codex  [2] Claude  [h] Chats  [?] More  [q] " + ("Detach" if managed else "Quit")]
     else:
-        from panel_debate import debates as room_debates
         chosen_member = next((m for m in mains + [c for calls in everyone.values() for c in calls]
                               if action(m) == selected), None)
-        footer = footer_hints(navigation, width, managed, unicode, chosen_member, len(mains), True,
-                              bool(room_debates(report)))
+        footer = footer_hints(navigation, width, managed, unicode, chosen_member, len(mains), True)
     hint_rows = len(footer)
     if navigation.get("notice"):
         if height >= 20 or menu:
@@ -645,19 +733,24 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     def state_of(m):
         return "exited" if m.get("role") == "main" and m["state"] == "done" else m["state"]
 
+    claims = claims_by_main(report)
+
+    def claim_line(m):
+        held = claims.get(m["participant"], [])
+        if not held:
+            return ""
+        return "Task: %s · %s" % (held[0].get("id"), held[0].get("state")) + (" +%s" % (len(held) - 1) if len(held) > 1 else "")
+
+    def declared_of(m):
+        return readable(mapping(mapping(room.get("statuses")).get(m["participant"])).get("text"), " ")
+
     def task_of(m):
         task = clean(m.get("title")) or "Task unrecorded"
         if task not in ("Native task not recorded", "Task unrecorded"):
             return task
         if m.get("role") == "main":
-            declared = readable((room.get("statuses") or {}).get(m["participant"], {}).get("text"), " ")
-            if declared:
-                return "Now: " + declared
-            # Native task text is never intercepted; the main's own latest message is its visible status.
-            said_last = next((readable(x.get("text"), " ") for x in reversed(listing(room.get("messages")))
-                              if x.get("sender") == m["participant"] and readable(x.get("text"), " ")), "")
-            if said_last:
-                return "Latest sent: " + said_last
+            return " · ".join(part for part in (claim_line(m), "Now: " + declared_of(m) if declared_of(m) else "") if part) \
+                or "no status yet"
         return "no task title yet"
 
     # Mail to finished calls is never read again; unread mail to mains and running calls is counted.
@@ -668,6 +761,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     clock = time.strftime("%m-%d ") + WEEKDAYS[time.localtime().tm_wday] + time.strftime(" %H:%M")
     if display_width(heading_text) + len(clock) + 2 <= width:
         heading_text += " " * (width - display_width(heading_text) - len(clock)) + clock
+    if height >= 10:
+        for text, style in goal_banner(report, width, unicode):
+            hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": ("tab", "plan")})
+            add(text, style)
     add(heading_text, "head")
     for alert in status_alerts(report):
         add(alert, "bad")
@@ -710,7 +807,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                          if mapping(p).get("recipient") == m["participant"])
             badge = " ".join("%s%s" % (mark, n) for mark, n in (
                 ("W", sum(c.get("role") == "worker" for c in calls)),
-                ("A", sum(c.get("role") != "worker" for c in calls)), ("!", alerts), ("M", unread)) if n)
+                ("A", sum(c.get("role") != "worker" for c in calls)), ("!", alerts), ("M", unread),
+                ("?", open_count(room, m["participant"]))) if n)
             pin = ("[x]" if m in pinned else "[+]") if multiple else ""
             mark = ("▸" if unicode else ">") if m == primary else " "
             room_left = max(4, tab_width - (len(badge) + 1 if badge else 0) - len(pin) - 2)
@@ -830,7 +928,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     def detail_rows():
         # The overview keeps one-line cards so the selected block's detail gets the rest.
         if not previewed:
-            return 0
+            # The tab box stays after Esc, so Plan, Debate and Messages remain reachable.
+            return 6 if interactive and fits(6) else 0
         room_left = budget - used - (max(20 if grid else 6, (budget - used) // 2) if lanes else wires + minimum_total) - 1
         return room_left if room_left >= 5 else 3 if fits(3) else 0
 
@@ -868,9 +967,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         return sum(max(minimum_rows(g), min(card_height, needed(g, g == [primary]))) for g in shown_groups)
 
     available_cards = budget - used - wires - reserve
-    if (interactive and not previewed and primary and not lanes and height >= 24
-            and not navigation.get("dismissed") and available_cards - minimum_total >= 6):
-        available_cards -= 6  # Five detail rows and one status row.
     card_height = next((candidate for candidate in range(6, 2, -1)
                         if drawn_rows(candidate) <= available_cards), 3)
     if reserve > 3 and height < 9 * band_count + 20:
@@ -897,6 +993,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 role = {"advisor": "ADV", "reviewer": "REV", "worker": "WRK", "council": "DEB"}.get(m.get("role"), "MAIN")
                 title = (("▸ " if unicode else "> ") if action(m) == selected else "") + role
             status = "%s %s" % (activity(state_of(m), frame, unicode), said(state_of(m)))
+            if m.get("role") == "main" and open_count(room, m["participant"]):
+                status += (" · " if unicode else " / ") + "? %s open" % open_count(room, m["participant"])
             if m.get("role") != "main" and primary:
                 status += " · for " + clean(name_of(primary))
             task = task_of(m)
@@ -1020,20 +1118,43 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         judge_sets = {m["participant"]: [c for c in teams[m["participant"]] if c.get("role") != "worker"][:3] for m in group}
         most = max(1, max(len(judges) for judges in judge_sets.values()))
         # With room, each main's advisors and reviewers share one box above it; boxes and mains line up across lanes.
-        boxed = rows >= 16
+        boxed = rows >= 14
         lift = most + 2 if boxed else most
 
-        def doing(m):
-            # The recorded task, then the main's latest message: what it is doing now.
-            lines = wrapped(task_of(m), lane_width - 4, 3)
-            latest = task_of(dict(m, title=None))
-            if len(lines) < 3 and latest.startswith("Latest sent: ") and latest != task_of(m):
-                lines += wrapped(latest, lane_width - 4, 3 - len(lines))
-            return lines
+        def activity_line(calls, ident):
+            running = sum(c.get("role") == "worker" and c["state"] in LIVE_STATES for c in calls)
+            needs = sum(c["state"] in ATTENTION_STATES for c in calls)
+            said_at = next((x.get("ts") for x in reversed(listing(room.get("messages"))) if x.get("sender") == ident), None)
+            parts = ["%s worker%s running" % (running, "" if running == 1 else "s") if running else "no workers running"]
+            if needs:
+                parts.append("%s needs you" % needs)
+            if ago(said_at):
+                parts.append("last message " + ago(said_at))
+            return " · ".join(parts)
 
-        # Spare rows grow every main card alike, up to three task lines, keeping one worker box below.
-        body = max(1, min(3, rows - lift - 3 - 3 - 1)) if rows >= 12 else 0
-        head = 3 + body if body else 3
+        def lane_text(m, calls, rows_left):
+            """Task, declared status and activity as [(line, dim)], wrapped into the rows the card has."""
+            items = [x for x in (claim_line(m), "Now: " + declared_of(m) if declared_of(m) else "") if x]
+            placeholder = not items
+            items = items or ["no status yet"]
+            last = activity_line(calls, m["participant"])
+            kept = items[:max(1, rows_left - 1)] + [last] if rows_left >= 2 else items[:1]
+            spare = rows_left - len(kept)
+            span = [1] * len(kept)
+            for n, text in enumerate(kept):
+                while spare > 0 and span[n] < 3 and len(wrapped(text, lane_width - 4, 9)) > span[n]:
+                    span[n] += 1
+                    spare -= 1
+            return [(line, placeholder and n == 0) for n, text in enumerate(kept)
+                    for line in wrapped(text, lane_width - 4, span[n])]
+
+        # The card shows its status line, then Task / Now / activity; the shown rows shrink on short boards.
+        want = 6 if height >= 32 else 5 if height >= 24 else 4
+        head = 3
+        if rows >= 8:
+            head = max(3, min(want, rows - lift - 3 - 1))
+            if height >= 32:
+                head = max(head, min(6, rows - lift - 1))
         for i, m in enumerate(group):
             x0 = i * (lane_width + 1)
             top = len(lines) + 1
@@ -1076,14 +1197,22 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                     row_hit(len(cells) - 1, action(c))
             title = ("▸ " if unicode else "> ") if m == primary else ""
             status = "%s %s" % (activity(state_of(m), frame, unicode), said(state_of(m)))
-            content = [status] + doing(m)[:body] if body else [status + " · " + task_of(m)]
+            if open_count(room, m["participant"]):
+                status += (" · " if unicode else " / ") + "? %s open" % open_count(room, m["participant"])
+            texts = lane_text(m, calls, head - 3) if head > 3 else []
+            content = [status] + [line for line, _ in texts] if head > 3 else [status + " · " + task_of(m)]
             block = card(title + "MAIN / " + name_of(m), content, lane_width, head, unicode)
+            dim_rows = {2 + n for n, (_, dim) in enumerate(texts) if dim}
             block[0] = joint(block[0], 1, "┴" if unicode else "+")[0]
             block[-1] = joint(block[-1], 2, "┬" if unicode else "+")[0]
             style = hue(m)
             for row, line in enumerate(block):
                 # The shown main's title edge reads as an active tab; its body keeps the plain colour.
-                cells.append(chosen(line, style) if m == primary and row == 0 else paint(line, style))
+                if row in dim_rows:
+                    line = paint(line[0], style) + paint(line[1:-1], "dim") + paint(line[-1], style)
+                    cells.append(line)
+                else:
+                    cells.append(chosen(line, style) if m == primary and row == 0 else paint(line, style))
                 hits.append({"y": top + lift + row, "x1": x0 + 1, "x2": x0 + lane_width,
                              "action": ("chat", m["participant"]), "select": True})
             key = "lane:" + m["participant"]
@@ -1096,7 +1225,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 last = n == len(shown) - 1 and not hidden
                 box = card("Worker %s %s %s" % (name_of(c), activity(c["state"], frame, unicode),
                                                 call_span(c, "→" if unicode else "->")),
-                           [task_of(c)], lane_width - 3, 3, unicode)
+                           [("round %s · " % c["round"] if c.get("round", 1) > 1 else "") + task_of(c)], lane_width - 3, 3, unicode)
                 rails = (("└", " ", " ") if last else ("├", "│", "│")) if unicode else (("`", " ", " ") if last else ("|", "|", "|"))
                 style = tone(c["state"]) if c["state"] in ATTENTION_STATES else "worker"
                 for row, line in enumerate(box):
@@ -1151,58 +1280,84 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if reserve and (automatic or previewed and spare > reserve):
         # Bands sized to their content leave rows the detail can use; keep one for the status line.
         reserve = max(reserve, spare - 1)
-    if reserve and spare >= reserve:
-        top = len(lines) + 1
-        body, targets = detail(previewed, preview, width - 4, members, room, teams, everyone, labels)
-        # A short detail does not stretch an empty box over the rest of the board.
-        reserve = min(reserve, max(3, len(body) + 2))
-        capacity = max(1, reserve - 2)
-        first = min(scrolled.get("detail", 0), max(0, len(body) - capacity))
-        scrolled_now["detail"] = first
-        role = previewed.get("role", "worker").upper()
-        title = "DETAIL / %s / %s%s" % (role, name_of(previewed), " / auto" if automatic else "")
-        if len(body) > capacity:
-            title += " / %s-%s of %s / wheel" % (first + 1, min(len(body), first + capacity), len(body))
-        shown = body[first:first + capacity]
-        style = hue(previewed) if role == "MAIN" else "review" if role != "WORKER" else "worker"
-        for row, line in enumerate(card(title, shown, width, reserve, unicode)):
-            add(line, style if row in (0, reserve - 1) else None)
-        for row in range(reserve):
-            line = first + row - 1  # border row 0; body rows follow
-            hits.append({"y": top + row, "x1": 1, "x2": width, "preview": True,
-                         "action": targets.get(line, action(previewed)) if 0 < row < reserve - 1 else action(previewed)})
-        bands_hit.append({"name": "detail", "y1": top, "y2": top + reserve - 1, "x1": 1, "x2": width, "step": 3})
-        spare -= reserve
     omitted = len(children) - len(shown_judges) - len(shown_workers) if not lanes else 0
+    below = bool(omitted or unlinked)
+    if reserve and spare >= reserve:
+        # One box with tabs: the selected call's detail, the plan, this main's debates, the room's messages.
+        from panel_debate import signature, tab_body as debate_body
+        from panel_messages import tab_body as messages_body
+        top = len(lines) + 1
+        active = navigation.get("tab") if navigation.get("tab") in dict(TABS) else "detail"
+        navigation["main_attempt"] = main_attempt
+        body, targets = detail(previewed, preview, width - 4, members, room, teams, everyone, labels) if previewed else (
+            ["No call selected · click a main or a call to see it here"], {})
+        # A short detail does not stretch an empty box over the rest of the board; the other tabs need room too.
+        room_rows = max(0, spare - below)
+        rows_high = max(min(reserve, max(3, len(body) + 3)), min(7, room_rows))
+        rows_high = min(rows_high, room_rows) if room_rows >= 3 else rows_high
+        capacity = max(1, rows_high - 2)
+        seen = navigation.setdefault("debate_seen", {})
+        shown_main = primary["participant"] if primary else None
+        digest = signature(report, shown_main)
+        if active == "debate":
+            seen[shown_main] = digest
+        marks = {"debate": (" •" if unicode else " *") if digest and seen.get(shown_main) != digest else "",
+                 "messages": " %d" % unread_total if unread_total else ""}
+        texts = [("[ %s ]" if key == active else "%s") % (name + marks.get(key, "")) for key, name in TABS]
+        edge = box_edge("  ".join(texts), width, unicode)
+        column, span = 3, None
+        for key, text in zip(dict(TABS), texts):
+            x1, x2 = column + 1, min(column + len(text), width - 3)
+            if x1 <= x2:
+                hits.append({"y": top, "x1": x1, "x2": x2, "action": ("tab", key)})
+                span = (column, x2) if key == active else span
+            column += len(text) + 2
+        role = previewed.get("role", "worker").upper() if previewed else ""
+        style = (hue(previewed) if role == "MAIN" else "review" if role != "WORKER" else "worker") if previewed else "dim"
+        lines.append(paint(edge, style) if span is None or not color else
+                     paint(edge[:span[0]], style) + chosen(edge[span[0]:span[1]], style) + paint(edge[span[1]:], style))
+        first = 0
+        if active == "detail" and capacity == 1 and previewed and body:
+            # One row holds the content line itself; a title there would leave nothing to scroll.
+            first = min(scrolled.get("detail", 0), len(body) - 1)
+            scrolled_now["detail"] = first
+            rows = [(body[first], targets.get(first, action(previewed)), False)]
+        elif active == "detail":
+            first = min(scrolled.get("detail", 0), max(0, len(body) - (capacity - 1)))
+            scrolled_now["detail"] = first
+            head = "%s / %s%s" % (role, name_of(previewed), " / auto" if automatic else "") if previewed else "DETAIL"
+            if len(body) > capacity - 1:
+                head += " / %s-%s of %s / wheel" % (first + 1, min(len(body), first + capacity - 1), len(body))
+            rows = [(head, action(previewed) if previewed else None, False)] + [
+                (text, targets.get(first + i, action(previewed)) if previewed else None, False)
+                for i, text in enumerate(body[first:first + capacity - 1])]
+        elif active == "plan":
+            plan = plan_rows(report, labels, width - 4, unicode)
+            first = min(scrolled.get("detail", 0), max(0, len(plan) - capacity))
+            scrolled_now["detail"] = first
+            rows = [(text, None, False) for text in plan[first:first + capacity]]
+        elif active == "debate":
+            rows = debate_body(report, shown_main, width - 4, capacity, navigation, labels, unicode)
+        else:
+            rows = messages_body(report, width - 4, capacity, navigation, unicode)
+        for n in range(capacity):
+            text, target, picked = rows[n] if n < len(rows) else ("", None, False)
+            line = box_row(text, width, unicode)
+            lines.append("\033[7m" + line + "\033[0m" if color and picked else line)
+            if target:
+                hits.append({"y": top + 1 + n, "x1": 1, "x2": width, "action": target,
+                             **({"preview": True} if active == "detail" else {})})
+        lines.extend([box_row("", width, unicode)] * (rows_high - 2 - capacity))
+        lines.append(paint(box_edge("", width, unicode, "bottom"), style))
+        bands_hit.append({"name": "detail", "y1": top, "y2": top + rows_high - 1, "x1": 1, "x2": width, "step": 3})
+        navigation["box"] = {"y1": top, "y2": top + rows_high - 1, "pages": bool(previewed) or active == "plan"}
+        spare -= rows_high
     if spare and (omitted or unlinked):
         parts = ["%s more calls (scroll)" % omitted] if omitted else []
         if unlinked:
             parts.append("%s call%s with no known main · t shows them" % (len(unlinked), "" if len(unlinked) == 1 else "s"))
         add(" / ".join(parts), "alert" if unlinked else "dim")
         spare -= 1
-    acceptance = mapping(report.get("acceptance"))
-    if spare and acceptance.get("available") and (plan_idle(report) or 0) < 7:
-        add("Plan: %s of %s tasks verified" % (mapping(acceptance.get("counts")).get("verified", 0),
-            acceptance.get("total", "?")), "good" if acceptance.get("complete") else "alert")
-        spare -= 1
-    messages = listing(room.get("messages"))
-    if spare >= 3 and messages:
-        def person(ident):
-            return "everyone" if ident == "all" else who(next((m for m in members if m["participant"] == ident), None), labels)
-        logs = [clipped("%s → %s: %s" % (person(m.get("sender")), person((listing(m.get("targets")) or ["all"])[0]),
-                                        readable(m.get("text"), " ") or "(empty)"), width - 4)
-                for m in messages[-min(3, spare - 2):]]
-        first = len(lines) + 2
-        shown = messages[-min(3, spare - 2):]
-        hits += [{"y": first + i, "x1": 1, "x2": width, "action": ("message", str(m.get("id")))}
-                 for i, m in enumerate(shown)]
-        for line in card("RECENT MESSAGES", logs, width, len(logs) + 2, unicode):
-            add(line, "dim")
-    elif spare >= 3 and listing(room.get("repo_tasks")):
-        tasks = listing(room.get("repo_tasks"))
-        body = ["%s · %s" % (t.get("title") or t.get("id"), said(t.get("state"))) for t in tasks[:spare - 2]]
-        for line in card("REPOSITORY TASKS", body, width, len(body) + 2, unicode):
-            add(line, "dim")
     lines += [""] * max(0, height - int(menu) - len(lines) - len(footer))
     lines += [clipped(line, width) for line in footer]
     if bar:
@@ -1222,11 +1377,31 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     return text if unicode else text.translate({ord("·"): "/", ord("→"): ">", ord("×"): "x", ord("│"): "|"})
 
 
+TABS = (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"))
+PLAN_ORDER = {"done": 0, "review": 1, "landing": 1, "running": 2, "claimed": 2, "ready": 3, "blocked": 4}
+
+
+def plan_rows(report, labels, width, unicode):
+    """The shared repository plan: its goal, then one row per task, verified work first."""
+    goal = mapping(report.get("goal")).get("text")
+    tasks = listing(mapping(report.get("room")).get("repo_tasks"))
+    glyphs = (dict(done="✓", review="◐", landing="◐", running="●", claimed="●", ready="○", blocked="✗") if unicode else
+              dict(done="+", review="~", landing="~", running="*", claimed="*", ready="o", blocked="x"))
+    rows = wrapped("Goal: " + goal, width, 2) if goal else []
+    for t in sorted((mapping(t) for t in tasks), key=lambda t: PLAN_ORDER.get(t.get("state"), 5)):
+        by = t.get("claimed_by_participant")
+        claimant = (clean(labels.get(by) or by, 40) if by else clean(t.get("provider"), 20)) or "unclaimed"
+        rows.append("%s %s · %s · %s · %s" % (glyphs.get(t.get("state"), "?"), clean(t.get("id"), 40),
+                                              clean(t.get("title"), 120) or "untitled", claimant,
+                                              clean(t.get("verify"), 80) or "no verify"))
+    return rows or ["No repository plan recorded"]
+
+
 def action(member):
     return member.get("_action") or ("chat" if member.get("role") == "main" else "result", member["participant"])
 
 
-def footer_hints(navigation, width, managed, unicode, member, mains, graph, debates=False):
+def footer_hints(navigation, width, managed, unicode, member, mains, graph):
     """At most five hints for what is selected; `?` swaps in the full list of working keys."""
     selected = navigation.get("selected")
     kind = selected[0] if selected else "chat"
@@ -1237,7 +1412,7 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph, deba
         keys = ["Enter Open", move + " Move", arrows + " Main" if mains > 1 else "",
                 "Space " + ("Pin" if graph else "Fold") if mains else "", "a Ask advisor",
                 "w Worktree" if worktree else "", "f Full result" if navigation.get("full_result") else "",
-                "g Graph", "t Tree", "d Debates" if debates else "", "m Messages",
+                "Tab Next tab", "g Graph", "t Tree",
                 "v " + ("Collapse" if navigation.get("expanded") else "Expand"), "b Attention", "Esc Back",
                 "F6/F7 Main" if managed else "", toggle if managed else "q Quit", "? Hide"]
         lines = [""]
@@ -1250,7 +1425,7 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph, deba
                   "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
                   "Enter Chat" if kind == "chat" else "Enter Show",
                   "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
-                  "d Debates" if debates else "", "m Messages",
+                  "Tab Next tab",
                   ("Space Pin" if graph else "Space Fold") if kind == "chat" and (mains > 1 or not graph) else ""]
     # The panel-wide F-keys stay fixed at the end of every board; board keys fill what is left.
     reserved = ["F6/F7 Main", toggle, "F5 Control", "F12 Keys"] if managed else ["q Quit", "? Keys"]

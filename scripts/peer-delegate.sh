@@ -61,6 +61,7 @@ INCLUDE_TASK=1
 INCLUDE_ML_CONTEXT=0
 THREAD_ID=""
 TASK_ID=""
+RESUME_SESSION=""
 PLAN_TASK_ID=""
 PLAN_LEASE_ID=""
 AUTOPILOT_OWNER_ID="${OMS_AUTOPILOT_OWNER_ID:-}"
@@ -167,6 +168,8 @@ Options:
                        worker brief and the outcome is appended (thread.sh).
   --task-id ID         Plan/task id (agent-plan.sh) to stamp on this run's
                        artifact-index rows for lineage. [A-Za-z0-9._-]+.
+  --resume-session ID  Continue this provider session (claude, codex) in the
+                       new worktree; its id is recorded as refs.native_session.
   --plan-task ID       Couple this delegation to an agent-plan.sh task: on
                        worker/verify failure (or an outbound-gate block) the
                        claim is released back to ready; on success the task
@@ -378,6 +381,18 @@ while [ "$#" -gt 0 ]; do
       TASK_ID="$2"
       shift 2
       ;;
+    --resume-session)
+      [ "$#" -ge 2 ] || fail "--resume-session requires a session id"
+      case "$2" in
+        [A-Za-z0-9]*) ;; *) fail "--resume-session requires a session id" ;;
+      esac
+      case "$2" in
+        *[!A-Za-z0-9._-]*) fail "--resume-session requires a session id" ;;
+      esac
+      [ "${#2}" -ge 8 ] && [ "${#2}" -le 80 ] || fail "--resume-session requires a session id"
+      RESUME_SESSION="$2"
+      shift 2
+      ;;
     --plan-task)
       [ "$#" -ge 2 ] || fail "--plan-task requires id"
       case "$2" in
@@ -522,6 +537,10 @@ elif [ -z "$PROMPT" ] && [ -z "$PLAN_TASK_ID" ]; then
 fi
 
 oms_require_peer_owner || exit $?
+unset OMS_RESUME_SESSION
+if [ -n "$RESUME_SESSION" ]; then
+  case "$TO" in claude|codex) ;; *) fail "--resume-session supports claude and codex" ;; esac
+fi
 
 REPO="$(cd "$REPO" && pwd -P)"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
@@ -1457,6 +1476,26 @@ delegate_attempt_finish_without_verify() {
   fi
 }
 
+# Claude stores a session under its project directory, named for the working
+# directory; a continuation runs in a new worktree, so the session file is
+# copied to where --resume will look for it.
+prepare_resume_session() {
+  local config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" found="" target real
+  case "$TO" in
+    codex) return 0 ;;
+    claude) ;;
+    *) echo "error: $TO cannot resume a session" >&2; return 1 ;;
+  esac
+  for found in "$config"/projects/*/"$RESUME_SESSION".jsonl; do
+    [ -f "$found" ] && break
+    found=""
+  done
+  [ -n "$found" ] || { echo "error: no claude session $RESUME_SESSION to resume" >&2; return 1; }
+  real="$(cd "$worktree" && pwd -P)" || return 1
+  target="$config/projects/$(printf '%s' "$real" | sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$target" && cp "$found" "$target/$RESUME_SESSION.jsonl"
+}
+
 run_worker() {
   local prompt="$1"
   local local_authority_detail=""
@@ -1468,6 +1507,14 @@ run_worker() {
     return 0
   fi
   [ -z "$PLAN_LEASE_ID" ] || export OMS_PLAN_LEASE_ID="$PLAN_LEASE_ID"
+  if [ -n "$RESUME_SESSION" ]; then
+    if ! prepare_resume_session; then
+      worker_status=125
+      route_retry_terminal=1
+      return 0
+    fi
+    export OMS_RESUME_SESSION="$RESUME_SESSION"
+  fi
   OMS_LAST_ATTEMPT_ID=""
   OMS_LAST_ATTEMPT_OWNED=0
   ma_run_routed_provider "$TO" "$WORKER_ACCESS" "$prompt" "$artifact" "$worktree" \
@@ -2295,6 +2342,8 @@ PY
   fi
   delegate_attempt_fail_if_live delegate_failed delegate-final-failed || true
   plan_failure_transition
+  # A wall-clock timeout keeps its own code so a caller can offer --continue.
+  [ "$worker_status" -ne 124 ] || exit 124
   exit 1
 fi
 if [ "$applied" = 1 ]; then

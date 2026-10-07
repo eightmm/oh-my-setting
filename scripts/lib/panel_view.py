@@ -373,6 +373,18 @@ def inbox_items(report, unicode=True):
             items.append({"stamp": message.get("ts") or "", "glyph": ">" if not unicode else "»",
                           "who": who(sender), "what": "to all: " + clean(text, 80),
                           "style": "alert", "action": ("chat", sender["participant"])})
+    from room_view import main_names
+    import room as room_module
+    titles = main_names(report, members)
+    byid = {m["participant"]: m for m in members}
+    for question in listing(mapping(report.get("room")).get("open_questions")):
+        question, minutes = mapping(question), room_module.age(mapping(question).get("ts")) // 60
+        asker, target = byid.get(question.get("sender")), byid.get(question.get("recipient"))
+        if minutes * 60 >= room_module.PERSON_AFTER and asker and target and target.get("role") == "main":
+            label = lambda m: titles.get(m["participant"]) or name(m)
+            items.append({"stamp": question.get("ts") or "", "glyph": "?", "who": "Question from " + label(asker),
+                          "what": "to %s open %d min" % (label(target), minutes), "style": "alert",
+                          "action": ("chat", target["participant"])})
     for request in close_requests(report, unicode):
         items.append({"stamp": request["ts"], "glyph": "✕" if unicode else "x", "who": "Close " + request["label"],
                       "what": sep_join(unicode, "requested by " + request["by"], request["reason"],
@@ -529,18 +541,6 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         # Graph-only targets must not leak into a tree drawn from the same navigation.
         for key in ("surface", "bands", "primary"):
             navigation.pop(key, None)
-    if view == "debate" and navigation is not None:
-        from panel_debate import render_debate
-        lines, hits = render_debate(report, width, height, navigation, color, unicode)
-        navigation.update(hits=hits, items=[], bands=[])
-        return "\n".join(lines)
-    if view == "messages" and navigation is not None:
-        from panel_messages import render_messages
-        navigation["main_attempt"] = main_attempt
-        lines, hits = render_messages(report, width, height, navigation, color, unicode)
-        navigation.update(hits=hits, items=[], bands=[])
-        text = "\n".join(lines)
-        return text if unicode else text.translate({ord("·"): "/", ord("→"): ">", ord("▸"): ">", ord("▾"): "v"})
     if menu and view != "graph":
         return render_inbox(report, width, height, color, unicode, managed, previous, navigation)
     if view in ("tree", "summary") or (view == "auto" and mapping(report.get("room")).get("participants")

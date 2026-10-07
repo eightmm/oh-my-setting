@@ -169,11 +169,32 @@ edges, and a particle on a live edge moves toward its consumer. Child status
 names its main. Cards stay bounded in width instead of stretching a lone worker
 across the terminal.
 
+Row 1 of the graph and the tree is the goal banner: `◎ GOAL  <plan goal>` in the head colour with a
+progress bar and counts right-aligned (`▕██████░░░░▏ 6/9 verified · 1 review · 2 running`; ASCII
+`@ GOAL` and `[######....]`). A goal too long for the row wraps to a second row before it is cut, and
+the progress never leaves row 1. Clicking the banner selects the `("tab", "plan")` target. Without an
+active plan (none, no goal, or idle for 7 days) it reads `◎ No shared goal · oms agent-plan init --goal
+TEXT` in dim style. The `OMS · …` header moves to row 2. `oms agent-plan claim` run by a panel main
+also records its room participant (`claimed_by_participant`), so two mains of one provider differ; a
+main's lane card then shows `Task: <id> · <state>`, `Now: <declared status>` and an activity line
+(`2 workers running · 1 needs you · last message 3m ago`), or a dim `no status yet`; it is six rows
+tall on boards of 32 or more rows and shrinks to four on short ones. Every prompt of a panel main
+carries a `[oms plan]` sentence (goal, progress, the main's task, the next ready task and its claim
+command) and, when its declared status is missing or older than 20 minutes, a reminder to set it.
+
 Main tabs show each main's state, model, a distinguishing title, worker and
 advisor counts (`W3 A2`), attention count (`!1`) and unread mail addressed to
 that main (`M2`), including mail from other mains; zero counts are omitted. A
 long title keeps its tail, which tells mains apart, and gives up the shared
-prefix first. A `Between mains` block under the tabs lists one
+prefix first. A question to a main with no linked answer (`oms room send --kind answer
+--reply-to ID`) adds `?N` to its tab, `? N open` to its card and a `? ` window-name
+prefix (`! ` wins). The recipient's hooks list open questions by id and name, from five
+minutes on every hook and `overdue` from fifteen; the asker's own hook records one
+`remind-<id>-1` note at ten minutes and `-2` at thirty, and the control window's
+`Needs you` list shows the question from twenty minutes. A `--kind answer` without
+`--reply-to` links the one open question from that recipient, or is refused with the ids.
+
+A `Between mains` block under the tabs lists one
 `Sol 6.1 → Opus 5.5 · 36 messages · 1 unread` line per sender and recipient (unread
 pairs first, then most recent; at most four plus `+N more pairs`); a board shorter
 than 32 rows shows `Between mains: N pairs · M unread`. The header holds one usage
@@ -592,6 +613,19 @@ menu lists them by number and `--main PARTICIPANT` names one; either choice only
 narrows the same live-main proof and is refused for a departed, exited or
 unknown main. A native main always dispatches as itself.
 
+Continue a timed-out or reviewed worker with `--continue TASK_ID` instead of
+re-dispatching from scratch: `oms panel --repo . --dispatch worker --owner codex
+--continue TASK_ID --brief-file next.md --verify COMMAND` takes the same role,
+workload and access checks, finds the latest worker of that task owned by this
+main, and starts a new run in a new worktree at the current HEAD that resumes
+the worker's native session (recorded as `refs.native_session` in the attempt,
+never in room text). The brief is prefixed with "Your earlier work was on OLD;
+the repository is now at NEW. Your previous patch is at PATH (apply what still
+fits). New instructions follow." A session that is missing, or from a provider
+without resume, falls back to a fresh worker given the previous patch and
+summary, and says so on stderr. A worker that ended by timeout (exit 124) shows
+"timed out · c continue" on its card; later rounds of one task show "round N".
+
 Give each dispatched subtask a descriptive task ID and short `--label`; reuse
 the exact reviewed plan task ID where one exists. Labels are optional for direct
 calls: an omitted label displays the typed purpose. Prompts and briefs are at
@@ -627,6 +661,7 @@ than tall (columns more than twice the rows) gets a left board (40 percent),
 otherwise the graph is above the original CLI, with each taking half the window.
 When a watcher's window is resized across that boundary, the board moves itself
 (with a small hysteresis band); `--position top|left|side` fixes the placement.
+The board/chat split is one setting for the whole panel: drag the border in any main window and the other main windows (and mains opened later) take the same share, except a zoomed board.
 A watcher whose OMS sources change re-executes itself once they compile, so
 updated boards need no manual restart. `--position side` retains a 28 percent
 tmux sidebar (26 percent in Herdr), defaulting to `summary`. Select `v` in the
@@ -877,24 +912,35 @@ without executing a model. Four seats must complete to report council success;
 failed seats remain visible and the owner still decides the outcome. All seats
 are read-only. There is no model fallback or additional synthesis-model call.
 
-Key `d` on the board opens the debate reader in place: this room's debates
-(newest first, at most ten) with owner main, state and time. Up/Down selects,
-Enter or a click opens one, PgUp/PgDn or the wheel scrolls it, Esc returns to
-the list and then the graph, and `d` returns to the graph at once. An opened
-debate shows the question, each seat's stance (its VERDICT or first Answer
-sentence, with what changed after round 1), Agreement/Disagreement only when
-the synthesis has such headings, the owner's recorded decision, and the
-synthesis artifact path. Evidence is read in the background.
+The board's bottom is one box whose top edge is a tab strip: Detail, Plan,
+Debate and Messages. The selected tab is bracketed; a `•` after Debate marks a
+debate running or finished since the tab was last opened, and a number after
+Messages counts the unread mail for live participants. A click on a tab name or
+Tab (Detail, Plan, Debate, Messages, then around) switches; a tab never changes
+by itself, and the box stays after Esc.
 
-Key `m` on the board opens the messages reader: the room's last 200 messages,
-oldest first, one row each with local time (date when from another day), sender
-and recipient by the board's main names, an `unread` mark while a recipient has
-not consumed it, and the question/answer/handoff/status kind. Left/Right cycles
-the filter (all, to/from the selected main, to/from this window's main),
-Up/Down selects, Enter or a click expands the message in place to its full
-wrapped text (PgUp/PgDn or the wheel scrolls) and again collapses it, and `m` or
-Esc returns. A click on a RECENT MESSAGES row opens the reader with that message
-expanded. Reading never acknowledges a message; the full log is read in the
+Detail is the selected call's detail. Plan shows the shared repository plan:
+the goal, then one row per task (state glyph, id, title, claimant by the board's
+main name or provider, verify command) ordered verified, review, running or
+claimed, ready, blocked. Debate shows the shown main's debates, newest first
+(Left/Right cycles when there are several): title with the opener's board name
+and local time, seats answered and round, the question (at most three lines),
+one line per seat with its VERDICT or first Answer sentence (sentences end only
+at `.`, `!` or `?` followed by a space, never inside backticks or quotes; the
+line is cut at about 140 columns), `(changed in round 2: (c) -> (a))` only when
+the seat's choice token such as (a), A, yes/no or proceed/revise differs between
+rounds, Agreement/Disagreement only when the synthesis has such headings, and
+the owner's recorded decision. Up/Down moves the seat cursor, Enter shows that
+seat's full answer in the tab, Esc returns, and `f` opens the full recorded
+result reader. Evidence is read in the background.
+
+Messages lists the room's last 200 messages, oldest first, one row each with
+local time (date when from another day), sender and recipient by the board's
+main names, an `unread` mark while a recipient has not consumed it, and the
+question/answer/handoff/status kind. Left/Right cycles the filter (all,
+to/from the selected main, to/from this window's main), Up/Down selects, Enter
+or a click expands the message in place to its full wrapped text and again
+collapses it. Reading never acknowledges a message; the full log is read in the
 background and re-read only when the room's message counts change.
 
 The owning main records a result through `--finalize`. Native process exit and

@@ -5,8 +5,8 @@ Debate text is untrusted peer data: every line passes through clean()/wrapped(),
 
 import re
 
-from dashboard_projection import clean, listing, mapping
-from panel_view import MODEL_NAMES, PALETTE, PROVIDER_NAMES, clipped, wrapped
+from dashboard_projection import clean, fit, listing, mapping
+from panel_view import MODEL_NAMES, PROVIDER_NAMES, TERMINAL_STATES, wrapped
 
 MAX_DEBATES, MAX_SYNTHESIS = 10, 64 * 1024
 DISAGREE = re.compile(r"disagree|conflict|dissent", re.I)
@@ -32,7 +32,7 @@ def debates(report, room=None):
         if row.get("task_id") and main:
             found.append({"task": row["task_id"], "main": main, "state": clean(row.get("state"), 40) or "unknown",
                           "title": clean(meta.get("label"), 120) or row["task_id"],
-                          "time": (clean(row.get("updated_at"), 40) or "").replace("T", " ")[:16]})
+                          "time": clean(row.get("updated_at"), 40) or ""})
     found.sort(key=lambda d: d["time"], reverse=True)
     return found[:MAX_DEBATES]
 
@@ -59,6 +59,34 @@ def _provider(call):
                 "claude" if model.startswith("claude") else "codex" if model.startswith("gpt") else "unknown")
 
 
+def _sentence(text):
+    """First sentence: ends at . ! ? followed by whitespace or the end, never inside `code` or "quotes"."""
+    closing = None
+    for i, ch in enumerate(text):
+        if closing:
+            closing = None if ch == closing else closing
+        elif ch in "`\"“":
+            closing = "”" if ch == "“" else ch
+        elif ch in ".!?" and (i + 1 == len(text) or text[i + 1].isspace()):
+            return text[:i + 1]
+    return text
+
+
+CHOICE = (re.compile(r"(?<![\w`])\(([a-zA-Z])\)"),
+          re.compile(r"^[\s*_\"'`>#-]*([A-D])(?:[:.,)/]|\s+[—–-]\s|$)"),
+          re.compile(r"\b(?:[Oo]ption|[Cc]hoice|[Aa]nswer)\s+([A-D])\b"),
+          re.compile(r"(?i)^[\s*_\"'`>#-]*(yes|no|proceed|revise)\b"))
+
+
+def choice(text):
+    """The leading choice token of a stance - (a), A, yes/no, proceed/revise - or None."""
+    for n, pattern in enumerate(CHOICE):
+        found = pattern.search(text or "")
+        if found:
+            return ("(%s)" if n < 3 else "%s") % found[1].lower()
+    return None
+
+
 def _stance(answer):
     """(verdict or None, stance text): the VERDICT line, else the Answer section's first sentence."""
     from peer_artifacts import debate_sections
@@ -70,20 +98,20 @@ def _stance(answer):
     body = next((b for h, b in sections if h == "Answer" and b.strip()), None)
     if body is None:
         return None, clean(" ".join(answer.split("\n")[:4]), 400)
-    first = re.match(r"(.+?[.!?])(?:\s|$)", clean(body, 800))
-    return None, first[1] if first else clean(body, 400)
+    return None, _sentence(clean(body, 800))
 
 
 def _seats(calls):
     """One seat per model, round 1 and 2 answers kept apart by the artifact's -rN suffix."""
     seats = {}
     for call in calls:
-        if call.get("kind") != "ask" or not call.get("answer"):
+        if call.get("kind") != "ask":
             continue
         round_ = re.search(r"-r(\d+)\.md$", call.get("artifact") or "")
         key = call.get("selected_model") or call.get("artifact") or "unknown"
         seat = seats.setdefault(key, {"model": call.get("selected_model"), "provider": _provider(call), "rounds": {}})
-        seat["rounds"][int(round_[1]) if round_ else 1] = call["answer"]
+        if call.get("answer"):
+            seat["rounds"][int(round_[1]) if round_ else 1] = call["answer"]
     return list(seats.values())
 
 
@@ -120,116 +148,137 @@ def _prompt(text):
     return clean(" ".join(lines[:12]), 600)
 
 
-def _block(lines, text, width, limit, indent="  "):
-    lines += [indent + part for part in wrapped(text, width - len(indent), limit)]
+def _view(navigation):
+    return navigation.setdefault("debate_view", {"index": 0, "shown": None, "seat": None, "cursor": 0, "scroll": 0})
 
 
-def _body(entry, debate_report, width):
-    row = next((r for r in listing(debate_report.get("rows"))), {})
-    lines = ["Question"]
-    prompt = clean(row.get("title") or entry["title"], 160)
-    _block(lines, prompt, width, 1)
-    asked = _prompt(mapping(debate_report.get("synthesis")).get("text") or "")
-    if asked and asked != prompt:
-        _block(lines, asked, width, 4)
-    seats = _seats(listing(row.get("calls")))
-    for seat in seats:
-        name = MODEL_NAMES.get(seat["model"]) or clean(seat["model"], 40) or "Unknown model"
-        provider = PROVIDER_NAMES.get(seat["provider"], seat["provider"])
-        lines += ["", "%s (%s)" % (name, provider)]
-        latest = seat["rounds"][max(seat["rounds"])]
-        verdict, stance = _stance(latest)
-        _block(lines, stance or "No answer recorded", width, 4)
-        if len(seat["rounds"]) > 1:
-            first = _stance(seat["rounds"][min(seat["rounds"])])
-            if (verdict or stance) != (first[0] or first[1]):
-                _block(lines, "Changed after round 1: was " + clean(first[0] or first[1], 200), width, 2)
-    if not seats:
-        lines += ["", "No seat answers recorded yet"]
-    synthesis = mapping(debate_report.get("synthesis"))
-    for title, text in _sections(synthesis.get("text") or "").items():
-        lines += ["", title]
-        _block(lines, text, width, 4)
-    lines += ["", "Decision"]
-    summary = clean(row.get("summary"), 800)
-    if summary or row.get("outcome"):
-        _block(lines, ((summary + " " if summary else "") + ("(outcome: %s)" % clean(row.get("outcome"), 40)
-                                                           if row.get("outcome") else "")).strip(), width, 4)
-    else:
-        lines.append("  No decision recorded yet")
-    if synthesis.get("path"):
-        lines += ["", "Full text: " + synthesis["path"]]
-    return lines
+def signature(report, main):
+    """What the Debate tab marks as new: the shown main's debates and their states."""
+    return tuple((d["task"], d["state"]) for d in debates(report) if d["main"] == main)
 
 
-def render_debate(report, width, height, navigation, color=False, unicode=True):
-    """(lines, hits): the debate list, or one opened debate paged by navigation['offset']."""
-    state = navigation.setdefault("debate_view", {"index": 0, "open": None})
-    entries = debates(report)
-    state["index"] = min(max(0, state.get("index", 0)), max(0, len(entries) - 1))
+def _paragraphs(text, width, limit):
+    return [part for paragraph in text.splitlines()
+            for part in (wrapped(paragraph, width, 50, 8000) if paragraph.strip() else [""])][:limit]
+
+
+def tab_body(report, main, width, cap, navigation, labels, unicode=True):
+    """Rows (text, action, selected) for the Debate tab of one main: the newest debate, or one seat's full answer."""
+    from room_view import clock_stamp, readable
+    state = _view(navigation)
+    entries = [d for d in debates(report) if d["main"] == main]
+    name = clean(labels.get(main) or main, 60) if main else "this main"
+    if not entries:
+        state.update(shown=None, seat=None)
+        return [("No debate opened by %s · a main opens one with oms panel --council" % name, None, False)]
+    state["index"] = min(max(0, state.get("index", 0)), len(entries) - 1)
+    entry = entries[state["index"]]
+    key = (entry["task"], entry["main"])
+    if state.get("shown") != key:
+        for stale in ("report", "error", "refresh"):
+            state.pop(stale, None)
+        state.update(shown=key, seat=None, cursor=0, scroll=0)
     navigation["debate_targets"] = [(e["task"], e["main"]) for e in entries]
-    room = mapping(report.get("room"))
-    head = "OMS / Debates / " + clean(room.get("title") or room.get("id") or "room", 60)
-    lines, hits = [clipped(head, width), ""], []
-    opened = next((e for e in entries if (e["task"], e["main"]) == state.get("open")), None)
-    budget = max(1, height - len(lines) - 1)
-    if opened is None:
-        state["open"] = None
-        if not entries:
-            lines.append("No debates in this room yet")
-        for i, entry in enumerate(entries[:budget]):
-            row = "%s %s - %s - %s - %s" % (">" if i == state["index"] else " ", entry["title"], entry["main"],
-                                            entry["state"], entry["time"] or "time unrecorded")
-            lines.append(clipped(row, width))
-            hits.append({"y": len(lines), "x1": 1, "x2": width, "action": ("debate", (entry["task"], entry["main"]))})
-        footer = ("Enter Open  %s Move  d/Esc Graph" % ("↑↓" if unicode else "^v"))
-        navigation["viewport"] = budget
-    else:
-        pending = "report" not in state
-        body = ([clipped("Reading debate...", width)] if pending else
-                [clipped(line, width) for line in _body(opened, state["report"], width)])
-        if state.get("error"):
-            body.append(clipped("! " + clean(state["error"], 120), width))
-        offset = min(max(0, navigation.get("offset", 0)), max(0, len(body) - budget))
-        navigation["offset"] = offset
-        navigation["viewport"] = budget
-        lines.append(clipped("%s - %s - %s" % (opened["title"], opened["main"], opened["state"]), width))
-        lines += body[offset:offset + budget - 1]
-        footer = "%s%s  PgUp/PgDn Scroll  Esc List  d Graph" % (
-            "%d-%d/%d  " % (offset + 1, min(len(body), offset + budget - 1), len(body)) if len(body) > budget - 1 else "",
-            "↑↓" if unicode else "^v")
-    lines = lines[:height - 1] + [clipped(footer, width)]
-    if color:
-        lines = [PALETTE["head"] + lines[0] + "\033[0m"] + lines[1:-1] + [PALETTE["dim"] + lines[-1] + "\033[0m"]
-    return lines[:height], hits
+    report_ = state.get("report")
+    if report_ is None:
+        return [(clean(entry["title"], 120), None, False),
+                (clean("! " + state["error"], 120) if state.get("error") else "Reading debate...", None, False)]
+    row = next(iter(listing(report_.get("rows"))), {})
+    seats = _seats(listing(row.get("calls")))
+    state.update(seats=len(seats), viewport=cap)
+    dash, arrow = ("—", "→") if unicode else ("-", "->")
+    if state.get("seat") is not None and state["seat"] < len(seats):
+        seat = seats[state["seat"]]
+        latest = max(seat["rounds"]) if seat["rounds"] else 0
+        title = "%s %s round %s answer · Esc back" % (
+            MODEL_NAMES.get(seat["model"]) or clean(seat["model"], 40) or "Unknown model", dash, latest)
+        text = readable(seat["rounds"].get(latest, "No answer recorded"), "\n", True)
+        body = [(title, None, False)] + [(line, None, False) for line in _paragraphs(text, width, 400)]
+        state["scroll"] = min(max(0, state.get("scroll", 0)), max(0, len(body) - cap))
+        return body[state["scroll"]:state["scroll"] + cap]
+    answered = sum(1 for seat in seats if seat["rounds"])
+    rounds = max([r for seat in seats for r in seat["rounds"]] or [1])
+    done = entry["state"] in TERMINAL_STATES
+    stamp = clock_stamp(entry["time"])
+    head = "%s · opened by %s%s · %d of %d seats answered · %s" % (
+        entry["title"], name, " · " + stamp if stamp else "", answered, len(seats),
+        "round %d of %d" % (rounds, rounds) if done else "running")
+    if len(entries) > 1:
+        head += " · debate %d of %d (%s)" % (state["index"] + 1, len(entries), "←→" if unicode else "<>")
+    synthesis = mapping(report_.get("synthesis"))
+    asked = _prompt(synthesis.get("text") or "") or clean(row.get("title") or entry["title"], 300)
+    body = [(part, None, False) for part in wrapped(head, width, 2)]
+    for n, part in enumerate(wrapped(asked, width - len("Question: "), 3)):
+        body.append((("Question: " if not n else " " * len("Question: ")) + part, None, False))
+    state["cursor"] = min(max(0, state.get("cursor", 0)), max(0, len(seats) - 1))
+    starts = {}
+    mark = "▸ " if unicode else "> "
+    for i, seat in enumerate(seats):
+        model = MODEL_NAMES.get(seat["model"]) or clean(seat["model"], 40) or "Unknown model"
+        if seat["rounds"]:
+            first, last = seat["rounds"][min(seat["rounds"])], seat["rounds"][max(seat["rounds"])]
+            stance = fit(clean(_stance(last)[1], 400) or "No answer recorded", 140)
+            note = ""
+            if len(seat["rounds"]) > 1:
+                before, after = choice(_stance(first)[1]), choice(_stance(last)[1])
+                if before and after and before != after:
+                    note = " (changed in round %d: %s %s %s)" % (max(seat["rounds"]), before, arrow, after)
+            text = "%s %s %s%s" % (model, dash, stance, note)
+        else:
+            text = "%s %s no answer recorded yet" % (model, dash)
+        starts[i] = len(body)
+        for n, part in enumerate(wrapped(text, width - 2, 2)):
+            body.append((((mark if i == state["cursor"] else "  ") if not n else "  ") + part,
+                         ("seat", i), i == state["cursor"]))
+    if not seats:
+        body.append(("No seat answers recorded yet", None, False))
+    for title, text in _sections(synthesis.get("text") or "").items():
+        for n, part in enumerate(wrapped(title + ": " + text, width, 2)):
+            body.append((part, None, False))
+    summary = clean(row.get("summary"), 800) or ""
+    outcome = ("(outcome: %s)" % clean(row.get("outcome"), 40)) if row.get("outcome") else ""
+    decision = (summary + " " + outcome).strip() or "No decision recorded yet"
+    body += [(part, None, False) for part in wrapped("Decision: " + decision, width, 3)]
+    if state.pop("reveal", False) and state["cursor"] in starts:
+        first_row = starts[state["cursor"]]
+        if first_row < state["scroll"]:
+            state["scroll"] = first_row
+        elif first_row >= state["scroll"] + cap:
+            state["scroll"] = first_row - cap + 1
+    state["scroll"] = min(max(0, state.get("scroll", 0)), max(0, len(body) - cap))
+    return body[state["scroll"]:state["scroll"] + cap]
 
 
 def handle(event, navigation):
-    """Debate-view keys; True when the event belongs to this view. Opening resets the read."""
-    state = navigation.setdefault("debate_view", {"index": 0, "open": None})
-    targets, kind = navigation.get("debate_targets", []), event[0]
-
-    def open_(target):
-        state.update(open=target, index=targets.index(target) if target in targets else 0)
-        for key in ("report", "error", "refresh"):
-            state.pop(key, None)
-        navigation["offset"] = 0
-
-    if state.get("open"):
-        step = max(1, navigation.get("viewport", 1))
+    """Debate-tab keys; True when the event belongs to the tab. Opening a seat resets its scroll."""
+    state, kind = _view(navigation), event[0]
+    targets = navigation.get("debate_targets", [])
+    step = max(1, state.get("viewport", 1))
+    if state.get("seat") is not None:
+        if kind == "escape":
+            state.update(seat=None, scroll=0, reveal=True)
+            return True
         delta = {"up": -1, "down": 1, "pageup": -step, "pagedown": step}.get(kind)
-        if kind == "scroll":
-            delta = event[1]
-        if delta is None:
-            return kind in {"click", "enter", "home", "end"}
-        navigation["offset"] = max(0, navigation.get("offset", 0) + delta)
-        return True
-    if kind in {"up", "down"} and targets:
-        state["index"] = (state.get("index", 0) + (1 if kind == "down" else -1)) % len(targets)
-    elif kind == "enter" and targets:
-        open_(targets[min(state.get("index", 0), len(targets) - 1)])
+        delta = event[1] if kind == "scroll" else delta
+        if delta is not None:
+            state["scroll"] = max(0, state.get("scroll", 0) + delta)
+        return delta is not None or kind in {"enter", "left", "right", "home", "end"}
+    seats = state.get("seats", 0)
+    if kind in {"left", "right"} and len(targets) > 1:
+        state["index"] = (state.get("index", 0) + (1 if kind == "right" else -1)) % len(targets)
+    elif kind in {"up", "down"} and seats:
+        state["cursor"] = min(seats - 1, max(0, state.get("cursor", 0) + (1 if kind == "down" else -1)))
+        state["reveal"] = True
+    elif kind == "enter" and seats:
+        state.update(seat=state.get("cursor", 0), scroll=0)
     elif kind == "click":
         hit = next((h for h in navigation.get("hits", []) if h["y"] == event[2] and h["x1"] <= event[1] <= h["x2"]), None)
-        if hit:
-            open_(hit["action"][1])
-    return kind in {"up", "down", "enter", "click", "home", "end", "scroll", "pageup", "pagedown", "left", "right"}
+        if not hit or hit["action"][0] != "seat":
+            return False
+        state.update(cursor=hit["action"][1], seat=hit["action"][1], scroll=0)
+    elif kind in {"pageup", "pagedown", "scroll"}:
+        delta = event[1] if kind == "scroll" else step if kind == "pagedown" else -step
+        state["scroll"] = max(0, state.get("scroll", 0) + delta)
+    else:
+        return False
+    return True

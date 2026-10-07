@@ -204,6 +204,7 @@ def bootstrap(provider, repo):
         "Use fresh scoped briefs with paths, authority, constraints, success "
         "criteria and a return contract. Inspect the returned artifacts and "
         "patch, use patch-admit/patch-land when authorized, and verify the result. "
+        "Continue a timed-out or reviewed worker with --continue TASK_ID instead of re-dispatching from scratch. "
         "Worker completion is not acceptance. Workers cannot recursively "
         "orchestrate. Do not commit, push or install without user authority. "
         "OMS records are shared; native conversations are separate. "
@@ -228,6 +229,8 @@ def bootstrap(provider, repo):
         "architecture, integration, review, patch admission and coordination with other mains in the main. "
         "Work directly only when writing the brief would take longer than the edit, or when the step needs the "
         "main itself, such as integrating into a shared tree another main has frozen. "
+        "Panel mains work from the shared plan (oms agent-plan): claim a ready task, delegate it, verify it, "
+        "mark it reviewed/verified; propose new tasks with oms agent-plan add instead of starting unplanned work. "
         "At material decisions use oms panel --dispatch advisor --owner %s "
         "--seat astra|fable|auto --repo . --prompt TEXT, choosing the seat by need: astra (GPT-6 Astra) "
         "for source-level correctness, code paths, tooling and test evidence; fable (Fable 5.1) for design, "
@@ -555,12 +558,111 @@ def active_mains(repo, room_id, state, owner):
     return candidates
 
 
+def session_stored(provider, session):
+    """Whether the provider still has this native session on disk."""
+    if provider == "claude":
+        base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+        return any(base.glob("*/%s.jsonl" % session))
+    if provider == "codex":
+        base = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
+        return any(base.rglob("*%s*.jsonl" % session))
+    return False
+
+
+def owning_attempt(repo, owner, main, env):
+    """The live panel-main attempt that owns a continued worker; another main's workers never match."""
+    parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
+    if parent:
+        return parent
+    room_id = env.get("OMS_ROOM_ID")
+    if not room_id:
+        raise ValueError("--continue needs the main that owns the worker; select its room with --room")
+    candidates = active_mains(repo, room_id, room.project(room.records(repo, room_id)), owner)
+    if main:
+        candidates = {main: candidates[main]} if main in candidates else {}
+    if len(candidates) != 1:
+        raise ValueError("select a unique active main in this room before continuing a worker")
+    return next(iter(candidates.values()))["attempt_id"]
+
+
+def continuation(repo, owner, main, task_id, route, brief, env):
+    """(brief file, native session or None, note) for the next round of one of this main's workers."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id or ""):
+        raise ValueError("invalid task ID to continue")
+    parent = owning_attempt(repo, owner, main, env)
+    rows = json.loads(events(repo, "list", "--json", output=True))
+    earlier = sorted((row for row in rows if row.get("task_id") == task_id and row.get("parent_attempt_id") == parent
+                      and row.get("refs", {}).get("panel_role") == "worker"), key=lambda row: row.get("sequence", 0))
+    if not earlier:
+        raise ValueError("this main has no worker for task %s to continue" % task_id)
+    last = earlier[-1]
+    session = last.get("refs", {}).get("native_session")
+    call = next((c for c in reversed(results(repo, task_id)["rows"][0].get("calls", []))
+                 if c.get("attempt_id") == last["attempt_id"]), {})
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"], capture_output=True,
+                          text=True, check=False, stdin=subprocess.DEVNULL).stdout.strip()
+    old = last.get("base_sha") or "an earlier commit"
+    patch = call.get("patch")
+    where = ""
+    if patch:
+        # Absolute machine paths never leave in a prompt (the outbound scrubber refuses them), and the new
+        # worktree has no .oms artifacts, so the earlier patch travels inline while it fits.
+        try:
+            body = (Path(repo) / patch).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            body = ""
+        name = os.path.relpath(Path(repo) / patch, repo)
+        if body and len(body.encode("utf-8")) + len(Path(brief).read_bytes()) + 8192 <= MAX_PROMPT:
+            where = " Your previous patch (%s) follows; apply what still fits.\n```diff\n%s```\n" % (name, body)
+        else:
+            where = " Your previous patch is %s in the main checkout (apply what still fits)." % name
+    resume = session if (session and last.get("provider") == route["provider"]
+                         and session_stored(route["provider"], session)) else None
+    if resume:
+        preamble = ("Your earlier work was on %s; the repository is now at %s.%s New instructions follow.\n\n"
+                    % (old, head, where))
+        note = "continuing round %d of %s in its native session" % (len(earlier) + 1, task_id)
+    else:
+        summary = clean(str(call.get("answer") or "no summary recorded"), 1500)
+        reason = ("the earlier worker ran on %s, not %s" % (last.get("provider"), route["provider"])
+                  if session and last.get("provider") != route["provider"] else
+                  "the earlier session is not recorded or no longer on disk")
+        preamble = ("A fresh worker continues earlier work on %s (%s). The repository is now at %s.%s "
+                    "Earlier summary: %s\nNew instructions follow.\n\n" % (task_id, reason, head, where, summary))
+        note = "no resumable session (%s); started a fresh worker with the previous patch and summary" % reason
+    text = preamble + Path(brief).read_text(encoding="utf-8")
+    if len(text.encode("utf-8")) > MAX_PROMPT:
+        raise ValueError("brief plus continuation preamble exceeds the panel input contract")
+    handle = tempfile.NamedTemporaryFile("w", suffix=".md", prefix="oms-continue-", encoding="utf-8", delete=False)
+    with handle:
+        handle.write(text)
+    return Path(handle.name), resume, note
+
+
 def dispatch(repo, owner, role, workload, seat, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
-             main=None):
+             main=None, continue_task=None):
     route = selected_route(owner, role, workload, seat, access, purpose, target, model, effort)
     label = safe_label(label)
-    argv = routed_command(ENTRY, repo, route, prompt, brief, verify, task_id)
+    resume = None
+    temporary = None
+    if continue_task:
+        if role != "worker" or not brief or prompt or task_id:
+            raise ValueError("--continue takes a worker and --brief-file, not --prompt or --task-id")
+        brief, resume, note = continuation(repo, owner, main, continue_task, route, brief, child_environment(owner, repo))
+        temporary, task_id = brief, continue_task
+        print(note, file=sys.stderr)
+    try:
+        return run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, brief, verify, task_id,
+                            dry_run, label, route, main, resume)
+    finally:
+        if temporary:
+            temporary.unlink()
+
+
+def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, brief, verify, task_id,
+                 dry_run, label, route, main, resume):
+    argv = routed_command(ENTRY, repo, route, prompt, brief, verify, task_id, resume)
     if dry_run:
         print(json.dumps({"schema": 1, "kind": "oms-panel-route", "route": route,
                           "argv": argv, "executes": False}))
@@ -814,9 +916,99 @@ def board_position(target=None, current=None):
         return current or "top"
 
 
+def parse_split(text):
+    """The panel-wide board share "<top|left>:<percent>" as (placement, percent); None when unset or invalid."""
+    match = re.fullmatch(r"(top|left):(\d{1,2})", (text or "").strip())
+    return (match.group(1), int(match.group(2))) if match and 5 <= int(match.group(2)) <= 95 else None
+
+
+def split_share(pane, window):
+    return max(5, min(95, (200 * pane + window) // (2 * window)))
+
+
+def split_cells(percent, window):
+    return max(3, min(window - 4, (2 * percent * window + 100) // 200))
+
+
+def split_resize(stored, pane, window):
+    """Cells a board of `pane` cells in a `window`-cell axis should take to match the stored share, or None
+    when it is already within one cell (a 2-cell gap is the threshold that keeps windows from ping-ponging)."""
+    wanted = split_cells(stored[1], window)
+    return wanted if abs(wanted - pane) >= 2 else None
+
+
 def board_split(pane, repo, command):
-    subprocess.run(tmux_command("split-window", *SPLITS[board_position(pane)], "-t", pane, "-c", str(repo), command),
-                   check=True)
+    position = board_position(pane)
+    flags = list(SPLITS[position])
+    try:
+        shared = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{@oms_panel_split}"),
+                                capture_output=True, text=True, check=False, timeout=3,
+                                stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        shared = ""
+    stored = parse_split(shared)
+    if stored:
+        flags[-1] = "%d%%" % stored[1]
+    subprocess.run(tmux_command("split-window", *flags, "-t", pane, "-c", str(repo), command), check=True)
+
+
+def panel_geometry():
+    """One tmux read of this board: (window active, zoomed, panes, window w/h, pane w/h, stored split text);
+    None when tmux cannot say or this is the control window (only main windows share the split)."""
+    try:
+        result = subprocess.run(tmux_command("display-message", "-p", "-t", os.environ.get("TMUX_PANE", ""),
+                                             "#{window_active} #{window_zoomed_flag} #{window_panes} #{window_width} "
+                                             "#{window_height} #{pane_width} #{pane_height} #{window_name} #{@oms_panel_split}"),
+                                capture_output=True, text=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
+        fields = result.stdout.split() if result.returncode == 0 else []
+        if len(fields) < 8 or fields[7] == "control" or fields[0] not in ("0", "1") or fields[1] not in ("0", "1"):
+            return None
+        return (fields[0] == "1", fields[1] == "1", int(fields[2]), (int(fields[3]), int(fields[4])),
+                (int(fields[5]), int(fields[6])), fields[8] if len(fields) > 8 else "")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+class SplitSync:
+    """Keeps every main window's board at the one panel-wide share: a border drag in the active window is
+    recorded in the session option @oms_panel_split, and the other windows resize their own board to it."""
+
+    def __init__(self):
+        self.last = None
+        self.force = True
+
+    def tick(self, geometry):
+        """Apply one geometry read; return the name of what was done ("record", "follow") or None."""
+        if geometry is None:
+            return None
+        active, zoomed, panes, window, pane, text = geometry
+        before, self.last = self.last, (window, pane, active)
+        if zoomed or panes != 2:
+            self.last = None
+            return None
+        position = "top" if pane[0] == window[0] else "left"
+        axis = 1 if position == "top" else 0
+        if before is not None and before[0] != window:
+            self.force = True
+        elif active and before is not None and before[2] and before[1] != pane:
+            share = "%s:%d" % (position, split_share(pane[axis], window[axis]))
+            if share != text:
+                subprocess.run(tmux_command("set-option", "-t", os.environ.get("OMS_PANEL_SESSION", ""),
+                                            "@oms_panel_split", share), check=False, timeout=3,
+                               stdin=subprocess.DEVNULL)
+            return "record"
+        stored = parse_split(text)
+        if stored is None or active and not (self.force or before is not None and not before[2]):
+            return None
+        self.force = False
+        cells = split_resize(stored, pane[axis], window[axis])
+        if cells is None:
+            return None
+        subprocess.run(tmux_command("resize-pane", "-t", os.environ.get("TMUX_PANE", ""),
+                                    "-y" if position == "top" else "-x", str(cells)), check=False, timeout=3,
+                       stdin=subprocess.DEVNULL)
+        self.last = (window, (pane[0], cells) if position == "top" else (cells, pane[1]), active)
+        return "follow"
 
 
 def relayout_board():
@@ -1044,7 +1236,7 @@ def bind_window(pane, launch, view, attention_only):
 # (F9 appears there only in a test remap); Alt/Shift arrows edit or queue input there.
 # F9 selects the other pane of the window: the native chat from its board and back.
 KEYS_HELP = ("OMS panel keys: F6/F7 previous/next main · F9 chat/board · F5 control window · F12 this help · "
-             "on a board: Enter open · a advisor · d debates · m messages · f full result · t tree · v expand · n new main · ? all")
+             "on a board: Enter open · Tab next tab · a advisor · f full result · t tree · v expand · n new main · ? all")
 # F5/F9/F12 are unbound in Codex 0.160 and Claude Code; F8 is Codex voice, F10/F11 belong to terminal menus.
 MAIN_KEYS = (("F7", "next-window", 2), ("F6", "previous-window", 2), ("F9", "select-pane -t :.+", 0),
              ("F5", "select-window -t :=control", 0), ("F12", 'display-message -d 8000 "%s"' % KEYS_HELP, 0))
@@ -1551,18 +1743,6 @@ def session_option(name):
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def window_active():
-    """Whether this pane's window is the one its tmux session shows; None when unknown."""
-    try:
-        result = subprocess.run(tmux_command("display-message", "-p", "-t", os.environ.get("TMUX_PANE", ""),
-                                             "#{window_active}"),
-                                capture_output=True, text=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    value = result.stdout.strip() if result.returncode == 0 else ""
-    return value == "1" if value in ("0", "1") else None
-
-
 def pane_option(name):
     try:
         result = subprocess.run(tmux_command("show-option", "-w", "-v", "-t",
@@ -1750,6 +1930,31 @@ def open_worktree(repo, state, navigation):
     return "Worktree shell opened; edits there are not part of the worker's recorded patch"
 
 
+def tab_event(event, navigation):
+    """The bottom box's own keys and clicks; True when the event was consumed. Tabs never switch by themselves."""
+    from room_view import TABS
+    names = [key for key, unused in TABS]
+    tab = navigation.get("tab") if navigation.get("tab") in names else "detail"
+    kind = event[0]
+    if navigation.get("surface") != "graph" or navigation.get("detail"):
+        return False
+    if kind == "tab":
+        navigation["tab"] = names[(names.index(tab) + 1) % len(names)]
+        return True
+    hit = next((h for h in navigation.get("hits", []) if kind == "click" and h["y"] == event[2]
+                and h["x1"] <= event[1] <= h["x2"] and h["action"][0] in {"tab", "message", "seat"}), None)
+    if hit and hit["action"][0] == "tab":
+        navigation["tab"] = hit["action"][1]
+        return True
+    box = navigation.get("box") or {}
+    inside = bool(box) and (event[3] if kind == "scroll" and len(event) > 3 else box["y1"]) in range(box["y1"], box["y2"] + 1)
+    if tab == "messages" and kind != "q" and (hit is not None or kind != "click") and inside:
+        return panel_messages.handle(event, navigation)
+    if tab == "debate" and kind != "q" and (hit is not None or kind != "click") and inside:
+        return panel_debate.handle(event, navigation)
+    return False
+
+
 def refreshed_navigation(navigation, state, saved_pins=None):
     """Apply a new snapshot: another room resets the view; an open preview re-reads its evidence."""
     ident = state.get("room", {}).get("id")
@@ -1764,7 +1969,7 @@ def refreshed_navigation(navigation, state, saved_pins=None):
         if signature != navigation.get("preview_signature"):
             navigation["preview"]["refresh"] = True
         navigation["preview_signature"] = signature
-    if (navigation.get("debate_view") or {}).get("open"):
+    if (navigation.get("debate_view") or {}).get("shown"):
         navigation["debate_view"]["refresh"] = True
     # The session's saved pins apply when they change, so a pin made in one window reaches every board.
     if saved_pins and saved_pins != navigation.get("saved_pins"):
@@ -1883,19 +2088,30 @@ def main_needs_attention(state, main_attempt):
                for m in members)
 
 
-def mark_window(attention):
-    """Prefix this watcher's own OMS window with "! " while its main needs attention; None when unchanged/unsafe."""
+def main_has_open_questions(state, main_attempt):
+    """Whether a question addressed to this window's main has no linked answer."""
+    from room_view import nodes, open_count
+    from dashboard_projection import mapping
+    return any(open_count(mapping(state.get("room")), key) for m in nodes(state)
+               if main_attempt in (m.get("participant"), m.get("attempt")) and m.get("role") == "main"
+               for key in (m.get("participant"), m.get("attempt")) if key)
+
+
+def mark_window(attention, asked=False):
+    """Prefix this watcher's own OMS window with "! " while its main needs attention, else "? " while a question
+    to it is open; no-op when unchanged/unsafe."""
     pane = os.environ.get("TMUX_PANE", "")
     if not managed_session() or not re.fullmatch(r"%[0-9]+", pane):
         return
+    mark = "! " if attention else "? " if asked else ""
     try:
         result = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{window_name}"),
                                 capture_output=True, text=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
         name = result.stdout.rstrip("\n") if result.returncode == 0 else ""
-        base = name[2:] if name.startswith("! ") else name
-        if base not in PROVIDERS or name == ("! " if attention else "") + base:
+        base = name[2:] if name[:2] in ("! ", "? ") else name
+        if base not in PROVIDERS or name == mark + base:
             return
-        subprocess.run(tmux_command("rename-window", "-t", pane, ("! " if attention else "") + base),
+        subprocess.run(tmux_command("rename-window", "-t", pane, mark + base),
                        capture_output=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         pass
@@ -1953,7 +2169,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
         return tuple(as_tuple(item) for item in value) if isinstance(value, list) else value
     if isinstance(kept, dict) and kept.get("room_id"):
         navigation.update({key: as_tuple(value) for key, value in kept.items()
-                           if key in ("room_id", "selected", "pinned", "dismissed") and value is not None})
+                           if key in ("room_id", "selected", "pinned", "dismissed", "tab") and value is not None})
         if isinstance(navigation.get("pinned"), tuple):
             navigation["pinned"] = list(navigation["pinned"])
         if kept.get("preview"):
@@ -2006,7 +2222,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             state, status, main_attempt = {"repo": {"name": repo.name}, "collection": {"ok": False, "pending": True}}, 0, None
             density, filtered = view or board_view("auto"), attention_only
             next_read, next_frame, revision = 0, 0, 0
-            next_focus, was_active = 0, None
+            next_focus, was_active, splits = 0, None, SplitSync()
             while True:
                 collected = False
                 if background:
@@ -2028,16 +2244,14 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     if "attention" in navigation:
                         # The `b` key overrides a flag or window option that would turn the filter back on.
                         read_filtered = navigation["attention"]
-                    if density in {"debate", "messages"}:
-                        read_density = density  # a refresh never leaves the debate or messages reader
                     if not background or revision == submitted_revision:
                         density, filtered = read_density, read_filtered
                     navigation = refreshed_navigation(navigation, state, managed_session() and
                                                       session_option("@oms_panel_pins"))
                     if managed_session() and state.get("collection", {}).get("ok") is True and main_attempt:
-                        alert = main_needs_attention(state, main_attempt)
+                        alert = (main_needs_attention(state, main_attempt), main_has_open_questions(state, main_attempt))
                         if alert != flagged:
-                            mark_window(alert)
+                            mark_window(*alert)
                             flagged = alert
                     if n and not sys.stdout.isatty():
                         print("----")
@@ -2046,7 +2260,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     if inputs.fd is not None and not count and reload_ready(stamps):
                         # The re-executed watcher keeps what the person selected, so a reload never moves it.
                         os.environ["OMS_PANEL_RESUME"] = json.dumps({key: navigation.get(key) for key in (
-                            "room_id", "selected", "pinned", "dismissed")} | {
+                            "room_id", "selected", "pinned", "dismissed", "tab")} | {
                             "preview": (navigation.get("preview") or {}).get("target")})
                         raise ReloadWatcher()
                     if REJECTED_RELOAD.pop("notice", False):
@@ -2086,7 +2300,9 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         # Arriving at this window (F6/F7, Ctrl-b n, a click elsewhere) shows its own main again;
                         # a pick made earlier on this board must not keep another main selected.
                         next_focus = time.monotonic() + 1
-                        active = window_active()
+                        geometry = panel_geometry()
+                        active = geometry[0] if geometry else None
+                        splits.tick(geometry)
                         if active and was_active is False and navigation.get("selected"):
                             for key in ("selected", "preview", "detail"):
                                 navigation.pop(key, None)
@@ -2098,6 +2314,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                 os.environ.get("OMS_PANEL_POSITION", "auto") == "auto"):
                             try:
                                 relayout_board()
+                                splits.force = True
                             except (OSError, ValueError, subprocess.SubprocessError):
                                 navigation["notice"] = "Board placement unchanged; window resize could not move it"
                         size = redraw()
@@ -2128,38 +2345,16 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             return status
                         if resized and event[0] == "click":
                             continue
-                        if event[0] == "escape" and density == "debate":
-                            if (navigation.get("debate_view") or {}).get("open"):
-                                navigation["debate_view"]["open"] = None
-                            else:
-                                density = navigation.pop("debate_from", "graph")
-                                navigation["view"] = density
-                            navigation["offset"] = 0
-                        elif event[0] == "d" and density != "messages":
-                            navigation.pop("detail", None)
-                            navigation["offset"] = 0
-                            if density == "debate":
-                                density = navigation.pop("debate_from", "graph")
-                            else:
-                                navigation["debate_from"], density = density, "debate"
-                            navigation["view"] = density
-                        elif event[0] == "m" or event[0] == "escape" and density == "messages" or \
-                                density != "messages" and panel_messages.clicked(event, navigation):
-                            opened = panel_messages.clicked(event, navigation)
-                            navigation.pop("detail", None)
-                            navigation["offset"] = 0
-                            if density == "messages":
-                                density = navigation.pop("messages_from", "graph")
-                            else:
-                                navigation["messages_from"], density = density, "messages"
-                                if opened:
-                                    panel_messages.open_message(navigation, opened)
-                            navigation["view"] = density
-                        elif density == "messages" and event[0] != "q" and panel_messages.handle(event, navigation):
+                        if tab_event(event, navigation):
                             pass
-                        elif density == "debate" and not navigation.get("detail") and event[0] != "q" and \
-                                panel_debate.handle(event, navigation):
-                            pass
+                        elif (event[0] == "f" and navigation.get("tab") == "debate" and navigation.get("surface") == "graph"
+                                and not navigation.get("detail") and (navigation.get("debate_view") or {}).get("shown")):
+                            navigation["notice"] = "Opening recorded result..."
+                            size = redraw()
+                            try:
+                                navigate(repo, ("debate", navigation["debate_view"]["shown"]), state, navigation, size.columns)
+                            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                                navigation["notice"] = clean(str(error), 160)
                         elif event[0] == "escape":
                             navigation.pop("opening", None)
                             if not navigation.pop("detail", None):
@@ -2210,7 +2405,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                     os.environ.get("TMUX_PANE", ""), name, value),
                                     check=False, timeout=2, stdin=subprocess.DEVNULL)
                         else:
-                            action = choose(event, navigation)
+                            action = choose(("down",) if event[0] == "tab" else event, navigation)
                             if action and not navigation.get("detail"):
                                 if action[0] in {"chat", "result", "debate"}:
                                     # Show the selection before tmux or evidence reads can block.
@@ -2264,12 +2459,12 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         preview.update(report=report[1], error=report[2])
                         size = redraw()
                     reader = navigation.get("debate_view") or {}
-                    if loaded and reader.get("open") and report and report[0] == ("debate", reader["open"]):
+                    if loaded and reader.get("shown") and report and report[0] == ("debate", reader["shown"]):
                         reader.update(report=report[1] or {}, error=report[2])
                         size = redraw()
-                    if density == "debate" and reader.get("open") and not previews.pending and (
+                    if navigation.get("tab") == "debate" and reader.get("shown") and not previews.pending and (
                             "report" not in reader or reader.pop("refresh", False)):
-                        target = ("debate", reader["open"])
+                        target = ("debate", reader["shown"])
 
                         def debate_read(target=target):
                             try:
@@ -2281,7 +2476,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     if loaded and report and report[0][0] == "messages":
                         log.update(log=report[1] or log.get("log"), rev=report[0][1])
                         size = redraw()
-                    if density == "messages" and state and not previews.pending and \
+                    if navigation.get("tab") == "messages" and state and not previews.pending and \
                             log.get("rev") != panel_messages.signature(state):
                         stale = panel_messages.signature(state)
                         room_id = stale[0]
@@ -2308,7 +2503,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         size = redraw()
                         next_frame = time.monotonic() + .25
     finally:
-        if flagged:
+        if flagged and any(flagged):
             mark_window(False)
         if expanded:
             try:
@@ -2699,6 +2894,8 @@ def main(argv=None):
     parser.add_argument("--purpose", choices=("explain", "investigate", "implement", "review", "advise"))
     parser.add_argument("--prompt", help="bounded read task for --dispatch")
     parser.add_argument("--brief-file", help="scoped task brief for --dispatch")
+    parser.add_argument("--continue", dest="continue_task", metavar="TASK_ID",
+                        help="continue this main's earlier worker for TASK_ID with --brief-file (worker dispatch)")
     parser.add_argument("--verify", help="mechanical verifier for a write or review")
     parser.add_argument("--task-id", help="existing plan/task identifier for the worker")
     parser.add_argument("--label", help="short task title for the role board")
@@ -2747,6 +2944,8 @@ def main(argv=None):
         parser.error("--task-id requires a task operation")
     if args.main and not args.dispatch:
         parser.error("--main requires --dispatch")
+    if args.continue_task and (args.dispatch != "worker" or not args.brief_file or args.prompt or args.task_id):
+        parser.error("--continue requires --dispatch worker with --brief-file, and takes no --prompt or --task-id")
     if args.main:
         try:
             room.identifier(args.main, "main participant")
@@ -2909,7 +3108,8 @@ def main(argv=None):
                     raise ValueError("prompt exceeds the panel input contract")
             status = dispatch(repo, owner, args.dispatch, args.workload, args.seat, args.access, purpose,
                               args.prompt, brief, args.verify, args.task_id, args.dry_run, args.label,
-                              args.to, args.model, args.reasoning_effort, main=args.main)
+                              args.to, args.model, args.reasoning_effort, main=args.main,
+                              continue_task=args.continue_task)
             if asked:
                 read_field("Exit %s; the answer is in the main's room mail. Press Enter to close: " % status,
                            required=False)

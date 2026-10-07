@@ -99,8 +99,8 @@ class TerminalInput:
             if value in (b"\r", b"\n"):
                 output.append(("enter",))
             elif value == b"\t":
-                output.append(("down",))
-            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"d", b"m", b"f", b"?", b"n", b"1", b"2"):
+                output.append(("tab",))
+            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"f", b"?", b"n", b"1", b"2"):
                 output.append((value.decode(),))
         if not self.pending:
             self.escape_since = None
@@ -150,7 +150,7 @@ def choose(event, navigation):
                     if h["y"] == event[2] and h["x1"] <= event[1] <= h["x2"]), None)
         if hit:
             target = hit["action"]
-            if target[0] == "pin":
+            if target[0] in ("pin", "tab", "message", "seat"):
                 return target
             navigation["selected"] = target
             if hit.get("fold") and event[1] <= 2:
@@ -209,10 +209,10 @@ def choose(event, navigation):
         step = band.get("step", 1)
         offsets[band["name"]] = max(0, offsets.get(band["name"], 0) + (step if event[1] > 0 else -step))
     elif kind in ("pageup", "pagedown") and navigation.get("bands") and not navigation.get("detail"):
-        # Graph pages: the detail scrolls when shown, otherwise every call band moves one page.
+        # Graph pages: the box scrolls when it shows a detail or the plan, otherwise every call band moves one page.
         names = [b["name"] for b in navigation["bands"]]
         offsets = navigation.setdefault("band_offsets", {})
-        for name in ["detail"] if "detail" in names else names:
+        for name in ["detail"] if "detail" in names and (navigation.get("box") or {}).get("pages") else names:
             step = 6 if name == "detail" else 3
             offsets[name] = max(0, offsets.get(name, 0) + (step if kind == "pagedown" else -step))
     elif kind in ("scroll", "pageup", "pagedown"):

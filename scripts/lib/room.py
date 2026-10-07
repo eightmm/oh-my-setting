@@ -1,6 +1,7 @@
 """Task-scoped participation and messages over the canonical OMS thread log."""
 
 import argparse
+import calendar
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 import uuid
 
 import thread_live
@@ -25,6 +27,9 @@ MAX_CALLS = 480
 MAX_ROOMS = 64
 MAX_SCAN_ENTRIES = 1024
 MAX_SCAN_BYTES = 8 * 1024 * 1024
+# Seconds an unanswered question must stay open before each escalation tier.
+ACK_AFTER = REPEAT_AFTER = 300
+ASKER_AFTER, OVERDUE_AFTER, PERSON_AFTER, SECOND_REMINDER_AFTER = 600, 900, 1200, 1800
 
 
 def identifier(value, label="identifier"):
@@ -408,9 +413,58 @@ def join(repo, room, who, provider, role="main", model=None, label=None, native_
     return event
 
 
-def send(repo, room, who, recipient, text, kind="note", reply_to=None, message_id=None):
+def now():
+    return time.time()
+
+
+def age(stamp):
+    """Seconds since a room timestamp; 0 when it cannot be read."""
+    try:
+        return max(0, int(now() - calendar.timegm(time.strptime(str(stamp)[:19], "%Y-%m-%dT%H:%M:%S"))))
+    except ValueError:
+        return 0
+
+
+def open_questions(state, recipient=None, asker=None):
+    """Unanswered questions to a joined participant, oldest first; a reply_to answer closes one for everyone."""
+    live = {p["participant"] for p in state["participants"] if p["joined"]}
+    return [{"id": m["id"], "sender": m["sender"], "recipient": m["recipient"], "ts": m["ts"], "age": age(m["ts"])}
+            for m in state["messages"]
+            if m["message_kind"] == "question" and not m["answered"] and any(t in live for t in m["targets"])
+            and (recipient is None or recipient in m["targets"]) and (asker is None or m["sender"] == asker)]
+
+
+def remind(repo, room, who, state=None):
+    """Record the asker's own reminder note for its open question; one per tier, ids make a repeat a no-op."""
+    state = state or project(records(repo, room))
+    seen, sent = {m["id"] for m in state["messages"]}, []
+    for question in open_questions(state, asker=who):
+        tier = 2 if question["age"] >= SECOND_REMINDER_AFTER else 1 if question["age"] >= ASKER_AFTER else 0
+        reminder = "remind-%s-%s" % (question["id"], tier)
+        if not tier or question["recipient"] == "all" or reminder in seen:
+            continue
+        try:
+            send(repo, room, who, question["recipient"], "Reminder: open question %s (%d min)" % (
+                question["id"], question["age"] // 60), "note", message_id=reminder, linked=False)
+            sent.append(question | {"reminder": reminder})
+        except ValueError:
+            pass  # a lost race or an over-long id leaves the question to the next safe point
+    return sent
+
+
+def send(repo, room, who, recipient, text, kind="note", reply_to=None, message_id=None, linked=True):
     if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 4000:
         raise ValueError("message needs 1..4000 UTF-8 bytes")
+    if kind == "answer" and not reply_to and linked:
+        # An answer without --reply-to never closes its question; link the one it can only mean.
+        pending = [q["id"] for q in open_questions(project(records(repo, room)), recipient=who)
+                   if q["sender"] == recipient]
+        if len(pending) > 1:
+            raise ValueError("%s has %d open questions to you; choose one with --reply-to: %s" % (
+                recipient, len(pending), ", ".join(pending[:8])))
+        if pending:
+            reply_to = pending[0]
+            print("room: linked this answer to open question %s" % reply_to, file=sys.stderr)
     event = {"kind": "message", "id": message_id or "msg-" + uuid.uuid4().hex,
              "sender": who, "recipient": recipient, "message_kind": kind}
     if reply_to:
@@ -493,6 +547,8 @@ def status(repo, room):
     state["pending_count"] = sum(len(live.intersection(m["pending_for"])) for m in state["messages"])
     state["statuses"] = {m["sender"]: {"text": m["text"], "ts": m["ts"], "seq": m["seq"]}
                          for m in state["messages"] if m["message_kind"] == "status"}
+    state["open_questions"] = [{k: q[k] for k in ("id", "sender", "recipient", "ts")}
+                               for q in open_questions(state)[:32]]
     state["call_results"] = {}
     parents = {p["participant"]: p.get("parent") for p in state["participants"] if p.get("role") != "main"}
     for m in state["messages"]:

@@ -2,8 +2,8 @@
 
 Input is one collection directory written by scripts/dashboard.sh: for each
 source NAME (state, artifacts, attempts) a NAME.json payload, NAME.rc exit
-code, and NAME.err stderr. Nothing here reads .oms directly, runs a model, or
-touches the network. Every label is untrusted: control, format, and bidi
+code, and NAME.err stderr. Nothing here runs a model or touches the network;
+the only .oms file read is the repository plan, for per-task claimants. Every label is untrusted: control, format, and bidi
 characters are replaced before anything reaches a terminal or JSON consumer.
 """
 
@@ -217,6 +217,23 @@ def project_acceptance(runtime):
     }
 
 
+def plan_tasks(repo_path):
+    """Bounded id/title/state/claimant rows of the repository plan; empty when it cannot be read."""
+    if not repo_path:
+        return []
+    try:
+        with open(os.path.join(repo_path, ".oms", "plan", "tasks.json"), "rb") as handle:
+            raw = handle.read(MAX_SOURCE_BYTES + 1)
+        rows = json.loads(raw).get("tasks") if len(raw) <= MAX_SOURCE_BYTES else None
+    except (OSError, ValueError, RecursionError, AttributeError):
+        return []
+    rows = list(rows.values()) if isinstance(rows, dict) else rows if isinstance(rows, list) else []
+    return [{"id": clean(row.get("id"), 40), "title": clean(row.get("title"), 80),
+             "state": clean(row.get("state"), 20),
+             "claimed_by": clean(row.get("claimed_by_participant"), 80) or None}
+            for row in rows[:40] if isinstance(row, dict) and row.get("id")]
+
+
 def build(directory, repo_name, repo_path="", now=None):
     state, state_error = load_source(directory, "state", repo_path)
     if state is not None and (not isinstance(state, dict) or state.get("schema") != 1):
@@ -283,6 +300,8 @@ def build(directory, repo_name, repo_path="", now=None):
         "stale_claims": len(listing(plan.get("stale"))),
         "stale_reviews": len(listing(plan.get("stale_review"))),
         "idle_days": count(plan.get("idle_days")),
+        "goal": clean(plan.get("goal"), 200) or None,
+        "tasks": plan_tasks(repo_path) if plan.get("present") is True else [],
         "contract_blocker": (clean(contract.get("blocker") or "unknown", 80)
                              if contract.get("bound") and not contract.get("satisfied") else None),
     }

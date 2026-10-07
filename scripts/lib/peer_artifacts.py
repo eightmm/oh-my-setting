@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import math
+import os
 import re
 import sys
 
@@ -216,6 +217,14 @@ def stage_context(source: Path, root: Path, relative: str) -> None:
             raise ValueError("council context file grew beyond its limit")
         with dest.open("xb") as output:
             output.write(data)
+
+
+def record_native_session(session) -> None:
+    """Hand the provider's own session id to the routed call through OMS_NATIVE_SESSION_FILE."""
+    path = os.environ.get("OMS_NATIVE_SESSION_FILE")
+    if path and isinstance(session, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{7,79}", session):
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(session)
 
 
 def usage_footer(provider: str, usages: list[dict], cost=None, tool_calls=None) -> list[str]:

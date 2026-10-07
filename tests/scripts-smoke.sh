@@ -8265,6 +8265,47 @@ test_import_call_result_indexes_call_import() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" "\"source\": \"$source_rel\""
 }
 
+test_delegate_resumes_native_session() {
+  local project="$TMP/delegate-resume"
+  local bin_dir="$TMP/delegate-resume-bin"
+  local home_dir="$TMP/delegate-resume-home"
+  local log="$TMP/delegate-resume.log"
+  local session=11111111-2222-3333-4444-555555555555
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir/.claude/projects/-old-worktree"
+  printf '{}\n' > "$home_dir/.claude/projects/-old-worktree/$session.jsonl"
+  cat > "$bin_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version|--help) printf 'fixture 1.0 --effort low medium high --resume --output-format\n'; exit 0 ;;
+esac
+encoded="$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')"
+{
+  printf 'argv: %s\n' "$*"
+  [ -f "$HOME/.claude/projects/$encoded/$FIXTURE_SESSION.jsonl" ] && printf 'session-in-new-cwd\n'
+  cat
+} > "$FIXTURE_LOG"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"resumed","session_id":"%s","stop_reason":"end_turn"}\n' "$FIXTURE_SESSION"
+EOF
+  chmod +x "$bin_dir/claude"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    FIXTURE_LOG="$log" FIXTURE_SESSION="$session" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
+    "$ROOT/scripts/peer-delegate.sh" --to claude --repo "$project" \
+    --artifact-dir "$project/artifacts" --no-verify --resume-session "$session" \
+    --prompt "Your earlier work was on abc; New instructions follow." >/dev/null ||
+    fail "resumed delegate failed"
+  assert_file_contains "$log" "--resume $session"
+  assert_file_contains "$log" "session-in-new-cwd"
+  assert_file_contains "$log" "Your earlier work was on abc"
+  grep -rqE "native_session\"?: ?\"$session\"" "$project/.oms/lifecycle" ||
+    fail "resumed delegate did not record the native session"
+  if "$ROOT/scripts/peer-delegate.sh" --to claude --repo "$project" --no-verify \
+      --resume-session '../x' --prompt p >/dev/null 2>&1; then
+    fail "an unsafe session id must be rejected"
+  fi
+}
+
 test_delegate_missing_cli_writes_exit_and_index() {
   local project="$TMP/delegate-missing-cli"
   local artifact_dir="$project/artifacts"
@@ -14065,6 +14106,23 @@ sys.exit(0 if d["tasks"]["t1"]["provider"] == "antigravity" else 1)
   if (cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t2 --provider gpt5 >/dev/null 2>&1); then
     fail "claim must reject an unknown provider name"
   fi
+
+  # A panel main's claim names its room participant; a second main is refused and a release forgets the claimant.
+  (cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t3 --title "three" >/dev/null)
+  (cd "$project" && OMS_PANEL_MAIN_ATTEMPT=a1 OMS_ROOM_PARTICIPANT=main-one "$ROOT/scripts/agent-plan.sh" claim --id t3 --provider claude >/dev/null)
+  if (cd "$project" && OMS_PANEL_MAIN_ATTEMPT=a2 OMS_ROOM_PARTICIPANT=main-two "$ROOT/scripts/agent-plan.sh" claim --id t3 --provider claude >/dev/null 2>&1); then
+    fail "a second main must not claim a task another main holds"
+  fi
+  python3 -c '
+import json, sys
+t = json.load(open(sys.argv[1]))["tasks"]
+sys.exit(0 if t["t3"].get("claimed_by_participant") == "main-one" and "claimed_by_participant" not in t["t1"] else 1)
+' "$project/.oms/plan/tasks.json" || fail "claim should record the panel main participant only for a panel main"
+  (cd "$project" && "$ROOT/scripts/agent-plan.sh" release --id t3 >/dev/null)
+  python3 -c '
+import json, sys
+sys.exit(1 if "claimed_by_participant" in json.load(open(sys.argv[1]))["tasks"]["t3"] else 0)
+' "$project/.oms/plan/tasks.json" || fail "release should clear the claimant"
 }
 
 test_oms_run_current_pointer_joins_and_expires() {

@@ -1175,6 +1175,75 @@ def panel_main_hint(payload: dict[str, Any]) -> str:
     if not os.environ.get("OMS_PANEL_MAIN_ATTEMPT") or not os.environ.get("OMS_PANEL_SESSION", "").startswith("oms-"):
         return ""
     room = os.environ.get("OMS_ROOM_ID", "")
+    return panel_main_base(payload, room) + panel_plan_hint(payload) + panel_status_hint(payload, room)
+
+
+def plain_line(value: Any, limit: int) -> str:
+    text = " ".join("".join(ch if ch.isprintable() else " " for ch in str(value or "")).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def panel_plan_hint(payload: dict[str, Any]) -> str:
+    """The shared plan as one bounded sentence: progress, the task this main holds, the next ready one."""
+    repo = Path(os.environ["OMS_ROOM_REPO"]) if os.environ.get("OMS_ROOM_REPO") else hook_repo(payload)
+    if repo is None:
+        return ""
+    try:
+        data = json.loads((repo / ".oms" / "plan" / "tasks.json").read_text(encoding="utf-8"))
+        rows = data.get("tasks") or {}
+        tasks = [t for t in (rows.values() if isinstance(rows, dict) else rows) if isinstance(t, dict) and t.get("id")]
+        goal = plain_line(data.get("goal"), 80)
+    except (OSError, ValueError, AttributeError):
+        return ""
+    if not tasks:
+        return ""
+    stamps = []
+    for t in tasks:
+        with contextlib.suppress(ValueError, TypeError):
+            stamps.append(datetime.strptime(str(t.get("updated")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
+    if stamps and time.time() - max(stamps) >= 7 * 86400:
+        return ""
+    done = {t["id"] for t in tasks if t.get("state") == "done"}
+    me = os.environ.get("OMS_ROOM_PARTICIPANT", "")
+    mine = next((t for t in tasks if me and t.get("claimed_by_participant") == me
+                 and t.get("state") in ("claimed", "running", "review", "landing")), None)
+    ready = next((t for t in sorted(tasks, key=lambda t: str(t.get("created", "")))
+                  if t.get("state") == "ready" and all(d in done for d in t.get("depends") or [])), None)
+    parts = ["Goal: %s" % goal if goal else "Goal: (none recorded)", "%d of %d verified" % (len(done), len(tasks))]
+    if mine:
+        parts.append("yours: %s (%s)" % (plain_line(mine["id"], 40), plain_line(mine.get("state"), 12)))
+    if ready:
+        parts.append("next ready: %s %s → oms agent-plan claim --id %s --provider %s" % (
+            plain_line(ready["id"], 40), plain_line(ready.get("title"), 40), plain_line(ready["id"], 40),
+            payload_agent(payload)))
+        if not mine:
+            parts.append("claim the next ready task before starting new work")
+    return " [oms plan] " + " · ".join(parts)
+
+
+def panel_status_hint(payload: dict[str, Any], room_id: str) -> str:
+    """Ask for a declared status when the main has none or it is older than twenty minutes."""
+    me = os.environ.get("OMS_ROOM_PARTICIPANT", "")
+    repo = Path(os.environ["OMS_ROOM_REPO"]) if os.environ.get("OMS_ROOM_REPO") else hook_repo(payload)
+    if not (me and room_id and repo):
+        return ""
+    try:
+        import room
+
+        found = (room.status(repo.resolve(), room_id).get("statuses") or {}).get(me) or {}
+        age = time.time() - datetime.strptime(str(found.get("ts")), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+        if found.get("text") and age <= 20 * 60:
+            return ""
+    except (ValueError, TypeError):
+        pass
+    except Exception:
+        return ""
+    return (" · set your status: oms room send --id %s --participant %s --to all --kind status "
+            "--text \"short current task\"" % (room_id, me))
+
+
+def panel_main_base(payload: dict[str, Any], room: str) -> str:
     return ("[oms panel] You are a control-tower main. Delegate implementation, investigation and test repair: "
             "oms panel --dispatch worker --owner %s%s --workload light|routine|main --purpose implement|investigate|explain "
             "--access write --brief-file PATH --verify COMMAND (or --access read --prompt TEXT), with --task-id and --label "
@@ -1316,6 +1385,41 @@ def room_binding_notice(payload: dict[str, Any], reason: str) -> str:
     return "[oms room] " + reason + "; room mail was withheld. Preserve task scope and reconnect explicitly before relying on peer messages."
 
 
+def room_reminders(repo: Path, tid: str, me: str, shown: list[str], reach: int | None, injected: bool, prompt: bool) -> str:
+    """Open questions to and from this main, plus unacknowledged delivered mail: ids and names only, never message text."""
+    import room
+    state = room.project(room.records(repo, tid))
+    try:
+        from panel_view import MODEL_NAMES
+    except ImportError:
+        MODEL_NAMES = {}
+    names = {p["participant"]: MODEL_NAMES.get(p.get("model"), p.get("model")) or p.get("provider", "participant")
+             for p in state["participants"]}
+    mine = " --id %s --participant %s" % (tid, me)
+    lines = []
+    asked = room.open_questions(state, asker=me)
+    if any(q["age"] >= room.ASKER_AFTER for q in asked):
+        room.remind(repo, tid, me, state)
+        for q in [q for q in asked if q["age"] >= room.ASKER_AFTER][:3]:
+            lines.append("Your question %s to %s has no answer for %d min; %s." % (
+                q["id"], names.get(q["recipient"], q["recipient"]), q["age"] // 60,
+                "it was re-sent as a reminder" if q["recipient"] != "all" else "ask the person to nudge it"))
+    open_q = room.open_questions(state, recipient=me)
+    if open_q and (injected or prompt or any(q["age"] >= room.REPEAT_AFTER for q in open_q)):
+        first = open_q[0]
+        lines.insert(0, "[oms room]%s %d question%s to you %s open: %s — answer with oms room send%s --to %s --kind answer --reply-to %s --text ..." % (
+            " overdue" if any(q["age"] >= room.OVERDUE_AFTER for q in open_q) else "", len(open_q),
+            "" if len(open_q) == 1 else "s", "is" if len(open_q) == 1 else "are",
+            ", ".join("%s from %s (%d min)" % (q["id"], names.get(q["sender"], q["sender"]), q["age"] // 60)
+                      for q in open_q[:3]), mine, first["sender"], first["id"]))
+    waiting = [m for m in state["messages"] if me in m["pending_for"] and m["message_kind"] != "status"
+               and m["id"] not in shown and (reach is None or m["seq"] <= reach) and room.age(m["ts"]) >= room.ACK_AFTER]
+    if waiting:
+        lines.append("[oms room] %d delivered message%s not acknowledged: oms room ack%s%s" % (
+            len(waiting), "" if len(waiting) == 1 else "s", mine, "".join(" --message " + m["id"] for m in waiting[:3])))
+    return "\n".join(lines)
+
+
 def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
     """Deliver opt-in thread deltas at existing safe points, never acknowledge them."""
     if is_harness_child() or os.environ.get("OMS_LIVE_COLLAB", "1") == "0":
@@ -1387,7 +1491,7 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
                 write_json_atomic(path, {"thread": tid, "participant": room_member, "cursor": after, "delivery_error": True})
                 return ("[oms live] thread " + tid + " delivery needs inspection; history was not skipped. "
                         "Read oms thread updates --id " + tid + " --max-bytes 65536 before relying on peer state.")
-            if delta["cursor"] == after:
+            if delta["cursor"] == after and not room_member:
                 return ""
             rows = [row for row in delta["turns"] if row.get("receipt") != "ack"]
             if room_member:
@@ -1409,7 +1513,7 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
                            + "Delivery is not consumption. After reading, record: oms room ack --id "
                            + tid + " --participant " + room_member
                            + "".join(" --message " + mid for mid in mids))
-            elif rows:
+            elif rows and not room_member:
                 consumer = session_hash(payload)
                 acked, asked = thread_relation(repo, tid, consumer)
                 # A session that asked here reads answers and seat notes from its
@@ -1432,7 +1536,18 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
                     + "Delivery is not acknowledgment. After consuming, record: oms thread ack --id "
                     + tid + " --consumer " + consumer + " --after " + delta["cursor"]
                 )
-            write_json_atomic(path, {"thread": tid, "participant": room_member, "cursor": delta["cursor"]})
+            if room_member:
+                # Mail still waiting beyond this batch is not yet delivered, so it cannot be an unacked delivery.
+                reach = max((row["seq"] for row in delta["turns"]), default=0) if delta["has_more"] else None
+                try:
+                    reminders = room_reminders(repo, tid, room_member, [row["room_event"]["id"] for row in rows], reach,
+                                               bool(message), (payload.get("hook_event_name") or payload.get("hookEventName"))
+                                               == "UserPromptSubmit" and bool(os.environ.get("OMS_ROOM_PARTICIPANT")))
+                except (ValueError, OSError):
+                    reminders = ""  # reminders are advisory; the delivered turns still go out
+                message = "\n".join(part for part in (message, reminders) if part)
+            if delta["cursor"] != after:
+                write_json_atomic(path, {"thread": tid, "participant": room_member, "cursor": delta["cursor"]})
         return message
     except Exception:
         return ""  # Optional collaboration cannot block tools or ordinary replies.

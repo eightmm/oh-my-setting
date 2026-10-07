@@ -997,46 +997,17 @@ debate["attempts"]["recent"] = [dict(seat, attempt_id="att_seat_done", state="do
 debate_tree = render(debate, "codex", 100, 60, view="detail")
 assert "COUNCIL (2)" in debate_tree and "Debate: Pick next work" in debate_tree, debate_tree
 assert "1 seat(s) answering" in debate_tree and "ADVISORS" not in debate_tree, debate_tree
-# The debate reader: seats with stances, agreement only from synthesis headings, the owner's decision, the full-text path.
+# One bottom box with tabs (Detail, Plan, Debate, Messages) replaces the d and m views and the messages card.
 import panel_debate
-reader_report = {"collection": {"ok": True}, "room": {"id": "r", "title": "T", "participants": [
-    {"participant": "m1", "role": "main", "joined": True, "model": "gpt-6-sol", "seq": 1, "provider": "codex"}]},
-    "attempts": {"active_recent": [{"attempt_id": "a1", "state": "working",
-                                    "panel": {"room_id": "r", "room_participant": "m1", "role": "main"}}],
-                 "recent": [{"attempt_id": "c1", "tool": "panel-council", "task_id": "decide", "state": "done",
-                             "updated_at": "2026-10-07T10:00:00Z", "parent_attempt_id": "a1",
-                             "panel": {"role": "advisor", "label": "Pick next work", "room_id": "r", "room_participant": "m1"}}]}}
-assert "d Debates" in render(reader_report, "codex", 110, 24, view="graph", navigation={"dismissed": True})
-assert "d Debates" not in render(tree, "codex", 110, 24, view="graph", navigation={"dismissed": True})
-reader_nav = {}
-listed = render(reader_report, "codex", 100, 24, view="debate", navigation=reader_nav)
-assert "Pick next work - m1 - done" in listed and "Debates" in listed, listed
-ask = ".oms/artifacts/ask/"
-reader_nav["debate_view"]["open"] = ("decide", "m1")
-reader_nav["debate_view"]["report"] = {"rows": [{"title": "Pick next work", "summary": "Ship X", "outcome": "accepted", "calls": [
-    {"kind": "ask", "selected_model": "gpt-6-sol", "artifact": ask + "codex-gpt-6-sol-s-1.md", "answer": "Answer: Ship X first. More.\nRisks: none"},
-    {"kind": "ask", "selected_model": "gpt-6-sol", "artifact": ask + "codex-gpt-6-sol-s-1-r2.md", "answer": "VERDICT: ship Y\x1b[31m\nAnswer: Y."},
-    {"kind": "ask", "selected_model": "claude-fable-5-1", "artifact": ask + "claude-claude-fable-5-1-s-1.md", "answer": "plain answer"}]}],
-    "synthesis": {"path": ask + "_synthesis-s-1.md",
-                  "text": "## Prompt\n### Agreement\nasked text\n## Output\n### Agreement\nTests first.\n### Dissent\nOrder differs.\n"}}
-opened = render(reader_report, "codex", 100, 40, view="debate", navigation=reader_nav)
-for needle in ("Sol 6 (Codex)", "Fable 5.1 (Claude Code)", "ship Y", "Changed after round 1: was Ship X first.", "plain answer",
-               "Agreement\n  Tests first.", "Disagreement\n  Order differs.", "Ship X (outcome: accepted)",
-               "Full text: " + ask + "_synthesis-s-1.md"):
-    assert needle in opened, (needle, opened)
-assert "asked text" in opened and "Agreement\n  asked" not in opened and "\x1b" not in opened, opened
-reader_nav["debate_view"]["report"]["synthesis"]["text"] = "## Output\nplain prose"
-reader_nav["debate_view"]["report"]["rows"][0].update(summary=None, outcome=None)
-bare = render(reader_report, "codex", 100, 40, view="debate", navigation=reader_nav)
-assert "Agreement" not in bare and "Disagreement" not in bare and "No decision recorded yet" in bare, bare
-reader_nav = {}
-render(reader_report, "codex", 100, 12, view="debate", navigation=reader_nav)
-assert panel_debate.handle(("click", 5, reader_nav["hits"][0]["y"]), reader_nav) and reader_nav["debate_view"]["open"] == ("decide", "m1")
-reader_nav["debate_view"]["report"] = {"rows": [{"calls": [{"kind": "ask", "selected_model": "gpt-6-sol", "answer": "x\n" * 30}]}]}
-render(reader_report, "codex", 100, 12, view="debate", navigation=reader_nav)
-assert panel_debate.handle(("pagedown",), reader_nav) and reader_nav["offset"] > 0
-# The messages reader: names, local times, unread marks, filters, in-place full text, card clicks; reading never writes.
 import panel_messages
+import room_view
+from panel_input import TerminalInput, choose
+from terminal_panel import tab_event
+assert panel_debate._sentence("I'm keeping (a), the `!` marker is cheaper. More.") == "I'm keeping (a), the `!` marker is cheaper."
+assert panel_debate._sentence('He said "stop! now" ok. More') == 'He said "stop! now" ok.'
+assert [panel_debate.choice(t) for t in ("저는 (a)를 고릅니다.", "B: safest", "A good idea", "Yes, ship", "revise", "none")] == \
+    ["(a)", "(b)", None, "yes", "revise", None]
+assert TerminalInput().decode(b"\t") == [("tab",)] and TerminalInput().decode(b"dm") == []
 msg_members = [{"participant": "m1", "role": "main", "joined": True, "model": "claude-opus-5-5", "seq": 1, "provider": "claude", "attempt": "a1"},
                {"participant": "m2", "role": "main", "joined": True, "model": "gpt-6.1-sol", "seq": 2, "provider": "codex", "attempt": "a2"},
                {"participant": "m3", "role": "main", "joined": True, "model": "gpt-6-luna", "seq": 3, "provider": "codex", "attempt": "a3"}]
@@ -1044,39 +1015,155 @@ msg_log = [{"id": "n%d" % i, "sender": "m1" if i % 3 else "m3", "recipient": "m2
             "message_kind": "question" if i % 5 == 0 else "note", "ts": "2026-10-0%dT10:%02d:00Z" % (6 if i < 5 else 7, i),
             "pending_for": ["m2"] if i == 29 else [], "text": "line %d\nsecond \x1b[31mred" % i} for i in range(30)]
 msg_log[28]["text"] = "long " + "word " * 80 + "END\n\nparagraph two"
+ask = ".oms/artifacts/ask/"
 msg_report = {"collection": {"ok": True}, "attempts": {"active_recent": [
-    {"attempt_id": "a%d" % n, "state": "working", "panel": {"room_id": "r", "room_participant": "m%d" % n, "role": "main"}} for n in (1, 2, 3)]},
-              "main_windows": {"m1": 1, "m2": 2, "m3": 3},
-              "room": {"id": "r", "title": "T", "participants": msg_members, "message_count": 30, "messages": msg_log[-12:]}}
-msg_nav = {}
+    {"attempt_id": "a%d" % n, "state": "working", "panel": {"room_id": "r", "room_participant": "m%d" % n, "role": "main"}} for n in (1, 2, 3)],
+    "recent": [{"attempt_id": "c1", "tool": "panel-council", "task_id": "decide", "state": "done", "updated_at": "2026-10-07T10:00:00Z",
+                "parent_attempt_id": "a2", "panel": {"role": "advisor", "label": "Panel attention signal", "room_id": "r", "room_participant": "m2"}}]},
+              "main_windows": {"m1": 1, "m2": 2, "m3": 3}, "goal": {"text": "Ship the tabbed panel", "source": "plan"},
+              "room": {"id": "r", "title": "T", "participants": msg_members, "message_count": 30, "messages": msg_log[-12:],
+                       "pairs": [{"recipient": "m2", "pending": 2}],
+                       "repo_tasks": [{"id": "t-blk", "title": "Blocked one", "state": "blocked", "provider": "codex", "verify": "make a"},
+                                      {"id": "t-rdy", "title": "Ready one", "state": "ready", "provider": "", "verify": "make b"},
+                                      {"id": "t-run", "title": "Running one", "state": "running", "provider": "claude",
+                                       "claimed_by_participant": "m1", "verify": "make c"},
+                                      {"id": "t-ver", "title": "Verified one", "state": "done", "provider": "codex", "verify": "make d"},
+                                      {"id": "t-rev", "title": "Review one", "state": "review", "provider": "claude", "verify": "make e"}]}}
+seat_calls = [{"kind": "ask", "selected_model": model, "artifact": ask + "%s-%s-s-1%s.md" % (family, model, suffix), "answer": text}
+              for suffix, texts in (("", ("Answer: 저는 (a)를 고릅니다. 이유는 단순합니다.", "Answer: I pick (c) first. Reasons follow.",
+                                          "Answer: (b) is safest. More.", "VERDICT: proceed")),
+                                    ("-r2", ("Answer: 저는 (a)를 고릅니다. 그대로 유지합니다.\nFULLTEXT-SOL second line",
+                                             "Answer: I'm keeping (a), the `!` marker is cheaper. More.",
+                                             "Answer: (b) stays safest. Still.", "VERDICT: revise\nAnswer: x")))
+              for (family, model), text in zip((("codex", "gpt-6-sol"), ("claude", "claude-opus-5-5"), ("claude", "claude-fable-5-1"),
+                                                ("codex", "gpt-6-astra")), texts)]
+debate_rows = {"rows": [{"title": "Panel attention signal", "summary": "Ship (a)", "outcome": "accepted", "calls": seat_calls}],
+               "synthesis": {"path": ask + "_synthesis-s-1.md", "text": "## Prompt\nShould the panel flag attention with a color or a glyph? Pick one. Third.\n"
+                             "## Output\n### Agreement\nTests first.\n### Dissent\nOrder differs.\n"}}
 before = deepcopy(msg_report)
-shown = render(msg_report, "codex", 110, 8, view="messages", navigation=msg_nav, main_attempt="a2")
-assert "OMS / Messages / T" in shown and "line 29" in shown and "line 20" not in shown, shown
-assert "#1 Opus 5.5 → #2 Sol 6.1" in shown and "· unread" in shown and "\x1b" not in shown, shown
-assert msg_report == before, "reading changed the report"
-msg_nav["messages_view"]["log"] = msg_log
-render(msg_report, "codex", 110, 20, view="messages", navigation=msg_nav, main_attempt="a2")
-assert panel_messages.handle(("up",), msg_nav) and panel_messages.handle(("enter",), msg_nav)
-opened_message = render(msg_report, "codex", 60, 30, view="messages", navigation=msg_nav, main_attempt="a2")
+BOX_CHARS = "╭╮│─╰╯•→—▸▾·"
+
+
+def board(tab, width=80, height=60, **kwargs):
+    nav = kwargs.pop("nav", None) or {"selected": ("chat", "m2"), "tab": tab}
+    nav["tab"] = tab
+    return nav, render(msg_report, "codex", width, height, view="graph", navigation=nav, main_attempt="a2", **kwargs)
+
+
+# The strip: selected tab bracketed, unread count and new-debate dot, hits equal drawing at 80 and 157 columns and in ASCII.
+for width in (80, 157):
+    for glyphs in (True, False):
+        nav, text = board("detail", width, 40, unicode=glyphs)
+        rows = text.split("\n")
+        assert len(rows) == 40 and "RECENT MESSAGES" not in text and "d Debates" not in text and "m Messages" not in text, text
+        assert "Quit" in rows[-1] and "Tab Next tab" in rows[-1] or width == 80, rows[-1]
+        strip_y = max(h["y"] for h in nav["hits"] if h["action"] == ("tab", "detail"))
+        tabs = {h["action"][1]: h for h in nav["hits"] if h["action"][0] == "tab" and h["y"] == strip_y}
+        assert list(tabs) == ["detail", "plan", "debate", "messages"], tabs
+        for key, name in (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages")):
+            hit = tabs[key]
+            seg = rows[hit["y"] - 1][hit["x1"] - 1:hit["x2"]]
+            assert seg.strip("[] ").startswith(name) and seg.count("[") == (key == "detail"), (width, glyphs, key, seg)
+        strip = rows[tabs["detail"]["y"] - 1]
+        assert "[ Detail ]  Plan  Debate " + ("•" if glyphs else "*") + "  Messages 2" in strip, strip
+        assert strip.startswith("╭─ " if glyphs else "+- ") and (glyphs or text.isascii()), strip
+# Tab cycles Detail > Plan > Debate > Messages and never moves by itself; clicks on a tab name select it.
+nav, text = board("detail")
+seen = []
+for unused in range(5):
+    assert tab_event(("tab",), nav)
+    seen.append(nav["tab"])
+assert seen == ["plan", "debate", "messages", "detail", "plan"], seen
+nav, text = board("plan")
+render(msg_report, "codex", 80, 60, view="graph", navigation=nav, main_attempt="a2")
+assert nav["tab"] == "plan"
+hit = next(h for h in nav["hits"] if h["action"] == ("tab", "messages"))
+assert tab_event(("click", hit["x1"], hit["y"]), nav) and nav["tab"] == "messages"
+assert choose(("click", hit["x1"], hit["y"]), nav) == ("tab", "messages") and nav["selected"] == ("chat", "m2")
+assert nav["box"]["y1"] == hit["y"] and msg_report == before
+# Plan: goal first, then verified, review, running, ready, blocked, with the claimant by board name or provider.
+nav, plan = board("plan")
+plan_rows = [line for line in plan.split("\n") if "Goal:" in line or " t-" in line]
+assert "Goal: Ship the tabbed panel" in plan_rows[0], plan
+assert [row.split(" · ")[0].split()[-1] for row in plan_rows[1:]] == ["t-ver", "t-rev", "t-run", "t-rdy", "t-blk"], plan_rows
+assert "· Verified one · codex · make d" in plan and "· Running one · #1 Opus 5.5 · make c" in plan and "· Review one · claude ·" in plan, plan
+assert "✓ t-ver" in plan and "○ t-rdy" in plan and "✗ t-blk" in plan, plan
+assert board("plan", unicode=False)[1].isascii()
+# Debate: opener and time by board name and local clock, question, one line per seat, stance cut, choice changes only.
+nav, text = board("debate")
+assert "No debate opened by #1 Opus 5.5 · a main opens one with oms panel --council" in board("debate", nav={"selected": ("chat", "m1")})[1]
+render(msg_report, "codex", 80, 60, view="graph", navigation=nav, main_attempt="a2")
+nav["debate_view"]["report"] = deepcopy(debate_rows)
+nav, text = board("debate", nav=nav)
+stamp = room_view.clock_stamp("2026-10-07T10:00:00Z")
+flat = " ".join(re.sub("[│|]", " ", line) for line in text.split("\n")).split()
+flat = " ".join(flat)
+for needle in ("Panel attention signal · opened by #2 Sol 6.1 · " + stamp + " · 4 of 4 seats answered · round 2 of 2",
+               "Question: Should the panel flag attention with a color or a glyph? Pick one. Third.",
+               "Sol 6 — 저는 (a)를 고릅니다.", "Opus 5.5 — I'm keeping (a), the `!` marker is cheaper.", "Fable 5.1 — (b) stays safest.",
+               "Astra 6 — revise", "(changed in round 2: (c) → (a))", "(changed in round 2: proceed → revise)",
+               "Agreement: Tests first.", "Disagreement: Order differs.", "Decision: Ship (a) (outcome: accepted)"):
+    assert needle in flat, (needle, flat)
+assert text.count("changed in round") == 2 and "Changed after" not in text and "opened by m2" not in text and "2026-10-07T" not in text, text
+assert "FULLTEXT-SOL" not in text and "\x1b" not in text and "Debate •" not in text and "[ Debate ]" in text, text
+nav["debate_view"]["report"]["synthesis"]["text"] = "## Output\nplain prose"
+nav["debate_view"]["report"]["rows"][0].update(summary=None, outcome=None)
+bare = board("debate", nav=nav)[1]
+assert "Agreement" not in bare and "Disagreement" not in bare and "Decision: No decision recorded yet" in bare, bare
+assert "Question: Panel attention signal" in bare
+# Enter on a seat shows its full answer in the tab, Esc returns to the summary.
+assert panel_debate.handle(("down",), nav) and panel_debate.handle(("up",), nav) and panel_debate.handle(("enter",), nav)
+assert "round 2 answer" in board("debate", nav=nav)[1] and "FULLTEXT-SOL second line" in board("debate", nav=nav)[1]
+assert tab_event(("escape",), nav) and nav["debate_view"]["seat"] is None and "FULLTEXT-SOL" not in board("debate", nav=nav)[1]
+assert not tab_event(("escape",), nav)
+nav["tab"] = "debate"
+hit = next(h for h in nav["hits"] if h["action"] == ("seat", 1))
+assert tab_event(("click", 5, hit["y"]), nav) and nav["debate_view"]["seat"] == 1
+nav["debate_view"]["seat"] = None
+ascii_debate = board("debate", nav=nav, unicode=False)[1]
+assert not any(ch in ascii_debate for ch in BOX_CHARS), ascii_debate
+assert "(changed in round 2: (c) -> (a))" in " ".join(ascii_debate.replace("|", " ").split()), ascii_debate
+# Messages: names, local times, unread marks, filters, in-place full text; reading never writes; the dot clears once the Debate tab was seen.
+nav, shown = board("messages", 110, 24)
+assert "Filter: all" in shown and "line 29" in shown and "#1 Opus 5.5 → #2 Sol 6.1" in shown and "· unread" in shown and "\x1b" not in shown, shown
+assert "Debate •" in board("detail", nav=nav)[1]
+viewed = board("debate")[0]
+assert "Debate •" not in board("detail", nav=viewed)[1] and "  Debate  " in board("detail", nav=viewed)[1]
+nav["messages_view"]["log"] = msg_log
+board("messages", 110, 40, nav=nav)
+assert tab_event(("up",), nav) and tab_event(("enter",), nav)
+opened_message = board("messages", 80, 60, nav=nav)[1]
 assert "END" in opened_message and "paragraph two" in opened_message and opened_message.count("word") > 70, opened_message
-assert panel_messages.handle(("enter",), msg_nav) and msg_nav["messages_view"]["open"] is None
-msg_nav["selected"] = ("chat", "m3")
-panel_messages.handle(("right",), msg_nav)
-narrowed = render(msg_report, "codex", 110, 40, view="messages", navigation=msg_nav, main_attempt="a2")
+assert tab_event(("enter",), nav) and nav["messages_view"]["open"] is None
+nav["selected"] = ("chat", "m3")
+assert tab_event(("right",), nav)
+narrowed = board("messages", 110, 40, nav=nav)[1]
 assert "Filter: to/from #3 Luna 6" in narrowed and "#2 Sol 6.1 main" not in narrowed and "line 27" in narrowed and "line 29" not in narrowed, narrowed
-panel_messages.handle(("right",), msg_nav)
-mine = render(msg_report, "codex", 110, 40, view="messages", navigation=msg_nav, main_attempt="a3")
-assert "to/from me" in mine and "#3 Luna 6 → #1" in mine and "line 29" not in mine, mine
-ascii_messages = render(msg_report, "codex", 110, 20, view="messages", navigation=msg_nav, main_attempt="a2", unicode=False)
-assert ascii_messages.isascii(), ascii_messages
-card_nav = {"dismissed": True}
-board = render(msg_report, "codex", 110, 40, view="graph", navigation=card_nav)
-assert "RECENT MESSAGES" in board and "m Messages" in board, board
-card_hit = next(h for h in card_nav["hits"] if h["action"][0] == "message")
-assert board.split("\n")[card_hit["y"] - 1].lstrip().startswith(("│", "|")) and "line" in board.split("\n")[card_hit["y"] - 1], board
-assert panel_messages.clicked(("click", 5, card_hit["y"]), card_nav) == card_hit["action"][1]
-panel_messages.open_message(card_nav, "n29")
-assert card_nav["messages_view"]["open"] == "n29"
+assert board("messages", unicode=False)[1].isascii() and msg_report == before, "reading changed the report"
+nav, listed = board("messages", 110, 40)
+hit = next(h for h in nav["hits"] if h["action"][0] == "message")
+assert listed.split("\n")[hit["y"] - 1].lstrip().startswith("│") and "line" in listed.split("\n")[hit["y"] - 1], listed
+assert tab_event(("click", 5, hit["y"]), nav) and nav["messages_view"]["open"] == hit["action"][1]
+# Detail keeps its content after Esc dismissed the preview: the box stays so every tab remains reachable.
+nav, dismissed = board("plan", 110, 40, nav={"dismissed": True, "tab": "plan"})
+assert "t-ver" in dismissed and "[ Plan ]" in dismissed and "RECENT MESSAGES" not in dismissed, dismissed
+nav, empty = board("detail", 110, 40, nav={"dismissed": True})
+assert "No call selected" in empty and "[ Detail ]" in empty, empty
+# A main with an unanswered question shows "? N open" in its tab and card; the person sees it in "Needs you" from 20 minutes.
+import panel_view as question_view
+import time as question_time
+asked_report = deepcopy(msg_report)
+asked_report["room"]["open_questions"] = [{"id": "q1", "sender": "m1", "recipient": "m2", "ts": question_time.strftime(
+    "%Y-%m-%dT%H:%M:%SZ", question_time.gmtime(question_time.time() - 25 * 60))}]
+for ascii_only in (False, True):
+    asked_board = render(asked_report, "codex", 140, 40, view="graph", navigation={"dismissed": True}, unicode=not ascii_only)
+    assert "? 1 open" in asked_board and " ?1" in asked_board, asked_board
+    assert not ascii_only or asked_board.isascii(), asked_board
+assert "? 1 open" not in render(msg_report, "codex", 140, 40, view="graph", navigation={"dismissed": True})
+waiting = [i for i in question_view.inbox_items(asked_report) if i["glyph"] == "?"]
+assert [(i["who"], i["what"], i["action"]) for i in waiting] == [("Question from #1 Opus 5.5", "to #2 Sol 6.1 open 25 min", ("chat", "m2"))], waiting
+asked_report["room"]["open_questions"][0]["ts"] = question_time.strftime("%Y-%m-%dT%H:%M:%SZ", question_time.gmtime(question_time.time() - 19 * 60))
+assert not [i for i in question_view.inbox_items(asked_report) if i["glyph"] == "?"], "under twenty minutes the person is not pulled in"
 empty_calls = deepcopy(tree)
 empty_calls["attempts"]["active_recent"] = empty_calls["attempts"]["active_recent"][:2]
 idle_mains = render(empty_calls, "codex", 100, 40)
@@ -1238,7 +1325,7 @@ for mode in ("animated", "static", "environment", "interrupt"):
 # A blocked state read must not block view keys or quitting the terminal.
 import threading
 import time
-for pressed, shown in ("t", "tree"), ("d", "debate"), ("m", "messages"):
+for pressed, shown in [("t", "tree")]:
   entered, released, finished_read = threading.Event(), threading.Event(), threading.Event()
   class ResponsiveInput:
       fd = 0
@@ -1459,7 +1546,11 @@ with open(os.environ["PANEL_TEST_WORKER_LOG"], "a", encoding="utf-8") as f:
                         "room": os.environ.get("OMS_ROOM_ID"),
                         "participant": os.environ.get("OMS_ROOM_PARTICIPANT")}) + "\\n")
 WORKER
-  cat >/dev/null
+  cat > "${PANEL_TEST_PROMPT:-/dev/null}"
+  if [ -n "${PANEL_TEST_SESSION:-}" ]; then
+    printf '{"type":"thread.started","thread_id":"%s"}\\n{"type":"item.completed","item":{"type":"agent_message","text":"Answer: inspected the bounded repository task."}}\\n{"type":"turn.completed","usage":{}}\\n' "$PANEL_TEST_SESSION"
+    exit 0
+  fi
   if [ "${PANEL_TEST_MODE:-}" = write ]; then
     printf 'new\\n' >> value.txt
     if bash "$OMS_PANEL_ENTRYPOINT" panel --launch codex >/dev/null 2>&1; then
@@ -2021,6 +2112,10 @@ for arguments in (["--resume", "--last"], ["--launch", "codex", "--resume", "../
                   ["--dispatch", "worker", "--access", "write", "--purpose", "implement", "--prompt", "change source"],
                   ["--dispatch", "worker", "--seat", "fable", "--prompt", "explain"],
                   ["--dispatch", "advisor", "--purpose", "explain", "--prompt", "explain"],
+                  ["--dispatch", "worker", "--continue", "t1", "--prompt", "explain"],
+                  ["--dispatch", "worker", "--continue", "t1", "--brief-file", "b.md", "--task-id", "t2"],
+                  ["--dispatch", "advisor", "--continue", "t1", "--brief-file", "b.md"],
+                  ["--continue", "t1", "--brief-file", "b.md"],
                   ["--json", "--dry-run"], []):
     result = subprocess.run(["bash", str(panel.ENTRY), "panel"] + arguments,
                             cwd=str(project), env=environment, capture_output=True, text=True)
@@ -2257,6 +2352,34 @@ if os.name == "posix":
                 assert subprocess.check_output(tmux + ["show-option", "-g", "-v", "mouse"], env=env, text=True).strip() == "off"
                 assert subprocess.check_output(tmux + ["show-option", "-t", session, "-v", "mouse"], env=env, text=True).strip() == "on"
                 subprocess.run(tmux + ["send-keys", "-t", listing[0], "Enter"], env=env, check=True)
+            # One panel-wide board split: a drag in the active window is recorded and the other main follows;
+            # a zoomed board is left alone.
+            shared = {}
+            for owner in ("codex", "claude"):
+                rows = subprocess.check_output(tmux + ["list-panes", "-t", session + ":" + owner, "-F",
+                                                       "#{pane_id}\t#{pane_start_command}"], env=env, text=True)
+                shared[owner] = next(row.split("\t")[0] for row in rows.splitlines() if "--watch" in row)
+            subprocess.run(tmux + ["select-window", "-t", session + ":codex"], env=env, check=True)
+            time.sleep(2.5)  # the codex watcher must see its window active before the drag
+            geometry = subprocess.check_output(tmux + ["display-message", "-p", "-t", shared["codex"],
+                "#{window_width} #{window_height} #{pane_width}"], env=env, text=True).split()
+            side = int(geometry[2]) != int(geometry[0])
+            position, flag, window = ("left", "-x", int(geometry[0])) if side else ("top", "-y", int(geometry[1]))
+            extent = "#{pane_width}" if side else "#{pane_height}"
+            dragged = window * 3 // 10
+            percent = panel.split_share(dragged, window)
+            subprocess.run(tmux + ["resize-pane", "-t", shared["codex"], flag, str(dragged)], env=env, check=True)
+            tmux_wait(["show-options", "-v", "-t", session, "@oms_panel_split"], "%s:%d" % (position, percent))
+            tmux_wait(["display-message", "-p", "-t", shared["claude"], extent],
+                      str(panel.split_cells(percent, window)), timeout=20)
+            subprocess.run(tmux + ["resize-pane", "-t", shared["claude"], "-Z"], env=env, check=True)
+            subprocess.run(tmux + ["set-option", "-t", session, "@oms_panel_split", position + ":70"], env=env, check=True)
+            time.sleep(3)
+            assert subprocess.check_output(tmux + ["display-message", "-p", "-t", shared["claude"],
+                "#{window_zoomed_flag}"], env=env, text=True).strip() == "1", "a zoomed board was resized"
+            subprocess.run(tmux + ["resize-pane", "-t", shared["claude"], "-Z"], env=env, check=True)
+            tmux_wait(["display-message", "-p", "-t", shared["claude"], extent],
+                      str(panel.split_cells(70, window)), timeout=20)
             control_sidebar = tmux_wait(["list-panes", "-t", session + ":control", "-F", "#{pane_id}"], "\n%").splitlines()[1]
             tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_owner"], "claude")
             tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "Claude | W")
@@ -2503,6 +2626,39 @@ handoff = next(m for m in state["messages"] if m["sender"] == child["participant
 assert handoff["recipient"] == room_owner and "parent acceptance pending" in handoff["text"], handoff
 assert "inspected the bounded repository task" in handoff["text"], handoff
 assert (project / "value.txt").read_text() == "old\n", "room cannot widen worker write access"
+# A continued worker resumes its native session in a new run and carries a delta preamble; without a stored
+# session it falls back to a fresh worker, and another main never reaches it.
+session = "0199aaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+stored = home / ".codex/sessions/2026/10/07"
+stored.mkdir(parents=True)
+(stored / ("rollout-2026-10-07T00-00-00-" + session + ".jsonl")).write_text("{}\n")
+worker = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared, "--dispatch", "worker",
+          "--owner", "claude", "--purpose", "investigate", "--workload", "light"]
+call(worker + ["--prompt", "Inspect value.txt without edits.", "--task-id", "room-continue", "--label", "Inspect"],
+     dict(room_env, PANEL_TEST_SESSION=session))
+listed = lambda: json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
+first = next(a for a in listed() if a["task_id"] == "room-continue" and a["refs"].get("panel_role") == "worker")
+assert first["refs"]["native_session"] == session, first
+brief.write_text("Task: look at value.txt again.\n")
+prompt_log = temporary / "continue-prompt.md"
+again = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-continue", "--label", "Look again"],
+                       env=dict(room_env, PANEL_TEST_SESSION=session, PANEL_TEST_PROMPT=str(prompt_log)),
+                       capture_output=True, text=True)
+assert again.returncode == 0 and "artifact:" in again.stdout and "native session" in again.stderr, again
+resumed = [json.loads(line) for line in worker_log.read_text().splitlines()][-1]
+assert resumed["argv"][-4:] == ["resume", "--all", session, "-"], (resumed, again)
+text = prompt_log.read_text()
+assert "Your earlier work was on" in text and "New instructions follow." in text and "Task: look at value.txt again." in text, text
+rounds = [a for a in listed() if a["task_id"] == "room-continue" and a["refs"].get("panel_role") == "worker"]
+assert len(rounds) == 2 and rounds[-1]["refs"]["native_session"] == session, rounds
+fresh = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-inspection"], env=dict(
+    room_env, PANEL_TEST_PROMPT=str(prompt_log)), capture_output=True, text=True)
+assert fresh.returncode == 0 and "no resumable session" in fresh.stderr, fresh
+assert "A fresh worker continues earlier work" in prompt_log.read_text(), prompt_log.read_text()
+foreign = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-continue"],
+                         env=dict(room_env, OMS_PANEL_MAIN_ATTEMPT=main_attempts["claude"]),
+                         capture_output=True, text=True)
+assert foreign.returncode != 0 and "no worker" in foreign.stderr, foreign
 # A status message is a declaration: no mail, no unread, latest per sender kept past the 12-message window;
 # unread counts ignore participants who left.
 declared = room.create(project, title="Declared status")
@@ -2615,8 +2771,9 @@ with patch.dict(os.environ, control_env, clear=True), patch.object(panel.subproc
 recorded = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--limit", "300", "--json"]))
 room_attempt = next(a for a in recorded if a.get("refs", {}).get("panel_room_participant") == child["participant"])
 assert room_attempt["refs"]["panel_room_id"] == shared
-observed = json.loads(worker_log.read_text().splitlines()[-1])
-assert observed["room"] == shared and observed["participant"] == child["participant"], observed
+observed = next(row for row in map(json.loads, reversed(worker_log.read_text().splitlines()))
+                if row["participant"] == child["participant"])
+assert observed["room"] == shared, observed
 # Same task reuse cannot return another participant's artifact as the result.
 assert not panel.results(project, "room-inspection", "unrelated-participant")["rows"][0]["calls"]
 participant_results = panel.results(project, room_participant=child["participant"])
@@ -2837,7 +2994,7 @@ mailed["room"]["messages"] = [{"sender": "advisor", "targets": ["flow-main"], "t
 mail_before = json.dumps(mailed, sort_keys=True)
 detail_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
 picture = render(mailed, "codex", 100, 30, view="graph", main_attempt="flow-attempt", navigation=detail_nav)
-assert "DETAIL / MAIN / Sol" in picture and "Team: 5 active" in picture and "MAIL FOR MAIN" in picture, picture
+assert "[ Detail ]" in picture and "MAIN / Sol 6 / 1-8 of" in picture and "Team: 5 active" in picture and "MAIL FOR MAIN" in picture, picture
 assert "ADVISOR / Astra" in picture and len(picture.splitlines()) <= 30, picture
 assert json.dumps(mailed, sort_keys=True) == mail_before, "reading main detail changed room mail"
 detail_band = next(b for b in detail_nav["bands"] if b["name"] == "detail")
@@ -2904,6 +3061,28 @@ with patch.dict(os.environ, {"OMS_PANEL_POSITION": "auto", "TMUX_PANE": "%7"}), 
         subprocess.CompletedProcess([], 0, "", ""), subprocess.CompletedProcess([], 0, "", "")]) as moved:
     assert panel.relayout_board() == "left"
     assert moved.call_args_list[2].args[0][1:3] == ["join-pane", "-h"], moved.call_args_list
+# A watcher records a border drag of the active window as the panel-wide share and every other window follows it by
+# at least two cells; a terminal resize, a zoomed board or a different placement never overwrites the stored share.
+assert panel.parse_split("top:30") == ("top", 30) and panel.parse_split("left:3") is None and panel.parse_split("x") is None
+assert panel.split_share(15, 50) == 30 and panel.split_cells(30, 50) == 15 and panel.split_cells(40, 220) == 88
+assert panel.split_resize(("top", 30), 15, 50) is None and panel.split_resize(("top", 30), 14, 50) is None
+assert panel.split_resize(("top", 30), 12, 50) == 15 and panel.split_resize(("left", 40), 25, 50) == 20
+def sync_run(sync, *reads):
+    with patch.dict(os.environ, {"OMS_PANEL_SESSION": "s", "TMUX_PANE": "%1"}), \
+            patch.object(panel.subprocess, "run") as tmux_run:
+        done = [sync.tick(read) for read in reads]
+    return done, [call.args[0][1:] for call in tmux_run.call_args_list]
+def reading(active, window, pane, text="", zoomed=False, panes=2):
+    return (active, zoomed, panes, window, pane, text)
+done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (100, 25)), reading(True, (100, 50), (100, 15)))
+assert done == [None, "record"] and calls == [["set-option", "-t", "s", "@oms_panel_split", "top:30"]], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (100, 25), "top:50"), reading(True, (100, 40), (100, 15), "top:50"),
+                       reading(True, (100, 40), (100, 20), "top:50"))
+assert done == [None, "follow", None] and [call for call in calls if call[0] == "set-option"] == [], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (100, 25), "top:30"), reading(False, (100, 50), (100, 15), "top:30"))
+assert done == ["follow", None] and calls[0][:2] == ["resize-pane", "-t"] and calls[0][3:] == ["-y", "15"], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (100, 50), "top:30", zoomed=True))
+assert done == [None] and calls == [], (done, calls)
 # A watcher restart keeps the person's selection: watch() restores what the reload saved.
 resumed_nav = {}
 class StopWatch(Exception):
@@ -3214,14 +3393,16 @@ ordered = render(flow, "codex", 100, 30, view="graph", main_attempt="flow-attemp
     "target": ("result", "builder"), "report": {"rows": [{"outcome": "accepted", "calls": [{"answer": "DONE TEXT"}]}]}}})
 assert ordered.index("Accepted by its main") < ordered.index("DONE TEXT"), ordered
 auto_nav = {}
-assert "DETAIL / MAIN / Sol 6 / auto" in render(flow, "codex", 100, 26, view="graph", main_attempt="flow-attempt", navigation=auto_nav)
+auto_board = render(flow, "codex", 100, 26, view="graph", main_attempt="flow-attempt", navigation=auto_nav)
+assert "[ Detail ]" in auto_board and "MAIN / Sol 6 / auto" in auto_board, auto_board
 roomy = render(flow, "codex", 100, 60, view="graph", main_attempt="flow-attempt", navigation={})
 roomy_lines = roomy.splitlines()
-detail_top = next(i for i, line in enumerate(roomy_lines) if "DETAIL /" in line)
+detail_top = next(i for i, line in enumerate(roomy_lines) if "[ Detail ]" in line)
 detail_end = next(i for i in range(detail_top + 1, len(roomy_lines)) if roomy_lines[i].startswith("╰"))
 # The board fills the pane (key hints pinned to the last row), but a short detail keeps a short box.
 assert detail_end - detail_top < 20 and len(roomy_lines) == 60, "a short detail stretched over the board"
-assert "DETAIL /" not in render(flow, "codex", 100, 26, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
+closed_board = render(flow, "codex", 100, 26, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
+assert "MAIN / Sol 6 / auto" not in closed_board and "No call selected" in closed_board, closed_board
 # People read the board: call exits become words, machine status lines and markdown marks are dropped.
 import room_view as graph_text
 assert graph_text.readable("Call exit=0; parent acceptance pending.\nstop-reason: provider=codex is_error=0\n**Verification:** `ok`", " ") \
@@ -3276,6 +3457,11 @@ for original, marks in (("codex", ["! codex", "codex"]), ("my-shell", [])):
         panel.mark_window(False)
     assert renames == marks, (original, renames)
     renames.clear()
+with patch.object(panel.subprocess, "run", TmuxStub("codex")):
+    for flags in ((False, True), (True, True), (False, False)):
+        panel.mark_window(*flags)
+assert renames == ["? codex", "! codex", "codex"], renames
+renames.clear()
 for name in ("TMUX", "TMUX_PANE", "OMS_PANEL_SESSION"):
     del os.environ[name]
 # A short board shows a notice instead of dropping it.
@@ -3289,8 +3475,9 @@ same_model["room"]["messages"] = [{"sender": "sol-worker", "targets": ["flow-mai
 picture = render(same_model, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                  navigation={"preview": {"target": ("chat", "flow-main"), "report": {}}})
 assert "From Sol 6 worker: Failed (exit 1)." in picture and "Messages to Sol 6 main" in picture, picture
-assert "Sol 6 worker → Sol 6 main: Failed (exit 1)." in render(same_model, "codex", 110, 40, view="graph",
-                                                          main_attempt="flow-attempt", navigation={"dismissed": True})
+sent_board = render(same_model, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
+                    navigation={"dismissed": True, "tab": "messages"})
+assert "Sol 6 worker → Sol 6 main  · Failed (exit 1)." in sent_board, sent_board
 # A finished call stays reachable from its main's detail: its team row selects it.
 done_flow = deepcopy(flow)
 for attempt in done_flow["attempts"]["active_recent"]:
@@ -3300,7 +3487,7 @@ team_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
 render(done_flow, "codex", 110, 40, view="graph", main_attempt="flow-attempt", navigation=team_nav)
 row = next(h for h in team_nav["hits"] if h["action"] == ("result", "builder"))
 assert choose(("click", row["x1"], row["y"]), team_nav) is None and team_nav["preview"] == {"target": ("result", "builder")}
-assert "DETAIL / WORKER / Sonnet 5.5" in render(done_flow, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
+assert "WORKER / Sonnet 5.5" in render(done_flow, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                                                   navigation=team_nav)
 # Expanded detail puts decisions before raw answers and keeps every grouped team row actionable.
 people = graph_text.nodes(done_flow)
@@ -3408,21 +3595,25 @@ counted["room"]["pairs"] = [{"sender": "flow-main", "recipient": "flow-other", "
                             {"sender": "flow-main", "recipient": "done-call", "sent": 2, "pending": 2},
                             {"sender": "flow-main", "recipient": "explorer", "sent": 3, "pending": 3}]
 counted["room"]["participants"][1]["label"] = "Native task not recorded"
-counted["room"]["messages"] = [{"sender": "flow-other", "targets": ["flow-main"], "text": "Call exit=0; parent acceptance pending.\nRebasing the parser"},
+counted["room"]["messages"] = [{"sender": "flow-other", "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 180)),
+                                "targets": ["flow-main"], "text": "Call exit=0; parent acceptance pending.\nRebasing the parser"},
                                {"id": "result-explorer", "sender": "explorer", "recipient": "flow-attempt", "message_kind": "handoff", "targets": ["flow-main"], "pending_for": [], "text": "Call exit=1;"}]
 for attempt in counted["attempts"]["active_recent"]:
     if attempt["attempt_id"] == "explorer":
         attempt["state"] = "failed"
 picture = render(counted, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
                  navigation={"overview": True, "dismissed": True})
-first_line = picture.splitlines()[0]
+first_line = picture.splitlines()[1]  # row 1 is the goal banner
 assert "1 unread for live participants" in first_line and re.search(r"\d\d:\d\d$", first_line), first_line
-assert "Latest sent: Finished. Rebasing the parser" in picture and "explorer" not in picture and "1 done" in picture, picture
+assert "no status yet" in picture and "Latest sent" not in picture, picture
+assert "explorer" not in picture and "1 done" in picture and "last message 3m ago" in picture, picture
+assert picture.splitlines()[0].startswith("◎ No shared goal · oms agent-plan init --goal TEXT"), picture
 declared_board = deepcopy(counted)
 declared_board["room"]["statuses"] = {"flow-other": {"text": "Fixing the parser", "ts": "2026-10-07T09:05:00Z", "seq": 3}}
 declared_picture = render(declared_board, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
                  navigation={"overview": True, "dismissed": True})
 assert "Now: Fixing the parser" in declared_picture and "Latest sent:" not in declared_picture, declared_picture
+assert "no workers running" in declared_picture or "worker" in declared_picture, declared_picture
 declared_picture = render(declared_board, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                  navigation={"preview": {"target": ("chat", "flow-other"), "report": {}}})
 assert re.search(r"Now: Fixing the parser \(\d\d:\d\d\)", declared_picture), declared_picture
@@ -3498,21 +3689,13 @@ for columns in (139, 140, 141, 200):
     nav = {}
     drawn = render(wide_flow, "codex", columns, 44, view="graph", main_attempt="flow-attempt", navigation=nav)
     assert all(display_width(line) <= columns for line in drawn.splitlines()) and len(drawn.splitlines()) <= 44
-    if columns >= 140:
-        assert "WORK STATUS" in drawn and "MAIL / to main" in drawn and "CHECK FIXTURE FIRST" in drawn
-        assert "no task title yet" in drawn and "Native task not recorded" not in drawn
-        row = next(line for line in drawn.splitlines() if "MAIN / Sol 6" in line)
-        assert "WORK STATUS" in row and "MAIL / to main" in row, row
-        for hit in nav["hits"]:
-            # Card hits stay inside the card; the full-width detail area is a separate target.
-            if hit["action"] == ("chat", "flow-main") and hit["y"] > 6 and not hit.get("preview"):
-                assert hit["x1"] > 1 and hit["x2"] < columns, hit
-        # Other mains' mail must not be copied into the selected main's card.
-        mailbox = "\n".join(line.split("MAIL / to main", 1)[-1] if "MAIL / to main" in line else
-                            line[(columns + 58) // 2 + 2:] for line in drawn.splitlines()[:20])
-        assert "PRIVATE OTHER MAIL" not in mailbox, mailbox
-    else:
-        assert "WORK STATUS" not in drawn
+    # The selected main's mail is read in the bottom Detail tab; another main's mail never shows.
+    assert "CHECK FIXTURE FIRST" in drawn and "PRIVATE OTHER MAIL" not in drawn, drawn
+    assert "no task title yet" in drawn and "Native task not recorded" not in drawn
+    for hit in nav["hits"]:
+        # Card hits stay inside the card; the full-width detail area is a separate target.
+        if hit["action"] == ("chat", "flow-main") and hit["y"] > 6 and not hit.get("preview"):
+            assert hit["x1"] > 1 and hit["x2"] < columns, hit
 from panel_view import PALETTE
 colored = render(wide_flow, "codex", 200, 44, view="graph", color=True)
 # Each provider keeps its own hue, and a selection is a coloured block, never a bare white inversion.
@@ -3605,6 +3788,18 @@ ended["room"]["call_results"]["old-03"]["exit"] = None
 ended_text = render(ended, "codex", 120, 120, view="tree", navigation={})
 assert "status unknown" not in ended_text and "failed (exit 1)" in ended_text, ended_text
 assert "Old job 03" in ended_text and ended_text.count("finished") == 12, ended_text
+# A worker that hit its wall clock says how to continue; later rounds of one task are numbered.
+timed = deepcopy(ended)
+timed["room"]["call_results"]["old-00"]["exit"] = 124
+assert "timed out · c continue" in render(timed, "codex", 120, 120, view="tree", navigation={})
+from room_view import nodes as room_nodes
+rounded = deepcopy(ended)
+rounded["attempts"] = {"active_recent": [], "recent": [
+    {"attempt_id": "a-%s" % ident, "state": "failed", "task_id": "same-task",
+     "panel": {"role": "worker", "room_participant": ident, "room_id": rounded["room"].get("id")}}
+    for ident in ("old-00", "old-01")]}
+numbered = {m["participant"]: m for m in room_nodes(rounded)}
+assert numbered["old-00"]["round"] == 1 and numbered["old-01"]["round"] == 2 and numbered["old-01"]["continues"] == "old-00", numbered
 rows = [line for line in ended_text.splitlines() if ("Luna" in line or "Sonnet" in line) and ("finished" in line or "failed" in line or "running" in line or "no record" in line)]
 order = [0 if "finished" in r else 2 if "running" in r else 1 for r in rows]
 assert order == sorted(order) and order[0] == 0 and order[-1] == 2 and 1 in order, rows
@@ -3663,12 +3858,31 @@ beaten = deepcopy(ended)
 beaten["attempts"]["active_recent"].append({"attempt_id": "old-00", "state": "working",
     "panel": {"room_id": "flow-room", "room_participant": "old-00", "role": "worker"}})
 assert next(m for m in graph_text.nodes(beaten) if m["participant"] == "old-00")["state"] == "working"
-assert re.search(r"\d\d-\d\d (Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d\d:\d\d$", graph_text.render_graph(flow, 120, 40).splitlines()[0])
+assert re.search(r"\d\d-\d\d (Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d\d:\d\d$", graph_text.render_graph(flow, 120, 40).splitlines()[1])
 board_text = graph_text.render_graph(words, 120, 40)
 assert "Plan:" not in board_text, board_text
-words["plan"] = {"idle_days": 3}
-assert "Plan: 0 of 6 tasks verified" in graph_text.render_graph(words, 120, 40)
-assert "Old plan" not in render(words, "codex", 120, 60, view="tree", navigation={})
+# An active plan puts its goal and progress on row 1 of both boards and the held task on its main's card.
+shown_main = next(m["participant"] for m in graph_text.nodes(words) if m.get("role") == "main")
+words["plan"] = {"present": True, "goal": "Ship the shared plan board", "task_count": 9, "idle_days": 3,
+                 "by_state": {"done": 6, "review": 1, "running": 2},
+                 "tasks": [{"id": "t7", "title": "Wire", "state": "running", "claimed_by": shown_main}]}
+banner_nav = {}
+active = graph_text.render_graph(words, 120, 40, navigation=banner_nav)
+top = active.splitlines()[0]
+assert top.startswith("◎ GOAL  Ship the shared plan board") and top.endswith("▕██████░░░░▏ 6/9 verified · 1 review · 2 running"), top
+assert "Plan:" not in active and "Task: t7 · running" in active, active
+assert {"y": 1, "x1": 1, "x2": 120, "action": ("tab", "plan")} in banner_nav["hits"], banner_nav["hits"][:3]
+assert "OMS · " in active.splitlines()[1]
+long_goal = deepcopy(words)
+long_goal["plan"]["goal"] = "Ship the shared plan board with every main claiming work from it " * 2
+wrapped_top = graph_text.render_graph(long_goal, 80, 40).splitlines()
+assert wrapped_top[0].endswith("6/9 verified · 1 review · 2 running") and wrapped_top[1].startswith("        ") and "OMS · " in wrapped_top[2], wrapped_top[:3]
+plain_board = graph_text.render_graph(words, 100, 40, unicode=False)
+assert plain_board.splitlines()[0].startswith("@ GOAL  Ship") and "[######....] 6/9 verified" in plain_board.splitlines()[0]
+assert all(ord(ch) < 128 for ch in plain_board.splitlines()[0]), plain_board.splitlines()[0]
+tree_active = render(words, "codex", 120, 60, view="tree", navigation={})
+assert tree_active.splitlines()[0].startswith("◎ GOAL  Ship the shared plan board") and "Plan:" not in tree_active, tree_active
+assert "Old plan" not in tree_active
 decoder = TerminalInput()
 assert decoder.decode(b"\033[<0;8;") == []
 assert decoder.decode(b"7M\033[<0;8;7m\033[<65;8;7M\033[A\r") == [

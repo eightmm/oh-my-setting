@@ -4,8 +4,8 @@ from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import header_rows
 from panel_view import (ATTENTION_STATES, PALETTE, activity, box_edge, box_row, clipped,
                         menu_rows, status_alerts, tone, usage_words, worker_rows, wrapped)
-from room_view import (action as member_action, call_order, call_span, footer_hints, joined_seconds, live_unread,
-                       main_names, model_name, nodes, plan_idle, readable, said,
+from room_view import (action as member_action, call_order, call_span, footer_hints, live_unread,
+                       goal_banner, main_names, model_name, nodes, plan_idle, readable, said,
                        settler, spawn_bar, window_order)
 
 
@@ -125,8 +125,6 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         idle = plan_idle(report) or 0
         if idle >= 7:
             add(sep.join(["Old plan", "idle %s days" % idle, verified]), "dim")
-        else:
-            add("Plan: " + verified, "good" if acceptance.get("complete") else "alert")
     for message in listing(room.get("messages"))[-2:]:
         add("Room log" + sep + (readable(message.get("text"), " ") or ""), "dim")
     if any(main.get("owns") for main in mains):
@@ -155,7 +153,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         footer.insert(len(footer) - hint_rows, bar[0])
     budget = max(0, height - int(menu) - len(footer))
     heading = "OMS / " + (clean(room.get("title") or room.get("id")) or "Work room")
-    head = [{"text": clipped(heading, width), "style": "main"}]
+    banner = [{"text": clipped(text, width), "style": style, "action": ("tab", "plan")}
+              for text, style in goal_banner(report, width, unicode)] if height >= 10 else []
+    head = banner + [{"text": clipped(heading, width), "style": "main"}]
     head += [{"text": clipped(alert, width), "style": "bad"} for alert in status_alerts(report)]
     if boxed and height >= 20:
         usage = usage_words(report, unicode)
@@ -193,7 +193,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         head.append({"text": clipped(mailbox, width), "style": "alert" if unread else "dim"})
     # The viewport owns its borders, so scrolling never leaves an open card.
     if boxed and budget - len(head) < 3:
-        head = head[:1 + len(status_alerts(report))]
+        head = head[:len(banner) + 1 + len(status_alerts(report))]
     head = head[:budget]
     room_budget = max(0, budget - len(head) - (2 if boxed else 0))
     body = rows

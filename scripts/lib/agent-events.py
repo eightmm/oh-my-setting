@@ -1035,6 +1035,16 @@ def create_attempt(
         return attempt_id
 
 
+def parse_refs(items: Sequence[str]) -> Dict[str, str]:
+    refs: Dict[str, str] = {}
+    for item in items:
+        key, separator, value = item.partition("=")
+        if not separator or not key or key in refs:
+            raise OpsError("--ref requires a unique NAME=VALUE")
+        refs[key] = value
+    return refs
+
+
 def event_start(args: argparse.Namespace) -> int:
     repo = repo_root(args.repo)
     budget = {
@@ -1042,12 +1052,7 @@ def event_start(args: argparse.Namespace) -> int:
         "max_tokens": args.max_tokens,
         "max_cost_microusd": args.max_cost_microusd,
     }
-    refs = {}
-    for item in args.ref:
-        key, separator, value = item.partition("=")
-        if not separator or not key or key in refs:
-            raise OpsError("--ref requires a unique NAME=VALUE")
-        refs[key] = value
+    refs = parse_refs(args.ref)
     attempt = create_attempt(
         repo,
         provider=args.provider,
@@ -1137,8 +1142,9 @@ def event_usage(args: argparse.Namespace) -> int:
         }.items()
         if value is not None
     }
-    if not usage:
-        raise OpsError("usage requires at least one measured value")
+    refs = parse_refs(args.ref)
+    if not usage and not refs:
+        raise OpsError("usage requires at least one measured value or ref")
     if any(value < 0 for value in usage.values()):
         raise OpsError("usage values must be non-negative integers")
     event = new_event(
@@ -1146,6 +1152,7 @@ def event_usage(args: argparse.Namespace) -> int:
         0,
         "attempt.usage",
         usage=usage,
+        refs=refs,
         actor={"kind": "telemetry", "name": safe_id(args.actor, "actor")},
         idempotency_key=safe_id(args.idempotency_key, "idempotency_key", optional=True),
     )
@@ -1975,6 +1982,8 @@ def add_event_parser(subparsers: argparse._SubParsersAction) -> None:
     usage.add_argument("--tokens", type=int)
     usage.add_argument("--duration-ms", type=int)
     usage.add_argument("--cost-microusd", type=int)
+    usage.add_argument("--ref", action="append", default=[], metavar="NAME=VALUE",
+                       help="bounded relative reference metadata; never changes authority")
     usage.add_argument("--actor", default="provider-telemetry")
     usage.add_argument("--idempotency-key", default="")
     usage.set_defaults(func=event_usage)

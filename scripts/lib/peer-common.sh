@@ -1768,6 +1768,7 @@ except OSError:
     raise SystemExit(0)
 
 envelope = None
+session = None
 others = []
 messages = []
 stream_seen = False
@@ -1780,6 +1781,8 @@ for line in raw.splitlines():
             doc = json.loads(candidate)
         except ValueError:
             doc = None
+        if isinstance(doc, dict) and isinstance(doc.get("session_id"), str):
+            session = doc["session_id"]
         # An aborted or errored envelope has no "result" key (observed live:
         # a planner killed at the wall emitted type=result, is_error=true,
         # stop_reason=tool_use and NO result) — it is still the envelope, and
@@ -1858,6 +1861,8 @@ with open(tmp, "w", encoding="utf-8") as handle:
     handle.write("\n".join(out) + "\n")
 import os
 os.replace(tmp, path)
+from peer_artifacts import record_native_session
+record_native_session(session)
 PY
 }
 
@@ -1887,6 +1892,7 @@ KNOWN = {
 }
 events = []
 others = []
+session = None
 for line in raw.splitlines():
     candidate = line.strip()
     doc = None
@@ -1897,6 +1903,8 @@ for line in raw.splitlines():
             doc = None
     if isinstance(doc, dict) and doc.get("type") in KNOWN:
         events.append(doc)
+        if doc["type"] == "thread.started" and isinstance(doc.get("thread_id"), str):
+            session = doc["thread_id"]
         continue
     others.append(line)
 if not events:
@@ -1971,6 +1979,8 @@ tmp = path + ".envelope"
 with open(tmp, "w", encoding="utf-8") as handle:
     handle.write("\n".join(out) + "\n")
 os.replace(tmp, path)
+from peer_artifacts import record_native_session
+record_native_session(session)
 PY
 }
 
@@ -2124,13 +2134,18 @@ ma_provider_attempt() {
       # the claude four-tool belt; config key accepted, probed 2026-08-18).
       [ "$access" = write ] || cmd+=(-c "tools.web_search=false")
       if [ "$access" = write ]; then
-        cmd+=(--sandbox workspace-write -)
+        cmd+=(--sandbox workspace-write)
       else
-        cmd+=(--sandbox read-only --skip-git-repo-check -)
+        cmd+=(--sandbox read-only --skip-git-repo-check)
       fi
+      # A resumed session is looked up by id; --all drops the cwd filter that
+      # would hide it from a continuation's new worktree.
+      [ -z "${OMS_RESUME_SESSION:-}" ] || cmd+=(resume --all "$OMS_RESUME_SESSION")
+      cmd+=(-)
       ;;
     claude)
       cmd=(claude)
+      [ -z "${OMS_RESUME_SESSION:-}" ] || cmd+=(--resume "$OMS_RESUME_SESSION")
       # Write workers inherit the operator's native permission policy. Forcing
       # acceptEdits overrides auto but still cannot approve Python/test commands
       # in a headless session. Read-only seats remain explicitly restricted.
@@ -2936,6 +2951,7 @@ ma_run_routed_provider() {
   local token_count=""
   local duration_ms=0
   local heartbeat_pid="" owner_pid
+  local native_session="" native_session_file=""
   local heartbeat_seconds="${OMS_ROUTED_HEARTBEAT_SECONDS:-60}"
   local -a start_args
   local -a usage_args
@@ -3001,7 +3017,12 @@ PY
       "$owner_pid" "$heartbeat_seconds") </dev/null >/dev/null 2>&1 &
     heartbeat_pid=$!
   fi
-  ma_run_routed_provider_inner "$@" || status=$?
+  native_session_file="$(agent_memory_mktemp 2>/dev/null)" || native_session_file=""
+  OMS_NATIVE_SESSION_FILE="$native_session_file" ma_run_routed_provider_inner "$@" || status=$?
+  if [ -n "$native_session_file" ]; then
+    native_session="$(head -c 100 "$native_session_file" 2>/dev/null | tr -d '\r\n')"
+    rm -f "$native_session_file"
+  fi
   if [ -n "$heartbeat_pid" ]; then
     kill "$heartbeat_pid" 2>/dev/null || true
     wait "$heartbeat_pid" 2>/dev/null || true
@@ -3040,10 +3061,12 @@ PY
     # duration samples that would inflate the aggregate.
     [ "${OMS_ATTEMPT_SUPERVISED:-0}" = 1 ] || usage_args+=(--duration-ms "$duration_ms")
     [ -z "$token_count" ] || usage_args+=(--tokens "$token_count")
+    # The provider's own session id rides the attempt refs, never room text.
+    [ -z "$native_session" ] || usage_args+=(--ref "native_session=$native_session")
     # Parsed provider output is cumulative observability only. It is not an
     # authenticated hard-budget source because provider text and trusted-local
     # worker processes share this boundary.
-    if [ "${OMS_ATTEMPT_SUPERVISED:-0}" != 1 ] || [ -n "$token_count" ]; then
+    if [ "${OMS_ATTEMPT_SUPERVISED:-0}" != 1 ] || [ -n "$token_count" ] || [ -n "$native_session" ]; then
       "$events" "${usage_args[@]}" >/dev/null || status=2
     fi
     if [ "$OMS_ATTEMPT_OWNED" = 1 ]; then

@@ -307,7 +307,7 @@ SH
 
 test_live_thread_delivery_at_existing_safe_points() {
   python3 - "$ROOT" "$TMP/live-hook" <<'PY'
-import json, os, pathlib, subprocess, sys
+import json, os, pathlib, subprocess, sys, time
 root, repo = map(pathlib.Path, sys.argv[1:])
 repo.mkdir()
 subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -518,6 +518,72 @@ assert ack_turns("next-1") == ["next-1"], "mail after consumed rows still arrive
 backlog = ["deep-%02d" % n for n in range(20)]
 assert ack_turns(*backlog, ack=backlog[:18]) == backlog[18:], "an acked backlog beyond the newest 12 was re-shown"
 assert room.status(repo, "acked")["pending_count"] == 6, "delivery still acks nothing"
+# Open questions escalate on their own; a linked answer stops every tier. The clock is the room's own time function.
+import time as clock_time
+real_now = room.now
+base = clock_time.time() + 20  # slack: message stamps are whole seconds taken after the setup
+at = lambda minutes: setattr(room, "now", lambda: base + minutes * 60)
+room.create(repo, "asks", "Open questions")
+room.join(repo, "asks", "asker", "codex", model="gpt-6.1-sol", native_session="ask-asker")
+room.join(repo, "asks", "target", "claude", model="claude-opus-5-5", native_session="ask-target")
+asker, target = (lambda: hook_state.live_thread_hint(payload("ask-asker", "codex"))), (lambda: hook_state.live_thread_hint(payload("ask-target")))
+room.send(repo, "asks", "asker", "target", "SECRET-QUESTION-TEXT", "question", message_id="ask-q1")
+at(0.5)
+first = target().splitlines()
+assert first[-1].startswith("[oms room] 1 question to you is open: ask-q1 from Sol 6.1 (0 min)") and "SECRET" not in first[-1], first
+assert "--reply-to ask-q1" in first[-1] and "--to asker --kind answer" in first[-1], first
+at(4)
+assert not target() and not asker(), "under five minutes nothing repeats on a tool hook"
+kept = {k: os.environ.pop(k, None) for k in ("OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT")}
+os.environ.update(OMS_ROOM_ID="asks", OMS_ROOM_PARTICIPANT="target")
+prompted = hook_state.live_thread_hint(dict(payload("ask-target"), hook_event_name="UserPromptSubmit"))
+assert "ask-q1 from Sol 6.1 (4 min)" in prompted, ("a panel main hears its open question on every prompt", prompted)
+for name, value in kept.items():
+    os.environ.pop(name, None)
+    if value is not None:
+        os.environ[name] = value
+at(6)
+lines = target().splitlines()
+assert lines[0].startswith("[oms room] 1 question to you is open: ask-q1") and "overdue" not in lines[0], lines
+assert lines[1] == "[oms room] 1 delivered message not acknowledged: oms room ack --id asks --participant target --message ask-q1", lines
+assert not asker(), "the asker hears nothing before ten minutes"
+at(11)
+told = asker()
+assert told == "Your question ask-q1 to Opus 5.5 has no answer for 11 min; it was re-sent as a reminder.", told
+assert asker() == told and [m["id"] for m in room.messages(repo, "asks")].count("remind-ask-q1-1") == 1, "one reminder, ever per tier"
+again = target().splitlines()
+assert any("Reminder: open question ask-q1 (11 min)" in l for l in again) and any("ask-q1 from Sol 6.1 (11 min)" in l for l in again), again
+at(16)
+assert "[oms room] overdue 1 question to you is open" in target(), "fifteen minutes is overdue"
+assert room.status(repo, "asks")["open_questions"][0]["id"] == "ask-q1"
+at(31)
+asker()
+asker()
+assert [m["id"] for m in room.messages(repo, "asks") if m["id"].startswith("remind-")] == ["remind-ask-q1-1", "remind-ask-q1-2"], "a second reminder at thirty minutes, never more"
+at(90)
+asker()
+assert len([m for m in room.messages(repo, "asks") if m["id"].startswith("remind-")]) == 2
+import contextlib, io
+captured = io.StringIO()
+with contextlib.redirect_stderr(captured):
+    room.send(repo, "asks", "target", "asker", "done", "answer")
+assert "linked this answer to open question ask-q1" in captured.getvalue()
+assert room.status(repo, "asks")["answered_count"] == 1 and not room.status(repo, "asks")["open_questions"], "one open question: auto-linked"
+assert "open:" not in target() and "Your question" not in asker(), "a linked answer closes the question and stops the reminders"
+for mid in ("ask-q2", "ask-q3"):
+    room.send(repo, "asks", "asker", "target", "again " + mid, "question", message_id=mid)
+try:
+    room.send(repo, "asks", "target", "asker", "ambiguous", "answer")
+except ValueError as error:
+    assert "ask-q2" in str(error) and "ask-q3" in str(error), error
+else:
+    raise AssertionError("an answer between two open questions must name which one")
+room.send(repo, "asks", "target", "asker", "just a note", "note")
+room.send(repo, "asks", "target", "asker", "second", "answer", reply_to="ask-q2")
+with contextlib.redirect_stderr(captured):
+    room.send(repo, "asks", "target", "asker", "third", "answer")
+assert not room.status(repo, "asks")["open_questions"]
+room.now = real_now
 room.send(repo, "team", "opus", "sol", "Final scoped note")
 call("close", "--id", "team")
 call("new", "--id", "unrelated-ordinary", "--live", "--topic", "Unrelated legacy broadcast")
@@ -579,6 +645,28 @@ os.environ.update(OMS_PANEL_MAIN_ATTEMPT="fresh-main", OMS_PANEL_SESSION="oms-fi
 tower = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 assert "control-tower main" in tower and "--owner claude --room binding-room" in tower, tower
 assert not hook_state.panel_main_hint(payload("tower")), "only prompts carry the reminder"
+# The shared plan rides on the same line: no plan, no plan sentence; then progress, the main's own task and the next ready one.
+assert "[oms plan]" not in tower, tower
+assert "set your status: oms room send" in tower and "--kind status" in tower, tower
+plan_dir = repo / ".oms" / "plan"
+plan_dir.mkdir(parents=True)
+stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+def plan_file(tasks):
+    (plan_dir / "tasks.json").write_text(json.dumps({"goal": "Ship the shared plan board " * 5, "tasks": {
+        t["id"]: dict(t, title=t.get("title", t["id"]), created=stamp, updated=stamp) for t in tasks}}))
+plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "ready", "depends": ["t1"], "title": "Wire banner"},
+           {"id": "t3", "state": "ready", "depends": ["t9"]}])
+free = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
+assert "[oms plan] Goal: Ship the shared plan board" in free and "1 of 3 verified" in free, free
+assert "yours:" not in free and "next ready: t2 Wire banner → oms agent-plan claim --id t2 --provider claude" in free, free
+assert "claim the next ready task before starting new work" in free and "t3" not in free.split("next ready:")[1], free
+assert len(free.split("[oms plan]")[1].split("set your status")[0]) < 420 and "\n" not in free, free
+plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
+           {"id": "t3", "state": "ready"}])
+held = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
+assert "yours: t2 (running)" in held and "next ready: t3" in held and "before starting new work" not in held, held
+room.send(repo, "binding-room", os.environ["OMS_ROOM_PARTICIPANT"], "all", "Wiring the banner", kind="status")
+assert "set your status" not in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 os.environ.pop("OMS_PANEL_MAIN_ATTEMPT")
 assert not hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 os.environ.pop("OMS_PANEL_SESSION")

@@ -165,6 +165,14 @@ def owner_id():
 def clear_claim(t):
     t.update(state="ready", provider="", ttl="", claimed_at="", reason="",
              lease_id="", autopilot_owner_id="")
+    t.pop("claimed_by_participant", None)
+
+def panel_claimant():
+    """Room participant of a panel main, so two mains of one provider differ."""
+    value = env("OMS_ROOM_PARTICIPANT")
+    if env("OMS_PANEL_MAIN_ATTEMPT") and re.fullmatch(r"[A-Za-z0-9._:-]{1,80}", value or ""):
+        return value
+    return ""
 
 def same_absolute_path(left, right):
     return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
@@ -848,6 +856,9 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"),
                  claimed_at=ts, reason="", repair_artifact="",
                  autopilot_owner_id=owner_id())
+        who = panel_claimant()
+        if who: t["claimed_by_participant"] = who
+        else: t.pop("claimed_by_participant", None)
     elif act == "start":
         if t["state"] != "claimed": die("task %s is %s; claim it first" % (i, t["state"]))
         require_current_lease(t)
@@ -1224,6 +1235,9 @@ if act == "next":
         issue_lease(t)
         t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"),
                  claimed_at=ts, reason="", autopilot_owner_id=owner_id())
+        who = panel_claimant()
+        if who: t["claimed_by_participant"] = who
+        else: t.pop("claimed_by_participant", None)
         t["updated"] = ts
         save(d)
     if env("OMS_AS_JSON") == "1":

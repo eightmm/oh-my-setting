@@ -53,11 +53,13 @@ def allocate(owner, role="worker", workload="routine", seat="auto", access="read
     return dict(route, role=role, owner=owner, workload=workload, access=access, purpose=purpose)
 
 
-def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=None):
+def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=None, resume=None):
     if bool(prompt) == bool(brief):
         raise ValueError("provide exactly one prompt or scoped brief file")
     if route["access"] == "write" and (not brief or not verify or not verify.strip()):
         raise ValueError("write workers need a scoped brief file and verifier")
+    if resume and route["role"] != "worker":
+        raise ValueError("only workers continue a session")
     if route["role"] == "reviewer" and (not verify or not verify.strip()):
         raise ValueError("reviewers need a verifier")
     brief_text = None
@@ -92,4 +94,6 @@ def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=No
         result += ["--verify", verify]
     if task_id:
         result += ["--task-id", task_id]
+    if resume:
+        result += ["--resume-session", resume]
     return result
