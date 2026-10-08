@@ -370,9 +370,12 @@ def plan_summary(report):
             number("review", "landing"), number("claimed", "running"))
 
 
-def goal_banner(report, width, unicode):
-    """The goal rows at the top of every board as [(text, style)]; the progress always stays on the first row."""
-    rows = goal_rows(report, width, unicode)
+def goal_banner(report, width, unicode, compact=False):
+    """The pinned goal box as [(text, style)], every row a link to the Plan tab; compact is one row.
+
+    A plan draws a card titled GOAL (goal text on at most two rows, progress on the title row); without one a dim one-row box.
+    """
+    rows = goal_box(report, width, unicode, compact)
     land = mapping(report.get("land"))
     if land.get("active") is True:
         sep = " · " if unicode else " / "
@@ -382,45 +385,38 @@ def goal_banner(report, width, unicode):
     return rows
 
 
-def goal_rows(report, width, unicode):
+def one_row(text, width):
+    """A box short enough for one row: square brackets stand in for the card's edges."""
+    text = clipped(text, max(1, width - 4))
+    return "[ " + text + " " * max(0, width - display_width(text) - 4) + " ]"
+
+
+def goal_box(report, width, unicode, compact):
     summary = plan_summary(report)
     sep = " · " if unicode else " / "
     if summary is None:
-        return [(clipped(("◎ " if unicode else "@ ") + "No shared goal" + sep + "oms agent-plan init --goal TEXT", width), "dim")]
+        return [(one_row("GOAL" + sep + "none" + sep + "oms agent-plan init --goal TEXT", width), "dim")]
     goal, done, total, review, claimed = summary
     filled = min(10, 10 * done // total) if total else 0
     bar = ("▕" + "█" * filled + "░" * (10 - filled) + "▏") if unicode else "[" + "#" * filled + "." * (10 - filled) + "]"
-    prefix = ("◎ " if unicode else "@ ") + "GOAL  "
     counts = "%s/%s verified" % (done, total)
     # A claim is not proof of running work, and work waiting for review is progress: review outlives the bar.
     reviewing = sep + "%s review" % review if review else ""
     options = [bar + " " + counts + reviewing + sep + "%s claimed" % claimed, bar + " " + counts + reviewing,
                counts + reviewing, "%s/%s%s" % (done, total, reviewing), "%s/%s" % (done, total)]
-    right = next((o for o in options if width - display_width(o) - 2 - display_width(prefix) >= 12), options[-1])
-    room = max(1, width - display_width(right) - 2)
-    if display_width(prefix + goal) <= room:
-        text = prefix + goal
-        return [(text + " " * max(2, width - display_width(text) - display_width(right)) + right, "head")]
-    first, used = "", 0
-    words = goal.split(" ")
-    for index, word in enumerate(words):
-        gap = 1 if first else 0
-        if used + gap + display_width(word) > room - display_width(prefix):
-            break
-        first += " " * gap + word
-        used += gap + display_width(word)
-    else:
-        index = len(words)
-    rest = " ".join(words[index:])
-    if not first:
-        # One unbroken word wider than the row: cut it by cells and carry the remainder down.
-        cut = fit(rest, room - display_width(prefix)).rstrip(ELLIPSIS[0])
-        first, rest = cut, rest[len(cut):]
-    head = prefix + first
-    rows = [(head + " " * max(2, width - display_width(head) - display_width(right)) + right, "head")]
-    if rest:
-        rows.append((clipped(" " * display_width(prefix) + rest, width), "head"))
-    return rows
+    inner = max(1, width - 4)
+    if compact:
+        prefix = "GOAL  "
+        right = next((o for o in options if inner - display_width(o) - 2 - len(prefix) >= 12), options[-1])
+        text = fit(prefix + goal, max(1, inner - display_width(right) - 2))
+        return [(one_row(text + " " * max(2, inner - display_width(text) - display_width(right)) + right, width), "head")]
+    top = box_edge("GOAL", width, unicode)
+    left, bar_char, closing = ("╭─ GOAL ", "─", "─╮") if unicode else ("+- GOAL ", "-", "-+")
+    right = next((o for o in options if width - len(left) - display_width(o) - 6 >= 2), None)
+    if right:
+        top = left + bar_char * (width - len(left) - display_width(right) - 2 - len(closing)) + " " + right + " " + closing
+    return [(top, "head")] + [(box_row(line, width, unicode), "head") for line in wrapped(goal, inner, 2)] \
+        + [(box_edge("", width, unicode, "bottom"), "head")]
 
 
 def claims_by_main(report):
@@ -841,7 +837,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     joiner = " ⇄ " if unicode else " <> "
     pair_members = [{"participant": "pair:%s:%s" % (l["left"], l["right"]), "role": "pair", "_link": l,
                      "_action": ("pair", (l["left"], l["right"])),
-                     "model": labels[l["left"]] + joiner + labels[l["right"]]} for l in links[:4]]
+                     "model": labels[l["left"]] + joiner + labels[l["right"]]} for l in links]
     previewed = next((m for m in mains + [c for calls in everyone.values() for c in calls] + pair_members
                       if action(m) == preview.get("target")), None)
     if (preview.get("target") or ("",))[0] == "pair":
@@ -955,19 +951,13 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if display_width(heading_text) + len(clock) + 2 <= width:
         heading_text += " " * (width - display_width(heading_text) - len(clock)) + clock
     add(heading_text, "head")
+    from panel_metrics import usage_line
+    add(usage_line(report, width, unicode), "dim")
+    for text, style in goal_banner(report, width, unicode, compact=height < 20):
+        hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": ("tab", "plan")})
+        add(text, style)
     for alert in status_alerts(report):
         add(alert, "bad")
-    if height >= 26:
-        from panel_metrics import percent
-        readings = mapping(report.get("provider_status"))
-        known = []
-        for key, title in (("claude", "Claude"), ("codex", "Codex")):
-            row = mapping(readings.get(key))
-            week, context = percent(row.get("weekly_used")), percent(row.get("context_left"))
-            if week is not None or context is not None:
-                known.append("%s %s week · ctx %s" % (
-                    title, "?" if week is None else "%s%%" % week, "?" if context is None else "%s%%" % context))
-        add(" │ ".join(known) if known else "Usage readings unavailable (Claude, Codex)", "dim")
     if height >= 20 and mains:
         # Tabs select a main locally; only the already-shown main's tab opens its chat.
         y, x, value = len(lines) + 1, 0, ""
@@ -1091,10 +1081,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 label += " / %s earlier unknown" % unknown
             hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": target})
             add(label, "review" if kind == "review" else "dim")
-    if height >= 10:
-        for text, style in goal_banner(report, width, unicode):
-            hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": ("tab", "plan")})
-            add(text, style)
     others = listing(room.get("other_rooms"))
     if room.get("other_rooms_incomplete") and height >= 20 and not others:
         add("OTHER ROOMS / scan incomplete; mains in other rooms may be missing", "alert")
@@ -1536,6 +1522,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         # One box with tabs: the selected call's detail, the plan, this main's debates, the room's messages.
         from panel_debate import signature, tab_body as debate_body
         from panel_messages import tab_body as messages_body
+        from panel_between import tab_body as between_body
         top = len(lines) + 1
         active = navigation.get("tab") if navigation.get("tab") in dict(TABS) else "detail"
         navigation["main_attempt"] = main_attempt
@@ -1613,15 +1600,20 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                     # Nothing to pick or open: the seat and target keys would do nothing.
                     footer[-hint_rows:] = hints = footer_hints(dict(navigation, debate_empty=True), width, managed,
                                                                unicode, chosen_member, len(mains), True)
+            elif active == "between":
+                rows = between_body(report, width - 4, capacity, navigation, unicode)
             else:
-                pairs = [("%s%s%s  %s" % (labels[l["left"]], joiner, labels[l["right"]], link_counts(l, unicode)),
-                          ("pair", (l["left"], l["right"]))) for l in links[:4]]
-                if len(links) > 4:
-                    pairs.append(("+%s more pair%s" % (len(links) - 4, "" if len(links) == 5 else "s"), None))
-                rows = messages_body(report, width - 4, capacity, navigation, unicode, pairs)
+                rows = messages_body(report, width - 4, capacity, navigation, unicode)
             for n in range(capacity):
-                text, target, picked = rows[n] if n < len(rows) else ("", None, False)
+                text, target, picked, *extra = rows[n] if n < len(rows) else ("", None, False)
                 line = box_row(text, width, unicode)
+                extra = extra[0] if extra else {}
+                if color:
+                    for a, b, how, reverse in reversed(extra.get("spans", [])):
+                        line = line[:a + 2] + PALETTE[how] + "\033[7m" * reverse + line[a + 2:b + 2] + "\033[0m" + line[b + 2:]
+                # Each drawn label is its own hit: a main's vertex or a pair's count, at the columns it occupies.
+                hits += [{"y": top + 1 + n, "x1": x1 + 3, "x2": x2 + 3, "action": a, "preview": True}
+                         for x1, x2, a in extra.get("cells", [])]
                 lines.append("\033[7m" + line + "\033[0m" if color and picked else line)
                 if target:
                     # Body text without its own link is passive, so a click that selects text changes nothing.
@@ -1653,7 +1645,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         lines[row] = paint(lines[row], "main" if bar[1] else "dim")
         hits += [{"y": row + 1, "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
     visible = [m for lane in lanes for m in teams[lane["participant"]]] if lanes else shown_judges + shown_workers
-    items = [("chat", m["participant"]) for m in mains] + [action(m) for m in pair_members]
+    items = [("chat", m["participant"]) for m in mains]
     items += [action(m) for m in visible]
     items += [action(m) for calls in everyone.values() for m in calls if classify(m) == "live"] + group_actions
     items += [hit["action"] for hit in hits if hit["action"][0] in {"result", "debate"}]
@@ -1667,7 +1659,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     return text if unicode else text.translate({ord("·"): "/", ord("→"): ">", ord("×"): "x", ord("│"): "|"})
 
 
-TABS = (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"))
+TABS = (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"), ("between", "Between"))
 PLAN_ORDER = {"done": 0, "review": 1, "landing": 1, "running": 2, "claimed": 2, "ready": 3, "blocked": 4}
 
 

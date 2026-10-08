@@ -189,12 +189,17 @@ edges, and a particle on a live edge moves toward its consumer. Child status
 names its main. Cards stay bounded in width instead of stretching a lone worker
 across the terminal.
 
-The goal banner sits under the header (`OMS · …`, row 1), the usage line (row 2) and the main tabs with their Needs review / Past work rows, above the lanes; the tree puts it under its header and usage card. It reads `◎ GOAL  <plan goal>` in the head colour with a
-progress bar and counts right-aligned (`▕██████░░░░▏ 6/9 verified · 1 review · 2 claimed`; ASCII
-`@ GOAL` and `[######....]`). A goal too long for the row wraps to a second row before it is cut, and
-the progress stays on its first row. Clicking the banner selects the `("tab", "plan")` target. Without an
-active plan (none, no goal, or idle for 7 days) it reads `◎ No shared goal · oms agent-plan init --goal
-TEXT` in dim style. While `oms land status --json` reports `active: true` (a probe of the land lock, never the receipt), one more row reads `LANDING <sha7> · <step> · <N>m`. `oms agent-plan claim` run by a panel main
+Three rows are pinned at the top of every board (graph and tree of every main window, and the control
+window), in this order, and never scroll away: the header (`OMS · …`), the usage line, then the goal box.
+Main tabs, groups, lanes, the bottom tab box and the footer follow; status alerts sit under the goal box.
+The usage line always covers both providers (`Claude week 66% · ctx 73% │ Codex --`); a provider without a
+reading reads `Codex --`, whichever main the window belongs to. The goal box is a card titled `GOAL` with the
+plan goal on at most two rows and the progress right-aligned on the title row
+(`╭─ GOAL ──── ▕██████░░░░▏ 6/9 verified · 1 review · 2 claimed ─╮`; ASCII `+- GOAL` and `[######....]`). On a
+board under 20 rows (or when the pinned rows would starve the body) the box shrinks to one row,
+`[ GOAL  <goal>  <bar> <counts> ]`, before any pinned row is dropped. Clicking the box selects the
+`("tab", "plan")` target on every row it draws. Without an active plan (none, no goal, or idle for 7 days)
+it is a one-row dim box, `[ GOAL · none · oms agent-plan init --goal TEXT ]`. While `oms land status --json` reports `active: true` (a probe of the land lock, never the receipt), one more row reads `LANDING <sha7> · <step> · <N>m`. `oms agent-plan claim` run by a panel main
 also records its room participant (`claimed_by_participant`), so two mains of one provider differ; a
 main's lane card then shows `Task: <id> · <state>`, `Now: <declared status>` and an activity line
 (`2 workers running · 1 needs you · last message 3m ago`), or a dim `no status yet`; it is six rows
@@ -221,9 +226,9 @@ then the message list. Clicking a pair row (or moving onto it with the arrow key
 switches the box to DETAIL and shows the pair's last six messages, oldest first, from the room
 snapshot, which keeps only the room's latest 12 messages. The top of the board carries no
 between-mains line. When no main in a lane row has an advisor or reviewer, the per-lane
-`◇ Advisors: none active` rows are dropped (the footer offers `a Ask advisor`). The header holds one usage
-line (`Claude 66% week · ctx 73% │ Codex 2% week · ctx 84%`; the model-call totals
-stay in the control/tree USAGE card). Truncation reads `…` (`...` in ASCII mode).
+`◇ Advisors: none active` rows are dropped (the footer offers `a Ask advisor`). The pinned usage line
+(`Claude week 66% · ctx 73% │ Codex week 2% · ctx 84%`) holds the readings; the model-call totals
+stay in the tree USAGE card. Truncation reads `…` (`...` in ASCII mode).
 `⚑` (ASCII `A`) marks a call waiting for approval, `?` one waiting for input.
 When a call of a main fails, times out, is blocked or waits for a person, that
 main's tmux window name gets a `! ` prefix, set and cleared only by the watcher in
@@ -287,9 +292,8 @@ The shell has no worker authority; edits there are not part of the recorded
 patch. Outside tmux the board shows the path.
 
 The board is an overview above and a detail area below. Cards keep only the
-rows their content needs (an unrecorded location stays in the detail), and an
-unavailable provider reading collapses to one `Usage readings unavailable (Claude, Codex)`
-line (the tree keeps its USAGE box where model-use data exists). On a
+rows their content needs (an unrecorded location stays in the detail), and a
+provider without a reading reads `Codex --` on the pinned usage line (the tree keeps its USAGE box where model-use data exists). On a
 board of 24 rows or more, rows the overview leaves free show the shown main's
 detail, marked `auto`; it never replaces a chosen block, and Esc dismisses it for
 that watcher. While a block is selected, overview cards shrink to one line and
@@ -766,9 +770,9 @@ layout in the checkout's panel when tmux is available, while `--host inline
 --launch` runs the CLI alone.
 
 The room's default tree uses closed usage, activity and action cards. Wide
-usage cards put provider quota/context readings beside the retained model-call
-totals; call totals appear once and are not account quotas. Narrow cards use
-`W` for weekly used percentage and `C` for main context left. Activity keeps
+usage cards list the retained model-call totals (the quota/context readings are
+the pinned usage line); call totals appear once and are not account quotas. A narrow
+usage line uses `W` for weekly used percentage and `C` for main context left. Activity keeps
 main/role branches, wraps task titles, separates repository tasks, and closes
 the viewport border even while scrolling. Empty declared scopes are omitted.
 The control menu is an inbox. **Needs you** lists up to 12 items, newest first,

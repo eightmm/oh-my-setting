@@ -1,7 +1,7 @@
 """Connected room tree and a frame-local map of navigation targets."""
 
 from dashboard_projection import clean, display_width, listing, mapping
-from panel_metrics import header_rows
+from panel_metrics import usage_line
 from panel_view import (ATTENTION_STATES, PALETTE, activity, box_edge, box_row, clipped,
                         menu_rows, status_alerts, tone, usage_words, worker_rows, wrapped)
 from room_view import (action as member_action, call_order, context_note, open_count, call_span, footer_hints, live_unread,
@@ -182,55 +182,35 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         footer.insert(len(footer) - hint_rows, bar[0])
     budget = max(0, height - int(menu) - len(footer))
     heading = "OMS / " + (clean(room.get("title") or room.get("id")) or "Work room")
-    banner = [{"text": clipped(text, width), "style": style, "action": ("tab", "plan")}
-              for text, style in goal_banner(report, width, unicode)] if height >= 10 else []
-    head = [{"text": clipped(heading, width), "style": "main"}]
-    head += [{"text": clipped(alert, width), "style": "bad"} for alert in status_alerts(report)]
-    readings = mapping(report.get("provider_status"))
-    blank = not usage_words(report, unicode) and not any(
-        mapping(readings.get(key)).get(field) is not None for key in ("claude", "codex")
-        for field in ("weekly_used", "context_left"))
-    if blank and boxed and height >= 20 and budget - len(head) - len(banner) >= 5:
-        # Nothing to read: one line says so instead of a box of dashes.
-        head.append({"text": clipped("Usage readings unavailable (Claude, Codex)", width), "style": "dim"})
-    elif boxed and height >= 20:
-        usage = usage_words(report, unicode)
-        labels = usage[:2] if summary else usage
-        if summary and len(usage) > 2:
-            labels += ["+%s models / expand for more" % (len(usage) - 2)]
-        labels = labels or ["No reported calls"]
-        maximum = max(2, budget - len(head) - len(banner) - 9)
+    alerts = status_alerts(report)
+    # Header, usage and goal box are pinned; the goal box shrinks to one row before any of them is dropped.
+    full = goal_banner(report, width, unicode)
+    banner = full if budget - 2 - len(alerts) - len(full) >= 3 and height >= 20 else goal_banner(report, width, unicode, True)
+    head = [{"text": clipped(heading, width), "style": "main"},
+            {"text": clipped(usage_line(report, width, unicode), width), "style": "dim"}]
+    head += [{"text": clipped(text, width), "style": style, "action": ("tab", "plan")} for text, style in banner]
+    head += [{"text": clipped(alert, width), "style": "bad"} for alert in alerts]
+    pinned = len(head)
+    labels = usage_words(report, unicode)
+    if boxed and height >= 20 and labels and budget - len(head) >= 5:
+        if summary:
+            labels = labels[:2] + (["+%s models / expand for more" % (len(labels) - 2)] if len(labels) > 2 else [])
+        maximum = max(2, budget - len(head) - 9)
         if len(labels) > maximum:
             labels = labels[:maximum - 1] + ["+%s models / expand for more" % (len(labels) - maximum + 1)]
-        wide = width >= 84 and not summary
-        left = (content_width + 8) // 2
-        metric_lines = header_rows(report, left if wide else content_width)
-        content = []
-        if wide:
-            content.append(("Usage limits".ljust(left) + "  Model use, last 8 calls", "dim"))
-            for index in range(max(len(metric_lines), len(labels))):
-                metric = metric_lines[index] if index < len(metric_lines) else ""
-                label = labels[index] if index < len(labels) else ""
-                metric = clipped(metric, left)
-                content.append((metric + " " * (left - display_width(metric)) + "  " + label, None))
-        else:
-            content = [(line, None) for line in metric_lines]
-            content += [("Model use, last 8 calls", "dim")] + [(line, None) for line in labels]
-        head.append({"text": box_edge("USAGE / W used, C left" if content_width < 40 else "USAGE", width, unicode), "style": "dim"})
+        content = [("Model use, last 8 calls", "dim")] + [(line, None) for line in labels]
+        head.append({"text": box_edge("USAGE", width, unicode), "style": "dim"})
         head += [{"text": box_row(line, width, unicode), "style": style} for line, style in content]
         head.append({"text": box_edge("", width, unicode, "bottom"), "style": "dim"})
-    elif budget - len(head) - len(banner) >= 5:
-        head += [{"text": clipped(line, width), "style": "dim"} for line in header_rows(report, width)]
-    if budget - len(head) - len(banner) >= 5:
+    if budget - len(head) >= 5:
         unread = live_unread(report, members, settled)
         mailbox = "Messages: %s unread for live participants" % unread
         if not summary:
             mailbox += sep + "%s read" % room.get("received_count", 0) + sep + "%s answered" % room.get("answered_count", 0)
         head.append({"text": clipped(mailbox, width), "style": "alert" if unread else "dim"})
     # The viewport owns its borders, so scrolling never leaves an open card.
-    if boxed and budget - len(head) - len(banner) < 3:
-        head = head[:1 + len(status_alerts(report))]
-    head += banner
+    if boxed and budget - len(head) < 3:
+        head = head[:pinned]
     head = head[:budget]
     room_budget = max(0, budget - len(head) - (2 if boxed else 0))
     body = rows
@@ -308,7 +288,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
 
 
 def render_detail(report, detail, width, height, navigation, managed=False):
-    heading = ["OMS / " + detail["title"]] + header_rows(report, width)
+    heading = ["OMS / " + detail["title"], usage_line(report, width)]
     if "report" in detail:
         from panel_view import render_results
         text = render_results(detail["report"], width)

@@ -154,20 +154,18 @@ def collect(report, main_attempt=None, now=None, repo=None):
     return output
 
 
-def header_rows(report, width=100):
-    output = []
+def usage_line(report, width=100, unicode=True):
+    """One row for both providers; a provider without a reading stays on the row as "Codex --"."""
+    parts = []
     for provider, title in (("claude", "Claude"), ("codex", "Codex")):
         row = mapping(mapping(report.get("provider_status")).get(provider))
         week, context = percent(row.get("weekly_used")), percent(row.get("context_left"))
-        if width < 40:
-            output.append("%s | W %s / C %s" % (title,
-                "--" if week is None else "%s%%" % week,
-                "--" if context is None else "%s%%" % context))
+        if week is None and context is None:
+            parts.append(title + " --")
             continue
-        text = "%s | week %s | main ctx %s" % (title,
-            "--" if week is None else "%s%% used" % week,
-            "--" if context is None else "%s%% left" % context)
-        if width >= 68:
-            text += " | " + (row.get("source") or "unavailable")
-        output.append(text)
-    return output
+        mark = lambda value: "--" if value is None else "%s%%" % value
+        parts.append("%s week %s%sctx %s" % (title, mark(week), " · " if unicode else " / ", mark(context)))
+    line = (" │ " if unicode else " | ").join(parts)
+    if len(line) > width:
+        line = (" │ " if unicode else " | ").join(p.replace(" week ", " W ").replace("ctx ", "C ") for p in parts)
+    return line

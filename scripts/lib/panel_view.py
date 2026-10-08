@@ -420,14 +420,19 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
     head = [("✳ " if unicode else "* ") + "OMS control panel / " +
             (clean(room.get("title") or room.get("id")) or mapping(report.get("repo")).get("name") or "repository")]
     styles = ["head"]
+    from panel_metrics import usage_line
+    from room_view import goal_banner
+    head.append(usage_line(report, width, unicode))
+    styles.append("dim")
+    full = goal_banner(report, width, unicode)
+    # Header, usage and goal box are pinned; the goal box shrinks to one row before any of them is dropped.
+    for text, style in full if height >= 20 and budget - 2 - len(full) >= 6 else goal_banner(report, width, unicode, True):
+        head.append(text)
+        styles.append(style)
+    pinned = len(head)
     for alert in status_alerts(report):
         head.append(alert)
         styles.append("bad")
-    if height >= 20:
-        from panel_metrics import header_rows
-        for line in header_rows(report, width):
-            head.append(line)
-            styles.append("dim")
     if previous is not None and height >= 12:
         head.append("Last: " + previous)
         styles.append("dim")
@@ -435,7 +440,8 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
         for line in wrapped(ONBOARDING, width, 3):
             head.append(line)
             styles.append("main")
-    head, styles = head[:max(1, budget - 3)], styles[:max(1, budget - 3)]
+    keep = max(pinned, budget - 3)
+    head, styles = head[:keep], styles[:keep]
     boxed = width >= 28 and budget - len(head) >= 4
     available = max(0, budget - len(head) - (2 if boxed else 0))
     shown, hidden = items[:INBOX_LIMIT], max(0, len(items) - INBOX_LIMIT)
@@ -587,12 +593,13 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     repo = mapping(report.get("repo"))
     add(("✳ " if unicode else "* ") + "OMS " + ("control panel" if menu else "dashboard") +
         " / " + (repo.get("name") or "repository"), "head")
+    from panel_metrics import usage_line
+    from room_view import goal_banner
+    add(usage_line(report, width, unicode), "dim")
+    for text, style in goal_banner(report, width, unicode, compact=height < 20):
+        add(text, style)
     for alert in alerts:
         add(alert, "bad")
-    if height >= 20:
-        from panel_metrics import header_rows
-        for line in header_rows(report, width):
-            add(line, "dim")
     if height >= 34:
         add(repo.get("branch") or "branch unknown", "dim")
 
