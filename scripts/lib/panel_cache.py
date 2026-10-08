@@ -13,6 +13,7 @@ from panel_results import DURABLE, _lock
 INTERVAL = 5
 MAX_BYTES = 8 * 1024 * 1024
 DIRECTORY = '.oms/hooks/panel-cache'
+SKIPPED = {DIRECTORY, '.oms/hooks/panel-activity'}
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -31,7 +32,8 @@ def fingerprint(repo):
             entries.append((label, info.st_mode, info.st_dev, info.st_ino))
             for child in sorted(path.iterdir()):
                 relative = label + '/' + child.name
-                if relative == DIRECTORY or child.name.endswith(('.lock', '.tmp')):
+                # Mains' activity heartbeats are read by each board directly, not through this cache.
+                if relative in SKIPPED or child.name.endswith(('.lock', '.tmp')):
                     continue
                 visit(child, relative)
         else:
@@ -105,22 +107,21 @@ def read_shared(repo, key, collect, cacheable=None):
         return collect()
     identity = hashlib.sha256(str(repo).encode()).hexdigest()
     relative = DIRECTORY + '/' + key + '.json'
+    cached = None
     try:
         stamp = fingerprint(repo)
         cached = _load(repo, relative, identity, stamp)
-        if cached and 0 <= time.time() - cached['created'] < INTERVAL:
-            if fingerprint(repo) == stamp:
-                return cached['value']
-            raise ValueError('panel inputs changed during cache read')
+        if cached and 0 <= time.time() - cached['created'] < INTERVAL and fingerprint(repo) == stamp:
+            return cached['value']
         with _lock(repo, 'panel-cache-' + key, timeout=0):
             cached = _load(repo, relative, identity, stamp)
-            if cached and 0 <= time.time() - cached['created'] < INTERVAL:
-                if fingerprint(repo) == stamp:
-                    return cached['value']
-                raise ValueError('panel inputs changed during cache read')
+            if cached and 0 <= time.time() - cached['created'] < INTERVAL and fingerprint(repo) == stamp:
+                return cached['value']
             value = collect()
             if fingerprint(repo) != stamp:
-                raise ValueError('panel inputs changed during collection')
+                # Mains write state all the time; a read that overlapped a write is still a valid read for this
+                # board, it is just not stored for the others.
+                return value
             if cacheable is not None and not cacheable(value):
                 return value
             data = {'schema': 1, 'repo': identity, 'fingerprint': stamp,
@@ -137,9 +138,10 @@ def read_shared(repo, key, collect, cacheable=None):
             return value
     except ValueError as error:
         if str(error) == 'panel operation is busy; retry later':
-            if cached and fingerprint(repo) == stamp:
+            # Another board is collecting: show its last value while it works, or read directly without one.
+            if cached:
                 return cached['value']
-            raise ValueError('panel collection pending for changed inputs') from error
+            return collect()
         if str(error) == 'panel lock unavailable':
             return collect()
         raise

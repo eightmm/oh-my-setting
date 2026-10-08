@@ -922,22 +922,23 @@ with panel_results._lock(project, 'panel-cache-dashboard', timeout=0):
     assert board(created + cache.INTERVAL + 1) == {'number': 1}
     assert time.monotonic() - start < 2, 'contending board blocked'
     plan.write_text('second generation', encoding='utf-8')
-    assert board() == {'pending': True}, 'replayed a different input generation'
-assert counter.read_text() == '1'
-assert board() == {'number': 2}
-assert board(json.loads(path.read_text())['created'] + cache.INTERVAL + 1) == {'number': 3}
+    # A board never replays another input generation; with the writer busy it reads for itself.
+    assert board() == {'number': 2}, 'replayed a different input generation'
+assert counter.read_text() == '2'
+assert board() == {'number': 3}
+assert board(json.loads(path.read_text())['created'] + cache.INTERVAL + 1) == {'number': 4}
 path.write_text('{"schema":1,', encoding='utf-8')
-assert board() == {'number': 4}, 'corrupt cache was reused'
+assert board() == {'number': 5}, 'corrupt cache was reused'
 path.write_text('{"schema":1}', encoding='utf-8')
-assert board() == {'number': 5}, 'partial cache was reused'
+assert board() == {'number': 6}, 'partial cache was reused'
 entry = json.loads(path.read_text())
 entry['value'] = {'number': 999}
 path.write_text(json.dumps(entry), encoding='utf-8')
-assert board() == {'number': 6}, 'damaged payload was reused'
+assert board() == {'number': 7}, 'damaged payload was reused'
 entry = json.loads(path.read_text())
 entry['created'] = 10 ** 400
 path.write_text(json.dumps(entry), encoding='utf-8')
-assert board() == {'number': 7}, 'overflowing cache timestamp did not trigger recollection'
+assert board() == {'number': 8}, 'overflowing cache timestamp did not trigger recollection'
 
 # The board still selects its own room, and result queries share the same
 # generation without retaining scoped answer text or skipping digest checks.
@@ -950,10 +951,11 @@ with patch.object(panel, 'dashboard', return_value=({'repo': {'name': 'fixture'}
     assert dashboard.call_count == 1
     with panel_results._lock(project, 'panel-cache-dashboard', timeout=0):
         plan.write_text('third generation', encoding='utf-8')
+        # Inputs that change while another board collects never turn this board into "collection degraded".
         state, status = panel.snapshot(project, 'two')
-        assert status == 1 and state['collection']['ok'] is False and 'room' not in state
+        assert status == 0 and state['room']['id'] == 'two', state
     assert panel.snapshot(project, 'two')[0]['room']['id'] == 'two'
-    assert dashboard.call_count == 2
+    assert dashboard.call_count == 3
 with patch.object(panel_results, '_records', return_value=([], [])) as queries:
     assert panel_results.results(project, _shared=True)['rows'] == []
     assert panel_results.results(project, _shared=True)['rows'] == []
@@ -972,13 +974,14 @@ with patch.object(panel_results, '_records', return_value=([], many)), \
 def changing():
     plan.write_text('changed while collecting', encoding='utf-8')
     return {'number': 42}
-try:
-    cache.read_shared(project, 'race', changing)
-except ValueError:
-    pass
-else:
-    raise AssertionError('published data collected across input generations')
+# A read that overlapped a write is this board's answer, but it is not published for the others.
+assert cache.read_shared(project, 'race', changing) == {'number': 42}
 assert not (project / cache.DIRECTORY / 'race.json').exists()
+# Mains' activity heartbeats change all the time and are read directly; they do not invalidate shared reads.
+before = cache.fingerprint(project)
+(project / '.oms/hooks/panel-activity').mkdir(parents=True, exist_ok=True)
+(project / '.oms/hooks/panel-activity/main.json').write_text('{}', encoding='utf-8')
+assert cache.fingerprint(project) == before
 for relative in ('.oms/lifecycle/events.jsonl', '.oms/hooks/events.jsonl', '.oms/threads/room.jsonl'):
     source = project / relative
     source.parent.mkdir(exist_ok=True)
