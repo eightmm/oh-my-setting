@@ -238,6 +238,9 @@ def bootstrap(provider, repo):
         "Before editing shared files, declare your scope with oms room scope --owns PATH, and pass "
         "--scope PATH to write workers; overlaps warn, they never lock. "
         "Refer to other mains by tmux window and model, such as #1 Opus 5.5 or #2 Sol 6.1, never by participant id. "
+        "Every main lands its own work: admit worker patches on your own oms/<task> branch in a worktree from "
+        "oms scratch-worktree add --repo ., rebase it on the remote target, verify, and run oms land from that "
+        "worktree; land's lock serialises mains, and nobody commits in the shared checkout or waits for one integrator. "
         "At material decisions use oms panel --dispatch advisor --owner %s "
         "--seat astra|fable|auto --repo . --prompt TEXT, choosing the seat by need: astra (GPT-6 Astra) "
         "for source-level correctness, code paths, tooling and test evidence; fable (Fable 5.1) for design, "
@@ -1000,60 +1003,96 @@ def board_view(view):
 SPLITS = {"top": ["-v", "-b", "-l", "50%"], "left": ["-h", "-b", "-l", "40%"], "side": ["-h", "-l", "28%"]}
 
 
-def shape(width, height, current=None):
+def shape(width, height):
     """Board placement for a window: cells are about twice as tall as wide, so a visually wide
-    window (width > 2 x height) gets a left board; the 1.8-2.2 band keeps the current one."""
-    if current in ("top", "left") and 1.8 * height <= width <= 2.2 * height:
-        return current
+    window (width > 2 x height) gets a left board."""
     return "left" if width > 2 * height else "top"
 
 
-def board_position(target=None, current=None):
+def board_position(size, recorded=None):
+    """An explicit OMS_PANEL_POSITION, else the placement the panel already recorded, else the shape of
+    `size`: the placement is chosen once per panel session and a resize never changes it."""
     position = os.environ.get("OMS_PANEL_POSITION", "auto")
     if position != "auto":
         return position
-    try:
-        size = subprocess.run(tmux_command("display-message", "-p", "-t", target or os.environ.get("TMUX_PANE", ""),
-                                           "#{window_width} #{window_height}"), capture_output=True, text=True,
-                              check=True, timeout=3, stdin=subprocess.DEVNULL).stdout.split()
-        return shape(int(size[0]), int(size[1]), current)
-    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-        return current or "top"
+    if recorded in ("top", "left"):
+        return recorded
+    return shape(*size) if size else "top"
+
+
+MIN_BOARD = MIN_CHAT = 20
 
 
 def parse_split(text):
-    """The panel-wide board share "<top|left>:<percent>" as (placement, percent); None when unset or invalid."""
-    match = re.fullmatch(r"(top|left):(\d{1,2})", (text or "").strip())
-    return (match.group(1), int(match.group(2))) if match and 5 <= int(match.group(2)) <= 95 else None
+    """The panel-wide board geometry as (placement, number, legacy): "<top|left>:<cells>c" in absolute cells,
+    or the older "<top|left>:<percent>" (legacy, 5-95); None when unset or invalid. The unit letter keeps
+    a recorded cell count from reading as a percentage."""
+    match = re.fullmatch(r"(top|left):(\d{1,4})(c?)", (text or "").strip())
+    if not match:
+        return None
+    number = int(match.group(2))
+    if match.group(3):
+        return (match.group(1), number, False) if number else None
+    return (match.group(1), number, True) if 5 <= number <= 95 else None
 
 
-def split_share(pane, window):
-    return max(5, min(95, (200 * pane + window) // (2 * window)))
+def split_text(position, cells):
+    return "%s:%dc" % (position, cells)
 
 
-def split_cells(percent, window):
-    return max(3, min(window - 4, (2 * percent * window + 100) // 200))
+def split_cells(stored, window):
+    """Board cells on a `window`-cell axis for a parsed geometry, leaving the chat pane (and the border) at least
+    MIN_CHAT cells and the board at least MIN_BOARD; a window too small for both splits in half."""
+    cells = (2 * stored[1] * window + 100) // 200 if stored[2] else stored[1]
+    low, high = MIN_BOARD, window - MIN_CHAT - 1
+    return max(low, min(high, cells)) if high >= low else max(1, window // 2)
 
 
 def split_resize(stored, pane, window):
-    """Cells a board of `pane` cells in a `window`-cell axis should take to match the stored share, or None
+    """Cells a board of `pane` cells in a `window`-cell axis should take to match the stored geometry, or None
     when it is already within one cell (a 2-cell gap is the threshold that keeps windows from ping-ponging)."""
-    wanted = split_cells(stored[1], window)
+    wanted = split_cells(stored, window)
     return wanted if abs(wanted - pane) >= 2 else None
 
 
+def terminal_window():
+    """The launching terminal as the window an attaching client will get (one row goes to the tmux status line)."""
+    for fd in (1, 0, 2):
+        try:
+            columns, rows = os.get_terminal_size(fd)
+            return columns, rows - 1
+        except (OSError, ValueError):
+            pass
+    return None
+
+
 def board_split(pane, repo, command):
-    position = board_position(pane)
-    flags = list(SPLITS[position])
+    """Open this window's board at the panel-wide geometry. The first main window's board chooses the placement
+    and records its size in cells; later boards reuse both. The control window only follows the record."""
     try:
-        shared = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{@oms_panel_split}"),
-                                capture_output=True, text=True, check=False, timeout=3,
-                                stdin=subprocess.DEVNULL).stdout
-    except (OSError, subprocess.SubprocessError):
-        shared = ""
-    stored = parse_split(shared)
-    if stored:
-        flags[-1] = "%d%%" % stored[1]
+        read = subprocess.run(tmux_command("display-message", "-p", "-t", pane,
+                                           "#{window_width} #{window_height} #{session_attached} #{session_id}"
+                                           "\t#{window_name}\t#{@oms_panel_split}"),
+                              capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL).stdout
+        parts = (read.replace("\r", "").rstrip("\n").split("\t") + ["", ""])[:3]
+        fields = parts[0].split()
+        window, attached, session = (int(fields[0]), int(fields[1])), int(fields[2]) > 0, fields[3]
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        window, attached, session, parts = None, True, "", ["", "", ""]
+    stored = parse_split(parts[2])
+    # A detached session still has tmux's 80x24 window; the terminal that is about to attach is the better size.
+    sized = window if attached else terminal_window()
+    position = board_position(sized or window, stored[0] if stored else None)
+    flags = list(SPLITS[position])
+    if sized:
+        # The sidebar is a left board that starts narrower.
+        kind = "top" if position == "top" else "left"
+        extent = sized[1 if kind == "top" else 0]
+        cells = split_cells(stored if stored and stored[0] == kind else (kind, int(SPLITS[position][-1].rstrip("%")), True), extent)
+        flags[-1] = str(cells) if attached else "%d%%" % max(1, min(99, (200 * cells + extent) // (2 * extent)))
+        if session and parts[1] != "control" and (stored is None or stored[2] and stored[0] == kind):
+            subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_split", split_text(kind, cells)),
+                           check=False, timeout=3, stdin=subprocess.DEVNULL)
     subprocess.run(tmux_command("split-window", *flags, "-t", pane, "-c", str(repo), command), check=True)
 
 
@@ -1077,49 +1116,65 @@ def panel_geometry():
 
 
 class SplitSync:
-    """Keeps every main window's board at the one panel-wide share: a border drag in the active window is
-    recorded in the session option @oms_panel_split, and the other windows resize their own board to it."""
+    """Holds every main window's board at the one panel-wide geometry in the session option @oms_panel_split, active
+    or not: each watcher resizes its own board to the recorded cells, and a border drag in the active window is
+    recorded as the new cells for the others to follow."""
 
     def __init__(self):
+        # (window, board cells, active) of the previous tick; None after this watcher's own resize, so its
+        # result is never read back as a drag.
         self.last = None
-        self.force = True
 
     def tick(self, geometry):
         """Apply one geometry read; return the name of what was done ("record", "follow") or None."""
         if geometry is None:
             return None
         active, zoomed, panes, window, pane, text = geometry
-        before, self.last = self.last, (window, pane, active)
+        before, self.last = self.last, None
         if zoomed or panes != 2:
-            self.last = None
             return None
         position = "top" if pane[0] == window[0] else "left"
         axis = 1 if position == "top" else 0
-        if before is not None and before[0] != window:
-            self.force = True
-        elif active and before is not None and before[2] and before[1] != pane:
-            share = "%s:%d" % (position, split_share(pane[axis], window[axis]))
-            if share != text:
-                subprocess.run(tmux_command("set-option", "-t", os.environ.get("OMS_PANEL_SESSION", ""),
-                                            "@oms_panel_split", share), check=False, timeout=3,
-                               stdin=subprocess.DEVNULL)
-            return "record"
+        self.last = (window, pane[axis], active)
         stored = parse_split(text)
-        if stored is None or active and not (self.force or before is not None and not before[2]):
-            return None
-        self.force = False
+        session = os.environ.get("OMS_PANEL_SESSION", "")
+
+        def record(cells):
+            if split_text(position, cells) != text:
+                subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_split", split_text(position, cells)),
+                               check=False, timeout=3, stdin=subprocess.DEVNULL)
+
+        if stored is None:
+            if not active:
+                return None
+            record(split_cells((position, pane[axis], False), window[axis]))
+            return "record"
+        if stored[0] != position:
+            return None  # an explicit OMS_PANEL_POSITION board keeps its own placement; the record never flips
+        if active and before is not None and before[2] and before[0] == window and before[1] != pane[axis]:
+            record(split_cells((position, pane[axis], False), window[axis]))
+            return "record"
+        done = None
+        if stored[2]:
+            stored = (position, split_cells(stored, window[axis]), False)
+            record(stored[1])
+            done = "record"
         cells = split_resize(stored, pane[axis], window[axis])
         if cells is None:
-            return None
+            return done
         subprocess.run(tmux_command("resize-pane", "-t", os.environ.get("TMUX_PANE", ""),
                                     "-y" if position == "top" else "-x", str(cells)), check=False, timeout=3,
                        stdin=subprocess.DEVNULL)
-        self.last = (window, (pane[0], cells) if position == "top" else (cells, pane[1]), active)
+        self.last = None
         return "follow"
 
 
 def relayout_board():
-    """Move this watcher's board to the placement its resized window now calls for."""
+    """Move this watcher's board to an explicitly requested placement (OMS_PANEL_POSITION=top|left) when it
+    differs; an automatic placement is chosen once and never moves."""
+    wanted = os.environ.get("OMS_PANEL_POSITION", "auto")
+    if wanted not in ("top", "left"):
+        return None
     me = os.environ.get("TMUX_PANE", "")
     rows = subprocess.run(tmux_command("list-panes", "-t", me, "-F", "#{pane_id} #{pane_width} #{window_width}"),
                           capture_output=True, text=True, check=True, timeout=3, stdin=subprocess.DEVNULL).stdout.split("\n")
@@ -1128,9 +1183,7 @@ def relayout_board():
     others = [p for p in panes if p[0] != me]
     if mine is None or len(others) != 1:
         return None
-    current = "top" if mine[1] == mine[2] else "left"
-    wanted = board_position(me, current)
-    if wanted == current or wanted not in ("top", "left"):
+    if wanted == ("top" if mine[1] == mine[2] else "left"):
         return None
     subprocess.run(tmux_command("join-pane", *SPLITS[wanted], "-s", me, "-t", others[0][0]), check=True,
                    timeout=3, stdin=subprocess.DEVNULL)
@@ -1876,6 +1929,39 @@ def snapshot(repo, room_id=None):
         return {"repo": {"name": repo.name}, "collection": {"ok": False}}, 1
 
 
+def refresh_failed(state):
+    """The exact no-room fallback snapshot() returns when a read fails."""
+    return state.get("collection") == {"ok": False}
+
+
+def hold_state(held, state, status, key):
+    """Keep the last good read when a refresh fails; returns state, status and a stale notice or None.
+
+    Only a board that has already drawn a good state for the same room key holds it."""
+    if not refresh_failed(state):
+        held.update(state=state, status=status, key=key, at=time.monotonic(), failures=0)
+        return state, status, None
+    if "state" not in held or held["key"] != key:
+        return state, status, None
+    held["failures"] += 1
+    age = int(time.monotonic() - held["at"])
+    since = "%ds" % age if age < 60 else "%dm" % (age // 60) if age < 3600 else "%dh" % (age // 3600)
+    if held["failures"] >= 3:
+        notice = "State refresh keeps failing (%d in a row); showing data from %s ago" % (held["failures"], since)
+    else:
+        notice = "State refresh failed; showing data from %s ago" % since
+    return held["state"], held["status"], notice
+
+
+def stale_notice(navigation, notice):
+    """Show or withdraw the stale-data notice without replacing another notice."""
+    mine = navigation.pop("stale_notice", None)
+    if mine is not None and navigation.get("notice") == mine:
+        navigation.pop("notice", None)
+    if notice and "notice" not in navigation:
+        navigation["notice"] = navigation["stale_notice"] = notice
+
+
 AVAILABLE = {}
 
 
@@ -1933,6 +2019,10 @@ def show(repo, provider, previous=None, menu=True, clear=True, main_attempt=None
         state, status = cache["state"], cache["status"]
     else:
         state, status = snapshot(repo)
+        if cache is not None:
+            state, status, notice = hold_state(cache.setdefault("held", {}), state, status, os.environ.get("OMS_ROOM_ID", ""))
+            if navigation is not None:
+                stale_notice(navigation, notice)
         from panel_metrics import collect
         if state.get("room", {}).get("participants"):
             state = dict(state, provider_status=collect(state, main_attempt, repo=repo))
@@ -2213,7 +2303,94 @@ def tab_event(event, navigation):
     return False
 
 
-def refreshed_navigation(navigation, state, saved_pins=None):
+BOTTOM_OPTION = "@oms_panel_bottom"
+BOTTOM_LIMIT = 512
+BOTTOM_KINDS = {"chat", "result", "debate", "pair"}
+
+
+def bottom_state(navigation):
+    """The bottom box as this board shows it: tab, previewed target and detail scroll."""
+    from room_view import TABS
+    tab = navigation.get("tab") if navigation.get("tab") in dict(TABS) else "detail"
+    target = (navigation.get("preview") or {}).get("target")
+    if not (isinstance(target, tuple) and len(target) == 2 and target[0] in BOTTOM_KINDS):
+        target = None
+    offset = (navigation.get("band_offsets") or {}).get("detail", 0)
+    return {"tab": tab, "target": target, "offset": offset if isinstance(offset, int) and offset > 0 else 0,
+            "dismissed": bool(navigation.get("dismissed"))}
+
+
+def bottom_text(state):
+    def listed(value):
+        return [listed(item) for item in value] if isinstance(value, tuple) else value
+    return json.dumps(dict(state, target=listed(state["target"])), separators=(",", ":"))
+
+
+def read_bottom(raw):
+    """A shared bottom state, or None when the option is unset, oversized or malformed."""
+    from room_view import TABS
+    if not raw or len(raw.encode("utf-8", "replace")) > BOTTOM_LIMIT:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    if (not isinstance(value, dict) or set(value) - {"tab", "target", "offset", "dismissed"}
+            or value.get("tab") not in dict(TABS) or not isinstance(value.get("dismissed", False), bool)):
+        return None
+    ident = lambda item: isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9._:/-]{1,128}", item) is not None
+    target, offset = value.get("target"), value.get("offset", 0)
+    if target is not None:
+        if not (isinstance(target, list) and len(target) == 2 and target[0] in BOTTOM_KINDS):
+            return None
+        if target[0] in {"debate", "pair"}:
+            if not (isinstance(target[1], list) and len(target[1]) == 2 and all(ident(i) for i in target[1])):
+                return None
+            target = (target[0], tuple(target[1]))
+        elif ident(target[1]):
+            target = tuple(target)
+        else:
+            return None
+    if not isinstance(offset, int) or isinstance(offset, bool) or not 0 <= offset <= 100000:
+        return None
+    return {"tab": value["tab"], "target": target, "offset": offset, "dismissed": value.get("dismissed", False)}
+
+
+def apply_bottom(navigation, state, shared):
+    """Show the panel session's bottom box; a target naming nobody in this room is left alone."""
+    navigation["tab"] = shared["tab"]
+    navigation.setdefault("band_offsets", {})["detail"] = shared["offset"]
+    # Esc in one window empties the box in every window, instead of each showing its own default.
+    if shared["dismissed"]:
+        navigation["dismissed"] = True
+    else:
+        navigation.pop("dismissed", None)
+    target = shared["target"]
+    if target is None:
+        navigation.pop("preview", None)
+        return
+    members = {m.get("participant") for m in state.get("room", {}).get("participants") or [] if isinstance(m, dict)}
+    named = target[1] if target[0] in {"debate", "pair"} else (target[1],)
+    if target[0] == "debate":
+        named = named[1:]
+    if all(who in members for who in named):
+        if (navigation.get("preview") or {}).get("target") != target:
+            navigation["preview"] = {"target": target}
+
+
+def publish_bottom(navigation, before):
+    """Write the session's bottom box when one input event changed it; render clamps and unchanged frames write nothing."""
+    state = bottom_state(navigation)
+    if before is None or state == before:
+        return
+    navigation["bottom_seen"] = state
+    if managed_session():
+        subprocess.run(tmux_command("set-option", "-t", os.environ.get("OMS_PANEL_SESSION", ""),
+                                    BOTTOM_OPTION, bottom_text(state)),
+                       check=False, timeout=2, stdin=subprocess.DEVNULL)
+
+
+def refreshed_navigation(navigation, state, saved_pins=None, bottom=None):
     """Apply a new snapshot: another room resets the view; an open preview re-reads its evidence."""
     ident = state.get("room", {}).get("id")
     if navigation.get("room_id") and ident and navigation["room_id"] != ident:
@@ -2234,6 +2411,11 @@ def refreshed_navigation(navigation, state, saved_pins=None):
         navigation["saved_pins"] = saved_pins
         navigation["pinned"] = [] if saved_pins == "-" else None if saved_pins == "*" else [
             ident for ident in saved_pins.split(",") if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", ident)]
+    # Likewise the bottom box: a tab, target or scroll chosen in one window reaches every board in one refresh.
+    shared = read_bottom(bottom)
+    if shared and shared != navigation.get("bottom_seen"):
+        navigation["bottom_seen"] = shared
+        apply_bottom(navigation, state, shared)
     return navigation
 
 
@@ -2477,8 +2659,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             print("\033[?25l", end="", flush=True)
         with TerminalInput(managed_session(), active=capable) as inputs:
             background = BackgroundRead() if inputs.fd is not None else None
-            if inputs.fd is not None and managed_session() and os.environ.get("OMS_PANEL_POSITION", "auto") == "auto":
-                # A board started (or restarted) in an already wide or tall window takes that shape at once.
+            if inputs.fd is not None and managed_session() and os.environ.get("OMS_PANEL_POSITION", "auto") in ("top", "left"):
+                # A board restarted under a different explicit placement moves to it at once.
                 try:
                     relayout_board()
                 except (OSError, ValueError, subprocess.SubprocessError):
@@ -2487,7 +2669,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             state, status, main_attempt = {"repo": {"name": repo.name}, "collection": {"ok": False, "pending": True}}, 0, None
             density, filtered = view or board_view("auto"), attention_only
             next_read, next_frame, revision = 0, 0, 0
-            next_focus, was_active, splits = 0, None, SplitSync()
+            held = {}
+            next_focus, splits = 0, SplitSync()
             while True:
                 collected = False
                 if background:
@@ -2504,6 +2687,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                   provider, main_attempt, density, filtered, os.environ.get("OMS_ROOM_ID", ""))
                     state, status, provider, main_attempt, read_density, read_filtered, selected_room = result
                     os.environ["OMS_ROOM_ID"] = selected_room
+                    state, status, notice = hold_state(held, state, status, selected_room)
                     if view is not None or not managed_session():
                         read_density = navigation.get("view") or read_density
                     if "attention" in navigation:
@@ -2512,7 +2696,9 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     if not background or revision == submitted_revision:
                         density, filtered = read_density, read_filtered
                     navigation = refreshed_navigation(navigation, state, managed_session() and
-                                                      session_option("@oms_panel_pins"))
+                                                      session_option("@oms_panel_pins"),
+                                                      managed_session() and session_option(BOTTOM_OPTION))
+                    stale_notice(navigation, notice)
                     if managed_session() and state.get("collection", {}).get("ok") is True and main_attempt:
                         alert = (main_needs_attention(state, main_attempt), main_has_open_questions(state, main_attempt))
                         if alert != flagged:
@@ -2562,29 +2748,16 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     except (OSError, ValueError):
                         resized = False
                     if managed_session() and inputs.fd is not None and time.monotonic() >= next_focus:
-                        # Arriving at this window (F6/F7, Ctrl-b n, a click elsewhere) shows its own main again;
-                        # a pick made earlier on this board must not keep another main selected.
+                        # F6/F7 only moves this board's own main; the bottom box is the session's shared state.
                         next_focus = time.monotonic() + 1
-                        geometry = panel_geometry()
-                        active = geometry[0] if geometry else None
-                        splits.tick(geometry)
-                        if active and was_active is False and navigation.get("selected"):
-                            for key in ("selected", "preview", "detail"):
-                                navigation.pop(key, None)
-                            navigation["band_offsets"] = {}
-                            size = redraw()
-                        was_active = active if active is not None else was_active
+                        splits.tick(panel_geometry())
                     if resized:
-                        if (managed_session() and not expanded and
-                                os.environ.get("OMS_PANEL_POSITION", "auto") == "auto"):
-                            try:
-                                relayout_board()
-                                splits.force = True
-                            except (OSError, ValueError, subprocess.SubprocessError):
-                                navigation["notice"] = "Board placement unchanged; window resize could not move it"
                         size = redraw()
                     batch_hits = navigation.get("hits")
+                    changed_from = None
                     for event in events:
+                        publish_bottom(navigation, changed_from)
+                        changed_from = bottom_state(navigation)
                         if event[0] == "click" and navigation.get("hits") != batch_hits:
                             continue  # The board was redrawn after this batch was read; the click names the old map.
                         revision += 1
@@ -2714,6 +2887,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                                     navigation["notice"] = clean(str(error), 160)
                         size = redraw()
+                    publish_bottom(navigation, changed_from)
                     for popup in [p for p in navigation.get("popups", []) if p.poll() not in (None, 0)]:
                         navigation["notice"] = ("Advisor popup unavailable (exit %s; tmux 3.2+ has popups); "
                                                 "use the control menu a Advisor" % popup.returncode)
@@ -2931,6 +3105,7 @@ def interactive(repo, view="auto", attention_only=False):
         provider = "codex"
     previous = "ready"
     navigation = {}
+    held = {}
     if managed_session() and not os.environ.get("OMS_ROOM_ID"):
         # A bare control window shows the panel's recorded room, when it still exists.
         adopted = recorded_room(os.environ["OMS_PANEL_SESSION"])
@@ -2946,7 +3121,7 @@ def interactive(repo, view="auto", attention_only=False):
                                         "@oms_panel_room", os.environ.get("OMS_ROOM_ID", "")), check=True)
             subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
                                         "@oms_panel_attention", "1" if attention_only else "0"), check=True)
-        cache = {}
+        cache = {"held": held}
         navigation["line_input"] = not raw_keys()
         try:
             choice = read_choice(repo, provider, previous, view, attention_only, navigation, cache)

@@ -700,6 +700,7 @@ with patch.object(hook_state, "percent_left_from_cache", return_value=10), \
 tower = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 assert "control-tower main" in tower and "--owner claude --room binding-room" in tower, tower
 assert "#1 Opus 5.5" in tower and "trust boundaries" in tower, tower
+assert "Land your own work" in tower and "oms/<task> branch" in tower, tower
 assert not hook_state.panel_main_hint(payload("tower")), "only prompts carry the reminder"
 # The shared plan rides on the same line: no plan, no plan sentence; then progress, the main's own task and the next ready one.
 assert "[oms plan]" not in tower, tower

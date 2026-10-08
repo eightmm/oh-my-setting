@@ -4,7 +4,7 @@ Run `oms` in a terminal to open the control panel. Native Claude Code or Codex
 keeps the conversation pane; the OMS sidebar shows recorded main, advisor and
 worker activity. `oms --help` and bare `oms` with redirected input/output retain
 command help. The panel uses existing OMS state, authentication and front doors.
-Boards of one repository share atomic dashboard and result-query caches in `.oms/hooks/panel-cache`, invalidated by input file stats or five-second expiry, while room selection and terminal reads stay per window.
+Boards of one repository share atomic dashboard and result-query caches in `.oms/hooks/panel-cache`, invalidated by input file stats or five-second expiry, while room selection and terminal reads stay per window. A read that races a state change collects directly instead of failing, and a board or control window whose refresh still fails keeps its last good state with a `State refresh failed; showing data from Ns ago` notice rather than the no-room fallback.
 
 ## Quick start
 
@@ -263,6 +263,10 @@ line names it with its live-main (resumed mains count by their participant) and
 pending counts, and an incomplete room scan says so; graphs of different rooms
 are never merged, and `o Rooms` in the control window switches. Room scans for
 that line are cached for 30 seconds; liveness comes from the current snapshot.
+The bottom box (tab, previewed target and detail scroll) is one state of the panel
+session, kept in `@oms_panel_bottom` (at most 512 bytes of JSON; invalid values and targets naming
+nobody in the room are ignored). A change in any window's board reaches every board within one
+refresh, and F6/F7 or arriving at a window moves only that board's own main, never the bottom box.
 Terminals attached to the same panel session share its current window, so
 navigating from one client also moves the other. The wheel scrolls only the band, lane or detail under the
 pointer.
@@ -653,6 +657,14 @@ It works directly only when a brief would cost more than the edit or the step
 needs the main itself. Outside the panel, the global rule still requires an
 explicit request before spawning subagents.
 
+Every main also lands its own work. It admits worker patches on its own
+`oms/<task>` branch in a worktree from `oms scratch-worktree add`, rebases on
+the remote target, verifies and runs `oms land` from that worktree. Nobody
+commits in the shared checkout, and no main waits for a single integrator:
+`oms land`'s lock serialises the pushes, the worker guard treats other mains'
+`oms/*` branches and harness worktrees as soft, and `oms room scope` warns
+about overlapping files before the work starts.
+
 Task complexity and write authority are independent. A write worker needs an
 implementation purpose, scoped brief file and mechanical verifier. Read workers
 use isolated worktrees too. Write workers return a patch for parent inspection
@@ -743,9 +755,16 @@ scope and unknown values. A socket error does not stop the native sibling.
 New native boards default to `--position auto`: a window that is visually wider
 than tall (columns more than twice the rows) gets a left board (40 percent),
 otherwise the graph is above the original CLI, with each taking half the window.
-When a watcher's window is resized across that boundary, the board moves itself
-(with a small hysteresis band); `--position top|left|side` fixes the placement.
-The board/chat split is one setting for the whole panel: drag the border in any main window and the other main windows (and mains opened later) take the same share, except a zoomed board.
+That placement is chosen once, when the panel's first main window opens its board
+(from the terminal that is attaching), and a window resize never moves it;
+`--position top|left|side` fixes the placement.
+The board size is one setting for the whole panel, recorded in absolute cells in the
+session option `@oms_panel_split` (`<top|left>:<cells>c`; the older percent form is
+converted on first sight). Every main window's board, active or not, resizes itself to
+those cells (keeping at least 20 cells for the board and for the chat), so `F6`/`F7`
+between mains only moves the `▸` cursor. Drag the border in any main window and the
+other main windows (and mains opened later) take the new width; a zoomed board and the
+control window are left alone.
 A watcher whose OMS sources change re-executes itself once they compile, so
 updated boards need no manual restart. `--position side` retains a 28 percent
 tmux sidebar (26 percent in Herdr), defaulting to `summary`. Select `v` in the

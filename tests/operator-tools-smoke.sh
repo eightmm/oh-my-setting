@@ -982,6 +982,29 @@ before = cache.fingerprint(project)
 (project / '.oms/hooks/panel-activity').mkdir(parents=True, exist_ok=True)
 (project / '.oms/hooks/panel-activity/main.json').write_text('{}', encoding='utf-8')
 assert cache.fingerprint(project) == before
+# Watch loop and control window keep the room board when a later read fails.
+good = ({'repo': {'name': 'fixture'}, 'room': {'id': 'one', 'participants': []}}, 0)
+bad = ({'repo': {'name': 'fixture'}, 'collection': {'ok': False}}, 1)
+held = {}
+assert panel.hold_state(held, *good, 'one') == (good[0], 0, None)
+held['at'] -= 12
+state, status, notice = panel.hold_state(held, *bad, 'one')
+assert state is good[0] and status == 0 and notice.startswith('State refresh failed; showing data from 1') and notice.endswith('s ago'), notice
+panel.hold_state(held, *bad, 'one')
+assert 'keeps failing (3 in a row)' in panel.hold_state(held, *bad, 'one')[2]
+assert panel.hold_state(held, *bad, 'two') == (bad[0], 1, None), 'another room drew the held board'
+assert panel.hold_state({}, *bad, 'one') == (bad[0], 1, None), 'a board that never read kept today fallback'
+navigation = {}
+panel.stale_notice(navigation, notice)
+assert navigation['notice'] == notice
+panel.stale_notice(navigation, None)
+assert 'notice' not in navigation
+with patch.object(panel, 'snapshot', side_effect=[good, bad]), patch.object(panel, 'frame_view', return_value=('', os.terminal_size((80, 24)), False)) as frame:
+    shown, navigation = {}, {}
+    for unused in range(2):
+        shown.pop('state', None)
+        panel.show(project, 'codex', navigation=navigation, cache=shown)
+    assert frame.call_args[0][2] is good[0] and navigation['notice'].startswith('State refresh failed'), 'control window dropped the room'
 for relative in ('.oms/lifecycle/events.jsonl', '.oms/hooks/events.jsonl', '.oms/threads/room.jsonl'):
     source = project / relative
     source.parent.mkdir(exist_ok=True)
@@ -1863,6 +1886,7 @@ for owner in panel.PROVIDERS:
     assert "--dispatch advisor" in panel.bootstrap(owner, project)
     assert "control tower: by default delegate" in panel.bootstrap(owner, project)
     assert "#1 Opus 5.5" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
+    assert "Every main lands its own work" in panel.bootstrap(owner, project) and "oms scratch-worktree add" in panel.bootstrap(owner, project)
     assert "oms room scope" in panel.bootstrap(owner, project) and "--scope PATH" in panel.bootstrap(owner, project)
 option_text = "--dangerously-skip-permissions"
 assert panel.native_command("claude", project, task=option_text)[-2:] == ["--", option_text]
@@ -2621,8 +2645,8 @@ if os.name == "posix":
                 assert subprocess.check_output(tmux + ["show-option", "-g", "-v", "mouse"], env=env, text=True).strip() == "off"
                 assert subprocess.check_output(tmux + ["show-option", "-t", session, "-v", "mouse"], env=env, text=True).strip() == "on"
                 subprocess.run(tmux + ["send-keys", "-t", listing[0], "Enter"], env=env, check=True)
-            # One panel-wide board split: a drag in the active window is recorded and the other main follows;
-            # a zoomed board is left alone.
+            # One panel-wide board geometry in cells: both mains end with the same board size, a drag in the active
+            # window is recorded and the other main follows; a zoomed board is left alone.
             shared = {}
             for owner in ("codex", "claude"):
                 rows = subprocess.check_output(tmux + ["list-panes", "-t", session + ":" + owner, "-F",
@@ -2635,20 +2659,23 @@ if os.name == "posix":
             side = int(geometry[2]) != int(geometry[0])
             position, flag, window = ("left", "-x", int(geometry[0])) if side else ("top", "-y", int(geometry[1]))
             extent = "#{pane_width}" if side else "#{pane_height}"
-            dragged = window * 3 // 10
-            percent = panel.split_share(dragged, window)
-            subprocess.run(tmux + ["resize-pane", "-t", shared["codex"], flag, str(dragged)], env=env, check=True)
-            tmux_wait(["show-options", "-v", "-t", session, "@oms_panel_split"], "%s:%d" % (position, percent))
             tmux_wait(["display-message", "-p", "-t", shared["claude"], extent],
-                      str(panel.split_cells(percent, window)), timeout=20)
+                      subprocess.check_output(tmux + ["display-message", "-p", "-t", shared["codex"], extent],
+                                              env=env, text=True).strip(), timeout=20)
+            dragged = panel.split_cells((position, window * 3 // 10, False), window)
+            subprocess.run(tmux + ["resize-pane", "-t", shared["codex"], flag, str(dragged)], env=env, check=True)
+            tmux_wait(["show-options", "-v", "-t", session, "@oms_panel_split"], panel.split_text(position, dragged))
+            tmux_wait(["display-message", "-p", "-t", shared["claude"], extent], str(dragged), timeout=20)
+            tmux_wait(["display-message", "-p", "-t", shared["codex"], extent], str(dragged), timeout=20)
             subprocess.run(tmux + ["resize-pane", "-t", shared["claude"], "-Z"], env=env, check=True)
-            subprocess.run(tmux + ["set-option", "-t", session, "@oms_panel_split", position + ":70"], env=env, check=True)
+            wider = panel.split_cells((position, window * 7 // 10, False), window)
+            subprocess.run(tmux + ["set-option", "-t", session, "@oms_panel_split", panel.split_text(position, wider)],
+                           env=env, check=True)
             time.sleep(3)
             assert subprocess.check_output(tmux + ["display-message", "-p", "-t", shared["claude"],
                 "#{window_zoomed_flag}"], env=env, text=True).strip() == "1", "a zoomed board was resized"
             subprocess.run(tmux + ["resize-pane", "-t", shared["claude"], "-Z"], env=env, check=True)
-            tmux_wait(["display-message", "-p", "-t", shared["claude"], extent],
-                      str(panel.split_cells(70, window)), timeout=20)
+            tmux_wait(["display-message", "-p", "-t", shared["claude"], extent], str(wider), timeout=20)
             control_sidebar = tmux_wait(["list-panes", "-t", session + ":control", "-F", "#{pane_id}"], "\n%").splitlines()[1]
             tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_owner"], "claude")
             tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "Claude --")
@@ -3590,27 +3617,57 @@ changed_nav = {"preview": {"target": ("result", "builder"), "report": {"rows": [
     {"answer": "Patched the parser.", "changes": stat}]}]}}}
 picture = render(flow, "codex", 100, 34, view="graph", main_attempt="flow-attempt", navigation=changed_nav)
 assert "Changed files: 1 (+2 -1)" in picture and "value.txt +2 -1" in picture, picture
-# Board placement follows the window shape (cells are about twice as tall as wide), with a
-# hysteresis band so a resize near the boundary does not flap; explicit positions are kept.
+# Board placement follows the window shape (cells are about twice as tall as wide) once per panel; the
+# recorded placement and an explicit position win, and a resize never moves an automatic board.
 assert panel.shape(220, 50) == "left" and panel.shape(157, 132) == "top"
-assert panel.shape(200, 100, "left") == "left" and panel.shape(200, 100, "top") == "top"
-with patch.dict(os.environ, {"OMS_PANEL_POSITION": "auto", "TMUX_PANE": "%7"}), \
-        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "240 60\n", "")):
-    assert panel.board_position() == "left"
+with patch.dict(os.environ, {"OMS_PANEL_POSITION": "auto"}):
+    assert panel.board_position((240, 60)) == "left" and panel.board_position((100, 10), "top") == "top"
+    assert panel.board_position(None) == "top" and panel.board_position((100, 10), "left") == "left"
 with patch.dict(os.environ, {"OMS_PANEL_POSITION": "side"}):
-    assert panel.board_position() == "side" and panel.board_view("auto") == "summary"
-with patch.dict(os.environ, {"OMS_PANEL_POSITION": "auto", "TMUX_PANE": "%7"}), patch.object(panel.subprocess, "run", side_effect=[
+    assert panel.board_position((240, 60), "top") == "side" and panel.board_view("auto") == "summary"
+with patch.dict(os.environ, {"OMS_PANEL_POSITION": "auto", "TMUX_PANE": "%7"}), \
+        patch.object(panel.subprocess, "run") as untouched:
+    assert panel.relayout_board() is None and not untouched.called
+with patch.dict(os.environ, {"OMS_PANEL_POSITION": "left", "TMUX_PANE": "%7"}), patch.object(panel.subprocess, "run", side_effect=[
         subprocess.CompletedProcess([], 0, "%7 157 157\n%8 157 157\n", ""),
-        subprocess.CompletedProcess([], 0, "240 60\n", ""),
         subprocess.CompletedProcess([], 0, "", ""), subprocess.CompletedProcess([], 0, "", "")]) as moved:
     assert panel.relayout_board() == "left"
-    assert moved.call_args_list[2].args[0][1:3] == ["join-pane", "-h"], moved.call_args_list
-# A watcher records a border drag of the active window as the panel-wide share and every other window follows it by
-# at least two cells; a terminal resize, a zoomed board or a different placement never overwrites the stored share.
-assert panel.parse_split("top:30") == ("top", 30) and panel.parse_split("left:3") is None and panel.parse_split("x") is None
-assert panel.split_share(15, 50) == 30 and panel.split_cells(30, 50) == 15 and panel.split_cells(40, 220) == 88
-assert panel.split_resize(("top", 30), 15, 50) is None and panel.split_resize(("top", 30), 14, 50) is None
-assert panel.split_resize(("top", 30), 12, 50) == 15 and panel.split_resize(("left", 40), 25, 50) == 20
+    assert moved.call_args_list[1].args[0][1:3] == ["join-pane", "-h"], moved.call_args_list
+with patch.dict(os.environ, {"OMS_PANEL_POSITION": "left", "TMUX_PANE": "%7"}), patch.object(panel.subprocess, "run", side_effect=[
+        subprocess.CompletedProcess([], 0, "%7 88 220\n%8 131 220\n", "")]) as kept:
+    assert panel.relayout_board() is None and len(kept.call_args_list) == 1
+# One panel-wide board geometry in absolute cells (the older percent form is read once and re-recorded as cells):
+# every main window's board, active or not, resizes itself to it; a border drag in the active window is recorded and
+# the others follow by at least two cells; our own resize, a window resize, a zoomed board or another placement never
+# overwrite it; the board and the chat each keep 20 cells.
+assert panel.parse_split("top:15c") == ("top", 15, False) and panel.parse_split("left:40") == ("left", 40, True)
+assert panel.parse_split("left:3") is None and panel.parse_split("x") is None and panel.parse_split("top:0c") is None
+assert panel.split_cells(("left", 40, True), 220) == 88 and panel.split_cells(("top", 25, False), 50) == 25
+assert panel.split_cells(("left", 5, False), 100) == 20 and panel.split_cells(("left", 95, False), 100) == 79
+assert panel.split_cells(("top", 30, False), 30) == 15
+assert panel.split_resize(("top", 25, False), 25, 50) is None and panel.split_resize(("top", 25, False), 24, 50) is None
+assert panel.split_resize(("top", 25, False), 22, 50) == 25 and panel.split_resize(("left", 20, False), 25, 50) == 20
+assert panel.split_resize(("left", 40, True), 25, 50) == 20
+def board_calls(display, terminal=None, position="auto"):
+    def answer(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, display if "display-message" in command else "", "")
+    with patch.dict(os.environ, {"OMS_PANEL_POSITION": position}), patch.object(panel, "terminal_window", return_value=terminal), \
+            patch.object(panel.subprocess, "run", side_effect=answer) as tmux_run:
+        panel.board_split("%1", Path("/repo"), "board")
+    return [call.args[0][1:] for call in tmux_run.call_args_list if "display-message" not in call.args[0]]
+record_left = ["set-option", "-t", "$1", "@oms_panel_split", "left:80c"]
+assert board_calls("200 50 1 $1\tcodex\t") == [record_left, ["split-window", "-h", "-b", "-l", "80", "-t", "%1", "-c", "/repo", "board"]]
+assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [["split-window", "-h", "-b", "-l", "70", "-t", "%1", "-c", "/repo", "board"]]
+assert board_calls("200 50 1 $1\tcodex\tleft:40") == [record_left, ["split-window", "-h", "-b", "-l", "80", "-t", "%1", "-c", "/repo", "board"]]
+assert board_calls("100 80 1 $1\tcodex\tleft:70c")[-1][1:5] == ["-h", "-b", "-l", "70"], "a left record keeps its placement"
+assert board_calls("200 50 1 $1\tcontrol\t") == [["split-window", "-h", "-b", "-l", "80", "-t", "%1", "-c", "/repo", "board"]]
+assert board_calls("200 50 1 $1\tcodex\ttop:12c", position="left")[-1][1:5] == ["-h", "-b", "-l", "80"]
+assert [c for c in board_calls("200 50 1 $1\tcodex\ttop:12c", position="left") if c[0] == "set-option"] == []
+# A detached session still reports tmux's 80x24: the attaching terminal sizes the placement and the record.
+assert board_calls("80 24 0 $1\tcodex\t", terminal=(240, 59)) == [
+    ["set-option", "-t", "$1", "@oms_panel_split", "left:96c"], ["split-window", "-h", "-b", "-l", "40%", "-t", "%1", "-c", "/repo", "board"]]
+assert board_calls("80 24 0 $1\tcodex\t", terminal=(100, 60))[-1][1:5] == ["-v", "-b", "-l", "50%"]
+assert board_calls("80 24 0 $1\tcodex\t") == [["split-window", "-h", "-b", "-l", "40%", "-t", "%1", "-c", "/repo", "board"]]
 def sync_run(sync, *reads):
     with patch.dict(os.environ, {"OMS_PANEL_SESSION": "s", "TMUX_PANE": "%1"}), \
             patch.object(panel.subprocess, "run") as tmux_run:
@@ -3618,15 +3675,33 @@ def sync_run(sync, *reads):
     return done, [call.args[0][1:] for call in tmux_run.call_args_list]
 def reading(active, window, pane, text="", zoomed=False, panes=2):
     return (active, zoomed, panes, window, pane, text)
-done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (100, 25)), reading(True, (100, 50), (100, 15)))
-assert done == [None, "record"] and calls == [["set-option", "-t", "s", "@oms_panel_split", "top:30"]], (done, calls)
-done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (100, 25), "top:50"), reading(True, (100, 40), (100, 15), "top:50"),
-                       reading(True, (100, 40), (100, 20), "top:50"))
-assert done == [None, "follow", None] and [call for call in calls if call[0] == "set-option"] == [], (done, calls)
-done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (100, 25), "top:30"), reading(False, (100, 50), (100, 15), "top:30"))
-assert done == ["follow", None] and calls[0][:2] == ["resize-pane", "-t"] and calls[0][3:] == ["-y", "15"], (done, calls)
-done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (100, 50), "top:30", zoomed=True))
-assert done == [None] and calls == [], (done, calls)
+# A border drag in the active window is recorded as cells (clamped) and an inactive window resizes to the record.
+done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (100, 25), "top:25c"), reading(True, (100, 50), (100, 22), "top:25c"))
+assert done == [None, "record"] and calls == [["set-option", "-t", "s", "@oms_panel_split", "top:22c"]], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (100, 25), "top:25c"), reading(True, (100, 50), (100, 5), "top:25c"))
+assert done == [None, "record"] and calls[-1][-1] == "top:20c", (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (100, 25), "top:22c"), reading(False, (100, 50), (100, 22), "top:22c"))
+assert done == ["follow", None] and calls == [["resize-pane", "-t", "%1", "-y", "22"]], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (200, 50), (130, 50), "left:80c"))
+assert done == ["follow"] and calls == [["resize-pane", "-t", "%1", "-x", "80"]], (done, calls)
+# The active window enforces the record too, and its own resize is not read back as a drag.
+done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (100, 30), "top:22c"), reading(True, (100, 50), (100, 21), "top:22c"))
+assert done == ["follow", None] and calls == [["resize-pane", "-t", "%1", "-y", "22"]], (done, calls)
+# A window resize moves the board back to the recorded cells and never records the new size.
+done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (100, 25), "top:25c"), reading(True, (100, 60), (100, 30), "top:25c"))
+assert done == [None, "follow"] and calls == [["resize-pane", "-t", "%1", "-y", "25"]], (done, calls)
+# Nothing recorded yet: the active window records its size, an inactive one waits; the older percent form is converted.
+done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (100, 25)), reading(False, (100, 50), (100, 25)))
+assert done == ["record", None] and calls == [["set-option", "-t", "s", "@oms_panel_split", "top:25c"]], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (100, 25), "top:30"))
+assert done == ["follow"] and calls == [["set-option", "-t", "s", "@oms_panel_split", "top:20c"],
+                                        ["resize-pane", "-t", "%1", "-y", "20"]], (done, calls)
+# A zoomed board and a board in the other placement are left alone.
+done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (100, 50), "top:30c", zoomed=True),
+                       reading(False, (200, 50), (130, 50), "top:15c"))
+assert done == [None, None] and calls == [], (done, calls)
+assert board_calls("200 50 1 $1\tcodex\t", position="side") == [
+    ["set-option", "-t", "$1", "@oms_panel_split", "left:56c"], ["split-window", "-h", "-l", "56", "-t", "%1", "-c", "/repo", "board"]]
 # A watcher restart keeps the person's selection: watch() restores what the reload saved.
 resumed_nav = {}
 class StopWatch(Exception):
@@ -3913,6 +3988,51 @@ kept_nav = {"room_id": "flow-room", "preview": {"target": ("result", "builder"),
 assert panel.refreshed_navigation(kept_nav, flow, "")["preview"]["refresh"] is True
 assert panel.refreshed_navigation(dict(kept_nav, preview={"target": 1}), flow, "a,b,-x")["pinned"] == ["a", "b", "-x"]
 assert "preview" not in panel.refreshed_navigation(dict(kept_nav, room_id="other"), flow, None)
+# The bottom box is one panel-session state: a tab, target or scroll changed on one board reaches the others.
+session_bottom = {}
+def fake_bottom_tmux(command, **kwargs):
+    if "@oms_panel_bottom" in command:
+        session_bottom["raw"] = command[command.index("@oms_panel_bottom") + 1]
+    return subprocess.CompletedProcess(command, 0, "", "")
+fresh_bottom = {"tab": "detail", "target": None, "offset": 0, "dismissed": False}
+board_a = {"room_id": "flow-room", "tab": "plan", "preview": {"target": ("debate", ("t1", "flow-other"))},
+           "band_offsets": {"detail": 3}}
+with patch.object(panel, "managed_session", return_value=True), patch.dict(os.environ, {"OMS_PANEL_SESSION": "oms-panel-x"}), \
+        patch.object(panel.subprocess, "run", side_effect=fake_bottom_tmux) as bottom_writes:
+    panel.publish_bottom(board_a, panel.bottom_state(board_a))
+    assert bottom_writes.call_count == 0, "an unchanged bottom box was written"
+    panel.publish_bottom(board_a, fresh_bottom)
+    assert bottom_writes.call_count == 1 and len(session_bottom["raw"]) <= 512, session_bottom
+    assert panel.read_bottom(session_bottom["raw"]) == panel.bottom_state(board_a) == {
+        "tab": "plan", "target": ("debate", ("t1", "flow-other")), "offset": 3, "dismissed": False}, session_bottom
+board_b = {"room_id": "flow-room", "tab": "messages", "preview": {"target": ("chat", "flow-main")}}
+panel.refreshed_navigation(board_b, flow, None, session_bottom["raw"])
+assert board_b["tab"] == "plan" and board_b["preview"]["target"] == ("debate", ("t1", "flow-other")), board_b
+assert board_b["band_offsets"]["detail"] == 3 and "selected" not in board_b, board_b
+board_b["tab"] = "debate"  # B's own later change is not undone while the shared value is unchanged
+assert panel.refreshed_navigation(board_b, flow, None, session_bottom["raw"])["tab"] == "debate"
+shared_tab = lambda target: json.dumps({"tab": "messages", "target": target, "offset": 0})
+assert "preview" not in panel.refreshed_navigation(board_b, flow, None, shared_tab(None))
+# Esc in one window empties the box in every window; a later pick clears it again.
+emptied = panel.refreshed_navigation({"room_id": "flow-room"}, flow, None,
+                                     json.dumps({"tab": "detail", "target": None, "offset": 0, "dismissed": True}))
+assert emptied.get("dismissed") is True and panel.bottom_state(emptied)["dismissed"] is True, emptied
+assert "dismissed" not in panel.refreshed_navigation(emptied, flow, None, shared_tab(["chat", "flow-main"]))
+# A target naming nobody in this room is ignored; the tab still follows.
+ghost_nav = panel.refreshed_navigation({"room_id": "flow-room", "preview": {"target": ("chat", "flow-main")}},
+                                       flow, None, shared_tab(["chat", "ghost"]))
+assert ghost_nav["tab"] == "messages" and ghost_nav["preview"]["target"] == ("chat", "flow-main"), ghost_nav
+ghost_pair = panel.refreshed_navigation({"room_id": "flow-room"}, flow, None, shared_tab(["pair", ["flow-main", "ghost"]]))
+assert "preview" not in ghost_pair, ghost_pair
+for invalid in ("", "{", "[]", '{"tab":"nope","target":null}', '{"tab":"plan","target":["x","y"]}',
+                '{"tab":"plan","target":["chat","a b"]}', '{"tab":"plan","target":["debate","t1"]}',
+                '{"tab":"plan","offset":-1}', '{"tab":"plan","offset":true}', '{"tab":"plan","extra":1}',
+                '{"tab":"plan","dismissed":1}',
+                shared_tab(["chat", "x" * 600]), shared_tab(["chat", "x" * 129])):
+    assert panel.read_bottom(invalid) is None, invalid
+    assert panel.refreshed_navigation({"room_id": "flow-room", "tab": "plan"}, flow, None, invalid) == {"room_id": "flow-room", "tab": "plan"}
+# Arriving at a window no longer clears the selection: F6/F7 moves only that board's own main.
+assert "was_active" not in Path(panel.__file__).read_text(encoding="utf-8")
 # A full or closed selected room makes the next main start a new room instead of reusing it.
 with patch.dict(os.environ, {"OMS_ROOM_ID": "room-full"}), patch.object(panel, "room_headroom", return_value=False), \
         patch.object(panel.room, "create", return_value="room-fresh") as fresh, \
