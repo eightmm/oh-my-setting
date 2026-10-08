@@ -156,7 +156,25 @@ def hit_at(event, navigation):
 
 def passive_click(event, navigation):
     """A click on plain Detail text selects text in the terminal; it changes and repaints nothing."""
-    return event[0] == "click" and (hit_at(event, navigation) or {}).get("passive", False)
+    if event[0] != "click":
+        return False
+    hit = hit_at(event, navigation)
+    if hit:
+        return hit.get("passive", False)
+    # The graph Detail body includes blank rows and its empty-state hint, which
+    # have no action hit. Use only the bounds from the last graph render.
+    from room_view import TABS
+    # An unset or unknown tab draws Detail, as render_graph does.
+    tab = navigation.get("tab")
+    if navigation.get("surface") != "graph" or (tab in dict(TABS) and tab != "detail"):
+        return False
+    box = navigation.get("box") or {}
+    band = next((b for b in navigation.get("bands", []) if b.get("name") == "detail"), None)
+    if not band or not all(key in box for key in ("y1", "y2")):
+        return False
+    x, y = event[1], event[2]
+    return (max(box["y1"], band["y1"]) < y < min(box["y2"], band["y2"])
+            and max(box.get("x1", band["x1"]), band["x1"]) < x < min(box.get("x2", band["x2"]), band["x2"]))
 
 
 def choose(event, navigation):

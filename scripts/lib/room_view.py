@@ -615,7 +615,12 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         unknown = [c for c in calls if c["state"] not in ATTENTION_STATES | LIVE_STATES | FINISHED]
         counts = [(len(group), label) for group, label in ((active, "active"), (attention, "need attention"),
                   (finished, "finished"), (unknown, "no record")) if group]
-        lines += ["", "Team: " + (" · ".join("%s %s" % pair for pair in counts) or "no calls recorded")]
+        lines.append("Team: " + (" · ".join("%s %s" % pair for pair in counts) or "no calls recorded"))
+        native = next((c for c in calls if c.get("_native")), None)
+        if native:
+            # A summary of the main's advisor state belongs beside the team counts, not below the call log.
+            lines.append("Built-in advisor: " + ("asked %s · running" % native["_native"] if native["state"] != "done"
+                                                 else "last answered %s" % (native.get("_finished") or native["_native"])))
 
         def team_rows(heading, group):
             if group:
@@ -631,23 +636,18 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         if member.get("started_by"):
             starter = next((m for m in members if m["participant"] == member["started_by"]), {})
             lines.append("Started by %s·%s" % (model_name(starter) if starter else "another main", member["started_by"][-4:]))
-        lines += ["", "Messages to %s: %s%s" % (who(member, labels), len(inbox), " (%s unread)" % unread if unread else "")]
+        lines.append("Messages to %s: %s%s" % (who(member, labels), len(inbox), " (%s unread)" % unread if unread else ""))
         for m in inbox[-3:]:
             lines += wrapped("  From %s: %s" % (names.get(m.get("sender"), clean(m.get("sender"))),
                                                 readable(m.get("text"), " ") or "(empty)"), width, 1)
         if not inbox:
             lines.append("  No messages received")
-        lines.append("")
         # The team reads like a log: finished calls on top, then what needs attention, live work last.
         team_rows("Finished", finished)
         team_rows("Needs attention", attention)
         team_rows("No record", unknown)
         team_rows("Active", active)
         lines += ["", "Works %s%s" % (where, " · effort " + member["effort"] if member.get("effort") else "")]
-        native = next((c for c in calls if c.get("_native")), None)
-        if native:
-            lines.append("Built-in advisor: " + ("asked %s · running" % native["_native"] if native["state"] != "done"
-                                                 else "last answered %s" % (native.get("_finished") or native["_native"])))
         return lines + ["Click a team row to see it here · click the main again to open its chat"], targets
     if member.get("_native"):
         done = member["state"] == "done"
@@ -678,6 +678,14 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
                "failed": "Marked failed by its main"}.get(row.get("outcome"), "Not reviewed by its main yet")
     check = mapping(row.get("verification")).get("status")
     lines += ["", outcome + " · " + ("checks %s" % str(check).replace("_", " ") if check else "no checks run")]
+    # The changed files are a bounded summary of the outcome: they come before long prose, which pages below.
+    changes = next((c["changes"] for c in reversed(listing(row.get("calls"))) if c.get("changes")), None)
+    if changes and changes.get("issue"):
+        lines += ["", "Changed files: unavailable (" + changes["issue"] + ")"]
+    elif changes and changes.get("count"):
+        lines += ["", "Changed files: %s (+%s -%s)" % (changes["count"], changes["added"], changes["removed"])]
+        lines += ["  %s +%s -%s" % tuple(f) for f in changes["files"][:12]]
+        lines += ["  and %s more files" % (changes["count"] - 12)] if changes["count"] > 12 else []
     summary = readable(row.get("summary"), paragraphs=True)
 
     def result_text(heading, text, limit):
@@ -707,13 +715,6 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         result_text("Main's summary:", summary, 24)
     if answer and answer != summary:
         result_text("Worker's answer:" if summary else "Answer:", answer, 12 if summary else 40)
-    changes = next((c["changes"] for c in reversed(listing(row.get("calls"))) if c.get("changes")), None)
-    if changes and changes.get("issue"):
-        lines += ["", "Changed files: unavailable (" + changes["issue"] + ")"]
-    elif changes and changes.get("count"):
-        lines += ["", "Changed files: %s (+%s -%s)" % (changes["count"], changes["added"], changes["removed"])]
-        lines += ["  %s +%s -%s" % tuple(f) for f in changes["files"][:12]]
-        lines += ["  and %s more files" % (changes["count"] - 12)] if changes["count"] > 12 else []
     lines += ["", metadata]
     if str(member.get("location") or "").startswith("worktree:") and member.get("state") in FINISHED | {"failed"}:
         lines.append("w opens its worktree in a shell")
@@ -1090,13 +1091,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             "s" if r.get("mains") != 1 else "",
             " / %s pending" % r["pending"] if r.get("pending") else "") for r in others[:3]) +
             (" | +%s" % (len(others) - 3) if len(others) > 3 else "") + " / o Rooms in control", "alert")
-    budget = max(0, height - int(menu) - len(footer))
+    total_rows = max(0, height - int(menu) - len(footer))
     used = len(lines)
-    band_count = 1 + bool(shown_judges) + bool(shown_workers)
     wire_rows = 2 if height >= 32 else 1
-    wires = wire_rows * (bool(shown_judges) + bool(shown_workers))
+    base_wires = wire_rows * (bool(shown_judges) + bool(shown_workers))
     # Empty advisor/worker places stay visible, one row each, so the structure never changes shape.
-    wires += (not shown_judges) + (not shown_workers) if primary and height >= 20 else 0
+    base_wires += (not shown_judges) + (not shown_workers) if primary and height >= 20 else 0
 
     def full_title(m):
         role = "MAIN" if m.get("role") == "main" else m.get("role", "worker").upper()
@@ -1118,52 +1118,82 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         return 4 + max(len(task_lines(m, span - 4, 2)) for m in group) if compact(group, span) else 3
 
     minimum_total = sum(minimum_rows(g) for g in shown_groups)
-    embedded = {}
-    if primary and not lanes and height <= 20 and budget - used - wires < minimum_total:
-        main_span, main_left = layout(width, 1, True)
-        middle = main_left + main_span // 2
-        for name, group in (("judge", shown_judges), ("worker", shown_workers)):
-            if not group:
-                continue
-            span, left = layout(width, len(group))
-            points = [left + span // 2 + i * (span + 1) for i in range(len(group))]
-            if not all(main_left < point < main_left + main_span - 1 for point in points):
-                continue
-            title_start = None
-            if name == "judge":
-                ports = sorted(set([main_left, middle, main_left + main_span - 1] + points))
-                free = [(end - start - 1, start + 1) for start, end in zip(ports, ports[1:])]
-                size, title_start = max(free)
-                if size < display_width(heading(primary)) + 2:
+
+    def plan_upper(rows_left):
+        """Wire rows and embedded branches of the main-and-bands board in `rows_left` rows."""
+        wires, embedded = base_wires, {}
+        if primary and height <= 20 and rows_left - wires < minimum_total:
+            main_span, main_left = layout(width, 1, True)
+            middle = main_left + main_span // 2
+            for name, group in (("judge", shown_judges), ("worker", shown_workers)):
+                if not group:
                     continue
-            embedded[name] = (points, group, title_start)
-        # A short graph can reuse a free main border for a branch without losing card content.
-        wires -= wire_rows * len(embedded)
+                span, left = layout(width, len(group))
+                points = [left + span // 2 + i * (span + 1) for i in range(len(group))]
+                if not all(main_left < point < main_left + main_span - 1 for point in points):
+                    continue
+                title_start = None
+                if name == "judge":
+                    ports = sorted(set([main_left, middle, main_left + main_span - 1] + points))
+                    free = [(end - start - 1, start + 1) for start, end in zip(ports, ports[1:])]
+                    size, title_start = max(free)
+                    if size < display_width(heading(primary)) + 2:
+                        continue
+                embedded[name] = (points, group, title_start)
+            # A short graph can reuse a free main border for a branch without losing card content.
+            wires -= wire_rows * len(embedded)
+        return embedded, wires
 
-    def fits(extra):
-        return budget - used - extra >= (20 if grid else 6) if lanes else budget - used - wires - extra >= minimum_total
+    # The bottom reading box is reserved before anything above it is sized. Its rows come from the terminal
+    # size and the ordinary full upper shape (three advisors, the main, three workers, one warning row), never
+    # from how many calls are live, so call counts cannot move it; rows the upper region leaves unused sit above
+    # it. Target: two fifths of the rows, keeping 17 for the upper region. Stable means eleven rows or more: a
+    # page of eight lines is the least that holds a main's first-page summary, so a screen that cannot keep that
+    # beside the ordinary shape takes the rows the current calls leave (three or more, up to the target), then the
+    # one-row tab strip, then none. Compact screens trade stability for a readable box.
+    target = 0 if not interactive else min(height * 2 // 5, height - 17)
+    target = target if target >= 3 else int(interactive)
+    warn_possible = int(bool(unlinked) or len(children) > len(shown_judges) + len(shown_workers))
+    # A compact card (heading, status, two wrapped task rows, two borders) is six rows, so the reservation
+    # takes six for the main and for a narrow three-card band whatever is selected or recorded.
+    band_floor = 6 if layout(width, 3)[0] // 2 - 4 < 21 else 3
+    ordinary = (2 * wire_rows + 6 + 2 * band_floor) if primary else 0
+    lanes_flat = lane_set(cap) if grid and (navigation.get("pinned") or len(mains) <= cap) else lanes
+    shapes = ([("grid", lanes)] if grid else []) + ([("rows", lanes_flat)] if lanes_flat else []) + [("none", [])]
 
-    def detail_rows():
-        # The overview keeps one-line cards so the selected block's detail gets the rest.
-        if not previewed:
-            # The tab box stays after Esc, so Plan, Debate and Messages remain reachable.
-            return 6 if interactive and fits(6) else 1 if interactive and fits(1) else 0
-        room_left = budget - used - (max(20 if grid else 6, (budget - used) // 2) if lanes else wires + minimum_total) - 1
-        return room_left if room_left >= 5 else 3 if fits(3) else 1 if interactive and fits(1) else 0
+    def upper_fit(name, rows_left, stable):
+        """(embedded branches, wire rows) when this shape's upper region fits rows_left, else None."""
+        if name != "none":
+            # A lane needs three advisor rows, its three-row main and the worker overflow note.
+            return ({}, 0) if rows_left >= (20 if name == "grid" else 7) else None
+        embedded, wires = plan_upper(rows_left)
+        return (embedded, wires) if rows_left >= max(wires + minimum_total, ordinary * stable) else None
 
-    reserve = detail_rows()
-    if lanes and not fits(reserve):
-        if grid:
-            # Two rows do not fit: one row, as when the board is too narrow for a grid.
-            grid = False
-            lanes = lane_set(cap) if navigation.get("pinned") or len(mains) <= cap else []
-            reserve = detail_rows()
-        if lanes and not fits(reserve):
-            lanes = []
-            reserve = detail_rows()
-    if not lanes and not fits(0):
+    plan = None
+    tiers = ((True, 11, target), (False, 3, target), (False, 1, min(target, 1)), (False, 0, 0)) if interactive else ((False, 0, 0),)
+    # A visible warning outranks a bigger box, but not the tab strip; the strip outranks the warning.
+    for warn in (1, 0) if warn_possible else (0,):
+        for stable, low, high in tiers:
+            if stable and height <= 20 or high < low or warn and not high:
+                continue
+            found = []
+            for name, shape_lanes in shapes:
+                for dock_rows in range(high, low - 1, -1):
+                    got = upper_fit(name, total_rows - used - dock_rows - (warn or stable) * bool(dock_rows), stable)
+                    if got is not None:
+                        found.append((dock_rows, name, shape_lanes, got))
+                        break
+            # The richest shape that keeps the whole target wins; otherwise the shape leaving the biggest box.
+            best = next((f for f in found if f[0] == high), max(found, key=lambda f: f[0]) if found else None)
+            if best:
+                plan = best + ((warn or stable) * bool(best[0]),)
+                break
+        if plan:
+            break
+    if plan is None:
         from panel_view import render
         navigation.update(hits=[], items=[], viewport=0, positions={})
+        navigation.pop("full_result", None)
         text = render(report, primary.get("provider", "codex") if primary else "codex", width, height,
                       color, unicode, menu=menu, managed=managed, main_attempt=main_attempt, frame=frame,
                       view="tree" if interactive else "compact", attention_only=attention_only, navigation=navigation)
@@ -1172,6 +1202,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             rows[-1] = clipped(footer[-1], width)
             text = "\n".join(rows)
         return text
+    dock, shape, lanes, (embedded, wires), warn_reserve = plan
+    grid = shape == "grid"
+    budget = total_rows - dock - warn_reserve
+
     def extras(m):
         return 1 if m.get("role") == "main" or m.get("location") or m.get("effort") else 0
 
@@ -1184,20 +1218,13 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     def drawn_rows(card_height):
         return sum(max(minimum_rows(g), min(card_height, needed(g, g == [primary]))) for g in shown_groups)
 
-    available_cards = budget - used - wires - reserve
+    available_cards = budget - used - wires
     card_height = next((candidate for candidate in range(6, 2, -1)
                         if drawn_rows(candidate) <= available_cards), 3)
-    if reserve > 3 and (height < 9 * band_count + 20 or navigation.get("tab") in ("plan", "debate", "messages")):
-        # Reading tabs get the rows: the cards shrink to one line.
-        card_height, reserve = 3, budget - used - wires - (3 * band_count * (1 + grid) if lanes else minimum_total) - 1
     automatic = False
-    if (interactive and not previewed and primary and not lanes and height >= 24
-            and not navigation.get("dismissed")):
-        # Rows the cards leave unused show the shown main by default; it never displaces a choice.
-        drawn = drawn_rows(card_height)
-        spare_rows = budget - used - wires - drawn - 1
-        if spare_rows >= 5:
-            previewed, preview, reserve, automatic = primary, {"target": action(primary), "report": {}}, spare_rows, True
+    if interactive and not previewed and primary and not lanes and dock >= 5 and not navigation.get("dismissed"):
+        # The box shows the shown main by default; it never displaces a choice.
+        previewed, preview, automatic = primary, {"target": action(primary), "report": {}}, True
 
     def cards(group, style, centered=False, top=False, bottom=False, before=None):
         count = len(group)
@@ -1490,7 +1517,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     root_bottom = main_left + main_width // 2
     root_top = root_bottom
     if lanes:
-        lane_view(budget - used - reserve)
+        lane_view(budget - used)
         for band in bands_hit:
             if band["name"].startswith("lane:"):
                 band["y2"] = min(band["y2"], len(lines))
@@ -1511,14 +1538,24 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         elif primary and height >= 20:
             add(" " * max(0, root_bottom - 10) + ("▢ Workers: none running · they appear here when spawned" if unicode else
                                                    "Workers: none running / they appear here when spawned"), "dim")
-    spare = budget - len(lines)
-    if reserve and (automatic or previewed and spare > reserve):
-        # Bands sized to their content leave rows the detail can use; keep one for the status line.
-        reserve = max(reserve, spare - 1)
     body_drawn = False
     omitted = len(children) - len(shown_judges) - len(shown_workers) if not lanes else 0
-    below = bool(omitted or unlinked)
-    if reserve and spare >= reserve:
+    if omitted or unlinked:
+        parts = ["%s more calls (scroll)" % omitted] if omitted else []
+        open_unlinked = [m for m in unlinked if classify(m) != "past"]
+        if unlinked:
+            parts.append("%s call%s with no known main%s · t shows them" % (
+                len(open_unlinked), "" if len(open_unlinked) == 1 else "s",
+                " (+%s past)" % (len(unlinked) - len(open_unlinked)) if len(open_unlinked) < len(unlinked) else ""))
+        if len(lines) < total_rows - dock:
+            # The warning sits on the row just above the box, so it holds still as the upper region changes.
+            lines.extend([""] * max(0, total_rows - dock - 1 - len(lines)) * bool(dock))
+            add(" / ".join(parts), "alert" if open_unlinked else "dim")
+    # The box keeps the rows it was given whatever the upper region drew; only an overflowing region shrinks it.
+    rows_high = min(dock, max(0, total_rows - len(lines)))
+    rows_high = 1 if 0 < rows_high < 3 else rows_high
+    if rows_high:
+        lines.extend([""] * (total_rows - rows_high - len(lines)))
         # One box with tabs: the selected call's detail, the plan, this main's debates, the room's messages.
         from panel_debate import signature, tab_body as debate_body
         from panel_messages import tab_body as messages_body
@@ -1528,13 +1565,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         navigation["main_attempt"] = main_attempt
         body, targets = detail(previewed, preview, width - 4, members, room, teams, everyone, labels) if previewed else (
             ["No call selected · click a main or a call to see it here"], {})
-        # A short detail does not stretch an empty box over the rest of the board; the other tabs need room too.
-        room_rows = max(0, spare - below)
-        # The box is the board's reading area: it takes every row the cards above leave, so a tab switch
-        # never resizes it and long Messages or Plan tabs have room.
-        rows_high = room_rows if room_rows >= 3 else max(min(reserve, max(3, len(body) + 3)), min(7, room_rows))
-        strip_only = reserve < 3 and rows_high < 3
-        rows_high = 1 if strip_only else rows_high
+        strip_only = rows_high < 3
         capacity = max(1, rows_high - 2)
         seen = navigation.setdefault("debate_seen", {})
         shown_main = primary["participant"] if primary else None
@@ -1559,7 +1590,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         # No room for a body: the strip alone keeps every tab one click away.
         if strip_only:
             navigation.pop("box", None)
-            spare -= 1
         else:
             body_drawn = True
             first, plain = 0, set()
@@ -1624,16 +1654,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             lines.append(paint(box_edge("", width, unicode, "bottom"), style))
             bands_hit.append({"name": "detail", "y1": top, "y2": top + rows_high - 1, "x1": 1, "x2": width, "step": 3})
             navigation["box"] = {"y1": top, "y2": top + rows_high - 1, "pages": bool(previewed) or active == "plan"}
-            spare -= rows_high
-    if spare and (omitted or unlinked):
-        parts = ["%s more calls (scroll)" % omitted] if omitted else []
-        open_unlinked = [m for m in unlinked if classify(m) != "past"]
-        if unlinked:
-            parts.append("%s call%s with no known main%s · t shows them" % (
-                len(open_unlinked), "" if len(open_unlinked) == 1 else "s",
-                " (+%s past)" % (len(unlinked) - len(open_unlinked)) if len(open_unlinked) < len(unlinked) else ""))
-        add(" / ".join(parts), "alert" if open_unlinked else "dim")
-        spare -= 1
+    if not body_drawn:
+        navigation.pop("full_result", None)
     if not body_drawn and not menu and not navigation.get("keys_help") and footer[-hint_rows:] == hints:
         # Without a box body there is nothing to close or open in full.
         footer[-hint_rows:] = footer_hints(dict(navigation, preview=None, detail=None, full_result=None),

@@ -298,10 +298,12 @@ patch. Outside tmux the board shows the path.
 The board is an overview above and a detail area below. Cards keep only the
 rows their content needs (an unrecorded location stays in the detail), and a
 provider without a reading reads `Codex --` on the pinned usage line (the tree keeps its USAGE box where model-use data exists). On a
-board of 24 rows or more, rows the overview leaves free show the shown main's
-detail, marked `auto`; it never replaces a chosen block, and Esc dismisses it for
-that watcher. While a block is selected, overview cards shrink to one line and
-the detail area shows its content, starting with outcome and verification: for a worker or advisor the latest retained answer, the changed files
+board of 24 rows or more, the bottom Detail box is reserved before the upper
+layout is sized, so blank spare rows stay above it. When the main preview is
+automatic, it is marked `auto` and does not replace a chosen preview. Esc
+dismisses the preview while preserving the box. Choosing a block replaces the
+Detail content without resizing the reserved box; it shows the selected content,
+starting with outcome and verification: for a worker or advisor the latest retained answer, the changed files
 of a recorded patch (summarized only while its SHA-256 still matches, so it
 survives worktree cleanup), outcome, verification and artifact references (read
 in the background, refreshed with each snapshot); for a main its addressed mail
@@ -1023,20 +1025,23 @@ failed seats remain visible and the owner still decides the outcome. All seats
 are read-only. There is no model fallback or additional synthesis-model call.
 
 The board's bottom is one box whose top edge is a tab strip: Detail, Plan,
-Debate and Messages. The selected tab is bracketed; a `•` after Debate marks a
+Debate, Messages and Between. The selected tab is bracketed; a `•` after Debate marks a
 debate running or finished since the tab was last opened, and a number after
 Messages counts the unread mail for live participants. A click on a tab name or
-Tab (Detail, Plan, Debate, Messages, then around) switches; a tab never changes
-by itself, and the box stays after Esc. The box takes every row the cards above leave;
-on a board too short for that it shrinks to its tab strip alone, and the tabs stay
-clickable.
+Tab (Detail, Plan, Debate, Messages, Between, then around) switches; a tab never changes
+by itself, and the box stays after Esc. The box is reserved before the upper
+layout is drawn, with spare padding above it. It persists when empty or dismissed.
+On supported ordinary layouts (80x40, 157x60 and 126x90), its bounds stay fixed
+as calls come and go. Physically short terminals adapt the readable body, strip,
+or tree fallback to available space. The tabs stay clickable when only the strip fits.
 
 The tree shows a main's `? N open` questions and `cN%` context left on its status line,
 like the graph. When the tree is taller than the screen, mains other than this window's
 and the selected one fold to that line so every main stays visible; selecting one
 (arrows or click) unfolds it.
 
-Detail is the selected call's detail. Plan shows the shared repository plan:
+Detail is the selected call's persistent, reserved reader; it remains present
+when dismissed or when there is no selection. Plan shows the shared repository plan:
 the goal, then one row per task (state glyph, id, title, claimant by the board's
 main name or provider, verify command) ordered verified, review, running or
 claimed, ready, blocked. Debate shows the shown main's debates, newest first

@@ -1062,6 +1062,7 @@ import terminal_panel as panel
 from panel_routing import allocate
 from dashboard_projection import display_width
 from panel_view import render
+from panel_input import passive_click
 from room_view import render_graph
 from panel_view import wrapped
 
@@ -1367,6 +1368,55 @@ nav, dismissed = board("plan", 110, 40, nav={"dismissed": True, "tab": "plan"})
 assert "t-ver" in dismissed and "[ Plan ]" in dismissed and "RECENT MESSAGES" not in dismissed, dismissed
 nav, empty = board("detail", 110, 40, nav={"dismissed": True})
 assert "No call selected" in empty and "[ Detail ]" in empty, empty
+# The bottom box is reserved before the board is sized, from the terminal size alone: call counts, tabs, an empty
+# or dismissed box, a selected call, its task text and the drawing set never move it; unused overview rows sit above it.
+
+
+def crowd(report, advisors, workers, label=None, parent="a2", prefix="x"):
+    crowded = deepcopy(report)
+    for role, count, model in (("advisor", advisors, "gpt-6-astra"), ("worker", workers, "gpt-6-luna")):
+        for n in range(count):
+            ident = "%s-%s-%d" % (prefix, role, n)
+            crowded["room"]["participants"].append({"participant": ident, "role": role, "joined": True, "model": model,
+                                                    "parent": parent, "label": ident})
+            crowded["attempts"]["active_recent"].append({"attempt_id": ident, "state": "working", "panel": {
+                "room_id": "r", "room_participant": ident, "role": role}})
+    if label:
+        for member in crowded["room"]["participants"]:
+            if member["role"] in ("advisor", "worker"):
+                member["model"], member["label"] = "claude-opus-5-5", label
+    return crowded
+
+
+long_label = "A normal recorded task with sufficient words to wrap to a second line"
+for width, height in ((80, 40), (157, 60), (126, 90)):
+    baseline = set()
+    for advisors in (0, 1, 3):
+        for workers in (0, 1, 3):
+            for label in (None, long_label):
+                report = crowd(msg_report, advisors, workers, label)
+                for tab, tab_name in room_view.TABS:
+                    for selected in (("chat", "m2"), ("result", "x-advisor-0"), ("result", "x-worker-0")):
+                        if selected[1] == "x-advisor-0" and not advisors or selected[1] == "x-worker-0" and not workers:
+                            continue
+                        for closed in (True, False):
+                            for glyphs in (True, False) if label else (True,):
+                                nav = {"selected": selected, "tab": tab, **({"dismissed": True} if closed else {})}
+                                text = render(report, "codex", width, height, view="graph", navigation=nav, main_attempt="a2", unicode=glyphs)
+                                rows = text.split("\n")
+                                where = (width, height, advisors, workers, label, tab, selected, closed, glyphs)
+                                y1, y2 = nav["box"]["y1"], nav["box"]["y2"]
+                                assert len(rows) == height and y2 == height - 1 and max(map(display_width, rows)) <= width, (where, text)
+                                assert rows[y1 - 1].startswith("╭─ " if glyphs else "+- ") and "[ %s" % tab_name in rows[y1 - 1], (where, text)
+                                assert rows[y2 - 1].startswith("╰" if glyphs else "+") and "Quit" in rows[-1], (where, text)
+                                assert glyphs or text.isascii(), (where, text)
+                                detail_band = next(b for b in nav["bands"] if b["name"] == "detail")
+                                assert (detail_band["y1"], detail_band["y2"]) == (y1, y2), (where, detail_band, nav["box"])
+                                strip = {h["action"][1]: h["y"] for h in nav["hits"] if h["action"][0] == "tab"}
+                                assert strip == {key: y1 for key, _ in room_view.TABS}, (where, strip)
+                                baseline.add((y1, y2))
+    # One box for every ordinary count, selection, task text, tab, drawing set and open state; it holds a first page.
+    assert len(baseline) == 1 and next(iter(baseline))[1] - next(iter(baseline))[0] + 1 >= 11, (width, height, baseline)
 # A main with an unanswered question shows "? N open" in its tab and card; the person sees it in "Needs you" from 20 minutes.
 import panel_view as question_view
 import time as question_time
@@ -4129,6 +4179,53 @@ assert detail_end - detail_top >= 20 and len(roomy_lines) == 60, roomy
 assert not any(line.strip() for line in roomy_lines[detail_end + 1:-3]) or roomy_lines[detail_end + 1].strip(), roomy
 closed_board = render(flow, "codex", 100, 26, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
 assert "MAIN / Sol 6 / auto" not in closed_board and "No call selected" in closed_board, closed_board
+# A board too short for the full overview still keeps a feasible box, auto or dismissed, and its warning row above it.
+for rows_high in (26, 28, 30, 34):
+    kept = {}
+    for label, nav in (("auto", {}), ("closed", {"dismissed": True})):
+        shown = render(flow, "codex", 100, rows_high, view="graph", main_attempt="flow-attempt", navigation=nav)
+        kept[label] = (nav["box"]["y1"], nav["box"]["y2"])
+        lines_shown = shown.splitlines()
+        assert nav["box"]["y2"] - nav["box"]["y1"] + 1 >= 5 and nav["box"]["y2"] == rows_high - 1, (rows_high, nav["box"], shown)
+        assert ("MAIN / Sol 6 / auto" in shown) == (label == "auto") and ("No call selected" in shown) == (label == "closed"), shown
+        assert "no known main" in lines_shown[nav["box"]["y1"] - 2], shown
+    assert kept["auto"] == kept["closed"], (rows_high, kept)
+# Four mains, a pair box, one worker and the overview lanes: advisors 0 to 3, other rooms and an unlinked call
+# change neither the box nor the visibility of their own warning.
+four = deepcopy(msg_report)
+four["room"]["participants"].append({"participant": "m4", "role": "main", "joined": True, "model": "gpt-6-luna", "seq": 4,
+                                     "provider": "codex", "attempt": "a4"})
+four["attempts"]["active_recent"].append({"attempt_id": "a4", "state": "working", "panel": {
+    "room_id": "r", "room_participant": "m4", "role": "main"}})
+four["main_windows"]["m4"] = 4
+four["room"]["main_messages"] = four["room"]["messages"] = [
+    {"id": "p%d" % i, "sender": "m1", "recipient": "m2", "targets": ["m2"], "message_kind": "note",
+     "ts": "2026-10-07T10:%02d:00Z" % i, "text": "pair %d" % i} for i in range(6)]
+four["room"]["pairs"] = [{"sender": "m1", "recipient": "m2", "sent": 6, "pending": 0}]
+for variant in ("plain", "other", "unlinked"):
+    kept = set()
+    for advisors in (0, 1, 3):
+        report = crowd(four, advisors, 1, parent="a1", prefix=variant)
+        if variant == "other":
+            report["room"]["other_rooms"] = [{"id": "room-next", "mains": 1, "pending": 2}]
+        if variant == "unlinked":
+            report["room"]["participants"].append({"participant": "orphan", "role": "worker", "joined": True, "parent": "gone",
+                                                   "model": "gpt-6-luna", "label": "orphan"})
+            report["attempts"]["active_recent"].append({"attempt_id": "orphan", "state": "working", "panel": {
+                "room_id": "r", "room_participant": "orphan", "role": "worker"}})
+        nav = {"selected": ("chat", "m1"), "dismissed": True, "overview": True}
+        text = render(report, "codex", 157, 32, view="graph", navigation=nav, main_attempt="a1")
+        assert any(band["name"].startswith("lane:") for band in nav["bands"]) and len(text.splitlines()) == 32, text
+        assert ("OTHER ROOMS" in text) == (variant == "other") and ("no known main" in text) == (variant == "unlinked"), text
+        kept.add((nav["box"]["y1"], nav["box"]["y2"]))
+    assert kept == {(20, 31)}, (variant, kept)
+# Where a readable box cannot fit, the one-row tab strip stays reachable while the cards fit around it (19 rows;
+# at 16 the compact fallback draws none); neither keeps the previous box or its open-in-full target.
+for rows_high in (19, 16):
+    nav = {"preview": {"target": ("result", "builder"), "report": {}}, "box": {"y1": 1, "y2": 2}, "full_result": ("result", "builder")}
+    shown = render(flow, "codex", 100, rows_high, view="graph", main_attempt="flow-attempt", navigation=nav)
+    assert nav["surface"] == "graph" and "box" not in nav and "full_result" not in nav and len(shown.splitlines()) == rows_high, nav
+    assert rows_high == 16 or shown.splitlines()[-2].startswith("╭─ [ Detail ]  Plan"), shown
 # People read the board: call exits become words, machine status lines and markdown marks are dropped.
 import room_view as graph_text
 assert graph_text.readable("Call exit=0; parent acceptance pending.\nstop-reason: provider=codex is_error=0\n**Verification:** `ok`", " ") \
@@ -5196,6 +5293,39 @@ with patch.object(panel, "menu_input", return_value=GraphInput()), patch.object(
 # The first frame, the card click and the wheel paint; the plain-text click does not.
 assert painted.call_count == 3 and graph_nav["preview"].get("report") == {} and moved.call_count == 1, (
     painted.call_count, moved.call_args_list)
+# Empty and blank Detail body rows have no hit, but still must not trigger a redraw.
+empty_graph = {"room": {"id": "empty-graph", "participants": []}}
+empty_graph_nav = {"dismissed": True}
+empty_graph_frame = render_graph(empty_graph, 100, 30, navigation=empty_graph_nav)
+hint_y = next(i for i, line in enumerate(empty_graph_frame.splitlines(), 1)
+              if "No call selected" in line)
+blank_y = next(i for i, line in enumerate(empty_graph_frame.splitlines(), 1)
+               if empty_graph_nav["box"]["y1"] < i < empty_graph_nav["box"]["y2"]
+               and line.startswith("│") and line.endswith("│") and not line.strip("│ "))
+assert passive_click(("click", 50, hint_y), empty_graph_nav)
+assert passive_click(("click", 50, blank_y), empty_graph_nav)
+tab_hit = next(h for h in empty_graph_nav["hits"] if h["action"] == ("tab", "plan"))
+assert not passive_click(("click", tab_hit["x1"], tab_hit["y"]), empty_graph_nav)
+assert choose(("click", tab_hit["x1"], tab_hit["y"]), dict(empty_graph_nav)) == ("tab", "plan")
+for default_tab in (None, "bogus"):
+    assert passive_click(("click", 50, hint_y), dict(empty_graph_nav, tab=default_tab)), default_tab
+for bad_nav, event in (
+        (dict(empty_graph_nav, tab="plan"), ("click", 50, hint_y)),
+        (dict(empty_graph_nav, surface="tree"), ("click", 50, hint_y)),
+        (dict(empty_graph_nav, box={"y1": 2, "y2": 2}), ("click", 50, hint_y)),
+        (empty_graph_nav, ("click", 1, hint_y)),
+        (empty_graph_nav, ("click", 100, hint_y)),
+        (empty_graph_nav, ("click", 50, empty_graph_nav["box"]["y1"]))):
+    assert not passive_click(event, bad_nav), (event, bad_nav)
+class EmptyGraphInput(ReaderInput):
+    batches = [[("click", 50, hint_y)], [("click", 50, blank_y)], [("q",)]]
+def draw_empty_graph(*args, **kwargs):
+    render_graph(empty_graph, 100, 30, navigation=empty_graph_nav)
+with patch.object(panel, "menu_input", return_value=EmptyGraphInput()), \
+        patch.object(panel, "show", side_effect=draw_empty_graph) as painted, \
+        patch.object(panel, "navigate") as moved:
+    assert panel.read_choice(Path("."), "codex", "ready", "auto", False, empty_graph_nav, {}) == "q"
+assert painted.call_count == 1 and moved.call_count == 0, (painted.call_count, moved.call_count)
 assert TerminalInput().decode(b"v\033[A") == [("v",), ("up",)]
 # Keys the board does not bind are ignored, never read as Esc; Home/End work in every encoding tmux sends.
 for sequence, expected in ((b"\033[1~", "home"), (b"\033[4~", "end"), (b"\033[7~", "home"), (b"\033[8~", "end"),
