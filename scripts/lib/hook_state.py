@@ -1179,6 +1179,53 @@ def is_panel_main() -> bool:
     return bool(os.environ.get("OMS_PANEL_MAIN_ATTEMPT")) and os.environ.get("OMS_PANEL_SESSION", "").startswith("oms-")
 
 
+def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> None:
+    """Turn presence only; never copy prompt/tool text or append room events."""
+    if not is_panel_main() or is_harness_child():
+        return
+    event = payload.get("hook_event_name") or payload.get("hookEventName")
+    if event not in ("UserPromptSubmit", "PostToolUse", "Stop"):
+        return
+    participant = os.environ.get("OMS_ROOM_PARTICIPANT", "")
+    attempt = os.environ.get("OMS_PANEL_MAIN_ATTEMPT", "")
+    room_id = os.environ.get("OMS_ROOM_ID", "")
+    if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", value)
+               for value in (participant, attempt, room_id)):
+        return
+    with contextlib.suppress(OSError, ValueError, SystemExit):
+        import thread_live
+        # Explicit room binding wins; the local ancestor walk avoids a Git subprocess.
+        bound = os.environ.get("OMS_ROOM_REPO") or os.environ.get("OMS_HOOK_RESOLVED_REPO")
+        if bound:
+            repo = Path(bound).resolve()
+        elif repo is None:
+            cwd = Path(payload_cwd(payload)).resolve()
+            repo = next((p for p in (cwd, *cwd.parents) if (p / ".git").exists()), None)
+        if repo is None:
+            return
+        relative = ".oms/hooks/panel-activity/" + participant + ".json"
+        path = thread_live.safe_path(repo, relative, True)
+        raw = thread_live.DURABLE["read_no_follow"](str(repo), relative, "panel activity",
+                                                   missing_ok=True, max_bytes=4096)
+        try:
+            old = json.loads(raw) if raw else {}
+        except (ValueError, UnicodeError, RecursionError):
+            old = {}
+        old = old if isinstance(old, dict) else {}
+        now = time.time()
+        same = old.get("attempt") == attempt and old.get("room") == room_id
+        updated = old.get("updated_at")
+        if (event == "PostToolUse" and same and old.get("state") == "busy"
+                and type(updated) in (int, float) and 0 <= updated <= now and now - updated < 10):
+            return
+        state = "idle" if event == "Stop" else "busy"
+        since = old.get("since") if same and old.get("state") == state and event == "PostToolUse" else now
+        if type(since) not in (int, float) or not 0 <= since <= now:
+            since = now
+        write_json_atomic(path, {"schema": 1, "participant": participant, "attempt": attempt,
+                                 "room": room_id, "state": state, "since": since, "updated_at": now})
+
+
 def panel_main_hint(payload: dict[str, Any]) -> str:
     """Restate a panel main's control-tower role on every prompt.
 
@@ -1453,6 +1500,7 @@ def room_reminders(repo: Path, tid: str, me: str, shown: list[str], reach: int |
 
 def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
     """Deliver opt-in thread deltas at existing safe points, never acknowledge them."""
+    record_panel_activity(payload, repo)
     if is_harness_child() or os.environ.get("OMS_LIVE_COLLAB", "1") == "0":
         return ""
     if not (payload.get("session_id") or payload.get("sessionId")):
@@ -1833,6 +1881,7 @@ def relay_turn(payload: dict[str, Any], repo: Path | None) -> None:
 def cmd_relay(_: argparse.Namespace) -> int:
     """Relay the turn, then print the state repo for the Stop hook's journal tail."""
     payload, _ = load_payload()
+    record_panel_activity(payload)
     repo = hook_repo(payload)
     # A relay failure must not cost the journal its repo.
     with contextlib.suppress(Exception):

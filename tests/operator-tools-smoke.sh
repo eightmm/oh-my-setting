@@ -4015,20 +4015,21 @@ assert graph_text.readable("## Decision\n\nFirst paragraph\n\n\n- next step", pa
 talking = deepcopy(flow)
 talking["room"]["pairs"] = [{"sender": "flow-main", "recipient": "flow-other", "sent": 2, "pending": 1}]
 picture = render(talking, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation={})
-assert "Between mains: 1 pair · 1 unread" in picture, picture
+assert "Between mains" not in picture and "BETWEEN MAINS" not in picture, picture
 tall = render(talking, "codex", 157, 65, view="graph", main_attempt="flow-attempt", navigation={})
-assert "BETWEEN MAINS · 1 pair · 1 unread" in tall and "Sol 6 ⇄ Opus 5.5  →2 · 1 new" in tall, tall
-pair_nav = {}
+assert "BETWEEN MAINS" not in tall and "Between mains" not in tall, tall
+tall_messages = render(talking, "codex", 157, 65, view="graph", main_attempt="flow-attempt", navigation={"tab": "messages"})
+assert "Sol 6 ⇄ Opus 5.5  →2 · 1 new" in tall_messages, tall_messages
+pair_nav = {"tab": "messages"}
 render(talking, "codex", 157, 65, view="graph", main_attempt="flow-attempt", navigation=pair_nav)
 pair_nav["preview"] = {"target": next(h["action"] for h in pair_nav["hits"] if h["action"][0] == "pair")}
 pair_foot = render(talking, "codex", 157, 65, view="graph", main_attempt="flow-attempt", navigation=pair_nav).split("\n")[-1]
 assert "Esc Close" in pair_foot and "Enter Chat" not in pair_foot and "Ask advisor" not in pair_foot, pair_foot
 assert "Model use, last calls" not in tall and "W0 A0" not in tall and "Click any block" not in tall, tall
 assert "..." not in tall and sum("week" in line for line in tall.splitlines()) <= 1, tall
-ascii_tall = render(talking, "codex", 157, 65, view="graph", unicode=False, main_attempt="flow-attempt", navigation={})
-assert not any(g in ascii_tall for g in "…│·→⚑") and "BETWEEN MAINS / 1 pair / 1 unread" in ascii_tall \
-    and "Sol 6 <> Opus 5.5  ->2 / 1 new" in ascii_tall, ascii_tall
-# Between mains is a box of its own; with lanes each pair is drawn as a link between the two lane columns.
+ascii_tall = render(talking, "codex", 157, 65, view="graph", unicode=False, main_attempt="flow-attempt", navigation={"tab": "messages"})
+assert not any(g in ascii_tall for g in "…│·→⚑") and "Sol 6 <> Opus 5.5  ->2 / 1 new" in ascii_tall, ascii_tall
+# Between mains lives in the Messages tab: one row per pair, unread pairs first; the top of the board has none.
 import time as pair_clock
 stamp = pair_clock.strftime("%Y-%m-%dT%H:%M:%SZ", pair_clock.gmtime())
 trio = deepcopy(flow)
@@ -4044,23 +4045,16 @@ trio["room"]["messages"] = [{"id": "t1", "sender": "flow-main", "targets": ["flo
                             {"id": "t2", "sender": "flow-third", "targets": ["flow-other"], "ts": "2020-01-02T03:04:05Z",
                              "text": "THIRD ASKS OPUS"},
                             {"id": "t3", "sender": "flow-other", "targets": ["flow-third"], "ts": stamp, "text": "OPUS ANSWERS THIRD\nSECOND LINE STAYS OUT"}]
-trio_nav = {"overview": True}
+trio_nav = {"overview": True, "tab": "messages"}
 linked = render(trio, "codex", 157, 40, view="graph", navigation=trio_nav).splitlines()
-assert "BETWEEN MAINS · 2 pairs · 7 unread" in linked[4], linked[4]  # row 1 is the goal banner
+assert "BETWEEN MAINS" not in "\n".join(linked) and "Between mains" not in "\n".join(linked), linked
 both = next(l for l in linked if "→16 ←85 · 7 new" in l)
-assert "◀" in both and "▶" in both and both.index("#1") < both.index("→16") < both.index("#2"), both
 far = next(l for l in linked if "←4" in l)
-assert "◀" in far and "▶" not in far and far.index("#1") < far.index("←4") < far.index("#3"), far
-# The pair that skips the middle main crosses its column; the counts move to the longer free stretch.
-assert 52 <= far.index("┼") < 103 and "┼" not in both, far
-last = next(l for l in linked if l.startswith("│ last: "))
-assert "last: #1 Opus 5.5 → #3 Fable 5.1 · %s · OPUS ANSWERS THIRD" % graph_text.clock_stamp(stamp) in last \
-    and "SECOND LINE" not in last, last
-# Every pair row names both ends with the board's names, not a clipped model.
-assert "#1 Opus 5.5" in both and "#2 Sol 6" in both and "#1 Opus 5.5" in far and "#3 Fable 5.1" in far, (both, far)
+# Every pair row names both ends with the board's names, not a clipped model; unread pairs come first.
+assert "#1 Opus 5.5 ⇄ #2 Sol 6" in both and "#1 Opus 5.5 ⇄ #3 Fable 5.1" in far and linked.index(both) < linked.index(far), (both, far)
 # A click on a pair row shows that pair's messages in DETAIL, oldest first, both directions.
 row = next(h for h in trio_nav["hits"] if h["action"] == ("pair", ("flow-other", "flow-third")))
-assert row["preview"] and "◀" in linked[row["y"] - 1], (row, linked[row["y"] - 1])
+assert row["preview"] and "#3 Fable 5.1" in linked[row["y"] - 1], (row, linked[row["y"] - 1])
 assert trio_nav["items"].index(("chat", "flow-third")) < trio_nav["items"].index(("pair", ("flow-other", "flow-third")))
 assert choose(("click", 10, row["y"]), trio_nav) is None
 clicked = render(trio, "codex", 157, 40, view="graph", navigation=trio_nav)
@@ -4068,30 +4062,23 @@ detail_text = clicked.split("[ Detail ]")[1]
 assert "│ PAIR / #1 Opus 5.5 ⇄ #3 Fable 5.1" in clicked and "SOL TO OPUS" not in detail_text, clicked
 assert "%s #3 Fable 5.1 → #1 Opus 5.5: THIRD ASKS OPUS" % graph_text.clock_stamp("2020-01-02T03:04:05Z") in detail_text \
     and detail_text.index("THIRD ASKS OPUS") < detail_text.index("%s #1 Opus 5.5 → #3 Fable 5.1: OPUS ANSWERS THIRD" % graph_text.clock_stamp(stamp)), clicked
+# The reader may go back to Messages afterwards; the same pair does not pull the tab to Detail again.
+trio_nav["tab"] = "messages"
+assert "[ Messages" in render(trio, "codex", 157, 40, view="graph", navigation=trio_nav)
 # The snapshot's mail between mains reaches past the room's newest-twelve window.
 older = deepcopy(trio)
 older["room"]["main_messages"] = [{"id": "old-%s" % n, "sender": "flow-third", "recipient": "flow-other",
                                    "targets": ["flow-other"], "ts": "2020-01-01T00:00:0%sZ" % n, "text": "OLDER PAIR %s" % n}
                                   for n in range(3)]
-older_nav = dict(trio_nav, preview={"target": ("pair", ("flow-other", "flow-third")), "report": {}})
+older_nav = dict(trio_nav, tab="detail", preview={"target": ("pair", ("flow-other", "flow-third")), "report": {}})
 older_detail = render(older, "codex", 157, 40, view="graph", navigation=older_nav)
 assert "OLDER PAIR 2" in older_detail, older_detail
-# `last:` reads that same window, so a room whose newest twelve are all worker mail still shows it.
-older["room"]["messages"] = [{"id": "w%s" % n, "sender": "worker-%s" % n, "targets": ["flow-other"], "ts": stamp, "text": "WORKER MAIL"}
-                             for n in range(12)]
-assert any(l.startswith("│ last: ") and "OLDER PAIR 2" in l for l in
-           render(older, "codex", 157, 40, view="graph", navigation={"overview": True}).splitlines())
-# Without lanes the pair is a text row; ASCII mode keeps every glyph plain.
-single = render(trio, "codex", 157, 40, view="graph", main_attempt="flow-attempt", navigation={}).splitlines()
-assert any("#1 Opus 5.5 ⇄ #2 Sol 6  →16 ←85 · 7 new" in l for l in single) and any("#1 Opus 5.5 ⇄ #3 Fable 5.1  ←4" in l for l in single), single
-ascii_lanes = render(trio, "codex", 157, 40, view="graph", unicode=False, navigation={"overview": True})
-assert "BETWEEN MAINS / 2 pairs / 7 unread" in ascii_lanes and not any(g in ascii_lanes for g in "─│╭╮╰╯◀▶┼⇄→←·"), ascii_lanes
-ascii_far = next(l for l in ascii_lanes.splitlines() if "<-4" in l)
-assert "<" in ascii_far and "+" in ascii_far and "#1 Opus 5.5" in ascii_far and "#3 Fable 5.1" in ascii_far, ascii_far
-assert "->16 <-85" in ascii_lanes and not re.search(r"(?<!-)>\d|<\d", ascii_lanes), ascii_lanes
-# A short board keeps the one-line summary.
+# ASCII mode keeps every glyph plain; a short board shows no between-mains line at the top.
+ascii_lanes = render(trio, "codex", 157, 40, view="graph", unicode=False, navigation={"overview": True, "tab": "messages"})
+assert "#1 Opus 5.5 <> #3 Fable 5.1  <-4" in ascii_lanes and "->16 <-85" in ascii_lanes \
+    and not re.search(r"(?<!-)>\d|<\d", ascii_lanes.replace("<>", "")), ascii_lanes
 short = render(trio, "codex", 157, 31, view="graph", navigation={"overview": True})
-assert "Between mains: 2 pairs · 7 unread" in short and "BETWEEN MAINS" not in short, short
+assert "Between mains" not in short and "BETWEEN MAINS" not in short, short
 # Board truth: stale status shows its age, a guard stop reads as one, "needs you" counts calls and reviews alike,
 # running workers lead their lane and say how many are hidden.
 def stamp_ago(hours):
@@ -4386,7 +4373,7 @@ for attempt in counted["attempts"]["active_recent"]:
         attempt["state"] = "failed"
 picture = render(counted, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
                  navigation={"overview": True, "dismissed": True})
-first_line = picture.splitlines()[1]  # row 1 is the goal banner
+first_line = picture.splitlines()[0]  # row 1 is the header, row 2 the usage line
 assert "1 unread for live participants" in first_line and re.search(r"\d\d:\d\d$", first_line), first_line
 # Calls in review or blocked have ended; broadcasts still pending for them are not unread anyone can act on.
 ended_members = [{"participant": "um", "role": "main"}, {"participant": "ur", "role": "worker", "parent": "um", "state": "review"},
@@ -4396,14 +4383,18 @@ ended_pairs = {"room": {"pairs": [{"recipient": who, "pending": n} for who, n in
 assert graph_text.live_unread(ended_pairs, ended_members, lambda m: False) == 3
 assert "no status yet" in picture and "Latest sent" not in picture, picture
 assert "explorer" not in picture and "Past work (1)" in picture and "last message 3m ago" in picture, picture
-assert picture.splitlines()[0].startswith("◎ No shared goal · oms agent-plan init --goal TEXT"), picture
+pic_rows = picture.splitlines()
+goal_at = next(i for i, l in enumerate(pic_rows) if l.startswith("◎ No shared goal · oms agent-plan init --goal TEXT"))
+main_row = next(i for i, l in enumerate(pic_rows) if "MAIN / " in l)
+assert pic_rows[0].startswith("OMS · ") and ("week" in pic_rows[1] or "Usage readings" in pic_rows[1]) and 2 < goal_at < main_row, picture
+assert all(l.strip() for l in pic_rows[goal_at:main_row]), picture
 assert "LANDING" not in picture, picture
 for land in ({"active": True, "sha": "abcdef0123", "step": "ci", "minutes": 7},):
     landing = deepcopy(counted)
     landing["land"] = land
     shown = render(landing, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
                    navigation={"overview": True, "dismissed": True})
-    assert "LANDING abcdef0 · ci · 7m" in shown.splitlines()[1], shown
+    assert any(l.startswith("LANDING abcdef0 · ci · 7m") for l in shown.splitlines()[3:8]), shown
     landing["land"]["active"] = False
     assert "LANDING" not in render(landing, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
                                    navigation={"overview": True, "dismissed": True})
@@ -4454,8 +4445,9 @@ bare["room"]["participants"] = [p for p in bare["room"]["participants"] if p.get
 for glyphs in (True, False):
     bare_lanes = render(bare, "codex", 160, 50, view="graph", navigation={"dismissed": True}, unicode=glyphs).splitlines()
     assert not any("ADVISORS" in l for l in bare_lanes), bare_lanes
-    advisor_rows = [i for i, l in enumerate(bare_lanes) if "Advisors: none active" in l]
-    assert len(advisor_rows) == 1 and bare_lanes[advisor_rows[0] + 1].count("MAIN / ") == 2, bare_lanes
+    # No main has an advisor: the empty rows are dropped and the mains still share one row.
+    assert not any("Advisors: none active" in l for l in bare_lanes), bare_lanes
+    assert any(l.count("MAIN / ") == 2 for l in bare_lanes), bare_lanes
 lonely = deepcopy(flow)
 lonely["room"]["participants"] = [p for p in lonely["room"]["participants"] if p["participant"] == "flow-main"]
 alone = render(lonely, "codex", 120, 30, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
@@ -4742,33 +4734,45 @@ beaten = deepcopy(ended)
 beaten["attempts"]["active_recent"].append({"attempt_id": "old-00", "state": "working",
     "panel": {"room_id": "flow-room", "room_participant": "old-00", "role": "worker"}})
 assert next(m for m in graph_text.nodes(beaten) if m["participant"] == "old-00")["state"] == "working"
-assert re.search(r"\d\d-\d\d (Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d\d:\d\d$", graph_text.render_graph(flow, 120, 40).splitlines()[1])
+assert re.search(r"\d\d-\d\d (Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d\d:\d\d$", graph_text.render_graph(flow, 120, 40).splitlines()[0])
 board_text = graph_text.render_graph(words, 120, 40)
 assert "Plan:" not in board_text, board_text
-# An active plan puts its goal and progress on row 1 of both boards and the held task on its main's card.
+# An active plan puts its goal and progress under the header, usage and main tabs of both boards and the held task on its main's card.
 shown_main = next(m["participant"] for m in graph_text.nodes(words) if m.get("role") == "main")
 words["plan"] = {"present": True, "goal": "Ship the shared plan board", "task_count": 9, "idle_days": 3,
                  "by_state": {"done": 6, "review": 1, "running": 2},
                  "tasks": [{"id": "t7", "title": "Wire", "state": "running", "claimed_by": shown_main}]}
 banner_nav = {}
 active = graph_text.render_graph(words, 120, 40, navigation=banner_nav)
-top = active.splitlines()[0]
+active_rows = active.splitlines()
+top_at = next(i for i, l in enumerate(active_rows) if l.startswith("◎ GOAL"))
+top = active_rows[top_at]
+assert "OMS · " in active_rows[0] and 1 < top_at < 6 and not any(l.startswith("◎") for l in active_rows[:top_at]), active
 assert top.startswith("◎ GOAL  Ship the shared plan board") and top.endswith("▕██████░░░░▏ 6/9 verified · 1 review · 2 claimed"), top
 assert "Plan:" not in active and "Task: t7 · running" in active, active
-assert {"y": 1, "x1": 1, "x2": 120, "action": ("tab", "plan")} in banner_nav["hits"], banner_nav["hits"][:3]
-assert "OMS · " in active.splitlines()[1]
+assert {"y": top_at + 1, "x1": 1, "x2": 120, "action": ("tab", "plan")} in banner_nav["hits"], banner_nav["hits"][:3]
+for order_width, order_height in ((100, 40), (160, 60)):
+    order_rows = graph_text.render_graph(words, order_width, order_height).splitlines()
+    order_at = {k: next(i for i, l in enumerate(order_rows) if l.startswith(k)) for k in ("OMS · ", "◎ GOAL")}
+    first_main = next(i for i, l in enumerate(order_rows) if "MAIN / " in l)
+    assert order_at["OMS · "] == 0 and ("week" in order_rows[1] or "Usage readings" in order_rows[1]) \
+        and 2 < order_at["◎ GOAL"] < first_main and "BETWEEN MAINS" not in "\n".join(order_rows), order_rows
 long_goal = deepcopy(words)
 long_goal["plan"]["goal"] = "Ship the shared plan board with every main claiming work from it " * 2
 wrapped_top = graph_text.render_graph(long_goal, 80, 40).splitlines()
-assert wrapped_top[0].endswith("6/9 verified · 1 review · 2 claimed") and wrapped_top[1].startswith("        ") and "OMS · " in wrapped_top[2], wrapped_top[:3]
+wrap_at = next(i for i, l in enumerate(wrapped_top) if l.startswith("◎ GOAL"))
+assert "OMS · " in wrapped_top[0] and wrapped_top[wrap_at].endswith("6/9 verified · 1 review · 2 claimed") \
+    and wrapped_top[wrap_at + 1].startswith("        "), wrapped_top[:wrap_at + 2]
 # On a narrow board the claimed count goes first; work waiting for review stays visible next to the bar.
-narrow_top = graph_text.render_graph(words, 60, 40).splitlines()[0]
+narrow_top = next(l for l in graph_text.render_graph(words, 60, 40).splitlines() if l.startswith("◎ GOAL"))
 assert narrow_top.endswith("6/9 verified · 1 review") and "claimed" not in narrow_top, narrow_top
 plain_board = graph_text.render_graph(words, 100, 40, unicode=False)
-assert plain_board.splitlines()[0].startswith("@ GOAL  Ship") and "[######....] 6/9 verified" in plain_board.splitlines()[0]
-assert all(ord(ch) < 128 for ch in plain_board.splitlines()[0]), plain_board.splitlines()[0]
+plain_goal = next(l for l in plain_board.splitlines() if l.startswith("@ GOAL  Ship"))
+assert "[######....] 6/9 verified" in plain_goal and all(ord(ch) < 128 for ch in plain_goal), plain_goal
 tree_active = render(words, "codex", 120, 60, view="tree", navigation={})
-assert tree_active.splitlines()[0].startswith("◎ GOAL  Ship the shared plan board") and "Plan:" not in tree_active, tree_active
+tree_rows = tree_active.splitlines()
+tree_goal = next(i for i, l in enumerate(tree_rows) if l.startswith("◎ GOAL  Ship the shared plan board"))
+assert tree_rows[0].startswith("OMS / ") and "USAGE" in "\n".join(tree_rows[:tree_goal]) and "Plan:" not in tree_active, tree_active
 assert "Old plan" not in tree_active
 decoder = TerminalInput()
 assert decoder.decode(b"\033[<0;8;") == []
@@ -5861,6 +5865,90 @@ native_report = {"room": room.status(project, shared), "attempts": {"active_rece
      "room_participant": member}}], "recent": []}}
 linked = next(row for row in graph_view.nodes(native_report) if row["participant"] == member)
 assert linked["state"] == "working" and linked["model"] == "fixture-model"
+# Main turn presence changes only presentation, including the control graph's main rows.
+activity_main = {"participant": "activity-main", "role": "main", "joined": True,
+                 "provider": "claude", "model": "fixture-model", "seq": 1}
+activity_worker = {"participant": "activity-worker", "role": "worker", "joined": True,
+                   "provider": "codex", "model": "gpt-6-sol", "parent": "activity-attempt", "seq": 2}
+activity_report = {"collection": {"ok": True}, "room": {"id": "activity-room", "participants": [activity_main, activity_worker]},
+                   "attempts": {"recent": [], "active_recent": [
+                       {"attempt_id": "activity-attempt", "state": "working", "panel": {"role": "main",
+                        "room_id": "activity-room", "room_participant": "activity-main"}},
+                       {"attempt_id": "activity-child", "state": "working", "panel": {"role": "worker",
+                        "room_id": "activity-room", "room_participant": "activity-worker"}}]}}
+activity_row = {"schema": 1, "participant": "activity-main", "room": "activity-room",
+                "attempt": "activity-attempt", "state": "busy", "since": 100, "updated_at": 100}
+activity_repo = temporary / "main-activity"
+activity_path = activity_repo / ".oms/hooks/panel-activity/activity-main.json"
+activity_path.parent.mkdir(parents=True)
+activity_path.write_text(json.dumps(activity_row))
+activity_windows = [["1", "activity-main", "", "%777", str(activity_repo), "activity-attempt"]]
+panel.MAIN_OUTPUT.clear()
+with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"native prompt", b"")) as capture:
+    with patch.object(panel.time, "time", return_value=1000):
+        assert "activity-main" in panel.main_activity(activity_repo, [activity_worker] * 129 + [activity_main])
+        first = panel.main_activity(activity_repo, [activity_main, activity_worker], activity_windows)
+        assert first["activity-main"]["state"] == "busy"
+    with patch.object(panel.time, "time", return_value=1005):
+        assert panel.main_activity(activity_repo, [activity_main], activity_windows) == first
+        assert capture.call_count == 1, "native captures must be cached"
+    with patch.object(panel.time, "time", return_value=1091):
+        silent = panel.main_activity(activity_repo, [activity_main], activity_windows)
+        assert silent["activity-main"]["state"] == "idle" and silent["activity-main"]["since"] == 1000, silent
+    activity_path.write_text(json.dumps(dict(activity_row, updated_at=1090)))
+    with patch.object(panel.time, "time", return_value=1092):
+        assert panel.main_activity(activity_repo, [activity_main], activity_windows)["activity-main"]["state"] == "busy", "a fresh heartbeat prevents silence fallback"
+    activity_path.write_text(json.dumps(activity_row))
+    assert "native prompt" not in repr(panel.MAIN_OUTPUT)
+    assert capture.call_args.args[0][-5:] == ["-p", "-t", "%777", "-S", "0"], capture.call_args
+    capture.return_value = subprocess.CompletedProcess([], 0, b"new native output", b"")
+    with patch.object(panel.time, "time", return_value=1102):
+        assert panel.main_activity(activity_repo, [activity_main], activity_windows)["activity-main"]["state"] == "busy"
+    capture.return_value = subprocess.CompletedProcess([], 1, b"", b"")
+    with patch.object(panel.time, "time", return_value=1200):
+        assert panel.main_activity(activity_repo, [activity_main], activity_windows)["activity-main"]["state"] == "busy", "a failed capture cannot prove silence"
+    assert not panel.MAIN_OUTPUT
+for reading, word in (({}, "live"), ({"activity-main": activity_row}, "working"),
+                      ({"activity-main": dict(activity_row, state="idle", since=280)}, "idle · 12m"),
+                      ({"activity-main": dict(activity_row, state="idle", since=280, attempt="old")}, "live")):
+    report = dict(activity_report, main_activity=reading)
+    with patch.object(panel.time, "time", return_value=1000):
+        projected_main = next(m for m in graph_view.nodes(report) if m["role"] == "main")
+        assert projected_main["state"] == "working", "presentation must preserve attempt lifecycle"
+        expected_state = "idle" if word.startswith("idle") else "working" if word == "working" else "live marker"
+        assert graph_view.main_state(projected_main) == expected_state
+        assert graph_view.main_words(projected_main) == word
+        for ascii_only in (False, True):
+            expected = word.replace(" · ", " / ") if ascii_only else word
+            for activity_view, menu in (("graph", False), ("tree", False), ("graph", True)):
+                navigation = {}
+                screen = render(report, "claude", 120, 44, view=activity_view, menu=menu,
+                                frame=2, unicode=not ascii_only, navigation=navigation)
+                assert expected in screen and "running" in screen, (activity_view, screen)
+                if ascii_only:
+                    screen.encode("ascii")
+                if word.startswith("idle") and activity_view == "graph":
+                    assert ("o " if ascii_only else "○ ") + expected in screen, screen
+                    tab = next(h for h in navigation["hits"] if h.get("select") and h["action"] == ("chat", "activity-main"))
+                    tab_text = screen.splitlines()[tab["y"] - 1][tab["x1"] - 1:tab["x2"]]
+                    assert ("o" if ascii_only else "○") in tab_text and "⠹" not in tab_text, tab_text
+        for ascii_only in (False, True):
+            legacy = render(report, "claude", 120, 44, view="compact", main_attempt="activity-attempt",
+                            frame=2, unicode=not ascii_only)
+            assert (word.replace(" · ", " / ") if ascii_only else word) in legacy, legacy
+            if ascii_only:
+                legacy.encode("ascii")
+        # Turn-idle cannot change what appears under Needs you.
+        from panel_view import inbox_items
+        assert inbox_items(report) == inbox_items(activity_report)
+with patch.object(panel.time, "time", return_value=1000):
+    activity_path.write_text(json.dumps(dict(activity_row, updated_at=1001)))
+    assert not panel.main_activity(activity_repo, [activity_main]), "future timestamps are untrusted"
+    activity_path.write_text("x" * 4097)
+    assert not panel.main_activity(activity_repo, [activity_main]), "activity reads must be bounded"
+    activity_path.unlink()
+    activity_path.symlink_to(activity_repo / "missing-target")
+    assert not panel.main_activity(activity_repo, [activity_main]), "never follow activity symlinks"
 # A council's seats inherit the main's participant; the graph shows the debate
 # beside the main instead of relabeling the main card as a seat.
 council_meta = {"role": "advisor", "label": "Pick next work", "room_id": shared, "room_participant": member}

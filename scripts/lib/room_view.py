@@ -58,6 +58,7 @@ def nodes(report):
         derived = "presence unknown" if member.get("role") == "main" or type(code) is not int else \
             "done" if code == 0 else "failed"
         output.append(dict(member, attempt=attempt.get("attempt_id"), state=attempt.get("state") or derived,
+                           panel_activity=mapping(mapping(report.get("main_activity")).get(member.get("participant"))),
                            ended=result.get("ts"), exit=code if type(code) is int else None,
                            guard=member.get("participant") in guarded,
                            model=model, model_at_launch=meta.get("model") or member.get("model"),
@@ -74,6 +75,34 @@ def nodes(report):
             earlier.append(member["participant"])
     rank = lambda member: (0 if member["state"] in LIVE_STATES else 2 if member["state"] in {"done", "cancelled"} else 1, -member.get("seq", 0))
     return sorted(output, key=rank)
+
+
+def main_state(member):
+    state = member.get("state")
+    if member.get("role") != "main":
+        return state
+    if state == "done":
+        return "exited"
+    if state not in LIVE_STATES:
+        return state
+    reading = mapping(member.get("panel_activity"))
+    if reading.get("attempt") == member.get("attempt"):
+        if reading.get("state") == "busy":
+            return "working"
+        if reading.get("state") == "idle":
+            return "idle"
+    return "live marker"
+
+
+def main_words(member, unicode=True):
+    state = main_state(member)
+    if member.get("role") != "main":
+        return said(state)
+    if state == "idle":
+        since = mapping(member.get("panel_activity")).get("since")
+        minutes = int(max(0, time.time() - since) // 60) if type(since) in (int, float) and 0 <= since <= time.time() else 0
+        return "idle" + ((" · " if unicode else " / ") + "%sm" % minutes if minutes else "")
+    return {"working": "working", "live marker": "live"}.get(state, said(state))
 
 
 def spawn_bar(width, navigation):
@@ -175,54 +204,6 @@ def link_counts(link, unicode):
     right, left = ("→", "←") if unicode else ("->", "<-")
     parts = [mark + str(link[key]) for mark, key in ((right, "forward"), (left, "back")) if link[key]]
     return " ".join(parts) + (" · %s new" % link["new"] if link["new"] else "")
-
-
-def short_name(label, room):
-    """The board's name for a main, shortened to `room` cells while its "#N" or "#id" stays visible."""
-    if display_width(label) <= room:
-        return label
-    first, _, rest = label.partition(" ")
-    if first.startswith("#") and rest:
-        keep = room - display_width(first) - 1
-        return first + " " + fit(rest, keep) if keep >= 3 else first if display_width(first) <= room else ""
-    rest, _, last = label.rpartition(" ")
-    if last.startswith("#") and rest:
-        keep = room - display_width(last) - 1
-        return fit(rest, keep) + " " + last if keep >= 3 else last if display_width(last) <= room else ""
-    return fit(label, room) if room > 0 else ""
-
-
-def link_row(link, centres, labels, width, unicode):
-    """The pair drawn between its lane columns: the line crosses mains in between and the counts sit on it.
-
-    None when an end has no lane or both ends share a column, so the caller writes the pair as text."""
-    start, end = centres.get(link["left"]), centres.get(link["right"])
-    if start is None or end is None or end - start < 12:
-        return None
-    cells = [" "] * width
-    cells[0] = cells[-1] = "│" if unicode else "|"
-    bar, cross = ("─", "┼") if unicode else ("-", "+")
-    cells[start:end + 1] = [bar] * (end - start + 1)
-    cells[start] = ("◀" if unicode else "<") if link["back"] else bar
-    cells[end] = ("▶" if unicode else ">") if link["forward"] else bar
-    stops = {start, end}
-    for column in set(centres.values()):
-        if start < column < end:
-            cells[column] = cross
-            stops.add(column)
-    stops = sorted(stops)
-    text = link_counts(link, unicode)
-    gap = max(((a + 1, b - 1) for a, b in zip(stops, stops[1:])), key=lambda g: g[1] - g[0])
-    if gap[1] - gap[0] + 1 < len(text) + 2:
-        return None
-    first = gap[0] + (gap[1] - gap[0] + 1 - len(text)) // 2
-    cells[first - 1:first + len(text) + 1] = list(" " + text + " ")
-    for ident, edge, step in ((link["left"], start - 1, -1), (link["right"], end + 1, 1)):
-        tag = short_name(labels[ident], edge - 1 if step < 0 else width - 3 - edge)
-        place = edge - len(tag) if step < 0 else edge + 1
-        if tag and 0 < place and place + len(tag) < width - 1:
-            cells[place:place + len(tag)] = list(tag)
-    return "".join(cells)
 
 
 def pair_detail(member, room, width, labels):
@@ -486,8 +467,8 @@ def description(member, frame, unicode, width):
     model = member.get("model")
     name = MODEL_NAMES.get(model, model) or member.get("provider", "unknown")
     title = wrapped(member.get("title") or member["participant"], width - 4, 2)
-    state = "exited" if member.get("role") == "main" and member["state"] == "done" else member["state"]
-    return title + ["%s %s / %s" % (activity(state, frame, unicode), name, state),
+    state = main_state(member)
+    return title + ["%s %s / %s" % (activity(state, frame, unicode), name, main_words(member, unicode)),
                     "@ " + location_label(member.get("location")),
                     "id: " + member["participant"]]
 
@@ -615,13 +596,13 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         return pair_detail(member, room, width, labels), {}
     names = {m["participant"]: who(m, labels) for m in members}
     name = mapping(labels).get(member.get("participant")) or model_name(member)
-    state = "exited" if member.get("role") == "main" and member.get("state") == "done" else member.get("state")
+    state = main_state(member)
     title = clean(member.get("title")) or ""
     title = "" if title in ("Native task not recorded", "Task unrecorded") else title
     where = "in the repository" if member.get("location") in (None, "repository") else "in its own worktree"
     targets = {}
     if member.get("role") == "main":
-        lines = wrapped("%s · %s main · %s" % (name, (member.get("provider") or "").capitalize(), said(state)), width, 2)
+        lines = wrapped("%s · %s main · %s" % (name, (member.get("provider") or "").capitalize(), main_words(member)), width, 2)
         lines += wrapped("Task: " + (title or "no task title yet"), width, 2)
         lines += declared_status(room, member["participant"], width)
         if member.get("owns"):
@@ -860,9 +841,15 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     joiner = " ⇄ " if unicode else " <> "
     pair_members = [{"participant": "pair:%s:%s" % (l["left"], l["right"]), "role": "pair", "_link": l,
                      "_action": ("pair", (l["left"], l["right"])),
-                     "model": labels[l["left"]] + joiner + labels[l["right"]]} for l in links[:4] if height >= 32]
+                     "model": labels[l["left"]] + joiner + labels[l["right"]]} for l in links[:4]]
     previewed = next((m for m in mains + [c for calls in everyone.values() for c in calls] + pair_members
                       if action(m) == preview.get("target")), None)
+    if (preview.get("target") or ("",))[0] == "pair":
+        # A pair picked in Messages opens its messages in Detail once; leaving Detail afterwards is the reader's choice.
+        if navigation.get("pair_seen") != preview["target"]:
+            navigation["tab"], navigation["pair_seen"] = "detail", preview["target"]
+    else:
+        navigation.pop("pair_seen", None)
     navigation.pop("full_result", None)
     if previewed and previewed.get("role") not in ("main", "pair") and not previewed.get("_native"):
         navigation["full_result"] = action(previewed)
@@ -914,7 +901,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         return labels.get(m["participant"]) or model_name(m)
 
     def state_of(m):
-        return "exited" if m.get("role") == "main" and m["state"] == "done" else m["state"]
+        return main_state(m)
 
     claims = claims_by_main(report)
 
@@ -967,10 +954,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     clock = time.strftime("%m-%d ") + WEEKDAYS[time.localtime().tm_wday] + time.strftime(" %H:%M")
     if display_width(heading_text) + len(clock) + 2 <= width:
         heading_text += " " * (width - display_width(heading_text) - len(clock)) + clock
-    if height >= 10:
-        for text, style in goal_banner(report, width, unicode):
-            hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": ("tab", "plan")})
-            add(text, style)
     add(heading_text, "head")
     for alert in status_alerts(report):
         add(alert, "bad")
@@ -1084,7 +1067,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             if pin:
                 hits.append({"y": y, "x1": x + display_width(body) + 1, "x2": x + display_width(body) + 3,
                              "action": ("pin", m["participant"])})
-            style = "alert" if p["alerts"] or (p["ctx"] and p["ctx"][1] == "alert") else hue(m)
+            style = "alert" if p["alerts"] or (p["ctx"] and p["ctx"][1] == "alert") else "dim" if state_of(m) == "idle" else hue(m)
             value += (chosen(body, style) if m == primary else paint(body, style)) + paint(pin, "dim") + " "
             x += display_width(body) + len(pin) + 1
         if hi < len(mains):
@@ -1108,19 +1091,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 label += " / %s earlier unknown" % unknown
             hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": target})
             add(label, "review" if kind == "review" else "dim")
-    pair_at = len(lines)
-    mains_by_id = {m["participant"] for m in mains}
-    latest = next((m for m in map(mapping, reversed(listing(room.get("main_messages")) or listing(room.get("messages")))) if m.get("sender") in mains_by_id
-                   and any(t in mains_by_id and t != m["sender"] for t in listing(m.get("targets")))), None)
-    box_height = 2 + len(links[:4]) + (len(links) > 4) + bool(latest)
-    if links and height >= 32:
-        # Placeholder rows keep the budget honest; the box is drawn once the lanes are final.
-        lines.extend([""] * box_height)
-    elif links and height >= 20:
-        pair_unread = sum(l["new"] for l in links)
-        add("Between mains: %s pair%s · %s unread%s" % (
-            len(links), "" if len(links) == 1 else "s", pair_unread,
-            " of %s in room" % unread_total if unread_total > pair_unread else ""), "review")
+    if height >= 10:
+        for text, style in goal_banner(report, width, unicode):
+            hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": ("tab", "plan")})
+            add(text, style)
     others = listing(room.get("other_rooms"))
     if room.get("other_rooms_incomplete") and height >= 20 and not others:
         add("OTHER ROOMS / scan incomplete; mains in other rooms may be missing", "alert")
@@ -1251,7 +1225,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             if reflow:
                 role = {"advisor": "ADV", "reviewer": "REV", "worker": "WRK", "council": "DEB"}.get(m.get("role"), "MAIN")
                 title = (("▸ " if unicode else "> ") if action(m) == selected else "") + role
-            status = "%s %s" % (activity(state_of(m), frame, unicode), said(state_of(m)))
+            status = "%s %s" % (activity(state_of(m), frame, unicode), main_words(m, unicode))
             if m.get("role") == "main" and open_count(room, m["participant"]):
                 status += (" · " if unicode else " / ") + "? %s open" % open_count(room, m["participant"])
             if m.get("role") != "main" and primary:
@@ -1334,7 +1308,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             for i, block in enumerate(blocks):
                 cell = block[row]
                 if color:
-                    cell_style = tone(group[i]["state"]) if row == 1 and group[i]["state"] in ATTENTION_STATES else style
+                    cell_style = "dim" if row == 1 and main_state(group[i]) == "idle" else tone(group[i]["state"]) if row == 1 and group[i]["state"] in ATTENTION_STATES else style
                     cell = ((PALETTE[cell_style] + "\033[7m" if action(group[i]) == selected else
                             ("\033[1m" if group[i].get("role") == "main" else "") + PALETTE[cell_style]) + cell + "\033[0m")
                 value += cell + (" " if i < count - 1 else "")
@@ -1375,7 +1349,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         tag_of = {"advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate"}
         columns = []
         judge_sets = {m["participant"]: [c for c in teams[m["participant"]] if c.get("role") != "worker"][:3] for m in group}
-        most = max(1, max(len(judges) for judges in judge_sets.values()))
+        most = max(len(judges) for judges in judge_sets.values())
         # With room, each main's advisors and reviewers share one box above it; boxes and mains line up across lanes.
         boxed = rows >= 14 and any(judge_sets.values())
         lift = most + 2 if boxed else most
@@ -1448,9 +1422,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                     if c:
                         row_hit(len(cells) - 1, action(c))
             else:
-                cells.extend([" " * lane_width] * (lift - max(1, len(judges_here))))
-                if not judges_here:
-                    # No judges, no box: one dim row keeps the lanes aligned and gives the rest to cards and workers.
+                cells.extend([" " * lane_width] * (lift - max(1, len(judges_here)) if lift else 0))
+                if not judges_here and lift:
+                    # Only beside a lane that has judges: the lanes stay aligned; no judges anywhere, no row.
                     cells.append(paint(padded(" ◇ Advisors: none active · a asks one" if unicode else
                                               " Advisors: none active / a asks one", lane_width), "dim"))
                 for n, c in enumerate(judges_here):
@@ -1459,7 +1433,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                     cells.append(chosen(text, judge_style(c)) if action(c) == selected else paint(text, judge_style(c)))
                     row_hit(len(cells) - 1, action(c))
             title = ("▸ " if unicode else "> ") if m == primary else ""
-            status = "%s %s" % (activity(state_of(m), frame, unicode), said(state_of(m)))
+            status = "%s %s" % (activity(state_of(m), frame, unicode), main_words(m, unicode))
             if open_count(room, m["participant"]):
                 status += (" · " if unicode else " / ") + "? %s open" % open_count(room, m["participant"])
             ctx = context_note(report, m)
@@ -1471,6 +1445,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             content = [status] + [line for line, _ in texts] if head > 3 else [status + " · " + task_of(m)]
             block = card(title + "MAIN / " + name_of(m), content, lane_width, head, unicode)
             dim_rows = {2 + n for n, (_, dim) in enumerate(texts) if dim}
+            if state_of(m) == "idle":
+                dim_rows.add(1)
             block[0] = joint(block[0], 1, "┴" if unicode else "+")[0]
             block[-1] = joint(block[-1], 2, "┬" if unicode else "+")[0]
             style = hue(m)
@@ -1523,33 +1499,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         for band in bands_hit[first_band:]:
             band["y2"] = min(band["y2"], len(lines))
 
-    if links and height >= 32:
-        per_row = grid_cols if grid else len(lanes)
-        lane_wide = (width - per_row + 1) // per_row if lanes else 0
-        centres = {m["participant"]: i % per_row * (lane_wide + 1) + lane_wide // 2 for i, m in enumerate(lanes)}
-        unread = sum(l["new"] for l in links)
-        box = [box_edge("BETWEEN MAINS · %s pair%s · %s unread%s" % (
-            len(links), "" if len(links) == 1 else "s", unread,
-            " of %s in room" % unread_total if unread_total > unread else ""), width, unicode)]
-        for n, link in enumerate(links[:4]):
-            drawn = link_row(link, centres, labels, width, unicode)
-            if drawn is None:
-                drawn = box_row("%s%s%s  %s" % (labels[link["left"]], joiner, labels[link["right"]],
-                                                 link_counts(link, unicode)), width, unicode)
-            box.append(drawn)
-            hits.append({"y": pair_at + 2 + n, "x1": 1, "x2": width, "preview": True,
-                         "action": ("pair", (link["left"], link["right"]))})
-        if len(links) > 4:
-            box.append(box_row("+%s more pair%s" % (len(links) - 4, "" if len(links) == 5 else "s"), width, unicode))
-        if latest:
-            target = [t for t in listing(latest.get("targets")) if t in mains_by_id and t != latest["sender"]]
-            stamp = clock_stamp(latest.get("ts"))
-            box.append(box_row("last: %s → %s · %s%s" % (
-                labels[latest["sender"]], ", ".join(labels[t] for t in target), stamp + " · " if stamp else "",
-                clipped((readable(latest.get("text")).split("\n")[0]) or "(empty)", 60)), width, unicode))
-        box.append(box_edge("", width, unicode, "bottom"))
-        lines[pair_at:pair_at + box_height] = [
-            paint(line, "dim" if latest and n == len(box) - 2 else "review") for n, line in enumerate(box)]
     scrolled_now = {"judge": judge_start, "worker": worker_start}
     main_width, main_left = layout(width, 1, True)
     root_bottom = main_left + main_width // 2
@@ -1665,7 +1614,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                     footer[-hint_rows:] = hints = footer_hints(dict(navigation, debate_empty=True), width, managed,
                                                                unicode, chosen_member, len(mains), True)
             else:
-                rows = messages_body(report, width - 4, capacity, navigation, unicode)
+                pairs = [("%s%s%s  %s" % (labels[l["left"]], joiner, labels[l["right"]], link_counts(l, unicode)),
+                          ("pair", (l["left"], l["right"]))) for l in links[:4]]
+                if len(links) > 4:
+                    pairs.append(("+%s more pair%s" % (len(links) - 4, "" if len(links) == 5 else "s"), None))
+                rows = messages_body(report, width - 4, capacity, navigation, unicode, pairs)
             for n in range(capacity):
                 text, target, picked = rows[n] if n < len(rows) else ("", None, False)
                 line = box_row(text, width, unicode)
@@ -1673,7 +1626,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 if target:
                     # Body text without its own link is passive, so a click that selects text changes nothing.
                     hits.append({"y": top + 1 + n, "x1": 1, "x2": width, "action": target,
-                                 **({"preview": True, "passive": n in plain} if active == "detail" else {})})
+                                 **({"preview": True, "passive": n in plain} if active == "detail" else
+                                    {"preview": True} if target[0] == "pair" else {})})
             lines.extend([box_row("", width, unicode)] * (rows_high - 2 - capacity))
             lines.append(paint(box_edge("", width, unicode, "bottom"), style))
             bands_hit.append({"name": "detail", "y1": top, "y2": top + rows_high - 1, "x1": 1, "x2": width, "step": 3})

@@ -1010,6 +1010,64 @@ assert room.participant(room.status(repo, "late-room"), "late-main")["consumer"]
 PY
 }
 
+test_panel_main_activity() {
+  python3 - "$ROOT/scripts/lib" "$TMP" <<'PYTEST'
+import json
+import os
+from pathlib import Path
+import sys
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import hook_state
+repo = Path(sys.argv[2]) / "panel-activity"
+repo.mkdir()
+(repo / ".git").mkdir()
+payload = {"cwd": str(repo), "session_id": "native", "prompt": "never persist this text"}
+path = repo / ".oms/hooks/panel-activity/main.json"
+env = {"OMS_PANEL_MAIN_ATTEMPT": "turn-attempt", "OMS_PANEL_SESSION": "oms-fixture",
+       "OMS_ROOM_ID": "activity-room", "OMS_ROOM_PARTICIPANT": "main", "OMS_ROOM_REPO": str(repo),
+       "OMS_LIVE_COLLAB": "0"}
+with patch.dict(os.environ, env), patch.object(hook_state.subprocess, "run", side_effect=AssertionError("activity must not spawn")):
+    for event, now in (("UserPromptSubmit", 100), ("PostToolUse", 105), ("PostToolUse", 111), ("Stop", 115)):
+        with patch.object(hook_state.time, "time", return_value=now):
+            if event == "Stop":
+                with patch.object(hook_state, "load_payload", return_value=(dict(payload, hook_event_name=event), "")), \
+                     patch.object(hook_state, "hook_repo", return_value=repo), patch.object(hook_state, "relay_turn"):
+                    hook_state.cmd_relay(None)
+            else:
+                hook_state.live_thread_hint(dict(payload, hook_event_name=event))
+        row = json.loads(path.read_text())
+        assert row["state"] == ("idle" if event == "Stop" else "busy"), row
+        assert row["updated_at"] == (100 if now == 105 else now), row
+        assert row["since"] == (115 if event == "Stop" else 100), row
+        assert "never persist" not in path.read_text()
+    assert not (repo / ".oms/hooks/events.jsonl").exists()
+    assert not (repo / ".oms/threads").exists()
+    before = path.read_bytes()
+    for overrides in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_PANEL_MAIN_ATTEMPT": ""},
+                      {"OMS_PANEL_SESSION": "ordinary"}, {"OMS_ROOM_PARTICIPANT": "../escape"}):
+        with patch.dict(os.environ, overrides):
+            hook_state.record_panel_activity(dict(payload, hook_event_name="UserPromptSubmit"))
+        assert path.read_bytes() == before
+    # A resume uses a fresh attempt, so an old heartbeat cannot suppress its first update.
+    with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": "fresh"}), patch.object(hook_state.time, "time", return_value=116):
+        hook_state.record_panel_activity(dict(payload, hook_event_name="PostToolUse"))
+    assert json.loads(path.read_text())["since"] == 116
+    path.write_text("[" * 1500 + "0" + "]" * 1500)
+    with patch.object(hook_state.time, "time", return_value=117):
+        hook_state.record_panel_activity(dict(payload, hook_event_name="UserPromptSubmit"))
+    assert json.loads(path.read_text())["state"] == "busy"
+    path.unlink()
+    target = repo / "untouched"
+    target.write_text("private")
+    path.symlink_to(target)
+    with patch.object(hook_state.time, "time", return_value=117):
+        hook_state.record_panel_activity(dict(payload, hook_event_name="UserPromptSubmit"))
+    assert path.is_symlink() and target.read_text() == "private"
+PYTEST
+}
+
+test_panel_main_activity
 test_classifier_boundaries
 test_peer_tail_is_bounded
 test_explicit_goal_rotation

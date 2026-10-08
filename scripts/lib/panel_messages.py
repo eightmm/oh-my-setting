@@ -84,8 +84,8 @@ def readable_text(text):
     return readable(str(text or "")[:MAX_TEXT], "\n", True)
 
 
-def tab_body(report, width, cap, navigation, unicode=True):
-    """Rows (text, action, selected) for the Messages tab: the filter line, then the log window."""
+def tab_body(report, width, cap, navigation, unicode=True, pairs=()):
+    """Rows (text, action, selected) for the Messages tab: the filter line, the pair rows, then the log window."""
     state = navigation.setdefault("messages_view", {"selected": None, "open": None, "filter": 0, "scroll": 0})
     room = mapping(report.get("room"))
     name_of, mains, me, chosen = _people(report, navigation)
@@ -104,7 +104,7 @@ def tab_body(report, width, cap, navigation, unicode=True):
         state["reveal"] = True
     if state.get("open") not in ids:
         state["open"] = None
-    budget = max(1, cap - 1)
+    budget = max(1, cap - 1 - len(pairs))
     state["viewport"] = budget
     body, starts = [], {}
     for r in rows:
@@ -126,7 +126,7 @@ def tab_body(report, width, cap, navigation, unicode=True):
     head = "Filter: %s (%d)%s%s" % (label, len(rows), "  · loading earlier messages..." if loading else "",
                                     "  · %d-%d of %d" % (scroll + 1, min(len(body), scroll + budget), len(body))
                                     if len(body) > budget else "")
-    out = [(head, None, False)]
+    out = [(head, None, False)] + [(text, target, False) for text, target in pairs]
     if not rows:
         out.append(("Reading messages..." if loading else "No messages in this room yet", None, False))
     out += [(text, ("message", ident) if header else None, header and ident == state["selected"])

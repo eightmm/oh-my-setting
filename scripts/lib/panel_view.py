@@ -43,7 +43,7 @@ def activity(state, frame=None, unicode=True):
     if state in LIVE_STATES:
         return (("⠋⠙⠹⠸" if unicode else "|/-\\")[frame % 4]
                 if frame is not None else "●" if unicode else "*")
-    return {"done": "✓" if unicode else "+", "failed": "!", "timed_out": "!",
+    return {"idle": "○" if unicode else "o", "done": "✓" if unicode else "+", "failed": "!", "timed_out": "!",
             "blocked": "!", "waiting_input": "?", "waiting_approval": "⚑" if unicode else "A",
             "review": "◇" if unicode else "o"}.get(state, "·" if unicode else "-")
 
@@ -607,6 +607,8 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     main = next((row for row in listing(attempts.get("active_recent")) + listing(attempts.get("recent"))
                  if main_attempt and row.get("attempt_id") == main_attempt), {})
     metadata = mapping(main.get("panel"))
+    from room_view import main_state, main_words, nodes
+    shown_mains = {m.get("attempt"): m for m in nodes(report) if m.get("role") == "main"}
     if main_attempt and not roots:
         roots = [{"id": main_attempt, "title": "MAIN / " + PROVIDER_NAMES.get(provider, provider),
                   "label": metadata.get("label"), "state": main.get("state"), "groups": []}]
@@ -712,14 +714,16 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     plans = []
     for root in roots:
         prelude = []
-        title = root["title"] + (" / " + root["state"] if root["state"] else " / ownership unrecorded")
+        shown_main = shown_mains.get(root["id"])
+        state_word = main_words(shown_main, unicode) if shown_main else root["state"]
+        title = root["title"] + (" / " + state_word if state_word else " / ownership unrecorded")
         if main_attempt:
             title = "MAIN / " + PROVIDER_NAMES.get(main.get("provider") or provider, provider)
             prelude += [(line, None) for line in wrapped("Goal: " + (metadata.get("label") or "Native task not recorded"),
                                                        width - 4, 1 if compact else 2)]
-            prelude.append(("%s %s / %s / %s" % (activity(main.get("state"), frame, unicode),
+            prelude.append(("%s %s / %s / %s" % (activity(main_state(shown_main) if shown_main else main.get("state"), frame, unicode),
                 MODEL_NAMES.get(metadata.get("model"), metadata.get("model")) or "model unrecorded",
-                metadata.get("effort") or "effort unrecorded", main.get("state") or "unobserved"), "dim"))
+                metadata.get("effort") or "effort unrecorded", state_word or "unobserved"), "dim"))
         elif root.get("label") and not compact:
             prelude = [(line, None) for line in wrapped(root["label"], width - 4, 2)]
         if not root["groups"]:

@@ -189,12 +189,12 @@ edges, and a particle on a live edge moves toward its consumer. Child status
 names its main. Cards stay bounded in width instead of stretching a lone worker
 across the terminal.
 
-Row 1 of the graph and the tree is the goal banner: `◎ GOAL  <plan goal>` in the head colour with a
+The goal banner sits under the header (`OMS · …`, row 1), the usage line (row 2) and the main tabs with their Needs review / Past work rows, above the lanes; the tree puts it under its header and usage card. It reads `◎ GOAL  <plan goal>` in the head colour with a
 progress bar and counts right-aligned (`▕██████░░░░▏ 6/9 verified · 1 review · 2 claimed`; ASCII
 `@ GOAL` and `[######....]`). A goal too long for the row wraps to a second row before it is cut, and
-the progress never leaves row 1. Clicking the banner selects the `("tab", "plan")` target. Without an
+the progress stays on its first row. Clicking the banner selects the `("tab", "plan")` target. Without an
 active plan (none, no goal, or idle for 7 days) it reads `◎ No shared goal · oms agent-plan init --goal
-TEXT` in dim style. While `oms land status --json` reports `active: true` (a probe of the land lock, never the receipt), one more row reads `LANDING <sha7> · <step> · <N>m`. The `OMS · …` header moves to row 2. `oms agent-plan claim` run by a panel main
+TEXT` in dim style. While `oms land status --json` reports `active: true` (a probe of the land lock, never the receipt), one more row reads `LANDING <sha7> · <step> · <N>m`. `oms agent-plan claim` run by a panel main
 also records its room participant (`claimed_by_participant`), so two mains of one provider differ; a
 main's lane card then shows `Task: <id> · <state>`, `Now: <declared status>` and an activity line
 (`2 workers running · 1 needs you · last message 3m ago`), or a dim `no status yet`; it is six rows
@@ -214,18 +214,14 @@ minutes on every hook and `overdue` from fifteen; the asker's own hook records o
 `Needs you` list shows the question from twenty minutes. A `--kind answer` without
 `--reply-to` links the one open question from that recipient, or is refused with the ids.
 
-A `BETWEEN MAINS · N pairs · M unread` box under the tabs, with its own border,
-holds one row per pair of mains that exchanged mail, named like the tabs
-(`#2 Sol 6.1`). With lanes the row is a link between the two lane columns:
-`◀`/`▶` mark each direction that has mail, the counts sit on the line
-(`→85 ←16 · 7 new`, relative to the left main) and a main in between shows `┼`;
-without lanes, or when both ends share a lane column, the row is text
-(`#1 Opus 5.5 ⇄ #2 Sol 6.1  →16 ←85 · 7 new`). Unread pairs come first, then the most
-recent; at most four rows plus `+N more pairs`. A dim `last:` line shows the newest
-message between mains. Clicking a pair row (or moving onto it with the arrow keys)
-shows the pair's last six messages in DETAIL, oldest first, from the room snapshot,
-which keeps only the room's latest 12 messages. A board shorter than 32 rows shows
-`Between mains: N pairs · M unread` instead. The header holds one usage
+The Messages tab opens with the pair summary, one row per pair of mains that exchanged
+mail, named like the tabs (`#1 Opus 5.5 ⇄ #2 Sol 6.1  →16 ←85 · 7 new`, counts relative to the left
+main). Unread pairs come first, then the most recent; at most four rows plus `+N more pairs`,
+then the message list. Clicking a pair row (or moving onto it with the arrow keys)
+switches the box to DETAIL and shows the pair's last six messages, oldest first, from the room
+snapshot, which keeps only the room's latest 12 messages. The top of the board carries no
+between-mains line. When no main in a lane row has an advisor or reviewer, the per-lane
+`◇ Advisors: none active` rows are dropped (the footer offers `a Ask advisor`). The header holds one usage
 line (`Claude 66% week · ctx 73% │ Codex 2% week · ctx 84%`; the model-call totals
 stay in the control/tree USAGE card). Truncation reads `…` (`...` in ASCII mode).
 `⚑` (ASCII `A`) marks a call waiting for approval, `?` one waiting for input.
@@ -236,7 +232,9 @@ whole fields of its last two status lines. A notice shows on a short board in pl
 of the key hints. Board text is written for
 people: states read `running`, `finished` or `needs approval`, call exits and
 provider status lines are dropped from messages, and the detail says whether its
-main reviewed a result instead of showing internal fields. Clicking another main's
+main reviewed a result instead of showing internal fields. A main reads `working`
+during a hook-recorded turn, `idle · Nm` after Stop (or a stale busy signal plus
+90 seconds of unchanged native-pane output), and `live` until its first activity signal. Clicking another main's
 tab selects it and shows its detail; clicking the tab of the main already shown
 (or its card) opens its proven original conversation. Left/right arrows move
 between mains and move the detail with them. Tabs that do not fit shrink in steps (task text, counts, names, one marker, the

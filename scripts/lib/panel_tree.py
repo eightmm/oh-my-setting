@@ -6,7 +6,7 @@ from panel_view import (ATTENTION_STATES, PALETTE, activity, box_edge, box_row, 
                         menu_rows, status_alerts, tone, usage_words, worker_rows, wrapped)
 from room_view import (action as member_action, call_order, context_note, open_count, call_span, footer_hints, live_unread,
                        goal_banner, main_names, model_name, native_advisors, nodes, plan_idle, readable, said,
-                       settler, spawn_bar, window_order, call_classifier, CALL_GROUPS, declared_status)
+                       settler, spawn_bar, window_order, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
 
 
 def render_tree(report, width, height, color=False, unicode=True, frame=None, menu=False,
@@ -98,8 +98,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         action = ("chat", main["participant"])
         folded = main["participant"] in collapsed
         toggle = ("▸" if folded else "▾") if unicode else (">" if folded else "v")
-        state = "exited" if main["state"] == "done" else main["state"]
-        said_state = state if state == "exited" else said(state)
+        state = main_state(main)
+        said_state = main_words(main, unicode)
         model = names.get(main["participant"]) or model_name(main)
         # The node carries one mark: the fold arrow, or its state where there is nothing to fold.
         label = "%s %s%s" % (toggle if attached else activity(state, frame, unicode),
@@ -114,10 +114,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             reviews = sum(classify(m) == "review" for m in attached)
             if reviews:
                 status += sep + "Needs review (%s)" % reviews
-        add(label if width < 60 else label + sep + status, "codex" if main.get("provider") == "codex" else "main",
+        add(label if width < 60 else label + sep + status, "dim" if state == "idle" else "codex" if main.get("provider") == "codex" else "main",
             action, bool(attached))
         if width < 60:
-            add("  " + status, tone(state), action)
+            add("  " + status, "dim" if state == "idle" else tone(state), action)
         title = main.get("title")
         if title and title != "Native task not recorded":
             for line in wrapped(title, max(1, content_width - 7), 2):
@@ -184,13 +184,13 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     heading = "OMS / " + (clean(room.get("title") or room.get("id")) or "Work room")
     banner = [{"text": clipped(text, width), "style": style, "action": ("tab", "plan")}
               for text, style in goal_banner(report, width, unicode)] if height >= 10 else []
-    head = banner + [{"text": clipped(heading, width), "style": "main"}]
+    head = [{"text": clipped(heading, width), "style": "main"}]
     head += [{"text": clipped(alert, width), "style": "bad"} for alert in status_alerts(report)]
     readings = mapping(report.get("provider_status"))
     blank = not usage_words(report, unicode) and not any(
         mapping(readings.get(key)).get(field) is not None for key in ("claude", "codex")
         for field in ("weekly_used", "context_left"))
-    if blank and boxed and height >= 20 and budget - len(head) >= 5:
+    if blank and boxed and height >= 20 and budget - len(head) - len(banner) >= 5:
         # Nothing to read: one line says so instead of a box of dashes.
         head.append({"text": clipped("Usage readings unavailable (Claude, Codex)", width), "style": "dim"})
     elif boxed and height >= 20:
@@ -199,7 +199,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         if summary and len(usage) > 2:
             labels += ["+%s models / expand for more" % (len(usage) - 2)]
         labels = labels or ["No reported calls"]
-        maximum = max(2, budget - len(head) - 9)
+        maximum = max(2, budget - len(head) - len(banner) - 9)
         if len(labels) > maximum:
             labels = labels[:maximum - 1] + ["+%s models / expand for more" % (len(labels) - maximum + 1)]
         wide = width >= 84 and not summary
@@ -219,17 +219,18 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         head.append({"text": box_edge("USAGE / W used, C left" if content_width < 40 else "USAGE", width, unicode), "style": "dim"})
         head += [{"text": box_row(line, width, unicode), "style": style} for line, style in content]
         head.append({"text": box_edge("", width, unicode, "bottom"), "style": "dim"})
-    elif budget - len(head) >= 5:
+    elif budget - len(head) - len(banner) >= 5:
         head += [{"text": clipped(line, width), "style": "dim"} for line in header_rows(report, width)]
-    if budget - len(head) >= 5:
+    if budget - len(head) - len(banner) >= 5:
         unread = live_unread(report, members, settled)
         mailbox = "Messages: %s unread for live participants" % unread
         if not summary:
             mailbox += sep + "%s read" % room.get("received_count", 0) + sep + "%s answered" % room.get("answered_count", 0)
         head.append({"text": clipped(mailbox, width), "style": "alert" if unread else "dim"})
     # The viewport owns its borders, so scrolling never leaves an open card.
-    if boxed and budget - len(head) < 3:
-        head = head[:len(banner) + 1 + len(status_alerts(report))]
+    if boxed and budget - len(head) - len(banner) < 3:
+        head = head[:1 + len(status_alerts(report))]
+    head += banner
     head = head[:budget]
     room_budget = max(0, budget - len(head) - (2 if boxed else 0))
     body = rows
