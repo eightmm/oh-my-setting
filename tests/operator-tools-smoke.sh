@@ -4899,6 +4899,14 @@ with patch("panel_chats.windows", return_value={}), patch("panel_chats.native_in
     assert reading["codex"]["source"] == "main ambiguous", reading
     reading = collect(tree_room, main_attempt=main_attempts["codex"])
     assert reading["codex"]["participant"] == main_attempts["codex"], reading
+# Weekly use is the account's: with several mains of one provider the board still shows it; context stays per main.
+codex_mains = [m["participant"] for m in nodes(tree_room) if m.get("role") == "main" and m.get("provider") == "codex"]
+if len(codex_mains) > 1:
+    with patch("panel_chats.windows", return_value={who: [{"pane": "%%%d" % n}] for n, who in enumerate(codex_mains)}), \
+            patch("panel_chats.current_models", return_value={}), \
+            patch("panel_metrics.pane_reading", side_effect=[{"weekly_used": 15, "context_left": 80}, {"weekly_used": 22}] * 4):
+        reading = collect(tree_room, repo=project)
+        assert reading["codex"]["weekly_used"] == 22 and reading["codex"]["context_left"] is None, reading
 with patch("panel_metrics.subprocess.run", side_effect=[
         subprocess.CompletedProcess([], 0, "99\t0\n"),
         subprocess.CompletedProcess([], 0, "GPT-6-Sol · Context 83% left · weekly 61% left\n")]) as pane_probe:

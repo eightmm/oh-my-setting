@@ -150,6 +150,18 @@ def collect(report, main_attempt=None, now=None, repo=None):
             row.update(reading)
             if main["state"] in {"done", "failed", "cancelled", "timed_out", "abandoned"}:
                 row["context_left"] = None
+        elif len(selected) > 1:
+            # Weekly use belongs to the account, so any of these mains can show it; context stays per main.
+            weeks = []
+            for main in selected:
+                reading = cached(main.get("consumer"), now) if provider == "claude" else {}
+                targets = panes.get(main["participant"], [])
+                if reading.get("weekly_used") is None and len(targets) == 1:
+                    reading = pane_reading(targets[0], provider)
+                if percent(reading.get("weekly_used")) is not None:
+                    weeks.append(percent(reading.get("weekly_used")))
+            if weeks:
+                row.update(weekly_used=max(weeks), source="account")
         output[provider] = row
     return output
 
