@@ -854,11 +854,10 @@ test_project_doctor_warns_structure_drift() {
     fail "structure drift must warn, not fail"
   printf '%s' "$out" | grep -Fq 'train_root.py' || fail "missing stray-python warning"
   printf '%s' "$out" | grep -Fq 'NOTES.md' || fail "missing markdown-outside-docs warning"
-  printf '%s' "$out" | grep -Fq 'exp.ipynb' || fail "missing notebook warning"
-  printf '%s' "$out" | grep -Fq 'src/ layout' || fail "missing src layout warning"
-  printf '%s' "$out" | grep -Fq 'gitignored dirs' || fail "missing tracked-in-ignored warning"
-  printf '%s' "$out" | grep -Fq 'big model.ckpt' ||
-    fail "missing over-10MB warning (filename with space must survive)"
+  case "$out" in *'exp.ipynb'*) ;; *) fail "missing notebook warning" ;; esac
+  case "$out" in *'src/ layout'*) ;; *) fail "missing src layout warning" ;; esac
+  case "$out" in *'gitignored dirs'*) ;; *) fail "missing tracked-in-ignored warning" ;; esac
+  case "$out" in *'big model.ckpt'*) ;; *) fail "missing over-10MB warning (filename with space must survive)" ;; esac
 
   # High cardinality: head's early exit under pipefail must not silence the
   # warning (the exact bug: SIGPIPE wiped the captured output).
@@ -7252,8 +7251,9 @@ EOF
     fake_planner "$verify"
     out="$(HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --to codex 2>&1)" &&
       fail "a verify that delegates must be refused at propose: $verify: $out"
-    printf '%s' "$out" | grep -Fq 'verify runs delegating suite' ||
-      fail "the refusal must name the delegating suite ($verify): $out"
+    # A builtin match: no pipe that can fail under load while the text is there.
+    case "$out" in *'verify runs delegating suite'*) ;; *)
+      fail "the refusal must name the delegating suite ($verify): $out" ;; esac
     [ ! -f "$project/.oms/plan/tasks.json" ] || fail "a refused proposal must not touch the task board"
   done
   fake_planner 'bash -n tests/autopilot-smoke.sh && shellcheck -x -S warning tests/autopilot-smoke.sh && grep -F tests/autopilot-smoke.sh tests/run.sh && cat tests/autopilot-smoke.sh >/dev/null && wc -l tests/autopilot-smoke.sh >/dev/null && head -n 1 tests/autopilot-smoke.sh >/dev/null && tail -n 1 tests/autopilot-smoke.sh >/dev/null && test -f tests/autopilot-smoke.sh && [ -f tests/autopilot-smoke.sh ]'
