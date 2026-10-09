@@ -17159,6 +17159,10 @@ d = json.load(open(p))
 d["tasks"]["t1"]["updated"] = "2020-01-01T00:00:00Z"
 json.dump(d, open(p, "w"))
 PY
+  "$SH" --repo "$d" status | grep -Fq "stale review t1:" ||
+    fail "plain status must name a review nobody has answered"
+  "$SH" --repo "$d" list | grep -Fq "STALE(review" ||
+    fail "plan list must tag a stale review"
   # Aged review is only reclaimed with the opt-in flag.
   "$SH" --repo "$d" reclaim >/dev/null
   "$SH" --repo "$d" show --id t1 | grep -Fq '"state": "review"' ||

@@ -1406,6 +1406,8 @@ if act == "list":
         # The state column keeps saying what is stored; the tag says how that
         # stored state reads now.
         tag = (" EXPIRED(%s)" % expiry_note(t)) if claim_expired(t) else ""
+        if review_expired(t):
+            tag = " STALE(review %dh old)" % (claim_age(t) // 3600)
         print("%-10s %-9s %s%s%s%s" % (t["id"], t["state"], t["title"], prov, dep, tag))
     sys.exit(0)
 
@@ -1465,6 +1467,11 @@ if act == "status":
     for t in ordered:
         if claim_expired(t):
             print("expired claim %s: %s" % (t["id"], expiry_note(t)))
+    # Nothing reclaims a review by default, so an abandoned one would sit
+    # unseen in text output while JSON readers already flag it.
+    for r in stale_review:
+        print("stale review %s: %dh without a verdict (oms agent-plan reclaim --include-review)"
+              % (r["id"], r["age_seconds"] // 3600))
     blocked = [t for t in ordered if t["state"] == "blocked"]
     for t in blocked:
         print("blocked %s: %s" % (t["id"], t.get("reason", "")))
