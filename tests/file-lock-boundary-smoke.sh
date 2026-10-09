@@ -40,6 +40,16 @@ test_temp_state_locks_under_the_temp_root() {
     "$home/.cache/oh-my-setting/locks/"tasks.json.*.lock) ;;
     *) fail "state under HOME must keep the cache lock directory, got $lock" ;;
   esac
+  # A fixture under /tmp outside TMPDIR (a suite's sibling state directory)
+  # still locks under the temp root, not in the cache.
+  lock="$(HOME="$home" TMPDIR="$tmp_root" bash -c '
+    unset OMS_LOCK_DIR
+    . "$1/scripts/lib/file-lock.sh"
+    oms_file_lock_path_for_file "/tmp/oms-lock-sibling-$$/state/tasks.json"' _ "$ROOT")"
+  case "$lock" in
+    /tmp/oh-my-setting-locks-"$(id -u)"/tasks.json.*.lock) ;;
+    *) fail "a /tmp fixture outside TMPDIR must lock under /tmp, got $lock" ;;
+  esac
   rm -rf "$tmp_root/oh-my-setting-locks-$(id -u)"
   ln -s "$TMP/elsewhere" "$tmp_root/oh-my-setting-locks-$(id -u)"
   lock="$(HOME="$home" TMPDIR="$tmp_root" bash -c '

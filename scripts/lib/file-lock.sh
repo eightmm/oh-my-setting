@@ -80,15 +80,20 @@ oms_file_lock_path_for_file() {
 # lock open truncates; anything else falls back to the cache directory.
 oms_file_lock_dir_for_path() {  # ABSOLUTE_STATE_PATH
   local abs="$1"
-  local tmp_root="${TMPDIR:-/tmp}"
+  local root="${TMPDIR:-/tmp}"
+  local tmp_root=""
   local candidate
 
   [ -z "${OMS_LOCK_DIR:-}" ] || { oms_file_lock_dir; return 0; }
-  tmp_root="${tmp_root%/}"
+  root="${root%/}"
+  # Suites export TMPDIR=$TMP/tmp but keep fixtures in sibling directories, so
+  # /tmp outside HOME counts too: those locks used to stay in the cache.
   case "$abs" in
-    "$tmp_root"/*) ;;
-    *) oms_file_lock_dir; return 0 ;;
+    "$root"/*) tmp_root="$root" ;;
+    "${HOME%/}"/*) ;;
+    /tmp/*) tmp_root=/tmp ;;
   esac
+  [ -n "$tmp_root" ] || { oms_file_lock_dir; return 0; }
   candidate="$tmp_root/oh-my-setting-locks-${UID:-$(id -u)}"
   if [ ! -e "$candidate" ]; then
     mkdir -m 700 "$candidate" 2>/dev/null || true
