@@ -466,7 +466,14 @@ run_job() {
     *) finish failed "pushed $SHORT but ci $conclusion"; return 1 ;;
   esac
   local install installed_tree
-  if [ "$UPDATE" -eq 1 ] && install="$(install_root)"; then
+  # A skipped update records why, so a passed land that left the install
+  # behind is distinguishable from one that could not find it.
+  if [ "$UPDATE" -ne 1 ]; then
+    rset update.reason=no-update
+  elif ! install="$(install_root)"; then
+    rset update.reason=no-install-for-remote
+  fi
+  if [ "$UPDATE" -eq 1 ] && [ -n "${install:-}" ]; then
     if [ "$conclusion" != success ]; then
       finish blocked "pushed $SHORT; install update requires successful CI (ci $conclusion)"
       return 1
@@ -536,7 +543,8 @@ if sys.argv[4] and r.get("sha") != sys.argv[4]:
     print("  note: newest land in this repository, not this worktree's HEAD %s" % sys.argv[4][:7])
 print("  gate: %s (%ss)  push: %s  update: %s  ci: %s%s" % (
     "ok" if g.get("rc") == 0 else g.get("rc", "-"), g.get("seconds", "-"),
-    "ok" if p.get("rc") == 0 else p.get("rc", "-"), "ok" if u.get("rc") == 0 else u.get("rc", "-"),
+    "ok" if p.get("rc") == 0 else p.get("rc", "-"),
+    "ok" if u.get("rc") == 0 else "%s%s" % (u.get("rc", "-"), " (%s)" % u["reason"] if u.get("reason") else ""),
     c.get("conclusion", "-"), " (run %s)" % c["run_id"] if c.get("run_id") else ""))
 if r.get("summary"):
     print("  %s" % r["summary"])

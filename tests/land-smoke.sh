@@ -389,6 +389,8 @@ grep -q 'ci run-skipped' "$TMP/run-skipped.out" || fail "skipped run reason miss
 gate 'echo zero padded wait probe'
 OMS_TEST_CI_RESULT=success "$LAND" --repo "$repo" --wait --no-update --ci-wait 08 \
   > "$TMP/padded.out" 2>&1 || fail "--ci-wait 08 must mean eight seconds: $(cat "$TMP/padded.out")"
+"$LAND" status --repo "$repo" | grep -q 'update: skipped (no-update)' ||
+  fail "a skipped update must name its reason: $("$LAND" status --repo "$repo")"
 # A commit without workflows has no run to wait for.
 git -C "$repo" rm -q .github/workflows/test.yml
 gate 'echo no workflow probe'
