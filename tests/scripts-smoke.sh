@@ -1651,6 +1651,42 @@ test_fail_ledger_list_limit_names_omissions() {
     fail "no limit keeps every row: $out"
 }
 
+test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
+  local project="$TMP/state-root-scratch"
+  local managed="$TMP/state-root-managed"
+  local parent="env -u OMS_HARNESS_CHILD -u OMS_HARNESS_DELEGATE_DEPTH OMS_DELEGATE_WORKTREE_ROOT=$TMP/state-root-managed"
+  local probe='. "$1/scripts/lib/agent-memory-common.sh"; oms_state_root "$2"'
+  local scratch main plain
+
+  make_committed_repo "$project"
+  main="$(cd "$project" && pwd -P)"
+  scratch="$($parent "$ROOT/scripts/scratch-worktree.sh" add --repo "$project" --owner-pid $$)" ||
+    fail "scratch add failed"
+  mkdir -p "$scratch/src"
+  [ "$($parent bash -c "$probe" _ "$ROOT" "$scratch/src")" = "$main" ] ||
+    fail "a parent's scratch state must resolve to the main checkout"
+  # Workers and unmarked linked worktrees keep the worktree-local root.
+  [ "$($parent OMS_HARNESS_CHILD=1 bash -c "$probe" _ "$ROOT" "$scratch")" = "$scratch" ] ||
+    fail "a harness child in a scratch must keep its own state root"
+  [ "$($parent OMS_HARNESS_DELEGATE_DEPTH=1 bash -c "$probe" _ "$ROOT" "$scratch")" = "$scratch" ] ||
+    fail "a delegated worker in a scratch must keep its own state root"
+  # The parent's gate failures reach the shared ledger and outlive the scratch;
+  # a worker's stay on its own surface.
+  $parent "$ROOT/scripts/fail-ledger.sh" --repo "$scratch/src" record --kind cmd \
+    --cmd scratch-gate --exit 1 --summary parent >/dev/null 2>&1 || fail "parent record failed"
+  grep -q '"summary": "parent"' "$main/.oms/failures.jsonl" && [ ! -e "$scratch/.oms/failures.jsonl" ] ||
+    fail "a parent's scratch failure must land in the main checkout's ledger"
+  $parent OMS_HARNESS_CHILD=1 "$ROOT/scripts/fail-ledger.sh" --repo "$scratch" record --kind cmd \
+    --cmd scratch-gate --exit 1 --summary child >/dev/null 2>&1 || fail "child record failed"
+  grep -q '"summary": "child"' "$scratch/.oms/failures.jsonl" &&
+    ! grep -q '"summary": "child"' "$main/.oms/failures.jsonl" ||
+    fail "a harness child's failure must stay in the scratch's ledger"
+  plain="$managed/oh-my-setting-scratch.plain/wt"
+  git -C "$project" worktree add --quiet --detach "$plain" HEAD
+  [ "$($parent bash -c "$probe" _ "$ROOT" "$plain")" = "$(cd "$plain" && pwd -P)" ] ||
+    fail "a linked worktree without a scratch marker must keep its own state root"
+}
+
 test_run_ledger_records_and_lists() {
   local project="$TMP/run-ledger"
   make_committed_repo "$project"

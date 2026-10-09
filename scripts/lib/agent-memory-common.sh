@@ -10,6 +10,9 @@ AGENT_MEMORY_DB_HELPER="$AGENT_MEMORY_COMMON_LIB_DIR/agent-memory-db.py"
 . "$AGENT_MEMORY_COMMON_LIB_DIR/oms-common.sh"
 # shellcheck source=provider-registry.sh
 . "$AGENT_MEMORY_COMMON_LIB_DIR/provider-registry.sh"
+# shellcheck source=harness-residue.sh
+declare -F oms_harness_safe_residue_worktree >/dev/null ||
+  . "$AGENT_MEMORY_COMMON_LIB_DIR/harness-residue.sh"
 
 # Normalize a repo argument to its git worktree root so shared state does not
 # silently fork when a command runs from a subdirectory (repo/src/.oms vs
@@ -23,6 +26,46 @@ oms_repo_root() {
   else
     (cd "$repo" && pwd)
   fi
+}
+
+# Where a parent's shared .oms state belongs, as opposed to the tree its
+# commands operate on (oms_repo_root). A parent session working in its own
+# `oms scratch-worktree` keeps plan, ledger and landing rows in the checkout
+# that owns the git common dir, so they reach the shared board and survive
+# scratch removal. The scratch must verify as one (marker beside it, matching
+# registration) and the first `git worktree list` entry must own the common
+# dir. Workers and every other linked worktree keep their own root:
+# the worker guard's .oms surface is worktree-local. Unverifiable -> own root.
+oms_state_root() {
+  local root="" physical="" parent="" managed="" marker="" kind="" temporary=""
+  local common="" main=""
+  root="$(oms_repo_root "$1")" || return 1
+  root="${root//$'\r'/}"
+  if [ "${OMS_HARNESS_CHILD:-0}" = 0 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] &&
+    physical="$(oms_harness_physical_dir "$root" 2>/dev/null)" &&
+    managed="$(oms_harness_physical_dir "$(oms_harness_delegate_worktree_root)" 2>/dev/null)"; then
+    parent="${physical%/wt}"
+    marker="$parent/.oh-my-setting-tmp"
+    case "$parent" in "$managed"/oh-my-setting-scratch.*) ;; *) parent="" ;; esac
+    if [ -n "$parent" ] && [ "$physical" = "$parent/wt" ] && [ -f "$marker" ] && [ ! -L "$marker" ]; then
+      kind="$(oms_harness_read_marker_value "$marker" kind)"
+      temporary="$(oms_harness_read_marker_value "$marker" temporary)"
+      if [ "$kind" = oh-my-setting-temp ] && [ "$temporary" = 1 ] &&
+        oms_harness_safe_residue_worktree "$managed" "$parent" \
+          "$(oms_harness_read_marker_value "$marker" repo)" \
+          "$(oms_harness_read_marker_value "$marker" worktree)" &&
+        common="$(oms_harness_git_path_physical "$physical" --git-common-dir)" &&
+        main="$(git -C "$physical" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')" &&
+        main="$(oms_harness_physical_dir "${main//$'\r'/}" 2>/dev/null)" &&
+        [ "$main" != "$physical" ] &&
+        [ "$(git -C "$main" rev-parse --is-bare-repository 2>/dev/null)" = false ] &&
+        [ "$(oms_harness_git_path_physical "$main" --git-dir 2>/dev/null)" = "$common" ]; then
+        printf '%s\n' "$main"
+        return 0
+      fi
+    fi
+  fi
+  printf '%s\n' "$root"
 }
 
 # Best-effort identity of the agent CLI running this process, for attribution

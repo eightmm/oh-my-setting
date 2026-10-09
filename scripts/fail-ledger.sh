@@ -209,7 +209,10 @@ case "$KIND" in
   *) fail "--kind must be one of: cmd, hook, verify, plan-run, delegate, patch-land" ;;
 esac
 STATE_ROOT="$(oms_repo_root "$REPO")" || fail "bad --repo"
-LEDGER="${OMS_FAIL_LEDGER:-$STATE_ROOT/.oms/failures.jsonl}"
+# Rows describe STATE_ROOT's tree; a parent's scratch files them in the shared
+# ledger so other mains see them and they outlive the scratch.
+LEDGER_ROOT="$(oms_state_root "$STATE_ROOT")" || fail "bad --repo"
+LEDGER="${OMS_FAIL_LEDGER:-$LEDGER_ROOT/.oms/failures.jsonl}"
 
 # Read-time retirement clock for automatic hook rows. The deployed baseline is
 # not measured yet, so the default sits behind an override.
