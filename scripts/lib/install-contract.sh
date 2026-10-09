@@ -21,7 +21,10 @@ oms_strip_cr() {
   printf '%s\n' "${value//$'\r'/}"
 }
 
-OMS_INSTALL_CONTRACT_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)"
+case "${BASH_SOURCE[0]}" in
+  */*) OMS_INSTALL_CONTRACT_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)" ;;
+  *) OMS_INSTALL_CONTRACT_LIB_DIR="$(pwd -P)" ;;
+esac
 if [ -f "$OMS_INSTALL_CONTRACT_LIB_DIR/platform.sh" ]; then
   # shellcheck source=scripts/lib/platform.sh
   . "$OMS_INSTALL_CONTRACT_LIB_DIR/platform.sh"

@@ -6,7 +6,10 @@
 # exec into a freshly cloned checkout, and a file descriptor is not a portable
 # cross-exec contract on Bash 3.2 and Windows Git Bash.
 
-OMS_INSTALL_LIFECYCLE_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)"
+case "${BASH_SOURCE[0]}" in
+  */*) OMS_INSTALL_LIFECYCLE_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)" ;;
+  *) OMS_INSTALL_LIFECYCLE_LIB_DIR="$(pwd -P)" ;;
+esac
 # shellcheck source=scripts/lib/file-lock.sh
 . "$OMS_INSTALL_LIFECYCLE_LIB_DIR/file-lock.sh"
 

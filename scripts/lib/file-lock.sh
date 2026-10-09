@@ -1,9 +1,12 @@
 # shellcheck shell=bash
 # Shared per-file inter-process locks. Sourced, not executed.
 
-# Libraries are always sourced by a path, so the directory needs no dirname
-# process; this file is sourced over a thousand times in one gate run.
-OMS_FILE_LOCK_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
+# No dirname process: this file is sourced over a thousand times in one gate
+# run. A bare-name source has no slash to cut at.
+case "${BASH_SOURCE[0]}" in
+  */*) OMS_FILE_LOCK_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)" ;;
+  *) OMS_FILE_LOCK_LIB_DIR="$(pwd)" ;;
+esac
 
 # The kernel name cannot change within a process; ask uname once. Not
 # exported, so a child started with a different PATH still asks its own.

@@ -4,7 +4,10 @@
 
 # Shared checks and cleanup for installed agent links/skills.
 if [ -z "${ROOT:-}" ]; then
-  ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
+  case "${BASH_SOURCE[0]}" in
+    */*) ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd -P)" ;;
+    *) ROOT="$(cd ../.. && pwd -P)" ;;
+  esac
 fi
 
 # Exported state read by thin wrapper scripts.
@@ -73,7 +76,8 @@ oms_ops_latest_backup() {
   [ "$dir" != "$target" ] || dir=.
   [ -n "$dir" ] || dir=/
   if [ "$target" = / ]; then base=/; else base="${target##*/}"; fi
-  find "$dir" -maxdepth 1 -name "$base.backup.*" -print 2>/dev/null |
+  # -H: a dotfiles-managed parent (~/.codex -> elsewhere) is still searched.
+  find -H "$dir" -maxdepth 1 -name "$base.backup.*" -print 2>/dev/null |
     LC_ALL=C sort |
     tail -n 1
 }
