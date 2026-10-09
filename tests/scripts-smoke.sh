@@ -1656,12 +1656,15 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
   local managed="$TMP/state-root-managed"
   local parent="env -u OMS_HARNESS_CHILD -u OMS_HARNESS_DELEGATE_DEPTH OMS_DELEGATE_WORKTREE_ROOT=$TMP/state-root-managed"
   local probe='. "$1/scripts/lib/agent-memory-common.sh"; oms_state_root "$2"'
-  local scratch main plain
+  local scratch second main plain main_head scratch_head second_head committed
 
   make_committed_repo "$project"
   main="$(cd "$project" && pwd -P)"
   scratch="$($parent "$ROOT/scripts/scratch-worktree.sh" add --repo "$project" --owner-pid $$)" ||
     fail "scratch add failed"
+  git -C "$scratch" switch -q -c scratch-work
+  main_head="$(git -C "$main" rev-parse HEAD)"
+  scratch_head="$(git -C "$scratch" rev-parse HEAD)"
   mkdir -p "$scratch/src"
   [ "$($parent bash -c "$probe" _ "$ROOT" "$scratch/src")" = "$main" ] ||
     fail "a parent's scratch state must resolve to the main checkout"
@@ -1707,14 +1710,71 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
     fail "a scratch landing must record its tree in the main checkout's landings"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id landed | grep -q '"state": "done"' ||
     fail "a scratch landing must finish the main checkout's plan task"
-  # The detached scratch reaches the branch fence only after validating the shared landing receipt.
-  if ( cd "$scratch" && $parent "$ROOT/scripts/goal-drive.sh" --commit-task landed \
-      >"$TMP/state-root-goal.err" 2>&1 ); then
-    fail "goal-drive must require a checked-out work branch before committing"
+  second="$($parent "$ROOT/scripts/scratch-worktree.sh" add --repo "$project" --owner-pid $$)" ||
+    fail "second scratch add failed"
+  git -C "$second" switch -q -c scratch-foreign
+  [ "$($parent bash -c "$probe" _ "$ROOT" "$second")" = "$main" ] ||
+    fail "the second parent's scratch must share the main checkout's state"
+  second_head="$(git -C "$second" rev-parse HEAD)"
+  # Matching landed bytes cannot transfer the first scratch's commit authority.
+  cp "$scratch/file.txt" "$second/file.txt"
+  if ( cd "$second" && $parent "$ROOT/scripts/goal-drive.sh" --commit-task landed \
+      >"$TMP/state-root-foreign.err" 2>&1 ); then
+    fail "goal-drive must reject another scratch's completed landing receipt"
   fi
-  grep -Fq -- '--commit-task requires a checked-out work branch' "$TMP/state-root-goal.err" &&
+  grep -Fq 'no exact completed landing receipt' "$TMP/state-root-foreign.err" &&
+    grep -Fq 'landed task receipt is invalid' "$TMP/state-root-foreign.err" &&
+    [ "$(git -C "$second" rev-parse HEAD)" = "$second_head" ] ||
+    fail "a foreign landing must fail receipt validation without committing: $(cat "$TMP/state-root-foreign.err")"
+  # Freeze the existing receipt once; distinct refs make both open intents valid
+  # and non-duplicate, so an unfiltered reader would park on multiple intents.
+  python3 - "$main" "$scratch" "$second" "$scratch_head" <<'PY'
+import hashlib, json, pathlib, sys
+repo = pathlib.Path(sys.argv[1])
+task = json.loads((repo / ".oms/plan/tasks.json").read_text())["tasks"]["landed"]
+patch = pathlib.Path(task["patch"])
+if not patch.is_absolute():
+    patch = repo / patch
+frozen = repo / ".oms/plan/commit-patches/scratch-fixture.patch"
+frozen.parent.mkdir(exist_ok=True)
+frozen.write_bytes(patch.read_bytes())
+row = {"schema": 1, "kind": "commit-intent", "ts": "2026-10-10T00:00:00Z",
+       "cycle": 1, "run_id": "gd-scratch-fixture", "phase": "landed", "reason": "fixture",
+       "task_id": task["id"], "base_sha": sys.argv[4], "title": task["title"],
+       "patch": frozen.relative_to(repo).as_posix(), "paths": ["file.txt"],
+       "patch_sha256": hashlib.sha256(frozen.read_bytes()).hexdigest(),
+       "provider": task["provider"], "lease_id": task["review_lease_id"],
+       "verify_sha256": hashlib.sha256(task["verify"].replace("\r", "").encode()).hexdigest()}
+with (repo / ".oms/plan/progress.jsonl").open("a", encoding="utf-8") as handle:
+    for owner, ref, intent in ((sys.argv[2], "scratch-work", "scratch-own"),
+                               (sys.argv[3], "scratch-foreign", "scratch-other")):
+        handle.write(json.dumps(dict(row, worktree=owner, head_ref="refs/heads/" + ref,
+                                     intent_id=intent)) + "\n")
+PY
+  ( cd "$scratch" && $parent "$ROOT/scripts/goal-drive.sh" --commit-task landed \
+      >"$TMP/state-root-goal.err" 2>&1 ) ||
+    fail "goal-drive must commit its own landed intent despite another scratch's open intent: $(cat "$TMP/state-root-goal.err")"
+  if grep -Eq 'multiple-commit-intents|scratch-other' "$TMP/state-root-goal.err"; then
+    fail "another scratch's intent must be silently ignored: $(cat "$TMP/state-root-goal.err")"
+  fi
+  committed="$(git -C "$scratch" rev-parse HEAD)"
+  [ "$committed" != "$scratch_head" ] &&
+    [ "$(git -C "$scratch" symbolic-ref HEAD)" = refs/heads/scratch-work ] &&
+    [ "$(git -C "$scratch" rev-parse scratch-work)" = "$committed" ] &&
+    [ "$(git -C "$scratch" rev-parse HEAD^)" = "$scratch_head" ] &&
+    git -C "$scratch" show HEAD:file.txt | grep -Fq 'scratch work' ||
+    fail "goal-drive must create a commit containing the landed change on scratch-work"
+  [ "$(git -C "$main" rev-parse HEAD)" = "$main_head" ] &&
+    [ "$(git -C "$second" rev-parse HEAD)" = "$second_head" ] &&
     [ ! -e "$scratch/.oms/plan/tasks.json" ] && [ ! -e "$scratch/.oms/landings.jsonl" ] ||
-    fail "goal-drive must validate the main checkout's plan and landing receipt: $(cat "$TMP/state-root-goal.err")"
+    fail "goal-drive must keep commits on its scratch and durable evidence in the main checkout"
+  python3 - "$main/.oms/plan/progress.jsonl" "$scratch" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+written = [row for row in rows if row.get("kind") == "commit-intent"
+           and row.get("phase") == "committed" and row.get("intent_id") == "scratch-own"]
+assert written and all(row.get("worktree") == sys.argv[2] for row in written), written
+PY
   plain="$managed/oh-my-setting-scratch.plain/wt"
   git -C "$project" worktree add --quiet --detach "$plain" HEAD
   [ "$($parent bash -c "$probe" _ "$ROOT" "$plain")" = "$(cd "$plain" && pwd -P)" ] ||

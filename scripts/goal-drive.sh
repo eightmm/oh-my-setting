@@ -137,6 +137,7 @@ PY
 )" || fail "--provider-timeout must be a positive duration up to 24h (for example 15m)"
 
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
+REPO="$(cd "${REPO//$'\r'/}" && pwd -P)" || fail "bad --repo"
 # Plan evidence belongs to the state checkout; Git authority stays on the working tree.
 STATE_REPO="$(oms_state_root "$REPO")" || fail "bad --repo"
 STATE_REPO="$(cd "${STATE_REPO//$'\r'/}" && pwd -P)" || fail "cannot resolve the plan's repository"
@@ -539,13 +540,14 @@ intent_write() {  # PHASE REASON
     OMS_GD_PATCH="$INTENT_PATCH" OMS_GD_PATCH_SHA="$INTENT_PATCH_SHA" \
     OMS_GD_PATHS="$INTENT_PATHS" OMS_GD_TITLE="$INTENT_TITLE" \
     OMS_GD_LEASE="$INTENT_LEASE" OMS_GD_VERIFY_SHA="$INTENT_VERIFY_SHA" \
-    OMS_GD_PROVIDER="$INTENT_PROVIDER" \
+    OMS_GD_PROVIDER="$INTENT_PROVIDER" OMS_GD_WORKTREE="$REPO" \
     python3 - <<'PY' | progress_append
 import json, os
 paths = json.loads(os.environ["OMS_GD_PATHS"])
 print(json.dumps({
     "schema": 1,
     "kind": "commit-intent",
+    "worktree": os.environ["OMS_GD_WORKTREE"],
     "ts": os.environ["OMS_GD_TS"],
     "run_id": os.environ["OMS_GD_RUN"],
     "cycle": int(os.environ["OMS_GD_CYCLE"]),
@@ -568,7 +570,9 @@ PY
 
 latest_open_intent() {
   [ -f "$PROGRESS" ] || return 0
-  OMS_GD_RUN="$RUN_ID" python3 - "$REPO" "$PROGRESS" "$PLAN_FILE" "$STATE_REPO" <<'PY' | tr -d '\r'
+  OMS_GD_RUN="$RUN_ID" OMS_GD_WORKTREE="$REPO" \
+    OMS_GD_LOCAL="$([ "$STATE_REPO" = "$REPO" ] && echo 1 || echo 0)" \
+    python3 - "$REPO" "$PROGRESS" "$PLAN_FILE" "$STATE_REPO" <<'PY' | tr -d '\r'
 import hashlib, json, os, pathlib, re, subprocess, sys, tempfile
 
 repo = os.path.realpath(sys.argv[1])
@@ -914,6 +918,10 @@ with open(progress, encoding="utf-8", errors="replace") as handle:
         except Exception:
             continue
         if not isinstance(row, dict) or row.get("kind") != "commit-intent":
+            continue
+        owner = row.get("worktree")
+        if owner != os.environ["OMS_GD_WORKTREE"] and not (
+                owner is None and os.environ["OMS_GD_LOCAL"] == "1"):
             continue
         key = row.get("intent_id")
         if not isinstance(key, str) or not ident.fullmatch(key):
@@ -2033,11 +2041,14 @@ if [ -n "$COMMIT_TASK" ]; then
   [ "$TASK_RECEIPT_STATE" = "done" ] || fail "--commit-task requires a done task"
   PROVIDER="$TASK_RECEIPT_PROVIDER"
   COMMIT_RECEIPT_SHA="$TASK_RECEIPT_SHA"
-  landed_receipt="$(python3 - "$ROOT/scripts/lib" "$STATE_REPO" "$COMMIT_TASK" <<'PY' | tr -d '\r'
-import hashlib, pathlib, re, runpy, sys
+  landed_receipt="$(OMS_GD_WORKTREE="$REPO" \
+    OMS_GD_LOCAL="$([ "$STATE_REPO" = "$REPO" ] && echo 1 || echo 0)" \
+    python3 - "$ROOT/scripts/lib" "$STATE_REPO" "$COMMIT_TASK" <<'PY' | tr -d '\r'
+import hashlib, os, pathlib, re, runpy, sys
 sys.path.insert(0, sys.argv[1])
 from oms_runtime.common import read_json, read_jsonl
 repo = pathlib.Path(sys.argv[2])
+worktree = os.environ["OMS_GD_WORKTREE"]
 plan = read_json(repo / ".oms/plan/tasks.json")
 task = plan["tasks"][sys.argv[3]]
 digest = runpy.run_path(str(pathlib.Path(sys.argv[1]) / "plan-receipt.py"))["digest"](task)
@@ -2049,6 +2060,8 @@ if patch.is_symlink() or not patch.is_file() or not patch.resolve().is_relative_
 patch_sha = hashlib.sha256(patch.read_bytes()).hexdigest()
 rows = [row for row in read_jsonl(repo / ".oms/landings.jsonl")
         if row.get("event") == "complete" and row.get("task") == task["id"]
+        and (row.get("worktree") == worktree
+             or (row.get("worktree") is None and os.environ["OMS_GD_LOCAL"] == "1"))
         and row.get("plan_id") == plan.get("plan_id")
         and row.get("lease") == task.get("review_lease_id")
         and row.get("plan_done_receipt_sha") == digest and row.get("patch_sha") == patch_sha]
