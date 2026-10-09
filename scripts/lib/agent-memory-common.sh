@@ -281,8 +281,18 @@ agent_memory_sensitive_report() {  # FILE
   local file="$1"
   local begin end tier re line number region
   local prompt_lines context_lines prompt_count context_count
+  local wrap_lines wrap_count brief_first=0 brief_last=0
 
   [ -s "$file" ] || return 0
+  # Optional FIRST:LAST of the caller's own text inside a composed prompt
+  # (set by the delegate wrapper). Without it, lines are file-relative.
+  case "${OMS_SCAN_BRIEF_RANGE:-}" in
+    [0-9]*:[0-9]*)
+      brief_first="${OMS_SCAN_BRIEF_RANGE%%:*}"
+      brief_last="${OMS_SCAN_BRIEF_RANGE##*:}"
+      case "$brief_first$brief_last" in *[!0-9]*) brief_first=0 ;; esac
+      [ "$brief_first" -le "$brief_last" ] 2>/dev/null || brief_first=0 ;;
+  esac
   # `|| true`: a prompt with no harness context has no marker, grep exits 1,
   # and under pipefail the assignment would end the command substitution this
   # report runs inside -- silently dropping the whole diagnostic.
@@ -297,6 +307,7 @@ agent_memory_sensitive_report() {  # FILE
       re="$(agent_memory_machine_re)"
     fi
     prompt_lines=""; context_lines=""; prompt_count=0; context_count=0
+    wrap_lines=""; wrap_count=0
     while IFS= read -r line; do
       number="${line%%:*}"
       case "$number" in *[!0-9]*|"") continue ;; esac
@@ -308,14 +319,23 @@ agent_memory_sensitive_report() {  # FILE
       if [ "$region" = context ]; then
         context_count=$((context_count + 1))
         [ "$context_count" -gt 3 ] || context_lines="${context_lines:+$context_lines, }$number"
+      elif [ "$brief_first" -gt 0 ] && { [ "$number" -lt "$brief_first" ] || [ "$number" -gt "$brief_last" ]; }; then
+        wrap_count=$((wrap_count + 1))
+        [ "$wrap_count" -gt 3 ] || wrap_lines="${wrap_lines:+$wrap_lines, }$number"
       else
+        [ "$brief_first" -eq 0 ] || number=$((number - brief_first + 1))
         prompt_count=$((prompt_count + 1))
         [ "$prompt_count" -gt 3 ] || prompt_lines="${prompt_lines:+$prompt_lines, }$number"
       fi
     done <<EOF
 $(agent_memory_scan_input "$file" 2>/dev/null | grep -Ein "$re" | cut -d: -f1)
 EOF
-    agent_memory_sensitive_report_line "$tier" "your prompt" "$prompt_lines" "$prompt_count"
+    if [ "$brief_first" -gt 0 ]; then
+      agent_memory_sensitive_report_line "$tier" "your brief" "$prompt_lines" "$prompt_count"
+      agent_memory_sensitive_report_line "$tier" "the delegate role/wrapper text" "$wrap_lines" "$wrap_count"
+    else
+      agent_memory_sensitive_report_line "$tier" "your prompt" "$prompt_lines" "$prompt_count"
+    fi
     agent_memory_sensitive_report_line "$tier" "attached harness context" "$context_lines" "$context_count"
   done
 }

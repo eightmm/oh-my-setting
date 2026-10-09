@@ -992,11 +992,14 @@ write_minimal_change_doctrine() {
     printf '\n'
   fi
   printf '## Brief\n\n'
+  # Line range of the caller's own text, so a refusal can point inside it.
+  brief_first=$(($(grep -c '' < "$prompt_file") + 1))
   if [ -n "$BRIEF_FILE" ]; then
     cat "$BRIEF_FILE"
   else
     printf '%s\n' "$PROMPT"
   fi
+  brief_last=$(grep -c '' < "$prompt_file")
   write_context_pack_section
   if [ "$INTERACTIVE" = 1 ]; then
     printf '\nAnswer the current question concisely. Include changed files, checks, uncertainty or blockers when relevant; do not repeat a completion template on every turn. The parent owns final verification and landing.\n'
@@ -1023,7 +1026,7 @@ export OMS_DELEGATION_ID="${OMS_DELEGATION_ID:-$timestamp}"
 artifact="$ARTIFACT_DIR/$TO-$slug-$timestamp.md"
 patch_file="$ARTIFACT_DIR/$TO-$slug-$timestamp.patch"
 
-if ! ma_validate_outbound_prompt "$prompt_file"; then
+if ! OMS_SCAN_BRIEF_RANGE="$brief_first:$brief_last" ma_validate_outbound_prompt "$prompt_file"; then
   {
     printf '# %s delegate\n\n' "$TO"
     printf -- '- started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

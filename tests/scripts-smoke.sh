@@ -9583,6 +9583,18 @@ test_scrubber_refusal_names_tier_and_region() {
     fail "the report should place the machine-tier match in the caller's own prompt: $(cat "$out")"
   grep -Fq 'secret-tier match in attached harness context at line 4' "$out" ||
     fail "the report should place the secret-tier match in the attached context: $(cat "$out")"
+  # Composed delegate prompt: lines inside the brief count from the brief's
+  # first line; role/wrapper lines are labelled apart.
+  {
+    printf 'wrapper line\nrole at /hom%s/someone/r\n## Brief\n\n' 'e'
+    printf 'one-line brief /hom%s/someone/project\n' 'e'
+    printf 'tail\n'
+  } > "$project/composed.txt"
+  OMS_SCAN_BRIEF_RANGE=5:5 bash -c '. "$1/scripts/lib/agent-memory-common.sh"; agent_memory_sensitive_report "$2"' \
+    _ "$ROOT" "$project/composed.txt" > "$project/composed.report" 2>&1
+  grep -Fq 'machine-tier match in your brief at line 1:' "$project/composed.report" &&
+    grep -Fq 'machine-tier match in the delegate role/wrapper text at line 2:' "$project/composed.report" ||
+    fail "brief-relative report wrong: $(cat "$project/composed.report")"
   # The pointer is a line number and a tier, never the matched text.
   ! grep -Fq 'abcdefghijklmnop' "$out" ||
     fail "the report must not echo the matched content"
