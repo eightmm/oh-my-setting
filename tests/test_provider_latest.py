@@ -75,6 +75,39 @@ class ProviderLatestTests(unittest.TestCase):
                 LATEST.stable_version(candidate, "1.0.0")
         self.assertEqual(LATEST.stable_version("2.0.0", "1.99.99"), "2.0.0")
 
+    def test_incomplete_release_keeps_pinned_provider(self):
+        # Upstream published 99.1.0 without one native build: codex keeps its
+        # pinned entry, claude still resolves, and the input is untouched.
+        old = self.lock["npm"]["codex"]["version"]
+        missing = "99.1.0-" + LATEST.lock_tools.npm_platform_suffix(sorted(self.lock["npm"]["codex"]["native"])[0])
+        def partial(url):
+            if url.endswith("/" + missing):
+                raise LATEST.IncompleteRelease(url + " is not published")
+            if "codex" not in url or "/manifests/" in url:
+                return self.metadata(url)
+            row = self.metadata(url.replace("99.1.0", old))
+            row["version"] = row["version"].replace(old, "99.1.0")
+            row["dist"]["tarball"] = row["dist"]["tarball"].replace(old, "99.1.0")
+            return row
+        original = copy.deepcopy(self.lock)
+        with patch.object(LATEST, "fetch_json", side_effect=partial):
+            result = LATEST.resolve(self.lock, ["codex", "claude"])
+        self.assertEqual(result["npm"]["codex"], self.lock["npm"]["codex"])
+        self.assertEqual(result["npm"]["claude"], self.lock["npm"]["claude"])
+        self.assertEqual(self.lock, original)
+        def split_agy(url):
+            row = self.metadata(url)
+            if "/manifests/" in url and url.endswith("linux_amd64.json"):
+                row["url"] = row["url"].replace("/%s-" % row["version"], "/99.1.0-")
+                row["version"] = "99.1.0"
+            return row
+        with patch.object(LATEST, "fetch_json", side_effect=split_agy):
+            self.assertEqual(LATEST.resolve(self.lock, ["agy"])["antigravity"], self.lock["antigravity"])
+        not_found = LATEST.urllib.error.HTTPError("https://registry.npmjs.org/x", 404, "Not Found", {}, None)
+        with patch.object(LATEST.urllib.request.OpenerDirector, "open", side_effect=not_found):
+            with self.assertRaises(LATEST.IncompleteRelease):
+                LATEST.fetch_json("https://registry.npmjs.org/x")
+
     def test_transport_rejects_foreign_hosts_and_redirects(self):
         for url in ("http://registry.npmjs.org/x", "https://evil.example/x", "https://user@registry.npmjs.org/x"):
             with self.assertRaises(LATEST.LockError):

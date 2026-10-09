@@ -23,6 +23,10 @@ _spec = importlib.util.spec_from_file_location("tool_lock", Path(__file__).with_
 lock_tools = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(lock_tools)
 LockError = lock_tools.LockError
+
+
+class IncompleteRelease(LockError):
+    """Upstream has not (yet) published every artifact of a release."""
 MANIFEST_HOST = "antigravity-cli-auto-updater-974169037036.us-central1.run.app"
 MAX_RESPONSE = 2 * 1024 * 1024
 
@@ -53,6 +57,10 @@ def fetch_json(url):
         if len(payload) > MAX_RESPONSE:
             raise LockError("provider metadata exceeds size limit")
         return lock_tools.mapping(json.loads(payload), "provider metadata")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise IncompleteRelease("%s is not published" % parsed.path) from exc
+        raise LockError("cannot read provider release metadata") from exc
     except (OSError, ValueError, urllib.error.URLError) as exc:
         raise LockError("cannot read provider release metadata") from exc
 
@@ -76,36 +84,52 @@ def resolve(lock, providers):
     lock_tools.validate(lock)
     snapshot = copy.deepcopy(lock)
     for provider in dict.fromkeys(providers):
-        if provider in {"claude", "codex"}:
-            row = snapshot["npm"][provider]
-            version, digest = npm_release(row["package"], "latest")
-            row["version"] = stable_version(version, row["version"])
-            row["integrity"] = digest
-            for platform, native in row["native"].items():
-                release = row["version"]
-                if provider == "codex":
-                    release += "-" + lock_tools.npm_platform_suffix(platform)
-                native["version"], native["integrity"] = npm_release(native["package"], release)
-        elif provider == "agy":
-            section = snapshot["antigravity"]
-            versions = set()
-            for platform, row in section["platforms"].items():
-                data = fetch_json("https://%s/manifests/%s.json" % (MANIFEST_HOST, platform.replace("-", "_")))
-                version = stable_version(data.get("version"), section["version"])
-                versions.add(version)
-                url = lock_tools.https(data.get("url"), "agy release URL", "storage.googleapis.com")
-                path = urllib.parse.urlsplit(url).path
-                prefix = "/antigravity-public/antigravity-cli/%s-" % version
-                if not path.startswith(prefix) or any(part in {".", ".."} for part in path.split("/")):
-                    raise LockError("agy release URL is not bound to its official bucket and version")
-                row.update(url=url, sha512=data.get("sha512"))
-            if len(versions) != 1:
-                raise LockError("agy release is not consistent across supported platforms; retry later")
-            section["version"] = versions.pop()
-        else:
-            raise LockError("unknown provider: %s" % provider)
+        try:
+            resolve_one(snapshot, provider)
+        except IncompleteRelease as exc:
+            # A release published for some platforms only must not fail every
+            # install update: keep this provider's pinned entry until upstream
+            # finishes. Integrity, binding and transport failures still raise.
+            if provider == "agy":
+                snapshot["antigravity"] = copy.deepcopy(lock["antigravity"])
+                kept = lock["antigravity"]["version"]
+            else:
+                snapshot["npm"][provider] = copy.deepcopy(lock["npm"][provider])
+                kept = lock["npm"][provider]["version"]
+            print("warning: %s release incomplete (%s); keeping %s" % (provider, exc, kept), file=sys.stderr)
     lock_tools.validate(snapshot)
     return snapshot
+
+
+def resolve_one(snapshot, provider):
+    if provider in {"claude", "codex"}:
+        row = snapshot["npm"][provider]
+        version, digest = npm_release(row["package"], "latest")
+        row["version"] = stable_version(version, row["version"])
+        row["integrity"] = digest
+        for platform, native in row["native"].items():
+            release = row["version"]
+            if provider == "codex":
+                release += "-" + lock_tools.npm_platform_suffix(platform)
+            native["version"], native["integrity"] = npm_release(native["package"], release)
+    elif provider == "agy":
+        section = snapshot["antigravity"]
+        versions = set()
+        for platform, row in section["platforms"].items():
+            data = fetch_json("https://%s/manifests/%s.json" % (MANIFEST_HOST, platform.replace("-", "_")))
+            version = stable_version(data.get("version"), section["version"])
+            versions.add(version)
+            url = lock_tools.https(data.get("url"), "agy release URL", "storage.googleapis.com")
+            path = urllib.parse.urlsplit(url).path
+            prefix = "/antigravity-public/antigravity-cli/%s-" % version
+            if not path.startswith(prefix) or any(part in {".", ".."} for part in path.split("/")):
+                raise LockError("agy release URL is not bound to its official bucket and version")
+            row.update(url=url, sha512=data.get("sha512"))
+        if len(versions) != 1:
+            raise IncompleteRelease("agy release is not consistent across supported platforms")
+        section["version"] = versions.pop()
+    else:
+        raise LockError("unknown provider: %s" % provider)
 
 
 def checked_path(path):
