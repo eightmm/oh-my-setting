@@ -664,7 +664,10 @@ For reviewed tasks integrated together by commit, use `oms agent-plan finish
 --id ID --landed-commit SHA [--repo PATH]`. This requires retained review
 artifact/patch evidence, an exact-SHA `oms land` receipt with state `passed`,
 successful gate/push/CI, and SHA reachable from the receipt's recorded local
-remote/target ref; it performs no fetch. The task retains the commit and receipt
+remote/target ref; it performs no fetch. A task's current lease must match
+when one is given, and a task with allowed paths needs the landed range, from
+the nearest earlier pushed receipt (else the first parent) to SHA, to change at
+least one of them, so a receipt for unrelated work cannot finish it. The task retains the commit and receipt
 file SHA-256 as landing proof and counts as done in plan status and the panel.
 The typed `patch-land` path with `--expected-landing-receipt-sha256` remains the
 default for single patches.

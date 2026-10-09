@@ -139,9 +139,13 @@ Commands:
          --id ID --landed-commit SHA  Complete reviewed work integrated by
                                      commit. Requires an exact-SHA oms land
                                      receipt with passed gate/push/CI and
-                                     reachability from its local target ref.
-                                     Typed patch-land remains the default
-                                     for single patches.
+                                     reachability from its local target ref,
+                                     the task's current lease when one is
+                                     given, and, for a task with allowed
+                                     paths, a landed range (previous pushed
+                                     receipt..SHA) that touches them. Typed
+                                     patch-land remains the default for
+                                     single patches.
   lint-verify --verify CMD --allowed "p1,p2"
                                      Lint a verify/acceptance command against
                                      the admission floor: content reads of
