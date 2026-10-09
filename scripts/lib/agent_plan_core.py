@@ -296,8 +296,12 @@ def marker_json_is_finite(value):
         return all(marker_json_is_finite(item) for item in value)
     return True
 
+def state_repo():
+    """The checkout that owns plan state; a parent's scratch worktree shares the main checkout's."""
+    return os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
+
 def worker_marker_dir():
-    repo_root = os.path.realpath(env("OMS_REPO"))
+    repo_root = state_repo()
     expected = os.path.join(repo_root, ".oms", "delegations")
     supplied = env("OMS_PLAN_MARKERS_DIR") or expected
     marker_dir = os.path.abspath(supplied)
@@ -551,7 +555,7 @@ if act == "next" and env("OMS_CLAIM") == "1":
     needs_retirement_guard = True
 if act in {"recover-lease", "recover-owner"} and env("OMS_CHECK_ONLY") == "1":
     needs_retirement_guard = False
-canonical_plan = os.path.join(os.path.realpath(env("OMS_REPO")), ".oms", "plan", "tasks.json")
+canonical_plan = os.path.join(state_repo(), ".oms", "plan", "tasks.json")
 if not same_absolute_path(path, canonical_plan):
     needs_retirement_guard = False
 if needs_retirement_guard:

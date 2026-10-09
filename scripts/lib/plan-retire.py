@@ -603,7 +603,7 @@ def cleanup_completed_retirement(context):
     CONTEXT = context
     STATES = context["states"]
     ID_RE = context["id_re"]
-    repo_root = os.path.realpath(env("OMS_REPO"))
+    repo_root = os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
     parent = checked_plan_parent(repo_root)
     matches = residual_retirement_intents(parent)
     if not matches:

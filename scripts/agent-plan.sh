@@ -329,7 +329,10 @@ case "$ACTION" in
 esac
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve the physical repository"
-PLAN_FILE="${PLAN_FILE:-$REPO/.oms/plan/tasks.json}"
+# A parent's scratch worktree reads and writes the main checkout's plan; REPO stays the tree it works on.
+STATE_REPO="$(oms_state_root "$REPO")" || fail "bad --repo"
+STATE_REPO="$(cd "${STATE_REPO//$'\r'/}" && pwd -P)" || fail "cannot resolve the plan's repository"
+PLAN_FILE="${PLAN_FILE:-$STATE_REPO/.oms/plan/tasks.json}"
 PLAN_LOCK_FILE=""
 if [ -n "$PROVIDER" ]; then
   PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
@@ -357,6 +360,7 @@ python_path_for_host() {  # PATH
 }
 
 PY_REPO="$(python_path_for_host "$REPO")" || fail "cannot normalize repository path for Python"
+PY_STATE_REPO="$(python_path_for_host "$STATE_REPO")" || fail "cannot normalize repository path for Python"
 if [ -n "$LANDED_COMMIT" ]; then
   # Match land.sh's shared-worktree state directory using shell path spelling;
   # native Windows Python paths must not change the cksum repository identity.
@@ -498,7 +502,7 @@ fi
 # `next --claim` from different agents cannot both win the same task (the write
 # itself is atomic, but the read-decide-write critical section is not).
 export OMS_PLAN_FILE="$PY_PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
-  OMS_REPO="$PY_REPO" \
+  OMS_REPO="$PY_REPO" OMS_STATE_REPO="$PY_STATE_REPO" \
   OMS_ID="$ID" OMS_TITLE="$TITLE" OMS_GOAL="$GOAL" OMS_PROVIDER="$PROVIDER" \
   OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
   OMS_REFREEZE_ACCEPTANCE="$REFREEZE_ACCEPTANCE" \
@@ -556,7 +560,7 @@ plan_run_with_plan_lock() {
   oms_with_file_lock "$PLAN_LOCK_FILE" plan_run
 }
 plan_run_with_marker_and_plan_locks() {
-  oms_with_file_lock "$REPO/.oms/delegations/.marker-set-lock-target" \
+  oms_with_file_lock "$STATE_REPO/.oms/delegations/.marker-set-lock-target" \
     plan_run_with_plan_lock
 }
 

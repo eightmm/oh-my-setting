@@ -1681,6 +1681,14 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
   grep -q '"summary": "child"' "$scratch/.oms/failures.jsonl" &&
     ! grep -q '"summary": "child"' "$main/.oms/failures.jsonl" ||
     fail "a harness child's failure must stay in the scratch's ledger"
+  # The parent's plan commands read and write the main checkout's plan; the scratch gets none.
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal shared >/dev/null || fail "plan init failed"
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch/src" add --id from-scratch --title t >/dev/null ||
+    fail "a parent's scratch plan add failed"
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" claim --id from-scratch --provider codex >/dev/null ||
+    fail "a parent's scratch plan claim failed"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id from-scratch | grep -q '"state": "claimed"' &&
+    [ ! -e "$scratch/.oms/plan/tasks.json" ] || fail "a parent's scratch plan write must land in the main checkout's plan"
   plain="$managed/oh-my-setting-scratch.plain/wt"
   git -C "$project" worktree add --quiet --detach "$plain" HEAD
   [ "$($parent bash -c "$probe" _ "$ROOT" "$plain")" = "$(cd "$plain" && pwd -P)" ] ||
