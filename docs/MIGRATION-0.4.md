@@ -47,7 +47,7 @@ and `oms update --rollback` to return to the recorded prior success.
 | `multi-agent-delegate.sh` | `oms peer-delegate` |
 | `OMS_MULTI_AGENT_*` | the matching `OMS_PEER_*` variable (legacy names are now ignored, not errors) |
 | `workflows/spec-first.md` | `spec-interview` skill |
-| `workflows/slurm-hpc.md` | `project-slurm-AGENTS.md` plus `oms generate-slurm-skill` |
+| `workflows/slurm-hpc.md` | `project-slurm-AGENTS.md` plus `oms snapshot --cluster` |
 | `workflows/new-server.md` | chat-driven installer and project bootstrap |
 
 Legacy environment variables fail with an explicit replacement instead of

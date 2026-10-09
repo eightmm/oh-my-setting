@@ -41,7 +41,7 @@ additional evidence. Installation health and project integrity remain distinct.
 | One bounded implementation | `oms peer-delegate --to PROVIDER` | Write workers return a patch, with no commit/push authority. |
 | Inside an OMS panel | `oms panel --dispatch` (worker, advisor or reviewer); mail: `oms room updates/send/ack/scope` | Read: `--prompt`/`--brief-file`; write adds `--verify --scope`. |
 | Questions/changes for agents already working together | `oms thread append`, `updates`, `ack` on a scoped live thread | Messages neither spawn providers nor grant authority; see state-memory.md. |
-| Isolated clean-HEAD audit with a worker role | `oms peer-delegate --read-only` | Report only, never a patch. |
+| Isolated clean-HEAD audit with a worker role | `oms peer-delegate --to PROVIDER --read-only` | Report only, never a patch. |
 
 `agent-call` is read-only, not an extra council seat. Select read/write
 authority explicitly; `agent-run` was removed. Peer outputs share the artifact

@@ -81,7 +81,7 @@ verification reminders at task close.
 ```text
 user request
   -> provider skill/router
-  -> oms command
+  -> oms <tool>
        -> read: consult / peer-ask / peer-review / advise
        -> write: peer-delegate -> isolated worktree -> patch
                                       -> patch-admit -> patch-land
