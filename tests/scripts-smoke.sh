@@ -1691,7 +1691,8 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
     [ ! -e "$scratch/.oms/plan/tasks.json" ] || fail "a parent's scratch plan write must land in the main checkout's plan"
   # patch-land from the scratch applies there, but its landing row, frozen patch and plan finish
   # use the main checkout; a relative review patch resolves against the plan's checkout.
-  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" add --id landed --title t --verify true >/dev/null
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" add --id landed --title t \
+    --verify true --allowed file.txt >/dev/null
   $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" claim --id landed --provider codex >/dev/null
   printf 'scratch work\n' >> "$scratch/file.txt"
   git -C "$scratch" diff > "$main/.oms/scratch-review.patch"
@@ -1706,12 +1707,14 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
     fail "a scratch landing must record its tree in the main checkout's landings"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id landed | grep -q '"state": "done"' ||
     fail "a scratch landing must finish the main checkout's plan task"
-  # goal-drive's repo-local commit state would split from the shared plan: it refuses the scratch.
-  if $parent "$ROOT/scripts/goal-drive.sh" --repo "$scratch" >"$TMP/state-root-goal.err" 2>&1; then
-    fail "goal-drive must refuse a parent's scratch worktree"
+  # The detached scratch reaches the branch fence only after validating the shared landing receipt.
+  if ( cd "$scratch" && $parent "$ROOT/scripts/goal-drive.sh" --commit-task landed \
+      >"$TMP/state-root-goal.err" 2>&1 ); then
+    fail "goal-drive must require a checked-out work branch before committing"
   fi
-  grep -q "cannot run from a parent's scratch worktree" "$TMP/state-root-goal.err" ||
-    fail "goal-drive must name the scratch refusal: $(cat "$TMP/state-root-goal.err")"
+  grep -Fq -- '--commit-task requires a checked-out work branch' "$TMP/state-root-goal.err" &&
+    [ ! -e "$scratch/.oms/plan/tasks.json" ] && [ ! -e "$scratch/.oms/landings.jsonl" ] ||
+    fail "goal-drive must validate the main checkout's plan and landing receipt: $(cat "$TMP/state-root-goal.err")"
   plain="$managed/oh-my-setting-scratch.plain/wt"
   git -C "$project" worktree add --quiet --detach "$plain" HEAD
   [ "$($parent bash -c "$probe" _ "$ROOT" "$plain")" = "$(cd "$plain" && pwd -P)" ] ||

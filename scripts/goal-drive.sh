@@ -137,11 +137,9 @@ PY
 )" || fail "--provider-timeout must be a positive duration up to 24h (for example 15m)"
 
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
-# agent-plan gives a parent's scratch the main checkout's plan, but the frozen
-# commit patches and progress rows below are checked as repo-local state.
+# Plan evidence belongs to the state checkout; Git authority stays on the working tree.
 STATE_REPO="$(oms_state_root "$REPO")" || fail "bad --repo"
-[ "$(cd "${STATE_REPO//$'\r'/}" && pwd -P)" = "$(cd "$REPO" && pwd -P)" ] ||
-  fail "goal-drive cannot run from a parent's scratch worktree; its plan lives in ${STATE_REPO//$'\r'/}: run it there or in a dedicated worktree"
+STATE_REPO="$(cd "${STATE_REPO//$'\r'/}" && pwd -P)" || fail "cannot resolve the plan's repository"
 PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
   fail "unknown provider: inspect 'oms models' for registered transports"
 if [ -n "$EXPECTED_REF" ]; then
@@ -181,8 +179,8 @@ export "${GOAL_HOOK_KEY?}" "${GOAL_HOOK_VALUE?}"
 GIT_CONFIG_COUNT=$((GOAL_GIT_CONFIG_COUNT + 1))
 export GIT_CONFIG_COUNT
 
-PLAN_FILE="$REPO/.oms/plan/tasks.json"
-PROGRESS="$REPO/.oms/plan/progress.jsonl"
+PLAN_FILE="$STATE_REPO/.oms/plan/tasks.json"
+PROGRESS="$STATE_REPO/.oms/plan/progress.jsonl"
 [ -f "$PLAN_FILE" ] || fail "no plan at $PLAN_FILE; create one first (agent-plan init/add)"
 python3 "$ROOT/scripts/lib/durable-jsonl.py" --label progress.jsonl check "$PROGRESS" ||
   fail "progress.jsonl must be a repo-local regular non-symlink file"
@@ -570,12 +568,13 @@ PY
 
 latest_open_intent() {
   [ -f "$PROGRESS" ] || return 0
-  OMS_GD_RUN="$RUN_ID" python3 - "$REPO" "$PROGRESS" "$PLAN_FILE" <<'PY' | tr -d '\r'
+  OMS_GD_RUN="$RUN_ID" python3 - "$REPO" "$PROGRESS" "$PLAN_FILE" "$STATE_REPO" <<'PY' | tr -d '\r'
 import hashlib, json, os, pathlib, re, subprocess, sys, tempfile
 
 repo = os.path.realpath(sys.argv[1])
 progress = sys.argv[2]
 plan_file = sys.argv[3]
+state_repo = os.path.realpath(sys.argv[4])
 current_run = os.environ["OMS_GD_RUN"]
 ident = re.compile(r"^[A-Za-z0-9._-]+$")
 sha = re.compile(r"^[0-9a-f]{64}$")
@@ -606,7 +605,7 @@ def digest(path):
 def repo_file(value):
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValueError("receipt path")
-    return value if os.path.isabs(value) else os.path.join(repo, value)
+    return value if os.path.isabs(value) else os.path.join(state_repo, value)
 
 def patch_paths(base, path):
     tree = expected_tree(base, path)
@@ -674,10 +673,10 @@ def validate(row):
             or len(relative.parts) != 4
             or any(part in ("", ".", "..") for part in relative.parts)):
         raise ValueError("patch path")
-    frozen_root = os.path.join(repo, ".oms", "plan", "commit-patches")
+    frozen_root = os.path.join(state_repo, ".oms", "plan", "commit-patches")
     if os.path.realpath(frozen_root) != frozen_root:
         raise ValueError("patch root")
-    patch = os.path.join(repo, *relative.parts)
+    patch = os.path.join(state_repo, *relative.parts)
     if (os.path.islink(patch) or os.path.realpath(os.path.dirname(patch)) != frozen_root
             or not os.path.isfile(patch) or digest(patch) != patch_sha):
         raise ValueError("patch receipt")
@@ -815,7 +814,7 @@ def exact_commit_exists(base, tree, head_ref):
 
 def rebased_patch_on_current_lineage(active):
     relative = pathlib.PurePosixPath(active["patch"])
-    patch = os.path.join(repo, *relative.parts)
+    patch = os.path.join(state_repo, *relative.parts)
     old_base = active["base_sha"]
     head_ref = active.get("head_ref", "")
     task = tasks.get(active.get("task_id"), {})
@@ -1049,7 +1048,7 @@ for key,value in assignments.items(): print("%s=%s" % (key,shlex.quote(value)))
 }
 
 intent_patch_file() {
-  python3 - "$REPO" "$INTENT_PATCH" <<'PY' | tr -d '\r'
+  python3 - "$STATE_REPO" "$INTENT_PATCH" <<'PY' | tr -d '\r'
 import os, pathlib, sys
 repo=os.path.realpath(sys.argv[1])
 rel=pathlib.PurePosixPath(sys.argv[2])
@@ -1126,7 +1125,11 @@ assignments["TASK_RECEIPT_SHA"]=hashlib.sha256(json.dumps(
 for key,value in assignments.items(): print("%s=%s" % (key,shlex.quote(value)))
 ' "$ROOT/scripts/lib/task-assignment.py" "$PROVIDER" "$MODEL" "$FALLBACK_MODEL" \
     "$REASONING_EFFORT" | tr -d '\r')" || return 1
-  eval "$values"
+  eval "$values" || return $?
+  if [ "$STATE_REPO" != "$(cd "$REPO" && pwd -P)" ]; then
+    case "$TASK_RECEIPT_PATCH" in /*|"") ;; *) TASK_RECEIPT_PATCH="$STATE_REPO/$TASK_RECEIPT_PATCH" ;; esac
+    case "$TASK_RECEIPT_ARTIFACT" in /*|"") ;; *) TASK_RECEIPT_ARTIFACT="$STATE_REPO/$TASK_RECEIPT_ARTIFACT" ;; esac
+  fi
 }
 
 patch_leaf_replace() {  # SOURCE_BASENAME DEST_BASENAME
@@ -1208,9 +1211,9 @@ intent_prepare() {  # TASK PATCH BASE REF SUFFIX [REUSE_INTENT_ID]
   INTENT_VERIFY_SHA="$(printf '%s' "$TASK_RECEIPT_VERIFY" | oms_sha256_stream)"
   INTENT_PROVIDER="$TASK_ROUTE_PROVIDER"
   INTENT_ID="${reuse_id:-$RUN_ID-$CYCLE-$task}"
-  frozen_dir="$REPO/.oms/plan/commit-patches"
-  repo_physical="$(cd "$REPO" && pwd -P)"
-  plan_physical="$(cd "$REPO/.oms/plan" 2>/dev/null && pwd -P)" ||
+  frozen_dir="$STATE_REPO/.oms/plan/commit-patches"
+  repo_physical="$(cd "$STATE_REPO" && pwd -P)"
+  plan_physical="$(cd "$STATE_REPO/.oms/plan" 2>/dev/null && pwd -P)" ||
     park "unsafe-patch-path" "repo-local .oms/plan must be a real directory"
   [ "$plan_physical" = "$repo_physical/.oms/plan" ] ||
     park "unsafe-patch-path" "the plan directory must not cross a symlink boundary"
@@ -1225,7 +1228,7 @@ intent_prepare() {  # TASK PATCH BASE REF SUFFIX [REUSE_INTENT_ID]
     # directory handle. This is portable to the documented Git Bash path where
     # Python dir_fd/openat support is not uniform.
     (
-      cd "$REPO/.oms/plan" 2>/dev/null || exit 1
+      cd "$STATE_REPO/.oms/plan" 2>/dev/null || exit 1
       [ "$(pwd -P)" = "$plan_physical" ] || exit 1
       umask 077
       mkdir commit-patches
@@ -1263,7 +1266,7 @@ intent_prepare() {  # TASK PATCH BASE REF SUFFIX [REUSE_INTENT_ID]
   frozen_abs="$frozen_dir/$frozen_name"
   [ -f "$frozen_abs" ] && [ ! -L "$frozen_abs" ] ||
     park "unsafe-patch-path" "the frozen patch must be a regular non-symlink file"
-  patch_rel="${frozen_abs#"$REPO"/}"
+  patch_rel="${frozen_abs#"$STATE_REPO"/}"
   [ "$patch_rel" != "$frozen_abs" ] || park "unsafe-patch-path" "the frozen patch must stay inside repo-local .oms"
   INTENT_PATCH="$patch_rel"
   INTENT_PATCH_SHA="$(oms_sha256_file "$frozen_abs")"
@@ -2030,7 +2033,7 @@ if [ -n "$COMMIT_TASK" ]; then
   [ "$TASK_RECEIPT_STATE" = "done" ] || fail "--commit-task requires a done task"
   PROVIDER="$TASK_RECEIPT_PROVIDER"
   COMMIT_RECEIPT_SHA="$TASK_RECEIPT_SHA"
-  landed_receipt="$(python3 - "$ROOT/scripts/lib" "$REPO" "$COMMIT_TASK" <<'PY' | tr -d '\r'
+  landed_receipt="$(python3 - "$ROOT/scripts/lib" "$STATE_REPO" "$COMMIT_TASK" <<'PY' | tr -d '\r'
 import hashlib, pathlib, re, runpy, sys
 sys.path.insert(0, sys.argv[1])
 from oms_runtime.common import read_json, read_jsonl
