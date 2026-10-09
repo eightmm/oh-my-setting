@@ -536,6 +536,7 @@ grep -rqs '"command": *"bash scripts/check.sh --parallel"' "$receipt_dir" ||
   probe_head=verified
   now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
   rset() { :; }
+  oms_test_growth() { :; }
   can_resume() { return 1; }
   request_stamp() { printf '%s\n' "$STAMP"; }
   collect_live_siblings() { export SIBLING_LIVE=''; }
