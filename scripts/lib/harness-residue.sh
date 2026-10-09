@@ -375,6 +375,120 @@ oms_harness_cleanup_residue() {
   oms_harness_cleanup_temp_dirs "$dry_run"
 }
 
+# A delegate killed by SIGKILL never runs its cleanup trap, so its liveness
+# marker stays and reads as an ORPHAN forever; gc only runs on request. Each
+# delegate start therefore reaps markers whose pid is proven dead and that no
+# recovery path needs: task/lease/executor/autopilot-coupled markers stay for
+# gc's plan recovery. Validation mirrors gc's delegation_marker_snapshot. The
+# set lock is only tried, never waited for, and every entry that is not
+# provably safe is kept, so a delegate run never stalls or fails here.
+oms_harness_reap_dead_delegation_markers() {  # PHYSICAL_REPO
+  local repo="$1"
+
+  [ -d "$repo/.oms/delegations" ] && [ ! -L "$repo/.oms/delegations" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  oms_try_file_lock "$repo/.oms/delegations/.marker-set-lock-target" \
+    oms_harness_reap_dead_delegation_markers_locked "$repo" \
+    "$OMS_FILE_LOCK_LIB_DIR/process_liveness.py" >/dev/null 2>&1 || true
+}
+
+oms_harness_reap_dead_delegation_markers_locked() {  # REPO LIVENESS_PY
+  python3 - "$1" "$2" <<'PY'
+import json, os, random, re, runpy, stat, sys
+
+repo = os.path.realpath(sys.argv[1])
+liveness = runpy.run_path(sys.argv[2])
+pid_alive = liveness["pid_alive"]
+native_proven = liveness["persisted_native_pid_is_proven"]
+marker_dir = os.path.join(repo, ".oms", "delegations")
+safe_name = re.compile(r"^[A-Za-z0-9._-]+\.json$")
+limit = 64 * 1024
+flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+
+info = os.lstat(marker_dir)
+if (not stat.S_ISDIR(info.st_mode) or
+        os.path.normcase(os.path.realpath(marker_dir)) !=
+        os.path.normcase(os.path.abspath(marker_dir))):
+    raise SystemExit(0)
+names = []
+with os.scandir(marker_dir) as iterator:
+    for entry in iterator:
+        if len(names) >= 65536:
+            break
+        if safe_name.fullmatch(entry.name):
+            names.append(entry.name)
+# Bounded per run but still progressing: a shuffled sample lets successive
+# starts drain a backlog that kept entries at the front would otherwise block.
+random.shuffle(names)
+
+def reapable(path):
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+        return None
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or
+                (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+            return None
+        payload = os.read(descriptor, limit + 1)
+        if len(payload) > limit or os.read(descriptor, 1):
+            return None
+    finally:
+        os.close(descriptor)
+    marker = json.loads(payload.decode("utf-8"))
+    if not isinstance(marker, dict):
+        return None
+    schema = marker.get("schema")
+    pid = marker.get("pid")
+    native_pid = marker.get("native_pid")
+    if (isinstance(schema, bool) or schema not in {1, 2, 3, 4} or
+            isinstance(pid, bool) or not isinstance(pid, int) or
+            not 0 < pid <= 0x7FFFFFFF):
+        return None
+    if "native_pid" in marker and (
+            isinstance(native_pid, bool) or not isinstance(native_pid, int)
+            or not 0 < native_pid <= 0xFFFFFFFF):
+        return None
+    if schema == 4 and "native_pid" not in marker:
+        return None
+    if not native_proven(native_pid, marker.get("native_pid_source")):
+        return None
+    for key in ("task_id", "lease_id", "executor_id", "autopilot_owner_id"):
+        if marker.get(key, ""):
+            return None
+    if pid_alive(pid, native_pid=native_pid):
+        return None
+    return (opened.st_dev, opened.st_ino, opened.st_size)
+
+removed = 0
+for name in names[:4096]:
+    path = os.path.join(marker_dir, name)
+    try:
+        identity = reapable(path)
+        if identity is None:
+            continue
+        final = os.lstat(path)
+        if (not stat.S_ISREG(final.st_mode) or
+                (final.st_dev, final.st_ino, final.st_size) != identity):
+            continue
+        os.unlink(path)
+        removed += 1
+    except Exception:
+        continue
+if removed:
+    try:
+        directory = os.open(marker_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError:
+        pass
+PY
+}
+
 oms_harness_count_unindexed_artifacts() {
   local repo="$1"
   local artifacts_dir="$repo/.oms/artifacts"

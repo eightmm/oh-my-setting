@@ -791,6 +791,7 @@ agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
 
 oms_harness_prune_stale_worktrees "$REPO" 0 >/dev/null
+[ "$DRY_RUN" = 1 ] || oms_harness_reap_dead_delegation_markers "$REPO"
 prompt_file="$(mktemp)" || fail "mktemp failed"
 repair_prompt_file="$prompt_file.repair"
 verify_out="$prompt_file.verify"
