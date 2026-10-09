@@ -49,7 +49,7 @@ out="$(
     env CLAUDECODE=1 bash "$ROOT/scripts/advise.sh" \
       --prompt "routing probe" --to claude --dry-run
 )"
-printf '%s' "$out" | grep -q '^dry-run: claude ' ||
+printf '%s' "$out" | grep >/dev/null '^dry-run: claude ' ||
   fail "--to must still override the exclusion: $out"
 
 # consult shares the exclusion contract: a claude session's automatic
@@ -60,10 +60,10 @@ out="$(
       bash "$ROOT/scripts/consult.sh" --prompt "routing probe" \
       --dry-run --quiet 2>&1
 )" || fail "consult dry-run failed: $out"
-if printf '%s' "$out" | grep -Eq '(^|/)claude-'; then
+if printf '%s' "$out" | grep >/dev/null -E '(^|/)claude-'; then
   fail "a claude session's automatic consult picked claude: $out"
 fi
-printf '%s' "$out" | grep -Eq '(^|/)(codex|antigravity)-' ||
+printf '%s' "$out" | grep >/dev/null -E '(^|/)(codex|antigravity)-' ||
   fail "consult dry-run should have picked a non-claude peer: $out"
 
 # The documented preference participates only in automatic single-seat
@@ -87,7 +87,7 @@ out="$(
 )" || fail "explicit consult dry-run failed: $out"
 printf '%s\n' "$out" | sed -n '1p' | grep -Eq '(^|/)codex-' ||
   fail "explicit --to did not override OMS_CONSULT_PROVIDER: $out"
-if printf '%s' "$out" | grep -Eq '(^|/)antigravity-'; then
+if printf '%s' "$out" | grep >/dev/null -E '(^|/)antigravity-'; then
   fail "environment preference leaked into an explicit consult: $out"
 fi
 

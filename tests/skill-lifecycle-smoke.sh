@@ -179,7 +179,7 @@ test_skill_bundle_preview_import_update_and_rollback() {
   printf 'ghp_%s\n' 'abcdefghijklmnopqrstuvwxyz0123456789' > "$source/.env"
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" preview \
     --source "$source" --json 2>&1)" && fail "preview accepted a credential file: $out"
-  printf '%s' "$out" | grep -Fq 'sensitive' ||
+  printf '%s' "$out" | grep >/dev/null -F 'sensitive' ||
     fail "credential bundle refusal was not explicit: $out"
 }
 
@@ -204,15 +204,15 @@ test_corrupt_lock_hides_only_its_own_skill() {
   printf 'x' >> "$repo/.oms/skill-store/oms-aaa-fixture/lock.json"
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" validate 2>&1)" ||
     fail "validate failed outright on one corrupt lock: $out"
-  printf '%s' "$out" | grep -Fq 'ok: oms-zzz-fixture' ||
+  printf '%s' "$out" | grep >/dev/null -F 'ok: oms-zzz-fixture' ||
     fail "a corrupt sibling lock hid a healthy imported skill: $out"
-  printf '%s' "$out" | grep -Fq 'oms-aaa-fixture' ||
+  printf '%s' "$out" | grep >/dev/null -F 'oms-aaa-fixture' ||
     fail "the corrupt lock's own skill vanished silently: $out"
-  printf '%s' "$out" | grep -Fqi 'unreadable' ||
+  printf '%s' "$out" | grep >/dev/null -Fi 'unreadable' ||
     fail "the corrupt lock was not named loudly: $out"
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" status 2>&1)" ||
     fail "status failed outright on one corrupt lock: $out"
-  printf '%s' "$out" | grep -Fq '1 project skill(s) valid' ||
+  printf '%s' "$out" | grep >/dev/null -F '1 project skill(s) valid' ||
     fail "status lost the healthy skill next to a corrupt lock: $out"
 }
 

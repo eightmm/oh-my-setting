@@ -630,7 +630,7 @@ case "${OMS_TEST_CHECK_MUTATION:-}" in
   tick)
     out="$(OMS_LOCK_DIR="$OMS_TEST_TICK_LOCK_DIR" OMS_WORK_JOURNAL=0 \
       OMS_INSTALL_RECEIPT="$root/no-receipt" "$OMS_TEST_TICK" run --repo "$root")"
-    printf '%s' "$out" | grep -q 'verification running'
+    printf '%s' "$out" | grep >/dev/null 'verification running'
     ;;
 esac
 EOF
@@ -657,7 +657,7 @@ EOF
       OMS_TEST_CHECK_MUTATION="$mutation" \
       bash scripts/check.sh --quick --changed-from "$base" --changed-to "$head" 2>&1)" || status=$?
     [ "$status" -ne 0 ] || fail "check gate missed .oms $mutation mutation"
-    printf '%s' "$out" | grep -Fq "a suite wrote into this checkout's .oms state" ||
+    printf '%s' "$out" | grep >/dev/null -F "a suite wrote into this checkout's .oms state" ||
       fail "check gate did not explain .oms $mutation mutation: $out"
   done
 
@@ -809,16 +809,16 @@ EOF
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=full \
     bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" --list-stages)" ||
     fail "affected gate rejected a fail-open graph plan"
-  printf '%s\n' "$out" | grep -Fxq autonomy-hook ||
+  printf '%s\n' "$out" | grep >/dev/null -Fx autonomy-hook ||
     fail "uncertain affected plan did not fall back to the full focused gate: $out"
-  printf '%s\n' "$out" | grep -Fxq shellcheck ||
+  printf '%s\n' "$out" | grep >/dev/null -Fx shellcheck ||
     fail "full affected fallback omitted lint: $out"
-  printf '%s\n' "$out" | grep -Fxq artifact-supersession ||
+  printf '%s\n' "$out" | grep >/dev/null -Fx artifact-supersession ||
     fail "fail-open affected stage listing stopped before the full focused gate: $out"
   out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=error \
     bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" --list-stages 2>/dev/null)" ||
     fail "affected gate propagated a graph-reader failure"
-  printf '%s\n' "$out" | grep -Fxq autonomy-hook ||
+  printf '%s\n' "$out" | grep >/dev/null -Fx autonomy-hook ||
     fail "graph-reader failure did not fail open to the focused gate: $out"
 
   boundary_base="$head"
@@ -829,7 +829,7 @@ EOF
   out="$(cd "$gate" && bash scripts/check.sh --affected \
     --changed-from "$boundary_base" --changed-to "$head" --list-stages 2>/dev/null)" ||
     fail "affected gate rejected its own selector-boundary change"
-  printf '%s\n' "$out" | grep -Fxq autonomy-hook ||
+  printf '%s\n' "$out" | grep >/dev/null -Fx autonomy-hook ||
     fail "check.sh trusted the graph to validate its own selector change: $out"
 
   # Prose changes need no graph or unrelated runtime suites. Agent policy is
@@ -1057,21 +1057,21 @@ EOF
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" \
     OH_MY_SETTING_AUTO_UPDATE_STATE="$TMP/stale-auto-update.status" \
     "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq -- '- status: stale' ||
+  printf '%s' "$out" | grep >/dev/null -F -- '- status: stale' ||
     fail "status should flag auto-update state from a different canonical HEAD"
-  printf '%s' "$out" | grep -Fq -- '- recorded_status: up_to_date' ||
+  printf '%s' "$out" | grep >/dev/null -F -- '- recorded_status: up_to_date' ||
     fail "stale status should preserve the recorded auto-update conclusion"
-  printf '%s' "$out" | grep -Fq -- "- installed_actual_commit: $(git -C "$canonical" rev-parse HEAD)" ||
+  printf '%s' "$out" | grep >/dev/null -F -- "- installed_actual_commit: $(git -C "$canonical" rev-parse HEAD)" ||
     fail "status omitted live installed revision"
   mkdir -p "$canonical/scripts" "$canonical/rules"
   touch "$canonical/scripts/oms" "$canonical/rules/global-AGENTS.md"
   git -C "$canonical" add .
   git -C "$canonical" commit -qm markers
   out="$(cd "$canonical" && HOME="$home_dir" OMS_INSTALL_RECEIPT="$receipt" "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq -- '- alignment: in-sync' || fail "same clean checkout should be in sync"
+  printf '%s' "$out" | grep >/dev/null -F -- '- alignment: in-sync' || fail "same clean checkout should be in sync"
   printf 'edited\n' >> "$canonical/file"
   out="$(cd "$canonical" && HOME="$home_dir" OMS_INSTALL_RECEIPT="$receipt" "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq -- '- alignment: installed-uncommitted' || fail "live edits should not be reported as a clean installation"
+  printf '%s' "$out" | grep >/dev/null -F -- '- alignment: installed-uncommitted' || fail "live edits should not be reported as a clean installation"
 }
 
 test_checkout_runtime_is_current

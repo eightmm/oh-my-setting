@@ -467,12 +467,12 @@ OMS_PROJECT_GRAPH_STATE="$work/bounded" "$OMS" graph --repo "$auto" project ensu
 # an OMS repository must not inspect, report, or build its project graph.
 hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$tmp" | "$ROOT/scripts/resume-hook.sh")" \
   || fail "the resume hook must exit 0"
-if printf '%s\n' "$hook_out" | grep -Fq -- '- graph:'; then
+if printf '%s\n' "$hook_out" | grep >/dev/null -F -- '- graph:'; then
   fail "session start must not inspect a current project graph: $hook_out"
 fi
 hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$auto" |
   OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")" || fail "the resume hook must exit 0"
-if printf '%s\n' "$hook_out" | grep -Fq -- '- graph:'; then
+if printf '%s\n' "$hook_out" | grep >/dev/null -F -- '- graph:'; then
   fail "session start must not inspect an absent project graph: $hook_out"
 fi
 
@@ -644,7 +644,7 @@ printf '{"schema":1,"kind":"graph-route-shadow"}\n' > "$exec_repo/.oms/graph/sha
 hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$exec_repo" |
   OMS_GRAPH_AUTOBUILD=0 OMS_LOCK_DIR="$work/locks" OMS_WORK_JOURNAL=0 "$ROOT/scripts/resume-hook.sh")" \
   || fail "the resume hook must exit 0 with a plan present"
-if printf '%s\n' "$hook_out" | grep -Fq -- '- graph route:'; then
+if printf '%s\n' "$hook_out" | grep >/dev/null -F -- '- graph route:'; then
   fail "session start must not run the execution-graph shadow: $hook_out"
 fi
 shadow_lines="$(wc -l < "$exec_repo/.oms/graph/shadow.jsonl" | tr -d ' ')"

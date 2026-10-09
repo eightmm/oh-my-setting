@@ -242,7 +242,7 @@ import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8")).get("plan_id", ""))
 PY
 )"
-printf '%s\n' "$first_plan_id" | grep -Eq '^plan_[0-9a-f]{32}$' || {
+printf '%s\n' "$first_plan_id" | grep >/dev/null -E '^plan_[0-9a-f]{32}$' || {
   echo "agent-plan init did not mint a plan lineage: $first_plan_id" >&2
   exit 1
 }

@@ -848,12 +848,12 @@ live="$($EVENTS --repo "$compact_repo" start --provider codex --tool agent-call)
 # strictly older than "now" before --days 0 may see it.
 sleep 2
 out="$($EVENTS --repo "$compact_repo" compact --days 0)" || fail "compact dry-run failed"
-printf '%s' "$out" | grep -Fq 'would drop 4 event(s) across 1 terminal attempt(s)' ||
+printf '%s' "$out" | grep >/dev/null -F 'would drop 4 event(s) across 1 terminal attempt(s)' ||
   fail "compact dry-run should name the drop: $out"
 [ "$(wc -l < "$compact_repo/.oms/lifecycle/events.jsonl")" -eq 5 ] ||
   fail "a dry run must not touch the stream"
 out="$($EVENTS --repo "$compact_repo" compact --days 0 --apply)" || fail "compact apply failed"
-printf '%s' "$out" | grep -Fq 'dropped 4 event(s)' || fail "compact apply should report the drop: $out"
+printf '%s' "$out" | grep >/dev/null -F 'dropped 4 event(s)' || fail "compact apply should report the drop: $out"
 $EVENTS --repo "$compact_repo" validate >/dev/null || fail "the compacted stream must still validate"
 $EVENTS --repo "$compact_repo" show --attempt "$live" >/dev/null 2>&1 ||
   fail "the live attempt must survive compaction"

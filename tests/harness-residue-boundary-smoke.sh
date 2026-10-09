@@ -80,11 +80,11 @@ for dry in 1 0; do
     "kept: $TMPDIR/oh-my-setting-scratch.untracked (dead harness temp dir; worktree has uncommitted or untracked files)" \
     "kept: $TMPDIR/oh-my-setting-delegate.plan (dead harness temp dir; worktree holds .oms/plan/tasks.json)" \
     "kept=4"; do
-    printf '%s\n' "$out" | grep -Fxq "$want" || fail "dry=$dry missing '$want': $out"
+    printf '%s\n' "$out" | grep >/dev/null -Fx "$want" || fail "dry=$dry missing '$want': $out"
   done
-  printf '%s\n' "$out" | grep -Eq '^kept: .*scratch\.detached \(dead harness temp dir; worktree HEAD [0-9a-f]{12} is on no branch, tag or remote ref\)$' ||
+  printf '%s\n' "$out" | grep >/dev/null -E '^kept: .*scratch\.detached \(dead harness temp dir; worktree HEAD [0-9a-f]{12} is on no branch, tag or remote ref\)$' ||
     fail "dry=$dry must keep an unreferenced commit: $out"
-  if printf '%s\n' "$out" | grep -Eq '(would remove|removed): '; then
+  if printf '%s\n' "$out" | grep >/dev/null -E '(would remove|removed): '; then
     fail "dry=$dry must not offer kept work for removal: $out"
   fi
 done

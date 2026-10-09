@@ -69,23 +69,23 @@ EOF
   cp "$index" "$TMP/index-before"
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" resolve-superseded --dry-run)" ||
     fail "dry-run sweep failed"
-  printf '%s\n' "$out" | grep -Fq 'would resolve evt_admit_fail (superseded by evt_admit_ok)' ||
+  printf '%s\n' "$out" | grep >/dev/null -F 'would resolve evt_admit_fail (superseded by evt_admit_ok)' ||
     fail "dry run did not name the superseded admit failure: $out"
-  printf '%s\n' "$out" | grep -Fq '2 superseded failure(s) would be resolved (dry run)' ||
+  printf '%s\n' "$out" | grep >/dev/null -F '2 superseded failure(s) would be resolved (dry run)' ||
     fail "dry run did not summarize its count: $out"
   cmp -s "$TMP/index-before" "$index" || fail "a dry run must not touch the index"
 
   out="$(cd "$repo" && OMS_AGENT=codex "$ROOT/scripts/artifact-index.sh" resolve-superseded)" ||
     fail "sweep failed"
-  printf '%s\n' "$out" | grep -Fq 'resolved evt_admit_fail (superseded by evt_admit_ok)' ||
+  printf '%s\n' "$out" | grep >/dev/null -F 'resolved evt_admit_fail (superseded by evt_admit_ok)' ||
     fail "the sweep did not resolve the exact-byte admit failure: $out"
   # The bound is byte identity, not the exit code: a timeout whose patch the
   # same provider later admitted is as answered as any other superseded row.
-  printf '%s\n' "$out" | grep -Fq 'resolved evt_timeout_landed (superseded by evt_admit_ok)' ||
+  printf '%s\n' "$out" | grep >/dev/null -F 'resolved evt_timeout_landed (superseded by evt_admit_ok)' ||
     fail "a timeout whose exact bytes later landed should still resolve: $out"
-  printf '%s\n' "$out" | grep -Fq '2 superseded failure(s) resolved' ||
+  printf '%s\n' "$out" | grep >/dev/null -F '2 superseded failure(s) resolved' ||
     fail "the sweep did not summarize its count: $out"
-  if printf '%s\n' "$out" | grep -Eq 'evt_other_provider|evt_timeout_open'; then
+  if printf '%s\n' "$out" | grep >/dev/null -E 'evt_other_provider|evt_timeout_open'; then
     fail "the sweep claimed a row outside the exact-byte, same-provider bound: $out"
   fi
 
@@ -94,9 +94,9 @@ EOF
   after="$(unresolved_count "$repo")"
   [ "$after" = "2" ] || fail "expected 2 unresolved rows after the sweep, got $after"
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" unresolved 100)"
-  printf '%s\n' "$out" | grep -Fq 'event=evt_other_provider' ||
+  printf '%s\n' "$out" | grep >/dev/null -F 'event=evt_other_provider' ||
     fail "a same-bytes failure from another provider must stay a human call"
-  printf '%s\n' "$out" | grep -Fq 'event=evt_timeout_open' ||
+  printf '%s\n' "$out" | grep >/dev/null -F 'event=evt_timeout_open' ||
     fail "a failure the bytes do not answer must stay in the queue"
 
   python3 - "$index" <<'PY' || fail "the appended resolutions are not the rows resolve would have written"
@@ -120,7 +120,7 @@ PY
   cp "$index" "$TMP/index-settled"
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" resolve-superseded)" ||
     fail "second sweep failed"
-  printf '%s\n' "$out" | grep -Fq '0 superseded failure(s) resolved' ||
+  printf '%s\n' "$out" | grep >/dev/null -F '0 superseded failure(s) resolved' ||
     fail "a second sweep must find nothing left to resolve: $out"
   cmp -s "$TMP/index-settled" "$index" || fail "a second sweep appended a duplicate resolution"
 }
@@ -150,7 +150,7 @@ EOF
   cp "$index" "$TMP/refused-before"
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" resolve-superseded)" ||
     fail "sweep over unrepairable rows failed"
-  printf '%s\n' "$out" | grep -Fq '0 superseded failure(s) resolved' ||
+  printf '%s\n' "$out" | grep >/dev/null -F '0 superseded failure(s) resolved' ||
     fail "the sweep answered a row resolve would refuse: $out"
   cmp -s "$TMP/refused-before" "$index" ||
     fail "the sweep wrote a resolution that could never settle"
@@ -180,7 +180,7 @@ EOF
     fail "expected 5 unresolved rows before recovery, got $before"
 
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" unresolved 100)"
-  printf '%s\n' "$out" | grep -Fq 'recovered-by: evt_seat_back' ||
+  printf '%s\n' "$out" | grep >/dev/null -F 'recovered-by: evt_seat_back' ||
     fail "the eligible wall death lost its recovered-by annotation: $out"
   [ "$(printf '%s\n' "$out" | grep -Fc 'recovered-by:')" = "1" ] ||
     fail "recovered-by annotated a row outside the eligible bound: $out"
@@ -188,10 +188,10 @@ EOF
   cp "$index" "$TMP/recovered-before"
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" resolve-recovered --dry-run)" ||
     fail "recovered dry-run sweep failed"
-  printf '%s\n' "$out" | grep -Fq \
+  printf '%s\n' "$out" | grep >/dev/null -F \
     'would resolve evt_wall_death (recovered by evt_seat_back)' ||
     fail "recovered dry run did not name the wall death: $out"
-  printf '%s\n' "$out" | grep -Fq \
+  printf '%s\n' "$out" | grep >/dev/null -F \
     '1 recovered failure(s) would be resolved (dry run)' ||
     fail "recovered dry run did not summarize its count: $out"
   cmp -s "$TMP/recovered-before" "$index" ||
@@ -200,10 +200,10 @@ EOF
   out="$(cd "$repo" && OMS_AGENT=codex \
     "$ROOT/scripts/artifact-index.sh" resolve-recovered)" ||
     fail "recovered sweep failed"
-  printf '%s\n' "$out" | grep -Fq \
+  printf '%s\n' "$out" | grep >/dev/null -F \
     'resolved evt_wall_death (recovered by evt_seat_back)' ||
     fail "the sweep did not resolve the recovered wall death: $out"
-  printf '%s\n' "$out" | grep -Fq '1 recovered failure(s) resolved' ||
+  printf '%s\n' "$out" | grep >/dev/null -F '1 recovered failure(s) resolved' ||
     fail "the recovered sweep did not summarize its count: $out"
   if printf '%s\n' "$out" |
     grep -Eq 'evt_review_open|evt_semantic_fail|evt_call_early_only|evt_delegate_open'; then
@@ -217,7 +217,7 @@ EOF
     fail "expected 4 unresolved rows after recovery, got $after"
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" unresolved 100)"
   for event in evt_review_open evt_semantic_fail evt_call_early_only evt_delegate_open; do
-    printf '%s\n' "$out" | grep -Fq "event=$event" ||
+    printf '%s\n' "$out" | grep >/dev/null -F "event=$event" ||
       fail "$event left the unresolved queue without matching recovery evidence"
   done
 
@@ -240,7 +240,7 @@ PY
   cp "$index" "$TMP/recovered-settled"
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" resolve-recovered)" ||
     fail "second recovered sweep failed"
-  printf '%s\n' "$out" | grep -Fq '0 recovered failure(s) resolved' ||
+  printf '%s\n' "$out" | grep >/dev/null -F '0 recovered failure(s) resolved' ||
     fail "a second recovered sweep found work: $out"
   cmp -s "$TMP/recovered-settled" "$index" ||
     fail "a second recovered sweep appended a duplicate resolution"
@@ -257,11 +257,11 @@ test_artifact_resolution_argument_surfaces() {
     label="${resolver#resolve-}"
     out="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" "$resolver")" ||
       fail "an empty index should be a no-op $resolver sweep"
-    printf '%s\n' "$out" | grep -Fq "0 $label failure(s) resolved" ||
+    printf '%s\n' "$out" | grep >/dev/null -F "0 $label failure(s) resolved" ||
       fail "the empty $resolver sweep did not report a count: $out"
     out="$("$ROOT/scripts/artifact-index.sh" --repo "$repo" "$resolver" --dry-run)" ||
       fail "an empty index should be a no-op $resolver dry run"
-    printf '%s\n' "$out" | grep -Fq \
+    printf '%s\n' "$out" | grep >/dev/null -F \
       "0 $label failure(s) would be resolved (dry run)" ||
       fail "the empty $resolver dry run did not report a count: $out"
 

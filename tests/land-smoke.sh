@@ -65,7 +65,7 @@ remote_tip() { git -C "$TMP/remote.git" rev-parse main; }
 
 # --- 1. nothing to land ------------------------------------------------------
 out="$("$LAND" --repo "$repo" --wait --ci-wait 0)"
-printf '%s' "$out" | grep -q 'nothing to land' || fail "an up-to-date tree lands nothing: $out"
+printf '%s' "$out" | grep >/dev/null 'nothing to land' || fail "an up-to-date tree lands nothing: $out"
 [ ! -e "$state_land" ] || fail "an up-to-date landing must not leave receipt state"
 
 # --- 2. green worktree gate: state survives worktree removal ------------------
@@ -289,7 +289,7 @@ grep -q 'rebase first' "$TMP/diverged.err" || fail "diverged refusal must say so
 # --- 7. detached mode: receipt appears, status reads it -----------------------
 git -C "$repo" pull -q --rebase origin main
 out="$("$LAND" --repo "$repo" --ci-wait 0)"
-printf '%s' "$out" | grep -q 'receipt: ' || fail "detached mode must print the receipt path: $out"
+printf '%s' "$out" | grep >/dev/null 'receipt: ' || fail "detached mode must print the receipt path: $out"
 receipt="$(printf '%s\n' "$out" | sed -n 's/^receipt: //p')"
 for _ in $(seq 1 60); do
   [ -f "$receipt" ] && grep -q '"state": "passed"' "$receipt" && break

@@ -412,7 +412,7 @@ test_memory_citations_revalidate_and_stay_out_of_default_context() {
     --source-file "$source_path" --source-line 2 \
     --text "The important invariant is enforced here." >/dev/null
   out="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" context)"
-  if printf '%s' "$out" | grep -Fq 'important invariant is enforced'; then
+  if printf '%s' "$out" | grep >/dev/null -F 'important invariant is enforced'; then
     fail "source-derived facts must be recalled after validation, not injected blindly"
   fi
   out="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" recall --json "important invariant")" ||
@@ -839,13 +839,13 @@ for path in landing_paths:
 PY
 
   out="$(bash "$ROOT/scripts/gc.sh" --repo "$repo" --days 1 --dry-run)"
-  printf '%s' "$out" | grep -Fq 'checkpoint:' ||
+  printf '%s' "$out" | grep >/dev/null -F 'checkpoint:' ||
     fail "gc did not report the old local checkpoint"
-  printf '%s' "$out" | grep -Fq 'hook-events: compact 3 -> 2 rows' ||
+  printf '%s' "$out" | grep >/dev/null -F 'hook-events: compact 3 -> 2 rows' ||
     fail "gc did not report old hook-event compaction"
-  printf '%s' "$out" | grep -Fq 'hook-session:' ||
+  printf '%s' "$out" | grep >/dev/null -F 'hook-session:' ||
     fail "gc did not report the old hook session"
-  printf '%s' "$out" | grep -Fq 'landing-patch:' ||
+  printf '%s' "$out" | grep >/dev/null -F 'landing-patch:' ||
     fail "gc did not report an unreferenced terminal landing snapshot"
   [ -d "$repo/.oms/checkpoints/$checkpoint_id" ] ||
     fail "gc dry-run removed a checkpoint"

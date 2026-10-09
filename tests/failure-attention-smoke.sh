@@ -63,13 +63,13 @@ make_repo "$repo"
   --cmd "session-handoff capture --agent claude (session-end)" --exit 1 \
   --summary "capture failed once" >/dev/null
 out="$(inbox_of "$repo")"
-printf '%s' "$out" | grep -q 'P3 retiring-failures' ||
+printf '%s' "$out" | grep >/dev/null 'P3 retiring-failures' ||
   fail "a single hook failure must be a P3 retiring item: $out"
-if printf '%s' "$out" | grep -q 'P1 open-failures'; then
+if printf '%s' "$out" | grep >/dev/null 'P1 open-failures'; then
   fail "a single hook failure must not raise P1: $out"
 fi
 r="$(resume_of "$repo")"
-printf '%s' "$r" | grep -q 'auto-retire on TTL' ||
+printf '%s' "$r" | grep >/dev/null 'auto-retire on TTL' ||
   fail "resume must label one-shot hook noise as retiring: $r"
 ledger_json="$("$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved --json)"
 printf '%s' "$ledger_json" | python3 -c '
@@ -92,12 +92,12 @@ assert row["failures"] == [], row["failures"]
   --cmd "session-handoff capture --agent claude (session-end)" --exit 1 \
   --summary "capture failed again" >/dev/null
 out="$(inbox_of "$repo")"
-printf '%s' "$out" | grep -q 'P1 open-failures' ||
+printf '%s' "$out" | grep >/dev/null 'P1 open-failures' ||
   fail "a recurring hook failure must be P1 actionable: $out"
-printf '%s' "$out" | grep -q 'actionable failure' ||
+printf '%s' "$out" | grep >/dev/null 'actionable failure' ||
   fail "the P1 item must speak in actionable terms: $out"
 r="$(resume_of "$repo")"
-printf '%s' "$r" | grep -q 'failures: 1 actionable' ||
+printf '%s' "$r" | grep >/dev/null 'failures: 1 actionable' ||
   fail "resume must count the recurring hook failure as actionable: $r"
 ledger_json="$("$ROOT/scripts/fail-ledger.sh" --repo "$repo" list --unresolved --json)"
 printf '%s' "$ledger_json" | python3 -c '
@@ -121,10 +121,10 @@ make_repo "$repo2"
 "$ROOT/scripts/fail-ledger.sh" record --repo "$repo2" \
   --cmd "pytest tests/test_real.py" --exit 1 --summary "assertion failed" >/dev/null
 out="$(inbox_of "$repo2")"
-printf '%s' "$out" | grep -q 'P1 open-failures' ||
+printf '%s' "$out" | grep >/dev/null 'P1 open-failures' ||
   fail "a deliberate record must be P1 on first sight: $out"
 r="$(resume_of "$repo2")"
-printf '%s' "$r" | grep -q 'failures: 1 actionable' ||
+printf '%s' "$r" | grep >/dev/null 'failures: 1 actionable' ||
   fail "resume must surface a deliberate record: $r"
 
 # --- 4. expired hook row: invisible on every surface ------------------------
@@ -134,11 +134,11 @@ make_repo "$repo3"
   --cmd "some hook thing" --exit 1 --summary "old noise" >/dev/null
 sleep 2
 out="$(OMS_HOOK_FAIL_TTL=1 inbox_of "$repo3")"
-if printf '%s' "$out" | grep -qE 'open-failures|retiring-failures'; then
+if printf '%s' "$out" | grep >/dev/null -E 'open-failures|retiring-failures'; then
   fail "an expired hook row must not appear in inbox: $out"
 fi
 r="$(OMS_HOOK_FAIL_TTL=1 resume_of "$repo3")"
-if printf '%s' "$r" | grep -q 'failures:'; then
+if printf '%s' "$r" | grep >/dev/null 'failures:'; then
   fail "an expired hook row must not appear at session start: $r"
 fi
 # An invalid TTL must degrade, not crash the surfaces.
@@ -155,9 +155,9 @@ make_repo "$repo4"
 "$ROOT/scripts/fail-ledger.sh" record --repo "$repo4" --kind hook \
   --cmd "flaky gate" --exit 1 --summary "hook saw it once" >/dev/null
 out="$(inbox_of "$repo4")"
-printf '%s' "$out" | grep -q 'P3 retiring-failures' ||
+printf '%s' "$out" | grep >/dev/null 'P3 retiring-failures' ||
   fail "post-resolve fresh hook row must be retiring, not haunted by old counts: $out"
-if printf '%s' "$out" | grep -q 'P1 open-failures'; then
+if printf '%s' "$out" | grep >/dev/null 'P1 open-failures'; then
   fail "resolve must reset the recurrence count: $out"
 fi
 
@@ -178,7 +178,7 @@ show_out="$("$ROOT/scripts/fail-ledger.sh" --repo "$repo4" show --fingerprint "$
   fail "show must succeed for a known fingerprint"
 for want in "fingerprint: +$fp4" "state: +OPEN" "attention: +retiring" "count: +1" "kind: +hook" \
     "cmd: +flaky gate" "summary: +hook saw it once"; do
-  printf '%s\n' "$show_out" | grep -qE -- "^$want\$" || fail "show output missing '$want': $show_out"
+  printf '%s\n' "$show_out" | grep >/dev/null -E -- "^$want\$" || fail "show output missing '$want': $show_out"
 done
 if "$ROOT/scripts/fail-ledger.sh" --repo "$repo4" show --fingerprint 0123456789abcdef \
     >/dev/null 2>"$TMP/show.err"; then
@@ -200,12 +200,12 @@ assert len(rows) == 1 and rows[0]["attention"] == "stale", rows
 assert rows[0]["actionable"] is False and rows[0]["retiring"] is False, rows
 ' || fail "one failure recorded against another commit must be stale: $ledger_json"
 r="$(resume_of "$repo5")"
-printf '%s' "$r" | grep -q 'failures: 1 stale on an older commit' ||
+printf '%s' "$r" | grep >/dev/null 'failures: 1 stale on an older commit' ||
   fail "resume must count the stale row apart from actionable ones: $r"
 out="$(inbox_of "$repo5")"
-printf '%s' "$out" | grep -q 'P3 stale-failures' ||
+printf '%s' "$out" | grep >/dev/null 'P3 stale-failures' ||
   fail "inbox must file a stale row under P3: $out"
-if printf '%s' "$out" | grep -q 'P1 open-failures'; then
+if printf '%s' "$out" | grep >/dev/null 'P1 open-failures'; then
   fail "a stale row must not raise P1: $out"
 fi
 runtime_json="$("$ROOT/scripts/runtime.sh" --repo "$repo5" envelope show)"
@@ -218,9 +218,9 @@ assert not any(action["id"] == "resolve_blocker" for action in row["next_actions
 "$ROOT/scripts/fail-ledger.sh" record --repo "$repo5" --kind verify \
   --cmd "bash scripts/check.sh" --exit 1 --summary "gate failed again" >/dev/null
 r="$(resume_of "$repo5")"
-printf '%s' "$r" | grep -q 'failures: 1 actionable' ||
+printf '%s' "$r" | grep >/dev/null 'failures: 1 actionable' ||
   fail "a recurrence across commits is tree-independent and actionable: $r"
-printf '%s' "$r" | grep -qE 'fp: [0-9a-f]{16} \(oms fail-ledger show --fingerprint [0-9a-f]{16}\)' ||
+printf '%s' "$r" | grep >/dev/null -E 'fp: [0-9a-f]{16} \(oms fail-ledger show --fingerprint [0-9a-f]{16}\)' ||
   fail "resume failure line must carry the fingerprint and the show command: $r"
 runtime_json="$("$ROOT/scripts/runtime.sh" --repo "$repo5" envelope show)"
 printf '%s' "$runtime_json" | python3 -c '
@@ -350,9 +350,9 @@ make_repo "$repo5"
 out="$(cd "$repo5" && env OMS_INSTALL_RECEIPT="$au_receipt" XDG_CONFIG_HOME="$au_xdg" \
   OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$au_cron" \
   OH_MY_SETTING_AUTO_UPDATE_STATE="$au_state" "$ROOT/scripts/inbox.sh")"
-printf '%s' "$out" | grep -q 'P1 auto-update-failed' ||
+printf '%s' "$out" | grep >/dev/null 'P1 auto-update-failed' ||
   fail "a failed updater must be a P1 inbox item: $out"
-printf '%s' "$out" | grep -q 'codex command is required' ||
+printf '%s' "$out" | grep >/dev/null 'codex command is required' ||
   fail "the inbox item must carry the failure detail: $out"
 
 echo "failure-attention-smoke: ok"

@@ -847,7 +847,7 @@ test_project_doctor_warns_structure_drift() {
   dd if=/dev/zero of="$project/data/huge-untracked.bin" bs=1 count=0 seek=20971520 2>/dev/null
 
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "clean scaffold should pass doctor"
-  if printf '%s' "$out" | grep -Eq "move into src/|move there|over 10MB|gitignored dirs"; then
+  if printf '%s' "$out" | grep >/dev/null -E "move into src/|move there|over 10MB|gitignored dirs"; then
     fail "exempt files / untracked data must not raise drift warnings: $out"
   fi
 
@@ -897,7 +897,7 @@ test_project_doctor_warns_unregistered_experiments() {
   # Fresh ml scaffold has the section and no ledger: quiet.
   assert_file_contains "$project/PROJECT.md" '## Experiment Pre-Registration'
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "fresh scaffold should pass"
-  if printf '%s' "$out" | grep -q 'no .## Experiment Pre-Registration'; then
+  if printf '%s' "$out" | grep >/dev/null 'no .## Experiment Pre-Registration'; then
     fail "scaffolded section present: must not warn"
   fi
 
@@ -906,7 +906,7 @@ test_project_doctor_warns_unregistered_experiments() {
   mkdir -p "$project/docs"
   printf '{"ts":"2026-06-11T00:00:00Z","exit":0}\n' > "$project/docs/EXPERIMENTS.jsonl"
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "missing pre-reg should warn, not fail"
-  printf '%s' "$out" | grep -q 'Experiment Pre-Registration' ||
+  printf '%s' "$out" | grep >/dev/null 'Experiment Pre-Registration' ||
     fail "ledger without pre-registration section must warn"
 }
 
@@ -918,7 +918,7 @@ test_project_doctor_warns_empty_contract_past_draft() {
 
   # Fresh apply is draft: the contract warnings must stay silent.
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "fresh general apply should pass"
-  if printf '%s' "$out" | grep -q 'past draft but'; then
+  if printf '%s' "$out" | grep >/dev/null 'past draft but'; then
     fail "draft PROJECT.md must not raise contract warnings"
   fi
 
@@ -934,7 +934,7 @@ test_project_doctor_warns_empty_contract_past_draft() {
   sed -i 's/^- Test:$/- Test: pytest/; s/^- Success criteria:$/- Success criteria: tests pass/' \
     "$project/PROJECT.md"
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "filled contract should pass"
-  if printf '%s' "$out" | grep -q 'past draft but'; then
+  if printf '%s' "$out" | grep >/dev/null 'past draft but'; then
     fail "filled contract must not warn: $out"
   fi
 }
@@ -984,7 +984,7 @@ test_review_verdicts_subcommand() {
   printf '# synthesis\n' > "$dir/allpass/_synthesis-x-$run.md"
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/allpass")" && rc=0 || rc=$?
   [ "$rc" = "0" ] || fail "all-pass run should exit 0, got $rc"
-  if printf '%s' "$out" | grep -q '_synthesis'; then
+  if printf '%s' "$out" | grep >/dev/null '_synthesis'; then
     fail "synthesis artifact must not be treated as a provider"
   fi
 
@@ -1588,15 +1588,15 @@ test_tsp_queue_logs_bounded_tail() {
   out="$(cd "$project" && OMS_TSP_FORCE_FALLBACK=1 OMS_TSP_FALLBACK_DIR="$project/fallback" \
     OMS_TSP_LOG_LINES=10 PATH="/usr/bin:/bin" \
     "$ROOT/scripts/tsp-queue.sh" logs "$job_id" 2>/dev/null)"
-  printf '%s\n' "$out" | grep -Fq '[showing last 10 of 50 lines' ||
+  printf '%s\n' "$out" | grep >/dev/null -F '[showing last 10 of 50 lines' ||
     fail "bounded logs must name the cut: $out"
-  printf '%s\n' "$out" | grep -Fxq '50' || fail "bounded logs keep the tail: $out"
-  if printf '%s\n' "$out" | grep -Fxq '1'; then
+  printf '%s\n' "$out" | grep >/dev/null -Fx '50' || fail "bounded logs keep the tail: $out"
+  if printf '%s\n' "$out" | grep >/dev/null -Fx '1'; then
     fail "bounded logs must drop the head: $out"
   fi
   out="$(cd "$project" && OMS_TSP_FORCE_FALLBACK=1 OMS_TSP_FALLBACK_DIR="$project/fallback" \
     PATH="/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" logs --full "$job_id" 2>/dev/null)"
-  printf '%s\n' "$out" | grep -Fxq '1' || fail "--full must print the whole log: $out"
+  printf '%s\n' "$out" | grep >/dev/null -Fx '1' || fail "--full must print the whole log: $out"
 }
 
 test_tsp_queue_secret_guard_blocks_enqueue() {
@@ -3037,7 +3037,7 @@ test_prompt_takers_refuse_a_mistyped_option() {
       --bogus-flag --prompt probe 2>&1)" || rc=$?
     [ "$rc" != "0" ] ||
       fail "$script must refuse a mistyped option, got success: $out"
-    printf '%s\n' "$out" | grep -Fq 'unknown option: --bogus-flag' ||
+    printf '%s\n' "$out" | grep >/dev/null -F 'unknown option: --bogus-flag' ||
       fail "$script must name the mistyped option: $out"
   done
 }
@@ -5930,7 +5930,7 @@ PY
 )"
   out="$("$plan" --repo "$project" retire)" ||
     fail "retire check should succeed: $out"
-  printf '%s\n' "$out" | grep -Fq "$plan_sha" ||
+  printf '%s\n' "$out" | grep >/dev/null -F "$plan_sha" ||
     fail "retire check did not print the exact plan CAS: $out"
   after="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
 import hashlib, sys
@@ -6105,14 +6105,14 @@ PY
   printf 'tamper\n' >> "$archive"
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" || rc=$?
-  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'plan-retirement' ||
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F 'plan-retirement' ||
     fail "state-verify did not fail closed on a corrupt retirement archive: $out"
   cp "$TMP/agent-plan-retire.archive-good" "$archive"
   duplicate="$(tail -n 1 "$receipt")"
   printf '%s\n' "$duplicate" >> "$receipt"
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" || rc=$?
-  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'duplicate retirement receipts' ||
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F 'duplicate retirement receipts' ||
     fail "state-verify did not reject duplicate plan retirement authority: $out"
 
   # Active authority always wins, even for a non-verifying disposition.
@@ -6171,7 +6171,7 @@ PY
   if [ "$rc" = 0 ]; then
     fail "retire ignored a live task worker marker"
   fi
-  printf '%s\n' "$out" | grep -Fq 'live worker marker prevents retirement' ||
+  printf '%s\n' "$out" | grep >/dev/null -F 'live worker marker prevents retirement' ||
     fail "typed-live marker fixture hit the wrong veto path: $out"
   printf '{"schema":99,"id":"future","pid":%s,"task_id":"t1","lease_id":"","executor_id":""}\n' \
     "$$" > "$marker_project/.oms/delegations/live.json"
@@ -6179,7 +6179,7 @@ PY
   out="$("$plan" --repo "$marker_project" retire --apply \
       --expected-plan-sha256 "$plan_sha" --disposition superseded \
       --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
-  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'malformed or unproven' ||
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'malformed or unproven' ||
     fail "future/unproven matching marker did not fail closed: $out"
 
   python3 - "$marker_project/.oms/plan/tasks.json" <<'PY'
@@ -6206,7 +6206,7 @@ PY
   out="$("$plan" --repo "$marker_project" retire --apply \
       --expected-plan-sha256 "$plan_sha" --disposition superseded \
       --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
-  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'malformed or unproven' ||
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'malformed or unproven' ||
     fail "duplicate task_id marker collapsed past the malformed veto: $out"
   (
     . "$ROOT/scripts/lib/file-lock.sh"
@@ -6219,7 +6219,7 @@ PY
   out="$("$plan" --repo "$marker_project" retire --apply \
       --expected-plan-sha256 "$plan_sha" --disposition superseded \
       --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
-  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'malformed or unproven' ||
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'malformed or unproven' ||
     fail "non-finite marker bypassed the malformed veto: $out"
   (
     . "$ROOT/scripts/lib/file-lock.sh"
@@ -6232,7 +6232,7 @@ PY
   out="$("$plan" --repo "$marker_project" retire --apply \
       --expected-plan-sha256 "$plan_sha" --disposition superseded \
       --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
-  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'malformed or unproven' ||
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'malformed or unproven' ||
     fail "overflowed float marker bypassed the malformed veto: $out"
 
   # Superseded retirement is allowed only after every old task is done. It is
@@ -6481,7 +6481,7 @@ PY
 )" = "$different_sha" ] || fail "failed residual-intent next --claim changed the plan"
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$claim_project" --json 2>&1)" || rc=$?
-  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'active plan lineage conflicts' ||
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F 'active plan lineage conflicts' ||
     fail "state-verify trusted a mutated retired plan lineage: $out"
   if "$plan" --repo "$claim_project" retire --apply \
       --expected-plan-sha256 "$plan_sha" --disposition superseded \
@@ -6618,20 +6618,20 @@ with open(path, "wb") as handle:
 PY
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$duplicate_project" --json 2>&1)" || rc=$?
-  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'duplicate JSON key' ||
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F 'duplicate JSON key' ||
     fail "state-verify did not reject a duplicate-key retirement intent: $out"
   rc=0
   out="$("$plan" --repo "$duplicate_project" retire --apply \
     --expected-plan-sha256 "$plan_sha" --disposition superseded \
     --reason "$reason" 2>&1)" || rc=$?
-  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'duplicate JSON key' ||
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'duplicate JSON key' ||
     fail "retire replay trusted a duplicate-key intent: $out"
   [ -e "$duplicate_project/.oms/plan/tasks.json" ] &&
     [ ! -e "$duplicate_project/.oms/plan/retirements.jsonl" ] ||
     fail "duplicate-key intent replay mutated retirement authority"
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" || rc=$?
-  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'retirement intent(s) remain incomplete' ||
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F 'retirement intent(s) remain incomplete' ||
     fail "state-verify did not expose the interrupted retirement intent: $out"
   "$plan" --repo "$project" retire --apply \
     --expected-plan-sha256 "$plan_sha" --disposition superseded \
@@ -6772,7 +6772,7 @@ PY
     rc=0
     out="$("$ROOT/scripts/state-verify.sh" \
       --repo "$TMP/agent-plan-retire-proof-$variant" --json 2>&1)" || rc=$?
-    [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'plan-retirement' ||
+    [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F 'plan-retirement' ||
       fail "state-verify trusted $variant retirement proof corruption: $out"
   done
 
@@ -6846,13 +6846,13 @@ PY
 )"
     rc=0
     out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" || rc=$?
-    [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq "$diagnostic" ||
+    [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F "$diagnostic" ||
       fail "state-verify accepted or misclassified $variant retirement JSONL: $out"
     rc=0
     out="$("$plan" --repo "$project" retire --apply \
       --expected-plan-sha256 "$plan_sha" --disposition superseded \
       --reason "a reviewed replacement contract superseded this plan" 2>&1)" || rc=$?
-    [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq "$diagnostic" ||
+    [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F "$diagnostic" ||
       fail "retire mutation accepted or misclassified $variant retirement JSONL: $out"
     after="$(python3 - "$ledger" <<'PY' | tr -d '\r'
 import hashlib, sys
@@ -6885,7 +6885,7 @@ PY
     --expected-plan-sha256 "$plan_sha" --disposition completed-external \
     --reason "equivalent implementation is committed on detached HEAD" 2>&1)" || rc=$?
   [ "$rc" = 0 ] || fail "detached completed-external retirement failed: $out"
-  printf '%s\n' "$out" | grep -Fq 'Traceback' &&
+  printf '%s\n' "$out" | grep >/dev/null -F 'Traceback' &&
     fail "detached retirement leaked a Python traceback: $out"
   [ ! -e "$project/.oms/plan/tasks.json" ] ||
     fail "detached completed-external retirement left its plan active"
@@ -9092,7 +9092,7 @@ assert isinstance(row.get("tokens"), int) and row["tokens"] > 0, row
 PY
 
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
-  printf '%s' "$out" | grep -Eq 'token-reports=[1-9]' ||
+  printf '%s' "$out" | grep >/dev/null -E 'token-reports=[1-9]' ||
     fail "telemetry should report the token count: $out"
 
   # The artifact goes; the accounting stays. Coverage of artifacts drops, which
@@ -9101,9 +9101,9 @@ PY
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
   contains "$out" 'artifacts=0' ||
     fail "artifact coverage should drop once the file is gone: $out"
-  printf '%s' "$out" | grep -Eq 'token-reports=[1-9]' ||
+  printf '%s' "$out" | grep >/dev/null -E 'token-reports=[1-9]' ||
     fail "token accounting must survive artifact deletion: $out"
-  printf '%s' "$out" | grep -Eq 'durations=[1-9]' ||
+  printf '%s' "$out" | grep >/dev/null -E 'durations=[1-9]' ||
     fail "duration accounting must survive artifact deletion: $out"
 }
 
@@ -10358,10 +10358,10 @@ test_memory_context_omits_sensitive_sections_cleanly() {
   printf -- '- 2026-06-10T00:00:00Z [agent] secret path /hom%s/x\n' "e" > "$pins"
 
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" context 2>/dev/null || true)"
-  if printf '%s' "$out" | grep -q '### project'; then
+  if printf '%s' "$out" | grep >/dev/null '### project'; then
     fail "omitted section must not leave a dangling header"
   fi
-  if printf '%s' "$out" | grep -q 'Shared harness memory follows'; then
+  if printf '%s' "$out" | grep >/dev/null 'Shared harness memory follows'; then
     fail "intro line must not appear when all sections are omitted"
   fi
 }
@@ -11146,7 +11146,7 @@ test_release_version_file_and_status_agree() {
     *) fail "VERSION not semver-like: $version" ;;
   esac
   out="$("$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Eq '^- version: [0-9]' || fail "status.sh missing version line"
+  printf '%s' "$out" | grep >/dev/null -E '^- version: [0-9]' || fail "status.sh missing version line"
 }
 
 test_status_probes_provider_versions_only_when_verbose() {
@@ -11776,7 +11776,7 @@ test_autoupdate_malformed_cron_precedes_systemd_status() {
   out="$(XDG_CONFIG_HOME="$config_home" \
     OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s\n' "$out" | grep -Fxq -- '- trigger: cron (malformed)' ||
+  printf '%s\n' "$out" | grep >/dev/null -Fx -- '- trigger: cron (malformed)' ||
     fail "active systemd masked malformed cron status: $out"
 }
 
@@ -12247,7 +12247,7 @@ test_python_helpers_are_syntax_checked() {
 
   out="$(cd "$ROOT" && bash scripts/check-python.sh 2>&1)" ||
     fail "python syntax gate should pass: $out"
-  printf '%s' "$out" | grep -Eq 'python-syntax: ok \([0-9]+ files\)' ||
+  printf '%s' "$out" | grep >/dev/null -E 'python-syntax: ok \([0-9]+ files\)' ||
     fail "python syntax gate must report what it checked: $out"
   mkdir -p "$dir"
   printf 'valid = 1\n' > "$dir/good.py"
@@ -12835,7 +12835,7 @@ test_run_capsule_captures_and_reproduces() {
   # Env is captured reconstructably (lock or freeze) and reproduce points at it.
   [ -f "$runs/$id/env.uv.lock" ] || [ -f "$runs/$id/env.freeze.txt" ] ||
     fail "no reconstructable env lock saved"
-  printf '%s' "$repro" | grep -Eq 'uv sync|pip install' || fail "reproduce missing env recreate step"
+  printf '%s' "$repro" | grep >/dev/null -E 'uv sync|pip install' || fail "reproduce missing env recreate step"
 
   # verify: clean against the same tree, drift after a change.
   local vout
@@ -13964,12 +13964,12 @@ PY
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 prompt="$(cat)"
-if printf '%s' "$prompt" | grep -q 'continuing your own previous attempt'; then
-  printf '%s' "$prompt" | grep -q 'Read applicable repository instructions and PROJECT.md' || exit 8
-  printf '%s' "$prompt" | grep -q 'preserve contracts and safety' || exit 8
-  printf '%s' "$prompt" | grep -q 'reuse existing tests, and run affected checks' || exit 8
-  printf '%s' "$prompt" | grep -q 'IMPLEMENTATION-WORKER-STRATEGY' || exit 9
-  if printf '%s' "$prompt" | grep -q 'PRESERVED-PATCH-CONTENT'; then exit 10; fi
+if printf '%s' "$prompt" | grep >/dev/null 'continuing your own previous attempt'; then
+  printf '%s' "$prompt" | grep >/dev/null 'Read applicable repository instructions and PROJECT.md' || exit 8
+  printf '%s' "$prompt" | grep >/dev/null 'preserve contracts and safety' || exit 8
+  printf '%s' "$prompt" | grep >/dev/null 'reuse existing tests, and run affected checks' || exit 8
+  printf '%s' "$prompt" | grep >/dev/null 'IMPLEMENTATION-WORKER-STRATEGY' || exit 9
+  if printf '%s' "$prompt" | grep >/dev/null 'PRESERVED-PATCH-CONTENT'; then exit 10; fi
   [ "$(git show :large.txt | grep -c PRESERVED-PATCH-CONTENT)" = 1000 ] || exit 11
   printf 'fixed\n' > delegated.txt
   echo "worker repaired"
@@ -14072,7 +14072,7 @@ PY
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 prompt="$(cat)"
-if printf '%s' "$prompt" | grep -q 'continuing your own previous attempt'; then
+if printf '%s' "$prompt" | grep >/dev/null 'continuing your own previous attempt'; then
   exit 127
 fi
 printf 'broken\n' > delegated.txt
@@ -14502,21 +14502,21 @@ test_oms_dispatcher_lists_and_dispatches() {
   # pipefail as soon as the match is found.
   out="$("$bin/oms" list)" || fail "oms list should succeed"
   [ "$out" = "$("$bin/oms" list --frontdoor)" ] || fail "default catalog must be compact"
-  printf '%s' "$out" | grep -Eq '^inbox ' || fail "compact catalog needs inbox"
-  if printf '%s' "$out" | grep -Eq '^agent-run |^herdr-adapter |^semantic-eval '; then
+  printf '%s' "$out" | grep >/dev/null -E '^inbox ' || fail "compact catalog needs inbox"
+  if printf '%s' "$out" | grep >/dev/null -E '^agent-run |^herdr-adapter |^semantic-eval '; then
     fail "default catalog leaked primitive, optional or retired tools"
   fi
   out="$("$bin/oms" list --all)" || fail "expanded catalog should succeed"
-  printf '%s' "$out" | grep -Eq '^run-ledger ' || fail "oms list should include run-ledger"
+  printf '%s' "$out" | grep >/dev/null -E '^run-ledger ' || fail "oms list should include run-ledger"
   for public in agent-events agent-supervisor approval-inbox autopilot draft-pr \
     runtime open-in otel-export; do
-    printf '%s\n' "$out" | grep -Eq "^${public} " ||
+    printf '%s\n' "$out" | grep >/dev/null -E "^${public} " ||
       fail "oms list should include new public tool: $public"
     "$bin/oms" "$public" --help >/dev/null 2>&1 ||
       fail "oms should dispatch new public tool: $public"
   done
   for retired in herdr-adapter a2a-bridge agent-card ops-cockpit agent-run research-runner; do
-    if printf '%s\n' "$out" | grep -Eq "^${retired} "; then
+    if printf '%s\n' "$out" | grep >/dev/null -E "^${retired} "; then
       fail "retired adapter leaked into core catalog: $retired"
     fi
     if "$bin/oms" "$retired" --help >/dev/null 2>&1; then
@@ -14526,11 +14526,11 @@ test_oms_dispatcher_lists_and_dispatches() {
   "$bin/oms" semantic-eval --help >/dev/null || fail "retired evaluator needs migration help"
   for hidden in skill-router turn-guard check-bash32 install-tools multi-agent-ask multi-agent-review multi-agent-delegate \
     generate-slurm-reference generate-slurm-skill github-source import-agent-result install-autoupdate run-capsule tool-lock uninstall-autoupdate write-machine-snapshot; do
-    if printf '%s' "$out" | grep -Eq "^${hidden} "; then
+    if printf '%s' "$out" | grep >/dev/null -E "^${hidden} "; then
       fail "oms list should hide internal/deprecated tool: $hidden"
     fi
   done
-  printf '%s' "$out" | grep -Eq '^snapshot ' || fail "oms list should include snapshot"
+  printf '%s' "$out" | grep >/dev/null -E '^snapshot ' || fail "oms list should include snapshot"
   "$bin/oms" run-ledger --help >/dev/null 2>&1 || fail "oms should dispatch run-ledger via its symlink"
   (cd "$d" && "$bin/oms" run ls >/dev/null 2>&1) || fail "oms run door broke"
   # One spelling per verb: the dispatcher used to accept both a short alias
@@ -14576,28 +14576,28 @@ test_oms_frontdoor_routes_primary_subsystems() {
   all_tools="$("$bin/oms" list --all)" || fail "oms list --all should succeed"
   help_text="$("$bin/oms" --help)" || fail "oms --help should succeed"
   review_help="$("$bin/oms" peer-review --help)" || fail "peer-review --help should succeed"
-  printf '%s\n' "$help_text" | grep -Fq 'reveals core primitives' ||
+  printf '%s\n' "$help_text" | grep >/dev/null -F 'reveals core primitives' ||
     fail "oms help should distinguish the full public catalog from subsystem front doors"
-  printf '%s\n' "$review_help" | grep -Fq 'Plain review persists seat answers as artifacts.' ||
+  printf '%s\n' "$review_help" | grep >/dev/null -F 'Plain review persists seat answers as artifacts.' ||
     fail "peer-review help should not promise a typed gate outcome in plain mode"
-  printf '%s\n' "$review_help" | grep -Fq 'With --gate, enforce and record the typed gate outcome.' ||
+  printf '%s\n' "$review_help" | grep >/dev/null -F 'With --gate, enforce and record the typed gate outcome.' ||
     fail "peer-review help should scope its typed outcome to gate mode"
 
   for primary in autopilot consult dashboard doctor inbox journal land panel patch-admit patch-land \
     peer-delegate peer-review room runtime tick update; do
-    printf '%s\n' "$frontdoors" | grep -Eq "^${primary} " ||
+    printf '%s\n' "$frontdoors" | grep >/dev/null -E "^${primary} " ||
       fail "frontdoor catalog should route the canonical workflow: $primary"
   done
 
-  if printf '%s\n' "$frontdoors" | grep -Eq '^agent-call '; then
+  if printf '%s\n' "$frontdoors" | grep >/dev/null -E '^agent-call '; then
     fail "read primitive should stay behind list --all: agent-call"
   fi
-  printf '%s\n' "$all_tools" | grep -Eq '^agent-call ' ||
+  printf '%s\n' "$all_tools" | grep >/dev/null -E '^agent-call ' ||
     fail "list --all should retain the read primitive: agent-call"
 
   duplicate="$(printf '%s\n' "$frontdoors" | awk '{ seen[$1]++ } END { for (name in seen) if (seen[name] > 1) print name }')"
   [ -z "$duplicate" ] || fail "frontdoor catalog contains duplicate tools: $duplicate"
-  printf '%s\n' "$frontdoors" | grep -Eq '^peer-review .*diff' ||
+  printf '%s\n' "$frontdoors" | grep >/dev/null -E '^peer-review .*diff' ||
     fail "peer-review catalog description should distinguish diff review from peer-ask"
 }
 
@@ -14881,7 +14881,7 @@ open(path, "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
 PY
   local out
   out="$(cd "$project" && "$ROOT/scripts/experiment-board.sh" list)"
-  printf '%s' "$out" | grep -q "old .*STALE" || fail "an aged claim should be tagged STALE"
+  printf '%s' "$out" | grep >/dev/null "old .*STALE" || fail "an aged claim should be tagged STALE"
   printf '%s' "$out" | grep "fresh" | grep -q "STALE" && fail "a fresh claim must not be STALE"
   [ "$(cd "$project" && "$ROOT/scripts/experiment-board.sh" list --stale | grep -c .)" -eq 1 ] ||
     fail "--stale should show only the stale claim"
@@ -15189,9 +15189,9 @@ test_agent_role_and_delegate_injection() {
   make_committed_repo "$empty_project"
   roles="$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
     "$ROOT/scripts/agent-role.sh" list)"
-  printf '%s\n' "$roles" | grep -Fxq decision-advisor ||
+  printf '%s\n' "$roles" | grep >/dev/null -Fx decision-advisor ||
     fail "agent-role list should include bundled decision-advisor"
-  printf '%s\n' "$roles" | grep -Fxq repo-auditor ||
+  printf '%s\n' "$roles" | grep >/dev/null -Fx repo-auditor ||
     fail "agent-role list should include bundled repo-auditor"
   [ "$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
     "$ROOT/scripts/agent-role.sh" --name decision-advisor resolve)" = "$ROOT/roles/decision-advisor.md" ] ||
@@ -15736,8 +15736,8 @@ test_delegation_liveness_in_state() {
     > "$project/.oms/delegations/d2.json"
   local out
   out="$(cd "$project" && "$ROOT/scripts/state.sh")"
-  printf '%s' "$out" | grep -Eq "d1.*ORPHAN" || fail "a dead-pid delegation must be flagged as ORPHAN"
-  printf '%s' "$out" | grep -Eq "d2.*live" || fail "a live-pid delegation must show as live"
+  printf '%s' "$out" | grep >/dev/null -E "d1.*ORPHAN" || fail "a dead-pid delegation must be flagged as ORPHAN"
+  printf '%s' "$out" | grep >/dev/null -E "d2.*live" || fail "a live-pid delegation must show as live"
 }
 
 test_gc_reclaims_safely() {
@@ -16849,7 +16849,7 @@ test_gc_preserves_unknown_exact_marker_schema() {
   [ "$rc" = 3 ] || fail "schema-4 marker without native pid did not veto plan recovery, got $rc"
 
   dry_out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
-  if printf '%s' "$dry_out" | grep -Eq 'orphan-delegation-(plan|executor): .* -> (ready|failed)'; then
+  if printf '%s' "$dry_out" | grep >/dev/null -E 'orphan-delegation-(plan|executor): .* -> (ready|failed)'; then
     fail "gc dry-run consumed semantically unproven exact marker evidence: $dry_out"
   fi
   (cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply \
@@ -17432,7 +17432,7 @@ test_skill_router_matches_and_dedupes() {
   out="$(printf '{"prompt":"peer review하고 의견 물어봐","session_id":"r2","turn_id":"t3","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
   contains "$out" "oms-agent-harness" || fail "peer intents should route to oms-agent-harness"
-  if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
+  if printf '%s' "$out" | grep >/dev/null -E 'peer-(ask|review|delegate)'; then
     fail "retired peer skill names must not be suggested"
   fi
   # The documented natural-language autopilot request must reach the harness
@@ -17490,14 +17490,14 @@ test_skill_router_separates_consultation_from_delegation() {
   out="$(printf '{"prompt":"codex한테 의견 물어봐","session_id":"ask1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
   contains "$out" 'oms-agent-harness' || fail "consultation should route to oms-agent-harness"
-  if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
+  if printf '%s' "$out" | grep >/dev/null -E 'peer-(ask|review|delegate)'; then
     fail "consultation must not expose a retired peer skill"
   fi
 
   out="$(printf '{"prompt":"codex한테 시켜: README 고쳐","session_id":"write1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
   contains "$out" 'oms-agent-harness' || fail "write delegation should route to oms-agent-harness"
-  if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
+  if printf '%s' "$out" | grep >/dev/null -E 'peer-(ask|review|delegate)'; then
     fail "write delegation must not expose a retired peer skill"
   fi
 }
@@ -17605,7 +17605,7 @@ EOF
     out="$(printf '{"prompt":"%s","session_id":"router-near-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
       PATH="$d/bin:$PATH" TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    if printf '%s' "$out" | grep -Eq 'skill hint:.*oms-(agent-harness|gpu-workstation)'; then
+    if printf '%s' "$out" | grep >/dev/null -E 'skill hint:.*oms-(agent-harness|gpu-workstation)'; then
       fail "generic prompt must not force a specialized skill: $prompt ($out)"
     fi
   done
@@ -18555,23 +18555,23 @@ test_resume_hook_prints_bounded_resume_block() {
 
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")" ||
     fail "resume hook must exit 0"
-  printf '%s\n' "$out" | grep -q '^\[oms resume\]' || fail "missing resume header: $out"
-  printf '%s\n' "$out" | grep -q 'Ship the resume surface' || fail "missing task goal"
-  printf '%s\n' "$out" | grep -q 'next: wire hooks.json' || fail "missing next step"
-  printf '%s\n' "$out" | grep -q 'verify: bash tests/x.sh' || fail "missing verify command"
+  printf '%s\n' "$out" | grep >/dev/null '^\[oms resume\]' || fail "missing resume header: $out"
+  printf '%s\n' "$out" | grep >/dev/null 'Ship the resume surface' || fail "missing task goal"
+  printf '%s\n' "$out" | grep >/dev/null 'next: wire hooks.json' || fail "missing next step"
+  printf '%s\n' "$out" | grep >/dev/null 'verify: bash tests/x.sh' || fail "missing verify command"
   # The plan contract must survive a compaction the way the task packet does:
   # a live plan was previously completely silent at session start.
-  printf '%s\n' "$out" | grep -q 'plan: Unify the writer contract' ||
+  printf '%s\n' "$out" | grep >/dev/null 'plan: Unify the writer contract' ||
     fail "missing plan goal: $out"
-  printf '%s\n' "$out" | grep -q 'accept: bash tests/plan-accept.sh' ||
+  printf '%s\n' "$out" | grep >/dev/null 'accept: bash tests/plan-accept.sh' ||
     fail "missing plan acceptance: $out"
-  printf '%s\n' "$out" | grep -q 'session-handoff show claude-abc.md' ||
+  printf '%s\n' "$out" | grep >/dev/null 'session-handoff show claude-abc.md' ||
     fail "missing handoff pointer"
-  printf '%s\n' "$out" | grep -q 'failures: 1 actionable' || fail "missing failure line"
-  if printf '%s\n' "$out" | grep -q 'peers:'; then
+  printf '%s\n' "$out" | grep >/dev/null 'failures: 1 actionable' || fail "missing failure line"
+  if printf '%s\n' "$out" | grep >/dev/null 'peers:'; then
     fail "resume hook must leave peer warnings to the prompt router: $out"
   fi
-  if printf '%s\n' "$out" | grep -Fq -- '- graph:'; then
+  if printf '%s\n' "$out" | grep >/dev/null -F -- '- graph:'; then
     fail "resume hook must leave graph work to an explicit reader: $out"
   fi
   [ "$(printf '%s\n' "$out" | wc -l)" -le 15 ] || fail "resume block exceeds its line budget"
@@ -18598,7 +18598,7 @@ EOF
     PATH="$crlf_bin:/usr/bin:/bin" OMS_TEST_REAL_PYTHON="$real_python" \
       "$ROOT/scripts/resume-hook.sh")" ||
     fail "CRLF resume hook must exit 0"
-  printf '%s\n' "$out" | grep -q 'plan: Unify the writer contract' ||
+  printf '%s\n' "$out" | grep >/dev/null 'plan: Unify the writer contract' ||
     fail "CRLF Python output hid the active plan: $out"
   case "$out" in
     *$'\r'*) fail "resume block retained a carriage return" ;;
@@ -18608,7 +18608,7 @@ EOF
   # a prior version of this hook misread and counted forever.
   ( cd "$repo" && "$ROOT/scripts/fail-ledger.sh" resolve --cmd "pytest -k boom" >/dev/null 2>&1 )
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
-  if printf '%s\n' "$out" | grep -q 'failures:'; then
+  if printf '%s\n' "$out" | grep >/dev/null 'failures:'; then
     fail "a resolved failure must drop out of the resume count: $out"
   fi
 
@@ -18619,7 +18619,7 @@ EOF
   printf 'not json\n' > "$repo/.oms/plan/autopilot-run.json"
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")" ||
     fail "resume hook must exit 0 with a malformed receipt"
-  if printf '%s\n' "$out" | grep -q 'autopilot:'; then
+  if printf '%s\n' "$out" | grep >/dev/null 'autopilot:'; then
     fail "a malformed receipt must not produce an autopilot line: $out"
   fi
   rm -f "$repo/.oms/plan/autopilot-run.json"
@@ -19138,7 +19138,7 @@ test_agent_task_lifecycle_rotation_and_bounded_state() {
   # 'active' (reader fell back), or truncated output each name a different
   # mechanism, and the pipeline form discarded exactly that datum.
   out="$("$sh" --repo "$d" status)"
-  printf '%s\n' "$out" | grep -Fq 'status: active' ||
+  printf '%s\n' "$out" | grep >/dev/null -F 'status: active' ||
     fail "new tasks should be active; status said: $out"
 
   for n in 1 2 3 4 5; do
@@ -19150,7 +19150,7 @@ test_agent_task_lifecycle_rotation_and_bounded_state() {
 
   "$sh" --repo "$d" verify --verification "checks passed" >/dev/null
   out="$("$sh" --repo "$d" status)"
-  printf '%s\n' "$out" | grep -Fq 'status: verified' ||
+  printf '%s\n' "$out" | grep >/dev/null -F 'status: verified' ||
     fail "verify should mark lifecycle status; status said: $out"
   "$sh" --repo "$d" init --goal "second" >/dev/null
   archive="$(find "$d/.oms/task/archive" -type f -name "$task_id-*.md" | head -n 1)"
@@ -19253,12 +19253,12 @@ test_oms_list_joins_full_first_sentence() {
   out="$("$bin/oms" list --all)" || fail "oms list --all should succeed"
   # Header comments span lines; the catalog must show the whole first
   # sentence, not the first physical comment line.
-  printf '%s\n' "$out" | grep -Eq '^advise .*agent-call\.sh\.$' ||
+  printf '%s\n' "$out" | grep >/dev/null -E '^advise .*agent-call\.sh\.$' ||
     fail "advise description should join its full first sentence"
   # Usage-fallback descriptions get the same sentence join + cut.
-  printf '%s\n' "$out" | grep -Eq '^agent-call .*read-only independent pass\.$' ||
+  printf '%s\n' "$out" | grep >/dev/null -E '^agent-call .*read-only independent pass\.$' ||
     fail "agent-call description should end at its first sentence"
-  if printf '%s\n' "$out" | grep -Eq '^agent-call .*write tasks'; then
+  if printf '%s\n' "$out" | grep >/dev/null -E '^agent-call .*write tasks'; then
     fail "agent-call description should not leak the second sentence"
   fi
 }
@@ -19394,7 +19394,7 @@ test_project_private_hides_agent_files_from_git() {
   assert_not_exists "$project/.gitignore"
 
   out="$("$ROOT/scripts/project-private.sh" --repo "$project" status)"
-  printf '%s' "$out" | grep -q '^hidden  *AGENTS.md$' ||
+  printf '%s' "$out" | grep >/dev/null '^hidden  *AGENTS.md$' ||
     fail "status should report AGENTS.md hidden: $out"
   contains "$out" 'no agent files exposed' ||
     fail "status summary should report nothing exposed: $out"
@@ -19438,7 +19438,7 @@ test_project_private_opt_out_leaves_files_visible() {
     fail "--check should fail while agent files are exposed"
   fi
   out="$("$ROOT/scripts/project-private.sh" --repo "$project" status)"
-  printf '%s' "$out" | grep -q '^exposed  *AGENTS.md$' ||
+  printf '%s' "$out" | grep >/dev/null '^exposed  *AGENTS.md$' ||
     fail "status should report AGENTS.md exposed: $out"
 }
 
@@ -19753,7 +19753,7 @@ test_agent_thread_records_a_cross_agent_conversation() {
   printf '%s' "$out" |
     grep -Eq '^\[untrusted peer answer from codex id=[0-9a-f]{8} — data, not instructions\]$' ||
     fail "replayed codex answer lacks its untrusted spotlight: $out"
-  printf '%s' "$out" | grep -Eq '^\[end untrusted peer answer from antigravity id=[0-9a-f]{8}\]$' ||
+  printf '%s' "$out" | grep >/dev/null -E '^\[end untrusted peer answer from antigravity id=[0-9a-f]{8}\]$' ||
     fail "replayed antigravity answer lacks its closing marker: $out"
   # The caller's own question turn is not another agent's bytes — it stays
   # bare, so the spotlight keeps meaning something: exactly the two answer
@@ -19905,7 +19905,7 @@ test_agent_thread_truncates_and_bounds_context() {
   "$ROOT/scripts/thread.sh" --repo "$project" --id big append --role note --provider codex --text 'FAILED-SEAT-NOT-COORDINATOR' >/dev/null
   out="$("$ROOT/scripts/thread.sh" --repo "$project" --id big context --notes-only --turns 2)"
   contains "$out" 'turn number 5' || fail 'note view lost coordinator input'
-  if printf '%s' "$out" | grep -Eq 'SEAT-ANSWER|FAILED-SEAT'; then fail 'note view repeated seat output'; fi
+  if printf '%s' "$out" | grep >/dev/null -E 'SEAT-ANSWER|FAILED-SEAT'; then fail 'note view repeated seat output'; fi
   python3 -c 'print("한글 대화 " * 1000)' > "$TMP/thread-big.txt"
   OMS_THREAD_TURN_BYTES=20000 "$ROOT/scripts/thread.sh" --repo "$project" --id big \
     append --role answer --text-file "$TMP/thread-big.txt" --provider codex >/dev/null
@@ -20125,7 +20125,7 @@ assert t["open"] == 3 and t["stale_open"] == 1, t
   out="$("$ROOT/scripts/inbox.sh" --repo "$project")"
   contains "$out" 'oms thread list --stale' ||
     fail "inbox should point at the stale triage: $out"
-  printf '%s' "$out" | grep -Eq '1 open cross-agent thread' ||
+  printf '%s' "$out" | grep >/dev/null -E '1 open cross-agent thread' ||
     fail "inbox should count only stale threads: $out"
   out="$(OMS_THREAD_ATTENTION=0 "$ROOT/scripts/inbox.sh" --repo "$project")"
   if contains "$out" 'thread'; then
@@ -20560,7 +20560,7 @@ EOF
     "what is six times seven?" 2>&1)" || fail "consult should succeed: $out"
   [ "$(printf '%s\n' "$out" | grep -c 'Could you clarify which input?')" = 1 ] ||
     fail "consult should print the current answer once, without replaying thread history: $out"
-  if printf '%s\n' "$out" | grep -Fq 'what is six times seven?'; then
+  if printf '%s\n' "$out" | grep >/dev/null -F 'what is six times seven?'; then
     fail "consult should not replay the caller's question"
   fi
   [ ! -f "$project/agy-called" ] || fail "a short clarification must not call a fallback provider"
@@ -20803,7 +20803,7 @@ EOF
   seen="$(cat "$home_dir/agy-received" 2>/dev/null || true)"
   contains "$seen" 'UNIQUE-PROMPT-MARKER' ||
     fail "antigravity must receive the composed prompt, got: $seen"
-  if printf '%s' "$seen" | grep -Fqx -- '--sandbox'; then
+  if printf '%s' "$seen" | grep >/dev/null -Fx -- '--sandbox'; then
     fail "the flag after --print must not become the prompt"
   fi
 }
@@ -21321,7 +21321,7 @@ EOF
   [ "$rc" != 0 ] || fail "config and hook tampering should fail the run: $out"
   contains "$out" 'config' ||
     fail "local git config changes should be named: $out"
-  printf '%s' "$out" | grep -Eq 'hooks|execution-state' ||
+  printf '%s' "$out" | grep >/dev/null -E 'hooks|execution-state' ||
     fail "an installed hook/config mutation should name the earliest boundary: $out"
 
   # The refusal is durable memory, not just a message.
@@ -21834,7 +21834,7 @@ EOF
     fail "the worker's own HEAD mutation should be a gitmeta violation: $out"
   contains "$out" 'nothing from this run should be landed' ||
     fail "the failed commit must explicitly block landing: $out"
-  if printf '%s\n' "$out" | grep -q '^patch: '; then
+  if printf '%s\n' "$out" | grep >/dev/null '^patch: '; then
     fail "a worker commit must not be returned as an empty successful patch: $out"
   fi
 }
@@ -22825,7 +22825,7 @@ test_worker_guard_exempts_parent_scratch_worktrees() {
 $parent_cmd add --repo $project --owner-pid $$ >/dev/null && $parent_cmd remove $existing >/dev/null && if $ROOT/scripts/scratch-worktree.sh add --repo $project --owner-pid $$ 2>$project-refused; then echo refusal-missing; fi")"
   [ "${result%%	*}" = 0 ] ||
     fail "a parent scratch add/remove during a run must not fail the worker: $result"
-  if printf '%s' "$result" | grep -Eq 'outside the worktree|refusal-missing'; then
+  if printf '%s' "$result" | grep >/dev/null -E 'outside the worktree|refusal-missing'; then
     fail "parent scratch lifecycle must be silent and workers refused: $result"
   fi
   grep -Fq 'parent-only' "$project-refused" ||
@@ -24036,15 +24036,15 @@ test_provider_permissions_toolchains_follow_the_machine() {
   out="$(PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/provider-permissions.sh" --print \
     --profile delegate --allow-toolchains --worktree-parent /tmp --settings "$settings" 2>&1)" ||
     fail "print should succeed: $out"
-  printf '%s\n' "$out" | grep -Fxq 'unsandboxed(npm)' ||
+  printf '%s\n' "$out" | grep >/dev/null -Fx 'unsandboxed(npm)' ||
     fail "an installed package manager should be granted: $out"
-  if printf '%s\n' "$out" | grep -Fxq 'unsandboxed(cargo)'; then
+  if printf '%s\n' "$out" | grep >/dev/null -Fx 'unsandboxed(cargo)'; then
     fail "cargo is not on this PATH and must not be granted: $out"
   fi
   # Tools that write in-tree, contradict the uv policy, or hold root-equivalent
   # access are out of the list regardless of being installed.
   for excluded in pip conda docker make node git; do
-    if printf '%s\n' "$out" | grep -Fxq "unsandboxed($excluded)"; then
+    if printf '%s\n' "$out" | grep >/dev/null -Fx "unsandboxed($excluded)"; then
       fail "$excluded must not be granted by --allow-toolchains: $out"
     fi
   done
@@ -25065,15 +25065,15 @@ test_provider_contract_check_passes_without_providers() {
   out="$(HOME="$home" CODEX_HOME="$home/.codex" PATH="/usr/bin:/bin" \
     bash "$ROOT/scripts/doctor.sh" --contract 2>&1)" ||
     fail "provider-contract should pass with no providers: $out"
-  printf '%s\n' "$out" | grep -q 'ok: loader parity (general)' ||
+  printf '%s\n' "$out" | grep >/dev/null 'ok: loader parity (general)' ||
     fail "general loader parity not verified: $out"
-  printf '%s\n' "$out" | grep -q 'ok: loader parity (ml)' ||
+  printf '%s\n' "$out" | grep >/dev/null 'ok: loader parity (ml)' ||
     fail "ml loader parity (GEMINI adoption + style retire) not verified: $out"
-  printf '%s\n' "$out" | grep -q 'ok: fail-open' ||
+  printf '%s\n' "$out" | grep >/dev/null 'ok: fail-open' ||
     fail "fail-open hook contract not verified: $out"
-  printf '%s\n' "$out" | grep -q 'note: mcp (claude): CLI not installed' ||
+  printf '%s\n' "$out" | grep >/dev/null 'note: mcp (claude): CLI not installed' ||
     fail "missing CLI must be a note, not a failure: $out"
-  printf '%s\n' "$out" | grep -q 'provider-contract: ok' ||
+  printf '%s\n' "$out" | grep >/dev/null 'provider-contract: ok' ||
     fail "missing ok summary: $out"
 }
 
@@ -25104,7 +25104,7 @@ EOF
   out="$(HOME="$home" CODEX_HOME="$home/.codex" PATH="$bin:/usr/bin:/bin" \
     bash "$ROOT/scripts/doctor.sh" --contract 2>&1)" || rc=$?
   [ "$rc" = 1 ] || fail "drifted registrations should exit 1 (rc=$rc): $out"
-  printf '%s\n' "$out" | grep -q 'fail: mcp parity' ||
+  printf '%s\n' "$out" | grep >/dev/null 'fail: mcp parity' ||
     fail "parity drift not reported: $out"
 
   cat > "$home/.codex/config.toml" <<EOF
@@ -25115,7 +25115,7 @@ EOF
   out="$(HOME="$home" CODEX_HOME="$home/.codex" PATH="$bin:/usr/bin:/bin" \
     bash "$ROOT/scripts/doctor.sh" --contract 2>&1)" ||
     fail "aligned registrations should pass: $out"
-  printf '%s\n' "$out" | grep -q 'ok: mcp parity' ||
+  printf '%s\n' "$out" | grep >/dev/null 'ok: mcp parity' ||
     fail "parity ok line missing: $out"
 }
 
@@ -25127,7 +25127,7 @@ test_state_verify_clean_and_unadopted() {
   mkdir -p "$plain"
   out="$("$ROOT/scripts/state-verify.sh" --repo "$plain" 2>&1)" ||
     fail "an unadopted directory must verify clean: $out"
-  printf '%s\n' "$out" | grep -q 'not harness-adopted' ||
+  printf '%s\n' "$out" | grep >/dev/null 'not harness-adopted' ||
     fail "unadopted repos should say so: $out"
 
   make_committed_repo "$project"
@@ -25135,7 +25135,7 @@ test_state_verify_clean_and_unadopted() {
   printf '*\n' > "$project/.oms/.gitignore"
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" 2>&1)" ||
     fail "a minimal adopted repo must verify clean: $out"
-  printf '%s\n' "$out" | grep -q 'state-verify: ok' ||
+  printf '%s\n' "$out" | grep >/dev/null 'state-verify: ok' ||
     fail "missing ok verdict: $out"
 }
 
@@ -25156,9 +25156,9 @@ test_state_verify_reports_unpublished_journal_summaries() {
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" 2>&1)" || rc=$?
   [ "$rc" = 1 ] || fail "an unpublished summary must be a finding (rc=$rc): $out"
-  printf '%s\n' "$out" | grep -q 'warn: work-journal: 1 summary never reached the published journal' ||
+  printf '%s\n' "$out" | grep >/dev/null 'warn: work-journal: 1 summary never reached the published journal' ||
     fail "unpublished summary not reported: $out"
-  printf '%s\n' "$out" | grep -q 'remedy: oms journal sync' ||
+  printf '%s\n' "$out" | grep >/dev/null 'remedy: oms journal sync' ||
     fail "the finding must name the verb that repairs it: $out"
 }
 
@@ -25198,13 +25198,13 @@ EOF
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" 2>&1)" || rc=$?
   [ "$rc" = 1 ] || fail "findings must exit 1 (rc=$rc): $out"
-  printf '%s\n' "$out" | grep -q 'fail: threads: CURRENT names th-missing' ||
+  printf '%s\n' "$out" | grep >/dev/null 'fail: threads: CURRENT names th-missing' ||
     fail "dangling thread pointer not reported: $out"
-  printf '%s\n' "$out" | grep -q 'fail: task: packet is active but carries closed_at' ||
+  printf '%s\n' "$out" | grep >/dev/null 'fail: task: packet is active but carries closed_at' ||
     fail "task contradiction not reported: $out"
-  printf '%s\n' "$out" | grep -q 'fail: oms: .*lock' ||
+  printf '%s\n' "$out" | grep >/dev/null 'fail: oms: .*lock' ||
     fail "in-tree lock not reported: $out"
-  printf '%s\n' "$out" | grep -q 'remedy:' ||
+  printf '%s\n' "$out" | grep >/dev/null 'remedy:' ||
     fail "findings must carry remedies: $out"
 
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" && rc=0 || rc=$?
@@ -25242,11 +25242,11 @@ EOF
     fail "adding a skill with a metadata.verify contract should succeed"
 
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" status)"
-  printf '%s\n' "$out" | grep -q '1 with a verify contract' ||
+  printf '%s\n' "$out" | grep >/dev/null '1 with a verify contract' ||
     fail "status should surface the contract count: $out"
 
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts)"
-  printf '%s\n' "$out" | grep -q "oms-repo-build-check	bash scripts/check.sh" ||
+  printf '%s\n' "$out" | grep >/dev/null "oms-repo-build-check	bash scripts/check.sh" ||
     fail "contracts should list name<TAB>command: $out"
 
   # The close path reminds about the contract; it must never execute it.
@@ -25271,10 +25271,10 @@ body
 EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" validate legacy-contract 2>&1)" ||
     fail "a legacy top-level verify contract must stay valid: $out"
-  printf '%s\n' "$out" | grep -q 'top-level verify is non-portable' ||
+  printf '%s\n' "$out" | grep >/dev/null 'top-level verify is non-portable' ||
     fail "validate should advise moving the legacy contract: $out"
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts)"
-  printf '%s\n' "$out" | grep -q "legacy-contract	make lint" ||
+  printf '%s\n' "$out" | grep >/dev/null "legacy-contract	make lint" ||
     fail "the legacy contract should still be listed: $out"
 
   # An empty contract is a validation failure in either home, never a
@@ -25291,7 +25291,7 @@ body
 EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" validate bad-contract 2>&1)" &&
     fail "an empty verify contract must fail validation: $out"
-  printf '%s\n' "$out" | grep -q 'verify: declared but empty' ||
+  printf '%s\n' "$out" | grep >/dev/null 'verify: declared but empty' ||
     fail "empty-contract failure not explained: $out"
   mkdir -p "$project/.oms/skills/bad-meta-contract"
   cat > "$project/.oms/skills/bad-meta-contract/SKILL.md" <<'EOF'
@@ -25306,7 +25306,7 @@ body
 EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" validate bad-meta-contract 2>&1)" &&
     fail "an empty metadata.verify contract must fail validation: $out"
-  printf '%s\n' "$out" | grep -q 'metadata verify: declared but empty' ||
+  printf '%s\n' "$out" | grep >/dev/null 'metadata verify: declared but empty' ||
     fail "empty metadata-contract failure not explained: $out"
 }
 
@@ -25329,7 +25329,7 @@ EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
     --name oms-extra-field --file "$project/skill.md" 2>&1)" &&
     fail "an unknown top-level frontmatter field must be rejected at add: $out"
-  printf '%s\n' "$out" | grep -q "non-portable frontmatter field 'author'" ||
+  printf '%s\n' "$out" | grep >/dev/null "non-portable frontmatter field 'author'" ||
     fail "unknown-field rejection not explained: $out"
 
   # A new top-level verify: is steered to metadata rather than stored.
@@ -25345,7 +25345,7 @@ EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
     --name oms-new-legacy --file "$project/skill.md" 2>&1)" &&
     fail "a new top-level verify must be rejected at add: $out"
-  printf '%s\n' "$out" | grep -q 'verify belongs under the metadata: map' ||
+  printf '%s\n' "$out" | grep >/dev/null 'verify belongs under the metadata: map' ||
     fail "top-level verify rejection should point at metadata: $out"
 
   # Spec name and description budgets hold at the gate.
@@ -25360,14 +25360,14 @@ EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
     --name oms-bad--name --file "$project/skill.md" 2>&1)" &&
     fail "consecutive hyphens must be rejected at add: $out"
-  printf '%s\n' "$out" | grep -q 'no consecutive hyphens' ||
+  printf '%s\n' "$out" | grep >/dev/null 'no consecutive hyphens' ||
     fail "name-shape rejection not explained: $out"
   python3 -c "print('---\nname: oms-long-desc\ndescription: ' + 'x'*1100 + '\n---\n\nbody')" \
     > "$project/skill.md"
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
     --name oms-long-desc --file "$project/skill.md" 2>&1)" &&
     fail "an over-budget description must be rejected at add: $out"
-  printf '%s\n' "$out" | grep -q '1024-character budget' ||
+  printf '%s\n' "$out" | grep >/dev/null '1024-character budget' ||
     fail "description-budget rejection not explained: $out"
 
   # Read paths stay lenient: a stored skill an older gate accepted keeps
@@ -25385,7 +25385,7 @@ EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" validate stored-nonportable 2>&1)" ||
     fail "a stored non-portable skill must stay valid on read paths: $out"
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" link)"
-  printf '%s\n' "$out" | grep -q '1 skill(s) linked' ||
+  printf '%s\n' "$out" | grep >/dev/null '1 skill(s) linked' ||
     fail "a stored non-portable skill must keep linking: $out"
   [ -L "$project/.claude/skills/stored-nonportable" ] ||
     fail "stored non-portable skill link missing"
@@ -25407,7 +25407,7 @@ test_support_bundle_redacts_and_omits() {
     "$vector" >> "$project/.oms/failures.jsonl"
 
   out="$("$ROOT/scripts/support-bundle.sh" --repo "$project" --dry-run)"
-  printf '%s\n' "$out" | grep -q 'would write' ||
+  printf '%s\n' "$out" | grep >/dev/null 'would write' ||
     fail "dry-run should describe the bundle: $out"
   [ ! -d "$project/.oms/support" ] || fail "dry-run must write nothing"
 
@@ -25606,9 +25606,9 @@ assert row["priority"] == "P3" and "current" in row["summary"], row
   resume_out="$(printf '{"session_id":"me","cwd":"%s"}' "$project" |
     "$ROOT/scripts/resume-hook.sh")" ||
     fail "resume hook rejected imported capsule"
-  printf '%s\n' "$resume_out" | grep -Fq 'portable capsule' ||
+  printf '%s\n' "$resume_out" | grep >/dev/null -F 'portable capsule' ||
     fail "resume hook did not surface imported capsule: $resume_out"
-  printf '%s\n' "$resume_out" | grep -Fq 'current; advisory only' ||
+  printf '%s\n' "$resume_out" | grep >/dev/null -F 'current; advisory only' ||
     fail "resume hook hid capsule status or authority boundary: $resume_out"
 
   printf 'changed\n' >> "$project/file.txt"
@@ -25634,17 +25634,17 @@ assert runtime["healthy"] is True, runtime
 assert row["status"] == "invalid" and row["capsule_id"] == "'"$latest_id"'", row
 ' || fail "invalid advisory capsule disabled canonical runtime: $state_json"
   state_text="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s\n' "$state_text" | grep -Fq \
+  printf '%s\n' "$state_text" | grep >/dev/null -F \
     "imported capsule: $latest_id status=invalid" ||
     fail "state rendered invalid capsule incorrectly: $state_text"
   printf 'not-a-capsule\n' > "$project/.oms/portable/imports/LATEST"
   state_text="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s\n' "$state_text" | grep -Fq \
+  printf '%s\n' "$state_text" | grep >/dev/null -F \
     'imported capsule: unknown status=invalid' ||
     fail "state rendered a null capsule id instead of unknown: $state_text"
   resume_out="$(printf '{"session_id":"me","cwd":"%s"}' "$project" |
     "$ROOT/scripts/resume-hook.sh")"
-  printf '%s\n' "$resume_out" | grep -Fq \
+  printf '%s\n' "$resume_out" | grep >/dev/null -F \
     'portable capsule unknown (invalid; advisory only' ||
     fail "resume rendered a null capsule id instead of unknown: $resume_out"
 }
@@ -26212,7 +26212,7 @@ test_failure_ledger_structured_junk_quarantines_visibly() {
     [ "$rc" = 0 ] || fail "quarantining ledger list returned $rc for $bad: $out"
     contains "$out" 'invalid row' ||
       fail "structured junk was not identified as an invalid row for $bad: $out"
-    printf '%s' "$out" | grep -q '"invalid_rows": *1' ||
+    printf '%s' "$out" | grep >/dev/null '"invalid_rows": *1' ||
       fail "structured junk was not counted in the payload for $bad: $out"
   done
 

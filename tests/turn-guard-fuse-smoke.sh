@@ -61,7 +61,7 @@ assert_contains() {
   local haystack="$1"
   local needle="$2"
   local what="$3"
-  printf '%s' "$haystack" | grep -Fq -- "$needle" ||
+  printf '%s' "$haystack" | grep >/dev/null -F -- "$needle" ||
     fail "$what: expected $needle in: $haystack"
 }
 
@@ -105,7 +105,7 @@ test_unparseable_verdict_reports_an_unguarded_turn() {
   out="$(run_stop "$fake/scripts/turn-guard.sh" "$project" s-garbage)" || rc=$?
   [ "$rc" = 0 ] || fail "the Stop hook must stay fail-open, got exit $rc"
   assert_contains "$out" 'oh-my-setting turn guard: unavailable' "garbage output"
-  if printf '%s' "$out" | grep -Fq 'this is not a verdict'; then
+  if printf '%s' "$out" | grep >/dev/null -F 'this is not a verdict'; then
     fail "unparseable helper output must not reach the Stop protocol: $out"
   fi
 }

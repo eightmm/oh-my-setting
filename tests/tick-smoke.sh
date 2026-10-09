@@ -157,10 +157,10 @@ for scheduler in tick install-autoupdate; do
   scheduler_args=(--method auto --dry-run)
   [ "$scheduler" != tick ] || scheduler_args=(install "${scheduler_args[@]}")
   out="$("$ROOT/scripts/$scheduler.sh" "${scheduler_args[@]}")"
-  printf '%s' "$out" | grep -q 'would install systemd user timer' ||
+  printf '%s' "$out" | grep >/dev/null 'would install systemd user timer' ||
     fail "$scheduler must select the shared usable user manager: $out"
   out="$(OMS_TEST_SYSTEMD_AVAILABLE=1 "$ROOT/scripts/$scheduler.sh" "${scheduler_args[@]}")"
-  printf '%s' "$out" | grep -q 'would install cron' ||
+  printf '%s' "$out" | grep >/dev/null 'would install cron' ||
     fail "$scheduler must select the shared cron fallback: $out"
 done
 [ ! -e "$XDG_CONFIG_HOME/systemd" ] || fail "scheduler dry-run must not write units"
@@ -171,7 +171,7 @@ a="$TMP/a"; b="$TMP/b"; make_repo "$a"; make_repo "$b"
 "$TICK" register --repo "$a" | grep -q '^registered' || fail "register must add a repo"
 "$TICK" register --repo "$a" | grep -q 'already registered' || fail "register must dedupe"
 out="$("$TICK" register --repo "$TMP" 2>&1 || true)"
-printf '%s' "$out" | grep -q 'no .oms' || fail "an unadopted dir must be refused: $out"
+printf '%s' "$out" | grep >/dev/null 'no .oms' || fail "an unadopted dir must be refused: $out"
 [ "$(wc -l < "$XDG_CONFIG_HOME/oh-my-setting/tick-repos.txt")" -eq 1 ] || fail "registry must hold one line"
 
 # The receipt stays in the purity inventory: defer the entire sweep instead.
@@ -186,11 +186,11 @@ for backend in 0 1; do
     first_owner="$OMS_CHECK_MAINTENANCE_OWNER"
     oms_check_maintenance_begin "$maintenance"
     out="$("$TICK" run --repo "$maintenance")"
-    printf '%s' "$out" | grep -q 'verification running' || fail "tick ignored active checks: $out"
+    printf '%s' "$out" | grep >/dev/null 'verification running' || fail "tick ignored active checks: $out"
     [ ! -e "$maintenance/.oms/tick" ] || fail "deferred sweep wrote a receipt"
     oms_check_maintenance_end
     out="$("$TICK" run --repo "$maintenance")"
-    printf '%s' "$out" | grep -q 'verification running' || fail "one check released another"
+    printf '%s' "$out" | grep >/dev/null 'verification running' || fail "one check released another"
     OMS_CHECK_MAINTENANCE_MARKER="$first_marker"
     OMS_CHECK_MAINTENANCE_OWNER="$first_owner"
     oms_check_maintenance_end
@@ -200,11 +200,11 @@ for backend in 0 1; do
     trap oms_release_held_file_lock EXIT
     oms_check_maintenance_active "$maintenance" && fail "dead check remained active"
     out="$("$TICK" run --repo "$maintenance")"
-    printf '%s' "$out" | grep -q 'maintenance already running' || fail "overlapping sweep was allowed"
+    printf '%s' "$out" | grep >/dev/null 'maintenance already running' || fail "overlapping sweep was allowed"
   )
 done
 out="$("$TICK" run --repo "$maintenance")"
-printf '%s' "$out" | grep -q 'swept ' || fail "maintenance did not resume: $out"
+printf '%s' "$out" | grep >/dev/null 'swept ' || fail "maintenance did not resume: $out"
 
 # --- sweep: idle thread/task closed, fresh/live task kept, gc off, receipt ----
 THREAD="$ROOT/scripts/thread.sh"
@@ -219,12 +219,12 @@ touch -d '10 days ago' "$a/.oms/threads/new-thread.jsonl"
 "$TASK" --repo "$a" init >/dev/null
 set_task_activity "$a"
 out="$(bash -x "$TICK" run --repo "$a" 2>"$TMP/tick.trace")"
-printf '%s' "$out" | grep -q 'threads_closed=2' || fail "idle non-current threads must be closed: $out"
+printf '%s' "$out" | grep >/dev/null 'threads_closed=2' || fail "idle non-current threads must be closed: $out"
 [ "$(grep -c '^++ bounded .* thread list ' "$TMP/tick.trace")" -eq 1 ] ||
   fail "the sweep must query the thread catalog once"
 grep -Fq 'work_journal_sync' "$TMP/tick.trace" || fail "tick must own journal sync"
 grep -Fq -- '--force' "$TMP/tick.trace" || fail "tick must include current summaries"
-printf '%s' "$out" | grep -q 'tasks_closed=1' || fail "the idle goal-less task must be closed: $out"
+printf '%s' "$out" | grep >/dev/null 'tasks_closed=1' || fail "the idle goal-less task must be closed: $out"
 "$THREAD" list --repo "$a" | grep -q 'new-thread' || fail "a fresh thread must stay open"
 if "$THREAD" list --repo "$a" | grep -q 'old-thread'; then fail "the idle thread must not stay open"; fi
 [ ! -e "$a/.oms/task/current.md" ] || fail "the idle goal-less task must not stay active"
@@ -243,25 +243,25 @@ assert isinstance(r["journal_rc"], int) and isinstance(r["reconcile_rc"], int), 
 PY
 "$TASK" --repo "$a" init >/dev/null
 out="$("$TICK" run --repo "$a")"
-printf '%s' "$out" | grep -q 'tasks_closed=0' || fail "a fresh goal-less task must stay active: $out"
+printf '%s' "$out" | grep >/dev/null 'tasks_closed=0' || fail "a fresh goal-less task must stay active: $out"
 [ -f "$a/.oms/task/current.md" ] || fail "a fresh goal-less task must stay active"
 "$TASK" --repo "$a" update --goal 'live task must not be retired' >/dev/null
 set_task_activity "$a"
 out="$("$TICK" run --repo "$a")"
-printf '%s' "$out" | grep -q 'tasks_closed=0' || fail "a stale task with a goal must stay active: $out"
+printf '%s' "$out" | grep >/dev/null 'tasks_closed=0' || fail "a stale task with a goal must stay active: $out"
 [ -f "$a/.oms/task/current.md" ] || fail "a stale task with a goal must stay active"
 c="$TMP/nonactive-task"; make_repo "$c"
 "$TASK" --repo "$c" init --verify true >/dev/null
 "$TASK" --repo "$c" verify >/dev/null
 set_task_activity "$c"
 out="$("$TICK" run --repo "$c")"
-printf '%s' "$out" | grep -q 'tasks_closed=0' || fail "a non-active task must stay active: $out"
+printf '%s' "$out" | grep >/dev/null 'tasks_closed=0' || fail "a non-active task must stay active: $out"
 [ -f "$c/.oms/task/current.md" ] || fail "a non-active task must stay active"
 
 # --- sweep: idle all-done plans retire; undone, fresh, or claimed plans stay --
 p="$TMP/idle-plan"; make_committed_repo "$p"; make_stale_plan "$p" 'done'
 out="$("$TICK" run --repo "$p")"
-printf '%s' "$out" | grep -q 'plans_retired=1' || fail "the idle all-done plan must retire: $out"
+printf '%s' "$out" | grep >/dev/null 'plans_retired=1' || fail "the idle all-done plan must retire: $out"
 [ ! -e "$p/.oms/plan/tasks.json" ] || fail "the retired plan must not stay active"
 python3 - "$p/.oms/tick/last.json" "$p/.oms/plan/retirements.jsonl" "$p/.oms/work-journal/events.jsonl" <<'PY' || fail "plan retirement receipts are wrong"
 import json
@@ -280,7 +280,7 @@ assert any(row["source"]["type"] == "oms-run" and
 PY
 r="$TMP/ready-plan"; make_committed_repo "$r"; make_stale_plan "$r" ready
 out="$("$TICK" run --repo "$r")"
-printf '%s' "$out" | grep -q 'plans_retired=0' || fail "an idle plan with undone tasks is a parent decision, not a sweep: $out"
+printf '%s' "$out" | grep >/dev/null 'plans_retired=0' || fail "an idle plan with undone tasks is a parent decision, not a sweep: $out"
 [ -e "$r/.oms/plan/tasks.json" ] || fail "an undone plan must not be retired"
 f="$TMP/fresh-plan"; make_committed_repo "$f"; make_stale_plan "$f" 'done'
 python3 - "$f/.oms/plan/tasks.json" <<'PY'
@@ -290,27 +290,27 @@ d["tasks"]["t1"]["updated"] = datetime.datetime.now(datetime.timezone.utc).strft
 json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 PY
 out="$("$TICK" run --repo "$f")"
-printf '%s' "$out" | grep -q 'plans_retired=0' || fail "a plan finished inside the idle window must stay: $out"
+printf '%s' "$out" | grep >/dev/null 'plans_retired=0' || fail "a plan finished inside the idle window must stay: $out"
 [ -e "$f/.oms/plan/tasks.json" ] || fail "a fresh plan must not be retired"
 q="$TMP/claimed-plan"; make_committed_repo "$q"; make_stale_plan "$q" ready
 "$PLAN" --repo "$q" claim --id t1 --provider codex >/dev/null
 set_plan_activity "$q"
 out="$("$TICK" run --repo "$q")"
-printf '%s' "$out" | grep -q 'plans_retired=0' || fail "a claimed plan must stay active: $out"
+printf '%s' "$out" | grep >/dev/null 'plans_retired=0' || fail "a claimed plan must stay active: $out"
 [ -f "$q/.oms/plan/tasks.json" ] || fail "a claimed plan must stay active"
 e="$TMP/empty-plan"; make_committed_repo "$e"
 "$PLAN" --repo "$e" init --goal empty-plan --accept false >/dev/null
 out="$("$TICK" run --repo "$e")"
-printf '%s' "$out" | grep -q 'plans_retired=0' || fail "a plan without tasks must stay active: $out"
+printf '%s' "$out" | grep >/dev/null 'plans_retired=0' || fail "a plan without tasks must stay active: $out"
 [ -f "$e/.oms/plan/tasks.json" ] || fail "a plan without tasks must stay active"
 i="$TMP/invalid-plan"; make_repo "$i"; mkdir -p "$i/.oms/plan"
 printf '{not json\n' > "$i/.oms/plan/tasks.json"
 out="$("$TICK" run --repo "$i")"
-printf '%s' "$out" | grep -q 'plans_retired=0' || fail "an invalid plan must stay active: $out"
+printf '%s' "$out" | grep >/dev/null 'plans_retired=0' || fail "an invalid plan must stay active: $out"
 [ -f "$i/.oms/plan/tasks.json" ] || fail "an invalid plan must stay active"
 u="$TMP/uncommitted-plan"; make_repo "$u"; make_stale_plan "$u" 'done'
 out="$("$TICK" run --repo "$u")"
-printf '%s' "$out" | grep -q 'plans_retired=0' || fail "a failed plan retirement must not abort a sweep: $out"
+printf '%s' "$out" | grep >/dev/null 'plans_retired=0' || fail "a failed plan retirement must not abort a sweep: $out"
 [ -f "$u/.oms/plan/tasks.json" ] || fail "a failed plan retirement must keep the active plan"
 python3 - "$u/.oms/tick/last.json" <<'PY' || fail "a failed plan retirement must record its exit"
 import json
@@ -323,7 +323,7 @@ PY
 # --- sweep: mechanically recovered artifact failures resolve every pass -----
 v="$TMP/recovered-artifacts"; make_repo "$v"; make_recovered_artifact_index "$v"
 out="$(OMS_TICK_RETIRE=0 "$TICK" run --repo "$v")"
-printf '%s' "$out" | grep -q 'artifacts_resolved=1' ||
+printf '%s' "$out" | grep >/dev/null 'artifacts_resolved=1' ||
   fail "a recovered artifact failure must resolve even with retirement off: $out"
 python3 - "$v/.oms/tick/last.json" "$v/.oms/artifacts/index.jsonl" <<'PY' || fail "artifact recovery sweep evidence is wrong"
 import json
@@ -336,12 +336,12 @@ assert receipt["artifacts_resolved"] == 1 and receipt["artifact_resolve_rc"] == 
 assert len(resolutions) == 1 and resolutions[0]["resolves_event_id"] == "evt_wall_death", resolutions
 PY
 out="$("$TICK" run --repo "$v")"
-printf '%s' "$out" | grep -q 'artifacts_resolved=0' ||
+printf '%s' "$out" | grep >/dev/null 'artifacts_resolved=0' ||
   fail "a second artifact recovery sweep must be idempotent: $out"
 w="$TMP/invalid-artifacts"; make_repo "$w"; mkdir -p "$w/.oms/artifacts"
 printf '{not json\n' > "$w/.oms/artifacts/index.jsonl"
 out="$("$TICK" run --repo "$w")"
-printf '%s' "$out" | grep -q 'artifacts_resolved=0' ||
+printf '%s' "$out" | grep >/dev/null 'artifacts_resolved=0' ||
   fail "a failed artifact resolver must not abort a sweep: $out"
 python3 - "$w/.oms/tick/last.json" <<'PY' || fail "a failed artifact resolver must record its exit"
 import json
@@ -355,16 +355,16 @@ PY
 # --- sweep: one default sweep settles both a supersession and a stale row ----
 y="$TMP/both-at-once"; make_committed_repo "$y"; make_superseded_artifacts_and_stale_failures "$y"
 out="$("$TICK" run --repo "$y")"
-printf '%s' "$out" | grep -q 'artifacts_superseded=1 failures_retired=1' ||
+printf '%s' "$out" | grep >/dev/null 'artifacts_superseded=1 failures_retired=1' ||
   fail "one sweep must report both counters at once: $out"
 grep -q 'retired by oms tick' "$y/.oms/failures.jsonl" || fail "the retirement must carry the tick provenance"
 
 # --- sweep: superseded artifacts and stale one-shot failures settle safely --
 x="$TMP/superseded-and-stale"; make_committed_repo "$x"; make_superseded_artifacts_and_stale_failures "$x"
 out="$(OMS_TICK_RETIRE=0 "$TICK" run --repo "$x")"
-printf '%s' "$out" | grep -q 'artifacts_superseded=1' ||
+printf '%s' "$out" | grep >/dev/null 'artifacts_superseded=1' ||
   fail "a superseded artifact failure must resolve with retirement off: $out"
-printf '%s' "$out" | grep -q 'failures_retired=0' ||
+printf '%s' "$out" | grep >/dev/null 'failures_retired=0' ||
   fail "retirement opt-out must leave stale failure rows alone: $out"
 python3 - "$x/.oms/tick/last.json" "$x/.oms/failures.jsonl" <<'PY' || fail "retirement opt-out receipt is wrong"
 import json
@@ -378,9 +378,9 @@ assert not any(row.get("event") == "resolved" and row.get("fingerprint") == "111
                for row in ledger), ledger
 PY
 out="$("$TICK" run --repo "$x")"
-printf '%s' "$out" | grep -q 'artifacts_superseded=0' ||
+printf '%s' "$out" | grep >/dev/null 'artifacts_superseded=0' ||
   fail "an already-resolved superseded artifact must be idempotent: $out"
-printf '%s' "$out" | grep -q 'failures_retired=1' ||
+printf '%s' "$out" | grep >/dev/null 'failures_retired=1' ||
   fail "one old stale one-shot failure must retire: $out"
 "$ROOT/scripts/fail-ledger.sh" --repo "$x" list --unresolved --json > "$TMP/superseded-unresolved.json"
 python3 - "$x/.oms/tick/last.json" "$x/.oms/artifacts/index.jsonl" "$x/.oms/failures.jsonl" "$TMP/superseded-unresolved.json" <<'PY' || fail "superseded and stale sweep evidence is wrong"
@@ -403,19 +403,19 @@ assert unresolved["3333333333333333"]["count"] == 2 and unresolved["333333333333
 assert unresolved["4444444444444444"]["attention"] == "retiring", unresolved
 PY
 out="$("$TICK" run --repo "$x")"
-printf '%s' "$out" | grep -q 'artifacts_superseded=0' ||
+printf '%s' "$out" | grep >/dev/null 'artifacts_superseded=0' ||
   fail "a second superseded sweep must remain idempotent: $out"
-printf '%s' "$out" | grep -q 'failures_retired=0' ||
+printf '%s' "$out" | grep >/dev/null 'failures_retired=0' ||
   fail "a second stale-failure sweep must remain idempotent: $out"
 o="$TMP/retire-off"; make_committed_repo "$o"; make_stale_plan "$o" 'done'
 out="$(OMS_TICK_RETIRE=0 "$TICK" run --repo "$o")"
-printf '%s' "$out" | grep -q 'plans_retired=0' || fail "retirement opt-out must keep plans: $out"
+printf '%s' "$out" | grep >/dev/null 'plans_retired=0' || fail "retirement opt-out must keep plans: $out"
 [ -f "$o/.oms/plan/tasks.json" ] || fail "retirement opt-out must keep plans"
 r="$TMP/retire-off-task"; make_repo "$r"
 "$TASK" --repo "$r" init >/dev/null
 set_task_activity "$r"
 out="$(OMS_TICK_RETIRE=0 "$TICK" run --repo "$r")"
-printf '%s' "$out" | grep -q 'tasks_closed=0' || fail "retirement opt-out must keep tasks: $out"
+printf '%s' "$out" | grep >/dev/null 'tasks_closed=0' || fail "retirement opt-out must keep tasks: $out"
 [ -f "$r/.oms/task/current.md" ] || fail "retirement opt-out must keep tasks"
 "$TICK" run | grep -q "swept $a" || fail "run without --repo must use the registry"
 "$TICK" run --repo "$b" --dry-run | grep -q "would sweep $b" || fail "dry-run must not sweep"
@@ -424,19 +424,19 @@ set +e
 bad_idle="$(OMS_TICK_TASK_IDLE_DAYS=bad "$TICK" status 2>&1)"
 bad_idle_rc=$?
 set -e
-[ "$bad_idle_rc" -eq 2 ] && printf '%s' "$bad_idle" | grep -q 'must be integers' ||
+[ "$bad_idle_rc" -eq 2 ] && printf '%s' "$bad_idle" | grep >/dev/null 'must be integers' ||
   fail "a non-numeric task idle threshold must be rejected: $bad_idle"
 set +e
 bad_plan_idle="$(OMS_TICK_PLAN_IDLE_DAYS=bad "$TICK" status 2>&1)"
 bad_plan_idle_rc=$?
 set -e
-[ "$bad_plan_idle_rc" -eq 2 ] && printf '%s' "$bad_plan_idle" | grep -q 'must be integers' ||
+[ "$bad_plan_idle_rc" -eq 2 ] && printf '%s' "$bad_plan_idle" | grep >/dev/null 'must be integers' ||
   fail "a non-numeric plan idle threshold must be rejected: $bad_plan_idle"
 set +e
 bad_failure_stale="$(OMS_TICK_FAILURE_STALE_DAYS=bad "$TICK" status 2>&1)"
 bad_failure_stale_rc=$?
 set -e
-[ "$bad_failure_stale_rc" -eq 2 ] && printf '%s' "$bad_failure_stale" | grep -q 'must be integers' ||
+[ "$bad_failure_stale_rc" -eq 2 ] && printf '%s' "$bad_failure_stale" | grep >/dev/null 'must be integers' ||
   fail "a non-numeric failure stale threshold must be rejected: $bad_failure_stale"
 
 # --- install / status / uninstall through the stub --------------------------
@@ -478,18 +478,18 @@ grep -q "^Environment=PATH=$TMP/bin:" "$XDG_CONFIG_HOME/systemd/user/oh-my-setti
   fail "the unit must carry the resolved tool dirs first in PATH: $(grep Environment "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.service")"
 grep -q 'enable --now oh-my-setting-tick.timer' "$TMP/systemctl.log" || fail "install must enable the timer"
 st="$("$TICK" status)"
-printf '%s' "$st" | grep -q 'timer: systemd (owned)' || fail "status must see the owned timer: $st"
-printf '%s' "$st" | grep -q "$a  last:" || fail "status must show the last sweep: $st"
-printf '%s' "$st" | grep -q 'tasks_closed=0' || fail "status must report task closures: $st"
-printf '%s' "$st" | grep -q 'plans_retired=0' || fail "status must report plan retirements: $st"
-printf '%s' "$st" | grep -q 'artifacts_resolved=0' || fail "status must report artifact recoveries: $st"
-printf '%s' "$st" | grep -q 'artifacts_superseded=0' || fail "status must report artifact supersession: $st"
-printf '%s' "$st" | grep -q 'failures_retired=0' || fail "status must report stale failure retirements: $st"
+printf '%s' "$st" | grep >/dev/null 'timer: systemd (owned)' || fail "status must see the owned timer: $st"
+printf '%s' "$st" | grep >/dev/null "$a  last:" || fail "status must show the last sweep: $st"
+printf '%s' "$st" | grep >/dev/null 'tasks_closed=0' || fail "status must report task closures: $st"
+printf '%s' "$st" | grep >/dev/null 'plans_retired=0' || fail "status must report plan retirements: $st"
+printf '%s' "$st" | grep >/dev/null 'artifacts_resolved=0' || fail "status must report artifact recoveries: $st"
+printf '%s' "$st" | grep >/dev/null 'artifacts_superseded=0' || fail "status must report artifact supersession: $st"
+printf '%s' "$st" | grep >/dev/null 'failures_retired=0' || fail "status must report stale failure retirements: $st"
 "$TICK" uninstall | grep -q 'removed' || fail "uninstall must report"
 [ ! -f "$XDG_CONFIG_HOME/systemd/user/oh-my-setting-tick.timer" ] || fail "uninstall must remove the timer"
 grep -q 'disable --now oh-my-setting-tick.timer' "$TMP/systemctl.log" || fail "uninstall must disable the owned timer"
 st="$("$TICK" status)"
-printf '%s' "$st" | grep -q 'timer: none' || fail "status must report no timer: $st"
+printf '%s' "$st" | grep >/dev/null 'timer: none' || fail "status must report no timer: $st"
 "$TICK" unregister --repo "$a" >/dev/null
 "$TICK" unregister --repo "$b" >/dev/null
 "$TICK" run | grep -q 'nothing registered' || fail "an empty registry must say so"

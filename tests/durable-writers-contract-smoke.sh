@@ -112,14 +112,14 @@ for source_id, occurred_at in (
 PY
 out="$(bash "$ROOT/scripts/journal.sh" distill --repo "$repo" 2>&1)" ||
   fail "distill must not crash on a scrubber-refused lesson: $out"
-printf '%s\n' "$out" | grep -Fq 'refused by the memory writer' ||
+printf '%s\n' "$out" | grep >/dev/null -F 'refused by the memory writer' ||
   fail "distill must report the skipped lesson: $out"
 if [ -f "$repo/.oms/memory/shared.md" ] &&
   grep -Fq "$LEAK" "$repo/.oms/memory/shared.md"; then
   fail "secret leaked through distill into shared memory"
 fi
 second="$(bash "$ROOT/scripts/journal.sh" distill --repo "$repo" 2>&1)"
-printf '%s\n' "$second" | grep -Fq 'nothing to promote' ||
+printf '%s\n' "$second" | grep >/dev/null -F 'nothing to promote' ||
   fail "distill marker must advance past the refused lesson: $second"
 
 # --- agent-plan: secret in goal/accept text refuses; runtime acceptance ---
@@ -155,7 +155,7 @@ if artifact_error="$({
 } 2>&1)"; then
   fail "artifact index append must refuse a leaf symlink"
 fi
-printf '%s\n' "$artifact_error" | grep -Fq 'artifact index' ||
+printf '%s\n' "$artifact_error" | grep >/dev/null -F 'artifact index' ||
   fail "artifact index refusal must name its durable-writer label: $artifact_error"
 grep -Fxq 'outside untouched' "$outside_index" ||
   fail "artifact index append followed a planted leaf symlink"
@@ -270,7 +270,7 @@ cp "$structural_repo/.oms/artifacts/index.jsonl" "$TMP/invalid-event-ids-before"
 invalid_event_out="$(bash "$ROOT/scripts/artifact-index.sh" \
   --repo "$structural_repo" validate 2>&1)" &&
   fail "validate accepted invalid event ids"
-printf '%s\n' "$invalid_event_out" | grep -Fq 'Traceback' &&
+printf '%s\n' "$invalid_event_out" | grep >/dev/null -F 'Traceback' &&
   fail "validate raised a traceback for an invalid event id" || true
 [ "$(printf '%s\n' "$invalid_event_out" | \
   grep -Fc 'invalid event_id')" -eq 3 ] ||
@@ -341,7 +341,7 @@ PY
   strict_plan="$(bash "$ROOT/scripts/artifact-index.sh" \
     --repo "$strict_repo" salvage 2>&1)" ||
     fail "salvage could not plan $corruption recovery: $strict_plan"
-  printf '%s\n' "$strict_plan" | grep -Fq 'recovered=1 dropped=1' ||
+  printf '%s\n' "$strict_plan" | grep >/dev/null -F 'recovered=1 dropped=1' ||
     fail "salvage miscounted $corruption recovery: $strict_plan"
   cmp -s "$TMP/$corruption-raw" \
     "$strict_repo/.oms/artifacts/index.jsonl" ||
@@ -425,9 +425,9 @@ cmp -s "$TMP/salvage-raw-before" \
 salvage_plan="$(bash "$ROOT/scripts/artifact-index.sh" \
   --repo "$salvage_repo" salvage 2>&1)" ||
   fail "artifact salvage plan failed: $salvage_plan"
-printf '%s\n' "$salvage_plan" | grep -Fq 'plan only' ||
+printf '%s\n' "$salvage_plan" | grep >/dev/null -F 'plan only' ||
   fail "salvage default did not identify itself as plan-only: $salvage_plan"
-printf '%s\n' "$salvage_plan" | grep -Fq "$LEAK" &&
+printf '%s\n' "$salvage_plan" | grep >/dev/null -F "$LEAK" &&
   fail "salvage plan printed corrupt secret-shaped content" || true
 cmp -s "$TMP/salvage-raw-before" \
   "$salvage_repo/.oms/artifacts/index.jsonl" ||
@@ -447,7 +447,7 @@ salvage_rel=".oms/artifacts/quarantine/artifact-index-$salvage_digest.raw"
 salvage_out="$(bash "$ROOT/scripts/artifact-index.sh" \
   --repo "$salvage_repo" salvage --apply 2>&1)" ||
   fail "artifact salvage apply failed: $salvage_out"
-printf '%s\n' "$salvage_out" | grep -Fq "$LEAK" &&
+printf '%s\n' "$salvage_out" | grep >/dev/null -F "$LEAK" &&
   fail "salvage apply printed corrupt secret-shaped content" || true
 cmp -s "$TMP/salvage-raw-before" "$salvage_repo/$salvage_rel" ||
   fail "salvage quarantine is not an exact raw snapshot"
@@ -484,7 +484,7 @@ cp "$salvage_repo/.oms/artifacts/index.jsonl" "$TMP/salvage-repaired-before"
 salvage_repeat="$(bash "$ROOT/scripts/artifact-index.sh" \
   --repo "$salvage_repo" salvage --apply 2>&1)" ||
   fail "idempotent salvage rerun failed: $salvage_repeat"
-printf '%s\n' "$salvage_repeat" | grep -Fq 'already healthy' ||
+printf '%s\n' "$salvage_repeat" | grep >/dev/null -F 'already healthy' ||
   fail "idempotent salvage rerun was not reported as a no-op: $salvage_repeat"
 cmp -s "$TMP/salvage-repaired-before" \
   "$salvage_repo/.oms/artifacts/index.jsonl" ||
@@ -699,7 +699,7 @@ if hard_error="$({
 } 2>&1)"; then
   fail "artifact index append must refuse a hard-linked ledger"
 fi
-printf '%s\n' "$hard_error" | grep -Fq 'artifact index' ||
+printf '%s\n' "$hard_error" | grep >/dev/null -F 'artifact index' ||
   fail "hard-link refusal must name its durable-writer label: $hard_error"
 grep -Fxq 'outside hard untouched' "$outside_hard" ||
   fail "artifact index append mutated a hard-linked outside file"
@@ -772,7 +772,7 @@ if component_error="$({
 } 2>&1)"; then
   fail "artifact index append must refuse a symlinked .oms component"
 fi
-printf '%s\n' "$component_error" | grep -Fq 'artifact index' ||
+printf '%s\n' "$component_error" | grep >/dev/null -F 'artifact index' ||
   fail "component refusal must identify the artifact index: $component_error"
 [ -z "$(ls -A "$outside_component" 2>/dev/null)" ] ||
   fail "artifact index setup escaped through a symlinked .oms component"
@@ -1331,7 +1331,7 @@ stale_chain_dry="$(bash "$ROOT/scripts/artifact-index.sh" \
 printf '%s\n' "$stale_chain_dry" |
   grep -Fq 'would drop 3 stale row(s), 3 -> 0' ||
   fail "nested lineage drops were not counted as stale: $stale_chain_dry"
-if printf '%s\n' "$stale_chain_dry" | grep -Fq 'byte retention'; then
+if printf '%s\n' "$stale_chain_dry" | grep >/dev/null -F 'byte retention'; then
   fail "nested lineage drops were mislabeled as byte retention: $stale_chain_dry"
 fi
 bash "$ROOT/scripts/artifact-index.sh" --repo "$stale_chain_repo" \

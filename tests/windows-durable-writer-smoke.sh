@@ -372,7 +372,7 @@ missing_out="$(MSYS2_ARG_CONV_EXCL="$shell_repo/.oms" \
     --file "$shell_repo/.oms/artifacts/index.jsonl" list 2>&1)" || missing_rc=$?
 [ "$missing_rc" = 2 ] ||
   fail "native explicit missing index returned $missing_rc instead of 2"
-printf '%s\n' "$missing_out" | grep -Fq 'no artifact index at' ||
+printf '%s\n' "$missing_out" | grep >/dev/null -F 'no artifact index at' ||
   fail "native explicit index failed before the empty-index view: $missing_out"
 
 # The local gate fixes the converter contract even without Windows: CRLF is

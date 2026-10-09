@@ -1239,7 +1239,7 @@ EOF
     [ -f "$TMP/$cli.registered" ] || fail "$cli failure fixture unexpectedly removed its registration"
     grep -Fq "claude mcp remove" "$log" && grep -Fq "codex mcp remove" "$log" ||
       fail "MCP removal did not attempt every present provider after $cli failed"
-    if printf '%s' "$out" | grep -Fq "mcp: $cli registration removed"; then
+    if printf '%s' "$out" | grep >/dev/null -F "mcp: $cli registration removed"; then
       fail "$cli MCP removal printed false success"
     fi
 
@@ -1282,9 +1282,9 @@ EOF
   out="$(HOME="$TMP/mcp-held-home" CODEX_HOME="$TMP/mcp-held-home/.codex" PATH="/usr/bin:/bin" \
     bash "$ROOT/scripts/install-mcp.sh" --remove 2>&1)" || status=$?
   [ "$status" -ne 0 ] || fail "missing MCP CLIs were accepted during removal"
-  printf '%s' "$out" | grep -Fq "claude CLI is required" ||
+  printf '%s' "$out" | grep >/dev/null -F "claude CLI is required" ||
     fail "missing claude removal did not explain its recovery requirement"
-  printf '%s' "$out" | grep -Fq "codex CLI is required" ||
+  printf '%s' "$out" | grep >/dev/null -F "codex CLI is required" ||
     fail "missing codex removal did not attempt every provider"
 }
 
@@ -1642,7 +1642,7 @@ test_update_probe_flag_reaches_the_probe() {
   local out
   out="$(PATH="/usr/bin:/bin" bash "$ROOT/scripts/update.sh" --probe-agy-surfaces 2>&1)" ||
     fail "the update flag should exit 0 with no agy installed: $out"
-  printf '%s\n' "$out" | grep -Fq "agy-surfaces: unverified" ||
+  printf '%s\n' "$out" | grep >/dev/null -F "agy-surfaces: unverified" ||
     fail "an absent agy is unverified, never a guess: $out"
   out="$(bash "$ROOT/scripts/update.sh" --probe-agy-surfaces --check 2>&1)" && rc=0 || rc=$?
   [ "${rc:-0}" = 2 ] || fail "--probe-agy-surfaces with --check should be misuse"
@@ -1704,7 +1704,7 @@ test_router_resolves_payload_repo_before_process_cwd() {
   payload="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"repo-route","turn_id":"payload-turn","cwd":"%s"}' "$payload_repo")"
   out="$(cd "$process_repo" && printf '%s' "$payload" | env -u OMS_STATE_REPO \
     TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "actionable fail-ledger rows" ||
+  printf '%s' "$out" | grep >/dev/null -F "actionable fail-ledger rows" ||
     fail "the payload repository should own state hints when process cwd differs: $out"
   [ -f "$payload_repo/.oms/hooks/state-hint.$(date +%Y-%m-%d)" ] ||
     fail "the payload repo should receive the state hint marker"
@@ -1715,7 +1715,7 @@ test_router_resolves_payload_repo_before_process_cwd() {
   payload="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"repo-override","turn_id":"override-turn","cwd":"%s"}' "$payload_repo")"
   out="$(cd "$process_repo" && printf '%s' "$payload" | OMS_STATE_REPO="$override_repo" \
     TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "actionable fail-ledger rows" ||
+  printf '%s' "$out" | grep >/dev/null -F "actionable fail-ledger rows" ||
     fail "OMS_STATE_REPO must override the payload cwd: $out"
   [ -f "$override_repo/.oms/hooks/state-hint.$(date +%Y-%m-%d)" ] ||
     fail "the explicit state repo should receive the marker"
@@ -1750,7 +1750,7 @@ test_router_state_hint_surfaces_parked_goal() {
   payload='{"prompt":"continue the work","session_id":"s","turn_id":"t"}'
   out="$(printf '%s' "$payload" |
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "goal parked (tasks-exhausted)" ||
+  printf '%s' "$out" | grep >/dev/null -F "goal parked (tasks-exhausted)" ||
     fail "a parked goal run should surface in the daily hint: $out"
 
   # When an outer autopilot receipt exists, the hook must not tell the next
@@ -1761,12 +1761,12 @@ test_router_state_hint_surfaces_parked_goal() {
   rm -f "$repo/.oms/hooks/state-hint."*
   out="$(printf '%s' "$payload" |
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'parent agent: inspect and resume the validated autopilot receipt internally' ||
+  printf '%s' "$out" | grep >/dev/null -F 'parent agent: inspect and resume the validated autopilot receipt internally' ||
     fail "a parked outer run should assign recovery to the parent agent: $out"
-  if printf '%s' "$out" | grep -Eq 'run `oms|resume with `oms|review \.oms'; then
+  if printf '%s' "$out" | grep >/dev/null -E 'run `oms|resume with `oms|review \.oms'; then
     fail "a parked outer run should not expose recovery commands to the user: $out"
   fi
-  if printf '%s' "$out" | grep -Fq 'resume with `oms goal-drive`'; then
+  if printf '%s' "$out" | grep >/dev/null -F 'resume with `oms goal-drive`'; then
     fail "outer autopilot park was downgraded to a bare goal-drive resume"
   fi
 
@@ -1777,7 +1777,7 @@ test_router_state_hint_surfaces_parked_goal() {
   rm -f "$repo/.oms/hooks/state-hint."*
   out="$(printf '%s' "$payload" |
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq "goal parked"; then
+  if printf '%s' "$out" | grep >/dev/null -F "goal parked"; then
     fail "a completed goal must not keep hinting"
   fi
 }
@@ -1805,7 +1805,7 @@ test_router_keeps_resolved_repeats_quiet() {
   payload='{"prompt":"continue the work","session_id":"s","turn_id":"t"}'
   out="$(printf '%s' "$payload" |
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq "skill-forge add"; then
+  if printf '%s' "$out" | grep >/dev/null -F "skill-forge add"; then
     fail "a resolved failure alone must not request another project skill: $out"
   fi
 
@@ -1816,7 +1816,7 @@ test_router_keeps_resolved_repeats_quiet() {
   rm -f "$repo/.oms/hooks/state-hint."*
   out="$(printf '%s' "$payload" |
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq "skill-forge add"; then
+  if printf '%s' "$out" | grep >/dev/null -F "skill-forge add"; then
     fail "an existing project skill must silence the forge hint"
   fi
 }
@@ -1854,7 +1854,7 @@ test_usage_tracking_is_opt_in_without_forge_hints() {
   out="$(printf '%s' "$payload" |
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" \
     bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq "tooling recurred"; then
+  if printf '%s' "$out" | grep >/dev/null -F "tooling recurred"; then
     fail "usage frequency alone must not request another project skill: $out"
   fi
   # gc compacts under the reader's own TTL predicate: expired rows drop,
@@ -1862,7 +1862,7 @@ test_usage_tracking_is_opt_in_without_forge_hints() {
   printf '{"schema": 1, "family": "gpu", "day": "2020-01-01"}\n' \
     >> "$repo/.oms/usage.jsonl"
   out="$(bash "$ROOT/scripts/gc.sh" --repo "$repo" --apply)"
-  printf '%s' "$out" | grep -q 'usage: compact' ||
+  printf '%s' "$out" | grep >/dev/null 'usage: compact' ||
     fail "gc should compact usage rows: $out"
   if grep -q '2020-01-01' "$repo/.oms/usage.jsonl"; then
     fail "gc must drop usage rows past the TTL"
@@ -1924,7 +1924,7 @@ test_conditional_skills_link_only_where_required_commands_exist() {
   out="$(PATH="$toolbox" HOME="$home" bash "$ROOT/scripts/link.sh")"
   [ ! -e "$home/.codex/skills/oms-slurm" ] ||
     fail "oms-slurm link should be removed once sinfo is gone"
-  printf '%s' "$out" | grep -Fq "unlinked disabled skill" ||
+  printf '%s' "$out" | grep >/dev/null -F "unlinked disabled skill" ||
     fail "removal should be reported: $out"
 }
 
@@ -1943,12 +1943,12 @@ test_router_skips_conditional_skill_without_command() {
 
   out="$(printf '%s' "$payload" | OMS_SKILL_HINTS=1 PATH="$stub:$toolbox" \
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-slurm" ||
+  printf '%s' "$out" | grep >/dev/null -F "oms-slurm" ||
     fail "router should suggest oms-slurm when sinfo exists: $out"
 
   out="$(printf '%s' "$payload" | OMS_SKILL_HINTS=1 PATH="$toolbox" \
     OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq "oms-slurm"; then
+  if printf '%s' "$out" | grep >/dev/null -F "oms-slurm"; then
     fail "router must not suggest oms-slurm without sinfo: $out"
   fi
 }
@@ -2023,17 +2023,17 @@ Review this lesson periodically.
 EOF
   touch -t 202001010000 "$skill"
   out="$(OMS_SKILL_STALE_DAYS=1 bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status)"
-  printf '%s' "$out" | grep -Fq "1 project skill(s) untouched >1d" ||
+  printf '%s' "$out" | grep >/dev/null -F "1 project skill(s) untouched >1d" ||
     fail "stale skill warning should name the count: $out"
 
   out="$(OMS_SKILL_STALE_DAYS=0 bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status)"
-  if printf '%s' "$out" | grep -Fq "untouched >"; then
+  if printf '%s' "$out" | grep >/dev/null -F "untouched >"; then
     fail "OMS_SKILL_STALE_DAYS=0 must silence stale warnings: $out"
   fi
 
   touch "$skill"
   out="$(OMS_SKILL_STALE_DAYS=1 bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" status)"
-  if printf '%s' "$out" | grep -Fq "untouched >"; then
+  if printf '%s' "$out" | grep >/dev/null -F "untouched >"; then
     fail "fresh skills must not produce stale warnings: $out"
   fi
 }
@@ -2065,7 +2065,7 @@ test_skill_forge_rejects_thin_and_sensitive() {
     bash "$ROOT/scripts/skill-forge.sh" --repo "$repo" add --name plain-lesson 2>&1)"; then
     fail "an unprefixed skill name must be rejected at add"
   fi
-  printf '%s' "$prefix_out" | grep -Fq "oms-plain-lesson" ||
+  printf '%s' "$prefix_out" | grep >/dev/null -F "oms-plain-lesson" ||
     fail "prefix rejection should suggest the corrected name: $prefix_out"
   [ ! -d "$repo/.oms/skills/plain-lesson" ] ||
     fail "rejected unprefixed skill must not be stored"
@@ -2095,7 +2095,7 @@ test_task_close_does_not_propose_skills_for_resolved_repeats() {
     bash "$ROOT/scripts/fail-ledger.sh" resolve --cmd "make flaky" >/dev/null )
   bash "$ROOT/scripts/agent-task.sh" --repo "$repo" init --goal "lesson" >/dev/null
   out="$(bash "$ROOT/scripts/agent-task.sh" --repo "$repo" close 2>&1 || true)"
-  if printf '%s' "$out" | grep -Fq "skill-forge add"; then
+  if printf '%s' "$out" | grep >/dev/null -F "skill-forge add"; then
     fail "close must not turn a resolved failure into a skill-creation chore: $out"
   fi
 }

@@ -28,7 +28,7 @@ if PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" OMS_MODEL_EXPLICIT=provid
 fi
 if PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" OMS_MODEL_EXPLICIT=model-a OMS_REASONING_EFFORT_REQUEST=high bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex' >/dev/null 2>&1; then fail 'per-model effort must validate'; fi
 out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" OMS_MODEL_EXPLICIT='' OMS_REASONING_EFFORT_REQUEST=auto bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex; printf "%s" "$OMS_MODEL_DISTINCT_CHAIN"')"
-printf '%s\n' "$out" | grep -Fxq 'Model B' || fail 'provider-default catalog chain missing distinct model'
+printf '%s\n' "$out" | grep >/dev/null -Fx 'Model B' || fail 'provider-default catalog chain missing distinct model'
 # The tier layer is gone entirely: a legacy class request is plain unknown
 # environment — routing neither warns about it nor lets it change the route.
 out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" OMS_MODEL_CLASS_REQUEST=deep OMS_MODEL_EXPLICIT='' OMS_REASONING_EFFORT_REQUEST=auto bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex; printf "%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_RESOLVED_CLASS"' 2>"$TMP/warn.err")"
@@ -587,9 +587,9 @@ sed -n '3p' "$TMP/provider.calls" | grep -Fq -- '--model Model B' ||
 # provider target. The target notation already carries an exact model and must
 # not be silently overwritten by a second --model.
 consult_help="$(bash "$ROOT/scripts/consult.sh" --help)" || fail 'consult --help failed'
-printf '%s' "$consult_help" | grep -Fq -- '--model MODEL' || fail 'consult help omits --model'
-printf '%s' "$consult_help" | grep -Fq -- '--fallback-model M' || fail 'consult help omits --fallback-model'
-printf '%s' "$consult_help" | grep -Fq -- '--reasoning-effort E' || fail 'consult help omits --reasoning-effort'
+printf '%s' "$consult_help" | grep >/dev/null -F -- '--model MODEL' || fail 'consult help omits --model'
+printf '%s' "$consult_help" | grep >/dev/null -F -- '--fallback-model M' || fail 'consult help omits --fallback-model'
+printf '%s' "$consult_help" | grep >/dev/null -F -- '--reasoning-effort E' || fail 'consult help omits --reasoning-effort'
 consult_invoke() {
   env -u NVM_DIR HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
     CODEX_ARGV_OUT="$TMP/codex.argv" CLAUDE_ARGV_OUT="$TMP/claude.argv" \

@@ -1894,7 +1894,7 @@ HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   fail "rename intent did not publish exactly one commit"
 rename_status="$(git -C "$rename_repo" diff-tree --no-commit-id --name-status -r -M \
   "$rename_before" HEAD | tr -d '\r')"
-printf '%s\n' "$rename_status" | grep -Eq '^R[0-9]+[[:space:]]+old\.txt[[:space:]]+new\.txt$' ||
+printf '%s\n' "$rename_status" | grep >/dev/null -E '^R[0-9]+[[:space:]]+old\.txt[[:space:]]+new\.txt$' ||
   fail "rename intent commit did not preserve old/new rename lineage"
 [ -z "$(git -C "$rename_repo" status --porcelain)" ] ||
   fail "rename intent left the repository dirty"
