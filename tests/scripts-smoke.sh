@@ -21130,6 +21130,24 @@ EOF
   ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) |
     grep -Fq 'worker changed protected state' ||
     fail "the violation should be recorded in the fail-ledger"
+
+  # Branch-tracking relief stops at the shape Git writes: a remote that is not
+  # configured, or an indented "[core]" Git reads as a new section, stays hard.
+  local p
+  for p in "$project-remote" "$project-indent"; do
+    make_committed_repo "$p"
+    case "$p" in
+      *-remote) printf 'git -C "%s" config branch.x.remote /tmp/elsewhere\n' "$p" ;;
+      *) printf 'printf "[branch \\"x\\"]\\n\\tremote = .\\n\\tmerge = refs/heads/main\\n\\t[core]\\n\\tfsmonitor = /bin/true\\n" >> "%s/.git/config"\n' "$p" ;;
+    esac | { printf '#!/usr/bin/env bash\n'; cat; printf 'echo done\n'; } > "$bin_dir/codex"
+    rc=0
+    out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      "$ROOT/scripts/peer-delegate.sh" --repo "$p" --to codex --prompt x \
+      --no-verify 2>&1)" || rc=$?
+    [ "$rc" != 0 ] || fail "a non-tracking config delta must fail the run ($p): $out"
+    printf '%s' "$out" | grep -Fq 'execution-state' ||
+      fail "a non-tracking config delta should name execution-state ($p): $out"
+  done
 }
 
 test_delegate_execution_config_guard_runs_before_git_capture() {
@@ -22636,6 +22654,28 @@ $parent_cmd add --repo $project --owner-pid $$ >/dev/null && $parent_cmd remove 
   fi
   [ "$(git -C "$project" worktree list --porcelain | grep -c 'oh-my-setting-scratch\.')" = 1 ] ||
     fail "residue cleanup must keep a live-owner scratch worktree"
+
+  # A main switching to its task branch from origin/<default> in its scratch
+  # writes branch tracking into the shared config: soft, hard under strict.
+  local p track
+  for p in "$project-track" "$project-track-strict"; do
+    make_guard_repo "$p"
+    git -C "$p" remote add origin "$p" && git -C "$p" fetch -q origin ||
+      fail "could not create the tracking remote fixture"
+    make_live_managed_sibling "$p" "$managed_root/oh-my-setting-scratch.${p##*-}"
+  done
+  track='case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
+git -C SIB switch -q -c oms/t --track origin/'"$(git -C "$project-track" symbolic-ref --short HEAD)"
+  result="$(run_delegate_beside_sibling "$project-track" "$managed_root" \
+    "${track/SIB/$managed_root/oh-my-setting-scratch.track/wt}")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "branch tracking written by a sibling scratch must not fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'branch-tracking' ||
+    fail "branch tracking should be reported softly: $result"
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-track-strict" \
+    "$managed_root" "${track/SIB/$managed_root/oh-my-setting-scratch.strict/wt}")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "strict mode must keep branch tracking hard: $result"
 }
 
 test_worker_guard_flags_a_sibling_whose_marker_died() {
@@ -22675,6 +22715,29 @@ test_worker_guard_softens_a_sibling_that_finished_kept() {
     fail "a sibling that finished kept must not fail the run: $result"
   printf '%s' "$result" | grep -Fq 'during this run: kept-sibling' ||
     fail "a kept sibling should be reported as a soft change: $result"
+
+  # A main keeps using its scratch after the owner pid died: only that
+  # residue entry's HEAD moves. Soft by default, hard under strict mode.
+  local p moved
+  for p in "$project-moved" "$project-moved-strict"; do
+    make_guard_repo "$p"
+    make_live_managed_sibling "$p" "$sibling_parent${p#"$project"}"
+    printf 'kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s\ntemporary=1\n' \
+      "$dead_pid" "$p" "$sibling_parent${p#"$project"}/wt" \
+      > "$sibling_parent${p#"$project"}/.oh-my-setting-tmp"
+  done
+  moved='case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
+git -C SIB -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m moved'
+  result="$(run_delegate_beside_sibling "$project-moved" "$managed_root" \
+    "${moved/SIB/$sibling_parent-moved/wt}")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a HEAD move in a dead-owner scratch must not fail the run: $result"
+  printf '%s' "$result" | grep -Fq 'during this run: kept-sibling' ||
+    fail "a HEAD move in a dead-owner scratch should be reported softly: $result"
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-moved-strict" \
+    "$managed_root" "${moved/SIB/$sibling_parent-moved-strict/wt}")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "strict mode must keep a dead-owner scratch HEAD move hard: $result"
 }
 
 # The incident that serialized every main's launches: sibling B starts after

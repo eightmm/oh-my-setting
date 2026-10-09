@@ -348,14 +348,18 @@ $worktree_dir/config.worktree"
   [ "$mode" = config-only ] || paths="$paths
 $index_path"
 
-  OMS_GIT_EXEC_PATHS="$paths" python3 - <<'PY' > "$tmp" || {
+  # The common config's bytes are kept beside OUT (OUT.config) so a later
+  # branch-tracking delta can be read against them; they are the bytes row 0
+  # hashes, and the assert re-binds them to that digest.
+  rm -f "$out.config"
+  OMS_GIT_EXEC_PATHS="$paths" OMS_GIT_EXEC_COPY="$tmp.config" python3 - <<'PY' > "$tmp" || {
 import base64
 import hashlib
 import os
 import stat
 import sys
 
-for path in os.environ["OMS_GIT_EXEC_PATHS"].splitlines():
+for number, path in enumerate(os.environ["OMS_GIT_EXEC_PATHS"].splitlines()):
     if not path:
         continue
     key = base64.b64encode(os.fsencode(path)).decode("ascii")
@@ -374,16 +378,67 @@ for path in os.environ["OMS_GIT_EXEC_PATHS"].splitlines():
         print("%s\toversized:%d" % (key, info.st_size))
         raise SystemExit(2)
     digest = hashlib.sha256()
+    copy = None
+    if number == 0:
+        copy = open(os.environ["OMS_GIT_EXEC_COPY"], "wb")
     with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+            if copy:
+                copy.write(chunk)
+    if copy:
+        copy.close()
     print("%s\tregular:%o:%d:%s" % (
         key, stat.S_IMODE(info.st_mode), info.st_size, digest.hexdigest()))
 PY
-    rm -f "$tmp"
+    rm -f "$tmp" "$tmp.config"
     return 2
   }
+  if [ -f "$tmp.config" ]; then
+    mv "$tmp.config" "$out.config" || { rm -f "$tmp" "$tmp.config"; return 2; }
+  fi
   mv "$tmp" "$out"
+}
+
+# A sibling main that creates its task branch from a remote-tracking ref writes
+# branch.<name>.remote/merge into the shared config (branch.autoSetupMerge, or
+# push -u). That is the only tolerated delta. Git's own parser reads it:
+# configparser folds an indented "[core]" line into the previous value, Git
+# does not. `git config --file --list` reads no index and runs no configured
+# program, so it is safe on worker-written bytes before the execution check.
+oms_git_config_delta_is_branch_tracking() {  # BEFORE_FILE AFTER_FILE
+  python3 - "$1" "$2" <<'PY'
+import collections, os, re, subprocess, sys
+env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+here = os.path.dirname(os.path.abspath(sys.argv[1]))
+env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(here)
+def rows(path):
+    out = subprocess.run(["git", "config", "--file", path, "--no-includes", "--list", "-z"],
+                         env=env, cwd=here, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                         check=True).stdout
+    # "key\nvalue" or a bare "key" (true): keep the separator so the two differ.
+    return [tuple(r.decode("utf-8", "surrogateescape").partition("\n"))
+            for r in out.split(b"\0") if r]
+try:
+    before, after = rows(sys.argv[1]), rows(sys.argv[2])
+except (OSError, subprocess.CalledProcessError):
+    raise SystemExit(1)
+b, a = collections.Counter(before), collections.Counter(after)
+delta = list((a - b).elements()) + list((b - a).elements())
+remotes = {k[7:-4] for k, _, _ in before if k.startswith("remote.") and k.endswith(".url")}
+if not delta:
+    raise SystemExit(1)
+for key, sep, value in delta:
+    m = re.fullmatch(r"branch\.(.+)\.(remote|merge)", key)
+    if not m or not sep or "\n" in value:
+        raise SystemExit(1)
+    if m.group(2) == "remote" and value != "." and value not in remotes:
+        raise SystemExit(1)
+    if m.group(2) == "merge" and not value.startswith("refs/heads/"):
+        raise SystemExit(1)
+PY
 }
 
 # Compare with the same no-Git raw walk and bind the private snapshot bytes to
@@ -394,6 +449,7 @@ oms_git_execution_state_assert_unchanged() {  # REPO SNAPSHOT EXPECTED_SHA
   local snapshot="$2"
   local expected_sha="$3"
   local actual_sha=""
+  local changed_config=""
 
   # Root is part of the public signature for callers and documents which
   # repository the receipt belongs to. The trusted snapshot contains the
@@ -406,7 +462,7 @@ oms_git_execution_state_assert_unchanged() {  # REPO SNAPSHOT EXPECTED_SHA
     echo "Git execution-state snapshot changed or became unreadable" >&2
     return 2
   fi
-  if ! python3 - "$snapshot" <<'PY'
+  if ! changed_config="$(python3 - "$snapshot" "$snapshot.config" <<'PY'
 import base64
 import hashlib
 import os
@@ -438,17 +494,34 @@ try:
     rows = open(sys.argv[1], "rb").read().splitlines()
 except OSError:
     raise SystemExit(2)
-for row in rows:
+# Row 0 is the common config in both snapshot modes. It alone may change in
+# content, and only against the saved copy that its recorded digest binds.
+for number, row in enumerate(rows):
     try:
         encoded, expected = row.split(b"\t", 1)
         path = os.fsdecode(base64.b64decode(encoded, validate=True))
         expected = expected.decode("ascii", "strict")
     except (ValueError, UnicodeError):
         raise SystemExit(2)
-    if not os.path.isabs(path) or signature(path) != expected:
+    if not os.path.isabs(path):
         raise SystemExit(2)
+    current = signature(path)
+    if current == expected:
+        continue
+    old, new = expected.split(":"), current.split(":")
+    if number != 0 or len(old) != 4 or len(new) != 4 or old[0] != "regular" or old[:2] != new[:2]:
+        raise SystemExit(2)
+    if signature(sys.argv[2]).split(":")[2:] != old[2:]:
+        raise SystemExit(2)
+    sys.stdout.write(path)
 PY
+)"
   then
+    echo "Git execution config or hidden index state changed" >&2
+    return 2
+  fi
+  if [ -n "$changed_config" ] &&
+    ! oms_git_config_delta_is_branch_tracking "$snapshot.config" "$changed_config"; then
     echo "Git execution config or hidden index state changed" >&2
     return 2
   fi
@@ -965,6 +1038,7 @@ oms_worker_surface_diff() {
   local current_worktree_physical="${4:-}"
   local changed=""
   local name
+  local common
 
   for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks; do
     [ -f "$before_dir/$name" ] || continue
@@ -977,6 +1051,14 @@ oms_worker_surface_diff() {
       if [ "$name" = gitmeta ] && oms_worker_gitmeta_only_kept_siblings "$repo" \
         "$before_dir" "$current_worktree_physical"; then
         changed="${changed:+$changed, }$OMS_WG_GITMETA_SOFT"
+        continue
+      fi
+      # Callers pass the execution-state assert first, which binds this copy.
+      if [ "$name" = config ] && [ -f "$before_dir/git-execution-state.config" ] &&
+        common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" &&
+        [ -n "$common" ] && oms_git_config_delta_is_branch_tracking \
+          "$before_dir/git-execution-state.config" "$common/config"; then
+        changed="${changed:+$changed, }branch-tracking"
         continue
       fi
       changed="${changed:+$changed, }$name"
@@ -1184,6 +1266,8 @@ EOF
 # another main may unregister a sibling that was already dead and kept at the
 # snapshot (`gitmeta-residue`); name that softly (`sibling-cleanup`) only when
 # every removed line belongs to such an entry and none of its lines remain.
+# A main may keep using its scratch after its owner pid died; a changed HEAD
+# line alone on such a residue entry that still exists is `kept-sibling` too.
 # This is false-positive relief for cooperative parallel runs, not
 # attribution: a same-UID worker can forge the same shape (SECURITY.md). A
 # removed marker, a partial removal, any other changed line, or
@@ -1199,6 +1283,7 @@ oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   local removed
   local added
   local head
+  local cleaned=""
 
   OMS_WG_GITMETA_SOFT=""
   git_dir="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || printf '')"
@@ -1224,12 +1309,19 @@ oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
         *) return 1 ;;
       esac
       grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-residue" 2>/dev/null || return 1
+      # A dead-owner scratch its main still uses moves only its HEAD.
+      if [ "$line" != "${line#"worktree worktrees/$entry/HEAD "}" ] &&
+        awk -v k="worktrees/$entry/HEAD" '$1 == "worktree" && $2 == k { f = 1 } END { exit !f }' \
+          "$before_dir/gitmeta-now"; then
+        continue
+      fi
       ! awk -v e="worktrees/$entry" '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
         "$before_dir/gitmeta-now" || return 1
+      cleaned=1
     done <<EOF
 $removed
 EOF
-    OMS_WG_GITMETA_SOFT=sibling-cleanup
+    [ -z "$cleaned" ] || OMS_WG_GITMETA_SOFT=sibling-cleanup
   fi
   [ -n "$added" ] || return 0
   while IFS= read -r line; do
@@ -1241,7 +1333,9 @@ EOF
         ;;
       *) return 1 ;;
     esac
-    if ! grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-exempt" 2>/dev/null; then
+    if ! grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-exempt" 2>/dev/null &&
+      ! { [ "$line" != "${line#"worktree worktrees/$entry/HEAD "}" ] &&
+        grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-residue" 2>/dev/null; }; then
       ! awk -v e="worktrees/$entry" '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
         "$before_dir/gitmeta-before" || return 1
       [ -f "$git_dir/worktrees/$entry/HEAD" ] && [ ! -L "$git_dir/worktrees/$entry/HEAD" ] || return 1

@@ -211,9 +211,10 @@ Environment:
                              scan is reported, never silent.
   OMS_WORKER_GUARD_STRICT=1  Fail on every changed surface. By default a change
                              to untracked/ignored files, tracked content,
-                             remote-tracking refs, or stash is reported but
-                             does not fail the run: it cannot be told apart
-                             from concurrent repository activity.
+                             remote-tracking refs, stash, a sibling's branch
+                             tracking config, or a dead-owner scratch HEAD move
+                             is reported but does not fail the run: it cannot
+                             be told apart from concurrent repository activity.
   OMS_WORKER_AUTHORITY_EXCLUSIVE=1
                              When no sibling can write owner state, compare and
                              restore the full primary .oms authority surface.
@@ -1911,7 +1912,7 @@ conversation_boundary_check() {
     "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")" || return 2
   for surface in $(printf '%s' "$changed" | tr ',' ' '); do
     case "$surface" in
-      files|tracked|remote-refs|work-branches|kept-sibling|sibling-cleanup) [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] || return 2 ;;
+      files|tracked|remote-refs|work-branches|kept-sibling|sibling-cleanup|branch-tracking) [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] || return 2 ;;
       *) echo "error: conversation changed owner surface: $surface" >&2; return 2 ;;
     esac
   done
@@ -2187,7 +2188,7 @@ if [ -n "$worker_guard_dir" ]; then
   worker_guard_soft=""
   for guard_surface in $(printf '%s' "$worker_guard_changed" | tr ',' ' '); do
     case "$guard_surface" in
-      files|tracked|remote-refs|work-branches|kept-sibling|sibling-cleanup)
+      files|tracked|remote-refs|work-branches|kept-sibling|sibling-cleanup|branch-tracking)
         if [ "${OMS_WORKER_GUARD_STRICT:-0}" = "1" ]; then
           worker_guard_hard="${worker_guard_hard:+$worker_guard_hard, }$guard_surface"
         else
