@@ -1,10 +1,10 @@
 # Command Routing
 
-Choose the narrowest front door; retain primitives for lower-level contracts.
+Choose the narrowest front door; retain primitives.
 
-`oms list` (also `--frontdoor`) exposes compact subsystem entrypoints;
-`oms list --all` exposes core primitives. Start with the six work families in SKILL.md;
-this reference resolves intent variants, not additional default steps.
+`oms list` (also `--frontdoor`) exposes entrypoints;
+`oms list --all` exposes primitives. Start with SKILL.md's six work families;
+this resolves intent variants, not extra steps.
 
 ## Orient and resume
 
@@ -39,12 +39,13 @@ additional evidence. Installation health and project integrity remain distinct.
 | Findings on an existing diff | `oms peer-review --gate` | `peer-ask --diff` does not provide the same typed review and mechanical gate. |
 | High-risk decision, repeated failure, or release go/no-go | `oms advise` | Do not spend an advisor on routine completion. |
 | One bounded implementation | `oms peer-delegate --to PROVIDER` | Write workers return a patch, with no commit/push authority. |
+| Inside an OMS panel | `oms panel --dispatch` (worker, advisor or reviewer); mail: `oms room updates/send/ack/scope` | Read: `--prompt`/`--brief-file`; write adds `--verify --scope`. |
 | Questions/changes for agents already working together | `oms thread append`, `updates`, `ack` on a scoped live thread | Messages neither spawn providers nor grant authority; see state-memory.md. |
 | Isolated clean-HEAD audit with a worker role | `oms peer-delegate --read-only` | Report only, never a patch. |
 
-`agent-call` is a read primitive, not an extra council seat. Select read or
-write authority explicitly; the redundant `agent-run` wrapper was removed.
-All peer outputs use the same artifact section reader; review remains typed.
+`agent-call` is read-only, not an extra council seat. Select read/write
+authority explicitly; `agent-run` was removed. Peer outputs share the artifact
+reader; review remains typed.
 
 ## Plan and autonomy depth
 
@@ -56,9 +57,9 @@ All peer outputs use the same artifact section reader; review remains typed.
 | Repeated tasks in an already reviewed plan | `oms goal-drive` |
 | Confirmed `PROJECT.md` through reviewed proposal and bounded drive | `oms autopilot` |
 
-`autopilot -> goal-drive -> plan-run` is an execution hierarchy, not three
-parallel loops. `agent-plan` owns tasks/leases. Start only the required layer;
-retain its stop/publication boundary and reviewed task contract.
+`autopilot -> goal-drive -> plan-run` is an execution hierarchy, not parallel
+loops. `agent-plan` owns tasks/leases. Start only the required layer; retain
+its stop/publication boundary and reviewed task contract.
 
 Use Execution Graph only for explicit branching or an existing graph run,
 not ordinary tasks. GPU/Slurm/experiments stay project-specific.
@@ -92,14 +93,14 @@ installation ownership. Never widen one deletion scope to another.
 | Same-machine provider-session continuation | `oms session-handoff` |
 | Sanitized cross-machine project continuity | `oms runtime capsule` |
 
-These stores have different retention, provenance, and sensitive-content
+These stores have distinct retention, provenance, and sensitive-content
 contracts. Do not merge them or treat one as another's authority source.
 
 ## Typed runtime and compatibility surfaces
 
 Prefer `oms runtime profile`, `backend`, and `experiment`. `install-profile`
-shares the profile engine; `runtime backend` owns execution preflight and runs.
-Do not repeat probes.
+shares the profile engine; `runtime backend` owns preflight and runs. Do not
+repeat probes.
 `runtime experiment launch` pre-registers one command through run-ledger;
 `register/run/summarize` handle comparable multi-arm studies.
 Experiment-board owns intent/claims, run-ledger records execution, and runtime
