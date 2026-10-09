@@ -18,17 +18,17 @@ out="$(PATH="$TMP/bin:$PATH" "$ROOT/scripts/provider-permissions.sh" \
   --print --profile consult --settings "$TMP/settings.json")" ||
   fail "consult permission projection failed"
 
-printf '%s\n' "$out" | grep -Fxq 'read_file(*)' ||
+printf '%s\n' "$out" | grep >/dev/null -Fx 'read_file(*)' ||
   fail "consult profile lost repository reads"
-printf '%s\n' "$out" | grep -Fxq 'command(*)' ||
+printf '%s\n' "$out" | grep >/dev/null -Fx 'command(*)' ||
   fail "consult profile lost sandboxed commands"
-if printf '%s\n' "$out" | grep -Fq 'mcp(*)'; then
+if printf '%s\n' "$out" | grep >/dev/null -F 'mcp(*)'; then
   fail "consult profile must not grant every MCP server and tool"
 fi
 
 help="$($ROOT/scripts/provider-permissions.sh --help)" ||
   fail "permission help failed"
-if printf '%s\n' "$help" | grep -Fq 'mcp(*)'; then
+if printf '%s\n' "$help" | grep >/dev/null -F 'mcp(*)'; then
   fail "permission consent must not advertise an all-MCP grant"
 fi
 
@@ -41,7 +41,7 @@ assert_unsafe_input_rejected() {
     --print --profile delegate --settings "$TMP/settings.json" "$@" 2>&1)" || rc=$?
   [ "$rc" = 2 ] ||
     fail "$label must be rejected before it can become a rule (status $rc): $out"
-  if printf '%s\n' "$out" | grep -Eq '^(write_file|unsandboxed)\('; then
+  if printf '%s\n' "$out" | grep >/dev/null -E '^(write_file|unsandboxed)\('; then
     fail "$label emitted an injected permission rule: $out"
   fi
 }
@@ -76,9 +76,9 @@ out="$(PATH="$TMP/bin:$PATH" "$ROOT/scripts/provider-permissions.sh" \
   --worktree-parent '/tmp/worktrees/../delegates//' \
   --settings "$TMP/settings.json")" ||
   fail "safe exact permissions were rejected"
-printf '%s\n' "$out" | grep -Fxq 'write_file(/tmp/delegates)' ||
+printf '%s\n' "$out" | grep >/dev/null -Fx 'write_file(/tmp/delegates)' ||
   fail "worktree parent was not normalized to one exact rule: $out"
-printf '%s\n' "$out" | grep -Fxq 'unsandboxed(python3.12)' ||
+printf '%s\n' "$out" | grep >/dev/null -Fx 'unsandboxed(python3.12)' ||
   fail "safe command token lost its exact grant: $out"
 [ "$(printf '%s\n' "$out" | grep -Ec '^(write_file|unsandboxed)\(')" = 2 ] ||
   fail "safe inputs emitted more than their two exact rules: $out"
@@ -95,9 +95,9 @@ out="$(HOME="$default_home" XDG_CACHE_HOME="$default_cache" \
   --settings "$TMP/default-settings.json")" ||
   fail "default delegate permission projection failed"
 default_root="$default_cache/oh-my-setting/worktrees"
-printf '%s\n' "$out" | grep -Fxq "write_file($default_root)" ||
+printf '%s\n' "$out" | grep >/dev/null -Fx "write_file($default_root)" ||
   fail "default delegate grant is not the dedicated OMS root: $out"
-if printf '%s\n' "$out" | grep -Fxq "write_file($TMP/untrusted-tmp)"; then
+if printf '%s\n' "$out" | grep >/dev/null -Fx "write_file($TMP/untrusted-tmp)"; then
   fail "default delegate grant still widens the shared temporary directory"
 fi
 
@@ -231,7 +231,9 @@ fi
 grep -Fq 'python3 is required' "$TMP/nopy.out" || fail "missing python3 must be named: $(cat "$TMP/nopy.out")"
 # The other uninstall removals likewise need python3 only for something to remove.
 for remover in install-claude-hooks.sh install-codex-plugin.sh; do
+  # No receipt either: an install that failed this early wrote none.
   out="$(PATH="$nopy" HOME="$TMP/no-python-home" CODEX_HOME="$TMP/no-python-home/.codex" \
+    XDG_CONFIG_HOME="$TMP/no-python-home/.config" OMS_INSTALL_RECEIPT='' \
     OMS_CLAUDE_SETTINGS="$TMP/no-python-home/.claude/settings.json" \
     OMS_CODEX_CONFIG="$TMP/no-python-home/.codex/config.toml" \
     "$ROOT/scripts/$remover" --remove 2>&1)" || fail "$remover --remove without python3 or config must succeed: $out"
