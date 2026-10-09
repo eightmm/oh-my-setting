@@ -23078,6 +23078,15 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
     fail "a deleted state file should be named: $result"
   grep -Fq '"fingerprint":"abc"' "$removed/.oms/failures.jsonl" ||
     fail "deleted shared state should be restored"
+
+  # The parent's own prompt hook consumes its resume hint mid-run.
+  local hint="$TMP/guard-state-hook-hint"
+  make_guard_repo "$hint"
+  mkdir -p "$hint/.oms/hooks/sessions"
+  printf '*\n' > "$hint/.oms/.gitignore"
+  printf '{"source":"compact"}\n' > "$hint/.oms/hooks/sessions/abc.resume.json"
+  result="$(run_guarded_worker "$hint" "rm -f $hint/.oms/hooks/sessions/abc.resume.json")"
+  [ "${result%%	*}" = 0 ] || fail "a consumed hook session hint is not worker authority: $result"
 }
 
 test_worker_authority_guard_restores_primary_state() {
