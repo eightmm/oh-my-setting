@@ -497,13 +497,19 @@ land_active() {  # true | false | null, from a read-only probe of the land lock
   esac
 }
 
-show_status() {  # show_status [RECEIPT]; default: the most recently written one
-  local newest="${1:-}" active rc=0
+show_status() {  # show_status [RECEIPT]; default: this HEAD's newest, else the newest
+  local newest="${1:-}" active rc=0 head=""
   active="$(land_active)"
   [ "$ACTIVE_EXIT" -eq 1 ] && [ "$active" = true ] && rc=3
+  # Several mains share one land directory: this worktree's own HEAD is the
+  # landing its caller means, and the newest receipt may be another main's.
+  if [ -z "$newest" ] && head="$(git -C "$REPO" rev-parse -q --verify HEAD 2>/dev/null)"; then
+    head="${head//$'\r'/}"
+    newest="$(ls -t "$LAND_DIR/$head"-*.json 2>/dev/null | head -n 1)" || true
+  fi
   [ -n "$newest" ] || newest="$(ls -t "$LAND_DIR"/*.json 2>/dev/null | head -n 1)" || true
   [ -n "$newest" ] || { echo "no landing recorded under $LAND_DIR"; [ "$rc" -ne 0 ] || rc=1; return "$rc"; }
-  python3 - "$newest" "$active" "$JSON" <<'PY' || return $?
+  python3 - "$newest" "$active" "$JSON" "${head:-}" <<'PY' || return $?
 import calendar, json, sys, time
 r = json.load(open(sys.argv[1], encoding="utf-8"))
 active = {"true": True, "false": False}.get(sys.argv[2])
@@ -526,6 +532,8 @@ if state == "running" and active is True:
 elif state == "running" and active is False:
     state = "receipt says running, but no land holds the lock (stale receipt)"
 print("land %s: %s" % (str(r.get("sha", ""))[:7], state))
+if sys.argv[4] and r.get("sha") != sys.argv[4]:
+    print("  note: newest land in this repository, not this worktree's HEAD %s" % sys.argv[4][:7])
 print("  gate: %s (%ss)  push: %s  update: %s  ci: %s%s" % (
     "ok" if g.get("rc") == 0 else g.get("rc", "-"), g.get("seconds", "-"),
     "ok" if p.get("rc") == 0 else p.get("rc", "-"), "ok" if u.get("rc") == 0 else u.get("rc", "-"),
