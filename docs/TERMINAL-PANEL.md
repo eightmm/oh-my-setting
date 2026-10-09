@@ -225,8 +225,10 @@ main). Unread pairs come first, then the most recent; at most four rows plus `+N
 then the message list. Clicking a pair row (or moving onto it with the arrow keys)
 switches the box to DETAIL and shows the pair's last six messages, oldest first, from the room
 snapshot, which keeps only the room's latest 12 messages. The top of the board carries no
-between-mains line. When no main in a lane row has an advisor or reviewer, the per-lane
-`◇ Advisors: none active` rows are dropped (the footer offers `a Ask advisor`). The pinned usage line
+between-mains line. Each lane keeps a
+`◇ Advisors: none active` row above its main when no judge is there and the rows allow (the footer offers
+`a Ask advisor`); an answered advisor, reviewer or debate stays above its main for 30 minutes before it
+counts as Past work. The pinned usage line
 (`Claude week 66% · ctx 73% │ Codex week 2% · ctx 84%`) holds the readings; the model-call totals
 stay in the tree USAGE card. Truncation reads `…` (`...` in ASCII mode).
 `⚑` (ASCII `A`) marks a call waiting for approval, `?` one waiting for input.

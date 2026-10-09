@@ -4738,9 +4738,26 @@ bare["room"]["participants"] = [p for p in bare["room"]["participants"] if p.get
 for glyphs in (True, False):
     bare_lanes = render(bare, "codex", 160, 50, view="graph", navigation={"dismissed": True}, unicode=glyphs).splitlines()
     assert not any("ADVISORS" in l for l in bare_lanes), bare_lanes
-    # No main has an advisor: the empty rows are dropped and the mains still share one row.
-    assert not any("Advisors: none active" in l for l in bare_lanes), bare_lanes
-    assert any(l.count("MAIN / ") == 2 for l in bare_lanes), bare_lanes
+    # No main has an advisor: each lane still keeps its advisor place right above its main, on one row.
+    bare_top = next(i for i, l in enumerate(bare_lanes) if l.count("MAIN / ") == 2)
+    assert bare_lanes[bare_top - 1].count("Advisors: none active") == 2, bare_lanes
+# An answered advisor or reviewer stays above its main for half an hour, then counts as Past work.
+import time as linger_clock
+for age, kept in ((60, True), (3600, False)):
+    answered = deepcopy(flow)
+    answered["room"]["participants"] = [p for p in answered["room"]["participants"] if p.get("role") == "main"
+                                        or p["participant"] == "reviewer"]
+    for attempt in answered["attempts"]["active_recent"]:
+        if attempt["attempt_id"] == "reviewer":
+            attempt["state"] = "done"
+    answered["room"]["call_results"] = {"reviewer": {"exit": 0, "read": True, "seq": 9, "ts": linger_clock.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", linger_clock.gmtime(linger_clock.time() - age))}}
+    answered_lanes = render(answered, "codex", 160, 50, view="graph", navigation={"dismissed": True})
+    assert ("Reviewer" in answered_lanes and "Past work" not in answered_lanes) is kept, answered_lanes
+    assert ("Past work (1)" in answered_lanes) is not kept, answered_lanes
+    # Attention-only views still hide settled calls, lingering or not.
+    assert "Reviewer" not in render(answered, "codex", 160, 50, view="graph", attention_only=True,
+                                    navigation={"dismissed": True}), answered_lanes
 lonely = deepcopy(flow)
 lonely["room"]["participants"] = [p for p in lonely["room"]["participants"] if p["participant"] == "flow-main"]
 alone = render(lonely, "codex", 120, 30, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
@@ -6357,12 +6374,13 @@ advisor_board = graph_view.render_graph(dict(board, native_advisors=open_call), 
 assert "Fable 5.1" in advisor_board and "Built-in advisor" in advisor_board, advisor_board
 nav = {"selected": ("result", "native-advisor-adv-main"), "preview": {"target": ("result", "native-advisor-adv-main"), "report": {}}}
 assert "answer stays inside the main" in graph_view.render_graph(dict(board, native_advisors=open_call), 100, 40, navigation=nav)
-# An answered call draws no card; it counts as finished and the main's detail says when it answered.
+# An answered call keeps its card above the main instead of counting as finished; the detail says when it answered.
 pair_board = dict(board, room={"id": "adv-room", "participants": [claude_main, dict(claude_main, participant="adv-other",
                                                                                     provider="codex", seq=2)]})
 finished_board = graph_view.render_graph(dict(pair_board, native_advisors=answered_call), 120, 34,
                                          navigation={"overview": True, "dismissed": True})
-assert "Fable 5.1" not in finished_board and "Past work (1)" in finished_board, finished_board
+assert "Fable 5.1" in finished_board and "Past work" not in finished_board, finished_board
+assert "answered " + answered_call["adv-main"]["finished"] in finished_board, finished_board
 finished_nav = {"selected": ("chat", "adv-main"), "preview": {"target": ("chat", "adv-main"), "report": {}}}
 finished_detail = graph_view.render_graph(dict(board, native_advisors=answered_call), 100, 40, navigation=finished_nav)
 assert "Built-in advisor: last answered " + answered_call["adv-main"]["finished"] in finished_detail, finished_detail

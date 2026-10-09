@@ -280,11 +280,13 @@ def call_classifier(report):
     """Display buckets only; admission and lifecycle evidence retain their own authority."""
     settled, _ = settler(report)
     awaiting = set(listing(report.get("awaiting_admission")))
+    # Only a call with a main to sit above can linger there.
+    mains = {key for m in nodes(report) if m.get("role") == "main" for key in (m["participant"], m.get("attempt")) if key}
 
     def classify(call):
         if call["state"] == "review" and not settled(call) or (call["state"] == "done" and call.get("participant") in awaiting):
             return "review"
-        return "past" if settled(call) else "live"
+        return "past" if settled(call) and not (call.get("parent") in mains and lingering(call)) else "live"
     return classify
 
 
@@ -312,6 +314,9 @@ def clock_stamp(ts, today=None):
 def call_span(call, arrow="->"):
     """"14:02 -> 14:31 finished" / "14:05 -> running"; the times come from the room, the end state from the call."""
     state = call["state"]
+    if call.get("_native"):
+        # The built-in advisor keeps only local clock times.
+        return "answered " + call["_finished"] if call.get("_finished") else "asked %s %s running" % (call["_native"], arrow)
     words = said(state)
     if state == "failed" and call.get("guard"):
         words = "guard stop"
@@ -328,6 +333,21 @@ def call_span(call, arrow="->"):
     if not start:
         return (words + " " + end).strip()
     return "%s %s %s%s" % (start, arrow, end + " " if end else "", words)
+
+
+JUDGE_LINGER = 1800  # panel_chats.ADVISOR_MAX_AGE: the built-in advisor's answer window
+
+
+def lingering(call):
+    """An answered advisor, reviewer or debate stays above its main for half an hour before Past work."""
+    if call.get("role") not in {"advisor", "reviewer", "council"} or call["state"] != "done":
+        return False
+    if str(call.get("participant", "")).startswith("native-advisor-"):
+        return True  # panel_chats already drops answers older than the window
+    try:
+        return time.time() - calendar.timegm(time.strptime(str(call.get("ended")), "%Y-%m-%dT%H:%M:%SZ")) <= JUDGE_LINGER
+    except ValueError:
+        return False
 
 
 def joined_seconds(call):
@@ -788,7 +808,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     everyone = teams
     teams = {key: [c for c in calls if classify(c) == "live"] for key, calls in teams.items()}
     children = teams[primary["participant"]] if primary else []
-    judges = [m for m in children if m.get("role") in {"advisor", "reviewer", "council"}]
+    # Running judges first; answered ones linger after them.
+    judges = sorted((m for m in children if m.get("role") in {"advisor", "reviewer", "council"}),
+                    key=lambda m: m["state"] in FINISHED)
     workers = [m for m in children if m.get("role") == "worker"]
     unlinked = [m for m in members if m.get("role") != "main" and m.get("parent") not in owners]
     offset = max(0, navigation.get("offset", 0))
@@ -1361,11 +1383,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         first_band = len(bands_hit)
         tag_of = {"advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate"}
         columns = []
-        judge_sets = {m["participant"]: [c for c in teams[m["participant"]] if c.get("role") != "worker"][:3] for m in group}
+        judge_sets = {m["participant"]: sorted((c for c in teams[m["participant"]] if c.get("role") != "worker"),
+                                               key=lambda c: c["state"] in FINISHED)[:3] for m in group}
         most = max(len(judges) for judges in judge_sets.values())
         # With room, each main's advisors and reviewers share one box above it; boxes and mains line up across lanes.
         boxed = rows >= 14 and any(judge_sets.values())
-        lift = most + 2 if boxed else most
+        lift = most + 2 if boxed else max(most, int(rows >= 8))
 
         def activity_line(calls, m):
             ident = m["participant"]
@@ -1437,7 +1460,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             else:
                 cells.extend([" " * lane_width] * (lift - max(1, len(judges_here)) if lift else 0))
                 if not judges_here and lift:
-                    # Only beside a lane that has judges: the lanes stay aligned; no judges anywhere, no row.
+                    # Every lane keeps its advisor place when the rows allow, so the tier never disappears.
                     cells.append(paint(padded(" ◇ Advisors: none active · a asks one" if unicode else
                                               " Advisors: none active / a asks one", lane_width), "dim"))
                 for n, c in enumerate(judges_here):
