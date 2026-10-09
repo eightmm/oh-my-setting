@@ -2983,6 +2983,40 @@ handoff = next(m for m in state["messages"] if m["sender"] == child["participant
 assert handoff["recipient"] == room_owner and "parent acceptance pending" in handoff["text"], handoff
 assert "inspected the bounded repository task" in handoff["text"], handoff
 assert (project / "value.txt").read_text() == "old\n", "room cannot widen worker write access"
+# A dispatch with a shared-plan task ID moves that task for the calling main only: dry-run leaves it ready, the
+# claim records the main, and every further worker of the same main reuses the running lease.
+plan_cli = ["bash", str(panel.ENTRY), "agent-plan", "--repo", str(project)]
+call(plan_cli + ["init", "--goal", "dispatch moves the plan"])
+call(plan_cli + ["add", "--id", "plan-link", "--title", "Plan-linked dispatch"])
+plan_dispatch = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+                 "--dispatch", "worker", "--owner", "claude", "--purpose", "investigate", "--workload", "light",
+                 "--prompt", "Inspect value.txt without edits.", "--task-id", "plan-link", "--label", "Plan linked"]
+plan_task = lambda: {k: v for k, v in json.loads(call(plan_cli + ["show", "--id", "plan-link"])).items() if k != "claim_age_s"}
+call(plan_dispatch + ["--dry-run"], room_env)
+assert plan_task()["state"] == "ready", plan_task()
+linked = subprocess.run(plan_dispatch, env=room_env, capture_output=True, text=True)
+assert linked.returncode == 0, linked
+held = plan_task()
+assert held["state"] == "running" and held["provider"] == "claude" and held["claimed_by_participant"] == room_owner, held
+assert "plan plan-link running (lease %s)" % held["lease_id"] in linked.stderr, linked.stderr
+assert "agent-plan review --id plan-link --lease-id %s" % held["lease_id"] in linked.stderr, linked.stderr
+assert "agent-plan finish --id plan-link --landed-commit SHA" in linked.stderr, linked.stderr
+again = subprocess.run(plan_dispatch, env=room_env, capture_output=True, text=True)
+assert again.returncode == 0 and plan_task() == held and "lease %s" % held["lease_id"] in again.stderr, again
+call(plan_cli + ["add", "--id", "plan-held", "--title", "Held by codex"])
+call(plan_cli + ["claim", "--id", "plan-held", "--provider", "codex"])
+other = subprocess.run(plan_dispatch[:-4] + ["--task-id", "plan-held", "--label", "Held elsewhere"], env=room_env,
+                       capture_output=True, text=True)
+assert other.returncode == 0 and "another claimant" in other.stderr, other
+assert json.loads(call(plan_cli + ["show", "--id", "plan-held"]))["state"] == "claimed"
+call(plan_cli + ["review", "--id", "plan-link", "--lease-id", held["lease_id"]])
+closed = subprocess.run(plan_dispatch, env=room_env, capture_output=True, text=True)
+assert closed.returncode == 0 and plan_task()["state"] == "review" and "plan plan-link is review" in closed.stderr, closed
+hinted = subprocess.run(final_args[:final_args.index("--task-id") + 1] + ["plan-link"] + final_args[final_args.index("--task-id") + 2:],
+                        cwd=project, env=environment, capture_output=True, text=True)
+assert hinted.returncode == 0 and "agent-plan finish --id plan-link --landed-commit SHA" in hinted.stderr, hinted
+import shutil
+shutil.rmtree(project / ".oms/plan")  # later board fixtures expect a project with no plan
 # A continued worker resumes its native session in a new run and carries a delta preamble; without a stored
 # session it falls back to a fresh worker, and another main never reaches it.
 session = "0199aaaa-bbbb-cccc-dddd-eeeeeeeeeeee"

@@ -778,7 +778,7 @@ assert len(free.split("[oms plan]")[1].split("set your status")[0]) < 420 and "\
 plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
            {"id": "t3", "state": "ready"}])
 held = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
-assert "yours: t2 (running)" in held and "next ready: t3" in held and "before starting new work" not in held, held
+assert "yours: t2 (running) → oms agent-plan brief --id t2" in held and "next ready: t3" in held and "before starting new work" not in held, held
 room.send(repo, "binding-room", os.environ["OMS_ROOM_PARTICIPANT"], "all", "Wiring the banner", kind="status")
 assert "set your status" not in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 # Context pressure: a panel main is told to compact in place at each band; any other session keeps the fresh-session advice.

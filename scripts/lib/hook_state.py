@@ -1274,7 +1274,9 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
                   if t.get("state") == "ready" and all(d in done for d in t.get("depends") or [])), None)
     parts = ["Goal: %s" % goal if goal else "Goal: (none recorded)", "%d of %d verified" % (len(done), len(tasks))]
     if mine:
-        parts.append("yours: %s (%s)" % (plain_line(mine["id"], 40), plain_line(mine.get("state"), 12)))
+        mine_id = plain_line(mine["id"], 40)
+        parts.append("yours: %s (%s) → oms agent-plan brief --id %s" % (
+            mine_id, plain_line(mine.get("state"), 12), mine_id))
     if ready:
         parts.append("next ready: %s %s → oms agent-plan claim --id %s --provider %s" % (
             plain_line(ready["id"], 40), plain_line(ready.get("title"), 40), plain_line(ready["id"], 40),

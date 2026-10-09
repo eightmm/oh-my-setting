@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import runpy
 import subprocess
+import sys
 import time
 import uuid
 
@@ -264,6 +265,18 @@ def _deliver(repo, payload, relative, rows, retry=False):
     return delivered
 
 
+def _plan_hint(repo, task_id):
+    # No land receipt exists here, so the plan is never finished automatically.
+    try:
+        shown = subprocess.run(['bash', str(ENTRY), 'agent-plan', '--repo', str(repo), 'show', '--id', task_id],
+                               capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=60)
+        if not shown.returncode and json.loads(shown.stdout).get('state') not in ('done', None):
+            print('plan %s is not done: after oms land run oms agent-plan finish --id %s --landed-commit SHA'
+                  % (task_id, task_id), file=sys.stderr)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
+
 def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=None, notify=False):
     _owner()
     if owner not in ('codex', 'claude') or not ID.fullmatch(task_id) or outcome not in ('completed', 'accepted', 'failed'):
@@ -313,6 +326,8 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
         if not any(r.get('kind') == 'panel-result' and r.get('artifact') == relative for r in rows):
             _register(repo, owner, task_id, path)
         delivery = _deliver(repo, payload, relative, rows) if notify else _last_delivery(repo, rows, task_id, payload['revision'])
+        if outcome == 'accepted':
+            _plan_hint(repo, task_id)
         return dict(payload, artifact=relative, delivery=delivery)
 
 

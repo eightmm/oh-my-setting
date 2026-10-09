@@ -232,8 +232,9 @@ def bootstrap(provider, repo):
         "architecture, integration, review, patch admission and coordination with other mains in the main. "
         "Work directly only when writing the brief would take longer than the edit, or when the step needs the "
         "main itself, such as integrating into a shared tree another main has frozen. "
-        "Panel mains work from the shared plan (oms agent-plan): claim a ready task, delegate it, verify it, "
-        "mark it reviewed/verified; propose new tasks with oms agent-plan add instead of starting unplanned work. "
+        "Panel mains work from the shared plan (oms agent-plan): claim a ready task, delegate it (--task-id moves it "
+        "to running), then oms agent-plan review after acceptance and finish --landed-commit SHA after oms land; "
+        "propose new tasks with oms agent-plan add instead of starting unplanned work. "
         "To know whether a land is running, use oms land status --repo PATH (active: true) - never pgrep. "
         "Before editing shared files, declare your scope with oms room scope --owns PATH, and pass "
         "--scope PATH to write workers; overlaps warn, they never lock. "
@@ -712,6 +713,46 @@ def dispatch(repo, owner, role, workload, seat, access, purpose, prompt=None, br
             temporary.unlink()
 
 
+def plan_link(repo, owner, task_id, env, caller):
+    """Move a shared-plan task for the calling main; its workers never claim, so the panel owns the transition."""
+    base = ["bash", str(ENTRY), "agent-plan", "--repo", str(repo)]
+    plan_env = dict(env, OMS_ROOM_PARTICIPANT=caller) if caller else dict(env)
+    plan_env.pop("OMS_LEASE_ID", None)
+
+    def plan(*args):
+        return subprocess.run(base + list(args), capture_output=True, text=True, check=False,
+                              stdin=subprocess.DEVNULL, env=plan_env, timeout=60)
+
+    try:
+        shown = plan("show", "--id", task_id)
+        if shown.returncode:
+            return
+        task = json.loads(shown.stdout)
+        state, holder = task.get("state"), task.get("claimed_by_participant")
+        if state in ("claimed", "running") and (task.get("provider") != owner or (holder and caller and holder != caller)):
+            print("plan %s is %s by another claimant; panel left it unchanged" % (task_id, state), file=sys.stderr)
+            return
+        if state not in ("ready", "claimed", "running"):
+            print("plan %s is %s; panel left it unchanged" % (task_id, state), file=sys.stderr)
+            return
+        if state == "ready":
+            moved = plan("claim", "--id", task_id, "--provider", owner)
+            if moved.returncode:
+                raise ValueError(moved.stderr.strip() or "claim failed")
+            task = json.loads(plan("show", "--id", task_id).stdout)
+            state = "claimed"
+        lease = task.get("lease_id", "")
+        if state == "claimed":
+            moved = plan("start", "--id", task_id, "--lease-id", lease)
+            if moved.returncode:
+                raise ValueError(moved.stderr.strip() or "start failed")
+        print("plan %s running (lease %s): after acceptance oms agent-plan review --id %s --lease-id %s "
+              "--artifact PATH [--patch PATH]; after oms land: oms agent-plan finish --id %s --landed-commit SHA"
+              % (task_id, lease, task_id, lease, task_id), file=sys.stderr)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        print("plan %s could not be moved; dispatch continues" % task_id, file=sys.stderr)
+
+
 def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes):
     argv = routed_command(ENTRY, repo, route, prompt, brief, verify, task_id, resume)
@@ -797,6 +838,8 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
         room.send(repo, room_id, caller, member, "Assigned: " + (label or purpose), "handoff")
         env.update(OMS_ROOM_ID=room_id, OMS_ROOM_PARTICIPANT=member, OMS_ROOM_REPO=str(repo),
                    OMS_ROOM_ADMITTED_PARTICIPANT=member)
+    if task_id:
+        plan_link(repo, owner, task_id, env, caller)
     print("%s / %s -> %s / %s / %s / %s" % (owner, role, route["provider"], route["model"],
                                             route["effort"] or "native-settings", access), flush=True)
     status = subprocess.call(argv, cwd=str(repo), env=env)
