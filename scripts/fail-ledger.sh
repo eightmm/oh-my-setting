@@ -41,7 +41,8 @@ usage() {
 Usage: fail-ledger.sh [--repo PATH] record --cmd CMD --exit N [--kind K] [--summary TEXT] [--next TEXT]
        fail-ledger.sh [--repo PATH] check  --cmd CMD [--ignore-state]
        fail-ledger.sh [--repo PATH] resolve (--fingerprint FP | --cmd CMD) [--how TEXT]
-       fail-ledger.sh [--repo PATH] list   [--unresolved] [--json]
+       fail-ledger.sh [--repo PATH] list   [--unresolved] [--json] [--limit N]
+       fail-ledger.sh [--repo PATH] show   --fingerprint FP [--json]
 
 Durable failure memory shared by Codex, Claude Code, and Antigravity.
 Fingerprint = short hash of the normalized command (whitespace collapsed,
@@ -67,6 +68,8 @@ list     One line per fingerprint (count, last exit, resolved); --unresolved
          shows only still-failing ones, --json emits a schema-1 JSON object,
          --limit N keeps the N most recently active fingerprints and says
          how many older ones were omitted.
+show     Print one fingerprint's full current row (state, count, exit, kind,
+         last ts, cmd, summary, next, how); exit 1 for an unknown fingerprint.
 
 kind=hook rows are filed automatically for every failed shell command, so
 nothing ever resolves them by hand. They retire on a read-time TTL instead:
@@ -190,15 +193,16 @@ while [ "$#" -gt 0 ]; do
       case "$2" in ''|*[!0-9]*) fail "--limit must be a non-negative integer" ;; esac
       LIMIT="$2"; shift 2 ;;
     --ignore-state) IGNORE_STATE=1; shift ;;
-    record|check|resolve|list) ACTION="$1"; shift ;;
+    record|check|resolve|list|show) ACTION="$1"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
 
 ACTION="${ACTION:-list}"
-[ "$AS_JSON" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--json is only supported by list"
+[ "$AS_JSON" -eq 0 ] || [ "$ACTION" = "list" ] || [ "$ACTION" = "show" ] || fail "--json is only supported by list and show"
 [ "$LIMIT" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--limit is only supported by list"
+[ "$ACTION" != "show" ] || [ -n "$FINGERPRINT" ] || fail "show requires --fingerprint"
 [ "$IGNORE_STATE" -eq 0 ] || [ "$ACTION" = "check" ] || fail "--ignore-state is only supported by check"
 case "$KIND" in
   cmd|hook|verify|plan-run|delegate|patch-land) ;;
@@ -380,9 +384,10 @@ PY
     rm -f "$row_tmp"
     echo "fail-ledger: resolved $FINGERPRINT" >&2
     ;;
-  list)
+  list|show)
     [ ! -L "$LEDGER" ] || fail "failure ledger must be a regular non-symlink file"
     if [ ! -f "$LEDGER" ]; then
+      [ "$ACTION" != "show" ] || fail "unknown fingerprint: $FINGERPRINT (no ledger at $LEDGER)"
       if [ "$AS_JSON" -eq 1 ]; then
         echo '{"schema": 1, "failures": [], "invalid_rows": 0}'
       else
@@ -391,6 +396,7 @@ PY
       exit 0
     fi
     OMS_UNRESOLVED="$UNRESOLVED_ONLY" OMS_JSON="$AS_JSON" OMS_LIMIT="$LIMIT" \
+      OMS_SHOW="$([ "$ACTION" = show ] && printf '%s' "$FINGERPRINT")" \
       OMS_HEAD="$(git -c core.fsmonitor=false -C "$STATE_ROOT" rev-parse HEAD 2>/dev/null || printf unborn)" \
       python3 - "$LEDGER" <<'PY'
 import calendar, json, os, sys, time
@@ -399,6 +405,7 @@ as_json = os.environ.get("OMS_JSON") == "1"
 ttl = int(os.environ.get("OMS_HOOK_TTL") or 86400)
 now = time.time()
 head = os.environ.get("OMS_HEAD") or ""
+show_fp = os.environ.get("OMS_SHOW") or ""
 
 def stale_head(r):
     # One failure against another commit is evidence about a tree that is
@@ -509,7 +516,9 @@ rows = []
 for fp in order:
     d = agg[fp]
     # --unresolved answers "what is still failing", and a retired row is not.
-    if unresolved_only and (d["resolved"] or d["count"] == 0):
+    if show_fp and fp != show_fp:
+        continue
+    if unresolved_only and not show_fp and (d["resolved"] or d["count"] == 0):
         continue
     last = d["last"] or d["last_expired"] or {}
     row = {
@@ -546,6 +555,31 @@ for fp in order:
     if d.get("how"):
         row["how"] = d["how"]
     rows.append(row)
+def tag_of(r):
+    if r["resolved"]:
+        return "resolved"
+    if r["expired"]:
+        return "EXPIRED"
+    if r["attention"] == "stale":
+        return "stale"
+    return "OPEN"
+
+if show_fp:
+    if not rows:
+        sys.stderr.write("fail-ledger: unknown fingerprint: %s (see: oms fail-ledger list --unresolved)\n" % show_fp)
+        sys.exit(1)
+    r = rows[0]
+    if as_json:
+        print(json.dumps({"schema": 1, "failure": r, "invalid_rows": invalid}, ensure_ascii=False))
+    else:
+        for k, v in (("fingerprint", r["fingerprint"]), ("state", tag_of(r)),
+                     ("attention", r.get("attention")),
+                     ("count", r["count"]), ("exit", r["exit"]), ("kind", r["kind"]),
+                     ("last", r["ts"]), ("cmd", r["cmd"]), ("summary", r["summary"]),
+                     ("next", r.get("next")), ("how", r.get("how"))):
+            if v is not None:
+                print("%-11s %s" % (k + ":", v))
+    sys.exit(0)
 # Most recently active fingerprints first when a limit is set: the projection
 # rides into agent context (MCP), and the whole aggregated history outgrows
 # any output budget. The omission is stated, never silent; retirement
@@ -564,14 +598,7 @@ if as_json:
     print(json.dumps(doc, ensure_ascii=False))
 else:
     for r in rows:
-        if r["resolved"]:
-            tag = "resolved"
-        elif r["expired"]:
-            tag = "EXPIRED"
-        elif r["attention"] == "stale":
-            tag = "stale"
-        else:
-            tag = "OPEN"
+        tag = tag_of(r)
         print("%s  %-8s count=%d exit=%s  %s" % (
             r["fingerprint"], tag, r["count"],
             "-" if r["exit"] is None else r["exit"],

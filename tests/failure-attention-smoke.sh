@@ -171,6 +171,21 @@ if grep -q '0123456789abcdef' "$repo4/.oms/failures.jsonl"; then
   fail "a refused resolve must not append a phantom row"
 fi
 
+# --- show verb ----------------------------------------------
+fp4="$("$ROOT/scripts/fail-ledger.sh" --repo "$repo4" list --unresolved --json |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["failures"][0]["fingerprint"])' | tr -d '\r')"
+show_out="$("$ROOT/scripts/fail-ledger.sh" --repo "$repo4" show --fingerprint "$fp4")" ||
+  fail "show must succeed for a known fingerprint"
+for want in "fingerprint: +$fp4" "state: +OPEN" "attention: +retiring" "count: +1" "kind: +hook" \
+    "cmd: +flaky gate" "summary: +hook saw it once"; do
+  printf '%s\n' "$show_out" | grep -qE -- "^$want\$" || fail "show output missing '$want': $show_out"
+done
+if "$ROOT/scripts/fail-ledger.sh" --repo "$repo4" show --fingerprint 0123456789abcdef \
+    >/dev/null 2>"$TMP/show.err"; then
+  fail "show of an unknown fingerprint must exit non-zero"
+fi
+grep -q 'unknown fingerprint' "$TMP/show.err" || fail "show refusal must name the cause: $(cat "$TMP/show.err")"
+
 # --- 6. one failure on an older commit: stale, not actionable ---------------
 repo5="$TMP/stale"
 make_repo "$repo5"
@@ -205,6 +220,8 @@ assert not any(action["id"] == "resolve_blocker" for action in row["next_actions
 r="$(resume_of "$repo5")"
 printf '%s' "$r" | grep -q 'failures: 1 actionable' ||
   fail "a recurrence across commits is tree-independent and actionable: $r"
+printf '%s' "$r" | grep -qE 'fp: [0-9a-f]{16} \(oms fail-ledger show --fingerprint [0-9a-f]{16}\)' ||
+  fail "resume failure line must carry the fingerprint and the show command: $r"
 runtime_json="$("$ROOT/scripts/runtime.sh" --repo "$repo5" envelope show)"
 printf '%s' "$runtime_json" | python3 -c '
 import json, sys

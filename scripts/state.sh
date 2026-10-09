@@ -1191,7 +1191,7 @@ else:
 
     fl = state["failures"]
     if not fl.get("healthy", True):
-        line("\n## Unresolved failures: unavailable or invalid (run: oms fail-ledger list)")
+        line("\n## Unresolved failures: unavailable or invalid (run: oms fail-ledger list --unresolved)")
     elif fl["open_total"] > 0:
         line("\n## Unresolved failures (%d%s)" % (
             fl["open_total"], ", %d stale" % fl["stale_total"] if fl.get("stale_total") else ""))
