@@ -5677,6 +5677,11 @@ PY
     fail "commit finish accepted abbreviated SHA"
   fi
   assert_file_contains "$d/err" 'full lowercase commit SHA'
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" --lease-id stale >"$d/err" 2>&1; then
+    fail "commit finish accepted a stale lease"
+  fi
+  assert_file_contains "$d/err" 'lease mismatch'
+  [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "stale lease changed plan"
   # A newer unrelated receipt must not shadow the exact-SHA proof.
   printf '{"schema":1,"state":"failed"}\n' > "$receipt_dir/unrelated.json"
   linked="$TMP/agent-plan-linked"
@@ -5703,6 +5708,31 @@ assert s["stale_review"] == [], s
     fail "commit finish accepted done instead of review"
   fi
   assert_file_contains "$d/err" 'requires review'
+
+  # A receipt proves a landing, not which task it landed: a scoped task needs
+  # the landed range, back to the previous pushed receipt, to touch its paths.
+  local inside outside
+  "$SH" --repo "$d" add --id scoped --title scoped --allowed "src/" >/dev/null
+  "$SH" --repo "$d" claim --id scoped --provider codex >/dev/null
+  "$SH" --repo "$d" review --id scoped --artifact artifact.md --patch change.patch >/dev/null
+  mkdir -p "$d/src"; printf 'x\n' > "$d/src/a.txt"
+  git -C "$d" add src/a.txt; git -C "$d" commit -qm inside
+  inside="$(git -C "$d" rev-parse HEAD)"
+  printf 'x\n' > "$d/other.txt"
+  git -C "$d" add other.txt; git -C "$d" commit -qm outside
+  outside="$(git -C "$d" rev-parse HEAD)"
+  git -C "$d" update-ref refs/remotes/origin/main HEAD
+  sed "s/$sha/$inside/" "$receipt" > "$receipt_dir/$inside-fixture.json"
+  sed "s/$sha/$outside/" "$receipt" > "$receipt_dir/$outside-fixture.json"
+  before="$(cat "$d/.oms/plan/tasks.json")"
+  if "$SH" --repo "$d" finish --id scoped --landed-commit "$outside" >"$d/err" 2>&1; then
+    fail "commit finish accepted a landing outside the task's allowed_paths"
+  fi
+  assert_file_contains "$d/err" "landed commit $outside does not land task scoped: $inside..$outside"
+  assert_file_contains "$d/err" 'allowed_paths (src/); changed: other.txt'
+  [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "out-of-scope proof changed plan"
+  "$SH" --repo "$d" finish --id scoped --landed-commit "$inside" >/dev/null ||
+    fail "commit finish must accept a landing that touches allowed_paths"
 }
 
 test_agent_plan_retire_is_cas_fenced_and_evidence_honest() {

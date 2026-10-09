@@ -26,7 +26,8 @@ process_pid_alive = process_liveness["pid_alive"]
 persisted_native_pid_is_proven = process_liveness[
     "persisted_native_pid_is_proven"
 ]
-within_envelope = _load(sys.argv[6])["within_envelope"]
+path_scope = _load(sys.argv[6])
+within_envelope = path_scope["within_envelope"]
 project_state_snapshot = _load(sys.argv[7])["snapshot"]
 validate_assignment = _load(sys.argv[8])["validate"]
 def env(k): return os.environ.get(k, "")
@@ -164,6 +165,47 @@ def commit_landing_proof(sha):
     if passed:
         die("landed commit %s is not reachable from a passed receipt's local pushed target ref" % sha)
     die("no passed oms land receipt for %s with gate/push ok and CI success" % sha)
+
+def landed_range_paths(sha):
+    """Files the landing of sha changed. The range starts at the nearest
+    first-parent ancestor with its own pushed land receipt (the tip that land
+    pushed onto); with none, it is sha's own commit against its first parent."""
+    directory = env("OMS_LAND_RECEIPTS_DIR")
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        names = []
+    pushed = set()
+    for name in names:
+        prior = name.split("-", 1)[0]
+        if (prior == sha or not name.endswith(".json") or
+                not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", prior)):
+            continue
+        raw = read_regular_bytes(os.path.join(directory, name), "oms land receipt", 1024 * 1024)
+        try:
+            receipt = json.loads(raw)
+        except (ValueError, UnicodeError):
+            continue
+        push = receipt.get("push") if isinstance(receipt, dict) else None
+        if (isinstance(push, dict) and receipt.get("sha") == prior and
+                type(push.get("rc")) is int and push["rc"] == 0):
+            pushed.add(prior)
+    git_env = dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="")
+    def git(*args):
+        try:
+            run = subprocess.run(["git", "-C", env("OMS_REPO")] + list(args),
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 env=git_env, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            run = exc
+        if not isinstance(run, subprocess.CompletedProcess) or run.returncode != 0:
+            die("cannot list files changed by landed commit %s; retry where its history is local" % sha)
+        return run.stdout.decode("utf-8", "surrogateescape")
+    chain = git("rev-list", "--first-parent", "--max-count=1000", sha).split()
+    base = next((c for c in chain[1:] if c in pushed), chain[1] if len(chain) > 1 else "")
+    diff = ["diff-tree", "-r", "-z", "--name-only", "--no-commit-id"]
+    paths = git(*(diff + ([base, sha] if base else ["--root", sha]))).split("\0")
+    return ("%s..%s" % (base, sha) if base else "root commit %s" % sha), [x for x in paths if x]
 
 def reject_controls(value, label):
     if any(unicodedata.category(ch) in ("Cc", "Cf", "Cs") for ch in value):
@@ -1015,10 +1057,24 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
             die("task %s is %s; --landed-commit finish requires review" % (i, t["state"]))
         if not t.get("artifact") or not t.get("patch"):
             die("task %s review is missing artifact/patch evidence" % i)
+        require_current_lease(t)
         history = t.get("history", [])
         if not isinstance(history, list):
             die("task %s history must be a list" % i)
         landing = commit_landing_proof(env("OMS_LANDED_COMMIT"))
+        allowed = t.get("allowed_paths") or []
+        if allowed:
+            try:
+                scope = path_scope["validate_patterns"](
+                    path_scope["normalize"](a, "allowed path") for a in allowed)
+            except ValueError as exc:
+                die("task %s allowed_paths are invalid: %s" % (i, exc))
+            span, changed = landed_range_paths(landing["sha"])
+            if not any(path_scope["matches"](p, a) for p in changed for a in scope):
+                die("landed commit %s does not land task %s: %s changed none of its allowed_paths (%s); "
+                    "changed: %s. Finish against the SHA whose land pushed this task's work"
+                    % (landing["sha"], i, span, ", ".join(allowed),
+                       ", ".join(changed[:5]) + (" ..." if len(changed) > 5 else "") or "nothing"))
         history.append({"schema": 1, "kind": "finish", "ts": ts,
                         "state": "done", "landing": landing})
         t.update(state="done", landing=landing, history=history)
