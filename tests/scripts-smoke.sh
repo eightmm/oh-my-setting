@@ -102,6 +102,13 @@ assert_file_contains() {
   grep -Fq -- "$text" "$file" || fail "$file does not contain: $text"
 }
 
+# A builtin substring match: `printf | grep -q` fails under pipefail when grep
+# exits at its match while printf is still writing a long value.
+contains() {
+  case "$1" in *"$2"*) return 0 ;; esac
+  return 1
+}
+
 assert_not_exists() {
   local path="$1"
   [ ! -e "$path" ] || fail "$path should not exist"
@@ -225,7 +232,7 @@ test_poll_interval_adapts_to_elapsed_and_remaining() {
   [ "$(OMS_POLL_MAX_SECONDS=4 oms_poll_interval_seconds 180 300)" = "4" ] ||
     fail "OMS_POLL_MAX_SECONDS should cap long waits"
   out="$(OMS_POLL_VERBOSE=1 oms_poll_log_next unit 7 2 5 2>&1)"
-  printf '%s' "$out" | grep -Fq 'oh-my-setting poll: unit elapsed=7s next=2s remaining=5s' ||
+  contains "$out" 'oh-my-setting poll: unit elapsed=7s next=2s remaining=5s' ||
     fail "verbose poll log should include label, elapsed, next, and remaining"
 }
 
@@ -811,13 +818,13 @@ test_project_doctor_warns_missing_check() {
 
   "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "doctor should pass fresh ml apply"
-  printf '%s' "$out" | grep -Fq 'verification contract present' ||
+  contains "$out" 'verification contract present' ||
     fail "doctor should confirm check.sh presence"
 
   rm "$project/scripts/check.sh"
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "missing check.sh should warn, not fail"
-  printf '%s' "$out" | grep -Fq 'scripts/check.sh missing' ||
+  contains "$out" 'scripts/check.sh missing' ||
     fail "doctor should warn about missing check.sh"
 }
 
@@ -852,8 +859,8 @@ test_project_doctor_warns_structure_drift() {
 
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "structure drift must warn, not fail"
-  printf '%s' "$out" | grep -Fq 'train_root.py' || fail "missing stray-python warning"
-  printf '%s' "$out" | grep -Fq 'NOTES.md' || fail "missing markdown-outside-docs warning"
+  contains "$out" 'train_root.py' || fail "missing stray-python warning"
+  contains "$out" 'NOTES.md' || fail "missing markdown-outside-docs warning"
   case "$out" in *'exp.ipynb'*) ;; *) fail "missing notebook warning" ;; esac
   case "$out" in *'src/ layout'*) ;; *) fail "missing src layout warning" ;; esac
   case "$out" in *'gitignored dirs'*) ;; *) fail "missing tracked-in-ignored warning" ;; esac
@@ -864,7 +871,7 @@ test_project_doctor_warns_structure_drift() {
   for i in $(seq 1 100); do printf 'x\n' > "$project/data/f$i.bin"; done
   git -C "$project" add -f data >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "doctor should still warn-pass"
-  printf '%s' "$out" | grep -Fq 'gitignored dirs' ||
+  contains "$out" 'gitignored dirs' ||
     fail "many tracked ignored files must still warn (pipefail/head)"
 
   # A small tracked symlink to a big target must not be flagged.
@@ -872,7 +879,7 @@ test_project_doctor_warns_structure_drift() {
   ln -s .big-target "$project/link.ckpt"
   git -C "$project" add -f link.ckpt >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "doctor should still warn-pass"
-  if printf '%s' "$out" | grep -Fq 'link.ckpt'; then
+  if contains "$out" 'link.ckpt'; then
     fail "tracked symlink must not be measured by its target size"
   fi
 }
@@ -915,9 +922,9 @@ test_project_doctor_warns_empty_contract_past_draft() {
   # Promote past draft while leaving commands/verification empty: warn.
   sed -i 's/^- State: draft/- State: active/' "$project/PROJECT.md"
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "empty contract should warn, not fail"
-  printf '%s' "$out" | grep -Fq 'Commands (Setup/Test/Run) are empty' ||
+  contains "$out" 'Commands (Setup/Test/Run) are empty' ||
     fail "doctor should warn about empty commands"
-  printf '%s' "$out" | grep -Fq "'Success criteria' is empty" ||
+  contains "$out" "'Success criteria' is empty" ||
     fail "doctor should warn about empty success criteria"
 
   # Fill the contract: warnings clear.
@@ -943,7 +950,7 @@ test_project_doctor_warns_empty_ml_scientific_contract() {
   sed -i 's/^- State: draft/- State: active/; s/^- Test:$/- Test: bash scripts\/check.sh fast/; s/^- Success criteria:$/- Success criteria: checks pass/' \
     "$project/PROJECT.md"
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "ML contract warning should not fail doctor"
-  printf '%s' "$out" | grep -Fq 'ML scientific contract fields are empty' ||
+  contains "$out" 'ML scientific contract fields are empty' ||
     fail "doctor should warn about missing ML scientific contract fields"
 }
 
@@ -964,10 +971,10 @@ test_review_verdicts_subcommand() {
 
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/mixed")" && rc=0 || rc=$?
   [ "$rc" = "2" ] || fail "incomplete artifact should yield exit 2, got $rc"
-  printf '%s' "$out" | grep -Fq 'codex: pass (confidence 0.9)' ||
+  contains "$out" 'codex: pass (confidence 0.9)' ||
     fail "stated confidence should ride the verdict line: $out"
-  printf '%s' "$out" | grep -Fq 'claude: fail' || fail "missing claude fail"
-  printf '%s' "$out" | grep -Fq 'antigravity: incomplete' || fail "missing incomplete detection"
+  contains "$out" 'claude: fail' || fail "missing claude fail"
+  contains "$out" 'antigravity: incomplete' || fail "missing incomplete detection"
 
   printf '# codex review\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' \
     > "$dir/allpass/codex-x-$run.md"
@@ -990,7 +997,7 @@ test_review_verdicts_subcommand() {
     > "$dir/died/codex-x-$run.md"
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/died")" && rc=0 || rc=$?
   [ "$rc" = "2" ] || fail "a dead seat's GATE line must not gate (want exit 2, got $rc)"
-  printf '%s' "$out" | grep -Fq 'codex: no-verdict (provider exited 124' ||
+  contains "$out" 'codex: no-verdict (provider exited 124' ||
     fail "dead seat must be named with its exit: $out"
 
   # A max_tokens stop exits 0 with finished-looking sentences; the recorded
@@ -1000,7 +1007,7 @@ test_review_verdicts_subcommand() {
     > "$dir/maxtok/claude-x-$run.md"
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/maxtok")" && rc=0 || rc=$?
   [ "$rc" = "2" ] || fail "a max_tokens seat's GATE line must not gate (want exit 2, got $rc)"
-  printf '%s' "$out" | grep -Fq 'claude: no-verdict (incomplete answer: provider=claude reason=max_tokens' ||
+  contains "$out" 'claude: no-verdict (incomplete answer: provider=claude reason=max_tokens' ||
     fail "truncated seat must be named with its stop reason: $out"
 
   mkdir -p "$dir/agy-timeout"
@@ -1032,9 +1039,9 @@ test_review_verdicts_subcommand() {
 
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/debate")" && rc=0 || rc=$?
   [ "$rc" = "1" ] || fail "debate run with a final-round fail should exit 1, got $rc"
-  printf '%s' "$out" | grep -Fq 'codex: pass' || fail "codex must be judged on final round (r2 pass)"
-  printf '%s' "$out" | grep -Fq 'claude: fail' || fail "claude must be judged on final round (r1 fail)"
-  printf '%s' "$out" | grep -Fq 'antigravity: pass' || fail "slug containing -r9 must be treated as base artifact"
+  contains "$out" 'codex: pass' || fail "codex must be judged on final round (r2 pass)"
+  contains "$out" 'claude: fail' || fail "claude must be judged on final round (r1 fail)"
+  contains "$out" 'antigravity: pass' || fail "slug containing -r9 must be treated as base artifact"
 }
 
 test_review_verdicts_json_mode() {
@@ -1121,7 +1128,7 @@ EOF
 
   out="$(OMS_JOB_DIGEST_POLL=0 PATH="$bin:$PATH" "$ROOT/scripts/job-digest.sh" --wait 12345 "$dir/run.log" 2>"$dir/werr")" ||
     fail "--wait digest should succeed once the job leaves the queue"
-  printf '%s' "$out" | grep -Fq '# Job digest' || fail "wait mode should still emit a digest"
+  contains "$out" '# Job digest' || fail "wait mode should still emit a digest"
   assert_file_contains "$dir/werr" "no longer queued"
   assert_file_contains "$dir/werr" "transiently"
   # Polled 5 times: queued, contact-error, invalid-user, not-found (all retry),
@@ -1187,12 +1194,12 @@ EOF
   rc=$?
   set -e
   [ "$rc" -eq 124 ] || fail "spent wait budget should exit 124, got $rc"
-  printf '%s' "$out" | grep -Fq 'wait: pending' || fail "pending digest should report an incomplete observation"
-  printf '%s' "$out" | grep -Fq 'outcome unknown, not verified' ||
+  contains "$out" 'wait: pending' || fail "pending digest should report an incomplete observation"
+  contains "$out" 'outcome unknown, not verified' ||
     fail "failed accounting must read as unknown, not success"
-  printf '%s' "$out" | grep -Fq '## Tail' || fail "failed sacct must not abort the log sections"
+  contains "$out" '## Tail' || fail "failed sacct must not abort the log sections"
   assert_file_contains "$dir/werr" 'queue state may be unknown'
-  if printf '%s' "$out" | grep -Fq 'still queued'; then
+  if contains "$out" 'still queued'; then
     fail "failed queue queries cannot prove that the job is still queued"
   fi
   [ ! -e "$dir/scancel.log" ] || fail "observer timeout must never cancel or resubmit the job"
@@ -1244,9 +1251,9 @@ EOF
     fail "byte-capped digest should succeed"
   size="$(printf '%s\n' "$out" | wc -c | tr -d ' ')"
   [ "$size" -le 2048 ] || fail "digest exceeded --max-bytes (got $size)"
-  printf '%s' "$out" | grep -Fq 'omitted by --max-bytes 2048' || fail "byte cap should mark the omission"
-  printf '%s' "$out" | grep -Fq 'ERROR: short cause line' || fail "byte cap should keep the short cause line"
-  printf '%s' "$out" | grep -Fq '마지막 줄 ok' || fail "byte cap should keep short lines after the long one"
+  contains "$out" 'omitted by --max-bytes 2048' || fail "byte cap should mark the omission"
+  contains "$out" 'ERROR: short cause line' || fail "byte cap should keep the short cause line"
+  contains "$out" '마지막 줄 ok' || fail "byte cap should keep short lines after the long one"
   if command -v iconv >/dev/null 2>&1; then
     printf '%s\n' "$out" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 ||
       fail "byte-capped digest must stay valid UTF-8"
@@ -1329,7 +1336,7 @@ test_tsp_queue_forwards_basic_subcommands() {
   out="$(TSP_STUB_LOG="$dir/tsp.log" TSP_STUB_ID=77 \
     OMS_TSP_STATE_DIR="$dir/state" PATH="$bin:/usr/bin:/bin" \
     "$ROOT/scripts/tsp-queue.sh" list)"
-  printf '%s' "$out" | grep -Fq '77 finished job' || fail "list should forward to tsp"
+  contains "$out" '77 finished job' || fail "list should forward to tsp"
 
   TSP_STUB_LOG="$dir/tsp.log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" cancel 77 >/dev/null
   TSP_STUB_LOG="$dir/tsp.log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" logs 77 >"$dir/logs"
@@ -1641,7 +1648,7 @@ test_fail_ledger_list_limit_names_omissions() {
   out="$("$ROOT/scripts/fail-ledger.sh" --repo "$project" list --limit 2)"
   [ "$(printf '%s\n' "$out" | grep -c 'OPEN')" -eq 2 ] ||
     fail "limit should keep 2 rows: $out"
-  printf '%s' "$out" | grep -Fq '1 older fingerprint(s) omitted' ||
+  contains "$out" '1 older fingerprint(s) omitted' ||
     fail "the omission must be named: $out"
   "$ROOT/scripts/fail-ledger.sh" --repo "$project" list --json --limit 2 |
     python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["failures"]) == 2 and d.get("omitted") == 1, d' ||
@@ -1794,7 +1801,7 @@ test_run_ledger_records_and_lists() {
   (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1) ||
     fail "successful command should exit 0"
   out="$(cd "$project" && "$ROOT/scripts/run-ledger.sh" list 5)"
-  printf '%s' "$out" | grep -Fq 'exit=3' || fail "ledger list missing failed run"
+  contains "$out" 'exit=3' || fail "ledger list missing failed run"
 }
 
 test_run_ledger_gate_skip_requires_reason() {
@@ -1824,8 +1831,8 @@ test_run_ledger_gate_skip_requires_reason() {
 
   # The gate decision is visible in list output, including the skip reason.
   out="$(cd "$project" && "$ROOT/scripts/run-ledger.sh" list 5)"
-  printf '%s' "$out" | grep -Fq 'gate=passed' || fail "list should show gate=passed"
-  printf '%s' "$out" | grep -Fq 'gate=skipped(hotfix rerun)' ||
+  contains "$out" 'gate=passed' || fail "list should show gate=passed"
+  contains "$out" 'gate=skipped(hotfix rerun)' ||
     fail "list should show the skip reason"
 
   # A failing applicable gate still aborts the launch (exit 3).
@@ -1926,7 +1933,7 @@ test_run_ledger_records_metrics() {
     fail "non-scalar metric fields must be dropped"
   fi
   out="$(cd "$project" && "$ROOT/scripts/run-ledger.sh" list 1)"
-  printf '%s' "$out" | grep -Fq 'pearson=0.71' || fail "ledger list should show metrics"
+  contains "$out" 'pearson=0.71' || fail "ledger list should show metrics"
 
   # A missing metrics file must not fail the run.
   (cd "$project" && "$ROOT/scripts/run-ledger.sh" --metrics nope.json -- bash -c 'exit 0' >/dev/null 2>"$project/merr") ||
@@ -2152,8 +2159,8 @@ EOF
     --artifact-dir "$artifact_dir" --prompt 'Unknown check mode' 2>&1)"; then
     fail "unbounded default verification must not launch"
   fi
-  printf '%s' "$out" | grep -Fq 'no bounded fast mode' || fail "missing actionable verification error: $out"
-  if printf '%s' "$out" | grep -Fq worker-started; then
+  contains "$out" 'no bounded fast mode' || fail "missing actionable verification error: $out"
+  if contains "$out" worker-started; then
     fail "worker launched before resolving the verification command"
   fi
 }
@@ -2166,9 +2173,9 @@ test_project_doctor_ok_after_apply() {
 
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "project-doctor should pass on freshly applied project: $out"
-  printf '%s' "$out" | grep -Fq 'ml block identical' ||
+  contains "$out" 'ml block identical' ||
     fail "project-doctor should confirm identical ml blocks"
-  printf '%s' "$out" | grep -Fq 'matches current template' ||
+  contains "$out" 'matches current template' ||
     fail "project-doctor should confirm template freshness"
 }
 
@@ -2185,13 +2192,13 @@ test_project_doctor_checks_subdirectory_loaders() {
   if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
     fail "a one-CLI subdirectory loader must fail the doctor: $out"
   fi
-  printf '%s' "$out" | grep -Fq 'sub: general block missing in AGENTS.md' ||
+  contains "$out" 'sub: general block missing in AGENTS.md' ||
     fail "the doctor must name the missing sibling: $out"
 
   "$ROOT/scripts/apply-project-template.sh" general "$project" sub/AGENTS.md sub/CLAUDE.md >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "a paired subdirectory loader should pass: $out"
-  printf '%s' "$out" | grep -Fq 'sub: general block matches current template' ||
+  contains "$out" 'sub: general block matches current template' ||
     fail "the doctor should confirm sub-tier freshness: $out"
 }
 
@@ -2205,7 +2212,7 @@ test_project_doctor_detects_drift() {
   if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
     fail "project-doctor should fail on drifted CLAUDE.md block"
   fi
-  printf '%s' "$out" | grep -Fq 'differs between AGENTS.md and CLAUDE.md' ||
+  contains "$out" 'differs between AGENTS.md and CLAUDE.md' ||
     fail "project-doctor should report block drift"
 }
 
@@ -2219,7 +2226,7 @@ test_project_doctor_detects_missing_block() {
   if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
     fail "project-doctor should fail when CLAUDE.md block is missing"
   fi
-  printf '%s' "$out" | grep -Fq 'missing in CLAUDE.md' ||
+  contains "$out" 'missing in CLAUDE.md' ||
     fail "project-doctor should report missing CLAUDE.md block"
 }
 
@@ -2234,7 +2241,7 @@ test_project_doctor_detects_stale_block() {
   if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
     fail "project-doctor should fail on stale blocks"
   fi
-  printf '%s' "$out" | grep -Fq 'stale' ||
+  contains "$out" 'stale' ||
     fail "project-doctor should report stale block"
 }
 
@@ -2343,10 +2350,10 @@ test_doctor_warns_bad_harness_index_json() {
 
   out="$(run_doctor_for_project "$project" "$home_dir")" ||
     fail "doctor warnings must not fail: $out"
-  printf '%s' "$out" | grep -Fq '# harness state' || fail "missing harness section"
-  printf '%s' "$out" | grep -Fq 'warn: artifact index has 1 invalid JSON line(s)' ||
+  contains "$out" '# harness state' || fail "missing harness section"
+  contains "$out" 'warn: artifact index has 1 invalid JSON line(s)' ||
     fail "missing bad JSON warning"
-  printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
+  contains "$out" 'doctor: ok' || fail "doctor should still pass"
 }
 
 
@@ -2360,9 +2367,9 @@ test_doctor_warns_missing_oms_gitignore() {
 
   out="$(run_doctor_for_project "$project" "$home_dir")" ||
     fail "missing .oms/.gitignore must not fail: $out"
-  printf '%s' "$out" | grep -Fq 'warn: .oms/.gitignore missing (re-run any harness command)' ||
+  contains "$out" 'warn: .oms/.gitignore missing (re-run any harness command)' ||
     fail "missing .oms/.gitignore warning"
-  printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
+  contains "$out" 'doctor: ok' || fail "doctor should still pass"
 }
 
 
@@ -2393,11 +2400,11 @@ JSON
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
     OH_MY_SETTING_CODEX_PLUGIN=0 "$ROOT/scripts/doctor.sh")" ||
     fail "a narrow antigravity allow-list is a warning, not a failure: $out"
-  printf '%s' "$out" | grep -Fq 'warn: antigravity will be denied these headlessly' ||
+  contains "$out" 'warn: antigravity will be denied these headlessly' ||
     fail "the doctor should name the missing permissions: $out"
-  printf '%s' "$out" | grep -Fq 'command(*)' ||
+  contains "$out" 'command(*)' ||
     fail "a curated command list does not survive a chained command: $out"
-  printf '%s' "$out" | grep -Fq 'permissions.allow' ||
+  contains "$out" 'permissions.allow' ||
     fail "the warning should say where to fix it: $out"
   # Shell access is not enough: reading a file is a separate permission, and a
   # config that grants every command but no read_file still answers nothing.
@@ -2412,7 +2419,7 @@ JSON
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
     OH_MY_SETTING_CODEX_PLUGIN=0 "$ROOT/scripts/doctor.sh")" ||
     fail "a missing read_file rule is a warning, not a failure: $out"
-  printf '%s' "$out" | grep -Fq 'read_file' ||
+  contains "$out" 'read_file' ||
     fail "the doctor should name the missing file-read permission: $out"
 }
 
@@ -2433,15 +2440,15 @@ test_doctor_clean_harness_state_has_no_warnings() {
 
   out="$(run_doctor_for_project "$project" "$home_dir")" ||
     fail "clean harness state should pass: $out"
-  printf '%s' "$out" | grep -Fq '# harness state' || fail "missing harness section"
-  printf '%s' "$out" | grep -Fq 'ok: artifact index JSONL' || fail "missing JSONL ok"
-  printf '%s' "$out" | grep -Fq 'ok: artifact index references' || fail "missing reference ok"
-  printf '%s' "$out" | grep -Fq 'ok: harness task/memory sensitive scan' ||
+  contains "$out" '# harness state' || fail "missing harness section"
+  contains "$out" 'ok: artifact index JSONL' || fail "missing JSONL ok"
+  contains "$out" 'ok: artifact index references' || fail "missing reference ok"
+  contains "$out" 'ok: harness task/memory sensitive scan' ||
     fail "missing sensitive scan ok"
   # This case owns the harness-state section, not the developer machine's
   # optional external tool versions. Keep host drift from masking its scope.
   harness_out="$(printf '%s\n' "$out" | sed -n '/^# harness state/,$p')"
-  if printf '%s' "$harness_out" | grep -Fq 'warn:'; then
+  if contains "$harness_out" 'warn:'; then
     fail "clean harness state should not warn: $out"
   fi
 }
@@ -2462,9 +2469,9 @@ test_doctor_fails_when_claude_hooks_unregistered() {
   HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
   out="$(PATH="$bin_dir:$PATH" run_doctor_for_project "$project" "$home_dir" 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "doctor must fail when claude hooks are not registered"
-  printf '%s' "$out" | grep -Fq 'claude hooks not registered' ||
+  contains "$out" 'claude hooks not registered' ||
     fail "doctor should name the missing hook registration: $out"
-  printf '%s' "$out" | grep -Fq 'install-claude-hooks.sh' ||
+  contains "$out" 'install-claude-hooks.sh' ||
     fail "doctor should point at the remedy: $out"
 }
 
@@ -2481,9 +2488,9 @@ test_doctor_warns_on_a_damaged_memory_database() {
 
   out="$(run_doctor_for_project "$project" "$home_dir")" ||
     fail "a damaged derived database should warn, not fail doctor: $out"
-  printf '%s' "$out" | grep -Fq 'warn: memory database is invalid' ||
+  contains "$out" 'warn: memory database is invalid' ||
     fail "doctor should report the damaged memory database: $out"
-  printf '%s' "$out" | grep -Fq 'oms agent-memory --repo . rebuild' ||
+  contains "$out" 'oms agent-memory --repo . rebuild' ||
     fail "doctor should name the safe rebuild command: $out"
 }
 
@@ -2523,9 +2530,9 @@ STUB
     GH_CONFIG_DIR="$TMP/doctor-gh-empty-config" \
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_CODEX_PLUGIN=0 \
     "$ROOT/scripts/doctor.sh" 2>&1)" || true
-  printf '%s' "$out" | grep -Fq 'ok: command gh' ||
+  contains "$out" 'ok: command gh' ||
     fail "gh should be checked as a required tool, not an optional one: $out"
-  printf '%s' "$out" | grep -Fq 'warn: gh is not authenticated' ||
+  contains "$out" 'warn: gh is not authenticated' ||
     fail "an unauthenticated gh should be reported: $out"
 
   # And a credentialed gh must stay quiet, or the warning becomes background
@@ -2533,7 +2540,7 @@ STUB
   out="$(cd "$project" && HOME="$home_dir" PATH="$bin_dir:$PATH" \
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_CODEX_PLUGIN=0 \
     "$ROOT/scripts/doctor.sh" 2>&1)" || true
-  if printf '%s' "$out" | grep -Fq 'warn: gh is not authenticated'; then
+  if contains "$out" 'warn: gh is not authenticated'; then
     fail "a credentialed gh must not warn: $out"
   fi
 }
@@ -2637,9 +2644,9 @@ test_doctor_accepts_a_database_the_tool_just_built() {
 
   out="$(run_doctor_for_project "$project" "$home_dir")" ||
     fail "doctor should pass on a freshly built memory database: $out"
-  printf '%s' "$out" | grep -Fq 'ok: memory database schema/integrity' ||
+  contains "$out" 'ok: memory database schema/integrity' ||
     fail "doctor should accept the schema the helper writes: $out"
-  if printf '%s' "$out" | grep -Fq 'warn: memory database is invalid'; then
+  if contains "$out" 'warn: memory database is invalid'; then
     fail "doctor must not call the current schema invalid: $out"
   fi
 }
@@ -2660,7 +2667,7 @@ test_doctor_fails_on_corrupt_operations_state() {
 
   out="$(run_doctor_for_project "$project" "$home_dir")" && rc=0 || rc=$?
   [ "$rc" -ne 0 ] || fail "doctor reported ok over a corrupt lifecycle stream: $out"
-  printf '%s' "$out" | grep -Fq 'lifecycle' ||
+  contains "$out" 'lifecycle' ||
     fail "doctor did not name the corrupt lifecycle stream: $out"
 
   # A clean project still reports the streams as ok.
@@ -2669,7 +2676,7 @@ test_doctor_fails_on_corrupt_operations_state() {
   printf '*\n' > "$clean/.oms/.gitignore"
   out="$(run_doctor_for_project "$clean" "$home_dir")" ||
     fail "clean operations state should pass: $out"
-  printf '%s' "$out" | grep -Fq 'ok: lifecycle and approval streams' ||
+  contains "$out" 'ok: lifecycle and approval streams' ||
     fail "doctor did not report the operations streams: $out"
 
   # A dead or unreadable validator is not a green stream: swallowing its
@@ -2679,7 +2686,7 @@ test_doctor_fails_on_corrupt_operations_state() {
     run_doctor_for_project "$clean" "$home_dir")" && rc=0 || rc=$?
   [ "$rc" -ne 0 ] ||
     fail "doctor reported ok while its operations validator was missing: $out"
-  printf '%s' "$out" | grep -Fq 'operations validator' ||
+  contains "$out" 'operations validator' ||
     fail "doctor did not name the dead validator: $out"
   printf 'exit 3\n' > "$TMP/doctor-ops-broken-verify.sh"
   chmod +x "$TMP/doctor-ops-broken-verify.sh"
@@ -2705,7 +2712,7 @@ EOF
 
   out="$(run_doctor_for_project "$project" "$home_dir")" ||
     fail "artifact validation warning should not fail doctor: $out"
-  printf '%s' "$out" | grep -Fq 'warn: artifact index canonical validation failed' ||
+  contains "$out" 'warn: artifact index canonical validation failed' ||
     fail "doctor should surface canonical artifact contract failures"
 }
 
@@ -2731,9 +2738,9 @@ test_doctor_notes_flock_lock_files_without_removing_them() {
     OMS_LOCK_DIR="$lock_root" OMS_LOCK_FILE_NOTE_AT=1 \
     OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
     fail "a flock lock file must not fail the doctor: $out"
-  printf '%s' "$out" | grep -Fq 'flock lock file(s)' ||
+  contains "$out" 'flock lock file(s)' ||
     fail "doctor should report flock lock files: $out"
-  printf '%s' "$out" | grep -Fq 'not removable by design' ||
+  contains "$out" 'not removable by design' ||
     fail "doctor should say why they stay: $out"
 
   # Reported, and still there afterwards. cleanup must not take them either.
@@ -2769,13 +2776,13 @@ test_doctor_reports_crash_residue_warnings() {
     OMS_LOCK_DIR="$lock_root" \
     XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
     fail "doctor residue warnings must not fail: $out"
-  printf '%s' "$out" | grep -Fq 'warn: 1 dead harness lock dir(s)' ||
+  contains "$out" 'warn: 1 dead harness lock dir(s)' ||
     fail "missing dead lock warning: $out"
-  printf '%s' "$out" | grep -Fq 'warn: 1 unindexed artifact file(s)' ||
+  contains "$out" 'warn: 1 unindexed artifact file(s)' ||
     fail "missing unindexed artifact warning: $out"
-  printf '%s' "$out" | grep -Fq 'hint: run cleanup.sh --apply to remove safe harness residue' ||
+  contains "$out" 'hint: run cleanup.sh --apply to remove safe harness residue' ||
     fail "missing cleanup hint: $out"
-  printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
+  contains "$out" 'doctor: ok' || fail "doctor should still pass"
 }
 
 test_doctor_reports_malformed_run_state() {
@@ -2791,15 +2798,15 @@ test_doctor_reports_malformed_run_state() {
   printf '%s\n' '{"schema":1,"run_id":"r","tool":"t","event":"new"}' > "$project/.oms/runs/spine.jsonl"
   out="$(cd "$project" && HOME="$home_dir" XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
     fail "doctor must not fail on clean run-state: $out"
-  printf '%s' "$out" | grep -Fq 'ok: run-state JSONL' || fail "missing clean run-state line: $out"
+  contains "$out" 'ok: run-state JSONL' || fail "missing clean run-state line: $out"
 
   # Corrupt it: doctor warns (and still passes).
   printf '%s\n' 'NOT JSON{' >> "$project/.oms/runs/spine.jsonl"
   out="$(cd "$project" && HOME="$home_dir" XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
     fail "doctor run-state warning must not fail: $out"
-  printf '%s' "$out" | grep -Fq 'run-state JSONL file(s) have malformed lines' ||
+  contains "$out" 'run-state JSONL file(s) have malformed lines' ||
     fail "missing malformed run-state warning: $out"
-  printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
+  contains "$out" 'doctor: ok' || fail "doctor should still pass"
 }
 
 test_peer_export_only_and_import_result() {
@@ -3297,7 +3304,7 @@ EOF
     --prompt 'Never execute clean filters' 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "peer-review accepted a local clean filter: $out"
   [ ! -e "$marker" ] || fail "peer-review executed a local clean filter"
-  printf '%s' "$out" | grep -Fq 'unsafe Git execution config' ||
+  contains "$out" 'unsafe Git execution config' ||
     fail "clean-filter refusal was unclear: $out"
 
   # Generic safe diff capture also ignores trusted-global filter commands.
@@ -5105,7 +5112,7 @@ EOF
   out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
     search --agent claude --text "legacy split")" ||
     fail "database-backed search should migrate existing logs: $out"
-  printf '%s' "$out" | grep -Fq 'Keep the legacy split policy stable.' ||
+  contains "$out" 'Keep the legacy split policy stable.' ||
     fail "migrated search missed the legacy shared entry: $out"
   [ -f "$db" ] || fail "search should create the project memory database"
 
@@ -5262,7 +5269,7 @@ PY
 
   out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
     --repo "$project" health 2>/dev/null)" || true
-  printf '%s' "$out" | grep -Fq 'memory health: stale' ||
+  contains "$out" 'memory health: stale' ||
     fail "human health output should name the stale state: $out"
   [ -f "$index" ] || fail "health must never remove the derived index"
 
@@ -5359,7 +5366,7 @@ PY
   out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
     search --text "schema-one")" ||
     fail "schema-one memory should migrate automatically: $out"
-  printf '%s' "$out" | grep -Fq 'Keep the schema-one memory available.' ||
+  contains "$out" 'Keep the schema-one memory available.' ||
     fail "automatic migration lost the existing memory: $out"
 
   python3 - "$db" <<'PY' || fail "schema-one database did not migrate cleanly"
@@ -5415,10 +5422,10 @@ test_agent_memory_records_git_and_task_provenance() {
   assert_file_contains "$project/.oms/memory/shared.md" "task_id: $task_id"
 
   context="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" context)"
-  if printf '%s' "$context" | grep -Fq 'oms-memory'; then
+  if contains "$context" 'oms-memory'; then
     fail "structured provenance must not consume compact provider context"
   fi
-  if printf '%s' "$context" | grep -Fq 'git_sha:'; then
+  if contains "$context" 'git_sha:'; then
     fail "git provenance must stay out of compact provider context"
   fi
 
@@ -5510,13 +5517,13 @@ test_agent_memory_db_preserves_search_and_adds_ranked_recall() {
   out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
     search --text "GVector only")" ||
     fail "database search should preserve substring matching: $out"
-  printf '%s' "$out" | grep -Fq 'Use pgvector only after lexical recall has evidence.' ||
+  contains "$out" 'Use pgvector only after lexical recall has evidence.' ||
     fail "substring search changed during database migration: $out"
 
   out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
     recall --limit 1 --text "sqlite full text")" ||
     fail "ranked recall should return a database result: $out"
-  printf '%s' "$out" | grep -Fq 'SQLite full text recall keeps the local baseline cheap.' ||
+  contains "$out" 'SQLite full text recall keeps the local baseline cheap.' ||
     fail "ranked recall returned the wrong entry: $out"
 
   # The database is derived. Rebuilding it must recover from a damaged index
@@ -5527,7 +5534,7 @@ test_agent_memory_db_preserves_search_and_adds_ranked_recall() {
   out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
     search --text "local baseline")" ||
     fail "rebuilt database should be searchable: $out"
-  printf '%s' "$out" | grep -Fq 'SQLite full text recall keeps the local baseline cheap.' ||
+  contains "$out" 'SQLite full text recall keeps the local baseline cheap.' ||
     fail "rebuild lost source memory: $out"
 }
 
@@ -6988,12 +6995,12 @@ test_agent_plan_next_and_brief() {
 
   # brief renders scope + verify.
   out="$("$SH" --repo "$d" brief --id P1)"
-  printf '%s' "$out" | grep -Fq 'allowed_paths: scripts/' || fail "brief missing allowed_paths"
-  printf '%s' "$out" | grep -Fq 'forbidden_paths: install.sh' || fail "brief missing forbidden_paths"
+  contains "$out" 'allowed_paths: scripts/' || fail "brief missing allowed_paths"
+  contains "$out" 'forbidden_paths: install.sh' || fail "brief missing forbidden_paths"
 
   # next --claim atomically claims the first actionable task.
   out="$("$SH" --repo "$d" next --claim --provider codex)"
-  printf '%s' "$out" | grep -Fq '# Task P1' || fail "next should return P1 brief"
+  contains "$out" '# Task P1' || fail "next should return P1 brief"
   "$SH" --repo "$d" show --id P1 | grep -Fq '"state": "claimed"' ||
     fail "next --claim should leave P1 claimed"
 
@@ -8863,7 +8870,7 @@ test_artifact_index_records_call() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"artifact": "artifacts/codex-assess-artifact-indexing-'
 
   out="$($ROOT/scripts/artifact-index.sh --repo "$project" latest)"
-  printf '%s' "$out" | grep -Fq 'call  codex  exit=0' || fail "artifact-index latest missing call row"
+  contains "$out" 'call  codex  exit=0' || fail "artifact-index latest missing call row"
   "$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry --json > "$project/telemetry.json"
   python3 - "$project" <<'PY' || fail "primary prompt byte measurement missing or inconsistent"
 import json, pathlib, sys
@@ -8996,11 +9003,11 @@ PY
   fi
 
   human="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
-  printf '%s' "$human" | grep -Fq 'retained window: 6/6 row(s)' ||
+  contains "$human" 'retained window: 6/6 row(s)' ||
     fail "human telemetry should disclose its retained window: $human"
-  printf '%s' "$human" | grep -Fq 'semantic outcome: mechanical-only' ||
+  contains "$human" 'semantic outcome: mechanical-only' ||
     fail "human telemetry must distinguish mechanical verification from task success: $human"
-  printf '%s' "$human" | grep -Fq 'provider-reported tokens: total=4200 reports=2' ||
+  contains "$human" 'provider-reported tokens: total=4200 reports=2' ||
     fail "human telemetry should expose the measured token subtotal: $human"
   printf '%s\n' '{"kind":"delegate","provider":"codex","exit":0,"verify_exit":0,"context_verification":"none"}' >> "$index"
   "$ROOT/scripts/artifact-index.sh" --repo "$project" --json telemetry |
@@ -9024,15 +9031,15 @@ test_artifact_index_latest_run_groups_rows() {
 EOF
 
   out="$($ROOT/scripts/artifact-index.sh --repo "$project" latest-run)"
-  printf '%s' "$out" | grep -Fq 'run: 20260611T000002Z-20  kind=delegate,review  debate_round=2' ||
+  contains "$out" 'run: 20260611T000002Z-20  kind=delegate,review  debate_round=2' ||
     fail "latest-run missing grouped header: $out"
-  printf '%s' "$out" | grep -Fq 'review  codex  exit=0  artifact=.oms/artifacts/review/codex-new-20260611T000002Z-20-r2.md' ||
+  contains "$out" 'review  codex  exit=0  artifact=.oms/artifacts/review/codex-new-20260611T000002Z-20-r2.md' ||
     fail "latest-run should keep final codex debate row"
-  printf '%s' "$out" | grep -Fq 'review  claude  exit=0' || fail "latest-run missing claude row"
-  printf '%s' "$out" | grep -Fq 'review  antigravity  exit=2' || fail "latest-run missing antigravity row"
-  printf '%s' "$out" | grep -Fq 'delegate  codex  exit=0  verify=0' ||
+  contains "$out" 'review  claude  exit=0' || fail "latest-run missing claude row"
+  contains "$out" 'review  antigravity  exit=2' || fail "latest-run missing antigravity row"
+  contains "$out" 'delegate  codex  exit=0  verify=0' ||
     fail "latest-run missing delegate verify exit"
-  printf '%s' "$out" | grep -Fq 'patch=.oms/artifacts/delegate/codex-new-20260611T000002Z-20.patch' ||
+  contains "$out" 'patch=.oms/artifacts/delegate/codex-new-20260611T000002Z-20.patch' ||
     fail "latest-run missing delegate patch"
   if printf '%s\n' "$out" | grep -F 'review  codex' |
     grep -Fq 'codex-new-20260611T000002Z-20.md'; then
@@ -9041,7 +9048,7 @@ EOF
 
   printf '{"ts":"2026-06-11T00:00:07Z","kind":"call","provider":"codex","exit":0,"artifact":".oms/artifacts/call/unparseable.md"}\n' >> "$index"
   out="$($ROOT/scripts/artifact-index.sh --repo "$project" latest-run)"
-  printf '%s' "$out" | grep -Fq 'call  codex  exit=0  artifact=.oms/artifacts/call/unparseable.md' ||
+  contains "$out" 'call  codex  exit=0  artifact=.oms/artifacts/call/unparseable.md' ||
     fail "latest-run should list unparseable artifact row individually"
 }
 
@@ -9089,7 +9096,7 @@ PY
   # is the honest part — the numbers do not.
   rm -rf "$project/.oms/artifacts/call"
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
-  printf '%s' "$out" | grep -Fq 'artifacts=0' ||
+  contains "$out" 'artifacts=0' ||
     fail "artifact coverage should drop once the file is gone: $out"
   printf '%s' "$out" | grep -Eq 'token-reports=[1-9]' ||
     fail "token accounting must survive artifact deletion: $out"
@@ -9109,12 +9116,12 @@ test_artifact_index_prunes_stale_references() {
   printf '{"ts":"2026-06-11T00:00:03Z","kind":"call","exit":0}\n' >> "$index"
 
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale --dry-run)"
-  printf '%s' "$out" | grep -Fq 'would drop 1 stale row' ||
+  contains "$out" 'would drop 1 stale row' ||
     fail "dry-run should report the stale row: $out"
   [ "$(wc -l < "$index")" = "3" ] || fail "dry-run must not change the index"
 
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale)"
-  printf '%s' "$out" | grep -Fq 'dropped 1 stale row' || fail "stale sweep should report: $out"
+  contains "$out" 'dropped 1 stale row' || fail "stale sweep should report: $out"
   [ "$(wc -l < "$index")" = "2" ] || fail "stale sweep should drop exactly the stale row"
   grep -Fq 'present.md' "$index" || fail "a row whose artifact exists must survive"
   grep -Fq 'gone.md' "$index" && fail "the stale row must be gone"
@@ -9123,7 +9130,7 @@ test_artifact_index_prunes_stale_references() {
 
   # Age is not the question, so --keep must not enter into it.
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale)"
-  printf '%s' "$out" | grep -Fq 'no stale references' || fail "second sweep should be a no-op: $out"
+  contains "$out" 'no stale references' || fail "second sweep should be a no-op: $out"
   [ "$(wc -l < "$index")" = "2" ] || fail "a clean index must be left alone"
 
   # A resolution explains why an earlier failure is closed, so it cannot outlive
@@ -9134,7 +9141,7 @@ test_artifact_index_prunes_stale_references() {
   printf '{"ts":"2026-06-11T00:00:05Z","kind":"artifact-resolution","event_id":"evt_res","resolves_event_id":"evt_target"}\n' >> "$index"
   rm -f "$project/.oms/artifacts/ask/resolved.md"
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale)"
-  printf '%s' "$out" | grep -Fq 'dropped 2 stale row' ||
+  contains "$out" 'dropped 2 stale row' ||
     fail "the stale row and its orphaned resolution should go together: $out"
   ! grep -Fq 'evt_res' "$index" || fail "a resolution outlived the row it resolves"
   "$ROOT/scripts/artifact-index.sh" --repo "$project" validate \
@@ -9157,7 +9164,7 @@ test_artifact_index_prune() {
   done
 
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune 3)"
-  printf '%s' "$out" | grep -Fq 'pruned 10 -> 3' || fail "prune should report 10 -> 3"
+  contains "$out" 'pruned 10 -> 3' || fail "prune should report 10 -> 3"
   [ "$(wc -l < "$index")" = "3" ] || fail "prune should keep exactly 3 rows"
   # Newest rows are kept (tail).
   tail -n1 "$index" | grep -Fq '00:10Z' || fail "prune must keep the newest rows"
@@ -9165,7 +9172,7 @@ test_artifact_index_prune() {
 
   # Under the keep count: no-op, exit 0.
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune 100)" || fail "prune within keep should exit 0"
-  printf '%s' "$out" | grep -Fq 'nothing pruned' || fail "prune within keep should be a no-op"
+  contains "$out" 'nothing pruned' || fail "prune within keep should be a no-op"
   TMPDIR=/nonexistent-oms-tmp "$ROOT/scripts/artifact-index.sh" --repo "$project" prune 100 >/dev/null ||
     fail "prune no-op without --files must not require TMPDIR"
 
@@ -9197,11 +9204,11 @@ EOF
 
   out="$(OMS_ARTIFACT_ORPHAN_GRACE=0 \
     "$ROOT/scripts/artifact-index.sh" --repo "$project" prune 1 --files)"
-  printf '%s' "$out" | grep -Fq 'deleted: .oms/artifacts/call/old.md' ||
+  contains "$out" 'deleted: .oms/artifacts/call/old.md' ||
     fail "prune --files should print deleted artifact"
-  printf '%s' "$out" | grep -Fq 'deleted: .oms/artifacts/delegate/old.patch' ||
+  contains "$out" 'deleted: .oms/artifacts/delegate/old.patch' ||
     fail "prune --files should print deleted patch"
-  printf '%s' "$out" | grep -Fq 'deleted 2 orphan file(s)' ||
+  contains "$out" 'deleted 2 orphan file(s)' ||
     fail "prune --files should print final delete count"
   assert_not_exists "$project/.oms/artifacts/call/old.md"
   assert_not_exists "$project/.oms/artifacts/delegate/old.patch"
@@ -9227,9 +9234,9 @@ EOF
 
   out="$(OMS_ARTIFACT_ORPHAN_GRACE=0 \
     "$ROOT/scripts/artifact-index.sh" --repo "$project" prune 1 --files --dry-run)"
-  printf '%s' "$out" | grep -Fq 'would delete: .oms/artifacts/call/old.md' ||
+  contains "$out" 'would delete: .oms/artifacts/call/old.md' ||
     fail "dry-run should print would-delete artifact"
-  printf '%s' "$out" | grep -Fq 'would delete 1 orphan file(s)' ||
+  contains "$out" 'would delete 1 orphan file(s)' ||
     fail "dry-run should print final would-delete count"
   assert_file_contains "$project/.oms/artifacts/call/old.md" "old artifact"
   assert_file_contains "$project/.oms/artifacts/call/kept.md" "kept artifact"
@@ -10943,7 +10950,7 @@ test_command_help_surfaces_run() {
   local out
 
   out="$("$ROOT/scripts/update.sh" --help)"
-  printf '%s' "$out" | grep -Fq -- '--tools' || fail "update help should expose opt-in tool refresh"
+  contains "$out" '--tools' || fail "update help should expose opt-in tool refresh"
 
   "$ROOT/scripts/artifact-index.sh" --help >/dev/null
   "$ROOT/scripts/import-agent-result.sh" --help >/dev/null
@@ -11191,11 +11198,11 @@ Run smoke tests
 EOF
 
   out="$(OH_MY_SETTING_TASK_FILE="$task" "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq '## Active Task' || fail "status.sh missing active task section"
-  printf '%s' "$out" | grep -Fq -- '- status: active' || fail "status.sh missing active task status"
-  printf '%s' "$out" | grep -Fq -- '- goal: Ship loop hardening' || fail "status.sh missing task goal"
-  printf '%s' "$out" | grep -Fq -- '- loop_attempts: 2' || fail "status.sh missing loop attempts"
-  printf '%s' "$out" | grep -Fq -- '- verification_level: focused-test' || fail "status.sh missing verification level"
+  contains "$out" '## Active Task' || fail "status.sh missing active task section"
+  contains "$out" '- status: active' || fail "status.sh missing active task status"
+  contains "$out" '- goal: Ship loop hardening' || fail "status.sh missing task goal"
+  contains "$out" '- loop_attempts: 2' || fail "status.sh missing loop attempts"
+  contains "$out" '- verification_level: focused-test' || fail "status.sh missing verification level"
 
   cat > "$task" <<'EOF'
 # Active Agent Task
@@ -11221,9 +11228,9 @@ upstream=origin/main
 EOF
 
   out="$(OH_MY_SETTING_AUTO_UPDATE_STATE="$state" "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq '## Auto Update' || fail "status.sh missing auto update section"
-  printf '%s' "$out" | grep -Fq -- '- status: update_available' || fail "status.sh missing auto update status"
-  printf '%s' "$out" | grep -Fq -- '- upstream: origin/main' || fail "status.sh missing auto update upstream"
+  contains "$out" '## Auto Update' || fail "status.sh missing auto update section"
+  contains "$out" '- status: update_available' || fail "status.sh missing auto update status"
+  contains "$out" '- upstream: origin/main' || fail "status.sh missing auto update upstream"
 }
 
 test_auto_update_check_detects_update() {
@@ -11545,13 +11552,13 @@ test_autoupdate_cron_install_and_uninstall() {
   assert_file_contains "$cron_file" "OH_MY_SETTING_CODEX_PLUGIN=0"
 
   out="$(XDG_CONFIG_HOME="$config_home" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq -- '- trigger: cron' || fail "status.sh missing cron trigger"
+  contains "$out" '- trigger: cron' || fail "status.sh missing cron trigger"
 
   # A stale disabled unit file must not hide the active cron trigger.
   mkdir -p "$config_home/systemd/user"
   printf '[Timer]\nOnCalendar=daily\n' > "$config_home/systemd/user/oh-my-setting-autoupdate.timer"
   out="$(XDG_CONFIG_HOME="$config_home" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq -- '- trigger: cron' || fail "disabled systemd file hid active cron trigger"
+  contains "$out" '- trigger: cron' || fail "disabled systemd file hid active cron trigger"
 
   OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/uninstall-autoupdate.sh" >"$TMP/autoupdate-uninstall"
@@ -11933,7 +11940,7 @@ PY
   # Dry-run previews the receipt write without performing it.
   out="$(OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/install-autoupdate.sh" --method cron --dry-run)"
-  printf '%s' "$out" | grep -Fq 'would record auto_update=true' ||
+  contains "$out" 'would record auto_update=true' ||
     fail "dry-run should preview the receipt write: $out"
   python3 - "$receipt" <<'PY'
 import json, sys
@@ -11952,7 +11959,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 PY
   out="$(OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/install-autoupdate.sh" --method cron 2>&1)"
-  printf '%s' "$out" | grep -Fq 'not recorded' ||
+  contains "$out" 'not recorded' ||
     fail "foreign-owner install should note the skipped receipt write: $out"
   python3 - "$receipt" <<'PY'
 import json, sys
@@ -12056,7 +12063,7 @@ test_check_gate_hard_fails_without_shellcheck() {
   out="$(OMS_SHELLCHECK_BIN=__oms_absent_shellcheck__ \
     "$ROOT/scripts/check.sh" --lint-only 2>&1)" && \
     fail "check.sh must exit nonzero when shellcheck is missing"
-  printf '%s' "$out" | grep -Fq "shellcheck is not installed" ||
+  contains "$out" "shellcheck is not installed" ||
     fail "check.sh missing-tool message absent: $out"
 }
 
@@ -12099,7 +12106,7 @@ test_state_writing_entrypoints_reject_unknown_arguments() {
   for script in link.sh install-hooks.sh check-python.sh skill-doctor.sh; do
     out="$("$ROOT/scripts/$script" --help 2>&1)" ||
       fail "$script --help should exit 0: $out"
-    printf '%s' "$out" | grep -Fq "usage: $script" ||
+    contains "$out" "usage: $script" ||
       fail "$script --help should print its usage: $out"
     if out="$("$ROOT/scripts/$script" --definitely-not-a-flag 2>&1)"; then
       fail "$script must refuse an unknown argument instead of running: $out"
@@ -12110,7 +12117,7 @@ test_state_writing_entrypoints_reject_unknown_arguments() {
   # loop treats it as a path — it exited 127 trying to parse a file named --help.
   out="$("$ROOT/scripts/check-bash32.sh" --help 2>&1)" ||
     fail "check-bash32.sh --help should exit 0: $out"
-  printf '%s' "$out" | grep -Fq 'usage: check-bash32.sh' ||
+  contains "$out" 'usage: check-bash32.sh' ||
     fail "check-bash32.sh should print usage: $out"
   if out="$("$ROOT/scripts/check-bash32.sh" --definitely-not-a-flag 2>&1)"; then
     fail "check-bash32.sh must refuse an unknown option: $out"
@@ -12168,7 +12175,7 @@ EOF
   if out="$("$ROOT/scripts/check-bash32.sh" "$bad" 2>&1)"; then
     fail "the gate must reject an odd-apostrophe heredoc inside \$( ): $out"
   fi
-  printf '%s' "$out" | grep -Fq 'heredoc <<PY inside $( )' ||
+  contains "$out" 'heredoc <<PY inside $( )' ||
     fail "the gate must name the offending heredoc: $out"
 
   "$ROOT/scripts/check-bash32.sh" "$good" >/dev/null 2>&1 ||
@@ -12192,7 +12199,7 @@ EOF
   if out="$("$ROOT/scripts/check-bash32.sh" "$sneaky" 2>&1)"; then
     fail "the gate must reject a paren hidden inside an even quote span: $out"
   fi
-  printf '%s' "$out" | grep -Fq 'paren drift: +1' ||
+  contains "$out" 'paren drift: +1' ||
     fail "the gate must report the paren drift: $out"
 }
 
@@ -12215,18 +12222,18 @@ EOF
   out="$(cd "$ROOT" && OMS_SHELLCHECK_BIN="$shellcheck_stub" \
     bash scripts/check.sh --lint-only 2>&1)" ||
     fail "lint-only gate should pass: $out"
-  printf '%s' "$out" | grep -Fq 'ok: shellcheck' ||
+  contains "$out" 'ok: shellcheck' ||
     fail "lint-only gate must run shellcheck: $out"
-  printf '%s' "$out" | grep -Fq 'check: ok (lint only)' ||
+  contains "$out" 'check: ok (lint only)' ||
     fail "lint-only gate must say what it skipped: $out"
-  if printf '%s' "$out" | grep -Fq 'ok: context-core'; then
+  if contains "$out" 'ok: context-core'; then
     fail "lint-only gate must not run the test suites: $out"
   fi
 
   if out="$(cd "$ROOT" && bash scripts/check.sh --no-lint --lint-only 2>&1)"; then
     fail "a gate that runs nothing must be refused: $out"
   fi
-  printf '%s' "$out" | grep -Fq 'leave nothing to run' ||
+  contains "$out" 'leave nothing to run' ||
     fail "refusal must name the cause: $out"
 }
 
@@ -12263,7 +12270,7 @@ EOF
   chmod +x "$d/bin/gh"
   out="$(OMS_GH_BIN="$d/bin/gh" "$ROOT/scripts/ci-status.sh" main 2>&1)" && \
     fail "ci-status must exit nonzero on a failed run"
-  printf '%s' "$out" | grep -Fq "failure" || fail "ci-status missing conclusion: $out"
+  contains "$out" "failure" || fail "ci-status missing conclusion: $out"
 
   # A successful latest run -> exit 0.
   cat > "$d/bin/gh" <<'EOF'
@@ -12819,8 +12826,8 @@ test_run_capsule_captures_and_reproduces() {
   # reproduce prints the exact checkout + diff-apply for the captured state.
   local repro
   repro="$(cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" reproduce "$id")"
-  printf '%s' "$repro" | grep -Fq "git checkout" || fail "reproduce missing checkout"
-  printf '%s' "$repro" | grep -Fq "uncommitted.diff" || fail "reproduce missing diff apply"
+  contains "$repro" "git checkout" || fail "reproduce missing checkout"
+  contains "$repro" "uncommitted.diff" || fail "reproduce missing diff apply"
 
   # Env is captured reconstructably (lock or freeze) and reproduce points at it.
   [ -f "$runs/$id/env.uv.lock" ] || [ -f "$runs/$id/env.freeze.txt" ] ||
@@ -12831,7 +12838,7 @@ test_run_capsule_captures_and_reproduces() {
   local vout
   vout="$(cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" 2>&1)" ||
     fail "verify should pass on the unchanged tree"
-  printf '%s' "$vout" | grep -Fq "env-python" || fail "verify missing env-drift report"
+  contains "$vout" "env-python" || fail "verify missing env-drift report"
   printf 'changed\n' >> "$proj/file.txt"
   if ( cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" >/dev/null ); then
     fail "verify should report drift after a change"
@@ -12868,7 +12875,7 @@ test_run_capsule_whence_traces_checkpoint() {
   local out
   out="$(cd "$proj" && OMS_RUNS_DIR="$runs" \
     "$ROOT/scripts/run-capsule.sh" whence model.pt 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq "$id" || fail "whence did not find the producing run"
+  contains "$out" "$id" || fail "whence did not find the producing run"
 
   # An unrelated file has no producing run.
   printf 'unrelated\n' > "$proj/other.pt"
@@ -12886,7 +12893,7 @@ test_run_capsule_whence_traces_checkpoint() {
   assert_file_contains "$runs/$id2/capsule.json" '"hashed": true'
   out="$(cd "$proj" && OMS_RUNS_DIR="$runs" \
     "$ROOT/scripts/run-capsule.sh" whence produced.pt 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq "$id2" || fail "whence must trace a run-produced output"
+  contains "$out" "$id2" || fail "whence must trace a run-produced output"
 }
 
 test_data_manifest_check_and_leakage() {
@@ -12922,7 +12929,7 @@ test_data_manifest_check_and_leakage() {
   local out
   out="$( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name leak 2>&1 )" && \
     fail "leakage should exit nonzero on overlap"
-  printf '%s' "$out" | grep -Fq "LEAKAGE" || fail "leakage output missing LEAKAGE marker"
+  contains "$out" "LEAKAGE" || fail "leakage output missing LEAKAGE marker"
 }
 
 test_data_manifest_csv_column() {
@@ -12961,9 +12968,9 @@ test_data_manifest_key_column_leakage() {
   local out rc=0
   out="$( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name c )" || rc=$?
   [ "$rc" = 1 ] || fail "scaffold leakage should exit 1"
-  printf '%s' "$out" | grep -Fq 'ok      train ∩ test: no overlap' ||
+  contains "$out" 'ok      train ∩ test: no overlap' ||
     fail "exact-ID overlap should be clean"
-  printf '%s' "$out" | grep -Fq 'LEAKAGE[scaffold] train ∩ test: 1 shared key(s)' ||
+  contains "$out" 'LEAKAGE[scaffold] train ∩ test: 1 shared key(s)' ||
     fail "scaffold-level leakage must be flagged"
 
   # A missing key column is rejected at create (cannot silently no-op).
@@ -13034,7 +13041,7 @@ test_data_manifest_key_set_drift() {
   local out
   out="$( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" check --name c )" ||
     fail "label-only change must not be drift"
-  printf '%s' "$out" | grep -Fq 'WARN' || fail "expected WARN for byte-only change"
+  contains "$out" 'WARN' || fail "expected WARN for byte-only change"
 
   # Changing the scaffold assignment (ID set still identical) IS drift.
   printf 'id,scaffold,y\nm1,sX,0\nm2,s2,1\n' > "$d/train.csv"
@@ -13296,10 +13303,10 @@ test_experiment_board_lifecycle_and_duplicate_guard() {
   # Active list hides the finished experiment; --all shows it, owner = claimer.
   local active all
   active="$(OMS_EXPERIMENT_BOARD="$board" "$SH" list 2>/dev/null)"
-  printf '%s' "$active" | grep -Fq "$id" && fail "finished experiment must not be active"
+  contains "$active" "$id" && fail "finished experiment must not be active"
   all="$(OMS_EXPERIMENT_BOARD="$board" "$SH" list --all 2>/dev/null)"
-  printf '%s' "$all" | grep -Fq "$id" || fail "--all must show finished experiment"
-  printf '%s' "$all" | grep -Fq "owner=claude" || fail "owner must stay the claimer"
+  contains "$all" "$id" || fail "--all must show finished experiment"
+  contains "$all" "owner=claude" || fail "owner must stay the claimer"
 }
 
 test_experiment_board_stale_reclaim() {
@@ -13597,8 +13604,8 @@ test_oms_run_spine_links_and_joins() {
 
   local out
   out="$(OMS_RUN_INDEX="$index" "$SH" show "$id" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq "run-ledger" || fail "show missing ledger link"
-  printf '%s' "$out" | grep -Fq "run-capsule" || fail "show missing capsule link"
+  contains "$out" "run-ledger" || fail "show missing ledger link"
+  contains "$out" "run-capsule" || fail "show missing capsule link"
   OMS_RUN_INDEX="$index" "$SH" ls 2>/dev/null | grep -Fq "$id" || fail "ls missing run"
 
   # Unknown run id -> nonzero.
@@ -13655,9 +13662,9 @@ test_oms_run_diff_compares_capsules() {
     "$cap" run --seed 2 --metrics mB.json --no-ledger -- true >/dev/null 2>&1 ) || fail "run B failed"
 
   out="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" diff "$a" "$b" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq "metric:auc" || fail "diff missing metric line"
-  printf '%s' "$out" | grep -Fq "0.08" || fail "diff missing metric delta"
-  printf '%s' "$out" | grep -Fq "seeds" || fail "diff missing seeds line"
+  contains "$out" "metric:auc" || fail "diff missing metric line"
+  contains "$out" "0.08" || fail "diff missing metric delta"
+  contains "$out" "seeds" || fail "diff missing seeds line"
   printf '%s\n' "$out" | grep -F "metric:ok" > "$d/okline" || fail "diff missing bool metric"
   if grep -Fq "(Δ" "$d/okline"; then
     fail "bool metrics must not be treated as numeric deltas"
@@ -13686,7 +13693,7 @@ EOF
 
   out="$("$SH" top --metric auc --file "$ledger")"
   printf '%s\n' "$out" | head -n 1 | grep -Fq "auc=0.83" || fail "top should rank the best exit-0 run first"
-  if printf '%s' "$out" | grep -Fq "0.99"; then
+  if contains "$out" "0.99"; then
     fail "failed runs must be excluded without --all"
   fi
 
@@ -13713,20 +13720,20 @@ test_oms_run_timeline_merges_streams() {
   printf '{"ts":"2026-01-01T03:00:00Z","git_sha":"abc","dirty":0,"exit":0,"duration_s":5,"note":"tl run","cmd":["train"]}\n' > "$d/docs/EXPERIMENTS.jsonl"
 
   out="$(cd "$d" && "$SH" timeline)"
-  printf '%s' "$out" | grep -Fq "runs/spine" || fail "timeline should include the spine stream"
-  printf '%s' "$out" | grep -Fq "artifacts/index" || fail "timeline should include the artifact index stream"
-  printf '%s' "$out" | grep -Fq "ledger" || fail "timeline should include the run ledger"
+  contains "$out" "runs/spine" || fail "timeline should include the spine stream"
+  contains "$out" "artifacts/index" || fail "timeline should include the artifact index stream"
+  contains "$out" "ledger" || fail "timeline should include the run ledger"
   printf '%s\n' "$out" | head -n 1 | grep -Fq "01:00:00Z" || fail "timeline should be time-ordered (oldest first)"
   printf '%s\n' "$out" | tail -n 1 | grep -Fq "03:00:00Z" || fail "the newest event should print last"
 
   out="$(cd "$d" && "$SH" timeline --since 2026-01-01T02:30:00Z)"
-  if printf '%s' "$out" | grep -Fq "spine"; then
+  if contains "$out" "spine"; then
     fail "--since should filter out earlier events"
   fi
-  printf '%s' "$out" | grep -Fq "ledger" || fail "--since should keep later events"
+  contains "$out" "ledger" || fail "--since should keep later events"
 
   out="$(cd "$d" && "$SH" timeline --limit 1)"
-  printf '%s' "$out" | grep -Fq "omitted" || fail "--limit should report omitted earlier events"
+  contains "$out" "omitted" || fail "--limit should report omitted earlier events"
 }
 
 test_agent_plan_reclaim_requeues_stale_claim() {
@@ -13748,15 +13755,15 @@ test_agent_plan_reclaim_requeues_stale_claim() {
   "$SH" --repo "$d" review --id t4 >/dev/null
 
   out="$("$SH" --repo "$d" reclaim)"
-  printf '%s' "$out" | grep -Fq "reclaimed t1" || fail "expired claimed task should be reclaimed"
-  printf '%s' "$out" | grep -Fq "reclaimed 1 task(s)" || fail "only the expired claimed task should be reclaimed by default"
+  contains "$out" "reclaimed t1" || fail "expired claimed task should be reclaimed"
+  contains "$out" "reclaimed 1 task(s)" || fail "only the expired claimed task should be reclaimed by default"
   "$SH" --repo "$d" show --id t1 | grep -Fq '"state": "ready"' || fail "t1 should be requeued to ready"
   "$SH" --repo "$d" show --id t2 | grep -Fq '"state": "claimed"' || fail "a fresh claim must stay claimed"
   "$SH" --repo "$d" show --id t3 | grep -Fq '"state": "running"' || fail "running must require --include-running"
   "$SH" --repo "$d" show --id t4 | grep -Fq '"state": "review"' || fail "review must never be reclaimed"
 
   out="$("$SH" --repo "$d" reclaim --include-running)"
-  printf '%s' "$out" | grep -Fq "reclaimed t3" || fail "--include-running should reclaim the stale running task"
+  contains "$out" "reclaimed t3" || fail "--include-running should reclaim the stale running task"
 
   if "$SH" --repo "$d" reclaim --ttl abc >/dev/null 2>"$d/err"; then
     fail "non-numeric reclaim --ttl must be rejected"
@@ -14232,7 +14239,7 @@ test_doctor_fails_broken_config_symlink() {
 
   out="$(run_doctor_for_project "$project" "$home_dir" 2>&1)" && rc=0 || rc=$?
   [ "$rc" -ne 0 ] || fail "doctor must fail on a dangling config symlink"
-  printf '%s' "$out" | grep -Fq "broken link: $home_dir/.claude/CLAUDE.md" ||
+  contains "$out" "broken link: $home_dir/.claude/CLAUDE.md" ||
     fail "doctor should diagnose the dangling symlink as a broken link"
 }
 
@@ -14346,7 +14353,7 @@ test_oms_dispatcher_refuses_an_unusable_receipt() {
   if out="$(OMS_INSTALL_RECEIPT="$dir/absent.json" "$dir/bin/oms" list 2>&1)"; then
     fail "oms must not dispatch with no checkout and no receipt: $out"
   fi
-  printf '%s' "$out" | grep -Fq 'cannot locate its checkout' ||
+  contains "$out" 'cannot locate its checkout' ||
     fail "oms must name the broken contract: $out"
 
   # A pre-v0.4 receipt names a root but not under the contract this reads.
@@ -14359,7 +14366,7 @@ test_oms_dispatcher_refuses_an_unusable_receipt() {
   printf '{"schema": 2, "source_root": "%s"}\n' "$ROOT" > "$receipt"
   out="$(OMS_INSTALL_RECEIPT="$receipt" "$dir/bin/oms" list --all 2>&1)" ||
     fail "oms must dispatch through a schema-2 receipt: $out"
-  printf '%s' "$out" | grep -Fq plan-run ||
+  contains "$out" plan-run ||
     fail "receipt dispatch did not reach the real tool list: $out"
 }
 
@@ -14379,7 +14386,7 @@ test_validate_separates_the_two_index_families() {
 
   out="$("$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)" ||
     fail "both index families should validate: $out"
-  printf '%s' "$out" | grep -Fq '0 with errors or invalid rows' ||
+  contains "$out" '0 with errors or invalid rows' ||
     fail "a run-capsule index must not be reported invalid: $out"
 
   # Each family still enforces its own required field.
@@ -14387,7 +14394,7 @@ test_validate_separates_the_two_index_families() {
   if out="$("$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)"; then
     fail "a runs index row without an id must be rejected: $out"
   fi
-  printf '%s' "$out" | grep -Fq "missing required field 'id'" ||
+  contains "$out" "missing required field 'id'" ||
     fail "the runs index must be checked for id: $out"
 
   printf '{"id": "20260101T000000Z-1"}\n' > "$project/.oms/runs/index.jsonl"
@@ -14395,7 +14402,7 @@ test_validate_separates_the_two_index_families() {
   if out="$("$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)"; then
     fail "an artifact index row without a kind must be rejected: $out"
   fi
-  printf '%s' "$out" | grep -Fq "missing required field 'kind'" ||
+  contains "$out" "missing required field 'kind'" ||
     fail "the artifact index must still be checked for kind: $out"
 }
 
@@ -14606,7 +14613,7 @@ test_doctor_detects_foreign_config_link() {
 
   out="$(run_doctor_for_project "$project" "$home_dir" 2>&1)" && rc=0 || rc=$?
   [ "$rc" -ne 0 ] || fail "doctor must fail when a config link resolves to a foreign file"
-  printf '%s' "$out" | grep -Fq "linked elsewhere: $home_dir/.claude/CLAUDE.md" ||
+  contains "$out" "linked elsewhere: $home_dir/.claude/CLAUDE.md" ||
     fail "doctor should diagnose the foreign link target"
 }
 
@@ -14665,7 +14672,7 @@ test_verify_timeout_bounds_hung_verify() {
     OMS_PEER_VERIFY_TIMEOUT=1s run_verify_with_timeout bash -c 'sleep 30'
     echo exit=\$?
   " 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq "exit=124" || fail "a hung verify should fail with timeout exit 124"
+  contains "$out" "exit=124" || fail "a hung verify should fail with timeout exit 124"
 }
 
 test_delegate_worker_does_not_receive_primary_state_env() {
@@ -14847,7 +14854,7 @@ test_change_guard_catches_committed_escape() {
 
   local out
   out="$(cd "$project" && "$ROOT/scripts/change-guard.sh" check 2>&1)" || true
-  printf '%s' "$out" | grep -Fq "outside declared scope: out-of-scope/f.txt" ||
+  contains "$out" "outside declared scope: out-of-scope/f.txt" ||
     fail "committed out-of-scope file must be caught by the scope check"
   if ( cd "$project" && "$ROOT/scripts/change-guard.sh" --strict check >/dev/null 2>&1 ); then
     fail "--strict must fail when a committed change escapes scope"
@@ -14926,7 +14933,7 @@ test_delegate_plan_task_hydrates_brief_and_verify() {
   local out
   out="$(cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex --plan-task t1 2>&1)" || fail "plan-task dry-run should succeed"
-  printf '%s' "$out" | grep -Fq "plan-verify: echo custom-verify-marker" ||
+  contains "$out" "plan-verify: echo custom-verify-marker" ||
     fail "verify should be hydrated from the plan task"
   assert_one_artifact_contains "$project/.oms/artifacts/delegate" 'codex-*.md' 'Fix the frobnicator'
 }
@@ -15053,9 +15060,9 @@ PY
 
   local text
   text="$(cd "$project" && "$ROOT/scripts/state.sh")"
-  printf '%s' "$text" | grep -Fq "goal: ship it" || fail "repo-state should show the active task goal"
-  printf '%s' "$text" | grep -Fq "actionable now: a1" || fail "repo-state should list actionable tasks"
-  printf '%s' "$text" | grep -Fq "STALE claims: a2" || fail "repo-state should flag stale plan claims"
+  contains "$text" "goal: ship it" || fail "repo-state should show the active task goal"
+  contains "$text" "actionable now: a1" || fail "repo-state should list actionable tasks"
+  contains "$text" "STALE claims: a2" || fail "repo-state should flag stale plan claims"
 
   # --json is valid and carries the same facts, and it is invocable via oms state.
   ( cd "$project" && "$ROOT/scripts/state.sh" --json ) |
@@ -15167,7 +15174,7 @@ test_delegate_plan_task_hydrates_from_subdir() {
   local out
   out="$(cd "$project/src" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex --plan-task t1 2>&1)" || fail "subdir plan-task dry-run should succeed"
-  printf '%s' "$out" | grep -Fq "plan-verify: echo VERIFYMARK" ||
+  contains "$out" "plan-verify: echo VERIFYMARK" ||
     fail "verify must hydrate from the plan task even when run from a subdirectory"
 }
 
@@ -15374,27 +15381,27 @@ test_fail_ledger_names_an_advisor_after_a_repeat() {
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" record \
     --cmd "$gate" --exit 1 --summary "assert failed" 2>&1)" ||
     fail "first record should succeed"
-  if printf '%s' "$out" | grep -Fq 'oms advise'; then
+  if contains "$out" 'oms advise'; then
     fail "a single failure is not a pattern; no advisor yet: $out"
   fi
 
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" record \
     --cmd "$gate" --exit 1 --summary "assert failed" 2>&1)" ||
     fail "second record should succeed"
-  printf '%s' "$out" | grep -Fq 'has failed 2x unresolved' ||
+  contains "$out" 'has failed 2x unresolved' ||
     fail "the second unresolved failure should be named as a repeat: $out"
-  printf '%s' "$out" | grep -Fq 'oms advise' ||
+  contains "$out" 'oms advise' ||
     fail "the repeat should name the advisor: $out"
-  printf '%s' "$out" | grep -Fq 'if authorized' ||
+  contains "$out" 'if authorized' ||
     fail "the hint must not authorize another model call: $out"
 
   # `check` gates the retry, so it carries the same escalation and keeps exit 3.
   local rc=0
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" check --cmd "$gate" 2>&1)" || rc=$?
   [ "$rc" = 3 ] || fail "check must still exit 3 for a known failure, got $rc"
-  printf '%s' "$out" | grep -Fq 'oms advise' ||
+  contains "$out" 'oms advise' ||
     fail "check should name the advisor on a repeat: $out"
-  printf '%s' "$out" | grep -Fq 'if authorized' ||
+  contains "$out" 'if authorized' ||
     fail "check must preserve the optional advisor boundary: $out"
 
   # A resolve zeroes the run: the next failure is a first failure again.
@@ -15402,7 +15409,7 @@ test_fail_ledger_names_an_advisor_after_a_repeat() {
     fail "resolve should succeed"
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" record \
     --cmd "$gate" --exit 1 2>&1)" || fail "record after resolve should succeed"
-  if printf '%s' "$out" | grep -Fq 'oms advise'; then
+  if contains "$out" 'oms advise'; then
     fail "a resolved fingerprint must start counting again: $out"
   fi
 
@@ -15410,7 +15417,7 @@ test_fail_ledger_names_an_advisor_after_a_repeat() {
   # want an advisor named at all.
   out="$(cd "$project" && OMS_ADVISE_AFTER_FAILURES=0 "$ROOT/scripts/fail-ledger.sh" record \
     --cmd "$gate" --exit 1 2>&1)" || fail "record with the hint disabled should succeed"
-  if printf '%s' "$out" | grep -Fq 'oms advise'; then
+  if contains "$out" 'oms advise'; then
     fail "OMS_ADVISE_AFTER_FAILURES=0 must silence the hint: $out"
   fi
 }
@@ -15656,7 +15663,7 @@ test_fail_ledger_kind_next_how_and_legacy_rows() {
   make_committed_repo "$project"
   out="$(cd "$project" && "$SH" --repo "$project" record --cmd "false" --exit 1 --kind invalid 2>&1)" &&
     fail "unknown fail-ledger kind must fail"
-  printf '%s' "$out" | grep -Fq 'cmd, hook, verify, plan-run, delegate, patch-land' ||
+  contains "$out" 'cmd, hook, verify, plan-run, delegate, patch-land' ||
     fail "kind rejection must name the allowed set: $out"
 
   ( cd "$project" && "$SH" --repo "$project" record --cmd "bash broken.sh" --exit 1 \
@@ -15664,16 +15671,16 @@ test_fail_ledger_kind_next_how_and_legacy_rows() {
     fail "record with --next should succeed"
   out="$(cd "$project" && "$SH" --repo "$project" check --cmd "bash broken.sh" 2>&1)" || rc=$?
   [ "$rc" = 3 ] || fail "check must still return 3 with --next, got $rc"
-  printf '%s' "$out" | grep -Fq 'next: inspect the failing assertion' ||
+  contains "$out" 'next: inspect the failing assertion' ||
     fail "check must surface the recommended next action: $out"
   out="$(cd "$project" && "$SH" --repo "$project" list)" || fail "list with --next should succeed"
-  printf '%s' "$out" | grep -Fq '  next: inspect the failing assertion' ||
+  contains "$out" '  next: inspect the failing assertion' ||
     fail "list must surface --next: $out"
   fp="$(printf '%s\n' "$out" | awk 'NR == 1 { print $1 }')"
   ( cd "$project" && "$SH" --repo "$project" resolve --fingerprint "$fp" --how "fixed the assertion" ) \
     >/dev/null 2>&1 || fail "resolve with --how should succeed"
   out="$(cd "$project" && "$SH" --repo "$project" list)" || fail "list after --how should succeed"
-  printf '%s' "$out" | grep -Fq '  fixed: fixed the assertion' ||
+  contains "$out" '  fixed: fixed the assertion' ||
     fail "list must surface --how on resolved rows: $out"
   out="$(cd "$project" && "$SH" --repo "$project" list --json)" || fail "list --json should succeed"
   printf '%s' "$out" | python3 -c '
@@ -15688,9 +15695,9 @@ assert row["how"] == "fixed the assertion", row
   printf '{"event":"fail","fingerprint":"implicit-schema-row","cmd":"older command","exit":1}\n' \
     >> "$project/.oms/failures.jsonl"
   out="$(cd "$project" && "$SH" --repo "$project" list)" || fail "list should parse old rows"
-  printf '%s' "$out" | grep -Fq 'old command' ||
+  contains "$out" 'old command' ||
     fail "old rows without new fields must still list: $out"
-  printf '%s' "$out" | grep -Fq 'older command' ||
+  contains "$out" 'older command' ||
     fail "legacy rows without an explicit schema must still list: $out"
 }
 
@@ -15770,7 +15777,7 @@ test_gc_reclaims_aged_handoffs() {
   touch -t 202601010000 "$project/.oms/handoffs/old.md"
 
   out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
-  printf '%s' "$out" | grep -Fq "handoff: $project/.oms/handoffs/old.md" ||
+  contains "$out" "handoff: $project/.oms/handoffs/old.md" ||
     fail "dry-run should list the aged handoff: $out"
   [ -f "$project/.oms/handoffs/old.md" ] || fail "dry-run must keep aged handoffs"
   [ -f "$project/.oms/handoffs/fresh.md" ] || fail "dry-run must keep fresh handoffs"
@@ -15792,15 +15799,15 @@ test_oms_init_seeds_and_guides() {
   [ -f "$project/.oms/memory/shared.md" ] || fail "init should seed shared memory"
   [ -f "$project/.oms/memory/memory.sqlite3" ] ||
     fail "init should create the project memory database"
-  printf '%s' "$out" | grep -Fq 'tick registry registered' ||
+  contains "$out" 'tick registry registered' ||
     fail "init should report tick registration: $out"
   [ "$(grep -Fxc "$project" "$registry")" = 1 ] ||
     fail "init should register the repo exactly once"
-  printf '%s' "$out" | grep -Fq "ML repo" || fail "init should tailor the checklist to an ML repo"
-  printf '%s' "$out" | grep -Fq "oms state" || fail "init should point at oms state"
-  printf '%s' "$out" | grep -Fq "oms data-manifest check --name <manifest>" ||
+  contains "$out" "ML repo" || fail "init should tailor the checklist to an ML repo"
+  contains "$out" "oms state" || fail "init should point at oms state"
+  contains "$out" "oms data-manifest check --name <manifest>" ||
     fail "init should show a valid named manifest check command"
-  printf '%s' "$out" | grep -Fq "oms data-manifest leakage --name <manifest>" ||
+  contains "$out" "oms data-manifest leakage --name <manifest>" ||
     fail "init should show a valid named leakage command"
   # Idempotent and migratory: a Markdown-only project gets its derived index
   # back on the next init without changing the source.
@@ -15808,7 +15815,7 @@ test_oms_init_seeds_and_guides() {
   out="$(cd "$project" && "$ROOT/scripts/init.sh")" || fail "init must be idempotent"
   [ -f "$project/.oms/memory/memory.sqlite3" ] ||
     fail "init should migrate an existing Markdown-only memory"
-  printf '%s' "$out" | grep -Fq 'tick registry already registered' ||
+  contains "$out" 'tick registry already registered' ||
     fail "an idempotent init should report the existing tick registration: $out"
   [ "$(grep -Fxc "$project" "$registry")" = 1 ] ||
     fail "an idempotent init should not duplicate the registry entry"
@@ -15830,7 +15837,7 @@ open(sys.argv[1], "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
 PY
   local out
   out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
-  printf '%s' "$out" | grep -Fq "stale-run-close: $rid" || fail "dry-run should report the stale open run"
+  contains "$out" "stale-run-close: $rid" || fail "dry-run should report the stale open run"
   ( cd "$project" && "$ROOT/scripts/run.sh" ls --open | grep -Fq "$rid" ) ||
     fail "dry-run must not close the run"
   ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
@@ -15907,9 +15914,9 @@ test_gc_dead_marker_cannot_release_live_same_lease() {
     "$$" "$lease" > "$project/.oms/delegations/z-live.json"
 
   dry_out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
-  printf '%s' "$dry_out" | grep -Fq 'live exact worker; kept it' ||
+  contains "$dry_out" 'live exact worker; kept it' ||
     fail "gc dry-run did not apply the locked live-marker veto: $dry_out"
-  if printf '%s' "$dry_out" | grep -Fq 'task t1 (claimed) -> ready'; then
+  if contains "$dry_out" 'task t1 (claimed) -> ready'; then
     fail "gc dry-run falsely planned release of a live same-lease retry: $dry_out"
   fi
   "$sh" --repo "$project" show --id t1 | grep -Fq '"state": "claimed"' ||
@@ -16743,9 +16750,9 @@ test_gc_dead_marker_cannot_fail_live_same_executor() {
     > "$markers/z-live.json"
 
   dry_out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
-  printf '%s' "$dry_out" | grep -Fq 'retired Soul executor exact; keeping legacy marker and evidence' ||
+  contains "$dry_out" 'retired Soul executor exact; keeping legacy marker and evidence' ||
     fail "executor dry-run did not apply the locked live-marker veto: $dry_out"
-  if printf '%s' "$dry_out" | grep -Fq 'orphan-delegation-executor: exact running -> failed'; then
+  if contains "$dry_out" 'orphan-delegation-executor: exact running -> failed'; then
     fail "executor dry-run falsely planned failure of a live retry: $dry_out"
   fi
   grep -Fq '"state":"running"' "$meta" || fail "executor dry-run changed metadata"
@@ -17053,7 +17060,7 @@ test_gc_keeps_orphan_artifacts_unless_asked() {
   out="$(cd "$project" && OMS_ARTIFACT_ORPHAN_GRACE=0 "$ROOT/scripts/gc.sh" --days 0 --apply)"
   [ -f "$orphan" ] ||
     fail "the routine sweep must not delete an unreferenced artifact: $out"
-  printf '%s' "$out" | grep -Fq 'would delete' &&
+  contains "$out" 'would delete' &&
     fail "the routine sweep must not even plan a file deletion: $out"
 
   out="$(cd "$project" && OMS_ARTIFACT_ORPHAN_GRACE=0 "$ROOT/scripts/gc.sh" --days 0 --apply --delete-orphan-files)"
@@ -17103,7 +17110,7 @@ FIXTURE_PY
   # Compaction of the terminal one is the sweep's existing behavior, asserted
   # here because the two halves have to agree on which streams survive.
   out="$(cd "$project" && OMS_ATTEMPT_STALE_SECONDS=0 "$ROOT/scripts/gc.sh" --days 1 --apply)"
-  printf '%s' "$out" | grep -Fq "stale-attempt: $stuck" ||
+  contains "$out" "stale-attempt: $stuck" ||
     fail "gc should reconcile an attempt that stopped reporting: $out"
   "$events" --repo "$project" show --attempt "$stuck" --json |
     grep -Fq '"state": "blocked"' ||
@@ -17139,7 +17146,7 @@ open(p, "w").writelines(lines)
 PY
   local out
   out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply 2>&1)"
-  printf '%s' "$out" | grep -Fq "stale-change-guard" || fail "gc should report the stale guard"
+  contains "$out" "stale-change-guard" || fail "gc should report the stale guard"
   assert_not_exists "$project/.oms/guards/change-guard.tsv"
 }
 
@@ -17150,13 +17157,13 @@ test_change_guard_status_flags_stale() {
   ( cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . begin >/dev/null )
   local out
   out="$(cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . status)"
-  printf '%s' "$out" | grep -Fq "STALE" && fail "fresh guard must not read as stale"
+  contains "$out" "STALE" && fail "fresh guard must not read as stale"
   out="$(cd "$project" && OMS_GUARD_TTL=0 sh -c 'sleep 1; exec "$0" --repo . status' "$ROOT/scripts/change-guard.sh")"
-  printf '%s' "$out" | grep -Fq "STALE" || fail "aged guard should read as stale with OMS_GUARD_TTL=0"
+  contains "$out" "STALE" || fail "aged guard should read as stale with OMS_GUARD_TTL=0"
   # A dead opt-in owner pid is stale regardless of age.
   ( cd "$project" && OMS_GUARD_PID=999999 "$ROOT/scripts/change-guard.sh" --repo . begin >/dev/null )
   out="$(cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . status)"
-  printf '%s' "$out" | grep -Fq "STALE" || fail "dead owner pid should read as stale"
+  contains "$out" "STALE" || fail "dead owner pid should read as stale"
   ( cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . end >/dev/null )
 }
 
@@ -17275,7 +17282,7 @@ PY
     fail "default reclaim must never touch review"
   local out
   out="$("$SH" --repo "$d" reclaim --include-review)"
-  printf '%s' "$out" | grep -Fq "reclaimed t1 from review" || fail "aged review should be reclaimed with the flag"
+  contains "$out" "reclaimed t1 from review" || fail "aged review should be reclaimed with the flag"
   "$SH" --repo "$d" show --id t1 | grep -Fq '"patch": "/tmp/p.patch"' ||
     fail "reclaiming a review must keep its artifact/patch"
 }
@@ -17298,8 +17305,8 @@ PY
   ( cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . begin >/dev/null )
   local out
   out="$(cd "$project" && OMS_GUARD_TTL=0 sh -c 'sleep 1; exec "$0" --repo .' "$ROOT/scripts/state.sh")"
-  printf '%s' "$out" | grep -Fq "STALE review" || fail "repo-state should flag the stale review"
-  printf '%s' "$out" | grep -Fq "Change-guard: ACTIVE (STALE" || fail "repo-state should flag the stale guard"
+  contains "$out" "STALE review" || fail "repo-state should flag the stale review"
+  contains "$out" "Change-guard: ACTIVE (STALE" || fail "repo-state should flag the stale guard"
   ( cd "$project" && "$ROOT/scripts/state.sh" --repo . --json ) |
     python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["plan"]["stale_review"][0]["id"]=="t1"' ||
     fail "stale review should be in the JSON view"
@@ -17383,7 +17390,7 @@ EOF
   chmod +x "$bin/gh"
   local out
   out="$(cd "$project" && OMS_GH_BIN="$bin/gh" "$ROOT/scripts/state.sh" --repo . --refresh-ci)"
-  printf '%s' "$out" | grep -Fq "failure" || fail "--refresh-ci should surface the recorded CI conclusion"
+  contains "$out" "failure" || fail "--refresh-ci should surface the recorded CI conclusion"
   assert_file_contains "$project/.oms/ci.jsonl" '"conclusion": "failure"'
 }
 
@@ -17398,14 +17405,14 @@ test_skill_router_matches_and_dedupes() {
   # Trigger match suggests the mapped skill once.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"r1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-ops" || fail "router should suggest oms-ops"
+  contains "$out" "oms-ops" || fail "router should suggest oms-ops"
   [ -f "$project/.oms/hooks/events.jsonl" ] || fail "router should write hook events"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "skill_hint"'
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"workflow": "task"'
   # A later turn in the same session may need the skill reminder again.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-ops" || fail "router should re-suggest a skill on a later turn"
+  contains "$out" "oms-ops" || fail "router should re-suggest a skill on a later turn"
   # Duplicate delivery of the same hook event stays silent.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
@@ -17413,15 +17420,15 @@ test_skill_router_matches_and_dedupes() {
   # Payloads without turn_id cannot safely persist a per-turn dedupe key.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"r-no-turn","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-ops" || fail "router should hint without turn_id"
+  contains "$out" "oms-ops" || fail "router should hint without turn_id"
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"r-no-turn","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-ops" ||
+  contains "$out" "oms-ops" ||
     fail "router must not suppress later identical prompts when turn_id is absent"
   # Multiple peer intents collapse to the one harness front door.
   out="$(printf '{"prompt":"peer review하고 의견 물어봐","session_id":"r2","turn_id":"t3","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" || fail "peer intents should route to oms-agent-harness"
+  contains "$out" "oms-agent-harness" || fail "peer intents should route to oms-agent-harness"
   if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
     fail "retired peer skill names must not be suggested"
   fi
@@ -17429,43 +17436,43 @@ test_skill_router_matches_and_dedupes() {
   # skill that owns its proposal approval and remote-write boundaries.
   out="$(printf '{"prompt":"확정된 PROJECT.md를 구현해서 Draft PR까지 만들어줘","session_id":"r3","turn_id":"t4","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "confirmed spec to Draft PR should route to oms-agent-harness"
   out="$(printf '{"prompt":"Implement the confirmed project spec and open a draft PR","session_id":"r4","turn_id":"t5","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "English autopilot paraphrase should route to oms-agent-harness"
   out="$(printf '{"prompt":"확정된 프로젝트 스펙을 구현하고 Draft PR을 만들어줘","session_id":"r5","turn_id":"t6","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "Korean autopilot paraphrase should route to oms-agent-harness"
   out="$(printf '{"prompt":"autopilot 돌려서 남은 일을 끝내줘","session_id":"r6","turn_id":"t7","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "literal English autopilot trigger should route to oms-agent-harness"
   out="$(printf '{"prompt":"오토파일럿 돌려줘","session_id":"r7","turn_id":"t8","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "literal Korean autopilot trigger should route to oms-agent-harness"
   out="$(printf '{"prompt":"자율 코딩으로 구현해줘","session_id":"r8","turn_id":"t9","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "Korean autonomous-coding trigger should route to oms-agent-harness"
   out="$(printf '{"prompt":"확정된 목표대로 알아서 구현하고 검증까지 마무리해줘","session_id":"r9","turn_id":"t10","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "Korean agent-owned implementation request should route to oms-agent-harness"
   out="$(printf '{"prompt":"Take this confirmed goal through implementation and verification","session_id":"r10","turn_id":"t11","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "English agent-owned implementation request should route to oms-agent-harness"
   out="$(printf '{"prompt":"프로젝트 그래프로 코드를 보고 작업하자","session_id":"r11","turn_id":"t12","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "Korean graph-guided coding request should route to oms-agent-harness"
   out="$(printf '{"prompt":"Use the project graph for this coding task","session_id":"r12","turn_id":"t13","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "English project-graph request should route to oms-agent-harness"
 }
 
@@ -17479,14 +17486,14 @@ test_skill_router_separates_consultation_from_delegation() {
   make_committed_repo "$project"
   out="$(printf '{"prompt":"codex한테 의견 물어봐","session_id":"ask1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'oms-agent-harness' || fail "consultation should route to oms-agent-harness"
+  contains "$out" 'oms-agent-harness' || fail "consultation should route to oms-agent-harness"
   if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
     fail "consultation must not expose a retired peer skill"
   fi
 
   out="$(printf '{"prompt":"codex한테 시켜: README 고쳐","session_id":"write1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'oms-agent-harness' || fail "write delegation should route to oms-agent-harness"
+  contains "$out" 'oms-agent-harness' || fail "write delegation should route to oms-agent-harness"
   if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
     fail "write delegation must not expose a retired peer skill"
   fi
@@ -17512,7 +17519,7 @@ test_skill_router_routes_trust_boundary_precisely() {
       "$prompt" "$i" "$project" |
       TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh" \
         2> "$d/router-stderr.txt")"
-    printf '%s' "$out" | grep -Fq 'oms-trust-boundary' ||
+    contains "$out" 'oms-trust-boundary' ||
       fail "router should suggest oms-trust-boundary for: $prompt (out: $out; stderr: $(cat "$d/router-stderr.txt" 2>/dev/null))"
   done <<'EOF'
 threat model this webhook before release
@@ -17529,7 +17536,7 @@ EOF
     out="$(printf '{"prompt":"%s","session_id":"security-neg-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
       TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    if printf '%s' "$out" | grep -Fq 'oms-trust-boundary'; then
+    if contains "$out" 'oms-trust-boundary'; then
       fail "router must not suggest oms-trust-boundary for: $prompt ($out)"
     fi
   done <<'EOF'
@@ -17558,7 +17565,7 @@ test_skill_router_keeps_trace_off_ordinary_test_talk() {
     out="$(printf '{"prompt":"%s","session_id":"router-pos-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
       TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    printf '%s' "$out" | grep -Fq 'skill hint: oms-trace' ||
+    contains "$out" 'skill hint: oms-trace' ||
       fail "router should suggest oms-trace for: $prompt ($out)"
   done <<'EOF'
 원인 추적 좀 해줘
@@ -17574,7 +17581,7 @@ EOF
     out="$(printf '{"prompt":"%s","session_id":"router-neg-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
       TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    if printf '%s' "$out" | grep -Fq 'oms-trace'; then
+    if contains "$out" 'oms-trace'; then
       fail "router must not suggest oms-trace for: $prompt ($out)"
     fi
   done <<'EOF'
@@ -17601,7 +17608,7 @@ EOF
   done
   out="$(printf '{"prompt":"CUDA OOM","session_id":"router-gpu","turn_id":"t1","cwd":"%s"}' "$project" |
     PATH="$d/bin:$PATH" TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'oms-gpu-workstation' || fail "real OOM must still route to GPU guidance"
+  contains "$out" 'oms-gpu-workstation' || fail "real OOM must still route to GPU guidance"
 }
 
 test_skill_router_auto_records_task_prompts() {
@@ -17652,7 +17659,7 @@ test_skill_router_plain_question_leaves_no_state() {
   make_committed_repo "$project"
   out="$(printf '{"prompt":"oh-my-setting이 뭐야","session_id":"plain1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'oms-ops' || fail "plain question should still receive a skill hint"
+  contains "$out" 'oms-ops' || fail "plain question should still receive a skill hint"
   assert_not_exists "$project/.oms"
 }
 
@@ -17694,7 +17701,7 @@ test_context_pressure_warns_once_at_low_context() {
 
   out="$(printf '{"prompt":"이어서 계속 봐줘","session_id":"ctxwarn1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq '[oms] context low (~10% left)' ||
+  contains "$out" '[oms] context low (~10% left)' ||
     fail "10% left must trigger the warn advisory: $out"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "context_pressure"'
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"capture": "skipped"'
@@ -17702,7 +17709,7 @@ test_context_pressure_warns_once_at_low_context() {
   # The advisory is once per band per session, not once per prompt.
   out="$(printf '{"prompt":"이어서 계속 봐줘 2","session_id":"ctxwarn1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+  if contains "$out" '[oms] context'; then
     fail "warn band must announce once per session: $out"
   fi
 }
@@ -17719,7 +17726,7 @@ test_context_capture_starts_silently_at_thirty_percent_left() {
   printf '{"schema":1,"used_percentage":72}\n' > "$hud/ctx-$digest.json"
   out="$(printf '{"prompt":"이어서 계속 봐줘","session_id":"ctxcap1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+  if contains "$out" '[oms] context'; then
     fail "28% left is a capture, not an advisory: $out"
   fi
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "context_capture"'
@@ -17733,7 +17740,7 @@ test_context_capture_starts_silently_at_thirty_percent_left() {
   printf '{"schema":1,"used_percentage":90}\n' > "$hud/ctx-$digest.json"
   out="$(printf '{"prompt":"이어서 계속 봐줘 3","session_id":"ctxcap1","turn_id":"t3","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq '[oms] context low (~10% left)' ||
+  contains "$out" '[oms] context low (~10% left)' ||
     fail "the warn band must still announce after an early capture: $out"
 }
 
@@ -17755,10 +17762,10 @@ test_context_pressure_escalates_and_rearms() {
   }
 
   out="$(run_band 90 t1)"
-  printf '%s' "$out" | grep -Fq 'context low' || fail "10% left must warn: $out"
+  contains "$out" 'context low' || fail "10% left must warn: $out"
   # Crossing into the urgent band speaks once more, then latches.
   out="$(run_band 95 t2)"
-  printf '%s' "$out" | grep -Fq 'context nearly exhausted (~5% left)' ||
+  contains "$out" 'context nearly exhausted (~5% left)' ||
     fail "5% left must escalate to urgent: $out"
   out="$(run_band 96 t3)"
   [ -z "$out" ] || fail "urgent band must announce once: $out"
@@ -17767,7 +17774,7 @@ test_context_pressure_escalates_and_rearms() {
   [ -z "$out" ] || fail "recovered context must stay silent: $out"
   grep -Fq '"stage": null' "$state" || fail "recovery must reset the band latch"
   out="$(run_band 88 t5)"
-  printf '%s' "$out" | grep -Fq 'context low (~12% left)' ||
+  contains "$out" 'context low (~12% left)' ||
     fail "a fresh crossing after re-arm must warn again: $out"
 }
 
@@ -17786,7 +17793,7 @@ test_context_pressure_reads_codex_transcript() {
 
   out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxcodex1","turn_id":"t1","cwd":"%s","transcript_path":"%s"}' "$project" "$transcript" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$d/no-cache" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'context low (~11% left)' ||
+  contains "$out" 'context low (~11% left)' ||
     fail "codex transcript token_count must feed the advisory: $out"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"source": "codex"'
 }
@@ -17805,14 +17812,14 @@ test_context_pressure_fails_open() {
   # Kill switch.
   out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxopen1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_PRESSURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+  if contains "$out" '[oms] context'; then
     fail "OMS_CTX_PRESSURE=0 must silence the advisory: $out"
   fi
   # A stale reading is no reading: the cache outlived its TTL.
   touch -d '2 hours ago' "$hud/ctx-$digest.json"
   out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxopen1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+  if contains "$out" '[oms] context'; then
     fail "a stale context cache must stay silent: $out"
   fi
   # Unadopted repos hold no latch state, so they get no advisory at all.
@@ -17822,7 +17829,7 @@ test_context_pressure_fails_open() {
   printf '{"schema":1,"used_percentage":90}\n' > "$hud/ctx-$digest.json"
   out="$(printf '{"prompt":"이 저장소가 뭐야","session_id":"ctxplain1","turn_id":"t1","cwd":"%s"}' "$plain" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+  if contains "$out" '[oms] context'; then
     fail "an unadopted repo must not receive the advisory: $out"
   fi
   assert_not_exists "$plain/.oms"
@@ -17848,7 +17855,7 @@ test_claude_hud_feeds_context_pressure() {
   # ...consumer: the prompt hook turns it into one advisory line.
   out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxchain1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'context low (~9% left)' ||
+  contains "$out" 'context low (~9% left)' ||
     fail "the status-line cache must feed the prompt-time advisory: $out"
   # A payload without a context reading writes no cache.
   printf '{"session_id":"ctxchain2","context_window":{}}' |
@@ -17903,7 +17910,7 @@ test_peer_advisory_warns_incumbent_once_per_neighbor() {
 
   # The incumbent started before the neighbor, so SessionStart never told it.
   out="$(peer_prompt "$d" "$project" incumbent1 t1)"
-  printf '%s' "$out" | grep -Fq '[oms] another session is live in this worktree' ||
+  contains "$out" '[oms] another session is live in this worktree' ||
     fail "a live neighbor must warn the incumbent: $out"
   assert_file_contains "$events" '"action": "peer_advisory"'
   latch="$project/.oms/hooks/sessions/$(session_digest incumbent1).peers.json"
@@ -17911,14 +17918,14 @@ test_peer_advisory_warns_incumbent_once_per_neighbor() {
 
   # Once per neighbor, not once per prompt.
   out="$(peer_prompt "$d" "$project" incumbent1 t2)"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "an announced neighbor must not warn again: $out"
   fi
 
   # A second neighbor is news; the first one's latch survives.
   write_peer_event "$events" peer-b 60
   out="$(peer_prompt "$d" "$project" incumbent1 t3)"
-  printf '%s' "$out" | grep -Fq '[oms] another session is live in this worktree' ||
+  contains "$out" '[oms] another session is live in this worktree' ||
     fail "a newly arrived neighbor must warn: $out"
   assert_file_contains "$latch" "$(session_digest peer-a)"
   assert_file_contains "$latch" "$(session_digest peer-b)"
@@ -17929,9 +17936,9 @@ test_peer_advisory_warns_incumbent_once_per_neighbor() {
   write_peer_event "$events" peer-c 30
   out="$(printf '{"prompt":"계속 진행해줘","session_id":"incumbent2","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'context low (~10% left)' ||
+  contains "$out" 'context low (~10% left)' ||
     fail "the pressure advisory must still fire alongside the peer advisory: $out"
-  printf '%s' "$out" | grep -Fq '[oms] another session is live' ||
+  contains "$out" '[oms] another session is live' ||
     fail "the peer advisory must fire alongside the pressure advisory: $out"
   ctx="$project/.oms/hooks/sessions/$(session_digest incumbent2).ctx.json"
   assert_file_contains "$ctx" '"stage": "warn"'
@@ -17955,7 +17962,7 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   write_peer_event "$events" child-a 30 action=ignored_child origin=peer-delegate status=route
   write_peer_event "$events" child-b 30 origin=peer-review
   out="$(peer_prompt "$d" "$project" quiet1 t1)"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "harness child rows must not read as a live peer: $out"
   fi
   assert_not_exists "$project/.oms/hooks/sessions/$(session_digest quiet1).peers.json"
@@ -17966,7 +17973,7 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   : > "$events"
   write_peer_event "$events" peer-old 4000
   out="$(peer_prompt "$d" "$project" quiet2 t1)"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "a stale neighbor row must stay silent: $out"
   fi
 
@@ -17977,7 +17984,7 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   write_peer_event "$events" peer-ended 40
   write_peer_event "$events" peer-ended 5 hook=SessionEnd action=telemetry
   out="$(peer_prompt "$d" "$project" quiet-ended t1)"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "a cleanly ended neighbor must stay silent: $out"
   fi
 
@@ -17985,7 +17992,7 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   : > "$events"
   write_peer_event "$events" peer-live 30
   out="$(peer_prompt "$d" "$project" quiet3 t1 OMS_PEER_ADVISORY=0)"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "OMS_PEER_ADVISORY=0 must silence the advisory: $out"
   fi
 
@@ -17993,7 +18000,7 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   : > "$events"
   write_peer_event "$events" quiet4 30
   out="$(peer_prompt "$d" "$project" quiet4 t1)"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "own session rows must not read as a peer: $out"
   fi
 
@@ -18003,7 +18010,7 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   make_committed_repo "$plain"
   out="$(printf '{"prompt":"이 저장소가 뭐야","session_id":"quiet5","turn_id":"t1","cwd":"%s"}' "$plain" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$d/no-cache" bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "an unadopted repo must not receive the advisory: $out"
   fi
   assert_not_exists "$plain/.oms"
@@ -18031,7 +18038,7 @@ test_session_budget_blocks_once_past_the_turn_cap() {
   out="$(printf '%s' "$stop_payload" | OMS_SESSION_BUDGET_TURNS=2 OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/turn-guard.sh")"
   [ -z "$out" ] || fail "one turn is inside a two-turn budget: $out"
   out="$(printf '%s' "$stop_payload" | OMS_SESSION_BUDGET_TURNS=2 OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/turn-guard.sh")"
-  printf '%s' "$out" | grep -Fq '[oms] session budget: 2 turns' ||
+  contains "$out" '[oms] session budget: 2 turns' ||
     fail "the second stop must hit the budget: $out"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "session_budget"'
   # The continuation Stop after a block, and the same band, stay silent.
@@ -18087,11 +18094,11 @@ test_turn_relay_crosses_between_claude_and_codex() {
   # Codex dispatches through the plugin, whose SessionStart has no turn_id.
   out="$(printf '{"hook_event_name":"SessionStart","session_id":"relay-k1","cwd":"%s"}' "$project" |
     OMS_HOOK_AGENT=codex OMS_CODEX_HOME="$d/codex" bash "$ROOT/scripts/resume-hook.sh")"
-  printf '%s' "$out" | grep -Fq '[oms relay] claude finished a turn' ||
+  contains "$out" '[oms relay] claude finished a turn' ||
     fail "a codex session start must see the claude completion: $out"
   out="$(printf '{"prompt":"status?","session_id":"relay-k1","turn_id":"t2","cwd":"%s"}' "$project" |
     OMS_HOOK_AGENT=codex OMS_CODEX_HOME="$d/codex" OMS_HUD_CACHE_DIR="$d/no-cache" bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms relay]'; then fail "a completion is shown once per session: $out"; fi
+  if contains "$out" '[oms relay]'; then fail "a completion is shown once per session: $out"; fi
 
   stamp="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   printf '{"type":"session_meta","payload":{"cwd":"%s","source":{"subagent":{"other":"guardian"}}}}\n{"timestamp":"%s","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"allow"}}\n' "$project" "$stamp" > "$day/rollout-guard.jsonl"
@@ -18099,9 +18106,9 @@ test_turn_relay_crosses_between_claude_and_codex() {
   touch "$day/rollout-guard.jsonl"
   out="$(printf '{"hook_event_name":"SessionStart","session_id":"relay-c2","cwd":"%s"}' "$project" |
     OMS_CODEX_HOME="$d/codex" bash "$ROOT/scripts/resume-hook.sh")"
-  printf '%s' "$out" | grep -Fq '[oms relay] codex finished a turn ~0m ago: Codex ran the tests.' ||
+  contains "$out" '[oms relay] codex finished a turn ~0m ago: Codex ran the tests.' ||
     fail "a claude session start must see the codex rollout completion, not a guardian's: $out"
-  if printf '%s' "$out" | grep -Fq 'claude finished'; then fail "an agent never sees its own card: $out"; fi
+  if contains "$out" 'claude finished'; then fail "an agent never sees its own card: $out"; fi
 }
 
 
@@ -18568,11 +18575,11 @@ test_resume_hook_prints_bounded_resume_block() {
 
   mkdir -p "$repo/src/nested"
   out="$(printf '{"cwd":"%s/src/nested"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
-  printf '%s' "$out" | grep -Fq 'Ship the resume surface' || fail "nested cwd lost the active task"
+  contains "$out" 'Ship the resume surface' || fail "nested cwd lost the active task"
   [ ! -e "$repo/src/nested/.oms" ] || fail "resume created nested state"
   mkdir -p "$repo/src/nested/.oms"
   out="$(printf '{"cwd":"%s/src/nested"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
-  printf '%s' "$out" | grep -Fq 'Ship the resume surface' || fail "nested state shadowed the repository root"
+  contains "$out" 'Ship the resume surface' || fail "nested state shadowed the repository root"
 
   # Native Windows Python writes CRLF to a pipe. Every value read back into
   # Bash must lose the CR before it participates in path checks or output.
@@ -18635,15 +18642,15 @@ os.utime(path, (time.time() - 600, time.time() - 600))
 (repo / '.oms/handoffs/unrelated.md').write_text('- task_id: different\n')
 PY
   out="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
-  printf '%s' "$out" | grep -Fq 'current task snapshot' || fail "matching handoff was not recognized"
-  printf '%s' "$out" | grep -Fq 'show matching.md' || fail "newer unrelated handoff displaced the active task"
+  contains "$out" 'current task snapshot' || fail "matching handoff was not recognized"
+  contains "$out" 'show matching.md' || fail "newer unrelated handoff displaced the active task"
   (cd "$repo" && "$ROOT/scripts/agent-task.sh" update --next "changed next action" >/dev/null)
   out="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
-  printf '%s' "$out" | grep -Fq 'same task, recheck changed state' || fail "changed packet was treated as current"
+  contains "$out" 'same task, recheck changed state' || fail "changed packet was treated as current"
   (cd "$repo" && "$ROOT/scripts/agent-task.sh" update --goal "$(python3 -c 'print("긴목표" * 2000)')" >/dev/null)
   out="$(printf '{"cwd":"%s"}' "$repo" | OMS_RESUME_MAX_BYTES=512 "$ROOT/scripts/resume-hook.sh")"
   [ "$(printf '%s' "$out" | wc -c)" -le 512 ] || fail "resume byte budget exceeded"
-  printf '%s' "$out" | grep -Fq 'resume truncated' || fail "resume truncation was hidden"
+  contains "$out" 'resume truncated' || fail "resume truncation was hidden"
   printf '%s' "$out" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' || fail "resume split a UTF-8 character"
 }
 
@@ -18719,7 +18726,7 @@ EOF
     OMS_TEST_CODEX_REJECTS_USAGE=1 PATH="$bin:/usr/bin:/bin" \
     "$ROOT/scripts/install-codex-plugin.sh" 2>&1)" ||
     fail "rejected usage keys must not fail the Codex plugin install: $out"
-  printf '%s' "$out" | grep -Fq 'codex-usage: rolled back' ||
+  contains "$out" 'codex-usage: rolled back' ||
     fail "installer should roll back usage keys this codex rejects: $out"
   if grep -Eq 'min_wait_timeout_ms|background_terminal_max_timeout' "$codex_home/config.toml"; then
     fail "rolled-back usage keys are still in the Codex config"
@@ -18827,7 +18834,7 @@ EOF
   if grep -Fq 'oh-my-setting managed Codex HUD' "$codex_home/config.toml"; then
     fail "Codex plugin failure prevented independent managed HUD cleanup"
   fi
-  if printf '%s' "$out" | grep -Fq 'codex-plugin: removed'; then
+  if contains "$out" 'codex-plugin: removed'; then
     fail "Codex plugin removal printed false success"
   fi
 
@@ -19196,7 +19203,7 @@ test_artifact_prune_preserves_fresh_unindexed_file() {
     "$ROOT/scripts/artifact-index.sh" --repo "$d" prune 1 --files)"
   [ -f "$d/.oms/artifacts/fresh.md" ] ||
     fail "artifact pruning must preserve fresh unindexed writer output"
-  printf '%s' "$out" | grep -Fq 'kept 1 recent unindexed file(s)' ||
+  contains "$out" 'kept 1 recent unindexed file(s)' ||
     fail "prune should say why it kept the fresh file: $out"
 }
 
@@ -19231,7 +19238,7 @@ test_oms_run_validate_flags_schema_drift() {
   local out
   out="$(cd "$project" && "$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)" && \
     fail "schema drift must make validate exit nonzero"
-  printf '%s' "$out" | grep -Fq "DRIFT" || fail "validate should tag the drifted family"
+  contains "$out" "DRIFT" || fail "validate should tag the drifted family"
 }
 
 test_oms_list_joins_full_first_sentence() {
@@ -19264,12 +19271,12 @@ test_oms_dispatcher_hints_help_on_misuse() {
   rc=0
   err="$( (cd "$d" && "$bin/oms" agent-plan frobnicate) 2>&1 >/dev/null )" || rc=$?
   [ "$rc" -eq 2 ] || fail "usage misuse through oms should exit 2, got $rc"
-  printf '%s' "$err" | grep -Fq "oms agent-plan --help" ||
+  contains "$err" "oms agent-plan --help" ||
     fail "dispatcher should hint at --help on a usage error"
   # Success paths stay hint-free.
   err="$( (cd "$d" && "$bin/oms" state) 2>&1 >/dev/null )" ||
     fail "state should succeed"
-  if printf '%s' "$err" | grep -Fq "hint:"; then
+  if contains "$err" "hint:"; then
     fail "dispatcher must not hint on success"
   fi
 }
@@ -19386,7 +19393,7 @@ test_project_private_hides_agent_files_from_git() {
   out="$("$ROOT/scripts/project-private.sh" --repo "$project" status)"
   printf '%s' "$out" | grep -q '^hidden  *AGENTS.md$' ||
     fail "status should report AGENTS.md hidden: $out"
-  printf '%s' "$out" | grep -Fq 'no agent files exposed' ||
+  contains "$out" 'no agent files exposed' ||
     fail "status summary should report nothing exposed: $out"
   "$ROOT/scripts/project-private.sh" --repo "$project" status --check >/dev/null ||
     fail "--check should pass once the agent files are hidden"
@@ -19421,7 +19428,7 @@ test_project_private_opt_out_leaves_files_visible() {
   make_committed_repo "$project"
   "$ROOT/scripts/apply-project-template.sh" general "$project" --no-private >/dev/null
   out="$(git -C "$project" status --porcelain)"
-  printf '%s' "$out" | grep -Fq 'AGENTS.md' ||
+  contains "$out" 'AGENTS.md' ||
     fail "--no-private should leave AGENTS.md visible to git"
 
   if "$ROOT/scripts/project-private.sh" --repo "$project" status --check >/dev/null; then
@@ -19469,7 +19476,7 @@ test_project_private_leaves_tracked_agent_file_alone() {
   git -C "$project" -c user.email=t@example.com -c user.name=t commit -qm agents >/dev/null
 
   out="$("$ROOT/scripts/project-private.sh" --repo "$project" apply)"
-  printf '%s' "$out" | grep -Fq 'tracked (left alone;' ||
+  contains "$out" 'tracked (left alone;' ||
     fail "apply should report the tracked file instead of hiding it: $out"
   git -C "$project" ls-files --error-unmatch AGENTS.md >/dev/null 2>&1 ||
     fail "apply must never untrack a committed agent file on its own"
@@ -19477,7 +19484,7 @@ test_project_private_leaves_tracked_agent_file_alone() {
     fail "a deliberately tracked file is not an exposure"
 
   out="$("$ROOT/scripts/project-private.sh" --repo "$project" apply --untrack)"
-  printf '%s' "$out" | grep -Fq 'untracked AGENTS.md' ||
+  contains "$out" 'untracked AGENTS.md' ||
     fail "--untrack should stage the index removal: $out"
   [ -f "$project/AGENTS.md" ] || fail "--untrack must keep the file on disk"
   git -C "$project" diff --cached --name-only | grep -Fq 'AGENTS.md' ||
@@ -19519,13 +19526,13 @@ test_project_doctor_flags_exposed_agent_files() {
   "$ROOT/scripts/apply-project-template.sh" general "$project" --no-private >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "exposed agent files should warn, not fail: $out"
-  printf '%s' "$out" | grep -Fq 'agent files visible to git' ||
+  contains "$out" 'agent files visible to git' ||
     fail "doctor should warn about agent files visible to git: $out"
 
   "$ROOT/scripts/project-private.sh" --repo "$project" apply >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "doctor should pass once agent files are hidden: $out"
-  printf '%s' "$out" | grep -Fq 'agent files hidden from git' ||
+  contains "$out" 'agent files hidden from git' ||
     fail "doctor should confirm the agent files are hidden: $out"
 }
 
@@ -19561,16 +19568,16 @@ test_oms_init_reports_missing_project_rules() {
 
   make_committed_repo "$project"
   out="$("$ROOT/scripts/init.sh" --repo "$project")" || fail "oms init should succeed"
-  printf '%s' "$out" | grep -Fq 'rules=missing' ||
+  contains "$out" 'rules=missing' ||
     fail "oms init should report missing project rules: $out"
-  printf '%s' "$out" | grep -Fq 'No project rules yet' ||
+  contains "$out" 'No project rules yet' ||
     fail "oms init should name applying a template as the next action: $out"
 
   "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
   out="$("$ROOT/scripts/init.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'rules=present' ||
+  contains "$out" 'rules=present' ||
     fail "oms init should see applied rules: $out"
-  printf '%s' "$out" | grep -Fq 'spec=draft' ||
+  contains "$out" 'spec=draft' ||
     fail "oms init should report the PROJECT.md state: $out"
 
   # A hand-written AGENTS.md is not an oh-my-setting harness.
@@ -19578,7 +19585,7 @@ test_oms_init_reports_missing_project_rules() {
   make_committed_repo "$plain"
   printf '# my own rules\n' > "$plain/AGENTS.md"
   out="$("$ROOT/scripts/init.sh" --repo "$plain")"
-  printf '%s' "$out" | grep -Fq 'rules=missing' ||
+  contains "$out" 'rules=missing' ||
     fail "a file without a managed block is not applied rules: $out"
 }
 
@@ -19590,9 +19597,9 @@ test_oms_init_registers_repo_with_tick() {
 
   make_committed_repo "$project"
   out="$("$ROOT/scripts/init.sh" --repo "$project")" || fail "oms init should succeed"
-  printf '%s' "$out" | grep -Fq 'tick registry registered' || fail "init should register the repo: $out"
+  contains "$out" 'tick registry registered' || fail "init should register the repo: $out"
   out="$("$ROOT/scripts/init.sh" --repo "$project")" || fail "init must be idempotent"
-  printf '%s' "$out" | grep -Fq 'tick registry already registered' || fail "a second init reports the existing entry: $out"
+  contains "$out" 'tick registry already registered' || fail "a second init reports the existing entry: $out"
   [ "$(grep -Fxc "$project" "$registry")" = 1 ] || fail "the registry must hold the repo exactly once"
 
   # A regular file as the registry's parent is unwritable for every test user.
@@ -19602,7 +19609,7 @@ test_oms_init_registers_repo_with_tick() {
     fail "init should tolerate an unwritable tick registry"
   [ -f "$blocked_project/.oms/.gitignore" ] ||
     fail "init should seed state when tick registration fails"
-  printf '%s' "$out" | grep -Fq 'tick registry not registered' ||
+  contains "$out" 'tick registry not registered' ||
     fail "init should report a failed tick registration: $out"
 }
 
@@ -19619,7 +19626,7 @@ test_oms_init_hides_agent_files_after_a_late_git_init() {
     fail "precondition: agent files should start exposed after a late git init"
 
   out="$("$ROOT/scripts/init.sh" --repo "$project")" || fail "oms init should succeed"
-  printf '%s' "$out" | grep -Fq 'hid the agent files from git' ||
+  contains "$out" 'hid the agent files from git' ||
     fail "oms init should report hiding the agent files: $out"
   out="$(git -C "$project" status --porcelain)"
   [ -z "$out" ] || fail "oms init should leave nothing visible to git, got: $out"
@@ -19637,22 +19644,22 @@ test_repo_state_reports_the_project_harness() {
 
   make_committed_repo "$project"
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'Project harness: none' ||
+  contains "$out" 'Project harness: none' ||
     fail "a repo with no harness should say so: $out"
 
   "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'rules: general' ||
+  contains "$out" 'rules: general' ||
     fail "state should report the applied styles: $out"
-  printf '%s' "$out" | grep -Fq 'spec: PROJECT.md draft' ||
+  contains "$out" 'spec: PROJECT.md draft' ||
     fail "state should report the spec state: $out"
-  if printf '%s' "$out" | grep -Fq 'visible to git'; then
+  if contains "$out" 'visible to git'; then
     fail "hidden agent files should not be reported as visible"
   fi
 
   "$ROOT/scripts/project-private.sh" --repo "$project" remove >/dev/null
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'visible to git (run: oms project-private apply)' ||
+  contains "$out" 'visible to git (run: oms project-private apply)' ||
     fail "state should surface exposed agent files: $out"
 
   "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
@@ -19673,9 +19680,9 @@ test_repo_state_does_not_nag_about_hand_written_rules() {
   make_committed_repo "$project"
   printf '# hand-written rules\n' > "$project/AGENTS.md"
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'hand-written (no oh-my-setting block)' ||
+  contains "$out" 'hand-written (no oh-my-setting block)' ||
     fail "state should report hand-written agent rules as such: $out"
-  if printf '%s' "$out" | grep -Fq 'apply-project-template'; then
+  if contains "$out" 'apply-project-template'; then
     fail "state must not push a template onto a repo with its own agent rules"
   fi
   "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
@@ -19700,7 +19707,7 @@ test_remove_project_template_reports_the_leftover_exclusion() {
   # tell a real regression from the known parallel-load flake class.
   apply_out="$("$ROOT/scripts/apply-project-template.sh" general "$project" 2>&1)"
   out="$("$ROOT/scripts/remove-project-template.sh" all "$project")"
-  printf '%s' "$out" | grep -Fq "'oms project-private remove' undoes that" ||
+  contains "$out" "'oms project-private remove' undoes that" ||
     fail "removing the template should mention the leftover git exclusion: $out
 --- apply-project-template said ---
 $apply_out
@@ -19709,7 +19716,7 @@ $(cat "$project/.git/info/exclude" 2>&1)"
 
   "$ROOT/scripts/project-private.sh" --repo "$project" remove >/dev/null
   out="$("$ROOT/scripts/remove-project-template.sh" all "$project")"
-  if printf '%s' "$out" | grep -Fq 'project-private remove'; then
+  if contains "$out" 'project-private remove'; then
     fail "with no exclusion left there is nothing to report"
   fi
 }
@@ -19733,9 +19740,9 @@ test_agent_thread_records_a_cross_agent_conversation() {
 
   # The point of a thread: one context that carries every provider's answer.
   out="$("$ROOT/scripts/thread.sh" --repo "$project" context)"
-  printf '%s' "$out" | grep -Fq 'map-style; shard by file' ||
+  contains "$out" 'map-style; shard by file' ||
     fail "context should carry the first answer: $out"
-  printf '%s' "$out" | grep -Fq 'watch DDP worker duplication' ||
+  contains "$out" 'watch DDP worker duplication' ||
     fail "context should carry the second provider's answer: $out"
   # Replayed answers are another model's bytes entering a new seat's prompt:
   # they ride the metadata-generated spotlight (mechanism existence, the
@@ -19884,17 +19891,17 @@ test_agent_thread_truncates_and_bounds_context() {
     i=$((i + 1))
   done
   out="$("$ROOT/scripts/thread.sh" --repo "$project" --id big context --turns 2)"
-  printf '%s' "$out" | grep -Fq 'turn number 5' ||
+  contains "$out" 'turn number 5' ||
     fail "context should keep the newest turns: $out"
-  if printf '%s' "$out" | grep -Fq 'turn number 0'; then
+  if contains "$out" 'turn number 0'; then
     fail "context should drop older turns beyond --turns"
   fi
-  printf '%s' "$out" | grep -Fq 'earlier turn(s) omitted' ||
+  contains "$out" 'earlier turn(s) omitted' ||
     fail "context should say how much it dropped: $out"
   "$ROOT/scripts/thread.sh" --repo "$project" --id big append --role answer --text 'SEAT-ANSWER-NOT-NOTE' >/dev/null
   "$ROOT/scripts/thread.sh" --repo "$project" --id big append --role note --provider codex --text 'FAILED-SEAT-NOT-COORDINATOR' >/dev/null
   out="$("$ROOT/scripts/thread.sh" --repo "$project" --id big context --notes-only --turns 2)"
-  printf '%s' "$out" | grep -Fq 'turn number 5' || fail 'note view lost coordinator input'
+  contains "$out" 'turn number 5' || fail 'note view lost coordinator input'
   if printf '%s' "$out" | grep -Eq 'SEAT-ANSWER|FAILED-SEAT'; then fail 'note view repeated seat output'; fi
   python3 -c 'print("한글 대화 " * 1000)' > "$TMP/thread-big.txt"
   OMS_THREAD_TURN_BYTES=20000 "$ROOT/scripts/thread.sh" --repo "$project" --id big \
@@ -19934,9 +19941,9 @@ test_agent_call_threads_the_exchange() {
     fail "the injected context should contain the earlier question"
 
   out="$("$ROOT/scripts/thread.sh" --repo "$project" --id work show)"
-  printf '%s' "$out" | grep -Fq 'first question' ||
+  contains "$out" 'first question' ||
     fail "the question should be recorded: $out"
-  printf '%s' "$out" | grep -Fq 'answer' ||
+  contains "$out" 'answer' ||
     fail "the answer should be recorded: $out"
 
   # Panel consultations can record the current question before dispatch.
@@ -19966,7 +19973,7 @@ test_consult_asks_a_peer_and_keeps_the_thread() {
     OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
     "$ROOT/scripts/consult.sh" --repo "$project" "which split policy?" --quiet)" ||
     fail "consult should succeed: $out"
-  printf '%s' "$out" | grep -Fq 'thread: ' || fail "consult should report its thread: $out"
+  contains "$out" 'thread: ' || fail "consult should report its thread: $out"
 
   id="$("$ROOT/scripts/thread.sh" --repo "$project" current)"
   [ -n "$id" ] || fail "consult should leave a current thread"
@@ -20004,7 +20011,7 @@ test_consult_rejects_conflicting_targets() {
   fi
   out="$(OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/consult.sh" --repo "$project" \
     --to agy --to antigravity "x" 2>&1 || true)"
-  printf '%s' "$out" | grep -Fq 'duplicate target: antigravity' ||
+  contains "$out" 'duplicate target: antigravity' ||
     fail "agy and antigravity must not count as two consultation targets"
 }
 
@@ -20021,9 +20028,9 @@ test_repo_state_and_gc_cover_threads() {
     --summary "resolved" >/dev/null
 
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'Cross-agent threads' ||
+  contains "$out" 'Cross-agent threads' ||
     fail "state should surface open threads: $out"
-  printf '%s' "$out" | grep -Fq 'keep-open' ||
+  contains "$out" 'keep-open' ||
     fail "state should name the open thread: $out"
   "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
 import json, sys
@@ -20080,12 +20087,12 @@ for tid, ts in (("abandoned", "2001-01-01T00:00:00Z"), ("undatable", "whenever")
 PY
 
   out="$("$ROOT/scripts/thread.sh" --repo "$project" list --stale)"
-  printf '%s' "$out" | grep -Fq 'oms thread close --id abandoned' ||
+  contains "$out" 'oms thread close --id abandoned' ||
     fail "--stale should print the exact close command per thread: $out"
-  if printf '%s' "$out" | grep -Fq 'undatable'; then
+  if contains "$out" 'undatable'; then
     fail "a thread with no parseable timestamp must never be stale: $out"
   fi
-  if printf '%s' "$out" | grep -Fq 'close --id live'; then
+  if contains "$out" 'close --id live'; then
     fail "the current thread must never be reported stale: $out"
   fi
 
@@ -20113,12 +20120,12 @@ t = json.load(sys.stdin)["threads"]
 assert t["open"] == 3 and t["stale_open"] == 1, t
 ' || fail "repo-state should separate stale open threads from the total"
   out="$("$ROOT/scripts/inbox.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'oms thread list --stale' ||
+  contains "$out" 'oms thread list --stale' ||
     fail "inbox should point at the stale triage: $out"
   printf '%s' "$out" | grep -Eq '1 open cross-agent thread' ||
     fail "inbox should count only stale threads: $out"
   out="$(OMS_THREAD_ATTENTION=0 "$ROOT/scripts/inbox.sh" --repo "$project")"
-  if printf '%s' "$out" | grep -Fq 'thread'; then
+  if contains "$out" 'thread'; then
     fail "OMS_THREAD_ATTENTION=0 should drop the thread advisory: $out"
   fi
 
@@ -20196,32 +20203,32 @@ test_task_verification_is_bound_to_repo_state() {
     --verify "true" >/dev/null )
 
   out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
-  printf '%s' "$out" | grep -Fq 'verification: none' ||
+  contains "$out" 'verification: none' ||
     fail "an unverified task should report verification: none: $out"
 
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
   out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
-  printf '%s' "$out" | grep -Fq 'verification: fresh' ||
+  contains "$out" 'verification: fresh' ||
     fail "a passing verify should be fresh: $out"
 
   # The whole point: a green status must not survive a change to the tree it
   # was green on.
   printf 'changed\n' >> "$project/file.txt"
   out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
-  printf '%s' "$out" | grep -Fq 'verification: stale' ||
+  contains "$out" 'verification: stale' ||
     fail "editing a tracked file should make verification stale: $out"
 
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
   printf 'untracked\n' > "$project/new-file.txt"
   out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
-  printf '%s' "$out" | grep -Fq 'verification: stale' ||
+  contains "$out" 'verification: stale' ||
     fail "a new untracked file should make verification stale: $out"
 
   # A rewritten contract is a different contract, even with an unchanged tree.
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" update --verify "true # different" >/dev/null )
   out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
-  printf '%s' "$out" | grep -Fq 'verification: stale' ||
+  contains "$out" 'verification: stale' ||
     fail "changing the verify command should make verification stale: $out"
 
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" status --json ) | python3 -c '
@@ -20254,7 +20261,7 @@ test_task_close_refuses_a_false_green() {
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" close --reason "abandoned for a different approach" >/dev/null ) ||
     fail "--reason should allow closing without fresh verification"
   out="$(cat "$project"/.oms/task/archive/*.md)"
-  printf '%s' "$out" | grep -Fq 'closed without fresh verification' ||
+  contains "$out" 'closed without fresh verification' ||
     fail "the override should be recorded in the archived packet: $out"
 
   # Re-verified tasks close without ceremony, and a packet with no verification
@@ -20280,9 +20287,9 @@ test_repo_state_flags_ci_recorded_for_another_commit() {
     "$old" > "$project/.oms/ci.jsonl"
 
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'STALE' ||
+  contains "$out" 'STALE' ||
     fail "CI recorded for another commit should be marked stale: $out"
-  printf '%s' "$out" | grep -Fq 'oms state --refresh-ci' ||
+  contains "$out" 'oms state --refresh-ci' ||
     fail "state should name the refresh command: $out"
   "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
 import json, sys
@@ -20294,7 +20301,7 @@ assert ci["current_sha"], ci
   printf '{"schema":1,"ts":"2026-07-21T00:00:00Z","branch":"main","sha":"%s","status":"completed","conclusion":"success"}\n' \
     "$head" >> "$project/.oms/ci.jsonl"
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  if printf '%s' "$out" | grep -Fq 'STALE'; then
+  if contains "$out" 'STALE'; then
     fail "CI recorded for HEAD must not be marked stale: $out"
   fi
   "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
@@ -20327,7 +20334,7 @@ test_answer_quality_fails_closed_without_its_helper() {
   err="$(cat "$dir/err")"
   [ "$verdict" = blocked ] ||
     fail "a missing answer-quality helper must not read as a real answer: $verdict"
-  printf '%s' "$err" | grep -Fq 'answer-quality helper is missing' ||
+  contains "$err" 'answer-quality helper is missing' ||
     fail "the missing helper must be named on stderr: $err"
 }
 
@@ -20514,7 +20521,7 @@ EOF
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" \
     "which loader?" --quiet 2>&1)" || fail "consult should recover: $out"
-  printf '%s' "$out" | grep -Fq 'did not really answer (blocked); asking antigravity' ||
+  contains "$out" 'did not really answer (blocked); asking antigravity' ||
     fail "consult should report the fallback: $out"
 
   "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
@@ -20602,7 +20609,7 @@ EOF
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" --to codex \
     "which loader?" --quiet 2>&1)" || true
-  if printf '%s' "$out" | grep -Fq 'asking antigravity'; then
+  if contains "$out" 'asking antigravity'; then
     fail "an explicitly pinned peer must not be second-guessed: $out"
   fi
   "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
@@ -20658,23 +20665,23 @@ PY
   git -C "$project" apply --binary "$patch"
 
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'Interrupted landings (1)' ||
+  contains "$out" 'Interrupted landings (1)' ||
     fail "state should show the outstanding landing: $out"
 
   out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)"
-  printf '%s' "$out" | grep -Fq 'recovered land-crash' ||
+  contains "$out" 'recovered land-crash' ||
     fail "recovery should finish an applied landing: $out"
   grep -Fq 'patch-land' "$project/.oms/artifacts/index.jsonl" ||
     fail "recovery should record the missing lineage row"
 
   # Idempotent: a second pass must not re-apply or re-record anything.
   out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)"
-  printf '%s' "$out" | grep -Fq '0 recovered, 0 abandoned' ||
+  contains "$out" '0 recovered, 0 abandoned' ||
     fail "recovery must be idempotent: $out"
   [ "$(grep -c 'patch-land' "$project/.oms/artifacts/index.jsonl")" = "1" ] ||
     fail "recovery must not duplicate the lineage row"
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  if printf '%s' "$out" | grep -Fq 'Interrupted landings'; then
+  if contains "$out" 'Interrupted landings'; then
     fail "a recovered landing should no longer be outstanding: $out"
   fi
 }
@@ -20700,7 +20707,7 @@ PY
     "$patch" "$patch_sha" "$base_sha" > "$project/.oms/landings.jsonl"
 
   out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)"
-  printf '%s' "$out" | grep -Fq 'never applied' ||
+  contains "$out" 'never applied' ||
     fail "recovery should mark an unapplied landing abandoned: $out"
   # Recovery is bookkeeping: it must never apply the patch itself.
   [ "$(git -C "$project" status --porcelain -- file.txt)" = "" ] ||
@@ -20727,15 +20734,15 @@ test_state_validator_rejects_parseable_but_invalid_state() {
   rc=0
   out="$("$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)" || rc=$?
   [ "$rc" = 1 ] || fail "invalid state should exit 1, got $rc"
-  printf '%s' "$out" | grep -Fq "missing required field 'run_id'" ||
+  contains "$out" "missing required field 'run_id'" ||
     fail "a spine row without run_id should be flagged: $out"
-  printf '%s' "$out" | grep -Fq "unknown thread role 'bogus'" ||
+  contains "$out" "unknown thread role 'bogus'" ||
     fail "an unknown thread role should be flagged: $out"
-  printf '%s' "$out" | grep -Fq "event='weird' is not one of" ||
+  contains "$out" "event='weird' is not one of" ||
     fail "an unknown landing event should be flagged: $out"
-  printf '%s' "$out" | grep -Fq "depends on missing task 'ghost'" ||
+  contains "$out" "depends on missing task 'ghost'" ||
     fail "a dangling plan dependency should be flagged: $out"
-  printf '%s' "$out" | grep -Fq "task b has unknown state 'nonsense'" ||
+  contains "$out" "task b has unknown state 'nonsense'" ||
     fail "an unknown plan state should be flagged: $out"
 }
 
@@ -20791,7 +20798,7 @@ EOF
     fail "antigravity call should succeed"
 
   seen="$(cat "$home_dir/agy-received" 2>/dev/null || true)"
-  printf '%s' "$seen" | grep -Fq 'UNIQUE-PROMPT-MARKER' ||
+  contains "$seen" 'UNIQUE-PROMPT-MARKER' ||
     fail "antigravity must receive the composed prompt, got: $seen"
   if printf '%s' "$seen" | grep -Fqx -- '--sandbox'; then
     fail "the flag after --print must not become the prompt"
@@ -20825,7 +20832,7 @@ EOF
   [ "$(printf '%s\n' "$out" | grep -c 'Shard by file for streaming inputs')" = 3 ] ||
     fail "all three panel answers must remain visible exactly once: $out"
 
-  printf '%s' "$out" | grep -Fq '3/3 target(s) answered, 2 independent model family(ies)' ||
+  contains "$out" '3/3 target(s) answered, 2 independent model family(ies)' ||
     fail "the panel should report answers and independent families: $out"
 
   "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
@@ -20862,9 +20869,9 @@ EOF
     --to codex:model=gpt-5.6-sol --to codex:model=gpt-5.6-luna \
     "which loader?" --quiet 2>&1)" ||
     fail "same-family panel should still succeed: $out"
-  printf '%s' "$out" | grep -Fq '1 independent model family' ||
+  contains "$out" '1 independent model family' ||
     fail "family count should collapse for one provider: $out"
-  printf '%s' "$out" | grep -Fq 'treat agreement as one opinion, not corroboration' ||
+  contains "$out" 'treat agreement as one opinion, not corroboration' ||
     fail "same-family agreement must not be sold as corroboration: $out"
 
   if "$ROOT/scripts/consult.sh" --repo "$project" --to codex:huge "x" >/dev/null 2>&1; then
@@ -20939,7 +20946,7 @@ test_patch_land_completes_only_when_its_records_land() {
   out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] ||
     fail "an applied patch with missing receipts must not report terminal success: $out"
-  printf '%s' "$out" | grep -Fq 'records are incomplete' ||
+  contains "$out" 'records are incomplete' ||
     fail "an unwritable lineage row must be reported: $out"
   python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "a land with missing records must not be complete"
 import json, sys
@@ -20975,7 +20982,7 @@ test_patch_land_refuses_a_tree_that_moved_during_admission() {
   out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" \
     --verify "git -C $project -c user.email=t@example.com -c user.name=t commit --allow-empty -q -m concurrent" 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "landing onto a moved tree should fail: $out"
-  printf '%s' "$out" | grep -Fq 'tree moved during admission' ||
+  contains "$out" 'tree moved during admission' ||
     fail "the refusal should name the race: $out"
   [ "$(git -C "$project" status --porcelain -- file.txt)" = "" ] ||
     fail "nothing should have been applied"
@@ -21014,11 +21021,11 @@ test_peer_ask_panel_spans_providers_and_tiers() {
     --prompt "is this safe?" 2>&1)" ||
     fail "a model panel council should succeed: $out"
 
-  printf '%s' "$out" | grep -Fq 'summary: 4/4 providers succeeded' ||
+  contains "$out" 'summary: 4/4 providers succeeded' ||
     fail "two providers at two models each should be four calls: $out"
   # Agreement across models of one CLI is replication; the count must say how
   # many independent families actually answered.
-  printf '%s' "$out" | grep -Fq 'families: 2 independent model family(ies) answered' ||
+  contains "$out" 'families: 2 independent model family(ies) answered' ||
     fail "the council should report independent families: $out"
 
   # Each target needs its own artifact, or a panel overwrites its own answers.
@@ -21047,9 +21054,9 @@ test_peer_ask_panel_warns_on_one_family_and_rejects_repeats() {
     --providers codex:model=gpt-5.6-sol,codex:model=gpt-5.6-luna \
     --prompt "is this safe?" 2>&1)" ||
     fail "a single-provider panel should still succeed: $out"
-  printf '%s' "$out" | grep -Fq 'families: 1 independent model family(ies) answered' ||
+  contains "$out" 'families: 1 independent model family(ies) answered' ||
     fail "one provider at two models is one family: $out"
-  printf '%s' "$out" | grep -Fq 'treat agreement as replication, not corroboration' ||
+  contains "$out" 'treat agreement as replication, not corroboration' ||
     fail "same-family agreement must be labelled: $out"
 
   # The same target twice is one voice counted twice, whatever the spelling.
@@ -21085,9 +21092,9 @@ test_peer_review_panel_reports_families() {
     --providers codex:model=gpt-5.6-sol,codex:model=gpt-5.6-terra,antigravity:model=gemini-3.6-flash,antigravity:model=gemini-3.5-flash \
     --prompt "review this diff" 2>&1)" ||
     fail "a model-panel review should succeed: $out"
-  printf '%s' "$out" | grep -Fq 'summary: 4/4 providers succeeded' ||
+  contains "$out" 'summary: 4/4 providers succeeded' ||
     fail "the review panel should run every target: $out"
-  printf '%s' "$out" | grep -Fq 'families: 2 independent model family(ies) answered' ||
+  contains "$out" 'families: 2 independent model family(ies) answered' ||
     fail "the review panel should report families: $out"
 }
 
@@ -21247,9 +21254,9 @@ test_peer_review_verdicts_name_a_blocked_provider() {
 
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/run")" && rc=0 || rc=$?
   [ "$rc" = "2" ] || fail "a missing verdict must still fail the gate, got $rc"
-  printf '%s' "$out" | grep -Fq 'codex: no-verdict (blocked: add an allow-rule for the read tool' ||
+  contains "$out" 'codex: no-verdict (blocked: add an allow-rule for the read tool' ||
     fail "a gate failure should say what the operator has to fix: $out"
-  printf '%s' "$out" | grep -Fq 'claude: no-verdict (complete but no GATE line)' ||
+  contains "$out" 'claude: no-verdict (complete but no GATE line)' ||
     fail "a provider that merely omitted the line keeps the plain message: $out"
 }
 
@@ -21276,9 +21283,9 @@ EOF
     OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
     --to codex --prompt x --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "a worker writing to the primary tree should fail a strict run: $out"
-  printf '%s' "$out" | grep -Fq 'changed protected state outside its worktree: tracked' ||
+  contains "$out" 'changed protected state outside its worktree: tracked' ||
     fail "the violation should name the surface: $out"
-  printf '%s' "$out" | grep -Fq 'worktree kept at' ||
+  contains "$out" 'worktree kept at' ||
     fail "the evidence worktree should be preserved: $out"
 
   # Detection, not prevention: say so by leaving the write visible.
@@ -21309,7 +21316,7 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
     --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "config and hook tampering should fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'config' ||
+  contains "$out" 'config' ||
     fail "local git config changes should be named: $out"
   printf '%s' "$out" | grep -Eq 'hooks|execution-state' ||
     fail "an installed hook/config mutation should name the earliest boundary: $out"
@@ -21333,7 +21340,7 @@ EOF
       "$ROOT/scripts/peer-delegate.sh" --repo "$p" --to codex --prompt x \
       --no-verify 2>&1)" || rc=$?
     [ "$rc" != 0 ] || fail "a non-tracking config delta must fail the run ($p): $out"
-    printf '%s' "$out" | grep -Fq 'execution-state' ||
+    contains "$out" 'execution-state' ||
       fail "a non-tracking config delta should name execution-state ($p): $out"
   done
 }
@@ -21403,7 +21410,7 @@ EOF
       --to codex --prompt x --no-verify 2>&1)" || rc=$?
     [ "$rc" != 0 ] || fail "$mode execution config mutation passed: $out"
     [ ! -e "$marker" ] || fail "$mode command executed during post-worker capture"
-    printf '%s' "$out" | grep -Fq 'execution-state' ||
+    contains "$out" 'execution-state' ||
       fail "$mode did not name the raw execution-state boundary: $out"
     # Restore raw trusted bytes without asking Git to parse hostile config.
     cp "$base_config" "$project/.git/config"
@@ -21440,7 +21447,7 @@ EOF
     --to codex --prompt x --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "linked-worktree execution config mutation passed: $out"
   [ ! -e "$marker" ] || fail "linked-worktree fsmonitor ran during patch capture"
-  printf '%s' "$out" | grep -Fq 'execution-state' ||
+  contains "$out" 'execution-state' ||
     fail "linked config violation did not name the boundary: $out"
 }
 
@@ -21486,7 +21493,7 @@ EOF
     fail "primary tracked mutation should fail strict delegation: $out"
   [ ! -e "$marker" ] ||
     fail "delegate patch or protected-surface capture executed a global filter"
-  printf '%s' "$out" | grep -Fq 'outside its worktree: tracked' ||
+  contains "$out" 'outside its worktree: tracked' ||
     fail "raw protected-surface capture lost the primary mutation: $out"
 }
 
@@ -21519,7 +21526,7 @@ EOF
     --repair 1 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "verifier execution config mutation passed: $out"
   [ ! -e "$marker" ] || fail "verifier-planted diff.external ran before repair"
-  printf '%s' "$out" | grep -Fq 'execution-state' ||
+  contains "$out" 'execution-state' ||
     fail "verifier config violation did not name the boundary: $out"
 }
 
@@ -21543,7 +21550,7 @@ EOF
     OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
     --to codex --prompt x --no-verify 2>&1)" ||
     fail "ordinary worker staging should remain valid: $out"
-  if printf '%s' "$out" | grep -Fq 'execution-state'; then
+  if contains "$out" 'execution-state'; then
     fail "ordinary staged index bytes were treated as hidden authority: $out"
   fi
 }
@@ -21578,7 +21585,7 @@ EOF
     --to codex --prompt x --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "worker hidden index/config mutation passed: $out"
   [ ! -e "$marker" ] || fail "hidden-index companion command ran during capture"
-  printf '%s' "$out" | grep -Fq 'execution-state' ||
+  contains "$out" 'execution-state' ||
     fail "hidden index mutation did not name raw boundary: $out"
 }
 
@@ -21602,7 +21609,7 @@ EOF
     --prompt x --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "strict delegation accepted initial fsmonitor config"
   [ ! -e "$marker" ] || fail "strict preflight executed initial fsmonitor"
-  printf '%s' "$out" | grep -Fq 'unsafe Git execution config' ||
+  contains "$out" 'unsafe Git execution config' ||
     fail "strict preflight did not explain unsafe config: $out"
 
   # extensions.worktreeConfig places main-worktree config in
@@ -21617,7 +21624,7 @@ EOF
     --prompt x --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "strict delegation accepted main config.worktree"
   [ ! -e "$marker" ] || fail "strict preflight executed main config.worktree"
-  printf '%s' "$out" | grep -Fq 'unsafe Git execution config' ||
+  contains "$out" 'unsafe Git execution config' ||
     fail "main config.worktree refusal was unclear: $out"
 }
 
@@ -21733,7 +21740,7 @@ EOF
     fail "patch admission with a normal hooksPath should succeed: $out"
   [ ! -e "$marker" ] ||
     fail "admission worktree lifecycle executed a checkout hook or global filter"
-  printf '%s' "$out" | grep -Fq 'patch-admit: ADMIT' ||
+  contains "$out" 'patch-admit: ADMIT' ||
     fail "hook-suppression fixture did not reach an admitted verdict: $out"
 }
 
@@ -21746,7 +21753,7 @@ test_write_post_attempt_guard_rejects_an_injected_callback() {
     ma_write_post_attempt_guard write" 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "injected post-attempt callback was accepted"
   [ ! -e "$marker" ] || fail "post-attempt callback string was evaluated"
-  printf '%s' "$out" | grep -Fq 'invalid write post-attempt guard function' ||
+  contains "$out" 'invalid write post-attempt guard function' ||
     fail "invalid callback refusal was unclear: $out"
 }
 
@@ -21789,7 +21796,7 @@ EOF
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
     --no-verify 2>&1)" || fail "a worktree-only worker should pass: $out"
-  if printf '%s' "$out" | grep -Fq 'changed protected state'; then
+  if contains "$out" 'changed protected state'; then
     fail "a worker staying in its worktree must not be flagged: $out"
   fi
   [ -s "$(printf '%s' "$out" | sed -n 's/^patch: //p' | head -1)" ] ||
@@ -21820,9 +21827,9 @@ EOF
     --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "a worker commit must not turn into an empty successful delegation: $out"
-  printf '%s' "$out" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$out" 'outside its worktree: gitmeta' ||
     fail "the worker's own HEAD mutation should be a gitmeta violation: $out"
-  printf '%s' "$out" | grep -Fq 'nothing from this run should be landed' ||
+  contains "$out" 'nothing from this run should be landed' ||
     fail "the failed commit must explicitly block landing: $out"
   if printf '%s\n' "$out" | grep -q '^patch: '; then
     fail "a worker commit must not be returned as an empty successful patch: $out"
@@ -21857,7 +21864,7 @@ EOF
     --verify ": > '$verify_marker'" 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "a replaced worktree pathname must fail before capture or verify: $out"
-  printf '%s' "$out" | grep -Fq 'delegated worktree identity changed' ||
+  contains "$out" 'delegated worktree identity changed' ||
     fail "the changed worktree identity should be named: $out"
   [ ! -e "$verify_marker" ] ||
     fail "verification ran after the delegated worktree identity changed"
@@ -21868,7 +21875,7 @@ EOF
 
   registered="$(git -C "$project" worktree list --porcelain | grep -c '^worktree ' || true)"
   if [ "${registered:-0}" -gt 1 ]; then
-    printf '%s' "$out" | grep -Fq 'preserved for inspection' ||
+    contains "$out" 'preserved for inspection' ||
       fail "a registration that could not be removed safely was left without recovery guidance: $out"
   fi
 }
@@ -21901,7 +21908,7 @@ EOF
     --verify ": > '$verify_marker'" 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "a same-path replacement with copied backpointer bytes must fail: $out"
-  printf '%s' "$out" | grep -Fq 'delegated worktree identity changed' ||
+  contains "$out" 'delegated worktree identity changed' ||
     fail "the changed checkout inode should be named as an identity violation: $out"
   [ ! -e "$verify_marker" ] ||
     fail "verification ran after the delegated checkout inode changed"
@@ -21938,7 +21945,7 @@ EOF
     --verify ": > '$verify_marker'" 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "a same-path gitdir replacement with copied bytes must fail: $out"
-  printf '%s' "$out" | grep -Fq 'delegated worktree identity changed' ||
+  contains "$out" 'delegated worktree identity changed' ||
     fail "the changed gitdir inode should be named as an identity violation: $out"
   [ ! -e "$verify_marker" ] ||
     fail "verification ran after the delegated gitdir inode changed"
@@ -21982,7 +21989,7 @@ EOF
     --verify "bash '$verifier'" 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "a pathname replaced by candidate verification must fail the final guard: $out"
-  printf '%s' "$out" | grep -Fq 'delegated worktree identity changed before final worker guard' ||
+  contains "$out" 'delegated worktree identity changed before final worker guard' ||
     fail "the final guard did not name the post-verify identity change: $out"
   git -C "$project" diff --quiet HEAD -- ||
     fail "post-verify identity failure changed the primary worktree"
@@ -21990,7 +21997,7 @@ EOF
     fail "post-verify identity failure changed the primary index"
   registered="$(git -C "$project" worktree list --porcelain | grep -c '^worktree ' || true)"
   if [ "${registered:-0}" -gt 1 ]; then
-    printf '%s' "$out" | grep -Fq 'preserved for inspection' ||
+    contains "$out" 'preserved for inspection' ||
       fail "post-verify identity failure left a registration without recovery guidance: $out"
   fi
 }
@@ -22025,7 +22032,7 @@ EOF
     OMS_WORKER_AUTHORITY_EXCLUSIVE=1 \
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
     --no-verify 2>&1)" || fail "owner authority should be stripped, not break the worker: $out"
-  if printf '%s' "$out" | grep -Fq 'authority variable leaked'; then
+  if contains "$out" 'authority variable leaked'; then
     fail "delegated worker received owner authority: $out"
   fi
 }
@@ -22080,7 +22087,7 @@ EOF
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] ||
     fail "default guard accepted a rewrite of current plan/executor authority: $out"
-  printf '%s' "$out" | grep -Fq 'current-operation' ||
+  contains "$out" 'current-operation' ||
     fail "current authority rewrite did not name its boundary: $out"
   for detail in \
     'plan task guarded changed' \
@@ -22089,7 +22096,7 @@ EOF
     'executor_soul_sha256' \
     'lease_id' \
     'verify'; do
-    printf '%s' "$out" | grep -Fq "$detail" ||
+    contains "$out" "$detail" ||
       fail "current authority report omitted $detail: $out"
   done
   if [ -f "$project/.oms/artifacts/index.jsonl" ]; then
@@ -22139,7 +22146,7 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || fail "worker deleted the current-operation snapshot and bypassed the guard"
-  printf '%s' "$out" | grep -Fq 'current operation snapshot was changed or deleted' ||
+  contains "$out" 'current operation snapshot was changed or deleted' ||
     fail "snapshot deletion was not reported: $out"
 }
 
@@ -22245,7 +22252,7 @@ EOF
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] ||
     fail "a restored authority rewrite must still fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'restored: plan task guarded' ||
+  contains "$out" 'restored: plan task guarded' ||
     fail "plan restoration was not named: $out"
   python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
 import json, sys
@@ -22296,9 +22303,9 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || fail "a deleted task must still fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'restored: plan task guarded' ||
+  contains "$out" 'restored: plan task guarded' ||
     fail "the deleted task restoration was not named: $out"
-  printf '%s' "$out" | grep -Fq 'task was deleted' ||
+  contains "$out" 'task was deleted' ||
     fail "the deletion was not named as the restore cause: $out"
   # The resurrected row must round-trip through agent-plan's own verbs:
   # release ran on it with the operation's lease and re-offered it clean.
@@ -22357,9 +22364,9 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || fail "a forged lease must still fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'restored: plan task guarded' ||
+  contains "$out" 'restored: plan task guarded' ||
     fail "authority fields under a forged lease were not restored: $out"
-  printf '%s' "$out" | grep -Fq 'kept: plan task guarded claim fields' ||
+  contains "$out" 'kept: plan task guarded claim fields' ||
     fail "the kept claim fields were not named for inspection: $out"
   python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
 import json, sys
@@ -22413,9 +22420,9 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || fail "a blocked-state rewrite must still fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'restored: plan task guarded' ||
+  contains "$out" 'restored: plan task guarded' ||
     fail "the weakened verifier next to a block was not restored: $out"
-  printf '%s' "$out" | grep -Fq 'kept: plan task guarded operator block' ||
+  contains "$out" 'kept: plan task guarded operator block' ||
     fail "the preserved block was not named: $out"
   python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
 import json, sys
@@ -22465,11 +22472,11 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || fail "a rewritten snapshot must still fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'current operation snapshot was changed or deleted' ||
+  contains "$out" 'current operation snapshot was changed or deleted' ||
     fail "the rewritten snapshot was not detected: $out"
-  printf '%s' "$out" | grep -Fq 'restore refused' ||
+  contains "$out" 'restore refused' ||
     fail "restore from an untrusted snapshot was not refused: $out"
-  if printf '%s' "$out" | grep -Fq 'restored: plan task guarded'; then
+  if contains "$out" 'restored: plan task guarded'; then
     fail "worker-written snapshot bytes were installed as authority: $out"
   fi
   python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
@@ -22522,7 +22529,7 @@ test_worker_guard_sees_planted_and_ignored_files() {
   # identical — so it is reported, not failed, unless the caller asks for strict.
   result="$(run_guarded_worker "$project" "printf 'evil\n' > $project/sitecustomize.py")"
   [ "${result%%	*}" = 0 ] || fail "unattributable churn must not fail an ordinary run: $result"
-  printf '%s' "$result" | grep -Fq 'changed outside the worktree during this run: files' ||
+  contains "$result" 'changed outside the worktree during this run: files' ||
     fail "the untracked surface should still be reported: $result"
   result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$project" "printf 'evil2\n' > $project/sitecustomize2.py")"
   [ "${result%%	*}" != 0 ] || fail "strict mode should fail on a planted file: $result"
@@ -22534,7 +22541,7 @@ test_worker_guard_sees_planted_and_ignored_files() {
   result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$swap" "printf 'tampered\n' > $swap/venv/bin/python")"
   [ "${result%%	*}" != 0 ] ||
     fail "replacing a file inside an ignored directory should fail a strict run"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: files' ||
+  contains "$result" 'outside its worktree: files' ||
     fail "an ignored-tree replacement should be named: $result"
 }
 
@@ -22552,9 +22559,9 @@ test_worker_guard_reports_a_sibling_remote_ref_change_as_soft() {
   [ "${result%%$'\t'*}" = 0 ] ||
     fail "a remote-tracking ref change should not fail an ordinary run: $result"
   out="${result#*$'\t'}"
-  printf '%s' "$out" | grep -Fq 'changed outside the worktree during this run: remote-refs' ||
+  contains "$out" 'changed outside the worktree during this run: remote-refs' ||
     fail "the remote-ref surface should still be reported: $out"
-  printf '%s' "$out" | grep -Fq 'cannot be attributed to codex' ||
+  contains "$out" 'cannot be attributed to codex' ||
     fail "the remote-ref warning should remain non-attributable: $out"
   artifact="$(printf '%s\n' "$out" | sed -n 's/^artifact: //p' | head -n 1)"
   [ -f "$artifact" ] || fail "missing soft remote-ref artifact: $out"
@@ -22566,7 +22573,7 @@ test_worker_guard_reports_a_sibling_remote_ref_change_as_soft() {
     "git -C \"$project\" update-ref -d refs/remotes/origin/main")"
   [ "${result%%$'\t'*}" != 0 ] ||
     fail "strict mode should fail on a remote-tracking ref change: $result"
-  printf '%s' "$result" | grep -Fq 'changed protected state outside its worktree: remote-refs' ||
+  contains "$result" 'changed protected state outside its worktree: remote-refs' ||
     fail "strict remote-ref violation should be named: $result"
 }
 
@@ -22581,7 +22588,7 @@ test_worker_guard_still_fails_on_a_local_branch_ref_change() {
     "git -C \"$project\" update-ref refs/heads/guard-local \"$head\"")"
   [ "${result%%$'\t'*}" != 0 ] ||
     fail "a local branch ref change should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'changed protected state outside its worktree: refs' ||
+  contains "$result" 'changed protected state outside its worktree: refs' ||
     fail "the local branch ref violation should remain hard: $result"
 }
 
@@ -22594,14 +22601,14 @@ test_worker_guard_sees_object_store_and_metadata_writes() {
   result="$(run_guarded_worker "$project" \
     "mkdir -p $project/.git/objects/info && printf '/tmp/elsewhere\n' > $project/.git/objects/info/alternates")"
   [ "${result%%	*}" != 0 ] || fail "adding an object alternate should fail the run"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$result" 'outside its worktree: gitmeta' ||
     fail "the metadata surface should be named: $result"
 
   local excl="$TMP/guard-exclude"
   make_guard_repo "$excl"
   result="$(run_guarded_worker "$excl" "printf 'drop\n' >> $excl/.git/info/exclude")"
   [ "${result%%	*}" != 0 ] || fail "editing .git/info/exclude should fail the run"
-  printf '%s' "$result" | grep -Fq 'gitmeta' ||
+  contains "$result" 'gitmeta' ||
     fail "an exclude-file edit should be named: $result"
 }
 
@@ -22649,7 +22656,7 @@ EOF
     --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "duplicate metadata must not inherit a live sibling's managed exemption: $out"
-  printf '%s' "$out" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$out" 'outside its worktree: gitmeta' ||
     fail "duplicate managed-looking metadata should be a gitmeta violation: $out"
 }
 
@@ -22697,7 +22704,7 @@ EOF
     --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "symlink worktree metadata must be a hard guard violation: $out"
-  printf '%s' "$out" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$out" 'outside its worktree: gitmeta' ||
     fail "symlink worktree metadata should be named as gitmeta: $out"
 }
 
@@ -22754,7 +22761,7 @@ test_worker_guard_exempts_a_live_sibling_mid_removal() {
     "rm -rf $sibling_parent/wt $scratch_parent/wt")"
   [ "${result%%	*}" = 0 ] ||
     fail "a live sibling mid-removal must not fail the run: $result"
-  if printf '%s' "$result" | grep -Fq 'outside the worktree'; then
+  if contains "$result" 'outside the worktree'; then
     fail "a live sibling mid-removal should not be reported as a change: $result"
   fi
 }
@@ -22779,7 +22786,7 @@ test_worker_guard_exempts_a_live_sibling_mid_creation() {
 mv $sibling_parent/pending $sibling_parent/wt && mkdir -p $scratch_parent && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$project\\nworktree=$scratch_parent/wt\\ntemporary=1\\n' > $scratch_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $scratch_parent/wt HEAD && mv $scratch_parent/wt $scratch_parent/pending")"
   [ "${result%%	*}" = 0 ] ||
     fail "a live sibling mid-creation must not fail the run: $result"
-  if printf '%s' "$result" | grep -Fq 'outside the worktree'; then
+  if contains "$result" 'outside the worktree'; then
     fail "a live sibling mid-creation should not be reported as a change: $result"
   fi
 }
@@ -22858,7 +22865,7 @@ git -C SIB switch -q -c oms/t --track origin/'"$(git -C "$project-track" symboli
     "${track/SIB/$managed_root/oh-my-setting-scratch.track/wt}")"
   [ "${result%%	*}" = 0 ] ||
     fail "branch tracking written by a sibling scratch must not fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'branch-tracking' ||
+  contains "$result" 'branch-tracking' ||
     fail "branch tracking should be reported softly: $result"
   result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-track-strict" \
     "$managed_root" "${track/SIB/$managed_root/oh-my-setting-scratch.strict/wt}")"
@@ -22881,7 +22888,7 @@ test_worker_guard_flags_a_sibling_whose_marker_died() {
     "rm -f $sibling_parent/.oh-my-setting-tmp")"
   [ "${result%%	*}" != 0 ] ||
     fail "a sibling whose marker died must stay a hard gitmeta violation: $result"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$result" 'outside its worktree: gitmeta' ||
     fail "a dead-marker sibling should be named as gitmeta: $result"
 }
 
@@ -22901,7 +22908,7 @@ test_worker_guard_softens_a_sibling_that_finished_kept() {
     "printf 'kind=oh-my-setting-temp\\npid=$dead_pid\\nrepo=$project\\nworktree=$sibling_parent/wt\\ntemporary=1\\n' > $sibling_parent/.oh-my-setting-tmp")"
   [ "${result%%	*}" = 0 ] ||
     fail "a sibling that finished kept must not fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'during this run: kept-sibling' ||
+  contains "$result" 'during this run: kept-sibling' ||
     fail "a kept sibling should be reported as a soft change: $result"
 
   # A main keeps using its scratch after the owner pid died: only that
@@ -22920,7 +22927,7 @@ git -C SIB -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m
     "${moved/SIB/$sibling_parent-moved/wt}")"
   [ "${result%%	*}" = 0 ] ||
     fail "a HEAD move in a dead-owner scratch must not fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'during this run: kept-sibling' ||
+  contains "$result" 'during this run: kept-sibling' ||
     fail "a HEAD move in a dead-owner scratch should be reported softly: $result"
   result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-moved-strict" \
     "$managed_root" "${moved/SIB/$sibling_parent-moved-strict/wt}")"
@@ -22947,7 +22954,7 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
   result="$(run_delegate_beside_sibling "$project" "$managed_root" "$body")"
   [ "${result%%	*}" = 0 ] ||
     fail "a sibling started and kept mid-run must not fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'during this run: kept-sibling' ||
+  contains "$result" 'during this run: kept-sibling' ||
     fail "a late kept sibling should be reported as a soft change: $result"
 
   make_guard_repo "$project-strict"
@@ -22984,7 +22991,7 @@ test_worker_guard_exempts_a_sibling_marked_from_a_linked_worktree() {
     "mkdir -p $sibling_parent && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$linked\\nworktree=$sibling_parent/wt\\ntemporary=1\\n' > $sibling_parent/.oh-my-setting-tmp && git -C $linked worktree add --quiet --detach $sibling_parent/wt HEAD >/dev/null 2>&1")"
   [ "${result%%	*}" = 0 ] ||
     fail "a live sibling marked from a linked worktree must not fail the run: $result"
-  if printf '%s' "$result" | grep -Fq 'outside its worktree'; then
+  if contains "$result" 'outside its worktree'; then
     fail "a linked-worktree marker should vouch for its sibling: $result"
   fi
 }
@@ -23013,7 +23020,7 @@ test_worker_guard_softens_cleanup_of_a_dead_kept_sibling() {
 git -C $project worktree remove --force $sibling_parent/wt && rm -rf $sibling_parent")"
   [ "${result%%	*}" = 0 ] ||
     fail "cleanup of a dead kept sibling must not fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'during this run: sibling-cleanup' ||
+  contains "$result" 'during this run: sibling-cleanup' ||
     fail "cleanup of a dead kept sibling should be reported softly: $result"
 
   result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-strict" "$managed_root" \
@@ -23029,7 +23036,7 @@ git -C $project-strict worktree remove --force $sibling_parent-strict/wt && rm -
 rm -f $common_dir/worktrees/wt/HEAD")"
   [ "${result%%	*}" != 0 ] ||
     fail "a partial removal of a residue entry must stay hard: $result"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$result" 'outside its worktree: gitmeta' ||
     fail "a partial residue removal should be named as gitmeta: $result"
 
   make_guard_repo "$project-plain"
@@ -23040,7 +23047,7 @@ rm -f $common_dir/worktrees/wt/HEAD")"
 git -C $project-plain worktree remove --force $project-plain-wt")"
   [ "${result%%	*}" != 0 ] ||
     fail "removing a plain worktree must stay a hard violation: $result"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$result" 'outside its worktree: gitmeta' ||
     fail "a removed plain worktree should be named as gitmeta: $result"
 }
 
@@ -23062,7 +23069,7 @@ test_worker_guard_reports_a_bounded_scan() {
   out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$project-bin:/usr/bin:/bin" \
     OMS_WORKER_GUARD_MAX_FILES=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
     --to codex --prompt x --no-verify 2>&1)" || fail "a bounded scan should not fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'coverage is partial' ||
+  contains "$out" 'coverage is partial' ||
     fail "a truncated scan must say so: $out"
 }
 
@@ -23084,7 +23091,7 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
   result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$project" \
     "printf '{\"schema\":1,\"fingerprint\":\"def\",\"exit\":1}\n' >> $project/.oms/failures.jsonl")"
   [ "${result%%	*}" != 0 ] || fail "appending primary authority state should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'shared-state' ||
+  contains "$result" 'shared-state' ||
     fail "an appended authority row should name the shared-state surface: $result"
   if grep -Fq '"fingerprint":"def"' "$project/.oms/failures.jsonl"; then
     fail "the appended authority row should be rolled back"
@@ -23100,9 +23107,9 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
   result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$plan_rewrite" \
     "printf '{\"tasks\":[{\"id\":\"t1\",\"allowed_paths\":[\"/\"]}]}\\n' > $plan_rewrite/.oms/plan/tasks.json")"
   [ "${result%%	*}" != 0 ] || fail "rewriting plan authority should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'plan/tasks.json' ||
+  contains "$result" 'plan/tasks.json' ||
     fail "the rewritten authority file should be named: $result"
-  if printf '%s' "$result" | grep -Fq 'shared-state: failures.jsonl'; then
+  if contains "$result" 'shared-state: failures.jsonl'; then
     fail "parent failure bookkeeping must not be blamed on the plan-mutating worker: $result"
   fi
   grep -Fq '"allowed_paths":["src/"]' "$plan_rewrite/.oms/plan/tasks.json" ||
@@ -23119,9 +23126,9 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
   result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$rewrite" \
     "printf '{\"schema\":1,\"fingerprint\":\"zzz\",\"exit\":0}\n' > $rewrite/.oms/failures.jsonl")"
   [ "${result%%	*}" != 0 ] || fail "rewriting shared state should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'shared-state' ||
+  contains "$result" 'shared-state' ||
     fail "the shared-state surface should be named: $result"
-  printf '%s' "$result" | grep -Fq 'failures.jsonl changed' ||
+  contains "$result" 'failures.jsonl changed' ||
     fail "the violation should name the file and what happened: $result"
   grep -Fq '"fingerprint":"abc"' "$rewrite/.oms/failures.jsonl" ||
     fail "rewritten shared state should be restored"
@@ -23134,7 +23141,7 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
   result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$removed" \
     "rm -f $removed/.oms/failures.jsonl")"
   [ "${result%%	*}" != 0 ] || fail "deleting shared state should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'was deleted' ||
+  contains "$result" 'was deleted' ||
     fail "a deleted state file should be named: $result"
   grep -Fq '"fingerprint":"abc"' "$removed/.oms/failures.jsonl" ||
     fail "deleted shared state should be restored"
@@ -23181,7 +23188,7 @@ printf 'ambient journal\\n' > $project/.oms/work-journal/worker-event
 ")"
   [ "${result%%	*}" != 0 ] ||
     fail "authority mutation should block the delegated worker: $result"
-  printf '%s' "$result" | grep -Fq 'owner authority shared-state' ||
+  contains "$result" 'owner authority shared-state' ||
     fail "authority mutation should report the provider-window boundary: $result"
   for detail in \
     'authority changed' \
@@ -23191,13 +23198,13 @@ printf 'ambient journal\\n' > $project/.oms/work-journal/worker-event
     'authority/deleted.txt was deleted' \
     'authority/mode.txt changed' \
     '.oms root changed'; do
-    printf '%s' "$result" | grep -Fq "$detail" ||
+    contains "$result" "$detail" ||
       fail "authority report lost the actual worker mutation ($detail): $result"
   done
-  if printf '%s' "$result" | grep -Fq 'shared-state: failures.jsonl'; then
+  if contains "$result" 'shared-state: failures.jsonl'; then
     fail "parent failure bookkeeping must not enter the provider mutation report: $result"
   fi
-  printf '%s' "$result" | grep -Fq 'restored from pre-provider snapshot' ||
+  contains "$result" 'restored from pre-provider snapshot' ||
     fail "authority report should confirm successful rollback: $result"
 
   [ "$(cat "$state/content.txt")" = "original content" ] ||
@@ -23248,9 +23255,9 @@ printf 'outside remains outside\\n' > $outside/worker-marker
 ")"
   [ "${result%%	*}" != 0 ] ||
     fail "replacing the authority root should block the delegated worker: $result"
-  printf '%s' "$result" | grep -Fq '.oms root changed' ||
+  contains "$result" '.oms root changed' ||
     fail "root replacement should be named without traversing it: $result"
-  if printf '%s' "$result" | grep -Fq 'foreign.txt'; then
+  if contains "$result" 'foreign.txt'; then
     fail "authority scan followed the worker-planted root symlink: $result"
   fi
   if [ -L "$replaced/.oms" ] || [ ! -d "$replaced/.oms" ]; then
@@ -23373,7 +23380,7 @@ test_worker_guard_sees_submodule_and_worktree_metadata() {
   result="$(run_guarded_worker "$project" \
     "git -C $project/vendor config --local oms.tampered yes")"
   [ "${result%%	*}" != 0 ] || fail "submodule config tampering should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'gitmeta' ||
+  contains "$result" 'gitmeta' ||
     fail "submodule metadata should be named: $result"
 
   # A linked worktree is another checkout of the same repo, registered in the
@@ -23383,7 +23390,7 @@ test_worker_guard_sees_submodule_and_worktree_metadata() {
   result="$(OMS_TASK_ID=guard-worktree run_guarded_worker "$wt" \
     "git -C $wt worktree add --detach $wt/../guard-worktree-extra HEAD")"
   [ "${result%%	*}" != 0 ] || fail "registering a worktree should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'gitmeta' ||
+  contains "$result" 'gitmeta' ||
     fail "a new worktree registration should be named: $result"
   # The room and panel relay the artifact's closing Output, not stderr.
   python3 - "$wt" "$ROOT/scripts/lib" <<'PY' || fail "a guard failure must leave a readable reason"
@@ -23410,7 +23417,7 @@ PY
   result="$(run_guarded_worker "$forged" \
     "printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$forged\\nworktree=$forged_parent/wt\\ntemporary=1\\n' > $forged_parent/.oh-my-setting-tmp && git -C $forged worktree add --detach $forged_parent/wt HEAD")"
   [ "${result%%	*}" != 0 ] || fail "a forged scratch marker must not exempt a worker's add: $result"
-  printf '%s' "$result" | grep -Fq 'gitmeta' ||
+  contains "$result" 'gitmeta' ||
     fail "a forged scratch registration should be named: $result"
 }
 
@@ -23429,15 +23436,15 @@ test_shared_memory_context_ranked_recall() {
   # memory context; without a query the recency tails stand alone.
   out="$(cd "$repo" && bash -c '. "$1"; ma_write_shared_memory_context "$2" "refactor the parser module tests"' \
     _ "$ROOT/scripts/lib/agent-memory-common.sh" "$repo")"
-  printf '%s' "$out" | grep -Fq '### relevant recall' ||
+  contains "$out" '### relevant recall' ||
     fail "query should add a ranked recall section: $out"
-  printf '%s' "$out" | grep -Fq 'focused parser test' ||
+  contains "$out" 'focused parser test' ||
     fail "recall should surface the matching lesson"
   out="$(cd "$repo" && OMS_AGENT_MEMORY_MODE=relevant bash -c '. "$1"; ma_write_shared_memory_context "$2" "parser module tests"' \
     _ "$ROOT/scripts/lib/agent-memory-common.sh" "$repo")"
-  printf '%s' "$out" | grep -Fq 'focused parser test' || fail "relevant mode lost matching evidence"
-  printf '%s' "$out" | grep -Fq '[selection: query relevance' || fail "recall selection reason missing"
-  if printf '%s' "$out" | grep -Fq 'staging flag'; then
+  contains "$out" 'focused parser test' || fail "relevant mode lost matching evidence"
+  contains "$out" '[selection: query relevance' || fail "recall selection reason missing"
+  if contains "$out" 'staging flag'; then
     fail "relevant mode included unrelated recent deployment memory"
   fi
   out="$(cd "$repo" && OMS_AGENT_MEMORY_MODE=relevant bash -c '. "$1"; ma_write_shared_memory_context "$2" "zzzxxyy no-match"' \
@@ -23445,7 +23452,7 @@ test_shared_memory_context_ranked_recall() {
   [ -z "$out" ] || fail "no-match relevant recall should not inject unrelated summaries"
   out="$(cd "$repo" && bash -c '. "$1"; ma_write_shared_memory_context "$2"' \
     _ "$ROOT/scripts/lib/agent-memory-common.sh" "$repo")"
-  if printf '%s' "$out" | grep -Fq 'relevant recall'; then
+  if contains "$out" 'relevant recall'; then
     fail "no query must mean no recall section"
   fi
 }
@@ -23524,9 +23531,9 @@ test_worker_guard_keeps_shared_memory_parent_owned() {
   result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$project" \
     "OMS_STATE_REPO=$project HOME=$project-home $ROOT/scripts/agent-memory.sh --repo $project append --agent codex --text 'worker note' >/dev/null")"
   [ "${result%%	*}" != 0 ] || fail "a worker appending shared memory should fail: $result"
-  printf '%s' "$result" | grep -Fq 'memory/shared.md' ||
+  contains "$result" 'memory/shared.md' ||
     fail "the appended memory log should be named: $result"
-  if printf '%s' "$result" | grep -Fq 'shared-state: failures.jsonl'; then
+  if contains "$result" 'shared-state: failures.jsonl'; then
     fail "parent failure bookkeeping must not be blamed on the memory-mutating worker: $result"
   fi
   if grep -Fq 'worker note' "$project/.oms/memory/shared.md"; then
@@ -23542,9 +23549,9 @@ test_worker_guard_keeps_shared_memory_parent_owned() {
   result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$edited" \
     "sed -i 's/prefer scripts/IGNORE scripts/' $edited/.oms/memory/shared.md")"
   [ "${result%%	*}" != 0 ] || fail "editing an existing memory note should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'memory/shared.md changed' ||
+  contains "$result" 'memory/shared.md changed' ||
     fail "the violation should name shared.md and what happened: $result"
-  if printf '%s' "$result" | grep -Fq 'shared-state: failures.jsonl'; then
+  if contains "$result" 'shared-state: failures.jsonl'; then
     fail "parent failure bookkeeping must stay outside the provider-window diff: $result"
   fi
   grep -Fq 'prefer scripts/check.sh' "$edited/.oms/memory/shared.md" ||
@@ -23564,7 +23571,7 @@ test_worker_guard_sees_an_edit_to_an_already_dirty_file() {
     "printf 'base\nCLOBBERED BY WORKER\n' > $project/file.txt")"
   [ "${result%%	*}" != 0 ] ||
     fail "clobbering an already-dirty tracked file should fail a strict run: $result"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: tracked' ||
+  contains "$result" 'outside its worktree: tracked' ||
     fail "the tracked surface should catch a content change, not just its status: $result"
 }
 
@@ -23655,7 +23662,7 @@ test_landing_refuses_to_apply_without_a_recorded_intent() {
   out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
   chmod 644 "$project/.oms/landings.jsonl"
   [ "$rc" != 0 ] || fail "an unrecordable intent must not apply: $out"
-  printf '%s' "$out" | grep -Fq 'refusing to apply' ||
+  contains "$out" 'refusing to apply' ||
     fail "the refusal should say why: $out"
   [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] ||
     fail "nothing should have been applied"
@@ -23698,7 +23705,7 @@ PY
   out="$(PATH="$bin:$PATH" "$ROOT/scripts/provider-permissions.sh" --check --profile delegate \
     --allow-command npm --worktree-parent /tmp --settings "$settings" 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "a missing unsandboxed grant should not check clean: $out"
-  printf '%s' "$out" | grep -Fq -- '--allow-command npm' ||
+  contains "$out" '--allow-command npm' ||
     fail "following the hint must grant what was reported: $out"
 
   # The sandbox boundary is not something to hand over with one flag.
@@ -23880,10 +23887,10 @@ EOF
       "$ROOT/scripts/provider-permissions.sh --help"; do
     out="$(bash -c "$help_command")" || fail "permission help failed: $help_command"
     for rule in 'read_file(*)' 'command(*)'; do
-      printf '%s' "$out" | grep -Fq "$rule" ||
+      contains "$out" "$rule" ||
         fail "permission consent omitted $rule: $help_command"
     done
-    if printf '%s' "$out" | grep -Fq 'mcp(*)'; then
+    if contains "$out" 'mcp(*)'; then
       fail "permission consent must not advertise an all-MCP grant: $help_command"
     fi
   done
@@ -23959,7 +23966,7 @@ PY
   [ "$rc" -ne 0 ] || fail "invalid permission ownership state was ignored"
   after="$(cksum < "$settings")"
   [ "$before" = "$after" ] || fail "failed permission removal mutated settings"
-  printf '%s' "$out" | grep -Fq 'managed permission state' ||
+  contains "$out" 'managed permission state' ||
     fail "invalid permission ownership failure was not explained: $out"
   rm -f "$managed"
 
@@ -23978,7 +23985,7 @@ PY
       fail "symbolic-link ownership failure mutated settings"
     [ "$victim_before" = "$(cksum < "$victim")" ] ||
       fail "symbolic-link ownership failure mutated its target"
-    printf '%s' "$out" | grep -Fq 'symbolic link' ||
+    contains "$out" 'symbolic link' ||
       fail "symbolic-link ownership refusal was not explained: $out"
     rm -f "$managed" "$victim"
   fi
@@ -24005,7 +24012,7 @@ PY
   [ "$before" = "$(cksum < "$settings")" ] ||
     fail "stale permission-removal journal overwrote concurrent user edits"
   [ -f "$managed" ] || fail "failed permission-removal retry lost ownership state"
-  printf '%s' "$out" | grep -Fq 'settings changed' ||
+  contains "$out" 'settings changed' ||
     fail "stale permission-removal journal failure was not explained: $out"
   rm -f "$managed"
 }
@@ -24050,7 +24057,7 @@ test_provider_permissions_leaves_flag_driven_providers_alone() {
   mkdir -p "$dir" "$bin"
   out="$(PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/provider-permissions.sh" --check 2>&1)" ||
     fail "no antigravity means nothing to do: $out"
-  printf '%s' "$out" | grep -Fq 'not installed' || fail "should say why there is nothing to do: $out"
+  contains "$out" 'not installed' || fail "should say why there is nothing to do: $out"
 }
 
 test_worker_guard_spends_its_budget_on_untracked_before_ignored() {
@@ -24240,7 +24247,7 @@ test_delegate_says_the_worker_cannot_see_uncommitted_work() {
   out="$(HOME="$home_dir" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
     --to codex --repo "$project" --prompt "change the thing" --no-verify 2>&1)" ||
     fail "a dirty caller tree is a note, not a failure: $out"
-  printf '%s' "$out" | grep -Fq 'differ from HEAD' ||
+  contains "$out" 'differ from HEAD' ||
     fail "delegating from a dirty tree should say the worker sees HEAD: $out"
 
   artifact="$(printf '%s' "$out" | sed -n 's/^artifact: //p' | head -n 1)"
@@ -24265,9 +24272,9 @@ test_memory_recall_spans_notes_and_recorded_failures() {
   # recall has to answer the softer question across everything recorded: notes,
   # pins, and what already went wrong.
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt")"
-  printf '%s' "$out" | grep -Fq 'ERROR: state.txt not fixed' ||
+  contains "$out" 'ERROR: state.txt not fixed' ||
     fail "recall should reach the failure ledger: $out"
-  printf '%s' "$out" | grep -Fq 'the gate reads state.txt directly' ||
+  contains "$out" 'the gate reads state.txt directly' ||
     fail "recall should still reach the notes: $out"
 }
 
@@ -24289,7 +24296,7 @@ test_memory_recall_marks_a_resolved_failure() {
     fail "the gate should pass once state.txt is fixed"
 
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt")"
-  printf '%s' "$out" | grep -Fq 'resolved' ||
+  contains "$out" 'resolved' ||
     fail "recall must mark a resolved failure as resolved: $out"
   "$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt" --json |
     grep -Fq '"kind": "failure-resolved"' ||
@@ -24299,7 +24306,7 @@ test_memory_recall_marks_a_resolved_failure() {
   printf 'broken\n' > "$project/state.txt"
   "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 || true
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt" --json)"
-  printf '%s' "$out" | grep -Fq '"kind": "failure"' ||
+  contains "$out" '"kind": "failure"' ||
     fail "a failure recorded after a resolution must recall as open: $out"
 }
 
@@ -24344,10 +24351,10 @@ PY
 
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" search "fixture missing")" ||
     fail "an older database must upgrade rather than error: $out"
-  printf '%s' "$out" | grep -Fq 'ERROR: fixture missing' ||
+  contains "$out" 'ERROR: fixture missing' ||
     fail "the upgraded index should carry failures: $out"
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" search "older note kept")"
-  printf '%s' "$out" | grep -Fq 'older note kept' ||
+  contains "$out" 'older note kept' ||
     fail "re-deriving must not lose what is still in the Markdown: $out"
 }
 
@@ -24366,15 +24373,15 @@ test_task_verify_surfaces_the_advisor_on_a_repeat() {
     --verify "$gate" >/dev/null
 
   out="$("$ROOT/scripts/agent-task.sh" --repo "$project" verify 2>&1)" || true
-  if printf '%s' "$out" | grep -Fq 'oms advise'; then
+  if contains "$out" 'oms advise'; then
     fail "one failed gate is not a pattern: $out"
   fi
 
   out="$("$ROOT/scripts/agent-task.sh" --repo "$project" verify 2>&1)" || true
-  printf '%s' "$out" | grep -Fq 'oms advise' ||
+  contains "$out" 'oms advise' ||
     fail "a gate that failed twice should reach the agent with an advisor: $out"
   # The bookkeeping stays quiet; only the escalation is let through.
-  if printf '%s' "$out" | grep -Fq 'fail-ledger: recorded'; then
+  if contains "$out" 'fail-ledger: recorded'; then
     fail "the recording line should stay silenced: $out"
   fi
 
@@ -24383,7 +24390,7 @@ test_task_verify_surfaces_the_advisor_on_a_repeat() {
     fail "the gate should pass once state.txt is fixed"
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list)" ||
     fail "list should succeed"
-  printf '%s' "$out" | grep -Fq 'resolved' ||
+  contains "$out" 'resolved' ||
     fail "a passing gate should resolve its row: $out"
 }
 
@@ -24403,9 +24410,9 @@ test_task_close_promotes_the_decision_and_the_pitfall() {
   # Both lines were already written during the work. Closing used to keep the
   # goal and drop the two lines a later session could act on.
   out="$(cat "$project/.oms/memory/shared.md")"
-  printf '%s' "$out" | grep -Fq 'decision: ' ||
+  contains "$out" 'decision: ' ||
     fail "the decision already in the packet should survive close: $out"
-  printf '%s' "$out" | grep -Fq 'PATH stub shadowed' ||
+  contains "$out" 'PATH stub shadowed' ||
     fail "the pitfall already in the packet should survive close: $out"
 }
 
@@ -24423,7 +24430,7 @@ test_task_verify_files_and_clears_its_own_failures() {
   # diagnosed twice.
   "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 || true
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved)"
-  printf '%s' "$out" | grep -Fq 'ERROR: state.txt not fixed' ||
+  contains "$out" 'ERROR: state.txt not fixed' ||
     fail "a failed gate should file a row carrying the failing line: $out"
 
   # The readers are already wired: patch-land and plan-run ask this before
@@ -24431,7 +24438,7 @@ test_task_verify_files_and_clears_its_own_failures() {
   # check signals "this failed before" through its exit code, which is why
   # patch-land.sh:305 also takes it with `|| true`.
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" check --cmd "$gate" 2>&1 || true)"
-  printf '%s' "$out" | grep -Fq 'already failed' ||
+  contains "$out" 'already failed' ||
     fail "the existing check path should see the row: $out"
 
   # Same gate, fixed code: the row clears, so the ledger answers "is this still
@@ -24440,7 +24447,7 @@ test_task_verify_files_and_clears_its_own_failures() {
   "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 ||
     fail "a passing gate must still verify the task"
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved)"
-  if printf '%s' "$out" | grep -Fq 'state.txt not fixed'; then
+  if contains "$out" 'state.txt not fixed'; then
     fail "a passing gate should clear its own row: $out"
   fi
 }
@@ -24735,7 +24742,7 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
     --prompt "a task that keeps failing" --model fixture-model --verify false --repair 2 2>&1)" || true
 
-  printf '%s' "$out" | grep -Fq 'advisor consulted after repeated failure' ||
+  contains "$out" 'advisor consulted after repeated failure' ||
     fail "a second failing attempt should pull in an outside opinion: $out"
   artifact="$(printf '%s' "$out" | sed -n 's/^artifact: //p' | head -n 1)"
   grep -Fq 'Advisor (after repeated failure)' "$artifact" ||
@@ -24787,7 +24794,7 @@ test_delegate_does_not_consult_an_advisor_on_a_first_failure() {
   out="$(HOME="$home_dir" PATH="$bin:/usr/bin:/bin" OMS_ADVISOR_PROVIDER=claude OMS_ADVISE_ON_REPEAT=1 \
     "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
     --prompt "fails once" --no-verify --repair 1 2>&1)" || true
-  if printf '%s' "$out" | grep -Fq 'advisor consulted'; then
+  if contains "$out" 'advisor consulted'; then
     fail "a single repair round should not pay for an advisor: $out"
   fi
 }
@@ -24910,9 +24917,9 @@ test_delegate_refuses_to_nest_beyond_the_depth_cap() {
     "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
     --prompt "spawn from inside a worker" --no-verify 2>&1)" || rc=$?
   [ "$rc" = 2 ] || fail "a worker must not spawn its own worker: $out"
-  printf '%s' "$out" | grep -Fq 'does not spawn its own workers' ||
+  contains "$out" 'does not spawn its own workers' ||
     fail "the refusal should say what to do instead: $out"
-  printf '%s' "$out" | grep -Fq 'let the parent fan out' ||
+  contains "$out" 'let the parent fan out' ||
     fail "the refusal should return recursive work to the parent: $out"
 
   # A two-stage job can raise the cap on purpose, in one place.
@@ -24957,12 +24964,12 @@ EOF
   # status, where a caller reading the run can tell "could not act" from "acted
   # and failed".
   [ "$rc" != 0 ] || fail "a blocked worker must not report success: $out"
-  printf '%s' "$out" | grep -Fq 'could not run' ||
+  contains "$out" 'could not run' ||
     fail "the operator needs to be told the worker never acted: $out"
-  printf '%s' "$out" | grep -Fq 'exit 126' ||
+  contains "$out" 'exit 126' ||
     fail "a blocked worker should be distinguishable from a failed one: $out"
   # No rewording of the brief grants a permission, so repair must not burn calls.
-  if printf '%s' "$out" | grep -Fq 'repair 1'; then
+  if contains "$out" 'repair 1'; then
     fail "a blocked worker is not repairable: $out"
   fi
   if grep -R -Fxq unnecessary-verifier-ran "$project/.oms/artifacts/delegate"; then
@@ -25008,7 +25015,7 @@ test_landing_refuses_while_another_landing_holds_the_repo() {
   wait "$holder_pid" 2>/dev/null || true
 
   [ "$rc" != 0 ] || fail "a concurrent landing should be refused: $out"
-  printf '%s' "$out" | grep -Fq 'another landing or recovery is in progress' ||
+  contains "$out" 'another landing or recovery is in progress' ||
     fail "the refusal should name the reason: $out"
   [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] ||
     fail "the refused landing must not have applied anything"
@@ -25037,7 +25044,7 @@ test_landing_recovery_refuses_a_changed_patch() {
 
   out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "a changed patch should make recovery exit nonzero: $out"
-  printf '%s' "$out" | grep -Fq 'recover this one by hand' ||
+  contains "$out" 'recover this one by hand' ||
     fail "recovery should hand it to a human: $out"
   # Neither outcome may be recorded: the transaction stays outstanding.
   if grep -Eq '"event": ?"(complete|abandoned)"' "$project/.oms/landings.jsonl"; then
@@ -25659,9 +25666,9 @@ with open(repo / ".oms/plan/progress.jsonl", "w", encoding="utf-8") as fh:
         fh.write(json.dumps(r) + "\n")
 PY
   out="$("$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 1 2>&1)" || rc=$?
-  printf '%s' "$out" | grep -Fq 'ignored invalid commit intent legacy-bad' ||
+  contains "$out" 'ignored invalid commit intent legacy-bad' ||
     fail "a current-run (legacy) invalid intent must still warn (rc=$rc): $out"
-  if printf '%s' "$out" | grep -Fq 'foreign-landed'; then
+  if contains "$out" 'foreign-landed'; then
     fail "a closed foreign-run chain must stay silent: $out"
   fi
 }
@@ -25704,7 +25711,7 @@ assert row["all_done"] is False, row
   rc=0
   out="$("$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 1 2>&1)" || rc=$?
   [ "$rc" = 2 ] || fail "goal-drive accepted a zero-task plan (rc=$rc): $out"
-  printf '%s' "$out" | grep -Fq 'no tasks' ||
+  contains "$out" 'no tasks' ||
     fail "zero-task refusal did not explain the missing work contract: $out"
   if [ -f "$project/.oms/plan/progress.jsonl" ] &&
     grep -Eq '"status"[[:space:]]*:[[:space:]]*"(pass|done)"' \
@@ -25734,37 +25741,37 @@ test_project_state_parser_is_shared_and_rejects_typos() {
   rc=0
   out="$("$ROOT/scripts/project-doctor.sh" --strict "$project" 2>&1)" || rc=$?
   [ "$rc" = 1 ] || fail "strict project-doctor accepted an invalid State (rc=$rc): $out"
-  printf '%s' "$out" | grep -Fq 'invalid' ||
+  contains "$out" 'invalid' ||
     fail "project-doctor did not name the invalid State: $out"
 
   out="$("$ROOT/scripts/init.sh" --repo "$project" --no-private)" ||
     fail "init should diagnose an invalid State without crashing"
-  printf '%s' "$out" | grep -Fq 'requires confirmation' ||
+  contains "$out" 'requires confirmation' ||
     fail "init presented an invalid State as an in-place contract: $out"
 
   rc=0
   out="$("$ROOT/scripts/plan-from-spec.sh" --repo "$project" 2>&1)" || rc=$?
   [ "$rc" = 2 ] || fail "plan-from-spec accepted an invalid State (rc=$rc): $out"
-  printf '%s' "$out" | grep -Fq 'invalid' ||
+  contains "$out" 'invalid' ||
     fail "plan-from-spec did not name the invalid State: $out"
 
   rc=0
   out="$("$ROOT/scripts/autopilot.sh" --repo "$project" --base main propose 2>&1)" || rc=$?
   [ "$rc" = 2 ] || fail "autopilot accepted an invalid State (rc=$rc): $out"
-  printf '%s' "$out" | grep -Fq 'invalid' ||
+  contains "$out" 'invalid' ||
     fail "autopilot did not name the invalid State: $out"
 
   sed -i 's/^- State: confirmd/- State: active/' "$project/PROJECT.md"
   out="$("$ROOT/scripts/init.sh" --repo "$project" --no-private)" ||
     fail "init rejected legacy active State"
-  printf '%s' "$out" | grep -Fq 'spec=active' ||
+  contains "$out" 'spec=active' ||
     fail "init changed the public legacy active spelling: $out"
-  if printf '%s' "$out" | grep -Fq 'legacy-active'; then
+  if contains "$out" 'legacy-active'; then
     fail "init leaked the internal typed legacy-active verdict: $out"
   fi
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "project-doctor rejected legacy active State"
-  printf '%s' "$out" | grep -Fq 'PROJECT.md state: active' ||
+  contains "$out" 'PROJECT.md state: active' ||
     fail "project-doctor changed the public legacy active spelling: $out"
 }
 
@@ -25944,7 +25951,7 @@ test_agent_plan_apply_rejects_noncanonical_project_state() {
       --expected-plan-sha256 absent --goal gate --accept true \
       --allowed-envelope . 2>&1)" || rc=$?
     [ "$rc" = 2 ] || fail "apply-proposal accepted $kind PROJECT State (rc=$rc): $out"
-    printf '%s' "$out" | grep -Fq 'PROJECT.md State' ||
+    contains "$out" 'PROJECT.md State' ||
       fail "apply-proposal $kind refusal did not name PROJECT.md State: $out"
     [ ! -e "$project/.oms/plan/tasks.json" ] ||
       fail "apply-proposal mutated topology for $kind PROJECT State"
@@ -26046,11 +26053,11 @@ assert row["actionable"] == [], row
     fail "ready exposed a task after PROJECT contract drift"
   rc=0
   out="$("$plan" --repo "$project" next 2>&1)" || rc=$?
-  [ "$rc" = 3 ] && printf '%s' "$out" | grep -Fq 'PROJECT.md contract' ||
+  [ "$rc" = 3 ] && contains "$out" 'PROJECT.md contract' ||
     fail "next did not report the contract blocker (rc=$rc): $out"
   rc=0
   out="$("$plan" --repo "$project" claim --id t2 --provider codex 2>&1)" || rc=$?
-  [ "$rc" = 2 ] && printf '%s' "$out" | grep -Fq 'PROJECT.md contract' ||
+  [ "$rc" = 2 ] && contains "$out" 'PROJECT.md contract' ||
     fail "direct claim bypassed PROJECT drift (rc=$rc): $out"
   [ "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$plan_file")" = "$before" ] ||
     fail "a refused drifted claim changed the plan"
@@ -26087,7 +26094,7 @@ assert "inspect_plan_contract" in inbox_actions, inbox_actions
 PY
   out="$("$ROOT/scripts/state.sh" --repo "$project")" ||
     fail "state text could not project a drifted contract"
-  printf '%s' "$out" | grep -Fq 'PROJECT contract: BLOCKED (project-drift' ||
+  contains "$out" 'PROJECT contract: BLOCKED (project-drift' ||
     fail "state text hid the PROJECT contract blocker: $out"
 
   rm -f "$project_file"
@@ -26174,7 +26181,7 @@ assert "EXTERNAL_" not in json.dumps(row), row
 
   state_text="$("$ROOT/scripts/state.sh" --repo "$project")" ||
     fail "state text should report unhealthy symlink projections"
-  if printf '%s' "$state_text" | grep -Fq 'EXTERNAL_'; then
+  if contains "$state_text" 'EXTERNAL_'; then
     fail "state text exposed external symlink authority: $state_text"
   fi
 }
@@ -26200,7 +26207,7 @@ test_failure_ledger_structured_junk_quarantines_visibly() {
     # kill the whole runtime envelope while the inbox's remediation was this
     # very command.
     [ "$rc" = 0 ] || fail "quarantining ledger list returned $rc for $bad: $out"
-    printf '%s' "$out" | grep -Fq 'invalid row' ||
+    contains "$out" 'invalid row' ||
       fail "structured junk was not identified as an invalid row for $bad: $out"
     printf '%s' "$out" | grep -q '"invalid_rows": *1' ||
       fail "structured junk was not counted in the payload for $bad: $out"
@@ -26281,9 +26288,9 @@ assert "raw_output" not in row, row
     XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
     "$ROOT/scripts/doctor.sh" --repo "$project" --remediation-plan \
       --no-model-doctor)" || fail "doctor remediation plan failed"
-  printf '%s' "$plan" | grep -Fq 'local_mutation' ||
+  contains "$plan" 'local_mutation' ||
     fail "doctor plan omitted authority: $plan"
-  printf '%s' "$plan" | grep -Fq 'artifact-index.sh prune --files' ||
+  contains "$plan" 'artifact-index.sh prune --files' ||
     fail "doctor plan omitted the exact remedy: $plan"
 
   if "$ROOT/scripts/doctor.sh" --repo "$project" --json --repair \
