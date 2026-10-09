@@ -1027,7 +1027,8 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
             die("--expected-review-patch-sha256 must be a lowercase SHA-256")
         patch_path = stored_patch
         if not os.path.isabs(patch_path):
-            patch_path = os.path.join(env("OMS_REPO"), patch_path)
+            # Stored review evidence lives with the plan, not in the tree being landed.
+            patch_path = os.path.join(state_repo(), patch_path)
         digest = hashlib.sha256()
         try:
             with open(patch_path, "rb") as handle:
@@ -1113,7 +1114,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
             repo_root = os.path.realpath(env("OMS_REPO") or os.path.dirname(
                 os.path.dirname(os.path.dirname(os.path.abspath(path)))))
             if isinstance(contract, dict) and patch_rel:
-                patch_abs = os.path.join(repo_root, *patch_rel.split("/")) \
+                patch_abs = os.path.join(state_repo() if env("OMS_STATE_REPO") else repo_root, *patch_rel.split("/")) \
                     if not os.path.isabs(patch_rel) else patch_rel
                 touched = set()
                 try:

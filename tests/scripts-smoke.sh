@@ -1689,6 +1689,23 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
     fail "a parent's scratch plan claim failed"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id from-scratch | grep -q '"state": "claimed"' &&
     [ ! -e "$scratch/.oms/plan/tasks.json" ] || fail "a parent's scratch plan write must land in the main checkout's plan"
+  # patch-land from the scratch applies there, but its landing row, frozen patch and plan finish
+  # use the main checkout; a relative review patch resolves against the plan's checkout.
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" add --id landed --title t --verify true >/dev/null
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" claim --id landed --provider codex >/dev/null
+  printf 'scratch work\n' >> "$scratch/file.txt"
+  git -C "$scratch" diff > "$main/.oms/scratch-review.patch"
+  git -C "$scratch" checkout -q file.txt
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" review --id landed \
+    --artifact .oms/scratch-review.patch --patch .oms/scratch-review.patch >/dev/null
+  ( cd "$scratch" && $parent "$ROOT/scripts/patch-land.sh" --plan-task landed --verify true >/dev/null 2>&1 ) ||
+    fail "patch-land from a parent's scratch should land"
+  grep -q 'scratch work' "$scratch/file.txt" && ! grep -q 'scratch work' "$main/file.txt" ||
+    fail "a scratch landing must apply to the scratch tree only"
+  grep -q "\"worktree\": \"$scratch\"" "$main/.oms/landings.jsonl" && [ ! -e "$scratch/.oms/landings.jsonl" ] ||
+    fail "a scratch landing must record its tree in the main checkout's landings"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id landed | grep -q '"state": "done"' ||
+    fail "a scratch landing must finish the main checkout's plan task"
   plain="$managed/oh-my-setting-scratch.plain/wt"
   git -C "$project" worktree add --quiet --detach "$plain" HEAD
   [ "$($parent bash -c "$probe" _ "$ROOT" "$plain")" = "$(cd "$plain" && pwd -P)" ] ||
