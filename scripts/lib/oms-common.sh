@@ -1793,6 +1793,9 @@ PY
                   "$(readlink "$wt" 2>/dev/null | oms_sha256_stream || printf 'unreadable')"
                 continue
               fi
+              # A sibling worktree removed between find and this test is gone,
+              # not a planted file; recording it would fail the run on cleanup.
+              [ -e "$wt" ] || continue
               if [ ! -d "$wt" ]; then
                 printf 'worktree-entry %s non-directory\n' "${wt#"$git_dir"/}"
                 continue
