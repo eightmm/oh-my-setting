@@ -3009,6 +3009,19 @@ other = subprocess.run(plan_dispatch[:-4] + ["--task-id", "plan-held", "--label"
                        capture_output=True, text=True)
 assert other.returncode == 0 and "another claimant" in other.stderr, other
 assert json.loads(call(plan_cli + ["show", "--id", "plan-held"]))["state"] == "claimed"
+# A write worker on a plan task this main cannot hold would run unbound: it is refused before joining the room.
+call(plan_cli + ["add", "--id", "plan-blocked", "--title", "Blocked"])
+call(plan_cli + ["block", "--id", "plan-blocked", "--reason", "waits on a decision"])
+(project / "write-brief.md").write_text("Change nothing.\n")
+thread = project / ".oms/threads" / (shared + ".jsonl")
+for refused_id in ("plan-blocked", "plan-held"):
+    before = thread.read_text()
+    refused = subprocess.run(plan_dispatch[:plan_dispatch.index("--purpose")] + [
+        "--purpose", "implement", "--access", "write", "--workload", "light",
+        "--brief-file", str(project / "write-brief.md"), "--verify", "true",
+        "--task-id", refused_id, "--label", "Refused write"], env=room_env, capture_output=True, text=True)
+    assert refused.returncode != 0 and "reopen or claim it before dispatching a write worker" in refused.stderr, refused
+    assert thread.read_text() == before, "a refused write dispatch must not join the room"
 call(plan_cli + ["review", "--id", "plan-link", "--lease-id", held["lease_id"]])
 closed = subprocess.run(plan_dispatch, env=room_env, capture_output=True, text=True)
 assert closed.returncode == 0 and plan_task()["state"] == "review" and "plan plan-link is review" in closed.stderr, closed

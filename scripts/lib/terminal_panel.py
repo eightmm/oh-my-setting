@@ -726,15 +726,15 @@ def plan_link(repo, owner, task_id, env, caller):
     try:
         shown = plan("show", "--id", task_id)
         if shown.returncode:
-            return
+            return None
         task = json.loads(shown.stdout)
         state, holder = task.get("state"), task.get("claimed_by_participant")
         if state in ("claimed", "running") and (task.get("provider") != owner or (holder and caller and holder != caller)):
             print("plan %s is %s by another claimant; panel left it unchanged" % (task_id, state), file=sys.stderr)
-            return
+            return False
         if state not in ("ready", "claimed", "running"):
             print("plan %s is %s; panel left it unchanged" % (task_id, state), file=sys.stderr)
-            return
+            return False
         if state == "ready":
             moved = plan("claim", "--id", task_id, "--provider", owner)
             if moved.returncode:
@@ -749,8 +749,10 @@ def plan_link(repo, owner, task_id, env, caller):
         print("plan %s running (lease %s): after acceptance oms agent-plan review --id %s --lease-id %s "
               "--artifact PATH [--patch PATH]; after oms land: oms agent-plan finish --id %s --landed-commit SHA"
               % (task_id, lease, task_id, lease, task_id), file=sys.stderr)
+        return True
     except (OSError, ValueError, subprocess.SubprocessError):
         print("plan %s could not be moved; dispatch continues" % task_id, file=sys.stderr)
+        return False
 
 
 def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, brief, verify, task_id,
@@ -832,13 +834,21 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
             if dry_run:
                 print(json.dumps(dict(plan, overlaps=found)))
                 return 0
+        if task_id:
+            linked = plan_link(repo, owner, task_id, env, caller)
+            # A write worker on a plan task this main cannot hold (blocked,
+            # done, another claimant's) would run unbound; refuse before it
+            # joins the room. Read workers only inform and still run.
+            if linked is False and access == "write":
+                raise ValueError("plan task %s is not this main's to run; reopen or claim it before "
+                                 "dispatching a write worker" % task_id)
         member = "call-" + uuid.uuid4().hex[:16]
         room.join(repo, room_id, member, route["provider"], role, route["model"], label or purpose,
                   owns=scopes, parent=caller)
         room.send(repo, room_id, caller, member, "Assigned: " + (label or purpose), "handoff")
         env.update(OMS_ROOM_ID=room_id, OMS_ROOM_PARTICIPANT=member, OMS_ROOM_REPO=str(repo),
                    OMS_ROOM_ADMITTED_PARTICIPANT=member)
-    if task_id:
+    if task_id and not room_id:
         plan_link(repo, owner, task_id, env, caller)
     print("%s / %s -> %s / %s / %s / %s" % (owner, role, route["provider"], route["model"],
                                             route["effort"] or "native-settings", access), flush=True)
