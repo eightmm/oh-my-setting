@@ -6,10 +6,12 @@
 
 OMS_HARNESS_RESIDUE_REMOVED=0
 OMS_HARNESS_RESIDUE_WOULD_REMOVE=0
+OMS_HARNESS_RESIDUE_KEPT=0
 
 oms_harness_residue_reset() {
   OMS_HARNESS_RESIDUE_REMOVED=0
   OMS_HARNESS_RESIDUE_WOULD_REMOVE=0
+  OMS_HARNESS_RESIDUE_KEPT=0
 }
 
 oms_harness_tmp_base() {
@@ -177,6 +179,56 @@ EOF
   return 0
 }
 
+OMS_HARNESS_RESIDUE_KEEP_REASON=""
+
+# A dead owner does not make its worktree disposable: a crashed run can leave
+# the only copy of uncommitted edits, an unreferenced commit, or ignored .oms
+# records there. Sets OMS_HARNESS_RESIDUE_KEEP_REASON when the worktree must be
+# kept; anything git cannot answer is kept too. Never moves or rewrites it.
+oms_harness_worktree_keep_reason() {  # WORKTREE
+  local wt="$1"
+  local status=""
+  local head=""
+  local record=""
+
+  OMS_HARNESS_RESIDUE_KEEP_REASON=""
+  if ! status="$(git -c core.fsmonitor=false -C "$wt" --no-optional-locks \
+      status --porcelain --untracked-files=normal 2>/dev/null)"; then
+    OMS_HARNESS_RESIDUE_KEEP_REASON="status is unreadable"
+    return 0
+  fi
+  if [ -n "$status" ]; then
+    OMS_HARNESS_RESIDUE_KEEP_REASON="has uncommitted or untracked files"
+    return 0
+  fi
+  head="$(git -C "$wt" rev-parse -q --verify HEAD 2>/dev/null || true)"
+  head="${head//$'\r'/}"
+  if [ -n "$head" ] && [ -z "$(git -C "$wt" for-each-ref --count=1 \
+      --contains "$head" --format=x refs/heads refs/tags refs/remotes \
+      2>/dev/null)" ]; then
+    OMS_HARNESS_RESIDUE_KEEP_REASON="HEAD ${head:0:12} is on no branch, tag or remote ref"
+    return 0
+  fi
+  # .oms is ignored, so status cannot see it; a symlinked .oms belongs elsewhere
+  # and worktree removal does not follow it.
+  [ -d "$wt/.oms" ] && [ ! -L "$wt/.oms" ] || return 0
+  for record in plan/tasks.json failures.jsonl landings.jsonl artifacts/index.jsonl; do
+    [ -s "$wt/.oms/$record" ] || continue
+    OMS_HARNESS_RESIDUE_KEEP_REASON="holds .oms/$record"
+    return 0
+  done
+}
+
+# Returns 0 when the dead residue's worktree is verified for removal (see
+# oms_harness_safe_residue_worktree) and sets the keep reason for it.
+oms_harness_classify_dead_residue() {  # BASE DIR MARKER
+  OMS_HARNESS_RESIDUE_KEEP_REASON=""
+  oms_harness_safe_residue_worktree "$1" "$2" \
+    "$(oms_harness_read_marker_value "$3" repo)" \
+    "$(oms_harness_read_marker_value "$3" worktree)" || return 1
+  oms_harness_worktree_keep_reason "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE"
+}
+
 oms_harness_count_stale_worktrees() {
   local repo="$1"
   local count=0
@@ -305,9 +357,11 @@ oms_harness_tmp_residue_count() {
       temporary="$(oms_harness_read_marker_value "$marker" temporary)"
       [ "$temporary" = "1" ] || continue
       pid="$(oms_harness_read_marker_value "$marker" pid)"
-      if ! oms_file_lock_pid_alive "$pid"; then
-        count=$((count + 1))
-      fi
+      oms_file_lock_pid_alive "$pid" && continue
+      # Kept work is not residue: counting it would warn with a remedy that
+      # cannot act on it.
+      oms_harness_classify_dead_residue "$base" "$dir" "$marker" || true
+      [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ] || count=$((count + 1))
     done
   done <<EOF
 $(oms_harness_temp_bases)
@@ -321,9 +375,8 @@ oms_harness_cleanup_temp_dirs() {
   local dir
   local marker
   local pid
-  local repo
+  local safe
   local temporary
-  local worktree
 
   while IFS= read -r base; do
     [ -d "$base" ] || continue
@@ -339,15 +392,21 @@ oms_harness_cleanup_temp_dirs() {
       pid="$(oms_harness_read_marker_value "$marker" pid)"
       oms_file_lock_pid_alive "$pid" && continue
 
+      safe=0
+      oms_harness_classify_dead_residue "$base" "$dir" "$marker" && safe=1
+      if [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
+        printf 'kept: %s (dead harness temp dir; worktree %s)\n' \
+          "$dir" "$OMS_HARNESS_RESIDUE_KEEP_REASON"
+        OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
+        continue
+      fi
       if [ "$dry_run" = "1" ]; then
         printf 'would remove: %s (dead harness temp dir)\n' "$dir"
         OMS_HARNESS_RESIDUE_WOULD_REMOVE=$((OMS_HARNESS_RESIDUE_WOULD_REMOVE + 1))
         continue
       fi
 
-      repo="$(oms_harness_read_marker_value "$marker" repo)"
-      worktree="$(oms_harness_read_marker_value "$marker" worktree)"
-      if oms_harness_safe_residue_worktree "$base" "$dir" "$repo" "$worktree"; then
+      if [ "$safe" = 1 ]; then
         # Both arguments are physical paths established above. In particular,
         # the remove target is the expected residue child, never marker input.
         git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" worktree remove --force \

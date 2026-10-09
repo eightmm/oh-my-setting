@@ -47,15 +47,58 @@ victim_physical="$(cd "$victim" && pwd -P)"
 git -C "$repo" worktree list --porcelain | grep -Fxq "worktree $victim_physical" ||
   fail "a planted marker removed the unrelated worktree registration"
 
-# Preserve the intended recovery path: the production delegate shape is one
-# exact child named wt, registered to the marker repository's common dir.
+# Production shape: one exact child named wt, registered to the marker
+# repository's common dir, whose owner is dead.
+dead_residue() {
+  mkdir -p "$1"
+  git -C "$repo" worktree add --detach "$1/wt" HEAD >/dev/null 2>&1
+  oms_harness_mark_tmpdir "$1" "$repo" "$1/wt"
+  sed 's/^pid=.*/pid=999999999/' "$1/.oh-my-setting-tmp" > "$1/.oh-my-setting-tmp.tmp"
+  mv "$1/.oh-my-setting-tmp.tmp" "$1/.oh-my-setting-tmp"
+}
+
+# A dead owner may have left the only copy of its work; cleanup keeps it.
+# .oms is ignored as in real repos, so only the record check can see it.
+printf '.oms/\n' >> "$repo/.git/info/exclude"
+dead_residue "$TMPDIR/oh-my-setting-scratch.dirty"
+printf 'edit\n' >> "$TMPDIR/oh-my-setting-scratch.dirty/wt/file.txt"
+dead_residue "$TMPDIR/oh-my-setting-scratch.untracked"
+printf 'new\n' > "$TMPDIR/oh-my-setting-scratch.untracked/wt/new.txt"
+dead_residue "$TMPDIR/oh-my-setting-scratch.detached"
+git -C "$TMPDIR/oh-my-setting-scratch.detached/wt" commit -q --allow-empty -m orphan
+dead_residue "$TMPDIR/oh-my-setting-delegate.plan"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.plan/wt/.oms/plan"
+printf '[]\n' > "$TMPDIR/oh-my-setting-delegate.plan/wt/.oms/plan/tasks.json"
+
+[ "$(oms_harness_tmp_residue_count)" = 0 ] ||
+  fail "doctor must not count kept work as removable residue"
+for dry in 1 0; do
+  oms_harness_residue_reset
+  out="$(oms_harness_cleanup_temp_dirs "$dry"; echo "kept=$OMS_HARNESS_RESIDUE_KEPT")"
+  for want in \
+    "kept: $TMPDIR/oh-my-setting-scratch.dirty (dead harness temp dir; worktree has uncommitted or untracked files)" \
+    "kept: $TMPDIR/oh-my-setting-scratch.untracked (dead harness temp dir; worktree has uncommitted or untracked files)" \
+    "kept: $TMPDIR/oh-my-setting-delegate.plan (dead harness temp dir; worktree holds .oms/plan/tasks.json)" \
+    "kept=4"; do
+    printf '%s\n' "$out" | grep -Fxq "$want" || fail "dry=$dry missing '$want': $out"
+  done
+  printf '%s\n' "$out" | grep -Eq '^kept: .*scratch\.detached \(dead harness temp dir; worktree HEAD [0-9a-f]{12} is on no branch, tag or remote ref\)$' ||
+    fail "dry=$dry must keep an unreferenced commit: $out"
+  if printf '%s\n' "$out" | grep -Eq '(would remove|removed): '; then
+    fail "dry=$dry must not offer kept work for removal: $out"
+  fi
+done
+for kept in scratch.dirty scratch.untracked scratch.detached delegate.plan; do
+  [ -d "$TMPDIR/oh-my-setting-$kept/wt" ] || fail "cleanup destroyed kept work in $kept"
+done
+[ "$(tail -n 1 "$TMPDIR/oh-my-setting-scratch.dirty/wt/file.txt")" = edit ] ||
+  fail "cleanup rewrote kept work"
+rm -rf "$TMPDIR"/oh-my-setting-scratch.* "$TMPDIR/oh-my-setting-delegate.plan"
+git -C "$repo" worktree prune
+
+# A clean worktree at a referenced commit is still removed.
 legitimate="$TMPDIR/oh-my-setting-delegate.legitimate"
-mkdir -p "$legitimate"
-git -C "$repo" worktree add --detach "$legitimate/wt" HEAD >/dev/null 2>&1
-oms_harness_mark_tmpdir "$legitimate" "$repo" "$legitimate/wt"
-sed 's/^pid=.*/pid=999999999/' "$legitimate/.oh-my-setting-tmp" \
-  > "$legitimate/.oh-my-setting-tmp.tmp"
-mv "$legitimate/.oh-my-setting-tmp.tmp" "$legitimate/.oh-my-setting-tmp"
+dead_residue "$legitimate"
 
 oms_harness_cleanup_temp_dirs 0 >/dev/null
 [ ! -e "$legitimate" ] || fail "valid dead delegate residue was not removed"
