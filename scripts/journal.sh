@@ -17,6 +17,27 @@ if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
   esac
 fi
 
+# A managed disconnect without python3 (an install that failed before its
+# runtime) has nothing to remove when no config file exists; the path mirrors
+# work_journal_config_path.
+if [ "${1:-}" = disconnect ] && ! command -v python3 >/dev/null 2>&1; then
+  config="${OMS_WORK_JOURNAL_CONFIG:-}"
+  config="${config/#\~/$HOME}"
+  if [ -z "$config" ] && [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    config="$XDG_CONFIG_HOME/oh-my-setting/work-journal.json"
+  fi
+  if [ -z "$config" ]; then
+    case "$(uname -s)" in
+      MINGW*|MSYS*|CYGWIN*) [ -z "${LOCALAPPDATA:-}" ] || config="$LOCALAPPDATA/oh-my-setting/work-journal.json" ;;
+    esac
+  fi
+  config="${config:-$HOME/.config/oh-my-setting/work-journal.json}"
+  if [ ! -e "$config" ] && [ ! -L "$config" ]; then
+    echo "not configured"
+    exit 0
+  fi
+fi
+
 case "${1:-}" in
   status|show|rebuild|sync|distill|identity)
     command_name="$1"

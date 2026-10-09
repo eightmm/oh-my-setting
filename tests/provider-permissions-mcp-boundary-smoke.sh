@@ -209,4 +209,37 @@ then
   fail "serialized disjoint grants or ownership were lost"
 fi
 
+# A host without python3 (an install that failed before its runtime) can still
+# remove nothing; managed grants left on such a host still need the validator.
+nopy="$TMP/no-python-bin"
+mkdir -p "$nopy"
+for tool in /usr/bin/* /bin/*; do
+  case "${tool##*/}" in python*) continue ;; esac
+  [ -e "$nopy/${tool##*/}" ] || ln -s "$tool" "$nopy/${tool##*/}"
+done
+absent="$TMP/no-python-home/.gemini/antigravity-cli/settings.json"
+out="$(PATH="$nopy" OMS_ANTIGRAVITY_SETTINGS="$absent" \
+  "$ROOT/scripts/provider-permissions.sh" --remove 2>&1)" ||
+  fail "removing absent grants without python3 must succeed: $out"
+case "$out" in *'nothing to remove'*) ;; *) fail "absent grants must report nothing to remove: $out" ;; esac
+mkdir -p "${absent%/*}"
+printf '{"rules": []}\n' > "$absent.oh-my-setting-permissions.json"
+if PATH="$nopy" OMS_ANTIGRAVITY_SETTINGS="$absent" \
+  "$ROOT/scripts/provider-permissions.sh" --remove >"$TMP/nopy.out" 2>&1; then
+  fail "a recorded ownership sidecar must still require python3 to revoke"
+fi
+grep -Fq 'python3 is required' "$TMP/nopy.out" || fail "missing python3 must be named: $(cat "$TMP/nopy.out")"
+# The other uninstall removals likewise need python3 only for something to remove.
+for remover in install-claude-hooks.sh install-codex-plugin.sh; do
+  out="$(PATH="$nopy" HOME="$TMP/no-python-home" CODEX_HOME="$TMP/no-python-home/.codex" \
+    OMS_CLAUDE_SETTINGS="$TMP/no-python-home/.claude/settings.json" \
+    OMS_CODEX_CONFIG="$TMP/no-python-home/.codex/config.toml" \
+    "$ROOT/scripts/$remover" --remove 2>&1)" || fail "$remover --remove without python3 or config must succeed: $out"
+  case "$out" in *'nothing to remove'*) ;; *) fail "$remover must report nothing to remove: $out" ;; esac
+done
+out="$(PATH="$nopy" HOME="$TMP/no-python-home" XDG_CONFIG_HOME="$TMP/no-python-home/.config" \
+  "$ROOT/scripts/journal.sh" disconnect --managed 2>&1)" ||
+  fail "journal disconnect without python3 or config must succeed: $out"
+[ "$out" = "not configured" ] || fail "journal disconnect must report not configured: $out"
+
 echo "provider-permissions-mcp-boundary-smoke: ok"

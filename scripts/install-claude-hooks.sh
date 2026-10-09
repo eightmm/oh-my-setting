@@ -189,6 +189,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# Nothing to remove needs no interpreter: a failed early install has neither.
+if [ "$REMOVE" = 1 ] && [ ! -e "$SETTINGS" ] && [ ! -L "$SETTINGS" ]; then
+  echo "claude-hooks: nothing to remove ($SETTINGS absent)"
+  exit 0
+fi
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
 if [ "$PRINT_EXPECTED" = "1" ]; then
