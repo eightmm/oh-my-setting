@@ -67,7 +67,10 @@ confirm() {
   if [ "$ASSUME_YES" = "1" ]; then
     return 0
   fi
-  if [ ! -r /dev/tty ]; then
+  # Readable permissions are not a terminal: without a controlling tty (CI,
+  # containers, agent shells) opening /dev/tty fails, and the read below would
+  # silently answer no.
+  if ! { : </dev/tty; } 2>/dev/null; then
     echo "error: $prompt (no tty; rerun with --yes)" >&2
     exit 1
   fi
@@ -131,6 +134,15 @@ if [ "$PURGE" = 1 ] && [ "$PURGE_DIRTY" != 1 ] && [ -d "$ROOT/.git" ]; then
   fi
 fi
 
+# Ask before removing anything, so a refused or impossible confirmation leaves
+# every integration in place.
+purge_confirmed=0
+if [ "$PURGE" = "1" ]; then
+  if confirm "Delete checkout directory $ROOT?"; then
+    purge_confirmed=1
+  fi
+fi
+
 removal_failed=0
 run_removal() {  # LABEL COMMAND...
   local label="$1"
@@ -166,13 +178,6 @@ if [ "$removal_failed" -ne 0 ]; then
   exit 1
 fi
 
-purge_confirmed=0
-if [ "$PURGE" = "1" ]; then
-  if confirm "Delete checkout directory $ROOT?"; then
-    purge_confirmed=1
-  fi
-fi
-
 # Work Journal owns configuration outside the checkout. Remove it before
 # unlinking the recovery command or receipt, so a failure leaves the install
 # fully retryable and honors the same mutation boundary as other integrations.
@@ -195,7 +200,7 @@ if [ "$PURGE" != "1" ]; then
 fi
 
 if [ "$purge_confirmed" != "1" ]; then
-  echo "purge: aborted"
+  echo "purge: aborted; checkout kept at $ROOT"
   exit 0
 fi
 

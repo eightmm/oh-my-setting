@@ -81,7 +81,8 @@ problem() {
 }
 
 run_login() {
-  if [ "$LOGIN_USES_TTY" = 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  # Permissions are not a terminal: open it, as the redirect below will.
+  if [ "$LOGIN_USES_TTY" = 1 ] && { : </dev/tty >/dev/tty; } 2>/dev/null; then
     "$@" </dev/tty >/dev/tty
   else
     "$@"

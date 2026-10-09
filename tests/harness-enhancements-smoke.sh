@@ -959,6 +959,19 @@ EOF
   if grep -Fq 'purged ' "$out"; then
     fail "uninstall printed purge success after Journal failure"
   fi
+
+  : > "$log"
+  : > "$out"
+  status=0
+  # No controlling terminal (CI, containers): /dev/tty stays readable by mode
+  # but cannot be opened, so purge must refuse before removing anything.
+  HOME="$TMP/uninstall-home" XDG_CONFIG_HOME="$TMP/uninstall-home/.config" \
+    OMS_TEST_OPS_LOG="$log" python3 -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+    "$checkout/scripts/uninstall.sh" --purge --purge-dirty > "$out" 2>&1 </dev/null || status=$?
+  [ "$status" -ne 0 ] || fail "purge without a terminal or --yes reported success: $(cat "$out")"
+  grep -Fq 'no tty; rerun with --yes' "$out" || fail "purge without a terminal must say how to confirm: $(cat "$out")"
+  [ ! -s "$log" ] || fail "purge without confirmation removed integrations: $(cat "$log")"
+  [ -d "$checkout" ] || fail "purge without confirmation deleted the checkout"
 }
 
 test_install_owner_guards_and_stale_status() {
