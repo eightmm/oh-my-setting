@@ -137,6 +137,11 @@ PY
 )" || fail "--provider-timeout must be a positive duration up to 24h (for example 15m)"
 
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
+# agent-plan gives a parent's scratch the main checkout's plan, but the frozen
+# commit patches and progress rows below are checked as repo-local state.
+STATE_REPO="$(oms_state_root "$REPO")" || fail "bad --repo"
+[ "$(cd "${STATE_REPO//$'\r'/}" && pwd -P)" = "$(cd "$REPO" && pwd -P)" ] ||
+  fail "goal-drive cannot run from a parent's scratch worktree; its plan lives in ${STATE_REPO//$'\r'/}: run it there or in a dedicated worktree"
 PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
   fail "unknown provider: inspect 'oms models' for registered transports"
 if [ -n "$EXPECTED_REF" ]; then

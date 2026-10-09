@@ -1706,6 +1706,12 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
     fail "a scratch landing must record its tree in the main checkout's landings"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id landed | grep -q '"state": "done"' ||
     fail "a scratch landing must finish the main checkout's plan task"
+  # goal-drive's repo-local commit state would split from the shared plan: it refuses the scratch.
+  if $parent "$ROOT/scripts/goal-drive.sh" --repo "$scratch" >"$TMP/state-root-goal.err" 2>&1; then
+    fail "goal-drive must refuse a parent's scratch worktree"
+  fi
+  grep -q "cannot run from a parent's scratch worktree" "$TMP/state-root-goal.err" ||
+    fail "goal-drive must name the scratch refusal: $(cat "$TMP/state-root-goal.err")"
   plain="$managed/oh-my-setting-scratch.plain/wt"
   git -C "$project" worktree add --quiet --detach "$plain" HEAD
   [ "$($parent bash -c "$probe" _ "$ROOT" "$plain")" = "$(cd "$plain" && pwd -P)" ] ||
