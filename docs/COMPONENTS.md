@@ -661,8 +661,9 @@ claim behavior. Runtime, state, and inbox consume this decision rather than
 reconstructing readiness from stored task states.
 
 For reviewed tasks integrated together by commit, use `oms agent-plan finish
---id ID --landed-commit SHA [--repo PATH]`. This requires retained review
-artifact/patch evidence, an exact-SHA `oms land` receipt with state `passed`,
+--id ID --landed-commit SHA [--repo PATH]`. This requires review
+artifact/patch evidence, retained from `review` or given here with `--artifact`
+and `--patch`, an exact-SHA `oms land` receipt with state `passed`,
 successful gate/push/CI, and SHA reachable from the receipt's recorded local
 remote/target ref; it performs no fetch. A task's current lease must match
 when one is given, and a task with allowed paths needs the landed range, from

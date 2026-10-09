@@ -5657,6 +5657,20 @@ test_agent_plan_lifecycle() {
     fail "commit finish from claimed must be rejected"
   fi
   assert_file_contains "$d/err" 'requires review'
+  # A review without evidence is not stuck: the commit finish names the flags that supply it.
+  "$SH" --repo "$d" review --id integrated >/dev/null
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then
+    fail "commit finish without review evidence must be rejected"
+  fi
+  assert_file_contains "$d/err" 'pass --artifact and --patch'
+  before="$(cat "$d/.oms/plan/tasks.json")"
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" --artifact artifact.md --patch change.patch >"$d/err" 2>&1; then
+    fail "commit finish without receipt must be rejected"
+  fi
+  assert_file_contains "$d/err" 'no passed oms land receipt'
+  [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "evidence on a rejected finish changed plan"
+  "$SH" --repo "$d" release --id integrated >/dev/null
+  "$SH" --repo "$d" claim --id integrated --provider codex >/dev/null
   "$SH" --repo "$d" review --id integrated --artifact artifact.md --patch change.patch >/dev/null
   before="$(cat "$d/.oms/plan/tasks.json")"
   if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then

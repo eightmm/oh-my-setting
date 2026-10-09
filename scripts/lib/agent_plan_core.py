@@ -1055,8 +1055,10 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
     elif act == "finish" and env("OMS_LANDED_COMMIT"):
         if t["state"] != "review":
             die("task %s is %s; --landed-commit finish requires review" % (i, t["state"]))
+        # A review recorded without evidence takes it here instead of a release and a new claim.
+        t.update(artifact=env("OMS_ARTIFACT") or t.get("artifact", ""), patch=env("OMS_PATCH") or t.get("patch", ""))
         if not t.get("artifact") or not t.get("patch"):
-            die("task %s review is missing artifact/patch evidence" % i)
+            die("task %s review is missing artifact/patch evidence; pass --artifact and --patch" % i)
         require_current_lease(t)
         history = t.get("history", [])
         if not isinstance(history, list):

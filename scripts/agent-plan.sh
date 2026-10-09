@@ -143,9 +143,10 @@ Commands:
                                      the task's current lease when one is
                                      given, and, for a task with allowed
                                      paths, a landed range (previous pushed
-                                     receipt..SHA) that touches them. Typed
-                                     patch-land remains the default for
-                                     single patches.
+                                     receipt..SHA) that touches them.
+                                     --artifact/--patch supply evidence a
+                                     review lacked. Typed patch-land remains
+                                     the default for single patches.
   lint-verify --verify CMD --allowed "p1,p2"
                                      Lint a verify/acceptance command against
                                      the admission floor: content reads of
