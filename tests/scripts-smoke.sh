@@ -2496,9 +2496,7 @@ test_doctor_reports_a_provider_cli_that_is_not_logged_in() {
   out="$(cd "$project" && HOME="$home_dir" PATH="$bin_dir:$PATH" \
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_CODEX_PLUGIN=0 \
     "$ROOT/scripts/doctor.sh" 2>&1)" || true
-  if printf '%s' "$out" | grep -Fq 'has no local credential'; then
-    fail "a credentialed provider CLI must not warn: $out"
-  fi
+  case "$out" in *'has no local credential'*) fail "a credentialed provider CLI must not warn: $out" ;; esac
 
   # Logged out: one line per CLI, naming the CLI to log in with.
   rm -f "$home_dir/.claude/.credentials.json" "$home_dir/.codex/auth.json" \
@@ -2506,13 +2504,13 @@ test_doctor_reports_a_provider_cli_that_is_not_logged_in() {
   out="$(cd "$project" && HOME="$home_dir" PATH="$bin_dir:$PATH" \
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_CODEX_PLUGIN=0 \
     "$ROOT/scripts/doctor.sh" 2>&1)" || true
+  # Builtin matches: grep -q closing a pipe on the long doctor output fails it under pipefail.
   for cli in claude codex agy; do
-    printf '%s' "$out" | grep -Fq "warn: $cli is installed but has no local credential" ||
-      fail "doctor should report $cli as installed and not logged in: $out"
+    case "$out" in *"warn: $cli is installed but has no local credential"*) ;; *)
+      fail "doctor should report $cli as installed and not logged in: $out" ;; esac
   done
   # Reported, never failed: an interactive login is not an install defect.
-  printf '%s' "$out" | grep -Fq 'doctor: ok' ||
-    fail "a missing provider credential must not fail the doctor: $out"
+  case "$out" in *'doctor: ok'*) ;; *) fail "a missing provider credential must not fail the doctor: $out" ;; esac
 }
 
 test_installer_enables_auto_update_by_default() {
