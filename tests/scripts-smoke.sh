@@ -208,13 +208,9 @@ agent_plan_finish_landed() {
   local receipt
 
   receipt="$("$plan" --repo "$repo" show --id "$id" | python3 -c '
-import hashlib,json,sys
-d=json.load(sys.stdin)
-for name in ("state", "updated", "claim_expired", "claim_age_s"):
-    d.pop(name, None)
-print(hashlib.sha256(json.dumps(
- d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
-')"
+import json,runpy,sys
+print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
+' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')"
   "$plan" --repo "$repo" finish --id "$id" \
     --expected-landing-receipt-sha256 "$receipt"
 }

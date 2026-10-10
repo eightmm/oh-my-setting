@@ -96,13 +96,9 @@ if "$plan" --repo "$plan_repo" finish --id t1 --lease-id "$review_lease" \
   fail "landed task finished without an exact landing receipt"
 fi
 landing_receipt_sha="$("$plan" --repo "$plan_repo" show --id t1 | python3 -c '
-import hashlib,json,sys
-d=json.load(sys.stdin)
-for name in ("state", "updated", "claim_expired", "claim_age_s"):
-    d.pop(name, None)
-print(hashlib.sha256(json.dumps(
- d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
-')"
+import json,runpy,sys
+print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
+' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')"
 "$plan" --repo "$plan_repo" finish --id t1 --lease-id "$review_lease" \
   --expected-landing-receipt-sha256 "$landing_receipt_sha" >/dev/null
 status_out="$("$plan" --repo "$plan_repo" show --id t1)"
@@ -211,13 +207,9 @@ rf_finish() {  # TASK EXTRA-FLAGS...
     --expected-review-executor-soul-sha256 "" \
     --expected-review-lease-id "$rf_lease" >/dev/null
   rf_receipt="$("$plan" --repo "$rf_repo" show --id "$tid" | python3 -c '
-import hashlib,json,sys
-d=json.load(sys.stdin)
-for name in ("state", "updated", "claim_expired", "claim_age_s", "project_contract"):
-    d.pop(name, None)
-print(hashlib.sha256(json.dumps(
- d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
-')"
+import json,runpy,sys
+print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
+' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')"
   "$plan" --repo "$rf_repo" finish --id "$tid" --lease-id "$rf_lease" \
     --expected-landing-receipt-sha256 "$rf_receipt" "$@" >/dev/null
 }
@@ -262,13 +254,9 @@ rf_binary_finish() {  # TASK
     --expected-review-executor-soul-sha256 "" \
     --expected-review-lease-id "$rf_lease" >/dev/null
   rf_receipt="$("$plan" --repo "$rf_repo" show --id "$tid" | python3 -c '
-import hashlib,json,sys
-d=json.load(sys.stdin)
-for name in ("state", "updated", "claim_expired", "claim_age_s", "project_contract"):
-    d.pop(name, None)
-print(hashlib.sha256(json.dumps(
- d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
-')"
+import json,runpy,sys
+print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
+' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')"
   "$plan" --repo "$rf_repo" finish --id "$tid" --lease-id "$rf_lease" \
     --expected-landing-receipt-sha256 "$rf_receipt" --refreeze-acceptance >/dev/null
 }
