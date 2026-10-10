@@ -18542,8 +18542,69 @@ test_patch_land_reject_records_and_resolves_fail_ledger() {
   printf 'change\n' >> "$project/file.txt"
   ( cd "$project" && git diff > "$TMP/land-ledger.patch" && git checkout -- file.txt )
   local rc=0
-  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$TMP/land-ledger.patch" --verify false ) \
-    >/dev/null 2>"$err1" || rc=$?
+  # Explicit ready/release files keep admission paused inside a real observer
+  # window. Poll the barrier with a deadline; elapsed time never implies readiness.
+  rc="$(python3 - "$ROOT" "$project" "$TMP/land-ledger.patch" "$err1" "$TMP" <<'PY'
+import hashlib, json, os, pathlib, shlex, subprocess, sys, time
+root, project, patch, errors, tmp = sys.argv[1:]
+ready = pathlib.Path(tmp) / "landing-verifier-ready"
+release = pathlib.Path(tmp) / "landing-verifier-release"
+code = "\n".join([
+    "import pathlib,sys,time",
+    "pathlib.Path(%r).write_text('ready')" % str(ready),
+    "release = pathlib.Path(%r)" % str(release),
+    "deadline = time.monotonic() + 30",
+    "while not release.exists():",
+    "    if time.monotonic() >= deadline: raise SystemExit(9)",
+    "    time.sleep(0.05)",
+    "sys.exit(1)",
+])
+verify = "python3 -c " + shlex.quote(code)
+snapshot = os.path.join(tmp, "landing-observer")
+with open(errors, "w") as err:
+    worker = subprocess.Popen(["bash", root + "/scripts/patch-land.sh", "--repo", project,
+                               "--patch", patch, "--verify", verify],
+                              stdout=subprocess.DEVNULL, stderr=err)
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists():
+            assert worker.poll() is None, "landing exited before the verifier barrier"
+            assert time.monotonic() < deadline, "verifier barrier timed out"
+            time.sleep(0.05)
+        subprocess.run(["bash", "-c", '. "$1/scripts/lib/oms-common.sh"; '
+                        'oms_worker_surface_snapshot "$2" "$3"',
+                        "observer", root, project, snapshot], check=True)
+        assert ".gitignore EXISTS" in pathlib.Path(snapshot, "omsstate").read_text()
+        frozen = pathlib.Path(project) / ".oms/landing-patches"
+        assert not list(frozen.glob("*.patch")), "published before ADMIT"
+        release.write_text("go")
+        assert worker.wait(timeout=30) == 1
+        result = subprocess.run(["bash", "-c", '. "$1/scripts/lib/oms-common.sh"; '
+                                 'oms_worker_state_violations "$2" "$3/omsstate"',
+                                 "observer", root, project, snapshot],
+                                check=True, text=True, capture_output=True)
+        assert not result.stdout.strip(), result.stdout
+        assert not list(frozen.glob("*.patch")), "rejection published a canonical patch"
+        index = pathlib.Path(project) / ".oms/artifacts/index.jsonl"
+        rows = [json.loads(line) for line in index.read_text().splitlines()]
+        row = [row for row in rows if row.get("kind") == "patch-admit"][-1]
+        assert row["exit"] == 1 and "patch" not in row
+        assert row["patch_external"]["owned"] is False
+        expected = hashlib.sha256(pathlib.Path(patch).read_bytes()).hexdigest()
+        assert row["patch_sha256"] == row["patch_external"]["sha256"] == expected
+        report = pathlib.Path(project) / row["artifact"]
+        capture = pathlib.Path(next(line[len("- patch: "):] for line in report.read_text().splitlines()
+                                    if line.startswith("- patch: ")))
+        assert capture.read_bytes() == pathlib.Path(patch).read_bytes()
+        assert not str(capture).startswith(project + "/")
+    finally:
+        release.write_text("go")
+        if worker.poll() is None:
+            worker.kill()
+            worker.wait()
+print(worker.returncode)
+PY
+)" || fail "concurrent rejection or retained capture check failed"
   [ "$rc" = "1" ] || fail "rejected land should exit 1, got $rc"
   ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list ) | grep -Fq "patch-land REJECT" ||
     fail "rejection should be recorded in the fail-ledger"
@@ -18555,6 +18616,14 @@ test_patch_land_reject_records_and_resolves_fail_ledger() {
   ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) | grep -Fq "patch-land REJECT" &&
     fail "successful land should resolve the recorded rejection"
   assert_file_contains "$project/file.txt" "change"
+  "$ROOT/scripts/artifact-index.sh" --repo "$project" --json unresolved 100 \
+    > "$TMP/land-ledger-index.json"
+  python3 - "$TMP/land-ledger-index.json" <<'PY' || fail "external capture digest lost supersession identity"
+import json, sys
+rows = json.load(open(sys.argv[1]))["rows"]
+failed = [row for row in rows if row.get("kind") == "patch-admit" and row.get("exit") == 1]
+assert len(failed) == 1 and failed[0].get("superseded_by"), failed
+PY
 }
 
 test_patch_land_plan_task_supplies_patch() {
@@ -25537,6 +25606,23 @@ test_landing_refuses_to_apply_without_a_recorded_intent() {
     fail "the refusal should say why: $out"
   [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] ||
     fail "nothing should have been applied"
+  python3 - "$project" "$patch" <<'PY' || fail "intent failure deleted or changed published evidence"
+import pathlib, sys
+repo, source = map(pathlib.Path, sys.argv[1:])
+patches = list((repo / ".oms/landing-patches").glob("*.patch"))
+assert len(patches) == 1, patches
+assert patches[0].read_bytes() == source.read_bytes()
+assert not (repo / ".oms/landings.jsonl").read_bytes()
+PY
+  "$ROOT/scripts/patch-land.sh" --repo "$project" --recover >/dev/null ||
+    fail "empty-intent recovery failed"
+  "$ROOT/scripts/patch-land.sh" --repo "$project" --recover >/dev/null ||
+    fail "repeated empty-intent recovery failed"
+  [ ! -s "$project/.oms/landings.jsonl" ] || fail "recovery invented an intent for retained evidence"
+  for out in "$project"/.oms/landing-patches/*.patch; do
+    cmp "$patch" "$out" || fail "recovery changed retained orphan evidence"
+  done
+
 }
 
 test_provider_permissions_grants_only_what_is_missing() {

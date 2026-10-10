@@ -53,7 +53,6 @@ long-terminal attempts, archived task packets,
 handoff digests, local tracked-state checkpoints, hook events/sessions,
 terminal supervisor runtime records outside the repository (durable lifecycle
 events and attempt specs remain),
-terminal frozen landing patches no longer referenced by the artifact index,
 stale open runs (no spine event in --days; a close event is appended), run
 capsules of runs that are NOT open, abandoned change-guards (dead owner pid
 or aged snapshot), terminal/draft executor souls, retired failure rows
@@ -63,7 +62,8 @@ artifact index rows are delegated to
 artifact-index prune; orphaned artifact files are left alone unless
 --delete-orphan-files says otherwise. Never touches live runs, the active task, unresolved
 failures, active experiment claims, or plan tasks in review. The append-only
-experiment board is left intact.
+experiment board is left intact. Frozen landing snapshots are retained because
+the existing schema cannot prove ownership of the current file generation.
 EOF
 }
 
@@ -109,12 +109,10 @@ note_remove() {  # note_remove KIND PATH
   fi
 }
 
-# 0.5) A landing freezes caller-owned patch bytes before admission so verifier
-# code cannot swap the approved object. Keep that snapshot while recovery is
-# outstanding and while the artifact index still cites it; once both durable
-# records say it is terminal/unreferenced, it is transient storage like an old
-# supervisor log. The same non-blocking landing lock prevents GC from racing a
-# live apply or recovery. A busy landing is expected and simply defers cleanup.
+# 0.5) Validate landing retention inputs, but never unlink frozen evidence.
+# Terminal rows, filenames and equal bytes cannot prove native ownership of the
+# current file generation. The existing schema has no such publication receipt;
+# snapshots (including no-intent orphans) require manual storage management.
 landing_patch_gc_locked() {
   python3 - "$STATE_ROOT" "$OMS/landings.jsonl" "$OMS/artifacts/index.jsonl" \
     "$DAYS" "$DRY_RUN" <<'PY'
@@ -217,8 +215,6 @@ if index_lines is not None:
                     referenced.add(real)
 
 cutoff = time.time() - int(days_raw) * 86400
-dry_run = dry_raw == "1"
-removed = False
 for path in sorted(terminal_paths - active_paths - referenced):
     name = os.path.basename(path)
     if not (name.startswith("land-") and name.endswith(".patch")):
@@ -229,19 +225,7 @@ for path in sorted(terminal_paths - active_paths - referenced):
         continue
     if not stat.S_ISREG(info.st_mode) or info.st_mtime > cutoff:
         continue
-    print("- landing-patch: %s" % path)
-    if not dry_run:
-        os.unlink(path)
-        removed = True
-if removed:
-    try:
-        directory = os.open(patch_root, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except OSError:
-        pass
+    print("- landing-patch: retained (ownership unproven): %s" % path)
 PY
 }
 
@@ -253,9 +237,6 @@ if [ -f "$OMS/landings.jsonl" ] && [ -d "$OMS/landing-patches" ]; then
   case "$landing_gc_status" in
     0)
       [ -z "$landing_gc_out" ] || printf '%s\n' "$landing_gc_out"
-      landing_gc_changes="$(printf '%s\n' "$landing_gc_out" |
-        awk '/^- landing-patch: / {n++} END {print n+0}')"
-      removed=$((removed + landing_gc_changes))
       ;;
     75) echo "- landing-patch: skipped while a landing or recovery is active" ;;
     *) echo "error: gc: frozen landing patch maintenance failed" >&2; exit "$landing_gc_status" ;;

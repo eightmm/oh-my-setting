@@ -1038,7 +1038,11 @@ def path_fields(label, raw):
     ext = {"name": os.path.basename(path), "owned": False}
     if digest:
         ext["sha256"] = digest
-    return {label + "_external": ext}
+    fields = {label + "_external": ext}
+    # Supersession compares patch digests independently of path ownership.
+    if label == "patch" and digest:
+        fields["patch_sha256"] = digest
+    return fields
 
 operation_id = safe_id(os.environ.get("OMS_INDEX_OPERATION_ID", "")) or ("op_" + uuid.uuid4().hex)
 run_id = safe_id(os.environ.get("OMS_INDEX_RUN_ID", ""))

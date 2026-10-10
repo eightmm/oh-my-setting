@@ -197,6 +197,7 @@ git -C "$race_repo" restore file.txt
 printf 'unapproved\n' > "$race_repo/file.txt"
 git -C "$race_repo" diff --binary > "$replacement_patch"
 git -C "$race_repo" restore file.txt
+cp "$approved_patch" "$TMP/approved-original.patch"
 race_verify="cp '$replacement_patch' '$approved_patch'"
 race_approval="$(OMS_REQUIRE_LANDING_APPROVAL=1 "$LAND" --repo "$race_repo" \
   --patch "$approved_patch" --verify "$race_verify" --request-approval)" ||
@@ -211,21 +212,67 @@ OMS_REQUIRE_LANDING_APPROVAL=1 "$LAND" --repo "$race_repo" \
 grep -Fxq approved "$race_repo/file.txt" ||
   fail "patch pathname changed between approval and apply"
 
+python3 - "$race_repo" "$TMP/approved-original.patch" <<'PY' ||
+import hashlib, json, pathlib, sys
+repo = pathlib.Path(sys.argv[1])
+expected = pathlib.Path(sys.argv[2]).read_bytes()
+intents = [json.loads(line) for line in (repo / ".oms/landings.jsonl").read_text().splitlines()
+           if json.loads(line)["event"] == "intent"]
+frozen = pathlib.Path(intents[-1]["patch"])
+assert frozen.parent == repo / ".oms/landing-patches"
+assert frozen.read_bytes() == expected
+assert intents[-1]["patch_sha"] == hashlib.sha256(expected).hexdigest()
+rows = [json.loads(line) for line in (repo / ".oms/artifacts/index.jsonl").read_text().splitlines()]
+admit = [row for row in rows if row.get("kind") == "patch-admit"][-1]
+assert "patch" not in admit and admit["patch_external"]["owned"] is False
+assert admit["patch_sha256"] == admit["patch_external"]["sha256"] == intents[-1]["patch_sha"]
+report = repo / admit["artifact"]
+capture = pathlib.Path(next(line[len("- patch: "):] for line in report.read_text().splitlines()
+                            if line.startswith("- patch: ")))
+assert capture.read_bytes() == expected and capture != frozen
+assert not str(capture).startswith(str(repo) + "/")
+PY
+  fail "publication or persisted external admission identity lost captured bytes"
+
 # The landing copy itself is private but not an OS isolation boundary: verifier
-# code runs as the same user and can discover .oms/landing-patches. If it moves
-# those bytes, admission must fail closed before touching the clean tree.
+# code runs as the same user and can discover its private capture. Mutate the
+# actual admission input, not a previously published snapshot, and fail closed.
 git -C "$race_repo" restore file.txt
 frozen_approved_patch="$TMP/frozen-approved.patch"
 printf 'approved again\n' > "$race_repo/file.txt"
 git -C "$race_repo" diff --binary > "$frozen_approved_patch"
 git -C "$race_repo" restore file.txt
-frozen_race_verify="for candidate in '$race_repo'/.oms/landing-patches/*.patch; do cp '$replacement_patch' \"\$candidate\"; done"
-if "$LAND" --repo "$race_repo" --patch "$frozen_approved_patch" \
-  --verify "$frozen_race_verify" >/dev/null 2>&1; then
+mkdir -p "$TMP/capture-race"
+frozen_race_verify="for candidate in '$TMP'/capture-race/oms-landing-capture-*/*.patch; do [ -f \"\$candidate\" ] || exit 9; cp '$replacement_patch' \"\$candidate\"; printf mutated > '$TMP/capture-mutated'; done"
+if TMPDIR="$TMP/capture-race" "$LAND" --repo "$race_repo" --patch "$frozen_approved_patch" \
+  --verify "$frozen_race_verify" >"$TMP/capture-race.out" 2>&1; then
   fail "same-UID verifier mutation of the frozen patch was admitted"
 fi
+[ -s "$TMP/capture-mutated" ] || fail "verifier did not mutate the actual capture"
+grep -Fq 'frozen patch changed during admission' "$TMP/capture-race.out" ||
+  fail "capture mutation did not reach the digest refusal"
 grep -Fxq base "$race_repo/file.txt" ||
   fail "frozen-patch mutation changed the main tree"
+
+# A publication collision is a real I/O failure: never overwrite the existing
+# destination, create an intent, or apply bytes after the successful admission.
+mkdir -p "$TMP/capture-collision"
+collision_verify="for candidate in '$TMP'/capture-collision/oms-landing-capture-*/*.patch; do [ -f \"\$candidate\" ] || exit 9; printf foreign > '$race_repo/.oms/landing-patches/'\$(basename \"\$candidate\"); done"
+collision_lines="$(wc -l < "$race_repo/.oms/landings.jsonl" | tr -d ' ')"
+if TMPDIR="$TMP/capture-collision" "$LAND" --repo "$race_repo" \
+  --patch "$frozen_approved_patch" --verify "$collision_verify" >"$TMP/collision.out" 2>&1; then
+  fail "publication overwrote an existing destination"
+fi
+grep -Fq 'cannot publish admitted captured patch' "$TMP/collision.out" ||
+  fail "collision did not exercise publication failure"
+[ "$(wc -l < "$race_repo/.oms/landings.jsonl" | tr -d ' ')" = "$collision_lines" ] ||
+  fail "failed publication wrote an intent"
+for collision_capture in "$TMP"/capture-collision/oms-landing-capture-*/*.patch; do
+  cmp "$frozen_approved_patch" "$collision_capture" || fail "failed publication lost its admission input"
+  grep -Fxq foreign "$race_repo/.oms/landing-patches/$(basename "$collision_capture")" ||
+    fail "failed publication changed or deleted the existing destination"
+done
+grep -Fxq base "$race_repo/file.txt" || fail "failed publication changed the tree"
 
 # An approval requested from one lifecycle attempt is not a bearer grant for
 # the same patch outside that attempt. A missing caller attempt must fail just

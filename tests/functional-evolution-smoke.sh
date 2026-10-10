@@ -795,7 +795,7 @@ PY
 
 test_gc_bounds_old_checkpoint_and_hook_state() {
   local repo="$TMP/retention"
-  local checkpoint_id out landing_dir
+  local checkpoint_id out landing_dir landing_lock_mode retained_name
 
   make_repo "$repo"
   checkpoint_id="$(cd "$repo" && bash "$ROOT/scripts/checkpoint.sh" create --json |
@@ -855,8 +855,8 @@ PY
     fail "gc apply kept an expired checkpoint"
   [ ! -e "$repo/.oms/hooks/sessions/old.json" ] ||
     fail "gc apply kept an expired hook session"
-  [ ! -e "$landing_dir/land-terminal.patch" ] ||
-    fail "gc apply kept an expired terminal landing snapshot"
+  [ -e "$landing_dir/land-terminal.patch" ] ||
+    fail "gc trusted terminal hints to delete frozen evidence"
   [ -e "$landing_dir/land-live.patch" ] ||
     fail "gc removed a snapshot whose landing is still recoverable"
   [ -e "$landing_dir/land-referenced.patch" ] ||
@@ -868,6 +868,39 @@ PY
   if grep -Fq '"session":"old"' "$repo/.oms/hooks/events.jsonl"; then
     fail "gc kept the expired hook event"
   fi
+
+  # A filename/terminal hint is not native ownership, and a matching digest
+  # cannot distinguish a replacement generation. No-intent leftovers also stay.
+  python3 - "$repo" <<'PY'
+import json, os, pathlib, sys, time
+repo = pathlib.Path(sys.argv[1])
+root = repo / ".oms/landing-patches"
+old = time.time() - 10 * 86400
+with (repo / ".oms/landings.jsonl").open("a") as journal:
+    for name in ("forged", "replacement", "orphan"):
+        path = root / ("land-" + name + ".patch")
+        path.write_bytes(b"retained evidence\n")
+        if name != "orphan":
+            journal.write(json.dumps({"landing_id": "land-" + name, "event": "intent", "patch": str(path)}) + "\n")
+            journal.write(json.dumps({"landing_id": "land-" + name, "event": "abandoned", "reason": "unadmitted"}) + "\n")
+        if name == "replacement":
+            inode = path.stat().st_ino
+            replacement = root / "replacement.tmp"
+            replacement.write_bytes(path.read_bytes())
+            replacement.replace(path)
+            assert path.stat().st_ino != inode
+        os.utime(path, (old, old))
+PY
+  for landing_lock_mode in 0 1; do
+    # flock files and mkdir locks cannot share a pathname across backends.
+    OMS_LOCK_DIR="$TMP/landing-locks-$landing_lock_mode" OMS_LOCK_TIMEOUT=5 \
+      OMS_LOCK_FORCE_MKDIR="$landing_lock_mode" bash "$ROOT/scripts/gc.sh" \
+      --repo "$repo" --days 1 --apply >/dev/null
+    for retained_name in forged replacement orphan; do
+      grep -Fxq 'retained evidence' "$landing_dir/land-$retained_name.patch" ||
+        fail "gc deleted unproven $retained_name evidence (lock mode $landing_lock_mode)"
+    done
+  done
 
   # Frozen landing retention is a safety decision. One malformed landing or
   # artifact row makes the reference set unknowable, so apply mode must keep
