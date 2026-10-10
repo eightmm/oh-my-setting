@@ -125,9 +125,12 @@ def _seats(calls):
             continue
         round_ = re.search(r"-r(\d+)\.md$", call.get("artifact") or "")
         key = call.get("selected_model") or call.get("artifact") or "unknown"
-        seat = seats.setdefault(key, {"model": call.get("selected_model"), "provider": _provider(call), "rounds": {}})
+        seat = seats.setdefault(key, {"model": call.get("selected_model"), "provider": _provider(call), "rounds": {}, "truncated": {}})
         if call.get("answer"):
-            seat["rounds"][int(round_[1]) if round_ else 1] = call["answer"]
+            number = int(round_[1]) if round_ else 1
+            seat["rounds"][number] = call["answer"]
+            seat["truncated"][number] = ({"path": clean(call.get("artifact"), MAX_SEAT_ANSWER)}
+                                          if call.get("answer_truncated") is True else None)
     return list(seats.values())
 
 
@@ -235,7 +238,12 @@ def tab_body(report, main, width, cap, navigation, labels, unicode=True):
         title = "%s %s round %s answer · Esc back" % (
             MODEL_NAMES.get(seat["model"]) or clean(seat["model"], 40) or "Unknown model", dash, latest)
         text = readable(seat["rounds"].get(latest, "No answer recorded"), "\n", True)
-        body = [(title, None, False)] + [(line, None, False) for line in _answer_rows(text, width)]
+        body = [(title, None, False)]
+        notice = seat["truncated"].get(latest)
+        if notice:
+            message = "Answer was truncated; source artifact: %s" % notice["path"]
+            body.extend((line, None, False) for line in wrapped(message, width, len(message), len(message)))
+        body.extend((line, None, False) for line in _answer_rows(text, width))
         state["scroll"] = min(max(0, state.get("scroll", 0)), max(0, len(body) - cap))
         return body[state["scroll"]:state["scroll"] + cap]
     answered = sum(1 for seat in seats if seat["rounds"])

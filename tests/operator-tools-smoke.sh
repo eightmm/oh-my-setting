@@ -1352,6 +1352,32 @@ assert "Question: Panel attention signal" in bare
 # Enter on a seat shows its full answer in the tab, Esc returns to the summary.
 assert panel_debate.handle(("down",), nav) and panel_debate.handle(("up",), nav) and panel_debate.handle(("enter",), nav)
 assert "round 2 answer" in board("debate", nav=nav)[1] and "FULLTEXT-SOL second line" in board("debate", nav=nav)[1]
+# The full-seat view carries the selected round's truncation flag and source path.
+full_nav = deepcopy(nav)
+full_nav["debate_view"].update(seat=0, scroll=0)
+base_call = dict(seat_calls[0], artifact=ask + "codex-gpt-6-sol-s-1-r1.md", answer="round 1 answer", answer_truncated=True)
+round_two = dict(base_call, artifact=ask + "codex-gpt-6-sol-s-1-r2.md", answer="round 2 answer", answer_truncated=False)
+full_nav["debate_view"]["report"]["rows"][0]["calls"] = [base_call, round_two]
+assert "source artifact:" not in board("debate", 80, 40, nav=full_nav)[1]
+round_two["answer_truncated"] = True
+full_nav["debate_view"]["report"]["rows"][0]["calls"] = [base_call, round_two]
+notice = board("debate", 80, 40, nav=full_nav)[1]
+assert "Answer was truncated" in notice and base_call["artifact"] not in notice and round_two["artifact"] in notice, notice
+round_two["artifact"] = ask + ("x" * 80 + "/") * 2 + "x" * 120 + "-r2.md"
+for glyphs in (True, False):
+    notice = board("debate", 76, 40, nav=full_nav, unicode=glyphs)[1]
+    assert round_two["artifact"] in "".join(line.strip(" │|") for line in notice.splitlines()), notice
+    assert len(notice.splitlines()) == 40 and all(display_width(line) <= 76 for line in notice.splitlines())
+round_two["answer_truncated"] = False
+full_nav["debate_view"]["report"]["rows"][0]["calls"] = [base_call, round_two]
+assert "Answer was truncated" not in board("debate", 80, 40, nav=full_nav)[1]
+round_two.pop("answer_truncated")
+full_nav["debate_view"]["report"]["rows"][0]["calls"] = [base_call, round_two]
+assert "Answer was truncated" not in board("debate", 80, 40, nav=full_nav)[1]
+same_round_replacement = dict(base_call, answer="replacement answer", answer_truncated=False)
+full_nav["debate_view"]["report"]["rows"][0]["calls"] = [base_call, same_round_replacement]
+replacement_view = board("debate", 80, 40, nav=full_nav)[1]
+assert "replacement answer" in replacement_view and "Answer was truncated" not in replacement_view, replacement_view
 # Full answers remain scrollable through the retained source byte bound, including
 # the tail of both a multiline answer and one long paragraph.
 for answer_tail, answer_text in (("LINE-0499", "x\n" * 499 + "LINE-0499"),

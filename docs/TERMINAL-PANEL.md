@@ -1131,8 +1131,10 @@ line is cut at about 140 columns), `(changed in round 2: (c) -> (a))` only when
 the seat's choice token such as (a), A, yes/no or proceed/revise differs between
 rounds, Agreement/Disagreement only when the synthesis has such headings, and
 the owner's recorded decision. Up/Down moves the seat cursor, Enter shows that
-seat's full answer in the tab, Esc returns, and `f` opens the full recorded
-result reader. Evidence is read in the background.
+seat's retained answer in the tab. If only part of that round's source answer
+was retained, the tab shows a truncation notice and the recorded source artifact
+path. Esc returns, and `f` opens the full recorded result reader. Evidence is
+read in the background.
 
 Messages lists the room's last 200 messages, oldest first, one row each with
 local time (date when from another day), sender and recipient by the board's
