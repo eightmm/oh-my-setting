@@ -2113,9 +2113,11 @@ def latest_selected_main(history):
 def selected_main_leave_proof(repo, session, ident, rows, participant, history=None):
     state = room.project(rows)
     member = room.participant(state, participant)
+    # A native start digest cannot establish ownership of a later re-enrollment.
     if (state["closed"] or member.get("role") != "main" or member.get("parent")
             or member.get("provider") not in NATIVE_HARNESSES
-            or type(member.get("seq")) is not int or member["seq"] < 1):
+            or type(member.get("seq")) is not int or member["seq"] < 1
+            or member["seq"] != member.get("initial_seq")):
         raise ValueError("main membership changed or is uncertain")
     history = selected_main_history(repo, ident, participant) if history is None else history
     latest = latest_selected_main(history)

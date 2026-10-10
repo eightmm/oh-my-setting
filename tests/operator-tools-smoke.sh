@@ -8317,6 +8317,29 @@ with patch.object(panel, "managed_session", return_value=True), patch.object(pan
                             subprocess.CompletedProcess([], 0, "%2\n", ""), subprocess.CompletedProcess([], 0, "", "")]) as rebound_run:
                     panel.close_main(project, "r1", "mx")
                     assert len(leaves) == 1 and rebound_run.call_count == 3
+    # A matching native digest cannot give an old window authority over a later enrollment.
+    rejoined_rows = deepcopy(bound_rows) + [{"thread": "r1", "seq": 3, "room_event": {
+        "kind": "leave", "participant": "mx"}}, dict(bound_rows[-1], seq=4)]
+    rejoined_member = panel.room.project(rejoined_rows)["participants"][0]
+    assert rejoined_member["seq"] == 4 and rejoined_member["initial_seq"] == 2
+    for rejoined_terminal in (False, True):
+        old_rejoined_attempt = dict(panel_main_row, terminal=rejoined_terminal,
+            state="done" if rejoined_terminal else "working",
+            refs=dict(panel_main_row["refs"], panel_session_digest="a" * 32))
+        assert old_rejoined_attempt["refs"]["panel_session_digest"] == rejoined_member["consumer"]
+        with patch.object(panel.room, "records", return_value=rejoined_rows), \
+                patch.object(panel, "main_history", return_value=[old_rejoined_attempt]), \
+                patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                    "@1\ta1\tmx\tr1\t%s\t%s" % (str(Path(project).resolve()),
+                        "" if rejoined_terminal else "%2"), ""),
+                    subprocess.CompletedProcess([], 0, "%2\n", ""), subprocess.CompletedProcess([], 0, "", "")]) as rejoined_run, \
+                patch.object(panel.room, "append") as rejoined_leave:
+            try:
+                panel.close_main(project, "r1", "mx")
+                raise AssertionError("an old window closed a participant rejoined before observation")
+            except ValueError as error:
+                assert "membership changed or is uncertain" in str(error), error
+            assert rejoined_run.call_count == 2 and not rejoined_leave.called
     invalid_chain = deepcopy(rebound_rows)
     invalid_chain[-1]["room_event"]["previous"] = "f" * 32
     for invalid_rows in (invalid_chain, [dict(row, room_event=dict(row.get("room_event", {}), consumer="b" * 32))
