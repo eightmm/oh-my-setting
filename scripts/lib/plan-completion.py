@@ -787,7 +787,20 @@ def satisfaction(repo, bundle, tasks, plan_id):
         row = matches[0]
         if (row.get('kind') != kind or type(row.get('exit')) is not int or row['exit'] != 0 or
                 row.get('plan_id') != plan_id or row.get('task_id') != tid or
-                legacy_relative(repo, row.get('patch')) != patch_ref['path'] or row.get('patch_sha256') != patch_ref['sha256']):
+                row.get('patch_sha256') != patch_ref['sha256']):
+            fail('successor admission/land index mismatch')
+        if kind == 'patch-admit' and 'patch_external' in row:
+            # Admission inspects a private capture before canonical publication.
+            # Its digest links that inspection to the independently retained
+            # intent/land product; the diagnostic name grants no path authority.
+            external = row['patch_external']
+            keys(external, ('name', 'owned', 'sha256'))
+            text(external['name'], 'external patch name')
+            if ('patch' in row or external['owned'] is not False or
+                    digest(external['sha256']) != patch_ref['sha256']):
+                fail('successor admission external patch mismatch')
+        elif ('patch_external' in row or
+              legacy_relative(repo, row.get('patch')) != patch_ref['path']):
             fail('successor admission/land index mismatch')
         return row
     admission = indexed(successor['admission_event_id'], 'patch-admit')

@@ -1808,7 +1808,6 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id from-scratch | grep -q '"state": "claimed"' &&
     [ ! -e "$scratch/.oms/plan/tasks.json" ] || fail "a parent's scratch plan write must land in the main checkout's plan"
   $parent python3 - "$ROOT/scripts/agent-plan.sh" "$scratch" "$main" <<'PYMARKER' ||
-    fail "a scratch TTL view ignored the shared plan's live exact marker"
 import json
 import os
 from pathlib import Path
@@ -1834,6 +1833,7 @@ invoke("reclaim")
 assert json.loads(invoke("show", "--id", "live-shared"))["lease_id"] == lease
 marker.unlink()
 PYMARKER
+    fail "a scratch TTL view ignored the shared plan's live exact marker"
   # patch-land from the scratch applies there, but its landing row, frozen patch and plan finish
   # use the main checkout; a relative review patch resolves against the plan's checkout.
   $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" add --id landed --title t \
@@ -6729,6 +6729,9 @@ landings = [json.loads(line) for line in (repo / '.oms/landings.jsonl').read_byt
 intent = [r for r in landings if r['event'] == 'intent'][-1]
 admission = [r for r in index() if r['kind'] == 'patch-admit'][-1]
 landed = [r for r in index() if r['kind'] == 'patch-land'][-1]
+assert 'patch' not in admission and admission['patch_external']['owned'] is False
+assert admission['patch_external']['sha256'] == admission['patch_sha256'] == intent['patch_sha']
+assert 'patch_external' not in landed and (repo / landed['patch']).read_bytes() == (repo / intent['patch']).read_bytes()
 satisfied = {'schema': 1, 'kind': 'satisfied-by', 'plan_id': current['plan_id'], 'task_id': 'original',
              'task_sha256': engine['digest'](original), 'plan_sha256': h(plan_path.read_bytes()),
              'state': original['state'], 'lease_id': original['lease_id'],
@@ -6745,6 +6748,63 @@ satisfied = {'schema': 1, 'kind': 'satisfied-by', 'plan_id': current['plan_id'],
                            'task_sha256': engine['digest'](successor), 'original_contract': engine['projection'](successor),
                            'landing_id': intent['landing_id'], 'admission_event_id': admission['event_id'],
                            'land_event_id': landed['event_id']}}
+# Admission diagnostics cannot replace exact owned landing and product proof.
+index_path = repo / '.oms/artifacts/index.jsonl'
+index_raw = index_path.read_bytes()
+for case in ('missing', 'duplicate', 'kind', 'exit', 'plan', 'task', 'digest',
+             'external-missing-digest', 'external-malformed-digest', 'external-digest',
+             'external-owned', 'external-owned-number', 'external-fields', 'external-name',
+             'external-and-owned', 'external-and-empty-owned', 'land-external'):
+    records = index()
+    row = next(r for r in records if r['event_id'] == admission['event_id'])
+    if case == 'missing': records.remove(row)
+    elif case == 'duplicate': records.append(copy.deepcopy(row))
+    elif case == 'kind': row['kind'] = 'patch-land'
+    elif case == 'exit': row['exit'] = 1
+    elif case == 'plan': row['plan_id'] = 'plan_' + '0'*32
+    elif case == 'task': row['task_id'] = 'original'
+    elif case == 'digest': row['patch_sha256'] = '0'*64
+    elif case == 'external-missing-digest': row['patch_external'].pop('sha256')
+    elif case == 'external-malformed-digest': row['patch_external']['sha256'] = 'invalid'
+    elif case == 'external-digest': row['patch_external']['sha256'] = '0'*64
+    elif case == 'external-owned': row['patch_external']['owned'] = True
+    elif case == 'external-owned-number': row['patch_external']['owned'] = 0
+    elif case == 'external-fields': row['patch_external']['path'] = intent['patch']
+    elif case == 'external-name': row['patch_external']['name'] = None
+    elif case == 'external-and-owned': row['patch'] = landed['patch']
+    elif case == 'external-and-empty-owned': row['patch'] = ''
+    elif case == 'land-external':
+        row = next(r for r in records if r['event_id'] == landed['event_id'])
+        row.pop('patch'); row['patch_external'] = copy.deepcopy(admission['patch_external'])
+    index_path.write_bytes(b''.join((json.dumps(r)+'\n').encode() for r in records))
+    rejected = invoke(satisfied, action='satisfy', ok=False)
+    assert any(message in rejected for message in ('successor indexed receipt missing',
+               'successor admission', 'malformed or unsupported object fields',
+               'invalid SHA-256', 'invalid external patch name')), (case, rejected)
+    assert h(plan_path.read_bytes()) == satisfied['plan_sha256'], case
+    index_path.write_bytes(index_raw)
+for path in (repo / admission['artifact'], repo / intent['patch']):
+    raw = path.read_bytes()
+    for altered in (None, raw + b'altered proof\n'):
+        if altered is None: path.unlink()
+        else: path.write_bytes(altered)
+        invoke(satisfied, action='satisfy', ok=False)
+        path.write_bytes(raw)
+# Existing canonical admissions remain valid against the same real landing.
+# Probe the product reader without publishing a receipt with modified history.
+records = index()
+row = next(r for r in records if r['event_id'] == admission['event_id'])
+row.pop('patch_external'); row['patch'] = landed['patch']
+index_path.write_bytes(b''.join((json.dumps(r)+'\n').encode() for r in records))
+legacy_core = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+legacy_core['satisfaction'](str(repo), satisfied, current['tasks'], current['plan_id'])
+index_path.write_bytes(index_raw)
+# A fresh, truthful manifest of unrelated bytes still lacks product proof.
+(repo / 'file.txt').write_text('unproven replacement\n')
+invalid = copy.deepcopy(satisfied)
+invalid['source_manifest'][0] = entry('file.txt')
+assert 'source content/mode differs from successor product' in invoke(invalid, action='satisfy', ok=False)
+(repo / 'file.txt').write_text('base\nactual replacement\n')
 for key, val in [('plan_id', 'plan_'+'0'*32), ('task_id', 'original'), ('landing_id', 'false'), ('task_sha256', '0'*64)]:
     invalid = copy.deepcopy(satisfied); invalid['successor'][key] = val
     invoke(invalid, action='satisfy', ok=False)
