@@ -968,7 +968,7 @@ PY
 git -C "$dedupe_repo" apply --binary "$dedupe_patch"
 (
   . "$ROOT/scripts/lib/peer-common.sh"
-  ma_append_artifact_index "$dedupe_repo" patch-land "" 0 "" "$dedupe_patch"
+  OMS_TASK_ID= OMS_INDEX_PLAN_ID= ma_append_artifact_index "$dedupe_repo" patch-land "" 0 "" "$dedupe_patch"
 )
 "$LAND" --repo "$dedupe_repo" --recover >"$TMP/recover-dedupe.out" 2>&1 ||
   fail "lineage-dedupe recovery did not finish"
