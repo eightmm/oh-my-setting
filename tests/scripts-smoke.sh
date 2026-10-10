@@ -24596,6 +24596,7 @@ test_worker_guard_exempts_a_live_sibling_mid_creation() {
   local managed_root="$TMP/guard-sibling-creation-root"
   local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
   local scratch_parent="$managed_root/oh-my-setting-scratch.sibling"
+  local agy_parent="$managed_root/oh-my-setting-agy-read.sibling"
   local result
 
   make_guard_repo "$project"
@@ -24608,7 +24609,7 @@ test_worker_guard_exempts_a_live_sibling_mid_creation() {
   # here the final capture lands inside that window of an add begun mid-run.
   result="$(run_delegate_beside_sibling "$project" "$managed_root" \
     'case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
-mv $sibling_parent/pending $sibling_parent/wt && mkdir -p $scratch_parent && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$project\\nworktree=$scratch_parent/wt\\ntemporary=1\\n' > $scratch_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $scratch_parent/wt HEAD && mv $scratch_parent/wt $scratch_parent/pending")"
+mv $sibling_parent/pending $sibling_parent/wt && mkdir -p $scratch_parent && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$project\\nworktree=$scratch_parent/wt\\ntemporary=1\\n' > $scratch_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $scratch_parent/wt HEAD && mv $scratch_parent/wt $scratch_parent/pending && mkdir -p $agy_parent && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$project\\nworktree=$agy_parent/tree\\ntemporary=1\\n' > $agy_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $agy_parent/tree HEAD && mv $agy_parent/tree $agy_parent/pending")"
   [ "${result%%	*}" = 0 ] ||
     fail "a live sibling mid-creation must not fail the run: $result"
   if contains "$result" 'outside the worktree'; then

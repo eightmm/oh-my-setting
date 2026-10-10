@@ -239,6 +239,9 @@ ma_agy_read_dir() {
   # signal (Ctrl-C mid-call) is still reclaimable by cleanup.sh / doctor, the
   # same residue path delegate and patch-admit use.
   base="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-agy-read.XXXXXX")" || return 1
+  # Mark before registering, so a concurrent worker guard sees a marked, live
+  # entry at every instant of the add rather than an unexplained new worktree.
+  [ -z "$repo" ] || oms_harness_mark_tmpdir "$base" "$repo" "$base/tree" 2>/dev/null || true
   if [ -n "$repo" ] &&
      oms_git_assert_safe_execution_config "$repo" diff-read >/dev/null 2>&1 &&
      git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 &&
@@ -246,7 +249,6 @@ ma_agy_read_dir() {
        GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
        -c core.fsmonitor=false -C "$repo" \
        worktree add --detach "$base/tree" HEAD >/dev/null 2>&1; then
-    oms_harness_mark_tmpdir "$base" "$repo" "$base/tree" 2>/dev/null || true
     printf '%s/tree\n' "$base"
   else
     oms_harness_mark_tmpdir "$base" "$repo" "" 2>/dev/null || true

@@ -1259,10 +1259,12 @@ oms_worker_gitmeta_is_pending_managed_worktree() {  # REPO WT_PATH CURRENT_WORKT
 
   command -v oms_harness_temp_bases >/dev/null 2>&1 || return 1
   command -v oms_harness_read_marker_value >/dev/null 2>&1 || return 1
-  case "$wt_path" in /*/wt) ;; *) return 1 ;; esac
-  residue_dir="${wt_path%/wt}"
-  case "$(basename "$residue_dir")" in
-    oh-my-setting-delegate.*|oh-my-setting-admit.*|oh-my-setting-scratch.*|oh-my-setting-land.*) ;;
+  # Antigravity read passes register <base>/tree; every other harness tree is <base>/wt.
+  case "$wt_path" in /*/wt|/*/tree) ;; *) return 1 ;; esac
+  residue_dir="${wt_path%/*}"
+  case "$(basename "$residue_dir")/${wt_path##*/}" in
+    oh-my-setting-delegate.*/wt|oh-my-setting-admit.*/wt|oh-my-setting-scratch.*/wt|oh-my-setting-land.*/wt) ;;
+    oh-my-setting-agy-read.*/tree) ;;
     *) return 1 ;;
   esac
   residue_physical="$(oms_harness_physical_dir "$residue_dir" 2>/dev/null || true)"
@@ -1282,8 +1284,8 @@ oms_worker_gitmeta_is_pending_managed_worktree() {  # REPO WT_PATH CURRENT_WORKT
   repo_physical="$(oms_harness_physical_dir "$repo" 2>/dev/null || true)"
   [ -n "$repo_physical" ] || return 1
   oms_worker_same_repository "$repo_physical" "$marker_repo" || return 1
-  case "$marker_worktree" in /*/wt) ;; *) return 1 ;; esac
-  marker_parent="$(oms_harness_physical_dir "${marker_worktree%/wt}" 2>/dev/null || true)"
+  [ "${marker_worktree##*/}" = "${wt_path##*/}" ] || return 1
+  marker_parent="$(oms_harness_physical_dir "${marker_worktree%/*}" 2>/dev/null || true)"
   [ -n "$marker_parent" ] && [ "$marker_parent" = "$residue_physical" ] || return 1
   residue_parent="$(dirname "$residue_physical")"
   while IFS= read -r base; do
