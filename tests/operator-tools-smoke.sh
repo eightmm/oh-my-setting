@@ -2043,6 +2043,7 @@ fi
     executable.chmod(0o755)
 
 environment = dict(os.environ, HOME=str(home), NVM_DIR=str(home / ".nvm"),
+                   CODEX_HOME=str(home / ".codex"), CLAUDE_CONFIG_DIR=str(home / ".claude"),
                    PATH=str(binary) + os.pathsep + os.environ["PATH"],
                    XDG_STATE_HOME=str(temporary / "panel-state"),
                    OMS_PANEL_ENTRYPOINT=str(panel.ENTRY), PANEL_TEST_LOG=str(log),
@@ -2114,6 +2115,7 @@ for owner in panel.PROVIDERS:
     assert "No upstream is needed" in panel.bootstrap(owner, project)
     assert "when commit and publication are authorized" in panel.bootstrap(owner, project)
     assert "pushes the verified SHA to its target" in panel.bootstrap(owner, project)
+    assert "concurrent land exits 75" in panel.bootstrap(owner, project) and "retry after" in panel.bootstrap(owner, project)
     assert "oms room scope" in panel.bootstrap(owner, project) and "--scope PATH" in panel.bootstrap(owner, project)
 option_text = "--dangerously-skip-permissions"
 assert panel.native_command("claude", project, task=option_text)[-2:] == ["--", option_text]

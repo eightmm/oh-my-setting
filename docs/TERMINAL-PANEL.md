@@ -732,9 +732,10 @@ the remote target. No upstream is needed. After verification, commit and run
 `oms land` from that worktree only when commit and publication are authorized;
 `oms land` pushes the verified SHA to its target. Nobody commits in the shared
 checkout, and no main waits for a single integrator:
-`oms land`'s lock serialises the pushes, the worker guard treats other mains'
-`oms/*` branches and harness worktrees as soft, and `oms room scope` warns
-about overlapping files before the work starts.
+a concurrent `oms land` exits 75 if the lock stays held past `OMS_LOCK_TIMEOUT` (default 300s); retry after the active land finishes.
+The worker guard treats other mains' `oms/*` branches and harness worktrees
+as soft, and `oms room scope` warns about overlapping files before the work
+starts.
 
 Task complexity and write authority are independent. A write worker needs an
 implementation purpose, scoped brief file and mechanical verifier. Read workers
