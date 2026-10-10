@@ -94,7 +94,8 @@ Esc to cancel"; the second `x` records the main leaving the room and kills its t
 when the current window tags, repository, room, recorded attempt and native pane all still match
 that joined main in this checkout's panel session. A finished attempt is removable when its latest
 terminal record still matches the window and the native pane binding has been cleared; an active
-attempt must still have its exact native pane. If tmux refuses, membership remains. If the
+attempt must still have its exact native pane. If tmux refuses, membership remains; if the kill
+response times out, closure is unknown and membership remains without retrying the kill. If the
 window closes but recording the room leave fails, the panel rechecks membership and retries the
 leave once without issuing another kill. A persistent failure is reported as partial, without
 claiming that the main left. If the control panel shares the selected main's window, closure is

@@ -8007,6 +8007,17 @@ with patch.object(panel, "managed_session", return_value=True), patch.object(pan
     with patch.object(panel, "main_history", return_value=[panel_main_row]), \
             patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
                 "@1\ta1\tmx\tr1\t%s\t%%2" % str(Path(project).resolve()), ""),
+                subprocess.CompletedProcess([], 0, "%2\n", ""), subprocess.TimeoutExpired("kill-window", 5)]) as timed_out_kill:
+        try:
+            panel.close_main(project, "r1", "mx")
+            raise AssertionError("an uncertain kill was accepted")
+        except ValueError as error:
+            assert "closure status is unknown" in str(error) and "membership remains" in str(error)
+        assert timed_out_kill.call_count == 3, "a timed-out kill was retried"
+        assert not left_room.called, "leave was recorded after an uncertain kill"
+    with patch.object(panel, "main_history", return_value=[panel_main_row]), \
+            patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                "@1\ta1\tmx\tr1\t%s\t%%2" % str(Path(project).resolve()), ""),
                 subprocess.CompletedProcess([], 0, "%2\n", ""), subprocess.CompletedProcess([], 0, "", "")]), \
             patch.object(panel.room, "append", side_effect=OSError("fixture leave failure")) as failed_leave:
         try:

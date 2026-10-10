@@ -2133,6 +2133,8 @@ def close_main(repo, ident, participant):
             raise ValueError("the control panel shares the main window; close it from another panel window")
     try:
         subprocess.run(tmux_command("kill-window", "-t", proven[0][0]), check=True, timeout=5, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired as error:
+        raise ValueError("main window closure status is unknown; room membership remains") from error
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError("tmux refused to close the main window; room membership remains") from error
     try:
