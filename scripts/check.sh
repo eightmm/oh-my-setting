@@ -811,7 +811,7 @@ if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
         affected_index=$((affected_index + 1))
       done
       stage "affected:$affected_test" env \
-        "PYTHONPATH=$ROOT/scripts/lib${PYTHONPATH:+:$PYTHONPATH}" \
+        "PYTHONPATH=$ROOT/scripts/lib:$ROOT/tests${PYTHONPATH:+:$PYTHONPATH}" \
         python3 -m unittest "${affected_args[@]}" "$affected_test"
     else
       stage "affected:$affected_test" bash "$affected_test"
