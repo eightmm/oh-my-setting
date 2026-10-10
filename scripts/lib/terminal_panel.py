@@ -3,6 +3,7 @@
 
 import argparse
 import atexit
+from datetime import datetime
 from contextlib import nullcontext
 import hashlib
 import json
@@ -1966,7 +1967,15 @@ def validate_main_leave(repo, rows, event, expected):
     guard = main_lifecycle_lock(repo, expected["room"], event["participant"])
     guard.__enter__()
     try:
-        actual = main_leave_proof(repo, expected["session"], expected["room"], rows, event["participant"])
+        if expected.get("kind") == "selected-close":
+            actual = selected_main_leave_proof(repo, expected["session"], expected["room"],
+                                               rows, event["participant"])
+            windows = reconciliation_windows(repo, expected["session"])
+            if any(row[7] == event["participant"] and row[6] == expected["room"]
+                   or row[5] in actual["attempt_ids"] for row in windows):
+                raise ValueError("main has a window after the selected close")
+        else:
+            actual = main_leave_proof(repo, expected["session"], expected["room"], rows, event["participant"])
         if actual != expected:
             raise ValueError("main leave observation changed")
     except BaseException:
@@ -2077,13 +2086,112 @@ def request_close(repo, target, reason=None):
     return {"requested": target, "by": sender, "room": ident}
 
 
+def selected_main_history(repo, ident, participant):
+    history = main_history(repo, ident, participant)
+    for row in history:
+        refs = row.get("refs", {})
+        if (row.get("tool") != "panel-main" or refs.get("panel_role") != "main"
+                or refs.get("panel_room_id") != ident
+                or refs.get("panel_room_participant", row.get("attempt_id")) != participant
+                or not isinstance(row.get("created_at"), str)):
+            raise ValueError("main attempt identity is foreign or uncertain; nothing closed")
+        try:
+            if datetime.strptime(row["created_at"], "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ") != row["created_at"]:
+                raise ValueError("noncanonical timestamp")
+        except ValueError as error:
+            raise ValueError("main attempt creation time is uncertain; nothing closed") from error
+    return history
+
+
+def latest_selected_main(history):
+    latest = max(history, key=lambda row: row["created_at"], default=None)
+    if latest and sum(row["created_at"] == latest["created_at"] for row in history) != 1:
+        raise ValueError("latest main attempt is ambiguous; nothing closed")
+    return latest
+
+
+def selected_main_leave_proof(repo, session, ident, rows, participant, history=None):
+    state = room.project(rows)
+    member = room.participant(state, participant)
+    if (state["closed"] or member.get("role") != "main" or member.get("parent")
+            or member.get("provider") not in NATIVE_HARNESSES
+            or type(member.get("seq")) is not int or member["seq"] < 1):
+        raise ValueError("main membership changed or is uncertain")
+    history = selected_main_history(repo, ident, participant) if history is None else history
+    latest = latest_selected_main(history)
+    if not latest:
+        raise ValueError("main has no authoritative attempt")
+    if any(row.get("provider") != member["provider"] for row in history):
+        raise ValueError("main attempt provider differs from room membership; nothing closed")
+    # Projection keeps only the current consumer. Replay this enrollment's
+    # bindings to prove /clear, /resume and /fork descend from its start binding.
+    lineage = [{key: row.get(key) for key in ("seq", "ts", "room_event")} for row in rows
+               if row.get("room_event", {}).get("participant") == participant
+               and row["room_event"].get("kind") in {"join", "bind", "leave"}]
+    enrollment = next((i for i, row in enumerate(lineage) if row["seq"] == member["seq"]
+                       and row["room_event"]["kind"] == "join"), None)
+    if enrollment is None:
+        raise ValueError("main enrollment history is unavailable; nothing closed")
+    consumer = lineage[enrollment]["room_event"].get("consumer")
+    bindings = [consumer] if consumer else []
+    for row in lineage[enrollment + 1:]:
+        event = row["room_event"]
+        if event["kind"] != "bind" or event.get("previous") != consumer:
+            raise ValueError("main native binding lineage is unproven; nothing closed")
+        consumer = event["consumer"]
+        if not re.fullmatch(r"[0-9a-f]{32}", consumer):
+            raise ValueError("main native binding lineage is invalid; nothing closed")
+        bindings.append(consumer)
+    digest = latest.get("refs", {}).get("panel_session_digest")
+    rooted = (digest in bindings if digest is not None else
+              latest["attempt_id"] == participant and member["seq"] == member["initial_seq"]
+              and bool(bindings) and bindings[0] == member.get("initial_consumer"))
+    if (consumer != member.get("consumer") or consumer and not rooted or not consumer and digest):
+        raise ValueError("main native binding differs from room membership; nothing closed")
+    # Terminal telemetry can converge after kill. Enrollment and immutable
+    # attempt identity must remain exactly the generation the person selected.
+    identities = [{key: row.get(key) for key in ("attempt_id", "provider", "tool", "created_at", "refs")}
+                  for row in sorted(history, key=lambda row: row["attempt_id"])]
+    return {"kind": "selected-close", "session": session, "room": ident, "participant": participant,
+            "member_digest": reconciliation_digest({key: member.get(key) for key in
+                ("participant", "provider", "role", "parent", "consumer", "seq", "joined_at")}),
+            "binding_digest": reconciliation_digest(lineage),
+            "attempts_digest": reconciliation_digest(identities),
+            "attempt_ids": sorted(row["attempt_id"] for row in history)}
+
+
 def close_main(repo, ident, participant):
-    """Close a person-selected main after rechecking its live window and native pane binding."""
+    """Keep resume excluded through kill; the leave independently fences that selected generation."""
+    with main_lifecycle_lock(repo, ident, participant):
+        expected = close_main_window(repo, ident, participant)
+    # The thread helper takes lifecycle exclusion itself and holds it through
+    # append. Releasing here preserves its existing thread/lifecycle lock order.
+    try:
+        room.append(repo, ident, {"kind": "leave", "participant": participant}, "Participant left",
+                    expected_main_leave=expected)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        try:
+            still_joined = any(p["participant"] == participant and p["joined"]
+                               for p in room.status(repo, ident)["participants"])
+        except (OSError, ValueError, subprocess.SubprocessError) as status_error:
+            raise ValueError("main window closed, but room leave status is unknown") from status_error
+        if not still_joined:
+            return
+        try:
+            room.append(repo, ident, {"kind": "leave", "participant": participant}, "Participant left",
+                        expected_main_leave=expected)
+        except (OSError, ValueError, subprocess.SubprocessError) as retry_error:
+            raise ValueError("main window closed, but room leave failed after one safe retry; membership may remain") from retry_error
+
+
+def close_main_window(repo, ident, participant):
+    """Recheck and close the selected window while holding participant lifecycle exclusion."""
     session = os.environ.get("OMS_PANEL_SESSION", "")
     if not managed_session() or session != panel_session(repo) or session_owner(session) != str(repo):
         raise ValueError("closing a main needs this checkout's open tmux panel")
     try:
-        participants = room.status(repo, ident)["participants"]
+        rows = room.records(repo, ident)
+        participants = room.project(rows)["participants"]
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         raise ValueError("could not recheck room membership; nothing closed") from error
     if not any(p["participant"] == participant and p["joined"] and p["role"] == "main" for p in participants):
@@ -2100,13 +2208,10 @@ def close_main(repo, ident, participant):
     tagged = [r for r in (line.replace("\r", "").split("\t") for line in found.stdout.splitlines())
               if len(r) == 6 and r[2] == participant]
     try:
-        history = [row for row in main_history(repo, ident, participant)
-                   if row.get("tool") == "panel-main" and row.get("refs", {}).get("panel_role") == "main"
-                   and row.get("refs", {}).get("panel_room_id", ident) == ident
-                   and row.get("refs", {}).get("panel_room_participant", row.get("attempt_id")) == participant]
+        history = selected_main_history(repo, ident, participant)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         raise ValueError("could not recheck the main attempt; nothing closed") from error
-    latest = max(history, key=lambda row: row.get("sequence", 0), default=None)
+    latest = latest_selected_main(history)
     # A finished main may still have a native window the person wants removed.
     # The newest attempt remains the ownership identity even after it is terminal.
     attempts = {latest.get("attempt_id")} if latest and latest.get("attempt_id") else set()
@@ -2144,26 +2249,14 @@ def close_main(repo, ident, participant):
             raise ValueError("could not verify the control window; nothing closed")
         if current_window.stdout.strip() == proven[0][0]:
             raise ValueError("the control panel shares the main window; close it from another panel window")
+    expected = selected_main_leave_proof(repo, session, ident, rows, participant, history)
     try:
         subprocess.run(tmux_command("kill-window", "-t", proven[0][0]), check=True, timeout=5, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired as error:
         raise ValueError("main window closure status is unknown; room membership remains") from error
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError("tmux refused to close the main window; room membership remains") from error
-    try:
-        room.append(repo, ident, {"kind": "leave", "participant": participant}, "Participant left")
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        try:
-            still_joined = any(p["participant"] == participant and p["joined"]
-                               for p in room.status(repo, ident)["participants"])
-        except (OSError, ValueError, subprocess.SubprocessError) as status_error:
-            raise ValueError("main window closed, but room leave status is unknown") from status_error
-        if not still_joined:
-            return
-        try:
-            room.append(repo, ident, {"kind": "leave", "participant": participant}, "Participant left")
-        except (OSError, ValueError, subprocess.SubprocessError) as retry_error:
-            raise ValueError("main window closed, but room leave failed after one safe retry; membership may remain") from retry_error
+    return expected
 
 
 def close_selected(repo, navigation, state, unicode):

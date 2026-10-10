@@ -8159,10 +8159,17 @@ for result in (subprocess.CompletedProcess([], 1, "", "failed"),
             raise AssertionError("unreadable or malformed window evidence was accepted")
         except ValueError:
             pass
+close_rows = [{"thread": "r1", "seq": 0, "live": True},
+              {"thread": "r1", "seq": 1, "room_event": {"kind": "created"}},
+              {"thread": "r1", "seq": 2, "room_event": {"kind": "join", "participant": "mx",
+                  "provider": "codex", "role": "main", "label": "main"}}]
+close_mail = {"thread": "r1", "seq": 3, "text": "unrelated mail", "room_event": {
+    "kind": "message", "id": "mail1", "sender": "mx", "recipient": "all", "message_kind": "note"}}
+assert panel.room.validate_event(close_rows, close_mail["room_event"], close_mail["text"])
 with patch.object(panel, "managed_session", return_value=True), patch.object(panel, "panel_session", return_value="s"), \
         patch.object(panel, "session_owner", return_value=str(project)), patch.dict(os.environ, {"OMS_PANEL_SESSION": "s"}), \
         patch.object(panel, "tmux_command", return_value=["true"]), patch.object(panel.room, "append") as left_room, \
-        patch.object(panel.room, "status", return_value={"participants": [{"participant": "mx", "joined": True, "role": "main"}]}), \
+        patch.object(panel.room, "records", return_value=close_rows), \
         patch.object(panel, "main_history", return_value=[]):
     with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
         try:
@@ -8170,7 +8177,8 @@ with patch.object(panel, "managed_session", return_value=True), patch.object(pan
             raise AssertionError("a main with no window closed")
         except ValueError as error:
             assert "proven" in str(error)
-    panel_main_row = {"attempt_id": "a1", "tool": "panel-main", "state": "working", "sequence": 1,
+    panel_main_row = {"attempt_id": "a1", "tool": "panel-main", "state": "working", "sequence": 100,
+                      "provider": "codex", "created_at": "2026-10-09T00:00:00Z",
                       "refs": {"panel_role": "main", "panel_room_id": "r1", "panel_room_participant": "mx"}}
     with patch.object(panel, "main_history", return_value=[panel_main_row]), \
             patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
@@ -8211,7 +8219,8 @@ with patch.object(panel, "managed_session", return_value=True), patch.object(pan
             patch.object(panel.room, "append", side_effect=[OSError("fixture transient leave failure"), None]) as retry_leave:
         panel.close_main(project, "r1", "mx")
         assert retry_leave.call_count == 2
-    replaced_history = [panel_main_row, dict(panel_main_row, attempt_id="a2", sequence=2,
+    replaced_history = [panel_main_row, dict(panel_main_row, attempt_id="a2", sequence=3,
+        created_at="2026-10-10T00:00:00Z",
         state="done", terminal=True)]
     with patch.object(panel, "main_history", return_value=replaced_history), \
             patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0,
@@ -8222,7 +8231,8 @@ with patch.object(panel, "managed_session", return_value=True), patch.object(pan
         except ValueError as error:
             assert "proven" in str(error)
         assert stale_run.call_count == 1
-    newest_terminal = dict(panel_main_row, attempt_id="a2", sequence=2, state="done", terminal=True)
+    newest_terminal = dict(panel_main_row, attempt_id="a2", sequence=3,
+                           created_at="2026-10-10T00:00:00Z", state="done", terminal=True)
     with patch.object(panel, "main_history", return_value=[newest_terminal]), \
             patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
                 "@1\ta2\tmx\tr1\t%s\t\n" % str(Path(project).resolve()), ""),
@@ -8264,6 +8274,127 @@ with patch.object(panel, "managed_session", return_value=True), patch.object(pan
         except ValueError as error:
             assert "shares the main window" in str(error)
         assert run.call_count == 3 and not own_leave.called
+    with patch.object(panel, "main_history", return_value=[panel_main_row,
+            dict(panel_main_row, attempt_id="a2", sequence=3)]), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0,
+                "@1\ta1\tmx\tr1\t%s\t%%2" % str(Path(project).resolve()), "")) as ambiguous_run:
+        try:
+            panel.close_main(project, "r1", "mx")
+            raise AssertionError("equal creation times selected a main")
+        except ValueError as error:
+            assert "ambiguous" in str(error)
+        assert ambiguous_run.call_count == 1
+    # Replay real persisted enrollment/binding rows; room.project must not invent authority.
+    bound_rows = deepcopy(close_rows)
+    bound_rows[-1]["room_event"]["consumer"] = "a" * 32
+    rebound_rows = bound_rows + [{"thread": "r1", "seq": 3, "room_event": {
+        "kind": "bind", "participant": "mx", "previous": "a" * 32, "consumer": "b" * 32}}]
+    for rebound_terminal in (False, True):
+        for resumed_binding in (False, True):
+            rebound_attempt = dict(panel_main_row, attempt_id="a1" if resumed_binding else "mx",
+                terminal=rebound_terminal, state="done" if rebound_terminal else "working",
+                refs=dict(panel_main_row["refs"], **({"panel_session_digest": "a" * 32} if resumed_binding else {})))
+            for late_initial_bind in (False, True):
+                current_rows = deepcopy(rebound_rows)
+                if late_initial_bind:
+                    del current_rows[2]["room_event"]["consumer"]
+                    current_rows.insert(3, {"thread": "r1", "seq": 3, "room_event": {
+                        "kind": "bind", "participant": "mx", "consumer": "a" * 32}})
+                    current_rows[-1]["seq"] = 4
+                leaves = []
+                def validated_rebound_leave(repo, ident, event, text, expected_main_leave=None):
+                    with patch.object(panel.atexit, "register") as retained:
+                        panel.validate_main_leave(repo, current_rows, event, expected_main_leave)
+                        leaves.append(event)
+                        retained.call_args.args[0](*retained.call_args.args[1:])
+                with patch.object(panel.room, "records", return_value=current_rows), \
+                        patch.object(panel, "main_history", return_value=[rebound_attempt]), \
+                        patch.object(panel, "reconciliation_windows", return_value=[["", "", "", "", "", "", "", ""]]), \
+                        patch.object(panel.room, "append", validated_rebound_leave), \
+                        patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                            "@1\t%s\tmx\tr1\t%s\t%s" % (rebound_attempt["attempt_id"],
+                            str(Path(project).resolve()), "" if rebound_terminal else "%2"), ""),
+                            subprocess.CompletedProcess([], 0, "%2\n", ""), subprocess.CompletedProcess([], 0, "", "")]) as rebound_run:
+                    panel.close_main(project, "r1", "mx")
+                    assert len(leaves) == 1 and rebound_run.call_count == 3
+    invalid_chain = deepcopy(rebound_rows)
+    invalid_chain[-1]["room_event"]["previous"] = "f" * 32
+    for invalid_rows in (invalid_chain, [dict(row, room_event=dict(row.get("room_event", {}), consumer="b" * 32))
+                                       if row.get("seq") == 2 else row for row in bound_rows]):
+        with patch.object(panel.room, "records", return_value=invalid_rows), \
+                patch.object(panel, "main_history", return_value=[dict(panel_main_row,
+                    refs=dict(panel_main_row["refs"], panel_session_digest="a" * 32))]), \
+                patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                    "@1\ta1\tmx\tr1\t%s\t%%2" % str(Path(project).resolve()), ""),
+                    subprocess.CompletedProcess([], 0, "%2\n", "")]) as invalid_run, \
+                patch.object(panel.room, "append") as invalid_leave:
+            try:
+                panel.close_main(project, "r1", "mx")
+                raise AssertionError("an unproven binding chain closed a main")
+            except ValueError as error:
+                assert "binding" in str(error), error
+            assert invalid_run.call_count == 2 and not invalid_leave.called
+    for race in ("resume", "binding-aba", "leave-rejoin", "mail", "terminal-convergence"):
+        for change_on in (1, 2):
+            current_rows = deepcopy(bound_rows)
+            current_history = [dict(panel_main_row, refs=dict(panel_main_row["refs"], panel_session_digest="a" * 32))]
+            append_calls, actually_left = [], []
+            def guarded_selected_leave(repo, ident, event, text, expected_main_leave=None):
+                append_calls.append(expected_main_leave)
+                assert expected_main_leave and expected_main_leave["kind"] == "selected-close"
+                if len(append_calls) == change_on:
+                    if race == "resume":
+                        current_history.append(dict(current_history[0], attempt_id="resumed", sequence=1,
+                                                    created_at="2026-10-10T00:00:00Z"))
+                    elif race == "binding-aba":
+                        current_rows.extend(rebound_rows[-1:] + [{"thread": "r1", "seq": 4, "room_event": {
+                            "kind": "bind", "participant": "mx", "previous": "b" * 32, "consumer": "a" * 32}}])
+                    elif race == "leave-rejoin":
+                        current_rows.extend([{"thread": "r1", "seq": 3, "room_event": {
+                            "kind": "leave", "participant": "mx"}}, dict(bound_rows[-1], seq=4)])
+                    elif race == "terminal-convergence":
+                        current_history[0].update(state="done", terminal=True, sequence=101)
+                    else:
+                        current_rows.append(close_mail)
+                elif len(append_calls) < change_on:
+                    raise OSError("transient first leave failure")
+                with patch.object(panel.atexit, "register") as retained:
+                    panel.validate_main_leave(repo, current_rows, event, expected_main_leave)
+                    actually_left.append(event)
+                    retained.call_args.args[0](*retained.call_args.args[1:])
+            with patch.object(panel, "main_history", return_value=current_history), \
+                    patch.object(panel.room, "records", return_value=current_rows), \
+                    patch.object(panel, "reconciliation_windows", return_value=[["", "", "", "", "", "", "", ""]]), \
+                    patch.object(panel.room, "append", guarded_selected_leave), \
+                    patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                        "@1\ta1\tmx\tr1\t%s\t%%2" % str(Path(project).resolve()), ""),
+                        subprocess.CompletedProcess([], 0, "%2\n", ""), subprocess.CompletedProcess([], 0, "", "")]):
+                if race in ("mail", "terminal-convergence"):
+                    panel.close_main(project, "r1", "mx")
+                    assert len(append_calls) == change_on and len(actually_left) == 1
+                else:
+                    try:
+                        panel.close_main(project, "r1", "mx")
+                        raise AssertionError("old close left a resumed or rebound main")
+                    except ValueError as error:
+                        assert "after one safe retry" in str(error), error
+                    assert len(append_calls) == 2 and not actually_left
+                assert all(proof == append_calls[0] for proof in append_calls)
+                assert panel.room.project(current_rows)["participants"][0]["joined"]
+    print("selected-close: active/terminal rebinds, lineage rejection, resume/ABA fences and unrelated mail passed")
+    for foreign in (dict(panel_main_row, provider="claude"),
+                    dict(panel_main_row, refs=dict(panel_main_row["refs"], panel_session_digest="a" * 32))):
+        with patch.object(panel, "main_history", return_value=[foreign]), \
+                patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                    "@1\ta1\tmx\tr1\t%s\t%%2" % str(Path(project).resolve()), ""),
+                    subprocess.CompletedProcess([], 0, "%2\n", "")]) as foreign_run, \
+                patch.object(panel.room, "append") as foreign_leave:
+            try:
+                panel.close_main(project, "r1", "mx")
+                raise AssertionError("foreign provider/native binding closed a main")
+            except ValueError as error:
+                assert "differs from room membership" in str(error), error
+            assert foreign_run.call_count == 2 and not foreign_leave.called
 # An unanswered close request survives twelve newer messages in the projected status.
 with patch.object(room, "records", return_value=[]), patch.object(room, "project", return_value={
         "participants": [], "publications": {}, "closed": False, "id": "r1", "messages": [
