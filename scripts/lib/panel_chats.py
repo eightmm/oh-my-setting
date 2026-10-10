@@ -118,9 +118,9 @@ def pi_session_dir(repo):
 
 def pi_session_storage_safe(repo, create=False):
     """Validate each owned directory before creating or descending into its child."""
-    root = pi_session_dir(repo)
-    home = Path.home().resolve(strict=True)
     try:
+        root = pi_session_dir(repo)
+        home = Path.home().resolve(strict=True)
         current = home
         home_info = current.stat()
         if not stat.S_ISDIR(home_info.st_mode) or (hasattr(os, "getuid") and home_info.st_uid != os.getuid()):
@@ -148,8 +148,8 @@ def pi_session_storage_safe(repo, create=False):
 
 def pi_session_headers(repo):
     """Boundedly read safe Pi session headers from this exact project directory."""
-    root = pi_session_dir(repo)
     try:
+        root = pi_session_dir(repo)
         if not pi_session_storage_safe(repo):
             return None
         result = {}
@@ -181,7 +181,7 @@ def pi_session_headers(repo):
                 except (OSError, ValueError, IndexError, RecursionError):
                     return None
         return result
-    except OSError:
+    except (OSError, RuntimeError, ValueError):
         return None
 
 

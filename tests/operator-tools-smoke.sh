@@ -2172,6 +2172,42 @@ with patch.object(panel_chats.Path, "home", return_value=unsafe_home):
     assert not panel_chats.pi_session_storage_safe(project, create=True)
 assert sorted((path.name, path.read_bytes()) for path in outside_home.iterdir()) == outside_before
 
+
+# Optional Pi path failures neither hide valid Codex/Claude sessions nor create storage.
+from types import SimpleNamespace
+pi_catalog = temporary / "pi-fallback-catalog"
+pi_codex = pi_catalog / "codex" / "sessions"
+pi_claude = pi_catalog / "claude" / "projects"
+pi_codex.mkdir(parents=True)
+pi_claude.mkdir(parents=True)
+pi_native_id = "7443b094-a060-466b-a28d-f06313c81a54"
+(pi_codex / (pi_native_id + ".jsonl")).write_text(json.dumps(
+    {"type": "session_meta", "payload": {"id": pi_native_id}}) + "\n")
+(pi_claude / (pi_native_id + ".jsonl")).write_text("{}\n")
+pi_consumer = panel_chats.hashlib.sha256(pi_native_id.encode()).hexdigest()[:32]
+pi_expected = {"codex": {pi_consumer: {pi_native_id}}, "claude": {pi_consumer: {pi_native_id}}, "pi": {}}
+pi_missing_home = temporary / "pi-missing-home"
+pi_paths_before = sorted(str(path.relative_to(temporary)) for path in temporary.rglob("*"))
+# Replace only this module's environment view; the process HOME and CODEX_HOME stay untouched.
+pi_environment = {"OMS_CODEX_HOME": str(pi_codex.parent), "CLAUDE_CONFIG_DIR": str(pi_claude.parent)}
+with patch.object(panel_chats, "os", SimpleNamespace(**dict(vars(os), environ=pi_environment))), \
+        patch("claude_app_notify._registry", return_value=[]):
+    with patch.object(panel_chats.Path, "home", return_value=pi_missing_home):
+        assert panel_chats.pi_session_headers(project) is None
+        assert not panel_chats.pi_session_storage_safe(project, create=True)
+        assert panel_chats.native_index({pi_consumer}, project) == pi_expected
+    for error in (PermissionError("inaccessible home"), RuntimeError("home resolution loop"), ValueError("invalid home path")):
+        with patch.object(panel_chats.Path, "home", return_value=pi_home), \
+                patch.object(panel_chats.Path, "resolve", side_effect=error):
+            assert panel_chats.pi_session_headers(project) is None
+            assert not panel_chats.pi_session_storage_safe(project, create=True)
+            assert panel_chats.native_index({pi_consumer}, project) == pi_expected
+            with patch.object(panel_chats, "pi_session_dir", return_value=pi_dir):
+                assert not panel_chats.pi_session_storage_safe(project, create=True)
+assert not pi_missing_home.exists()
+assert sorted(str(path.relative_to(temporary)) for path in temporary.rglob("*")) == pi_paths_before
+assert sorted((path.name, path.read_bytes()) for path in outside_home.iterdir()) == outside_before
+
 # Scratch repository selection shares state without moving native execution.
 import room
 import room_repository as repo_paths
