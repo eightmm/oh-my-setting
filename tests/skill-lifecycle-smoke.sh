@@ -105,6 +105,8 @@ assert row["skill_evals"] == {
     "trigger_false_negatives": 0,
     "trigger_false_positives": 0,
     "trigger_true_positives": 1,
+    "candidate_count": 0,
+    "candidate_task_pass_delta_sum": 0,
 }, row
 ' || fail "runtime benchmark did not project recorded skill evaluation"
 }
@@ -255,9 +257,10 @@ PY
   "$ROOT/scripts/runtime.sh" --repo "$repo" benchmark show | python3 -c '
 import json, sys
 row = json.load(sys.stdin)
-assert row["skill_evals"]["count"] == 1, row
-assert row["skill_evals"]["trigger_true_positives"] == 1, row
-assert row["skill_evals"]["task_pass_delta_sum"] == 0, row
+# A candidate run compares two skill versions, so it stays out of the skill-vs-none totals.
+assert row["skill_evals"]["count"] == 0, row
+assert row["skill_evals"]["candidate_count"] == 1, row
+assert row["skill_evals"]["candidate_task_pass_delta_sum"] == 0, row
 ' || fail "runtime benchmark did not project candidate evaluation"
   grep -Fq 'current-marker' "$repo/.oms/skills/oms-candidate-fixture/SKILL.md" ||
     fail "candidate eval changed the installed skill"

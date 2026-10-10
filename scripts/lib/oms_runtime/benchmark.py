@@ -223,6 +223,8 @@ def _skill_eval_summary(rows: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
         "trigger_false_negatives": 0,
         "trigger_false_positives": 0,
         "trigger_true_positives": 0,
+        "candidate_count": 0,
+        "candidate_task_pass_delta_sum": 0,
     }
     for number, row in enumerate(rows, 1):
         if row.get("schema") != 1 or not isinstance(row.get("skill"), str):
@@ -241,6 +243,12 @@ def _skill_eval_summary(rows: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
         }
         if any(isinstance(item, bool) or not isinstance(item, int) for item in values.values()):
             raise CoreError("skill evaluation row %d has non-integer metrics" % number)
+        comparison = row.get("comparison")
+        if isinstance(comparison, dict) and comparison.get("mode") == "candidate":
+            # Current vs candidate: a different baseline than skill vs none, so never summed with it.
+            summary["candidate_count"] += 1
+            summary["candidate_task_pass_delta_sum"] += values["task_pass_delta_sum"]
+            continue
         summary["count"] += 1
         for key, value in values.items():
             summary[key] += value
