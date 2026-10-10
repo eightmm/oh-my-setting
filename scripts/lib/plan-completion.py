@@ -1538,7 +1538,20 @@ def validate_verification(value, snapshot):
         fail('verifier proof digest mismatch')
 
 
+def verifier_timeout_seconds():
+    value = os.environ.get('OMS_PEER_VERIFY_TIMEOUT', '10m')
+    match = re.fullmatch(r'([0-9]+(?:\.[0-9]+)?)([smhd]?)', value)
+    if not match:
+        fail('OMS_PEER_VERIFY_TIMEOUT must be a positive finite duration up to 24h')
+    amount = float(match.group(1))
+    seconds = amount * {'': 1, 's': 1, 'm': 60, 'h': 3600, 'd': 86400}[match.group(2)]
+    if not math.isfinite(seconds) or seconds <= 0 or seconds > 24 * 60 * 60:
+        fail('OMS_PEER_VERIFY_TIMEOUT must be a positive finite duration up to 24h')
+    return seconds
+
+
 def capture_verifier(repo, command, snapshot):
+    timeout = verifier_timeout_seconds()
     execution_env = git_environment() if command == 'git diff --check' else dict(os.environ, GIT_OPTIONAL_LOCKS='0')
     proc = subprocess.Popen(['bash', '-c', command], cwd=repo, env=execution_env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1571,7 +1584,7 @@ def capture_verifier(repo, command, snapshot):
     reader.start()
     try:
         try:
-            rc = proc.wait(timeout=300)
+            rc = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             stop()
             fail('verifier execution timed out')

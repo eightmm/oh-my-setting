@@ -6240,6 +6240,57 @@ invoke(main_report, action='accept-main-research')
 main_done = plan()['tasks'][main_report['task_id']]
 assert main_done['completion_kind'] == 'main-research-accepted' and main_done['state'] == 'done'
 assert 'landing' not in main_done and not main_done['patch']
+# The completion verifier uses the bounded verifier budget, rejects invalid
+# budgets before launching, and leaves the reviewed task unchanged on timeout.
+verifier_marker = repo / '.oms/artifacts/verifier-budget-launched'
+completion_core = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+parse_timeout = completion_core['verifier_timeout_seconds']
+saved_timeout = os.environ.pop('OMS_PEER_VERIFY_TIMEOUT', None)
+try:
+    assert parse_timeout() == 600
+    for value, expected in [('0.5s', 0.5), ('24h', 86400)]:
+        os.environ['OMS_PEER_VERIFY_TIMEOUT'] = value
+        assert parse_timeout() == expected, value
+    for value in ('0s', '25h', '9' * 400 + 'd'):
+        os.environ['OMS_PEER_VERIFY_TIMEOUT'] = value
+        try:
+            parse_timeout()
+        except ValueError as exc:
+            assert 'OMS_PEER_VERIFY_TIMEOUT' in str(exc), (value, exc)
+        else:
+            raise AssertionError(('accepted invalid verifier budget', value))
+finally:
+    if saved_timeout is not None:
+        os.environ['OMS_PEER_VERIFY_TIMEOUT'] = saved_timeout
+    else:
+        os.environ.pop('OMS_PEER_VERIFY_TIMEOUT', None)
+slow_shell_init = repo / '.oms/artifacts/verifier-budget-env.sh'
+slow_shell_init.write_text('''if [ "${OMS_COMPLETION_PHASE:-}" = verify ]; then
+  printf started > .oms/artifacts/verifier-budget-launched
+  sleep 3
+fi
+''')
+slow_command = 'bash verify.sh'
+timed_bundle = setup(command=slow_command)
+before_timeout = plan_path.read_bytes()
+completion_dir = repo / '.oms/plan/completions'
+receipts_before_timeout = {path.name for path in completion_dir.glob('*.json')}
+timeout_env = {'OMS_PEER_VERIFY_TIMEOUT': '1s', 'BASH_ENV': str(slow_shell_init)}
+timeout_error = invoke(timed_bundle, extra=timeout_env, ok=False)
+assert 'verifier execution timed out' in timeout_error, timeout_error
+assert verifier_marker.is_file(), 'timeout fixture never launched the verifier'
+assert plan_path.read_bytes() == before_timeout, 'timeout completed the reviewed task'
+assert plan()['tasks'][timed_bundle['task_id']]['state'] == 'review'
+assert {path.name for path in completion_dir.glob('*.json')} == receipts_before_timeout, 'timeout published a completion receipt'
+for invalid_budget in ('not-a-duration', '25h'):
+    verifier_marker.unlink(missing_ok=True)
+    invalid_bundle = setup(command=slow_command)
+    before_invalid = plan_path.read_bytes()
+    invalid_env = dict(timeout_env, OMS_PEER_VERIFY_TIMEOUT=invalid_budget)
+    invalid_error = invoke(invalid_bundle, extra=invalid_env, ok=False)
+    assert 'OMS_PEER_VERIFY_TIMEOUT must be a positive finite duration up to 24h' in invalid_error, invalid_error
+    assert not verifier_marker.exists(), 'invalid budget launched the verifier'
+    assert plan_path.read_bytes() == before_invalid, 'invalid budget completed the reviewed task'
 invoke(main_report, action='accept-main-research')
 ap('show', '--id', main_report['task_id'], extra={'OMS_PANEL_MAIN_ATTEMPT': '', 'OMS_ROOM_PARTICIPANT': '', 'OMS_ROOM_ID': ''})
 failed_external = setup(main_report=True, producer_exit=17)
@@ -30194,7 +30245,13 @@ with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": foreign_sid, "CODEX_SESSION
 with tempfile.TemporaryDirectory() as home:
     path = pathlib.Path(home) / "rollout.jsonl"
     path.write_bytes(raw)
+    assert m.MAX_ROLLOUT == 64 * 1024 * 1024
     assert m._read_record(str(path), os.getuid(), home) == raw
+    with mock.patch.object(m, "MAX_ROLLOUT", len(raw)):
+        assert m._read_record(str(path), os.getuid(), home) == raw
+    with mock.patch.object(m, "MAX_ROLLOUT", len(raw) - 1), \
+         mock.patch.object(m.os, "read", side_effect=AssertionError("oversized record was read")):
+        rejects(m._read_record, str(path), os.getuid(), home)
     os.chmod(path, 0o666)
     rejects(m._read_record, str(path), os.getuid(), home)
     os.chmod(path, 0o600)

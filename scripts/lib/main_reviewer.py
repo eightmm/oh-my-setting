@@ -26,7 +26,7 @@ except ImportError:  # Windows can import the module; live capture rejects the h
 POLICY = "main-read-completion-v1"
 ACTION = "accept-main-research"
 APPROVE_ACTION = "approve-main-research"
-MAX_ROLLOUT = 32 * 1024 * 1024
+MAX_ROLLOUT = 64 * 1024 * 1024
 MAX_STORE_ENTRIES = 20000
 MAX_AGE = 120
 MAX_CONTINUATION_AGE = 420

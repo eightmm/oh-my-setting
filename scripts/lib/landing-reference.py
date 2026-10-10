@@ -158,10 +158,14 @@ def begin_owned(repo, tool, reference_input, channel, native_owner="", owner_sou
         if native_owner or owner_source:
             raise ValueError('unexpected reference owner override')
         owner = owner_identity(os.getppid())
+    # The fence precedes both monitor and waiter startup; its inode is bound
+    # into the immutable scope before either child can observe publication.
+    with open(channel + '.ready.pending', 'xb') as pending:
+        pending_identity = C['identity'](os.fstat(pending.fileno()))
     binding = {'owner': owner, 'owner_source': owner_source or 'foreground-parent-v1', 'nonce': secrets.token_hex(32), 'tool': tool,
                'input': C['digest'](os.path.abspath(reference_input).encode()),
                'repo': C['digest'](os.path.realpath(repo).encode()),
-               'channel': C['identity'](info),
+               'channel': C['identity'](info), 'ready_pending': pending_identity,
                'directory': C['identity'](os.lstat(Path(channel).parent)),
                'helper': C['digest'](Path(__file__).read_bytes())}
     if tool not in ('agent-task', 'patch-admit'):
@@ -227,8 +231,27 @@ def monitor(repo, channel, expected):
         raise ValueError('reference operation ended before monitor startup')
     scope, _ = scope_read(repo, channel, expected)
     ready = channel + '.ready'
-    with open(ready, 'xb') as output:
-        output.write(C['encoded']({'scope': expected, 'monitor': owner_identity(os.getpid())}))
+    pending = ready + '.pending'
+    flags = os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
+    fd = os.open(pending, flags)
+    try:
+        info = os.fstat(fd)
+        if (C['identity'](info) != scope['binding']['ready_pending'] or
+                not stat.S_ISREG(info.st_mode) or C['D']['is_reparse'](info) or
+                info.st_nlink != 1 or info.st_size):
+            raise ValueError('reference publication fence changed')
+        with os.fdopen(fd, 'wb', closefd=False) as output:
+            output.write(C['encoded']({'scope': expected, 'monitor': owner_identity(os.getpid())}))
+            output.flush()
+    finally:
+        os.close(fd)
+    scope_read(repo, channel, expected)
+    if C['identity'](os.lstat(pending)) != scope['binding']['ready_pending']:
+        raise ValueError('reference publication fence replaced')
+    os.link(pending, ready)
+    if C['identity'](os.lstat(pending)) != scope['binding']['ready_pending']:
+        raise ValueError('reference publication fence replaced before release')
+    os.unlink(pending)
     next_pulse = time.monotonic() + 10.0
     next_owner = time.monotonic() + 1.0
     while True:
@@ -269,6 +292,25 @@ def await_monitor(repo, channel, expected, native_monitor):
         scope, _ = scope_read(repo, channel, expected)
         if caller_owner(scope['binding']) != scope['binding']['owner']:
             raise ValueError('reference readiness belongs to another writer')
+        try:
+            pending = os.lstat(channel + '.ready.pending')
+        except FileNotFoundError:
+            pass
+        else:
+            if (C['identity'](pending) != scope['binding']['ready_pending'] or
+                    not stat.S_ISREG(pending.st_mode) or C['D']['is_reparse'](pending) or
+                    pending.st_nlink not in (1, 2) or pending.st_size > 512 or
+                    (hasattr(os, 'getuid') and pending.st_uid != os.getuid())):
+                raise ValueError('reference publication fence changed while waiting')
+            try:
+                named = os.lstat(channel + '.ready')
+            except FileNotFoundError:
+                pass
+            else:
+                if C['identity'](named) != scope['binding']['ready_pending']:
+                    raise ValueError('foreign reference readiness during publication')
+            time.sleep(0.02)
+            continue
         try:
             raw, _ = C['regular'](channel + '.ready', maximum=512)
         except FileNotFoundError:
