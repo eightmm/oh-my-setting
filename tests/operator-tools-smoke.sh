@@ -7734,6 +7734,225 @@ for spawn_env, expected in (({"OMS_HARNESS_CHILD": "1"}, "worker cannot open own
                              cwd=str(project), env=dict(environment, OMS_PANEL_SESSION="", **spawn_env),
                              capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
     assert refused.returncode != 0 and expected in refused.stderr, (spawn_env, refused.stdout, refused.stderr)
+# Automatic management uses complete evidence and a guarded leave, never a close or a worker mutation.
+reconcile_repo = temporary / "main-management"
+reconcile_repo.mkdir()
+subprocess.run(["git", "init", "-q", str(reconcile_repo)], check=True)
+reconcile_bin = temporary / "main-management-bin"
+reconcile_bin.mkdir()
+reconcile_tmux = reconcile_bin / "tmux"
+reconcile_tmux.write_text('''#!/usr/bin/env python3
+import os, sys
+if sys.argv[1] == "has-session":
+    pass
+elif sys.argv[1] == "show-options":
+    print(os.environ["RECONCILE_REPO"])
+elif sys.argv[1] == "list-windows":
+    print("$8\\ts\\t1\\t@1\\t\\t\\t\\t\\t" + os.environ["RECONCILE_REPO"] + "\\tcontrol\\t\\toms-end")
+else:
+    raise SystemExit("unexpected tmux mutation")
+''')
+reconcile_tmux.chmod(0o755)
+reconcile_env = dict(environment, PATH=str(reconcile_bin) + os.pathsep + environment["PATH"],
+                     RECONCILE_REPO=str(reconcile_repo))
+for key in list(reconcile_env):
+    if key.startswith(("OMS_ROOM_", "OMS_PANEL_")):
+        reconcile_env.pop(key)
+with patch.dict(os.environ, reconcile_env, clear=True):
+    room.create(reconcile_repo, "ended")
+    ended_attempt = panel.events(reconcile_repo, "start", "--provider", "codex", "--tool", "panel-main",
+                                 "--ref", "panel_role=main", "--ref", "panel_room_id=ended",
+                                 "--then", "failed", output=True)
+    room.join(reconcile_repo, "ended", ended_attempt, "codex")
+    room.join(reconcile_repo, "ended", "standalone-worker", "codex", role="worker")
+    ended_rows = room.records(reconcile_repo, "ended")
+    ended_history = panel.reconciliation_attempts(reconcile_repo)
+    proof = panel.main_leave_proof(reconcile_repo, "s", "ended", ended_rows, ended_attempt)
+    # The thread helper retains lifecycle exclusion after validation until exit;
+    # an interrupted caller cannot leave a surviving appender unprotected.
+    held_guard = '''import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import terminal_panel as panel
+repo = Path(sys.argv[2])
+proof = json.loads(sys.argv[3])
+panel.validate_main_leave(repo, panel.room.records(repo, "ended"),
+                          {"kind": "leave", "participant": proof["participant"]}, proof)
+print("guard held", flush=True)
+sys.stdin.readline()
+print("helper exiting", flush=True)
+'''
+    guard_process = subprocess.Popen(["bash", "-c", '"$@" <&0 & wait', "guard-caller",
+                                      sys.executable, "-c", held_guard, str(panel.ROOT / "scripts/lib"),
+                                      str(reconcile_repo), json.dumps(proof)],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert guard_process.stdout.readline().strip() == "guard held"
+        guard_process.terminate()
+        guard_process.wait(timeout=5)
+        try:
+            with panel.main_lifecycle_lock(reconcile_repo, "ended", ended_attempt):
+                raise AssertionError("validator released lifecycle exclusion before append")
+        except ValueError:
+            pass
+    finally:
+        guard_output, guard_error = guard_process.communicate("exit\n", timeout=8)
+    assert guard_process.returncode == -panel.signal.SIGTERM and "helper exiting" in guard_output, (guard_output, guard_error)
+    with panel.main_lifecycle_lock(reconcile_repo, "ended", ended_attempt):
+        pass  # Helper exit released exclusion, despite the caller having died first.
+    ended_row = ended_history[0]
+    ended_event = {"kind": "leave", "participant": ended_attempt}
+    ended_window = panel.reconciliation_windows(reconcile_repo, "s")[0]
+    # Read failures, truncation, duplicated identities and incomplete enrollments all preserve membership.
+    malformed_windows = ["", "truncated", "\t".join(ended_window) + "\n" + "\t".join(ended_window) + "\n"]
+    for column, value in ((2, "2"), (0, "unknown"), (8, "/foreign"), (4, "codex"), (10, "%9"), (10, "unknown")):
+        changed = list(ended_window)
+        changed[column] = value
+        if column == 4:
+            changed[9] = "codex"
+        malformed_windows.append("\t".join(changed) + "\n")
+    for output, exit_code in [(value, 0) for value in malformed_windows] + [("\t".join(ended_window) + "\n", 1)]:
+        with patch.object(panel, "session_owner", return_value=str(reconcile_repo)), \
+                patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], exit_code, output, "")):
+            try:
+                panel.reconciliation_windows(reconcile_repo, "s")
+                raise AssertionError("incomplete window evidence accepted")
+            except ValueError:
+                pass
+    for changed_window in (["$8", "s", "1", "@1", "codex", ended_attempt, "another-room", "another-main", str(reconcile_repo), "codex", "", "oms-end"],
+                           ["$8", "s", "1", "@1", "codex", "reused-attempt", "ended", ended_attempt, str(reconcile_repo), "codex", "", "oms-end"]):
+        with patch.object(panel, "reconciliation_windows", return_value=[changed_window]), patch.object(room, "append") as automatic_leave:
+            panel.reconcile_mains(reconcile_repo, "s", "ended")
+            assert not automatic_leave.called, "a matching participant or reused attempt window was ignored"
+    # More than 300 unrelated attempts never hide an older active attempt; ambiguous latest and foreign history decline too.
+    newer = dict(ended_row, attempt_id="resumed", created_at="2099-01-01T00:00:00Z",
+                 refs=dict(ended_row["refs"], panel_room_participant=ended_attempt))
+    unrelated = [dict(ended_row, attempt_id="worker-%s" % i, tool="peer-delegate", terminal=False,
+                      refs={}) for i in range(301)]
+    histories = [[], [ended_row, ended_row], [dict(ended_row, refs=None)],
+                 [dict(ended_row, terminal=False, state="working"), *unrelated],
+                 [ended_row, dict(newer, terminal=False, state="queued")],
+                 [dict(ended_row, terminal=False, state="working"), newer],
+                 [ended_row, dict(newer, created_at=ended_row["created_at"])],
+                 [dict(ended_row, refs=dict(ended_row["refs"], panel_room_id="foreign"))],
+                 [dict(ended_row, terminal="true")]]
+    for history in histories:
+        with patch.object(panel, "events", return_value=json.dumps(history)) as history_read, \
+                patch.object(room, "append") as automatic_leave:
+            panel.reconcile_mains(reconcile_repo, "s", "ended")
+            assert not automatic_leave.called, history
+            assert history_read.call_args.args[1:] == ("list", "--json")
+    with patch.object(panel, "events", side_effect=ValueError("list failed")), patch.object(room, "append") as automatic_leave:
+        panel.reconcile_mains(reconcile_repo, "s", "ended")
+        assert not automatic_leave.called
+    with patch.object(panel, "events", return_value=json.dumps([ended_row, newer])), patch.object(room, "append") as automatic_leave:
+        panel.reconcile_mains(reconcile_repo, "s", "ended")
+        assert automatic_leave.call_count == 1, "unambiguously latest terminal history should reconcile"
+    control_menu = list(ended_window)
+    control_menu[4], control_menu[6] = "codex", "ended"
+    with patch.object(panel, "session_owner", return_value=str(reconcile_repo)), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "\t".join(control_menu) + "\n", "")):
+        assert panel.reconciliation_windows(reconcile_repo, "s") == [control_menu]
+    for window_name in ("control", "shell", "tagged-control"):
+        native_binding = list(control_menu)
+        native_binding[9], native_binding[10] = window_name, "%9"
+        if window_name == "tagged-control":
+            native_binding[5], native_binding[7], native_binding[9] = "foreign-attempt", "foreign-main", "control"
+        with patch.object(panel, "session_owner", return_value=str(reconcile_repo)), \
+                patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "\t".join(native_binding) + "\n", "")):
+            try:
+                panel.reconciliation_windows(reconcile_repo, "s")
+                raise AssertionError("unexpected native pane binding accepted")
+            except ValueError:
+                pass
+    # Proof fields are compared again by the actual thread subprocess, under its existing room lock.
+    for key, value in (("thread_identity", [-1, -1]), ("room_digest", "0" * 64),
+                       ("attempts_digest", "0" * 64), ("windows_digest", "0" * 64)):
+        try:
+            room.append(reconcile_repo, "ended", ended_event, "Participant left", expected_main_leave=dict(proof, **{key: value}))
+            raise AssertionError("stale observation accepted: " + key)
+        except ValueError:
+            pass
+    assert room.records(reconcile_repo, "ended") == ended_rows
+    # A consumer binding that changes and returns (ABA) still changes the room digest.
+    room.bind(reconcile_repo, "ended", ended_attempt, "native-one")
+    bound_rows = room.records(reconcile_repo, "ended")
+    bound_proof = panel.main_leave_proof(reconcile_repo, "s", "ended", bound_rows, ended_attempt)
+    room.bind(reconcile_repo, "ended", ended_attempt, "native-two", replaces=hashlib.sha256(b"native-one").hexdigest()[:32])
+    with patch.object(room, "append") as automatic_leave:
+        panel.reconcile_mains(reconcile_repo, "s", "ended")
+        assert not automatic_leave.called, "changed native binding was cleared"
+    room.bind(reconcile_repo, "ended", ended_attempt, "native-one", replaces=hashlib.sha256(b"native-two").hexdigest()[:32])
+    try:
+        room.append(reconcile_repo, "ended", ended_event, "Participant left", expected_main_leave=bound_proof)
+        raise AssertionError("ABA binding bypassed room observation")
+    except ValueError:
+        pass
+    # A newly started attempt between observation and append is rejected by the locked re-read.
+    race_rows = room.records(reconcile_repo, "ended")
+    race_proof = panel.main_leave_proof(reconcile_repo, "s", "ended", race_rows, ended_attempt)
+    resumed_attempt = panel.events(reconcile_repo, "start", "--provider", "codex", "--tool", "panel-main",
+                                   "--ref", "panel_role=main", "--ref", "panel_room_id=ended",
+                                   "--ref", "panel_room_participant=" + ended_attempt, output=True)
+    try:
+        room.append(reconcile_repo, "ended", ended_event, "Participant left", expected_main_leave=race_proof)
+        raise AssertionError("new live attempt was ignored")
+    except ValueError:
+        pass
+    panel.events(reconcile_repo, "transition", "--attempt", resumed_attempt, "--state", "failed")
+    # A separate original registration exercises real success, idempotence and unchanged worker history.
+    room.create(reconcile_repo, "cleanup")
+    cleanup_attempt = panel.events(reconcile_repo, "start", "--provider", "codex", "--tool", "panel-main",
+                                   "--ref", "panel_role=main", "--ref", "panel_room_id=cleanup",
+                                   "--then", "failed", output=True)
+    room.join(reconcile_repo, "cleanup", cleanup_attempt, "codex")
+    room.join(reconcile_repo, "cleanup", "independent", "codex", role="worker")
+    history_before_cleanup = panel.reconciliation_attempts(reconcile_repo)
+    panel.reconcile_mains(reconcile_repo, "s", "cleanup")
+    cleanup_rows = room.records(reconcile_repo, "cleanup")
+    assert cleanup_rows[-1]["room_event"] == {"kind": "leave", "participant": cleanup_attempt}
+    assert room.participant(room.status(reconcile_repo, "cleanup"), "independent")["joined"]
+    panel.reconcile_mains(reconcile_repo, "s", "cleanup")
+    assert room.records(reconcile_repo, "cleanup") == cleanup_rows
+    assert panel.reconciliation_attempts(reconcile_repo) == history_before_cleanup
+    room.join(reconcile_repo, "cleanup", cleanup_attempt, "codex")
+    panel.reconcile_mains(reconcile_repo, "s", "cleanup")
+    assert room.participant(room.status(reconcile_repo, "cleanup"), cleanup_attempt)["joined"], "rejoined main cleared"
+    # The portable participant lock really excludes a competing process (no live panes/providers).
+    lock_probe = '''import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import terminal_panel as panel
+try:
+    with panel.main_lifecycle_lock(Path(sys.argv[2]), "cleanup", sys.argv[3]):
+        raise SystemExit("competing lifecycle lock acquired")
+except ValueError:
+    pass
+'''
+    with panel.main_lifecycle_lock(reconcile_repo, "cleanup", cleanup_attempt):
+        blocked = subprocess.run([sys.executable, "-c", lock_probe, str(panel.ROOT / "scripts/lib"), str(reconcile_repo), cleanup_attempt],
+                                 capture_output=True, text=True, timeout=8)
+        assert blocked.returncode == 0, (blocked.stdout, blocked.stderr)
+    # Resume observes membership only after acquiring that same lock and fails before events/start if cleanup won.
+    import contextlib
+    resume_member = room.participant(room.status(reconcile_repo, "ended"), ended_attempt)
+    @contextlib.contextmanager
+    def cleanup_wins(repo, ident, who):
+        assert (repo, ident, who) == (reconcile_repo, "ended", ended_attempt)
+        with patch.object(room, "status", return_value={"participants": [dict(resume_member, joined=False)]}):
+            yield
+    with patch.object(panel.shutil, "which", return_value="/fixture/codex"), \
+            patch.object(panel, "main_history", return_value=[dict(ended_row, refs=dict(ended_row["refs"],
+                panel_session_digest=resume_member["consumer"]))]), \
+            patch.object(panel, "main_lifecycle_lock", cleanup_wins), patch.object(panel, "events") as started_attempt:
+        try:
+            panel._run_native("codex", reconcile_repo, resume="native-one", room_id="ended")
+            raise AssertionError("resume used membership removed during its lookup")
+        except ValueError as error:
+            assert "joined" in str(error) or "membership changed" in str(error), error
+        assert not started_attempt.called
+print("main-management: complete evidence, guarded leave, resume exclusion and retained workers passed")
+
 # The cap is checked after the tool check, so hosts without tmux or a CLI (CI) still reach it.
 with patch.object(panel, "session_owner", return_value=str(project)), patch.object(panel, "panel_room", return_value="r1"), \
         patch.object(panel.shutil, "which", return_value="/usr/bin/true"), \

@@ -2,6 +2,8 @@
 """Terminal front end; existing OMS tools retain state and mutation authority."""
 
 import argparse
+import atexit
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -597,20 +599,25 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
     started_by = os.environ.pop("OMS_PANEL_STARTED_BY", "")
     if not re.fullmatch(PARTICIPANT, started_by):
         started_by = ""
-    attempt = events(repo, "start", "--provider", provider, "--tool", "panel-main",
-                     "--ref", "panel_role=main", "--ref", "panel_owner=" + provider,
-                     "--ref", "panel_model=" + ("unknown" if provider == "pi" else model or preset["model"] or "unknown"),
-                     *( ["--ref", "panel_model_source=" + ("requested" if model else "unknown")] if provider == "pi" else []),
-                     *( ["--ref", "panel_model_requested=" + model] if provider == "pi" and model else []),
-                     "--ref", "panel_effort=" + (preset["effort"] if not model else "native-settings"),
-                     "--ref", "panel_label=" + label,
-                     "--ref", "panel_location=repository", "--ref", "panel_room_id=" + room_id,
-                     *(["--ref", "panel_started_by=" + started_by] if started_by else []),
-                     *(["--ref", "panel_session_digest=" + digest] if resume else []),
-                     *( ["--ref", "panel_session_digest=" + hashlib.sha256(native_session.encode()).hexdigest()[:32]] if provider == "pi" and not resume else []),
-                     *(["--ref", "panel_room_participant=" + member] if member else []),
-                     *[arg for key, value in host_refs.items() for arg in ("--ref", key + "=" + value)],
-                     "--then", "starting", "--then", "working", output=True)
+    # Resume may reuse a joined participant without another join event. Publish its
+    # nonterminal attempt under the same exclusion as automatic membership cleanup.
+    with main_lifecycle_lock(repo, room_id, member) if member else nullcontext():
+        if member and room.participant(room.status(repo, room_id), member) != prior:
+            raise ValueError("native main membership changed before resume; inspect its current room")
+        attempt = events(repo, "start", "--provider", provider, "--tool", "panel-main",
+                         "--ref", "panel_role=main", "--ref", "panel_owner=" + provider,
+                         "--ref", "panel_model=" + ("unknown" if provider == "pi" else model or preset["model"] or "unknown"),
+                         *( ["--ref", "panel_model_source=" + ("requested" if model else "unknown")] if provider == "pi" else []),
+                         *( ["--ref", "panel_model_requested=" + model] if provider == "pi" and model else []),
+                         "--ref", "panel_effort=" + (preset["effort"] if not model else "native-settings"),
+                         "--ref", "panel_label=" + label,
+                         "--ref", "panel_location=repository", "--ref", "panel_room_id=" + room_id,
+                         *(["--ref", "panel_started_by=" + started_by] if started_by else []),
+                         *(["--ref", "panel_session_digest=" + digest] if resume else []),
+                         *( ["--ref", "panel_session_digest=" + hashlib.sha256(native_session.encode()).hexdigest()[:32]] if provider == "pi" and not resume else []),
+                         *(["--ref", "panel_room_participant=" + member] if member else []),
+                         *[arg for key, value in host_refs.items() for arg in ("--ref", key + "=" + value)],
+                         "--then", "starting", "--then", "working", output=True)
     native_member = member or attempt
     try:
         if not member:
@@ -1834,6 +1841,160 @@ MAX_LIVE_MAINS = 6
 PARTICIPANT = r"[A-Za-z0-9._-]{1,128}"
 
 
+def main_lifecycle_lock(repo, ident, participant):
+    key = hashlib.sha256((ident + "\0" + participant).encode()).hexdigest()[:32]
+    return _lock(Path(repo).resolve(), "panel-main-lifecycle-" + key, timeout=3)
+
+
+def reconciliation_windows(repo, session):
+    """A complete snapshot, including a count and session identity to reject partial/replaced reads."""
+    if session_owner(session) != str(Path(repo).resolve()):
+        raise ValueError("panel ownership changed")
+    fields = ("session_id", "session_name", "session_windows", "window_id", "@oms_panel_owner",
+              "@oms_panel_main_attempt", "@oms_panel_room", "@oms_panel_room_participant", "@oms_panel_repo",
+              "window_name", "@oms_panel_native_pane")
+    found = subprocess.run(tmux_command("list-windows", "-t", "=" + session, "-F",
+                           "\t".join("#{" + key + "}" for key in fields) + "\toms-end"),
+                           capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+    if found.returncode or not found.stdout.endswith("\n"):
+        raise ValueError("complete panel windows unavailable")
+    rows = [line.rstrip("\r").split("\t") for line in found.stdout.split("\n")[:-1]]
+    seen, identity = set(), None
+    for row in rows:
+        if (len(row) != 12 or row[-1] != "oms-end" or not re.fullmatch(r"\$[0-9]+", row[0])
+                or row[1] != session or not row[2].isdigit() or int(row[2]) != len(rows)
+                or not re.fullmatch(r"@[0-9]+", row[3]) or row[3] in seen
+                or row[8] != str(Path(repo).resolve())
+                or row[10] and (row[9] == "control" or not re.fullmatch(r"%[0-9]+", row[10]))):
+            raise ValueError("ambiguous panel windows")
+        if identity is not None and identity != row[0]:
+            raise ValueError("panel session changed")
+        identity = row[0]
+        seen.add(row[3])
+        # The control menu records provider/room options too, but has no native
+        # attempt or participant. Other incomplete windows remain uncertain.
+        if row[9] == "control" and not row[5] and not row[7] and not row[10] and row[4] in ("", *NATIVE_HARNESSES):
+            if row[6]:
+                room.identifier(row[6], "room")
+            continue
+        # A newly opened, not yet enrolled window may be a pending resume.
+        if row[4] or any(row[5:8]) or row[10]:
+            if row[4] not in NATIVE_HARNESSES or not all(row[5:8]):
+                raise ValueError("panel main enrollment is incomplete")
+            for value in row[5:8]:
+                room.identifier(value)
+    if not rows:
+        raise ValueError("panel windows unavailable")
+    return rows
+
+
+def reconciliation_attempts(repo):
+    # No --limit or active filter: an older live attempt must veto cleanup too.
+    rows = json.loads(events(repo, "list", "--json", output=True))
+    if not isinstance(rows, list):
+        raise ValueError("complete main history unavailable")
+    seen = set()
+    for row in rows:
+        if (not isinstance(row, dict) or not isinstance(row.get("refs"), dict)
+                or not isinstance(row.get("tool"), str) or type(row.get("terminal")) is not bool):
+            raise ValueError("invalid main history")
+        ident = room.identifier(row.get("attempt_id"), "attempt")
+        if ident in seen:
+            raise ValueError("duplicate main attempt")
+        seen.add(ident)
+    return rows
+
+
+def reconciliation_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False).encode()).hexdigest()
+
+
+def main_leave_proof(repo, session, ident, rows, who):
+    state = room.project(rows)
+    member = room.participant(state, who)
+    if (state["closed"] or member["role"] != "main" or member.get("parent")
+            or member["seq"] != member["initial_seq"]):
+        raise ValueError("main registration is not an original joined owner")
+    history = reconciliation_attempts(repo)
+    related = [row for row in history if row["attempt_id"] == who
+               or row["refs"].get("panel_room_participant") == who]
+    if not related:
+        raise ValueError("main has no authoritative attempt")
+    for row in related:
+        refs = row["refs"]
+        if (row["tool"] != "panel-main" or row.get("provider") != member["provider"]
+                or row["terminal"] is not True or row.get("state") not in {"done", "failed", "cancelled", "timed_out", "abandoned"}
+                or refs.get("panel_role") != "main"
+                or refs.get("panel_room_id") != ident or refs.get("panel_room_participant", row["attempt_id"]) != who
+                or not isinstance(row.get("created_at"), str)
+                or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", row["created_at"])):
+            raise ValueError("main history is live, foreign or uncertain")
+    latest = max(related, key=lambda row: row["created_at"])
+    if sum(row["created_at"] == latest["created_at"] for row in related) != 1:
+        raise ValueError("latest main attempt is ambiguous")
+    consumer = member.get("consumer")
+    digest = latest["refs"].get("panel_session_digest")
+    if consumer:
+        if digest != consumer and not (digest is None and latest["attempt_id"] == who
+                                      and member.get("initial_consumer") == consumer):
+            raise ValueError("native binding does not match latest attempt")
+        if any(row["refs"].get("panel_session_digest") == consumer and row["terminal"] is not True for row in history):
+            raise ValueError("native binding has a live attempt")
+    elif digest:
+        raise ValueError("native binding is unavailable")
+    windows = reconciliation_windows(repo, session)
+    attempts = {row["attempt_id"] for row in related}
+    if any(row[5] in attempts or (row[6], row[7]) == (ident, who) for row in windows):
+        raise ValueError("main still has a window")
+    with room.thread_live.open_thread(repo, ident) as handle:
+        info = os.fstat(handle.fileno())
+        current = room.decode_records(handle.read(room.thread_live.MAX_FILE + 1), ident)
+    if current != rows:
+        raise ValueError("room changed during observation")
+    return {"session": session, "room": ident, "participant": who,
+            "thread_identity": [info.st_dev, info.st_ino], "room_digest": reconciliation_digest(rows),
+            "attempts_digest": reconciliation_digest(history), "windows_digest": reconciliation_digest(windows)}
+
+
+def validate_main_leave(repo, rows, event, expected):
+    # The thread helper owns this lock until process exit, including its append
+    # after validate_event returns. A timed-out caller cannot release it early.
+    if (not isinstance(expected, dict) or expected.get("room") != rows[0].get("thread")
+            or expected.get("participant") != event["participant"]
+            or not isinstance(expected.get("session"), str)):
+        raise ValueError("invalid main leave observation")
+    guard = main_lifecycle_lock(repo, expected["room"], event["participant"])
+    guard.__enter__()
+    try:
+        actual = main_leave_proof(repo, expected["session"], expected["room"], rows, event["participant"])
+        if actual != expected:
+            raise ValueError("main leave observation changed")
+    except BaseException:
+        guard.__exit__(*sys.exc_info())
+        raise
+    atexit.register(guard.__exit__, None, None, None)
+
+
+def reconcile_mains(repo, session, ident):
+    """On explicit start, leave only confirmed ended, windowless registrations; uncertainty preserves them."""
+    try:
+        rows = room.records(repo, ident)
+        members = room.project(rows)["participants"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    for member in members:
+        if not member.get("joined") or member.get("role") != "main":
+            continue
+        who = member["participant"]
+        try:
+            rows = room.records(repo, ident)
+            expected = main_leave_proof(repo, session, ident, rows, who)
+            room.append(repo, ident, {"kind": "leave", "participant": who}, "Participant left",
+                        expected_main_leave=expected)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            continue
+
+
 def live_mains(repo, session, room_id):
     """Panel-wide: joined mains with a live panel-main attempt in any room this panel's windows belong to, plus windows opened but not yet enrolled."""
     found = subprocess.run(tmux_command("list-windows", "-t", "=" + session, "-F",
@@ -1879,6 +2040,7 @@ def spawn_main(repo, provider, task=None, model=None, started_by=None):
     env = os.environ.copy()
     env["OMS_PANEL_SESSION"] = session
     ident = os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
+    reconcile_mains(repo, session, ident)
     if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
         raise ValueError("this panel already has %s live mains; finish one before starting another" % MAX_LIVE_MAINS)
     pane = add_main_window(repo, session, provider, board_view("auto"), False, env, None, model, task, started_by)
@@ -2033,6 +2195,7 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
             if launch:
                 # An explicit --room wins; otherwise new mains default to the panel's open room.
                 os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
+                reconcile_mains(repo, session, os.environ["OMS_ROOM_ID"])
                 if live_mains(repo, session, os.environ["OMS_ROOM_ID"]) >= MAX_LIVE_MAINS:
                     raise ValueError("this panel already has %s live mains; finish one before starting another" % MAX_LIVE_MAINS)
                 created = "window"

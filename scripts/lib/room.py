@@ -376,6 +376,10 @@ def validate_event(rows, event, text):
                                  else "room participant limit reached")
     elif kind == "leave":
         participant(state, event.get("participant"))
+        if "OMS_ROOM_EXPECTED_MAIN_LEAVE" in os.environ:
+            from terminal_panel import validate_main_leave
+            repo = Path(os.environ["OMS_TH_FILE"]).parents[2]
+            validate_main_leave(repo, rows, event, json.loads(os.environ["OMS_ROOM_EXPECTED_MAIN_LEAVE"]))
     elif kind == "message":
         identifier(event.get("id"), "message")
         participant(state, event.get("sender"))
@@ -418,17 +422,23 @@ def validate_event(rows, event, text):
     return True
 
 
-def command(repo, *args):
+def command(repo, *args, env=None):
     run = subprocess.run(["bash", str(ENTRY), "thread", "--repo", str(repo)] + list(args),
-                         capture_output=True, text=True, check=False, timeout=15, stdin=subprocess.DEVNULL)
+                         capture_output=True, text=True, check=False, timeout=15, stdin=subprocess.DEVNULL, env=env)
     if run.returncode:
         raise ValueError(clean(run.stderr or run.stdout, 300))
     return run.stdout.strip()
 
 
-def append(repo, room, event, text):
+def append(repo, room, event, text, expected_main_leave=None):
+    env = os.environ.copy()
+    env.pop("OMS_ROOM_EXPECTED_MAIN_LEAVE", None)
+    if expected_main_leave is not None:
+        if event.get("kind") != "leave":
+            raise ValueError("main leave observation requires a leave event")
+        env["OMS_ROOM_EXPECTED_MAIN_LEAVE"] = json.dumps(expected_main_leave, allow_nan=False)
     return command(repo, "append", "--id", identifier(room, "room"), "--role", "note", "--text", text,
-                   "--room-event", json.dumps(event, ensure_ascii=False))
+                   "--room-event", json.dumps(event, ensure_ascii=False), env=env)
 
 
 def create(repo, room=None, title="Shared work", task_id=None):

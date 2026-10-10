@@ -70,6 +70,16 @@ already has six live mains. The caller's room participant (`OMS_ROOM_PARTICIPANT
 with `↳` (`^` in ASCII mode) and its detail starts with "Started by Opus 5.5·1cb4". The bootstrap
 tells mains to use this only for a separate long line of work, not for ordinary subtasks.
 
+Before an explicit start (`--spawn-main` or `--launch` in an existing panel), OMS can
+clear an old registration in the selected room when its complete attempt history is
+terminal and a successful complete panel-window read proves no window belongs to it.
+Uncertain history, changed native bindings, rejoined registrations, missing evidence
+or any remaining window keep the registration. This only records a room leave;
+worker registrations and history remain. It never starts a replacement or kills a
+window. The six-main cap still applies. A participant lock serializes this cleanup
+with managed resumes, and the room lock checks the observation again before leaving.
+Tmux is observed separately: external window changes are not atomic with room updates.
+
 A main never closes another main, because closing ends a native chat and its running work. It
 may ask: `oms panel --request-close PARTICIPANT --reason "..." [--json]` (refused inside
 workers, for a target that is not a joined main of the caller's room, and without a dry-run)
