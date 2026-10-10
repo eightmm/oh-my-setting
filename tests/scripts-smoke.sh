@@ -18938,7 +18938,7 @@ test_patch_land_reject_records_and_resolves_fail_ledger() {
   # Explicit ready/release files keep admission paused inside a real observer
   # window. Poll the barrier with a deadline; elapsed time never implies readiness.
   rc="$(python3 - "$ROOT" "$project" "$TMP/land-ledger.patch" "$err1" "$TMP" <<'PY'
-import hashlib, json, os, pathlib, shlex, subprocess, sys, time
+import hashlib, json, os, pathlib, runpy, shlex, subprocess, sys, time
 root, project, patch, errors, tmp = sys.argv[1:]
 ready = pathlib.Path(tmp) / "landing-verifier-ready"
 release = pathlib.Path(tmp) / "landing-verifier-release"
@@ -18986,10 +18986,52 @@ with open(errors, "w") as err:
         expected = hashlib.sha256(pathlib.Path(patch).read_bytes()).hexdigest()
         assert row["patch_sha256"] == row["patch_external"]["sha256"] == expected
         report = pathlib.Path(project) / row["artifact"]
-        capture = pathlib.Path(next(line[len("- patch: "):] for line in report.read_text().splitlines()
+        report_bytes = report.read_bytes()
+        capture = pathlib.Path(next(line[len("- patch: "):] for line in report_bytes.decode().splitlines()
                                     if line.startswith("- patch: ")))
-        assert capture.read_bytes() == pathlib.Path(patch).read_bytes()
         assert not str(capture).startswith(project + "/")
+        if capture.exists():
+            assert capture.read_bytes() == pathlib.Path(patch).read_bytes()
+        else:
+            # A managed rejected generation may be collected only after its
+            # actual admission result and terminal release are durably linked.
+            helper = runpy.run_path(root + "/scripts/lib/landing-capture.py")
+            item = helper["find"](project, capture=str(capture))
+            log = helper["rows"](project)
+            encoded, digest = helper["encoded"], helper["digest"]
+            assert item["sha256"] == expected and item["bytes"] == 2 * len(pathlib.Path(patch).read_bytes())
+            assert item["directory"] == str(capture.parent) and not os.path.lexists(item["directory"])
+            assert item["namespace"] == digest(os.path.realpath(project).encode())
+            assert capture.name == item["landing_id"] + ".patch"
+            terminals = [r for r in log if r.get("event") == "capture-terminal" and
+                         r.get("managed_capture") == item]
+            assert len(terminals) == 1 and terminals[0]["reason"] == "admission-rejected"
+            assert not [r for r in log if r.get("event") == "intent" and r.get("landing_id") == item["landing_id"]]
+            engine = runpy.run_path(root + "/scripts/lib/agent-events.py")
+            events = engine["read_rows"](engine["event_path"](pathlib.Path(project)))
+            created = [r for r in events if r.get("attempt_id") == row["operation_id"] and
+                       r.get("event_type") == "attempt.created"]
+            done = [r for r in events if r.get("attempt_id") == row["operation_id"] and
+                    r.get("event_type") == "attempt.state_changed" and r.get("to_state") == "done"]
+            assert len(created) == len(done) == 1
+            assert created[0]["provider"] == "local" and created[0]["tool"] == "patch-admit"
+            assert created[0]["refs"]["reference_writer"] == "landing-reference-v1"
+            assert created[0]["refs"]["reference_input_sha256"] == digest(str(capture).encode())
+            assert report_bytes.decode().splitlines()[0] == "# Patch admission: REJECT"
+            assert row["artifact_sha256"] == digest(report_bytes) and row["exit"] == 1
+            assert engine["parse_ts"](created[0]["ts"]) <= engine["parse_ts"](row["ts"]) <= engine["parse_ts"](done[0]["ts"])
+            proof = dict(version=1, generation=item["generation"], attempt=row["operation_id"],
+                         created_sha256=digest(encoded(created[0])), report=row["artifact"],
+                         report_sha256=digest(report_bytes), index_event_id=row["event_id"],
+                         index_row_sha256=digest(encoded(row)), exit=1)
+            assert terminals[0]["native_terminal_proof"] == {
+                "phase": "admission-rejected", "admission_sha256": digest(encoded(proof))}
+            ready = helper["release_ready"](item, log)
+            assert ready is not None and ready["release_proof"]["terminal_event_sha256"] == digest(encoded(terminals[0]))
+            released = [r for r in log if r.get("event") == "capture-released" and
+                        r.get("managed_capture") == item]
+            assert len(released) == 1 and released[0]["release_ready_sha256"] == digest(encoded(ready))
+            assert log.index(terminals[0]) < log.index(ready) < log.index(released[0])
     finally:
         release.write_text("go")
         if worker.poll() is None:
