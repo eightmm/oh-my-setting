@@ -985,7 +985,7 @@ ma_append_artifact_index() {
   OMS_INDEX_CONTEXT_BUNDLE_SHA256="${OMS_INDEX_CONTEXT_BUNDLE_SHA256:-}" \
   OMS_INDEX_CONTEXT_SELECTED_BYTES="${OMS_INDEX_CONTEXT_SELECTED_BYTES:-}" \
   OMS_INDEX_CONTEXT_DEBT="${OMS_INDEX_CONTEXT_DEBT:-}" \
-  OMS_INDEX_OPERATION_ID="${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}" \
+  OMS_INDEX_OPERATION_ID="${OMS_INDEX_OPERATION_ID:-${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}}" \
   OMS_INDEX_RUN_ID="${OMS_RUN_ID:-}" OMS_INDEX_DELEGATION_ID="${OMS_DELEGATION_ID:-}" \
   OMS_INDEX_ATTEMPT_ID="${OMS_ATTEMPT_ID:-${OMS_LAST_ATTEMPT_ID:-}}" \
   OMS_INDEX_PARENT_EVENT_ID="${OMS_PARENT_EVENT_ID:-}" \
@@ -1032,7 +1032,11 @@ def path_fields(label, raw):
         internal = os.path.commonpath([real_repo, real]) == real_repo
     except ValueError:
         internal = False
-    digest = file_hash(path)
+    # Index publication is a pin. Validate managed payloads while this real
+    # index lock excludes GC; a stale path must not create a dangling new pin.
+    managed = runpy.run_path(os.path.join(os.environ["OMS_INDEX_TRACE_LIB"], "landing-capture.py"))
+    payload = managed["indexed_bytes"](real_repo, real)
+    digest = hashlib.sha256(payload).hexdigest() if payload is not None else file_hash(path)
     if internal:
         relative = os.path.relpath(real, real_repo).replace(os.sep, "/")
         return ({label: relative, label + "_sha256": digest}

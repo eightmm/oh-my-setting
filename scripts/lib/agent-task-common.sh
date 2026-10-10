@@ -6,6 +6,31 @@
 # shellcheck source=oms-common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/oms-common.sh"
 
+# Preserve the caller's identity: this is a separate local writer operation.
+agent_task_reference_mutation() {
+  local file="$1" repo operation rc=0
+  shift
+  repo="$(oms_state_root "${REPO:-$PWD}")" || return 1
+  repo="$(cd "$repo" && pwd -P)" || return 1
+  operation="$(python3 "$_OMS_TASK_REFERENCE_HELPER" begin "$repo" agent-task)" || return 1
+  operation="${operation//$'\r'/}"
+  oms_with_file_lock "$file" agent_task_reference_checked "$repo" "$file" "$operation" "$@" || rc=$?
+  python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$repo" "$operation" "$rc" || return 1
+  return "$rc"
+}
+
+agent_task_reference_checked() {
+  local repo="$1" file="$2" operation="$3"
+  shift 3
+  if ! python3 "$_OMS_TASK_REFERENCE_HELPER" task "$repo" "$file" "$@" "${OMS_AGENT_TASK_SOURCE_SESSION:-}"; then
+    python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$repo" "$operation" refuse-no-write || return 1
+    return 1
+  fi
+  "$@"
+}
+
+_OMS_TASK_REFERENCE_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/landing-reference.py"
+
 agent_task_project_file() {
   local repo="$1"
   repo="$(oms_repo_root "$repo")" || return 1
@@ -106,7 +131,7 @@ agent_task_set_metadata() {
   local key="$2"
   local value="$3"
 
-  oms_with_file_lock "$file" agent_task_set_metadata_unlocked "$file" "$key" "$value"
+  agent_task_reference_mutation "$file" agent_task_set_metadata_unlocked "$file" "$key" "$value"
 }
 
 agent_task_ensure_metadata_unlocked() {
@@ -175,7 +200,7 @@ agent_task_init_file_unlocked() {
 agent_task_init_file() {
   local file="$1"
 
-  oms_with_file_lock "$file" agent_task_init_file_unlocked "$file"
+  agent_task_reference_mutation "$file" agent_task_init_file_unlocked "$file"
 }
 
 agent_task_touch_updated_unlocked() {
@@ -191,7 +216,7 @@ agent_task_touch_updated_unlocked() {
 agent_task_touch_updated() {
   local file="$1"
 
-  oms_with_file_lock "$file" agent_task_touch_updated_unlocked "$file"
+  agent_task_reference_mutation "$file" agent_task_touch_updated_unlocked "$file"
 }
 
 agent_task_set_status_unlocked() {
@@ -236,7 +261,7 @@ agent_task_archive_unlocked() {
 agent_task_archive() {
   local file="$1"
 
-  oms_with_file_lock "$file" agent_task_archive_unlocked "$file"
+  agent_task_reference_mutation "$file" agent_task_archive_unlocked "$file"
 }
 
 agent_task_rotate_unlocked() {
@@ -253,7 +278,7 @@ agent_task_rotate_unlocked() {
 agent_task_rotate() {
   local file="$1"
 
-  oms_with_file_lock "$file" agent_task_rotate_unlocked "$file"
+  agent_task_reference_mutation "$file" agent_task_rotate_unlocked "$file"
 }
 
 agent_task_prune_current_state_unlocked() {
@@ -347,7 +372,7 @@ agent_task_replace_section() {
     return 3
   fi
 
-  oms_with_file_lock "$file" agent_task_replace_section_unlocked "$file" "$section" "$content_file"
+  agent_task_reference_mutation "$file" agent_task_replace_section_unlocked "$file" "$section" "$content_file"
 }
 
 agent_task_section_value() {
@@ -404,7 +429,7 @@ agent_task_upsert_loop_state() {
   local diff_budget="$4"
   local verify_level="$5"
 
-  oms_with_file_lock "$file" agent_task_upsert_loop_state_unlocked "$file" "$attempts" "$max_attempts" "$diff_budget" "$verify_level"
+  agent_task_reference_mutation "$file" agent_task_upsert_loop_state_unlocked "$file" "$attempts" "$max_attempts" "$diff_budget" "$verify_level"
 }
 
 agent_task_loop_warnings() {
@@ -539,7 +564,7 @@ agent_task_verify_snapshot_unlocked() {  # FILE OUT
 }
 
 agent_task_verify_snapshot() {  # FILE OUT
-  oms_with_file_lock "$1" agent_task_verify_snapshot_unlocked "$1" "$2"
+  agent_task_reference_mutation "$1" agent_task_verify_snapshot_unlocked "$1" "$2"
 }
 
 agent_task_verify_finalize_unlocked() {  # FILE EXPECTED_ID AGENT NOTE STATE_FP CMD_SHA STATUS
@@ -563,7 +588,7 @@ agent_task_verify_finalize_unlocked() {  # FILE EXPECTED_ID AGENT NOTE STATE_FP 
 }
 
 agent_task_verify_finalize() {  # FILE EXPECTED_ID AGENT NOTE STATE_FP CMD_SHA STATUS
-  oms_with_file_lock "$1" agent_task_verify_finalize_unlocked "$@"
+  agent_task_reference_mutation "$1" agent_task_verify_finalize_unlocked "$@"
 }
 
 agent_task_append_bullet() {
@@ -577,7 +602,7 @@ agent_task_append_bullet() {
     return 3
   fi
 
-  oms_with_file_lock "$file" agent_task_append_bullet_unlocked "$file" "$section" "$agent" "$content_file"
+  agent_task_reference_mutation "$file" agent_task_append_bullet_unlocked "$file" "$section" "$agent" "$content_file"
 }
 
 agent_task_file_has_sensitive_content() {

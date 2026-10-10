@@ -1779,6 +1779,7 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
     fail "scratch add failed"
   git -C "$scratch" switch -q -c scratch-work
   main_head="$(git -C "$main" rev-parse HEAD)"
+  git -C "$scratch" -c user.name=Test -c user.email=test@example.com commit --quiet --allow-empty -m "scratch base"
   scratch_head="$(git -C "$scratch" rev-parse HEAD)"
   mkdir -p "$scratch/src"
   [ "$($parent bash -c "$probe" _ "$ROOT" "$scratch/src")" = "$main" ] ||
@@ -1842,16 +1843,47 @@ PYMARKER
   printf 'scratch work\n' >> "$scratch/file.txt"
   git -C "$scratch" diff > "$main/.oms/scratch-review.patch"
   git -C "$scratch" checkout -q file.txt
+  cp "$main/.oms/scratch-review.patch" "$TMP/state-root-caller.patch"
+  $parent OMS_ARTIFACT_INDEX="$scratch/.oms/artifacts/custom-index.jsonl" \
+    "$ROOT/scripts/patch-admit.sh" --repo "$scratch" --patch "$main/.oms/scratch-review.patch" \
+    --verify true --report "$TMP/state-root-unmanaged.md" >"$TMP/state-root-admit.log" 2>&1 ||
+    fail "unmanaged scratch admission failed: $(cat "$TMP/state-root-admit.log")"
+  [ -s "$scratch/.oms/artifacts/custom-index.jsonl" ] || fail "unmanaged explicit index override was ignored"
+  cp "$scratch/.oms/artifacts/custom-index.jsonl" "$TMP/state-root-custom-index.before"
   $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" review --id landed \
     --artifact .oms/scratch-review.patch --patch .oms/scratch-review.patch >/dev/null
-  ( cd "$scratch" && $parent "$ROOT/scripts/patch-land.sh" --plan-task landed --verify true >/dev/null 2>&1 ) ||
-    fail "patch-land from a parent's scratch should land"
+  ( cd "$scratch" && $parent "$ROOT/scripts/patch-land.sh" --plan-task landed --verify true >"$TMP/state-root-land.log" 2>&1 ) ||
+    fail "patch-land from a parent's scratch should land: $(cat "$TMP/state-root-land.log")"
   grep -q 'scratch work' "$scratch/file.txt" && ! grep -q 'scratch work' "$main/file.txt" ||
     fail "a scratch landing must apply to the scratch tree only"
   grep -q "\"worktree\": \"$scratch\"" "$main/.oms/landings.jsonl" && [ ! -e "$scratch/.oms/landings.jsonl" ] ||
     fail "a scratch landing must record its tree in the main checkout's landings"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id landed | grep -q '"state": "done"' ||
     fail "a scratch landing must finish the main checkout's plan task"
+  cmp "$main/.oms/scratch-review.patch" "$TMP/state-root-caller.patch" || fail "admission changed caller patch bytes"
+  cmp "$scratch/.oms/artifacts/custom-index.jsonl" "$TMP/state-root-custom-index.before" ||
+    fail "managed admission wrote through the unmanaged index override"
+  python3 - "$main" "$scratch" "$scratch_head" <<'PYINDEX' ||
+import hashlib, json, pathlib, sys
+main, scratch = map(pathlib.Path, sys.argv[1:3])
+rows = [json.loads(line) for line in (main / '.oms/artifacts/index.jsonl').read_text().splitlines()]
+rows = [row for row in rows if row.get('kind') == 'patch-admit']
+assert len(rows) == 1, rows
+row = rows[0]
+assert row['exit'] == 0 and 'artifact_external' not in row, row
+report = main / row['artifact']
+assert row['artifact'].startswith('.oms/artifacts/admit/admit-att_'), row
+assert hashlib.sha256(report.read_bytes()).hexdigest() == row['artifact_sha256'], row
+assert sys.argv[3].startswith(row['base_sha']), row
+assert not (scratch / '.oms/artifacts/index.jsonl').exists()
+events = [json.loads(line) for line in (main / '.oms/lifecycle/events.jsonl').read_text().splitlines()]
+operation = [event for event in events if event.get('attempt_id') == row['operation_id']]
+created = [event for event in operation if event.get('event_type') == 'attempt.created']
+assert len(created) == 1, operation
+assert created[0]['provider'] == 'local' and created[0]['tool'] == 'patch-admit', created
+assert operation[-1]['to_state'] == 'done', operation
+PYINDEX
+    fail "managed scratch admission lost canonical report, native operation or physical base provenance"
   second="$($parent "$ROOT/scripts/scratch-worktree.sh" add --repo "$project" --owner-pid $$)" ||
     fail "second scratch add failed"
   git -C "$second" switch -q -c scratch-foreign
@@ -6073,10 +6105,10 @@ def plan():
 def index():
     return [json.loads(line) for line in (repo / '.oms/artifacts/index.jsonl').read_bytes().splitlines()]
 
-def register(kind, task, artifact, attempt='', patch='', base=''):
+def register(kind, task, artifact, attempt='', patch='', base='', exitcode=0):
     extra = dict(env, OMS_TASK_ID=task, OMS_INDEX_PLAN_ID=plan()['plan_id'],
-                 OMS_ATTEMPT_ID=attempt, OMS_INDEX_BASE_SHA=base)
-    result = subprocess.run(['bash', '-c', '. "$1"; ma_append_artifact_index "$2" "$3" codex 0 "$4" "$5"',
+                 OMS_ATTEMPT_ID=attempt, OMS_INDEX_BASE_SHA=base, OMS_FIXTURE_INDEX_EXIT=str(exitcode))
+    result = subprocess.run(['bash', '-c', '. "$1"; ma_append_artifact_index "$2" "$3" codex "$OMS_FIXTURE_INDEX_EXIT" "$4" "$5"',
                              'fixture', str(root / 'scripts/lib/peer-common.sh'), str(repo), kind,
                              str(repo / artifact), str(repo / patch) if patch else ''],
                             env=extra, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
@@ -6099,30 +6131,34 @@ call('room.sh', 'join', '--id', room, '--participant', participant, '--provider'
 
 env.update(OMS_ROOM_ID=room, OMS_ROOM_PARTICIPANT=participant, OMS_PANEL_MAIN_ATTEMPT=main)
 counter = 0
-def setup(command='bash verify.sh', empty_verify=False, claim_provider='codex'):
+def setup(command='bash verify.sh', empty_verify=False, claim_provider='codex', main_report=False, producer_exit=0):
     global counter
     read_base = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
     counter += 1
     tid = 'research%d' % counter
     ap('add', '--id', tid, '--title', 'Inspect all original obligations', '--allowed', 'file.txt,verify.sh',
        '--verify', '' if empty_verify else command,
+       '--role', 'analysis-worker' if main_report else '',
        '--assignment', json.dumps({'provider': claim_provider, 'workload': 'routine'}))
     ap('claim', '--id', tid, '--provider', 'codex',
        extra={'OMS_PANEL_MAIN_ATTEMPT': main, 'OMS_ROOM_PARTICIPANT': participant})
     artifact = '.oms/artifacts/research/%s.md' % tid
     (repo / artifact).parent.mkdir(parents=True, exist_ok=True)
-    read_result = subprocess.run(['bash', '-c', 'cat file.txt verify.sh'], cwd=str(repo),
+    read_result = subprocess.run(['bash', '-c', 'cat file.txt verify.sh; exit %d' % producer_exit], cwd=str(repo),
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    assert read_result.returncode == 0, read_result.stderr
+    assert read_result.returncode == producer_exit, read_result.stderr
     (repo / artifact).write_bytes(read_result.stdout)
-    attempt = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'peer-ask',
+    attempt, ancillary = '', ''
+    if not main_report:
+        attempt = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'peer-ask',
                    '--task-id', tid, '--parent-attempt-id', main, '--ref', 'panel_access=read',
                    '--then', 'starting', '--then', 'working')
-    call('agent-events.sh', 'transition', '--attempt', attempt, '--state', 'verifying',
+        call('agent-events.sh', 'transition', '--attempt', attempt, '--state', 'verifying',
          '--then', 'review', '--then', 'done')
-    ancillary = '.oms/artifacts/research/%s.patch' % tid
-    (repo / ancillary).write_bytes(b'')
-    row = register('ask', tid, artifact, attempt, patch=ancillary, base=read_base[:7])
+        ancillary = '.oms/artifacts/research/%s.patch' % tid
+        (repo / ancillary).write_bytes(b'')
+    row = register('call-import' if main_report else 'ask', tid, artifact, attempt,
+                   patch=ancillary, base=read_base[:7], exitcode=producer_exit)
     ap('review', '--id', tid, '--artifact', artifact)
     current = plan()
     task = current['tasks'][tid]
@@ -6145,6 +6181,18 @@ def setup(command='bash verify.sh', empty_verify=False, claim_provider='codex'):
             bundle['source_envelope'].append(script)
             bundle['source_manifest'].append(entry(script))
             bundle['verifier']['files'].append(entry(script))
+    if main_report:
+        bundle.pop('research')
+        bundle['kind'] = 'main-research-accepted'
+        bundle['reviewer'] = {'kind': 'native-panel-main'}
+        bundle['main_research'] = {'classification': 'research-only', 'provenance': 'main-reviewed-external',
+            'artifact': ref(artifact), 'index_event_id': row['event_id'], 'original_deliverable': task['title'],
+            'read_only_contract': 'original-report-only', 'original_producer_status':
+                {key: row.get(key) for key in ('kind', 'exit', 'attempt_id', 'task_id', 'plan_id', 'base_sha')}}
+        if producer_exit:
+            bundle['main_research'].update(provenance='main-reviewed-external',
+                failed_producer_review='The external command failed; current main independently reviewed its report and source')
+        return bundle
     bundle['legacy_adoption'] = {'artifact': ref(artifact), 'original_contract': bundle['original_contract'],
                                  'review_summary': 'Current explicit adoption of missing legacy producer binding'}
     return bundle
@@ -6157,6 +6205,240 @@ def invoke(bundle, action='accept-research', extra=None, ok=True, flags=(), payl
               '--expected-state', bundle['state'], '--expected-plan-sha256', bundle['plan_sha256'],
               '--expected-task-sha256', bundle['task_sha256'], '--completion-bundle', path,
               '--expected-completion-bundle-sha256', h(raw), *flags, extra=extra, ok=ok)
+
+# Actual main review is a separate provenance kind and needs no child attempt.
+main_report = setup(main_report=True)
+assert not main_report['main_research']['original_producer_status']['attempt_id']
+invoke(main_report, action='accept-main-research')
+main_done = plan()['tasks'][main_report['task_id']]
+assert main_done['completion_kind'] == 'main-research-accepted' and main_done['state'] == 'done'
+assert 'landing' not in main_done and not main_done['patch']
+invoke(main_report, action='accept-main-research')
+ap('show', '--id', main_report['task_id'], extra={'OMS_PANEL_MAIN_ATTEMPT': '', 'OMS_ROOM_PARTICIPANT': '', 'OMS_ROOM_ID': ''})
+failed_external = setup(main_report=True, producer_exit=17)
+producer_index_before = (repo / '.oms/artifacts/index.jsonl').read_bytes()
+invoke(failed_external, action='accept-main-research')
+assert (repo / '.oms/artifacts/index.jsonl').read_bytes() == producer_index_before
+external_receipt = json.loads((repo / plan()['tasks'][failed_external['task_id']]['completion_receipt']['path']).read_bytes())
+assert external_receipt['snapshot']['evidence']['index']['exit'] == 17
+assert external_receipt['snapshot']['evidence']['child_provenance_asserted'] is False
+for flaw in ('foreign-index', 'failed-without-review', 'product-deliverable', 'foreign-owner', 'missing-reviewer', 'unsupported-authorship'):
+    bad = setup(main_report=True, producer_exit=17 if flaw == 'failed-without-review' else 0)
+    if flaw == 'foreign-index':
+        row = register('call-import', 'foreign-task', bad['main_research']['artifact']['path'])
+        bad['main_research']['index_event_id'] = row['event_id']
+        bad['main_research']['original_producer_status'] = {key: row.get(key) for key in
+            ('kind', 'exit', 'attempt_id', 'task_id', 'plan_id', 'base_sha')}
+    elif flaw == 'failed-without-review':
+        bad['main_research'].pop('failed_producer_review')
+    elif flaw == 'product-deliverable':
+        current = plan(); task = current['tasks'][bad['task_id']]
+        task['title'] = 'Audit original findings and implement the remaining repair'
+        plan_path.write_text(json.dumps(current))
+        bad.update(plan_sha256=h(plan_path.read_bytes()), task_sha256=engine['digest'](task),
+                   original_contract=engine['projection'](task))
+        bad['main_research']['original_deliverable'] = task['title']
+        bad['requirements'][0]['obligation'] = task['title']
+    elif flaw == 'foreign-owner':
+        bad['owner']['participant'] = 'another-main'
+    elif flaw == 'unsupported-authorship':
+        bad['main_research']['provenance'] = 'main-authored'
+    else:
+        bad.pop('reviewer')
+    unchanged = plan_path.read_bytes()
+    invoke(bad, action='accept-main-research', ok=False)
+    assert plan_path.read_bytes() == unchanged
+
+
+# Partial legacy lineage requires exact reviewed adoption in both directions.
+for missing in ('task_id', 'plan_id'):
+    legacy = setup(main_report=True)
+    original_index = (repo / '.oms/artifacts/index.jsonl').read_bytes()
+    producer_rows = [json.loads(line) for line in original_index.splitlines()]
+    producer_row = next(row for row in producer_rows
+                        if row['event_id'] == legacy['main_research']['index_event_id'])
+    producer_row[missing] = ''
+    (repo / '.oms/artifacts/index.jsonl').write_bytes(b''.join(
+        json.dumps(row, ensure_ascii=False, separators=(',', ':')).encode() + b'\n'
+        for row in producer_rows))
+    legacy['main_research']['original_producer_status'] = {key: producer_row.get(key) for key in
+        ('kind', 'exit', 'attempt_id', 'task_id', 'plan_id', 'base_sha')}
+    unchanged = plan_path.read_bytes()
+    invoke(legacy, action='accept-main-research', ok=False)
+    assert plan_path.read_bytes() == unchanged
+    legacy['legacy_report_binding'] = {
+        'artifact': legacy['main_research']['artifact'],
+        'index_event_id': producer_row['event_id'],
+        'index_sha256': h(json.dumps(producer_row, sort_keys=True, ensure_ascii=False,
+                                   separators=(',', ':'), allow_nan=False).encode() + b'\n'),
+        'original_contract': legacy['original_contract'],
+        'review_summary': 'Reviewed exact original report, producer facts and partial missing lineage'}
+    invoke(legacy, action='accept-main-research')
+    assert plan()['tasks'][legacy['task_id']]['completion_kind'] == 'main-research-accepted'
+
+# Execute the real two-step controller. Only backend/native account records are
+# synthetic: this proves API integration, never a real Desktop approval receipt.
+if os.name == 'posix' and Path('/proc/self').is_dir():
+    import shlex
+    copied = []
+    for directory in ('scripts', 'config'):
+        if (root / directory).is_dir():
+            shutil.copytree(root / directory, repo / directory,
+                            ignore=shutil.ignore_patterns('__pycache__'))
+            copied.append(repo / directory)
+    desktop_home = repo.parent / 'completion-desktop-home'
+    desktop_home.mkdir(mode=0o700)
+    native_store = desktop_home / '.codex/sessions/2026/10/10'
+    native_store.mkdir(parents=True, mode=0o700)
+    for directory in [desktop_home, *native_store.parents]:
+        if directory == desktop_home or desktop_home in directory.parents:
+            directory.chmod(0o700)
+    # The production helper intentionally ignores HOME. Redirect only pwd's
+    # account-home lookup in fixture subprocesses; all provenance checks run.
+    shim = desktop_home / 'fixture-python'
+    shim.mkdir(mode=0o700)
+    (shim / 'sitecustomize.py').write_text(
+        "import os, pwd\n"
+        "_real_getpwuid = pwd.getpwuid\n"
+        "def _fixture_getpwuid(uid):\n"
+        "    row = list(_real_getpwuid(uid)); row[5] = os.environ['HOME']; return pwd.struct_passwd(row)\n"
+        "pwd.getpwuid = _fixture_getpwuid\n")
+    desktop_env = {key: value for key, value in env.items() if not key.startswith('OMS_')}
+    sid = '11111111-2222-4333-8444-555555555555'
+    foreign_sid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    desktop_env.update(HOME=str(desktop_home), PYTHONPATH=str(shim),
+                       CODEX_SESSION_ID=foreign_sid, CODEX_THREAD_ID=foreign_sid)
+    desktop_participant = 'desktop-review-main'
+    call('room.sh', 'join', '--id', room, '--participant', desktop_participant,
+         '--provider', 'codex', '--role', 'main', '--native-session', sid)
+    desktop = setup(main_report=True)
+    current = plan(); original = current['tasks'][desktop['task_id']]
+    original['claimed_by_participant'] = None  # Existing legacy contract, not a transferred owner.
+    plan_path.write_text(json.dumps(current))
+    desktop.update(plan_sha256=h(plan_path.read_bytes()), task_sha256=engine['digest'](original),
+                   original_contract=engine['projection'](original))
+    desktop['owner']['participant'] = desktop_participant
+    desktop['legacy_reviewer_binding'] = {
+        'participant': desktop_participant, 'original_contract': desktop['original_contract'],
+        'review_summary': 'Current main explicitly reviewed this unbound original report contract'}
+    question = '[OMS main-read-completion-v1] Support verified main review of exact READ reports'
+    answer = 'approve'
+    prompt_id = 'call_lifecycle_policy'
+    question_id = json.dumps(['request_user_input_async', prompt_id, 0], separators=(',', ':'))
+    policy = {'policy': 'main-read-completion-v1', 'message_id': 'msg_lifecycle_policy',
+              'question_item_id': question_id, 'question_sha256': h(question.encode()),
+              'answer_sha256': h(answer.encode())}
+    desktop['reviewer'] = {'kind': 'codex-desktop-main', 'room_id': room, 'approval': policy}
+    bundle_path = '.oms/artifacts/desktop-review.json'
+    (repo / bundle_path).write_text(json.dumps(desktop))
+    cas = ['--repo', str(repo), '--id', desktop['task_id'], '--lease-id', desktop['lease_id'],
+           '--expected-state', desktop['state'], '--expected-plan-sha256', desktop['plan_sha256'],
+           '--expected-task-sha256', desktop['task_sha256'], '--completion-bundle', bundle_path,
+           '--expected-completion-bundle-sha256', h((repo / bundle_path).read_bytes())]
+    approve_argv = ['scripts/oms', 'agent-plan', 'approve-main-research', *cas, '--approve-reviewed-bundle']
+    approve_command = shlex.join(approve_argv)
+    unchanged = plan_path.read_bytes()
+    native_path = native_store / ('rollout-2026-10-10T00-00-00-' + sid + '.jsonl')
+    native_rows = [
+        {'type': 'session_meta', 'payload': {'id': sid, 'session_id': sid, 'cwd': str(repo),
+          'originator': 'Codex Desktop', 'source': 'vscode', 'thread_source': 'user'}},
+        {'type': 'response_item', 'payload': {'type': 'function_call', 'name': 'request_user_input_async',
+          'call_id': prompt_id, 'arguments': json.dumps({'questions': [
+              {'title': question, 'options': [answer, 'decline']}]})}},
+        {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+          'id': policy['message_id'], 'content': [{'type': 'input_text', 'text':
+              '<send_user_message_question_reply>\n' + json.dumps([
+                  {'questionItemId': question_id, 'question': question, 'answer': answer}]) +
+              '\n</send_user_message_question_reply>\n'}]}}]
+    def desktop_call(argv, ok=True, refusal=None):
+        result = subprocess.run(argv, cwd=repo, env=desktop_env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        assert (result.returncode == 0) is ok, (argv, result.returncode, result.stderr.decode())
+        if refusal is not None:
+            assert refusal in result.stderr.decode(), result.stderr.decode()
+        return result.stdout.decode()
+    def approve_desktop(call_id):
+        output = desktop_call(approve_argv)
+        assert plan_path.read_bytes() == unchanged, 'approval changed task/lease/state'
+        envelope = json.loads(output)
+        assert envelope['kind'] == 'oms-main-read-approved'
+        approval = envelope['approval']
+        marker_bytes = (repo / approval['path']).read_bytes()
+        assert h(marker_bytes) == approval['sha256']
+        marker = json.loads(marker_bytes)
+        assert marker['authorized_action'] == 'accept-main-research' and len(marker['nonce']) == 64
+        assert marker['verification']['exit'] == 0 and marker['snapshot']['evidence']['reviewer'] == {}
+        assert marker['participant'] == desktop_participant
+        source = 'const r = await tools.exec_command(' + json.dumps(
+            {'cmd': approve_command, 'workdir': str(repo)}) + '); text(r.output);'
+        records = [
+            {'type': 'response_item', 'payload': {'type': 'custom_tool_call', 'name': 'exec',
+              'call_id': call_id, 'status': 'completed', 'input': source}},
+            {'type': 'event_msg', 'payload': {'type': 'item_completed', 'thread_id': sid,
+              'item': {'type': 'CommandExecution', 'id': 'exec-' + call_id, 'process_id': 'fixture-' + call_id,
+                'source': 'unified_exec_startup', 'command': ['/bin/bash', '-lc', approve_command],
+                'cwd': str(repo), 'status': 'completed', 'exit_code': 0, 'aggregated_output': output}}},
+            {'type': 'response_item', 'payload': {'type': 'custom_tool_call_output', 'call_id': call_id,
+              'output': [{'type': 'input_text', 'text': 'Script completed\nWall time 0.1 seconds\nOutput:\n'},
+                         {'type': 'input_text', 'text': output}]}}]
+        argv = ['scripts/oms', 'agent-plan', 'accept-main-research', *cas,
+                '--main-review-approval', approval['path'],
+                '--expected-main-review-approval-sha256', approval['sha256']]
+        return argv, records, repo / approval['path']
+    def write_native(records):
+        native_path.write_bytes(b''.join(json.dumps(row, sort_keys=True, separators=(',', ':')).encode() + b'\n'
+                                        for row in records))
+        native_path.chmod(0o600)
+    accept_argv, completed_rows, marker_path = approve_desktop('call_lifecycle_approve')
+    desktop_call(accept_argv, ok=False, refusal='native session')  # No producer session exists yet.
+    failed_rows = copy.deepcopy(completed_rows)
+    failed_rows[1]['payload']['item']['exit_code'] = 7
+    for producer_rows in (completed_rows[:1], failed_rows,
+                          completed_rows[:2] + [completed_rows[1]] + completed_rows[2:]):
+        write_native(native_rows + producer_rows)
+        desktop_call(accept_argv, ok=False, refusal='approval')
+        assert plan_path.read_bytes() == unchanged
+    write_native(native_rows + completed_rows)
+    marker_original = marker_path.read_bytes()
+    marker_path.write_bytes(marker_original + b' ')
+    desktop_call(accept_argv, ok=False, refusal='evidence digest changed')
+    marker_path.write_bytes(marker_original)
+    for target in (repo / desktop['main_research']['artifact']['path'], repo / 'file.txt'):
+        original_bytes = target.read_bytes()
+        target.write_bytes(original_bytes + b'changed after approval\n')
+        desktop_call(accept_argv, ok=False, refusal=(
+            'source content/mode changed' if target.name == 'file.txt' else 'evidence digest changed'))
+        assert plan_path.read_bytes() == unchanged
+        target.write_bytes(original_bytes)
+    stale = plan(); stale['tasks'][desktop['task_id']]['lease_id'] = 'lease_' + 'f' * 32
+    plan_path.write_text(json.dumps(stale))
+    stale_bytes = plan_path.read_bytes()
+    desktop_call(accept_argv, ok=False, refusal='unbound legacy review')
+    assert plan_path.read_bytes() == stale_bytes
+    plan_path.write_bytes(unchanged)
+    # Restoring report/source bytes cannot restore their ctime identity. A new
+    # explicit approval is required; both real command outputs remain recorded.
+    accept_argv, refreshed_rows, _ = approve_desktop('call_lifecycle_reapprove')
+    write_native(native_rows + completed_rows + refreshed_rows)
+    desktop_call(accept_argv)
+    done = plan()['tasks'][desktop['task_id']]
+    assert done['state'] == 'done' and done['completion_kind'] == 'main-research-accepted'
+    assert done['claimed_by_participant'] is None
+    receipt = json.loads((repo / done['completion_receipt']['path']).read_bytes())
+    reviewer = receipt['snapshot']['evidence']['reviewer']
+    assert reviewer['schema'] == 2 and reviewer['session_id_sha256'] == h(sid.encode())
+    assert reviewer['session_id_sha256'] != h(foreign_sid.encode())
+    assert receipt['executor'] == {'kind': 'local-uid', 'uid': os.getuid()}
+    done_bytes = plan_path.read_bytes()
+    desktop_call(accept_argv)
+    call('room.sh', 'leave', '--id', room, '--participant', desktop_participant)
+    native_path.unlink()
+    desktop_call(accept_argv)
+    desktop_call(['scripts/oms', 'agent-plan', 'show', '--repo', str(repo), '--id', desktop['task_id']])
+    assert plan_path.read_bytes() == done_bytes, 'historical receipt replay rewrote task state'
+    for directory in copied:
+        shutil.rmtree(directory)
+    print('Desktop main READ: real controller plus synthetic native approval lifecycle passed')
 
 # Existing native and literal conditional contracts remain usable without a rewrite.
 for command in ('git diff --check', 'if test -f verify.sh; then bash verify.sh; fi',
@@ -14854,6 +15136,70 @@ test_patch_admit_admits_clean_patch() {
   assert_file_contains "$repo/no-fast.out" 'no bounded fast mode'
   "$SH" --patch "$repo/change.patch" --repo "$repo" --verify true >/dev/null ||
     fail "explicit verification must override default detection"
+  # Direct managed admission is a real local operation throughout verification.
+  python3 - "$ROOT" "$repo" <<'PY_REFERENCE'
+import hashlib, pathlib, runpy, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+c = runpy.run_path(str(root / 'scripts/lib/landing-capture.py'))
+source = repo / 'change.patch'
+private = c['allocate'](str(repo), str(source), 'land-direct-reference', hashlib.sha256(source.read_bytes()).hexdigest())
+c['publish'](str(repo), private, str(repo / '.oms/landing-patches/land-direct-reference.patch'))
+PY_REFERENCE
+  local managed="$repo/.oms/landing-patches/land-direct-reference.patch"
+  if ln -s "$managed" "$repo/redirected.patch" 2>/dev/null; then
+    if "$SH" --repo "$repo" --patch "$repo/redirected.patch" --verify true >/dev/null 2>&1; then
+      fail "redirected managed admission input bypassed ownership validation"
+    fi
+  fi
+  if "$SH" --repo "$repo" --patch "$managed" --verify true --report "$repo/external.md" >/dev/null 2>&1; then
+    fail "managed admission accepted an external report"
+  fi
+  [ ! -e "$repo/external.md" ] || fail "external managed report was written"
+  python3 - "$ROOT" "$repo" <<'PY_REFERENCE'
+import pathlib, runpy, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+rows = e['read_rows'](e['event_path'](repo))
+ids = [r['attempt_id'] for r in rows if r['event_type'] == 'attempt.created']
+_, attempts = e['load_projection'](repo)
+count = 2 if (repo / 'redirected.patch').is_symlink() else 1
+assert all(attempts[i]['state'] == 'failed' and attempts[i]['terminal'] is True for i in ids[-count:])
+PY_REFERENCE
+  cat > "$repo/observe-reference.py" <<'PY_REFERENCE'
+import pathlib, runpy, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+_, attempts = e['load_projection'](repo)
+import os
+assert os.environ.get('OMS_ATTEMPT_ID') == 'att_original_native'
+assert any(a.get('provider') == 'local' and a.get('tool') == 'patch-admit' and
+           a.get('state') == 'working' and not a.get('parent_attempt_id') for a in attempts.values())
+PY_REFERENCE
+  OMS_ATTEMPT_ID=att_original_native "$SH" --repo "$repo" --patch "$managed" \
+    --verify "python3 '$repo/observe-reference.py' '$ROOT' '$repo'" >/dev/null ||
+    fail "managed direct admission did not keep its own local operation active"
+  # A failed durable pin must leave the operation nonterminal, even with a report.
+  mv "$repo/.oms/artifacts/index.jsonl" "$repo/.oms/artifacts/index.saved"
+  mkdir "$repo/.oms/artifacts/index.jsonl"
+  if "$SH" --repo "$repo" --patch "$managed" --verify true >/dev/null 2>&1; then
+    fail "managed admission ignored index publication failure"
+  fi
+  python3 - "$ROOT" "$repo" <<'PY_REFERENCE'
+import pathlib, runpy, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+_, attempts = e['load_projection'](repo)
+rows = e['read_rows'](e['event_path'](repo))
+last = [r['attempt_id'] for r in rows if r['event_type'] == 'attempt.created'][-1]
+assert attempts[last]['tool'] == 'patch-admit' and attempts[last]['state'] == 'blocked'
+assert attempts[last]['terminal'] is not True
+c = runpy.run_path(str(root / 'scripts/lib/landing-capture.py'))
+# The fixture owns these captures; retain no private temporary directory.
+import shutil
+for item in c['reservations'](str(repo)).values():
+    shutil.rmtree(item['directory'])
+PY_REFERENCE
+
 }
 
 test_patch_admit_scope_uses_canonical_glob_and_deny_precedence() {
@@ -18952,11 +19298,29 @@ code = "\n".join([
     "    time.sleep(0.05)",
     "sys.exit(1)",
 ])
-verify = "python3 -c " + shlex.quote(code)
+verify = "python3 -c " + shlex.quote("exec(" + repr(code) + ")")
 snapshot = os.path.join(tmp, "landing-observer")
+plan_cli = ["bash", root + "/scripts/agent-plan.sh", "--repo", project]
+subprocess.run(plan_cli + ["init", "--goal", "rejected native landing"], check=True, stdout=subprocess.DEVNULL)
+subprocess.run(plan_cli + ["add", "--id", "rejected", "--title", "fixture product change", "--verify", verify,
+                           "--allowed", "file.txt"], check=True, stdout=subprocess.DEVNULL)
+subprocess.run(plan_cli + ["claim", "--id", "rejected", "--provider", "codex"], check=True, stdout=subprocess.DEVNULL)
+review = pathlib.Path(tmp) / 'rejected-native-review.md'; review.write_text('Fixture review evidence\n')
+subprocess.run(plan_cli + ["review", "--id", "rejected", "--artifact", str(review), "--patch", patch],
+               check=True, stdout=subprocess.DEVNULL)
+task_before = pathlib.Path(project, ".oms/plan/tasks.json").read_bytes()
+request = subprocess.check_output(["bash", root + "/scripts/patch-land.sh", "--repo", project,
+                                  "--patch", patch, "--verify", verify, "--plan-task", "rejected", "--request-approval"], text=True).strip()
+approval_cli = ["bash", root + "/scripts/approval-inbox.sh", "--repo", project]
+grant = subprocess.check_output(approval_cli + ["decide", "--approval", request, "--decision", "approve",
+                                                "--expected-version", "1", "--actor", "operator"], text=True).strip()
+approval_before = json.loads(subprocess.check_output(approval_cli + ["show", "--approval", request, "--json"], text=True))
+source_before = pathlib.Path(patch).read_bytes()
+base_before = subprocess.check_output(["git", "-C", project, "rev-parse", "HEAD"])
 with open(errors, "w") as err:
     worker = subprocess.Popen(["bash", root + "/scripts/patch-land.sh", "--repo", project,
-                               "--patch", patch, "--verify", verify],
+                               "--patch", patch, "--verify", verify,
+                               "--plan-task", "rejected", "--approval", request, "--approval-version", "2", "--approval-token", grant],
                               stdout=subprocess.DEVNULL, stderr=err)
     try:
         deadline = time.monotonic() + 30
@@ -18990,12 +19354,13 @@ with open(errors, "w") as err:
         capture = pathlib.Path(next(line[len("- patch: "):] for line in report_bytes.decode().splitlines()
                                     if line.startswith("- patch: ")))
         assert not str(capture).startswith(project + "/")
+        assert hashlib.sha256(report_bytes).hexdigest() == row["artifact_sha256"]
+        helper = runpy.run_path(root + "/scripts/lib/landing-capture.py")
         if capture.exists():
-            assert capture.read_bytes() == pathlib.Path(patch).read_bytes()
+            assert capture.read_bytes() == source_before
         else:
             # A managed rejected generation may be collected only after its
             # actual admission result and terminal release are durably linked.
-            helper = runpy.run_path(root + "/scripts/lib/landing-capture.py")
             item = helper["find"](project, capture=str(capture))
             log = helper["rows"](project)
             encoded, digest = helper["encoded"], helper["digest"]
@@ -19032,11 +19397,53 @@ with open(errors, "w") as err:
                         r.get("managed_capture") == item]
             assert len(released) == 1 and released[0]["release_ready_sha256"] == digest(encoded(ready))
             assert log.index(terminals[0]) < log.index(ready) < log.index(released[0])
+        if os.name == 'nt':
+            assert capture.exists(), 'unsupported cleanup must preserve private data'
+            assert helper['usage'](project)[0] == 1
+        else:
+            assert not capture.exists(), "proved rejected private staging was not removed"
+            assert not capture.parent.exists(), "rejected generation remains charged"
+            assert helper['usage'](project) == (0, 0)
+        assert pathlib.Path(patch).read_bytes() == source_before and not list(frozen.glob('*.patch'))
+        assert subprocess.check_output(["git", "-C", project, "rev-parse", "HEAD"]) == base_before
+        assert json.loads(subprocess.check_output(approval_cli + ["show", "--approval", request, "--json"], text=True)) == approval_before
+        assert pathlib.Path(project, ".oms/plan/tasks.json").read_bytes() == task_before
     finally:
         release.write_text("go")
         if worker.poll() is None:
             worker.kill()
             worker.wait()
+# A contended immediate cleanup cannot inherit an unbounded caller timeout.
+if os.name != 'nt':
+    busy = pathlib.Path(tmp) / 'rejected-cleanup-busy'
+    subprocess.run(['git', 'clone', '-q', '--local', project, str(busy)], check=True)
+    (busy / '.oms/delegations').mkdir(parents=True)
+    lock_ready = pathlib.Path(tmp) / 'rejected-cleanup-lock-ready'
+    lock_release = pathlib.Path(tmp) / 'rejected-cleanup-lock-release'
+    holder = subprocess.Popen(['bash', '-c',
+        '. "$1/scripts/lib/file-lock.sh"; hold() { touch "$3"; while [ ! -e "$4" ]; do sleep 0.05; done; }; '
+        'oms_with_file_lock "$2" hold "$1" "$2" "$3" "$4"',
+        'busy-cleanup', root, str(busy / '.oms/delegations/.marker-set-lock-target'), str(lock_ready), str(lock_release)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 10
+        while not lock_ready.exists():
+            assert holder.poll() is None and time.monotonic() < deadline
+            time.sleep(0.02)
+        started = time.monotonic()
+        refused = subprocess.run(['bash', root + '/scripts/patch-land.sh', '--repo', str(busy),
+                                  '--patch', patch, '--verify', 'false'], env=dict(os.environ, OMS_LOCK_TIMEOUT='60'),
+                                 text=True, capture_output=True, timeout=12)
+        assert refused.returncode == 1 and time.monotonic() - started < 10, refused.stderr
+        assert holder.poll() is None
+        item = next(iter(helper['reservations'](str(busy)).values()))
+        value = helper['certificate'](item)
+        assert pathlib.Path(value['objects']['capture']['path']).exists()
+        assert (busy / value['admission']['report']).exists()
+        assert 'private rejected capture remains reserved' in refused.stderr
+    finally:
+        lock_release.write_text('release')
+        holder.wait(timeout=5)
 print(worker.returncode)
 PY
 )" || fail "concurrent rejection or retained capture check failed"
@@ -21035,6 +21442,73 @@ p.write_text(s)
 PY
   OMS_AGENT_TASK_TTL=1 "$sh" --repo "$d" status | grep -Fq 'stale: yes' ||
     fail "task status should expose TTL staleness"
+  python3 - "$ROOT" "$d" <<'PY_REFERENCE'
+import contextlib, hashlib, io, pathlib, runpy, subprocess, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+c = runpy.run_path(str(root / 'scripts/lib/landing-capture.py'))
+e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+h = root / 'scripts/lib/landing-reference.py'
+source = repo / 'source.patch'; source.write_bytes(b'fixture payload\n')
+private = c['allocate'](str(repo), str(source), 'land-task-reference', hashlib.sha256(source.read_bytes()).hexdigest())
+public = repo / '.oms/landing-patches/land-task-reference.patch'
+c['publish'](str(repo), private, str(public))
+# Writer first: GC observes a truthful nonterminal local operation and preserves.
+op = subprocess.check_output([sys.executable, str(h), 'begin', str(repo), 'agent-task'], text=True).strip()
+output = io.StringIO()
+with contextlib.redirect_stdout(output):
+    c['gc_quiescent'](str(repo), 0, False)
+assert 'native attempt not terminal' in output.getvalue()
+_, attempts = e['load_projection'](repo)
+assert attempts[op]['provider'] == 'local' and attempts[op]['tool'] == 'agent-task'
+assert not attempts[op].get('parent_attempt_id')
+subprocess.check_call([sys.executable, str(h), 'finish', str(repo), op, '0'])
+PY_REFERENCE
+  local managed="$d/.oms/landing-patches/land-task-reference.patch"
+  bash -c '. "$1/scripts/lib/agent-task-common.sh"; REPO="$2"; agent_task_set_metadata "$2/.oms/task/current.md" evidence "$3"' \
+    reference-metadata "$ROOT" "$d" "$managed" || fail "managed metadata path was mistaken for an ordinary input file"
+  OMS_ATTEMPT_ID=att_original_native "$sh" --repo "$d" append --text "$managed" >/dev/null ||
+    fail "task packet rejected a valid managed reference"
+  "$sh" --repo "$d" init --goal third >/dev/null
+  grep -Fl "$managed" "$d/.oms/task/archive/"*.md >/dev/null ||
+    fail "rotation lost the durable managed reference pin"
+  "$sh" --repo "$d" --file "$d/external.md" init --goal legacy >/dev/null ||
+    fail "legacy external packet compatibility was lost"
+  if "$sh" --repo "$d" --file "$d/external.md" append --text "$managed" >/dev/null 2>&1; then
+    fail "external task packet accepted an unscanned managed reference"
+  fi
+  # GC first: the reservation remains, but a collected publication cannot be
+  # introduced as a new packet reference. This is isolated fixture data only.
+  rm "$managed"
+  local before
+  before="$(cat "$d/.oms/task/current.md")"
+  if "$sh" --repo "$d" append --text '.oms/landing-patches/land-task-reference.patch' >/dev/null 2>&1; then
+    fail "task packet accepted a missing managed generation"
+  fi
+  [ "$before" = "$(cat "$d/.oms/task/current.md")" ] || fail "failed reference validation changed the packet"
+  python3 - "$ROOT" "$d" <<'PY_REFERENCE'
+import contextlib, io, pathlib, runpy, shutil, subprocess, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+c = runpy.run_path(str(root / 'scripts/lib/landing-capture.py'))
+e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+_, attempts = e['load_projection'](repo)
+assert all(a['terminal'] is True for a in attempts.values())
+assert sum(a['state'] == 'failed' for a in attempts.values()) >= 2
+output = io.StringIO()
+with contextlib.redirect_stdout(output):
+    c['gc_quiescent'](str(repo), 0, False)
+assert 'native attempt not terminal' not in output.getvalue()
+# A native attempt ID cannot accidentally be completed by the local helper.
+native = e['create_attempt'](repo, provider='codex', tool='panel-main')
+h = root / 'scripts/lib/landing-reference.py'
+for result in ('0', 'refuse-no-write', '1'):
+    assert subprocess.run([sys.executable, str(h), 'finish', str(repo), native, result],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0
+_, attempts = e['load_projection'](repo)
+assert attempts[native]['state'] == 'queued' and attempts[native]['terminal'] is False
+for item in c['reservations'](str(repo)).values():
+    shutil.rmtree(item['directory'])
+PY_REFERENCE
+
 }
 
 test_artifact_index_migrate_validate_and_idempotency() {
@@ -22500,7 +22974,8 @@ test_patch_land_records_a_recoverable_transaction() {
     fail "a clean patch should land"
   python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "a land should be one intent and one completion"
 import json, sys
-events = [json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]
+events = [json.loads(line)["event"] for line in open(sys.argv[1])
+          if line.strip() and not json.loads(line)["event"].startswith("capture-")]
 assert events == ["intent", "complete"], events
 PY
   # Nothing outstanding after a clean land.
@@ -22819,7 +23294,8 @@ test_patch_land_completes_only_when_its_records_land() {
     fail "an unwritable lineage row must be reported: $out"
   python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "a land with missing records must not be complete"
 import json, sys
-events = [json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]
+events = [json.loads(line)["event"] for line in open(sys.argv[1])
+          if line.strip() and not json.loads(line)["event"].startswith("capture-")]
 assert events[-1] == "applied-pending-receipt", events
 PY
   "$ROOT/scripts/state.sh" --repo "$project" | grep -Fq 'Interrupted landings' ||
@@ -22830,7 +23306,8 @@ PY
     fail "recovery should finish the pending landing"
   python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "recovery should complete it once the records land"
 import json, sys
-events = [json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]
+events = [json.loads(line)["event"] for line in open(sys.argv[1])
+          if line.strip() and not json.loads(line)["event"].startswith("capture-")]
 assert events[-1] == "complete", events
 PY
 }
@@ -26071,49 +26548,77 @@ test_landing_refuses_to_apply_without_a_recorded_intent() {
   make_committed_repo "$project"
   printf 'base\nadded\n' > "$project/file.txt"
   ( cd "$project" && git diff > "$patch" && git checkout -q -- file.txt )
-  mkdir -p "$project/.oms"
-  printf '*\n' > "$project/.oms/.gitignore"
-  : > "$project/.oms/landings.jsonl"
-  # Reservation writes also use this journal; target the intent producer so
-  # this fixture continues exercising failure after successful admission.
   local bin="$TMP/intent-failure-bin"
   mkdir -p "$bin"
   export OMS_FIXTURE_REAL_PYTHON
   OMS_FIXTURE_REAL_PYTHON="$(command -v python3)"
   cat > "$bin/python3" <<'SH_INTENT'
 #!/usr/bin/env bash
+# Fail before opening the journal, only in the real native intent producer.
 [ "${OMS_LD_EVENT:-}" != intent ] || exit 1
 exec "$OMS_FIXTURE_REAL_PYTHON" "$@"
 SH_INTENT
   chmod +x "$bin/python3"
   out="$(PATH="$bin:$PATH" "$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" --verify true 2>&1)" || rc=$?
-  unset OMS_FIXTURE_REAL_PYTHON
   [ "$rc" != 0 ] || fail "an unrecordable intent must not apply: $out"
-  contains "$out" 'refusing to apply' ||
-    fail "the refusal should say why: $out"
-  [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] ||
-    fail "nothing should have been applied"
-  python3 - "$project" "$patch" <<'PY' || fail "intent failure deleted or changed published evidence"
-import json, pathlib, sys
-repo, source = map(pathlib.Path, sys.argv[1:])
-patches = list((repo / ".oms/landing-patches").glob("*.patch"))
-assert len(patches) == 1, patches
-assert patches[0].read_bytes() == source.read_bytes()
-rows = [json.loads(line) for line in (repo / ".oms/landings.jsonl").read_bytes().splitlines()]
-assert not any(row.get("event") in ("intent", "complete", "abandoned") for row in rows), rows
-PY
-  "$ROOT/scripts/patch-land.sh" --repo "$project" --recover >/dev/null ||
-    fail "empty-intent recovery failed"
-  "$ROOT/scripts/patch-land.sh" --repo "$project" --recover >/dev/null ||
-    fail "repeated empty-intent recovery failed"
-  python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "recovery invented an intent for retained evidence"
-import json, pathlib, sys
-rows = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_bytes().splitlines()]
-assert not any(row.get("event") in ("intent", "complete", "abandoned") for row in rows), rows
-PY
-  for out in "$project"/.oms/landing-patches/*.patch; do
-    cmp "$patch" "$out" || fail "recovery changed retained orphan evidence"
-  done
+  contains "$out" 'refusing to apply' || fail "the refusal should say why: $out"
+  [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] || fail "nothing should have been applied"
+  python3 - "$ROOT" "$project" "$patch" "$TMP" <<'PY_INTENT' || fail "no-intent publication endpoint failed"
+import hashlib, json, os, pathlib, runpy, subprocess, sys
+root, repo, source, temporary = map(pathlib.Path, sys.argv[1:])
+h = runpy.run_path(str(root / 'scripts/lib/landing-capture.py'))
+e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+patches = list((repo / '.oms/landing-patches').glob('*.patch'))
+assert len(patches) == 1 and patches[0].read_bytes() == source.read_bytes()
+rows = h['rows'](str(repo))
+assert not any(r.get('event') in ('intent', 'complete', 'abandoned') for r in rows)
+item = next(iter(h['reservations'](str(repo)).values()))
+cert = h['certificate'](item)
+assert cert['terminal']['reason'] == 'publication-without-intent'
+assert cert['admission']['exit'] == 0
+report = repo / cert['admission']['report']
+report_before = report.read_bytes(); index = repo / '.oms/artifacts/index.jsonl'; index_before = index.read_bytes()
+# A fresh actual local operation cannot adopt another genuine report, even
+# for identical input bytes and the exact same retained private pathname.
+reference = root / 'scripts/lib/landing-reference.py'
+private = cert['objects']['capture']['path']
+other_op = subprocess.check_output([sys.executable, str(reference), 'begin', str(repo), 'patch-admit', private], text=True).strip()
+try:
+    h['record_admission'](str(repo), private, other_op, str(report), '0')
+except ValueError as error:
+    assert 'scope' in str(error), error
+else:
+    raise AssertionError('another actual operation replayed a genuine admission report')
+subprocess.run([sys.executable, str(reference), 'finish', str(repo), other_op, 'refuse-no-write'], check=True)
+assert report.read_bytes() == report_before and index.read_bytes() == index_before
+# Real recovery cannot invent a user task transition or delete this fresh file.
+for _ in range(2):
+    subprocess.run(['bash', str(root/'scripts/patch-land.sh'), '--repo', str(repo), '--recover'], check=True, stdout=subprocess.DEVNULL)
+h['gc'](str(repo), 1, True)
+assert patches[0].exists(), 'fresh no-intent publication removed immediately'
+if os.name == 'nt':
+    assert report.read_bytes() == report_before and index.read_bytes() == index_before
+    raise SystemExit(0)  # Native ACL/quarantine deletion is explicitly unsupported.
+clock = temporary / 'capture-age-clock'; clock.mkdir()
+(clock/'sitecustomize.py').write_text('import time\n_native=time.time\ntime.time=lambda:_native()+172800\n')
+env = dict(os.environ, PYTHONPATH=str(clock))
+cmd = [sys.executable, str(root/'scripts/lib/landing-capture.py'), 'gc', str(repo), '1', '1']
+live = e['create_attempt'](repo, provider='local', tool='capture-observer')
+subprocess.run(cmd, env=env, check=True, stdout=subprocess.DEVNULL)
+assert patches[0].exists(), 'live observer did not preserve aged publication'
+e['append_lifecycle'](repo, e['new_event'](live,0,'attempt.state_changed',from_state=None,to_state='failed',reason_code='fixture-ended'))
+pin = repo / '.oms/plan/pin.md'; pin.parent.mkdir(parents=True,exist_ok=True); pin.write_text(str(patches[0]))
+subprocess.run(cmd, env=env, check=True, stdout=subprocess.DEVNULL)
+assert patches[0].exists(), 'formal pin was mistaken for own admission trace'
+pin.unlink()
+subprocess.run(cmd, env=env, check=True, stdout=subprocess.DEVNULL)
+assert not patches[0].exists() and not pathlib.Path(item['directory']).exists()
+assert h['usage'](str(repo)) == (0, 0)
+assert report.read_bytes() == report_before and index.read_bytes() == index_before
+assert not any(r.get('event') in ('intent', 'complete', 'abandoned') for r in h['rows'](str(repo)))
+assert source.read_bytes() and (repo/'file.txt').read_text() == 'base\n'
+PY_INTENT
+  unset OMS_FIXTURE_REAL_PYTHON
 
 }
 
@@ -28788,6 +29293,279 @@ rows = [entry for entry in doc["hooks"].get("PostToolUse", [])
         if any("syntax-guard-hook" in hook.get("command", "") for hook in entry.get("hooks", []))]
 assert len(rows) == 1, rows
 assert "apply_patch" in rows[0].get("matcher", ""), rows[0]
+PY
+}
+
+test_codex_desktop_main_reviewer_proof_rejects_forged_context() {
+  python3 - "$ROOT" <<'PY' || fail "completed Desktop main approval provenance accepted a forgery"
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+import tempfile
+from unittest import mock
+
+spec = importlib.util.spec_from_file_location("main_reviewer", pathlib.Path(sys.argv[1]) / "scripts/lib/main_reviewer.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+def rejects(fn, *args):
+    try:
+        fn(*args)
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return
+    raise AssertionError("forged completed approval accepted")
+
+def encoded(*rows):
+    return b"".join(m._canonical(row) + b"\n" for row in rows)
+
+sid = "11111111-2222-4333-8444-555555555555"
+foreign_sid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+consumer = m._sha(sid.encode())[:32]
+repo = "/tmp/reviewer-fixture-repo"
+execution = "/tmp/reviewer-fixture-final-worktree"
+common_sha = m._sha(b"/tmp/shared-git")
+task = "t1"
+bundle_sha = "a" * 64
+question = (m.QUESTION_PREFIX + " 현재는 실제 native child가 생산한 결과만 허용해서, 앱 메인의 완료된 감사 2건을 정당하게 닫을 수 없습니다."
+            " 보완 시 보고서 원문·digest·검토한 소스·검증·실제 승인자 증빙을 요구하고 기존 child 증빙은 그대로 보존하겠습니다."
+            " AGENTS.md의 ‘승인 범위를 넘는 contract/schema 변경은 물어본다’ 규칙에 따라 이 결정만 확인하며, 코드 통합과 push 준비는 계속합니다.")
+assert m._sha(question.encode()) == m.LEGACY_QUESTION_SHA256
+qid = '["request_user_input_async","call_fixture_policy",0]'
+descriptor = {"policy": m.POLICY, "message_id": "msg_approval", "question_item_id": qid,
+              "question_sha256": m._sha(question.encode()), "answer_sha256": m._sha(m.ANSWER.encode())}
+argv = ["env", "OMS_STATE_REPO=" + repo, "scripts/oms", "agent-plan", m.APPROVE_ACTION,
+        "--repo", execution, "--id", task, "--lease-id", "lease", "--expected-state", "review",
+        "--expected-plan-sha256", "b" * 64, "--expected-task-sha256", "c" * 64,
+        "--completion-bundle", ".oms/review/main-read.json",
+        "--expected-completion-bundle-sha256", bundle_sha, "--approve-reviewed-bundle"]
+cmd = m.shlex.join(argv)
+values = m._approve_argv(cmd, execution, task, bundle_sha, argv, repo)
+assert values["--id"] == task
+marker = {"schema": 1, "kind": "oms-main-read-approval-v1", "authorized_action": m.ACTION,
+          "nonce": "d" * 64,
+          "task_id": task, "bundle_sha256": bundle_sha, "room_id": "room", "participant": "main",
+          "lease_id": "lease", "state": "review", "plan_sha256": "b" * 64,
+          "task_sha256": "c" * 64, "snapshot_sha256": "e" * 64,
+          "code_manifest_sha256": "f" * 64, "state_repo_sha256": m._sha(repo.encode()),
+          "execution_repo_sha256": m._sha(execution.encode()), "git_common_sha256": common_sha,
+          "report_sha256": "1" * 64, "index_sha256": "2" * 64, "verifier_sha256": "3" * 64}
+marker_raw = m._canonical(marker) + b"\n"
+marker_sha = m._sha(marker_raw)
+ref = {"path": ".oms/plan/completion-captures/" + marker_sha + ".json", "sha256": marker_sha}
+envelope = m._canonical({"kind": "oms-main-read-approved", "approval": ref}).decode() + "\n"
+request = {"policy": m.POLICY, "execution_repo": execution, "approve_argv": argv,
+           "approval": descriptor, "approved_marker": marker,
+           "expected_snapshot_sha256": marker["snapshot_sha256"],
+           "code_manifest_sha256": marker["code_manifest_sha256"]}
+assert m._approval_marker(ref, request, repo, execution, task, bundle_sha,
+                          "room", "main", common_sha, values)[1] == envelope
+rejects(m._approve_argv, cmd.replace("--approve-reviewed-bundle", ""), execution, task, bundle_sha,
+        argv[:-1], repo)
+rejects(m._approve_argv, cmd.replace("--expected-state review", "--expected-state done"),
+        execution, task, bundle_sha, argv, repo)
+for changed in (dict(marker, bundle_sha256="0" * 64), dict(marker, code_manifest_sha256="0" * 64),
+                dict(marker, plan_sha256="0" * 64), dict(marker, snapshot_sha256="0" * 64)):
+    altered = dict(request, approved_marker=changed)
+    changed_sha = m._sha(m._canonical(changed) + b"\n")
+    changed_ref = {"path": ".oms/plan/completion-captures/" + changed_sha + ".json",
+                   "sha256": changed_sha}
+    rejects(m._approval_marker, changed_ref, altered, repo, execution, task, bundle_sha,
+            "room", "main", common_sha, values)
+
+header = {"type": "session_meta", "payload": {"id": sid, "session_id": sid, "cwd": repo,
+          "originator": "Codex Desktop", "source": "vscode", "thread_source": "user"}}
+prompt = {"type": "response_item", "payload": {"type": "function_call",
+          "name": "request_user_input_async", "call_id": "call_fixture_policy",
+          "arguments": json.dumps({"questions": [{"title": question,
+                                  "options": [m.ANSWER, "기존 child 전용 계약 유지"]}]}, ensure_ascii=False)}}
+reply = "<send_user_message_question_reply>\n" + json.dumps([{
+    "questionItemId": qid, "question": question, "answer": m.ANSWER}], ensure_ascii=False) + "\n</send_user_message_question_reply>\n"
+user = {"type": "response_item", "payload": {"type": "message", "role": "user",
+        "id": "msg_approval", "content": [{"type": "input_text", "text": reply}]}}
+source = 'const r = await tools.exec_command(' + json.dumps({"cmd": cmd, "workdir": execution}) + '); text(r.output);'
+call = {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec",
+        "call_id": "call_prepare", "status": "completed", "input": source}}
+execution_event = {"type": "event_msg", "payload": {"type": "item_completed", "thread_id": sid,
+        "item": {"type": "CommandExecution", "id": "exec-fixture", "process_id": "75966",
+                 "source": "unified_exec_startup", "command": ["/bin/bash", "-lc", cmd],
+                 "cwd": execution, "status": "completed", "exit_code": 0,
+                 "aggregated_output": envelope}}}
+output = {"type": "response_item", "payload": {"type": "custom_tool_call_output",
+          "call_id": "call_prepare", "output": [
+              {"type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"},
+              {"type": "input_text", "text": envelope}]}}
+raw = encoded(header, prompt, user, call, execution_event, output)
+approval, native, header_sha = m._completed_approval_evidence(raw, sid, repo, request, cmd, envelope)
+assert approval["message_id"] == "msg_approval"
+assert native["completion_record_sha256"] == m._sha(encoded(execution_event))
+assert native["output_record_sha256"] == m._sha(encoded(output))
+assert native["workdir_sha256"] == m._sha(execution.encode())
+assert header_sha == m._sha(encoded(header))
+assert m._parse_exec_input(source) == {"cmd": cmd, "workdir": execution}
+uri_workdir = pathlib.Path(execution).as_uri()
+uri_event = dict(execution_event, payload=dict(execution_event["payload"],
+                 item=dict(execution_event["payload"]["item"], cwd=uri_workdir)))
+uri_raw = encoded(header, prompt, user, call, uri_event, output)
+uri_approval, uri_native, _ = m._completed_approval_evidence(uri_raw, sid, repo, request, cmd, envelope)
+assert uri_approval == approval and uri_native["workdir_sha256"] == m._sha(execution.encode())
+assert uri_native["completion_record_sha256"] == m._sha(encoded(uri_event))
+for wrong_cwd in ("file://localhost" + execution, "file:" + execution,
+                  pathlib.Path(execution + "/../reviewer-fixture-final-worktree").as_uri()):
+    wrong_event = dict(execution_event, payload=dict(execution_event["payload"],
+                       item=dict(execution_event["payload"]["item"], cwd=wrong_cwd)))
+    rejects(m._completed_approval_evidence, encoded(header, prompt, user, call, wrong_event, output),
+            sid, repo, request, cmd, envelope)
+for changed in (
+    (header, prompt, user, call, output),
+    (header, prompt, user, call, dict(execution_event, payload=dict(execution_event["payload"],
+      item=dict(execution_event["payload"]["item"], exit_code=1))), output),
+    (header, prompt, user, call, dict(execution_event, payload=dict(execution_event["payload"],
+      item=dict(execution_event["payload"]["item"], aggregated_output=envelope[:-1]))), output),
+    (header, prompt, user, call, execution_event, execution_event, output),
+    (header, prompt, user, call, execution_event,
+     dict(output, payload=dict(output["payload"], call_id="call_other"))),
+    (header, prompt, user, call, execution_event,
+     dict(output, payload=dict(output["payload"], output=output["payload"]["output"] * 2))),
+    (header, prompt, user, call, dict(execution_event, payload=dict(execution_event["payload"],
+      item=dict(execution_event["payload"]["item"], command=["/bin/bash", "-lc", "other"]))), output),
+    (header, prompt, user, call, dict(execution_event, payload=dict(execution_event["payload"],
+      thread_id=foreign_sid)), output),
+    (header, prompt, user, output, call, execution_event),
+):
+    rejects(m._completed_approval_evidence, encoded(*changed), sid, repo, request, cmd, envelope)
+foreign_header = dict(header, payload=dict(header["payload"], id=foreign_sid, session_id=foreign_sid))
+rejects(m._completed_approval_evidence, encoded(foreign_header, prompt, user, call, execution_event, output),
+        sid, repo, request, cmd, envelope)
+quoted = dict(user, payload=dict(user["payload"], role="assistant"))
+rejects(m._completed_approval_evidence, encoded(header, prompt, quoted, call, execution_event, output),
+        sid, repo, request, cmd, envelope)
+wrong_prompt = dict(prompt, payload=dict(prompt["payload"], arguments=json.dumps({
+    "questions": [{"title": "quoted approval", "options": [m.ANSWER, "deny"]}]})))
+rejects(m._completed_approval_evidence, encoded(header, wrong_prompt, user, call, execution_event, output),
+        sid, repo, request, cmd, envelope)
+
+room_binding = m._sha(m._canonical({"room": "room", "participant": "main",
+                                   "consumer": consumer, "role": "main", "provider": "codex"}))
+rollout = "/tmp/rollout-fixture-" + sid + ".jsonl"
+with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": foreign_sid, "CODEX_SESSION_ID": foreign_sid,
+                              "OMS_ROOM_ID": "foreign-room", "OMS_STATE_REPO": repo}, clear=True), \
+     mock.patch.object(m.os, "getcwd", return_value=execution), \
+     mock.patch.object(m, "_git_identity", return_value="/tmp/shared-git"), \
+     mock.patch.object(m, "_room_approver", return_value=(consumer, room_binding)), \
+     mock.patch.object(m, "_find_rollout", return_value=rollout), \
+     mock.patch.object(m, "_read_record", return_value=uri_raw):
+    proof = m.capture_completed_main_reviewer(repo, task, bundle_sha, "room", "main", ref, request)
+    assert proof["native_consumer"] == consumer
+    assert proof["session_id_sha256"] == m._sha(sid.encode())
+    assert proof["native_approval_execution"]["workdir_sha256"] == m._sha(execution.encode())
+    assert proof["native_approval_execution"]["completion_record_sha256"] == m._sha(encoded(uri_event))
+    assert foreign_sid not in json.dumps(proof)
+    expected = {key: proof[key] for key in (
+        "schema", "policy", "action", "authorized_action", "task_id", "bundle_sha256", "room_id", "participant",
+        "approval_ref", "marker_nonce_sha256", "snapshot_sha256", "code_manifest_sha256",
+        "state_repo_sha256", "execution_repo_sha256", "state_git_namespace_sha256",
+        "source_git_namespace_sha256", "git_common_sha256", "native_consumer",
+        "room_binding_sha256", "approve_invocation_sha256", "proof_sha256")}
+    expected["policy_approval"] = descriptor
+    assert m.verify_captured_main_reviewer(proof, expected)
+    wrong_native = dict(proof["native_approval_execution"], workdir_sha256="0" * 64)
+    wrong_proof = dict(proof, native_approval_execution=wrong_native)
+    wrong_proof["proof_sha256"] = m._sha(m._canonical({k: v for k, v in wrong_proof.items() if k != "proof_sha256"}))
+    assert not m.verify_captured_main_reviewer(wrong_proof, expected)
+    assert not m.verify_captured_main_reviewer(dict(proof, bundle_sha256="0" * 64), expected)
+    assert not m.verify_captured_main_reviewer(proof, dict(expected, code_manifest_sha256="0" * 64))
+    with mock.patch.object(m, "_read_record", return_value=encoded(header, prompt, user, call, output)):
+        rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
+    with mock.patch.object(m, "_read_record", return_value=encoded(foreign_header, prompt, user,
+                                                                      call, execution_event, output)):
+        rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
+    with mock.patch.object(m, "_room_approver", return_value=(m._sha(foreign_sid.encode())[:32], room_binding)):
+        rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
+    with mock.patch.object(m, "_git_identity", side_effect=["/tmp/shared-git", "/tmp/foreign-git"]):
+        rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
+    with mock.patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}):
+        rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
+
+with tempfile.TemporaryDirectory() as home:
+    path = pathlib.Path(home) / "rollout.jsonl"
+    path.write_bytes(raw)
+    assert m._read_record(str(path), os.getuid(), home) == raw
+    os.chmod(path, 0o666)
+    rejects(m._read_record, str(path), os.getuid(), home)
+    os.chmod(path, 0o600)
+    os.chmod(path, 0o660)
+    with mock.patch.object(m, "_private_group", return_value=False):
+        rejects(m._read_record, str(path), os.getuid(), home)
+    os.chmod(path, 0o600)
+    replacement = pathlib.Path(home) / "replacement.jsonl"
+    replacement.write_bytes(raw)
+    real_read = m.os.read
+    changed = [False]
+    def replace_after_first_read(fd, n):
+        result = real_read(fd, n)
+        if not changed[0]:
+            changed[0] = True
+            os.replace(replacement, path)
+        return result
+    with mock.patch.object(m.os, "read", side_effect=replace_after_first_read):
+        rejects(m._read_record, str(path), os.getuid(), home)
+    path.write_bytes(raw)
+    changed = [False]
+    def rewrite_same_inode(fd, n):
+        result = real_read(fd, n)
+        if not changed[0]:
+            changed[0] = True
+            with open(path, "r+b") as handle:
+                handle.write(b"X")
+        return result
+    with mock.patch.object(m.os, "read", side_effect=rewrite_same_inode):
+        rejects(m._read_record, str(path), os.getuid(), home)
+    path.write_bytes(raw)
+    alias = pathlib.Path(home) / "alias.jsonl"
+    os.link(path, alias)
+    rejects(m._read_record, str(path), os.getuid(), home)
+    alias.unlink()
+    path.unlink()
+    path.symlink_to("missing")
+    rejects(m._read_record, str(path), os.getuid(), home)
+with tempfile.TemporaryDirectory() as home:
+    parent = pathlib.Path(home) / "active"
+    parent.mkdir()
+    path = parent / "rollout.jsonl"
+    path.write_bytes(raw)
+    replacement = pathlib.Path(home) / "replacement"
+    replacement.mkdir()
+    (replacement / "rollout.jsonl").write_bytes(raw)
+    real_read = m.os.read
+    changed = [False]
+    def replace_parent_after_read(fd, n):
+        result = real_read(fd, n)
+        if not changed[0]:
+            changed[0] = True
+            parent.rename(pathlib.Path(home) / "old")
+            replacement.rename(parent)
+        return result
+    with mock.patch.object(m.os, "read", side_effect=replace_parent_after_read):
+        rejects(m._read_record, str(path), os.getuid(), home)
+with tempfile.TemporaryDirectory() as home:
+    store = pathlib.Path(home) / ".codex"
+    day = store / "sessions/2020/01/01"
+    day.mkdir(parents=True)
+    old = day / ("rollout-old-" + sid + ".jsonl")
+    old.write_bytes(raw)
+    assert m._find_rollout(str(store / "sessions"), consumer, os.getuid(), home, 0) == str(old)
+    archive = store / "archived_sessions"
+    archive.mkdir()
+    duplicate = archive / ("rollout-archived-" + sid + ".jsonl")
+    duplicate.write_bytes(raw)
+    rejects(m._find_rollout, str(store / "sessions"), consumer, os.getuid(), home, 0)
+    duplicate.unlink()
+    with mock.patch.object(m, "MAX_STORE_ENTRIES", 2):
+        rejects(m._find_rollout, str(store / "sessions"), consumer, os.getuid(), home, 0)
+with mock.patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}, clear=True):
+    rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
 PY
 }
 

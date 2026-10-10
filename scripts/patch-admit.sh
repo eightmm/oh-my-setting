@@ -46,6 +46,10 @@ floor_worktree_parent=""
 floor_worktree=""
 floor_worktree_created=0
 cleanup_done=0
+reference_operation=""
+reference_state=""
+managed_input=0
+reference_possible_writes=0
 
 usage() {
   cat <<'EOF'
@@ -96,6 +100,11 @@ fail() {
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
+  if [ -n "$reference_operation" ]; then
+    local reference_outcome=1
+    [ "$reference_possible_writes" = 1 ] || reference_outcome=refuse-no-write
+    python3 "$ROOT_LIB/landing-reference.py" finish "$reference_state" "$reference_operation" "$reference_outcome" >/dev/null 2>&1 || true
+  fi
   if [ -n "$floor_worktree" ] && [ "$floor_worktree_created" = 1 ] && [ "$KEEP_WORKTREE" = 0 ]; then
     git -C "$REPO" worktree remove --force "$floor_worktree" >/dev/null 2>&1 || true
   fi
@@ -144,10 +153,22 @@ done
 REPO="$(cd "$REPO" && pwd)" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 PATCH="$(cd "$(dirname "$PATCH")" && pwd)/$(basename "$PATCH")"
+reference_state="$(oms_state_root "$REPO")" || fail "cannot resolve reference state"
+reference_state="${reference_state//$'\r'/}"
+reference_operation="$(python3 "$ROOT_LIB/landing-reference.py" begin "$reference_state" patch-admit "$PATCH")" || fail "cannot start reference operation"
+reference_operation="${reference_operation//$'\r'/}"
+managed_input="$(python3 "$ROOT_LIB/landing-reference.py" admit "$reference_state" "$PATCH" "${REPORT:-$reference_state/.oms/artifacts/admit/pending.md}")" || fail "unsafe managed admission input"
+managed_input="${managed_input//$'\r'/}"
+if [ "$managed_input" = 1 ] && [ -z "$REPORT" ]; then
+  REPORT="$reference_state/.oms/artifacts/admit/admit-$reference_operation.md"
+fi
 oms_git_assert_safe_execution_config "$REPO" ||
   fail "unsafe executable Git config; remove it before patch admission"
 oms_git_assert_plain_index "$REPO" ||
   fail "Git index has hidden or unreadable entries; clear them before patch admission"
+# Everything below may establish plan lineage, invoke verification, or publish
+# evidence. Any interrupted/failed path from here has an uncertain write outcome.
+reference_possible_writes=1
 if [ -n "$COVERS" ]; then
   ma_validate_covers_ids "$REPO" "$COVERS" || exit 2
   COVERS_PLAN_ID="${OMS_INDEX_PLAN_ID:-}"
@@ -646,6 +667,16 @@ mkdir -p "$(dirname "$REPORT")"
 
 # Index the admission so the audit trail survives `artifact-index.sh prune
 # --files` (which removes unreferenced files under .oms/artifacts/).
+append_admission_index() {
+  if [ "$managed_input" = 1 ]; then
+    # The ownership witness lives with shared state; its Git base still belongs
+    # to the physical worktree where admission actually ran.
+    OMS_ARTIFACT_INDEX="$reference_state/.oms/artifacts/index.jsonl" \
+      OMS_INDEX_BASE_REPO="$REPO" ma_append_artifact_index "$reference_state" "$@"
+  else
+    ma_append_artifact_index "$REPO" "$@"
+  fi
+}
 admit_exit=1
 [ "$verdict" = "ADMIT" ] && admit_exit=0
 if [ -n "$COVERS" ]; then
@@ -663,7 +694,7 @@ if re.match(r"^[0-9a-f]{16,64}$", scope):
     payload["scope_digest"] = scope
 print(json.dumps(payload))')" || fail "could not compose the criterion coverage payload"
   OMS_INDEX_COVERS_JSON="$admit_covers" \
-    ma_append_artifact_index "$REPO" patch-admit "" "$admit_exit" "$REPORT" "$PATCH" ||
+    OMS_INDEX_OPERATION_ID="$reference_operation" append_admission_index patch-admit "" "$admit_exit" "$REPORT" "$PATCH" ||
     fail "criterion coverage was not recorded; failing closed"
 elif [ -n "${OMS_TASK_ID:-}" ]; then
   # A task-linked admission receipt is trusted evidence even without explicit
@@ -671,10 +702,12 @@ elif [ -n "${OMS_TASK_ID:-}" ]; then
   # One that cannot be recorded must not vanish while an older row keeps
   # speaking for the task — a dropped REJECT would let a stale ADMIT read as
   # current verification.
-  ma_append_artifact_index "$REPO" patch-admit "" "$admit_exit" "$REPORT" "$PATCH" ||
+  OMS_INDEX_OPERATION_ID="$reference_operation" append_admission_index patch-admit "" "$admit_exit" "$REPORT" "$PATCH" ||
     fail "task-linked admission receipt was not indexed; failing closed"
 else
-  ma_append_artifact_index "$REPO" patch-admit "" "$admit_exit" "$REPORT" "$PATCH" || true
+  if ! OMS_INDEX_OPERATION_ID="$reference_operation" append_admission_index patch-admit "" "$admit_exit" "$REPORT" "$PATCH"; then
+    [ "$managed_input" = 0 ] || fail "managed admission receipt was not indexed"
+  fi
 fi
 if [ "$verdict" = "ADMIT" ]; then
   work_journal_observe "$REPO" patch-admit "$REPORT" \
@@ -688,6 +721,13 @@ else
     --verification-status failed
 fi
 
+if [ "$managed_input" = 1 ]; then
+  oms_with_file_lock "$reference_state/.oms/artifacts/index.jsonl" python3 "$ROOT_LIB/landing-reference.py" \
+    admission "$reference_state" "$PATCH" "$reference_operation" "$REPORT" "$admit_exit" ||
+    fail "cannot bind native admission outcome to private capture"
+fi
+python3 "$ROOT_LIB/landing-reference.py" finish "$reference_state" "$reference_operation" 0 || fail "cannot finish reference operation"
+reference_operation=""
 echo "patch-admit: $verdict ($REPORT)" >&2
 printf '%s\n' "$verdict"
 [ "$verdict" = "ADMIT" ]

@@ -944,6 +944,588 @@ PY
     fail "gc deleted frozen evidence after malformed artifact input"
 }
 
+# These are real native writer generations; the preceding retention fixture
+# deliberately contains only legacy/forged rows and must continue preserving all.
+test_managed_landing_capture_retention() {
+  make_repo "$TMP/managed-capture/repo"
+  python3 - "$ROOT" "$TMP/managed-capture" <<'PY' || fail "managed landing capture retention"
+import hashlib, json, os, pathlib, runpy, shutil, subprocess, sys, tempfile, time
+root, sandbox = map(pathlib.Path, sys.argv[1:])
+sandbox.mkdir(exist_ok=True)
+tempfile.tempdir = str(sandbox)
+h = runpy.run_path(str(root / 'scripts/lib/landing-capture.py'))
+repo = sandbox / 'repo'
+(repo / '.oms/artifacts').mkdir(parents=True)
+(repo / '.oms/plan/completions').mkdir(parents=True)
+source = sandbox / 'input.patch'
+source.write_bytes(b'bounded payload\n')
+sha = hashlib.sha256(source.read_bytes()).hexdigest()
+
+def new(name, publish=True):
+    capture = pathlib.Path(h['allocate'](str(repo), str(source), 'land-' + name, sha))
+    patch = repo / '.oms/landing-patches' / ('land-' + name + '.patch')
+    if publish:
+        h['publish'](str(repo), str(capture), str(patch))
+        # The owner must seal the exact canonical intent and terminal receipt,
+        # not an unrelated shared terminal hint for the same basename.
+        fields = dict(landing_id='land-' + name, patch=str(patch), patch_sha=sha,
+                      base_sha='fixture-base', task='', lease='', plan_receipt_sha='',
+                      plan_done_receipt_sha='', approval='', approval_version='')
+        receipt = hashlib.sha256(json.dumps(dict(schema=1, **fields), sort_keys=True,
+                                            separators=(',', ':')).encode()).hexdigest()
+        for event in ('intent', 'complete'):
+            row = dict(schema=1, event=event, receipt_sha=receipt, ts='2020-01-01T00:00:00Z', **fields)
+            h['D']['append'](str(repo / '.oms/landings.jsonl'), h['encoded'](row), 'fixture native receipt')
+    h['seal'](str(repo), 'land-' + name, 'complete' if publish else 'before-admission')
+    return capture, patch
+
+def collect(apply=True):
+    h['collect'](str(repo), 0, apply)
+
+capture, patch = new('pin')
+assert capture.stat().st_nlink == patch.stat().st_nlink == 2
+assert h['read_patch'](str(repo), str(patch)) == source.read_bytes()
+try:
+    h['D']['read_no_follow'](str(repo), str(patch), 'ordinary reader')
+except (ValueError, SystemExit):
+    pass
+else:
+    raise AssertionError('ordinary durable reader accepted hardlinked evidence')
+receipt = repo / '.oms/plan/completions/pin.json'
+receipt.write_text(json.dumps({'artifact': {'path': str(patch)}}))
+collect()
+assert capture.exists() and patch.exists(), 'completion reference was not pinned'
+public_gc = subprocess.run(['bash', str(root / 'scripts/gc.sh'), '--repo', str(repo), '--days', '0', '--apply'],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+assert public_gc.returncode == 0, (public_gc.stdout.decode(), public_gc.stderr.decode())
+assert capture.exists() and patch.exists(), 'public GC lost completion pin'
+receipt.unlink()
+before = (repo / '.oms/landings.jsonl').read_bytes()
+collect(False)
+assert patch.exists() and (repo / '.oms/landings.jsonl').read_bytes() == before
+for backend in ('0', '1'):
+    native_capture, native_patch = new('backend-' + backend)
+    result = subprocess.run(['bash', str(root / 'scripts/gc.sh'), '--repo', str(repo), '--days', '0', '--apply'],
+                            env=dict(os.environ, OMS_LOCK_FORCE_MKDIR=backend,
+                                     OMS_LOCK_DIR=str(sandbox / ('locks-' + backend))),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode == 0, (result.stdout.decode(), result.stderr.decode())
+    assert not native_capture.exists() and not native_patch.exists(), 'public GC did not reclaim native generation'
+assert not capture.exists() and not patch.exists() and h['usage'](str(repo)) == (0, 0)
+validated = subprocess.run(['bash', str(root / 'scripts/run.sh'), 'validate', '--dir', str(repo / '.oms')],
+                           cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+assert validated.returncode == 0, (validated.stdout.decode(), validated.stderr.decode())
+assert any(row['event'] == 'capture-release-ready' for row in h['rows'](str(repo)))
+
+# Private ADMIT-failure inputs consume the same budget and are independently
+# reclaimable only when no persistent report/index references their exact input.
+capture, _ = new('rejected', False)
+report = repo / '.oms/artifacts/rejected.md'
+report.write_text('- patch: ' + str(capture))
+collect()
+assert capture.exists()
+report.unlink()
+collect()
+assert not capture.exists()
+
+# Quota refuses before creating another payload, including unknown/crashed
+# allocations whose writer never produced a terminal ownership seal.
+unknown = pathlib.Path(h['allocate'](str(repo), str(source), 'land-unknown', sha))
+before_retry = (repo / '.oms/landings.jsonl').read_bytes()
+try:
+    h['allocate'](str(repo), str(source), 'land-unknown', sha)
+except ValueError as error:
+    assert 'already reserved' in str(error)
+else:
+    raise AssertionError('retry duplicated the same native reservation')
+assert (repo / '.oms/landings.jsonl').read_bytes() == before_retry
+os.environ['OMS_LANDING_CAPTURE_COUNT'] = '1'
+old = (repo / '.oms/landings.jsonl').read_bytes()
+try:
+    h['allocate'](str(repo), str(source), 'land-overflow', sha)
+except ValueError as error:
+    assert 'quota' in str(error)
+else:
+    raise AssertionError('count quota bypassed')
+assert (repo / '.oms/landings.jsonl').read_bytes() == old
+collect()
+assert unknown.exists()
+os.environ.pop('OMS_LANDING_CAPTURE_COUNT')
+
+# A reference namespace that cannot be traversed makes the pin set unknown.
+# Inject the walk error in-process: chmod(000) is unreliable when the suite
+# runs as root, while the onerror callback is the exact OS-walk failure path.
+unknown_namespace = repo / '.oms/tasks/inaccessible/unknown.json'
+unknown_namespace.parent.mkdir(parents=True)
+unknown_namespace.write_bytes(b'{"retained":true}\n')
+error_capture, error_patch = new('reference-read-error')
+journal_before_read_error = (repo / '.oms/landings.jsonl').read_bytes()
+namespace_before_read_error = unknown_namespace.read_bytes()
+original_walk = h['os'].walk
+def unreadable_namespace(top, *args, **kwargs):
+    if os.path.realpath(top) == os.path.realpath(repo / '.oms/tasks'):
+        kwargs['onerror'](PermissionError('injected reference namespace read error'))
+        return iter(())
+    return original_walk(top, *args, **kwargs)
+h['os'].walk = unreadable_namespace
+try:
+    for apply in (True, False):
+        try:
+            h['collect'](str(repo), 0, apply)
+        except PermissionError as error:
+            assert 'injected reference namespace read error' in str(error)
+        else:
+            raise AssertionError('unknown reference namespace did not veto GC')
+        assert unknown.exists(), 'read-error GC removed an unknown reservation'
+        assert error_capture.exists() and error_patch.exists(), 'read-error GC collected eligible evidence'
+        assert unknown_namespace.read_bytes() == namespace_before_read_error
+        assert (repo / '.oms/landings.jsonl').read_bytes() == journal_before_read_error
+finally:
+    h['os'].walk = original_walk
+unknown_namespace.unlink()
+unknown_namespace.parent.rmdir()
+unknown_namespace.parent.parent.rmdir()
+os.environ['OMS_LANDING_CAPTURE_BYTES'] = str(2 * len(source.read_bytes()))
+try:
+    h['allocate'](str(repo), str(source), 'land-byte-overflow', sha)
+except ValueError as error:
+    assert 'quota' in str(error)
+else:
+    raise AssertionError('peak byte quota bypassed')
+os.environ.pop('OMS_LANDING_CAPTURE_BYTES')
+
+# Inconsistent reservation/release metadata cannot purchase new quota.
+quota_repo = sandbox / 'quota-invalid'
+(quota_repo / '.oms').mkdir(parents=True)
+quota_capture = pathlib.Path(h['allocate'](str(quota_repo), str(source), 'land-quota-invalid', sha))
+quota_journal = quota_repo / '.oms/landings.jsonl'
+quota_before = quota_journal.read_bytes()
+quota_rows = [json.loads(line) for line in quota_before.splitlines()]
+for amount in (0, 2):
+    altered = json.loads(json.dumps(quota_rows))
+    altered[0]['managed_capture']['bytes'] = amount
+    quota_journal.write_bytes(b''.join(h['encoded'](r) for r in altered))
+    before_refusal = quota_journal.read_bytes()
+    assert h['usage'](str(quota_repo)) == (1, 2 * h['MAX_OBJECT'])
+    os.environ['OMS_LANDING_CAPTURE_BYTES'] = str(2 * h['MAX_OBJECT'])
+    try:
+        h['allocate'](str(quota_repo), str(source), 'land-quota-bypass', sha)
+    except ValueError as error:
+        assert 'quota' in str(error)
+    else:
+        raise AssertionError('unknown generation waived its maximum quota charge')
+    finally:
+        os.environ.pop('OMS_LANDING_CAPTURE_BYTES')
+    assert quota_journal.read_bytes() == before_refusal
+quota_journal.write_bytes(quota_before)
+quota_item = h['find'](str(quota_repo), capture=str(quota_capture))
+held_directory = quota_capture.parent.with_name(quota_capture.parent.name + '-held')
+os.rename(quota_capture.parent, held_directory)
+for forged_release in (False, True):
+    quota_journal.write_bytes(quota_before)
+    if forged_release:
+        h['append'](str(quota_repo), 'capture-released', quota_item)
+    assert h['usage'](str(quota_repo)) == (1, 2 * h['MAX_OBJECT'])
+# Hash consistency is not enough: the probe's partial terminal/certificate and
+# object inventory must never waive a moved, still-retained generation.
+quota_journal.write_bytes(quota_before)
+terminal = h['append'](str(quota_repo), 'capture-terminal', quota_item)
+ready = h['append'](str(quota_repo), 'capture-release-ready', quota_item,
+    release_proof=dict(version=1, reservation_sha256=h['digest'](h['encoded'](quota_item)),
+                       certificate_sha256='0' * 64, terminal_event_sha256=h['digest'](h['encoded'](terminal)),
+                       objects={'capture': {'size': len(source.read_bytes())}}))
+h['append'](str(quota_repo), 'capture-released', quota_item, release_ready_sha256=h['digest'](h['encoded'](ready)))
+assert h['usage'](str(quota_repo)) == (1, 2 * h['MAX_OBJECT'])
+assert (held_directory / quota_capture.name).read_bytes() == source.read_bytes()
+quota_journal.write_bytes(quota_before)
+os.rename(held_directory, quota_capture.parent)
+assert h['usage'](str(quota_repo)) == (1, 2 * len(source.read_bytes()))
+
+# A proven empty object is valid; only missing ownership proof is unknown.
+empty_repo = sandbox / 'quota-empty'
+(empty_repo / '.oms').mkdir(parents=True)
+empty = sandbox / 'empty.patch'
+empty.write_bytes(b'')
+empty_capture = pathlib.Path(h['allocate'](str(empty_repo), str(empty), 'land-empty', hashlib.sha256(b'').hexdigest()))
+assert h['usage'](str(empty_repo)) == (1, 0)
+h['seal'](str(empty_repo), 'land-empty', 'before-admission')
+h['collect'](str(empty_repo), 0, True)
+assert not empty_capture.exists() and h['usage'](str(empty_repo)) == (0, 0)
+
+# Rehashing a genuine disposed generation's chain cannot make a malformed
+# native certificate valid; its unknown history remains maximally charged.
+empty_journal = empty_repo / '.oms/landings.jsonl'
+valid_release = empty_journal.read_bytes()
+for mutation in ('missing', 'bool', 'nan', 'infinite', 'negative', 'certificate-extra', 'terminal-extra'):
+    release_rows = [json.loads(line) for line in valid_release.splitlines()]
+    ready = next(row for row in release_rows if row['event'] == 'capture-release-ready')
+    proof = ready['release_proof']
+    cert = proof['certificate']
+    if mutation == 'missing':
+        cert['terminal'].pop('time')
+    elif mutation == 'certificate-extra':
+        cert['unknown'] = True
+    elif mutation == 'terminal-extra':
+        cert['terminal']['unknown'] = True
+    else:
+        cert['terminal']['time'] = {'bool': True, 'nan': float('nan'), 'infinite': float('inf'), 'negative': -1}[mutation]
+    proof['certificate_sha256'] = h['digest'](h['encoded'](cert))
+    next(row for row in release_rows if row['event'] == 'capture-released')['release_ready_sha256'] = h['digest'](h['encoded'](ready))
+    empty_journal.write_bytes(b''.join(h['encoded'](row) for row in release_rows))
+    assert h['usage'](str(empty_repo)) == (1, 2 * h['MAX_OBJECT']), mutation
+empty_journal.write_bytes(valid_release)
+assert h['usage'](str(empty_repo)) == (0, 0)
+
+# A crash after payload disposal but before its final release row stays charged.
+crash_repo = sandbox / 'quota-release-crash'
+(crash_repo / '.oms').mkdir(parents=True)
+crash_capture = pathlib.Path(h['allocate'](str(crash_repo), str(source), 'land-release-crash', sha))
+h['seal'](str(crash_repo), 'land-release-crash', 'before-admission')
+collect_globals = h['collect'].__globals__
+original_append = collect_globals['append']
+def fail_release(repo_arg, event, item, **extra):
+    if event == 'capture-released':
+        raise OSError('injected final release append failure')
+    return original_append(repo_arg, event, item, **extra)
+collect_globals['append'] = fail_release
+try:
+    h['collect'](str(crash_repo), 0, True)
+finally:
+    collect_globals['append'] = original_append
+assert not crash_capture.parent.exists()
+assert h['usage'](str(crash_repo)) == (1, 2 * h['MAX_OBJECT'])
+assert any(row['event'] == 'capture-release-ready' for row in h['rows'](str(crash_repo)))
+assert not any(row['event'] == 'capture-released' for row in h['rows'](str(crash_repo)))
+
+# The rejected best-effort chain has one budget including seal and scans.
+# These disposable probes intentionally have no managed generation: seal is a
+# real no-op and no test invents native admission authority for deletion.
+if os.name != 'nt':
+    import signal
+    deadline_repo = sandbox / 'cleanup-deadline'
+    (deadline_repo / '.oms/landing-patches').mkdir(parents=True)
+    legacy = deadline_repo / '.oms/landing-patches/unknown.patch'
+    legacy.write_bytes(b'unknown retained evidence')
+    def deadline_call():
+        started = time.monotonic()
+        try:
+            h['cleanup_rejected'](str(deadline_repo), 'land-no-generation')
+        except SystemExit as error:
+            assert error.code == 75, error
+        else:
+            raise AssertionError('slow cleanup did not exhaust its shared deadline')
+        elapsed = time.monotonic() - started
+        assert 1.7 <= elapsed < 2.6, elapsed
+        print('rejected-cleanup total deadline: %.3fs' % elapsed)
+        assert legacy.read_bytes() == b'unknown retained evidence'
+    def ready_wait(path, process):
+        end = time.monotonic() + 3
+        while not path.exists() and time.monotonic() < end:
+            assert process.poll() is None
+            time.sleep(.02)
+        assert path.exists(), path
+    def stop_owned(process):
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+    previous = dict(os.environ)
+    try:
+        for backend in ('0', '1'):
+            os.environ['OMS_LOCK_FORCE_MKDIR'] = backend
+            os.environ['OMS_LOCK_DIR'] = str(sandbox / ('deadline-locks-' + backend))
+            os.environ['OMS_LOCK_TIMEOUT'] = '60'
+            marker_ready = sandbox / ('marker-ready-' + backend)
+            native_ready = sandbox / ('native-ready-' + backend)
+            marker = subprocess.Popen(['bash', '-c',
+                '. "$1"; oms_with_file_lock "$2" python3 -c "$3" "$4"', 'deadline-marker',
+                str(root / 'scripts/lib/file-lock.sh'),
+                str(deadline_repo / '.oms/delegations/.marker-set-lock-target'),
+                'import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); time.sleep(.9)', str(marker_ready)],
+                start_new_session=True)
+            native = subprocess.Popen([sys.executable, '-c',
+                'import pathlib,runpy,sys,time; e=runpy.run_path(sys.argv[1]); '
+                'lock=e["file_lock"](pathlib.Path(sys.argv[2])); lock.__enter__(); '
+                'pathlib.Path(sys.argv[3]).touch(); time.sleep(8)',
+                str(root / 'scripts/lib/agent-events.py'), str(deadline_repo / '.oms/lifecycle/events.jsonl'),
+                str(native_ready)], start_new_session=True)
+            try:
+                ready_wait(marker_ready, marker)
+                ready_wait(native_ready, native)
+                deadline_call()
+                assert native.poll() is None, 'cleanup killed a foreign lock owner'
+            finally:
+                stop_owned(marker)
+                stop_owned(native)
+        os.environ['OMS_LOCK_FORCE_MKDIR'] = '0'
+        os.environ['OMS_LOCK_DIR'] = str(sandbox / 'deadline-slow-locks')
+        slow_bin = sandbox / 'deadline-bin'
+        slow_bin.mkdir()
+        wrapper = slow_bin / 'python3'
+        wrapper.write_text('#!' + sys.executable + '\n' +
+            'import os,pathlib,sys,time\n'
+            'args=sys.argv[1:]\n'
+            'slow=(os.environ["OMS_FIXTURE_SLOW_PHASE"] == "seal" and "seal" in args) or '
+            '(os.environ["OMS_FIXTURE_SLOW_PHASE"] == "collect" and len(args)>1 and args[0]=="-c" and "collect" in args[1])\n'
+            'if slow:\n pathlib.Path(os.environ["OMS_FIXTURE_SLOW_READY"]).touch(); time.sleep(8)\n'
+            'os.execv(' + repr(sys.executable) + ', [' + repr(sys.executable) + ']+args)\n')
+        wrapper.chmod(0o755)
+        os.environ['PATH'] = str(slow_bin) + os.pathsep + previous['PATH']
+        for phase in ('seal', 'collect'):
+            slow_ready = sandbox / ('slow-' + phase)
+            os.environ['OMS_FIXTURE_SLOW_PHASE'] = phase
+            os.environ['OMS_FIXTURE_SLOW_READY'] = str(slow_ready)
+            deadline_call()
+            assert slow_ready.exists(), 'probe did not reach ' + phase
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
+
+# A linked execution worktree can be on another Windows drive. Only capture
+# versus STATE filesystem equality matters; cross-drive ancestry is disjoint.
+original_commonpath = os.path.commonpath
+other_volume = str(sandbox / 'execution-on-another-volume')
+def cross_volume(paths):
+    if other_volume in paths:
+        raise ValueError('different drives')
+    return original_commonpath(paths)
+os.path.commonpath = cross_volume
+try:
+    cross_capture = pathlib.Path(h['allocate'](str(repo), str(source), 'land-cross-volume', sha, other_volume))
+finally:
+    os.path.commonpath = original_commonpath
+assert cross_capture.exists()
+
+# Replace the shared name after the last observation but before quarantine.
+# An equal-content new inode must survive, as must its native generation anchor.
+capture, patch = new('race')
+original_rename = os.rename
+ran = []
+def race(src, dst, *args, **kwargs):
+    if str(src) == str(patch) and not ran:
+        ran.append(True)
+        foreign = sandbox / 'foreign.patch'
+        foreign.write_bytes(patch.read_bytes())
+        os.replace(foreign, patch)
+    return original_rename(src, dst, *args, **kwargs)
+os.rename = race
+try:
+    collect()
+finally:
+    os.rename = original_rename
+assert ran and patch.read_bytes() == source.read_bytes()
+assert (capture.parent / 'publication.anchor').exists()
+assert patch.stat().st_ino != (capture.parent / 'publication.anchor').stat().st_ino
+try:
+    h['read_patch'](str(repo), str(patch))
+except ValueError:
+    pass
+else:
+    raise AssertionError('managed replacement escaped through the legacy reader')
+
+# Even private ownership does not permit collecting a changed intent contract.
+capture_contract, patch_contract = new('contract')
+journal = repo / '.oms/landings.jsonl'
+frozen_journal = journal.read_bytes()
+changed = [json.loads(line) for line in frozen_journal.splitlines()]
+for row in changed:
+    if row.get('landing_id') == 'land-contract' and row.get('event') == 'intent':
+        row['task'] = 'different-obligation'
+journal.write_bytes(b''.join(h['encoded'](row) for row in changed))
+collect()
+assert capture_contract.exists() and patch_contract.exists()
+journal.write_bytes(frozen_journal)
+
+# Crash after quarantine: recovery uses the still-retained native inode anchor.
+capture2, patch2 = new('interrupted')
+quarantine = capture2.parent / 'quarantine-publication.anchor'
+os.rename(patch2, quarantine)
+collect()
+assert not quarantine.exists() and not capture2.exists()
+
+# No-clobber restore: a new original-name occupant survives alongside foreign
+# data captured by the rename. Neither is eligible merely because bytes match.
+capture3, patch3 = new('reoccupied')
+ran = []
+def reoccupied(src, dst, *args, **kwargs):
+    if str(src) == str(patch3) and not ran:
+        ran.append(True)
+        foreign = sandbox / 'foreign3.patch'
+        foreign.write_bytes(b'foreign before capture')
+        os.replace(foreign, patch3)
+        result = original_rename(src, dst, *args, **kwargs)
+        patch3.write_bytes(b'new occupant')
+        return result
+    return original_rename(src, dst, *args, **kwargs)
+os.rename = reoccupied
+try:
+    collect()
+finally:
+    os.rename = original_rename
+assert patch3.read_bytes() == b'new occupant'
+assert (capture3.parent / 'quarantine-publication.anchor').read_bytes() == b'foreign before capture'
+
+# Copied certificates do not authorize a different private directory generation.
+item = h['find'](str(repo), capture=str(capture))
+owner = json.loads((capture.parent / 'owner.json').read_text())
+replacement = sandbox / 'copied-owner'
+shutil.copytree(capture.parent, replacement)
+original = capture.parent.with_name(capture.parent.name + '-original')
+os.rename(capture.parent, original)
+os.rename(replacement, capture.parent)
+try:
+    h['certificate'](item)
+except ValueError:
+    pass
+else:
+    raise AssertionError('copied owner metadata became generation authority')
+assert h['usage'](str(repo))[1] >= 2 * h['MAX_OBJECT']
+# Restore the fixture's actual owned generation without deleting the foreign copy.
+os.rename(capture.parent, replacement)
+os.rename(original, capture.parent)
+
+# The helper CLI validates every destructive argument before taking locks.
+# Invalid days and APPLY values must not alter retained bytes or create locks.
+validation_before = {}
+for path in (repo / '.oms/landings.jsonl', repo / '.oms/artifacts/index.jsonl',
+             capture, patch):
+    validation_before[path] = path.read_bytes() if path.exists() else None
+for invalid_args in (('-1', '1'), ('36501', '1'), ('0', '2'), ('x', '1'), ('0',), ('01', '1')):
+    invalid_gc = subprocess.run([sys.executable, str(root / 'scripts/lib/landing-capture.py'),
+                                 'gc', str(repo), *invalid_args],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert invalid_gc.returncode == 2, (invalid_args, invalid_gc.returncode,
+                                        invalid_gc.stdout.decode(), invalid_gc.stderr.decode())
+for path, before in validation_before.items():
+    assert (path.read_bytes() if path.exists() else None) == before, path
+
+# The locked collector rejects truncated JSONL instead of accepting a final
+# complete row that was never durably terminated.
+journal = repo / '.oms/landings.jsonl'
+journal_before = journal.read_bytes()
+rows_before = h['rows'](str(repo))
+journal.write_bytes(journal_before + b'{"schema":1,"event":"truncated"}')
+try:
+    h['rows'](str(repo))
+except ValueError as error:
+    assert 'truncated' in str(error)
+else:
+    raise AssertionError('landing journal accepted a final row without LF')
+assert journal.read_bytes() == journal_before + b'{"schema":1,"event":"truncated"}'
+journal.write_bytes(journal_before)
+assert h['rows'](str(repo)) == rows_before
+reference_dir = repo / '.oms/tasks'
+reference_dir.mkdir(exist_ok=True)
+truncated_reference = reference_dir / 'truncated.jsonl'
+truncated_reference.write_bytes(b'{"task":"complete"}')
+try:
+    h['reference_bytes'](str(repo))
+except ValueError as error:
+    assert 'truncated' in str(error)
+else:
+    raise AssertionError('reference scan accepted a final JSONL row without LF')
+assert truncated_reference.read_bytes() == b'{"task":"complete"}'
+truncated_reference.unlink()
+
+# The direct helper CLI must honor both inner quiescence locks as bounded
+# contention, while preserving all evidence and returning the native busy code.
+if os.name != 'nt':
+    lock_lib = root / 'scripts/lib/file-lock.sh'
+    engine_path = root / 'scripts/lib/agent-events.py'
+    for lock_name, lock_target, holder_command in (
+            ('lifecycle', repo / '.oms/lifecycle/events.jsonl',
+             [sys.executable, '-c',
+              'import runpy,sys,time; from pathlib import Path; '
+              'e=runpy.run_path(sys.argv[1]); cm=e["file_lock"](Path(sys.argv[2])); '
+              'cm.__enter__(); Path(sys.argv[3]).write_text("ready"); time.sleep(2); '
+              'cm.__exit__(None,None,None)', str(engine_path)]),
+            ('index', repo / '.oms/artifacts/index.jsonl',
+             ['bash', '-c',
+              '. "$0"; oms_with_file_lock "$1" sh -c \'printf ready > "$1"; sleep 2\' holder "$2"',
+              str(lock_lib)])):
+        lock_dir = sandbox / ('inner-gc-locks-' + lock_name)
+        ready = sandbox / ('inner-gc-lock-ready-' + lock_name)
+        lock_env = dict(os.environ, OMS_LOCK_DIR=str(lock_dir), OMS_LOCK_TIMEOUT='1')
+        if lock_name == 'lifecycle':
+            holder_args = holder_command + [str(lock_target), str(ready)]
+        else:
+            holder_args = holder_command + [str(lock_target), str(ready)]
+        holder = subprocess.Popen(holder_args, env=lock_env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.time() + 5
+            while not ready.exists() and time.time() < deadline:
+                time.sleep(0.01)
+            assert ready.exists(), 'inner lock fixture did not acquire ' + lock_name
+            direct_gc = subprocess.run([sys.executable, str(root / 'scripts/lib/landing-capture.py'),
+                                        'gc', str(repo), '0', '1'], env=lock_env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            assert direct_gc.returncode == 75, (lock_name, direct_gc.returncode,
+                                                direct_gc.stdout.decode(), direct_gc.stderr.decode())
+            assert journal.read_bytes() == journal_before, 'busy GC changed landing journal'
+            assert capture.exists() and patch.exists(), 'busy GC changed retained evidence'
+        finally:
+            if holder.poll() is None:
+                holder.terminate()
+            holder.communicate(timeout=5)
+        ready.unlink()
+
+# Marker uncertainty vetoes the locked collector, independently of age/PID.
+(repo / '.oms/delegations').mkdir()
+(repo / '.oms/delegations/unknown.json').write_text('{malformed')
+h['gc'](str(repo), 0, True)
+assert unknown.exists()
+(repo / '.oms/delegations/unknown.json').unlink()
+subprocess.run(['bash', str(root / 'scripts/agent-events.sh'), '--repo', str(repo), 'start',
+                '--provider', 'codex', '--tool', 'capture-fixture', '--then', 'starting'],
+               stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+capture4, patch4 = new('active')
+h['gc'](str(repo), 0, True)
+assert capture4.exists() and patch4.exists(), 'active native attempt did not veto GC'
+
+# The destructive collector is reachable only through the fully locked gc
+# entrypoint. Its former direct `collect` CLI path must now be rejected.
+rejected_collect = subprocess.run([sys.executable, str(root / 'scripts/lib/landing-capture.py'),
+                                   'collect', str(repo), '0', '1'],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+assert rejected_collect.returncode != 0, 'direct collect CLI bypassed outer locks'
+assert capture4.exists() and patch4.exists(), 'rejected collect CLI changed retained evidence'
+
+# A direct gc CLI invocation must contend on every outer writer lock before
+# reaching quiescence or collection. Inject lock holders rather than depending
+# on timing between two unlocked GC processes.
+if os.name != 'nt':
+    lock_lib = root / 'scripts/lib/file-lock.sh'
+    for lock_name, lock_target in (
+            ('landings', repo / '.oms/landings.jsonl'),
+            ('markers', repo / '.oms/delegations/.marker-set-lock-target'),
+            ('plan', repo / '.oms/plan/tasks.json')):
+        lock_dir = sandbox / ('direct-gc-locks-' + lock_name)
+        ready = sandbox / ('direct-gc-lock-ready-' + lock_name)
+        lock_env = dict(os.environ, OMS_LOCK_DIR=str(lock_dir), OMS_LOCK_TIMEOUT='1')
+        holder = subprocess.Popen([
+            'bash', '-c',
+            '. "$1"; oms_with_file_lock "$2" sh -c \'printf ready > "$1"; sleep 3\' lock-holder "$3"',
+            'direct-gc-lock-holder', str(lock_lib), str(lock_target), str(ready)],
+            env=lock_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.time() + 5
+            while not ready.exists() and time.time() < deadline:
+                time.sleep(0.01)
+            assert ready.exists(), 'outer lock fixture did not acquire ' + lock_name
+            direct_gc = subprocess.run([sys.executable, str(root / 'scripts/lib/landing-capture.py'),
+                                        'gc', str(repo), '0', '1'], env=lock_env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            assert direct_gc.returncode == 75, (lock_name, direct_gc.returncode,
+                                                direct_gc.stdout.decode(), direct_gc.stderr.decode())
+            assert capture4.exists() and patch4.exists(), 'blocked direct GC changed retained evidence'
+        finally:
+            holder.wait(timeout=5)
+        ready.unlink()
+PY
+}
+
+test_managed_landing_capture_retention
+
 test_native_hook_telemetry_is_content_free_and_correlated
 test_review_uptake_withholds_rates_until_both_cohorts_are_large_enough
 test_ci_tick_records_once_and_skips_a_fresh_sha

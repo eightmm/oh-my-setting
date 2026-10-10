@@ -1735,6 +1735,8 @@ def plan_rows(report, labels, width, unicode):
             kind = t.get("completion_kind")
             if kind == "research-accepted":
                 word = "done (research)"
+            elif kind == "main-research-accepted":
+                word = "done (main research)"
             elif kind == "satisfied-by":
                 word = "done (satisfied by)"
         age = t.get("claim_age_s")

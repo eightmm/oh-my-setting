@@ -163,9 +163,8 @@ Completion is evidence coverage, not model self-confidence.
 
 ## Reviewed plan completion
 
-The locally implemented operations add research acceptance and satisfaction
-records. They are not available from the installed OMS `PATH` yet; authorized
-same-SHA release and installation are separate. Existing `finish`, patch
+These operations record reviewed research acceptance and satisfaction.
+Existing `finish`, patch
 admission/`patch-land`, and committed land/gate/push/CI completion retain their
 current evidence and landing rules. These records do not claim a landing for
 the original task, and pending research or replacement tasks are not closed
@@ -174,9 +173,20 @@ automatically.
 | Operation | `completion_kind` |
 |---|---|
 | `oms agent-plan accept-research` | `research-accepted` |
+| `oms agent-plan accept-main-research` | `main-research-accepted` |
 | `oms agent-plan satisfy` | `satisfied-by` |
 
-Both commands use the same compare-and-swap, lease, state, and bundle flags;
+Before writing a new completion kind into a shared plan, publish and verify
+the compatible controller, complete its authorized same-SHA installation, and
+confirm that every active reader uses that controller. Older readers reject
+unknown active completion fields and can block unrelated plan commands. A
+source-only trial belongs in disposable state. If a new kind was written too
+early, the compatible parent can use the existing `agent-plan block` operation
+to preserve the immutable receipt in `completion-reactivated` history and
+reopen the task; this DONE transition has no task-level CAS. After reader
+migration, acceptance needs fresh current plan/task bundles and approvals.
+
+These completion commands use the same compare-and-swap, lease, state, and bundle flags;
 use the exact operation spelling shown above:
 
 ```bash
@@ -221,6 +231,38 @@ Missing legacy lineage requires explicit reviewed adoption of that artifact
 and original obligation; adoption cannot override contradictory provenance.
 An ancillary zero-byte patch from a proven read is metadata only, never
 landing evidence.
+
+
+Main READ acceptance covers an original report-only research obligation that a
+current main independently reviewed. It preserves the report bytes and indexed
+producer facts, including failures, and records `main-reviewed-external`
+provenance. A failed producer requires an explicit review of that failure;
+acceptance does not turn it into a successful child. Missing task or plan
+lineage requires exact reviewed adoption of the original index and contract.
+Product implementation, repair, landing and publication obligations cannot be
+closed by accepting a report. `main-authored` is unsupported without independent
+author evidence; a completion approval alone proves review.
+
+A native panel main uses its verified current room and attempt binding. Desktop
+mains use two separate commands. First, the main explicitly runs
+`oms agent-plan approve-main-research --approve-reviewed-bundle` with the same
+CAS and bundle flags. It executes the frozen verifier and checks the report,
+source and CAS before and after execution. It leaves the task open and outputs
+an immutable approval reference. The main then runs
+`oms agent-plan accept-main-research` with those flags plus
+`--main-review-approval APPROVAL_PATH` and
+`--expected-main-review-approval-sha256 APPROVAL_SHA256`.
+
+Desktop acceptance requires the same chat's recorded policy approval followed
+by its completed approving command, successful native execution and exact
+output reference. The marker binds a fresh nonce, the exact task, lease, plan,
+bundle, reviewed inputs and controller code. A different local parent may
+consume that already approved operation; its UID is recorded separately from
+the original approving chat. Copied environment session IDs confer no reviewer
+identity. Source, task or lease changes require a fresh approval. Immutable
+completion receipts retain historical reviewer proof so later room closure
+cannot erase an accepted result. These are local consistency checks within
+cooperating OMS storage, not authentication against hostile same-UID code.
 
 Satisfaction requires an independently `done` same-plan successor with real
 admitted `patch-land` evidence, or exact committed land receipt proof of passed

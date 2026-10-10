@@ -78,6 +78,9 @@ COMPLETION_OPTION_SET=0
 LEASE_ID_SET=0
 COMPLETION_BUNDLE=""
 EXPECTED_COMPLETION_BUNDLE_SHA256=""
+APPROVE_REVIEWED_BUNDLE=0
+MAIN_REVIEW_APPROVAL=""
+EXPECTED_MAIN_REVIEW_APPROVAL_SHA256=""
 ALLOWED_ENVELOPE=""
 MAX_TASKS=""
 ACCEPT_FILES=""
@@ -170,7 +173,7 @@ Commands:
                                      --artifact/--patch supply evidence a
                                      review lacked. Typed patch-land remains
                                      the default for single patches.
-  accept-research|satisfy --id ID --lease-id TOKEN --expected-state STATE
+  accept-research|approve-main-research|accept-main-research|satisfy --id ID --lease-id TOKEN --expected-state STATE
          --expected-plan-sha256 SHA256 --expected-task-sha256 SHA256
          --completion-bundle REPO_RELATIVE_FILE
          --expected-completion-bundle-sha256 SHA256
@@ -269,7 +272,7 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 # Parse: first non-option token is the command.
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --repo|--file|--id|--lease-id|--expected-state|--expected-lease-id|--expected-plan-sha256|--expected-task-sha256|--completion-bundle|--expected-completion-bundle-sha256|--json|--operator-consent|--decision-artifact|--expected-decision-artifact-sha256) ;;
+    --repo|--file|--id|--lease-id|--expected-state|--expected-lease-id|--expected-plan-sha256|--expected-task-sha256|--completion-bundle|--expected-completion-bundle-sha256|--approve-reviewed-bundle|--main-review-approval|--expected-main-review-approval-sha256|--json|--operator-consent|--decision-artifact|--expected-decision-artifact-sha256) ;;
     --*) COMPLETION_OTHER_OPTION=1 ;;
   esac
   case "$1" in
@@ -362,10 +365,17 @@ while [ "$#" -gt 0 ]; do
     --claim) CLAIM=1; shift ;;
     --refreeze-acceptance) REFREEZE_ACCEPTANCE=1; shift ;;
     --include-running) INCLUDE_RUNNING=1; shift ;;
+    --approve-reviewed-bundle) APPROVE_REVIEWED_BUNDLE=1; COMPLETION_OPTION_SET=1; shift ;;
+    --main-review-approval)
+      [ "$#" -ge 2 ] || fail "--main-review-approval requires a value"
+      MAIN_REVIEW_APPROVAL="$2"; COMPLETION_OPTION_SET=1; shift 2 ;;
+    --expected-main-review-approval-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-main-review-approval-sha256 requires a value"
+      EXPECTED_MAIN_REVIEW_APPROVAL_SHA256="$2"; COMPLETION_OPTION_SET=1; shift 2 ;;
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    accept-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|cancel|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify)
+    accept-research|approve-main-research|accept-main-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify|cancel)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -383,7 +393,7 @@ if [ -n "$LANDED_COMMIT" ]; then
     fail "--landed-commit cannot be combined with typed patch-land finish options"
 fi
 case "$ACTION" in
-  accept-research|satisfy)
+  accept-research|approve-main-research|accept-main-research|satisfy)
     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] ||
       fail "$ACTION is parent-only"
     [ "$LEASE_ID_SET" = 1 ] && [ -n "$ID" ] && [ -n "$LEASE_ID" ] && [ -n "$EXPECTED_STATE" ] &&
@@ -423,7 +433,19 @@ case "$ACTION" in
     [ "$PLAN_FILE_SET" = 0 ] || fail "cancel is valid only for the canonical repo-local plan"
     ;;
   *) [ "$COMPLETION_OPTION_SET" = 0 ] ||
-       fail "completion options require accept-research or satisfy" ;;
+       fail "completion options require accept-research, accept-main-research or satisfy" ;;
+esac
+case "$ACTION" in
+  approve-main-research)
+    [ "$APPROVE_REVIEWED_BUNDLE" = 1 ] && [ -z "$MAIN_REVIEW_APPROVAL$EXPECTED_MAIN_REVIEW_APPROVAL_SHA256" ] ||
+      fail "approve-main-research requires --approve-reviewed-bundle and no acceptance token" ;;
+  accept-main-research)
+    [ "$APPROVE_REVIEWED_BUNDLE" = 0 ] || fail "approval and acceptance are separate actions"
+    { [ -z "$MAIN_REVIEW_APPROVAL" ] && [ -z "$EXPECTED_MAIN_REVIEW_APPROVAL_SHA256" ]; } ||
+      { [ -n "$MAIN_REVIEW_APPROVAL" ] && [ -n "$EXPECTED_MAIN_REVIEW_APPROVAL_SHA256" ]; } ||
+      fail "main review approval requires its exact digest" ;;
+  *) [ "$APPROVE_REVIEWED_BUNDLE" = 0 ] && [ -z "$MAIN_REVIEW_APPROVAL$EXPECTED_MAIN_REVIEW_APPROVAL_SHA256" ] ||
+       fail "main approval flags require their matching main research action" ;;
 esac
 PLAN_READ_ONLY=0
 case "$ACTION" in
@@ -655,14 +677,17 @@ export OMS_EXPECTED_TASK_SHA256="$EXPECTED_TASK_SHA256" \
   OMS_DECISION_ARTIFACT="$DECISION_ARTIFACT" \
   OMS_EXPECTED_DECISION_ARTIFACT_SHA256="$EXPECTED_DECISION_ARTIFACT_SHA256" \
   OMS_COMPLETION_BUNDLE="$COMPLETION_BUNDLE" \
-  OMS_EXPECTED_COMPLETION_BUNDLE_SHA256="$EXPECTED_COMPLETION_BUNDLE_SHA256"
+  OMS_EXPECTED_COMPLETION_BUNDLE_SHA256="$EXPECTED_COMPLETION_BUNDLE_SHA256" \
+  OMS_APPROVE_REVIEWED_BUNDLE="$APPROVE_REVIEWED_BUNDLE" \
+  OMS_MAIN_REVIEW_APPROVAL="$MAIN_REVIEW_APPROVAL" \
+  OMS_EXPECTED_MAIN_REVIEW_APPROVAL_SHA256="$EXPECTED_MAIN_REVIEW_APPROVAL_SHA256"
 export OMS_AUTOPILOT_OWNER_ID="$OWNER_ID" OMS_PLAN_MARKERS_DIR="$PY_MARKERS_DIR"
 export OMS_TASK_ASSIGNMENT="$ASSIGNMENT"
 
 plan_run() {
   local entry
   entry="$ROOT/scripts/lib/agent-plan-engine.py"
-  if { [ "$ACTION" = accept-research ] || [ "$ACTION" = satisfy ]; } &&
+  if { [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ "$ACTION" = approve-main-research ] || [ "$ACTION" = satisfy ]; } &&
      [ "${OMS_COMPLETION_PHASE:-}" != verify ]; then
     python3 "$ROOT/scripts/lib/plan-completion.py" --locked-plan "$entry" "$PROPOSAL" \
       "$ROOT/scripts/lib/plan-receipt.py" "$ROOT/scripts/lib/verify-floor-lint.py" \
@@ -699,8 +724,8 @@ plan_run_with_marker_and_plan_locks() {
     plan_run_with_plan_lock
 }
 
-if [ "$ACTION" = accept-research ] || [ "$ACTION" = satisfy ]; then
-  # Thread -> marker-set -> plan -> native lifecycle writer lock. No writer
+if [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ "$ACTION" = approve-main-research ] || [ "$ACTION" = satisfy ]; then
+  # Landings -> thread -> marker-set -> plan -> native lifecycle writer lock. No writer
   # takes these locks in reverse; the verifier holds none of them.
   completion_state_repo="${OMS_STATE_REPO:-$REPO}"
   completion_state_repo="$(cd "${completion_state_repo//$'\r'/}" && pwd -P)" ||
@@ -714,7 +739,18 @@ if [ "$ACTION" = accept-research ] || [ "$ACTION" = satisfy ]; then
     fail "cannot normalize completion state repository"
   export OMS_STATE_REPO="$completion_py_state_repo"
   completion_room_id="${OMS_ROOM_ID:-}"
-  [[ "$completion_room_id" =~ ^room-[0-9a-f]{12}$ ]] || fail "invalid completion room identity"
+  if { [ "$ACTION" = accept-main-research ] || [ "$ACTION" = approve-main-research ]; } &&
+     { [ -n "$MAIN_REVIEW_APPROVAL" ] || [ "$ACTION" = approve-main-research ] || [ -z "$completion_room_id" ]; }; then
+    completion_room_id="$(python3 "$ROOT/scripts/lib/plan-completion.py" --main-review-room \
+      "$completion_py_state_repo" "$COMPLETION_BUNDLE" "$EXPECTED_COMPLETION_BUNDLE_SHA256" | tr -d '\r')" ||
+      fail "cannot resolve the declared main review room"
+    export OMS_ROOM_ID="$completion_room_id"
+  fi
+  if [ "$ACTION" = accept-main-research ] || [ "$ACTION" = approve-main-research ]; then
+    [[ "$completion_room_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$ ]] || fail "invalid main review room identity"
+  else
+    [[ "$completion_room_id" =~ ^room-[0-9a-f]{12}$ ]] || fail "invalid completion room identity"
+  fi
   completion_thread_parent="$(cd "$completion_state_repo/.oms/threads" && pwd -P)" ||
     fail "cannot resolve completion room parent"
   completion_thread_parent="$(printf '%s' "$completion_thread_parent" | tr -d '\r')"
@@ -728,9 +764,13 @@ if [ "$ACTION" = accept-research ] || [ "$ACTION" = satisfy ]; then
     oms_with_file_lock "$completion_state_repo/.oms/delegations/.marker-set-lock-target" \
       plan_run_with_plan_lock
   }
-  completion_run_locked() {
+  completion_run_with_thread_lock() {
     oms_with_file_lock "$completion_thread_parent/$completion_room_id.jsonl" \
       completion_run_with_marker_lock
+  }
+  completion_run_locked() {
+    oms_with_file_lock "$completion_state_repo/.oms/landings.jsonl" \
+      completion_run_with_thread_lock
   }
   OMS_COMPLETION_PHASE=preflight
   export OMS_COMPLETION_PHASE

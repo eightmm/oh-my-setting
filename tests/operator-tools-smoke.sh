@@ -1283,6 +1283,7 @@ completion_report = deepcopy(msg_report)
 completion_report["room"]["repo_tasks"] = [
     {"id": "legacy", "title": "Legacy", "state": "done"},
     {"id": "research", "title": "Research", "state": "done", "completion_kind": "research-accepted"},
+    {"id": "main-read", "title": "Main READ", "state": "done", "completion_kind": "main-research-accepted"},
     {"id": "satisfied", "title": "Satisfied", "state": "done", "completion_kind": "satisfied-by"},
     {"id": "running-kind", "title": "Running", "state": "running", "completion_kind": "research-accepted"},
     {"id": "unknown-kind", "title": "Unknown", "state": "done", "completion_kind": "operator-proof"},
@@ -1291,11 +1292,12 @@ completion_report["room"]["repo_tasks"] = [
 completion_plan = "\n".join(row for row, _ in render_plan_rows(completion_report, {}, 120, True))
 assert "legacy · done · Legacy" in completion_plan, completion_plan
 assert "research · done (research) · Research" in completion_plan, completion_plan
+assert "main-read · done (main research) · Main READ" in completion_plan, completion_plan
 assert "satisfied · done (satisfied by) · Satisfied" in completion_plan, completion_plan
 assert "running-kind · running · Running" in completion_plan, completion_plan
 assert "unknown-kind · done · Unknown" in completion_plan and "bad-kind · done · Bad" in completion_plan, completion_plan
 completion_hits = [action for _, action in render_plan_rows(completion_report, {}, 120, True) if action]
-assert completion_hits == [("task", task_id) for task_id in ("legacy", "research", "satisfied", "unknown-kind", "bad-kind", "running-kind")], completion_hits
+assert completion_hits == [("task", task_id) for task_id in ("legacy", "research", "main-read", "satisfied", "unknown-kind", "bad-kind", "running-kind")], completion_hits
 assert next(row for row, action in render_plan_rows(completion_report, {}, 120, False) if action).startswith("+ ")
 assert next(row for row, action in render_plan_rows(completion_report, {}, 120, True) if action).startswith("✓ ")
 foot = plan.split("\n")[-1]

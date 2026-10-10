@@ -62,8 +62,9 @@ artifact index rows are delegated to
 artifact-index prune; orphaned artifact files are left alone unless
 --delete-orphan-files says otherwise. Never touches live runs, the active task, unresolved
 failures, active experiment claims, or plan tasks in review. The append-only
-experiment board is left intact. Frozen landing snapshots are retained because
-the existing schema cannot prove ownership of the current file generation.
+experiment board is left intact. Legacy/unknown/referenced landing evidence is
+retained. New native capture generations are collected only with private anchor
+ownership, a writer terminal seal, complete reference checks and quiescence.
 EOF
 }
 
@@ -109,10 +110,9 @@ note_remove() {  # note_remove KIND PATH
   fi
 }
 
-# 0.5) Validate landing retention inputs, but never unlink frozen evidence.
-# Terminal rows, filenames and equal bytes cannot prove native ownership of the
-# current file generation. The existing schema has no such publication receipt;
-# snapshots (including no-intent orphans) require manual storage management.
+# 0.5) Validate legacy retention inputs without treating shared terminal rows
+# as ownership. The managed-generation collector below additionally requires
+# the native writer's retained private inode anchor and terminal seal.
 landing_patch_gc_locked() {
   python3 - "$STATE_ROOT" "$OMS/landings.jsonl" "$OMS/artifacts/index.jsonl" \
     "$DAYS" "$DRY_RUN" <<'PY'
@@ -156,6 +156,10 @@ with landing_lines:
         if not isinstance(landing_id, str) or not landing_id:
             raise SystemExit("landing row %d has no landing_id" % line_number)
         event = row.get("event")
+        if event in ("capture-reserved", "capture-terminal", "capture-release-ready", "capture-released"):
+            # These are validated against private ownership by the native
+            # collector; they are never legacy landing terminal authority.
+            continue
         if event == "intent":
             if not isinstance(row.get("patch"), str) or not row["patch"]:
                 raise SystemExit("landing intent %s has no patch" % landing_id)
@@ -250,6 +254,21 @@ fi
 #    bounded/no-follow digest+identity CAS preserves a generation replaced by
 #    a non-cooperative same-UID writer; OS sandboxing remains the only complete
 #    control for a swap in the final lstat/unlink syscall window.
+# The helper's gc entrypoint takes landings -> marker-set -> plan itself, then
+# lifecycle -> artifact-index. Keep the nonblocking landing-busy result used by
+# the legacy sweep while avoiding nested acquisition of the same outer locks.
+if [ -f "$OMS/landings.jsonl" ]; then
+  managed_gc_status=0
+  managed_gc_out="$(python3 "$ROOT_LIB/landing-capture.py" gc "$STATE_ROOT" \
+    "$DAYS" "$((1 - DRY_RUN))")" || managed_gc_status=$?
+  case "$managed_gc_status" in
+    0) [ -z "$managed_gc_out" ] || printf '%s\n' "$managed_gc_out" ;;
+    75) echo "- managed-landing-capture: skipped while a landing or lifecycle writer lock is active" ;;
+    *) echo "error: managed landing retention refused unknown state" >&2; exit "$managed_gc_status" ;;
+  esac
+fi
+
+
 delegation_set_lock="$STATE_ROOT/.oms/delegations/.marker-set-lock-target"
 delegation_dir_is_safe() {  # DIRECTORY
   python3 - "$1" "$STATE_ROOT" <<'PY'

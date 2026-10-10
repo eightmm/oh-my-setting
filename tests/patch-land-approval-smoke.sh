@@ -53,6 +53,16 @@ fi
 grep -Fxq base "$repo/file.txt" || fail "untracked-tree refusal still changed the patch target"
 rm -f "$repo/untracked.txt"
 
+# Native intake reserves peak bytes before creating the private admission input.
+cp "$repo/.oms/landings.jsonl" "$TMP/quota-journal.before"
+if OMS_LANDING_CAPTURE_BYTES=1 "$LAND" --repo "$repo" --patch "$patch" --verify true \
+  >"$TMP/quota-refusal.out" 2>&1; then
+  fail "native landing ignored capture quota"
+fi
+grep -Fq 'quota exhausted' "$TMP/quota-refusal.out" || fail "quota did not refuse at native intake"
+cmp "$repo/.oms/landings.jsonl" "$TMP/quota-journal.before" || fail "quota refusal changed existing reservations"
+grep -Fxq base "$repo/file.txt" || fail "quota refusal changed the tree"
+
 if OMS_REQUIRE_LANDING_APPROVAL=1 "$LAND" --repo "$repo" --patch "$patch" \
   --verify true >/dev/null 2>&1; then
   fail "strict landing policy accepted an unapproved patch"
@@ -231,6 +241,14 @@ capture = pathlib.Path(next(line[len("- patch: "):] for line in report.read_text
                             if line.startswith("- patch: ")))
 assert capture.read_bytes() == expected and capture != frozen
 assert not str(capture).startswith(str(repo) + "/")
+owner = json.loads((capture.parent / "owner.json").read_text())
+assert owner["terminal"]["reason"] == "complete"
+assert capture.stat().st_nlink == frozen.stat().st_nlink == 2
+assert (capture.parent / "publication.anchor").stat().st_ino == frozen.stat().st_ino
+assert (capture.parent / "capture.anchor").stat().st_ino == capture.stat().st_ino
+reserved = [json.loads(line) for line in (repo / ".oms/landings.jsonl").read_text().splitlines()
+            if json.loads(line)["event"] == "capture-reserved"]
+assert reserved[-1]["managed_capture"]["bytes"] == 2 * len(expected)
 PY
   fail "publication or persisted external admission identity lost captured bytes"
 

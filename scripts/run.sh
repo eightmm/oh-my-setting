@@ -475,7 +475,8 @@ ENUMS = {
     "experiments.jsonl": {"status": {"claimed", "running", "done", "finished", "aborted"}},
     "landings.jsonl": {"event": {"intent", "complete", "abandoned",
                                  "applied-pending-receipt",
-                                 "not-applied-pending-receipt"}},
+                                 "not-applied-pending-receipt", "capture-reserved",
+                                 "capture-terminal", "capture-release-ready", "capture-released"}},
 }
 # Threads are per-conversation files, so they are matched by directory.
 THREAD_REQUIRED = ("thread", "seq", "role")

@@ -10,6 +10,7 @@ import re
 import runpy
 import stat
 import shlex
+import secrets
 import threading
 import subprocess
 import sys
@@ -19,8 +20,10 @@ HERE = Path(__file__).resolve().parent
 DURABLE = runpy.run_path(str(HERE / 'durable-jsonl.py'))
 RECEIPT = runpy.run_path(str(HERE / 'plan-receipt.py'))
 SCOPE = runpy.run_path(str(HERE / 'path_scope.py'))
+CAPTURE = runpy.run_path(str(HERE / 'landing-capture.py'))
 MAX_JSON = 4 * 1024 * 1024
-KINDS = {'accept-research': 'research-accepted', 'satisfy': 'satisfied-by'}
+KINDS = {'accept-research': 'research-accepted', 'accept-main-research': 'main-research-accepted',
+         'satisfy': 'satisfied-by'}
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 _STREAMS = {}
 _ATTEMPTS = {}
@@ -108,12 +111,19 @@ def legacy_relative(repo, value):
     if not isinstance(value, str):
         fail('invalid historical evidence path')
     if os.path.isabs(value):
-        target = DURABLE['canonical_repo_path'](repo, value, 'historical landing evidence')
+        if os.path.dirname(os.path.abspath(value)) == os.path.join(os.path.realpath(repo), '.oms', 'landing-patches'):
+            CAPTURE['read_patch'](repo, value)
+            target = os.path.abspath(value)
+        else:
+            target = DURABLE['canonical_repo_path'](repo, value, 'historical landing evidence')
         value = os.path.relpath(target, repo).replace(os.sep, '/')
     return relative(value)
 
 
 def read(repo, rel, maximum=MAX_JSON, missing=False):
+    rel = relative(rel)
+    if rel.startswith('.oms/landing-patches/') and rel.count('/') == 2:
+        return CAPTURE['read_patch'](repo, rel, maximum)
     return DURABLE['read_no_follow'](repo, relative(rel), 'completion evidence',
                                     max_bytes=maximum, missing_ok=missing)
 
@@ -207,7 +217,7 @@ def load_prefixes(repo, proof):
     keys(proof, ('schema', 'repository_sha256', 'room_id', 'room', 'lifecycle', 'capture'))
     if (type(proof['schema']) is not int or proof['schema'] != 1 or
             proof['repository_sha256'] != namespace(repo) or
-            not isinstance(proof['room_id'], str) or not re.fullmatch(r'room-[0-9a-f]{12}', proof['room_id'])):
+            not isinstance(proof['room_id'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}', proof['room_id'])):
         fail('unsupported or foreign captured provenance')
     capture = proof['capture']
     keys(capture, ('path', 'sha256'))
@@ -401,6 +411,169 @@ def caller_owner(repo, bundle, task):
     return {'participant': who, 'parent_provider': provider, 'room_id': room}
 
 
+def approving_main():
+    return os.environ.get('OMS_ACTION') == 'approve-main-research'
+
+
+def neutral_snapshot(snapshot):
+    # Approval precedes native proof publication. Only that later identity is
+    # excluded; report, original producer, source, verifier and prefixes remain.
+    result = parsed(encoded(snapshot))
+    result['evidence']['reviewer'] = {}
+    return result
+
+
+def controller_manifest(repo):
+    if os.path.realpath(str(HERE.parent.parent)) != repo:
+        fail('approval controller must execute from its declared source worktree')
+    paths = ['scripts/oms']
+    def inaccessible(error):
+        raise error
+    for folder, directories, files in os.walk(os.path.join(repo, 'scripts'), onerror=inaccessible):
+        directories[:] = [name for name in directories if name != '__pycache__']
+        if any(os.path.islink(os.path.join(folder, name)) for name in directories):
+            fail('controller source directory is a link')
+        for name in files:
+            if name.endswith(('.py', '.sh')):
+                paths.append(os.path.relpath(os.path.join(folder, name), repo).replace(os.sep, '/'))
+    if len(paths) > 4096:
+        fail('controller source manifest exceeds bound')
+    result, total = [], 0
+    for rel in sorted(set(paths)):
+        raw = read(repo, rel, 8 * 1024 * 1024)
+        total += len(raw)
+        if total > 64 * 1024 * 1024:
+            fail('controller source bytes exceed bound')
+        info = os.lstat(os.path.join(repo, rel))
+        result.append({'path': rel, 'sha256': sha(raw), 'mode': file_mode(repo, rel, info)})
+    return result
+
+
+def approval_argv(state_repo, execution_repo, bundle, bundle_sha, bundle_path):
+    argv = ['scripts/oms', 'agent-plan', 'approve-main-research', '--repo', execution_repo,
+            '--id', bundle['task_id'], '--lease-id', bundle['lease_id'],
+            '--expected-state', bundle['state'], '--expected-plan-sha256', bundle['plan_sha256'],
+            '--expected-task-sha256', bundle['task_sha256'], '--completion-bundle', bundle_path,
+            '--expected-completion-bundle-sha256', bundle_sha, '--approve-reviewed-bundle']
+    return (['env', 'OMS_STATE_REPO=' + state_repo] if state_repo != execution_repo else []) + argv
+
+
+def approval_record(repo, ref, bundle, bundle_sha, current=False):
+    keys(ref, ('path', 'sha256'))
+    if ref['path'] != '.oms/plan/completion-captures/' + digest(ref['sha256']) + '.json':
+        fail('main approval must be an immutable canonical capture')
+    raw = reference(repo, ref)
+    marker = parsed(raw)
+    keys(marker, ('schema', 'kind', 'authorized_action', 'nonce', 'task_id', 'bundle_sha256',
+                  'room_id', 'participant', 'lease_id', 'state', 'plan_sha256', 'task_sha256',
+                  'snapshot_sha256', 'code_manifest_sha256', 'state_repo_sha256',
+                  'execution_repo_sha256', 'git_common_sha256', 'snapshot', 'verification',
+                  'bundle_path', 'approve_invocation_sha256'))
+    if encoded(marker) != raw or type(marker['schema']) is not int or marker['schema'] != 1:
+        fail('noncanonical main approval capture')
+    expected = dict(kind='oms-main-read-approval-v1', authorized_action='accept-main-research',
+                    task_id=bundle['task_id'], bundle_sha256=bundle_sha,
+                    room_id=bundle['reviewer']['room_id'], participant=bundle['owner']['participant'],
+                    lease_id=bundle['lease_id'], state=bundle['state'],
+                    plan_sha256=bundle['plan_sha256'], task_sha256=bundle['task_sha256'],
+                    state_repo_sha256=sha(repo.encode()), git_common_sha256=namespace(repo))
+    if any(marker.get(key) != value for key, value in expected.items()):
+        fail('main approval differs from exact original bundle/CAS/namespace')
+    for key in ('nonce', 'execution_repo_sha256', 'approve_invocation_sha256',
+                'snapshot_sha256', 'code_manifest_sha256'):
+        digest(marker[key])
+    relative(marker['bundle_path'])
+    snapshot = marker['snapshot']
+    keys(snapshot, ('head', 'base_commit', 'manifest_sha256', 'source_identities',
+                    'verifier_command_sha256', 'repository_sha256', 'evidence',
+                    'evidence_identities', 'provenance', 'controller_manifest'))
+    if (snapshot != neutral_snapshot(snapshot) or sha(encoded(snapshot)) != marker['snapshot_sha256'] or
+            sha(encoded(snapshot['controller_manifest'])) != marker['code_manifest_sha256'] or
+            snapshot['repository_sha256'] != namespace(repo) or
+            snapshot['manifest_sha256'] != sha(encoded(bundle['source_manifest'])) or
+            snapshot['base_commit'] != bundle['base_commit'] or
+            snapshot['verifier_command_sha256'] != sha(bundle['verifier']['command'].encode()) or
+            snapshot['provenance']['room_id'] != marker['room_id']):
+        fail('main approval changed its frozen report/source/verifier snapshot')
+    load_prefixes(repo, snapshot['provenance'])
+    validate_verification(marker['verification'], snapshot)
+    if current:
+        execution_repo = os.path.realpath(os.environ['OMS_REPO'])
+        if (marker['execution_repo_sha256'] != sha(execution_repo.encode()) or
+                marker['bundle_path'] != os.environ['OMS_COMPLETION_BUNDLE'] or
+                snapshot['controller_manifest'] != controller_manifest(execution_repo) or
+                marker['approve_invocation_sha256'] != sha(shlex.join(approval_argv(
+                    repo, execution_repo, bundle, bundle_sha, marker['bundle_path'])).encode())):
+            fail('main approval controller source or invocation changed')
+    return marker
+
+
+def runtime_approval(repo, bundle, bundle_sha):
+    ref = {'path': os.environ.get('OMS_MAIN_REVIEW_APPROVAL', ''),
+           'sha256': os.environ.get('OMS_EXPECTED_MAIN_REVIEW_APPROVAL_SHA256', '')}
+    return ref, approval_record(repo, ref, bundle, bundle_sha, current=True)
+
+
+def completion_owner(repo, bundle, task, action, bundle_sha):
+    if action != 'accept-main-research':
+        return caller_owner(repo, bundle, task)
+    descriptor = bundle.get('reviewer')
+    if not isinstance(descriptor, dict):
+        fail('explicit main reviewer required')
+    declared = bundle.get('owner', {}).get('participant')
+    original = dict(task)
+    if not task.get('claimed_by_participant'):
+        binding = bundle.get('legacy_reviewer_binding')
+        keys(binding, ('participant', 'original_contract', 'review_summary'))
+        if (binding['participant'] != declared or
+                binding['original_contract'] != RECEIPT['projection'](task)):
+            fail('unbound legacy review needs exact explicit current reviewer binding')
+        text(binding['review_summary'], 'current legacy reviewer binding')
+        original['claimed_by_participant'] = declared
+    elif task['claimed_by_participant'] != declared or 'legacy_reviewer_binding' in bundle:
+        fail('foreign native claim cannot be reassigned by main research')
+    if descriptor.get('kind') == 'native-panel-main':
+        keys(descriptor, ('kind',))
+        if approving_main() or os.environ.get('OMS_MAIN_REVIEW_APPROVAL'):
+            fail('native panel main retains its existing direct acceptance contract')
+        owner = caller_owner(repo, bundle, original)
+        owner['reviewer'] = dict(owner, schema=1, kind='native-panel-main',
+                                 attempt_id=os.environ['OMS_PANEL_MAIN_ATTEMPT'],
+                                 bundle_sha256=bundle_sha)
+        return owner
+    keys(descriptor, ('kind', 'room_id', 'approval'))
+    if (os.environ.get('OMS_HARNESS_CHILD') not in (None, '', '0') or
+            os.environ.get('OMS_HARNESS_DELEGATE_DEPTH') not in (None, '', '0') or
+            os.environ.get('OMS_ATTEMPT_ID') or os.environ.get('OMS_HARNESS_CALL_ID')):
+        fail('Desktop main approval is unavailable to a child or delegated caller')
+    if descriptor['kind'] != 'codex-desktop-main' or bundle.get('owner', {}).get('parent_provider') != 'codex':
+        fail('unsupported main reviewer authority')
+    records, content_sha = rows(repo, '.oms/threads/' + relative(descriptor['room_id']) + '.jsonl')
+    state = room_records(records, descriptor['room_id'], content_sha)
+    member = next((m for m in state['participants'] if m['participant'] == declared), {})
+    if (state['closed'] or not member.get('joined') or member.get('role') != 'main' or
+            member.get('parent') or member.get('provider') != 'codex' or
+            not re.fullmatch(r'[0-9a-f]{32}', member.get('consumer', ''))):
+        fail('declared main reviewer is not a current bound Desktop room main')
+    if approving_main():
+        if os.environ.get('OMS_APPROVE_REVIEWED_BUNDLE') != '1':
+            fail('explicit reviewed bundle approval flag required')
+        # This provisional identity grants nothing. Acceptance requires the
+        # actual native chat's successful completed command and output marker.
+        reviewer = {}
+    else:
+        ref, marker = runtime_approval(repo, bundle, bundle_sha)
+        execution_repo = os.path.realpath(os.environ['OMS_REPO'])
+        request = dict(policy='main-read-completion-v1', execution_repo=execution_repo,
+                       approve_argv=approval_argv(repo, execution_repo, bundle, bundle_sha, marker['bundle_path']),
+                       approval=descriptor['approval'], approved_marker=marker,
+                       expected_snapshot_sha256=marker['snapshot_sha256'],
+                       code_manifest_sha256=marker['code_manifest_sha256'])
+        reviewer = runpy.run_path(str(HERE / 'main_reviewer.py'))['capture_completed_main_reviewer'](
+            repo, task['id'], bundle_sha, descriptor['room_id'], declared, ref, request)
+    return dict(participant=declared, parent_provider='codex', room_id=descriptor['room_id'], reviewer=reviewer)
+
+
 def read_parent(repo, events, parent, child_events, who, provider):
     if not child_events or child_events[0].get('event_type') != 'attempt.created':
         fail('READ creation boundary is unproven')
@@ -447,7 +620,12 @@ def namespace(repo):
 
 
 def file_identity(repo, rel):
-    target = DURABLE['canonical_repo_path'](repo, relative(rel), 'frozen completion input')
+    rel = relative(rel)
+    if rel.startswith('.oms/landing-patches/') and rel.count('/') == 2:
+        CAPTURE['read_patch'](repo, rel)
+        target = os.path.join(os.path.realpath(repo), rel)
+    else:
+        target = DURABLE['canonical_repo_path'](repo, rel, 'frozen completion input')
     try:
         info = os.lstat(target)
     except FileNotFoundError:
@@ -718,6 +896,118 @@ def research(repo, bundle, task, plan_id):
             'attempt_events_sha256': sha(encoded(own_events)), 'ancillary_patch': ancillary}
 
 
+def main_research(repo, bundle, task, reviewer):
+    info = bundle['main_research']
+    keys(info, ('classification', 'provenance', 'artifact', 'index_event_id', 'original_deliverable',
+                'read_only_contract', 'original_producer_status'), ('failed_producer_review',))
+    if (info['classification'] != 'research-only' or info['provenance'] not in
+            ('main-authored', 'main-reviewed-external') or task.get('patch') or task.get('landing')
+            or task.get('landed_commit') or task.get('role') not in
+            ('researcher', 'analysis-worker', 'advisor', 'reviewer') or
+            info['original_deliverable'] != task.get('title') or info['read_only_contract'] != 'original-report-only' or
+            re.search(r'(?i)\b(implement|fix|repair|build|deploy|install|publish|push|merge)\b', task.get('title', ''))):
+        fail('main research cannot replace an original product or landing obligation')
+    artifact = info['artifact']
+    reference(repo, artifact)
+    if task.get('artifact') != artifact['path']:
+        fail('main reviewed report differs from original task artifact')
+    index, _ = rows(repo, '.oms/artifacts/index.jsonl')
+    matched = [row for row in index if row.get('event_id') == info['index_event_id']]
+    if len(matched) != 1:
+        fail('exact original report index event required')
+    row = matched[0]
+    if row.get('artifact') != artifact['path'] or row.get('artifact_sha256') != artifact['sha256']:
+        fail('main reviewed report index bytes changed')
+    if (row.get('task_id') and row['task_id'] != task['id'] or
+            row.get('plan_id') and row['plan_id'] != bundle['plan_id'] or type(row.get('exit')) is not int):
+        fail('foreign task/plan or malformed producer status cannot be adopted')
+    status = {key: row.get(key) for key in ('kind', 'exit', 'attempt_id', 'task_id', 'plan_id', 'base_sha')}
+    if info['original_producer_status'] != status:
+        fail('original producer facts must be preserved exactly')
+    if info['provenance'] == 'main-authored':
+        fail('main authorship provenance is unsupported; use explicit main-reviewed-external review')
+    if row['exit']:
+        if info['provenance'] != 'main-reviewed-external':
+            fail('failed producer can only be reviewed as external historical evidence')
+        text(info.get('failed_producer_review'), 'explicit failed producer review')
+    elif 'failed_producer_review' in info:
+        fail('failed producer review contradicts recorded producer status')
+    if not row.get('task_id') or not row.get('plan_id'):
+        adoption = bundle.get('legacy_report_binding')
+        keys(adoption, ('artifact', 'index_event_id', 'index_sha256', 'original_contract', 'review_summary'))
+        if (adoption['artifact'] != artifact or adoption['index_event_id'] != info['index_event_id'] or
+                digest(adoption['index_sha256']) != sha(encoded(row)) or
+                adoption['original_contract'] != bundle['original_contract']):
+            fail('legacy report binding must preserve exact unbound index and original task')
+        text(adoption['review_summary'], 'current unbound report review')
+    elif 'legacy_report_binding' in bundle:
+        fail('bound producer report cannot use legacy report adoption')
+    if row.get('patch'):
+        ancillary = {'path': relative(row['patch']), 'sha256': digest(row.get('patch_sha256'))}
+        if reference(repo, ancillary, 8 * 1024 * 1024) != b'':
+            fail('main research cannot relabel a nonempty producer patch')
+    elif row.get('patch_sha256'):
+        fail('producer patch digest without a path')
+    if not any(artifact in item['evidence'] and item['obligation'] == task['title']
+               for item in bundle['requirements']):
+        fail('original READ deliverable and report must be covered explicitly')
+    if not isinstance(reviewer, dict):
+        fail('actual main reviewer proof required')
+    return {'index': row, 'artifact': artifact, 'provenance': info['provenance'],
+            'child_provenance_asserted': False, 'reviewer': reviewer}
+
+
+def validate_main_reviewer(repo, bundle, reviewer, bundle_sha, provenance):
+    if not isinstance(reviewer, dict):
+        fail('invalid immutable main reviewer object')
+    with historical_prefixes(repo, provenance):
+        if reviewer.get('kind') == 'native-panel-main':
+            if bundle['reviewer']['kind'] != 'native-panel-main':
+                fail('native reviewer cannot replace the approved Desktop contract')
+            keys(reviewer, ('schema', 'kind', 'participant', 'parent_provider', 'room_id',
+                            'attempt_id', 'bundle_sha256'))
+            if (type(reviewer['schema']) is not int or reviewer['schema'] != 1 or
+                    reviewer['bundle_sha256'] != bundle_sha or
+                    reviewer['participant'] != bundle['owner']['participant'] or
+                    reviewer['parent_provider'] != bundle['owner']['parent_provider'] or
+                    reviewer['room_id'] != provenance['room_id']):
+                fail('immutable main reviewer binding mismatch')
+            events, attempts = attempts_for(repo)
+            bindings = related_native_bindings(events, reviewer['participant'],
+                                               reviewer['parent_provider'], reviewer['room_id'])
+            active = [attempts[ident] for ident in bindings if attempts[ident].get('terminal') is not True]
+            if len(active) != 1 or active[0].get('attempt_id') != reviewer['attempt_id']:
+                fail('captured main reviewer was not the unique native owner')
+            membership_epoch(repo, reviewer['room_id'], reviewer['participant'], reviewer['parent_provider'])
+            return
+        if bundle['reviewer']['kind'] != 'codex-desktop-main':
+            fail('Desktop reviewer cannot replace the native panel contract')
+        records, content_sha = rows(repo, '.oms/threads/' + provenance['room_id'] + '.jsonl')
+        state = room_records(records, provenance['room_id'], content_sha)
+        member = next((m for m in state['participants'] if m['participant'] == bundle['owner']['participant']), {})
+        if (state['closed'] or not member.get('joined') or member.get('role') != 'main'
+                or member.get('parent') or member.get('provider') != 'codex'):
+            fail('captured Desktop reviewer was not a joined native main')
+        marker = approval_record(repo, reviewer.get('approval_ref', {}), bundle, bundle_sha)
+        expected = dict(schema=2, action='approve-main-research', authorized_action='accept-main-research',
+                        policy='main-read-completion-v1', task_id=bundle['task_id'], bundle_sha256=bundle_sha,
+                        room_id=provenance['room_id'], participant=bundle['owner']['participant'],
+                        native_consumer=member.get('consumer'), state_repo_sha256=sha(repo.encode()),
+                        state_git_namespace_sha256=namespace(repo), source_git_namespace_sha256=namespace(repo),
+                        git_common_sha256=namespace(repo), approval_ref=reviewer['approval_ref'],
+                        marker_nonce_sha256=sha(marker['nonce'].encode()),
+                        snapshot_sha256=marker['snapshot_sha256'], code_manifest_sha256=marker['code_manifest_sha256'],
+                        execution_repo_sha256=marker['execution_repo_sha256'],
+                        approve_invocation_sha256=marker['approve_invocation_sha256'],
+                        proof_sha256=reviewer.get('proof_sha256'), policy_approval=bundle['reviewer']['approval'])
+        expected['room_binding_sha256'] = sha(json.dumps(
+            {'room': provenance['room_id'], 'participant': bundle['owner']['participant'],
+             'consumer': member.get('consumer'), 'role': 'main', 'provider': 'codex'},
+            sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode())
+        if runpy.run_path(str(HERE / 'main_reviewer.py'))['verify_captured_main_reviewer'](reviewer, expected) is not True:
+            fail('invalid immutable Desktop completed approval proof')
+
+
 def satisfaction(repo, bundle, tasks, plan_id):
     successor = bundle['successor']
     common = ('plan_id', 'task_id', 'task_sha256', 'original_contract', 'product_kind')
@@ -965,7 +1255,10 @@ def review_contract(state_repo, bundle, task, plan_id, action):
     required = ('schema', 'kind', 'plan_id', 'task_id', 'task_sha256', 'plan_sha256', 'state',
                 'lease_id', 'owner', 'original_contract', 'review_summary', 'reviewed_obligations',
                 'requirements', 'base_commit', 'source_envelope', 'source_manifest', 'verifier')
-    keys(bundle, required + (('research',) if action == 'accept-research' else ('successor',)), ('legacy_adoption',))
+    extra = (('research',) if action == 'accept-research' else
+             ('main_research', 'reviewer') if action == 'accept-main-research' else ('successor',))
+    optional = ('legacy_reviewer_binding', 'legacy_report_binding') if action == 'accept-main-research' else ('legacy_adoption',)
+    keys(bundle, required + extra, optional)
     if type(bundle['schema']) is not int or bundle['schema'] != 1 or bundle['kind'] != KINDS[action]:
         fail('unsupported completion bundle version/kind')
     if not isinstance(bundle['plan_id'], str) or not re.fullmatch(r'plan_[0-9a-f]{32}', bundle['plan_id']):
@@ -987,10 +1280,19 @@ def review_contract(state_repo, bundle, task, plan_id, action):
     text(bundle['owner']['parent_provider'], 'native parent provider', 80)
     text(bundle['owner']['provider'], 'owner provider', 80)
     text(bundle['owner']['participant'], 'owner participant', 160)
-    if (not task.get('provider') or not task.get('claimed_by_participant') or
+    legacy_main = action == 'accept-main-research' and not task.get('claimed_by_participant')
+    if (not task.get('provider') or (not legacy_main and not task.get('claimed_by_participant')) or
             bundle['owner']['provider'] != task['provider'] or
-            bundle['owner']['participant'] != task['claimed_by_participant']):
+            (not legacy_main and bundle['owner']['participant'] != task['claimed_by_participant'])):
         fail('current declared claim owner mismatch; owner inference is forbidden')
+    if legacy_main:
+        binding = bundle.get('legacy_reviewer_binding')
+        keys(binding, ('participant', 'original_contract', 'review_summary'))
+        if binding['participant'] != bundle['owner']['participant'] or binding['original_contract'] != bundle['original_contract']:
+            fail('legacy reviewer binding differs from original unbound contract')
+        text(binding['review_summary'], 'legacy reviewer approval summary')
+    elif 'legacy_reviewer_binding' in bundle:
+        fail('a bound native claim cannot use legacy reviewer adoption')
     text(bundle['review_summary'], 'parent review summary')
     screen = subprocess.run(['bash', '-c', '. "$1"; grep -Eiq "$(agent_memory_secret_re)"',
                              'completion-screen', str(HERE / 'agent-memory-common.sh')],
@@ -1033,7 +1335,7 @@ def review_contract(state_repo, bundle, task, plan_id, action):
         fail('reviewed obligation/verifier map omits declared source envelope')
 
 
-def check_bundle(repo, state_repo, bundle, task, tasks, plan_id, action, provenance):
+def check_bundle(repo, state_repo, bundle, task, tasks, plan_id, action, provenance, reviewer=None):
     review_contract(state_repo, bundle, task, plan_id, action)
     snapshot = source(repo, bundle, task)
     command_sha = verifier(repo, bundle['verifier'], task)
@@ -1061,6 +1363,11 @@ def check_bundle(repo, state_repo, bundle, task, tasks, plan_id, action, provena
                     any(frozen['attempt']['refs'].get(k) != value for k, value in event.get('refs', {}).items())):
                 fail('contradictory READ ref history')
         snapshot['evidence'] = frozen
+    elif action == 'accept-main-research':
+        snapshot['evidence'] = main_research(state_repo, bundle, task, reviewer)
+        if bundle['reviewer']['kind'] == 'codex-desktop-main':
+            snapshot['controller_manifest'] = controller_manifest(repo)
+
     else:
         snapshot['evidence'] = satisfaction(state_repo, bundle, tasks, plan_id)
     evidence_refs = [ref for item in bundle['requirements'] for ref in item['evidence']]
@@ -1068,12 +1375,18 @@ def check_bundle(repo, state_repo, bundle, task, tasks, plan_id, action, provena
         evidence_refs.append(bundle['research']['artifact'])
         if snapshot['evidence']['ancillary_patch']:
             evidence_refs.append(snapshot['evidence']['ancillary_patch'])
+    elif action == 'accept-main-research':
+        evidence_refs.append(bundle['main_research']['artifact'])
     elif bundle['successor']['product_kind'] == 'patch-land':
         proof = snapshot['evidence']
         evidence_refs.extend([{'path': legacy_relative(state_repo, proof['intent']['patch']),
                                'sha256': proof['intent']['patch_sha']},
                               {'path': proof['admission']['artifact'], 'sha256': proof['admission']['artifact_sha256']}])
     snapshot['evidence_identities'] = {ref['path']: file_identity(state_repo, ref['path']) for ref in evidence_refs}
+    if action == 'accept-main-research' and bundle['reviewer']['kind'] == 'codex-desktop-main' and not approving_main():
+        _, marker = runtime_approval(state_repo, bundle, sha(read(state_repo, os.environ['OMS_COMPLETION_BUNDLE'])))
+        if neutral_snapshot(snapshot) != marker['snapshot']:
+            fail('approved full snapshot differs from current report/source/verifier/CAS evidence')
     return snapshot
 
 
@@ -1094,14 +1407,14 @@ def checked_receipt(repo, ref):
         fail('completion receipt must be content-addressed in canonical namespace')
     receipt = parsed(reference(repo, ref))
     keys(receipt, ('schema', 'kind', 'completion_kind', 'bundle_sha256', 'bundle', 'original_task',
-                   'original_plan_sha256', 'snapshot', 'verification', 'ts', 'bundle_raw'))
+                   'original_plan_sha256', 'snapshot', 'verification', 'ts', 'bundle_raw'), ('executor',))
     if type(receipt['schema']) is not int or receipt['schema'] != 1 or receipt['kind'] != 'oms-plan-completion':
         fail('unsupported completion receipt')
     if not isinstance(receipt['original_task'], dict):
         fail('invalid receipt original task')
     keys(receipt['snapshot'], ('head', 'base_commit', 'manifest_sha256', 'source_identities',
                               'verifier_command_sha256', 'repository_sha256', 'evidence', 'evidence_identities',
-                              'provenance'))
+                              'provenance'), ('controller_manifest',))
     load_prefixes(repo, receipt['snapshot']['provenance'])
     datetime.datetime.strptime(receipt['ts'], '%Y-%m-%dT%H:%M:%SZ')
     bundle = receipt['bundle']
@@ -1164,6 +1477,20 @@ def validate_done(repo, plan, task, commit_proof=None):
         recorded = receipt['snapshot'].get('evidence', {})
         if any(actual[k] != recorded.get(k) for k in ('index', 'attempt', 'parent', 'attempt_events_sha256', 'ancillary_patch')):
             fail('immutable research provenance changed')
+    elif receipt['completion_kind'] == 'main-research-accepted':
+        recorded = receipt['snapshot'].get('evidence', {})
+        reviewer = recorded.get('reviewer', {})
+        validate_main_reviewer(repo, bundle, reviewer, receipt['bundle_sha256'], receipt['snapshot']['provenance'])
+        actual = main_research(repo, bundle, original, reviewer)
+        if actual != recorded:
+            fail('immutable main research report/index/reviewer changed')
+        if bundle['reviewer']['kind'] == 'codex-desktop-main':
+            marker = approval_record(repo, reviewer['approval_ref'], bundle, receipt['bundle_sha256'])
+            if neutral_snapshot(receipt['snapshot']) != marker['snapshot']:
+                fail('accepted snapshot differs from actual main approval')
+            keys(receipt.get('executor'), ('kind', 'uid'))
+            if receipt['executor']['kind'] != 'local-uid' or type(receipt['executor']['uid']) is not int or receipt['executor']['uid'] < 0:
+                fail('invalid separate local executor record')
     else:
         successor = bundle['successor']
         historical = dict(successor['original_contract'], state='done')
@@ -1283,7 +1610,8 @@ def run(context):
         fail('parent-only operation')
     global _COMMIT_PROOF
     _COMMIT_PROOF = context['commit_proof']
-    action = context['action']
+    approval_only = context['action'] == 'approve-main-research'
+    action = 'accept-main-research' if approval_only else context['action']
     repo = os.path.realpath(os.environ['OMS_REPO'])
     state_repo = os.path.realpath(os.environ.get('OMS_STATE_REPO') or repo)
     expected_path = os.path.join(state_repo, '.oms', 'plan', 'tasks.json')
@@ -1304,8 +1632,9 @@ def run(context):
     reset_streams()
     if namespace(repo) != namespace(state_repo):
         fail('foreign execution/state repository')
-    owner = caller_owner(state_repo, bundle, task)
-    prior = prior_receipt(state_repo, bundle_sha)
+    prior = None if approval_only else prior_receipt(state_repo, bundle_sha)
+    if approval_only and task.get('state') == 'done':
+        fail('a completed task cannot receive a fresh approval')
     if task.get('state') == 'done':
         validate_done(state_repo, plan, task)
         if not prior or prior[1] != task.get('completion_receipt') or prior[0]['bundle'] != bundle:
@@ -1313,6 +1642,17 @@ def run(context):
         original = prior[0]['original_task']
     else:
         original = task
+    desktop_replay = (task.get('state') == 'done' and action == 'accept-main-research' and
+                      bundle.get('reviewer', {}).get('kind') == 'codex-desktop-main')
+    if desktop_replay:
+        # A completed bearer approval can only replay its own immutable receipt;
+        # the producer chat and room need not remain live forever.
+        accepted_ref = prior[0]['snapshot']['evidence']['reviewer']['approval_ref']
+        if accepted_ref != {'path': os.environ.get('OMS_MAIN_REVIEW_APPROVAL', ''),
+                            'sha256': os.environ.get('OMS_EXPECTED_MAIN_REVIEW_APPROVAL_SHA256', '')}:
+            fail('completed replay requires its exact original main approval')
+    else:
+        owner = completion_owner(state_repo, bundle, original, action, bundle_sha)
     for name, actual in (('OMS_EXPECTED_PLAN_SHA256', bundle.get('plan_sha256')),
                          ('OMS_EXPECTED_TASK_SHA256', bundle.get('task_sha256')),
                          ('OMS_EXPECTED_STATE', bundle.get('state')),
@@ -1341,6 +1681,9 @@ def run(context):
     review_contract(state_repo, bundle, original, plan.get('plan_id'), action)
     if prior:
         provenance = prior[0]['snapshot']['provenance']
+    elif action == 'accept-main-research' and bundle['reviewer']['kind'] == 'codex-desktop-main' and not approval_only:
+        _, marker = runtime_approval(state_repo, bundle, bundle_sha)
+        provenance = marker['snapshot']['provenance']
     elif phase == 'preflight':
         provenance = capture_prefixes(state_repo, owner['room_id'])
     elif phase == 'finalize':
@@ -1349,7 +1692,10 @@ def run(context):
         fail('invalid transaction phase')
     if provenance['room_id'] != owner['room_id']:
         fail('current caller room differs from captured authority')
-    snapshot = check_bundle(repo, state_repo, bundle, original, plan['tasks'], plan.get('plan_id'), action, provenance)
+    snapshot = check_bundle(repo, state_repo, bundle, original, plan['tasks'], plan.get('plan_id'), action,
+                            provenance, owner.get('reviewer'))
+    if action == 'accept-main-research' and not approval_only:
+        validate_main_reviewer(state_repo, bundle, owner['reviewer'], bundle_sha, provenance)
     if prior:
         receipt, ref = prior
         if (receipt['bundle'] != bundle or receipt['original_task'] != original or
@@ -1364,6 +1710,22 @@ def run(context):
     if (checkpoint.get('bundle_sha256') != bundle_sha or checkpoint.get('snapshot') != snapshot or
             type(checkpoint.get('resume')) is not bool or (checkpoint['resume'] and not prior)):
         fail('evidence/source/verifier changed during execution')
+    if approval_only:
+        verification = parsed(os.environ['OMS_COMPLETION_VERIFICATION'])
+        validate_verification(verification, snapshot)
+        marker = dict(schema=1, kind='oms-main-read-approval-v1', authorized_action='accept-main-research',
+                      nonce=secrets.token_hex(32), task_id=task['id'], bundle_sha256=bundle_sha,
+                      room_id=owner['room_id'], participant=owner['participant'], lease_id=bundle['lease_id'],
+                      state=bundle['state'], plan_sha256=bundle['plan_sha256'], task_sha256=bundle['task_sha256'],
+                      snapshot_sha256=sha(encoded(neutral_snapshot(snapshot))),
+                      code_manifest_sha256=sha(encoded(snapshot['controller_manifest'])),
+                      state_repo_sha256=sha(state_repo.encode()), execution_repo_sha256=sha(repo.encode()),
+                      git_common_sha256=namespace(repo), snapshot=neutral_snapshot(snapshot), verification=verification,
+                      bundle_path=os.environ['OMS_COMPLETION_BUNDLE'], approve_invocation_sha256=sha(shlex.join(
+                          approval_argv(state_repo, repo, bundle, bundle_sha, os.environ['OMS_COMPLETION_BUNDLE'])).encode()))
+        ref = immutable_object(state_repo, '.oms/plan/completion-captures', encoded(marker), '.json', MAX_JSON)
+        print(encoded({'kind': 'oms-main-read-approved', 'approval': ref}).decode(), end='')
+        return
     if not prior:
         verification = parsed(os.environ['OMS_COMPLETION_VERIFICATION'])
         validate_verification(verification, snapshot)
@@ -1372,6 +1734,8 @@ def run(context):
                    'original_task': original,
                    'original_plan_sha256': sha(plan_raw), 'snapshot': snapshot,
                    'verification': verification, 'ts': context['ts']}
+        if action == 'accept-main-research' and bundle['reviewer']['kind'] == 'codex-desktop-main':
+            receipt['executor'] = {'kind': 'local-uid', 'uid': os.getuid()}
         raw = encoded(receipt)
         ref = {'path': '.oms/plan/completions/' + sha(raw) + '.json', 'sha256': sha(raw)}
         def immutable(old):
@@ -1405,15 +1769,17 @@ def execute(state_repo, bundle_path, expected, commit_proof):
         fail('plan changed before actual verifier execution')
     original = dict(bundle['original_contract'], state=bundle['state'])
     action = next(name for name, kind in KINDS.items() if kind == bundle['kind'])
-    caller_owner(state_repo, bundle, original)
+    owner = completion_owner(state_repo, bundle, original, action, expected)
     provenance = transaction_snapshot()['snapshot']['provenance']
-    before = check_bundle(repo, state_repo, bundle, original, current['tasks'], current.get('plan_id'), action, provenance)
+    before = check_bundle(repo, state_repo, bundle, original, current['tasks'], current.get('plan_id'), action,
+                          provenance, owner.get('reviewer'))
     if transaction_snapshot()['snapshot'] != before:
         fail('frozen inputs changed before actual verifier execution')
     verification = capture_verifier(repo, bundle['verifier']['command'], before)
     reset_streams()
-    caller_owner(state_repo, bundle, original)
-    after = check_bundle(repo, state_repo, bundle, original, current['tasks'], current.get('plan_id'), action, provenance)
+    owner = completion_owner(state_repo, bundle, original, action, expected)
+    after = check_bundle(repo, state_repo, bundle, original, current['tasks'], current.get('plan_id'), action,
+                         provenance, owner.get('reviewer'))
     if before != after:
         fail('source/evidence/verifier changed during actual execution')
     print(json.dumps(verification))
@@ -1443,7 +1809,18 @@ def locked_plan(arguments):
 
 if __name__ == '__main__':
     try:
-        if len(sys.argv) > 2 and sys.argv[1] == '--locked-plan':
+        if len(sys.argv) == 5 and sys.argv[1] == '--main-review-room':
+            state_repo, bundle_path, expected = sys.argv[2:]
+            raw = read(os.path.realpath(state_repo), bundle_path)
+            if sha(raw) != digest(expected):
+                fail('bundle changed before room selection')
+            descriptor = parsed(raw).get('reviewer', {})
+            ident = descriptor.get('room_id')
+            if (descriptor.get('kind') != 'codex-desktop-main' or not isinstance(ident, str)
+                    or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}', ident)):
+                fail('explicit Desktop review room required')
+            print(ident)
+        elif len(sys.argv) > 2 and sys.argv[1] == '--locked-plan':
             locked_plan(sys.argv[2:])
         elif sys.argv[1:] == ['--resume']:
             print(1 if transaction_snapshot()['resume'] else 0)

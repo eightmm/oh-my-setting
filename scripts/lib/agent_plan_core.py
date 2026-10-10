@@ -58,7 +58,7 @@ def load():
     # decoding it; a replaced FIFO cannot reveal its completion fields.
     typed_namespace = (same_absolute_path(path, canonical) and
                        os.path.lexists(os.path.join(state_root, ".oms", "plan", "completions")))
-    if act in {"accept-research", "satisfy"} or typed_namespace:
+    if act in {"accept-research", "approve-main-research", "accept-main-research", "satisfy"} or typed_namespace:
         completion = completion_module()
         try:
             d = completion["strict_plan"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), path)
@@ -677,7 +677,7 @@ if needs_retirement_guard:
         sys.exit(0)
     # The verifier phase is read-only and intentionally runs outside locks;
     # cleanup is fenced by both locked preflight and locked finalization.
-    if not (act in {"accept-research", "satisfy"} and env("OMS_COMPLETION_PHASE") == "verify"):
+    if act != "approve-main-research" and not (act in {"accept-research", "accept-main-research", "satisfy"} and env("OMS_COMPLETION_PHASE") == "verify"):
         retirement["cleanup_completed_retirement"](retirement_context)
 if act == "accept":
     if os.path.exists(path):
@@ -693,7 +693,7 @@ d = load()
 tasks = d["tasks"]
 CONTRACT_VERDICT = project_contract_verdict(d)
 
-if act in {"accept-research", "satisfy"}:
+if act in {"accept-research", "approve-main-research", "accept-main-research", "satisfy"}:
     require_project_contract_authority()
     completion = completion_module()
     try:
@@ -1062,6 +1062,16 @@ def get_task(i):
 
 if act in ("claim", "start", "finish", "review", "repair", "land", "block", "release", "recover-lease", "reopen", "show", "evidence-snapshot", "touch", "cancel"):
     i = require_id(); t = get_task(i)
+    if act in {"review", "finish"}:
+        candidate_patch = env("OMS_PATCH") or t.get("patch", "")
+        if candidate_patch:
+            candidate_path = os.path.abspath(os.path.join(state_repo(), candidate_patch))
+            if os.path.dirname(candidate_path) == os.path.join(os.path.realpath(state_repo()),
+                                                               ".oms", "landing-patches"):
+                # The plan writer lock excludes capture GC. Refuse a new pin
+                # if collection already won; ordinary patch paths are unchanged.
+                capture = _load(os.path.join(os.path.dirname(__file__), "landing-capture.py"))
+                capture["read_patch"](state_repo(), candidate_path)
     if act in {"claim", "start", "review", "repair", "land", "finish"} and (
             t.get("executor_id") or t.get("executor_soul_sha256")):
         die("Soul executor receipt is retired; preserve the old evidence and create a fresh plan task")

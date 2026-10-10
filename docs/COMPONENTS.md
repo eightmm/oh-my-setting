@@ -542,6 +542,34 @@ at every mutation boundary, including cleanup. Landing terminal rows close a
 transaction only when their canonical receipt and durable plan, approval, and
 lineage outcome also converge.
 
+
+New native landing captures reserve a generation before writing payload bytes.
+`OMS_LANDING_CAPTURE_COUNT` (default 256) and `OMS_LANDING_CAPTURE_BYTES`
+(default 134217728, 128 MiB) cap newly managed generations and their reserved
+peak payload bytes. Each input is limited to 16 MiB; the reservation charges both
+the private admission input and its separate publication copy. Hardlinked
+private anchors do not duplicate payload bytes. Admission failures, interrupted
+publication and unknown reservations remain charged. A full budget refuses a
+new capture before it writes bytes; it does not delete protected evidence to
+make room. These limits cover new managed payloads, not legacy files, journal
+metadata, externally modified files or total historical storage.
+
+`oms gc` preserves legacy, unknown and referenced history. On supported POSIX
+hosts it can reclaim an aged, unreferenced native generation only after checking
+the private directory and retained inode anchors, the actual writer's terminal
+seal, plan/completion/report/index pins, and quiescence. Collection holds the
+landing, marker, plan, lifecycle and artifact-index writer locks in that order.
+It first quarantines a shared pathname inside the private generation directory
+and checks its inode again. A replacement is restored without overwriting a
+new occupant, or preserved in quarantine; it is never deleted as native data.
+Interrupted owned quarantines can resume. Unproven reservations stay charged.
+Windows collection preserves captures until private ACL and quarantine semantics
+can be proved; quota and backpressure still apply. Filesystems without native
+hardlinks refuse new managed publication. Ordinary durable-file readers retain
+their single-link rule; only designated landing readers validate native anchors.
+The private generation directory is a cooperating-OMS ownership boundary, not
+an OS isolation boundary against hostile code running as the same user.
+
 ```bash
 oms peer-delegate --to codex --prompt "Implement the bounded change."
 oms patch-admit --patch path/to/change.patch  # optional read-only preview

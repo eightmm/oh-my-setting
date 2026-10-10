@@ -60,6 +60,7 @@ SOURCE_PATCH=""
 FROZEN_PATCH=""
 CAPTURE_PATCH=""
 CAPTURE_PERSIST=0
+CAPTURE_HELPER="$ROOT_LIB/landing-capture.py"
 LANDING_BASE=""
 intent_plan_receipt_sha=""
 intent_plan_done_receipt_sha=""
@@ -235,6 +236,12 @@ if directory_fd is not None:
     finally:
         os.close(directory_fd)
 PY
+  local append_status=$?
+  [ "$append_status" = 0 ] || return "$append_status"
+  case "$event" in
+    complete|abandoned)
+      python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" "$event" || return $? ;;
+  esac
 }
 
 landing_receipt_hash() {
@@ -742,10 +749,20 @@ if [ "$RECOVER" = 1 ]; then
       continue
     fi
     if [ "$intent_has_complete" = 1 ] && complete_terminal_converged; then
+      # Only actual receipt convergence can repair a missing native seal.
+      if ! python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" complete; then
+        needs_manual=$((needs_manual + 1))
+        continue
+      fi
       echo "patch-land: $LANDING_ID already complete (durable receipts converged)" >&2
       continue
     fi
     if [ "$intent_has_abandoned" = 1 ] && abandoned_terminal_converged; then
+      # Only actual receipt convergence can repair a missing native seal.
+      if ! python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" abandoned; then
+        needs_manual=$((needs_manual + 1))
+        continue
+      fi
       echo "patch-land: $LANDING_ID already abandoned (durable receipts converged)" >&2
       continue
     fi
@@ -1072,8 +1089,8 @@ if ! oms_hold_file_lock "$LANDINGS"; then
 fi
 patch_land_cleanup() {
   if [ -n "$CAPTURE_PATCH" ] && [ "$CAPTURE_PERSIST" = 0 ]; then
-    rm -f "$CAPTURE_PATCH" 2>/dev/null || true
-    rmdir "$(dirname "$CAPTURE_PATCH")" 2>/dev/null || true
+    python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" before-admission ||
+      echo "warning: unproven capture remains reserved" >&2
   fi
   oms_release_held_file_lock
 }
@@ -1083,76 +1100,11 @@ LANDING_ID="land-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM:-0}"
 agent_memory_ensure_oms_ignore "$STATE_REPO" || fail "cannot initialize private landing state"
 FROZEN_DIR="$STATE_REPO/.oms/landing-patches"
 FROZEN_PATCH="$FROZEN_DIR/$LANDING_ID.patch"
-CAPTURE_PATCH="$(python3 - "$SOURCE_PATCH" "$STATE_REPO" "$REPO" "$LANDING_ID" "$PATCH_SHA" "$ROOT/scripts/lib/durable-jsonl.py" <<'PY'
-import hashlib, os, runpy, shutil, stat, sys, tempfile
-source, state, repo, landing, expected, helper = sys.argv[1:]
-durable = runpy.run_path(helper)
-state, repo = os.path.realpath(state), os.path.realpath(repo)
-
-def outside(path):
-    path = os.path.realpath(path)
-    for root in (state, repo):
-        try:
-            if os.path.normcase(os.path.commonpath([path, root])) == os.path.normcase(root):
-                return False
-        except ValueError:
-            pass  # Different Windows volumes cannot overlap.
-    return True
-
-# Publication needs a same-filesystem atomic link. Prefer the system temp area;
-# a private sibling is the fallback when temp lives on a different filesystem.
-staging = None
-for parent in (tempfile.gettempdir(), os.path.dirname(state)):
-    try:
-        if not outside(parent) or os.stat(parent).st_dev != os.stat(state).st_dev:
-            continue
-        staging = tempfile.mkdtemp(prefix="oms-landing-capture-", dir=parent)
-        break
-    except OSError:
-        continue
-if staging is None:
-    raise SystemExit("no writable capture directory outside the repo on its filesystem")
-try:
-    directory = os.stat(staging, follow_symlinks=False)
-    if (not stat.S_ISDIR(directory.st_mode) or durable["is_reparse"](directory) or
-            (os.name != "nt" and directory.st_mode & 0o077) or
-            (hasattr(os, "getuid") and directory.st_uid != os.getuid())):
-        raise ValueError("capture directory is not private to this user")
-    before = os.stat(source, follow_symlinks=False)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    flags |= getattr(os, "O_NONBLOCK", 0)
-    with os.fdopen(os.open(source, flags), "rb") as original:
-        opened = os.fstat(original.fileno())
-        if (not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(before.st_mode) or
-                durable["is_reparse"](before) or durable["is_reparse"](opened) or
-                (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
-            raise ValueError("patch is not a stable regular file")
-        target = os.path.join(staging, landing + ".patch")
-        with open(target, "xb") as captured:
-            os.chmod(target, 0o600)
-            digest = hashlib.sha256()
-            remaining = opened.st_size
-            while remaining:
-                chunk = original.read(min(remaining, 1024 * 1024))
-                if not chunk:
-                    raise ValueError("patch shrank during capture")
-                remaining -= len(chunk)
-                captured.write(chunk)
-                digest.update(chunk)
-            if original.read(1) or digest.hexdigest() != expected:
-                raise ValueError("patch changed during capture")
-            captured.flush()
-            os.fsync(captured.fileno())
-    durable["_fsync_directory_path"](staging, "landing capture")
-    durable["_fsync_directory_path"](os.path.dirname(staging), "landing capture")
-    print(target.replace(os.sep, "/"))
-except BaseException:
-    shutil.rmtree(staging)
-    raise
-PY
-)" || fail "cannot capture patch bytes before admission"
+CAPTURE_PATCH="$(python3 "$CAPTURE_HELPER" allocate "$STATE_REPO" "$SOURCE_PATCH" "$LANDING_ID" "$PATCH_SHA" "$REPO")" ||
+  fail "cannot reserve and capture patch bytes before admission"
 CAPTURE_PATCH="${CAPTURE_PATCH//$'\r'/}"
 PATCH="$CAPTURE_PATCH"
+
 frozen_patch_matches() {
   local current_sha
   current_sha="$(oms_sha256_file "$PATCH" 2>/dev/null || true)"
@@ -1228,10 +1180,8 @@ fi
 # cycle), so they feed the shared failure memory: fingerprint by patch content
 # so the same rejected patch warns any later agent before it re-lands.
 land_fingerprint_cmd() {
-  local sha
-  sha="$(oms_sha256_file "$PATCH" 2>/dev/null || true)"
-  [ -n "$sha" ] || sha="$(basename "$SOURCE_PATCH")"
-  printf 'patch-land %s' "$sha"
+  # Admission identity survives disposal of its proved ephemeral input.
+  printf 'patch-land %s' "$PATCH_SHA"
 }
 known_reject_fp=""
 check_out="$( (cd "$REPO" && "$ROOT/scripts/fail-ledger.sh" check --cmd "$(land_fingerprint_cmd)") 2>&1 || true)"
@@ -1279,6 +1229,15 @@ admit_cmd=("$ROOT/scripts/patch-admit.sh" --patch "$PATCH" --repo "$REPO")
 # and bytes available; uncertain receipt writes are not permission to unlink.
 CAPTURE_PERSIST=1
 if ! "${admit_cmd[@]}" >/dev/null; then
+  # A verifier can change its private input before the stricter producer
+  # witness refuses it. Diagnose those bytes without sealing or deleting them.
+  frozen_patch_matches ||
+    fail "frozen patch changed during admission; verified bytes were not applied"
+  # The outer landings lock is still held here. Acquire only the remaining
+  # existing reader fences; no public skip-lock or force-cleanup capability.
+  python3 -c 'import runpy,sys; runpy.run_path(sys.argv[1])["cleanup_rejected"](sys.argv[2],sys.argv[3])' \
+    "$CAPTURE_HELPER" "$STATE_REPO" "$LANDING_ID" ||
+    echo "warning: private rejected capture remains reserved" >&2
   echo "patch-land: REJECTED by admission gate; not applied" >&2
   # Durable record: without this a later agent re-runs the whole delegate +
   # admit cycle for a patch already known to fail.
@@ -1302,51 +1261,9 @@ if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=all)" ]; then
   fail "tree became dirty during admission; re-admit against the current tree"
 fi
 
-# Publish only admitted captured bytes. Prepare outside protected state and link
-# without replacing any destination; after visibility, even fsync/intent failure
-# must preserve the snapshot for other observers and manual recovery.
-if ! python3 - "$CAPTURE_PATCH" "$FROZEN_PATCH" "$PATCH_SHA" "$STATE_REPO" \
-    "$ROOT/scripts/lib/durable-jsonl.py" <<'PY'
-import hashlib, os, runpy, sys, tempfile
-capture, destination, expected, state, helper = sys.argv[1:]
-durable = runpy.run_path(helper)
-destination = durable["canonical_repo_path"](state, destination, "landing patch", True)
-parent = os.path.dirname(destination)
-info = os.stat(parent, follow_symlinks=False)
-if hasattr(os, "getuid") and info.st_uid != os.getuid():
-    raise SystemExit("landing directory is not owned by this user")
-flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-flags |= getattr(os, "O_NONBLOCK", 0)
-prepared = None
-try:
-    before = os.stat(capture, follow_symlinks=False)
-    with os.fdopen(os.open(capture, flags), "rb") as original:
-        opened = os.fstat(original.fileno())
-        if (not durable["safe_regular"](before) or not durable["safe_regular"](opened) or
-                (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
-            raise ValueError("capture is not a stable private regular file")
-        fd, prepared = tempfile.mkstemp(prefix="publication-", dir=os.path.dirname(capture))
-        with os.fdopen(fd, "wb") as output:
-            digest = hashlib.sha256()
-            remaining = opened.st_size
-            while remaining:
-                chunk = original.read(min(remaining, 1024 * 1024))
-                if not chunk:
-                    raise ValueError("capture shrank during publication")
-                remaining -= len(chunk)
-                output.write(chunk)
-                digest.update(chunk)
-            if original.read(1) or digest.hexdigest() != expected:
-                raise ValueError("capture changed during publication")
-            output.flush()
-            os.fsync(output.fileno())
-        os.link(prepared, destination)
-    durable["_fsync_directory_path"](parent, "landing patch")
-finally:
-    if prepared is not None:
-        os.unlink(prepared)
-PY
-then
+# Keep the private publication anchor: it proves the live inode generation
+# independently of shared terminal hints, filenames, and equal-byte replacements.
+if ! python3 "$CAPTURE_HELPER" publish "$STATE_REPO" "$CAPTURE_PATCH" "$FROZEN_PATCH"; then
   fail "cannot publish admitted captured patch; refusing to apply"
 fi
 PATCH="$FROZEN_PATCH"
@@ -1374,6 +1291,10 @@ intent_receipt_sha="$(landing_receipt_hash)" ||
 intent_consent_extra=""
 [ "$ALLOW_VERIFIER_CHANGE" = 0 ] || intent_consent_extra="verifier_change_consent=true"
 if ! landing_append intent ${intent_consent_extra:+"$intent_consent_extra"}; then
+  # A complete journal with no intent is a distinct native producer outcome.
+  # Keep the canonical publication now; only aged quiescent GC may collect it.
+  python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" publication-without-intent ||
+    echo "warning: publication outcome remains unproven and reserved" >&2
   fail "cannot record the landing intent in $LANDINGS; refusing to apply"
 fi
 
