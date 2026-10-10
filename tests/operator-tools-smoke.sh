@@ -3813,7 +3813,7 @@ def exercise_observed_worker_leases():
     captured_dispatch = {}
     route = panel.selected_route("claude", "worker", "light", "auto", "write", "implement")
     dispatch_args = (project, "claude", "worker", "light", "auto", "write", "implement",
-                     None, brief, "true", "argv-observer", False, None, route, None, None, None)
+                     None, brief, "--task-id", "argv-observer", False, None, route, None, None, None)
     # The fake provider CLIs live in the fixture PATH, but this in-process
     # observer check inherits the host PATH. Keep route availability explicit
     # so CI hosts without Codex or Claude still exercise the real dispatcher.
@@ -3836,7 +3836,8 @@ def exercise_observed_worker_leases():
         assert panel.run_dispatch(*dispatch_args) == 0
     preview_argv = preflight.call_args.args[0]
     assert preview_argv[-1] == "--dry-run" and "--observe-plan-binding" not in preview_argv
-    assert preview_argv[preview_argv.index("--task-id") + 1].startswith("preflight-")
+    assert preview_argv[preview_argv.index("--verify") + 1] == "--task-id"
+    assert preview_argv[-3] == "--task-id" and preview_argv[-2].startswith("preflight-")
     dispatch_argv = captured_dispatch["argv"]
     assert "--observe-plan-binding" in dispatch_argv, dispatch_argv
     assert json.loads(dispatch_argv[dispatch_argv.index("--observe-plan-binding") + 1]) == argv_binding._asdict()

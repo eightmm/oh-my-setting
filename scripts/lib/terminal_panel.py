@@ -1148,7 +1148,7 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
         # Give it no room/plan identity so a refused preview cannot claim or enroll this call.
         preview = list(argv)
         preview[preview.index("--repo") + 1] = str(execution)
-        preview[preview.index("--task-id") + 1] = "preflight-" + uuid.uuid4().hex[:16]
+        preview[preview.index("--task-id", preview.index("--verify") + 2) + 1] = "preflight-" + uuid.uuid4().hex[:16]
         preview_env = {name: value for name, value in env.items()
                        if not name.startswith(("OMS_ROOM_", "OMS_PANEL_", "OMS_OBSERVE_PLAN_", "OMS_DL_"))
                        and name not in {"OMS_TASK_ID", "OMS_ATTEMPT_ID", "OMS_PARENT_ATTEMPT_ID",
