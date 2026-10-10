@@ -19026,7 +19026,7 @@ with open(errors, "w") as err:
                          index_row_sha256=digest(encoded(row)), exit=1)
             assert terminals[0]["native_terminal_proof"] == {
                 "phase": "admission-rejected", "admission_sha256": digest(encoded(proof))}
-            ready = helper["release_ready"](item, log)
+            ready = helper["release_ready"](item, log, project)
             assert ready is not None and ready["release_proof"]["terminal_event_sha256"] == digest(encoded(terminals[0]))
             released = [r for r in log if r.get("event") == "capture-released" and
                         r.get("managed_capture") == item]
