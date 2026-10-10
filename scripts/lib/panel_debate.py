@@ -7,6 +7,7 @@ import re
 
 from dashboard_projection import clean, fit, listing, mapping
 from panel_view import MODEL_NAMES, PROVIDER_NAMES, TERMINAL_STATES, wrapped
+from panel_results import MAX_RESULT as MAX_SEAT_ANSWER
 
 MAX_DEBATES, MAX_SYNTHESIS = 10, 64 * 1024
 DISAGREE = re.compile(r"disagree|conflict|dissent", re.I)
@@ -193,6 +194,16 @@ def _paragraphs(text, width, limit):
             for part in (wrapped(paragraph, width, 50, 8000) if paragraph.strip() else [""])][:limit]
 
 
+def _answer_rows(text, width):
+    """Wrap the retained seat answer within its byte bound and a fixed row ceiling."""
+    # A newline can consume only one byte while adding a row, so byte count
+    # itself is the safe upper bound on wrapped rows, independent of width.
+    bounded = text.encode("utf-8")[:MAX_SEAT_ANSWER].decode("utf-8", "ignore")
+    return [part for paragraph in bounded.splitlines()
+            for part in (wrapped(paragraph, width, MAX_SEAT_ANSWER, MAX_SEAT_ANSWER)
+                         if paragraph.strip() else [""])][:MAX_SEAT_ANSWER]
+
+
 def tab_body(report, main, width, cap, navigation, labels, unicode=True):
     """Rows (text, action, selected) for the Debate tab of one main: the newest debate, or one seat's full answer."""
     from room_view import clock_stamp, readable
@@ -224,7 +235,7 @@ def tab_body(report, main, width, cap, navigation, labels, unicode=True):
         title = "%s %s round %s answer · Esc back" % (
             MODEL_NAMES.get(seat["model"]) or clean(seat["model"], 40) or "Unknown model", dash, latest)
         text = readable(seat["rounds"].get(latest, "No answer recorded"), "\n", True)
-        body = [(title, None, False)] + [(line, None, False) for line in _paragraphs(text, width, 400)]
+        body = [(title, None, False)] + [(line, None, False) for line in _answer_rows(text, width)]
         state["scroll"] = min(max(0, state.get("scroll", 0)), max(0, len(body) - cap))
         return body[state["scroll"]:state["scroll"] + cap]
     answered = sum(1 for seat in seats if seat["rounds"])

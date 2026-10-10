@@ -1352,6 +1352,22 @@ assert "Question: Panel attention signal" in bare
 # Enter on a seat shows its full answer in the tab, Esc returns to the summary.
 assert panel_debate.handle(("down",), nav) and panel_debate.handle(("up",), nav) and panel_debate.handle(("enter",), nav)
 assert "round 2 answer" in board("debate", nav=nav)[1] and "FULLTEXT-SOL second line" in board("debate", nav=nav)[1]
+# Full answers remain scrollable through the retained source byte bound, including
+# the tail of both a multiline answer and one long paragraph.
+for answer_tail, answer_text in (("LINE-0499", "x\n" * 499 + "LINE-0499"),
+                                 ("PARAGRAPH-END", "word " * 1800 + "PARAGRAPH-END"),
+                                 ("LONG-PARAGRAPH-END", "x" * 12000 + "LONG-PARAGRAPH-END")):
+    assert len(answer_text.encode("utf-8")) <= panel_results.MAX_RESULT
+    full_nav = deepcopy(nav)
+    full_nav["debate_view"].update(seat=0, scroll=0)
+    full_nav["debate_view"]["report"]["rows"][0]["calls"] = [
+        dict(seat_calls[0], artifact=ask + "codex-gpt-6-sol-s-1.md", answer=answer_text, answer_truncated=False)]
+    visible = board("debate", 80, 40, nav=full_nav)[1]
+    assert answer_tail not in visible, visible
+    assert tab_event(("scroll", panel_results.MAX_RESULT), full_nav)
+    visible = board("debate", 80, 40, nav=full_nav)[1]
+    assert answer_tail in "".join(line.strip(" │") for line in visible.splitlines()), (answer_tail, visible)
+    assert len(visible.splitlines()) == 40 and all(display_width(line) <= 80 for line in visible.splitlines())
 assert tab_event(("escape",), nav) and nav["debate_view"]["seat"] is None and "FULLTEXT-SOL" not in board("debate", nav=nav)[1]
 assert not tab_event(("escape",), nav)
 nav["tab"] = "debate"
