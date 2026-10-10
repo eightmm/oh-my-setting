@@ -307,7 +307,8 @@ SH
 
 test_live_thread_delivery_at_existing_safe_points() {
   python3 - "$ROOT" "$TMP/live-hook" <<'PY'
-import json, os, pathlib, subprocess, sys, time
+import json, os, pathlib, stat, subprocess, sys, time
+from unittest.mock import patch
 root, repo = map(pathlib.Path, sys.argv[1:])
 repo.mkdir()
 subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -498,6 +499,106 @@ for key in ("OMS_HARNESS_CHILD", "OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT"):
     os.environ.pop(key)
 room.create(repo, "isolation", "Unrelated task")
 assert not hook_state.live_thread_hint(payload("room-stranger")), "CURRENT does not enroll strangers into rooms"
+# A selected coordination room adds mail without replacing the native main's authority or cursor.
+room.create(repo, "coord-source", "Native task authority")
+room.join(repo, "coord-source", "coord-reader", "claude", native_session="coord-native")
+room.join(repo, "coord-source", "coord-writer", "codex")
+room.create(repo, "coord-target", "Coordination mail")
+room.join(repo, "coord-target", "coord-reader", "claude", native_session="coord-native")
+room.join(repo, "coord-target", "coord-writer", "codex")
+room.send(repo, "coord-source", "coord-writer", "coord-reader", "PRIMARY MAIL", message_id="primary-mail")
+room.send(repo, "coord-target", "coord-writer", "coord-reader", "COORDINATION MAIL", message_id="coord-mail")
+coord_env = {"OMS_ROOM_ID": "coord-source", "OMS_ROOM_PARTICIPANT": "coord-reader", "OMS_ROOM_REPO": str(repo),
+             "OMS_PANEL_SESSION": "oms-fixture", "TMUX": "fixture", "TMUX_PANE": "%99", "OMS_PLAN_LEASE_ID": "original-lease"}
+host_identity = {"session": "oms-fixture", "repo": str(repo), "room": "coord-target"}
+real_run = subprocess.run
+def coordination_host(command, *args, **kwargs):
+    if pathlib.Path(command[0]).name == "tmux":
+        assert command[1:5] == ["display-message", "-p", "-t", "%99"] and kwargs["timeout"] == 0.2
+        return subprocess.CompletedProcess(command, 0, "\t".join(host_identity.values()) + "\n", "")
+    return real_run(command, *args, **kwargs)
+with patch.dict(os.environ, coord_env), patch.object(hook_state.subprocess, "run", side_effect=coordination_host):
+    hint = hook_state.live_thread_hint(payload("coord-native"))
+    assert "PRIMARY MAIL" in hint and "COORDINATION MAIL" in hint, "coordination hid the primary room or did not arrive"
+    assert "--id coord-source" in hint and "--id coord-target" in hint, "mail acknowledgements name the wrong room"
+    primary_cursor = repo / ".oms/hooks/sessions" / (hook_state.session_hash(payload("coord-native")) + ".thread.json")
+    coord_cursor = primary_cursor.with_name(primary_cursor.name.replace(".thread.json", ".coord-target.thread.json"))
+    prior = primary_cursor.read_bytes()
+    assert coord_cursor.exists() and not hook_state.live_thread_hint(payload("coord-native")), "coordination mail replayed"
+    assert primary_cursor.read_bytes() == prior and all(os.environ[key] == value for key, value in coord_env.items())
+    assert room.status(repo, "coord-source")["pending_count"] == room.status(repo, "coord-target")["pending_count"] == 1
+    room.send(repo, "coord-source", "coord-writer", "coord-reader", "NEXT PRIMARY", message_id="next-primary")
+    assert "NEXT PRIMARY" in hook_state.live_thread_hint(payload("coord-native")), "coordination moved the primary cursor past later mail"
+    for key, value in (("repo", str(repo / "foreign")), ("session", "other-session")):
+        previous = host_identity[key]
+        host_identity[key] = value
+        assert hook_state.coordination_room(payload("coord-native")) is None, "foreign tmux identity established coordination"
+        host_identity[key] = previous
+    with patch.dict(os.environ, {"TMUX_PANE": "foreign-target"}), patch.object(hook_state.subprocess, "run") as host:
+        assert hook_state.coordination_room(payload("coord-native")) is None and not host.called
+    with patch.object(hook_state.subprocess, "run", side_effect=subprocess.TimeoutExpired("tmux", 0.2)):
+        assert hook_state.coordination_room(payload("coord-native")) is None, "host timeout established coordination"
+    room.send(repo, "coord-source", "coord-writer", "coord-reader", "PRIMARY DURING HOST TIMEOUT", message_id="host-timeout-primary")
+    with patch.object(hook_state.subprocess, "run", side_effect=subprocess.TimeoutExpired("tmux", 0.2)):
+        assert "PRIMARY DURING HOST TIMEOUT" in hook_state.live_thread_hint(payload("coord-native"))
+    # Interrupted assembly cannot consume either staged room, and malformed
+    # disposable coordination cursors recover with the same bounded semantics.
+    room.send(repo, "coord-source", "coord-writer", "coord-reader", "STAGED PRIMARY", message_id="staged-primary")
+    room.send(repo, "coord-target", "coord-writer", "coord-reader", "STAGED COORDINATION", message_id="staged-coordination")
+    prior_primary, prior_coord = primary_cursor.read_bytes(), coord_cursor.read_bytes()
+    real_hint = hook_state._live_thread_hint
+    def interrupted_hint(*args, **kwargs):
+        if kwargs.get("coordination") is None:
+            raise RuntimeError("interrupted primary assembly")
+        return real_hint(*args, **kwargs)
+    with patch.object(hook_state, "_live_thread_hint", side_effect=interrupted_hint):
+        try:
+            hook_state.live_thread_hint(payload("coord-native"))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("interruption was not exercised")
+    assert primary_cursor.read_bytes() == prior_primary and coord_cursor.read_bytes() == prior_coord
+    staged = hook_state.live_thread_hint(payload("coord-native"))
+    assert "STAGED PRIMARY" in staged and "STAGED COORDINATION" in staged
+    for malformed in (b"{", b"[]"):
+        coord_cursor.write_bytes(malformed)
+        assert "COORDINATION MAIL" in hook_state.live_thread_hint(payload("coord-native"))
+        assert isinstance(json.loads(coord_cursor.read_bytes()), dict)
+        assert not hook_state.live_thread_hint(payload("coord-native")), "recovered cursor replayed mail"
+    # A replacement FIFO at final revalidation is refused without reading it;
+    # primary delivery completes and optional mail remains replayable later.
+    room.send(repo, "coord-source", "coord-writer", "coord-reader", "FIFO PRIMARY", message_id="fifo-primary")
+    room.send(repo, "coord-target", "coord-writer", "coord-reader", "FIFO COORDINATION", message_id="fifo-coordination")
+    def replace_optional_cache(*args, **kwargs):
+        message = real_hint(*args, **kwargs)
+        if kwargs.get("coordination") is None:
+            coord_cursor.unlink()
+            os.mkfifo(coord_cursor)
+        return message
+    with patch.object(hook_state, "_live_thread_hint", side_effect=replace_optional_cache):
+        fifo_message = hook_state.live_thread_hint(payload("coord-native"))
+    assert "FIFO PRIMARY" in fifo_message and "FIFO COORDINATION" in fifo_message
+    assert stat.S_ISFIFO(coord_cursor.lstat().st_mode)
+    coord_cursor.unlink()
+    replay = hook_state.live_thread_hint(payload("coord-native"))
+    assert "FIFO COORDINATION" in replay and "FIFO PRIMARY" not in replay
+    for changes in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_LIVE_COLLAB": "0"}):
+        with patch.dict(os.environ, changes), patch.object(hook_state, "coordination_room") as selected:
+            assert not hook_state.live_thread_hint(payload("coord-native")) and not selected.called
+    for case, changes in (("consumer", {"native_session": "foreign-native"}), ("provider", {"provider": "codex"}),
+                          ("model", {"model": "changed-model"}), ("role", {"role": "worker", "parent": "coord-writer"})):
+        target = "coord-wrong-" + case
+        room.create(repo, target, "Rejected coordination")
+        room.join(repo, target, "coord-writer", "codex")
+        values = dict(provider="claude", native_session="coord-native")
+        values.update(changes)
+        room.join(repo, target, "coord-reader", **values)
+        host_identity["room"] = target
+        assert hook_state.coordination_room(payload("coord-native")) is None, "coordination accepted mismatched " + case
+    host_identity["room"] = "coord-target"
+    room.append(repo, "coord-target", {"kind": "leave", "participant": "coord-reader"}, "Reader left coordination")
+    assert hook_state.coordination_room(payload("coord-native")) is None, "departed coordination receiver remained bound"
 # The hook skips mail its participant already consumed, yet moves its cursor past it.
 room.create(repo, "acked", "Consumed mail")
 room.join(repo, "acked", "writer", "codex", model="gpt-6-sol", native_session="ack-writer")
@@ -518,6 +619,24 @@ assert ack_turns("next-1") == ["next-1"], "mail after consumed rows still arrive
 backlog = ["deep-%02d" % n for n in range(20)]
 assert ack_turns(*backlog, ack=backlog[:18]) == backlog[18:], "an acked backlog beyond the newest 12 was re-shown"
 assert room.status(repo, "acked")["pending_count"] == 6, "delivery still acks nothing"
+# The hook caches its projection before updates opens the log for the first delivery.
+room.create(repo, "hook-race", "First hook delivery race")
+room.join(repo, "hook-race", "race-writer", "codex", native_session="hook-race-writer")
+room.join(repo, "hook-race", "race-reader", "claude", native_session="hook-race-reader")
+selected_before_scan = room._selected
+def append_after_selection(*args, **kwargs):
+    binding, state = selected_before_scan(*args, **kwargs)
+    assert binding == ("hook-race", "race-reader"), binding
+    room.send(repo, "hook-race", "race-writer", "race-reader", "Concurrent hook mail", message_id="hook-racing-mail")
+    return binding, state
+with patch.object(room, "_selected", side_effect=append_after_selection):
+    racing_hint = hook_state.live_thread_hint(payload("hook-race-reader"))
+assert not racing_hint, "the first hook classified mail outside its cached projection"
+racing_hint = hook_state.live_thread_hint(payload("hook-race-reader"))
+assert racing_hint and [row["room_event"]["id"] for row in json.loads(racing_hint.splitlines()[1])["turns"]] == [
+    "hook-racing-mail"], "the next hook lost mail appended after selection"
+assert not hook_state.live_thread_hint(payload("hook-race-reader")), "hook cursor replayed delivered mail"
+assert room.status(repo, "hook-race")["pending_count"] == 1, "hook delivery acknowledged concurrent mail"
 # Open questions escalate on their own; a linked answer stops every tier. The clock is the room's own time function.
 import time as clock_time
 real_now = room.now
@@ -584,7 +703,6 @@ with contextlib.redirect_stderr(captured):
     room.send(repo, "asks", "target", "asker", "third", "answer")
 assert not room.status(repo, "asks")["open_questions"]
 # One hook reuses a single room projection, and a reminder burst budgets attempts, including failures.
-from unittest.mock import patch
 bulk = room.project(room.records(repo, "asks"))
 question = next(m for m in bulk["messages"] if m["message_kind"] == "question")
 bulk["messages"] = [dict(question, id="bulk-%d" % n, answered=False) for n in range(300)]

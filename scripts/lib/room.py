@@ -598,6 +598,7 @@ def updates(repo, room, who, after="", budget=8192, limit=50, *, state=None):
         delta = thread_live.updates(repo, room, after, budget, limit, allow_first_row_over_budget=True)
         return dict(delta, turns=[r for r in delta["turns"] if visible(r, who, member["seq"])])
 
+    known = {message["id"] for message in state["messages"]}
     unread = {message["id"] for message in state["messages"]
               if who in message["targets"] and who not in message["received_by"]}
     with thread_live.open_thread(repo, room) as handle:
@@ -636,6 +637,12 @@ def updates(repo, room, who, after="", budget=8192, limit=50, *, state=None):
             if not isinstance(row, dict) or row.get("thread") != room:
                 raise ValueError("invalid room row")
             event = row.get("room_event", {})
+            # A cached projection cannot classify a new message's audience or
+            # receipts. Leave it for the next read instead of skipping it.
+            if event.get("kind") == "message" and event.get("id") not in known:
+                cursor = thread_live.cursor_for(handle, room, offset)
+                more_unread = True
+                break
             if visible(row, who, member["seq"]) and event.get("id") in unread:
                 if len(turns) >= limit or (turns and used + len(line) > budget):
                     more_unread = True

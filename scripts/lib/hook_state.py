@@ -1540,6 +1540,99 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
     record_panel_activity(payload, repo)
     if is_harness_child() or os.environ.get("OMS_LIVE_COLLAB", "1") == "0":
         return ""
+    coordination = coordination_room(payload, repo)
+    if coordination is None:
+        return _live_thread_hint(payload, repo)
+    pending = []
+    # Complete optional host work before advancing the primary room's cursor.
+    extra = _live_thread_hint(payload, repo, coordination=coordination, pending=pending)
+    primary = _live_thread_hint(payload, repo, pending=pending)
+    if pending:
+        with contextlib.suppress(Exception):
+            with event_file_lock(pending[0][0], timeout=0.05):
+                ready = []
+                for path, expected, value in pending:
+                    try:
+                        before = path.lstat()
+                    except FileNotFoundError:
+                        current = {}
+                    else:
+                        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 4096:
+                            continue
+                        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+                        with os.fdopen(descriptor, "rb") as handle:
+                            opened = os.fstat(handle.fileno())
+                            if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+                                continue
+                            raw = handle.read(4097)
+                        if len(raw) > 4096:
+                            continue
+                        try:
+                            current = json.loads(raw)
+                        except (ValueError, RecursionError):
+                            current = {}
+                        if not isinstance(current, dict):
+                            current = {}
+                    if current == expected:
+                        ready.append((path, value))
+                # Revalidate every cursor before writing any: an optional cache
+                # replacement must not block after primary mail has advanced.
+                for path, value in ready:
+                    write_json_atomic(path, value)
+    return "\n".join(part for part in (primary, extra) if part)
+
+
+def coordination_room(payload: dict[str, Any], repo: Path | None = None):
+    """Read mail from the panel's new room without moving execution authority."""
+    if not all(os.environ.get(key) for key in ("TMUX", "TMUX_PANE", "OMS_PANEL_SESSION",
+                                              "OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT")):
+        return None
+    if not (payload.get("session_id") or payload.get("sessionId")):
+        return None
+    try:
+        import room
+        import terminal_panel
+
+        selected_repo = repo if repo is not None else hook_repo(payload)
+        if selected_repo is None:
+            return None
+        selected_repo = Path(os.environ.get("OMS_ROOM_REPO", str(selected_repo))).resolve()
+        session = os.environ["OMS_PANEL_SESSION"]
+        pane = os.environ["TMUX_PANE"]
+        if not re.fullmatch(r"%[0-9]+", pane):
+            return None
+        deadline = time.monotonic() + 0.35
+        query = subprocess.run(terminal_panel.tmux_command(
+            "display-message", "-p", "-t", pane,
+            "#{session_name}\t#{@oms_panel_repo}\t#{OMS_ROOM_ID}"),
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=0.2, check=False)
+        values = query.stdout.replace("\r", "").rstrip("\n").split("\t")
+        if query.returncode or len(values) != 3 or time.monotonic() >= deadline:
+            return None
+        actual_session, owner, ident = values
+        if actual_session != session or not owner or Path(owner).resolve() != selected_repo:
+            return None
+        ident = room.identifier(ident, "room")
+        if not ident or ident == os.environ["OMS_ROOM_ID"]:
+            return None
+        who, consumer = os.environ["OMS_ROOM_PARTICIPANT"], session_hash(payload)
+        original, original_state = room._selected(selected_repo, consumer, os.environ["OMS_ROOM_ID"], who)
+        binding, state = room._selected(selected_repo, consumer, ident, who)
+        if not original or not binding:
+            return None
+        before, after = room.participant(original_state, who), room.participant(state, who)
+        if (before.get("role") != "main" or before.get("provider") != payload_agent(payload)
+                or before.get("consumer") != consumer
+                or any(after.get(key) != before.get(key) for key in ("role", "provider", "model", "consumer"))):
+            return None
+        return (selected_repo, binding, state, deadline) if time.monotonic() < deadline else None
+    except Exception:
+        return None
+
+
+def _live_thread_hint(payload: dict[str, Any], repo: Path | None = None, *, coordination=None, pending=None) -> str:
+    if is_harness_child() or os.environ.get("OMS_LIVE_COLLAB", "1") == "0":
+        return ""
     if not (payload.get("session_id") or payload.get("sessionId")):
         return ""
     repo = repo if repo is not None else hook_repo(payload)
@@ -1550,8 +1643,13 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
         import room
 
         room_repo = Path(os.environ.get("OMS_ROOM_REPO", str(repo))).resolve()
-        binding, room_state = room._selected(room_repo, session_hash(payload), os.environ.get("OMS_ROOM_ID"),
-                                             os.environ.get("OMS_ROOM_PARTICIPANT"))
+        if coordination is None:
+            binding, room_state = room._selected(room_repo, session_hash(payload), os.environ.get("OMS_ROOM_ID"),
+                                                 os.environ.get("OMS_ROOM_PARTICIPANT"))
+        else:
+            room_repo, binding, room_state, deadline = coordination
+            if time.monotonic() >= deadline:
+                return ""
         if (binding is None and not os.environ.get("OMS_ROOM_ID")
                 and (payload.get("hook_event_name") or payload.get("hookEventName")) == "UserPromptSubmit"):
             # A main already moved to the background service heals on its next prompt.
@@ -1596,7 +1694,8 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
                 event = {}
             if isinstance(event, dict) and event.get("kind") == "created":
                 return ""
-        path = thread_live.safe_path(repo, ".oms/hooks/sessions/" + session_hash(payload) + ".thread.json", True)
+        suffix = "." + tid if coordination is not None else ""
+        path = thread_live.safe_path(repo, ".oms/hooks/sessions/" + session_hash(payload) + suffix + ".thread.json", True)
         if path.exists() or path.is_symlink():
             info = path.lstat()
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
@@ -1658,7 +1757,7 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
                     + "Delivery is not acknowledgment. After consuming, record: oms thread ack --id "
                     + tid + " --consumer " + consumer + " --after " + delta["cursor"]
                 )
-            if room_member:
+            if room_member and coordination is None:
                 # Mail still waiting beyond this batch is not yet delivered, so it cannot be an unacked delivery.
                 reach = max((row["seq"] for row in delta["turns"]), default=0) if delta["has_more"] else None
                 try:
@@ -1669,7 +1768,13 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
                     reminders = ""  # reminders are advisory; the delivered turns still go out
                 message = "\n".join(part for part in (message, reminders) if part)
             if delta["cursor"] != after:
-                write_json_atomic(path, {"thread": tid, "participant": room_member, "cursor": delta["cursor"]})
+                if coordination is not None and time.monotonic() >= deadline:
+                    return ""
+                value = {"thread": tid, "participant": room_member, "cursor": delta["cursor"]}
+                if pending is None:
+                    write_json_atomic(path, value)
+                else:
+                    pending.append((path, state, value))
         return message
     except Exception:
         return ""  # Optional collaboration cannot block tools or ordinary replies.

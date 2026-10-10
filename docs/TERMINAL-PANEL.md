@@ -364,6 +364,15 @@ inventory reports `incomplete`. Exact explicit selection bypasses inventory
 lookup. Closed/left rooms do not
 deliver. Membership is a routing record, not authentication or an OS sandbox.
 
+For an existing tmux main, the session's selected room can also receive coordination
+mail when that room explicitly enrolls the same main, native consumer, provider,
+model and role. The session must belong to the same repository. Hooks retain the
+original room's cursor and use a separate cursor for coordination mail; neither
+delivery acknowledges messages. Existing process environment, attempts, leases,
+dispatch and acceptance authority keep their original binding. Selecting a room
+alone does not enroll a receiver or transfer its work. This requires the updated
+hook code; older installed hooks continue to read the process's original room.
+
 ```bash
 oms room join --repo . --id team --participant sol-main --provider codex \
   --role main --model gpt-6.1-sol --native-session EXACT_SESSION_ID

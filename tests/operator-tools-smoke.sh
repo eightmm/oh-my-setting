@@ -3571,6 +3571,32 @@ except ValueError:
     pass
 else:
     raise AssertionError("invalid room cursor was accepted")
+# A cached hook projection must not move its cursor past mail appended before the scan.
+race_room = room.create(project, "first-mail-race", "First delivery race")
+room.join(project, race_room, "race-writer", "codex")
+room.join(project, race_room, "race-reader", "claude")
+room.join(project, race_room, "race-other", "codex")
+room.send(project, race_room, "race-writer", "race-reader", "Consumed", message_id="race-old")
+room.acknowledge(project, race_room, "race-reader", ["race-old"])
+cached_room = room.project(room.records(project, race_room))
+room.send(project, race_room, "race-writer", "race-reader", "New direct", message_id="race-direct")
+room.send(project, race_room, "race-writer", "all", "New broadcast", message_id="race-broadcast")
+room.send(project, race_room, "race-writer", "race-other", "Other reader", message_id="race-other-only")
+race_page = room.updates(project, race_room, "race-reader", budget=1, limit=1, state=cached_room)
+assert not race_page["turns"] and race_page["has_more"], "first read classified mail outside its projection"
+race_next = room.updates(project, race_room, "race-reader", race_page["cursor"], budget=1, limit=1)
+assert [r["room_event"]["id"] for r in race_next["turns"]] == ["race-direct"] and race_next["has_more"], "cursor skipped concurrent mail"
+race_tail = room.updates(project, race_room, "race-reader", race_next["cursor"])
+assert [r["room_event"]["id"] for r in race_tail["turns"]] == ["race-broadcast"], "cursor skipped broadcast or crossed recipients"
+assert {r["room_event"]["id"] for r in room.updates(project, race_room, "race-reader")["turns"]} == {
+    "race-direct", "race-broadcast"}, "delivery consumed mail or replayed acknowledged mail"
+room.append(project, race_room, {"kind": "leave", "participant": "race-reader"}, "Reader left")
+room.send(project, race_room, "race-writer", "all", "While absent", message_id="race-absent")
+room.join(project, race_room, "race-reader", "claude")
+stale_membership = room.updates(project, race_room, "race-reader", state=cached_room)
+assert not stale_membership["turns"] and stale_membership["has_more"]
+assert not room.updates(project, race_room, "race-reader", stale_membership["cursor"])["turns"], "cached enrollment leaked broadcast to a later join"
+assert not room.updates(project, race_room, "race-reader")["turns"], "rejoining replayed mail from the previous enrollment"
 shared = room.create(project, "operator-room", "Shared parser task")
 room.join(project, shared, main_attempts["codex"], "codex", model="gpt-6-sol", label="Sol main")
 room.join(project, shared, main_attempts["claude"], "claude", model="claude-opus-5-5", label="Opus main")
