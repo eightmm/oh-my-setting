@@ -19975,7 +19975,7 @@ operation="${3:-}"
 delay_once() {
   [ ! -e "$OMS_TEST_DELAY_ONCE" ] || return 0
   : > "$OMS_TEST_DELAY_ONCE"
-  (sleep 1.5; : > "$OMS_TEST_CHILD_MARKER") &
+  (sleep 7; : > "$OMS_TEST_CHILD_MARKER") &
   printf '%s\n' "$!" > "$OMS_TEST_CHILD_PID"
   wait
 }
@@ -19986,7 +19986,7 @@ elif [ "$mode" = append-before ] && [ "$operation" = append ]; then
 elif [ "$mode" = success-descendant ] && [ "$operation" = append ]; then
   "$OMS_TEST_REAL_AGENT_TASK" "$@"
   result=$?
-  (sleep 1.5; : > "$OMS_TEST_CHILD_MARKER") &
+  (sleep 7; : > "$OMS_TEST_CHILD_MARKER") &
   printf '%s\n' "$!" > "$OMS_TEST_CHILD_PID"
   exit "$result"
 fi
@@ -20000,7 +20000,7 @@ if [ "${OMS_TEST_DELAY_MODE:-none}" = append-after ] &&
    [ "${2:-}" = finish ] && [ ! -e "$OMS_TEST_DELAY_ONCE" ] &&
    grep -Fq "$OMS_TEST_PROMPT_NOTE" "$3/.oms/task/current.md" 2>/dev/null; then
   : > "$OMS_TEST_DELAY_ONCE"
-  (sleep 1.5; : > "$OMS_TEST_CHILD_MARKER") &
+  (sleep 7; : > "$OMS_TEST_CHILD_MARKER") &
   printf '%s\n' "$!" > "$OMS_TEST_CHILD_PID"
   wait
 fi
@@ -20009,12 +20009,13 @@ EOF
     chmod +x "$wrapper" "$bin_dir/python3"
 
     invoke_auto_task() {
-      PATH="$bin_dir:$PATH" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT=1 \
+      local mode="$1" timeout="${2:-4}"
+      PATH="$bin_dir:$PATH" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT="$timeout" \
         OMS_HOOK_RESOLVED_REPO="$project" \
         OMS_TEST_REAL_AGENT_TASK="$ROOT/scripts/agent-task.sh" \
         OMS_TEST_REAL_PYTHON="$real_python" \
         OMS_TEST_LANDING_REFERENCE="$ROOT/scripts/lib/landing-reference.py" \
-        OMS_TEST_DELAY_MODE="$1" OMS_TEST_DELAY_ONCE="$d/$scenario/delayed" \
+        OMS_TEST_DELAY_MODE="$mode" OMS_TEST_DELAY_ONCE="$d/$scenario/delayed" \
         OMS_TEST_CHILD_MARKER="$d/$scenario/child-wrote" \
         OMS_TEST_CHILD_PID="$d/$scenario/child.pid" \
         OMS_TEST_PROMPT_NOTE="$prompt_note" \
@@ -20037,14 +20038,14 @@ print(json.dumps(states[-1] if states else {}))
 PY
     }
 
-    first="$(invoke_auto_task "$scenario")"
+    first="$(invoke_auto_task "$scenario" 4)"
     if [ "$scenario" = success-descendant ]; then
       python3 -c 'import json,sys; s=json.loads(sys.argv[1]); assert s.get("status") in {"created","appended","rotated"} and s.get("prompt_hash"), s' "$first" ||
         fail "successful publication must be acknowledged: $first"
       [ "$(grep -F "$prompt_note" "$project/.oms/task/current.md" | wc -l | tr -d ' ')" = "1" ] ||
         fail "successful publication must be recorded exactly once"
       [ -s "$d/$scenario/child.pid" ] || fail "success case did not start its owned descendant"
-      sleep 1.7
+      sleep 8
       [ ! -e "$d/$scenario/child-wrote" ] || fail "a successful helper left a detached descendant writing"
       kill -0 "$foreign_pid" 2>/dev/null || fail "success cleanup killed or altered the unrelated process"
       continue
@@ -20053,11 +20054,11 @@ PY
       fail "$scenario timeout must not publish a successful route hash: $first"
     assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "timeout"'
     [ -s "$d/$scenario/child.pid" ] || fail "$scenario did not start its owned descendant"
-    sleep 1.7
+    sleep 8
     [ ! -e "$d/$scenario/child-wrote" ] || fail "$scenario left a timed-out descendant running"
     kill -0 "$foreign_pid" 2>/dev/null || fail "$scenario killed or altered the unrelated process"
 
-    second="$(invoke_auto_task none)"
+    second="$(invoke_auto_task none 4)"
     python3 -c 'import json,sys; s=json.loads(sys.argv[1]); assert s.get("status") in {"created","appended","rotated"} and s.get("prompt_hash"), s' "$second" ||
       fail "$scenario retry must commit its prompt only after publication: $second"
     [ "$(grep -F "$prompt_note" "$project/.oms/task/current.md" | wc -l | tr -d ' ')" = "1" ] ||
@@ -21622,37 +21623,70 @@ fixture.mkdir()
 helper = root/'scripts/lib/landing-reference.py'
 h = runpy.run_path(str(helper))
 e = h['E']
-# Hold the real monitor after exclusive ready creation until the real waiter
-# observes its empty payload. Neither sleeps nor CPU load decide this race.
+# Exercise the protocol declared by the real scope: legacy empty publication
+# or startup-bound pending publication. Each path must cross its own barriers.
 ready_fixture = fixture/'ready-publication'; ready_fixture.mkdir()
 ready_driver = fixture/'ready-driver.py'
 ready_driver.write_text(r'''
-import builtins, contextlib, pathlib, runpy, sys, time
+import builtins, contextlib, json, os, pathlib, runpy, sys, time
 helper, repo, channel, digest, mode, *extra = sys.argv[1:]
 h = runpy.run_path(helper)
-observed = pathlib.Path(repo)/'empty-observed'
-if mode == 'monitor':
-    original_open = builtins.open
-    @contextlib.contextmanager
-    def delayed_open(path, *args, **kwargs):
-        with original_open(path, *args, **kwargs) as stream:
-            if str(path) == channel + '.ready' and args == ('xb',):
-                deadline = time.monotonic() + 5
-                while not observed.exists() and time.monotonic() < deadline:
-                    time.sleep(.01)
-                assert observed.exists(), 'waiter never observed empty ready'
-            yield stream
-    builtins.open = delayed_open
-    h['monitor'](repo, channel, digest)
+repo = pathlib.Path(repo)
+pending = channel + '.ready.pending'
+def barrier(name):
+    deadline = time.monotonic() + 5
+    while not (repo/name).exists() and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert (repo/name).exists(), 'waiter did not observe ' + name
+has_pending = 'ready_pending' in json.loads(pathlib.Path(channel).read_bytes())['binding']
+if not has_pending:
+    if mode == 'monitor':
+        original_open = builtins.open
+        @contextlib.contextmanager
+        def delayed_open(path, *args, **kwargs):
+            with original_open(path, *args, **kwargs) as stream:
+                if str(path) == channel + '.ready' and args == ('xb',):
+                    barrier('empty-observed')
+                yield stream
+        builtins.open = delayed_open
+        h['monitor'](str(repo), channel, digest)
+    else:
+        regular = h['C']['regular']
+        def observe_empty(path, *args, **kwargs):
+            result = regular(path, *args, **kwargs)
+            if str(path) == channel + '.ready' and not result[0]:
+                (repo/'empty-observed').write_text('observed')
+            return result
+        h['C']['regular'] = observe_empty
+        h['await_monitor'](str(repo), channel, digest, extra[0])
+elif mode == 'monitor':
+    expected = os.lstat(pending)
+    original_fstat, original_link = os.fstat, os.link
+    def paused_fstat(fd):
+        info = original_fstat(fd)
+        if (info.st_dev,info.st_ino) == (expected.st_dev,expected.st_ino) and not info.st_size:
+            barrier('pending-observed')
+        return info
+    def paused_link(source, target, *args, **kwargs):
+        original_link(source, target, *args, **kwargs)
+        if str(target) == channel + '.ready':
+            barrier('linked-observed')
+    os.fstat, os.link = paused_fstat, paused_link
+    h['monitor'](str(repo), channel, digest)
 else:
-    regular = h['C']['regular']
-    def observe(path, *args, **kwargs):
-        result = regular(path, *args, **kwargs)
-        if str(path) == channel + '.ready' and not result[0]:
-            observed.write_text('observed')
-        return result
-    h['C']['regular'] = observe
-    h['await_monitor'](repo, channel, digest, extra[0])
+    original_lstat, regular = os.lstat, h['C']['regular']
+    def observed_lstat(path, *args, **kwargs):
+        info = original_lstat(path, *args, **kwargs)
+        if str(path) == pending:
+            (repo/('linked-observed' if info.st_nlink == 2 else 'pending-observed')).write_text('observed')
+        return info
+    def strict_ready(path, *args, **kwargs):
+        if str(path) == channel + '.ready':
+            assert not os.path.lexists(pending), 'strict reader entered unfinished publication'
+        return regular(path, *args, **kwargs)
+    os.lstat = observed_lstat
+    h['C']['regular'] = strict_ready
+    h['await_monitor'](str(repo), channel, digest, extra[0])
 ''')
 ready_script = r'''
 set -eu
@@ -21663,6 +21697,47 @@ reference_channel="$reference_scope_dir/scope"
 : > "$reference_channel"
 python3 "$_OMS_TASK_REFERENCE_HELPER" begin-owned "$2" agent-task "$2/packet" "$reference_channel" '' '' > "$reference_scope_dir/result"
 IFS=' ' read -r reference_operation reference_scope_digest < "$reference_scope_dir/result"
+pending_supported="$(python3 -c 'import json,sys; print(int("ready_pending" in json.load(open(sys.argv[1]))["binding"]))' "$reference_channel")"
+pending_supported="${pending_supported//$'\r'/}"
+if [ "$4" = foreign ]; then
+  printf 'foreign readiness\n' > "$reference_channel.ready"
+  if python3 "$_OMS_TASK_REFERENCE_HELPER" monitor "$2" "$reference_channel" "$reference_scope_digest"; then
+    exit 1
+  fi
+  [ "$(cat "$reference_channel.ready")" = 'foreign readiness' ]
+  if [ "$pending_supported" = 1 ]; then
+    [ -f "$reference_channel.ready.pending" ]
+  fi
+  exit 0
+fi
+if [ "$pending_supported" = 1 ]; then
+python3 - "$_OMS_TASK_REFERENCE_HELPER" "$2" "$reference_channel" "$reference_scope_digest" <<'PY_PENDING'
+import pathlib,runpy,sys,time
+helper,repo,channel,digest=sys.argv[1:]
+h=runpy.run_path(helper); pending=pathlib.Path(channel+'.ready.pending')
+started=time.monotonic()
+try:
+    h['await_monitor'](repo,channel,digest,'0')
+except ValueError as exc:
+    assert str(exc)=='reference monitor did not become ready', str(exc)
+else:
+    raise AssertionError('unpublished pending scope accepted')
+assert 1.5 <= time.monotonic()-started < 2, 'startup deadline changed'
+assert pending.exists() and pending.read_bytes()==b'', 'unknown pending cleaned'
+foreign=pathlib.Path(channel+'.ready'); foreign.write_bytes(b'foreign')
+try:
+    started=time.monotonic()
+    try:
+        h['await_monitor'](repo,channel,digest,'0')
+    except ValueError as exc:
+        assert str(exc)=='foreign reference readiness during publication', str(exc)
+    else:
+        raise AssertionError('foreign readiness hidden by pending fence')
+    assert time.monotonic()-started < 1, 'foreign readiness retried'
+finally:
+    foreign.unlink()
+PY_PENDING
+fi
 python3 "$3" "$_OMS_TASK_REFERENCE_HELPER" "$2" "$reference_channel" "$reference_scope_digest" monitor &
 reference_monitor=$!
 python3 "$3" "$_OMS_TASK_REFERENCE_HELPER" "$2" "$reference_channel" "$reference_scope_digest" await "$reference_monitor" > "$reference_scope_dir/proof"
@@ -21687,15 +21762,22 @@ finally:
 PY_READY_INVALID
 python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$2" "$reference_operation" refuse-no-write
 oms_reference_stop "$2"
-[ -f "$2/empty-observed" ]
+if [ "$pending_supported" = 1 ]; then
+  [ -f "$2/pending-observed" ]
+  [ -f "$2/linked-observed" ]
+else
+  [ -f "$2/empty-observed" ]
+fi
 [ ! -e "$reference_scope_dir" ]
 '''
 # The forced publication interleaving uses the POSIX foreground-parent route;
 # Windows' separate native PID bridge remains covered by the normal calls.
 if os.name != 'nt':
-    result = subprocess.run(['bash','-c',ready_script,'fixture',str(root),str(ready_fixture),str(ready_driver)],
-                            text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
-    assert result.returncode == 0, (result.stdout,result.stderr)
+    for mode in ('normal', 'foreign'):
+        case = ready_fixture/mode; case.mkdir()
+        result = subprocess.run(['bash','-c',ready_script,'fixture',str(root),str(case),str(ready_driver),mode],
+                                text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        assert result.returncode == 0, (mode,result.stdout,result.stderr)
 repo = fixture/'live'; repo.mkdir()
 packet = repo/'.oms/task/current.md'
 script = r'''
@@ -28804,21 +28886,25 @@ metadata:
 
 Run the canonical gate before claiming done.
 EOF
-  "$ROOT/scripts/skill-forge.sh" --repo "$project" add \
-    --name oms-repo-build-check --file "$project/skill.md" >/dev/null 2>&1 ||
-    fail "adding a skill with a metadata.verify contract should succeed"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
+    --name oms-repo-build-check --file "$project/skill.md" 2>&1)" ||
+    fail "adding a skill with a metadata.verify contract should succeed: $out"
 
-  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" status)"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" status 2>&1)" ||
+    fail "skill contract status failed: $out"
   printf '%s\n' "$out" | grep >/dev/null '1 with a verify contract' ||
     fail "status should surface the contract count: $out"
 
-  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts)"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts 2>&1)" ||
+    fail "skill contracts listing failed: $out"
   printf '%s\n' "$out" | grep >/dev/null "oms-repo-build-check	bash scripts/check.sh" ||
     fail "contracts should list name<TAB>command: $out"
 
   # The close path reminds about the contract; it must never execute it.
-  "$ROOT/scripts/agent-task.sh" --repo "$project" init --goal g >/dev/null 2>&1
-  out="$("$ROOT/scripts/agent-task.sh" --repo "$project" close --reason smoke 2>&1)"
+  out="$("$ROOT/scripts/agent-task.sh" --repo "$project" init --goal g 2>&1)" ||
+    fail "skill contract task initialization failed: $out"
+  out="$("$ROOT/scripts/agent-task.sh" --repo "$project" close --reason smoke 2>&1)" ||
+    fail "skill contract close failed: $out"
   printf '%s\n' "$out" |
     grep -q "declares verify contract: bash scripts/check.sh" ||
     fail "close should remind about the verify contract: $out"
@@ -28840,7 +28926,8 @@ EOF
     fail "a legacy top-level verify contract must stay valid: $out"
   printf '%s\n' "$out" | grep >/dev/null 'top-level verify is non-portable' ||
     fail "validate should advise moving the legacy contract: $out"
-  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts)"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts 2>&1)" ||
+    fail "legacy skill contracts listing failed: $out"
   printf '%s\n' "$out" | grep >/dev/null "legacy-contract	make lint" ||
     fail "the legacy contract should still be listed: $out"
 
