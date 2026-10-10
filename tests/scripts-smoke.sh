@@ -13176,6 +13176,88 @@ PY
     fail "update downgraded the recorded apply mode: $(cat "$marker")"
 }
 
+test_check_affected_selects_python_test_files() {
+  local repo="$TMP/affected-python" base selected out rc
+  make_committed_repo "$repo"
+  mkdir -p "$repo/scripts/lib" "$repo/tests"
+  printf '.oms/\n__pycache__/\n' > "$repo/.gitignore"
+  cp "$ROOT/scripts/check.sh" "$repo/scripts/check.sh"
+  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/"
+  cp -R "$ROOT/scripts/lib/oms_runtime" "$repo/scripts/lib/"
+  cat > "$repo/scripts/graph.sh" <<'SH'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"schema":1,"mode":"affected","reasons":["fixture"],"tests":["tests/test_fixture.py"],"test_cases":[{"path":"tests/test_fixture.py","language":"python","id":"symbol:tests/test_fixture.py::TestFixture.test_selected","name":"selected"}]}
+JSON
+SH
+  chmod +x "$repo/scripts/graph.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/tests/source-distribution-smoke.sh"
+  git -C "$repo" add .gitignore scripts tests/source-distribution-smoke.sh
+  git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m checker >/dev/null
+  base="$(git -C "$repo" rev-parse HEAD)"
+  cat > "$repo/tests/runtime_test_base.py" <<'PY'
+VALUE = "sibling-imported"
+PY
+  mkdir -p "$TMP/affected-python-inherited"
+  printf 'VALUE = "inherited-imported"\n' > "$TMP/affected-python-inherited/inherited_test_base.py"
+  cat > "$repo/tests/test_fixture.py" <<'PY'
+import os
+import unittest
+import inherited_test_base
+from runtime_test_base import VALUE
+from oms_runtime.common import canonical_json
+
+class TestFixture(unittest.TestCase):
+    def test_selected(self):
+        with open(os.environ["OMS_AFFECTED_MARKER"], "a") as handle:
+            handle.write(VALUE + "|" + inherited_test_base.VALUE + "|" + canonical_json({"ok": True}).decode() + "\n")
+
+    def test_unselected_case(self):
+        with open(os.environ["OMS_AFFECTED_MARKER"], "a") as handle:
+            handle.write("unselected-case\n")
+PY
+  cat > "$repo/tests/test_other.py" <<'PY'
+import os
+import unittest
+
+class TestOther(unittest.TestCase):
+    def test_unselected_file(self):
+        with open(os.environ["OMS_AFFECTED_MARKER"], "a") as handle:
+            handle.write("unselected-file\n")
+PY
+  git -C "$repo" add scripts tests
+  git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m fixtures >/dev/null
+  selected="$TMP/affected-python.marker"
+  if out="$(cd "$repo" && PYTHONPATH="$TMP/affected-python-inherited" OMS_AFFECTED_MARKER="$selected" bash scripts/check.sh --affected --no-lint --changed-from "$base" --changed-to HEAD 2>&1)"; then
+    :
+  else
+    fail "affected Python execution with sibling import failed: $out"
+  fi
+  [ "$(cat "$selected")" = 'sibling-imported|inherited-imported|{"ok":true}' ] || fail "affected Python ran an unselected case/file: $(cat "$selected" 2>/dev/null || true)"
+
+  cat > "$repo/tests/test_fixture.py" <<'PY'
+import os
+import unittest
+import inherited_test_base
+from runtime_test_base import VALUE
+from oms_runtime.common import canonical_json
+
+class TestFixture(unittest.TestCase):
+    def test_selected(self):
+        raise AssertionError("selected failure propagated")
+
+    def test_unselected_case(self):
+        with open(os.environ["OMS_AFFECTED_MARKER"], "a") as handle:
+            handle.write("unselected-case\n")
+PY
+  git -C "$repo" add tests/test_fixture.py
+  git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m failing_fixture >/dev/null
+  rc=0
+  out="$(cd "$repo" && PYTHONPATH="$TMP/affected-python-inherited" OMS_AFFECTED_MARKER="$selected" bash scripts/check.sh --affected --no-lint --changed-from "$base" --changed-to HEAD 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "affected Python test failure was swallowed: $out"
+  contains "$out" 'selected failure propagated' || fail "selected Python failure was not reported: $out"
+}
+
 test_check_gate_hard_fails_without_shellcheck() {
   # The gate must FAIL (not silently skip) when shellcheck is absent — the
   # exact false-confidence that hid a session of red CI.
