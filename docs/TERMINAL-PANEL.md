@@ -71,16 +71,25 @@ with `↳` (`^` in ASCII mode) and its detail starts with "Started by Opus 5.5·
 tells mains to use this only for a separate long line of work, not for ordinary subtasks.
 
 A main never closes another main, because closing ends a native chat and its running work. It
-may only ask: `oms panel --request-close PARTICIPANT --reason "..." [--json]` (refused inside
+may ask: `oms panel --request-close PARTICIPANT --reason "..." [--json]` (refused inside
 workers, for a target that is not a joined main of the caller's room, and without a dry-run)
 records a `question` room message from the caller to that main whose text starts with
-`Close requested: `. The control window lists each open request under "Needs you" as
+`Close requested: `. The control window lists joined mains under "Needs you" so the person can
+select one directly; a request adds its sender and reason but is not required. Each row reports
+the number of running calls, which remain independent and are not cancelled by closing the main.
+An open request appears as
 "Close #3 Opus 5.5 · requested by #1 Opus 5.5 · reason · running calls 1 · unread 2 · 14:20".
 With the row selected (the inbox title then ends `x closes`), `x` asks "Close #3 Opus 5.5? running calls 1 — press x again to confirm,
 Esc to cancel"; the second `x` records the main leaving the room and kills its tmux window, only
-when `@oms_panel_main_attempt` and `@oms_panel_room_participant` prove the window is that main's
-in this checkout's panel session. The row is replaced by "Closed 14:20 by the person" until the next
-refresh. The native CLI keeps its history where it already stores it.
+when the current window tags, repository, room, recorded attempt and native pane all still match
+that joined main in this checkout's panel session. A finished attempt is removable when its latest
+terminal record still matches the window and the native pane binding has been cleared; an active
+attempt must still have its exact native pane. If tmux refuses, membership remains. If the
+window closes but recording the room leave fails, the panel rechecks membership and retries the
+leave once without issuing another kill. A persistent failure is reported as partial, without
+claiming that the main left. If the control panel shares the selected main's window, closure is
+refused so its own status process cannot be killed before it reports the result. The native CLI
+keeps its history where it already stores it.
 
 ## Shared work rooms and the graph
 

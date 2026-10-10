@@ -3473,7 +3473,7 @@ if os.name == "posix":
             assert len([m for m in room.status(project, menu_room)["messages"] if m["text"].startswith("Close requested: ")]) == 1
             with patch.dict(os.environ, dict(env, TMUX="fixture", OMS_PANEL_SESSION=session, OMS_ROOM_ID=menu_room), clear=True):
                 close_state, unused = panel.snapshot(project, menu_room)
-                assert [r["participant"] for r in close_requests(close_state)] == [target_id], close_state.get("room")
+                assert target_id in [r["participant"] for r in close_requests(close_state)], close_state.get("room")
                 close_nav = {"selected": ("close", target_id), "room_id": menu_room}
                 assert panel.close_selected(project, close_nav, close_state, True) == "close not confirmed"
                 assert "press x again to confirm, Esc to cancel" in close_nav["notice"], close_nav
@@ -6359,7 +6359,7 @@ for width, height in ((100, 28), (42, 24), (24, 18), (12, 10)):
         assert len(drawn.splitlines()) <= height - 1 and all(display_width(line) <= width for line in drawn.splitlines()), drawn
         closed_cards(drawn, width, glyphs)
 assert "key + Enter" in render(inbox_room, "codex", 100, 28, menu=True, navigation={"line_input": True})
-# A main's close request is a row only the person acts on; ASCII mode stays ASCII and the placeholder replaces it.
+# Joined mains are directly selectable for person-confirmed closure; a main request adds context but is optional.
 close_room = dict(inbox_room, main_windows={"m1": 3, "m0": 1})
 close_room["room"] = dict(inbox_room["room"], participants=inbox_room["room"]["participants"] + [
     {"participant": "m0", "role": "main", "joined": True, "provider": "claude", "model": "claude-opus-5-5", "seq": 0}],
@@ -6372,6 +6372,7 @@ for glyphs in (True, False):
     assert ("Close #3 Opus 5.5" + sep + "requested by #1 Opus 5.5" + sep + "done?[2J here" + sep + "running calls 0" + sep + "unread 0") in drawn, drawn
     assert ("Closed 14:20 by the person" in drawn and "\033" not in drawn and (glyphs or drawn.isascii())), drawn
     assert ("close", "m1") in nav["items"], nav
+    assert ("close", "m0") in nav["items"], nav
     assert "Up/Down, Enter opens, x closes" in drawn, drawn
 assert "x closes" not in render(inbox_room, "codex", 120, 30, menu=True, navigation={})
 assert panel.menu_input().decode(b"1\033[B2q ") == [("1",), ("down",), ("2",), ("q",), (" ",)]
@@ -7772,15 +7773,89 @@ with patch.object(panel, "managed_session", return_value=True), patch.object(pan
             raise AssertionError("a main with no window closed")
         except ValueError as error:
             assert "proven" in str(error)
-    with patch.object(panel, "main_history", return_value=[{"attempt_id": "a1", "tool": "panel-main"}]), \
-            patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0, "@1\ta1\tmx\tr1", ""),
-                                                                subprocess.CalledProcessError(1, "kill-window")]):
+    panel_main_row = {"attempt_id": "a1", "tool": "panel-main", "state": "working", "sequence": 1,
+                      "refs": {"panel_role": "main", "panel_room_id": "r1", "panel_room_participant": "mx"}}
+    with patch.object(panel, "main_history", return_value=[panel_main_row]), \
+            patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                "@1\ta1\tmx\tr1\t%s\t%%2" % str(Path(project).resolve()), ""),
+                subprocess.CompletedProcess([], 0, "%2\n", ""), subprocess.CalledProcessError(1, "kill-window")]):
         try:
             panel.close_main(project, "r1", "mx")
             raise AssertionError("a failed kill was accepted")
-        except subprocess.CalledProcessError:
-            pass
+        except ValueError as error:
+            assert "refused" in str(error)
     assert not left_room.called, "leave was recorded without a closed window"
+    with patch.object(panel, "main_history", return_value=[panel_main_row]), \
+            patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                "@1\ta1\tmx\tr1\t%s\t%%2" % str(Path(project).resolve()), ""),
+                subprocess.CompletedProcess([], 0, "%2\n", ""), subprocess.CompletedProcess([], 0, "", "")]), \
+            patch.object(panel.room, "append", side_effect=OSError("fixture leave failure")) as failed_leave:
+        try:
+            panel.close_main(project, "r1", "mx")
+            raise AssertionError("a failed leave was accepted")
+        except ValueError as error:
+            assert "after one safe retry" in str(error)
+        assert failed_leave.call_count == 2
+    with patch.object(panel, "main_history", return_value=[panel_main_row]), \
+            patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                "@1\ta1\tmx\tr1\t%s\t%%2" % str(Path(project).resolve()), ""),
+                subprocess.CompletedProcess([], 0, "%2\n", ""), subprocess.CompletedProcess([], 0, "", "")]), \
+            patch.object(panel.room, "append", side_effect=[OSError("fixture transient leave failure"), None]) as retry_leave:
+        panel.close_main(project, "r1", "mx")
+        assert retry_leave.call_count == 2
+    replaced_history = [panel_main_row, dict(panel_main_row, attempt_id="a2", sequence=2,
+        state="done", terminal=True)]
+    with patch.object(panel, "main_history", return_value=replaced_history), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0,
+                "@1\ta1\tmx\tr1\t%s\t%%2" % str(Path(project).resolve()), "")) as stale_run:
+        try:
+            panel.close_main(project, "r1", "mx")
+            raise AssertionError("a stale window tag survived a newer terminal attempt")
+        except ValueError as error:
+            assert "proven" in str(error)
+        assert stale_run.call_count == 1
+    newest_terminal = dict(panel_main_row, attempt_id="a2", sequence=2, state="done", terminal=True)
+    with patch.object(panel, "main_history", return_value=[newest_terminal]), \
+            patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                "@1\ta2\tmx\tr1\t%s\t\n" % str(Path(project).resolve()), ""),
+                subprocess.CompletedProcess([], 0, "%3\n", ""), subprocess.CompletedProcess([], 0, "", "")]) as terminal_run, \
+            patch.object(panel.room, "append") as terminal_leave:
+        panel.close_main(project, "r1", "mx")
+        assert terminal_run.call_count == 3 and terminal_leave.called
+    with patch.object(panel, "main_history", return_value=[newest_terminal]), \
+            patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                "@1\ta2\tmx\tr1\t%s\t%%2" % str(Path(project).resolve()), ""),
+                subprocess.CompletedProcess([], 0, "%2\n", "")]) as terminal_with_binding, \
+            patch.object(panel.room, "append") as bound_terminal_leave:
+        try:
+            panel.close_main(project, "r1", "mx")
+            raise AssertionError("a terminal main with a native pane binding was closed")
+        except ValueError as error:
+            assert "still has a native pane binding" in str(error)
+        assert terminal_with_binding.call_count == 2 and not bound_terminal_leave.called
+    with patch.object(panel, "main_history", return_value=[panel_main_row]), \
+            patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                "@1\ta1\tmx\tr1\t%s\t\n" % str(Path(project).resolve()), ""),
+                subprocess.CompletedProcess([], 0, "%3\n", "")]) as active_without_pane, \
+            patch.object(panel.room, "append") as refused_leave:
+        try:
+            panel.close_main(project, "r1", "mx")
+            raise AssertionError("an active main without a native pane was closed")
+        except ValueError as error:
+            assert "pane is missing or changed" in str(error)
+        assert active_without_pane.call_count == 2 and not refused_leave.called
+    with patch.dict(os.environ, {"TMUX_PANE": "%7"}), \
+            patch.object(panel, "main_history", return_value=[panel_main_row]), \
+            patch.object(panel.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0,
+                "@1\ta1\tmx\tr1\t%s\t%%2" % str(Path(project).resolve()), ""),
+                subprocess.CompletedProcess([], 0, "%2\n", ""), subprocess.CompletedProcess([], 0, "@1\n", "")]) as run, \
+            patch.object(panel.room, "append") as own_leave:
+        try:
+            panel.close_main(project, "r1", "mx")
+            raise AssertionError("the control panel closed its own window")
+        except ValueError as error:
+            assert "shares the main window" in str(error)
+        assert run.call_count == 3 and not own_leave.called
 # An unanswered close request survives twelve newer messages in the projected status.
 with patch.object(room, "records", return_value=[]), patch.object(room, "project", return_value={
         "participants": [], "publications": {}, "closed": False, "id": "r1", "messages": [
@@ -7792,7 +7867,7 @@ with patch.object(room, "records", return_value=[]), patch.object(room, "project
 assert all(m["id"] != "c0" for m in crowded["messages"]) and [m["id"] for m in crowded["close_requests"]] == ["c0"], crowded
 crowded_view = dict(close_room, room=dict(crowded, participants=close_room["room"]["participants"]))
 crowded_view["room"]["close_requests"] = [dict(crowded["close_requests"][0], sender="m0", recipient="m1")]
-assert [r["participant"] for r in panel.close_requests(crowded_view)] == ["m1"]
+assert {r["participant"] for r in panel.close_requests(crowded_view)} == {"m0", "m1"}
 failed_worker = {"participant": "adv-worker", "provider": "codex", "role": "worker", "joined": True, "label": "Worker",
                  "parent": "adv-main", "seq": 2}
 failed_board = dict(board, room={"id": "adv-room", "participants": [claude_main, failed_worker]}, attempts={"active_recent": [

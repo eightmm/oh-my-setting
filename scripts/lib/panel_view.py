@@ -332,6 +332,18 @@ def close_requests(report, unicode=True):
             "by": name(sender) if sender else clean(message.get("sender"), 40) or "unknown",
             "reason": clean(text[len(CLOSE_PREFIX):], 80) or "no reason given", "calls": calls, "unread": unread,
             "ts": message.get("ts") or "", "clock": clock_stamp(message.get("ts"))}
+    # The person can select any joined main directly. A main's request remains
+    # useful context, but is not a prerequisite for the person's action.
+    for target in mains.values():
+        if target["participant"] not in windows:
+            continue
+        found.setdefault(target["participant"], {
+            "participant": target["participant"], "label": name(target),
+            "by": "person selected", "reason": "close main", "calls": sum(
+                1 for m in members if m.get("parent") == target["participant"] and m["state"] in LIVE_STATES),
+            "unread": 0, "ts": target.get("joined_at") or "", "clock": "", "requested": False})
+    for request in found.values():
+        request.setdefault("requested", True)
     return list(found.values())
 
 
@@ -395,8 +407,9 @@ def inbox_items(report, unicode=True):
                           "row_id": ("question", str(question.get("id")) if question.get("id") else ("position", index))})
     for request in close_requests(report, unicode):
         items.append({"stamp": request["ts"], "glyph": "✕" if unicode else "x", "who": "Close " + request["label"],
-                      "what": sep_join(unicode, "requested by " + request["by"], request["reason"],
-                                       "running calls %s" % request["calls"], "unread %s" % request["unread"]),
+                      "what": sep_join(unicode, ("requested by " + request["by"] if request["requested"] else "select to close"),
+                                       request["reason"], "running calls %s" % request["calls"],
+                                       "unread %s" % request["unread"]),
                       "tail": request["clock"], "style": "alert", "action": ("close", request["participant"]),
                       "row_id": ("close", request["participant"])})
     return sorted(items, key=lambda item: item["stamp"], reverse=True)

@@ -1903,26 +1903,90 @@ def request_close(repo, target, reason=None):
 
 
 def close_main(repo, ident, participant):
-    """Close one main at the person's key press: record it leaving, then kill only the window proven to be its own."""
+    """Close a person-selected main after rechecking its live window and native pane binding."""
     session = os.environ.get("OMS_PANEL_SESSION", "")
     if not managed_session() or session != panel_session(repo) or session_owner(session) != str(repo):
         raise ValueError("closing a main needs this checkout's open tmux panel")
-    if not any(p["participant"] == participant and p["joined"] and p["role"] == "main"
-               for p in room.status(repo, ident)["participants"]):
+    try:
+        participants = room.status(repo, ident)["participants"]
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise ValueError("could not recheck room membership; nothing closed") from error
+    if not any(p["participant"] == participant and p["joined"] and p["role"] == "main" for p in participants):
         raise ValueError("that main already left this room")
-    found = subprocess.run(tmux_command("list-windows", "-t", "=" + session, "-F",
-                                        "#{window_id}\t#{@oms_panel_main_attempt}\t#{@oms_panel_room_participant}\t#{@oms_panel_room}"),
-                           capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+    try:
+        found = subprocess.run(tmux_command("list-windows", "-t", "=" + session, "-F",
+                                            "#{window_id}\t#{@oms_panel_main_attempt}\t#{@oms_panel_room_participant}\t"
+                                            "#{@oms_panel_room}\t#{@oms_panel_repo}\t#{@oms_panel_native_pane}"),
+                               capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("could not recheck panel windows; nothing closed") from error
+    if found.returncode:
+        raise ValueError("could not recheck panel windows; nothing closed")
     tagged = [r for r in (line.replace("\r", "").split("\t") for line in found.stdout.splitlines())
-              if len(r) == 4 and r[2] == participant]
-    attempts = {row.get("attempt_id") for row in main_history(repo, ident, participant) if row.get("tool") == "panel-main"}
-    proven = [r for r in tagged if r[1] and r[1] in attempts and r[3] == ident]
+              if len(r) == 6 and r[2] == participant]
+    try:
+        history = [row for row in main_history(repo, ident, participant)
+                   if row.get("tool") == "panel-main" and row.get("refs", {}).get("panel_role") == "main"
+                   and row.get("refs", {}).get("panel_room_id", ident) == ident
+                   and row.get("refs", {}).get("panel_room_participant", row.get("attempt_id")) == participant]
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise ValueError("could not recheck the main attempt; nothing closed") from error
+    latest = max(history, key=lambda row: row.get("sequence", 0), default=None)
+    # A finished main may still have a native window the person wants removed.
+    # The newest attempt remains the ownership identity even after it is terminal.
+    attempts = {latest.get("attempt_id")} if latest and latest.get("attempt_id") else set()
+    proven = [r for r in tagged if r[1] and r[1] in attempts and r[3] == ident and
+              r[4] == str(Path(repo).resolve())]
     if len(tagged) != len(proven):
         raise ValueError("no single window is proven to be that main's; nothing closed")
-    if len(proven) != 1:
+    if len(proven) != 1 or latest is None:
         raise ValueError("no single window is proven to be that main's; nothing closed")
-    subprocess.run(tmux_command("kill-window", "-t", proven[0][0]), check=True, timeout=5, stdin=subprocess.DEVNULL)
-    room.append(repo, ident, {"kind": "leave", "participant": participant}, "Participant left")
+    try:
+        panes = subprocess.run(tmux_command("list-panes", "-t", proven[0][0], "-F", "#{pane_id}"),
+                              capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("could not recheck the main pane; nothing closed") from error
+    pane_ids = {line.replace("\r", "").strip() for line in panes.stdout.splitlines() if line.strip()}
+    terminal = latest.get("terminal") is True or latest.get("state") in {"done", "failed", "cancelled", "timed_out", "abandoned"}
+    if panes.returncode or not pane_ids:
+        raise ValueError("the main window panes could not be rechecked; nothing closed")
+    if terminal:
+        # run_native clears this window option after confirmed process exit.
+        # Its empty value plus the latest terminal attempt proves no native pane remains bound.
+        if proven[0][5]:
+            raise ValueError("the finished main still has a native pane binding; nothing closed")
+    elif not re.fullmatch(r"%[0-9]+", proven[0][5]) or proven[0][5] not in pane_ids:
+        raise ValueError("the main pane is missing or changed; nothing closed")
+    current_pane = os.environ.get("TMUX_PANE", "")
+    if re.fullmatch(r"%[0-9]+", current_pane):
+        try:
+            current_window = subprocess.run(tmux_command("display-message", "-p", "-t", current_pane, "#{window_id}"),
+                                            capture_output=True, text=True, check=False, timeout=3,
+                                            stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError("could not verify the control window; nothing closed") from error
+        if current_window.returncode:
+            raise ValueError("could not verify the control window; nothing closed")
+        if current_window.stdout.strip() == proven[0][0]:
+            raise ValueError("the control panel shares the main window; close it from another panel window")
+    try:
+        subprocess.run(tmux_command("kill-window", "-t", proven[0][0]), check=True, timeout=5, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("tmux refused to close the main window; room membership remains") from error
+    try:
+        room.append(repo, ident, {"kind": "leave", "participant": participant}, "Participant left")
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        try:
+            still_joined = any(p["participant"] == participant and p["joined"]
+                               for p in room.status(repo, ident)["participants"])
+        except (OSError, ValueError, subprocess.SubprocessError) as status_error:
+            raise ValueError("main window closed, but room leave status is unknown") from status_error
+        if not still_joined:
+            return
+        try:
+            room.append(repo, ident, {"kind": "leave", "participant": participant}, "Participant left")
+        except (OSError, ValueError, subprocess.SubprocessError) as retry_error:
+            raise ValueError("main window closed, but room leave failed after one safe retry; membership may remain") from retry_error
 
 
 def close_selected(repo, navigation, state, unicode):
@@ -1930,7 +1994,7 @@ def close_selected(repo, navigation, state, unicode):
     selected = navigation.get("selected") or ("",)
     request = next((r for r in close_requests(state, unicode) if ("close", r["participant"]) == selected), None)
     if request is None:
-        return "Select a Close request in Needs you first"
+        return "Select a joined main's Close row first"
     armed = navigation.pop("close_armed", None)
     if armed is None or armed[0] != request["participant"] or time.monotonic() - armed[1] > 10:
         navigation["close_armed"] = (request["participant"], time.monotonic())
@@ -1938,7 +2002,12 @@ def close_selected(repo, navigation, state, unicode):
             request["label"], request["calls"], "—" if unicode else "-")
         return "close not confirmed"
     ident = navigation.get("room_id") or os.environ.get("OMS_ROOM_ID")
-    close_main(repo, ident, request["participant"])
+    try:
+        close_main(repo, ident, request["participant"])
+    except ValueError as error:
+        navigation.pop("close_armed", None)
+        navigation["notice"] = str(error)
+        return str(error)
     stamp = time.strftime("%H:%M")
     navigation["closed_note"] = "Closed %s by the person · %s" % (stamp, request["label"]) if unicode else \
         "Closed %s by the person / %s" % (stamp, request["label"])
