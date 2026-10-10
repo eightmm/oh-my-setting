@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# These fixtures set role inputs per case below. Do not inherit a caller's
+# operation or opt-out switch into generic provider-default assertions.
+unset OMS_MODEL_OPERATION OMS_MODEL_WORKLOAD OMS_MODEL_ROLE OMS_ROLE_ROUTING || true
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-routing.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
@@ -19,7 +22,7 @@ out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" OMS_MODEL_EXPLICIT=mo
 [ "$out" = 'model-a||||medium|explicit' ] || fail "explicit route must not invent fallback candidates: $out"
 out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" OMS_MODEL_EXPLICIT=model-a OMS_MODEL_FALLBACK_EXPLICIT='Model B' OMS_REASONING_EFFORT_REQUEST=auto bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex; printf "%s|%s|%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_FALLBACK" "$OMS_MODEL_ALTERNATE" "$OMS_MODEL_DISTINCT_CHAIN"')"
 [ "$out" = 'model-a|Model B||' ] || fail "explicit capacity fallback route: $out"
-out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" OMS_MODEL_EXPLICIT='' OMS_REASONING_EFFORT_REQUEST=auto bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex; printf "%s|%s|%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_FALLBACK" "$OMS_REASONING_RESOLVED" "$OMS_REASONING_EXPLICIT"')"
+out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" OMS_MODEL_OPERATION='' OMS_MODEL_EXPLICIT='' OMS_REASONING_EFFORT_REQUEST=auto bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex; printf "%s|%s|%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_FALLBACK" "$OMS_REASONING_RESOLVED" "$OMS_REASONING_EXPLICIT"')"
 [ "$out" = 'provider-default|||0' ] || fail "provider default route: $out"
 if PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$TMP/cap" OMS_MODEL_EXPLICIT=provider-default \
   OMS_REASONING_EFFORT_REQUEST=auto bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex' \
@@ -65,13 +68,13 @@ prepare_gen() {  # prepare_gen PROVIDER EXPLICIT ERRFILE REPORT-EXPRESSION
     bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare "$1" 2>"$2"; eval "$3"' _ "$1" "$3" "$4"
 }
 out="$(routable codex)"
-[ "$out" = 'gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna ' ] ||
+[ "$out" = 'gpt-5.6-sol gpt-5.6-luna ' ] ||
   fail "codex routable set must be the newest generation only: $out"
 out="$(routable antigravity)"
 [ "$out" = 'gemini-3.7-flash-high gemini-3.7-flash-low ' ] ||
   fail "antigravity routable set must drop the older pro line and re-hosted foreign families: $out"
 out="$(prepare_gen codex '' "$TMP/gen.err" 'printf "%s|%s" "$OMS_MODEL_ALTERNATE" "$(printf "%s" "$OMS_MODEL_DISTINCT_CHAIN" | tr "\n" " ")"')"
-[ "$out" = 'gpt-5.6-sol|gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna' ] ||
+[ "$out" = 'gpt-5.6-sol|gpt-5.6-sol gpt-5.6-luna' ] ||
   fail "provider-default recovery must stay inside the newest generation: $out"
 # A named previous-generation model still runs — it was named — but says so.
 out="$(prepare_gen codex gpt-5.5 "$TMP/gen.err" 'printf "%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_PREVIOUS_GENERATION"')"
@@ -98,7 +101,7 @@ safeguard_chain() {  # safeguard_chain PROVIDER OPERATION EXPLICIT
   fail "a provider-default claude call must still reach the Opus 5 floor: $(safeguard_chain claude consult '')"
 [ -z "$(safeguard_chain claude delegate claude-opus-5-5)" ] || fail "a named model must keep no safeguard chain"
 case "$(safeguard_chain codex delegate '')" in *opus*) fail "the floor belongs to claude only" ;; esac
-printf 'gpt-5.6-sol\ngpt-5.10-nova\n' > "$gen/codex.models"
+printf 'gpt-5.6-nova\ngpt-5.10-nova\n' > "$gen/codex.models"
 out="$(routable codex)"
 [ "$out" = 'gpt-5.10-nova ' ] || fail "a two-digit minor must compare numerically: $out"
 # A catalog whose names carry no generation is kept whole — nothing to compare —
@@ -110,11 +113,8 @@ printf 'model-a\ngpt-5.6-sol\n' > "$gen/codex.models"
 out="$(routable codex)"
 [ "$out" = 'gpt-5.6-sol ' ] || fail "an unversioned name beside versioned siblings drops: $out"
 
-# Role routing: a write worker takes the second seeded price rank of the
-# routable set; everything that judges keeps its account-specific default.
-# The order within a generation is the one seed the registry keeps, and it
-# expires with the generation: an unseeded newest generation routes as the
-# provider default and says so.
+# Role routing: Codex role families retain Astra, Sol, Luna cost order across
+# their independent newest versions; other providers keep generation seeds.
 role_prepare() {  # role_prepare PROVIDER OPERATION ROLE ERRFILE
   PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" OMS_MODEL_EXPLICIT='' OMS_REASONING_EFFORT_REQUEST=auto \
     OMS_MODEL_OPERATION="$2" OMS_MODEL_ROLE="$3" \
@@ -122,8 +122,8 @@ role_prepare() {  # role_prepare PROVIDER OPERATION ROLE ERRFILE
 }
 printf 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\n' > "$gen/codex.models"
 out="$(role_prepare codex delegate implementation-worker "$TMP/role.err")"
-[ "$out" = 'gpt-5.6-terra|role-default|role:worker|gpt-5.6-luna' ] ||
-  fail "a write worker takes the second price rank and tries cheaper recovery first: $out"
+[ "$out" = 'gpt-5.6-sol|role-default|role:worker|gpt-5.6-luna' ] ||
+  fail "a standard worker uses Sol and tries Luna recovery first: $out"
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine.err")"
 case "$out" in 'gpt-5.6-luna|role-default|role:routine-worker|'*) ;; *) fail "routine work must select the lowest routable seeded rank: $out" ;; esac
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare claude delegate implementation-worker "$TMP/routine-claude.err")"
@@ -149,19 +149,30 @@ done
 # is the cheapest seeded rank, so recovery can only climb to Fable.
 out="$(role_prepare claude delegate implementation-worker "$TMP/role6.err")"
 [ "$out" = 'claude-opus-5-5|role-default|role:worker|claude-fable-5-1' ] || fail "a catalog-less provider routes its worker and recovery from the seed: $out"
-# GPT-6 carries the catalog's own priority order: astra, sol, luna.
-printf 'gpt-6-astra\ngpt-6-sol\ngpt-6-luna\ngpt-5.6-sol\n' > "$gen/codex.models"
+# Codex role families advance independently. Sol 6.1, Astra 6.10 and Luna
+# 6.2 are the newest known IDs in their respective families; old Sol 6 stays
+# excluded while explicit pins retain the warning and exact route.
+printf 'gpt-6-astra\ngpt-6.2-astra\ngpt-6.10-astra\ngpt-6-sol\ngpt-6.1-sol\ngpt-6-luna\ngpt-6.2-luna\ngpt-6.10-nova\ngpt-6..11-sol\n' > "$gen/codex.models"
+out="$(routable codex)"
+[ "$out" = 'gpt-6.10-astra gpt-6.1-sol gpt-6.2-luna ' ] || fail "Codex keeps each known family at its newest numeric version: $out"
 out="$(role_prepare codex delegate implementation-worker "$TMP/role-g6.err")"
-[ "$out" = 'gpt-6-sol|role-default|role:worker|gpt-6-luna' ] || fail "a GPT-6 write worker takes sol: $out"
+[ "$out" = 'gpt-6.1-sol|role-default|role:worker|gpt-6.2-luna' ] || fail "a standard worker uses newest Sol and cheaper Luna recovery: $out"
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine-g6.err")"
-case "$out" in 'gpt-6-luna|role-default|role:routine-worker|'*) ;; *) fail "GPT-6 routine work takes luna: $out" ;; esac
-# The only listed 6.1 tier keeps both worker ranks on the exact current Sol.
-printf 'gpt-6-astra\ngpt-6-sol\ngpt-6.1-sol\ngpt-6-luna\n' > "$gen/codex.models"
-for workload in standard routine; do
-  out="$(OMS_MODEL_WORKLOAD="$workload" role_prepare codex delegate implementation-worker "$TMP/role-g61.err")"
-  case "$out" in 'gpt-6.1-sol|role-default|'*) ;; *) fail "6.1 routing selected another generation: $out" ;; esac
-done
-printf 'gpt-5.6-sol\ngpt-5.10-nova\n' > "$gen/codex.models"
+case "$out" in 'gpt-6.2-luna|role-default|role:routine-worker|gpt-6.1-sol') ;; *) fail "routine work uses newest Luna and cheaper Sol recovery: $out" ;; esac
+out="$(prepare_gen codex gpt-6-sol "$TMP/old-sol.err" 'printf "%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_PREVIOUS_GENERATION"')"
+[ "$out" = 'gpt-6-sol|1' ] || fail "an older exact Sol pin remains unchanged and flagged: $out"
+grep -q 'previous generation' "$TMP/old-sol.err" || fail 'an older exact Sol pin must retain its warning'
+out="$(prepare_gen codex gpt-6.1-sol "$TMP/current-sol.err" 'printf "%s|%s" "$OMS_MODEL_PRIMARY" "$OMS_MODEL_PREVIOUS_GENERATION"')"
+[ "$out" = 'gpt-6.1-sol|0' ] && [ ! -s "$TMP/current-sol.err" ] || fail "newest exact Sol pin remains exact: $out"
+# Numeric comparison, absent tiers and malformed/unknown IDs are bounded to
+# known families; legacy unknown-generation behavior remains covered above.
+printf 'gpt-6.2-sol\ngpt-6.10-sol\n' > "$gen/codex.models"
+[ "$(routable codex)" = 'gpt-6.10-sol ' ] || fail '6.10 must compare newer than 6.2'
+printf 'gpt-6.10-astra\ngpt-6.2-nova\ngpt-6..10-luna\n' > "$gen/codex.models"
+[ "$(routable codex)" = 'gpt-6.10-astra ' ] || fail 'absent tiers and malformed IDs must not be fabricated'
+out="$(role_prepare codex delegate implementation-worker "$TMP/role-absent.err")"
+[ "$out" = 'gpt-6.10-astra|role-default|role:worker|provider-default' ] || fail "missing Sol must use only available known family: $out"
+printf 'gpt-5.6-nova\ngpt-5.10-nova\n' > "$gen/codex.models"
 out="$(OMS_MODEL_WORKLOAD=routine role_prepare codex delegate implementation-worker "$TMP/routine-new.err")"
 case "$out" in 'provider-default|provider-default|'*) ;; *) fail "routine must not invent unseeded generation models: $out" ;; esac
 out="$(role_prepare codex delegate implementation-worker "$TMP/role4.err")"

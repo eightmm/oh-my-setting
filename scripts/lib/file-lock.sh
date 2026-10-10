@@ -68,6 +68,57 @@ oms_file_lock_path_for_file() {
   printf '%s/%s.%s.lock\n' "$(oms_file_lock_dir_for_path "$abs")" "$name" "$sum"
 }
 
+# Resolve the same path for a read-only observation without creating the
+# temporary-root lock directory. When that directory is absent, a writable
+# temp root means acquisition would create it; when it cannot be created,
+# acquisition falls back to the cache directory.
+oms_file_lock_path_for_observation() {
+  local file="$1"
+  local abs
+  local name
+  local leaf_path
+  local sum
+  local lock_dir
+  local root="${TMPDIR:-/tmp}"
+  local tmp_root=""
+  local candidate
+
+  case "$file" in
+    /*) abs="$file" ;;
+    *) abs="$PWD/$file" ;;
+  esac
+  leaf_path="$abs"
+  while [ "$leaf_path" != / ] && [ "${leaf_path%/}" != "$leaf_path" ]; do
+    leaf_path="${leaf_path%/}"
+  done
+  if [ "$leaf_path" = / ]; then name=/; else name="${leaf_path##*/}"; fi
+  name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
+  sum="$(printf '%s' "$abs" | cksum | awk '{print $1 "-" $2}')"
+
+  if [ -n "${OMS_LOCK_DIR:-}" ]; then
+    lock_dir="$OMS_LOCK_DIR"
+  else
+    root="${root%/}"
+    case "$abs" in
+      "$root"/*) tmp_root="$root" ;;
+      "${HOME%/}"/*) ;;
+      /tmp/*) tmp_root=/tmp ;;
+    esac
+    if [ -n "$tmp_root" ]; then
+      candidate="$tmp_root/oh-my-setting-locks-${UID:-$(id -u)}"
+        if { [ -d "$candidate" ] && [ ! -L "$candidate" ] && [ -O "$candidate" ]; } ||
+            { [ ! -e "$candidate" ] && [ ! -L "$candidate" ] && [ -w "$tmp_root" ]; }; then
+          lock_dir="$candidate"
+        else
+          lock_dir="$(oms_file_lock_dir)"
+        fi
+    else
+      lock_dir="$(oms_file_lock_dir)"
+    fi
+  fi
+  printf '%s/%s.%s.lock\n' "$lock_dir" "$name" "$sum"
+}
+
 # State that lives under the temp directory is a fixture or a throwaway
 # checkout, and its locks used to accumulate in the per-user cache forever:
 # every suite run outside check.sh (which sets OMS_LOCK_DIR) left hundreds of
@@ -678,24 +729,64 @@ oms_try_file_lock() {
 oms_file_lock_probe() {  # STATE_FILE
   local lock_path
 
-  lock_path="$(oms_file_lock_path_for_file "$1")"
+  lock_path="$(oms_file_lock_path_for_observation "$1")" || { echo unknown; return 0; }
   if command -v flock >/dev/null 2>&1 && [ "${OMS_LOCK_FORCE_MKDIR:-0}" != "1" ]; then
-    [ -e "$lock_path" ] || { echo free; return 0; }
     python3 - "$lock_path" <<'PY' 2>/dev/null || echo unknown
-import os, sys
+import os, stat, sys
 try:
-    st = os.stat(sys.argv[1])
-    rows = open("/proc/locks", encoding="ascii", errors="replace").read().splitlines()
+    st = os.lstat(sys.argv[1])
+except FileNotFoundError:
+    print("free")
+    sys.exit(0)
 except OSError:
     print("unknown")
     sys.exit(0)
+if stat.S_ISLNK(st.st_mode):
+    try:
+        st = os.stat(sys.argv[1])
+    except OSError:
+        print("unknown")
+        sys.exit(0)
 key = "%02x:%02x:%d" % (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
-held = any(len(f) > 5 and f[1] == "FLOCK" and f[5] == key for f in (row.split() for row in rows))
-print("held" if held else "free")
+try:
+    with open("/proc/locks", encoding="ascii", errors="replace") as stream:
+        rows = stream.read().splitlines()
+except OSError:
+    print("unknown")
+    sys.exit(0)
+for row in rows:
+    fields = row.split()
+    if len(fields) > 5 and fields[1] == "FLOCK" and fields[5] == key:
+        try:
+            current = os.stat(sys.argv[1])
+        except OSError:
+            print("unknown")
+            sys.exit(0)
+        if (current.st_dev, current.st_ino) != (st.st_dev, st.st_ino):
+            print("unknown")
+            sys.exit(0)
+        print("held")
+        sys.exit(0)
+# An absent row cannot prove the lock is free: procfs may filter another
+# namespace, and flock helpers may have exited while a descriptor was shared.
+print("unknown")
 PY
     return 0
   fi
-  [ -d "$lock_path" ] || { [ ! -e "$lock_path" ] && echo free || echo unknown; return 0; }
+  if [ ! -d "$lock_path" ]; then
+    python3 - "$lock_path" <<'PY' 2>/dev/null || { echo unknown; return 0; }
+import os, sys
+try:
+    os.lstat(sys.argv[1])
+except FileNotFoundError:
+    print("free")
+except OSError:
+    print("unknown")
+else:
+    print("unknown")
+PY
+    return 0
+  fi
   if oms_file_lock_mkdir_stale "$lock_path" "$(oms_file_lock_timeout)" "$(date +%s)"; then
     echo free
   else

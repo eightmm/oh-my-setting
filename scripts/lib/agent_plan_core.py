@@ -40,11 +40,33 @@ OWNER_RE = re.compile(r"^owner_[0-9a-f]{32}$")
 def die(msg):
     sys.stderr.write("error: %s\n" % msg); sys.exit(2)
 
+_completion_module = None
+
+def completion_module():
+    global _completion_module
+    if _completion_module is None:
+        _completion_module = _load(os.path.join(os.path.dirname(__file__), "plan-completion.py"))
+    return _completion_module
+
+
 def load():
     if not os.path.exists(path):
         return {"schema": SCHEMA, "goal": "", "accept": "", "tasks": {}}
-    with open(path, encoding="utf-8") as fh:
-        d = json.load(fh)
+    state_root = os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
+    canonical = os.path.join(state_root, ".oms", "plan", "tasks.json")
+    # Once typed receipts exist, readers must bound the plan read before
+    # decoding it; a replaced FIFO cannot reveal its completion fields.
+    typed_namespace = (same_absolute_path(path, canonical) and
+                       os.path.lexists(os.path.join(state_root, ".oms", "plan", "completions")))
+    if act in {"accept-research", "satisfy"} or typed_namespace:
+        completion = completion_module()
+        try:
+            d = completion["strict_plan"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), path)
+        except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
+            die(str(exc))
+    else:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
     d.setdefault("tasks", {})
     d.setdefault("accept", "")   # schema 2 plans predate the acceptance contract
     d["schema"] = SCHEMA
@@ -62,6 +84,14 @@ def load():
         task.setdefault("executor_id", "")
         task.setdefault("executor_soul_sha256", "")
         task.setdefault("autopilot_owner_id", "")
+    if any("completion_kind" in t or "completion_receipt" in t for t in d["tasks"].values()):
+        completion = completion_module()
+        try:
+            completion["strict_plan"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), path)
+            for task in d["tasks"].values():
+                completion["validate_done"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), d, task, commit_landing_proof)
+        except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
+            die(str(exc))
     return d
 
 def ensure_plan_id(d):
@@ -113,7 +143,7 @@ def read_regular_bytes(filename, label, maximum):
     finally:
         os.close(fd)
 
-def commit_landing_proof(sha):
+def commit_landing_proof(sha, expected_receipt_sha256=None):
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
         die("--landed-commit must be a full lowercase commit SHA")
     directory = env("OMS_LAND_RECEIPTS_DIR")
@@ -128,6 +158,8 @@ def commit_landing_proof(sha):
         if not name.startswith(sha + "-") or not name.endswith(".json"):
             continue
         raw = read_regular_bytes(os.path.join(directory, name), "oms land receipt", 1024 * 1024)
+        if expected_receipt_sha256 is not None and hashlib.sha256(raw).hexdigest() != expected_receipt_sha256:
+            continue
         try:
             receipt = json.loads(raw)
         except (ValueError, UnicodeError):
@@ -453,17 +485,33 @@ def claim_age(t):
         return None
     return int((now_dt - anchor).total_seconds())
 
+_ttl_worker_markers = None
+_ttl_worker_veto = {}
+
+def ttl_worker_protected(t):
+    """A stale clock cannot override recovery's exact live/unproven evidence.
+    Call only after TTL expiry; cache the strict directory read and each lease
+    probe for this invocation. Malformed unrelated records still fail closed.
+    """
+    global _ttl_worker_markers
+    if _ttl_worker_markers is None:
+        _ttl_worker_markers = load_worker_markers()
+    identity = (t["id"], t.get("lease_id", ""))
+    if identity not in _ttl_worker_veto:
+        exact = exact_lease_markers(_ttl_worker_markers, *identity)
+        _ttl_worker_veto[identity] = any(
+            not worker_marker_is_typed(row) or marker_pid_alive(row)
+            for row in exact)
+    return _ttl_worker_veto[identity]
+
 def claim_expired(t):
-    """Read-time view of a claim: past its TTL it belongs to a worker nobody
-    has heard from, so it is not a live hold on the task. Reads present that
-    and change nothing (the same way agent-thread treats an expired CURRENT
-    pointer); reclaim is what rewrites the row."""
+    """Read-only TTL recovery eligibility, subject to exact worker protection."""
     if t.get("state") != "claimed":
         return False
     age = claim_age(t)
     if age is None:
         return False
-    return age >= claim_ttl_for(t)
+    return age >= claim_ttl_for(t) and not ttl_worker_protected(t)
 
 def review_expired(t):
     if t.get("state") != "review":
@@ -568,15 +616,51 @@ if needs_retirement_guard:
         "durable_jsonl": os.path.join(os.path.dirname(sys.argv[5]), "durable-jsonl.py"),
     }
     if act == "retire":
+        if os.path.exists(path):
+            completion = completion_module()
+            try:
+                state_root = os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
+                retirement_plan = completion["strict_plan"](state_root, path)
+                for task in retirement_plan["tasks"].values():
+                    if "completion_kind" in task or "completion_receipt" in task:
+                        completion["validate_done"](state_root, retirement_plan, task, commit_landing_proof)
+            except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
+                die(str(exc))
         retirement["run"](retirement_context)
         sys.exit(0)
-    retirement["cleanup_completed_retirement"](retirement_context)
+    # The verifier phase is read-only and intentionally runs outside locks;
+    # cleanup is fenced by both locked preflight and locked finalization.
+    if not (act in {"accept-research", "satisfy"} and env("OMS_COMPLETION_PHASE") == "verify"):
+        retirement["cleanup_completed_retirement"](retirement_context)
 if act == "accept":
+    if os.path.exists(path):
+        acceptance_plan = json.loads(read_regular_bytes(path, "acceptance plan", 4 * 1024 * 1024))
+        acceptance_tasks = acceptance_plan.get("tasks", {}) if isinstance(acceptance_plan, dict) else {}
+        if isinstance(acceptance_tasks, dict) and any(
+                isinstance(task, dict) and ("completion_kind" in task or "completion_receipt" in task)
+                for task in acceptance_tasks.values()):
+            load()
     sys.exit(0)
 
 d = load()
 tasks = d["tasks"]
 CONTRACT_VERDICT = project_contract_verdict(d)
+
+if act in {"accept-research", "satisfy"}:
+    require_project_contract_authority()
+    completion = completion_module()
+    try:
+        if env("OMS_COMPLETION_PHASE") == "verify":
+            completion["execute"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")),
+                                  env("OMS_COMPLETION_BUNDLE"), env("OMS_EXPECTED_COMPLETION_BUNDLE_SHA256"),
+                                  commit_landing_proof)
+        else:
+            completion["run"]({"action": act, "path": path, "plan": d, "ts": ts,
+                           "markers": load_worker_markers, "typed": worker_marker_is_typed,
+                           "alive": marker_pid_alive, "commit_proof": commit_landing_proof})
+    except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
+        die(str(exc))
+    sys.exit(0)
 
 if act == "init":
     d = {"schema": SCHEMA, "plan_id": "plan_" + secrets.token_hex(16),
@@ -1181,6 +1265,14 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         if not r: die("--reason is required for block")
         if t["state"] in ("claimed", "running", "review", "landing"):
             require_current_lease(t)
+        if t.get("completion_kind"):
+            if (env("OMS_HARNESS_CHILD") == "1" or
+                    env("OMS_HARNESS_DELEGATE_DEPTH") not in ("", "0")):
+                die("reactivating a completed task is parent-only")
+            history = t.setdefault("history", [])
+            history.append({"schema": 1, "kind": "completion-reactivated", "ts": ts,
+                            "completion_kind": t.pop("completion_kind"),
+                            "completion_receipt": t.pop("completion_receipt"), "reason": r})
         t.update(state="blocked", reason=r)
     elif act == "release":
         # Requeue a claimed/running task (e.g. the worker died) back to ready.
@@ -1323,6 +1415,8 @@ if act == "reclaim":
             ttl_s = claim_ttl_for(t, default_ttl)
         age = int((now_dt - anchor).total_seconds())
         if age < ttl_s:
+            continue
+        if t["state"] in ("claimed", "running") and ttl_worker_protected(t):
             continue
         prov = t.get("provider", "") or "?"
         was = t["state"]

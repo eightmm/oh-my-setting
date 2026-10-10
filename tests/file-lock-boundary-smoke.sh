@@ -69,6 +69,61 @@ test_temp_state_locks_under_the_temp_root() {
     *) fail "OMS_LOCK_DIR must still win for temp-root state, got $lock" ;;
   esac
 }
+
+test_observation_routing_matches_acquisition_without_mutation() {
+  local home="$TMP/routing-home" tmp_root="$TMP/routing-tmp" sibling="$TMP/routing-sibling"
+  local unsafe_root="$TMP/routing-unsafe" missing_root="$TMP/routing-missing"
+  local explicit="$TMP/routing-explicit" state observed before after
+  mkdir -p "$home" "$tmp_root" "$sibling" "$unsafe_root" "$explicit"
+  printf 'preserve me\n' > "$tmp_root/state"
+  printf 'sibling state\n' > "$sibling/state"
+  chmod 640 "$tmp_root/state" "$sibling/state"
+  ln -s "$TMP/elsewhere" "$unsafe_root/oh-my-setting-locks-$(id -u)"
+
+  check_route() {
+    local env_root="$1" env_state="$2" expected_kind="$3" env_override="${4:-}"
+    local acquisition observation
+    acquisition="$(HOME="$home" TMPDIR="$env_root" bash -c '
+      . "$1/scripts/lib/file-lock.sh"
+      unset OMS_LOCK_DIR
+      [ -z "$3" ] || OMS_LOCK_DIR="$3"
+      oms_file_lock_path_for_file "$2"' _ "$ROOT" "$env_state" "$env_override")"
+    observation="$(HOME="$home" TMPDIR="$env_root" bash -c '
+      . "$1/scripts/lib/file-lock.sh"
+      unset OMS_LOCK_DIR
+      [ -z "$3" ] || OMS_LOCK_DIR="$3"
+      oms_file_lock_path_for_observation "$2"' _ "$ROOT" "$env_state" "$env_override")"
+    [ "$acquisition" = "$observation" ] || fail "observation route differs from acquisition: $observation != $acquisition"
+    case "$expected_kind:$observation" in
+      explicit:"$env_override"/*) ;;
+      tmp:"$env_root/oh-my-setting-locks-"*/*) ;;
+      sibling:"/tmp/oh-my-setting-locks-"*/*) ;;
+      cache:"$home/.cache/oh-my-setting/locks/"*) ;;
+      *) fail "unexpected $expected_kind route: $observation" ;;
+    esac
+  }
+  check_route "$tmp_root" "$tmp_root/state" tmp
+  check_route "$tmp_root" "$sibling/state" sibling
+  check_route "$tmp_root" "$home/project/state" cache
+  check_route "$tmp_root" "$tmp_root/state" explicit "$explicit"
+  check_route "$unsafe_root" "$unsafe_root/state" cache
+  check_route "$missing_root" "$missing_root/state" cache
+
+  rm -rf "$tmp_root/oh-my-setting-locks-$(id -u)"
+  state="$tmp_root/state"
+  before="$(cksum "$state") $(stat -c '%a' "$state" 2>/dev/null || stat -f '%Lp' "$state")"
+  observed="$(HOME="$home" TMPDIR="$tmp_root" OMS_LOCK_FORCE_MKDIR=1 bash -c '
+    . "$1/scripts/lib/file-lock.sh"; oms_file_lock_probe "$2"' _ "$ROOT" "$state")"
+  [ "$observed" = free ] || fail "unresolved-but-safe missing lock should be free, got $observed"
+  after="$(cksum "$state") $(stat -c '%a' "$state" 2>/dev/null || stat -f '%Lp' "$state")"
+  [ "$before" = "$after" ] || fail "observation changed fixture bytes or mode"
+  [ ! -e "$tmp_root/oh-my-setting-locks-$(id -u)" ] ||
+    fail "observation created the temp-root lock directory"
+
+  observed="$(HOME="$home" TMPDIR="$unsafe_root" OMS_LOCK_DIR="$TMP/no-parent/locks" OMS_LOCK_FORCE_MKDIR=1 bash -c '
+    . "$1/scripts/lib/file-lock.sh"; oms_file_lock_probe "$2"' _ "$ROOT" "$unsafe_root/state")"
+  [ "$observed" = free ] || fail "safe cache fallback missing lock should be free, got $observed"
+}
 export OMS_LOCK_FORCE_MKDIR=1
 
 # shellcheck source=scripts/lib/file-lock.sh
@@ -244,11 +299,99 @@ EOF
     fail "a stale observer renamed the new winner's live lock"
 }
 
+
+test_flock_observation_is_conservative_and_read_only() {
+  local state="$TMP/flock/state" lock_path proc_fixture key result real_python holder_pid attempts
+  local saved_lock_dir="${OMS_LOCK_DIR:-}"
+  mkdir -p "$TMP/flock" "$TMP/proc-bin" "$TMP/observe-tmp"
+  unset OMS_LOCK_FORCE_MKDIR
+  OMS_LOCK_DIR="$TMP/flock-locks"
+  mkdir -p "$OMS_LOCK_DIR"
+  lock_path="$(oms_file_lock_path_for_file "$state")"
+  : > "$lock_path"
+  proc_fixture="$TMP/proc-locks"
+  : > "$proc_fixture"
+  real_python="$(command -v python3)"
+  key="$(python3 - "$lock_path" <<'PY'
+import os, sys
+st = os.stat(sys.argv[1])
+print("%02x:%02x:%d" % (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino))
+PY
+)"
+  cat > "$TMP/proc-bin/python3" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "-" ] && [ -n "${OMS_TEST_PROC_LOCKS:-}" ]; then
+  shift
+  sed 's|open("/proc/locks"|open(os.environ["OMS_TEST_PROC_LOCKS"]|' |
+    "$OMS_TEST_REAL_PYTHON" - "$@"
+else
+  exec "$OMS_TEST_REAL_PYTHON" "$@"
+fi
+EOF
+  chmod +x "$TMP/proc-bin/python3"
+  result="$(PATH="$TMP/proc-bin:$PATH" OMS_TEST_REAL_PYTHON="$real_python" \
+    OMS_TEST_PROC_LOCKS="$proc_fixture" oms_file_lock_probe "$state")"
+  [ "$result" = unknown ] || fail "an empty flock view must be unknown, got $result"
+  cat > "$TMP/flock/leave-holder.sh" <<EOF
+#!/bin/sh
+sleep 1 >/dev/null 2>&1 &
+echo \$! > "$TMP/flock/holder.pid"
+EOF
+  chmod +x "$TMP/flock/leave-holder.sh"
+  oms_try_file_lock "$state" "$TMP/flock/leave-holder.sh" ||
+    fail "the flock helper could not launch its inheriting holder"
+  holder_pid="$(sed -n '1p' "$TMP/flock/holder.pid")"
+  kill -0 "$holder_pid" 2>/dev/null || fail "the post-helper lock holder already exited"
+  printf '17: FLOCK ADVISORY WRITE 99 %s\n' "$key" > "$proc_fixture"
+  result="$(PATH="$TMP/proc-bin:$PATH" OMS_TEST_REAL_PYTHON="$real_python" \
+    OMS_TEST_PROC_LOCKS="$proc_fixture" oms_file_lock_probe "$state")"
+  [ "$result" = held ] || fail "a matching current kernel row must prove held, got $result"
+  attempts=0
+  while kill -0 "$holder_pid" 2>/dev/null && [ "$attempts" -lt 50 ]; do
+    attempts=$((attempts + 1))
+    sleep 0.05
+  done
+  kill -0 "$holder_pid" 2>/dev/null && fail "the test holder did not release its lock"
+  printf '17: FLOCK ADVISORY WRITE 99 00:00:1\n' > "$proc_fixture"
+  result="$(PATH="$TMP/proc-bin:$PATH" OMS_TEST_REAL_PYTHON="$real_python" \
+    OMS_TEST_PROC_LOCKS="$proc_fixture" oms_file_lock_probe "$state")"
+  [ "$result" = unknown ] || fail "an unrelated flock row must be unknown, got $result"
+  result="$(PATH="$TMP/proc-bin:$PATH" OMS_TEST_REAL_PYTHON="$real_python" \
+    OMS_TEST_PROC_LOCKS="$TMP/no-such-proc-view" oms_file_lock_probe "$state")"
+  [ "$result" = unknown ] || fail "an unreadable flock view must be unknown, got $result"
+
+  rm -f "$lock_path"
+  result="$(oms_file_lock_probe "$state")"
+  [ "$result" = free ] || fail "a genuinely missing lock path must be free, got $result"
+  ln -s "$TMP/no-such-lock-target" "$lock_path"
+  result="$(oms_file_lock_probe "$state")"
+  [ "$result" = unknown ] || fail "a lock path with a stat error must be unknown, got $result"
+  result="$(OMS_LOCK_FORCE_MKDIR=1 oms_file_lock_probe "$state")"
+  [ "$result" = unknown ] || fail "a broken mkdir-lock path must be unknown, got $result"
+  rm -f "$lock_path"
+
+  # Resolving a temp-root observation must not create its per-user lock dir.
+  unset OMS_LOCK_DIR
+  result="$(HOME="$TMP/home" TMPDIR="$TMP/observe-tmp" \
+    bash -c '. "$1/scripts/lib/file-lock.sh"; oms_file_lock_probe "$2"' \
+      _ "$ROOT" "$TMP/observe-tmp/state")"
+  [ "$result" = free ] || fail "a missing temp-root lock must be free, got $result"
+  [ ! -e "$TMP/observe-tmp/oh-my-setting-locks-$(id -u)" ] ||
+    fail "observation created the temp-root lock directory"
+  OMS_LOCK_DIR="$saved_lock_dir"
+  export OMS_LOCK_DIR
+  export OMS_LOCK_FORCE_MKDIR=1
+}
+
 test_old_live_holder_is_not_reclaimed
 test_reused_pid_token_is_reclaimed_when_supported
 test_bash32_fallback_records_the_holder_process
 test_crashed_reclaimer_does_not_wedge_the_generation
 test_two_stale_contenders_do_not_reclaim_the_winner
-
+if command -v flock >/dev/null 2>&1; then
+  test_flock_observation_is_conservative_and_read_only
+fi
 test_temp_state_locks_under_the_temp_root
+test_observation_routing_matches_acquisition_without_mutation
 echo "file-lock-boundary-smoke: ok"

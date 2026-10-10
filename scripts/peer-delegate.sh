@@ -64,6 +64,8 @@ TASK_ID=""
 RESUME_SESSION=""
 PLAN_TASK_ID=""
 PLAN_LEASE_ID=""
+unset OBSERVED_BINDING
+OBSERVED_BINDING=""
 AUTOPILOT_OWNER_ID="${OMS_AUTOPILOT_OWNER_ID:-}"
 PLAN_ID=""
 PLAN_JSON=""
@@ -170,6 +172,9 @@ Options:
                        artifact-index rows for lineage. [A-Za-z0-9._-]+.
   --resume-session ID  Continue this provider session (claude, codex) in the
                        new worktree; its id is recorded as refs.native_session.
+  --observe-plan-binding JSON
+                       Panel-only marker observation, revalidated under locks.
+                       Excludes --plan-task and grants no child plan rights.
   --plan-task ID       Couple this delegation to an agent-plan.sh task: on
                        worker/verify failure (or an outbound-gate block) the
                        claim is released back to ready; on success the task
@@ -394,6 +399,12 @@ while [ "$#" -gt 0 ]; do
       RESUME_SESSION="$2"
       shift 2
       ;;
+    --observe-plan-binding)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || fail "--observe-plan-binding requires JSON"
+      [ -z "$OBSERVED_BINDING" ] || fail "duplicate --observe-plan-binding"
+      OBSERVED_BINDING="$2"
+      shift 2
+      ;;
     --plan-task)
       [ "$#" -ge 2 ] || fail "--plan-task requires id"
       case "$2" in
@@ -538,6 +549,20 @@ elif [ -z "$PROMPT" ] && [ -z "$PLAN_TASK_ID" ]; then
 fi
 
 oms_require_peer_owner || exit $?
+if [ -n "$OBSERVED_BINDING" ]; then
+  [ -z "$PLAN_TASK_ID$FALLBACK_MODEL" ] && [ "$DRY_RUN" = 0 ] && [ "$APPLY" = 0 ] ||
+    fail "plan observation excludes plan-task, fallback-model, dry-run and apply"
+  [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] ||
+    fail "plan observation requires an admitted panel worker or researcher"
+  case "${OMS_PANEL_ROLE:-}" in
+    worker) ;;
+    researcher)
+      [ "$WORKER_ACCESS" = read ] && [ "$ROLE" = researcher ] ||
+        fail "researcher plan observation requires its read-only role"
+      ;;
+    *) fail "plan observation requires an admitted panel worker or researcher" ;;
+  esac
+fi
 unset OMS_RESUME_SESSION
 if [ -n "$RESUME_SESSION" ]; then
   case "$TO" in claude|codex) ;; *) fail "--resume-session supports claude and codex" ;; esac
@@ -564,6 +589,14 @@ if [ "${OMS_WORKER_GUARD_STRICT:-0}" = 1 ]; then
     fail "unsafe Git execution config blocks strict delegation"
   oms_git_assert_plain_index "$REPO" ||
     fail "hidden Git index flags block strict delegation"
+fi
+# Panel scratch sources and canonical state have separate roots; resolve before child depth changes.
+unset DELEGATE_SOURCE_REPO
+DELEGATE_SOURCE_REPO="$REPO"
+if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ]; then
+  REPO="$(oms_state_root "$DELEGATE_SOURCE_REPO")" || fail "cannot resolve canonical panel state"
+  REPO="${REPO//$'\r'/}"
+  REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve physical panel state"
 fi
 # peer-delegate is a public front door, so the orientation pack is revalidated
 # here rather than trusted from plan-run: a malformed, oversized, traversing or
@@ -786,6 +819,10 @@ export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
 export OMS_REASONING_FALLBACK_EXPLICIT=""
 export OMS_MODEL_ROLE="$ROLE" OMS_MODEL_OPERATION=delegate
 oms_model_prepare "$TO" || exit $?
+if [ -n "$OBSERVED_BINDING" ]; then
+  [ -n "$MODEL" ] && [ "$OMS_MODEL_PRIMARY" = "$MODEL" ] && [ -z "$OMS_MODEL_FALLBACK" ] ||
+    fail "plan observation requires the selected exact model without fallback"
+fi
 
 load_user_tool_paths
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
@@ -1036,7 +1073,7 @@ if ! OMS_SCAN_BRIEF_RANGE="$brief_first:$brief_last" ma_validate_outbound_prompt
     printf '\n\n## Exit\n\n3\n'
   } > "$artifact"
   : > "$patch_file"
-  ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
+  OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
   echo "blocked: $TO sensitive outbound context -> $artifact"
   echo "artifact: $artifact"
   echo "patch: $patch_file"
@@ -1045,7 +1082,7 @@ if ! OMS_SCAN_BRIEF_RANGE="$brief_first:$brief_last" ma_validate_outbound_prompt
 fi
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
   GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
-  -c core.fsmonitor=false -C "$REPO" \
+  -c core.fsmonitor=false -C "$DELEGATE_SOURCE_REPO" \
   worktree add --detach "$worktree" HEAD >/dev/null 2>&1
 worktree_created=1
 if ! oms_worker_worktree_identity_capture "$REPO" "$worktree"; then
@@ -1061,7 +1098,7 @@ worker_identity_worktree_stat="$OMS_WORKER_IDENTITY_WORKTREE_STAT"
 worker_identity_gitdir_stat="$OMS_WORKER_IDENTITY_GITDIR_STAT"
 repair_replay_base="$(git -C "$worktree" rev-parse HEAD)"
 repair_replay_base="${repair_replay_base//$'\r'/}"
-oms_seed_local_agent_files "$REPO" "$worktree"
+oms_seed_local_agent_files "$DELEGATE_SOURCE_REPO" "$worktree"
 
 # Resolve the trusted base's contract before graph work or provider startup.
 # Explicit commands and plan-task verification take precedence over defaults.
@@ -1118,7 +1155,7 @@ context_compile_block() {
     printf '\n\n## Exit\n\n3\n'
   } > "$artifact"
   : > "$patch_file"
-  ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
+  OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
   echo "blocked: $TO context manifest compilation failed -> $artifact" >&2
   plan_failure_transition
   exit 3
@@ -1252,7 +1289,7 @@ print("%s\t%s\t%s\t%s\t%s" % (
       printf '\n\n## Exit\n\n3\n'
     } > "$artifact"
     : > "$patch_file"
-    ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
+    OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
     echo "blocked: $TO sensitive compiled context -> $artifact" >&2
     plan_failure_transition
     exit 3
@@ -1290,7 +1327,7 @@ export OMS_INDEX_CONTEXT_TASK_SHA256="${OMS_INDEX_CONTEXT_TASK_SHA256//$'\r'/}"
 # never find — the whole round is then spent on a tree that does not have the
 # problem in it. Say the count once, here, and put it in the artifact so the
 # reviewer of the patch knows which base it was written against.
-dirty_count="$(git -C "$REPO" status --porcelain --untracked-files=no 2>/dev/null | grep -c . || true)"
+dirty_count="$(git -C "$DELEGATE_SOURCE_REPO" status --porcelain --untracked-files=no 2>/dev/null | grep -c . || true)"
 if [ "${dirty_count:-0}" -gt 0 ]; then
   echo "note: $dirty_count file(s) differ from HEAD here; the worker sees HEAD, not your working tree" >&2
 fi
@@ -1329,8 +1366,23 @@ if [ "$DRY_RUN" != "1" ]; then
       ;;
   esac
   write_delegation_marker() {
-    python3 - <<'PY'
-import json, os, tempfile
+    OMS_DL_OBSERVATION="$OBSERVED_BINDING" python3 - "$(ma_scripts_dir)/lib" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+
+binding = None
+if os.environ.get("OMS_DL_OBSERVATION"):
+    sys.path.insert(0, sys.argv[1])
+    from terminal_panel import PlanBinding
+    try:
+        binding = PlanBinding.parse(os.environ["OMS_DL_OBSERVATION"])
+        # OMS_DL_FILE already uses native Python's path spelling on Git Bash.
+        binding.validate(Path(os.environ["OMS_DL_FILE"]).parents[2], os.environ, {
+            "provider": os.environ["OMS_DL_PROVIDER"], "model": os.environ["OMS_DL_MODEL"],
+            "reasoning_effort": os.environ["OMS_DL_REASONING_EFFORT"],
+            "fallback_model": os.environ["OMS_DL_FALLBACK_MODEL"]})
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SystemExit("error: plan observation rejected: " + str(exc))
 
 # Written atomically, not through a shell redirect: the redirect creates and
 # truncates the file before python runs, and this marker exists precisely to be
@@ -1346,8 +1398,9 @@ row = json.dumps({
     "native_pid": int(os.environ["OMS_DL_NATIVE_PID"]),
     "native_pid_source": os.environ["OMS_DL_NATIVE_PID_SOURCE"],
     "started_at": os.environ["OMS_DL_STARTED"], "state": "running",
-    "worktree": os.environ["OMS_DL_WT"], "task_id": os.environ.get("OMS_DL_TASK", ""),
-    "lease_id": os.environ.get("OMS_DL_LEASE", ""),
+    "worktree": os.environ["OMS_DL_WT"],
+    "task_id": binding.task_id if binding else os.environ.get("OMS_DL_TASK", ""),
+    "lease_id": binding.lease_id if binding else os.environ.get("OMS_DL_LEASE", ""),
     "autopilot_owner_id": os.environ.get("OMS_DL_AUTOPILOT_OWNER", ""),
     "model_class": os.environ.get("OMS_DL_MODEL_CLASS", ""),
     "model": os.environ.get("OMS_DL_MODEL", ""),
@@ -1385,7 +1438,18 @@ PY
     OMS_DL_TASK="${PLAN_TASK_ID:-}" OMS_DL_LEASE="$PLAN_LEASE_ID" \
     OMS_DL_AUTOPILOT_OWNER="$AUTOPILOT_OWNER_ID" \
     OMS_DL_FILE="$liveness_python_file"
-  oms_with_file_lock "$delegation_lock_target" write_delegation_marker
+  register_delegation_marker() {
+    if [ -n "$OBSERVED_BINDING" ]; then
+      local physical_plan_parent
+      physical_plan_parent="$(cd "$REPO/.oms/plan" && pwd -P)" || return 2
+      physical_plan_parent="${physical_plan_parent//$'\r'/}"
+      oms_with_file_lock "$physical_plan_parent/tasks.json" write_delegation_marker
+    else
+      write_delegation_marker
+    fi
+  }
+  oms_with_file_lock "$delegation_lock_target" register_delegation_marker ||
+    fail "marker registration failed; provider was not started"
 fi
 
 {
@@ -1532,7 +1596,9 @@ found.sort()
 best = found[-1]
 if len(found) > 1 and found[-2][0] == best[0]:
     contents = set()
-    for _, _, p in found[-2:]:
+    for mtime_ns, _, p in reversed(found):
+        if mtime_ns != best[0]:
+            break
         with open(p, "rb") as f:
             contents.add(f.read())
     if len(contents) > 1:
@@ -1576,6 +1642,12 @@ run_worker() {
     route_retry_terminal=1
     return 0
   fi
+  # Observation and execution-root metadata belong only to the launcher.
+  local marker_env
+  unset OMS_PANEL_EXECUTION_ROOT OMS_INDEX_BASE_REPO
+  for marker_env in $(compgen -e | grep -E '^OMS_(DL_|OBSERVER_|OBSERVE_PLAN_)' || true); do
+    unset "$marker_env"
+  done
   [ -z "$PLAN_LEASE_ID" ] || export OMS_PLAN_LEASE_ID="$PLAN_LEASE_ID"
   if [ -n "$RESUME_SESSION" ]; then
     if ! prepare_resume_session; then
@@ -2277,7 +2349,7 @@ if [ -n "$worker_guard_dir" ]; then
     # Output above was never closed. Paths stay in the local bullets above.
     printf "\n\n## Output\n\nThe worker guard stopped this run: protected state changed outside the worker's worktree (%s). The worktree was kept for inspection; nothing was landed.\n\n## Exit\n\n1\n" \
       "$worker_guard_changed" >> "$artifact"
-    ma_append_artifact_index "$REPO" delegate "$TO" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" ||
+    OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" ||
       echo "warning: worker-authority breach receipt was NOT indexed; inbox and recovery will not see it" >&2
     plan_failure_transition
     exit 1
@@ -2323,7 +2395,7 @@ if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
   index_exit=1
 fi
 OMS_INDEX_REPAIR_REPLAY_JSON="$repair_replay_json" \
-  ma_append_artifact_index "$REPO" delegate "$TO" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" "$REVIEW_ARTIFACT" || true
+  OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" "$REVIEW_ARTIFACT" || true
 
 applied=0
 plan_reviewed=0

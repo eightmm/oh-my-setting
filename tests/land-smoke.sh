@@ -13,7 +13,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-land.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 export OMS_WORK_JOURNAL_SUPPRESS=1 XDG_STATE_HOME="$TMP/state" GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
-  GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t TMPDIR="$TMP/tmp" OMS_LAND_SMOKE_ROOT="$ROOT"
+  GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t TMPDIR="$TMP/tmp" OMS_LAND_SMOKE_ROOT="$ROOT" \
+  OMS_LOCK_DIR="$TMP/locks"
 mkdir -p "$TMPDIR"
 log_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["log"])' "$1"; }
 LAND="$ROOT/scripts/land.sh"
@@ -94,12 +95,15 @@ r = json.load(open(sys.argv[1]))
 assert r["state"] == "passed" and r["sha"] == sys.argv[2], r
 assert r["gate"]["rc"] == 0 and r["push"]["rc"] == 0, r
 assert r["update"]["rc"] == "skipped" and r["ci"]["conclusion"] == "skipped", r
+assert r["update"].get("reason") == "no-install-for-remote", r
 assert "siblings" not in r, r
 assert r["gate"]["command"] == "bash scripts/check.sh", r
 PY
 grep -q 'gate ok' "$(log_of "$receipt")" || fail "gate output must land in the receipt log"
 case "$(log_of "$receipt")" in "$state_land"/*) ;; *) fail "the gate log must live outside the repo: $(log_of "$receipt")" ;; esac
 [ "$(dirname "$(log_of "$receipt")")" = "$receipt_dir" ] || fail "receipt and gate log must share a state directory"
+"$LAND" status --repo "$peer" | grep -q 'update: skipped (no-install-for-remote)' ||
+  fail "text status must display the install skip reason"
 [ "$peer_oms_before" = "$(find "$peer/.oms" -mindepth 1 -print | sort)" ] ||
   fail "a landing must not add receipt state under its worktree .oms"
 "$LAND" status --repo "$peer" | grep -q '^land .*: passed' || fail "status must read a worktree receipt"
@@ -476,6 +480,8 @@ for ci_failure in auth timeout; do
 done
 
 # One active landing across worktrees, with flock and the portable mkdir lock.
+# Contenders wait up to the shared file-lock timeout; detached startup reports
+# waiting, then confirms only after lock acquisition and request admission.
 for lock_kind in 0 1; do
   export OMS_TEST_LAND_COUNT="$TMP/count-$lock_kind" OMS_TEST_LAND_RELEASE="$TMP/release-$lock_kind"
   # flock leaves a file; mkdir uses a directory at that path. Model separate hosts.
@@ -488,37 +494,169 @@ for lock_kind in 0 1; do
   # The probe sees the held lock without taking, truncating or removing it.
   for _ in $(seq 1 100); do
     OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json 2>/dev/null | grep -q '"active": true' && break
+    # Some Linux containers expose an empty /proc/locks even to a process
+    # holding flock; in that environment the documented probe cannot observe
+    # this lock, so validate the running receipt and the actual contention below.
+    if [ "$lock_kind" = 0 ] && python3 -c 'import json,sys; assert json.load(sys.stdin)["active"] is None' \
+        < <(OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" --json 2>/dev/null); then
+      break
+    fi
     sleep 0.05
   done
   OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json > "$TMP/active.json" ||
     fail "status failed while a land was active"
-  python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["active"] is True and r["step"]=="gate" and r["minutes"]>=0, r' "$TMP/active.json" ||
-    fail "status must report the active gate step: $(cat "$TMP/active.json")"
-  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep -q '^land .*: running (lock held)' ||
-    fail "text status must say the lock is held"
-  active_rc=0
-  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --active-exit >/dev/null || active_rc=$?
-  [ "$active_rc" = 3 ] || fail "--active-exit must exit 3 while a land is active: $active_rc"
+  if python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["active"] is True' "$TMP/active.json" 2>/dev/null; then
+    python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["step"]=="gate" and r["minutes"]>=0, r' "$TMP/active.json" ||
+      fail "status must report the active gate step: $(cat "$TMP/active.json")"
+    OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep -q '^land .*: running (lock held)' ||
+      fail "text status must say the lock is held"
+    active_rc=0
+    OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --active-exit >/dev/null || active_rc=$?
+    [ "$active_rc" = 3 ] || fail "--active-exit must exit 3 while a land is active: $active_rc"
+  elif [ "$lock_kind" = 0 ] && python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["active"] is None' "$TMP/active.json" 2>/dev/null; then
+    python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["state"]=="running" and r["gate"]["rc"]=="pending", r' "$TMP/active.json" ||
+      fail "flock receipt must show a running gate when lock observation is unknown: $(cat "$TMP/active.json")"
+    unknown_rc=0
+    OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" --active-exit >/dev/null || unknown_rc=$?
+    [ "$unknown_rc" = 4 ] || fail "--active-exit must distinguish unknown lock state: $unknown_rc"
+    OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" | grep -q '^  active: unknown$' ||
+      fail "text status must identify unknown lock activity"
+  else
+    fail "status failed to detect the held landing lock: $(cat "$TMP/active.json")"
+  fi
   second_rc=0
-  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" --repo "$repo" --no-update --ci-wait 0 \
-    > "$TMP/second.out" 2>&1 || second_rc=$?
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" OMS_LOCK_TIMEOUT=1 "$LAND" --repo "$repo" \
+    --no-update --ci-wait 0 > "$TMP/second-timeout.out" 2>&1 || second_rc=$?
+  [ "$second_rc" = 75 ] || fail "land lock wait must honor OMS_LOCK_TIMEOUT: $(cat "$TMP/second-timeout.out")"
+  grep -q 'land not started (exit 75)' "$TMP/second-timeout.out" ||
+    fail "detached lock timeout must report its actual exit code: $(cat "$TMP/second-timeout.out")"
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" OMS_LOCK_TIMEOUT=10 "$LAND" --repo "$repo" \
+    --no-update --ci-wait 0 > "$TMP/second.out" 2>&1 &
+  second_pid=$!
+  for _ in $(seq 1 100); do
+    grep -q 'waiting for active landing lock' "$TMP/second.out" && break
+    sleep 0.05
+  done
+  grep -q 'waiting for active landing lock' "$TMP/second.out" || {
+    touch "$OMS_TEST_LAND_RELEASE"
+    wait "$first_pid" || true
+    wait "$second_pid" || true
+    fail "detached contender must report bounded lock waiting: $(cat "$TMP/second.out")"
+  }
+  ! grep -q '^receipt:' "$TMP/second.out" || {
+    touch "$OMS_TEST_LAND_RELEASE"
+    wait "$first_pid" || true
+    wait "$second_pid" || true
+    fail "a waiting contender must not advertise a receipt"
+  }
   touch "$OMS_TEST_LAND_RELEASE"
   wait "$first_pid" || fail "first landing failed: $(cat "$TMP/first.out")"
-  [ "$second_rc" = 75 ] || fail "duplicate landing did not report lock contention: $(cat "$TMP/second.out")"
-  ! grep -q '^receipt:' "$TMP/second.out" || fail "rejected background launch advertised a receipt"
+  wait "$second_pid" || fail "queued same-commit retry did not resume: $(cat "$TMP/second.out")"
+  grep -q '^receipt:' "$TMP/second.out" || fail "admitted queued landing must report its receipt"
   [ "$(wc -l < "$OMS_TEST_LAND_COUNT" | tr -d ' ')" = 1 ] || fail "duplicate landing repeated the gate"
-  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --json | grep -q '"active": false' ||
-    fail "a released lock must read inactive"
-  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" --active-exit >/dev/null ||
-    fail "--active-exit must exit 0 when no land is active"
+  if [ "$lock_kind" = 0 ]; then
+    OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" --json | grep -q '"active": null' ||
+      fail "a released flock file without a matching row must remain unknown"
+    unknown_rc=0
+    OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" --active-exit >/dev/null || unknown_rc=$?
+    [ "$unknown_rc" = 4 ] || fail "--active-exit must distinguish unknown lock state: $unknown_rc"
+  else
+    OMS_LOCK_FORCE_MKDIR=1 "$LAND" status --repo "$repo" --json | grep -q '"active": false' ||
+      fail "a released mkdir lock must read inactive"
+    OMS_LOCK_FORCE_MKDIR=1 "$LAND" status --repo "$repo" --active-exit >/dev/null ||
+      fail "--active-exit must exit 0 when no mkdir lock is active"
+  fi
+  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep -q '^land .*: passed' ||
+    fail "the queued retry must leave its passed receipt visible"
   # A receipt that says running without a lock holder is stale.
   stale_receipt="$(ls -t "$receipt_dir"/*.json | head -n 1)"
   cp "$stale_receipt" "$TMP/stale-backup.json"
   sed 's/"state": "[a-z]*"/"state": "running"/' "$TMP/stale-backup.json" > "$stale_receipt"
-  OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" status --repo "$repo" | grep -q 'no land holds the lock (stale receipt)' ||
-    fail "a running receipt without a lock must read stale"
+  if [ "$lock_kind" = 0 ]; then
+    OMS_LOCK_FORCE_MKDIR=0 "$LAND" status --repo "$repo" | grep -q 'lock activity is unknown' ||
+      fail "a running receipt with unknown lock state must remain unknown"
+  else
+    OMS_LOCK_FORCE_MKDIR=1 "$LAND" status --repo "$repo" | grep -q 'no land holds the lock (stale receipt)' ||
+      fail "a running receipt without a mkdir lock must read stale"
+  fi
   cp "$TMP/stale-backup.json" "$stale_receipt"
 done
+
+# A queued request revalidates its admitted SHA and tracked tree before it may
+# run the gate. These changes are made after the detached caller reports that
+# it is waiting, while an independent first landing still owns the lock.
+wait_for_queue_notice() {  # OUTPUT_FILE SECOND_PID RELEASE_FILE
+  local output="$1" second_pid="$2" release_file="$3"
+  for _ in $(seq 1 100); do
+    grep -q 'waiting for active landing lock' "$output" && break
+    sleep 0.05
+  done
+  if ! grep -q 'waiting for active landing lock' "$output"; then
+    touch "$release_file"
+    wait "$first_pid" || true
+    wait "$second_pid" || true
+    fail "queued land did not report waiting: $(cat "$output")"
+  fi
+  if grep -q '^receipt:' "$output"; then
+    touch "$release_file"
+    wait "$first_pid" || true
+    wait "$second_pid" || true
+    fail "waiting land advertised a receipt: $(cat "$output")"
+  fi
+}
+
+export OMS_TEST_LAND_COUNT="$TMP/queued-head-count" OMS_TEST_LAND_RELEASE="$TMP/queued-head-release"
+gate 'echo head-gate; echo gate >> "$OMS_TEST_LAND_COUNT"; for ((i=0;i<200;i++)); do [ ! -f "$OMS_TEST_LAND_RELEASE" ] || exit 0; sleep 0.05; done; exit 1' # queued HEAD change
+before="$(remote_tip)"
+OMS_LOCK_FORCE_MKDIR=0 "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 \
+  > "$TMP/queued-head-first.out" 2>&1 &
+first_pid=$!
+for _ in $(seq 1 100); do [ ! -f "$OMS_TEST_LAND_COUNT" ] || break; sleep 0.05; done
+[ -f "$OMS_TEST_LAND_COUNT" ] || fail "queued-HEAD fixture did not start its gate"
+OMS_LOCK_FORCE_MKDIR=0 OMS_LOCK_TIMEOUT=10 "$LAND" --repo "$repo" --no-update --ci-wait 0 \
+  > "$TMP/queued-head-second.out" 2>&1 &
+second_pid=$!
+wait_for_queue_notice "$TMP/queued-head-second.out" "$second_pid" "$OMS_TEST_LAND_RELEASE"
+echo queued-head-change > "$repo/queued-head-change"
+git -C "$repo" add queued-head-change
+git -C "$repo" commit -q -m 'test: move HEAD while land waits'
+touch "$OMS_TEST_LAND_RELEASE"
+first_rc=0 second_rc=0
+wait "$first_pid" || first_rc=$?
+wait "$second_pid" || second_rc=$?
+[ "$first_rc" -ne 0 ] || fail "the active land must reject a HEAD change during its gate"
+[ "$second_rc" -ne 0 ] || fail "the queued land must reject its stale request SHA"
+[ "$(remote_tip)" = "$before" ] || fail "queued HEAD change must not push"
+[ "$(wc -l < "$OMS_TEST_LAND_COUNT" | tr -d ' ')" = 1 ] || fail "queued stale-HEAD land ran the gate"
+! grep -q '^receipt:' "$TMP/queued-head-second.out" || fail "stale-HEAD land advertised a receipt"
+grep -q 'land not started (exit 1)' "$TMP/queued-head-second.out" ||
+  fail "stale-HEAD startup must preserve its failure status: $(cat "$TMP/queued-head-second.out")"
+
+export OMS_TEST_LAND_COUNT="$TMP/queued-tree-count" OMS_TEST_LAND_RELEASE="$TMP/queued-tree-release"
+gate 'echo tree-gate; echo gate >> "$OMS_TEST_LAND_COUNT"; for ((i=0;i<200;i++)); do [ ! -f "$OMS_TEST_LAND_RELEASE" ] || exit 0; sleep 0.05; done; exit 1' # queued tree change
+before="$(remote_tip)"
+OMS_LOCK_FORCE_MKDIR=0 "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 \
+  > "$TMP/queued-tree-first.out" 2>&1 &
+first_pid=$!
+for _ in $(seq 1 100); do [ ! -f "$OMS_TEST_LAND_COUNT" ] || break; sleep 0.05; done
+[ -f "$OMS_TEST_LAND_COUNT" ] || fail "queued-tree fixture did not start its gate"
+OMS_LOCK_FORCE_MKDIR=0 OMS_LOCK_TIMEOUT=10 "$LAND" --repo "$repo" --no-update --ci-wait 0 \
+  > "$TMP/queued-tree-second.out" 2>&1 &
+second_pid=$!
+wait_for_queue_notice "$TMP/queued-tree-second.out" "$second_pid" "$OMS_TEST_LAND_RELEASE"
+printf '# queued tracked edit\n' >> "$repo/scripts/check.sh"
+touch "$OMS_TEST_LAND_RELEASE"
+first_rc=0 second_rc=0
+wait "$first_pid" || first_rc=$?
+wait "$second_pid" || second_rc=$?
+[ "$first_rc" -ne 0 ] || fail "the active land must reject a tracked-tree change during its gate"
+[ "$second_rc" -ne 0 ] || fail "the queued land must reject its dirty tracked tree"
+[ "$(remote_tip)" = "$before" ] || fail "queued tracked-tree change must not push"
+[ "$(wc -l < "$OMS_TEST_LAND_COUNT" | tr -d ' ')" = 1 ] || fail "queued dirty-tree land ran the gate"
+! grep -q '^receipt:' "$TMP/queued-tree-second.out" || fail "dirty-tree land advertised a receipt"
+grep -q 'land not started (exit 1)' "$TMP/queued-tree-second.out" ||
+  fail "dirty-tree startup must preserve its failure status: $(cat "$TMP/queued-tree-second.out")"
+git -C "$repo" checkout -- scripts/check.sh
 
 gate 'echo successful CI and update probe'
 : > "$TMP/events"
@@ -534,10 +672,15 @@ grep -rqs '"command": *"bash scripts/check.sh --parallel"' "$receipt_dir" ||
 # Git is stubbed: this cannot publish or mutate the caller's repository.
 (
   export REPO="$repo" LAND_DIR="$TMP/race" LOG_DIR="$TMP/race" STAMP=verified-probe
+  export READY_FILE="$TMP/race-ready"
   export REMOTE=origin TARGET=main GATE=true IGNORE_SIBLINGS=0 UPDATE=0 CI_WAIT=0
+  # run_job is extracted from land.sh below, so load its real test-growth
+  # helper and initialize the same optional readiness setting as land.sh.
+  . "$ROOT/scripts/lib/test-growth.sh"
   probe_head=verified
   now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
   rset() { :; }
+  receipt_value() { :; }
   oms_test_growth() { :; }
   can_resume() { return 1; }
   request_stamp() { printf '%s\n' "$STAMP"; }
@@ -547,6 +690,7 @@ grep -rqs '"command": *"bash scripts/check.sh --parallel"' "$receipt_dir" ||
   finish() { printf '%s\n' "$1" > "$TMP/race-result"; }
   wait_for_live_siblings() { probe_head=unverified; }
   git() {
+    if [ "${1:-}" = -C ] && [ "${3:-}" = diff ]; then return 0; fi
     case "$1" in
       rev-parse) printf '%s\n' "$probe_head" ;;
       push) printf '%s\n' "$*" > "$TMP/race-push" ;;
@@ -559,6 +703,7 @@ grep -rqs '"command": *"bash scripts/check.sh --parallel"' "$receipt_dir" ||
   probe_head=verified
   wait_for_live_siblings() { :; }
   run_job || fail "stable HEAD failed to land"
+  [ "$(cat "$READY_FILE")" = 0 ] || fail "admitted job did not report startup readiness"
   grep -Fq 'verified:refs/heads/main' "$TMP/race-push" || fail "push uses mutable HEAD instead of verified SHA"
 ) || exit 1
 

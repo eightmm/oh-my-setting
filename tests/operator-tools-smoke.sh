@@ -4,7 +4,7 @@ unset HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID 
   OMS_PANEL_HOST OMS_PANEL_VIEW OMS_PANEL_POSITION OMS_PANEL_COLOR
 # The suite runs as a top-level operator even inside a panel window or a write worker, whose
 # child/room bindings would otherwise turn its room fixtures into refusals.
-unset TMUX TMUX_PANE OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH
+unset TMUX TMUX_PANE OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH OMS_STATE_REPO OMS_PLAN_LEASE_ID
 for oms_inherited in $(compgen -e | grep -E '^OMS_(PANEL|ROOM)_' || true); do unset "$oms_inherited"; done
 
 # Focused regressions for the read-only collaboration dashboard, content-free OTLP
@@ -994,6 +994,40 @@ panel.hold_state(held, *bad, 'one')
 assert 'keeps failing (3 in a row)' in panel.hold_state(held, *bad, 'one')[2]
 assert panel.hold_state(held, *bad, 'two') == (bad[0], 1, None), 'another room drew the held board'
 assert panel.hold_state({}, *bad, 'one') == (bad[0], 1, None), 'a board that never read kept today fallback'
+# A failed first read or room switch says the room is unknown, never an empty dashboard.
+from panel_view import render as draw
+from dashboard_projection import display_width
+healthy = {'repo': {'name': 'fixture'}, 'collection': {'ok': True}, 'room': {'id': 'one', 'participants': []}}
+for view in ('auto', 'graph', 'tree'):
+    for menu in (False, True):
+        for width, height in ((100, 28), (38, 40), (24, 18), (12, 10), (2, 8)):
+            stale = {'selected': ('chat', 'old'), 'primary': ('chat', 'old'), 'preview': {'target': ('result', 'r')},
+                     'surface': 'graph', 'hits': [{'y': 1, 'action': ('chat', 'old')}], 'items': [('chat', 'old')],
+                     'selected_row': 3, 'row_ids': ['old'], 'detail': 'old', 'room_id': 'one'}
+            drawn = draw(bad[0], 'codex', width, height, menu=menu, view=view, navigation=stale)
+            assert len(drawn.splitlines()) <= height - int(menu) and all(display_width(line) <= width for line in drawn.splitlines()), drawn
+            assert any(word in drawn for word in ('unavailable', 'unknown', 'Unknown')) or width < 12 or height - int(menu) < 2, (view, menu, width, height, drawn)
+            assert not any(word in drawn for word in ('Collection degraded', 'REPO ACCEPT', 'No active', 'Goal:', 'Joined mains', 'Messages:', 'Nothing needs you')), drawn
+            assert not any(stale.get(key) for key in ('selected', 'primary', 'preview', 'surface', 'hits', 'items', 'selected_row', 'row_ids', 'detail')), stale
+            assert stale['room_id'] == 'one'
+            assert menu is False or width < 28 or height < 20 or '[1] Codex' in drawn and '[9] Refresh' in drawn, drawn
+assert 'Press 9 to read again' in draw(bad[0], 'codex', 100, 28, menu=True)
+assert '\033' in draw(bad[0], 'codex', 100, 28, color=True)
+assert 'unavailable' not in draw(healthy, 'codex', 100, 28, menu=True).split('Actions')[0]
+assert 'Collection degraded' in draw(dict(bad[0], room={'id': 'one', 'participants': [], 'error': 'x'}), 'codex', 100, 28)
+assert bad[0] == {'repo': {'name': 'fixture'}, 'collection': {'ok': False}}
+# The full reader must yield to an unknown-room screen on first failure.
+with patch.object(panel, 'terminal_style', return_value=(False, False, False)), patch.object(panel, 'managed_session', return_value=False), patch.object(panel.os, 'get_terminal_size', return_value=os.terminal_size((100, 28))):
+    reader_nav = {'detail': 'old-result', 'selected_row': 'old-row', 'row_ids': ['old-row']}
+    unknown_text, unused, capable = panel.frame_view(project, 'codex', bad[0], navigation=reader_nav, view='tree')
+    assert 'Room state unavailable' in unknown_text and not reader_nav.get('detail'), (unknown_text, reader_nav)
+
+assert 'Room state unavailable' not in draw(good[0], 'codex', 100, 28, navigation={'selected': ('chat', 'old')})
+board, held_nav = {}, {}
+panel.hold_state(board, *good, 'one')
+shown, unused, hint = panel.hold_state(board, *bad, 'two')
+assert shown is bad[0] and hint is None and 'Room state unavailable' in draw(shown, 'codex', 100, 28, navigation=held_nav)
+assert panel.hold_state(board, *good, 'two')[0] is good[0] and 'Room state unavailable' not in draw(good[0], 'codex', 100, 28, navigation=held_nav)
 navigation = {}
 panel.stale_notice(navigation, notice)
 assert navigation['notice'] == notice
@@ -1063,7 +1097,7 @@ from panel_routing import allocate
 from dashboard_projection import display_width
 from panel_view import render
 from panel_input import passive_click
-from room_view import render_graph
+from room_view import render_graph, plan_rows as render_plan_rows
 from panel_view import wrapped
 
 view = json.loads((temporary / "panel-active.json").read_text())
@@ -1152,6 +1186,7 @@ assert "1 seat(s) answering" in debate_tree and "ADVISORS" not in debate_tree, d
 # One bottom box with tabs (Detail, Plan, Debate, Messages) replaces the d and m views and the messages card.
 import panel_debate
 import panel_messages
+import panel_chats
 import room_view
 from panel_input import TerminalInput, choose
 from terminal_panel import tab_event
@@ -1233,7 +1268,7 @@ hit = next(h for h in nav["hits"] if h["action"] == ("tab", "messages"))
 assert tab_event(("click", hit["x1"], hit["y"]), nav) and nav["tab"] == "messages"
 assert choose(("click", hit["x1"], hit["y"]), nav) == ("tab", "messages") and nav["selected"] == ("chat", "m2")
 assert nav["box"]["y1"] == hit["y"] and msg_report == before
-# Plan: goal first, then verified, review, running, ready, blocked, with the claimant by board name or provider.
+# Plan: goal first, then completed, review, running, ready, blocked, with the claimant by board name or provider.
 nav, plan = board("plan")
 plan_rows = [line for line in plan.split("\n") if "Goal:" in line or " t-" in line]
 assert "Goal: Ship the tabbed panel" in plan_rows[0], plan
@@ -1242,6 +1277,26 @@ assert "t-ver · done · Verified one" in plan and "Verified one · unclaimed" n
 assert "t-rev · review · Review one · unclaimed ·" in plan and "codex ·" not in plan and "claude ·" not in plan, plan
 task_hits = [h["action"] for h in nav["hits"] if h["action"][0] == "task"]
 assert task_hits == [("task", t) for t in ("t-ver", "t-rev", "t-run", "t-rdy", "t-blk")], task_hits
+# Recorded completion metadata is visible only for terminal rows; unknown/malformed kinds stay plain done.
+completion_report = deepcopy(msg_report)
+completion_report["room"]["repo_tasks"] = [
+    {"id": "legacy", "title": "Legacy", "state": "done"},
+    {"id": "research", "title": "Research", "state": "done", "completion_kind": "research-accepted"},
+    {"id": "satisfied", "title": "Satisfied", "state": "done", "completion_kind": "satisfied-by"},
+    {"id": "running-kind", "title": "Running", "state": "running", "completion_kind": "research-accepted"},
+    {"id": "unknown-kind", "title": "Unknown", "state": "done", "completion_kind": "operator-proof"},
+    {"id": "bad-kind", "title": "Bad", "state": "done", "completion_kind": {"type": "research-accepted"}},
+]
+completion_plan = "\n".join(row for row, _ in render_plan_rows(completion_report, {}, 120, True))
+assert "legacy · done · Legacy" in completion_plan, completion_plan
+assert "research · done (research) · Research" in completion_plan, completion_plan
+assert "satisfied · done (satisfied by) · Satisfied" in completion_plan, completion_plan
+assert "running-kind · running · Running" in completion_plan, completion_plan
+assert "unknown-kind · done · Unknown" in completion_plan and "bad-kind · done · Bad" in completion_plan, completion_plan
+completion_hits = [action for _, action in render_plan_rows(completion_report, {}, 120, True) if action]
+assert completion_hits == [("task", task_id) for task_id in ("legacy", "research", "satisfied", "unknown-kind", "bad-kind", "running-kind")], completion_hits
+assert next(row for row, action in render_plan_rows(completion_report, {}, 120, False) if action).startswith("+ ")
+assert next(row for row, action in render_plan_rows(completion_report, {}, 120, True) if action).startswith("✓ ")
 foot = plan.split("\n")[-1]
 assert "wheel Scroll" in foot and "Tab Next tab" in foot and "Enter Chat" not in foot and "Ask advisor" not in foot, foot
 # Four pinned mains on a 34-row board: the cards shrink so the Plan tab shows rows, not just its strip.
@@ -1854,10 +1909,41 @@ import json, os, sys
 with open(os.environ["PANEL_TEST_WORKER_LOG"], "a", encoding="utf-8") as f:
     f.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(),
                         "role": os.environ.get("OMS_PANEL_ROLE"),
+                        "purpose": os.environ.get("OMS_PANEL_PURPOSE"),
+                        "task_id": os.environ.get("OMS_TASK_ID"),
                         "parent": os.environ.get("OMS_PANEL_MAIN_ATTEMPT"),
                         "room": os.environ.get("OMS_ROOM_ID"),
                         "participant": os.environ.get("OMS_ROOM_PARTICIPANT")}) + "\\n")
 WORKER
+  if [ -n "${LEASE_FIXTURE_ENTERED:-}" ]; then
+    python3 - "$@" <<'LEASEWAIT'
+import json, os, sys, subprocess, time
+from pathlib import Path
+assert os.environ["OMS_AGENT"] == os.environ["LEASE_FIXTURE_PROVIDER"]
+assert os.environ["LEASE_FIXTURE_MODEL"] in sys.argv[1:], sys.argv
+if os.environ["OMS_AGENT"] == "claude":
+    assert sys.argv[sys.argv.index("--effort") + 1] == os.environ["LEASE_FIXTURE_EFFORT"], sys.argv
+else:
+    assert any("model_reasoning_effort" in a and os.environ["LEASE_FIXTURE_EFFORT"] in a for a in sys.argv), sys.argv
+for name in os.environ:
+    assert name not in ("OMS_PLAN_LEASE_ID", "OMS_PANEL_EXECUTION_ROOT", "OBSERVED_BINDING", "OMS_INDEX_BASE_REPO", "DELEGATE_SOURCE_REPO") and not name.startswith(("OMS_DL_", "OMS_OBSERVER_", "OMS_OBSERVE_PLAN_")), name
+entry = os.environ["OMS_PANEL_ENTRYPOINT"]
+for args in (("agent-plan", "--repo", os.environ["OMS_ROOM_REPO"], "add", "--id", "child-denied", "--title", "Denied"),
+             ("agent-plan", "--repo", os.environ["OMS_ROOM_REPO"], "touch", "--id", os.environ["OMS_TASK_ID"]),
+             ("peer-delegate", "--to", "codex", "--prompt", "nested")):
+    result = subprocess.run(["bash", entry, *args], capture_output=True, text=True)
+    assert result.returncode != 0, (args, result.stdout, result.stderr)
+Path(os.environ["LEASE_FIXTURE_ENTERED"]).write_text(json.dumps({"cwd": os.getcwd(),
+    "head": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+    "value": Path("value.txt").read_text(), "participant": os.environ["OMS_ROOM_PARTICIPANT"],
+    "parent": os.environ.get("OMS_PANEL_MAIN_ATTEMPT"), "role": os.environ.get("OMS_PANEL_ROLE"),
+    "purpose": os.environ.get("OMS_PANEL_PURPOSE")}))
+end = time.monotonic() + 60
+while not Path(os.environ["LEASE_FIXTURE_RELEASE"]).exists():
+    assert time.monotonic() < end, "worker fixture barrier exceeded"
+    time.sleep(.05)
+LEASEWAIT
+  fi
   cat > "${PANEL_TEST_PROMPT:-/dev/null}"
   if [ -n "${PANEL_TEST_SESSION:-}" ]; then
     printf '{"type":"thread.started","thread_id":"%s"}\\n{"type":"item.completed","item":{"type":"agent_message","text":"Answer: inspected the bounded repository task."}}\\n{"type":"turn.completed","usage":{}}\\n' "$PANEL_TEST_SESSION"
@@ -1910,6 +1996,14 @@ baseline = subprocess.check_output(["git", "-C", str(project), "status", "--porc
 report = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--json"]))
 assert report["kind"] == "oms-panel" and report["schema"] == 1
 assert all(report["providers"][p]["installed"] for p in panel.PROVIDERS)
+pi_plan = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--launch", "pi",
+                           "--host", "inline", "--dry-run"]))
+assert pi_plan["provider"] == "pi" and "--session-id" in pi_plan["argv"]
+assert "--session-dir" in pi_plan["argv"] and "--append-system-prompt" in pi_plan["argv"]
+assert "--no-session" not in pi_plan["argv"]
+pi_resume_plan = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--launch", "pi",
+                                   "--resume", "session.with.dot", "--host", "inline", "--dry-run"]))
+assert pi_resume_plan["argv"][pi_resume_plan["argv"].index("--session-id") + 1] == "session.with.dot"
 assert report["dashboard"]["kind"] == "oms-dashboard"
 assert not (project / ".oms").exists(), "panel query created a state store"
 assert subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"]) == baseline
@@ -1924,6 +2018,12 @@ for name in ("grok", "antigravity", "muse"):
     assert registered[name]["native_hook_wiring"] == "unverified"
 assert registered["muse"]["access"] == ["read"]
 assert registered["codex"]["native_launch"] and registered["claude"]["native_launch"]
+assert registered["pi"]["native_launch"] and registered["pi"]["native_hook_wiring"] == "unverified"
+assert inventory["native_harnesses"] == [
+    {"provider": "codex", "automatic_main": True, "hook_capable": True},
+    {"provider": "claude", "automatic_main": True, "hook_capable": True},
+    {"provider": "pi", "automatic_main": False, "hook_capable": False},
+]
 assert shlex.split(panel.shell_command(["bash", str(panel.ENTRY), str(project)]))[1:] == ["bash", str(panel.ENTRY), str(project)]
 assert allocate("claude", workload="light")["model"] == "gpt-6-luna"
 assert allocate("codex", workload="routine")["model"] == "claude-sonnet-5-5"
@@ -1941,11 +2041,372 @@ for owner in panel.PROVIDERS:
     assert "--dispatch advisor" in panel.bootstrap(owner, project)
     assert "control tower: by default delegate" in panel.bootstrap(owner, project)
     assert "#1 Opus 5.5" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
-    assert "Every main lands its own work" in panel.bootstrap(owner, project) and "oms scratch-worktree add" in panel.bootstrap(owner, project)
+    assert "Every main lands its own work" in panel.bootstrap(owner, project)
+    assert "oms scratch-worktree add --repo . starts detached" in panel.bootstrap(owner, project)
+    assert "git checkout --no-track -b oms/<task>" in panel.bootstrap(owner, project)
+    assert "No upstream is needed" in panel.bootstrap(owner, project)
+    assert "when commit and publication are authorized" in panel.bootstrap(owner, project)
+    assert "pushes the verified SHA to its target" in panel.bootstrap(owner, project)
     assert "oms room scope" in panel.bootstrap(owner, project) and "--scope PATH" in panel.bootstrap(owner, project)
 option_text = "--dangerously-skip-permissions"
 assert panel.native_command("claude", project, task=option_text)[-2:] == ["--", option_text]
 assert option_text not in panel.native_command("codex", project, task=option_text)[:-1]
+pi_cmd = panel.native_command("pi", project, model="explicit-model", task="@secret --session-id foreign",
+                              context_file=Path("/private/context"), session_id="exact-session")
+assert pi_cmd[:5] == ["pi", "--session-dir", str(panel_chats.pi_session_dir(project)),
+                      "--session-id", "exact-session"]
+assert pi_cmd[pi_cmd.index("--model") + 1] == "explicit-model"
+assert pi_cmd[pi_cmd.index("--append-system-prompt") + 1] == "/private/context"
+assert pi_cmd[-2:] == ["--", "OMS user task: @secret --session-id foreign"]
+assert "--no-session" not in pi_cmd and "--no-tools" not in pi_cmd
+assert "--" not in panel.native_command("pi", project, context_file=Path("/private/context")), "no task keeps ordinary interactive startup"
+with patch.dict(os.environ, {"PI_CODING_AGENT_SESSION_DIR": str(temporary / "override")}):
+    assert panel_chats.pi_session_dir(project) != Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
+assert panel.native_command("pi", project, resume="exact-session", context_file=Path("/private/context"))[4] == "exact-session"
+assert panel.native_command("pi", project, resume="session.with.dot", context_file=Path("/private/context"))[4] == "session.with.dot"
+try:
+    panel.native_command("pi", project, resume="bad.", context_file=Path("/private/context"))
+except ValueError:
+    pass
+else:
+    raise AssertionError("unsafe Pi session ID was accepted")
+with patch.object(panel.shutil, "which", return_value="/fixture/pi"), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
+            ["pi", "--help"], 0, "--session-id --session-dir --append-system-prompt", "")):
+    assert panel.require_pi_cli() == "/fixture/pi"
+spawn_report = {"provider": "pi", "window": 9, "room": "fixture-room"}
+with patch.object(panel, "require_pi_cli", return_value="/fixture/pi") as capability, \
+        patch.object(panel, "spawn_main", return_value=spawn_report) as spawn, \
+        patch.object(panel.sys, "stdout", io.StringIO()):
+    assert panel.main(["--repo", str(project), "--spawn-main", "pi", "--json"]) == 0
+    spawn.assert_called_once()
+    assert spawn.call_args.args[1] == "pi"
+with patch.object(panel.shutil, "which", return_value=None):
+    try:
+        panel.require_pi_cli()
+    except ValueError as error:
+        assert "not installed" in str(error)
+    else:
+        raise AssertionError("missing Pi CLI was treated as available")
+with patch.object(panel.shutil, "which", return_value="/fixture/pi"), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(["pi", "--help"], 0, "--session-id", "")):
+    try:
+        panel.require_pi_cli()
+        raise AssertionError("Pi CLI without required session flags was accepted")
+    except ValueError:
+        pass
+with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}), \
+        patch.object(panel, "require_pi_cli", side_effect=AssertionError("child reached Pi CLI preflight")):
+    try:
+        panel.run_native("pi", project)
+        raise AssertionError("child launched a Pi owner")
+    except ValueError as error:
+        assert "workers cannot open native owner sessions" in str(error)
+pi_home = temporary / "pi-home"
+pi_home.mkdir()
+with patch.object(panel_chats.Path, "home", return_value=pi_home):
+    assert panel_chats.pi_session_storage_safe(project, create=True)
+    with patch.object(panel_chats.os, "getuid", return_value=-1):
+        assert not panel_chats.pi_session_storage_safe(project)
+    pi_dir = panel_chats.pi_session_dir(project)
+    pi_id = "f6b4dd50-76b3-4cfe-b072-8f453db41569"
+    pi_file = pi_dir / (pi_id + ".jsonl")
+    pi_file.write_text(json.dumps({"type": "session", "version": 3, "id": pi_id,
+                                  "timestamp": "2026-10-10T00:00:00Z", "cwd": str(project.resolve())}) + "\n")
+    assert panel_chats.pi_session_header(project, pi_id)["id"] == pi_id
+    assert panel_chats.pi_session_header(project, "missing") is None
+    pi_file.write_text(json.dumps({"type": "session", "id": pi_id, "cwd": "/foreign"}) + "\n")
+    assert panel_chats.pi_session_header(project, pi_id) is None
+    pi_file.write_text(json.dumps({"type": "session", "id": pi_id, "cwd": str(project.resolve())}) + "\n")
+    duplicate = pi_dir / ("duplicate-" + pi_id + ".jsonl")
+    duplicate.write_text(pi_file.read_text())
+    assert panel_chats.pi_session_header(project, pi_id) is None
+    duplicate.unlink()
+    os.link(pi_file, duplicate)
+    assert panel_chats.pi_session_header(project, pi_id) is None
+    duplicate.unlink()
+    duplicate.symlink_to(pi_file)
+    assert panel_chats.pi_session_header(project, pi_id) is None
+    duplicate.unlink()
+    pi_file.write_text("not json\n")
+    assert panel_chats.pi_session_header(project, pi_id) is None
+    pi_file.write_text("{" + ("x" * 65536) + "}\n")
+    assert panel_chats.pi_session_header(project, pi_id) is None
+    pi_file.write_bytes(json.dumps({"type": "session", "id": pi_id, "cwd": str(project.resolve())}).encode())
+    assert panel_chats.pi_session_header(project, pi_id) is None, "partial first header must fail closed"
+    pi_file.write_text(json.dumps({"type": "session", "id": pi_id, "cwd": str(project.resolve())}) + "\n" + ("x" * 1000000))
+    assert panel_chats.pi_session_header(project, pi_id)["id"] == pi_id, "a large transcript with a valid header is bounded"
+
+unsafe_home = temporary / "pi-home-symlink"
+unsafe_home.mkdir()
+outside_home = temporary / "pi-home-outside"
+outside_home.mkdir()
+(outside_home / "sentinel").write_bytes(b"keep")
+(unsafe_home / ".pi").symlink_to(outside_home, target_is_directory=True)
+outside_before = sorted((path.name, path.read_bytes()) for path in outside_home.iterdir())
+with patch.object(panel_chats.Path, "home", return_value=unsafe_home):
+    assert not panel_chats.pi_session_storage_safe(project, create=True)
+assert sorted((path.name, path.read_bytes()) for path in outside_home.iterdir()) == outside_before
+
+# Scratch repository selection shares state without moving native execution.
+import room
+import room_repository as repo_paths
+shared_root = temporary / "shared root 'resolution'"
+subprocess.run(["git", "clone", "--quiet", "--no-local", str(project), str(shared_root)], check=True)
+registry = temporary / "resolution-registry"
+scratch_parent = registry / "oh-my-setting-scratch.resolution"
+scratch_parent.mkdir(parents=True)
+working_root = scratch_parent / "wt"
+subprocess.run(["git", "-C", str(shared_root), "worktree", "add", "--quiet", "--detach", str(working_root)], check=True)
+working_child = working_root / "nested"
+working_child.mkdir()
+proof = scratch_parent / ".oh-my-setting-tmp"
+proof_fields = {"kind": "oh-my-setting-temp", "temporary": "1", "pid": "99999999",
+                "repo": str(shared_root), "worktree": str(working_root)}
+proof_bytes = "".join(key + "=" + value + "\n" for key, value in proof_fields.items()).encode()
+proof.write_bytes(proof_bytes)
+resolver_env = dict(environment, OMS_DELEGATE_WORKTREE_ROOT=str(registry))
+shared_id = json.loads(call(["bash", str(panel.ENTRY), "room", "new", "--repo", str(shared_root), "--json"], resolver_env))["id"]
+call(["bash", str(panel.ENTRY), "room", "join", "--repo", str(shared_root), "--id", shared_id,
+      "--participant", "resolution-owner", "--native-session", "resolution-native-consumer", "--json"], resolver_env)
+selected_env = dict(resolver_env, OMS_ROOM_ID=shared_id, OMS_ROOM_REPO=str(shared_root),
+                    OMS_ROOM_PARTICIPANT="resolution-owner")
+consumer_before = room.participant(room.status(shared_root, shared_id), "resolution-owner")
+for requested in (working_root, working_child):
+    shown = json.loads(call(["bash", str(panel.ENTRY), "room", "show", "--repo", str(requested), "--json"], selected_env))
+    assert shown["id"] == shared_id, shown
+    board = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(requested), "--json"], selected_env))
+    assert board["dashboard"]["room"]["id"] == shared_id, board
+    with patch.dict(os.environ, resolver_env, clear=True):
+        assert panel.repository(requested) == shared_root
+        assert repo_paths.work_repository(requested) == working_root
+for front in ("room", "panel"):
+    default_command = ["bash", str(panel.ENTRY), front] + (["show"] if front == "room" else []) + ["--json"]
+    default_view = subprocess.run(default_command, cwd=working_child, env=selected_env,
+                                  capture_output=True, text=True, timeout=30)
+    assert default_view.returncode == 0, default_view
+    default_data = json.loads(default_view.stdout)
+    assert (default_data if front == "room" else default_data["dashboard"]["room"])["id"] == shared_id
+
+ordinary_root = registry / "ordinary"
+subprocess.run(["git", "-C", str(shared_root), "worktree", "add", "--quiet", "--detach", str(ordinary_root)], check=True)
+plain_directory = temporary / "resolution-non-git"
+plain_directory.mkdir()
+with patch.dict(os.environ, resolver_env, clear=True):
+    assert panel.repository(ordinary_root) == ordinary_root
+    assert panel.repository(plain_directory) == plain_directory
+    non_git_scratch = registry / "oh-my-setting-scratch.non-git" / "wt"
+    non_git_scratch.mkdir(parents=True)
+    (non_git_scratch.parent / ".oh-my-setting-tmp").write_bytes(proof_bytes)
+    assert panel.repository(non_git_scratch) == non_git_scratch
+    for delegation in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_HARNESS_DELEGATE_DEPTH": "2"}):
+        with patch.dict(os.environ, delegation):
+            assert panel.repository(working_child) == working_root
+    # The dead original PID never invalidates a registered parent scratch.
+    assert panel.repository(working_root) == shared_root
+    # A copied Git pointer with the same common directory is not registration.
+    orphan_parent = registry / "oh-my-setting-scratch.unregistered"
+    orphan_worktree = orphan_parent / "wt"
+    orphan_worktree.mkdir(parents=True)
+    (orphan_worktree / ".git").write_bytes((working_root / ".git").read_bytes())
+    orphan_proof = dict(proof_fields, worktree=str(orphan_worktree))
+    (orphan_parent / ".oh-my-setting-tmp").write_text("".join(key + "=" + value + "\n" for key, value in orphan_proof.items()))
+    assert panel.repository(orphan_worktree) == orphan_worktree
+    for field, invalid_value in (("repo", str(project)), ("worktree", str(ordinary_root)),
+                                 ("worktree", str(registry / "missing" / "wt")), ("temporary", "0"),
+                                 ("kind", "foreign-temp")):
+        invalid = dict(proof_fields, **{field: invalid_value})
+        proof.write_text("".join(key + "=" + value + "\n" for key, value in invalid.items()))
+        assert panel.repository(working_root) == working_root, (field, invalid_value)
+    for invalid in (proof_bytes + b"repo=conflict\n", b"x" * (repo_paths.MARKER_LIMIT + 1), b"kind=oh-my-setting-temp"):
+        proof.write_bytes(invalid)
+        assert panel.repository(working_root) == working_root
+    proof.write_bytes(proof_bytes.replace(b"\n", b"\r\n"))
+    assert panel.repository(working_root) == shared_root
+    proof.unlink()
+    proof_source = scratch_parent / "proof-source"
+    proof_source.write_bytes(proof_bytes)
+    proof.symlink_to(proof_source)
+    assert panel.repository(working_root) == working_root
+    proof.unlink()
+    os.link(proof_source, proof)
+    assert panel.repository(working_root) == working_root
+    proof.unlink()
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(proof)
+        assert panel.repository(working_root) == working_root
+        proof.unlink()
+    proof.write_bytes(proof_bytes)
+    alias_registry = temporary / "resolution-registry-link"
+    alias_registry.symlink_to(registry, target_is_directory=True)
+    with patch.dict(os.environ, {"OMS_DELEGATE_WORKTREE_ROOT": str(alias_registry)}):
+        assert panel.repository(working_root) == working_root
+
+for front in ("room", "panel"):
+    conflict = ["bash", str(panel.ENTRY), front] + (["show"] if front == "room" else []) + ["--repo", str(project), "--json"]
+    refused = subprocess.run(conflict, env=selected_env, capture_output=True, text=True, timeout=30)
+    assert refused.returncode and "conflicts" in refused.stderr, refused
+for restricted in (["updates", "--participant", "not-enrolled"],
+                   ["join", "--participant", "resolution-orphan", "--role", "worker", "--parent", "not-enrolled"]):
+    refused = subprocess.run(["bash", str(panel.ENTRY), "room"] + restricted +
+                             ["--repo", str(working_root), "--id", shared_id, "--json"], env=resolver_env,
+                             capture_output=True, text=True, timeout=30)
+    assert refused.returncode, refused
+
+execution_log = temporary / "resolution-native.jsonl"
+with patch.dict(os.environ, dict(selected_env, PANEL_TEST_LOG=str(execution_log)), clear=True), \
+        patch.object(panel.sys.stdin, "isatty", return_value=True), \
+        patch.object(panel.sys.stdout, "isatty", return_value=True):
+    assert panel.main(["--repo", str(working_child), "--host", "inline", "--layout", "inline", "--launch", "codex"]) == 0
+native_observed = json.loads(execution_log.read_text().splitlines()[-1])
+assert native_observed["cwd"] == str(working_root) and native_observed["repo"] == str(shared_root), native_observed
+assert room.participant(room.status(shared_root, shared_id), "resolution-owner") == consumer_before
+
+# Pi's native project identity follows the physical execution worktree while
+# its room and lifecycle evidence continue to resolve to the shared checkout.
+import hashlib
+pi_home = temporary / "resolution-pi-home"
+pi_home.mkdir()
+pi_bin = temporary / "resolution-pi-bin"
+pi_bin.mkdir()
+pi_log = temporary / "resolution-pi.jsonl"
+pi_cli = pi_bin / "pi"
+pi_cli.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+if "--help" in args:
+    print("--session-id --session-dir --append-system-prompt")
+    raise SystemExit(0)
+session_dir = pathlib.Path(args[args.index("--session-dir") + 1])
+sid = args[args.index("--session-id") + 1]
+session_dir.mkdir(parents=True, exist_ok=True)
+path = session_dir / (sid + ".jsonl")
+header = {"type": "session", "version": 3, "id": sid, "timestamp": "2026-10-10T00:00:00Z", "cwd": os.getcwd()}
+if not path.exists():
+    path.write_text(json.dumps(header) + "\\n", encoding="utf-8")
+with open(os.environ["PI_FIXTURE_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps({"cwd": os.getcwd(), "session_dir": str(session_dir), "session": sid,
+                             "participant": os.environ["OMS_ROOM_PARTICIPANT"],
+                             "attempt": os.environ["OMS_PANEL_MAIN_ATTEMPT"]}) + "\\n")
+""")
+pi_cli.chmod(0o755)
+pi_main_env = dict(selected_env, HOME=str(pi_home), PATH=str(pi_bin) + os.pathsep + os.environ["PATH"],
+                   PI_FIXTURE_LOG=str(pi_log))
+pi_main_args = ["--repo", str(working_child), "--host", "inline", "--layout", "inline", "--launch", "pi"]
+with patch.dict(os.environ, pi_main_env, clear=True), \
+        patch.object(panel.sys.stdin, "isatty", return_value=True), \
+        patch.object(panel.sys.stdout, "isatty", return_value=True):
+    assert panel.main(pi_main_args) == 0
+pi_fresh = json.loads(pi_log.read_text().splitlines()[-1])
+pi_session = pi_fresh["session"]
+pi_digest = hashlib.sha256(pi_session.encode()).hexdigest()[:32]
+pi_member = next(p for p in room.status(shared_root, shared_id)["participants"]
+                 if p.get("consumer") == pi_digest)
+assert pi_fresh["cwd"] == str(working_root), pi_fresh
+with patch.dict(os.environ, {"HOME": str(pi_home)}):
+    pi_storage = panel_chats.pi_session_dir(working_root)
+    assert pi_fresh["session_dir"] == str(pi_storage), pi_fresh
+    assert panel_chats.pi_session_header(working_root, pi_session)["cwd"] == str(working_root)
+    assert not panel_chats.pi_session_dir(shared_root).exists()
+assert pi_fresh["participant"] == pi_member["participant"]
+pi_fresh_attempt = next(row for row in panel.main_history(shared_root, shared_id, pi_member["participant"])
+                        if row["attempt_id"] == pi_fresh["attempt"])
+assert pi_fresh_attempt["terminal"] is True
+with patch.dict(os.environ, {"HOME": str(pi_home)}):
+    with patch.dict(os.environ, dict(selected_env, HOME=str(pi_home),
+                                     **{repo_paths.EXECUTION_ENV: str(working_root)}), clear=True):
+        pi_catalog = panel.chat_catalog(shared_root, shared_id)
+assert next(row for row in pi_catalog["rows"] if row["participant"] == pi_member["participant"])["session_id"] == pi_session
+pi_terminal = {"host": "herdr", "window": "pi-fixture", "pane": "%92", "session": "$92"}
+pi_open_output = io.StringIO()
+with patch.object(panel_chats, "windows", return_value={pi_member["participant"]: [pi_terminal]}), \
+        patch.dict(os.environ, pi_main_env, clear=True), \
+        patch("sys.stdout", pi_open_output):
+    assert panel.main(["--repo", str(working_child), "--open-chat", pi_member["participant"],
+                       "--dry-run", "--json"]) == 0
+pi_open = json.loads(pi_open_output.getvalue())
+assert pi_open["method"] == "existing-terminal" and pi_open["participant"] == pi_member["participant"], pi_open
+assert pi_open["commands"] == [] and pi_open["target"] == pi_terminal, pi_open
+pi_member_seq = pi_member["seq"]
+with patch.dict(os.environ, pi_main_env, clear=True), \
+        patch.object(panel.sys.stdin, "isatty", return_value=True), \
+        patch.object(panel.sys.stdout, "isatty", return_value=True):
+    assert panel.main(pi_main_args + ["--resume", pi_session]) == 0
+pi_resumed = json.loads(pi_log.read_text().splitlines()[-1])
+pi_member_after = next(p for p in room.status(shared_root, shared_id)["participants"]
+                       if p.get("consumer") == pi_digest)
+assert pi_resumed["participant"] == pi_member["participant"]
+assert pi_resumed["attempt"] != pi_fresh["attempt"]
+assert pi_member_after["seq"] == pi_member_seq
+
+def reject_pi_resume(execution_env, command_args=pi_main_args):
+    before_room = room.records(shared_root, shared_id)
+    before_events = panel.events(shared_root, "list", "--json", output=True)
+    before_calls = pi_log.read_text().splitlines()
+    status = 0
+    try:
+        with patch.dict(os.environ, dict(pi_main_env, **execution_env), clear=True), \
+                patch.object(panel.sys.stdin, "isatty", return_value=True), \
+                patch.object(panel.sys.stdout, "isatty", return_value=True), \
+                patch("sys.stderr", io.StringIO()):
+            status = panel.main(command_args + ["--resume", pi_session])
+    except SystemExit as error:
+        status = error.code
+    if not status:
+        raise AssertionError("Pi resume with foreign execution root was accepted")
+    assert room.records(shared_root, shared_id) == before_room
+    assert panel.events(shared_root, "list", "--json", output=True) == before_events
+    assert pi_log.read_text().splitlines() == before_calls
+
+pi_session_file = pi_storage / (pi_session + ".jsonl")
+pi_session_bytes = pi_session_file.read_bytes()
+for foreign_root in (shared_root, ordinary_root):
+    with patch.dict(os.environ, {"HOME": str(pi_home)}):
+        foreign_dir = panel_chats.pi_session_dir(foreign_root)
+    foreign_dir.mkdir(parents=True, exist_ok=True)
+    foreign_file = foreign_dir / pi_session_file.name
+    foreign_file.write_bytes(pi_session_bytes)
+    pi_session_file.unlink()
+    reject_pi_resume({})
+    foreign_file.unlink()
+    pi_session_file.write_bytes(pi_session_bytes)
+canonical_pi_args = ["--repo", str(shared_root), "--host", "inline", "--layout", "inline", "--launch", "pi"]
+reject_pi_resume({repo_paths.EXECUTION_ENV: str(ordinary_root)}, canonical_pi_args)
+assert not (working_root / ".oms").exists()
+with patch.dict(os.environ, dict(selected_env, **{repo_paths.EXECUTION_ENV: str(working_root)}), clear=True):
+    # Carry execution context into a canonical --repo child without changing
+    # tmux's existing state ownership and command identity checks.
+    assert repo_paths.EXECUTION_ENV + "=" + str(working_root) in shlex.split(panel.launch_command(shared_root, "oms-resolution", "codex"))
+    with patch.object(panel.subprocess, "check_output", return_value="%resolution\n") as created, \
+            patch.object(panel, "bind_window"), patch.object(panel, "board_split"):
+        panel.add_main_window(shared_root, "oms-resolution", "codex", "auto", False, os.environ.copy())
+        command = created.call_args.args[0]
+        assert command[command.index("-c") + 1] == str(working_root), command
+    with patch.object(panel, "native_binary", return_value="resolution-adapter"):
+        adapter = panel.native_command("muse", shared_root)
+        assert adapter[adapter.index("--workdir") + 1] == str(working_root), adapter
+    with patch.object(panel.panel_host, "herdr_active", return_value=True), \
+            patch.object(panel.panel_host, "open_native") as host_launch:
+        panel.open_native("codex", shared_root)
+        directory, provider, native_args, watcher_args = host_launch.call_args.args
+        assert directory == working_root and provider == "codex"
+        assert all(args[args.index("--repo") + 1] == str(working_root) for args in (native_args, watcher_args))
+    with patch.dict(os.environ, {repo_paths.EXECUTION_ENV: str(ordinary_root)}):
+        try:
+            repo_paths.native_repository(shared_root)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("ordinary linked worktree inherited canonical execution authority")
+room.command(shared_root, "close", "--id", shared_id)
+for closed_command in (["panel", "--room", shared_id],
+                       ["room", "join", "--participant", "resolution-owner"],
+                       ["room", "updates", "--participant", "resolution-owner"]):
+    refused = subprocess.run(["bash", str(panel.ENTRY)] + closed_command + ["--repo", str(working_root), "--json"],
+                             env=selected_env, capture_output=True, text=True, timeout=30)
+    assert refused.returncode and "closed" in refused.stderr, refused
+print("PASS: native scratch-state resolver and execution directory boundaries")
+
 
 for owner in panel.PROVIDERS:
     env = dict(environment, OMS_AGENT=owner)
@@ -1985,7 +2446,9 @@ cases = [("claude", "worker", "light", "read", "explain", "gpt-6-luna"),
          ("claude", "worker", "main", "write", "implement", "claude-opus-5-5"),
          ("claude", "advisor", "routine", "read", "advise", "gpt-6-astra"),
          ("codex", "advisor", "routine", "read", "advise", "claude-fable-5-1"),
-         ("claude", "reviewer", "routine", "read", "review", "gpt-6-astra")]
+         ("claude", "reviewer", "routine", "read", "review", "gpt-6-astra"),
+         ("codex", "researcher", "routine", "read", "research", "gpt-6-luna"),
+         ("claude", "researcher", "routine", "read", "research", "claude-haiku-5-5")]
 for index, (owner, role, workload, access, purpose, expected) in enumerate(cases):
     request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", role,
                "--owner", owner, "--workload", workload, "--access", access, "--purpose", purpose,
@@ -2016,7 +2479,7 @@ for index, (owner, role, workload, access, purpose, expected) in enumerate(cases
     assert refs["panel_access"] == access and refs["panel_label"] == "Inspect fixture source %s" % index, refs
     assert attempt["parent_attempt_id"] == main_attempts[owner], attempt
     assert attempt["state"] == ("review" if access == "write" else "done"), attempt
-    assert refs["panel_location"].startswith("worktree:") if role == "worker" else refs["panel_location"] == "repository", refs
+    assert refs["panel_location"].startswith("worktree:") if role in {"worker", "researcher"} else refs["panel_location"] == "repository", refs
     assert str(home) not in json.dumps(refs) and str(project) not in json.dumps(refs), refs
     if role == "advisor":
         retained = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
@@ -2031,10 +2494,104 @@ for index, (owner, role, workload, access, purpose, expected) in enumerate(cases
         assert any("model_reasoning_effort" in arg and route["route"]["effort"] in arg
                    for arg in observed["argv"]), observed
     assert observed["parent"] == main_attempts[owner], observed
-    if role == "worker":
+    if role in {"worker", "researcher"}:
         assert observed["cwd"] != str(project), observed
     else:
         assert observed["cwd"] == str(project), observed
+
+# A researcher keeps the cheap family, read-only strategy and source evidence.
+from panel_routing import newest_research_model, research_version
+assert newest_research_model("codex", "gpt-6-luna", ["gpt-6.2-luna", "gpt-6.10-luna", "gpt-7-astra"]) == "gpt-6.10-luna"
+assert newest_research_model("claude", "claude-haiku-5-5", ["claude-haiku-5-6", "claude-opus-9-9"]) == "claude-haiku-5-6"
+assert research_version("codex", "provider-default") is None
+with patch.object(panel, "provider_catalog", return_value=[{"provider": "codex", "binary": "codex",
+        "models": ["gpt-6-sol"], "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-7-astra"]}]):
+    assert panel.selected_route("codex", "worker", "main", "auto", "read", "investigate")["model"] == "gpt-6.2-sol"
+    assert panel.selected_route("codex", "worker", "light", "auto", "read", "explain")["model"] == "gpt-6-luna"
+with patch.object(panel, "provider_catalog", return_value=[{"provider": "codex", "binary": "codex",
+        "models": ["gpt-6-luna"], "catalog_models": ["gpt-6-luna"] * 20 + ["gpt-6.2-luna"]}]):
+    assert panel.selected_route("codex", "researcher", "routine", "auto", "read", "research")["model"] == "gpt-6.2-luna"
+try:
+    panel.room.declared_scopes("researcher", ["src"])
+    raise AssertionError("researcher write scope was accepted")
+except ValueError:
+    pass
+for owner in panel.PROVIDERS:
+    preset = panel.selected_route(owner, "researcher", "routine", "auto", "read", "research")
+    command = panel.routed_command(panel.ENTRY, project, preset, prompt="Find cited evidence.")
+    assert "--read-only" in command and command[command.index("--role") + 1] == "researcher"
+    assert preset["effort"] == "low" and preset["workload"] == "light"
+    for options in (("routine", "read", "implement", None, None, None),
+                    ("routine", "write", "research", None, None, None),
+                    ("main", "read", "research", None, None, None),
+                    ("routine", "read", "research", None, None, "high"),
+                    ("routine", "read", "research", "codex", "gpt-6-astra", None),
+                    ("routine", "read", "research", "claude", "provider-default", None)):
+        workload, access, purpose, target, model, effort = options
+        try:
+            panel.selected_route(owner, "researcher", workload, "auto", access, purpose, target, model, effort)
+            raise AssertionError("researcher authority/model override was accepted")
+        except ValueError:
+            pass
+    for forbidden in ({"verify": "true"}, {"resume": "fixture-session"}):
+        try:
+            panel.routed_command(panel.ENTRY, project, preset, prompt="Lookup only.", **forbidden)
+            raise AssertionError("researcher gate/continuation was accepted")
+        except ValueError:
+            pass
+
+# Lifecycle admission rejects a forged researcher label on a write delegate before the native CLI runs.
+for access, purpose, model, effort in (("write", "research", "gpt-6-luna", "low"),
+                                     ("read", "implement", "gpt-6-luna", "low"),
+                                     ("read", "research", "gpt-6-astra", "low"),
+                                     ("read", "research", "gpt-6-luna", "high")):
+    forged = dict(environment, OMS_AGENT="codex", OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"],
+                  OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE="researcher", OMS_PANEL_PURPOSE=purpose)
+    request = ["bash", str(panel.ENTRY), "peer-delegate", "--repo", str(project), "--to", "codex",
+               "--model", model, "--reasoning-effort", effort, "--brief-file", str(brief), "--verify", "test -f value.txt"]
+    if access == "read":
+        request.append("--read-only")
+    before = worker_log.read_bytes()
+    denied = subprocess.run(request, env=forged, capture_output=True, text=True)
+    assert denied.returncode != 0 and worker_log.read_bytes() == before, denied.stdout + denied.stderr
+
+# Omitted worker purpose follows access, and one effective ID binds the plan,
+# argv, execution metadata and operator-visible launch line.
+read_default = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "worker",
+                "--owner", "codex", "--prompt", "Explain the fixture source."]
+write_default = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "worker",
+                 "--owner", "codex", "--access", "write", "--brief-file", str(brief),
+                 "--verify", 'test "$(tail -1 value.txt)" = new', "--label", "Default implementation"]
+worker_before = worker_log.read_bytes()
+events_before = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"])
+read_plan = json.loads(call(read_default + ["--dry-run"]))
+write_plan = json.loads(call(write_default + ["--dry-run"]))
+for planned, purpose in ((read_plan, "explain"), (write_plan, "implement")):
+    ident = planned["task_id"]
+    assert planned["route"]["purpose"] == purpose, planned
+    assert re.fullmatch(r"panel-%s-[a-f0-9]{8}" % purpose, ident), ident
+    assert planned["argv"][planned["argv"].index("--task-id") + 1] == ident, planned
+    assert planned["executes"] is False
+assert worker_log.read_bytes() == worker_before, "dry-run invoked a native fixture"
+assert call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]) == events_before
+
+write_output = call(write_default, dict(environment, OMS_AGENT="codex",
+                                        OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"], PANEL_TEST_MODE="write"))
+visible = re.findall(r"\btask_id=(panel-implement-[a-f0-9]{8})\b", write_output)
+assert len(visible) == 1, write_output
+generated_id = visible[0]
+execution = json.loads(worker_log.read_text().splitlines()[-1])
+assert execution["purpose"] == "implement" and execution["task_id"] == generated_id, execution
+attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
+attempt = next(row for row in attempts if row.get("task_id") == generated_id)
+assert attempt["refs"]["panel_purpose"] == "implement", attempt
+
+# Explicit purpose and task IDs remain exact.
+explicit_id = "explicit-task-ID.7"
+explicit = read_default + ["--purpose", "investigate", "--task-id", explicit_id]
+explicit_plan = json.loads(call(explicit + ["--dry-run"]))
+assert explicit_plan["task_id"] == explicit_id and explicit_plan["route"]["purpose"] == "investigate"
+assert explicit_plan["argv"][explicit_plan["argv"].index("--task-id") + 1] == explicit_id
 
 # Registered transports join the same task tree without a native launcher or
 # changes to preset allocation. Muse is a synthetic custom-adapter fixture.
@@ -2965,6 +3522,55 @@ initial_mail = room.updates(project, mail_room, "mail-reader", budget=1)
 assert [r["room_event"]["id"] for r in initial_mail["turns"]] == ["first-mail"], "initial mail traversed pre-enrollment history"
 assert not room.updates(project, mail_room, "mail-reader", initial_mail["cursor"])["turns"]
 assert [r["room_event"]["id"] for r in room.updates(project, mail_room, "mail-reader", legacy_cursor)["turns"]] == ["first-mail"], "old cursors remain readable"
+resume_room = room.create(project, "resume-mail", "Resume cutoff")
+room.join(project, resume_room, "resume-writer", "codex")
+room.join(project, resume_room, "resume-reader", "claude")
+room.send(project, resume_room, "resume-writer", "resume-reader", "Before resume", message_id="before-resume")
+room.append(project, resume_room, {"kind": "leave", "participant": "resume-reader"}, "Participant left")
+room.join(project, resume_room, "resume-reader", "claude")
+room.send(project, resume_room, "resume-writer", "resume-reader", "After resume", message_id="after-resume")
+assert [r["room_event"]["id"] for r in room.updates(project, resume_room, "resume-reader")["turns"]] == [
+    "after-resume"], "resume replayed mail from before the participant cutoff"
+# Default reads are addressed unread mail; explicit cursors remain raw stream deltas.
+unread_room = room.create(project, "unread-mail", "Unread mailbox")
+room.join(project, unread_room, "unread-a", "codex")
+room.join(project, unread_room, "unread-b", "claude")
+room.join(project, unread_room, "unread-c", "codex")
+start_cursor = room.updates(project, unread_room, "unread-b")["cursor"]
+for number in range(60):
+    message_id = "old-%s" % number
+    room.send(project, unread_room, "unread-a", "unread-b", "Already consumed", message_id=message_id)
+    room.acknowledge(project, unread_room, "unread-b", [message_id])
+room.send(project, unread_room, "unread-c", "unread-b", "Direct from second sender", message_id="new-direct")
+room.send(project, unread_room, "unread-a", "all", "Broadcast", message_id="new-broadcast")
+room.send(project, unread_room, "unread-a", "unread-c", "Other recipient only", message_id="other-only")
+before_read = room.records(project, unread_room)
+page = room.updates(project, unread_room, "unread-b", budget=1, limit=1)
+assert [row["room_event"]["id"] for row in page["turns"]] == ["new-direct"]
+assert page["has_more"], "unread pagination ignored a later addressed message"
+default_mail = room.updates(project, unread_room, "unread-b")
+assert [row["room_event"]["id"] for row in default_mail["turns"]] == ["new-direct", "new-broadcast"]
+assert not default_mail["has_more"] and room.records(project, unread_room) == before_read, "reading changed room state"
+assert [row["room_event"]["id"] for row in room.updates(project, unread_room, "unread-b")["turns"]] == [
+    "new-direct", "new-broadcast"], "a repeated read hid unacknowledged mail"
+raw_delta = room.updates(project, unread_room, "unread-b", start_cursor)
+raw_rows = list(raw_delta["turns"])
+for _ in range(len(before_read)):
+    if not raw_delta["has_more"]:
+        break
+    raw_delta = room.updates(project, unread_room, "unread-b", raw_delta["cursor"])
+    raw_rows.extend(raw_delta["turns"])
+assert {row["room_event"].get("id") for row in raw_rows} >= {"old-0", "old-59", "new-direct", "new-broadcast"}
+other_mail = {row["room_event"]["id"] for row in room.updates(project, unread_room, "unread-c")["turns"]}
+assert other_mail == {"new-broadcast", "other-only"}, "direct mail crossed recipients or broadcast was hidden"
+room.acknowledge(project, unread_room, "unread-b", ["new-direct", "new-broadcast"])
+assert room.updates(project, unread_room, "unread-b")["turns"] == [], "acknowledged mail remained in the default inbox"
+try:
+    room.updates(project, unread_room, "unread-b", "invalid-cursor")
+except ValueError:
+    pass
+else:
+    raise AssertionError("invalid room cursor was accepted")
 shared = room.create(project, "operator-room", "Shared parser task")
 room.join(project, shared, main_attempts["codex"], "codex", model="gpt-6-sol", label="Sol main")
 room.join(project, shared, main_attempts["claude"], "claude", model="claude-opus-5-5", label="Opus main")
@@ -3009,30 +3615,348 @@ assert "agent-plan finish --id plan-link --landed-commit SHA" in linked.stderr, 
 again = subprocess.run(plan_dispatch, env=room_env, capture_output=True, text=True)
 assert again.returncode == 0 and plan_task() == held and "lease %s" % held["lease_id"] in again.stderr, again
 call(plan_cli + ["add", "--id", "plan-held", "--title", "Held by codex"])
-call(plan_cli + ["claim", "--id", "plan-held", "--provider", "codex"])
+call(plan_cli + ["claim", "--id", "plan-held", "--provider", "codex"],
+     dict(environment, OMS_ROOM_PARTICIPANT=main_attempts["codex"]))
 other = subprocess.run(plan_dispatch[:-4] + ["--task-id", "plan-held", "--label", "Held elsewhere"], env=room_env,
                        capture_output=True, text=True)
 assert other.returncode == 0 and "another claimant" in other.stderr, other
 assert json.loads(call(plan_cli + ["show", "--id", "plan-held"]))["state"] == "claimed"
-# A write worker on a plan task this main cannot hold would run unbound: it is refused before joining the room.
-call(plan_cli + ["add", "--id", "plan-blocked", "--title", "Blocked"])
+call(plan_cli + ["add", "--id", "plan-blocked", "--title", "Blocked before write"])
 call(plan_cli + ["block", "--id", "plan-blocked", "--reason", "waits on a decision"])
+call(plan_cli + ["add", "--id", "plan-ownerless", "--title", "Ownerless claim"])
+call(plan_cli + ["claim", "--id", "plan-ownerless", "--provider", "codex"])
 (project / "write-brief.md").write_text("Change nothing.\n")
+write_plan_dispatch = (plan_dispatch[:plan_dispatch.index("--prompt")] +
+                       ["--purpose", "implement", "--access", "write", "--workload", "light",
+                        "--brief-file", str(project / "write-brief.md"), "--verify", "true"])
 thread = project / ".oms/threads" / (shared + ".jsonl")
-for refused_id in ("plan-blocked", "plan-held"):
-    before = thread.read_text()
-    refused = subprocess.run(plan_dispatch[:plan_dispatch.index("--purpose")] + [
-        "--purpose", "implement", "--access", "write", "--workload", "light",
-        "--brief-file", str(project / "write-brief.md"), "--verify", "true",
-        "--task-id", refused_id, "--label", "Refused write"], env=room_env, capture_output=True, text=True)
+for refused_id in ("plan-blocked", "plan-held", "plan-ownerless"):
+    before_thread, before_provider = thread.read_bytes(), worker_log.read_bytes()
+    refused = subprocess.run(write_plan_dispatch + ["--task-id", refused_id, "--label", "Refused write"],
+                             env=room_env, capture_output=True, text=True)
     assert refused.returncode != 0 and "reopen or claim it before dispatching a write worker" in refused.stderr, refused
-    assert thread.read_text() == before, "a refused write dispatch must not join the room"
+    assert thread.read_bytes() == before_thread, "a refused write dispatch must not join the room"
+    assert worker_log.read_bytes() == before_provider, "a refused write dispatch must not call a provider"
+# Known unclaimable tasks keep informational read dispatch compatibility.
+read_blocked = subprocess.run(plan_dispatch[:-4] + ["--task-id", "plan-blocked", "--label", "Read blocked task"],
+                              env=room_env, capture_output=True, text=True)
+assert read_blocked.returncode == 0 and "plan plan-blocked is blocked" in read_blocked.stderr, read_blocked
+# Standalone known plan tasks have no main whose exact binding can be observed.
+call(plan_cli + ["add", "--id", "plan-standalone", "--title", "Standalone write"])
+standalone_before = worker_log.read_bytes()
+standalone_env = dict(environment)
+standalone_env.pop("CLAUDE_CODE_SESSION_ID", None)
+standalone_argv = list(write_plan_dispatch)
+room_arg = standalone_argv.index("--room")
+del standalone_argv[room_arg:room_arg + 2]
+standalone = subprocess.run(standalone_argv + ["--task-id", "plan-standalone", "--label", "Refused standalone"],
+                            env=standalone_env, capture_output=True, text=True)
+assert standalone.returncode != 0 and "no owned main relationship" in standalone.stderr, standalone
+assert worker_log.read_bytes() == standalone_before
+assert json.loads(call(plan_cli + ["show", "--id", "plan-standalone"]))["state"] == "ready"
+# Missing tasks retain the legacy unprotected write path.
+missing_before = worker_log.read_bytes()
+legacy = subprocess.run(write_plan_dispatch + ["--task-id", "plan-not-recorded", "--label", "Legacy write"],
+                        env=room_env, capture_output=True, text=True)
+assert legacy.returncode == 0 and worker_log.read_bytes() != missing_before, legacy
 call(plan_cli + ["review", "--id", "plan-link", "--lease-id", held["lease_id"]])
 closed = subprocess.run(plan_dispatch, env=room_env, capture_output=True, text=True)
 assert closed.returncode == 0 and plan_task()["state"] == "review" and "plan plan-link is review" in closed.stderr, closed
+before_thread, before_provider = thread.read_bytes(), worker_log.read_bytes()
+review_write = subprocess.run(write_plan_dispatch + ["--task-id", "plan-link", "--label", "Refused review write"],
+                              env=room_env, capture_output=True, text=True)
+assert review_write.returncode != 0 and "reopen or claim it before dispatching a write worker" in review_write.stderr, review_write
+assert thread.read_bytes() == before_thread and worker_log.read_bytes() == before_provider, review_write
+(project / "write-brief.md").unlink()  # The later blocking reviewer must see only its source fixture.
 hinted = subprocess.run(final_args[:final_args.index("--task-id") + 1] + ["plan-link"] + final_args[final_args.index("--task-id") + 2:],
                         cwd=project, env=environment, capture_output=True, text=True)
 assert hinted.returncode == 0 and "agent-plan finish --id plan-link --landed-commit SHA" in hinted.stderr, hinted
+def exercise_observed_worker_leases():
+    # Every success marker comes from the real peer dispatcher while the fake CLI waits.
+    import time
+    plan_api = ["bash", str(panel.ENTRY), "agent-plan", "--repo", str(project)]
+    # The observer tuple belongs on the peer dispatcher argv; the native CLI
+    # receives ordinary model flags and cannot expose this frontend argument.
+    argv_binding = panel.PlanBinding("plan_" + "1" * 32, "argv-observer", "lease_" + "2" * 32,
+                                     "codex", "claude", "argv-main", "att_" + "3" * 32, "argv-room")
+    captured_dispatch = {}
+    route = panel.selected_route("claude", "worker", "light", "auto", "write", "implement")
+    with patch.object(panel, "moved_main", return_value=None), \
+            patch.object(panel, "child_environment", return_value={}), \
+            patch.object(panel, "native_repository", return_value=project), \
+            patch.object(panel, "plan_link", return_value=argv_binding), \
+            patch.object(panel.subprocess, "call", side_effect=lambda argv, **kwargs: captured_dispatch.update(argv=argv) or 0):
+        assert panel.run_dispatch(project, "claude", "worker", "light", "auto", "write", "implement",
+                                  None, brief, "true", "argv-observer", False, None, route, None, None, None) == 0
+    dispatch_argv = captured_dispatch["argv"]
+    assert "--observe-plan-binding" in dispatch_argv, dispatch_argv
+    assert json.loads(dispatch_argv[dispatch_argv.index("--observe-plan-binding") + 1]) == argv_binding._asdict()
+    test_room = room.create(project, "observed-worker-room", "Worker lease producer")
+    mains = {}
+    for provider in panel.PROVIDERS:
+        participant = "observed-main-" + provider
+        attempt = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "start",
+                        "--provider", provider, "--tool", "panel-main", "--ref", "panel_role=main",
+                        "--ref", "panel_room_id=" + test_room, "--ref", "panel_room_participant=" + participant,
+                        "--then", "starting", "--then", "working"]).strip()
+        room.join(project, test_room, participant, provider, "main")
+        mains[provider] = participant, attempt
+    source = Path(call(["bash", str(panel.ENTRY), "scratch-worktree", "add", "--repo", str(project),
+                        "--owner-pid", str(os.getpid())]).strip())
+    (source / "value.txt").write_text("lease fixture scratch source\n")
+    subprocess.run(["git", "-C", str(source), "add", "value.txt"], check=True)
+    subprocess.run(["git", "-C", str(source), "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture scratch"], check=True)
+    source_sha = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+    primary_sha = subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD"], text=True).strip()
+    assert source_sha != primary_sha
+    print("scratch source HEAD:", source_sha, "canonical HEAD:", primary_sha)
+    scenarios = [("codex", "routine", "claude", "claude-sonnet-5-5", "medium", "write", True),
+                 ("claude", "light", "codex", "gpt-6-luna", "low", "write", True),
+                 ("codex", "routine", "claude", "claude-sonnet-5-5", "medium", "write", False),
+                 ("claude", "light", "codex", "gpt-6-luna", "low", "read", True),
+                 ("codex", "routine", "codex", "gpt-6-luna", "low", "read", True, "researcher")]
+    for number, scenario in enumerate(scenarios):
+        owner, workload, worker, model, effort, access, reviewed = scenario[:7]
+        role = scenario[7] if len(scenario) > 7 else "worker"
+        purpose = "research" if role == "researcher" else "implement" if access == "write" else "investigate"
+        task_id = "observed-worker-" + str(number)
+        main_member, main_attempt = mains[owner]
+        assignment = dict(provider=worker, model=model, reasoning_effort=effort) if reviewed else {}
+        call(plan_api + ["init", "--goal", "Observed worker fixture"])
+        call(plan_api + ["add", "--id", task_id, "--title", "Exact observed worker", "--assignment", json.dumps(assignment)])
+        entered, release = temporary / (task_id + "-entered"), temporary / (task_id + "-release")
+        env = dict(environment, OMS_ROOM_ID=test_room, OMS_ROOM_REPO=str(project), OMS_ROOM_PARTICIPANT=main_member,
+                   OMS_PANEL_MAIN_ATTEMPT=main_attempt, OMS_LOCK_DIR=str(temporary / "observed-locks"),
+                   OMS_PLAN_LEASE_ID="ambient-not-authority", OMS_OBSERVER_INJECTED="untrusted", OMS_DL_OBSERVATION="untrusted", OMS_INDEX_BASE_REPO="untrusted", DELEGATE_SOURCE_REPO="untrusted",
+                   LEASE_FIXTURE_ENTERED=str(entered), LEASE_FIXTURE_RELEASE=str(release),
+                   LEASE_FIXTURE_MODEL=model, LEASE_FIXTURE_EFFORT=effort, LEASE_FIXTURE_PROVIDER=worker,
+                   OMS_PEER_TIMEOUT="90")
+        argv = ["bash", str(panel.ENTRY), "panel", "--repo", str(source), "--room", test_room,
+                "--dispatch", role, "--owner", owner, "--workload", workload,
+                "--purpose", purpose, "--access", access]
+        if role == "researcher":
+            argv += ["--prompt", "Inspect the native source read-only."]
+        else:
+            argv += ["--brief-file", str(brief)]
+        if access == "write":
+            argv += ["--verify", ":"]
+        argv += ["--task-id", task_id]
+        child_process = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 30
+            while not entered.exists() and child_process.poll() is None and time.monotonic() < deadline:
+                time.sleep(.05)
+            if not entered.exists():
+                output, errors = child_process.communicate(timeout=10)
+                raise AssertionError((argv, child_process.returncode, output, errors))
+            observed = json.loads(entered.read_text())
+            row = json.loads(call(plan_api + ["evidence-snapshot", "--id", task_id], env))
+            marker = next(json.loads(p.read_text()) for p in (project / ".oms/delegations").glob("*.json")
+                          if json.loads(p.read_text())["task_id"] == task_id)
+            assert marker["schema"] == 4 and marker["lease_id"] == row["lease_id"], marker
+            assert (marker["provider"], marker["model"], marker["reasoning_effort"]) == (worker, model, effort), marker
+            assert marker["native_pid"] > 0 and marker["native_pid_source"] and marker["state"] == "running", marker
+            os.kill(marker["native_pid"], 0)
+            assert observed["head"] == source_sha and observed["value"] == "lease fixture scratch source\n", observed
+            assert observed["cwd"] == marker["worktree"] and observed["cwd"] != str(source), observed
+            if role == "researcher":
+                assert observed["role"] == "researcher" and observed["purpose"] == "research", observed
+                native_argv = json.loads(worker_log.read_text().splitlines()[-1])["argv"]
+                assert "--sandbox" in native_argv and native_argv[native_argv.index("--sandbox") + 1] == "read-only", native_argv
+                assert "--verify" not in native_argv and "--read-only" not in native_argv, native_argv
+            else:
+                assert observed["role"] == "worker" and observed["purpose"] == purpose, observed
+            assert not (source / ".oms/delegations").exists(), "state split into scratch"
+            assert row["claimed_by_participant"] == main_member and row["assignment"] == assignment, row
+            assert row["provider"] == (worker if reviewed else owner), row
+            observed_binding = dict(plan_id=row["plan_id"], task_id=task_id, lease_id=row["lease_id"],
+                                    claim_provider=row["provider"], owner_provider=owner,
+                                    owner_participant=main_member, owner_attempt=main_attempt,
+                                    room_id=test_room)
+            if reviewed and access == "write" and worker != owner:
+                assert observed_binding["claim_provider"] != observed_binding["owner_provider"], observed_binding
+            enrolled = room.participant(room.project(room.records(project, test_room)), observed["participant"])
+            assert enrolled["parent"] == main_member and observed["parent"] == main_attempt, enrolled
+            assert enrolled["role"] == role and enrolled["owns"] == [], enrolled
+            route = panel.selected_route(owner, role, workload, "auto", access, purpose)
+            validation_route = dict(provider=route["provider"], model=route["model"],
+                                    reasoning_effort=route["effort"], fallback_model="")
+            binding = panel.PlanBinding(row["plan_id"], task_id, row["lease_id"], row["provider"], owner,
+                                        main_member, main_attempt, test_room)
+            assert binding._asdict() == observed_binding, binding
+            child_env = dict(env, OMS_AGENT=owner, OMS_TASK_ID=task_id,
+                             OMS_ROOM_PARTICIPANT=observed["participant"],
+                             OMS_ROOM_ADMITTED_PARTICIPANT=observed["participant"])
+            if role == "researcher":
+                child_env["OMS_PANEL_ROLE"] = role
+                binding.validate(project, child_env, validation_route)
+                room_log = project / ".oms/threads" / (test_room + ".jsonl")
+                room_before = room_log.read_bytes()
+                for bad_state in ({"joined": False}, {"joined": True, "role": "worker", "parent": main_member,
+                                   "provider": route["provider"], "model": route["model"]},
+                                  {"joined": True, "role": "researcher", "parent": main_member,
+                                   "provider": route["provider"], "model": "wrong-model"}):
+                    with patch.object(panel.room, "participant", return_value=dict(enrolled, **bad_state)):
+                        try:
+                            binding.validate(project, child_env, validation_route)
+                        except (ValueError, KeyError):
+                            pass
+                        else:
+                            raise AssertionError("plan observer accepted invalid researcher membership: " + repr(bad_state))
+                wrong_controller_role = dict(child_env, OMS_PANEL_ROLE="worker")
+                try:
+                    binding.validate(project, wrong_controller_role, validation_route)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("researcher observation accepted a worker controller role")
+                assert room_log.read_bytes() == room_before, "observer validation changed room events"
+            else:
+                # Older worker observers have no controller role marker; the validator defaults to worker.
+                binding.validate(project, child_env, validation_route)
+            for lease_state in ("claimed", "running"):
+                # Clock/state edits are adversarial private-fixture data, serialized by the production plan lock.
+                mutate = ('import json,sys; from pathlib import Path; p=Path(sys.argv[1]); d=json.loads(p.read_text()); '
+                          'd["tasks"][sys.argv[2]].update(state=sys.argv[3], claimed_at="2000-01-01T00:00:00Z",ttl="1"); '
+                          'p.write_text(json.dumps(d))')
+                call(["bash", "-c", '. "$1"; oms_with_file_lock "$2" python3 -c "$3" "$2" "$4" "$5"',
+                      "fixture-expiry", str(panel.ROOT / "scripts/lib/file-lock.sh"),
+                      str(project / ".oms/plan/tasks.json"), mutate, task_id, lease_state], env)
+                plan_bytes = (project / ".oms/plan/tasks.json").read_bytes()
+                shown = json.loads(call(plan_api + ["show", "--id", task_id], env))
+                assert shown["claim_expired"] is False and shown["lease_id"] == marker["lease_id"], shown
+                assert task_id not in call(plan_api + ["ready"], env).splitlines()
+                next_claim = subprocess.run(plan_api + ["next", "--claim", "--provider", owner], env=env,
+                                            capture_output=True, text=True, timeout=30)
+                assert next_claim.returncode == 3 and "no actionable task" in next_claim.stderr, next_claim
+                call(plan_api + ["reclaim", "--include-running", "--ttl", "1"], env)
+                assert (project / ".oms/plan/tasks.json").read_bytes() == plan_bytes, "live exact lease changed"
+            release.touch()
+            output, errors = child_process.communicate(timeout=30)
+            assert child_process.returncode == 0, (output, errors)
+            delegate_rows = [r for r in json.loads(call(["bash", str(panel.ENTRY), "artifact-index", "--repo",
+                             str(project), "list", "1000", "--json"]))["rows"]
+                             if r["kind"] == "delegate" and r.get("task_id") == task_id]
+            assert delegate_rows and all(r["exit"] == 0 for r in delegate_rows), delegate_rows
+            for indexed in delegate_rows:
+                # The index uses Git's abbreviation; compare it to the actual full source object.
+                short = indexed["base_sha"]
+                assert len(short) >= 7 and source_sha.startswith(short), indexed
+                assert subprocess.check_output(["git", "-C", str(source), "rev-parse", short], text=True).strip() == source_sha
+                print("delegate source base:", task_id, short, source_sha)
+            assert not list((project / ".oms/delegations").glob("*.json"))
+            call(plan_api + ["reclaim", "--include-running", "--ttl", "1"], env)
+            assert json.loads(call(plan_api + ["show", "--id", task_id], env))["state"] == "ready"
+        finally:
+            release.touch()
+            if child_process.poll() is None:
+                child_process.terminate()
+            child_process.communicate(timeout=15)
+    # Non-worker backends retain canonical execution/state; they do not implement the delegate split.
+    main_member, main_attempt = mains["claude"]
+    canonical_env = dict(environment, OMS_ROOM_ID=test_room, OMS_ROOM_REPO=str(project),
+                         OMS_ROOM_PARTICIPANT=main_member, OMS_PANEL_MAIN_ATTEMPT=main_attempt,
+                         OMS_LOCK_DIR=str(temporary / "observed-locks"))
+    for role in ("advisor", "reviewer"):
+        task_id = "scratch-" + role
+        request = ["bash", str(panel.ENTRY), "panel", "--repo", str(source), "--room", test_room,
+                   "--dispatch", role, "--owner", "claude", "--purpose", "advise" if role == "advisor" else "review",
+                   "--prompt", "Inspect value.txt; judge only the supplied source evidence.", "--task-id", task_id]
+        if role == "reviewer":
+            request += ["--verify", "test -f value.txt"]
+        answer = call(request, canonical_env)
+        assert ("artifact:" if role == "advisor" else "artifacts:") in answer, answer
+        observed = json.loads(worker_log.read_text().splitlines()[-1])
+        assert observed["cwd"] == str(project) and observed["parent"] == main_attempt and observed["room"] == test_room, observed
+        enrolled = room.participant(room.project(room.records(project, test_room)), observed["participant"])
+        assert enrolled["role"] == role and enrolled["parent"] == main_member, enrolled
+        report = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
+                                 "--task-id", task_id, "--json"], canonical_env))
+        assert report["rows"] and any(c.get("answer") for r in report["rows"] for c in r.get("calls", [])), report
+        indexed = [r for r in json.loads(call(["bash", str(panel.ENTRY), "artifact-index", "--repo", str(project),
+                    "list", "1000", "--json"]))["rows"] if r.get("task_id") == task_id]
+        assert indexed and any(r.get("artifact") and (project / r["artifact"]).is_file() for r in indexed), indexed
+        assert not (source / ".oms/artifacts/index.jsonl").exists(), "non-worker artifacts split into scratch"
+    # Snapshot failure is a frontend refusal, even before an observer binding can be selected.
+    task_id = "frontend-owned"
+    call(plan_api + ["init", "--goal", "Frontend snapshot refusal"])
+    call(plan_api + ["add", "--id", task_id, "--title", "Owned snapshot"])
+    call(plan_api + ["claim", "--id", task_id, "--provider", "claude"], canonical_env)
+    request = ["bash", str(panel.ENTRY), "panel", "--repo", str(source), "--room", test_room,
+               "--dispatch", "worker", "--owner", "claude", "--workload", "light", "--purpose", "investigate",
+               "--prompt", "Inspect source without edits.", "--task-id", task_id]
+    plan_path = project / ".oms/plan/tasks.json"
+    original = plan_path.read_bytes()
+    def frontend_refused(arguments, denied_env=canonical_env):
+        started_before = worker_log.read_bytes()
+        refused = subprocess.run(arguments, env=denied_env, capture_output=True, text=True, timeout=30)
+        assert refused.returncode != 0 and refused.stderr.startswith("error:") and "plan protection is absent" not in refused.stderr, refused
+        assert worker_log.read_bytes() == started_before, ("provider started after failed snapshot", refused)
+    for hostile in (b"{", b"", b"[]", b'{"tasks":{},"tasks":{}}', b'{"tasks":[]}', b" " * (4 * 1024 * 1024 + 1)):
+        plan_path.write_bytes(hostile)
+        frontend_refused(request)
+    plan_path.write_bytes(original)
+    for linked in ("symbolic", "hard", "directory"):
+        saved = plan_path.with_name("frontend-saved.json")
+        plan_path.rename(saved)
+        if linked == "symbolic":
+            plan_path.symlink_to(saved)
+        elif linked == "hard":
+            os.link(saved, plan_path)
+        else:
+            plan_path.mkdir()
+        try:
+            frontend_refused(request)
+        finally:
+            plan_path.rmdir() if linked == "directory" else plan_path.unlink()
+            saved.rename(plan_path)
+    plan_path.chmod(0)
+    try:
+        frontend_refused(request)
+    finally:
+        plan_path.chmod(0o600)
+    # Inject failures only at the frontend's authoritative snapshot boundary; the provider remains real/fake.
+    harness = """import sys, subprocess
+sys.path.insert(0, sys.argv[1])
+import terminal_panel as p
+real, mode = p.subprocess.run, sys.argv[2]
+def query(args, **kwargs):
+    if 'agent-plan' in args and 'evidence-snapshot' in args:
+        if mode == 'timeout':
+            raise subprocess.TimeoutExpired(args, 1)
+        if mode == 'io':
+            raise OSError('snapshot unreadable')
+        if mode == 'missing':
+            return subprocess.CompletedProcess(args, 2, '',
+                'error: no such task: ' + args[args.index('--id') + 1] + '\\n'
+                'hint: run `oms agent-plan --help` for usage\\n')
+        return subprocess.CompletedProcess(args, 2 if mode == 'error' else 0,
+            '' if mode == 'error' else ('{}' if mode == 'json' else '{'),
+            'error: current-owner snapshot failed' if mode == 'error' else '')
+    return real(args, **kwargs)
+p.subprocess.run = query
+sys.exit(p.main(sys.argv[3:]))
+"""
+    for mode in ("error", "missing", "json", "malformed", "timeout", "io"):
+        frontend_refused(["python3", "-c", harness, str(panel.ROOT / "scripts/lib"), mode, *request[3:]])
+    # Proven task absence and no-plan compatibility still execute, explicitly without protection.
+    for no_plan in (False, True):
+        saved = plan_path.with_name("frontend-no-plan.json")
+        if no_plan:
+            plan_path.rename(saved)
+        try:
+            absent = subprocess.run(request[:-1] + ["frontend-absent"], env=canonical_env,
+                                    capture_output=True, text=True, timeout=30)
+            assert absent.returncode == 0 and "plan protection is absent" in absent.stderr, absent
+        finally:
+            if no_plan:
+                saved.rename(plan_path)
+    assert plan_path.read_bytes() == original, "frontend compatibility changed the owned row"
+    call(["bash", str(panel.ENTRY), "scratch-worktree", "remove", "--repo", str(project), str(source)])
+    print("observed worker leases: real markers, source-index lineage, scratch non-worker results, frontend refusal and recovery passed")
+
+exercise_observed_worker_leases()
+
 import shutil
 shutil.rmtree(project / ".oms/plan")  # later board fixtures expect a project with no plan
 # A continued worker resumes its native session in a new run and carries a delta preamble; without a stored
@@ -3055,6 +3979,8 @@ again = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room
                        capture_output=True, text=True)
 assert again.returncode == 0 and "artifact:" in again.stdout and "native session" in again.stderr, again
 resumed = [json.loads(line) for line in worker_log.read_text().splitlines()][-1]
+assert resumed["task_id"] == "room-continue", resumed
+assert len(re.findall(r"\btask_id=room-continue\b", again.stdout)) == 1, again.stdout
 assert resumed["argv"][-4:] == ["resume", "--all", session, "-"], (resumed, again)
 text = prompt_log.read_text()
 assert "Your earlier work was on" in text and "New instructions follow." in text and "Task: look at value.txt again." in text, text
@@ -3089,8 +4015,43 @@ def prompt_of(rows):
 assert "A fresh worker continues" in prompt_of([]), "empty results must still fall back to a fresh worker"
 def with_patch(path, digest):
     return [{"calls": [{"attempt_id": last_round["attempt_id"], "patch": path, "patch_sha256": digest,
+                        "exit": 0, "answer": "SAFE-CONTINUATION-SUMMARY",
                         "changes": {"issue": "patch evidence unavailable"}}]}]
-assert "tampered-marker" in prompt_of(with_patch(".oms/artifacts/cont.patch", good))
+real_verified_patch = panel.verified_patch
+verified_calls = []
+def tracked_verified_patch(repo, call):
+    verified_calls.append(call)
+    return real_verified_patch(repo, call)
+panel.verified_patch = tracked_verified_patch
+try:
+    successful_text = prompt_of(with_patch(".oms/artifacts/cont.patch", good))
+    assert "tampered-marker" in successful_text
+    assert "SAFE-CONTINUATION-SUMMARY" in successful_text
+    assert len(verified_calls) == 1, verified_calls
+    verified_calls[:] = []
+    rejected = [
+        with_patch(".oms/artifacts/cont.patch", good)[0]["calls"][0] | {"exit": 1},
+        with_patch(".oms/artifacts/cont.patch", good)[0]["calls"][0] | {"exit": None},
+        with_patch(".oms/artifacts/cont.patch", good)[0]["calls"][0] | {"exit": "0"},
+        with_patch(".oms/artifacts/cont.patch", good)[0]["calls"][0] | {"exit": True},
+        with_patch(".oms/artifacts/cont.patch", good)[0]["calls"][0] | {"attempt_id": "other-attempt"},
+    ]
+    missing_exit = with_patch(".oms/artifacts/cont.patch", good)[0]["calls"][0]
+    del missing_exit["exit"]
+    rejected.append(missing_exit)
+    for previous_call in rejected:
+        text = prompt_of([{"calls": [previous_call]}])
+        assert "tampered-marker" not in text and "cont.patch" not in text, text
+        assert "SAFE-CONTINUATION-SUMMARY" not in text, text
+        assert verified_calls == [], verified_calls
+    older = with_patch(".oms/artifacts/cont.patch", good)[0]["calls"][0]
+    latest = dict(older, attempt_id=last_round["attempt_id"], exit=1)
+    text = prompt_of([{"calls": [older, latest]}])
+    assert "tampered-marker" not in text and "cont.patch" not in text, text
+    assert "SAFE-CONTINUATION-SUMMARY" not in text, text
+    assert verified_calls == [], verified_calls
+finally:
+    panel.verified_patch = real_verified_patch
 for path, digest in ((".oms/artifacts/cont.patch", "0" * 64), (".oms/artifacts/link.patch", good)):
     text = prompt_of(with_patch(path, digest))
     assert "tampered-marker" not in text, text
@@ -3428,6 +4389,65 @@ unscoped = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(pro
                             "--owner", "claude", "--access", "write", "--purpose", "implement", "--brief-file", str(brief),
                             "--verify", "test -f value.txt", "--dry-run"], room_env))
 assert "overlaps" not in unscoped, unscoped
+fake_bin = temporary / "dispatch-bin"
+fake_bin.mkdir()
+provider_marker = temporary / "provider-invoked"
+fake_provider = fake_bin / "claude"
+fake_provider.write_text("#!/bin/sh\nprintf called > \"$OMS_FAKE_PROVIDER_MARKER\"\n")
+fake_provider.chmod(0o700)
+dry_env = dict(room_env, PATH=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+               OMS_FAKE_PROVIDER_MARKER=str(provider_marker))
+clean_prompt = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+                               "--dispatch", "worker", "--owner", "claude", "--access", "read",
+                               "--purpose", "investigate", "--prompt", "Inspect value.txt.", "--dry-run"],
+                              env=dry_env, capture_output=True, text=True, timeout=60)
+assert clean_prompt.returncode == 0 and json.loads(clean_prompt.stdout)["executes"] is False, clean_prompt
+room_before_scan = room.status(project, shared)["participants"]
+sensitive_prompt = "Inspect source.\npass" + "word=fixture-value"
+blocked_prompt = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+                                 "--dispatch", "worker", "--owner", "claude", "--access", "read",
+                                 "--purpose", "investigate", "--prompt", sensitive_prompt, "--dry-run"],
+                                env=dry_env, capture_output=True, text=True, timeout=60)
+assert blocked_prompt.returncode != 0 and not blocked_prompt.stdout, blocked_prompt
+assert "secret-tier match in your prompt at line 2" in blocked_prompt.stderr, blocked_prompt.stderr
+assert "fixture-value" not in blocked_prompt.stderr and room.status(project, shared)["participants"] == room_before_scan
+sensitive_brief = temporary / "sensitive-brief.md"
+sensitive_brief.write_text("Inspect source.\npass" + "word=fixture-value")
+blocked_brief = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+                                "--dispatch", "worker", "--owner", "claude", "--access", "write",
+                                "--purpose", "implement", "--brief-file", str(sensitive_brief),
+                                "--verify", "test -f value.txt", "--dry-run"],
+                               env=dry_env, capture_output=True, text=True, timeout=60)
+assert blocked_brief.returncode != 0 and not blocked_brief.stdout, blocked_brief
+assert "secret-tier match in your prompt at line 2" in blocked_brief.stderr, blocked_brief.stderr
+assert "fixture-value" not in blocked_brief.stderr and room.status(project, shared)["participants"] == room_before_scan
+blocked_scoped = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+                                 "--dispatch", "worker", "--owner", "claude", "--access", "write",
+                                 "--purpose", "implement", "--brief-file", str(sensitive_brief),
+                                 "--verify", "test -f value.txt", "--scope", "docs", "--dry-run"],
+                                env=dry_env, capture_output=True, text=True, timeout=60)
+assert blocked_scoped.returncode != 0 and not blocked_scoped.stdout, blocked_scoped
+assert "secret-tier match in your prompt at line 2" in blocked_scoped.stderr, blocked_scoped.stderr
+assert "fixture-value" not in blocked_scoped.stderr and room.status(project, shared)["participants"] == room_before_scan
+for name, prepare in (
+        ("symlink", lambda path: path.symlink_to(sensitive_brief)),
+        ("missing", lambda path: None),
+        ("unreadable", lambda path: (path.write_text("bounded"), path.chmod(0))),
+        ("oversized", lambda path: path.write_bytes(b"x" * (panel.MAX_PROMPT + 1)))):
+    invalid_brief = temporary / (name + "-brief.md")
+    prepare(invalid_brief)
+    refused = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
+                             "--dispatch", "worker", "--owner", "claude", "--access", "write",
+                             "--purpose", "implement", "--brief-file", str(invalid_brief),
+                             "--verify", "test -f value.txt", "--dry-run"],
+                            env=dry_env, capture_output=True, text=True, timeout=60)
+    assert refused.returncode != 0 and not refused.stdout, (name, refused)
+    assert "brief must be a readable regular file" in refused.stderr, (name, refused.stderr)
+    assert str(invalid_brief) not in refused.stderr
+    assert room.status(project, shared)["participants"] == room_before_scan
+    if name == "unreadable":
+        invalid_brief.chmod(0o600)
+assert not provider_marker.exists(), "dry-run invoked the fake provider"
 scoped_run = subprocess.run(scoped_dispatch.args[:-1], env=dict(room_env, PANEL_TEST_MODE="write"),
                             capture_output=True, text=True, timeout=90)
 assert scoped_run.returncode == 0 and "Scope overlap" in scoped_run.stderr, scoped_run
@@ -3901,7 +4921,7 @@ except ValueError as error:
     assert "select a joined main" in str(error)
 else:
     raise AssertionError("advisor action ran without a selected main")
-with patch.object(panel.sys.stdin, "isatty", return_value=False):
+with patch.object(panel.sys.stdin, "isatty", return_value=False), patch.dict(os.environ, {}, clear=False):
     assert panel.main(["--repo", str(root), "--dispatch", "advisor", "--owner", "claude", "--main", "flow-main"]) == 1
 with patch.object(panel, "session_owner", return_value="/elsewhere"):
     try:
@@ -5074,6 +6094,17 @@ long_plan_repo = Path(sys.argv[2]) / "long-plan"
 (long_plan_repo / ".oms/plan/tasks.json").write_text(json.dumps({"tasks": long_tasks}), encoding="utf-8")
 from dashboard_projection import plan_tasks
 assert len(plan_tasks(str(long_plan_repo))) == 45
+projected = plan_tasks(str(long_plan_repo))
+assert projected[0] == {"id": "long-00", "title": "Plan task 0", "state": "done", "claimed_by": None}, projected[0]
+completion_tasks = [dict(row) for row in long_tasks]
+completion_tasks[0]["completion_kind"] = "research-accepted"
+completion_tasks[1]["completion_kind"] = "satisfied-by"
+completion_tasks[2]["completion_kind"] = {"kind": "research-accepted"}
+(long_plan_repo / ".oms/plan/tasks.json").write_text(json.dumps({"tasks": completion_tasks}), encoding="utf-8")
+projected = plan_tasks(str(long_plan_repo))
+assert projected[0]["completion_kind"] == "research-accepted" and projected[1]["completion_kind"] == "satisfied-by", projected[:2]
+assert "completion_kind" not in projected[2] and "completion_kind" not in projected[3], projected[2:4]
+(long_plan_repo / ".oms/plan/tasks.json").write_text(json.dumps({"tasks": long_tasks}), encoding="utf-8")
 def long_plan_run(command, **kwargs):
     data = {"tasks": long_tasks} if "agent-plan" in command else []
     return subprocess.CompletedProcess(command, 0, json.dumps(data), "")
@@ -5270,6 +6301,31 @@ assert [h["action"] for h in nav["hits"]] == [("result", "w2"), ("result", "w1")
 assert nav["items"][0] == ("result", "w2") and nav["selected"] == ("result", "w2")
 choose(("down",), nav)
 assert nav["selected"] == nav["items"][1]
+# Two newer broadcasts to the same main remain separate rows and keyboard choices.
+duplicate_room = deepcopy(inbox_room)
+duplicate_room["room"]["participants"] = duplicate_room["room"]["participants"][:2]
+duplicate_room["attempts"]["active_recent"] = duplicate_room["attempts"]["active_recent"][:2]
+duplicate_room["room"]["messages"] = [dict(inbox_room["room"]["messages"][0], id="n%s" % number,
+    text="Message %s" % number, ts="2026-10-07T00:0%s:00Z" % (number + 2)) for number in (1, 2)]
+for columns, rows in ((100, 28), (24, 18)):
+    duplicate_nav = {}
+    render(duplicate_room, "codex", columns, rows, menu=True, navigation=duplicate_nav)
+    assert duplicate_nav["items"] == [("chat", "m1"), ("chat", "m1"), ("result", "w1")]
+    first, second = duplicate_nav["row_ids"][:2]
+    assert first != second and duplicate_nav["selected_row"] == first
+    choose(("down",), duplicate_nav)
+    assert duplicate_nav["selected_row"] == second and duplicate_nav["selected"] == ("chat", "m1")
+    assert choose(("enter",), duplicate_nav) == ("chat", "m1")
+    assert render(duplicate_room, "codex", columns, rows, menu=True, navigation=duplicate_nav)
+    assert duplicate_nav["selected_row"] == second
+    second_hit = next(hit for hit in duplicate_nav["hits"] if hit["row_id"] == second)
+    assert choose(("click", second_hit["x1"], second_hit["y"]), duplicate_nav) == ("chat", "m1")
+    choose(("down",), duplicate_nav)
+    assert duplicate_nav["selected"] == ("result", "w1")
+    choose(("down",), duplicate_nav)
+    assert duplicate_nav["selected_row"] == first
+    choose(("scroll", 2, 1, 1), duplicate_nav)
+    assert duplicate_nav["selected"] == ("result", "w1")
 # The control list has no folds or main tabs: Space, Left and Right change nothing there.
 nav["selected"] = ("chat", "m1")
 for key in (" ", "left", "right"):
@@ -5454,7 +6510,11 @@ answer_record = {"kind": "call", "task_id": "retained-long-answer", "attempt_id"
                  "artifact": ".oms/artifacts/long-answer.md"}
 sample_auth = "gh" + "p_" + "a" * 25
 for payload, truncated in ((long_answer + "\n" + sample_auth + "\n" + "z" * 9000 + " API_ANSWER_TAIL", False),
-                           ("x" * 40000 + " API_ANSWER_TAIL", True)):
+                           ("x" * 40000 + " API_ANSWER_TAIL", True),
+                           ("😀" * 9000 + " TAIL", True),
+                           ("😀" * 8191 + "ABCD", False),
+                           ("😀" * 8191 + "ABCDE", True),
+                           ("to" + "ken=" + "s" * 40000 + " RETAINED_TAIL", False)):
     with patch.object(saved, "_records", return_value=([answer_attempt], [answer_record])), \
             patch.object(saved, "_indexed", return_value=("## Output\n\n" + payload +
                 "\n\n## Verify\nPRIVATE_VERIFIER_SENTINEL\n\n## Exit\n\n0\n").encode()):
@@ -5464,10 +6524,16 @@ for payload, truncated in ((long_answer + "\n" + sample_auth + "\n" + "z" * 9000
     assert sample_auth not in normalized["answer"]
     assert "PRIVATE_VERIFIER_SENTINEL" not in normalized["answer"]
     if not truncated:
-        assert "Answer line 39" in normalized["answer"] and "API_ANSWER_TAIL" in normalized["answer"]
+        if "Answer line 39" in payload:
+            assert "Answer line 39" in normalized["answer"] and "API_ANSWER_TAIL" in normalized["answer"]
+        if "RETAINED_TAIL" in payload:
+            assert "RETAINED_TAIL" in normalized["answer"] and "s" * 40000 not in normalized["answer"]
+    elif "😀" in payload:
+        assert "TAIL" not in normalized["answer"]
 binding = panel.room_instructions("current-room", "stable-main")
 assert "room show --id current-room" in binding and "--room current-room" in binding
 assert "room updates --id current-room --participant stable-main" in binding
+assert "unacknowledged addressed messages" in binding and "--after CURSOR" in binding
 assert "--id current-room --participant stable-main --message MESSAGE_ID" in binding
 standalone_env = {key: value for key, value in environment.items()
                   if key not in {"OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT", "OMS_PANEL_MAIN_ATTEMPT"}}
@@ -5612,7 +6678,8 @@ with patch.object(panel, "managed_session", return_value=False), \
         patch("panel_chats.open_chat", return_value={"method": "existing-terminal"}) as opened:
     nav = {"room_id": shared}
     panel.navigate(project, ("chat", main_attempts["codex"]), tree_room, nav, 91)
-    assert opened.call_args.kwargs == {"allowed_methods": {"existing-terminal", "app-uri", "windows-uri"}}, opened.call_args
+    assert opened.call_args.kwargs == {"allowed_methods": {"existing-terminal", "app-uri", "windows-uri"},
+                                      "native_repo": project}, opened.call_args
     assert nav["notice"] == "Chat navigation requested in its window"
     left = deepcopy(tree_room["room"])
     for member in left["participants"]:
@@ -5780,6 +6847,8 @@ for who, provider, native in (("chat-sol", "codex", chat_codex), ("bad-sol", "co
                                ("chat-opus", "claude", chat_claude)):
     room.join(project, shared, who, provider)
     room.bind(project, shared, who, native)
+chat_pi = "55555555-5555-4555-8555-555555555555"
+room.join(project, shared, "chat-pi", "pi", native_session=chat_pi)
 codex_home = home / "chat-codex"
 codex_day = codex_home / "sessions/2026/10/05"
 codex_day.mkdir(parents=True)
@@ -5791,6 +6860,12 @@ claude_home = home / "chat-claude"
 claude_project = claude_home / "projects/local-project"
 claude_project.mkdir(parents=True)
 (claude_project / (chat_claude + ".jsonl")).write_text(json.dumps({"type": "user", "sessionId": chat_claude}) + "\n")
+with patch.object(panel_chats.Path, "home", return_value=home):
+    assert panel_chats.pi_session_storage_safe(project, create=True)
+    pi_catalog_dir = panel_chats.pi_session_dir(project)
+    (pi_catalog_dir / (chat_pi + ".jsonl")).write_text(json.dumps({
+        "type": "session", "version": 3, "id": chat_pi, "timestamp": "2026-10-10T00:00:00Z",
+        "cwd": str(project.resolve())}) + "\n")
 chat_env = dict(environment, CODEX_HOME=str(codex_home), CLAUDE_CONFIG_DIR=str(claude_home),
                 OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project), TMUX="fixture-tmux", TMUX_PANE="%1")
 room_before_chats = room.records(project, shared)
@@ -5815,7 +6890,8 @@ def tmux_navigation(command, **kwargs):
         return subprocess.CompletedProcess(command, 0, client_listing[0], "")
     navigation_calls.append(command)
     return subprocess.CompletedProcess(command, 0, "", "")
-with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats.shutil, "which", return_value="/fixture/launcher"), \
+with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats.Path, "home", return_value=home), \
+        patch.object(panel_chats.shutil, "which", return_value="/fixture/launcher"), \
         patch.object(panel_chats.subprocess, "run", side_effect=tmux_navigation):
     chats = panel_chats.catalog(project, shared)
     assert "PRIVATE_TRANSCRIPT_BODY" not in json.dumps(chats)
@@ -5823,6 +6899,12 @@ with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats.shut
     assert native["uri"] == "codex://threads/" + chat_codex and native["terminal"]["pane"] == "%42", native
     assert next(r for r in chats["rows"] if r["participant"] == "bad-sol")["status"] == "unresolved"
     assert next(r for r in chats["rows"] if r["participant"] == "chat-opus")["session_id"] == chat_claude
+    pi_chat = next(r for r in chats["rows"] if r["participant"] == "chat-pi")
+    assert pi_chat["status"] == "native" and pi_chat["session_id"] == chat_pi and pi_chat["uri"] is None
+    chat_text = panel_chats.text(chats)
+    assert "Pi native terminal session: " + chat_pi + " / resume with --launch pi --resume" in chat_text
+    assert "native session: " + chat_claude + " / Claude app sidebar" in chat_text
+    assert "codex://threads/" + chat_codex in chat_text
     assert next(r for r in chats["rows"] if r["participant"] == child["participant"])["status"] == "artifacts"
     dry = panel_chats.open_chat(project, shared, "chat-sol", dry_run=True)
     assert dry["method"] == "existing-terminal" and not navigation_calls
@@ -5876,13 +6958,13 @@ with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats.shut
             patch.object(panel.sys, "stdout", io.StringIO()):
         panel.browse_chats(project)
     assert selected.call_args.args[2] == "chat-sol"
-    assert selected.call_args.kwargs == {"surface": "auto"}
+    assert selected.call_args.kwargs == {"surface": "auto", "native_repo": project}
     with patch.object(panel, "read_field", side_effect=["a1", "", ""]), \
             patch.object(panel_chats, "catalog", return_value={"room": shared, "rows": [native]}), \
             patch.object(panel_chats, "open_chat", return_value=app) as selected, \
             patch.object(panel.sys, "stdout", io.StringIO()):
         panel.browse_chats(project)
-    assert selected.call_args.kwargs == {"surface": "app"}
+    assert selected.call_args.kwargs == {"surface": "app", "native_repo": project}
     assert selected.call_args.args[2] == "chat-sol"
     with patch.object(panel, "read_field", side_effect=["", "a1", "", ""]), \
             patch.object(panel_chats, "catalog", return_value={"room": shared, "rows": [native]}), \
@@ -6260,6 +7342,163 @@ with patch.dict(os.environ, recovery_env, clear=True):
             assert "terminal owner" in str(error)
         else:
             raise AssertionError("resume accepted unrelated ownership evidence")
+# Pi's native launcher must read a direct system-prompt path, create and pin
+# the requested session id, and place the task in a literal initial message.
+pi_log = temporary / "pi-native-log.jsonl"
+pi_cli = binary / "pi"
+pi_cli.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys, time
+args = sys.argv[1:]
+if "--help" in args:
+    print("--session-id --session-dir --append-system-prompt")
+    raise SystemExit(0)
+session_dir = pathlib.Path(args[args.index("--session-dir") + 1])
+sid = args[args.index("--session-id") + 1]
+context_path = pathlib.Path(args[args.index("--append-system-prompt") + 1])
+context = context_path.read_text(encoding="utf-8")
+assert context_path.stat().st_mode & 0o777 == 0o600
+message = args[args.index("--") + 1] if "--" in args else None
+if message is not None:
+    assert message.startswith("OMS user task: ") and not message.startswith(("@", "-"))
+assert "keep model identity separate" in context
+assert not any(flag in args for flag in ("--no-session", "--no-tools", "--no-approve", "--no-extensions"))
+session_dir.mkdir(parents=True, exist_ok=True)
+header = {"type": "session", "version": 3, "id": sid, "timestamp": "2026-10-10T00:00:00Z", "cwd": os.getcwd()}
+path = session_dir / (sid + ".jsonl")
+if not path.exists():
+    path.write_text(json.dumps(header) + "\\n", encoding="utf-8")
+else:
+    assert json.loads(path.read_text(encoding="utf-8").splitlines()[0])["id"] == sid
+with open(os.environ["PI_FIXTURE_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps({"argv": args, "session": sid, "context": context,
+                             "participant": os.environ["OMS_ROOM_PARTICIPANT"],
+                             "attempt": os.environ["OMS_PANEL_MAIN_ATTEMPT"],
+                             "hook": os.environ.get("OMS_HOOK_AGENT"), "message": message}) + "\\n")
+if os.environ.get("PI_TEST_HOLD_SECONDS"):
+    time.sleep(float(os.environ["PI_TEST_HOLD_SECONDS"]))
+""")
+pi_cli.chmod(0o755)
+pi_task = "@private --session-id foreign --model other"
+pi_env = dict(environment, OMS_ROOM_ID=shared, PI_FIXTURE_LOG=str(pi_log))
+with patch.dict(os.environ, pi_env, clear=True):
+    with patch.dict(os.environ, pi_env, clear=True):
+        assert panel.run_native("pi", project, model="explicit-model", task=pi_task) == 0
+    pi_calls = [json.loads(line) for line in pi_log.read_text().splitlines()]
+    assert len(pi_calls) == 1 and pi_calls[0]["message"] == "OMS user task: " + pi_task
+    pi_fresh = pi_calls[0]
+    pi_session = pi_fresh["session"]
+    pi_digest = hashlib.sha256(pi_session.encode()).hexdigest()[:32]
+    pi_member = next(p for p in room.status(project, shared)["participants"] if p.get("consumer") == pi_digest)
+    assert pi_fresh["participant"] == pi_member["participant"] and pi_fresh["hook"] is None
+    assert pi_fresh["argv"][pi_fresh["argv"].index("--model") + 1] == "explicit-model"
+    assert pi_task not in pi_fresh["context"]
+    assert "keep model identity separate" in pi_fresh["context"]
+    pi_attempts = panel.main_history(project, shared, pi_member["participant"])
+    pi_owner = next(row for row in pi_attempts if row["attempt_id"] == pi_fresh["attempt"])
+    assert pi_owner["terminal"] is True and pi_owner["refs"]["panel_session_digest"] == pi_digest
+    assert pi_owner["refs"]["panel_model"] == "unknown"
+    assert pi_owner["refs"]["panel_model_requested"] == "explicit-model"
+    pi_record_before_resume = room.records(project, shared)
+    pi_seq_before_resume = pi_member["seq"]
+    with patch.dict(os.environ, pi_env, clear=True):
+        assert panel.run_native("pi", project, resume=pi_session) == 0
+    pi_calls = [json.loads(line) for line in pi_log.read_text().splitlines()]
+    pi_resumed = pi_calls[-1]
+    pi_member_after = next(p for p in room.status(project, shared)["participants"] if p.get("consumer") == pi_digest)
+    assert pi_resumed["participant"] == pi_member["participant"]
+    assert pi_resumed["attempt"] != pi_fresh["attempt"]
+    assert pi_member_after == pi_member and pi_member_after["seq"] == pi_seq_before_resume
+    assert room.records(project, shared) == pi_record_before_resume
+    assert panel_chats.pi_session_header(project, pi_session)["cwd"] == str(project.resolve())
+
+    # Every rejected Pi resume leaves room events, attempts, and fake-Pi launches intact.
+    def pi_resume_rejected(session_id, phrase, incomplete=False):
+        before_room = room.records(project, shared)
+        before_attempts = panel.events(project, "list", "--json", output=True)
+        before_calls = pi_log.read_text().splitlines()
+        with patch.dict(os.environ, pi_env, clear=True), \
+                patch.object(room, "discover", return_value=([], True)) if incomplete else patch.object(room, "discover", wraps=room.discover):
+            try:
+                panel.run_native("pi", project, resume=session_id)
+            except ValueError as error:
+                assert phrase in str(error), str(error)
+            else:
+                raise AssertionError("unsafe Pi resume was accepted: " + session_id)
+        assert room.records(project, shared) == before_room
+        assert panel.events(project, "list", "--json", output=True) == before_attempts
+        assert pi_log.read_text().splitlines() == before_calls
+
+    pi_dir = panel_chats.pi_session_dir(project)
+    pi_unregistered = "f6b4dd50-76b3-4cfe-b072-8f453db41570"
+    (pi_dir / (pi_unregistered + ".jsonl")).write_text(json.dumps({
+        "type": "session", "version": 3, "id": pi_unregistered, "timestamp": "2026-10-10T00:00:00Z",
+        "cwd": str(project.resolve())}) + "\n")
+    pi_resume_rejected(pi_unregistered, "uniquely enrolled")
+    pi_resume_rejected(pi_session, "discovery is incomplete", incomplete=True)
+    pi_foreign_room = room.create(project, "pi-foreign", "Pi foreign room fixture")
+    pi_foreign_id = "f6b4dd50-76b3-4cfe-b072-8f453db41571"
+    room.join(project, pi_foreign_room, "pi-foreign-main", "pi", "main", "unknown", native_session=pi_foreign_id)
+    (pi_dir / (pi_foreign_id + ".jsonl")).write_text(json.dumps({
+        "type": "session", "version": 3, "id": pi_foreign_id, "timestamp": "2026-10-10T00:00:00Z",
+        "cwd": str(project.resolve())}) + "\n")
+    pi_resume_rejected(pi_foreign_id, "current room")
+    duplicate_state = deepcopy(room.status(project, shared))
+    duplicate_state["participants"].append(dict(pi_member, participant="pi-duplicate-main"))
+    with patch.object(room, "discover", return_value=([duplicate_state], False)):
+        pi_resume_rejected(pi_session, "uniquely enrolled")
+
+    # A valid but nonterminal owner attempt cannot be resumed.
+    pi_nonterminal = "f6b4dd50-76b3-4cfe-b072-8f453db41572"
+    room.join(project, shared, "pi-nonterminal-main", "pi", "main", "unknown", native_session=pi_nonterminal)
+    pi_nonterminal_attempt = panel.events(project, "start", "--provider", "pi", "--tool", "panel-main",
+        "--ref", "panel_role=main", "--ref", "panel_room_id=" + shared,
+        "--ref", "panel_room_participant=pi-nonterminal-main",
+        "--ref", "panel_session_digest=" + hashlib.sha256(pi_nonterminal.encode()).hexdigest()[:32],
+        "--then", "starting", "--then", "working", output=True)
+    (pi_dir / (pi_nonterminal + ".jsonl")).write_text(json.dumps({
+        "type": "session", "version": 3, "id": pi_nonterminal, "timestamp": "2026-10-10T00:00:00Z",
+        "cwd": str(project.resolve())}) + "\n")
+    pi_resume_rejected(pi_nonterminal, "terminal owner")
+
+    # A malformed or foreign header fails before lifecycle mutation.
+    pi_file = pi_dir / (pi_session + ".jsonl")
+    pi_bytes = pi_file.read_bytes()
+    pi_file.unlink()
+    pi_resume_rejected(pi_session, "header")
+    pi_file.write_bytes(pi_bytes)
+    pi_file.write_text(json.dumps({"type": "session", "id": pi_session, "cwd": "/foreign"}) + "\n")
+    pi_resume_rejected(pi_session, "header")
+    pi_file.write_bytes(pi_bytes)
+    malformed_json_headers = (
+        b"\xef\xbb\xbf" + pi_bytes,
+        json.dumps({"type": "session", "id": pi_session, "cwd": str(project.resolve()),
+                    "nested": {"value": float("nan")}}).encode() + b"\n",
+        json.dumps({"type": "session", "id": pi_session, "cwd": str(project.resolve()),
+                    "nested": [float("inf")]}).encode() + b"\n",
+    )
+    for malformed_header in malformed_json_headers:
+        pi_file.write_bytes(malformed_header)
+        pi_resume_rejected(pi_session, "header")
+    pi_file.write_bytes(pi_bytes)
+    # Concurrent Pi resumes share the provider/session lock: only the correctly
+    # enrolled room may launch, even when the other caller waits for that lock.
+    pi_race_script = ("import sys\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nimport terminal_panel as p\n"
+                      "try: p.run_native('pi',Path(sys.argv[2]),resume=sys.argv[3])\n"
+                      "except ValueError as e: print(str(e));sys.exit(75)\n")
+    pi_race_env = dict(pi_env, PI_TEST_HOLD_SECONDS="3")
+    pi_racers = [subprocess.Popen([sys.executable, "-c", pi_race_script, str(root / "scripts/lib"),
+                                   str(project), pi_session],
+                                  env=dict(pi_race_env, OMS_ROOM_ID=ident), stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+                  for ident in (shared, pi_foreign_room)]
+    try:
+        pi_race_outcomes = [r.communicate(timeout=20) for r in pi_racers]
+        assert sorted(r.returncode for r in pi_racers) == [0, 75], pi_race_outcomes
+        assert len(pi_log.read_text().splitlines()) == 3, "concurrent Pi resume launched more than one owner"
+    finally:
+        for racer in pi_racers:
+            if racer.poll() is None:
+                racer.kill(); racer.wait(timeout=5)
 # Two independent processes requesting the same resumed address must not both
 # launch. The first fake native stays active beyond the existing lock wait.
 race_log = temporary / "native-resume-race.txt"
@@ -6745,6 +7984,36 @@ for mark in ("completed", "accepted"):
     handled = dict(grouped_board, finalized={"adv-task": mark})
     failed = next(m for m in graph_view.nodes(handled) if m["participant"] == "adv-worker")
     assert graph_view.call_classifier(handled)(failed) == "past"
+    for mode in ("tree", "graph"):
+        filtered_nav = {"dismissed": True}
+        filtered = render(handled, "codex", 120, 80, view=mode, attention_only=True, navigation=filtered_nav)
+        assert "Broken patch" not in filtered and ("result", "adv-worker") not in filtered_nav["items"]
+        assert ("result", "blocked-call") in filtered_nav["items"]
+        history = render(handled, "codex", 120, 80, view=mode, navigation={"dismissed": True})
+        assert "Past work" in history or mode == "graph"
+    orphan_handled = deepcopy(handled)
+    next(m for m in orphan_handled["room"]["participants"] if m["participant"] == "adv-worker")["parent"] = "gone-main"
+    for mode in ("tree", "graph"):
+        orphan_nav = {"dismissed": True}
+        filtered = render(orphan_handled, "codex", 120, 80, view=mode, attention_only=True, navigation=orphan_nav)
+        assert "Broken patch" not in filtered and ("result", "adv-worker") not in orphan_nav["items"]
+        assert "call with no known main" not in filtered and "Calls with no known main" not in filtered
+research_board = deepcopy(grouped_board)
+research_board["room"]["participants"].append({"participant": "research-call", "role": "researcher",
+    "provider": "codex", "model": "gpt-6-luna", "parent": "adv-main", "joined": True, "seq": 99})
+research_board["attempts"]["active_recent"].append({"attempt_id": "research-attempt", "state": "working",
+    "task_id": "research-task", "panel": {"role": "researcher", "room_id": "adv-room",
+    "room_participant": "research-call", "model": "gpt-6-luna", "label": "Research citations"}})
+for mode in ("tree", "graph"):
+    for columns, rows in ((120, 80), (80, 24)):
+        research_nav = {}
+        candidate = deepcopy(research_board)
+        if rows == 24:
+            candidate['room']['participants'] = [m for m in candidate['room']['participants']
+                if m['role'] == 'main' or m['participant'] == 'research-call']
+        picture = render(candidate, "codex", columns, rows, view=mode, navigation=research_nav)
+        assert "Research citations" in picture or "researcher" in picture.lower() or "RES" in picture, picture
+        assert ("result", "research-call") in research_nav["items"], research_nav
 assert json.dumps(grouped_board, sort_keys=True) == frozen_grouped
 resumed_lifecycle = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
                                       "show", "--attempt", resumed["attempt"], "--json"]))

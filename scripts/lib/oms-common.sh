@@ -92,9 +92,6 @@ oms_git_assert_safe_execution_config() {  # REPO [diff-read]
   local root="$1"
   local mode="${2:-strict}"
   local command_problem=""
-  local paths=""
-  local common_dir=""
-  local worktree_dir=""
 
   # Pure shell on purpose: this guard fronts every git call the harness
   # makes, and a python3 start per call was the single largest process cost
@@ -148,141 +145,138 @@ oms_git_assert_safe_execution_config() {  # REPO [diff-read]
     return 2
   fi
 
-  # Resolve only Git's already-established metadata paths. At this point no
-  # repository config has been parsed by this function, and rev-parse does not
-  # load diff/filter/fsmonitor drivers. Canonical physical parents collapse the
-  # alternative path spellings seen under Windows Git Bash; CR comes from
-  # native Windows Python/Git and must not become part of the pathname.
-  common_dir="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null || true)"
-  worktree_dir="$(git -C "$root" rev-parse --git-dir 2>/dev/null || true)"
-  common_dir="${common_dir//$'\r'/}"
-  worktree_dir="${worktree_dir//$'\r'/}"
-  if [ -z "$common_dir" ] || [ -z "$worktree_dir" ]; then
-    echo "cannot inspect repository Git config paths" >&2
-    return 2
-  fi
-  case "$common_dir" in /*|[A-Za-z]:/*) ;; *) common_dir="$root/$common_dir" ;; esac
-  case "$worktree_dir" in /*|[A-Za-z]:/*) ;; *) worktree_dir="$root/$worktree_dir" ;; esac
-  common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
-    echo "cannot inspect repository Git config path" >&2
-    return 2
-  }
-  worktree_dir="$(cd "$worktree_dir" 2>/dev/null && pwd -P)" || {
-    echo "cannot inspect worktree Git config path" >&2
-    return 2
-  }
-  paths="$common_dir/config
-$worktree_dir/config.worktree"
-
-  # One process asks this up to nine times for the same repository (70% of
-  # 709 calls were repeats, 2026-10-01). Reuse a pass only for byte-identical
-  # config read by the read builtin, never across processes, and never for a
-  # file holding a NUL byte, which a shell variable cannot represent.
-  local cache_key="$mode|$paths" config_path config_text
-  for config_path in "$common_dir/config" "$worktree_dir/config.worktree"; do
-    if [ -e "$config_path" ] || [ -L "$config_path" ]; then
-      config_text=""
-      if IFS= read -r -d '' config_text < "$config_path" 2>/dev/null; then
-        cache_key=""  # stopped at a NUL byte: always inspect
-        break
-      fi
-      [ -r "$config_path" ] || { cache_key=""; break; }
-      cache_key="$cache_key|present:${#config_text}:$config_text"
-    else
-      cache_key="$cache_key|absent"
-    fi
-  done
-  if [ -n "$cache_key" ] && [ "${OMS_GIT_SAFE_CONFIG_PASSED:-}" = "$cache_key" ]; then
-    return 0
-  fi
-
-  OMS_GIT_CONFIG_PATHS="$paths" OMS_GIT_CONFIG_MODE="$mode" python3 - <<'PY' || return $?
-import configparser
+  root="$(cd "$root" 2>/dev/null && pwd -P)" || return 2
+  python3 - "$root" "$mode" <<'PY'
 import os
-import re
+import shutil
 import stat
+import subprocess
 import sys
 
-paths = [value for value in os.environ["OMS_GIT_CONFIG_PATHS"].splitlines()
-         if value]
-mode = os.environ.get("OMS_GIT_CONFIG_MODE", "strict")
-if mode not in ("strict", "diff-read"):
-    print("cannot inspect repository Git config: unknown inspection mode",
-          file=sys.stderr)
+root, mode = sys.argv[1:]
+
+def refuse(reason):
+    print("cannot inspect repository Git config: " + reason, file=sys.stderr)
     raise SystemExit(2)
 
-def unsafe(section, option):
-    section = section.lower()
-    option = option.lower()
-    def family(name):
-        # Git accepts modern quoted subsections separated by spaces OR tabs,
-        # plus the deprecated dotted form. Match the grammar boundary rather
-        # than one pretty-printed spelling of the section header.
-        return (section == name or section.startswith(name + ".") or
-                re.match(r"^" + re.escape(name) + r"[ \t]+\"", section))
-    if family("include") or family("includeif"):
+if mode not in ("strict", "diff-read"):
+    refuse("unknown inspection mode")
+
+# Keep the trusted runtime environment (including Windows DLL lookup), but no
+# inherited Git configuration, tracing, discovery redirects or command hooks.
+git = shutil.which("git")
+if not git:
+    refuse("Git unavailable")
+git = os.path.abspath(git)
+env = {key: value for key, value in os.environ.items()
+       if not key.upper().startswith("GIT_")}
+env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_SYSTEM=os.devnull,
+           GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_COUNT="0",
+           GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat", LC_ALL="C")
+command = [git, "--no-pager", "-c", "core.hooksPath=/dev/null",
+           "-c", "core.fsmonitor=false"]
+
+# rev-parse does not run drivers, but discovery can read includes before we
+# know the metadata paths. Bound that bootstrap too: a FIFO must not hang the
+# guard. Only the stdin parser below promises not to read include targets.
+def git_output(args, child_env, raw=None):
+    try:
+        result = subprocess.run(command + args, input=raw, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=child_env,
+                                timeout=5, check=False, shell=False)
+    except (OSError, subprocess.TimeoutExpired):
+        refuse("Git inspection failed or timed out")
+    if result.returncode:
+        refuse("Git inspection failed")
+    return result.stdout
+
+paths = []
+for flag, name in (("--git-common-dir", "config"),
+                   ("--git-dir", "config.worktree")):
+    output = git_output(["-C", root, "rev-parse", flag], env)
+    directory = os.fsdecode(output).replace("\r", "").rstrip("\n")
+    if not directory:
+        refuse("missing metadata path")
+    directory = os.path.realpath(os.path.join(root, directory))
+    paths.append(os.path.join(directory, name))
+
+def read_config(path, optional):
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        if optional:
+            return None
+        refuse("missing config")
+    except OSError:
+        refuse("unreadable config")
+    if not stat.S_ISREG(before.st_mode):
+        refuse("non-regular config")
+    limit = 1024 * 1024
+    if before.st_size > limit:
+        refuse("config exceeds 1 MiB")
+    # NOFOLLOW closes the lstat/open symlink race where available. NONBLOCK
+    # avoids hanging on a FIFO swap; fstat and identity checks also cover
+    # platforms without NOFOLLOW. Parse only these bytes, never reopen a path.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        with os.fdopen(os.open(path, flags), "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            current = os.lstat(path)
+            if (not stat.S_ISREG(opened.st_mode) or
+                    not stat.S_ISREG(current.st_mode) or
+                    (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino) or
+                    (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)):
+                refuse("config changed during inspection")
+            raw = handle.read(limit + 1)
+            after = os.fstat(handle.fileno())
+            if (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
+                    after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                refuse("config changed during inspection")
+    except OSError:
+        refuse("unreadable config")
+    if len(raw) > limit:
+        refuse("config exceeds 1 MiB")
+    if b"\0" in raw:
+        refuse("NUL in config")
+    try:
+        raw.decode("utf-8-sig", "strict")
+    except UnicodeError:
+        refuse("invalid config encoding")
+    return raw
+
+def unsafe(key):
+    section, _, tail = key.partition(b".")
+    option = tail.rsplit(b".", 1)[-1]
+    if section in (b"include", b"includeif"):
         return True
-    if section == "core" and option == "fsmonitor":
+    if key == b"core.fsmonitor":
         return True
-    if mode != "diff-read" and section == "diff" and option == "external":
+    if section == b"filter" and option in (b"clean", b"smudge", b"process"):
         return True
-    if family("filter") and option in (
-            "clean", "smudge", "process"):
-        return True
-    # A named diff driver can execute either a command or textconv program.
-    if mode != "diff-read" and family("diff") and option in (
-            "command", "external", "textconv"):
+    if mode != "diff-read" and section == b"diff" and option in (
+            b"command", b"external", b"textconv"):
         return True
     return False
 
-for path in paths:
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        # config.worktree is optional; the common config is not.
-        if path.endswith("config.worktree"):
-            continue
-        print("cannot inspect repository Git config: missing config", file=sys.stderr)
-        raise SystemExit(2)
-    except OSError:
-        print("cannot inspect repository Git config", file=sys.stderr)
-        raise SystemExit(2)
-    if not stat.S_ISREG(info.st_mode):
-        print("cannot inspect repository Git config: non-regular config", file=sys.stderr)
-        raise SystemExit(2)
-    try:
-        if info.st_size > 1024 * 1024:
-            raise ValueError("config exceeds 1 MiB")
-        raw = open(path, "rb").read()
-        if b"\0" in raw:
-            raise ValueError("NUL in config")
-        text = raw.decode("utf-8-sig", "strict")
-    except (OSError, UnicodeError, ValueError) as exc:
-        print("cannot inspect repository Git config: %s" % exc, file=sys.stderr)
-        raise SystemExit(2)
-
-    # Parse the syntax ourselves without interpolation or includes. Git permits
-    # bare booleans; ConfigParser accepts those with allow_no_value.
-    parser = configparser.RawConfigParser(
-        interpolation=None, strict=False, allow_no_value=True,
-        delimiters=("=",), comment_prefixes=("#", ";"),
-        inline_comment_prefixes=None)
-    parser.optionxform = str
-    try:
-        parser.read_string(text)
-    except configparser.Error as exc:
-        print("cannot inspect repository Git config: malformed config (%s)" % exc,
-              file=sys.stderr)
-        raise SystemExit(2)
-    for section in parser.sections():
-        for option, unused in parser.items(section, raw=True):
-            if unsafe(section, option):
-                key = "%s.%s" % (section, option)
-                print("unsafe Git execution config: %s" % key, file=sys.stderr)
-                raise SystemExit(2)
-raise SystemExit(0)
+# No shell cache: every pass validates the descriptors, including optional
+# config.worktree when common-dir equals git-dir and after a previous pass.
+configs = [read_config(path, optional=index == 1)
+           for index, path in enumerate(paths)]
+env["GIT_DIR"] = os.devnull
+for raw in configs:
+    if raw is None:
+        continue
+    keys = git_output(["config", "--no-includes", "--file", "-", "--null",
+                       "--name-only", "--list"], env, raw)
+    if keys and not keys.endswith(b"\0"):
+        refuse("invalid Git key framing")
+    for key in keys.split(b"\0")[:-1]:
+        if unsafe(key):
+            # Subsection names and parser stderr can contain private input.
+            print("unsafe Git execution config", file=sys.stderr)
+            raise SystemExit(2)
 PY
-  [ -z "$cache_key" ] || OMS_GIT_SAFE_CONFIG_PASSED="$cache_key"
 }
 
 # Refuse index hints that deliberately make tracked work invisible to ordinary
@@ -828,7 +822,7 @@ oms_worker_operation_violations() {  # REPO SNAPSHOT
 
   [ -f "$snapshot" ] || return 0
   OMS_WG_REPO="$repo" OMS_WG_OPERATION_SNAPSHOT="$snapshot" python3 - <<'PY'
-import json, os
+import datetime, json, os
 
 repo = os.environ["OMS_WG_REPO"]
 snapshot_path = os.environ["OMS_WG_OPERATION_SNAPSHOT"]
@@ -847,6 +841,47 @@ def changed_fields(before, after):
         return ["object-shape"]
     return sorted(key for key in set(before) | set(after)
                   if key not in before or key not in after or before[key] != after[key])
+
+def parse_timestamp(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        return None
+    return parsed.replace(tzinfo=datetime.timezone.utc)
+
+def is_touch_heartbeat(before, after, task_id, lease, fields):
+    if not fields or not set(fields).issubset({"claimed_at", "updated"}):
+        return False
+    if before.get("id") != task_id or after.get("id") != task_id:
+        return False
+    provider = before.get("provider")
+    if not isinstance(provider, str) or not provider or after.get("provider") != provider:
+        return False
+    if not isinstance(lease, str) or not lease:
+        return False
+    if before.get("lease_id") != lease or after.get("lease_id") != lease:
+        return False
+    state = before.get("state")
+    if state not in ("claimed", "running") or after.get("state") != state:
+        return False
+
+    heartbeat = parse_timestamp(after.get("claimed_at"))
+    updated = parse_timestamp(after.get("updated"))
+    now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    if heartbeat is None or updated is None or heartbeat != updated or heartbeat > now:
+        return False
+    for key in ("claimed_at", "updated"):
+        prior = before.get(key)
+        if prior in (None, ""):
+            continue
+        prior_timestamp = parse_timestamp(prior)
+        if prior_timestamp is None or heartbeat < prior_timestamp:
+            return False
+    return True
 
 try:
     expected = load_regular(snapshot_path)
@@ -867,10 +902,17 @@ if isinstance(plan_expected, dict):
     except (OSError, TypeError, ValueError, KeyError):
         print("plan task %s was deleted or became unreadable" % task_id)
     else:
-        fields = changed_fields(plan_expected.get("task"), current)
+        expected_task = plan_expected.get("task")
+        fields = changed_fields(expected_task, current)
+        lease = plan_expected.get("lease_id")
+        if fields and is_touch_heartbeat(expected_task, current, task_id, lease, fields):
+            fields = []
         if fields:
-            print("plan task %s changed: %s" % (task_id, ", ".join(fields)))
-        elif current.get("lease_id") != plan_expected.get("lease_id"):
+            detail = ", ".join(fields)
+            if set(fields).issubset({"claimed_at", "updated"}):
+                detail += " (not a valid same-lease touch heartbeat)"
+            print("plan task %s changed: %s" % (task_id, detail))
+        elif current.get("lease_id") != lease:
             print("plan task %s lease no longer matches its operation fence" % task_id)
 
 if expected.get("executor"):

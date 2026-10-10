@@ -181,7 +181,7 @@ def hierarchy(report, rows, main_attempt=None, include_empty=True):
                  "LINKED OWNER / metadata unavailable" if ident else "No known main")
         groups = [(role, [r for r in children if r["role"] == key]) for role, key in
                   (("COUNCIL", "council"), ("ADVISORS", "advisor"), ("REVIEWERS", "reviewer"),
-                   ("WORKERS", "worker"))]
+                   ("RESEARCHERS", "researcher"), ("WORKERS", "worker"))]
         roots.append({"id": ident, "title": title, "label": metadata.get("label"),
                       "state": main.get("state"), "groups": [(g, rs) for g, rs in groups if rs]})
     if main_attempt:
@@ -268,7 +268,8 @@ def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=T
               ("OTHER", "[o] Rooms  [9] Refresh  [?] More  [q] " + quit_label)]
     if expanded:
         groups += [("OPEN", "[h] Chats  [r] Results  [v] Detail  [g] Graph  [b] Attention  [z] Panel"),
-                   ("WORK", "[5] Explain  [6] Implement  [a] Advisor  [7] Review  [c] Council"),
+                   ("TERMINAL", "[s] Terminals and jobs"),
+                   ("WORK", "[5] Explain  [6] Implement  [e] Researcher  [a] Advisor  [7] Review  [c] Council"),
                    ("SETUP", "[4] Main provider  [p] CLIs  [8] Dashboard"),
                    ("RESULT", "[f] Finalize  [n] Retry delivery")]
     mode = "all shortcuts" if expanded else "press a key" if keys else "key + Enter"
@@ -370,30 +371,34 @@ def inbox_items(report, unicode=True):
         title = clean(member.get("title"), 80)
         items.append({"stamp": stamps.get(member.get("attempt")) or "", "glyph": activity(shown, None, unicode),
                       "who": who(member), "what": what + (": " + title if title and title != "Native task not recorded" else ""),
-                      "style": style, "action": ("chat" if member.get("role") == "main" else "result", member["participant"])})
-    for message in listing(mapping(report.get("room")).get("messages")):
+                      "style": style, "action": ("chat" if member.get("role") == "main" else "result", member["participant"]),
+                      "row_id": ("call", member["participant"])})
+    for index, message in enumerate(listing(mapping(report.get("room")).get("messages"))):
         sender = mains.get(message.get("sender"))
         if (sender and message.get("recipient") == "all" and message.get("message_kind") != "answer"
                 and not message.get("answered") and message.get("pending_for")):
             text = readable(message.get("text"), " ")
             items.append({"stamp": message.get("ts") or "", "glyph": ">" if not unicode else "»",
                           "who": who(sender), "what": "to all: " + clean(text, 80),
-                          "style": "alert", "action": ("chat", sender["participant"])})
+                          "style": "alert", "action": ("chat", sender["participant"]),
+                          "row_id": ("message", str(message.get("id")) if message.get("id") else ("position", index))})
     import room as room_module
     byid = {m["participant"]: m for m in members}
-    for question in listing(mapping(report.get("room")).get("open_questions")):
+    for index, question in enumerate(listing(mapping(report.get("room")).get("open_questions"))):
         question, minutes = mapping(question), room_module.age(mapping(question).get("ts")) // 60
         asker, target = byid.get(question.get("sender")), byid.get(question.get("recipient"))
         if minutes * 60 >= room_module.PERSON_AFTER and asker and target and target.get("role") == "main":
             label = lambda m: titles.get(m["participant"]) or name(m)
             items.append({"stamp": question.get("ts") or "", "glyph": "?", "who": "Question from " + label(asker),
                           "what": "to " + label(target), "style": "alert",
-                          "action": ("chat", target["participant"])})
+                          "action": ("chat", target["participant"]),
+                          "row_id": ("question", str(question.get("id")) if question.get("id") else ("position", index))})
     for request in close_requests(report, unicode):
         items.append({"stamp": request["ts"], "glyph": "✕" if unicode else "x", "who": "Close " + request["label"],
                       "what": sep_join(unicode, "requested by " + request["by"], request["reason"],
                                        "running calls %s" % request["calls"], "unread %s" % request["unread"]),
-                      "tail": request["clock"], "style": "alert", "action": ("close", request["participant"])})
+                      "tail": request["clock"], "style": "alert", "action": ("close", request["participant"]),
+                      "row_id": ("close", request["participant"])})
     return sorted(items, key=lambda item: item["stamp"], reverse=True)
 
 
@@ -445,26 +450,38 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
     boxed = width >= 28 and budget - len(head) >= 4
     available = max(0, budget - len(head) - (2 if boxed else 0))
     shown, hidden = items[:INBOX_LIMIT], max(0, len(items) - INBOX_LIMIT)
+    # Rows can share a destination. Keep the selection on the row while actions still name the destination.
+    seen = {}
+    row_ids = []
+    for item in shown:
+        key = item["row_id"]
+        occurrence = seen.get(key, 0)
+        seen[key] = occurrence + 1
+        row_ids.append((key, occurrence))
     selected = navigation.get("selected")
-    if selected not in [item["action"] for item in shown]:
-        selected = navigation["selected"] = shown[0]["action"] if shown else None
+    selected_row = navigation.get("selected_row")
+    if selected_row not in row_ids or selected != shown[row_ids.index(selected_row)]["action"]:
+        selected_row = next((row_ids[n] for n, item in enumerate(shown) if item["action"] == selected),
+                            row_ids[0] if shown else None)
+    selected = navigation["selected"] = shown[row_ids.index(selected_row)]["action"] if selected_row else None
+    navigation["selected_row"] = selected_row
     note = clean(navigation.get("closed_note"), 120)
     available -= bool(note)
     capacity = available - (1 if len(shown) + bool(hidden) > available else 0) if shown else 1
     capacity = max(0, capacity)
-    index = next((n for n, item in enumerate(shown) if item["action"] == selected), 0)
+    index = row_ids.index(selected_row) if selected_row else 0
     start = min(max(0, index - capacity + 1), max(0, len(shown) - capacity))
     window = shown[start:start + capacity]
     content_width = width - 4 if boxed else width
     body = [(note, "dim", None)] if note else []
     if not shown:
         body.append(("Nothing needs you right now", "dim", None))
-    for item in window:
+    for row_id, item in zip(row_ids[start:start + capacity], window):
         tail = item["tail"] if "tail" in item else age_label(item["stamp"])
         tail = sep + tail if tail else ""
         text = clipped("%s %s%s%s" % (item["glyph"], item["who"], sep, item["what"]),
                        max(1, content_width - display_width(tail) - 2)) + tail
-        body.append((text, item["style"], item["action"]))
+        body.append((text, item["style"], item["action"], row_id))
     more = len(shown) - len(window) + hidden
     if shown and more and available > len(window):
         body.append(("+%s more%s" % (more, sep + "arrows, wheel or page keys" if len(shown) > len(window) else ""), "dim", None))
@@ -476,8 +493,10 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
         title = "Needs you" + (sep + "%s" % len(items) if items else "") + (sep + "Up/Down, Enter opens" + (", x closes" if any(i["action"][0] == "close" for i in items) else "")
                                                                           if items and not navigation.get("line_input") else "")
         lines.append((PALETTE["alert" if items else "dim"] if color else "") + box_edge(title, width, unicode) + ("\033[0m" if color else ""))
-    for text, style, action in body:
-        chosen = action is not None and action == selected
+    for entry in body:
+        text, style, action = entry[:3]
+        row_id = entry[3] if len(entry) > 3 else None
+        chosen = row_id is not None and row_id == selected_row
         value = clipped(text, content_width)
         if not color and chosen:
             value = clipped(value, max(0, content_width - 2)) + " <"
@@ -489,11 +508,12 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
             value = PALETTE[style] + value + "\033[0m"
         lines.append(value)
         if action is not None:
-            hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action})
+            hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action, "row_id": row_id})
     if boxed:
         lines.append(box_edge("", width, unicode, "bottom"))
     lines += [clipped(line, width) for line in footer]
-    navigation.update(hits=hits, items=[item["action"] for item in shown], offset=0, viewport=capacity,
+    navigation.update(hits=hits, items=[item["action"] for item in shown], row_ids=row_ids,
+                      offset=0, viewport=capacity,
                       surface="inbox",
                       room_id=room.get("id"), positions={}, geometry=(width, height, True, False))
     return "\n".join(lines[:height - 1])
@@ -543,11 +563,56 @@ def call_groups(groups, width, slots, compact, frame, unicode, limit):
     return result, shown
 
 
+def room_unreadable(report):
+    """Match only the no-room fallback used when collection fails."""
+    return mapping(report.get("collection")) == {"ok": False} and not report.get("room")
+
+
+def render_unavailable(report, width, height, color, unicode, previous, menu, managed, navigation):
+    """Bounded status view for a room whose first read has failed."""
+    # Nothing from the prior room remains selectable or clickable.
+    for key in ("selected", "primary", "preview", "surface", "bands", "band_offsets", "mains", "box",
+                "full_result", "graph_selected", "main_attempt", "body_rows", "preview_signature", "geometry",
+                "selected_row", "row_ids", "detail"):
+        navigation.pop(key, None)
+    navigation.update(hits=[], items=[], positions={}, offset=0, viewport=0)
+    budget = height - int(menu)
+    if budget <= 0:
+        return ""
+    footer = menu_rows(width, height, unicode, navigation.get("menu_help", False), managed,
+                       keys=not navigation.get("line_input")) if menu else []
+    if menu and managed and height >= 20:
+        footer.append("F6/F7 previous/next main / Ctrl-b 0 control / Ctrl-b d detach")
+    if navigation.get("notice"):
+        footer.append(clean(navigation["notice"], 200))
+    if len(footer) > budget - 1:
+        footer = [clipped("1 Codex  2 Claude  ? More  q " + ("Detach" if managed else "Quit"), width)] if menu else []
+    alert = "! Room state unavailable" if width >= 24 else "! Room state unknown" if width >= 20 else "! Unknown" if width >= 9 else "?"
+    head = [(("✳ " if unicode else "* ") + "OMS " + ("control panel" if menu else "dashboard") + " / " +
+             (clean(mapping(report.get("repo")).get("name")) or "repository"), "head"),
+            (alert, "bad"),
+            ("This room could not be read; its work and messages are unknown, not empty.", "dim"),
+            (("Press 9 to read again." if menu else "A later refresh may recover it."), "dim")]
+    if previous is not None and height >= 12:
+        head.append(("Last: " + previous, "dim"))
+    body = max(1, budget - len(footer))
+    if body == 1:
+        head = [head[1] if width >= 20 else ("?", "bad")]
+    lines = []
+    for text, style in head[:body] + [(line, "dim" if line.startswith("F6") else "main") for line in footer]:
+        text = clipped(text, width)
+        lines.append(PALETTE[style] + text + "\033[0m" if color else text)
+    return "\n".join(lines[:budget])
+
+
 def render(report, provider, width=100, height=28, color=False, unicode=True,
            previous=None, availability=None, menu=False, managed=False, main_attempt=None, frame=None,
            view="auto", attention_only=False, navigation=None):
     width, height = max(1, min(200, width)), max(1, height)
     use_unicode(unicode)
+    if room_unreadable(report):
+        return render_unavailable(report, width, height, color, unicode, previous, menu, managed,
+                                  navigation if navigation is not None else {})
     if navigation is not None:
         # Graph-only targets must not leak into a tree drawn from the same navigation.
         for key in ("surface", "bands", "primary"):

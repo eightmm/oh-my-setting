@@ -46,10 +46,13 @@ outside the repo:
           once, it does not skip: --ignore-siblings skips)
 Status probes the land lock without taking it and reports active true|false|
 null (null: cannot tell). A receipt that says running proves nothing; active
-does. With --active-exit, status exits 3 while a land is active.
+does. Text status prints the lock observation explicitly. With --active-exit,
+status exits 3 when active is confirmed, 0 when free is confirmed, and 4 when
+the lock state is unknown.
 Without --wait the job detaches (setsid) and this prints the receipt path.
 Retrying the same commit/destination/gate reuses successful push evidence and
-resumes CI/install only. Concurrent jobs for this repository exit 75.
+resumes CI/install only. Concurrent jobs wait up to OMS_LOCK_TIMEOUT (default
+300 seconds), then exit 75 if the lock remains held; waiter order is unspecified.
 EOF
 }
 
@@ -358,6 +361,9 @@ run_job() {
   [ "$STAMP" = "$(request_stamp "$SHA")" ] || {
     note "error: HEAD or destination changed before job started"; return 1;
   }
+  clean_tree || {
+    note "error: tracked tree changed before job started"; return 1;
+  }
   local resume=0 remote_sha failed_stages
   if can_resume; then
     remote_sha="$(git ls-remote --exit-code "$(git remote get-url --push "$REMOTE")" "refs/heads/$TARGET")" || return 1
@@ -373,6 +379,9 @@ run_job() {
   rset growth="$(oms_test_growth "$REMOTE/$TARGET" "$SHA")"
   rset pid="$$" state=running started_at="$(now)" sha="$SHA" gate.command="$GATE" \
     remote="$REMOTE" target="$TARGET" log="$LOG" request="$STAMP" resumed="$resume"
+  # Detached startup is confirmed only after lock acquisition and the exact
+  # SHA/tracked-tree admission checks above have written a running receipt.
+  [ -z "$READY_FILE" ] || printf '0\n' > "$READY_FILE"
   local t0 rc=0
   if [ "$resume" -eq 0 ]; then
     rset gate.rc=pending push.rc=pending ci.conclusion=skipped update.rc=skipped
@@ -507,7 +516,9 @@ land_active() {  # true | false | null, from a read-only probe of the land lock
 show_status() {  # show_status [RECEIPT]; default: this HEAD's newest, else the newest
   local newest="${1:-}" active rc=0 head=""
   active="$(land_active)"
-  [ "$ACTIVE_EXIT" -eq 1 ] && [ "$active" = true ] && rc=3
+  if [ "$ACTIVE_EXIT" -eq 1 ]; then
+    case "$active" in true) rc=3 ;; false) rc=0 ;; *) rc=4 ;; esac
+  fi
   # Several mains share one land directory: this worktree's own HEAD is the
   # landing its caller means, and the newest receipt may be another main's.
   if [ -z "$newest" ] && head="$(git -C "$REPO" rev-parse -q --verify HEAD 2>/dev/null)"; then
@@ -538,9 +549,14 @@ if state == "running" and active is True:
     state = "running (lock held)"
 elif state == "running" and active is False:
     state = "receipt says running, but no land holds the lock (stale receipt)"
+elif state == "running" and active is None:
+    state = "receipt says running, but lock activity is unknown"
 print("land %s: %s" % (str(r.get("sha", ""))[:7], state))
 if sys.argv[4] and r.get("sha") != sys.argv[4]:
     print("  note: newest land in this repository, not this worktree's HEAD %s" % sys.argv[4][:7])
+print("  active: %s" % ("unknown" if active is None else str(active).lower()))
+if u.get("rc") == "skipped":
+    print("  install: skipped (%s)" % u.get("reason", "reason not recorded"))
 print("  gate: %s (%ss)  push: %s  update: %s  ci: %s%s" % (
     "ok" if g.get("rc") == 0 else g.get("rc", "-"), g.get("seconds", "-"),
     "ok" if p.get("rc") == 0 else p.get("rc", "-"),
@@ -558,17 +574,33 @@ PY
   return "$rc"
 }
 
-run_ready_job() {
-  [ -z "$READY_FILE" ] || printf '0\n' > "$READY_FILE"
-  run_job
+land_ready_exit() {
+  local rc="$?" ready_state=""
+
+  [ -n "$READY_FILE" ] && [ -f "$READY_FILE" ] || return 0
+  IFS= read -r ready_state < "$READY_FILE" || true
+  [ "$ready_state" = waiting ] || return 0
+  printf '%s\n' "$rc" > "$READY_FILE" 2>/dev/null || true
 }
 
 case "$MODE" in
   status) rc=0; show_status || rc=$?; exit "$rc" ;;
   job)
+    if [ -n "$READY_FILE" ]; then
+      printf 'waiting\n' > "$READY_FILE"
+      # A detached launcher can distinguish lock waiting from a failed start.
+      # The EXIT fallback covers signals before run_job writes its admission result.
+      trap land_ready_exit EXIT
+    fi
     rc=0
-    oms_try_file_lock "$LAND_DIR/active" run_ready_job || rc=$?
-    if [ -n "$READY_FILE" ] && [ -f "$READY_FILE" ] && [ ! -s "$READY_FILE" ]; then
+    oms_with_file_lock "$LAND_DIR/active" run_job || rc=$?
+    if [ -n "$READY_FILE" ] && [ -f "$READY_FILE" ]; then
+      ready_state=""
+      IFS= read -r ready_state < "$READY_FILE" || true
+    else
+      ready_state=""
+    fi
+    if [ "$ready_state" = waiting ]; then
       printf '%s\n' "$rc" > "$READY_FILE"
     fi
     [ "$rc" -ne 75 ] || echo "land already active for this repository; use land status" >&2
@@ -617,18 +649,45 @@ trap 'rm -f "$READY_FILE"' EXIT
 set -m
 setsid bash "${job[@]}" --ready-file "$READY_FILE" < /dev/null > /dev/null 2>&1 &
 set +m
-for ((ready_attempt=0; ready_attempt<50; ready_attempt++)); do
-  [ ! -s "$READY_FILE" ] || break
-  sleep 0.1
+ready_timeout="$(oms_file_lock_timeout)"
+ready_limit="$((10#$ready_timeout + 5))"
+ready_state=""
+waiting_reported=0
+for ((ready_attempt=0; ready_attempt<ready_limit; ready_attempt++)); do
+  if [ -s "$READY_FILE" ]; then
+    IFS= read -r ready_state < "$READY_FILE" || ready_state=""
+    case "$ready_state" in
+      waiting)
+        if [ "$waiting_reported" -eq 0 ]; then
+          echo "land: waiting for active landing lock (timeout ${ready_timeout}s)" >&2
+          waiting_reported=1
+        fi
+        ;;
+      0) break ;;
+      ''|*[!0-9]*) ready_state="" ;;
+      *) break ;;
+    esac
+  fi
+  sleep 1
 done
-if [ ! -s "$READY_FILE" ]; then
-  echo "error: landing start not confirmed; inspect land status before retrying" >&2
-  exit 1
+if [ -s "$READY_FILE" ]; then
+  IFS= read -r ready_state < "$READY_FILE" || ready_state=""
 fi
-read -r ready_rc < "$READY_FILE"
-if [ "$ready_rc" != 0 ]; then
-  echo "land not started (exit $ready_rc); another landing may be active; use land status" >&2
-  exit "$ready_rc"
+if [ "$ready_state" != 0 ]; then
+  case "$ready_state" in
+    ''|*[!0-9]*)
+      echo "error: landing start not confirmed; inspect land status before retrying" >&2
+      exit 1
+      ;;
+    *)
+      if [ "$ready_state" = 75 ]; then
+        echo "land not started (exit 75); another landing may be active; use land status" >&2
+      else
+        echo "land not started (exit $ready_state); use land status" >&2
+      fi
+      exit "$ready_state"
+      ;;
+  esac
 fi
 echo "landing $(git -C "$REPO" rev-parse --short HEAD) in the background"
 echo "receipt: $LAND_DIR/$STAMP.json"

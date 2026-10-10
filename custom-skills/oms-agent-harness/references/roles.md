@@ -15,7 +15,7 @@ success criteria, and expected output.
 Put task-specific behavior directly in the brief; do not launch another model
 to generate instructions. Roles specialize the task, never its authority.
 Use `oms consult --to PROVIDER` for an independent read, or
-`oms peer-delegate --read-only --role repo-auditor` for a clean-HEAD audit.
+`oms peer-delegate --to PROVIDER --read-only --role repo-auditor` for a clean-HEAD audit.
 
 ## Brief and return
 
@@ -40,3 +40,15 @@ Soul executors are retired. Old records remain evidence, not runnable contracts.
 Preserve their patches and approvals; create a fresh reviewed plan task rather
 than stripping the old executor binding. Normal plan leases, scoped admission,
 one-shot repair and one-use approval checks remain in force.
+
+## Cheap research and existing specialties
+
+A panel `researcher` is a read-only child of a main for bounded document/source
+lookup and cited summaries. Use the newest configured/catalog Luna or Haiku at
+low effort, pinned to its exact model ID. No write scopes, implementation, review
+gate, continuation or automatic model escalation are permitted. Catalog discovery
+does not prove live access or authorize spending; the main retains all decisions.
+
+Reuse `test-designer`, `patch-reviewer` and `repo-auditor` for tests, patch judgment
+and scoped audits. Document drafting is an ordinary scoped write worker. Do not
+create a paid seat merely to run a deterministic verification command.

@@ -6,6 +6,8 @@ worker activity. `oms --help` and bare `oms` with redirected input/output retain
 command help. The panel uses existing OMS state, authentication and front doors.
 Boards of one repository share atomic dashboard and result-query caches in `.oms/hooks/panel-cache`, invalidated by input file stats or five-second expiry, while room selection and terminal reads stay per window. A read that races a state change collects directly instead of failing, and a board or control window whose refresh still fails keeps its last good state with a `State refresh failed; showing data from Ns ago` notice rather than the no-room fallback.
 
+When the first read fails, or a window switches to a room it has not successfully read, the panel says that room state is unavailable and that its work and messages are unknown. It does not show empty-work counts. The control menu remains available for retry and navigation; a later successful read restores the normal board.
+
 ## Quick start
 
 1. Run `oms` in a terminal: window 0 is the control window, an inbox for you.
@@ -219,13 +221,16 @@ minutes on every hook and `overdue` from fifteen; the asker's own hook records o
 `Needs you` list shows the question from twenty minutes. A `--kind answer` without
 `--reply-to` links the one open question from that recipient, or is refused with the ids.
 
-The Messages tab opens with the pair summary, one row per pair of mains that exchanged
-mail, named like the tabs (`#1 Opus 5.5 ⇄ #2 Sol 6.1  →16 ←85 · 7 new`, counts relative to the left
-main). Unread pairs come first, then the most recent; at most four rows plus `+N more pairs`,
-then the message list. Clicking a pair row (or moving onto it with the arrow keys)
-switches the box to DETAIL and shows the pair's last six messages, oldest first, from the room
-snapshot, which keeps only the room's latest 12 messages. The top of the board carries no
-between-mains line. Each lane keeps a
+The bottom box has five tabs: Detail, Plan, Debate, Messages and Between. The Messages tab is a
+filtered room log; the Between tab shows one vertex per main and a labeled connection for each
+pair with recorded mail. Pair counts show sent mail in each direction and, when nonzero, unread
+mail (`new`); pairs with unread mail come first, then the most recent exchange. With two to six
+mains the tab draws a polygon when it fits, otherwise it lists pairs and may show `+N more pair(s)`;
+without a recorded exchange it says `No mail between mains yet`. Clicking a pair count or row
+opens that pair in Detail with up to its last six messages, oldest first, from the main-message
+snapshot; older messages may be absent from that snapshot. This opens Detail once per selection,
+after which the reader can return to Between. The pair detail does not make Messages a pair
+summary. The top of the board carries no between-mains line. Each lane keeps a
 `◇ Advisors: none active` row above its main when no judge is there and the rows allow (the footer offers
 `a Ask advisor`); an answered advisor, reviewer or debate stays above its main for 30 minutes before it
 counts as Past work. The pinned usage line
@@ -579,7 +584,11 @@ provider capability checks. Omitting effort retains the front door's native
 settings. For profile-controlled transports such as Vibe/DeepSeek Harness,
 omit `--model`; the native profile selects it and an exact override is refused.
 Default role allocation remains Sol 6.1/Opus, Luna/Sonnet and Astra/Fable.
-Codex delegated routes accept only the three GPT-6 models in the panel policy.
+Codex delegated routes accept the exact Sol, Luna and Astra model IDs in the
+panel policy, including Sol 6.1. Model-family versions are distinct from roles. Preset dispatch chooses the newest
+configured/catalog numeric version within its existing family and pins the exact ID;
+a newer Astra never replaces a Luna or Sol worker. Explicit CLI selections retain
+the caller's exact model request. A compact model preview does not limit routing.
 
 ```bash
 oms panel --repo . --dispatch advisor --owner codex --to grok --model MODEL \
@@ -624,6 +633,31 @@ Additional mains can use routine/light/advisor routes; main-level worker routing
 requires an explicit target. Owner finalization/council retains Codex/Claude's
 existing policy. No additional daemon, dependency or terminal injection is added.
 
+Pi is also selectable as a native coding harness when its `pi` CLI is already
+installed. `oms panel --launch pi` opens it as a native main; `oms panel
+--spawn-main pi --task '...'` supplies a task, and either form accepts an optional
+`--model MODEL_ID` request. Pi uses its existing profile, authentication, trust
+settings and tools. OMS does not install or log in to Pi, copy credentials, or add
+an API fallback. Cost and billing therefore follow the user's existing native
+profile; OMS does not guarantee whether that profile uses a paid API or a
+subscription. A missing or unsupported Pi CLI is reported and launch is refused;
+OMS does not install it automatically. Headless and additional-provider routes
+remain available, and Pi is not an automatic main or advisor route.
+
+Pi sessions use an exact pinned session ID and native session storage. Resume is
+allowed only for the exact Pi main enrolled in the current room, with its prior
+terminal owner and a safe persisted canonical-cwd session header confirmed. Missing,
+partial, ambiguous, foreign or selector-based session state does not authorize a
+fallback. Pi history and namespace remain native; panel navigation uses only the
+already-proved terminal pane and does not open arbitrary app URIs.
+
+The provider descriptor's `native_harnesses` and `hook_capable` fields describe
+capability; `native_hook_wiring` remains unverified. Without enrolled evidence,
+the current Pi hook state and the model actually served are unknown. A requested
+`--model` records a request, not served identity. Requesting the same model through
+different harnesses demonstrates harness diversity, not independent model-family
+review. Existing native profile settings may determine the served model.
+
 ## Roles and automatic allocation
 
 The native main owns the task, architecture, workload judgment, final synthesis
@@ -639,6 +673,7 @@ The launcher does not autonomously fan out before the main has a task.
 | Codex main | `gpt-6.1-sol` (shown as Sol 6.1) | high | Native main permissions |
 | Claude main | `claude-opus-5-5` | high | Native main permissions |
 | Light, clear worker | `gpt-6-luna` | low | Bounded read or isolated write |
+| Researcher | Latest configured/catalog Luna or Haiku | low | Read-only source/document lookup with citations |
 | Routine implementation / long straightforward explanation | `claude-sonnet-5-5` | medium | Bounded read or isolated write |
 | Main-level worker | Owning main's Sol / Opus preset | high | Bounded worker; no promotion |
 | Astra advisor / reviewer | `gpt-6-astra` | high | Read-only |
@@ -661,10 +696,13 @@ It works directly only when a brief would cost more than the edit or the step
 needs the main itself. Outside the panel, the global rule still requires an
 explicit request before spawning subagents.
 
-Every main also lands its own work. It admits worker patches on its own
-`oms/<task>` branch in a worktree from `oms scratch-worktree add`, rebases on
-the remote target, verifies and runs `oms land` from that worktree. Nobody
-commits in the shared checkout, and no main waits for a single integrator:
+Every main also lands its own work. `oms scratch-worktree add` starts a detached
+worktree; create a local, nontracking task branch there with
+`git checkout --no-track -b oms/<task>`, then admit worker patches and rebase on
+the remote target. No upstream is needed. After verification, commit and run
+`oms land` from that worktree only when commit and publication are authorized;
+`oms land` pushes the verified SHA to its target. Nobody commits in the shared
+checkout, and no main waits for a single integrator:
 `oms land`'s lock serialises the pushes, the worker guard treats other mains'
 `oms/*` branches and harness worktrees as soft, and `oms room scope` warns
 about overlapping files before the work starts.
@@ -913,8 +951,9 @@ role dividers report hidden calls and the overflow line shows nonzero counts
 with `8 Details`. Small panes use borderless summaries. Press `b` to
 toggle attention-only: waiting input, waiting approval, blocked, review and
 orphaned calls, plus retained failed terminal outcomes. Filtered calls are
-counted rather than changing their states. Both controls affect presentation,
-not the main identity or dispatch authority. A native window inherits these
+counted rather than changing their states. Settled calls classified as Past work
+remain hidden. Both controls affect presentation, not the main identity or
+dispatch authority. A native window inherits these
 settings when opened, and the control sidebar follows subsequent menu changes.
 CLI `--view` overrides a watch's window density; `--attention-only` keeps its
 filter enabled. These flags apply only to the menu or watch, not model operations.
@@ -1166,3 +1205,58 @@ events, lost acknowledgements and correlated persisted output.
 The operator suite also verifies multiple-main hierarchy, legacy ownership,
 separate review groups, compact/detail budgets, attention filtering, numbered
 result selection, menu cycling and view inheritance in an existing tmux server.
+
+## Researcher and supporting strategies
+
+Use `oms panel --dispatch researcher --owner codex --prompt 'Find and cite the relevant contract.'`
+(or `--owner claude`) for one bounded document/source question. The control menu's
+expanded `e Researcher` entry uses the same route. Researcher is a separate room
+participant beneath its main; its bounded answer is retained in Results and its
+status appears in tree/graph views. It never becomes a main or a patch approver.
+
+The Codex researcher uses Luna and the Claude researcher uses Haiku. Current
+configured floors are `gpt-6-luna` and `claude-haiku-5-5`. The dispatcher compares
+numeric versions within that family against the cached provider catalog and pins
+the newest exact ID. An omitted minor version means zero; `6.10` is newer than
+`6.2`. Cached discovery does not prove account access or live availability. No
+paid availability probe runs. If the pinned model cannot run, the task fails
+without an implicit older-model or more expensive-family substitution. A provider
+without a model catalog retains the configured exact ID until policy is refreshed.
+
+Researcher requires read access, research purpose and low effort. Write scopes,
+implementation, review gates, worker continuation and high-model/effort overrides
+are refused in routing; lifecycle recording independently rejects research
+metadata on a write call. Source content is data, never task authority. The main
+owns interpretation, architecture and acceptance. Official Haiku model/effort
+spelling is documented in [Claude model configuration](https://code.claude.com/docs/en/model-config).
+
+Additional execution seats are not needed for every specialty. Use the existing
+`test-designer` worker strategy for contract/edge-case tests, `patch-reviewer` for
+independent patch judgment, and `repo-auditor` for bounded source audits.
+Document drafting can stay a scoped implementation-worker task; discovery can
+stay Researcher. A deterministic verifier should run tests directly rather than
+paying another model to repeat a command. Deep correctness or risk decisions
+remain with the main/advisor, with models selected for that task.
+
+## Owned terminals, jobs and history
+
+Expanded `s Terminals and jobs` opens a separate owned tmux workspace. F4 shows
+controls and F5 returns to its origin. These are ordinary shells and explicit argv
+jobs, not AI chats. Listing does not capture screens or logs; reads are explicit
+and bounded. Jobs require Linux pidfds/subreaper ownership; unsupported hosts
+retain the normal OMS lifecycle. Shell/workspace ownership remains POSIX/tmux.
+
+`f` shows completed jobs with their actual completed count. A selected provably
+completed job or gone shell offers `x forget`, with a permanent history/log deletion
+warning and explicit `yes` confirmation. Live, uncertain, foreign or unsafe records
+are refused. Nothing is automatically pruned. Cleanup frees the per-kind 128-record
+allocation bound; it does not kill a terminal or job.
+
+CLI equivalents are `oms panel job forget ID --repo . --generation N` and
+`oms panel terminal forget ID --repo .`. Use `oms panel terminal workspaces --repo .`
+to discover workspace records and `oms panel terminal workspace-forget ID --repo .`
+for one provably gone workspace. These explicit commands permanently remove private
+history and any retained job log. Revalidate the ID/generation before requesting them.
+Restart keeps the previous completed generation and log when prelaunch validation
+or an unreleased supervisor constructor fails. Once approval release may have
+occurred, uncertainty stays unknown rather than allowing a duplicate generation.

@@ -182,6 +182,17 @@ def choose(event, navigation):
     kind = event[0]
     items = navigation.get("items", [])
     selected = navigation.get("selected")
+    inbox_rows = navigation.get("row_ids", []) if navigation.get("surface") == "inbox" else []
+    def item_index():
+        if inbox_rows and navigation.get("selected_row") in inbox_rows:
+            return inbox_rows.index(navigation["selected_row"])
+        return items.index(selected) if selected in items else None
+
+    def select_index(index):
+        navigation["selected"] = items[index]
+        if inbox_rows:
+            navigation["selected_row"] = inbox_rows[index]
+
     if navigation.get("detail") and kind in ("up", "down", "home", "end"):
         last = max(0, navigation.get("body_rows", 0) - max(1, navigation.get("viewport", 0)))
         offset = navigation.get("offset", 0)
@@ -189,10 +200,11 @@ def choose(event, navigation):
                                 min(last, max(0, offset + (1 if kind == "down" else -1))))
     elif navigation.get("surface") == "inbox" and not navigation.get("detail") and kind in ("scroll", "pageup", "pagedown"):
         if items:
-            index = items.index(selected) if selected in items else 0
+            index = item_index()
+            index = index if index is not None else 0
             step = event[1] if kind == "scroll" else max(1, navigation.get("viewport", 0)) * (
                 -1 if kind == "pageup" else 1)
-            navigation["selected"] = items[min(len(items) - 1, max(0, index + step))]
+            select_index(min(len(items) - 1, max(0, index + step)))
     elif kind == "click":
         hit = hit_at(event, navigation)
         if hit and not hit.get("passive"):
@@ -202,6 +214,8 @@ def choose(event, navigation):
                     navigation["selected"] = target
                 return target
             navigation["selected"] = target
+            if inbox_rows:
+                navigation["selected_row"] = hit.get("row_id")
             if hit.get("fold") and event[1] <= 2:
                 return ("fold", target[1])
             # A first click selects a main tab or previews a call; repeating it opens.
@@ -217,12 +231,14 @@ def choose(event, navigation):
                 return None
             return target
     elif kind in ("up", "down", "home", "end") and items:
-        index = items.index(selected) if selected in items else (-1 if kind == "down" else 0)
+        index = item_index()
+        index = index if index is not None else (-1 if kind == "down" else 0)
         index = 0 if kind == "home" else len(items) - 1 if kind == "end" else (index + (1 if kind == "down" else -1)) % len(items)
-        navigation["selected"] = items[index]
+        select_index(index)
         if navigation.get("surface") == "graph" and items[index][0] != "group":
             navigation["preview"] = {"target": items[index]}
-        visible = any(h["action"] == items[index] for h in navigation.get("hits", []))
+        visible = any(h.get("row_id") == inbox_rows[index] if inbox_rows else h["action"] == items[index]
+                      for h in navigation.get("hits", []))
         if not visible:
             positions = navigation.get("positions", {})
             row = positions.get(items[index], 0)

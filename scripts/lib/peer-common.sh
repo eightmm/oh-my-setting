@@ -2973,7 +2973,15 @@ ma_run_routed_provider() {
       [ -z "${OMS_TASK_ID:-}" ] || start_args+=(--task-id "$OMS_TASK_ID")
       [ -z "${OMS_RUN_ID:-}" ] || start_args+=(--run-id "$OMS_RUN_ID")
       if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ]; then
-        case "${OMS_PANEL_ROLE:-}" in worker|advisor|reviewer) ;; *)
+        case "${OMS_PANEL_ROLE:-}" in
+          researcher)
+            if [ "$access" != read ] || [ "${OMS_PANEL_PURPOSE:-}" != research ] || [ "${OMS_REASONING_SELECTED:-}" != low ]; then
+              echo 'error: researchers require read-only research at low effort' >&2; return 2
+            fi
+            case "$provider:$OMS_MODEL_PRIMARY" in codex:gpt-*-luna|claude:claude-haiku-*) ;; *)
+              echo 'error: researchers require a pinned Luna or Haiku model' >&2; return 2 ;; esac
+            ;;
+          worker|advisor|reviewer) ;; *)
           echo 'error: invalid panel role' >&2; return 2 ;; esac
         [ -z "${OMS_PANEL_MAIN_ATTEMPT:-}" ] ||
           start_args+=(--parent-attempt-id "$OMS_PANEL_MAIN_ATTEMPT")

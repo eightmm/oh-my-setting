@@ -8,6 +8,10 @@
     "light": {"provider": "codex", "model": "gpt-6-luna", "effort": "low"},
     "routine": {"provider": "claude", "model": "claude-sonnet-5-5", "effort": "medium"}
   },
+  "researcher": {
+    "codex": {"provider": "codex", "model": "gpt-6-luna", "effort": "low"},
+    "claude": {"provider": "claude", "model": "claude-haiku-5-5", "effort": "low"}
+  },
   "advisor": {
     "astra": {"provider": "codex", "model": "gpt-6-astra", "effort": "high"},
     "fable": {"provider": "claude", "model": "claude-fable-5-1", "effort": "high"}

@@ -108,6 +108,22 @@ grep -Fq 'models: gpt-5.6-sol, gpt-5.6-luna' "$text" ||
 grep -Fq 'not routed (previous generation or foreign family): gpt-5.5, gpt-5.3-codex-spark' "$text" ||
   fail "what is not routable must still be visible, and say why: $(cat "$text")"
 
+# Known Codex role families choose their own newest numeric version; unrelated
+# catalog entries stay visible but are not made automatic routes.
+printf '%s\n' \
+  gpt-6-astra gpt-6.2-astra gpt-6.10-astra \
+  gpt-6-sol gpt-6.1-sol \
+  gpt-6-luna gpt-6.2-luna \
+  gpt-6..11-sol gpt-6.10-nova claude-opus-6-10 > "$gen/codex.models"
+out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" "$ROOT/scripts/models.sh" --json --providers codex)"
+OMS_MODELS_JSON="$out" python3 - <<'PY'
+import json, os
+row = json.loads(os.environ['OMS_MODELS_JSON'])['providers'][0]
+assert row['routable'] == ['gpt-6.10-astra', 'gpt-6.1-sol', 'gpt-6.2-luna'], row['routable']
+assert row['not_routed'] == ['gpt-6-astra', 'gpt-6.2-astra', 'gpt-6-sol', 'gpt-6-luna',
+                             'gpt-6..11-sol', 'gpt-6.10-nova', 'claude-opus-6-10'], row['not_routed']
+PY
+
 # Cached ID/display-name rows and progress banners must never become routes.
 printf 'Fetching available models...\r\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\r\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\r\ngemini-3.8-flash-high\tDuplicate\n' > "$gen/antigravity.models"
 PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" bash -c '
@@ -121,3 +137,9 @@ grep -Fq 'models: gemini-3.8-flash-high, gemini-3.8-flash-low' "$TMP/normalized.
 if grep -Fq 'Fetching available' "$TMP/normalized.out"; then fail 'progress banner appeared as a model'; fi
 
 echo 'models-smoke: ok'
+
+# A compact UI preview must not cap the routing catalog.
+number=1
+while [ "$number" -le 21 ]; do printf 'gpt-6.%s-luna\n' "$number"; number=$((number + 1)); done > "$gen/codex.models"
+out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" "$ROOT/scripts/models.sh" --json --providers codex)"
+printf '%s' "$out" | python3 -c 'import json,sys; r=json.load(sys.stdin)["providers"][0]; assert len(r["models"]) == 20; assert len(r["catalog_models"]) == 21; assert r["catalog_models"][-1] == "gpt-6.21-luna"'

@@ -11,11 +11,13 @@ import re
 import shlex
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import time
 import threading
 import tempfile
+from typing import NamedTuple
 import room
 import uuid
 import panel_host
@@ -25,15 +27,91 @@ import panel_messages
 from dashboard_projection import clean
 from panel_view import CLOSE_PREFIX, INBOX_LIMIT, close_requests, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
-from panel_routing import allocate, command as routed_command, policy, MODEL_IDS
+from panel_routing import allocate, command as routed_command, policy, MODEL_IDS, research_version, newest_research_model, newest_route_model, route_family
 from panel_results import _read, _lock, finalize, outcomes, results, retry_delivery, verified_patch
 from panel_cache import read_shared
+from room_repository import EXECUTION_ENV, native_repository, state_repository, work_repository
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "scripts" / "oms"
 PROVIDERS = ("codex", "claude")
+NATIVE_HARNESSES = PROVIDERS + ("pi",)
 MAX_PROMPT = 65536
 SESSION_ID = r"[A-Za-z0-9][A-Za-z0-9_-]{0,159}"
+PI_SESSION_ID = r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,158}[A-Za-z0-9])?"
+OUTBOUND_SCANNER = ROOT / "scripts" / "lib" / "peer-common.sh"
+
+
+class PlanBinding(NamedTuple):
+    plan_id: str
+    task_id: str
+    lease_id: str
+    claim_provider: str
+    owner_provider: str
+    owner_participant: str
+    owner_attempt: str
+    room_id: str
+
+    @staticmethod
+    def unique_fields(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise ValueError("duplicate plan observation field")
+            result[name] = value
+        return result
+
+    @classmethod
+    def parse(cls, value):
+        if not isinstance(value, str) or len(value.encode("utf-8")) > 4096:
+            raise ValueError("plan observation exceeds 4096 bytes")
+        fields = json.loads(value, object_pairs_hook=cls.unique_fields)
+        if not isinstance(fields, dict) or set(fields) != set(cls._fields):
+            raise ValueError("plan observation requires exactly the binding fields")
+        formats = dict(plan_id=r"plan_[0-9a-f]{32}", lease_id=r"lease_[0-9a-f]{32}",
+                       task_id=r"[A-Za-z0-9._-]{1,160}", owner_attempt=r"att_[0-9a-f]{32}",
+                       owner_participant=r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}",
+                       room_id=r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}",
+                       claim_provider=r"[a-z0-9][a-z0-9._-]{0,63}",
+                       owner_provider=r"[a-z0-9][a-z0-9._-]{0,63}")
+        for name, pattern in formats.items():
+            if not isinstance(fields[name], str) or not re.fullmatch(pattern, fields[name]):
+                raise ValueError("invalid plan observation " + name)
+        return cls(**fields)
+
+    def validate(self, repo, env, route):
+        """Recheck observation under the caller's marker-set and canonical plan fences."""
+        import runpy
+        plan = json.loads(_read(repo, ".oms/plan/tasks.json", 4 * 1024 * 1024),
+                          object_pairs_hook=self.unique_fields)
+        task = plan["tasks"][self.task_id]
+        if (plan.get("plan_id") != self.plan_id or task.get("id") != self.task_id
+                or task.get("lease_id") != self.lease_id or task.get("state") not in {"claimed", "running"}
+                or task.get("provider") != self.claim_provider
+                or task.get("claimed_by_participant") != self.owner_participant):
+            raise ValueError("plan observation no longer matches its claim")
+        if (env.get("OMS_AGENT") != self.owner_provider or env.get("OMS_PANEL_MAIN_ATTEMPT") != self.owner_attempt
+                or env.get("OMS_ROOM_ID") != self.room_id
+                or Path(env.get("OMS_ROOM_REPO", "")).resolve() != repo.resolve()
+                or env.get("OMS_TASK_ID") != self.task_id
+                or not env.get("OMS_ROOM_PARTICIPANT")
+                or env.get("OMS_ROOM_ADMITTED_PARTICIPANT") != env.get("OMS_ROOM_PARTICIPANT")):
+            raise ValueError("foreign plan observation caller")
+        state = room.project(room.records(repo, self.room_id))
+        main = active_mains(repo, self.room_id, state, self.owner_provider).get(self.owner_participant)
+        child = room.participant(state, env["OMS_ROOM_PARTICIPANT"])
+        if (state["closed"] or not main or main.get("attempt_id") != self.owner_attempt
+                or main.get("refs", {}).get("panel_room_id", self.room_id) != self.room_id
+                or main.get("refs", {}).get("panel_room_participant", main.get("attempt_id")) != self.owner_participant
+                or not child["joined"] or child["role"] not in {"worker", "researcher"}
+                or env.get("OMS_PANEL_ROLE", "worker") != child["role"]
+                or child.get("parent") != self.owner_participant
+                or child["provider"] != route["provider"] or child.get("model") != route["model"]):
+            raise ValueError("plan observation main/room/admitted child mismatch")
+        assignment = runpy.run_path(str(ROOT / "scripts/lib/task-assignment.py"))["validate"](task.get("assignment", {}))
+        for field in ("provider", "model", "reasoning_effort", "fallback_model"):
+            if field in assignment and assignment[field] != route[field]:
+                raise ValueError("reviewed assignment mismatch: " + field)
 
 
 class NativeShutdown(KeyboardInterrupt):
@@ -59,12 +137,31 @@ def native_adapter(provider):
 
 
 def native_binary(provider):
+    if provider == "pi":
+        return "pi"
     if provider in PROVIDERS:
         return provider
     adapter = native_adapter(provider)
     if not adapter:
         raise ValueError("native launch requires an explicit OMS_PROVIDER_NATIVE_ADAPTERS open adapter")
     return adapter
+
+
+def require_pi_cli():
+    binary = shutil.which("pi")
+    if not binary:
+        raise ValueError("Pi CLI is not installed on PATH")
+    try:
+        result = subprocess.run([binary, "--help"], capture_output=True, text=True,
+                                timeout=3, check=False, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError("Pi CLI capability check failed")
+    if result.returncode:
+        raise ValueError("Pi CLI help capability check failed")
+    for flag in ("--session-id", "--session-dir", "--append-system-prompt"):
+        if flag not in result.stdout + result.stderr:
+            raise ValueError("installed Pi CLI lacks required %s support" % flag)
+    return binary
 
 
 def ensure_room(repo, ident=None, title="Shared work"):
@@ -85,7 +182,8 @@ def room_instructions(ident, member):
             "Other mains in this room (role main) are peers: coordinate shared files, findings and handoffs with "
             "them by addressing their participant ID, or --to all; ask before editing an area another main declared. "
             "Use oms room updates --id " + ident + " --participant " + member +
-            " for addressed messages at safe points; retain its cursor. "
+            " for unacknowledged addressed messages at safe points; retain its cursor. "
+            "Use --after CURSOR to read the ordered stream delta after a saved cursor. "
             "Use oms room send --id " + ident + " --participant " + member +
             " --to PARTICIPANT --kind question|answer|note --text TEXT "
             "and --reply-to MESSAGE_ID for answers. After consuming, use oms room ack "
@@ -125,7 +223,7 @@ def provider_catalog(selection="all"):
     writes = dict(line.replace("\r", "").split("\t") for line in access.stdout.splitlines())
     return [dict(row, installed=row["present"], access=["read"] +
                  (["write"] if writes.get(row["provider"]) == "true" else []),
-                 native_launch=row["provider"] in PROVIDERS or bool(native_adapter(row["provider"])),
+                 native_launch=row["provider"] in NATIVE_HARNESSES or bool(native_adapter(row["provider"])),
                  session_messaging="room_polling", native_hook_wiring="unverified")
             for row in rows]
 
@@ -134,12 +232,31 @@ def selected_route(owner, role, workload, seat, access, purpose, target=None, mo
     if owner not in PROVIDERS:
         owner = provider_catalog(owner)[0]["provider"]
     route = allocate(owner, role, workload, seat, access, purpose)
+    if role == "researcher":
+        if effort not in (None, "low"):
+            raise ValueError("researchers use low effort")
+        provider = target or route["provider"]
+        if provider not in ("codex", "claude"):
+            raise ValueError("researchers require a supported Luna or Haiku provider")
+        if target and (seat != "auto" or workload != "routine"):
+            raise ValueError("explicit routes omit preset workload and seat")
+        if model and not target:
+            raise ValueError("explicit peer model requires --to")
+        configured = policy()["researcher"][provider]["model"]
+        peer = provider_catalog(provider)[0]
+        chosen = newest_research_model(provider, configured, peer.get("catalog_models", peer.get("models", [])))
+        if model and model != chosen:
+            raise ValueError("researchers require the newest configured/catalog Luna or Haiku model")
+        return dict(route, provider=provider, binary=peer["binary"], model=chosen, effort="low")
     if effort not in (None, "low", "medium", "high"):
         raise ValueError("invalid reasoning effort")
     if not target:
         if model:
             raise ValueError("explicit peer model requires --to")
         # A role route keeps its tier's model; the main may raise or lower effort for one harder or simpler subtask.
+        peer = provider_catalog(route["provider"])[0]
+        route["model"] = newest_route_model(route["provider"], route["model"],
+                                           peer.get("catalog_models", peer.get("models", [])))
         return dict(route, effort=effort) if effort else route
     if seat != "auto" or workload != "routine":
         raise ValueError("--to is an explicit route; omit preset workload and advisor seat")
@@ -155,8 +272,9 @@ def selected_route(owner, role, workload, seat, access, purpose, target=None, mo
         raise ValueError("this provider cannot honor an exact --model")
     if access not in peer["access"]:
         raise ValueError("custom write providers require explicit OMS_PROVIDER_WRITE_ADAPTERS opt-in")
-    if peer["provider"] == "codex" and model not in MODEL_IDS["codex"]:
-        raise ValueError("Codex workers require gpt-6.1-sol, gpt-6-sol, gpt-6-luna or gpt-6-astra")
+    if peer["provider"] == "codex" and model not in MODEL_IDS["codex"] and not (
+            route_family("codex", model) and model in peer.get("catalog_models", peer.get("models", []))):
+        raise ValueError("Codex workers require a known versioned Sol, Luna or Astra model")
     return dict(route, provider=peer["provider"], binary=peer["binary"], model=model, effort=effort)
 
 
@@ -169,21 +287,17 @@ def show_providers(rows):
                   if row["exact_model_override"] else "native profile controls the model")
         print("  %s: %s / %s%s / %s" % (row["provider"], status, "/".join(row["access"]), native,
                                              clean(models, 180)))
+    print("  pi: %s / selectable native harness / no automatic main or hooks" %
+          ("installed" if shutil.which("pi") else "absent"))
 
 
 def repository(value):
-    path = Path(value).resolve(strict=True)
-    if not path.is_dir():
-        raise ValueError("repository must be a directory")
-    result = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, timeout=5, check=False, stdin=subprocess.DEVNULL,
-    )
-    return Path(result.stdout.strip()).resolve() if result.returncode == 0 else path
+    return state_repository(value)
 
 
 def child_environment(provider, repo):
-    env = os.environ.copy()
+    env = {name: value for name, value in os.environ.items()
+           if name not in {"OMS_PANEL_EXECUTION_ROOT", "OMS_INDEX_BASE_REPO", "DELEGATE_SOURCE_REPO"} and not name.startswith(("OMS_DL_", "OMS_OBSERVE_PLAN_", "OMS_OBSERVER_"))}
     env["OMS_AGENT"] = provider
     env["OMS_PANEL_REPO"] = str(repo)
     env["OMS_PANEL_ENTRYPOINT"] = str(ENTRY)
@@ -226,6 +340,9 @@ def bootstrap(provider, repo):
         "uses this owner's Sol/Opus preset without promoting the worker. "
         "Add --reasoning-effort high to one dispatch for trust-boundary, cross-file integration or unclear-failure "
         "work and low for lookups and mechanical edits; otherwise keep the tier default. "
+        "For document or source lookup use oms panel --dispatch researcher --owner %s --access read "
+        "--purpose research --prompt TEXT. It uses the newest configured/catalog Luna or Haiku at low effort, "
+        "returns cited findings and stays read-only; do not promote it or substitute an older model. "
         "Act as the control tower: by default delegate implementation, investigation and test repair to "
         "bounded workers (scoped brief with paths, constraints, success criteria and a --verify command), split "
         "separable files or steps into non-overlapping workers run in parallel, and keep scope, briefs, "
@@ -239,9 +356,11 @@ def bootstrap(provider, repo):
         "Before editing shared files, declare your scope with oms room scope --owns PATH, and pass "
         "--scope PATH to write workers; overlaps warn, they never lock. "
         "Refer to other mains by tmux window and model, such as #1 Opus 5.5 or #2 Sol 6.1, never by participant id. "
-        "Every main lands its own work: admit worker patches on your own oms/<task> branch in a worktree from "
-        "oms scratch-worktree add --repo ., rebase it on the remote target, verify, and run oms land from that "
-        "worktree; land's lock serialises mains, and nobody commits in the shared checkout or waits for one integrator. "
+        "Every main lands its own work: oms scratch-worktree add --repo . starts detached. Create a local "
+        "nontracking branch with git checkout --no-track -b oms/<task>, admit worker patches there, and rebase "
+        "on the remote target. No upstream is needed. After verification, when commit and publication are authorized, "
+        "commit and run oms land from that worktree; it pushes the verified SHA to its target. Land's lock "
+        "serialises mains, and nobody commits in the shared checkout or waits for one integrator. "
         "At material decisions use oms panel --dispatch advisor --owner %s "
         "--seat astra|fable|auto --repo . --prompt TEXT, choosing the seat by need: astra (GPT-6 Astra) "
         "for source-level correctness, code paths, tooling and test evidence; fable (Fable 5.1) for design, "
@@ -273,10 +392,12 @@ def bootstrap(provider, repo):
         "may request a close with oms panel --request-close PARTICIPANT --reason \"...\". "
         "If no task has been supplied, report "
         "readiness and wait."
-    ) % (provider, json.dumps(str(repo)), json.dumps(str(ENTRY)), peer, peer, peer, peer, provider, provider)
+    ) % (provider, json.dumps(str(repo)), json.dumps(str(ENTRY)), peer, peer, peer, peer, provider, provider, provider)
 
 
-def native_command(provider, repo, resume=None, model=None, task=None, room_id=None, member=None, context_file=None):
+def native_command(provider, repo, resume=None, model=None, task=None, room_id=None, member=None, context_file=None, session_id=None, execution_root=None):
+    if provider == "pi" and resume and not re.fullmatch(PI_SESSION_ID, resume):
+        raise ValueError("invalid exact Pi session ID")
     command = [provider]
     preset = policy()["main"].get(provider, {"model": None, "effort": "native-settings"})
     default = not model
@@ -303,8 +424,16 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
         command += ["--append-system-prompt", instructions]
         if task:
             command += ["--", task]
+    elif provider == "pi":
+        command = ["pi", "--session-dir", str(__import__("panel_chats").pi_session_dir(execution_root or native_repository(repo))),
+                   "--session-id", resume or session_id or "OMS_SESSION_ID"]
+        if model:
+            command += ["--model", model]
+        command += ["--append-system-prompt", str(context_file or "OMS_CONTEXT_FILE")]
+        if task:
+            command += ["--", "OMS user task: " + task]
     else:
-        command = [native_binary(provider), "open", "--workdir", str(repo),
+        command = [native_binary(provider), "open", "--workdir", str(native_repository(repo)),
                    "--context-file", str(context_file or "OMS_CONTEXT_FILE")]
         if model:
             command += ["--model", model]
@@ -348,6 +477,45 @@ def safe_label(value):
 def run_native(provider, repo, resume=None, model=None, task=None):
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
         raise ValueError("workers cannot open native owner sessions")
+    if provider == "pi" and resume and not re.fullmatch(PI_SESSION_ID, resume):
+        raise ValueError("invalid exact Pi session ID")
+    if provider == "pi":
+        require_pi_cli()
+        execution = native_repository(repo)
+    if resume and provider == "pi":
+        import panel_chats
+        ident = os.environ.get("OMS_ROOM_ID")
+        if not ident:
+            raise ValueError("Pi resume requires the current OMS room")
+        key = hashlib.sha256((provider + "\0" + resume).encode()).hexdigest()[:32]
+        with _lock(repo, "panel-native-" + key):
+            digest = hashlib.sha256(resume.encode()).hexdigest()[:32]
+            states, incomplete = room.discover(repo)
+            if incomplete:
+                raise ValueError("Pi resume ownership discovery is incomplete")
+            enrolled_rooms = [(state["id"], p) for state in states for p in state["participants"]
+                              if p.get("joined") and p.get("role") == "main" and p.get("provider") == "pi"
+                              and p.get("consumer") == digest]
+            if len(enrolled_rooms) != 1 or enrolled_rooms[0][0] != ident:
+                raise ValueError("Pi session must be uniquely enrolled in the current room")
+            status = room.status(repo, ident)
+            matches = [p for p in status["participants"] if p.get("joined") and p.get("role") == "main"
+                       and p.get("provider") == "pi" and p.get("consumer") == digest]
+            if len(matches) != 1:
+                raise ValueError("Pi session is not uniquely enrolled in the current room")
+            member = matches[0]["participant"]
+            history = main_history(repo, ident, member)
+            if (not history or not any(row.get("refs", {}).get("panel_session_digest") == digest for row in history)
+                    or any(row.get("provider") != "pi" or row.get("tool") != "panel-main"
+                    or row.get("terminal") is not True or row.get("refs", {}).get("panel_role") != "main"
+                    or row.get("refs", {}).get("panel_room_id", ident) != ident
+                    or row.get("refs", {}).get("panel_room_participant", member) != member
+                    for row in history)):
+                raise ValueError("Pi session has no confirmed terminal owner")
+            import panel_chats
+            if not panel_chats.pi_session_header(execution, resume):
+                raise ValueError("Pi session header is missing, ambiguous, or foreign")
+            return _run_native(provider, repo, resume, model, task, ident, execution)
     if resume:
         key = hashlib.sha256((provider + "\0" + resume).encode()).hexdigest()[:32]
         with _lock(repo, "panel-native-" + key):
@@ -368,7 +536,8 @@ def run_native(provider, repo, resume=None, model=None, task=None):
                         raise ValueError("native session has no confirmed terminal owner; inspect its existing session before resuming")
             ident = ensure_room(repo)
             return _run_native(provider, repo, resume, model, task, ident)
-    return _run_native(provider, repo, resume, model, task)
+    return _run_native(provider, repo, resume, model, task,
+                       execution_root=execution if provider == "pi" else None)
 
 
 def main_history(repo, ident, member=None):
@@ -382,12 +551,25 @@ def main_history(repo, ident, member=None):
             or row.get("attempt_id") in enrolled or row.get("refs", {}).get("panel_room_participant") in enrolled]
 
 
-def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None):
+def chat_catalog(repo, ident, who=None, terminal_first=False):
+    """Keep room lookup canonical while resolving native chats from their execution worktree."""
+    import panel_chats
+    return panel_chats.catalog(repo, ident, who=who, terminal_first=terminal_first,
+                               native_repo=native_repository(repo))
+
+
+def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None, execution_root=None):
+    execution = execution_root or native_repository(repo)
     binary = native_binary(provider)
     if not shutil.which(binary):
         raise ValueError("native provider is not installed")
-    preset = policy()["main"].get(provider, {"model": "provider-default", "effort": "native-settings"})
+    preset = policy()["main"].get(provider, {"model": None if provider == "pi" else "provider-default", "effort": "unknown" if provider == "pi" else "native-settings"})
     room_id = room_id or ensure_room(repo)
+    native_session = str(uuid.uuid4()) if provider == "pi" and not resume else resume
+    if provider == "pi":
+        import panel_chats
+        if not panel_chats.pi_session_storage_safe(execution, create=True):
+            raise ValueError("Pi session storage is not a safe owned directory")
     member = None
     if resume:
         digest = hashlib.sha256(resume.encode("utf-8")).hexdigest()[:32]
@@ -411,25 +593,28 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         # A native user task may reference private files; never copy that text
         # into shared status when it cannot serve as a safe display title.
         label = "Native task not recorded"
-    host_refs = panel_host.refs(repo) if panel_host.herdr_active() else {}
+    host_refs = panel_host.refs(execution) if panel_host.herdr_active() else {}
     started_by = os.environ.pop("OMS_PANEL_STARTED_BY", "")
     if not re.fullmatch(PARTICIPANT, started_by):
         started_by = ""
     attempt = events(repo, "start", "--provider", provider, "--tool", "panel-main",
                      "--ref", "panel_role=main", "--ref", "panel_owner=" + provider,
-                     "--ref", "panel_model=" + (model or preset["model"]),
+                     "--ref", "panel_model=" + ("unknown" if provider == "pi" else model or preset["model"] or "unknown"),
+                     *( ["--ref", "panel_model_source=" + ("requested" if model else "unknown")] if provider == "pi" else []),
+                     *( ["--ref", "panel_model_requested=" + model] if provider == "pi" and model else []),
                      "--ref", "panel_effort=" + (preset["effort"] if not model else "native-settings"),
                      "--ref", "panel_label=" + label,
                      "--ref", "panel_location=repository", "--ref", "panel_room_id=" + room_id,
                      *(["--ref", "panel_started_by=" + started_by] if started_by else []),
                      *(["--ref", "panel_session_digest=" + digest] if resume else []),
+                     *( ["--ref", "panel_session_digest=" + hashlib.sha256(native_session.encode()).hexdigest()[:32]] if provider == "pi" and not resume else []),
                      *(["--ref", "panel_room_participant=" + member] if member else []),
                      *[arg for key, value in host_refs.items() for arg in ("--ref", key + "=" + value)],
                      "--then", "starting", "--then", "working", output=True)
     native_member = member or attempt
     try:
         if not member:
-            room.join(repo, room_id, native_member, provider, "main", model or preset["model"], label, resume)
+            room.join(repo, room_id, native_member, provider, "main", "unknown" if provider == "pi" else model or preset["model"] or "unknown", label, native_session)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         update_activity(repo, "transition", "--attempt", attempt, "--state", "failed", "--actor", "panel-main",
                         "--reason-code", "room_join_failed")
@@ -498,12 +683,20 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                 subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
                                             "@oms_panel_started_by", started_by), check=True)
         context_path = Path(context.name) / "context.txt"
-        context_path.write_text(bootstrap(provider, repo) + room_instructions(room_id, native_member)
-                                + ("\nUser task (data): " + json.dumps(task) if task else ""), encoding="utf-8")
+        context_text = bootstrap(provider, repo) + room_instructions(room_id, native_member)
+        if provider == "pi":
+            context_text = ("Pi is the selected native coding harness; keep model identity separate from harness identity. "
+                            "An explicit model is a request, not evidence of the model Pi served. Leave current model, family, "
+                            "and activity unknown unless Pi reports them with enrolled evidence. A Pi and Codex session do not "
+                            "constitute independent model-family review merely because their harnesses differ. Use Pi's normal "
+                            "tools and project trust behavior; do not auto-approve trust or extensions.\n" + context_text)
+        context_path.write_text(context_text + ("\nUser task (data): " + json.dumps(task, ensure_ascii=False) if task and provider != "pi" else ""),
+                                encoding="utf-8")
         context_path.chmod(0o600)
         launch_inflight = True
-        process = subprocess.Popen(native_command(provider, repo, resume, model, task, room_id, native_member, context_path),
-                                   cwd=str(repo), env=env)
+        process = subprocess.Popen(native_command(provider, repo, native_session if provider == "pi" else resume, model, task, room_id, native_member, context_path,
+                                                  session_id=native_session, execution_root=execution),
+                                   cwd=str(execution), env=env)
         launch_inflight = False
         while True:
             try:
@@ -614,7 +807,12 @@ def continuation(repo, owner, main, task_id, route, brief, env):
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"], capture_output=True,
                           text=True, check=False, stdin=subprocess.DEVNULL).stdout.strip()
     old = last.get("base_sha") or "an earlier commit"
-    patch = call.get("patch")
+    # A digest proves which bytes were recorded, not that the worker call
+    # completed successfully. Only an exact attempt-linked success may expose
+    # a prior patch to the next worker.
+    eligible_result = (call.get("attempt_id") == last.get("attempt_id")
+                       and type(call.get("exit")) is int and call.get("exit") == 0)
+    patch = call.get("patch") if eligible_result else None
     where = ""
     if patch:
         # Absolute machine paths never leave in a prompt (the outbound scrubber refuses them), and the new
@@ -637,7 +835,7 @@ def continuation(repo, owner, main, task_id, route, brief, env):
                     % (old, head, where))
         note = "continuing round %d of %s in its native session" % (len(earlier) + 1, task_id)
     else:
-        summary = clean(str(call.get("answer") or "no summary recorded"), 1500)
+        summary = clean(str(call.get("answer") or "no summary recorded"), 1500) if eligible_result else "no verified summary recorded"
         reason = ("the earlier worker ran on %s, not %s" % (last.get("provider"), route["provider"])
                   if session and last.get("provider") != route["provider"] else
                   "the earlier session is not recorded or no longer on disk")
@@ -713,52 +911,156 @@ def dispatch(repo, owner, role, workload, seat, access, purpose, prompt=None, br
             temporary.unlink()
 
 
-def plan_link(repo, owner, task_id, env, caller):
-    """Move a shared-plan task for the calling main; its workers never claim, so the panel owns the transition."""
+def plan_link(repo, owner, task_id, env, caller, access="read"):
+    """Start a main's owned task; freeze observation without giving its worker plan authority."""
     base = ["bash", str(ENTRY), "agent-plan", "--repo", str(repo)]
     plan_env = dict(env, OMS_ROOM_PARTICIPANT=caller) if caller else dict(env)
-    plan_env.pop("OMS_LEASE_ID", None)
+    for name in ("OMS_LEASE_ID", "OMS_PLAN_LEASE_ID"):
+        plan_env.pop(name, None)
 
     def plan(*args):
         return subprocess.run(base + list(args), capture_output=True, text=True, check=False,
                               stdin=subprocess.DEVNULL, env=plan_env, timeout=60)
 
-    try:
-        shown = plan("show", "--id", task_id)
-        if shown.returncode:
-            return None
-        task = json.loads(shown.stdout)
+    def read_plan():
+        raw = _read(repo, ".oms/plan/tasks.json", 4 * 1024 * 1024, missing=True)
+        if not raw and not (repo / ".oms/plan/tasks.json").exists():
+            return {"tasks": {}}
+        document = json.loads(raw, object_pairs_hook=PlanBinding.unique_fields)
+        if not isinstance(document, dict) or not isinstance(document.get("tasks"), dict):
+            raise ValueError("invalid plan task table")
+        return document
+
+    def snapshot():
+        # The core reader is a compatibility reader; fence unsafe files before invoking it.
+        read_plan()
+        result = plan("evidence-snapshot", "--id", task_id)
+        if result.returncode:
+            # agent_plan_core.get_task/die exits 2; the oms front door appends this usage hint.
+            if (result.returncode == 2 and result.stderr.splitlines() == ["error: no such task: " + task_id,
+                        "hint: run `oms agent-plan --help` for usage"]
+                    and not result.stdout.strip() and task_id not in read_plan()["tasks"]):
+                return None
+            raise ValueError(result.stderr.strip() or "plan snapshot unavailable")
+        task = json.loads(result.stdout, object_pairs_hook=PlanBinding.unique_fields)
+        if (not isinstance(task, dict) or task.get("id") != task_id
+                or task.get("state") not in {"ready", "claimed", "running", "review", "landing", "blocked", "done"}):
+            raise ValueError("invalid plan snapshot")
+        return task
+
+    def unprotected(reason):
+        print("plan %s %s; plan protection is absent" % (task_id, reason), file=sys.stderr)
+
+    task = snapshot()
+    if task is None:
+        unprotected("has no recorded task; panel left it unchanged")
+        return None
+    state, holder = task.get("state"), task.get("claimed_by_participant")
+    if state not in ("ready", "claimed", "running"):
+        unprotected("is %s; panel left it unchanged" % state)
+        if access == "write":
+            raise ValueError("plan task %s is not this main's to run; reopen or claim it before "
+                             "dispatching a write worker" % task_id)
+        return None
+    if state != "ready" and holder != caller:
+        unprotected("is %s by another claimant; panel left it unchanged" % state if holder else
+                    "has an ownerless claim (another claimant); panel left it unchanged")
+        if access == "write":
+            raise ValueError("plan task %s is not this main's to run; reopen or claim it before "
+                             "dispatching a write worker" % task_id)
+        return None
+    ident, attempt = env.get("OMS_ROOM_ID"), env.get("OMS_PANEL_MAIN_ATTEMPT")
+    if not caller or not ident or not attempt:
+        unprotected("has no owned main relationship; panel left it unchanged")
+        if access == "write":
+            raise ValueError("plan task %s is not this main's to run; reopen or claim it before "
+                             "dispatching a write worker" % task_id)
+        return None
+    main = active_mains(repo, ident, room.project(room.records(repo, ident)), owner).get(caller)
+    if not main or main["attempt_id"] != attempt:
+        raise ValueError("plan observation requires the current room main")
+    if state == "ready":
+        result = plan("claim", "--id", task_id, "--provider", owner)
+        if result.returncode:
+            raise ValueError(result.stderr.strip() or "claim failed")
+        task = snapshot()
+        if task is None:
+            raise ValueError("plan task disappeared after claim")
         state, holder = task.get("state"), task.get("claimed_by_participant")
-        if state in ("claimed", "running") and (task.get("provider") != owner or (holder and caller and holder != caller)):
-            print("plan %s is %s by another claimant; panel left it unchanged" % (task_id, state), file=sys.stderr)
-            return False
-        if state not in ("ready", "claimed", "running"):
-            print("plan %s is %s; panel left it unchanged" % (task_id, state), file=sys.stderr)
-            return False
-        if state == "ready":
-            moved = plan("claim", "--id", task_id, "--provider", owner)
-            if moved.returncode:
-                raise ValueError(moved.stderr.strip() or "claim failed")
-            task = json.loads(plan("show", "--id", task_id).stdout)
-            state = "claimed"
-        lease = task.get("lease_id", "")
-        if state == "claimed":
-            moved = plan("start", "--id", task_id, "--lease-id", lease)
-            if moved.returncode:
-                raise ValueError(moved.stderr.strip() or "start failed")
-        print("plan %s running (lease %s): after acceptance oms agent-plan review --id %s --lease-id %s "
-              "--artifact PATH [--patch PATH]; after oms land: oms agent-plan finish --id %s --landed-commit SHA"
-              % (task_id, lease, task_id, lease, task_id), file=sys.stderr)
-        return True
-    except (OSError, ValueError, subprocess.SubprocessError):
-        print("plan %s could not be moved; dispatch continues" % task_id, file=sys.stderr)
-        return False
+    if state not in ("claimed", "running") or holder != caller:
+        raise ValueError("plan claim changed while selecting observation")
+    binding = PlanBinding.parse(json.dumps(dict(plan_id=task.get("plan_id"), task_id=task_id,
+        lease_id=task.get("lease_id"), claim_provider=task.get("provider"), owner_provider=owner,
+        owner_participant=caller, owner_attempt=attempt, room_id=ident)))
+    if task.get("claimed_by_participant") != caller:
+        raise ValueError("plan claimant changed while selecting observation")
+    if task.get("state") == "claimed":
+        result = plan("start", "--id", task_id, "--lease-id", binding.lease_id)
+        if result.returncode:
+            raise ValueError(result.stderr.strip() or "start failed")
+    print("plan %s running (lease %s): after acceptance oms agent-plan review --id %s --lease-id %s "
+          "--artifact PATH [--patch PATH]; after oms land: oms agent-plan finish --id %s --landed-commit SHA"
+          % (task_id, binding.lease_id, task_id, binding.lease_id, task_id), file=sys.stderr)
+    return binding
+
+
+def _read_dispatch_brief(path):
+    """Read a bounded regular brief without following a symlink."""
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise ValueError("brief must be a readable regular file of at most 64 KiB")
+        if info.st_size > MAX_PROMPT or not info.st_mode & 0o444:
+            raise ValueError("brief must be a readable regular file of at most 64 KiB")
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(opened.st_mode) or
+                    (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)):
+                raise ValueError("brief changed while being read")
+            content = handle.read(MAX_PROMPT + 1)
+    except OSError as error:
+        raise ValueError("brief must be a readable regular file of at most 64 KiB") from error
+    if len(content) > MAX_PROMPT:
+        raise ValueError("brief must be a readable regular file of at most 64 KiB")
+    return content
+
+
+def _validate_dry_run_inputs(prompt, brief):
+    """Use the shared outbound scanner before returning any dispatch plan."""
+    if prompt and (len(prompt.encode("utf-8")) > MAX_PROMPT or "\0" in prompt):
+        raise ValueError("prompt exceeds the panel input contract")
+    inputs = []
+    if prompt:
+        inputs.append(prompt.encode("utf-8"))
+    if brief:
+        inputs.append(_read_dispatch_brief(Path(brief)))
+    if not inputs:
+        return
+    with tempfile.TemporaryDirectory(prefix="oms-panel-scan-") as temporary:
+        for index, content in enumerate(inputs):
+            candidate = Path(temporary) / ("input-%d" % index)
+            candidate.write_bytes(content)
+            checked = subprocess.run(
+                ["bash", "-c", '. "$1"; ma_validate_outbound_prompt "$2"',
+                 "oms-outbound-scan", str(OUTBOUND_SCANNER), str(candidate)],
+                stdout=subprocess.DEVNULL, stderr=None, check=False)
+            if checked.returncode:
+                if checked.returncode == 3:
+                    raise ValueError("outbound dispatch input contains sensitive-looking content")
+                raise ValueError("outbound dispatch input could not be validated")
 
 
 def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes):
+    if dry_run:
+        _validate_dry_run_inputs(prompt, brief)
+    if task_id is None:
+        task_id = "panel-" + route["purpose"] + "-" + uuid.uuid4().hex[:8]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id):
+        raise ValueError("invalid task ID")
     argv = routed_command(ENTRY, repo, route, prompt, brief, verify, task_id, resume)
-    plan = {"schema": 1, "kind": "oms-panel-route", "route": route, "argv": argv, "executes": False}
+    plan = {"schema": 1, "kind": "oms-panel-route", "route": route, "task_id": task_id,
+            "argv": argv, "executes": False}
     if scopes:
         if role != "worker" or access != "write":
             raise ValueError("--scope declares a write worker's files; use it with --dispatch worker --access write")
@@ -769,6 +1071,7 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
         return 0
     if not dry_run and not shutil.which(route.get("binary", route["provider"])):
         raise ValueError("%s is not installed; this exact role route cannot run" % route["provider"])
+    execution = native_repository(repo) if role in {"worker", "researcher"} else repo
     env = child_environment(owner, repo)
     parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
     if parent:
@@ -780,20 +1083,17 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
         env["OMS_ROOM_ID"] = moved[0]
     env.pop("OMS_ATTEMPT_ID", None)
     env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE=role,
-               OMS_PANEL_PURPOSE=purpose, OMS_PANEL_WORKLOAD=workload)
+               OMS_PANEL_PURPOSE=route["purpose"], OMS_PANEL_WORKLOAD=route["workload"])
     if label:
         env["OMS_PANEL_LABEL"] = label
     else:
         env.pop("OMS_PANEL_LABEL", None)
-    if task_id:
-        env["OMS_TASK_ID"] = task_id
-    else:
-        env["OMS_TASK_ID"] = "panel-" + purpose + "-" + uuid.uuid4().hex[:8]
+    env["OMS_TASK_ID"] = task_id
     room_id = env.get("OMS_ROOM_ID")
     if main and not room_id:
         raise ValueError("--main needs a room; select it with --room")
     if not room_id and not parent:
-        print("Standalone dispatch: room and main relationship are unrecorded.", file=sys.stderr)
+        print("Standalone dispatch: room and main relationship are unrecorded; plan protection is absent.", file=sys.stderr)
     member = None
     caller = env.get("OMS_ROOM_PARTICIPANT")
     if room_id:
@@ -834,25 +1134,23 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
             if dry_run:
                 print(json.dumps(dict(plan, overlaps=found)))
                 return 0
-        if task_id:
-            linked = plan_link(repo, owner, task_id, env, caller)
-            # A write worker on a plan task this main cannot hold (blocked,
-            # done, another claimant's) would run unbound; refuse before it
-            # joins the room. Read workers only inform and still run.
-            if linked is False and access == "write":
-                raise ValueError("plan task %s is not this main's to run; reopen or claim it before "
-                                 "dispatching a write worker" % task_id)
+    # Observe and claim with the caller's main identity before enrolling a child.
+    # A joined child must never become the apparent owner of its own plan task.
+    binding = plan_link(repo, owner, task_id, env, caller, access)
+    if binding and role in {"worker", "researcher"}:
+        argv += ["--observe-plan-binding", json.dumps(binding._asdict(), separators=(",", ":"))]
+    if room_id:
         member = "call-" + uuid.uuid4().hex[:16]
         room.join(repo, room_id, member, route["provider"], role, route["model"], label or purpose,
                   owns=scopes, parent=caller)
         room.send(repo, room_id, caller, member, "Assigned: " + (label or purpose), "handoff")
         env.update(OMS_ROOM_ID=room_id, OMS_ROOM_PARTICIPANT=member, OMS_ROOM_REPO=str(repo),
                    OMS_ROOM_ADMITTED_PARTICIPANT=member)
-    if task_id and not room_id:
-        plan_link(repo, owner, task_id, env, caller)
+    argv[argv.index("--repo") + 1] = str(execution)
     print("%s / %s -> %s / %s / %s / %s" % (owner, role, route["provider"], route["model"],
-                                            route["effort"] or "native-settings", access), flush=True)
-    status = subprocess.call(argv, cwd=str(repo), env=env)
+                                            route["effort"] or "native-settings", access) +
+          " task_id=" + task_id, flush=True)
+    status = subprocess.call(argv, cwd=str(execution), env=env)
     if member:
         try:
             report = results(repo, env["OMS_TASK_ID"], member)
@@ -1046,7 +1344,7 @@ def panel_environment():
     return ["env"] + [name + "=" + os.environ[name] for name in
                       ("OMS_PANEL_NO_ANIMATION", "OMS_PANEL_COLOR", "NO_COLOR", "OMS_CODEX_NOTIFY", "OMS_CLAUDE_NOTIFY",
                        "OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_PANEL_HOST", "OMS_PANEL_VIEW", "OMS_PANEL_POSITION",
-                       "OMS_PANEL_THEME", "COLORFGBG") if name in os.environ]
+                       "OMS_PANEL_THEME", "COLORFGBG", EXECUTION_ENV) if name in os.environ]
 
 
 def board_view(view):
@@ -1524,7 +1822,7 @@ def panel_mains():
 def add_main_window(repo, session, launch, view, attention_only, env, resume=None, model=None, task=None,
                     started_by=None):
     pane = subprocess.check_output(tmux_command("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "=" + session + ":",
-                                   "-n", launch, "-c", str(repo),
+                                   "-n", launch, "-c", str(native_repository(repo)),
                                    launch_command(repo, session, launch, resume, model, task, started_by)),
                                    env=env, text=True).strip()
     bind_window(pane, launch, view, attention_only)
@@ -1542,7 +1840,7 @@ def live_mains(repo, session, room_id):
                                         "#{@oms_panel_owner}\t#{@oms_panel_room}\t#{@oms_panel_room_participant}"),
                            capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
     windows = [r for r in (line.replace("\r", "").split("\t") for line in found.stdout.splitlines())
-               if len(r) == 3 and r[0] in PROVIDERS]
+            if len(r) == 3 and r[0] in NATIVE_HARNESSES]
     live = set()
     for ident in sorted({room_id} | {r[1] for r in windows if r[1]}):
         try:
@@ -1566,6 +1864,8 @@ def spawn_main(repo, provider, task=None, model=None, started_by=None):
     """Add a main window to this checkout's existing panel without attaching or taking focus."""
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
         raise ValueError("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
+    if provider == "pi":
+        require_pi_cli()
     if not shutil.which("tmux") or not shutil.which(native_binary(provider)):
         raise ValueError("starting a main needs tmux and the %s CLI on PATH" % provider)
     if started_by is not None and not re.fullmatch(PARTICIPANT, started_by):
@@ -1680,7 +1980,7 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
             else:
                 shell = panel_shell(repo, session, view, attention_only)
             pane = subprocess.check_output(tmux_command("new-session", "-d", "-P", "-F", "#{pane_id}",
-                                          "-s", session, "-n", launch or "control", "-c", str(repo), shell), env=env, text=True).strip()
+                                          "-s", session, "-n", launch or "control", "-c", str(native_repository(repo)), shell), env=env, text=True).strip()
             created = "session"
             subprocess.run(tmux_command("set-environment", "-t", "=" + session,
                                         "OMS_PANEL_SESSION", session), check=True)
@@ -1729,21 +2029,22 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
 
 
 def open_native(provider, repo, resume=None, model=None, task=None, view="auto", attention_only=False):
+    execution = native_repository(repo)
     if not shutil.which(native_binary(provider)):
         raise ValueError("%s is not installed on PATH" % provider)
     session = os.environ.get("OMS_PANEL_SESSION", "")
     if panel_host.herdr_active() and os.environ.get("OMS_PANEL_HOST") != "inline":
         os.environ["OMS_ROOM_ID"] = ensure_room(repo)
-        native = ["bash", str(ROOT / "scripts" / "panel.sh"), "--repo", str(repo),
+        native = ["bash", str(ROOT / "scripts" / "panel.sh"), "--repo", str(execution),
                   "--host", "herdr", "--layout", "inline", "--launch", provider]
         for flag, value in (("--resume", resume), ("--model", model), ("--task", task)):
             if value:
                 native += [flag, value]
-        watcher = ["bash", str(ENTRY), "panel", "--repo", str(repo), "--host", "herdr",
+        watcher = ["bash", str(ENTRY), "panel", "--repo", str(execution), "--host", "herdr",
                    "--watch", "--owner", provider]
         if attention_only:
             watcher.append("--attention-only")
-        panel_host.open_native(repo, provider, native, watcher)
+        panel_host.open_native(execution, provider, native, watcher)
         return 0
     if os.environ.get("TMUX") and re.fullmatch(PANEL_SESSION, session):
         command = panel_environment() + ["bash", str(ROOT / "scripts" / "panel.sh"), "--repo", str(repo),
@@ -1757,7 +2058,7 @@ def open_native(provider, repo, resume=None, model=None, task=None, view="auto",
         # A new window preserves existing sessions, including active tool loops.
         window = subprocess.check_output(
             tmux_command("new-window", "-P", "-F", "#{pane_id}", "-t", session,
-                         "-n", provider, "-c", str(repo), shell_command(command)), text=True,
+                         "-n", provider, "-c", str(execution), shell_command(command)), text=True,
         ).strip()
         subprocess.run(tmux_command("set-option", "-w", "-t", window,
                                     "@oms_panel_owner", provider), check=True)
@@ -1992,7 +2293,7 @@ def frame_view(repo, provider, state, previous=None, menu=True, main_attempt=Non
         from panel_view import clipped
         text = "\n".join(clipped(line, size.columns) for line in
                          ("OMS / Loading work room...", "Keys remain available while status loads")[:max(0, size.lines)])
-    elif navigation is not None and navigation.get("detail"):
+    elif navigation is not None and navigation.get("detail") and not refresh_failed(state):
         from panel_tree import render_detail
         text = render_detail(state, navigation["detail"], size.columns, size.lines, navigation, managed_session())
     else:
@@ -2141,7 +2442,8 @@ def navigate(repo, action, state, navigation, width):
     if kind == "chat":
         import panel_chats
         opened = panel_chats.open_chat(repo, room_id, ident,
-            allowed_methods={"existing-terminal", "app-uri", "windows-uri"})
+            allowed_methods={"existing-terminal", "app-uri", "windows-uri"},
+            native_repo=native_repository(repo))
         navigation["notice"] = "Chat navigation requested " + {"existing-terminal": "in its window", "app-uri": "in the app",
                                                                   "windows-uri": "in the app"}.get(opened["method"], "")
     elif kind in {"result", "debate"}:
@@ -2642,7 +2944,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
         if expanded == enabled:
             return
         if panel_host.herdr_active():
-            panel_host.current(repo)
+            panel_host.current(native_repository(repo))
             panel_host.zoom(enabled)
         elif managed_session():
             # resize-pane -Z toggles; the person may have unzoomed with prefix+z or by selecting another pane.
@@ -2999,7 +3301,7 @@ def browse_chats(repo):
     if not ident:
         raise ValueError("select an existing room first")
     while True:
-        report = panel_chats.catalog(repo, ident)
+        report = chat_catalog(repo, ident)
         print(panel_chats.text(report))
         choice = read_field("Chat number (a<number> for Codex app, Enter to return): ", required=False)
         if not choice:
@@ -3018,7 +3320,8 @@ def browse_chats(repo):
             print(render_results(evidence, shutil.get_terminal_size().columns))
         else:
             try:
-                request = panel_chats.open_chat(repo, ident, row["participant"], surface="app" if app else "auto")
+                request = panel_chats.open_chat(repo, ident, row["participant"], surface="app" if app else "auto",
+                                                native_repo=native_repository(repo))
                 print("Chat navigation requested: " + request["method"])
             except ValueError as error:
                 print(clean(str(error), 180))
@@ -3160,6 +3463,20 @@ def interactive(repo, view="auto", attention_only=False):
                     previous = "detached; existing sessions preserved"
                     continue
                 return 0
+            if choice == "s":
+                pane = os.environ.get("TMUX_PANE", "")
+                if not os.environ.get("TMUX") or not re.fullmatch(r"%[0-9]+", pane):
+                    raise ValueError("terminals and jobs require a tmux pane")
+                result = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{session_id}"),
+                                        capture_output=True, text=True, check=False, timeout=3,
+                                        stdin=subprocess.DEVNULL)
+                origin_session = result.stdout.replace("\r", "").strip()
+                if result.returncode or not re.fullmatch(r"\$[0-9]+", origin_session):
+                    raise ValueError("could not prove the current tmux session")
+                import panel_workspaces
+                panel_workspaces.open_workspace(repo, origin_session)
+                previous = "terminals and jobs opened in a separate workspace"
+                continue
             if choice in ("1", "2", "3"):
                 selected = PROVIDERS[int(choice) - 1] if choice != "3" else read_field("Provider (codex/claude or opted-in native adapter): ")
                 if selected not in PROVIDERS:
@@ -3190,7 +3507,7 @@ def interactive(repo, view="auto", attention_only=False):
                 os.environ["OMS_ROOM_ID"] = panel_room(repo, title=title)
                 status = open_native(provider, repo, task=task, view=view, attention_only=attention_only)
                 previous = "%s task opened / exit=%s" % (provider, status)
-            elif choice in ("5", "6", "7", "a", "p"):
+            elif choice in ("5", "6", "7", "a", "p", "e"):
                 target = model = effort = None
                 explicit = choice == "p"
                 if explicit:
@@ -3214,7 +3531,7 @@ def interactive(repo, view="auto", attention_only=False):
                     effort = read_field("Effort (low/medium/high, Enter for native settings): ", required=False) or None
                     if effort not in (None, "low", "medium", "high"):
                         raise ValueError("choose a supported effort level")
-                action = {"5": "ask", "6": "delegate", "7": "review", "a": "advisor"}[choice]
+                action = {"5": "ask", "6": "delegate", "7": "review", "a": "advisor", "e": "research"}[choice]
                 prompt = brief = verify = None
                 if action == "delegate":
                     brief = Path(read_field("Scoped brief file: ")).expanduser()
@@ -3227,12 +3544,12 @@ def interactive(repo, view="auto", attention_only=False):
                     prompt = read_field("Question / review task: ")
                 if action in ("delegate", "review"):
                     verify = read_field("Verification command: ")
-                role = "advisor" if choice == "a" else "reviewer" if choice == "7" else "worker"
-                purpose = {"5": "explain", "6": "implement", "7": "review", "a": "advise"}[choice]
+                role = "researcher" if choice == "e" else "advisor" if choice == "a" else "reviewer" if choice == "7" else "worker"
+                purpose = {"5": "explain", "6": "implement", "7": "review", "a": "advise", "e": "research"}[choice]
                 workload = (read_field("Workload (light/routine/main) [routine]: ", required=False) or "routine"
                             if role == "worker" and not explicit else "routine")
                 seat = (read_field("Seat (auto/astra/fable) [auto]: ", required=False) or "auto"
-                        if role != "worker" and not explicit else "auto")
+                        if role in {"advisor", "reviewer"} and not explicit else "auto")
                 main = pick_main(repo, provider)
                 status = dispatch(repo, provider, role, workload, seat, "write" if choice == "6" else "read",
                                   purpose, prompt, brief, verify, target=target, model=model, effort=effort, main=main)
@@ -3286,7 +3603,7 @@ def interactive(repo, view="auto", attention_only=False):
                 delivered = retry_delivery(repo, task_id)
                 previous = "app delivery: " + delivered["receipt"]["status"]
             elif choice != "9":
-                raise ValueError("choose 1-9, t, a, p, c, r, h, f, n, o, g, v, b or q")
+                raise ValueError("choose 1-9, t, a, p, c, r, h, f, n, o, g, v, b, s, e or q")
         except EOFError:
             return 0
         except NativeShutdown:
@@ -3298,6 +3615,16 @@ def interactive(repo, view="auto", attention_only=False):
 
 
 def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] in ("terminal", "job"):
+        backend_name = "panel_terminals" if arguments[0] == "terminal" else "panel_jobs"
+        try:
+            backend = __import__(backend_name)
+        except ImportError as error:
+            print("error: %s backend is unavailable: %s" % (arguments[0], error), file=sys.stderr)
+            return 2
+        return backend.cli_main(arguments[1:])
+
     parser = argparse.ArgumentParser(description="OMS terminal control panel with registered CLI peers.")
     parser.add_argument("--repo", default=os.getcwd())
     parser.add_argument("--layout", choices=("auto", "inline", "split"), default="auto")
@@ -3327,7 +3654,7 @@ def main(argv=None):
     parser.add_argument("--attention-only", action="store_true", help="show only calls awaiting action in the menu or --watch")
     parser.add_argument("--routes", action="store_true", help="show the panel role policy without calling models")
     parser.add_argument("--task", help="task for the native main (requires --launch)")
-    parser.add_argument("--dispatch", choices=("worker", "advisor", "reviewer"), help="run one bounded role task")
+    parser.add_argument("--dispatch", choices=("worker", "advisor", "reviewer", "researcher"), help="run one bounded role task")
     parser.add_argument("--main", help="room participant of the active main that owns this dispatch")
     parser.add_argument("--scope", action="append", metavar="PATH",
                         help="repeatable repo-relative scope a write worker declares; overlaps warn, never lock")
@@ -3348,7 +3675,7 @@ def main(argv=None):
     parser.add_argument("--workload", choices=("light", "routine", "main"), default="routine")
     parser.add_argument("--seat", choices=("auto", "astra", "fable"), default="auto")
     parser.add_argument("--access", choices=("read", "write"), default="read")
-    parser.add_argument("--purpose", choices=("explain", "investigate", "implement", "review", "advise"))
+    parser.add_argument("--purpose", choices=("explain", "investigate", "implement", "review", "advise", "research"))
     parser.add_argument("--prompt", help="bounded read task for --dispatch")
     parser.add_argument("--brief-file", help="scoped task brief for --dispatch")
     parser.add_argument("--continue", dest="continue_task", metavar="TASK_ID",
@@ -3357,7 +3684,7 @@ def main(argv=None):
     parser.add_argument("--task-id", help="existing plan/task identifier for the worker")
     parser.add_argument("--label", help="short task title for the role board")
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.request_close, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.finalize, args.retry_delivery, args.providers,
                                      args.chats, args.open_chat)) > 1:
@@ -3433,11 +3760,19 @@ def main(argv=None):
     if args.dispatch:
         try:
             owner = args.owner or os.environ.get("OMS_AGENT", "codex")
-            purpose = args.purpose or {"worker": "explain", "advisor": "advise", "reviewer": "review"}[args.dispatch]
+            purpose = args.purpose or {
+                "worker": "implement" if args.access == "write" else "explain",
+                "advisor": "advise", "reviewer": "review", "researcher": "research",
+            }[args.dispatch]
             route = selected_route(owner, args.dispatch, args.workload, args.seat, args.access, purpose,
                                    args.to, args.model, args.reasoning_effort)
             # A prompt-less advisor call asks its single question interactively before routing.
             pending = args.dispatch == "advisor" and not (args.prompt or args.brief_file or args.dry_run)
+            if args.brief_file:
+                brief_path = Path(args.brief_file).expanduser()
+                if not brief_path.is_absolute():
+                    brief_path = Path(args.repo).expanduser() / brief_path
+                _read_dispatch_brief(brief_path)
             routed_command(ENTRY, args.repo, route, "pending question" if pending else args.prompt,
                            args.brief_file, args.verify, args.task_id)
         except (ValueError, OSError) as error:
@@ -3454,7 +3789,7 @@ def main(argv=None):
         parser.error("--reopen restores a tmux board; omit JSON, dry-run and non-tmux hosts")
     if args.json and args.dry_run and not args.open_chat:
         parser.error("choose --json or --dry-run")
-    if args.resume and not re.fullmatch(SESSION_ID, args.resume):
+    if args.resume and not re.fullmatch(PI_SESSION_ID if args.launch == "pi" else SESSION_ID, args.resume):
         parser.error("invalid exact session ID")
     if args.model and (args.model.startswith("-") or len(args.model) > 160
                        or not re.fullmatch(r"[A-Za-z0-9_./:-]+", args.model)):
@@ -3467,6 +3802,10 @@ def main(argv=None):
         parser.error("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
     try:
         repo = repository(args.repo)
+        requested_worktree = work_repository(args.repo)
+        if requested_worktree != repo:
+            os.environ[EXECUTION_ENV] = str(requested_worktree)
+        execution = native_repository(repo)
         position = args.position or os.environ.get("OMS_PANEL_POSITION", "auto")
         if position not in {"auto", "top", "left", "side"}:
             raise ValueError("panel position must be auto, top, left or side")
@@ -3474,7 +3813,7 @@ def main(argv=None):
         if args.host != "auto":
             os.environ["OMS_PANEL_HOST"] = args.host
         if args.host == "herdr" and not (args.json or args.dry_run):
-            panel_host.current(repo)
+            panel_host.current(execution)
         if args.host == "tmux" and args.layout == "inline":
             raise ValueError("--host tmux conflicts with --layout inline")
         if args.room:
@@ -3491,15 +3830,18 @@ def main(argv=None):
             ident = args.room or os.environ.get("OMS_ROOM_ID")
             if not ident:
                 raise ValueError("select an existing room first")
-            report = (panel_chats.catalog(repo, ident) if args.chats else
-                      panel_chats.open_chat(repo, ident, args.open_chat, args.chat_surface, args.dry_run))
+            report = (chat_catalog(repo, ident) if args.chats else
+                      panel_chats.open_chat(repo, ident, args.open_chat, args.chat_surface, args.dry_run,
+                                            native_repo=native_repository(repo)))
             print(panel_chats.text(report) if args.chats and not args.json else json.dumps(report, ensure_ascii=False, indent=2))
             return 0
-        if args.launch and args.launch not in PROVIDERS:
+        if args.launch and args.launch not in NATIVE_HARNESSES:
             args.launch = provider_catalog(args.launch)[0]["provider"]
             native_binary(args.launch)
+        if args.launch == "pi" and not args.dry_run:
+            require_pi_cli()
         if args.spawn_main:
-            if args.spawn_main not in PROVIDERS:
+            if args.spawn_main not in NATIVE_HARNESSES:
                 args.spawn_main = provider_catalog(args.spawn_main)[0]["provider"]
             report = spawn_main(repo, args.spawn_main, args.task, args.model,
                                 os.environ.get("OMS_ROOM_PARTICIPANT") or None)
@@ -3519,6 +3861,8 @@ def main(argv=None):
             rows = provider_catalog()
             if args.json:
                 print(json.dumps({"schema": 1, "kind": "oms-panel-providers", "providers": rows,
+                                  "native_harnesses": [{"provider": name, "automatic_main": name in PROVIDERS,
+                                                        "hook_capable": name in PROVIDERS} for name in NATIVE_HARNESSES],
                                   "executes": False}, ensure_ascii=False, indent=2))
             else:
                 show_providers(rows)
@@ -3549,13 +3893,15 @@ def main(argv=None):
             if brief:
                 if not brief.is_absolute():
                     brief = repo / brief
+                _read_dispatch_brief(brief)
                 brief = brief.resolve(strict=True)
-                if not brief.is_file() or brief.stat().st_size > MAX_PROMPT:
-                    raise ValueError("brief must be a regular file of at most 64 KiB")
             if args.prompt and (len(args.prompt.encode("utf-8")) > MAX_PROMPT or "\0" in args.prompt):
                 raise ValueError("prompt exceeds the panel input contract")
             owner = args.owner or os.environ.get("OMS_AGENT", "codex")
-            purpose = args.purpose or {"worker": "explain", "advisor": "advise", "reviewer": "review"}[args.dispatch]
+            purpose = args.purpose or {
+                "worker": "implement" if args.access == "write" else "explain",
+                "advisor": "advise", "reviewer": "review", "researcher": "research",
+            }[args.dispatch]
             asked = args.dispatch == "advisor" and not (args.prompt or brief or args.dry_run)
             if asked:
                 if not sys.stdin.isatty():
@@ -3584,6 +3930,7 @@ def main(argv=None):
             print(json.dumps({"schema": 1, "kind": "oms-panel", "dashboard": state,
                               "providers": {name: {"installed": bool(shutil.which(name))}
                                             for name in PROVIDERS},
+                              "native_harnesses": list(NATIVE_HARNESSES),
                               "split_available": bool(shutil.which("tmux")),
                               "routing": policy(),
                               "coverage": "OMS records; native sessions are separate"}))

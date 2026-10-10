@@ -496,6 +496,8 @@ test_delegate_marker_set_lock_does_not_grow_per_run() {
   mkdir -p "$bin_dir" "$home_dir"
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) echo 'fixture --effort low medium high'; exit 0 ;; esac
+if [ -n "${LEASE_NEGATIVE_STARTED:-}" ]; then printf 'started\n' > "$LEASE_NEGATIVE_STARTED"; fi
 cat >/dev/null
 printf 'worker edit\n' >> file.txt
 echo done
@@ -533,6 +535,109 @@ EOF
   [ -z "$(find "$lock_dir" -maxdepth 1 -type f \
     -name '*.json.*.lock' -print -quit 2>/dev/null)" ] ||
     fail "gc left a permanent per-marker flock inode"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" OMS_LOCK_DIR="$lock_dir" \
+    PATH="$bin_dir:/usr/bin:/bin" python3 - "$ROOT" "$project" <<'OBSERVATION'
+import os, sys, json, subprocess
+from pathlib import Path
+from unittest.mock import patch
+root, repo = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root / "scripts/lib"))
+import terminal_panel as panel
+import room
+env = {k: v for k, v in os.environ.items() if not k.startswith(("OMS_PANEL_", "OMS_ROOM_", "OMS_DL_", "OMS_OBSERVER_", "OMS_OBSERVE_PLAN_"))
+       and k not in {"OMS_STATE_REPO", "OMS_PLAN_LEASE_ID", "OMS_ATTEMPT_ID", "OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH"}}
+env.update(OMS_AGENT="claude", OMS_CAPABILITY_SKIP_MODELS="1", OMS_ROLE_ROUTING="0")
+entry = ["bash", str(root / "scripts/oms")]
+plan = entry + ["agent-plan", "--repo", str(repo)]
+def run(argv, use_env=None, ok=True):
+    result = subprocess.run(argv, cwd=repo, env=use_env or env, capture_output=True, text=True, timeout=30)
+    if ok:
+        assert result.returncode == 0, (argv, result.returncode, result.stdout, result.stderr)
+    return result
+with patch.dict(os.environ, env, clear=True):
+    ident = room.create(repo, "lease-observation-negative", "Observation boundary")
+    main = "lease-main"
+    attempt = run(entry + ["agent-events", "--repo", str(repo), "start", "--provider", "claude", "--tool", "panel-main",
+                          "--ref", "panel_role=main", "--ref", "panel_room_id=" + ident,
+                          "--ref", "panel_room_participant=" + main, "--then", "starting", "--then", "working"]).stdout.strip()
+    room.join(repo, ident, main, "claude", "main")
+    room.join(repo, ident, "lease-child", "codex", "worker", "gpt-6-luna", parent=main)
+env.update(OMS_ROOM_ID=ident, OMS_ROOM_REPO=str(repo), OMS_ROOM_PARTICIPANT=main, OMS_PANEL_MAIN_ATTEMPT=attempt)
+run(plan + ["init", "--goal", "Validated observation"])
+run(plan + ["add", "--id", "lease-bound", "--title", "Bound task", "--assignment",
+            json.dumps(dict(provider="codex", model="gpt-6-luna", reasoning_effort="low"))])
+run(plan + ["claim", "--id", "lease-bound", "--provider", "claude"])
+def current():
+    task = json.loads(run(plan + ["evidence-snapshot", "--id", "lease-bound"]).stdout)
+    return dict(plan_id=task["plan_id"], task_id=task["id"], lease_id=task["lease_id"], claim_provider=task["provider"],
+                owner_provider="claude", owner_participant=main, owner_attempt=attempt, room_id=ident)
+started = repo / "observer-provider-started"
+child_env = dict(env, OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE="worker", OMS_ROOM_PARTICIPANT="lease-child",
+                 OMS_ROOM_ADMITTED_PARTICIPANT="lease-child", LEASE_NEGATIVE_STARTED=str(started))
+peer = ["bash", str(root / "scripts/peer-delegate.sh"), "--repo", str(repo), "--to", "codex", "--model", "gpt-6-luna",
+        "--reasoning-effort", "low", "--prompt", "Inspect file.txt.", "--task-id", "lease-bound", "--no-verify"]
+def refuse(binding, extra=(), use_env=None, contains=None):
+    result = run(peer + ["--observe-plan-binding", binding] + list(extra), use_env or child_env, ok=False)
+    assert result.returncode != 0 and not started.exists(), (binding, result.stdout, result.stderr)
+    assert not list((repo / ".oms/delegations").glob("*.json"))
+    if contains:
+        assert contains in result.stderr, result.stderr
+binding = current()
+for raw in ("{}", "[]", "null", "{", "z" * 4097, json.dumps(binding)[:-1] + ',"task_id":"lease-bound"}',
+            json.dumps(dict(binding, lease_id="lease_" + "0" * 32)), json.dumps(dict(binding, plan_id="plan_" + "0" * 32)),
+            json.dumps(dict(binding, task_id="lease-bound; printf injected")), json.dumps(dict(binding, room_id="foreign")),
+            json.dumps(dict(binding, claim_provider="claude")), json.dumps(dict(binding, owner_provider="codex")),
+            json.dumps(dict(binding, owner_attempt="att_" + "0" * 32)), json.dumps(dict(binding, injected=True))):
+    refuse(raw)
+refuse(json.dumps(binding), ["--observe-plan-binding", json.dumps(binding)], contains="duplicate --observe-plan-binding")
+refuse(json.dumps(binding), ["--plan-task", "lease-bound"], contains="excludes plan-task")
+refuse(json.dumps(binding), use_env=dict(child_env, OMS_ROOM_ADMITTED_PARTICIPANT="foreign-child"))
+refuse(json.dumps(binding), use_env=dict(child_env, OMS_ROOM_REPO=str(repo.parent)))
+# Private hostile plan bytes, never shared control state.
+path = repo / ".oms/plan/tasks.json"
+original = path.read_bytes()
+for invalid in ("ownerless", "duplicate", "symlink", "hardlink", "oversize", "provider", "model", "reasoning_effort"):
+    backup = path.with_name("lease-fixture-backup")
+    backup.write_bytes(original)
+    try:
+        data = json.loads(original)
+        if invalid == "ownerless":
+            data["tasks"]["lease-bound"].pop("claimed_by_participant")
+            path.write_text(json.dumps(data))
+        elif invalid == "duplicate":
+            path.write_text(original.decode().rstrip()[:-1] + ',"plan_id":"' + binding["plan_id"] + '"}')
+        elif invalid in ("symlink", "hardlink"):
+            path.unlink()
+            if invalid == "symlink": path.symlink_to(backup.name)
+            else: os.link(backup, path)
+        elif invalid == "oversize": path.write_bytes(b" " * (4 * 1024 * 1024 + 1))
+        else:
+            data["tasks"]["lease-bound"]["assignment"][invalid] = {"provider":"claude", "model":"gpt-6-astra", "reasoning_effort":"high"}[invalid]
+            path.write_text(json.dumps(data))
+        refuse(json.dumps(binding), contains="assignment mismatch" if invalid in ("provider", "model", "reasoning_effort") else None)
+    finally:
+        path.unlink(); backup.unlink(); path.write_bytes(original)
+# Freeze a production panel snapshot, replace its lease via the API, then run the actual peer command.
+real_launch = subprocess.call
+def replace_before_launch(argv, **kwargs):
+    frozen = json.loads(argv[argv.index("--observe-plan-binding") + 1])
+    run(plan + ["release", "--id", "lease-bound", "--lease-id", frozen["lease_id"]])
+    run(plan + ["claim", "--id", "lease-bound", "--provider", "claude"])
+    assert current()["lease_id"] != frozen["lease_id"]
+    kwargs["env"] = dict(kwargs["env"], LEASE_NEGATIVE_STARTED=str(started))
+    return real_launch(argv, **kwargs)
+brief = repo / "lease-brief.md"
+brief.write_text("Inspect file.txt without edits; return evidence.\n")
+with patch.dict(os.environ, env, clear=True), patch.object(panel.subprocess, "call", side_effect=replace_before_launch):
+    assert panel.dispatch(repo, "claude", "worker", "light", "auto", "write", "implement", brief=brief,
+                          verify=":", task_id="lease-bound") != 0
+assert not started.exists()
+run(entry + ["agent-events", "--repo", str(repo), "transition", "--attempt", attempt,
+             "--state", "cancelled", "--reason-code", "fixture-terminal"])
+refuse(json.dumps(current()), contains="main/room/admitted child mismatch")
+print("observation negatives: malformed/duplicate/stale/foreign/injected/unsafe plan/assignment and real panel replacement barrier passed")
+OBSERVATION
+
 }
 
 setup_doctor_home() {
@@ -1702,6 +1807,33 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
     fail "a parent's scratch plan claim failed"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id from-scratch | grep -q '"state": "claimed"' &&
     [ ! -e "$scratch/.oms/plan/tasks.json" ] || fail "a parent's scratch plan write must land in the main checkout's plan"
+  $parent python3 - "$ROOT/scripts/agent-plan.sh" "$scratch" "$main" <<'PYMARKER' ||
+    fail "a scratch TTL view ignored the shared plan's live exact marker"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+cli, scratch, main = sys.argv[1:]
+def invoke(*args):
+    return subprocess.run(["bash", cli, "--repo", scratch, *args], text=True,
+                          capture_output=True, check=True).stdout
+invoke("add", "--id", "live-shared", "--title", "shared marker")
+invoke("claim", "--id", "live-shared", "--provider", "codex", "--ttl", "0")
+lease = json.loads(invoke("show", "--id", "live-shared"))["lease_id"]
+markers = Path(main) / ".oms/delegations"
+markers.mkdir()
+row = dict(schema=3, id="shared-live", pid=os.getpid(), task_id="live-shared", lease_id=lease)
+if os.name == "nt":
+    row.update(native_pid=os.getpid(), native_pid_source="msys-proc-v1")
+marker = markers / "shared-live.json"
+marker.write_text(json.dumps(row))
+assert not json.loads(invoke("show", "--id", "live-shared"))["claim_expired"]
+assert "live-shared" not in invoke("ready").split()
+invoke("reclaim")
+assert json.loads(invoke("show", "--id", "live-shared"))["lease_id"] == lease
+marker.unlink()
+PYMARKER
   # patch-land from the scratch applies there, but its landing row, frozen patch and plan finish
   # use the main checkout; a relative review patch resolves against the plan's checkout.
   $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" add --id landed --title t \
@@ -5885,6 +6017,881 @@ assert s["stale_review"] == [], s
   [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "out-of-scope proof changed plan"
   "$SH" --repo "$d" finish --id scoped --landed-commit "$inside" >/dev/null ||
     fail "commit finish must accept a landing that touches allowed_paths"
+  # Local completion uses typed lifecycle/index producers and an actual
+  # admitted landing. Self-reported exit/landing labels are not fixtures.
+  local completion_repo="$TMP/completion-contract"
+  make_committed_repo "$completion_repo"
+  python3 - "$ROOT" "$completion_repo" <<'PY' || fail "typed local completion contract failed"
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import runpy
+import stat
+import subprocess
+import sys
+import time
+import shutil
+root, repo = map(Path, sys.argv[1:])
+engine = runpy.run_path(str(root / 'scripts/lib/plan-receipt.py'))
+plan_path = repo / '.oms/plan/tasks.json'
+env = dict(os.environ)
+for name in list(env):
+    if name.startswith('OMS_'):
+        env.pop(name)
+env['OMS_LOCK_DIR'] = str(repo / '.oms/private-fixture-locks')
+
+def call(script, *args, extra=None, ok=True):
+    result = subprocess.run(['bash', str(root / 'scripts' / script), '--repo', str(repo), *args],
+                            env=dict(env, **(extra or {})), stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=40)
+    if ok and result.returncode:
+        raise AssertionError((args, result.returncode, result.stderr.decode()))
+    if not ok and not result.returncode:
+        raise AssertionError(('accepted invalid completion', args))
+    return (result.stdout + (result.stderr if not ok else b'')).decode().strip()
+
+def ap(*args, **kwargs):
+    return call('agent-plan.sh', *args, **kwargs)
+
+def h(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+def ref(path):
+    return {'path': path, 'sha256': h((repo / path).read_bytes())}
+
+def entry(path):
+    target = repo / path
+    if not target.exists():
+        return {'path': path, 'state': 'absent', 'mode': None, 'sha256': None}
+    return dict(ref(path), state='file', mode='100755' if target.stat().st_mode & stat.S_IXUSR else '100644')
+
+def plan():
+    return json.loads(plan_path.read_bytes())
+
+def index():
+    return [json.loads(line) for line in (repo / '.oms/artifacts/index.jsonl').read_bytes().splitlines()]
+
+def register(kind, task, artifact, attempt='', patch='', base=''):
+    extra = dict(env, OMS_TASK_ID=task, OMS_INDEX_PLAN_ID=plan()['plan_id'],
+                 OMS_ATTEMPT_ID=attempt, OMS_INDEX_BASE_SHA=base)
+    result = subprocess.run(['bash', '-c', '. "$1"; ma_append_artifact_index "$2" "$3" codex 0 "$4" "$5"',
+                             'fixture', str(root / 'scripts/lib/peer-common.sh'), str(repo), kind,
+                             str(repo / artifact), str(repo / patch) if patch else ''],
+                            env=extra, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    assert result.returncode == 0, result.stderr
+    return index()[-1]
+
+ap('init', '--goal', 'typed local completions', '--accept', 'printf accepted > .oms/acceptance-ran')
+(repo / 'verify.sh').write_text("test -s file.txt\nprintf '%s\\n' 'bounded verifier output'\n")
+(repo / 'obsolete.txt').write_text('Old product to delete\n')
+subprocess.run(['git', '-C', str(repo), 'add', 'verify.sh', 'obsolete.txt'], check=True)
+subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'fixture verifier'], env=env, check=True)
+base = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
+room = json.loads(call('room.sh', 'new', '--topic', 'Private completion fixture', '--json'))['id']
+# Native initial enrollment uses the new attempt ID and omits the ref.
+main = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
+            '--ref', 'panel_room_id=' + room, '--ref', 'panel_role=main',
+            '--then', 'starting', '--then', 'working')
+participant = main
+call('room.sh', 'join', '--id', room, '--participant', participant, '--provider', 'codex', '--role', 'main')
+
+env.update(OMS_ROOM_ID=room, OMS_ROOM_PARTICIPANT=participant, OMS_PANEL_MAIN_ATTEMPT=main)
+counter = 0
+def setup(command='bash verify.sh', empty_verify=False, claim_provider='codex'):
+    global counter
+    read_base = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
+    counter += 1
+    tid = 'research%d' % counter
+    ap('add', '--id', tid, '--title', 'Inspect all original obligations', '--allowed', 'file.txt,verify.sh',
+       '--verify', '' if empty_verify else command,
+       '--assignment', json.dumps({'provider': claim_provider, 'workload': 'routine'}))
+    ap('claim', '--id', tid, '--provider', 'codex',
+       extra={'OMS_PANEL_MAIN_ATTEMPT': main, 'OMS_ROOM_PARTICIPANT': participant})
+    artifact = '.oms/artifacts/research/%s.md' % tid
+    (repo / artifact).parent.mkdir(parents=True, exist_ok=True)
+    read_result = subprocess.run(['bash', '-c', 'cat file.txt verify.sh'], cwd=str(repo),
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    assert read_result.returncode == 0, read_result.stderr
+    (repo / artifact).write_bytes(read_result.stdout)
+    attempt = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'peer-ask',
+                   '--task-id', tid, '--parent-attempt-id', main, '--ref', 'panel_access=read',
+                   '--then', 'starting', '--then', 'working')
+    call('agent-events.sh', 'transition', '--attempt', attempt, '--state', 'verifying',
+         '--then', 'review', '--then', 'done')
+    ancillary = '.oms/artifacts/research/%s.patch' % tid
+    (repo / ancillary).write_bytes(b'')
+    row = register('ask', tid, artifact, attempt, patch=ancillary, base=read_base[:7])
+    ap('review', '--id', tid, '--artifact', artifact)
+    current = plan()
+    task = current['tasks'][tid]
+    bundle = {'schema': 1, 'kind': 'research-accepted', 'plan_id': current['plan_id'], 'task_id': tid,
+              'task_sha256': engine['digest'](task), 'plan_sha256': h(plan_path.read_bytes()),
+              'state': task['state'], 'lease_id': task['lease_id'],
+              'owner': {'provider': task['provider'], 'participant': participant, 'parent_provider': 'codex'},
+              'original_contract': engine['projection'](task), 'review_summary': 'Reviewed full original task contract',
+              'reviewed_obligations': ['inspect'], 'requirements': [
+                  {'id': 'inspect', 'obligation': task['title'], 'deliverable': 'Complete source findings',
+                   'source_paths': ['file.txt', 'verify.sh'], 'evidence': [ref(artifact)]}],
+              'base_commit': read_base, 'source_envelope': ['file.txt', 'verify.sh'],
+              'source_manifest': [entry('file.txt'), entry('verify.sh')],
+              'verifier': {'command': command, 'files': [entry('verify.sh')],
+                           'adopted': empty_verify, 'review_summary': 'Reviewed verifier and actual frozen inputs'},
+              'research': {'classification': 'research-only', 'artifact': ref(artifact),
+                           'index_event_id': row['event_id'], 'attempt_id': attempt, 'parent_attempt_id': main}}
+    for script in ('drift.py', 'source-drift.sh', 'append-proof.py'):
+        if script in command:
+            bundle['source_envelope'].append(script)
+            bundle['source_manifest'].append(entry(script))
+            bundle['verifier']['files'].append(entry(script))
+    bundle['legacy_adoption'] = {'artifact': ref(artifact), 'original_contract': bundle['original_contract'],
+                                 'review_summary': 'Current explicit adoption of missing legacy producer binding'}
+    return bundle
+
+def invoke(bundle, action='accept-research', extra=None, ok=True, flags=(), payload=None):
+    path = '.oms/artifacts/completion-bundle.json'
+    raw = json.dumps(bundle).encode() if payload is None else payload
+    (repo / path).write_bytes(raw)
+    return ap(action, '--id', bundle['task_id'], '--lease-id', bundle['lease_id'],
+              '--expected-state', bundle['state'], '--expected-plan-sha256', bundle['plan_sha256'],
+              '--expected-task-sha256', bundle['task_sha256'], '--completion-bundle', path,
+              '--expected-completion-bundle-sha256', h(raw), *flags, extra=extra, ok=ok)
+
+# Existing native and literal conditional contracts remain usable without a rewrite.
+for command in ('git diff --check', 'if test -f verify.sh; then bash verify.sh; fi',
+                'bash verify.sh && for oms_terminal_suite in verify.sh; do if test -f "$oms_terminal_suite"; then bash "$oms_terminal_suite" || exit; fi; done'):
+    invoke(setup(command=command))
+# A successful shell status cannot replace actual execution of a frozen verifier.
+skipped = setup(command='false && bash verify.sh; true')
+state_before = plan_path.read_bytes()
+invoke(skipped, ok=False)
+assert plan_path.read_bytes() == state_before
+(repo / '-c').write_text('exit 73\n')
+option_script = setup(command='bash -c true')
+option_script['verifier']['files'] = [entry('-c')]
+option_script['source_envelope'].append('-c')
+option_script['source_manifest'].append(entry('-c'))
+state_before = plan_path.read_bytes()
+invoke(option_script, ok=False)
+assert plan_path.read_bytes() == state_before
+(repo / '-c').unlink()
+initial = setup(claim_provider='claude')
+invoke(initial)
+initial_done = plan()['tasks'][initial['task_id']]
+assert initial_done['state'] == 'done' and initial_done['completion_kind'] == 'research-accepted'
+assert initial_done['claimed_by_participant'] == participant == initial['research']['parent_attempt_id']
+# Typed post-acceptance boundaries deliberately share the READ terminal
+# timestamp. Their append order is later; clock precision grants no authority.
+injection = repo / '.oms/test-injection'; injection.mkdir()
+(injection / 'sitecustomize.py').write_text('''import datetime, os, time
+if os.environ.get("OMS_FIXTURE_TIMESTAMP"):
+    stamp = os.environ["OMS_FIXTURE_TIMESTAMP"]
+    original = time.strftime
+    time.strftime = lambda fmt, *args: stamp if fmt == "%Y-%m-%dT%H:%M:%SZ" else original(fmt, *args)
+    previous = datetime.datetime
+    class Fixed(previous):
+        @classmethod
+        def now(cls, tz=None):
+            value = previous.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+            return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+    datetime.datetime = Fixed
+''')
+clock_source = (injection / 'sitecustomize.py').read_text()
+initial_terminal = next(row['ts'] for row in reversed([json.loads(line) for line in
+                        (repo/'.oms/lifecycle/events.jsonl').read_bytes().splitlines()])
+                        if row.get('attempt_id') == initial['research']['attempt_id'] and row.get('to_state') == 'done')
+clock = {'PYTHONPATH': str(injection), 'OMS_FIXTURE_TIMESTAMP': initial_terminal}
+private_room = repo / '.oms/threads' / (room + '.jsonl')
+original_room = private_room.read_bytes()
+call('room.sh', 'leave', '--id', room, '--participant', participant, extra=clock)
+assert json.loads(private_room.read_bytes().splitlines()[-1])['ts'] == initial_terminal
+ap('show', '--id', initial['task_id']); ap('status', '--json')
+invoke(initial, ok=False)
+call('thread.sh', 'close', '--id', room, '--summary', 'Same-second recorded closure', extra=clock)
+ap('show', '--id', initial['task_id']); ap('status', '--json')
+invoke(initial, ok=False)
+private_room.write_bytes(original_room)
+call('agent-events.sh', 'usage', '--tokens', '1', '--attempt', initial['research']['attempt_id'], extra=clock)
+ap('show', '--id', initial['task_id']); ap('status', '--json')
+# A later terminal duplicate cannot launder an ambiguous historical READ.
+historical_competitor = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
+                             '--ref', 'panel_room_participant=' + participant, '--ref', 'panel_room_id=' + room,
+                             '--ref', 'panel_role=main', '--then', 'starting', '--then', 'working')
+historical_duplicate = setup()
+call('agent-events.sh', 'transition', '--attempt', historical_competitor, '--state', 'verifying', '--then', 'review', '--then', 'done')
+assert 'unique active native owner' in invoke(historical_duplicate, ok=False)
+bundle = setup(claim_provider='claude')
+assert plan()['tasks'][bundle['task_id']]['provider'] == 'claude'
+before = plan_path.read_bytes()
+# Invalid explicit refs never fall back, even when attempt ID equals owner.
+owner_events = repo / '.oms/lifecycle/events.jsonl'
+for value in ('', 'foreign', '.malformed'):
+    frozen_events = owner_events.read_bytes()
+    call('agent-events.sh', 'usage', '--tokens', '0', '--attempt', main, '--ref', 'panel_room_participant=' + value)
+    rejected = invoke(bundle, ok=False)
+    assert 'native participant' in rejected, rejected
+    owner_events.write_bytes(frozen_events)
+# A restored current ref cannot hide a contradictory earlier owner binding.
+frozen_events = owner_events.read_bytes()
+call('agent-events.sh', 'usage', '--tokens', '0', '--attempt', main, '--ref', 'panel_room_participant=foreign')
+call('agent-events.sh', 'usage', '--tokens', '0', '--attempt', main, '--ref', 'panel_room_participant=' + participant)
+assert 'native participant' in invoke(bundle, ok=False)
+owner_events.write_bytes(frozen_events)
+# Gather all related attempts before filtering provider/room/tool/role.
+for key, value in (('provider', 'claude'), ('tool', 'peer-ask'), ('room', 'room-'+'0'*12), ('role', 'advisor')):
+    frozen_events = owner_events.read_bytes()
+    arguments = ['start', '--provider', value if key == 'provider' else 'codex',
+                 '--tool', value if key == 'tool' else 'panel-main',
+                 '--ref', 'panel_room_participant=' + participant,
+                 '--ref', 'panel_room_id=' + (value if key == 'room' else room),
+                 '--ref', 'panel_role=' + (value if key == 'role' else 'main'),
+                 '--then', 'starting', '--then', 'working']
+    conflicting = call('agent-events.sh', *arguments)
+    call('agent-events.sh', 'transition', '--attempt', conflicting, '--state', 'verifying', '--then', 'review', '--then', 'done')
+    assert 'contradictory native' in invoke(bundle, ok=False)
+    owner_events.write_bytes(frozen_events)
+frozen_events = owner_events.read_bytes()
+competing = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
+                 '--ref', 'panel_room_participant=' + participant, '--ref', 'panel_room_id=' + room,
+                 '--ref', 'panel_role=main', '--then', 'starting', '--then', 'working')
+assert 'ambiguous' in invoke(bundle, ok=False)
+owner_events.write_bytes(frozen_events)
+frozen_events = owner_events.read_bytes()
+call('agent-events.sh', 'transition', '--attempt', main, '--state', 'blocked')
+assert 'owner binding' in invoke(bundle, ok=False)
+owner_events.write_bytes(frozen_events)
+assert 'owner binding' in invoke(bundle, extra={'OMS_PANEL_MAIN_ATTEMPT': 'att_'+'0'*32}, ok=False)
+room_events = repo / '.oms/threads' / (room + '.jsonl')
+frozen_room = room_events.read_bytes()
+invalid_room = [json.loads(line) for line in frozen_room.splitlines()]
+invalid_room[0]['ts'] = '2026-1-01T00:00:00Z'
+room_events.write_bytes(b''.join(json.dumps(row).encode() + b'\n' for row in invalid_room))
+assert 'noncanonical native room timestamp' in invoke(bundle, ok=False)
+room_events.write_bytes(frozen_room)
+assert plan_path.read_bytes() == before
+for key, val in [('plan_id', 'plan_' + '0'*32), ('task_sha256', '0'*64), ('plan_sha256', '0'*64),
+                 ('state', 'claimed'), ('lease_id', 'lease_' + '0'*32)]:
+    invalid = copy.deepcopy(bundle); invalid[key] = val
+    invoke(invalid, ok=False)
+    assert plan_path.read_bytes() == before
+invoke(bundle, extra={'OMS_ROOM_PARTICIPANT': 'foreign'}, ok=False)
+invalid = copy.deepcopy(bundle); invalid['owner']['participant'] = 'foreign'
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid.pop('legacy_adoption')
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['requirements'] = []
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['reviewed_obligations'].append('omitted')
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['research']['classification'] = 'worker'
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['research']['parent_attempt_id'] = 'foreign'
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['source_manifest'][0]['sha256'] = '0'*64
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['source_manifest'][0]['mode'] = '100755'
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['verifier']['files'][0]['sha256'] = '0'*64
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['base_commit'] = base[:7]
+invoke(invalid, ok=False)
+invoke(bundle, extra={'OMS_HARNESS_CHILD': '1'}, ok=False)
+invoke(bundle, extra={'OMS_HARNESS_DELEGATE_DEPTH': '1'}, ok=False)
+invoke(bundle, flags=('--patch', 'fake.patch'), ok=False)
+invoke(bundle, payload=b'{"schema":1,"schema":1}', ok=False)
+invoke(bundle, payload=b'{"schema":NaN}', ok=False)
+invoke(bundle, payload=b' '*(4*1024*1024+1), ok=False)
+# Actual read producers index an empty ancillary patch, never a product.
+ancillary = repo / index()[-1]['patch']
+for data in (b'nonempty diff', b'changed ancillary'):
+    ancillary.write_bytes(data)
+    invoke(bundle, ok=False)
+ancillary.write_bytes(b'')
+# Even a matching digest cannot turn a nonempty ancillary diff into read proof.
+index_file = repo / '.oms/artifacts/index.jsonl'
+index_bytes = index_file.read_bytes()
+records = [json.loads(line) for line in index_bytes.splitlines()]
+ancillary.write_bytes(b'diff --git a/file.txt b/file.txt\n')
+records[-1]['patch_sha256'] = h(ancillary.read_bytes())
+index_file.write_text(''.join(json.dumps(row)+'\n' for row in records))
+invoke(bundle, ok=False)
+index_file.write_bytes(index_bytes); ancillary.write_bytes(b'')
+invalid = copy.deepcopy(bundle)
+invalid['verifier']['command'] = 'true # verify.sh'
+invalid['original_contract']['verify'] = invalid['verifier']['command']
+invoke(invalid, ok=False)
+# Readers reject every unsafe leaf/ancestor without blocking on a FIFO.
+artifact = repo / bundle['research']['artifact']['path']
+raw = artifact.read_bytes()
+linked = artifact.with_suffix('.copy')
+linked.write_bytes(raw)
+artifact.unlink(); artifact.symlink_to(linked.name)
+invoke(bundle, ok=False)
+artifact.unlink(); os.link(linked, artifact)
+invoke(bundle, ok=False)
+artifact.unlink(); artifact.write_bytes(raw)
+linked.unlink()
+if hasattr(os, 'mkfifo'):
+    artifact.unlink(); os.mkfifo(artifact)
+    invoke(bundle, ok=False)
+    artifact.unlink(); artifact.write_bytes(raw)
+original_dir = artifact.parent
+moved_dir = original_dir.with_name('research-real')
+original_dir.rename(moved_dir); original_dir.symlink_to(moved_dir.name, target_is_directory=True)
+invoke(bundle, ok=False)
+original_dir.unlink(); moved_dir.rename(original_dir)
+# Exact live/unproven markers veto even a complete bundle.
+markers = repo / '.oms/delegations'; markers.mkdir(exist_ok=True)
+marker = markers / 'exact.json'
+marker.write_text(json.dumps({'schema': 1, 'id': 'exact', 'pid': os.getpid(),
+                              'task_id': bundle['task_id'], 'lease_id': bundle['lease_id']}))
+invoke(bundle, ok=False)
+marker.write_text(json.dumps({'schema': 1, 'id': 'exact', 'pid': 'unknown',
+                              'task_id': bundle['task_id'], 'lease_id': bundle['lease_id']}))
+invoke(bundle, ok=False); marker.unlink()
+# Access and failure provenance cannot be laundered by parent adoption.
+events = repo / '.oms/lifecycle/events.jsonl'
+event_bytes = events.read_bytes()
+for mode in ('write', 'failed'):
+    records = [json.loads(line) for line in event_bytes.splitlines()]
+    for row in records:
+        if row.get('attempt_id') == bundle['research']['attempt_id']:
+            if mode == 'write' and row['event_type'] == 'attempt.created':
+                row['refs']['panel_access'] = 'write'
+            if mode == 'failed' and row.get('to_state') == 'done':
+                row['to_state'] = 'failed'
+    events.write_text(''.join(json.dumps(r)+'\n' for r in records))
+    invoke(bundle, ok=False)
+events.write_bytes(event_bytes)
+assert plan_path.read_bytes() == before
+# The active plan itself uses the bounded no-follow reader on this route.
+backup = plan_path.with_name('plan.backup')
+plan_path.rename(backup)
+plan_path.symlink_to(backup.name)
+invoke(bundle, ok=False)
+plan_path.unlink(); backup.rename(plan_path)
+backup.write_bytes(before)
+plan_path.unlink(); os.link(backup, plan_path)
+invoke(bundle, ok=False)
+plan_path.unlink(); plan_path.write_bytes(before); backup.unlink()
+if hasattr(os, 'mkfifo'):
+    plan_path.unlink(); os.mkfifo(plan_path)
+    invoke(bundle, ok=False)
+    plan_path.unlink(); plan_path.write_bytes(before)
+plan_path.write_bytes(b'{"plan_id":"duplicate",' + before.lstrip()[1:])
+invoke(bundle, ok=False)
+plan_path.write_bytes(before)
+# Crash exactly after the durable receipt write, before atomic plan replace.
+injection = repo / '.oms/test-injection'
+(injection / 'sitecustomize.py').write_text('''import os
+original = os.replace
+def replace(src, dst, *args, **kwargs):
+    if str(dst).endswith("tasks.json"):
+        raise OSError("fixture interruption after receipt persistence")
+    return original(src, dst, *args, **kwargs)
+os.replace = replace
+''')
+receipts_before = set((repo / '.oms/plan/completions').glob('*.json'))
+crash = invoke(bundle, extra={'PYTHONPATH': str(injection)}, ok=False)
+assert 'fixture interruption after receipt persistence' in crash, crash
+assert plan_path.read_bytes() == before
+assert len(set((repo / '.oms/plan/completions').glob('*.json')) - receipts_before) == 1
+invoke(bundle)
+done = plan()['tasks'][bundle['task_id']]
+assert done['completion_kind'] == 'research-accepted' and done['state'] == 'done'
+assert done['artifact'] == bundle['research']['artifact']['path'] and not done['patch']
+receipt = json.loads((repo / done['completion_receipt']['path']).read_bytes())
+verification = receipt['verification']
+assert verification['exit'] == 0 and verification['output_bytes'] == len(b'bounded verifier output\n')
+assert verification['output_sha256'] == h(b'bounded verifier output\n')
+assert 'bounded verifier output' not in json.dumps(receipt)
+
+assert 'landing' not in done and 'landed_commit' not in done
+stable = plan_path.read_bytes(); invoke(bundle); assert plan_path.read_bytes() == stable
+# Every first capture is the full canonical EOF; blobs retain the exact bytes.
+completion_core = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+proof = receipt['snapshot']['provenance']
+assert proof['schema'] == 1 and proof['room_id'] == room
+for kind in ('room', 'lifecycle'):
+    item = proof[kind]
+    prefix = (repo / item['path']).read_bytes()
+    assert prefix == (repo / item['source']).read_bytes()
+    assert h(prefix) == item['sha256'] and len(prefix) == item['bytes']
+    assert len(prefix.splitlines()) == item['rows']
+    if os.name != 'nt': assert stat.S_IMODE((repo / item['path']).stat().st_mode) == 0o600
+# Rehashing a shortened blob/ref cannot replace the separate trusted capture.
+def forged_receipt(mutator):
+    forged = copy.deepcopy(receipt)
+    mutator(forged)
+    verification = dict(forged['verification']); verification.pop('proof_sha256')
+    verification['snapshot_sha256'] = h(completion_core['encoded'](forged['snapshot']))
+    forged['verification']['proof_sha256'] = h(completion_core['encoded'](verification))
+    raw = completion_core['encoded'](forged)
+    pointer = {'path': '.oms/plan/completions/' + h(raw) + '.json', 'sha256': h(raw)}
+    (repo / pointer['path']).write_bytes(raw)
+    modified = plan()
+    modified['tasks'][bundle['task_id']] = completion_core['completion_task'](forged, pointer)
+    plan_path.write_text(json.dumps(modified))
+    rejected = ap('show', '--id', bundle['task_id'], ok=False)
+    plan_path.write_bytes(stable)
+    (repo / pointer['path']).unlink()
+    return rejected
+
+def shorten(forged):
+    item = forged['snapshot']['provenance']['room']
+    raw = (repo / item['path']).read_bytes().splitlines(keepends=True)[0]
+    path = '.oms/plan/completion-prefixes/' + h(raw) + '.jsonl'
+    (repo / path).write_bytes(raw)
+    item.update(path=path, sha256=h(raw), bytes=len(raw), rows=1)
+assert 'complete capture' in forged_receipt(shorten)
+for key, value in (('schema', 2), ('schema', True), ('repository_sha256', '0'*64),
+                   ('room_id', 'room-'+'0'*12)):
+    assert forged_receipt(lambda r, k=key, v=value: r['snapshot']['provenance'].__setitem__(k, v))
+assert forged_receipt(lambda r: r['snapshot'].pop('provenance'))
+assert forged_receipt(lambda r: r['snapshot']['provenance']['room'].__setitem__('bytes', True))
+assert forged_receipt(lambda r: r['snapshot']['provenance']['lifecycle'].__setitem__('source', '.oms/foreign.jsonl'))
+# Even a fully rehashed fake capture must pass stream sequence/ancestor checks.
+def malformed_prefix(forged, kind, mode):
+    p = forged['snapshot']['provenance']; item = p[kind]
+    raw = (repo / item['path']).read_bytes()
+    records = [json.loads(line) for line in raw.splitlines()]
+    if mode == 'mid-row': raw = raw[:-2]
+    elif mode == 'missing': records.pop(1)
+    elif mode == 'duplicate': records.insert(1, records[0])
+    elif mode == 'duplicate-json':
+        raw = (completion_core['encoded'](records[0]).replace(b'"schema":1', b'"schema":1,"schema":1', 1) +
+               b''.join(raw.splitlines(keepends=True)[1:]))
+    elif mode == 'nonfinite':
+        records[0]['unexpected'] = float('nan')
+    elif mode == 'ancestor':
+        for row in records:
+            if row.get('attempt_id') == bundle['research']['attempt_id'] and row['event_type'] == 'attempt.created':
+                row['parent_attempt_id'] = 'att_'+'0'*32
+    elif mode == 'access':
+        for row in records:
+            if row.get('attempt_id') == bundle['research']['attempt_id'] and row['event_type'] == 'attempt.created':
+                row['refs']['panel_access'] = 'write'
+    if mode not in ('mid-row', 'duplicate-json'):
+        raw = b''.join((json.dumps(row, allow_nan=True)+'\n').encode() for row in records)
+    item.update(path='.oms/plan/completion-prefixes/' + h(raw) + '.jsonl', sha256=h(raw),
+                bytes=len(raw), rows=len(records))
+    (repo / item['path']).write_bytes(raw)
+    capture = completion_core['encoded']({k: v for k, v in p.items() if k != 'capture'})
+    p['capture'] = {'path': '.oms/plan/completion-captures/' + h(capture) + '.json', 'sha256': h(capture)}
+    (repo / p['capture']['path']).write_bytes(capture)
+for kind, mode in (('room', 'mid-row'), ('room', 'missing'), ('room', 'duplicate'),
+                   ('room', 'duplicate-json'), ('lifecycle', 'nonfinite'),
+                   ('lifecycle', 'missing'), ('lifecycle', 'duplicate'),
+                   ('lifecycle', 'ancestor'), ('lifecycle', 'access')):
+    assert forged_receipt(lambda r, k=kind, m=mode: malformed_prefix(r, k, m))
+for kind in ('room', 'lifecycle'):
+    path = repo / proof[kind]['path']; original_prefix = path.read_bytes()
+    middle = len(original_prefix)//2
+    path.write_bytes(original_prefix[:middle] + bytes([original_prefix[middle] ^ 1]) + original_prefix[middle+1:])
+    ap('show', '--id', bundle['task_id'], ok=False)
+    path.write_bytes(original_prefix)
+# Prefix objects use the same bounded no-follow reader as other evidence.
+prefix_path = repo / proof['lifecycle']['path']; prefix_raw = prefix_path.read_bytes()
+prefix_copy = prefix_path.with_suffix('.copy'); prefix_copy.write_bytes(prefix_raw)
+prefix_path.unlink(); prefix_path.symlink_to(prefix_copy.name)
+ap('show', '--id', bundle['task_id'], ok=False)
+prefix_path.unlink(); os.link(prefix_copy, prefix_path)
+ap('show', '--id', bundle['task_id'], ok=False)
+prefix_path.unlink()
+if hasattr(os, 'mkfifo'):
+    os.mkfifo(prefix_path); ap('show', '--id', bundle['task_id'], ok=False); prefix_path.unlink()
+prefix_path.write_bytes(b' '*(16*1024*1024+1))
+ap('show', '--id', bundle['task_id'], ok=False)
+prefix_path.write_bytes(prefix_raw); prefix_path.chmod(0o600); prefix_copy.unlink()
+# Missing/duplicate canonical sequences cannot enter a fresh EOF capture.
+sequence_candidate = setup()
+for source, mode in ((events, 'missing'), (events, 'duplicate'),
+                     (room_events, 'missing'), (room_events, 'duplicate')):
+    original_stream = source.read_bytes(); records = original_stream.splitlines(keepends=True)
+    if mode == 'missing': records.pop(1)
+    else: records.insert(1, records[0])
+    source.write_bytes(b''.join(records))
+    invoke(sequence_candidate, ok=False)
+    source.write_bytes(original_stream)
+# Stop immediately before plan replacement; actual competing writers must
+# enter their own lock wait, then append only after completed publication.
+barrier_bundle = setup()
+barrier_ready = injection / 'publication-ready'; barrier_release = injection / 'publication-release'
+room_wait = injection / 'room-wait'; lifecycle_wait = injection / 'lifecycle-wait'
+(injection / 'sitecustomize.py').write_text('''import inspect, os, time
+from pathlib import Path
+original_replace, original_sleep = os.replace, time.sleep
+def replace(src, dst, *args, **kwargs):
+    if str(dst).endswith("tasks.json") and os.environ.get("OMS_FIXTURE_READY"):
+        Path(os.environ["OMS_FIXTURE_READY"]).touch()
+        deadline = time.monotonic() + 30
+        while not Path(os.environ["OMS_FIXTURE_RELEASE"]).exists():
+            if time.monotonic() > deadline: raise OSError("publication barrier timed out")
+            original_sleep(.01)
+    return original_replace(src, dst, *args, **kwargs)
+def sleep(seconds):
+    marker = os.environ.get("OMS_FIXTURE_LIFECYCLE_WAIT")
+    if marker and any(f.function == "file_lock" and f.filename.endswith("agent-events.py") for f in inspect.stack()):
+        Path(marker).touch()
+    return original_sleep(seconds)
+os.replace, time.sleep = replace, sleep
+''')
+raw = json.dumps(barrier_bundle).encode(); bundle_path = '.oms/artifacts/completion-bundle.json'
+(repo / bundle_path).write_bytes(raw)
+arguments = ['bash', str(root / 'scripts/agent-plan.sh'), '--repo', str(repo), 'accept-research',
+             '--id', barrier_bundle['task_id'], '--lease-id', barrier_bundle['lease_id'],
+             '--expected-state', barrier_bundle['state'], '--expected-plan-sha256', barrier_bundle['plan_sha256'],
+             '--expected-task-sha256', barrier_bundle['task_sha256'], '--completion-bundle', bundle_path,
+             '--expected-completion-bundle-sha256', h(raw)]
+def wait_file(path):
+    deadline = time.monotonic() + 20
+    while not path.exists():
+        assert time.monotonic() < deadline, ('missing fixture barrier', path)
+        time.sleep(.01)
+process = subprocess.Popen(arguments, env=dict(env, PYTHONPATH=str(injection),
+                           OMS_FIXTURE_READY=str(barrier_ready), OMS_FIXTURE_RELEASE=str(barrier_release)),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+wait_file(barrier_ready)
+sleep_wrapper = injection / 'sleep'
+sleep_wrapper.write_text('#!/usr/bin/env bash\n[ -z "${OMS_FIXTURE_ROOM_WAIT:-}" ] || : > "$OMS_FIXTURE_ROOM_WAIT"\nexec "$OMS_FIXTURE_REAL_SLEEP" "$@"\n')
+sleep_wrapper.chmod(0o755)
+waiting_room = subprocess.Popen(['bash', str(root/'scripts/room.sh'), '--repo', str(repo), 'describe',
+                                '--id', room, '--participant', participant, '--label', 'Later owner metadata'],
+                                env=dict(env, PATH=str(injection)+os.pathsep+env['PATH'],
+                                         OMS_FIXTURE_ROOM_WAIT=str(room_wait), OMS_FIXTURE_REAL_SLEEP=shutil.which('sleep')),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+waiting_lifecycle = subprocess.Popen(['bash', str(root/'scripts/agent-events.sh'), '--repo', str(repo),
+                                     'usage', '--tokens', '1', '--attempt', barrier_bundle['research']['attempt_id']],
+                                     env=dict(env, PYTHONPATH=str(injection), OMS_FIXTURE_LIFECYCLE_WAIT=str(lifecycle_wait)),
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+try:
+    wait_file(room_wait); wait_file(lifecycle_wait)
+    assert plan()['tasks'][barrier_bundle['task_id']]['state'] == 'review'
+    assert waiting_room.poll() is None and waiting_lifecycle.poll() is None
+    barrier_release.touch()
+    output, error = process.communicate(timeout=30)
+    assert process.returncode == 0, error
+    assert plan()['tasks'][barrier_bundle['task_id']]['state'] == 'done'
+    for writer in (waiting_room, waiting_lifecycle):
+        output, error = writer.communicate(timeout=30)
+        assert writer.returncode == 0, error
+finally:
+    barrier_release.touch()
+    for child in (process, waiting_room, waiting_lifecycle):
+        if child.poll() is None:
+            try: child.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill(); child.communicate(timeout=5)
+ap('show', '--id', barrier_bundle['task_id']); ap('status', '--json')
+# A resumed main keeps participant ownership; the producer parent may be done.
+terminal_parent = setup()
+call('agent-events.sh', 'transition', '--attempt', main, '--state', 'verifying', '--then', 'review', '--then', 'done')
+assert 'owner binding' in invoke(terminal_parent, ok=False)
+main = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
+            '--ref', 'panel_room_participant=' + participant, '--ref', 'panel_room_id=' + room,
+            '--ref', 'panel_role=main', '--then', 'starting', '--then', 'working')
+env['OMS_PANEL_MAIN_ATTEMPT'] = main
+invoke(terminal_parent)
+assert plan()['tasks'][terminal_parent['task_id']]['state'] == 'done'
+# Later progress on the original parent does not rewrite historical identity.
+call('agent-events.sh', 'usage', '--tokens', '0', '--attempt', participant, '--ref', 'panel_progress=source-reviewed')
+invoke(bundle)
+stable = plan_path.read_bytes()
+invoke(bundle); assert plan_path.read_bytes() == stable
+
+ap('show', '--id', bundle['task_id']); ap('status', '--json')
+(repo / 'file.txt').write_text('Later legitimate source edit\n')
+ap('show', '--id', bundle['task_id']); invoke(bundle)
+(repo / 'file.txt').write_text('base\n')
+# Typed-plan readers reject unsafe plan leaves before decoding any row.
+reader_backup = plan_path.with_name('reader.backup')
+plan_path.rename(reader_backup); plan_path.symlink_to(reader_backup.name)
+ap('show', '--id', bundle['task_id'], ok=False); ap('status', '--json', ok=False)
+plan_path.unlink(); reader_backup.rename(plan_path)
+if hasattr(os, 'mkfifo'):
+    plan_path.unlink(); os.mkfifo(plan_path)
+    ap('show', '--id', bundle['task_id'], ok=False); ap('status', '--json', ok=False)
+    plan_path.unlink(); plan_path.write_bytes(stable)
+# A forged task projection cannot unlock dependencies/counts.
+forged = plan(); forged['tasks'][bundle['task_id']]['completion_receipt']['sha256'] = '0'*64
+plan_path.write_text(json.dumps(forged))
+ap('status', '--json', ok=False); ap('ready', ok=False); ap('retire', '--check', ok=False)
+ap('accept', ok=False)
+assert not (repo / '.oms/acceptance-ran').exists(), 'forged completion executed goal acceptance'
+plan_path.write_bytes(stable)
+ap('accept')
+assert (repo / '.oms/acceptance-ran').read_text() == 'accepted'
+(repo / '.oms/acceptance-ran').unlink()
+# Actual failing verifier and concurrent plan/source drift never create done.
+verification_source = (repo / 'verify.sh').read_bytes()
+(repo / 'verify.sh').write_text('exit 27\n')
+failed_execution = setup()
+assert 'verifier failed (exit 27)' in invoke(failed_execution, ok=False)
+assert plan()['tasks'][failed_execution['task_id']]['state'] != 'done'
+(repo / 'verify.sh').write_bytes(verification_source)
+(repo / 'source-drift.sh').write_text('printf changed >> file.txt\n')
+for command in ('bash verify.sh; false', 'bash verify.sh; bash source-drift.sh',
+                'bash verify.sh; python3 drift.py'):
+    if 'drift.py' in command:
+        (repo / 'drift.py').write_text('import json\np=".oms/plan/tasks.json"\nd=json.load(open(p))\nd["goal"]="drifted"\njson.dump(d,open(p,"w"))\n')
+    candidate = setup(command)
+    invoke(candidate, ok=False)
+    assert plan()['tasks'][candidate['task_id']]['state'] != 'done'
+    if 'source-drift.sh' in command:
+        subprocess.run(['git', '-C', str(repo), 'checkout', '-q', '--', 'file.txt'], check=True)
+# Comments cannot satisfy the frozen verifier-input execution contract.
+commented = setup('true # verify.sh')
+assert 'verifier' in invoke(commented, ok=False)
+# An actual writer can run during verification, but relevant READ changes
+# (including a conflicting ref subsequently restored) cannot be accepted.
+(repo / 'read-ref-drift.py').write_text('''import os, subprocess
+for access in ("write", "read"):
+    subprocess.run(["bash", os.environ["OMS_FIXTURE_EVENTS_SCRIPT"], "--repo", os.getcwd(),
+                    "usage", "--tokens", "0", "--attempt", os.environ["OMS_FIXTURE_READ_ATTEMPT"],
+                    "--ref", "panel_access="+access], check=True)
+''')
+read_drift = setup('bash verify.sh; python3 read-ref-drift.py')
+read_drift['source_envelope'].append('read-ref-drift.py')
+read_drift['source_manifest'].append(entry('read-ref-drift.py'))
+read_drift['verifier']['files'].append(entry('read-ref-drift.py'))
+original_stream = events.read_bytes()
+rejected = invoke(read_drift, extra={'OMS_FIXTURE_EVENTS_SCRIPT': str(root/'scripts/agent-events.sh'),
+                                   'OMS_FIXTURE_READ_ATTEMPT': read_drift['research']['attempt_id']}, ok=False)
+assert 'read-access attempt provenance' in rejected or 'READ' in rejected, rejected
+assert plan()['tasks'][read_drift['task_id']]['state'] != 'done'
+events.write_bytes(original_stream); (repo/'read-ref-drift.py').unlink()
+# Frozen verifier inputs may include an actual sourced dependency.
+(repo / 'extra-input.sh').write_text('. ./frozen-lib.sh\n')
+(repo / 'frozen-lib.sh').write_text('test -s file.txt\n')
+with_input = setup('bash verify.sh; bash extra-input.sh')
+for path in ('extra-input.sh', 'frozen-lib.sh'):
+    with_input['source_envelope'].append(path)
+    with_input['source_manifest'].append(entry(path))
+    with_input['verifier']['files'].append(entry(path))
+invalid = copy.deepcopy(with_input); invalid['verifier']['files'][-1]['sha256'] = '0'*64
+invoke(invalid, ok=False)
+invoke(with_input)
+(repo / 'extra-input.sh').unlink(); (repo / 'frozen-lib.sh').unlink()
+# An empty legacy verifier requires explicit adoption.
+candidate = setup(empty_verify=True)
+invalid = copy.deepcopy(candidate); invalid['verifier']['adopted'] = False
+invoke(invalid, ok=False)
+invoke(candidate)
+(repo / 'drift.py').unlink()
+(repo / 'source-drift.sh').unlink()
+# Unrelated valid index/lifecycle appends do not change relevant proof.
+(repo / 'append-proof.py').write_text('''import json
+for path in (".oms/artifacts/index.jsonl", ".oms/lifecycle/events.jsonl"):
+    rows = [json.loads(line) for line in open(path)]
+    if "artifacts" in path:
+        row = dict(rows[0], event_id="unrelated-valid-index", task_id="unrelated")
+        with open(path, "a") as out: out.write(json.dumps(row)+"\\n")
+    else:
+        rows = [r for r in rows if r.get("attempt_id") == rows[-1].get("attempt_id")]
+        for row in rows:
+            row["attempt_id"] = "att_" + "a"*32
+            row["event_id"] = "evt_" + str(row.get("seq", 0))
+            with open(path, "a") as out: out.write(json.dumps(row)+"\\n")
+''')
+appended = setup('bash verify.sh; python3 append-proof.py')
+invoke(appended)
+(repo / 'append-proof.py').unlink()
+# A satisfied original retains failed/rejected evidence and reason history;
+# successor provenance comes from the real patch-land command, never labels.
+ap('add', '--id', 'original', '--title', 'Deliver complete source product', '--allowed', 'file.txt,verify.sh,obsolete.txt', '--verify', 'bash verify.sh')
+ap('claim', '--id', 'original', '--provider', 'codex', extra={'OMS_PANEL_MAIN_ATTEMPT': main, 'OMS_ROOM_PARTICIPANT': participant})
+rejected_artifact = '.oms/artifacts/rejected.md'
+rejected_patch = '.oms/artifacts/rejected.patch'
+(repo / rejected_artifact).write_text('Original failed candidate evidence\n')
+(repo / rejected_patch).write_text('Rejected original candidate bytes\n')
+ap('review', '--id', 'original', '--artifact', rejected_artifact, '--patch', rejected_patch)
+ap('block', '--id', 'original', '--reason', 'Rejected candidate preserved')
+# Existing legacy task history is part of the exact original contract.
+legacy = plan()
+legacy['tasks']['original']['history'] = [{'schema': 1, 'kind': 'rejected', 'reason': 'Original verifier failed',
+                                         'artifact': ref(rejected_artifact), 'patch': ref(rejected_patch)}]
+plan_path.write_text(json.dumps(legacy))
+ap('add', '--id', 'successor', '--title', 'Implement full replacement', '--allowed', 'file.txt,verify.sh,obsolete.txt', '--verify', 'bash verify.sh')
+ap('claim', '--id', 'successor', '--provider', 'codex')
+patch_path = '.oms/artifacts/product.patch'
+(repo / 'file.txt').write_text('base\nactual replacement\n')
+(repo / 'obsolete.txt').unlink()
+if os.name != 'nt':
+    (repo / 'verify.sh').chmod(0o755)
+(repo / patch_path).write_bytes(subprocess.check_output(['git', '-C', str(repo), 'diff', '--binary']))
+subprocess.run(['git', '-C', str(repo), 'checkout', '-q', '--', 'file.txt', 'verify.sh', 'obsolete.txt'], check=True)
+report = '.oms/artifacts/product-review.md'; (repo / report).write_text('Actual bounded product review\n')
+ap('review', '--id', 'successor', '--artifact', report, '--patch', patch_path)
+call('patch-land.sh', '--plan-task', 'successor', '--verify', 'bash verify.sh', '--allow-verifier-change')
+current = plan(); original = current['tasks']['original']; successor = current['tasks']['successor']
+landings = [json.loads(line) for line in (repo / '.oms/landings.jsonl').read_bytes().splitlines()]
+intent = [r for r in landings if r['event'] == 'intent'][-1]
+admission = [r for r in index() if r['kind'] == 'patch-admit'][-1]
+landed = [r for r in index() if r['kind'] == 'patch-land'][-1]
+satisfied = {'schema': 1, 'kind': 'satisfied-by', 'plan_id': current['plan_id'], 'task_id': 'original',
+             'task_sha256': engine['digest'](original), 'plan_sha256': h(plan_path.read_bytes()),
+             'state': original['state'], 'lease_id': original['lease_id'],
+             'owner': {'provider': 'codex', 'participant': participant, 'parent_provider': 'codex'},
+             'original_contract': engine['projection'](original), 'review_summary': 'Full original product independently reviewed',
+             'reviewed_obligations': ['product'], 'requirements': [
+                 {'id': 'product', 'obligation': original['title'], 'deliverable': 'Complete replacement file',
+                  'source_paths': ['file.txt', 'verify.sh', 'obsolete.txt'], 'evidence': [ref(admission['artifact'])]}],
+             'base_commit': base, 'source_envelope': ['file.txt', 'verify.sh', 'obsolete.txt'],
+             'source_manifest': [entry('file.txt'), entry('verify.sh'), entry('obsolete.txt')],
+             'verifier': {'command': 'bash verify.sh', 'files': [entry('verify.sh')], 'adopted': False,
+                          'review_summary': 'Actual command and frozen verifier reviewed'},
+             'successor': {'product_kind': 'patch-land', 'plan_id': current['plan_id'], 'task_id': 'successor',
+                           'task_sha256': engine['digest'](successor), 'original_contract': engine['projection'](successor),
+                           'landing_id': intent['landing_id'], 'admission_event_id': admission['event_id'],
+                           'land_event_id': landed['event_id']}}
+for key, val in [('plan_id', 'plan_'+'0'*32), ('task_id', 'original'), ('landing_id', 'false'), ('task_sha256', '0'*64)]:
+    invalid = copy.deepcopy(satisfied); invalid['successor'][key] = val
+    invoke(invalid, action='satisfy', ok=False)
+# Independently failed and cyclic successor rows fail even with fresh CAS.
+valid_plan = plan_path.read_bytes()
+for case in ('failed', 'cycle'):
+    changed = plan()
+    if case == 'failed':
+        changed['tasks']['successor']['state'] = 'blocked'
+    else:
+        changed['tasks']['successor']['depends'] = ['original']
+    plan_path.write_text(json.dumps(changed))
+    invalid = copy.deepcopy(satisfied)
+    invalid['plan_sha256'] = h(plan_path.read_bytes())
+    invalid['successor']['task_sha256'] = engine['digest'](changed['tasks']['successor'])
+    invalid['successor']['original_contract'] = engine['projection'](changed['tasks']['successor'])
+    invoke(invalid, action='satisfy', ok=False)
+plan_path.write_bytes(valid_plan)
+invalid = copy.deepcopy(satisfied); invalid['requirements'] = []
+invoke(invalid, action='satisfy', ok=False)
+(repo / 'obsolete.txt').write_text('Stale deletion\n')
+invoke(satisfied, action='satisfy', ok=False)
+(repo / 'obsolete.txt').unlink()
+if os.name != 'nt':
+    (repo / 'verify.sh').chmod(0o644)
+    invoke(satisfied, action='satisfy', ok=False)
+    (repo / 'verify.sh').chmod(0o755)
+(repo / 'file.txt').write_text('stale product\n')
+invoke(satisfied, action='satisfy', ok=False)
+(repo / 'file.txt').write_text('base\nactual replacement\n')
+# Computing an uncommitted product keeps Git objects, refs and index untouched.
+def git_controls():
+    common = Path(subprocess.check_output(['git', '-C', str(repo), 'rev-parse', '--git-common-dir']).decode().strip())
+    if not common.is_absolute(): common = repo / common
+    objects = {str(path.relative_to(common / 'objects')): h(path.read_bytes())
+               for path in (common / 'objects').rglob('*') if path.is_file()}
+    refs = subprocess.check_output(['git', '-C', str(repo), 'show-ref'])
+    return objects, refs, h((common / 'index').read_bytes())
+controls = git_controls()
+invoke(satisfied, action='satisfy')
+assert git_controls() == controls, 'satisfaction mutated shared Git controls'
+closed = plan()['tasks']['original']
+assert closed['completion_kind'] == 'satisfied-by' and closed['reason'] == 'Rejected candidate preserved'
+assert closed.get('patch', '') == original.get('patch', '') and 'landing' not in closed
+assert closed['history'][:-1] == original['history']
+assert closed['artifact'] == rejected_artifact and closed['patch'] == rejected_patch
+assert closed['history'][-1]['original_state'] == 'blocked'
+invoke(satisfied, action='satisfy')
+ap('status', '--json')
+(repo / 'file.txt').write_text('Later legitimate product edit\n')
+ap('show', '--id', 'original'); invoke(satisfied, action='satisfy')
+# Ordinary committed successors use the existing typed commit-finish route.
+(repo / 'file.txt').write_text('base\ncommit replacement\n')
+ap('add', '--id', 'commit-original', '--title', 'Complete committed replacement',
+   '--allowed', 'file.txt,verify.sh,obsolete.txt', '--verify', 'bash verify.sh')
+ap('claim', '--id', 'commit-original', '--provider', 'codex')
+ap('review', '--id', 'commit-original', '--artifact', rejected_artifact, '--patch', rejected_patch)
+ap('block', '--id', 'commit-original', '--reason', 'Original failed committed candidate')
+ap('add', '--id', 'commit-successor', '--title', 'Implement committed replacement',
+   '--allowed', 'file.txt,verify.sh,obsolete.txt', '--verify', 'bash verify.sh')
+ap('claim', '--id', 'commit-successor', '--provider', 'codex')
+commit_patch = '.oms/artifacts/commit-product.patch'
+(repo / commit_patch).write_bytes(subprocess.check_output(['git', '-C', str(repo), 'diff', '--binary', base]))
+commit_artifact = '.oms/artifacts/commit-product.md'
+(repo / commit_artifact).write_text('Reviewed complete committed replacement product\n')
+ap('review', '--id', 'commit-successor', '--artifact', commit_artifact, '--patch', commit_patch)
+subprocess.run(['git', '-C', str(repo), 'add', '-u'], check=True)
+subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'fixture committed product'], env=env, check=True)
+commit = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
+subprocess.run(['git', '-C', str(repo), 'update-ref', 'refs/remotes/origin/main', commit], check=True)
+completion = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+receipt_directory = Path(completion['canonical_land_directory'](str(repo)))
+receipt_directory.mkdir(parents=True, exist_ok=True)
+commit_receipt = receipt_directory / (commit + '-fixture.json')
+passed = {'schema': 1, 'state': 'passed', 'sha': commit, 'remote': 'origin', 'target': 'main',
+          'gate': {'rc': 0}, 'push': {'rc': 0}, 'ci': {'conclusion': 'success'}}
+commit_receipt.write_text(json.dumps(passed))
+ap('finish', '--id', 'commit-successor', '--landed-commit', commit)
+current = plan(); original_commit = current['tasks']['commit-original']; successor_commit = current['tasks']['commit-successor']
+committed = copy.deepcopy(satisfied)
+committed.update(task_id='commit-original', state=original_commit['state'], lease_id=original_commit['lease_id'],
+                 task_sha256=engine['digest'](original_commit), original_contract=engine['projection'](original_commit),
+                 plan_sha256=h(plan_path.read_bytes()), source_manifest=[entry('file.txt'), entry('verify.sh'), entry('obsolete.txt')])
+committed['requirements'][0].update(obligation=original_commit['title'], evidence=[ref(commit_artifact)])
+committed['successor'] = {'product_kind': 'commit', 'plan_id': current['plan_id'], 'task_id': 'commit-successor',
+                          'task_sha256': engine['digest'](successor_commit), 'original_contract': engine['projection'](successor_commit),
+                          'commit_sha': commit, 'land_receipt_sha256': h(commit_receipt.read_bytes())}
+for key, value in [('land_receipt_sha256', '0'*64), ('commit_sha', base), ('plan_id', 'plan_'+'0'*32)]:
+    invalid = copy.deepcopy(committed); invalid['successor'][key] = value
+    invoke(invalid, action='satisfy', ok=False)
+invalid = copy.deepcopy(committed); invalid['successor']['landing_id'] = 'mixed-route'
+invoke(invalid, action='satisfy', ok=False)
+receipt_bytes = commit_receipt.read_bytes()
+for stage in ('ci', 'push'):
+    failed = copy.deepcopy(passed)
+    failed[stage] = {'conclusion': 'failure'} if stage == 'ci' else {'rc': 1}
+    commit_receipt.write_text(json.dumps(failed))
+    invoke(committed, action='satisfy', ok=False)
+commit_receipt.write_bytes(receipt_bytes + b'\n')
+invoke(committed, action='satisfy', ok=False)
+commit_receipt.write_bytes(receipt_bytes)
+other_receipt = receipt_directory / (commit + '-aaa-other.json')
+other_receipt.write_text(json.dumps(dict(passed, request='different-passed-request')))
+(repo / 'file.txt').write_text('foreign or stale content\n')
+invoke(committed, action='satisfy', ok=False)
+(repo / 'file.txt').write_text('base\ncommit replacement\n')
+subprocess.run(['git', '-C', str(repo), 'update-ref', 'refs/remotes/origin/main', base], check=True)
+invoke(committed, action='satisfy', ok=False)
+subprocess.run(['git', '-C', str(repo), 'update-ref', 'refs/remotes/origin/main', commit], check=True)
+invoke(committed, action='satisfy')
+commit_done = plan()['tasks']['commit-original']
+assert commit_done['state'] == 'done' and commit_done['completion_kind'] == 'satisfied-by'
+assert commit_done['artifact'] == rejected_artifact and commit_done['patch'] == rejected_patch
+assert commit_done['history'][:-1] == original_commit.get('history', []) and 'landing' not in commit_done
+invoke(committed, action='satisfy'); ap('status', '--json')
+(repo / 'file.txt').write_text('Later legitimate committed source edit\n')
+ap('show', '--id', 'commit-original'); invoke(committed, action='satisfy')
+# Reactivation archives the identity in history and clears only current refs.
+ap('block', '--id', 'original', '--reason', 'New explicit parent obligation',
+   extra={'OMS_HARNESS_CHILD': '1'}, ok=False)
+ap('block', '--id', 'original', '--reason', 'New explicit parent obligation')
+reactivated = plan()['tasks']['original']
+assert 'completion_kind' not in reactivated and 'completion_receipt' not in reactivated
+assert reactivated['history'][-1]['completion_receipt'] == closed['completion_receipt']
+assert reactivated['history'][:-1] == closed['history']
+ap('reopen', '--id', 'original')
+ap('show', '--id', 'original'); ap('status', '--json')
+# Immutable receipts survive later departure, rejoin and room closure;
+# fresh mutations still reject recycled membership, even with the same owner.
+same_second = setup(); invoke(same_second)
+recycled = setup()
+stamp = next(row['ts'] for row in reversed([json.loads(line) for line in events.read_bytes().splitlines()])
+             if row.get('attempt_id') == same_second['research']['attempt_id'] and row.get('to_state') == 'done')
+(injection / 'sitecustomize.py').write_text(clock_source)
+clock = {'PYTHONPATH': str(injection), 'OMS_FIXTURE_TIMESTAMP': stamp}
+call('room.sh', 'leave', '--id', room, '--participant', participant, extra=clock)
+assert json.loads(room_events.read_bytes().splitlines()[-1])['ts'] == stamp
+ap('show', '--id', same_second['task_id']); ap('status', '--json')
+invoke(recycled, ok=False)
+call('room.sh', 'join', '--id', room, '--participant', participant, '--provider', 'codex', '--role', 'main', extra=clock)
+assert 'recycled' in invoke(recycled, ok=False)
+ap('show', '--id', initial['task_id']); ap('status', '--json')
+call('thread.sh', 'close', '--id', room, '--summary', 'Private owner epoch closed', extra=clock)
+ap('show', '--id', initial['task_id']); ap('status', '--json')
+invoke(recycled, ok=False)
+PY
+
 }
 
 test_agent_plan_retire_is_cas_fenced_and_evidence_honest() {
@@ -8607,19 +9614,75 @@ EOF
     fail "an unsafe session id must be rejected"
   fi
 
-  # A newer copy of the session wins over the original; links never copy.
   local projects="$home_dir/.claude/projects" outside="$TMP/delegate-resume-outside"
   mkdir -p "$projects/-newer-worktree"
-  printf 'round2\n' > "$projects/-newer-worktree/$session.jsonl"
-  touch -t 202001010000 "$projects/-old-worktree/$session.jsonl"
   resume_for_test() {
     : > "$log"
     HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
       FIXTURE_LOG="$log" FIXTURE_SESSION="$session" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
       "$ROOT/scripts/peer-delegate.sh" --to claude --repo "$project" \
       --artifact-dir "$project/artifacts" --no-verify --resume-session "$session" \
-      --prompt p >/dev/null 2>&1
+      --prompt p >"$log.out" 2>"$log.err"
   }
+  next_tied_mtime_ns() {
+    python3 - "$projects" "$session" <<'PY' | tr -d '\r'
+import os, stat, sys
+projects, session = sys.argv[1:3]
+times = []
+for name in os.listdir(projects):
+    path = os.path.join(projects, name, session + ".jsonl")
+    try:
+        st = os.lstat(path)
+    except OSError:
+        continue
+    if stat.S_ISREG(st.st_mode):
+        times.append(st.st_mtime_ns)
+print(max(times) + 1000000000)
+PY
+  }
+  set_resume_copy_mtime() {
+    local name="$1" body="$2" mtime_ns="$3"
+    mkdir -p "$projects/$name"
+    python3 - "$projects/$name/$session.jsonl" "$body" "$mtime_ns" <<'PY'
+import os, sys
+path, body, mtime_ns = sys.argv[1:4]
+with open(path, "wb") as f:
+    f.write(body.encode())
+timestamp = int(mtime_ns)
+os.utime(path, ns=(timestamp, timestamp))
+PY
+  }
+
+  local tie_ns
+  tie_ns="$(next_tied_mtime_ns)"
+  set_resume_copy_mtime -tie-a A "$tie_ns"
+  set_resume_copy_mtime -tie-b B "$tie_ns"
+  set_resume_copy_mtime -tie-c B "$tie_ns"
+  if resume_for_test; then fail "differing newest tied copies must be rejected"; fi
+  grep -q 'error: ambiguous claude session .*newest copies share a timestamp' "$log.err" ||
+    fail "tied-copy rejection did not report the expected ambiguity"
+  [ ! -s "$log" ] || fail "ambiguous tied copies must be rejected before invoking Claude"
+
+  tie_ns="$(next_tied_mtime_ns)"
+  set_resume_copy_mtime -tie-a A "$tie_ns"
+  set_resume_copy_mtime -tie-b A "$tie_ns"
+  set_resume_copy_mtime -tie-c A "$tie_ns"
+  resume_for_test || fail "three identical newest tied copies should resume"
+  assert_file_contains "$log" "session-body: A"
+
+  tie_ns="$(next_tied_mtime_ns)"
+  set_resume_copy_mtime -tie-a C "$tie_ns"
+  set_resume_copy_mtime -tie-b C "$tie_ns"
+  set_resume_copy_mtime -tie-c C "$tie_ns"
+  set_resume_copy_mtime -tie-older distinct "$((tie_ns - 1))"
+  resume_for_test || fail "a differing older copy must not make identical newest copies ambiguous"
+  assert_file_contains "$log" "session-body: C"
+
+  rm -rf "$projects/-tie-a" "$projects/-tie-b" "$projects/-tie-c" "$projects/-tie-older"
+
+  # A newer copy of the session wins over the original; links never copy.
+  printf 'round2\n' > "$projects/-newer-worktree/$session.jsonl"
+  touch -t 202001010000 "$projects/-old-worktree/$session.jsonl"
   resume_for_test || fail "resume with two copies failed"
   assert_file_contains "$log" "session-body: round2"
   rm -f "$projects/-newer-worktree/$session.jsonl"
@@ -13772,6 +14835,89 @@ test_agent_plan_reclaim_requeues_stale_claim() {
     fail "non-numeric reclaim --ttl must be rejected"
   fi
   assert_file_contains "$d/err" "must be an integer"
+
+  python3 - "$SH" "$d" <<'PY' || fail "worker evidence must fence TTL reuse consistently"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+cli, directory = sys.argv[1:]
+plan = Path(directory) / ".oms/plan/tasks.json"
+markers = Path(directory) / ".oms/delegations"
+markers.mkdir()
+def invoke(*options, expected=0):
+    result = subprocess.run(["bash", cli, "--repo", directory, *options], text=True, capture_output=True)
+    assert result.returncode == expected, (options, result.returncode, result.stderr)
+    return result.stdout
+
+def lease(task):
+    return json.loads(plan.read_text())["tasks"][task]["lease_id"]
+
+def write_marker(name, task, token, pid):
+    row = dict(schema=3, id=name, task_id=task, lease_id=token, pid=pid)
+    if os.name == "nt" and type(pid) is int:
+        row.update(native_pid=pid, native_pid_source="msys-proc-v1")
+    (markers / (name + ".json")).write_text(json.dumps(row))
+
+for task in ("t1", "t3"):
+    invoke("claim", "--id", task, "--provider", "codex", "--ttl", "0")
+    write_marker(task, task, lease(task), os.getpid())
+invoke("start", "--id", "t3", "--lease-id", lease("t3"))
+for task in ("unknown", "unknown-running"):
+    invoke("add", "--id", task, "--title", task)
+    invoke("claim", "--id", task, "--provider", "codex", "--ttl", "0")
+    write_marker(task, task, lease(task), None)
+invoke("start", "--id", "unknown-running", "--lease-id", lease("unknown-running"))
+dead_process = subprocess.Popen([sys.executable, "-c", "pass"])
+dead_process.wait()
+write_marker("old-retry", "t1", lease("t1"), dead_process.pid)
+snapshot = plan.read_bytes()
+for task in ("t1", "t3", "unknown", "unknown-running"):
+    assert not json.loads(invoke("show", "--id", task))["claim_expired"], task
+    assert "EXPIRED" not in invoke("brief", "--id", task)
+assert not any(t["claim_expired"] for t in json.loads(invoke("list", "--json"))["tasks"])
+assert "EXPIRED" not in invoke("list") and "ready now: (none)" in invoke("status")
+status = json.loads(invoke("status", "--json"))
+assert status["stale"] == status["actionable"] == [], status
+assert not invoke("ready").strip()
+invoke("next", expected=3)
+invoke("next", "--claim", "--provider", "claude", expected=3)
+assert "reclaimed 0 task(s)" in invoke("reclaim", "--include-running")
+assert plan.read_bytes() == snapshot, "protected claims were renewed or requeued"
+
+tokens = {}
+for task in ("dead", "dead-running", "wrong-lease", "wrong-task", "markerless"):
+    invoke("add", "--id", task, "--title", task)
+    invoke("claim", "--id", task, "--provider", "codex", "--ttl", "0")
+    tokens[task] = lease(task)
+invoke("start", "--id", "dead-running", "--lease-id", tokens["dead-running"])
+for task in ("dead", "dead-running"):
+    write_marker(task, task, tokens[task], dead_process.pid)
+write_marker("wrong-lease", "wrong-lease", "lease_previous", os.getpid())
+write_marker("wrong-task", "different-task", tokens["wrong-task"], os.getpid())
+recoverable = {"dead", "wrong-lease", "wrong-task", "markerless"}
+assert set(invoke("ready").split()) == recoverable
+assert set(json.loads(invoke("status", "--json"))["actionable"]) == recoverable
+chosen = json.loads(invoke("next", "--claim", "--provider", "claude", "--ttl", "9999", "--json"))
+assert chosen["id"] == "dead" and chosen["lease_id"] != tokens["dead"], chosen
+for action in ("touch", "start"):
+    invoke(action, "--id", "dead", "--lease-id", tokens["dead"], expected=2)
+invoke("touch", "--id", "dead", "--lease-id", chosen["lease_id"])
+assert "reclaimed 4 task(s)" in invoke("reclaim", "--include-running")
+for task in ("dead-running", "wrong-lease", "wrong-task", "markerless"):
+    assert json.loads(invoke("show", "--id", task))["state"] == "ready", task
+
+# Unrelated undecodable records still pass through the canonical strict reader.
+(markers / "unrelated.json").write_text('{"task_id":"unrelated","pid":NaN}')
+snapshot = plan.read_bytes()
+invoke("show", "--id", "dead")  # fresh TTL needs no marker scan
+for options in (("show", "--id", "t1"), ("ready",), ("reclaim", "--include-running"),
+                ("next", "--claim", "--provider", "claude")):
+    invoke(*options, expected=2)
+assert snapshot == plan.read_bytes()
+PY
 }
 
 test_delegate_plan_task_lifecycle() {
@@ -15193,6 +16339,8 @@ test_agent_role_and_delegate_injection() {
     fail "agent-role list should include bundled decision-advisor"
   printf '%s\n' "$roles" | grep >/dev/null -Fx repo-auditor ||
     fail "agent-role list should include bundled repo-auditor"
+  printf '%s' "$roles" | grep -Fxq researcher ||
+    fail "agent-role list should include bundled researcher"
   [ "$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
     "$ROOT/scripts/agent-role.sh" --name decision-advisor resolve)" = "$ROOT/roles/decision-advisor.md" ] ||
     fail "agent-role should fall back to bundled roles"
@@ -15743,30 +16891,244 @@ test_delegation_liveness_in_state() {
 test_gc_reclaims_safely() {
   local project="$TMP/gc"
   local gc_err="$project/gc.err"
+  local hook_project hook_case before after rc lock_mode lock_force_mkdir lock_target holder_pid python_real python_crlf_dir
+
+  gc_hook_digest() {
+    python3 -c 'import hashlib,sys
+h=hashlib.sha256()
+for path in sys.argv[1:]:
+    with open(path,"rb") as handle:
+        h.update(handle.read())
+print(h.hexdigest())' "$@"
+  }
+  gc_hook_seed() {
+    local path="$1"
+    mkdir -p "$path/.oms/hooks/sessions"
+    printf '%s\n' \
+      '{"schema":1,"ts":"2020-01-01T00:00:00Z","action":"old"}' \
+      '{"schema":1,"ts":"2099-01-01T00:00:00Z","action":"new"}' \
+      > "$path/.oms/hooks/events.jsonl"
+    printf '{"session":"old"}\n' > "$path/.oms/hooks/sessions/old.json"
+    python3 - "$path/.oms/hooks/sessions/old.json" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1, 1))
+PY
+  }
+
+  python_real="$(command -v python3)"
+  python_crlf_dir="$TMP/gc-python-crlf"
+  mkdir -p "$python_crlf_dir"
+  cat > "$python_crlf_dir/python3" <<'PYTHON'
+#!/usr/bin/env bash
+if [ "$#" -ge 3 ] && [ "$1" = "-c" ] && [ "$3" = "$CRLF_SESSION" ]; then
+  case "$2" in
+    *getmtime*)
+      value="$("$REAL_PYTHON" "$@")" || exit $?
+      printf '%s\r\n' "$value"
+      exit 0
+      ;;
+  esac
+fi
+exec "$REAL_PYTHON" "$@"
+PYTHON
+  chmod +x "$python_crlf_dir/python3"
+  gc_run_crlf() {
+    local gc_project="$1"
+    shift
+    ( cd "$gc_project" && REAL_PYTHON="$python_real" \
+      CRLF_SESSION="$gc_project/.oms/hooks/sessions/old.json" \
+      PATH="$python_crlf_dir:$PATH" "$ROOT/scripts/gc.sh" "$@" )
+  }
 
   make_committed_repo "$project"
   mkdir -p "$project/.oms/delegations" "$project/.oms/task/archive" "$project/.oms/runs/oldrun"
   printf '{"schema":1,"id":"d1","pid":999999,"state":"running"}\n' > "$project/.oms/delegations/d1.json"
   printf '{"schema":1,"id":"d2","pid":%s,"state":"running"}\n' "$$" > "$project/.oms/delegations/d2.json"
+  kill -0 "$$" 2>/dev/null || fail "test process PID must be independently live"
+  python3 - "$$" "$ROOT/scripts/lib/process_liveness.py" <<'PY' || fail "test PID must be verified live by shared process probe"
+import runpy, sys
+assert runpy.run_path(sys.argv[2])["pid_alive"](int(sys.argv[1]))
+PY
   printf 'x\n' > "$project/.oms/task/archive/current-old.md"
   printf '{}' > "$project/.oms/runs/oldrun/capsule.json"
   printf '%s\n' \
     '{"ts":"2020-01-01T00:00:00Z","fingerprint":"old","event":"fail"}' \
     '{"ts":"2020-01-01T00:00:01Z","fingerprint":"old","event":"resolved"}' \
     > "$project/.oms/failures.jsonl"
+  gc_hook_seed "$project"
   touch -t 202601010000 "$project/.oms/task/archive/current-old.md" "$project/.oms/runs/oldrun"
 
   # Dry-run changes nothing.
-  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 >/dev/null 2>&1 )
+  before="$(gc_hook_digest "$project/.oms/hooks/events.jsonl" "$project/.oms/hooks/sessions/old.json")"
+  gc_run_crlf "$project" --days 30 >/dev/null 2>&1
+  after="$(gc_hook_digest "$project/.oms/hooks/events.jsonl" "$project/.oms/hooks/sessions/old.json")"
+  [ "$before" = "$after" ] || fail "gc dry-run must preserve hook bytes"
   [ -f "$project/.oms/delegations/d1.json" ] || fail "dry-run must not delete anything"
   # Apply reclaims the orphan/old, keeps the live delegation.
-  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 0 --apply >/dev/null 2>"$gc_err" )
-  [ ! -s "$gc_err" ] || fail "gc should compact an all-resolved ledger without stderr: $(cat "$gc_err")"
+  before="$(gc_hook_digest "$project/.oms/hooks/events.jsonl" "$project/.oms/hooks/sessions/old.json")"
+  gc_run_crlf "$project" --days 0 --apply >/dev/null 2>"$gc_err"
+  after="$(gc_hook_digest "$project/.oms/hooks/events.jsonl" "$project/.oms/hooks/sessions/old.json")"
+  [ "$before" = "$after" ] || fail "verified live PID marker must preserve hook bytes"
+  grep -Fq 'hook cleanup skipped' "$gc_err" || fail "live marker should defer hook cleanup: $(cat "$gc_err")"
   [ ! -f "$project/.oms/delegations/d1.json" ] || fail "gc --apply should remove the dead-pid delegation"
   [ -f "$project/.oms/delegations/d2.json" ] || fail "gc must keep a live delegation"
   [ ! -f "$project/.oms/task/archive/current-old.md" ] || fail "gc should remove an aged task archive"
   [ ! -d "$project/.oms/runs/oldrun" ] || fail "gc should remove an aged capsule"
   [ ! -s "$project/.oms/failures.jsonl" ] || fail "gc should compact an all-resolved old ledger to empty"
+
+  # No marker and a verified dead marker permit normal cleanup. Every
+  # ambiguous marker shape defers both transient operations byte-for-byte.
+  for hook_case in no-marker dead unknown malformed symlink unsafe-name; do
+    hook_project="$TMP/gc-hook-$hook_case"
+    make_committed_repo "$hook_project"
+    gc_hook_seed "$hook_project"
+    if [ "$hook_case" != no-marker ]; then
+      mkdir -p "$hook_project/.oms/delegations"
+      case "$hook_case" in
+        dead) printf '{"schema":1,"id":"dead","pid":2147483647}\n' > "$hook_project/.oms/delegations/dead.json" ;;
+        unknown) printf '{"schema":1,"pid":2147483647}\n' > "$hook_project/.oms/delegations/unknown.json" ;;
+        malformed) printf '{broken\n' > "$hook_project/.oms/delegations/malformed.json" ;;
+        symlink)
+          printf '{"schema":1,"id":"target","pid":2147483647}\n' > "$TMP/gc-hook-marker-target"
+          ln -s "$TMP/gc-hook-marker-target" "$hook_project/.oms/delegations/link.json"
+          ;;
+        unsafe-name) printf '{"schema":1,"id":"unsafe","pid":2147483647}\n' > "$hook_project/.oms/delegations/bad name.json" ;;
+      esac
+    fi
+    before="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl" "$hook_project/.oms/hooks/sessions/old.json")"
+    gc_run_crlf "$hook_project" --days 0 --apply >"$hook_project/gc.out" 2>"$hook_project/gc.err" ||
+      fail "hook cleanup fixture failed for $hook_case: $(cat "$hook_project/gc.err")"
+    if [ "$hook_case" = no-marker ] || [ "$hook_case" = dead ]; then
+      [ ! -e "$hook_project/.oms/hooks/sessions/old.json" ] || fail "$hook_case marker case should remove old session"
+      ! grep -Fq '"action":"old"' "$hook_project/.oms/hooks/events.jsonl" ||
+        fail "$hook_case marker case should compact old hook event"
+      grep -Fq '"action":"new"' "$hook_project/.oms/hooks/events.jsonl" ||
+        fail "$hook_case marker case should preserve new hook event"
+    else
+      after="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl" "$hook_project/.oms/hooks/sessions/old.json")"
+      [ "$before" = "$after" ] || fail "$hook_case marker evidence changed hook bytes"
+      grep -Fq 'hook cleanup skipped' "$hook_project/gc.err" ||
+        fail "$hook_case marker evidence did not defer hook cleanup"
+    fi
+  done
+
+  # A failing event compactor remains a hard GC error and cannot fall through
+  # to session deletion. The shim fails only the explicit compact-events call.
+  hook_project="$TMP/gc-hook-compact-failure"
+  make_committed_repo "$hook_project"
+  mkdir -p "$hook_project/.oms/hooks/sessions" "$hook_project/bin"
+  printf '{"schema":1,"ts":"2020-01-01T00:00:00Z","action":"old"}\n' > "$hook_project/.oms/hooks/events.jsonl"
+  printf '{"session":"old"}\n' > "$hook_project/.oms/hooks/sessions/old.json"
+  python3 - "$hook_project/.oms/hooks/sessions/old.json" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1, 1))
+PY
+  before="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl")"
+  python_real="$(command -v python3)"
+  cat > "$hook_project/bin/python3" <<'PYTHON'
+#!/usr/bin/env bash
+case " $* " in
+  *hook_state.py*compact-events*) echo 'simulated compaction failure' >&2; exit 2 ;;
+esac
+exec "$REAL_PYTHON" "$@"
+PYTHON
+  chmod +x "$hook_project/bin/python3"
+  rc=0
+  ( cd "$hook_project" && REAL_PYTHON="$python_real" PATH="$hook_project/bin:$PATH" \
+    "$ROOT/scripts/gc.sh" --days 0 --apply >"$hook_project/gc.out" 2>"$hook_project/gc.err" ) || rc=$?
+  [ "$rc" -ne 0 ] || fail "event compaction failure must fail GC"
+  after="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl")"
+  [ "$before" = "$after" ] || fail "event compaction failure changed hook event bytes"
+  [ -f "$hook_project/.oms/hooks/sessions/old.json" ] ||
+    fail "event compaction failure must keep hook sessions"
+  grep -Fq 'could not compact hook events' "$hook_project/gc.err" ||
+    fail "event compaction failure was not reported: $(cat "$hook_project/gc.err")"
+
+  # Marker-set lock acquisition failure is a defer, with both lock backends.
+  for lock_mode in flock mkdir; do
+    hook_project="$TMP/gc-hook-lock-$lock_mode"
+    lock_force_mkdir=0
+    if [ "$lock_mode" = mkdir ]; then lock_force_mkdir=1; fi
+    make_committed_repo "$hook_project"
+    gc_hook_seed "$hook_project"
+    mkdir -p "$hook_project/.oms/delegations" "$TMP/gc-hook-locks-$lock_mode"
+    lock_target="$hook_project/.oms/delegations/.marker-set-lock-target"
+    OMS_LOCK_DIR="$TMP/gc-hook-locks-$lock_mode" OMS_LOCK_TIMEOUT=4 \
+      OMS_LOCK_FORCE_MKDIR="$lock_force_mkdir" \
+      PROBE_READY="$TMP/gc-hook-lock-ready-$lock_mode" bash -c '
+        . "$1/scripts/lib/file-lock.sh"
+        hold() { : > "$PROBE_READY"; sleep 3; }
+        oms_with_file_lock "$2" hold
+      ' _ "$ROOT" "$lock_target" &
+    holder_pid=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      [ -f "$TMP/gc-hook-lock-ready-$lock_mode" ] && break
+      sleep 0.1
+    done
+    [ -f "$TMP/gc-hook-lock-ready-$lock_mode" ] || fail "$lock_mode marker lock holder did not start"
+    before="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl" "$hook_project/.oms/hooks/sessions/old.json")"
+    lock_rc=0
+    ( cd "$hook_project" && OMS_LOCK_DIR="$TMP/gc-hook-locks-$lock_mode" OMS_LOCK_TIMEOUT=1 \
+      OMS_LOCK_FORCE_MKDIR="$lock_force_mkdir" \
+      "$ROOT/scripts/gc.sh" --days 0 --apply >"$hook_project/gc.out" 2>"$hook_project/gc.err" ) || lock_rc=$?
+    after="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl" "$hook_project/.oms/hooks/sessions/old.json")"
+    if [ "$lock_rc" != 0 ] || [ "$before" != "$after" ]; then
+      fail "$lock_mode lock failure changed hook state or failed GC"
+    fi
+    grep -Fq 'hook cleanup skipped' "$hook_project/gc.err" || fail "$lock_mode lock failure was not reported"
+    wait "$holder_pid" || fail "$lock_mode marker lock holder failed"
+  done
+
+  # A publisher starting while GC holds marker-set through event compaction
+  # must wait until the cleanup transaction releases the lock, on both backends.
+  for lock_mode in flock mkdir; do
+    hook_project="$TMP/gc-hook-start-race-$lock_mode"
+    lock_force_mkdir=0
+    if [ "$lock_mode" = mkdir ]; then lock_force_mkdir=1; fi
+    make_committed_repo "$hook_project"
+    gc_hook_seed "$hook_project"
+    mkdir -p "$hook_project/.oms/hooks/.events-lockdir" "$hook_project/.oms/delegations"
+    lock_target="$hook_project/.oms/delegations/.marker-set-lock-target"
+    OMS_LOCK_DIR="$TMP/gc-hook-start-race-locks-$lock_mode" OMS_LOCK_TIMEOUT=10 \
+      OMS_LOCK_FORCE_MKDIR="$lock_force_mkdir" \
+      "$ROOT/scripts/gc.sh" --repo "$hook_project" --days 0 --apply \
+      >"$hook_project/gc.out" 2>"$hook_project/gc.err" &
+    holder_pid=$!
+    lock_rc=0
+    local marker_busy_count=0
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+      if OMS_LOCK_DIR="$TMP/gc-hook-start-race-locks-$lock_mode" \
+        OMS_LOCK_FORCE_MKDIR="$lock_force_mkdir" bash -c '
+          . "$1/scripts/lib/file-lock.sh"
+          oms_try_file_lock "$2" true
+        ' _ "$ROOT" "$lock_target" >/dev/null 2>&1; then
+        marker_busy_count=0
+        sleep 0.05
+      else
+        marker_busy_count=$((marker_busy_count + 1))
+        if [ "$marker_busy_count" -ge 3 ]; then
+          lock_rc=1
+          break
+        fi
+        sleep 0.05
+      fi
+    done
+    [ "$lock_rc" = 1 ] || fail "$lock_mode GC did not hold marker-set while waiting for hook append lock"
+    OMS_LOCK_DIR="$TMP/gc-hook-start-race-locks-$lock_mode" \
+      OMS_LOCK_FORCE_MKDIR="$lock_force_mkdir" bash -c '
+        . "$1/scripts/lib/file-lock.sh"
+        marker_file="$3"
+        publish() { printf "{\"schema\":1,\"id\":\"started\",\"pid\":%s}\n" "$$" > "$marker_file"; }
+        oms_with_file_lock "$2" publish
+      ' _ "$ROOT" "$lock_target" "$hook_project/.oms/delegations/started.json" &
+    local publisher_pid=$!
+    sleep 0.1
+    [ ! -e "$hook_project/.oms/delegations/started.json" ] || fail "worker published inside GC marker-set critical section"
+    rmdir "$hook_project/.oms/hooks/.events-lockdir"
+    wait "$holder_pid" || fail "$lock_mode GC failed in marker publication race fixture: $(cat "$hook_project/gc.err")"
+    wait "$publisher_pid" || fail "$lock_mode marker publisher failed after GC released marker-set lock"
+    [ -f "$hook_project/.oms/delegations/started.json" ] || fail "$lock_mode worker marker was not published after cleanup"
+  done
 }
 
 test_gc_reclaims_aged_handoffs() {
@@ -21629,6 +22991,208 @@ EOF
   [ ! -e "$marker" ] || fail "strict preflight executed main config.worktree"
   contains "$out" 'unsafe Git execution config' ||
     fail "main config.worktree refusal was unclear: $out"
+
+  # Exercise the guard itself as well as delegate preflight. Git's grammar,
+  # byte framing and same-process cache replacements belong to this boundary.
+  python3 - "$ROOT/scripts/lib/oms-common.sh" "$project" "$bin_dir/marker" <<'PY' || fail "native execution-config guard regressions"
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+library, project, marker = sys.argv[1:]
+config = Path(project) / ".git/config"
+worktree = config.with_name("config.worktree")
+worktree.unlink()
+base = b"[core]\nrepositoryformatversion = 0\nbare = false\n"
+config.write_bytes(base)
+env = dict(os.environ)
+for key in list(env):
+    if key.startswith("GIT_") and key not in (
+            "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"):
+        del env[key]
+script = '. "$1"; oms_git_assert_safe_execution_config "$2" "$3"'
+
+def guard(expected, mode="strict", extra=None, shell=script):
+    child = dict(env)
+    child.update(extra or {})
+    result = subprocess.run(["bash", "-c", shell, "_", library, project, mode],
+                            env=child, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=12)
+    assert result.returncode == expected, (mode, result.returncode, result.stderr)
+    assert not (Path(marker).parent.parent / "preflight-marker-fired").exists()
+    return result
+
+command = marker.encode()
+for fragment in (
+        b"[safe]\nvalue = harmless\n  [core]\nfsmonitor = " + command,
+        b"[safe]\nvalue = harmless\n  [include]\npath = missing",
+        b'[safe]\nvalue = harmless\n  [includeIf "gitdir:**"]\npath = missing',
+        b"[core] fsmonitor = " + command,
+        b"[include] path = missing",
+        b'[includeIf "gitdir:**"] path = missing',
+        b"[CoRe]\nFsMonitor = " + command + b"\n[core]\nbare = false",
+        b'[filter "a.b"]\nclean = ' + command,
+        b"[filter.hostile]\nsmudge = " + command,
+        b'[filter\t"hostile"]\nprocess = ' + command,
+        b'[filter "hostile\\\"quoted"]\nclean = ' + command,
+        b'[includeIf\t"gitdir:**"]\npath = missing',
+        b'[include.hostile]\npath = missing'):
+    config.write_bytes(base + fragment + b"\n")
+    guard(2)
+    guard(2, "diff-read")
+
+for fragment in (b"[diff] external = ", b'[diff "a.b"]\ntextconv = ',
+                 b'[diff\t"hostile"]\ncommand = ',
+                 b"[diff.hostile]\nexternal = "):
+    config.write_bytes(base + fragment + command + b"\n")
+    guard(2)
+    guard(0, "diff-read")
+
+for fragment in (b"[safe]\nvalue = ok\n[broken", b'[safe]\nvalue = "unterminated',
+                 b"[safe]\nvalue = bad\\q", b"[safe]\nvalue = \0", b"\xff",
+                 b"#" + b"x" * (1024 * 1024)):
+    config.write_bytes(base + fragment + b"\n")
+    result = guard(2)
+    assert b"unterminated" not in result.stderr
+
+# Quoted escapes, real backslash-newline continuation and a UTF-8 BOM/CRLF
+# must keep working. A continuation that resembles a header is only a value.
+for raw in (base + b'[safe]\nvalue = "line\\nquote\\\"tab\\t"\n',
+            base + b"[safe]\nvalue = one\\\n  two\n",
+            base + b"[safe]\nvalue = one\\\n  [core] fsmonitor=harmless\n",
+            b"\xef\xbb\xbf" + base.replace(b"\n", b"\r\n"),
+            base + b'[core "named"]\nfsmonitor = harmless\n'):
+    config.write_bytes(raw)
+    guard(0)
+
+# Hooks, aliases and pagers are not newly forbidden policy classes. Inspecting
+# them or an include that names their config must never execute their values.
+config.write_bytes(base + ("[core]\nhooksPath = %s\npager = %s\n"
+                         "[alias]\nconfig = !%s\nrev-parse = !%s\n"
+                         "[pager]\nconfig = %s\n" % ((marker,) * 5)).encode())
+guard(0, extra={"GIT_TRACE": str(Path(project) / "trace-must-not-exist"),
+                "GIT_PAGER": marker, "PAGER": marker})
+assert not (Path(project) / "trace-must-not-exist").exists()
+included = Path(project) / "included.config"
+included.write_bytes(config.read_bytes() + b"[core] fsmonitor = " + command + b"\n")
+config.write_bytes(base + b"[include] path = " + os.fsencode(included) + b"\n")
+guard(2)
+config.write_bytes(base)
+
+# Inspect optional worktree bytes regardless of activation, including the
+# linked-worktree case with extensions.worktreeConfig enabled in common config.
+worktree.write_bytes(b"  [core] fsmonitor = " + command + b"\n")
+guard(2)
+worktree.unlink()
+config.write_bytes(base + b"[extensions]\nworktreeConfig = true\n")
+linked = Path(project) / "linked"
+subprocess.run(["git", "-C", project, "worktree", "add", "-q", "--detach", str(linked)],
+               env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+metadata = Path((linked / ".git").read_text().strip().split(": ", 1)[1])
+(metadata / "config.worktree").write_bytes(b"[include] path = missing\n")
+original_project = project
+project = str(linked)
+guard(2)
+project = original_project
+config.write_bytes(base)
+
+# A safe pass cannot authorize a later same-byte symlink, missing mandatory
+# file, FIFO, or unsafe regular-file replacement in the very same shell.
+saved = config.with_name("config.saved")
+shutil.copyfile(config, saved)
+for replacement in ('rm "$2/.git/config"',
+                    'rm "$2/.git/config"; ln -s config.saved "$2/.git/config"',
+                    'printf "[core] fsmonitor = unsafe\\n" > "$2/.git/config"'):
+    config.write_bytes(base)
+    guard(0, shell=script + ' || exit 1; ' + replacement +
+          '; oms_git_assert_safe_execution_config "$2" "$3"; [ "$?" = 2 ]')
+    if config.is_symlink():
+        config.unlink()
+if hasattr(os, "mkfifo"):
+    config.write_bytes(base)
+    guard(0, shell=script + ' || exit 1; rm "$2/.git/config"; mkfifo "$2/.git/config"; '
+          'oms_git_assert_safe_execution_config "$2" "$3"; [ "$?" = 2 ]')
+    config.unlink()
+config.write_bytes(base)
+for replacement in ("symlink", "fifo"):
+    if replacement == "fifo" and not hasattr(os, "mkfifo"):
+        continue
+    if replacement == "symlink":
+        worktree.symlink_to(saved)
+    else:
+        os.mkfifo(worktree)
+    guard(2)
+    worktree.unlink()
+config.write_bytes(base)
+guard(0)
+guard(2, extra={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                "GIT_CONFIG_VALUE_0": marker})
+guard(2, extra={"GIT_CONFIG_PARAMETERS": "'core.fsmonitor=unsafe'"})
+guard(0, extra={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                "GIT_CONFIG_VALUE_0": "/dev/null"})
+# Deterministic boundary interleavings avoid timing-dependent race loops. The
+# parser still runs real Git; only the swap or discovery result is controlled.
+from contextlib import redirect_stderr
+from io import StringIO
+from unittest.mock import patch
+
+source = Path(library).read_text().split("oms_git_assert_safe_execution_config()", 1)[1]
+source = source.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+real_open, real_run = os.open, subprocess.run
+
+def embedded(expected, open_call=real_open, run_call=real_run):
+    with patch.object(sys, "argv", ["guard", project, "strict"]), \
+            patch.object(os, "open", open_call), \
+            patch.object(subprocess, "run", run_call), redirect_stderr(StringIO()):
+        rc = 0
+        try:
+            exec(compile(source, library, "exec"), {})
+        except SystemExit as exc:
+            rc = exc.code
+        assert rc == expected, (rc, expected)
+
+for kind in ("symlink", "regular", "fifo"):
+    if kind == "fifo" and not hasattr(os, "mkfifo"):
+        continue
+    config.write_bytes(base)
+    def swap_open(path, flags):
+        if Path(path) == config:
+            if kind == "regular":
+                # Rename a distinct inode, not an unlink/create that can reuse it.
+                replacement = config.with_name("replacement")
+                replacement.write_bytes(base)
+                replacement.replace(config)
+            else:
+                config.unlink()
+                if kind == "symlink":
+                    config.symlink_to(saved)
+                else:
+                    os.mkfifo(config)
+        return real_open(path, flags)
+    embedded(2, open_call=swap_open)
+    config.unlink()
+
+# Replacing the pathname after descriptor validation cannot hide the original
+# unsafe bytes. A parse error after valid output must reject all partial keys.
+config.write_bytes(base + b"[core] fsmonitor = unsafe\n")
+def swap_before_parse(args, **kwargs):
+    if "--file" in args:
+        config.write_bytes(base)
+    return real_run(args, **kwargs)
+embedded(2, run_call=swap_before_parse)
+config.write_bytes(base + b"[safe]\nvalue = ordinary\n[broken")
+def discovery_only(args, **kwargs):
+    if "rev-parse" in args:
+        return subprocess.CompletedProcess(args, 0, os.fsencode(config.parent) + b"\n")
+    result = real_run(args, **kwargs)
+    assert result.returncode != 0 and result.stdout
+    return result
+embedded(2, run_call=discovery_only)
+config.write_bytes(base)
+assert not (Path(project) / "preflight-marker-fired").exists()
+PY
 }
 
 test_delegate_worktree_lifecycle_suppresses_checkout_hooks() {
@@ -22016,7 +23580,8 @@ test_delegate_does_not_export_owner_authority_to_worker() {
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
-for name in OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
+for name in OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID OMS_PANEL_EXECUTION_ROOT OMS_INDEX_BASE_REPO DELEGATE_SOURCE_REPO \
+  OMS_OBSERVER_INJECTED OMS_OBSERVE_PLAN_BINDING OMS_DL_OBSERVATION OBSERVED_BINDING \
   OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_WORKER_AUTHORITY_EXCLUSIVE; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then
@@ -22031,6 +23596,8 @@ EOF
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_TASK_ID=caller-task OMS_PLAN_LEASE_ID=caller-lease \
+    OMS_PANEL_EXECUTION_ROOT=internal-root OMS_INDEX_BASE_REPO=injected DELEGATE_SOURCE_REPO=injected OMS_OBSERVER_INJECTED=injected \
+    OMS_OBSERVE_PLAN_BINDING=injected OMS_DL_OBSERVATION=injected OBSERVED_BINDING=injected \
     OMS_EXECUTOR_ID=caller-executor OMS_SOUL_SHA256=caller-soul \
     OMS_WORKER_AUTHORITY_EXCLUSIVE=1 \
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
@@ -22204,6 +23771,132 @@ EOF
     grep -Fq '"state": "review"' || fail "current task did not publish its review"
   "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id sibling |
     grep -Fq '"state": "claimed"' || fail "sibling task transition was lost"
+}
+
+test_current_operation_guard_allows_parent_touch_heartbeat() {
+  local project="$TMP/worker-current-heartbeat"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local barrier="$TMP/worker-current-heartbeat-barrier"
+  local lease pid rc=0 ticks=0
+
+  make_guard_repo "$project"
+  mkdir -p "$barrier"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal heartbeat-safe >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id current \
+    --title current --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id current \
+    --provider codex >/dev/null
+  lease="$("$ROOT/scripts/agent-plan.sh" --repo "$project" show --id current |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])' | tr -d '\r')"
+  [ -n "$lease" ] || fail "could not read the exact current-task lease"
+  python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+plan = json.load(open(path, encoding="utf-8"))
+task = plan["tasks"]["current"]
+task["claimed_at"] = task["updated"] = "2000-01-01T00:00:00Z"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(plan, handle, ensure_ascii=False, indent=2)
+PY
+
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'worker edit\n' >> file.txt
+: > "$OMS_TEST_BARRIER/ready"
+while [ ! -f "$OMS_TEST_BARRIER/release" ]; do sleep 0.05; done
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_TEST_BARRIER="$barrier" OMS_PEER_TIMEOUT=15 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task current --no-verify > "$barrier/out" 2> "$barrier/err" &
+  pid=$!
+  while [ ! -f "$barrier/ready" ] && [ "$ticks" -lt 300 ] &&
+    kill -0 "$pid" 2>/dev/null; do
+    ticks=$((ticks + 1))
+    sleep 0.05
+  done
+  if [ ! -f "$barrier/ready" ]; then
+    : > "$barrier/release"
+    wait "$pid" 2>/dev/null || true
+    fail "current-operation fixture did not reach its provider barrier: $(cat "$barrier/err")"
+  fi
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" touch --id current \
+    --lease-id "$lease" >/dev/null
+  : > "$barrier/release"
+  wait "$pid" || rc=$?
+  [ "$rc" = 0 ] ||
+    fail "an exact parent touch heartbeat stopped its worker: $(cat "$barrier/err")"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id current |
+    grep -Fq '"state": "review"' || fail "the heartbeating task did not publish review"
+}
+
+test_current_operation_guard_rejects_invalid_heartbeat_timestamps() {
+  local project="$TMP/worker-current-future-heartbeat"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local snapshot="$TMP/current-operation-malformed-heartbeat.json"
+  local out
+  local rc=0
+
+  make_guard_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal future-heartbeat >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
+    --title guarded --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
+    --provider codex >/dev/null
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import datetime, json, os, sys, tempfile
+path = sys.argv[1]
+plan = json.load(open(path, encoding="utf-8"))
+task = plan["tasks"]["guarded"]
+future = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
+future = future.strftime("%Y-%m-%dT%H:%M:%SZ")
+task["claimed_at"] = task["updated"] = future
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(plan, handle, ensure_ascii=False, indent=2)
+os.replace(tmp, path)
+PY
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task guarded --no-verify 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a future heartbeat timestamp must fail the worker: $out"
+  printf '%s' "$out" | grep -Fq 'not a valid same-lease touch heartbeat' ||
+    fail "future heartbeat rejection did not identify the failed predicate: $out"
+
+  python3 - "$project/.oms/plan/tasks.json" "$snapshot" <<'PY'
+import json, sys
+plan_path, snapshot_path = sys.argv[1:]
+task = {"id": "guarded", "state": "running", "provider": "codex",
+        "lease_id": "lease_fixture", "claimed_at": "2000-01-01T00:00:00Z",
+        "updated": "2000-01-01T00:00:00Z"}
+current = dict(task)
+current["claimed_at"] = current["updated"] = "2026-10-9T1:00:00Z"
+with open(plan_path, "w", encoding="utf-8") as handle:
+    json.dump({"schema": 3, "tasks": {"guarded": current}}, handle)
+with open(snapshot_path, "w", encoding="utf-8") as handle:
+    json.dump({"schema": 2, "plan": {"task_id": "guarded",
+                                      "lease_id": "lease_fixture",
+                                      "task": task}, "executor": None}, handle)
+PY
+  out="$(bash -c '. "$1"; oms_worker_operation_violations "$2" "$3"' \
+    _ "$ROOT/scripts/lib/oms-common.sh" "$project" "$snapshot")"
+  printf '%s' "$out" | grep -Fq 'not a valid same-lease touch heartbeat' ||
+    fail "a noncanonical heartbeat timestamp was accepted: $out"
 }
 
 test_current_operation_guard_restores_same_lease_tampering() {

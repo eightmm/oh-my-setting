@@ -39,7 +39,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                           "_action": ("debate", (row["task"], owner["participant"]))})
     calls.sort(key=call_order)
     if attention_only:
-        calls = [m for m in calls if m["state"] in ATTENTION_STATES or classify(m) == "review"]
+        calls = [m for m in calls if classify(m) != "past" and
+                 (m["state"] in ATTENTION_STATES or classify(m) == "review")]
     prefix, end, stem = ("├─ ", "└─ ", "│  ") if unicode else ("|- ", "`- ", "|  ")
     rows, items = [], []
     boxed = width >= 28 and height >= 16
@@ -56,7 +57,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
 
     def call_groups(attached, owner, root_stem):
         groups = [(role, [m for m in attached if m.get("role") == role and classify(m) == "live"])
-                  for role in ("council", "advisor", "reviewer", "worker")]
+                  for role in ("council", "advisor", "reviewer", "researcher", "worker")]
         groups += [(kind, [m for m in attached if classify(m) == kind]) for kind, _ in CALL_GROUPS]
         groups = [(role, children) for role, children in groups if children]
         for group_index, (role, children) in enumerate(groups):
@@ -74,11 +75,13 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                     continue
             else:
                 add(root_stem + (end if last_group else prefix) + heading + " (%s)" % len(children),
-                    "worker" if role == "worker" else "review")
+                    "worker" if role in {"worker", "researcher"} else "review")
             indent = root_stem + ("   " if last_group else stem)
             for child_index, child in enumerate(children):
                 branch = end if child_index == len(children) - 1 else prefix
                 model = model_name(child)
+                if child.get("role") == "researcher":
+                    model = "Researcher " + model
                 label = child.get("title") or child["participant"]
                 child_action = child.get("_action") or ("result", child["participant"])
                 if child.get("_native"):

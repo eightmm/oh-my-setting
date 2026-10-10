@@ -20,6 +20,7 @@ from dashboard_projection import clean
 from panel_view import TERMINAL_STATES
 
 SESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,159}\Z")
+PI_SESSION = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,158}[A-Za-z0-9])?\Z")
 UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 MAX_ENTRIES = 8192
 MAX_FILES = 4096
@@ -34,9 +35,9 @@ def parent_only():
         raise ValueError("workers cannot navigate native owner chats")
 
 
-def native_index(wanted):
+def native_index(wanted, repo=None):
     """Resolve enrolled hashes from filenames and first metadata rows only."""
-    found = {"codex": {}, "claude": {}}
+    found = {"codex": {}, "claude": {}, "pi": {}}
     if not wanted:
         return found
     try:
@@ -97,7 +98,106 @@ def native_index(wanted):
                         found[provider].setdefault(consumer, set()).add(sid)
             except (OSError, ValueError, RecursionError):
                 continue
+    if repo is not None:
+        headers = pi_session_headers(repo)
+        if headers is not None:
+            for sid, rows in headers.items():
+                consumer = hashlib.sha256(sid.encode()).hexdigest()[:32]
+                if consumer in wanted and len(rows) == 1 and rows[0].get("cwd") == str(Path(repo).resolve()):
+                    found["pi"].setdefault(consumer, set()).add(sid)
     return found
+
+
+def pi_session_dir(repo):
+    """Pi's project-scoped session directory, using canonical home and project paths."""
+    home = Path.home().resolve(strict=True)
+    canonical = str(Path(repo).resolve(strict=True))
+    slug = "--" + re.sub(r"[^A-Za-z0-9]+", "-", canonical).strip("-") + "-" + hashlib.sha256(canonical.encode()).hexdigest()[:12] + "--"
+    return home / ".pi" / "agent" / "sessions" / slug
+
+
+def pi_session_storage_safe(repo, create=False):
+    """Validate each owned directory before creating or descending into its child."""
+    root = pi_session_dir(repo)
+    home = Path.home().resolve(strict=True)
+    try:
+        current = home
+        home_info = current.stat()
+        if not stat.S_ISDIR(home_info.st_mode) or (hasattr(os, "getuid") and home_info.st_uid != os.getuid()):
+            return False
+        for part in (".pi", "agent", "sessions", root.name):
+            child = current / part
+            try:
+                info = child.lstat()
+            except FileNotFoundError:
+                if not create:
+                    return False
+                try:
+                    child.mkdir(mode=0o700)
+                except FileExistsError:
+                    pass
+                info = child.lstat()
+            if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                    or hasattr(os, "getuid") and info.st_uid != os.getuid()):
+                return False
+            current = child
+        return current == root
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def pi_session_headers(repo):
+    """Boundedly read safe Pi session headers from this exact project directory."""
+    root = pi_session_dir(repo)
+    try:
+        if not pi_session_storage_safe(repo):
+            return None
+        result = {}
+        scanned = 0
+        with os.scandir(root) as entries:
+            for entry in entries:
+                scanned += 1
+                if scanned > MAX_FILES:
+                    return None
+                path = Path(entry.path)
+                if not entry.name.endswith(".jsonl"):
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    return None
+                try:
+                    data = _read_owned(path, 65537)
+                    newline = data.find(b"\n")
+                    if newline < 0 or newline > 65536:
+                        return None
+                    line = data[:newline]
+                    if len(line) > 65536:
+                        return None
+                    row = json.loads(line.decode("utf-8"), parse_constant=_reject_json_constant)
+                    if (not isinstance(row, dict) or row.get("type") != "session"
+                            or not isinstance(row.get("id"), str) or not PI_SESSION.fullmatch(row["id"])
+                            or not isinstance(row.get("cwd"), str)):
+                        return None
+                    result.setdefault(row["id"], []).append(row)
+                except (OSError, ValueError, IndexError, RecursionError):
+                    return None
+        return result
+    except OSError:
+        return None
+
+
+def _reject_json_constant(value):
+    raise ValueError("non-standard JSON constant: " + value)
+
+
+def pi_session_header(repo, ident):
+    if not isinstance(ident, str) or not PI_SESSION.fullmatch(ident):
+        return None
+    headers = pi_session_headers(repo)
+    if headers is None:
+        return None
+    rows = headers.get(ident, [])
+    canonical = str(Path(repo).resolve(strict=True))
+    return rows[0] if len(rows) == 1 and rows[0].get("cwd") == canonical else None
 
 
 def _claude_home():
@@ -328,14 +428,14 @@ def windows(repo, ident, state=None):
     return found
 
 
-def catalog(repo, ident, who=None, terminal_first=False):
+def catalog(repo, ident, who=None, terminal_first=False, native_repo=None):
     parent_only()
     state = room.status(repo, ident)
     members = [p for p in state["participants"] if who is None or p["participant"] == who]
     panes = windows(repo, ident, state)
     wanted = {p["consumer"] for p in members if p.get("consumer") and p["role"] == "main"
               and not (terminal_first and len(panes.get(p["participant"], [])) == 1)}
-    index = native_index(wanted) if wanted else {}
+    index = native_index(wanted, native_repo or repo) if wanted else {}
     rows = []
     for member in members:
         who, provider = member["participant"], member["provider"]
@@ -384,8 +484,8 @@ def terminal_commands(target):
     return commands
 
 
-def plan(repo, ident, who, surface="auto"):
-    report = catalog(repo, ident, who=who, terminal_first=surface != "app")
+def plan(repo, ident, who, surface="auto", native_repo=None):
+    report = catalog(repo, ident, who=who, terminal_first=surface != "app", native_repo=native_repo)
     row = next((r for r in report["rows"] if r["participant"] == who), None)
     if row is None:
         raise ValueError("choose a participant in the selected room")
@@ -440,8 +540,8 @@ def plan(repo, ident, who, surface="auto"):
             "frontend_authority": "none", "ui_observed": False}
 
 
-def open_chat(repo, ident, who, surface="auto", dry_run=False, allowed_methods=None):
-    request = plan(repo, ident, who, surface)
+def open_chat(repo, ident, who, surface="auto", dry_run=False, allowed_methods=None, native_repo=None):
+    request = plan(repo, ident, who, surface, native_repo=native_repo)
     if allowed_methods is not None and request["method"] not in allowed_methods:
         raise ValueError("no existing terminal or exact app link; choose the original chat in its app")
     if dry_run or request["method"] == "artifacts":
@@ -470,5 +570,8 @@ def text(report):
         if row["uri"]:
             lines.append("   " + row["uri"])
         if row["session_id"] and not row["uri"]:
-            lines.append("   native session: " + row["session_id"] + " / Claude app sidebar")
+            if row["provider"] == "pi":
+                lines.append("   Pi native terminal session: " + row["session_id"] + " / resume with --launch pi --resume")
+            else:
+                lines.append("   native session: " + row["session_id"] + " / Claude app sidebar")
     return "\n".join(lines)

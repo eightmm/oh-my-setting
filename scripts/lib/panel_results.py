@@ -440,10 +440,12 @@ def results(repo, task_id=None, room_participant=None, _shared=False):
                     trimmed, sections = debate_sections(answer)
                     if any(heading in ('Answer', 'Findings') for heading, _ in sections):
                         answer = trimmed
-                    safe = codex_app_notify._safe_message(answer, repo, maximum=MAX_RESULT + 1).strip()
-                    call['answer_truncated'] = (len(answer) > MAX_RESULT + 1 or
-                                                len(safe.encode('utf-8')) > MAX_RESULT)
-                    call['answer'] = sanitize_multiline(safe, MAX_RESULT, MAX_RESULT).strip()
+                    # Redact the whole bounded artifact before deciding whether the retained answer lost bytes.
+                    maximum = max(MAX_RESULT + 1, 2 * len(answer.encode('utf-8')) + MAX_RESULT)
+                    safe = codex_app_notify._safe_message(answer, repo, maximum=maximum).strip()
+                    complete = sanitize_multiline(safe, maximum, maximum).strip()
+                    call['answer'] = sanitize_multiline(complete, MAX_RESULT, MAX_RESULT).strip()
+                    call['answer_truncated'] = call['answer'] != complete
                 except (OSError, ValueError, TypeError):
                     call['answer'] = 'Answer evidence unavailable'
             if (task_id or room_participant) and row.get('patch') and row.get('patch_sha256'):

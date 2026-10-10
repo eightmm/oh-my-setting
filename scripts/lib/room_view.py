@@ -554,7 +554,7 @@ WORDS = {"working": "running", "live marker": "running", "verifying": "checking"
          "timed_out": "timed out", "orphaned": "lost", "waiting_input": "needs input",
          "waiting_approval": "needs approval", "review": "in review", "presence unknown": "status unknown"}
 WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-ROLES = {"main": "Main", "advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate", "worker": "Worker"}
+ROLES = {"main": "Main", "advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate", "worker": "Worker", "researcher": "Researcher"}
 MACHINE = re.compile(r"^(stop-reason:|model-route:|model-result:|usage detail:|tokens used|served model|cost usd|"
                      r"##\s*(output|exit|verify)\b|---\s*(begin|end) )", re.I)
 
@@ -776,6 +776,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if picked:
         primary = picked if picked.get("role") == "main" else owners.get(picked.get("parent"), primary)
     debates = [row for row in worker_rows(report) if row["source"] == "council"]
+    classify = call_classifier(report)
 
     def team(main, every=False):
         ids = {key for key in (main["participant"], main.get("attempt")) if key}
@@ -784,15 +785,13 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                   "_action": ("debate", (row["task"], main["participant"]))}
                  for row in debates if row["parent"] in ids]
         calls += [m for m in members if m.get("role") != "main" and m.get("parent") in ids]
-        calls = [m for m in calls if m["state"] in ATTENTION_STATES] if attention_only and not every else calls
+        if attention_only:
+            calls = [m for m in calls if classify(m) != "past" and
+                     (m["state"] in ATTENTION_STATES or classify(m) == "review")]
         # Judges precede workers so keyboard order follows the drawing.
-        return sorted(calls, key=lambda m: (m.get("role") == "worker",) + call_order(m))
+        return sorted(calls, key=lambda m: (m.get("role") in {"worker", "researcher"},) + call_order(m))
 
-    classify = call_classifier(report)
     teams = {m["participant"]: team(m, every=True) for m in mains}
-    if attention_only:
-        teams = {key: [c for c in calls if c["state"] in ATTENTION_STATES or classify(c) == "review"]
-                 for key, calls in teams.items()}
     grouped = {key: {kind: [c for c in calls if classify(c) == kind] for kind, _ in CALL_GROUPS}
                for key, calls in teams.items()}
     if navigation.get("group_tree"):
@@ -811,8 +810,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     # Running judges first; answered ones linger after them.
     judges = sorted((m for m in children if m.get("role") in {"advisor", "reviewer", "council"}),
                     key=lambda m: m["state"] in FINISHED)
-    workers = [m for m in children if m.get("role") == "worker"]
+    workers = [m for m in children if m.get("role") in {"worker", "researcher"}]
     unlinked = [m for m in members if m.get("role") != "main" and m.get("parent") not in owners]
+    if attention_only:
+        unlinked = [m for m in unlinked if classify(m) != "past" and
+                    (m["state"] in ATTENTION_STATES or classify(m) == "review")]
     offset = max(0, navigation.get("offset", 0))
     scrolled = mapping(navigation.get("band_offsets"))
     judge_start = min(scrolled.get("judge", offset), max(0, len(judges) - 3))
@@ -1004,7 +1006,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             asked = open_count(room, m["participant"])
             badge = " ".join("%s%s" % (mark, n) for mark, n in (
                 ("W", sum(c.get("role") == "worker" for c in calls)),
-                ("A", sum(c.get("role") != "worker" for c in calls)), ("!", alerts), ("M", unread),
+                ("R", sum(c.get("role") == "researcher" for c in calls)),
+                ("A", sum(c.get("role") not in {"worker", "researcher"} for c in calls)), ("!", alerts), ("M", unread),
                 ("?", asked)) if n)
             ctx = context_note(report, m)
             if ctx:
@@ -1130,7 +1133,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
     def compact(group, span):
         # The top wire must meet the card midpoint, even with a selection mark.
-        limit = span // 2 - 4 if any(m.get("role") in {"main", "worker"} for m in group) else span - 6
+        limit = span // 2 - 4 if any(m.get("role") in {"main", "worker", "researcher"} for m in group) else span - 6
         return any(display_width(heading(m)) > limit for m in group)
 
     shown_groups = [g for g in (shown_judges, shown_workers) if g] + ([[primary]] if primary else [])
@@ -1258,7 +1261,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             span = cell_width
             title = heading(m)
             if reflow:
-                role = {"advisor": "ADV", "reviewer": "REV", "worker": "WRK", "council": "DEB"}.get(m.get("role"), "MAIN")
+                role = {"advisor": "ADV", "reviewer": "REV", "worker": "WRK", "researcher": "RES", "council": "DEB"}.get(m.get("role"), "MAIN")
                 title = (("▸ " if unicode else "> ") if action(m) == selected else "") + role
             status = "%s %s" % (activity(state_of(m), frame, unicode), main_words(m, unicode))
             if m.get("role") == "main" and open_count(room, m["participant"]):
@@ -1273,7 +1276,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 if m.get("role") == "main":
                     calls = teams.get(m["participant"], [])
                     where = "Team W%s A%s%s" % (
-                        sum(c.get("role") == "worker" for c in calls), sum(c.get("role") != "worker" for c in calls),
+                        sum(c.get("role") in {"worker", "researcher"} for c in calls), sum(c.get("role") not in {"worker", "researcher"} for c in calls),
                         " / !%s attention" % sum(c["state"] in ATTENTION_STATES for c in calls)
                         if any(c["state"] in ATTENTION_STATES for c in calls) else "")
                 task_rows = len(task_lines(m, span - 4, 2))
@@ -1320,7 +1323,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             if flanks:
                 if row == 0:
                     left_width, right_width = left - 2, width - left - cell_width - 2
-                    linked_workers = [m for m in linked_children if m.get("role") == "worker"]
+                    linked_workers = [m for m in linked_children if m.get("role") in {"worker", "researcher"}]
                     status_rows = ["Workers %s / live %s" % (len(linked_workers), sum(m["state"] in LIVE_STATES for m in linked_workers)),
                                    "Advisors %s / reviewers %s" % (sum(m.get("role") == "advisor" for m in linked_children),
                                                                   sum(m.get("role") == "reviewer" for m in linked_children)),
@@ -1383,8 +1386,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         first_band = len(bands_hit)
         tag_of = {"advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate"}
         columns = []
-        judge_sets = {m["participant"]: sorted((c for c in teams[m["participant"]] if c.get("role") != "worker"),
-                                               key=lambda c: c["state"] in FINISHED)[:3] for m in group}
+        judge_sets = {m["participant"]: sorted((c for c in teams[m["participant"]]
+                                                 if c.get("role") not in {"worker", "researcher"}),
+                                                key=lambda c: c["state"] in FINISHED)[:3] for m in group}
         most = max(len(judges) for judges in judge_sets.values())
         # With room, each main's advisors and reviewers share one box above it; boxes and mains line up across lanes.
         boxed = rows >= 14 and any(judge_sets.values())
@@ -1392,7 +1396,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
         def activity_line(calls, m):
             ident = m["participant"]
-            running = sum(c.get("role") == "worker" and c["state"] in LIVE_STATES for c in calls)
+            running = sum(c.get("role") in {"worker", "researcher"} and c["state"] in LIVE_STATES for c in calls)
             needs = sum(c["state"] in ATTENTION_STATES for c in calls)
             reviews = len(grouped[ident]["review"])
             said_at = next((x.get("ts") for x in reversed(listing(room.get("messages"))) if x.get("sender") == ident), None)
@@ -1431,7 +1435,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             top = len(lines) + 1
             calls = teams[m["participant"]]
             judges_here = judge_sets[m["participant"]]
-            workers_here = sorted((c for c in calls if c.get("role") == "worker"),
+            workers_here = sorted((c for c in calls if c.get("role") in {"worker", "researcher"}),
                                   key=lambda c: 0 if c["state"] in LIVE_STATES else 1 if c["state"] in ATTENTION_STATES else 2)
             cells = []
 
@@ -1507,7 +1511,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             hidden = len(workers_here) - len(shown)
             for n, c in enumerate(shown):
                 last = n == len(shown) - 1 and not hidden
-                box = card("Worker %s %s %s" % (name_of(c), activity(c["state"], frame, unicode),
+                box = card("%s %s %s %s" % ("Researcher" if c.get("role") == "researcher" else "Worker",
+                                                name_of(c), activity(c["state"], frame, unicode),
                                                 call_span(c, "→" if unicode else "->")),
                            [("round %s · " % c["round"] if c.get("round", 1) > 1 else "") + task_of(c)], lane_width - 3, 3, unicode)
                 rails = (("└", " ", " ") if last else ("├", "│", "│")) if unicode else (("`", " ", " ") if last else ("|", "|", "|"))
@@ -1607,7 +1612,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 span = (column, x2) if key == active else span
             column += len(text) + 2
         role = previewed.get("role", "worker").upper() if previewed else ""
-        style = (hue(previewed) if role == "MAIN" else "review" if role != "WORKER" else "worker") if previewed else "dim"
+        style = (hue(previewed) if role == "MAIN" else "review" if role not in {"WORKER", "RESEARCHER"} else "worker") if previewed else "dim"
         lines.append(paint(edge, style) if span is None or not color else
                      paint(edge[:span[0]], style) + chosen(edge[span[0]:span[1]], style) + paint(edge[span[1]:], style))
         # No room for a body: the strip alone keeps every tab one click away.
@@ -1709,7 +1714,7 @@ PLAN_ORDER = {"done": 0, "review": 1, "landing": 1, "running": 2, "claimed": 2, 
 
 
 def plan_rows(report, labels, width, unicode):
-    """The shared repository plan: its goal, then one row per task, verified work first."""
+    """The shared repository plan: its goal, then one row per task, completed work first."""
     goal = mapping(report.get("goal")).get("text")
     tasks = listing(mapping(report.get("room")).get("repo_tasks"))
     glyphs = (dict(done="✓", review="◐", landing="◐", running="●", claimed="●", ready="○", blocked="✗") if unicode else
@@ -1718,6 +1723,12 @@ def plan_rows(report, labels, width, unicode):
     for t in sorted((mapping(t) for t in tasks), key=lambda t: PLAN_ORDER.get(t.get("state"), 5)):
         by = t.get("claimed_by_participant")
         word = clean(t.get("state"), 20) or "unknown"
+        if word == "done":
+            kind = t.get("completion_kind")
+            if kind == "research-accepted":
+                word = "done (research)"
+            elif kind == "satisfied-by":
+                word = "done (satisfied by)"
         age = t.get("claim_age_s")
         if t.get("claim_expired") and isinstance(age, (int, float)) and age >= 0:
             word += " %d%s stale" % ((age // 86400, "d") if age >= 86400 else (age // 3600, "h") if age >= 3600 else (age // 60, "m"))

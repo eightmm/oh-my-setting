@@ -161,6 +161,89 @@ missing
 
 Completion is evidence coverage, not model self-confidence.
 
+## Reviewed plan completion
+
+The locally implemented operations add research acceptance and satisfaction
+records. They are not available from the installed OMS `PATH` yet; authorized
+same-SHA release and installation are separate. Existing `finish`, patch
+admission/`patch-land`, and committed land/gate/push/CI completion retain their
+current evidence and landing rules. These records do not claim a landing for
+the original task, and pending research or replacement tasks are not closed
+automatically.
+
+| Operation | `completion_kind` |
+|---|---|
+| `oms agent-plan accept-research` | `research-accepted` |
+| `oms agent-plan satisfy` | `satisfied-by` |
+
+Both commands use the same compare-and-swap, lease, state, and bundle flags;
+use the exact operation spelling shown above:
+
+```bash
+oms agent-plan accept-research \
+  --id TASK_ID --lease-id LEASE_ID --expected-state STATE \
+  --expected-plan-sha256 PLAN_SHA256 --expected-task-sha256 TASK_SHA256 \
+  --completion-bundle REPO_RELATIVE_FILE \
+  --expected-completion-bundle-sha256 BUNDLE_SHA256
+
+oms agent-plan satisfy \
+  --id TASK_ID --lease-id LEASE_ID --expected-state STATE \
+  --expected-plan-sha256 PLAN_SHA256 --expected-task-sha256 TASK_SHA256 \
+  --completion-bundle REPO_RELATIVE_FILE \
+  --expected-completion-bundle-sha256 BUNDLE_SHA256
+```
+
+Replace placeholders with the current task's exact IDs, state, digests, lease,
+and bundle digest. `REPO_RELATIVE_FILE` is a path relative to the repository.
+The current claimed owner must invoke the parent-only operation from its
+verified native main room. The declared task owner and the actual native parent
+provider are recorded separately; neither is inferred from a title, model, or
+similar source.
+
+Initial native enrollment uses its exact attempt ID as participant when the
+participant ref is absent. A resumed main uses its explicit preserved ref;
+empty, conflicting or malformed refs are rejected. Historical READ ancestry
+and the current caller's unique active ownership are checked separately.
+
+The schema-1 bundle binds current plan/task/state/lease digests and the original
+task contract, exact declared owner, parent review summary, and a complete map
+of obligations, deliverables, source paths, and evidence. It names a full base
+commit and an explicit source envelope manifest with file content digests,
+modes, and absences/deletions. The frozen verifier command and its file
+identities are included and executed. A nonempty stored verifier must match
+exactly; a legacy empty verifier requires explicit reviewed adoption. Source,
+evidence, and verifier bindings are checked before and after execution.
+
+Research requires explicit `research-only` classification and the original
+artifact's indexed, successful terminal read attempt with its original parent
+and artifact digest. Write, failed, and unproven producers are rejected.
+Missing legacy lineage requires explicit reviewed adoption of that artifact
+and original obligation; adoption cannot override contradictory provenance.
+An ancillary zero-byte patch from a proven read is metadata only, never
+landing evidence.
+
+Satisfaction requires an independently `done` same-plan successor with real
+admitted `patch-land` evidence, or exact committed land receipt proof of passed
+gate, push, CI, and target-ref reachability. Current product bytes, modes, and
+deletions must match, with complete obligation mapping. Partial coverage,
+cycles, satisfaction chains, unrelated or foreign evidence, and no-op patches
+are rejected. Archived or cross-plan successors are unsupported.
+
+Success records an immutable content-addressed receipt and digest reference,
+preserves history, and marks the task `done` with distinct completion metadata
+and Plan labels. Exact replay is idempotent and interrupted receipt publication
+can recover; reactivation archives prior completion metadata. No landing fields
+are fabricated. The implementation remains local and uninstalled; worker exit
+does not establish completion.
+
+Versioned capture references bind complete bounded room and lifecycle prefixes
+to immutable local objects. Historical receipt reads use those captured facts;
+later departure, closure or telemetry cannot rewrite an accepted result. Each
+mutation still checks current authority. The actual room and lifecycle writer
+locks cover final authority validation through receipt and plan publication;
+the verifier runs outside them. Hashes establish local consistency and do not
+authenticate missing chronology or coordinated storage rewrites.
+
 ## ContextManifest
 
 ```bash

@@ -258,6 +258,8 @@ def plan_tasks(repo_path):
     _, rows = read_plan(repo_path)
     return [{"id": clean(row.get("id"), 40), "title": clean(row.get("title"), 80),
              "state": clean(row.get("state"), 20),
+             **({"completion_kind": clean(row["completion_kind"], 40)}
+                if isinstance(row.get("completion_kind"), str) else {}),
              "claimed_by": clean(row.get("claimed_by_participant"), 80) or None}
             for row in rows]
 

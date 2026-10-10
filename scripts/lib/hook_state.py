@@ -1260,16 +1260,19 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
     goal = plain_line(data.get("goal"), 80)
     if not tasks:
         return ""
+    me = os.environ.get("OMS_ROOM_PARTICIPANT", "")
+    mine = next((t for t in tasks if me and t.get("claimed_by_participant") == me
+                 and t.get("state") in ("claimed", "running", "review", "landing")), None)
+    worker_holds = [t for t in tasks if me and t.get("claimed_by_participant") == me
+                    and t.get("state") in ("claimed", "running")]
+    clock = time.time()
     stamps = []
     for t in tasks:
         with contextlib.suppress(ValueError, TypeError):
             stamps.append(datetime.strptime(str(t.get("updated")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
-    if stamps and time.time() - max(stamps) >= 7 * 86400:
+    if stamps and clock - max(stamps) >= 7 * 86400 and not worker_holds:
         return ""
     done = {t["id"] for t in tasks if t.get("state") == "done"}
-    me = os.environ.get("OMS_ROOM_PARTICIPANT", "")
-    mine = next((t for t in tasks if me and t.get("claimed_by_participant") == me
-                 and t.get("state") in ("claimed", "running", "review", "landing")), None)
     ready = next((t for t in sorted(tasks, key=lambda t: str(t.get("created", "")))
                   if t.get("state") == "ready" and all(d in done for d in t.get("depends") or [])), None)
     parts = ["Goal: %s" % goal if goal else "Goal: (none recorded)", "%d of %d verified" % (len(done), len(tasks))]
@@ -1277,6 +1280,34 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
         mine_id = plain_line(mine["id"], 40)
         parts.append("yours: %s (%s) → oms agent-plan brief --id %s" % (
             mine_id, plain_line(mine.get("state"), 12), mine_id))
+    if worker_holds:
+        known_ages = []
+        for held in worker_holds:
+            with contextlib.suppress(TypeError, ValueError, OverflowError):
+                anchor = datetime.strptime(held.get("claimed_at", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                seconds = clock - anchor.timestamp()
+                if seconds >= 0:
+                    known_ages.append((int(seconds), held))
+        age, held = max(known_ages, key=lambda item: item[0]) if known_ages else (None, worker_holds[0])
+        # Normalize decimal text without converting a potentially thousands-
+        # digit TTL to one integer. The comparison below retains its exact value.
+        ttl = "3600"
+        for value in (os.environ.get("OMS_PLAN_CLAIM_TTL", ""), held.get("ttl", "")):
+            if isinstance(value, str) and value.isdecimal():
+                ttl = "".join(str(int(digit)) for digit in value).lstrip("0") or "0"
+        ttl_display = ttl + "s" if len(ttl) <= 12 else ttl[:12] + "…s (%d digits)" % len(ttl)
+        note = "claim age: %ss / ttl %s" % (age, ttl_display) if age is not None else "claim age: unknown"
+        if held is not mine:
+            note += " (task %s)" % plain_line(held["id"], 40)
+        parts.append(note)
+        # age*5 >= ttl*4 is the 80% threshold. Decimal length/order avoids
+        # interpreter integer digit limits and never truncates authority tokens.
+        limit = str(age * 5 // 4) if age is not None else ""
+        near_expiry = age is not None and (len(ttl) < len(limit) or len(ttl) == len(limit) and ttl <= limit)
+        task_id, lease = held["id"], held.get("lease_id", "")
+        if (near_expiry and isinstance(lease, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", lease)
+                and re.fullmatch(r"[A-Za-z0-9._-]{1,40}", task_id)):
+            parts.append("refresh: oms agent-plan touch --id %s --lease-id %s" % (task_id, lease))
     if ready:
         parts.append("next ready: %s %s → oms agent-plan claim --id %s --provider %s" % (
             plain_line(ready["id"], 40), plain_line(ready.get("title"), 40), plain_line(ready["id"], 40),
@@ -1318,8 +1349,10 @@ def panel_main_base(payload: dict[str, Any], room: str) -> str:
             "coordination with other mains yourself; declare your scope with oms room scope --owns PATH before editing shared files "
             "and pass --scope PATH to write workers. Edit directly only when the brief would take longer than the edit "
             "or the step needs the main itself. Call other mains by window and model, such as #1 Opus 5.5 or #2 Sol 6.1. "
-            "Land your own work: commit on an oms/<task> branch in oms scratch-worktree add, rebase on the remote "
-            "target, then oms land from that worktree; never commit in the shared checkout another main uses. "
+            "Land your own work: oms scratch-worktree add starts detached; create a local nontracking branch with "
+            "git checkout --no-track -b oms/<task>, then commit, rebase on the remote target, and run oms land "
+            "from that worktree when commit and publication are authorized. No upstream is needed; oms land "
+            "pushes the verified SHA to its target. Never commit in the shared checkout another main uses. "
             "To know whether a land is running, use oms land status --repo PATH (active: true) - never pgrep."
             % (payload_agent(payload), " --room " + room if room else ""))
 
