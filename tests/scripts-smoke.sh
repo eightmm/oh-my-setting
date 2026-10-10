@@ -26074,28 +26074,43 @@ test_landing_refuses_to_apply_without_a_recorded_intent() {
   mkdir -p "$project/.oms"
   printf '*\n' > "$project/.oms/.gitignore"
   : > "$project/.oms/landings.jsonl"
-  chmod 444 "$project/.oms/landings.jsonl"
-
-  out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
-  chmod 644 "$project/.oms/landings.jsonl"
+  # Reservation writes also use this journal; target the intent producer so
+  # this fixture continues exercising failure after successful admission.
+  local bin="$TMP/intent-failure-bin"
+  mkdir -p "$bin"
+  export OMS_FIXTURE_REAL_PYTHON
+  OMS_FIXTURE_REAL_PYTHON="$(command -v python3)"
+  cat > "$bin/python3" <<'SH_INTENT'
+#!/usr/bin/env bash
+[ "${OMS_LD_EVENT:-}" != intent ] || exit 1
+exec "$OMS_FIXTURE_REAL_PYTHON" "$@"
+SH_INTENT
+  chmod +x "$bin/python3"
+  out="$(PATH="$bin:$PATH" "$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" --verify true 2>&1)" || rc=$?
+  unset OMS_FIXTURE_REAL_PYTHON
   [ "$rc" != 0 ] || fail "an unrecordable intent must not apply: $out"
   contains "$out" 'refusing to apply' ||
     fail "the refusal should say why: $out"
   [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] ||
     fail "nothing should have been applied"
   python3 - "$project" "$patch" <<'PY' || fail "intent failure deleted or changed published evidence"
-import pathlib, sys
+import json, pathlib, sys
 repo, source = map(pathlib.Path, sys.argv[1:])
 patches = list((repo / ".oms/landing-patches").glob("*.patch"))
 assert len(patches) == 1, patches
 assert patches[0].read_bytes() == source.read_bytes()
-assert not (repo / ".oms/landings.jsonl").read_bytes()
+rows = [json.loads(line) for line in (repo / ".oms/landings.jsonl").read_bytes().splitlines()]
+assert not any(row.get("event") in ("intent", "complete", "abandoned") for row in rows), rows
 PY
   "$ROOT/scripts/patch-land.sh" --repo "$project" --recover >/dev/null ||
     fail "empty-intent recovery failed"
   "$ROOT/scripts/patch-land.sh" --repo "$project" --recover >/dev/null ||
     fail "repeated empty-intent recovery failed"
-  [ ! -s "$project/.oms/landings.jsonl" ] || fail "recovery invented an intent for retained evidence"
+  python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "recovery invented an intent for retained evidence"
+import json, pathlib, sys
+rows = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_bytes().splitlines()]
+assert not any(row.get("event") in ("intent", "complete", "abandoned") for row in rows), rows
+PY
   for out in "$project"/.oms/landing-patches/*.patch; do
     cmp "$patch" "$out" || fail "recovery changed retained orphan evidence"
   done
