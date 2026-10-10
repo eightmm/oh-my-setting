@@ -3831,8 +3831,12 @@ def exercise_observed_worker_leases():
             patch.object(panel, "child_environment", return_value={}), \
             patch.object(panel, "native_repository", return_value=project), \
             patch.object(panel, "plan_link", return_value=argv_binding), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as preflight, \
             patch.object(panel.subprocess, "call", side_effect=lambda argv, **kwargs: captured_dispatch.update(argv=argv) or 0):
         assert panel.run_dispatch(*dispatch_args) == 0
+    preview_argv = preflight.call_args.args[0]
+    assert preview_argv[-1] == "--dry-run" and "--observe-plan-binding" not in preview_argv
+    assert preview_argv[preview_argv.index("--task-id") + 1].startswith("preflight-")
     dispatch_argv = captured_dispatch["argv"]
     assert "--observe-plan-binding" in dispatch_argv, dispatch_argv
     assert json.loads(dispatch_argv[dispatch_argv.index("--observe-plan-binding") + 1]) == argv_binding._asdict()
@@ -4593,6 +4597,16 @@ for name, prepare in (
     if name == "unreadable":
         invalid_brief.chmod(0o600)
 assert not provider_marker.exists(), "dry-run invoked the fake provider"
+call(plan_cli + ["add", "--id", "preflight-refusal", "--title", "Refused before worker start"])
+refusal_task = call(plan_cli + ["show", "--id", "preflight-refusal"])
+workers_before_refusal = worker_log.read_text()
+refused_write = subprocess.run(blocked_brief.args[:-1] + ["--task-id", "preflight-refusal"],
+                               env=room_env, capture_output=True, text=True, timeout=90)
+assert refused_write.returncode != 0 and "preflight refused before task claim" in refused_write.stderr, refused_write
+assert call(plan_cli + ["show", "--id", "preflight-refusal"]) == refusal_task
+assert room.status(project, shared)["participants"] == room_before_scan
+assert worker_log.read_text() == workers_before_refusal, "preflight refusal invoked a provider"
+shutil.rmtree(project / ".oms/plan")  # later board fixtures expect a project with no plan
 scoped_run = subprocess.run(scoped_dispatch.args[:-1], env=dict(room_env, PANEL_TEST_MODE="write"),
                             capture_output=True, text=True, timeout=90)
 assert scoped_run.returncode == 0 and "Scope overlap" in scoped_run.stderr, scoped_run

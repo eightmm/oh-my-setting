@@ -1143,6 +1143,25 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
             if dry_run:
                 print(json.dumps(dict(plan, overlaps=found)))
                 return 0
+    if role == "worker" and access == "write":
+        # Delegate's dry-run validates the same brief and route without starting a worker.
+        # Give it no room/plan identity so a refused preview cannot claim or enroll this call.
+        preview = list(argv)
+        preview[preview.index("--repo") + 1] = str(execution)
+        preview[preview.index("--task-id") + 1] = "preflight-" + uuid.uuid4().hex[:16]
+        preview_env = {name: value for name, value in env.items()
+                       if not name.startswith(("OMS_ROOM_", "OMS_PANEL_", "OMS_OBSERVE_PLAN_", "OMS_DL_"))
+                       and name not in {"OMS_TASK_ID", "OMS_ATTEMPT_ID", "OMS_PARENT_ATTEMPT_ID",
+                                        "OMS_PLAN_ID", "OMS_PLAN_TASK_ID", "OMS_LEASE_ID", "OMS_PLAN_LEASE_ID"}}
+        # Keep canonical artifact routing, but not the caller or child identity.
+        preview_env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_REPO=str(repo))
+        checked = subprocess.run(preview + ["--dry-run"], cwd=str(execution), env=preview_env,
+                                 capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+        if checked.returncode:
+            print("Delegate preflight refused before task claim or worker enrollment.", file=sys.stderr)
+            if checked.stderr:
+                print(checked.stderr.rstrip(), file=sys.stderr)
+            return checked.returncode
     # Observe and claim with the caller's main identity before enrolling a child.
     # A joined child must never become the apparent owner of its own plan task.
     binding = plan_link(repo, owner, task_id, env, caller, access)
