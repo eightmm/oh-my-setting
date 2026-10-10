@@ -867,6 +867,25 @@ EOF
     [ "$out" = full ] || fail "critical boundary escaped full verification: $policy_path"
   done
   base="$head"
+  printf '# shared runtime contract\n' > "$gate/scripts/lib/oms-common.sh"
+  git -C "$gate" add scripts/lib/oms-common.sh
+  git -C "$gate" commit -qm common-runtime-contract
+  head="$(git -C "$gate" rev-parse HEAD)"
+  out="$(cd "$gate" && OMS_TEST_GRAPH_MODE=affected bash scripts/check.sh --affected \
+    --print-affected-mode --changed-from "$base" --changed-to "$head" 2>/dev/null)" ||
+    fail "affected gate rejected the common runtime contract change"
+  [ "$out" = full ] || fail "shared runtime contract escaped full verification: $out"
+  (cd "$gate" && OMS_TEST_GRAPH_MODE=affected GITHUB_STEP_SUMMARY="$TMP/common-summary.md" \
+    OMS_TEST_AFFECTED_LOG="$TMP/common-inline.log" \
+    bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" \
+      --ci-output "$TMP/common-ci-mode" >/dev/null) ||
+    fail "CI selector tried to execute full lanes inline for common runtime contract change"
+  grep -Fxq 'mode=full' "$TMP/common-ci-mode" || fail "common runtime CI mode was not recorded as full"
+  grep -Fq 'contract-boundary:scripts/lib/oms-common.sh' "$TMP/common-summary.md" ||
+    fail "common runtime CI summary omitted the contract boundary reason"
+  [ ! -s "$TMP/common-inline.log" ] ||
+    fail "common runtime CI selector executed inline affected checks: $(cat "$TMP/common-inline.log")"
+  base="$head"
   git -C "$gate" mv lib/new.py docs/code.md
   git -C "$gate" commit -qm rename-code
   head="$(git -C "$gate" rev-parse HEAD)"
