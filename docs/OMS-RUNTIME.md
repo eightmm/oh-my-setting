@@ -274,6 +274,13 @@ an immutable approval reference. The main then runs
 `--main-review-approval APPROVAL_PATH` and
 `--expected-main-review-approval-sha256 APPROVAL_SHA256`.
 
+Use `const r = await tools.exec_command(<JSON>); text(r.output);` as the
+direct approval call. Its JSON object contains string fields `cmd` and
+`workdir`, with an optional integer `yield_time_ms` from 250 through 30000.
+The command must finish within that tool interval so the original call returns
+the completed native output. A later polled or replayed output cannot replace
+the original completed approval.
+
 Desktop acceptance requires the same chat's recorded policy approval followed
 by its completed approving command, successful native execution and exact
 output reference. The marker binds a fresh nonce, the exact task, lease, plan,
@@ -296,8 +303,7 @@ Success records an immutable content-addressed receipt and digest reference,
 preserves history, and marks the task `done` with distinct completion metadata
 and Plan labels. Exact replay is idempotent and interrupted receipt publication
 can recover; reactivation archives prior completion metadata. No landing fields
-are fabricated. The implementation remains local and uninstalled; worker exit
-does not establish completion.
+are fabricated. Worker exit does not establish completion.
 
 ## Parent-reviewed task cancellation
 

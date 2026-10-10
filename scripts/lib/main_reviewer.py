@@ -251,11 +251,15 @@ def _parse_exec_input(source):
     decoder = json.JSONDecoder(object_pairs_hook=_unique_object,
                                parse_constant=_nonfinite_json)
     obj, end = decoder.raw_decode(source, match.end())
-    if not CALL_SUFFIX.fullmatch(source[end:]) or not isinstance(obj, dict) or set(obj) != {"cmd", "workdir"}:
+    if (not CALL_SUFFIX.fullmatch(source[end:]) or not isinstance(obj, dict)
+            or set(obj) not in ({"cmd", "workdir"}, {"cmd", "workdir", "yield_time_ms"})):
         raise ValueError("native exec input has extra operations")
-    if not all(isinstance(obj[key], str) for key in obj):
+    if not all(isinstance(obj[key], str) for key in ("cmd", "workdir")):
         raise ValueError("native exec arguments are invalid")
-    return obj
+    if "yield_time_ms" in obj and (type(obj["yield_time_ms"]) is not int
+                                   or not 250 <= obj["yield_time_ms"] <= 30000):
+        raise ValueError("native exec yield is outside the bounded tool range")
+    return {key: obj[key] for key in ("cmd", "workdir")}
 
 
 def _argv(cmd, execution_repo, task_id, bundle_sha, expected, state_repo=None,

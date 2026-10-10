@@ -30161,6 +30161,35 @@ assert native["output_record_sha256"] == m._sha(encoded(output))
 assert native["workdir_sha256"] == m._sha(execution.encode())
 assert header_sha == m._sha(encoded(header))
 assert m._parse_exec_input(source) == {"cmd": cmd, "workdir": execution}
+for yield_ms in (250, 30000):
+    bounded_source = 'const r = await tools.exec_command(' + json.dumps({
+        "cmd": cmd, "workdir": execution, "yield_time_ms": yield_ms}) + '); text(r.output);'
+    bounded_call = dict(call, payload=dict(call["payload"], input=bounded_source))
+    bounded_raw = encoded(header, prompt, user, bounded_call, execution_event, output)
+    bounded_approval, bounded_native, _ = m._completed_approval_evidence(
+        bounded_raw, sid, repo, request, cmd, envelope)
+    assert bounded_approval == approval
+    assert bounded_native["call_input_sha256"] == m._sha(bounded_source.encode())
+    assert bounded_native["completion_record_sha256"] == native["completion_record_sha256"]
+    assert bounded_native["output_record_sha256"] == native["output_record_sha256"]
+    rejects(m._completed_approval_evidence, encoded(header, prompt, user, bounded_call, output),
+            sid, repo, request, cmd, envelope)
+    failed_event = dict(execution_event, payload=dict(execution_event["payload"],
+                        item=dict(execution_event["payload"]["item"], exit_code=1)))
+    rejects(m._completed_approval_evidence,
+            encoded(header, prompt, user, bounded_call, failed_event, output),
+            sid, repo, request, cmd, envelope)
+    mismatched_output = dict(output, payload=dict(output["payload"], output=[
+        output["payload"]["output"][0], {"type": "input_text", "text": envelope[:-1]}]))
+    rejects(m._completed_approval_evidence,
+            encoded(header, prompt, user, bounded_call, execution_event, mismatched_output),
+            sid, repo, request, cmd, envelope)
+for invalid_yield in (249, 30001, True, 30000.0, "30000", None):
+    rejects(m._parse_exec_input, 'const r = await tools.exec_command(' + json.dumps({
+        "cmd": cmd, "workdir": execution, "yield_time_ms": invalid_yield}) + '); text(r.output);')
+rejects(m._parse_exec_input, 'const r = await tools.exec_command(' + json.dumps({
+    "cmd": cmd, "workdir": execution, "yield_time_ms": 30000,
+    "login": False}) + '); text(r.output);')
 uri_workdir = pathlib.Path(execution).as_uri()
 uri_event = dict(execution_event, payload=dict(execution_event["payload"],
                  item=dict(execution_event["payload"]["item"], cwd=uri_workdir)))
