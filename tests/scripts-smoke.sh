@@ -17141,6 +17141,18 @@ PYTHON
 
   # A publisher starting while GC holds marker-set through event compaction
   # must wait until the cleanup transaction releases the lock, on both backends.
+  # Observe the compactor boundary before probing: startup work can outlast the
+  # probe loop, and successful probes themselves compete with GC for marker-set.
+  local race_bin="$TMP/gc-hook-start-race-bin" compact_ready ready_attempt
+  mkdir -p "$race_bin"
+  cat > "$race_bin/python3" <<'PYTHON'
+#!/usr/bin/env bash
+if [ "$#" -ge 3 ] && [ "${2##*/}" = hook_state.py ] && [ "$3" = compact-events ]; then
+  : > "$GC_COMPACT_READY"
+fi
+exec "$REAL_PYTHON" "$@"
+PYTHON
+  chmod +x "$race_bin/python3"
   for lock_mode in flock mkdir; do
     hook_project="$TMP/gc-hook-start-race-$lock_mode"
     lock_force_mkdir=0
@@ -17149,11 +17161,20 @@ PYTHON
     gc_hook_seed "$hook_project"
     mkdir -p "$hook_project/.oms/hooks/.events-lockdir" "$hook_project/.oms/delegations"
     lock_target="$hook_project/.oms/delegations/.marker-set-lock-target"
+    compact_ready="$hook_project/compact.ready"
     OMS_LOCK_DIR="$TMP/gc-hook-start-race-locks-$lock_mode" OMS_LOCK_TIMEOUT=10 \
       OMS_LOCK_FORCE_MKDIR="$lock_force_mkdir" \
+      REAL_PYTHON="$python_real" GC_COMPACT_READY="$compact_ready" PATH="$race_bin:$PATH" \
       "$ROOT/scripts/gc.sh" --repo "$hook_project" --days 0 --apply \
       >"$hook_project/gc.out" 2>"$hook_project/gc.err" &
     holder_pid=$!
+    ready_attempt=0
+    while [ ! -f "$compact_ready" ] && [ "$ready_attempt" -lt 200 ]; do
+      kill -0 "$holder_pid" 2>/dev/null || break
+      ready_attempt=$((ready_attempt + 1))
+      sleep 0.05
+    done
+    [ -f "$compact_ready" ] || fail "$lock_mode GC did not reach hook compaction: $(cat "$hook_project/gc.err")"
     lock_rc=0
     local marker_busy_count=0
     for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
