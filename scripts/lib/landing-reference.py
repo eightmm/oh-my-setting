@@ -267,9 +267,16 @@ def await_monitor(repo, channel, expected, native_monitor):
     deadline = time.monotonic() + 1.5
     while time.monotonic() < deadline:
         scope, _ = scope_read(repo, channel, expected)
+        if caller_owner(scope['binding']) != scope['binding']['owner']:
+            raise ValueError('reference readiness belongs to another writer')
         try:
             raw, _ = C['regular'](channel + '.ready', maximum=512)
         except FileNotFoundError:
+            time.sleep(0.02)
+            continue
+        # Exclusive creation publishes the name before the buffered payload.
+        # Only the empty in-progress file may wait within the original budget.
+        if not raw:
             time.sleep(0.02)
             continue
         ready = json.loads(raw)

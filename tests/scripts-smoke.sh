@@ -21622,6 +21622,80 @@ fixture.mkdir()
 helper = root/'scripts/lib/landing-reference.py'
 h = runpy.run_path(str(helper))
 e = h['E']
+# Hold the real monitor after exclusive ready creation until the real waiter
+# observes its empty payload. Neither sleeps nor CPU load decide this race.
+ready_fixture = fixture/'ready-publication'; ready_fixture.mkdir()
+ready_driver = fixture/'ready-driver.py'
+ready_driver.write_text(r'''
+import builtins, contextlib, pathlib, runpy, sys, time
+helper, repo, channel, digest, mode, *extra = sys.argv[1:]
+h = runpy.run_path(helper)
+observed = pathlib.Path(repo)/'empty-observed'
+if mode == 'monitor':
+    original_open = builtins.open
+    @contextlib.contextmanager
+    def delayed_open(path, *args, **kwargs):
+        with original_open(path, *args, **kwargs) as stream:
+            if str(path) == channel + '.ready' and args == ('xb',):
+                deadline = time.monotonic() + 5
+                while not observed.exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                assert observed.exists(), 'waiter never observed empty ready'
+            yield stream
+    builtins.open = delayed_open
+    h['monitor'](repo, channel, digest)
+else:
+    regular = h['C']['regular']
+    def observe(path, *args, **kwargs):
+        result = regular(path, *args, **kwargs)
+        if str(path) == channel + '.ready' and not result[0]:
+            observed.write_text('observed')
+        return result
+    h['C']['regular'] = observe
+    h['await_monitor'](repo, channel, digest, extra[0])
+''')
+ready_script = r'''
+set -eu
+. "$1/scripts/lib/agent-task-common.sh"
+reference_scope_dir="$(mktemp -d "$2/scope.XXXXXX")"
+reference_scope_dir="$(cd "$reference_scope_dir" && pwd -P)"
+reference_channel="$reference_scope_dir/scope"
+: > "$reference_channel"
+python3 "$_OMS_TASK_REFERENCE_HELPER" begin-owned "$2" agent-task "$2/packet" "$reference_channel" '' '' > "$reference_scope_dir/result"
+IFS=' ' read -r reference_operation reference_scope_digest < "$reference_scope_dir/result"
+python3 "$3" "$_OMS_TASK_REFERENCE_HELPER" "$2" "$reference_channel" "$reference_scope_digest" monitor &
+reference_monitor=$!
+python3 "$3" "$_OMS_TASK_REFERENCE_HELPER" "$2" "$reference_channel" "$reference_scope_digest" await "$reference_monitor" > "$reference_scope_dir/proof"
+IFS= read -r reference_ready_digest < "$reference_scope_dir/proof"
+python3 - "$_OMS_TASK_REFERENCE_HELPER" "$2" "$reference_channel" "$reference_scope_digest" "$reference_monitor" <<'PY_READY_INVALID'
+import json,pathlib,runpy,sys,time
+helper,repo,channel,digest,monitor=sys.argv[1:]
+h=runpy.run_path(helper); path=pathlib.Path(channel+'.ready'); original=path.read_bytes()
+wrong=json.loads(original); wrong['monitor']['birth']='wrong-generation'
+try:
+    for raw in (b'{',h['C']['encoded'](wrong)):
+        path.write_bytes(raw); started=time.monotonic()
+        try:
+            h['await_monitor'](repo,channel,digest,monitor)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('nonempty malformed/foreign ready accepted')
+        assert time.monotonic()-started < 1, 'invalid nonempty ready retried'
+finally:
+    path.write_bytes(original)
+PY_READY_INVALID
+python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$2" "$reference_operation" refuse-no-write
+oms_reference_stop "$2"
+[ -f "$2/empty-observed" ]
+[ ! -e "$reference_scope_dir" ]
+'''
+# The forced publication interleaving uses the POSIX foreground-parent route;
+# Windows' separate native PID bridge remains covered by the normal calls.
+if os.name != 'nt':
+    result = subprocess.run(['bash','-c',ready_script,'fixture',str(root),str(ready_fixture),str(ready_driver)],
+                            text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+    assert result.returncode == 0, (result.stdout,result.stderr)
 repo = fixture/'live'; repo.mkdir()
 packet = repo/'.oms/task/current.md'
 script = r'''
@@ -23783,6 +23857,8 @@ test_agent_call_declares_its_work_phase() {
 test_patch_land_completes_only_when_its_records_land() {
   local project="$TMP/landing-receipts"
   local patch="$TMP/landing-receipts.patch"
+  local fault_bin="$TMP/landing-lineage-fault-bin"
+  local real_git
   local out
   local rc=0
 
@@ -23792,9 +23868,42 @@ test_patch_land_completes_only_when_its_records_land() {
   mkdir -p "$project/.oms/artifacts"
   printf '*\n' > "$project/.oms/.gitignore"
   : > "$project/.oms/artifacts/index.jsonl"
-  chmod 444 "$project/.oms/artifacts/index.jsonl"
 
-  out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
+  # Admission and publication need the index to remain writable. Inject the
+  # failure only after the real apply to this fixture succeeds, immediately
+  # before patch-land records its lineage row.
+  real_git="$(command -v git)"
+  mkdir -p "$fault_bin"
+  cat > "$fault_bin/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+real_git="${OMS_TEST_REAL_GIT:?}"
+project="${OMS_TEST_LANDING_PROJECT:?}"
+index="${OMS_TEST_LANDING_INDEX:?}"
+marker="${OMS_TEST_LANDING_FAULT_MARKER:?}"
+if [ "$#" -eq 5 ] && [ "$1" = "-C" ] && [ "$2" = "$project" ] &&
+   [ "$3" = "apply" ] && [ "$4" = "--binary" ]; then
+  if "$real_git" "$@"; then
+    chmod 444 "$index"
+    : > "$marker"
+    exit 0
+  else
+    exit $?
+  fi
+fi
+exec "$real_git" "$@"
+SH
+  chmod +x "$fault_bin/git"
+
+  out="$(PATH="$fault_bin:$PATH" OMS_TEST_REAL_GIT="$real_git" \
+    OMS_TEST_LANDING_PROJECT="$project" \
+    OMS_TEST_LANDING_INDEX="$project/.oms/artifacts/index.jsonl" \
+    OMS_TEST_LANDING_FAULT_MARKER="$TMP/lineage-fault-injected" \
+    "$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
+  [ -f "$TMP/lineage-fault-injected" ] ||
+    fail "the lineage failure must be injected after the real git apply"
+  [ "$(cat "$project/file.txt")" = "$(printf 'base\nadded')" ] ||
+    fail "the real patch must be applied before lineage failure"
   [ "$rc" -ne 0 ] ||
     fail "an applied patch with missing receipts must not report terminal success: $out"
   contains "$out" 'records are incomplete' ||

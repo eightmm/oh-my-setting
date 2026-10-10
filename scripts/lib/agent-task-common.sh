@@ -13,7 +13,8 @@ agent_task_reference_root() {
   local owner kind git_root
   if [ -n "${REPO:-}" ]; then
     oms_state_root "$REPO"
-    return
+    # A bare return inside EXIT cleanup inherits the original failure status.
+    return "$?"
   fi
   owner="$(python3 - "$1" <<'PYROOT'
 import os, sys
@@ -44,7 +45,7 @@ PYROOT
     git_root="${git_root//$'\r'/}"
     if [ -z "$git_root" ] || [ "$(cd "$git_root" && pwd -P)" != "$owner" ]; then
       printf '%s\n' "$owner"
-      return
+      return "$?"
     fi
   fi
   oms_state_root "$owner"
