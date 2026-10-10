@@ -483,6 +483,25 @@ still requires the file fingerprint to change. Summaries are `supported`,
 `not_supported`, or `inconclusive`; missing seeds, no-regression metrics, or
 required invariant results keep the verdict inconclusive.
 
+This supports an inference-time improvement loop: state a falsifiable
+hypothesis, compare a fixed baseline and candidate under the same contract,
+verify the resulting execution, then have the parent review and adopt any
+change. The comparison is only as strong as its controls and receipts; it does
+not create an independent holdout or an operating-system sandbox. Static
+invariants describe properties checked by their declared commands, while
+executed feedback describes observed outcomes under the recorded run. Model
+judgments can help explain or propose a change, but agreement between models
+and a model's stated confidence are advisory signals, not substitutes for
+either kind of check. Intrinsic model confidence is also not a calibrated
+probability of success. These are different evidence sources, not a single
+ranked scale. This is an OMS workflow proposal informed by the
+[RSI survey](https://arxiv.org/abs/2607.07663), not a claim that OMS has
+measured scientific improvement.
+
+Experiment comparison identity includes the normalized `success` criteria and
+`invariant_pack` as well as controls, metrics, and seeds. A comparison that
+changes its success threshold or invariant definitions is not like-for-like.
+
 ## Effectiveness telemetry
 
 ```bash
@@ -546,6 +565,34 @@ measurements. Previously cached rows/snapshots are retained, not retroactively
 rewritten. Snapshots label `measurement_basis`; `compare` withholds affected
 rate/usage/duration deltas when the bases differ, rather than presenting a
 measurement change as an improvement.
+
+Skill changes can be evaluated before adoption with the additive candidate
+comparison mode, for example:
+
+```bash
+oms skill-forge eval oms-example --suite path/to/skill-suite.json \
+  --candidate candidates/oms-example --allow-host-commands --json
+```
+
+The candidate is compared with the active version using the same suite bytes;
+both arms enable the skill. The explicit host-command flag remains required.
+The evaluator checks the current and candidate skill bundle bytes, suite bytes,
+and `skill-lifecycle` implementation bytes before/after execution. It records
+content-free digests and aggregate results, including `comparison.mode`,
+`comparison.baseline_sha256`, and `comparison.treatment_sha256`. This does not
+freeze external router, task, or verifier commands, and does not establish an
+independent evaluator, holdout, or OS sandbox. Evaluation does not install or
+promote the candidate: parent review and existing adoption controls still
+apply. This staged evaluation follows the motivation of
+[SkillsBench](https://arxiv.org/abs/2602.12670); OMS has not measured scientific
+or general task improvement from it.
+
+Model-only call, ask, review, or synthesis completion is advisory evidence; a
+successful provider operation does not by itself verify a requirement. Use the
+existing command-backed verification receipts and parent review/admission path
+for execution evidence and adoption. Proposed experience graphs, automatic
+skill promotion or evolution archives, and adaptive routing remain future work;
+they are not current runtime behavior.
 
 ## Optional interoperability adapters
 

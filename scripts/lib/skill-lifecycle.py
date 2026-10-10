@@ -638,8 +638,8 @@ def run_bounded(command: Sequence[str], *, cwd: Path, env: Mapping[str, str], st
         error.close()
 
 
-def load_suite(path: Path, skill: str) -> Dict[str, Any]:
-    value = strict_json_bytes(read_regular(path, "skill eval suite"), "skill eval suite")
+def load_suite(path: Path, skill: str, raw: Optional[bytes] = None) -> Dict[str, Any]:
+    value = strict_json_bytes(raw if raw is not None else read_regular(path, "skill eval suite"), "skill eval suite")
     if value.get("schema") != 1 or value.get("skill") != skill:
         fail("skill eval suite schema/name does not match")
     router = command_array(value.get("router"), "router")
@@ -670,14 +670,37 @@ def load_suite(path: Path, skill: str) -> Dict[str, Any]:
     return {"router": router, "trigger_cases": triggers, "task_cases": tasks}
 
 
-def evaluate(repo: Path, name: str, suite_path: Path, allow_host: bool, record: bool) -> Dict[str, Any]:
+def evaluate(
+    repo: Path,
+    name: str,
+    suite_path: Path,
+    allow_host: bool,
+    record: bool,
+    candidate_path: Optional[Path] = None,
+) -> Dict[str, Any]:
     name = validate_name(name)
     skill = repo / ".oms" / "skills" / name
     if not skill.is_dir() or skill.is_symlink():
         fail("eval requires a local project skill: %s" % name)
-    parse_skill(skill / "SKILL.md")
+    current_name, _ = parse_skill(skill / "SKILL.md")
+    if current_name != name:
+        fail("local project skill identity does not match")
     suite_raw = read_regular(suite_path, "skill eval suite")
-    suite = load_suite(suite_path, name)
+    suite = load_suite(suite_path, name, suite_raw)
+    implementation = Path(__file__)
+    implementation_raw = read_regular(implementation, "skill lifecycle evaluator", MAX_FILE_BYTES)
+    current_entries = bundle_entries(skill)
+    current_sha = digest_bundle(current_entries)
+    candidate_entries: Optional[List[Tuple[str, Path, int, int]]] = None
+    candidate_sha: Optional[str] = None
+    candidate_skill: Optional[Path] = None
+    if candidate_path is not None:
+        candidate_skill = candidate_path
+        candidate_name, _ = parse_skill(candidate_skill / "SKILL.md")
+        if candidate_name != name:
+            fail("candidate skill identity does not match the requested skill")
+        candidate_entries = bundle_entries(candidate_skill)
+        candidate_sha = digest_bundle(candidate_entries)
     if (suite["trigger_cases"] or suite["task_cases"]) and not allow_host:
         fail("black-box eval commands require --allow-host-commands")
     matrix: Dict[str, Dict[str, int]] = {
@@ -686,10 +709,22 @@ def evaluate(repo: Path, name: str, suite_path: Path, allow_host: bool, record: 
     }
     task_pass = {"baseline": 0, "treatment": 0}
     base_env = dict(os.environ)
-    base_env.update({"OMS_SKILL_EVAL_SKILL": name, "OMS_SKILL_EVAL_PATH": str(skill.resolve()), "PYTHONHASHSEED": "0"})
-    for arm, enabled in (("baseline", "0"), ("treatment", "1")):
+    base_env.update({
+        "OMS_SKILL_EVAL_SKILL": name,
+        "OMS_SKILL_EVAL_PATH": str(skill.resolve()),
+        "PYTHONHASHSEED": "0",
+    })
+    if candidate_skill is None:
+        arms = (("baseline", "0", skill), ("treatment", "1", skill))
+    else:
+        arms = (("baseline", "1", skill), ("treatment", "1", candidate_skill))
+    for arm, enabled, arm_skill in arms:
         env = dict(base_env)
         env["OMS_SKILL_EVAL_TREATMENT"] = enabled
+        if candidate_skill is not None:
+            env["OMS_SKILL_EVAL_ARM"] = arm
+            env["OMS_SKILL_EVAL_PATH"] = str(arm_skill.resolve())
+            env["OMS_SKILL_EVAL_IMPLEMENTATION"] = str(implementation.resolve())
         for case in suite["trigger_cases"]:
             rc, raw = run_bounded(suite["router"], cwd=repo, env=env, stdin=case["prompt"].encode("utf-8"), capture=True)
             if rc != 0:
@@ -713,13 +748,22 @@ def evaluate(repo: Path, name: str, suite_path: Path, allow_host: bool, record: 
                     verify_rc, _ = run_bounded(verify, cwd=cwd, env=env)
                 if rc == 0 and verify_rc == 0:
                     task_pass[arm] += 1
+    if digest_bundle(bundle_entries(skill)) != current_sha:
+        fail("skill bundle changed during evaluation")
+    if candidate_skill is not None:
+        if candidate_sha is None or digest_bundle(bundle_entries(candidate_skill)) != candidate_sha:
+            fail("candidate bundle changed during evaluation")
+    if read_regular(suite_path, "skill eval suite") != suite_raw:
+        fail("skill eval suite changed during evaluation")
+    if read_regular(implementation, "skill lifecycle evaluator", MAX_FILE_BYTES) != implementation_raw:
+        fail("skill lifecycle evaluator changed during evaluation")
     treated = matrix["treatment"]
     precision_denominator = treated["true_positive"] + treated["false_positive"]
     recall_denominator = treated["true_positive"] + treated["false_negative"]
     result: Dict[str, Any] = {
         "schema": 1,
         "skill": name,
-        "skill_sha256": digest_bundle(bundle_entries(skill)),
+        "skill_sha256": current_sha,
         "suite_sha256": hashlib.sha256(suite_raw).hexdigest(),
         "trigger": {
             "baseline": matrix["baseline"],
@@ -734,6 +778,12 @@ def evaluate(repo: Path, name: str, suite_path: Path, allow_host: bool, record: 
             "pass_delta": task_pass["treatment"] - task_pass["baseline"],
         },
     }
+    if candidate_skill is not None:
+        result["comparison"] = {
+            "mode": "candidate",
+            "baseline_sha256": current_sha,
+            "treatment_sha256": candidate_sha,
+        }
     if record:
         stored = dict(result)
         stored["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -749,6 +799,7 @@ def parser() -> argparse.ArgumentParser:
     evaluate_parser = sub.add_parser("eval")
     evaluate_parser.add_argument("name")
     evaluate_parser.add_argument("--suite", required=True)
+    evaluate_parser.add_argument("--candidate", help="compare the active skill with a candidate bundle directory")
     evaluate_parser.add_argument("--allow-host-commands", action="store_true")
     evaluate_parser.add_argument("--record", action="store_true")
     evaluate_parser.add_argument("--json", action="store_true")
@@ -788,7 +839,10 @@ def main() -> int:
         active_targets(repo)
         return 0
     if args.command == "eval":
-        result = evaluate(repo, args.name, Path(args.suite), args.allow_host_commands, args.record)
+        result = evaluate(
+            repo, args.name, Path(args.suite), args.allow_host_commands, args.record,
+            Path(args.candidate) if args.candidate else None,
+        )
         emit(result, args.json)
         return 0
     if args.command == "rollback":

@@ -109,6 +109,166 @@ assert row["skill_evals"] == {
 ' || fail "runtime benchmark did not project recorded skill evaluation"
 }
 
+test_skill_eval_candidate_compares_frozen_bundles() {
+  local repo="$TMP/candidate-repo" suite="$TMP/candidate-suite.json"
+  local candidate="$TMP/candidate-version" router="$TMP/candidate-router.py"
+  local marker="$TMP/candidate-command-ran" current_sha candidate_sha
+  local out first second
+  make_repo "$repo"
+  make_skill "$repo/.oms/skills/oms-candidate-fixture" oms-candidate-fixture "current-marker"
+  make_skill "$candidate" oms-candidate-fixture "candidate-marker"
+  current_sha="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" preview \
+    --source "$repo/.oms/skills/oms-candidate-fixture" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundle_sha256"])')"
+  candidate_sha="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" preview \
+    --source "$candidate" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundle_sha256"])')"
+
+  cat > "$router" <<'PY'
+import json, os, pathlib, sys
+prompt = sys.stdin.read()
+marker = os.environ.get("OMS_TEST_MARKER")
+if marker:
+    pathlib.Path(marker).touch()
+path = pathlib.Path(os.environ["OMS_SKILL_EVAL_PATH"])
+body = (path / "SKILL.md").read_text()
+if os.environ.get("OMS_SKILL_EVAL_TREATMENT") != "1":
+    raise SystemExit(9)
+selected = []
+if ("current" in prompt and "current-marker" in body) or ("candidate" in prompt and "candidate-marker" in body):
+    selected.append("oms-candidate-fixture")
+print(json.dumps({"selected": selected}, sort_keys=True))
+PY
+  cat > "$suite" <<EOF
+{
+  "schema": 1,
+  "skill": "oms-candidate-fixture",
+  "router": ["python3", "$router"],
+  "trigger_cases": [
+    {"id": "current-version", "prompt": "current", "should_trigger": true},
+    {"id": "candidate-version", "prompt": "candidate", "should_trigger": true}
+  ],
+  "task_cases": [{
+    "id": "enabled-skill-path",
+    "command": ["python3", "-c", "import os,pathlib,sys; p=pathlib.Path(os.environ['OMS_SKILL_EVAL_PATH']); arm=os.environ['OMS_SKILL_EVAL_ARM']; marker={'baseline':'current-marker','treatment':'candidate-marker'}[arm]; ok=os.environ['OMS_SKILL_EVAL_TREATMENT']=='1' and marker in (p/'SKILL.md').read_text(); pathlib.Path('task-ok').touch() if ok else None; sys.exit(0 if ok else 1)"],
+    "verify": ["python3", "-c", "import pathlib,sys; sys.exit(0 if pathlib.Path('task-ok').is_file() else 1)"]
+  }]
+}
+EOF
+
+  out="$(OMS_TEST_MARKER="$marker" "$ROOT/scripts/skill-forge.sh" --repo "$repo" eval oms-candidate-fixture \
+    --suite "$suite" --candidate "$candidate" --json 2>&1)" &&
+    fail "candidate eval without host authority succeeded: $out"
+  [ ! -e "$marker" ] || fail "host-denied candidate eval ran the router"
+  [ ! -e "$repo/.oms/runtime/skill-evals.jsonl" ] ||
+    fail "host-denied candidate eval wrote a telemetry row"
+
+  first="$(OMS_TEST_MARKER="$marker" "$ROOT/scripts/skill-forge.sh" --repo "$repo" eval oms-candidate-fixture \
+    --suite "$suite" --candidate "$candidate" --allow-host-commands --json)" ||
+    fail "candidate skill eval failed"
+  second="$(OMS_TEST_MARKER="$marker" "$ROOT/scripts/skill-forge.sh" --repo "$repo" eval oms-candidate-fixture \
+    --suite "$suite" --candidate "$candidate" --allow-host-commands --json)" ||
+    fail "repeated candidate skill eval failed"
+  [ "$first" = "$second" ] || fail "candidate eval output is not deterministic"
+  printf '%s' "$first" | CANDIDATE_CURRENT_SHA="$current_sha" \
+    CANDIDATE_VERSION_SHA="$candidate_sha" CANDIDATE_PATH="$candidate" python3 -c '
+import json, os, sys
+row = json.load(sys.stdin)
+assert row["comparison"]["mode"] == "candidate", row
+assert row["comparison"]["baseline_sha256"] == os.environ["CANDIDATE_CURRENT_SHA"], row
+assert row["comparison"]["treatment_sha256"] == os.environ["CANDIDATE_VERSION_SHA"], row
+assert row["skill_sha256"] == os.environ["CANDIDATE_CURRENT_SHA"], row
+assert row["trigger"]["baseline"] == {"false_negative": 1, "false_positive": 0, "true_negative": 0, "true_positive": 1}, row
+assert row["trigger"]["treatment"] == {"false_negative": 1, "false_positive": 0, "true_negative": 0, "true_positive": 1}, row
+assert row["task"] == {"baseline_passed": 1, "cases": 1, "pass_delta": 0, "treatment_passed": 1}, row
+assert "current-marker" not in json.dumps(row) and "candidate-marker" not in json.dumps(row), row
+assert os.environ["CANDIDATE_PATH"] not in json.dumps(row) and "prompt" not in json.dumps(row), row
+' || fail "candidate eval output is incomplete or leaks content/path: $first"
+
+  # Invalid candidates are refused before evaluator commands or ledger writes.
+  rm -f "$marker"
+  mkdir -p "$TMP/wrong-name"
+  make_skill "$TMP/wrong-name" oms-wrong-candidate
+  out="$(OMS_TEST_MARKER="$marker" "$ROOT/scripts/skill-forge.sh" --repo "$repo" eval oms-candidate-fixture \
+    --suite "$suite" --candidate "$TMP/wrong-name" --allow-host-commands --json 2>&1)" &&
+    fail "wrong-name candidate was accepted: $out"
+  ln -s "$candidate" "$TMP/candidate-symlink"
+  out="$(OMS_TEST_MARKER="$marker" "$ROOT/scripts/skill-forge.sh" --repo "$repo" eval oms-candidate-fixture \
+    --suite "$suite" --candidate "$TMP/candidate-symlink" --allow-host-commands --json 2>&1)" &&
+    fail "symlink candidate was accepted: $out"
+  rm "$TMP/candidate-symlink"
+  ln -s "$candidate/SKILL.md" "$candidate/linked-skill.md"
+  out="$(OMS_TEST_MARKER="$marker" "$ROOT/scripts/skill-forge.sh" --repo "$repo" eval oms-candidate-fixture \
+    --suite "$suite" --candidate "$candidate" --allow-host-commands --json 2>&1)" &&
+    fail "candidate with nested symlink was accepted: $out"
+  rm "$candidate/linked-skill.md"
+  [ ! -e "$marker" ] || fail "invalid candidate eval ran the router"
+
+  # A persistent candidate change during execution must invalidate the run.
+  cat > "$router" <<'PY'
+import json, os, pathlib
+if os.environ.get("OMS_SKILL_EVAL_ARM") == "treatment":
+    path = pathlib.Path(os.environ["OMS_SKILL_EVAL_PATH"]) / "SKILL.md"
+    path.write_text(path.read_text() + "\nmutated-during-eval\n")
+print(json.dumps({"selected": []}))
+PY
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" eval oms-candidate-fixture \
+    --suite "$suite" --candidate "$candidate" --allow-host-commands --record --json 2>&1)" &&
+    fail "candidate mutation during eval was accepted: $out"
+  [ ! -e "$repo/.oms/runtime/skill-evals.jsonl" ] ||
+    fail "mutated candidate eval recorded telemetry"
+  make_skill "$candidate" oms-candidate-fixture "candidate-marker"
+
+  # The executing router can alter the evaluator file; that invalidates the run too.
+  cat > "$router" <<'PY'
+import json, os, pathlib
+path = pathlib.Path(os.environ["OMS_SKILL_EVAL_IMPLEMENTATION"])
+path.write_text(path.read_text() + "\n# mutated during eval\n")
+print(json.dumps({"selected": []}))
+PY
+  cp "$ROOT/scripts/lib/skill-lifecycle.py" "$TMP/evaluator-snapshot.py"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" eval oms-candidate-fixture \
+    --suite "$suite" --candidate "$candidate" --allow-host-commands --record --json 2>&1)" &&
+    fail "evaluator mutation during eval was accepted: $out"
+  cp "$TMP/evaluator-snapshot.py" "$ROOT/scripts/lib/skill-lifecycle.py"
+  [ ! -e "$repo/.oms/runtime/skill-evals.jsonl" ] ||
+    fail "mutated evaluator eval recorded telemetry"
+  cat > "$router" <<'PY'
+import json, os, pathlib, sys
+prompt = sys.stdin.read()
+path = pathlib.Path(os.environ["OMS_SKILL_EVAL_PATH"])
+body = (path / "SKILL.md").read_text()
+if os.environ.get("OMS_SKILL_EVAL_TREATMENT") != "1":
+    raise SystemExit(9)
+selected = []
+if ("current" in prompt and "current-marker" in body) or ("candidate" in prompt and "candidate-marker" in body):
+    selected.append("oms-candidate-fixture")
+print(json.dumps({"selected": selected}, sort_keys=True))
+PY
+  "$ROOT/scripts/skill-forge.sh" --repo "$repo" eval oms-candidate-fixture \
+    --suite "$suite" --candidate "$candidate" --allow-host-commands --record --json >/dev/null ||
+    fail "stable candidate evaluation could not be recorded"
+  [ "$(wc -l < "$repo/.oms/runtime/skill-evals.jsonl" | tr -d ' ')" = 1 ] ||
+    fail "candidate eval did not append exactly one telemetry row"
+  ! grep -Fq "$candidate" "$repo/.oms/runtime/skill-evals.jsonl" ||
+    fail "candidate eval ledger retained the absolute bundle path"
+  ! grep -Fq '"prompt"' "$repo/.oms/runtime/skill-evals.jsonl" ||
+    fail "candidate eval ledger retained prompt fields"
+  "$ROOT/scripts/runtime.sh" --repo "$repo" benchmark show | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+assert row["skill_evals"]["count"] == 1, row
+assert row["skill_evals"]["trigger_true_positives"] == 1, row
+assert row["skill_evals"]["task_pass_delta_sum"] == 0, row
+' || fail "runtime benchmark did not project candidate evaluation"
+  grep -Fq 'current-marker' "$repo/.oms/skills/oms-candidate-fixture/SKILL.md" ||
+    fail "candidate eval changed the installed skill"
+  [ "$("$ROOT/scripts/skill-forge.sh" --repo "$repo" preview \
+    --source "$repo/.oms/skills/oms-candidate-fixture" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundle_sha256"])')" = "$current_sha" ] ||
+    fail "candidate eval changed the installed bundle digest"
+  [ "$("$ROOT/scripts/skill-forge.sh" --repo "$repo" preview \
+    --source "$candidate" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundle_sha256"])')" = "$candidate_sha" ] ||
+    fail "candidate eval changed candidate bundle bytes"
+}
+
 test_skill_bundle_preview_import_update_and_rollback() {
   local repo="$TMP/bundle-repo" source="$TMP/bundle-source"
   local preview first second current out
@@ -217,6 +377,7 @@ test_corrupt_lock_hides_only_its_own_skill() {
 }
 
 test_skill_eval_is_explicit_repeatable_and_content_free
+test_skill_eval_candidate_compares_frozen_bundles
 test_skill_bundle_preview_import_update_and_rollback
 test_corrupt_lock_hides_only_its_own_skill
 
