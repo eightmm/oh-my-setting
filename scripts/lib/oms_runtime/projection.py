@@ -102,7 +102,10 @@ def _plan_status(repo: Path, payload: Any = None) -> Dict[str, Any]:
             not isinstance(payload.get('task_count'), int) or
             payload.get('task_count', -1) < 0 or
             not all(isinstance(payload.get(key), bool)
-                    for key in ('nonempty', 'all_done', 'has_unfinished')) or
+                    for key in ('nonempty', 'all_done', 'all_closed', 'has_unfinished')) or
+            any(isinstance(payload.get(key), bool) or not isinstance(payload.get(key), int)
+                or payload.get(key, -1) < 0 for key in
+                ('verified_count', 'cancelled_count', 'closed_count', 'unfinished_count')) or
             not isinstance(payload.get('by_state'), dict) or
             not all(isinstance(payload.get(key), list)
                     for key in ('actionable', 'stale', 'stale_review')) or
@@ -117,6 +120,15 @@ def _plan_status(repo: Path, payload: Any = None) -> Dict[str, Any]:
             any(not isinstance(item, str) for item in payload['actionable']) or
             len(payload['actionable']) != len(set(payload['actionable']))):
         raise CoreError('canonical plan status projection is unavailable or invalid')
+    by_state = payload['by_state']
+    if (payload['verified_count'] != by_state.get('done', 0) or
+            payload['cancelled_count'] != by_state.get('cancelled', 0) or
+            payload['closed_count'] != payload['verified_count'] + payload['cancelled_count'] or
+            payload['unfinished_count'] != payload['task_count'] - payload['closed_count'] or
+            payload['all_done'] != (payload['task_count'] > 0 and payload['verified_count'] == payload['task_count']) or
+            payload['all_closed'] != (payload['task_count'] > 0 and payload['unfinished_count'] == 0) or
+            payload['has_unfinished'] != (payload['unfinished_count'] > 0)):
+        raise CoreError('canonical plan status counts are inconsistent')
     return payload
 
 def _plan_state(repo: Path, status_snapshot: Any = None) -> Dict[str, Any]:
@@ -125,7 +137,9 @@ def _plan_state(repo: Path, status_snapshot: Any = None) -> Dict[str, Any]:
     if raw is None:
         retirement, source = _latest_plan_retirement(repo)
         return {'present': False, 'source': source, 'tasks': [], 'task_count': 0,
-                'nonempty': False, 'all_done': False, 'has_unfinished': False, 'counts': {},
+                'nonempty': False, 'all_done': False, 'all_closed': False,
+                'has_unfinished': False, 'verified_count': 0, 'cancelled_count': 0,
+                'closed_count': 0, 'unfinished_count': 0, 'counts': {},
                 'latest_retirement': retirement,
                 'scope': {'allowed': [], 'forbidden': []}}
     if not isinstance(raw, dict):
@@ -147,7 +161,7 @@ def _plan_state(repo: Path, status_snapshot: Any = None) -> Dict[str, Any]:
     task_ids = {task['id'] for task in tasks}
     if any(item not in task_ids for item in status['actionable']):
         raise CoreError('canonical plan status names an unknown actionable task')
-    return {'present': True, 'source': source_descriptor(path, repo), 'plan_id': plan_id, 'goal': bounded_line(raw.get('goal', ''), 1000), 'acceptance_present': bool(acceptance), 'acceptance_digest': sha256_text(acceptance) if acceptance else '', 'tasks': tasks, 'task_count': status['task_count'], 'nonempty': status['nonempty'], 'all_done': status['all_done'], 'has_unfinished': status['has_unfinished'], 'actionable': list(status['actionable']), 'contract': dict(status['contract']), 'counts': dict(sorted(collections.Counter(task['state'] for task in tasks).items())), 'scope': {'allowed': sorted(set(all_allowed)), 'forbidden': sorted(set(all_forbidden))}}
+    return {'present': True, 'source': source_descriptor(path, repo), 'plan_id': plan_id, 'goal': bounded_line(raw.get('goal', ''), 1000), 'acceptance_present': bool(acceptance), 'acceptance_digest': sha256_text(acceptance) if acceptance else '', 'tasks': tasks, 'task_count': status['task_count'], 'nonempty': status['nonempty'], 'all_done': status['all_done'], 'all_closed': status['all_closed'], 'has_unfinished': status['has_unfinished'], 'verified_count': status['verified_count'], 'cancelled_count': status['cancelled_count'], 'closed_count': status['closed_count'], 'unfinished_count': status['unfinished_count'], 'actionable': list(status['actionable']), 'contract': dict(status['contract']), 'counts': dict(sorted(collections.Counter(task['state'] for task in tasks).items())), 'scope': {'allowed': sorted(set(all_allowed)), 'forbidden': sorted(set(all_forbidden))}}
 
 def _failure_paths(repo: Path) -> List[Path]:
     oms = repo / '.oms'; canonical = oms / 'failures.jsonl'; candidates = [oms / 'fail-ledger.jsonl']
@@ -301,6 +315,8 @@ def _actions(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping[
             add('record_verified_completion', 50, 'append', 'Every declared criterion has current evidence and no plan task remains active.', 'oms agent-task close')
         elif plan.get('present') and plan.get('all_done'):
             add('inspect_completed_plan_retirement', 50, 'read', 'Every declared criterion has current evidence and the completed plan is still active.', 'oms agent-plan --repo . retire --check')
+        elif plan.get('present') and plan.get('all_closed'):
+            add('inspect_closed_plan_retirement', 50, 'read', 'The plan has no unfinished tasks; explicitly cancelled tasks are not verified completion.', 'oms agent-plan --repo . retire --check')
     if not result: add('orient', 10, 'read', 'No stronger deterministic transition is available.', 'oms inbox')
     return sorted(result, key=lambda item: (-int(item['priority']), str(item['id'])))
 

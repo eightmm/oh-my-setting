@@ -1275,7 +1275,11 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
     done = {t["id"] for t in tasks if t.get("state") == "done"}
     ready = next((t for t in sorted(tasks, key=lambda t: str(t.get("created", "")))
                   if t.get("state") == "ready" and all(d in done for d in t.get("depends") or [])), None)
-    parts = ["Goal: %s" % goal if goal else "Goal: (none recorded)", "%d of %d verified" % (len(done), len(tasks))]
+    cancelled = sum(1 for task in tasks if task.get("state") == "cancelled")
+    progress = "%d of %d verified" % (len(done), len(tasks))
+    if cancelled:
+        progress += " · %d cancelled" % cancelled
+    parts = ["Goal: %s" % goal if goal else "Goal: (none recorded)", progress]
     if mine:
         mine_id = plain_line(mine["id"], 40)
         parts.append("yours: %s (%s) → oms agent-plan brief --id %s" % (

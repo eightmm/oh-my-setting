@@ -22,7 +22,7 @@ import sys
 CONTEXT = {}
 STATES = set()
 ID_RE = None
-KNOWN_STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done"}
+KNOWN_STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done", "cancelled"}
 PLAN_ID_RE = re.compile(r"plan_[0-9a-f]{32}")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 MAX_JSONL_ROW = 1024 * 1024
@@ -170,6 +170,50 @@ def plan_from_payload(payload):
             die("plan contains an invalid task id")
         if not isinstance(task, dict) or task.get("state", "ready") not in allowed_states:
             die("plan task %s has an invalid state" % task_id)
+        cancellation = task.get("cancellation")
+        if task.get("state") == "cancelled":
+            required = {"schema", "kind", "ts", "operator_consent", "reason",
+                        "state", "original_updated", "lease_id_sha256", "plan_sha256", "task_sha256", "decision_artifact",
+                        "decision_artifact_sha256"}
+            if (not isinstance(cancellation, dict) or set(cancellation) != required or
+                    type(cancellation.get("schema")) is not int or cancellation.get("schema") != 1 or
+                    cancellation.get("kind") != "operator-cancellation" or
+                    not isinstance(cancellation.get("ts"), str) or not cancellation["ts"] or
+                    cancellation.get("operator_consent") != "cancel" or
+                    cancellation.get("state") not in {"ready", "blocked"} or
+                    not isinstance(cancellation.get("original_updated"), str) or
+                    not isinstance(cancellation.get("reason"), str) or
+                    not 0 < len(cancellation["reason"]) <= 500 or
+                    any(ord(char) < 32 or ord(char) == 127 for char in cancellation["reason"]) or
+                    not re.fullmatch(r"[0-9a-f]{64}", str(cancellation.get("lease_id_sha256", ""))) or
+                    not re.fullmatch(r"[0-9a-f]{64}", str(cancellation.get("plan_sha256", ""))) or
+                    not re.fullmatch(r"[0-9a-f]{64}", str(cancellation.get("task_sha256", ""))) or
+                    not isinstance(cancellation.get("decision_artifact"), str) or
+                    not cancellation["decision_artifact"] or
+                    cancellation["decision_artifact"].startswith("/") or
+                    "\\" in cancellation["decision_artifact"] or
+                    any(part in ("", ".", "..") for part in cancellation["decision_artifact"].split("/")) or
+                    not re.fullmatch(r"[0-9a-f]{64}", str(cancellation.get("decision_artifact_sha256", "")))):
+                die("plan task %s has invalid cancellation evidence" % task_id)
+            original = dict(task)
+            original.pop("cancellation", None)
+            original["state"] = cancellation["state"]
+            original["updated"] = cancellation["original_updated"]
+            original_raw = json.dumps(original, sort_keys=True, ensure_ascii=False,
+                                      separators=(",", ":"), allow_nan=False).encode("utf-8")
+            if (task.get("updated") != cancellation["ts"] or
+                    hashlib.sha256(str(original.get("lease_id", "")).encode("utf-8")).hexdigest() != cancellation["lease_id_sha256"] or
+                    hashlib.sha256(original_raw).hexdigest() != cancellation["task_sha256"]):
+                die("plan task %s cancellation evidence does not reconstruct its original task" % task_id)
+            repo_root = CONTEXT.get("repo_root") or os.path.realpath(env("OMS_REPO"))
+            decision_path = os.path.join(repo_root, *cancellation["decision_artifact"].split("/"))
+            if not same_absolute_path(os.path.realpath(decision_path), decision_path):
+                die("plan task %s cancellation decision artifact traverses a symlink" % task_id)
+            decision_raw, _ = bounded_regular(decision_path, "cancellation decision artifact", 64 * 1024)
+            if hashlib.sha256(decision_raw).hexdigest() != cancellation["decision_artifact_sha256"]:
+                die("plan task %s cancellation decision artifact digest changed" % task_id)
+        elif cancellation is not None:
+            die("plan task %s has cancellation evidence without cancelled state" % task_id)
     return value, task_rows
 
 
@@ -550,8 +594,8 @@ def validate_receipt_authority(row, repo_root):
         if row.get("acceptance_verified") is not True or row.get("acceptance") != proof:
             die("completed-external retirement receipt lacks its exact fresh acceptance proof")
     elif (row.get("acceptance_verified") is not False or
-            any(state != "done" for state in actual_states)):
-        die("superseded retirement receipt contradicts its all-done archive")
+            any(state not in {"done", "cancelled"} for state in actual_states)):
+        die("superseded retirement receipt contradicts its closed archive")
     return row
 
 
@@ -656,6 +700,7 @@ def validate_retirement_state(repo_root, filename=None):
 def run(context):
     global CONTEXT, STATES, ID_RE
     CONTEXT = context
+    CONTEXT["repo_root"] = os.path.realpath(env("OMS_REPO"))
     STATES = context["states"]
     ID_RE = context["id_re"]
     repo_root, parent = retirement_parent()
@@ -736,8 +781,8 @@ def run(context):
         die("completed-external requires a non-empty plan acceptance command")
     validate_authority(tasks)
     if disposition == "superseded" and any(
-            task.get("state", "ready") != "done" for task in tasks.values()):
-        die("superseded retirement requires every old-plan task to be done")
+            task.get("state", "ready") not in {"done", "cancelled"} for task in tasks.values()):
+        die("superseded retirement requires every old-plan task to be done or cancelled")
     head, git_ref, clean = git_snapshot(repo_root)
     if disposition == "completed-external" and not clean:
         die("plan retirement requires a clean committed worktree")

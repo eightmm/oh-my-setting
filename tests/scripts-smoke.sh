@@ -6954,6 +6954,204 @@ PY
 
 }
 
+test_agent_plan_cancellation_is_closed_not_verified_and_cas_fenced() {
+  local project="$TMP/agent-plan-cancel"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local plan_file decision plan_sha task_sha lease state out state_json runtime_json tamper
+  make_committed_repo "$project"
+  "$plan" --repo "$project" init --goal cancellation >/dev/null
+  "$plan" --repo "$project" add --id rejected --title rejected >/dev/null
+  "$plan" --repo "$project" add --id dependent --title dependent --depends rejected >/dev/null
+  decision="$project/decision.md"
+  printf 'Reviewed as rejected and unreproducible.\n' > "$decision"
+  git -C "$project" add decision.md && git -C "$project" commit -qm 'record cancellation decision'
+  plan_file="$project/.oms/plan/tasks.json"
+  plan_sha="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)"
+  "$plan" --repo "$project" show --id rejected > "$project/task.json"
+  task_sha="$(python3 - "$project/task.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding='utf-8'))['task_sha256'])
+PY
+)"
+  lease=none
+  state=ready
+
+  if "$plan" --repo "$project" cancel --id rejected --expected-plan-sha256 "$plan_sha" \
+      --expected-task-sha256 "$task_sha" --expected-state "$state" --expected-lease-id "$lease" \
+      --operator-consent cancel --reason "reviewed rejection" --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$(printf '%064d' 0)" >/dev/null 2>&1; then
+    fail "cancellation accepted a mismatched decision-artifact digest"
+  fi
+  if "$plan" --repo "$project" cancel --id rejected --expected-plan-sha256 "$plan_sha" \
+      --expected-task-sha256 "$task_sha" --expected-state blocked --expected-lease-id "$lease" \
+      --operator-consent cancel --reason "reviewed rejection" --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$(python3 - "$decision" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)" >/dev/null 2>&1; then
+    fail "cancellation accepted a stale task-state CAS"
+  fi
+  if OMS_HARNESS_CHILD=1 "$plan" --repo "$project" cancel --id rejected \
+      --expected-plan-sha256 "$plan_sha" --expected-task-sha256 "$task_sha" \
+      --expected-state "$state" --expected-lease-id "$lease" --operator-consent cancel \
+      --reason "reviewed rejection" --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$(python3 - "$decision" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)" >/dev/null 2>&1; then
+    fail "a harness child cancelled a task"
+  fi
+  mkdir -p "$project/.oms/delegations"
+  python3 - "$project/.oms/delegations/active.json" <<'PY'
+import json, os, sys
+json.dump({"schema": 1, "id": "active", "task_id": "rejected",
+           "lease_id": "", "pid": os.getppid()}, open(sys.argv[1], "w"))
+PY
+  if "$plan" --repo "$project" cancel --id rejected --expected-plan-sha256 "$plan_sha" \
+      --expected-task-sha256 "$task_sha" --expected-state "$state" --expected-lease-id "$lease" \
+      --operator-consent cancel --reason "reviewed rejection" --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$(python3 - "$decision" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)" >/dev/null 2>&1; then
+    fail "cancellation accepted a task with a live worker marker"
+  fi
+  rm -f "$project/.oms/delegations/active.json"
+  "$plan" --repo "$project" cancel --id rejected --expected-plan-sha256 "$plan_sha" \
+    --expected-task-sha256 "$task_sha" --expected-state "$state" --expected-lease-id "$lease" \
+    --operator-consent cancel --reason "reviewed rejection" --decision-artifact decision.md \
+    --expected-decision-artifact-sha256 "$(python3 - "$decision" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)" >/dev/null || fail "valid parent cancellation failed"
+  "$plan" --repo "$project" show --id rejected > "$project/cancelled.json"
+  python3 - "$project/cancelled.json" "$task_sha" "$plan_sha" "$decision" <<'PY' || fail "cancellation did not preserve truthful evidence"
+import hashlib, json, sys
+task = json.load(open(sys.argv[1], encoding='utf-8'))
+cancel = task['cancellation']
+assert task['state'] == 'cancelled' and task['task_sha256'] != sys.argv[2], task
+assert cancel['kind'] == 'operator-cancellation' and cancel['operator_consent'] == 'cancel', cancel
+assert cancel['plan_sha256'] == sys.argv[3] and cancel['task_sha256'] == sys.argv[2], cancel
+assert cancel['original_updated']
+assert cancel['decision_artifact'] == 'decision.md', cancel
+assert cancel['decision_artifact_sha256'] == hashlib.sha256(open(sys.argv[4], 'rb').read()).hexdigest(), cancel
+assert task.get('history', []) == [] and task['artifact'] == '' and task['patch'] == '', task
+PY
+  cp "$plan_file" "$TMP/agent-plan-cancel-valid-plan"
+  cp "$decision" "$TMP/agent-plan-cancel-valid-decision"
+  for tamper in original-field receipt-state lease task-digest extra-receipt; do
+    cp "$TMP/agent-plan-cancel-valid-plan" "$plan_file"
+    python3 - "$plan_file" "$tamper" <<'PY'
+import json, sys
+path, mode = sys.argv[1:]
+doc = json.load(open(path, encoding='utf-8'))
+task = doc['tasks']['rejected']
+receipt = task['cancellation']
+if mode == 'original-field': task['artifact'] = 'forged'
+elif mode == 'receipt-state': receipt['state'] = 'blocked'
+elif mode == 'lease': task['lease_id'] = 'forged-lease'
+elif mode == 'task-digest': receipt['task_sha256'] = '0' * 64
+elif mode == 'extra-receipt': receipt['unreviewed'] = True
+with open(path, 'w', encoding='utf-8') as handle: json.dump(doc, handle, indent=2)
+PY
+    if "$plan" --repo "$project" status --json >/dev/null 2>&1; then
+      fail "active status accepted forged cancellation evidence: $tamper"
+    fi
+  done
+  cp "$TMP/agent-plan-cancel-valid-plan" "$plan_file"
+  printf 'tampered decision bytes\n' >> "$decision"
+  if "$plan" --repo "$project" status --json >/dev/null 2>&1; then
+    fail "active status accepted changed cancellation decision bytes"
+  fi
+  cp "$TMP/agent-plan-cancel-valid-decision" "$decision"
+  out="$("$plan" --repo "$project" status --json)"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+s = json.load(sys.stdin)
+assert s["all_done"] is False and s["all_closed"] is False, s
+assert s["verified_count"] == 0 and s["cancelled_count"] == 1, s
+assert s["closed_count"] == 1 and s["unfinished_count"] == 1, s
+assert s["by_state"] == {"cancelled": 1, "ready": 1}, s
+' || fail "cancelled task was miscounted in plan status"
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+    fail "repo state rejected a plan containing cancellation"
+  runtime_json="$("$ROOT/scripts/runtime.sh" --repo "$project" envelope show)" ||
+    fail "runtime projection rejected a plan containing cancellation"
+  printf '%s\n' "$state_json" > "$project/state.json"
+  printf '%s\n' "$runtime_json" > "$project/runtime.json"
+  python3 - "$project/state.json" "$project/runtime.json" <<'PY' || fail "state or runtime hid cancellation semantics"
+import json, sys
+state, runtime = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
+for plan in (state["plan"], runtime["plan"]):
+    assert plan["all_done"] is False and plan["all_closed"] is False, plan
+    assert plan["verified_count"] == 0 and plan["cancelled_count"] == 1, plan
+    assert plan["closed_count"] == 1 and plan["unfinished_count"] == 1, plan
+PY
+  [ -z "$("$plan" --repo "$project" ready)" ] ||
+    fail "cancelled task incorrectly satisfied a dependent task"
+  "$plan" --repo "$project" add --id blocked_cancel --title blocked >/dev/null
+  "$plan" --repo "$project" block --id blocked_cancel --reason rejected >/dev/null
+  python3 - "$plan_file" <<'PY'
+import json, sys
+path = sys.argv[1]
+plan = json.load(open(path, encoding='utf-8'))
+task = plan['tasks']['blocked_cancel']
+task.update({
+    'artifact': '.oms/artifacts/original-review.md',
+    'patch': '.oms/artifacts/original.patch',
+    'provider': 'codex',
+    'lease_id': 'lease_preserved_123',
+    'review_lease_id': 'lease_preserved_123',
+    'autopilot_owner_id': 'owner_' + '1' * 32,
+    'history': [{'schema': 1, 'kind': 'prior-review', 'receipt': 'receipt-sha256'}],
+})
+with open(path, 'w', encoding='utf-8') as handle:
+    json.dump(plan, handle, ensure_ascii=False, indent=2)
+PY
+  "$plan" --repo "$project" show --id blocked_cancel > "$project/blocked.json"
+  task_sha="$(python3 - "$project/blocked.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding='utf-8'))['task_sha256'])
+PY
+)"
+  lease="$(python3 - "$project/blocked.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding='utf-8'))['lease_id'] or 'none')
+PY
+)"
+  plan_sha="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)"
+  "$plan" --repo "$project" cancel --id blocked_cancel --expected-plan-sha256 "$plan_sha" \
+    --expected-task-sha256 "$task_sha" --expected-state blocked --expected-lease-id "$lease" \
+    --operator-consent cancel --reason "blocked work rejected" --decision-artifact decision.md \
+    --expected-decision-artifact-sha256 "$(python3 - "$decision" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)" >/dev/null || fail "valid blocked-task cancellation failed"
+  "$plan" --repo "$project" show --id blocked_cancel | python3 -c '
+import json, sys
+task = json.load(sys.stdin)
+assert task["state"] == "cancelled", task
+assert task["artifact"] == ".oms/artifacts/original-review.md", task
+assert task["patch"] == ".oms/artifacts/original.patch", task
+assert task["lease_id"] == "lease_preserved_123" and task["review_lease_id"] == task["lease_id"], task
+assert task["autopilot_owner_id"] == "owner_" + "1" * 32, task
+assert task["history"] == [{"schema": 1, "kind": "prior-review", "receipt": "receipt-sha256"}], task
+' || fail "cancellation overwrote existing task evidence, lease, owner or history"
+}
+
 test_agent_plan_retire_is_cas_fenced_and_evidence_honest() {
   local project="$TMP/agent-plan-retire"
   local active_project="$TMP/agent-plan-retire-active"
@@ -6962,7 +7160,7 @@ test_agent_plan_retire_is_cas_fenced_and_evidence_honest() {
   local failed_accept_project="$TMP/agent-plan-retire-accept-fail"
   local mutate_accept_project="$TMP/agent-plan-retire-accept-mutate"
   local plan="$ROOT/scripts/agent-plan.sh"
-  local plan_file plan_sha archive receipt out before after rc state duplicate
+  local plan_file plan_sha archive receipt out before after rc state duplicate decision_sha
   local index_before index_after
 
   make_committed_repo "$project"
@@ -7302,8 +7500,8 @@ PY
   [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'malformed or unproven' ||
     fail "overflowed float marker bypassed the malformed veto: $out"
 
-  # Superseded retirement is allowed only after every old task is done. It is
-  # archival, never verification, and its receipt makes that negative claim.
+  # Superseded retirement accepts only a fully closed plan. Cancellation is
+  # archival, never verification, and its receipt keeps that distinction.
   make_committed_repo "$superseded_project"
   "$plan" --repo "$superseded_project" init --goal superseded --accept false >/dev/null
   "$plan" --repo "$superseded_project" add --id t1 --title superseded >/dev/null
@@ -7317,14 +7515,30 @@ PY
       --reason "a new reviewed contract replaced the old plan" >/dev/null 2>&1; then
     fail "superseded retirement accepted an unfinished old plan"
   fi
-  python3 - "$superseded_project/.oms/plan/tasks.json" <<'PY'
+  printf 'Reviewed cancellation of the superseded task.\n' > "$superseded_project/decision.md"
+  "$plan" --repo "$superseded_project" show --id t1 > "$superseded_project/task.json"
+  task_sha="$(python3 - "$superseded_project/task.json" <<'PY'
 import json, sys
-path = sys.argv[1]
-row = json.load(open(path, encoding="utf-8"))
-row["tasks"]["t1"]["state"] = "done"
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(row, handle, ensure_ascii=False, indent=2)
+print(json.load(open(sys.argv[1], encoding="utf-8"))["task_sha256"])
 PY
+)"
+  plan_sha="$(python3 - "$superseded_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  decision_sha="$(python3 - "$superseded_project/decision.md" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  "$plan" --repo "$superseded_project" cancel --id t1 \
+    --expected-plan-sha256 "$plan_sha" --expected-task-sha256 "$task_sha" \
+    --expected-state ready --expected-lease-id none --operator-consent cancel \
+    --reason "reviewed rejection" --decision-artifact decision.md \
+    --expected-decision-artifact-sha256 "$decision_sha" >/dev/null ||
+    fail "superseded task cancellation failed"
+  cp "$superseded_project/.oms/plan/tasks.json" "$TMP/agent-plan-retire-cancelled-original"
   plan_sha="$(python3 - "$superseded_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
 import hashlib, sys
 print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
@@ -7333,6 +7547,16 @@ PY
   "$plan" --repo "$superseded_project" retire --apply \
     --expected-plan-sha256 "$plan_sha" --disposition superseded \
     --reason "a new reviewed contract replaced the old plan" >/dev/null
+  cmp -s "$TMP/agent-plan-retire-cancelled-original" \
+    "$superseded_project/.oms/plan/tasks.$plan_sha.archive.json" ||
+    fail "superseded retirement did not preserve cancellation evidence bytes"
+  cp "$superseded_project/decision.md" "$TMP/agent-plan-retire-cancelled-decision"
+  printf 'tampered after retirement\n' >> "$superseded_project/decision.md"
+  rc=0
+  out="$("$ROOT/scripts/state-verify.sh" --repo "$superseded_project" --json 2>&1)" || rc=$?
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'cancellation decision artifact' ||
+    fail "retired cancellation did not recheck decision bytes: $out"
+  cp "$TMP/agent-plan-retire-cancelled-decision" "$superseded_project/decision.md"
   python3 - "$superseded_project/.oms/plan/retirements.jsonl" <<'PY' || fail "superseded retirement claimed completion evidence"
 import json, sys
 row = json.loads(open(sys.argv[1], encoding="utf-8").readline())

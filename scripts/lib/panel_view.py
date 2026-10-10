@@ -81,6 +81,8 @@ def clipped(text, width):
 def tone(state):
     if state in {"failed", "timed_out", "abandoned", "orphaned", "unresolved"}:
         return "bad"
+    if state == "cancelled":
+        return "dim"
     if state in {"waiting_input", "waiting_approval", "blocked"}:
         return "alert"
     if state in {"review", "verifying"}:

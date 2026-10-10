@@ -419,7 +419,11 @@ def goal_box(report, width, unicode, compact):
     goal, done, total, review, claimed = summary
     filled = min(10, 10 * done // total) if total else 0
     bar = ("▕" + "█" * filled + "░" * (10 - filled) + "▏") if unicode else "[" + "#" * filled + "." * (10 - filled) + "]"
+    by_state = mapping(mapping(report.get("plan")).get("by_state"))
+    cancelled = valid_count(by_state.get("cancelled")) or 0
     counts = "%s/%s verified" % (done, total)
+    if cancelled:
+        counts += sep + "%s cancelled" % cancelled
     # A claim is not proof of running work, and work waiting for review is progress: review outlives the bar.
     reviewing = sep + "%s review" % review if review else ""
     options = [bar + " " + counts + reviewing + sep + "%s claimed" % claimed, bar + " " + counts + reviewing,
@@ -1714,15 +1718,15 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
 
 TABS = (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"), ("between", "Between"))
-PLAN_ORDER = {"done": 0, "review": 1, "landing": 1, "running": 2, "claimed": 2, "ready": 3, "blocked": 4}
+PLAN_ORDER = {"done": 0, "cancelled": 1, "review": 2, "landing": 2, "running": 3, "claimed": 3, "ready": 4, "blocked": 5}
 
 
 def plan_rows(report, labels, width, unicode):
     """The shared repository plan: its goal, then one row per task, completed work first."""
     goal = mapping(report.get("goal")).get("text")
     tasks = listing(mapping(report.get("room")).get("repo_tasks"))
-    glyphs = (dict(done="✓", review="◐", landing="◐", running="●", claimed="●", ready="○", blocked="✗") if unicode else
-              dict(done="+", review="~", landing="~", running="*", claimed="*", ready="o", blocked="x"))
+    glyphs = (dict(done="✓", cancelled="×", review="◐", landing="◐", running="●", claimed="●", ready="○", blocked="✗") if unicode else
+              dict(done="+", cancelled="x", review="~", landing="~", running="*", claimed="*", ready="o", blocked="x"))
     rows = [(line, None) for line in wrapped("Goal: " + goal, width, 2)] if goal else []
     for t in sorted((mapping(t) for t in tasks), key=lambda t: PLAN_ORDER.get(t.get("state"), 5)):
         by = t.get("claimed_by_participant")

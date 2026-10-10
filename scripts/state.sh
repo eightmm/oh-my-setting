@@ -207,15 +207,25 @@ def valid_plan(path, physical):
         present = row.get("present") if isinstance(row, dict) else None
         count = row.get("task_count") if isinstance(row, dict) else None
         by_state = row.get("by_state") if isinstance(row, dict) else None
+        unfinished = row.get("unfinished_count") if isinstance(row, dict) else None
+        verified = row.get("verified_count") if isinstance(row, dict) else None
+        cancelled = row.get("cancelled_count") if isinstance(row, dict) else None
+        closed = row.get("closed_count") if isinstance(row, dict) else None
         contract = row.get("contract") if isinstance(row, dict) else None
         return (row.get("schema") == 1 and isinstance(present, bool) and
                 present == (physical == "1") and isinstance(count, int) and
                 not isinstance(count, bool) and count >= 0 and
                 all(isinstance(row.get(key), bool) for key in
-                    ("nonempty", "all_done", "has_unfinished")) and
+                    ("nonempty", "all_done", "all_closed", "has_unfinished")) and
+                all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                    for value in (unfinished, verified, cancelled, closed)) and
                 row.get("nonempty") == (count > 0) and
-                row.get("has_unfinished") ==
-                (count > 0 and not row.get("all_done")) and
+                verified == (by_state.get("done", 0) if isinstance(by_state, dict) else None) and
+                cancelled == (by_state.get("cancelled", 0) if isinstance(by_state, dict) else None) and
+                closed == verified + cancelled and unfinished == count - closed and
+                row.get("all_done") == (count > 0 and verified == count) and
+                row.get("all_closed") == (count > 0 and unfinished == 0) and
+                row.get("has_unfinished") == (unfinished > 0) and
                 isinstance(by_state, dict) and
                 all(isinstance(value, int) and not isinstance(value, bool) and
                     value >= 0 for value in by_state.values()) and
@@ -527,7 +537,12 @@ plan = {
     "task_count": int(plan_status.get("task_count") or 0),
     "nonempty": bool(plan_status.get("nonempty")),
     "all_done": bool(plan_status.get("all_done")),
+    "all_closed": bool(plan_status.get("all_closed")),
     "has_unfinished": bool(plan_status.get("has_unfinished")),
+    "verified_count": int(plan_status.get("verified_count") or 0),
+    "cancelled_count": int(plan_status.get("cancelled_count") or 0),
+    "closed_count": int(plan_status.get("closed_count") or 0),
+    "unfinished_count": int(plan_status.get("unfinished_count") or 0),
     "by_state": plan_status.get("by_state", {}),
     "stale": plan_status.get("stale", []),
     "stale_review": plan_status.get("stale_review", []),

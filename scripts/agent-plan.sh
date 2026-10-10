@@ -68,6 +68,12 @@ PROPOSAL=""
 EXPECTED_PROPOSAL_SHA256=""
 EXPECTED_PLAN_SHA256=""
 EXPECTED_TASK_SHA256=""
+EXPECTED_TASK_SHA256_SET=0
+EXPECTED_CANCEL_LEASE=""
+EXPECTED_CANCEL_LEASE_SET=0
+OPERATOR_CONSENT=""
+DECISION_ARTIFACT=""
+EXPECTED_DECISION_ARTIFACT_SHA256=""
 COMPLETION_OPTION_SET=0
 LEASE_ID_SET=0
 COMPLETION_BUNDLE=""
@@ -83,6 +89,7 @@ APPLY=0
 DISPOSITION=""
 RETIRE_PHASE="${OMS_PLAN_RETIRE_PHASE:-}"
 COMPLETION_OTHER_OPTION=0
+CANCEL_OTHER_OPTION=0
 
 usage() {
   cat <<'EOF'
@@ -143,6 +150,15 @@ Commands:
                                      recomputed from the landed tree; all
                                      other entries keep their frozen hashes,
                                      and each refreeze appends a typed row.
+  cancel --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA
+         --expected-state ready|blocked --expected-lease-id TOKEN|none
+         --operator-consent cancel --reason TEXT
+         --decision-artifact REPO_RELATIVE_FILE
+         --expected-decision-artifact-sha256 SHA
+                                     Parent-only cancellation of an inactive
+                                     ready/blocked task. Preserves task evidence;
+                                     cancelled is closed, never verified or a
+                                     dependency-satisfying state.
          --id ID --landed-commit SHA  Complete reviewed work integrated by
                                      commit. Requires an exact-SHA oms land
                                      receipt with passed gate/push/CI and
@@ -230,6 +246,9 @@ Commands:
 State: ready -> claimed -> running -> review -> landing -> done. An explicit
 repair moves review -> claimed without minting a lease. Any -> blocked (block);
 blocked -> ready (reopen); claimed/running/review -> ready (release).
+Parent cancellation moves an inactive ready/blocked task to cancelled with
+the exact plan/task and decision-artifact digests. Cancelled tasks are closed,
+not verified, and never satisfy dependencies.
 Tasks are stored in REPO/.oms/plan/tasks.json (override with --file).
 
 A claim whose last heartbeat (claimed_at, refreshed by touch) is older than
@@ -250,8 +269,12 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 # Parse: first non-option token is the command.
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --repo|--file|--id|--lease-id|--expected-state|--expected-plan-sha256|--expected-task-sha256|--completion-bundle|--expected-completion-bundle-sha256|--json) ;;
+    --repo|--file|--id|--lease-id|--expected-state|--expected-lease-id|--expected-plan-sha256|--expected-task-sha256|--completion-bundle|--expected-completion-bundle-sha256|--json|--operator-consent|--decision-artifact|--expected-decision-artifact-sha256) ;;
     --*) COMPLETION_OTHER_OPTION=1 ;;
+  esac
+  case "$1" in
+    --repo|--id|--expected-plan-sha256|--expected-task-sha256|--expected-state|--expected-lease-id|--operator-consent|--reason|--decision-artifact|--expected-decision-artifact-sha256) ;;
+    --*) CANCEL_OTHER_OPTION=1 ;;
   esac
   case "$1" in
     --repo) [ "$#" -ge 2 ] || fail "--repo requires path"; REPO="$2"; shift 2 ;;
@@ -303,6 +326,7 @@ while [ "$#" -gt 0 ]; do
     --owner-id) [ "$#" -ge 2 ] || fail "--owner-id requires a value"; OWNER_ID="$2"; shift 2 ;;
     --markers-dir) [ "$#" -ge 2 ] || fail "--markers-dir requires a path"; MARKERS_DIR="$2"; shift 2 ;;
     --expected-state) [ "$#" -ge 2 ] || fail "--expected-state requires a value"; EXPECTED_STATE="$2"; shift 2 ;;
+    --expected-lease-id) [ "$#" -ge 2 ] || fail "--expected-lease-id requires a value"; EXPECTED_CANCEL_LEASE="$2"; EXPECTED_CANCEL_LEASE_SET=1; shift 2 ;;
     --check) CHECK_ONLY=1; shift ;;
     --apply) APPLY=1; shift ;;
     --disposition) [ "$#" -ge 2 ] || fail "--disposition requires a value"; DISPOSITION="$2"; shift 2 ;;
@@ -315,7 +339,12 @@ while [ "$#" -gt 0 ]; do
       EXPECTED_PLAN_SHA256="$2"; shift 2 ;;
     --expected-task-sha256)
       [ "$#" -ge 2 ] || fail "--expected-task-sha256 requires a value"
-      EXPECTED_TASK_SHA256="$2"; COMPLETION_OPTION_SET=1; shift 2 ;;
+      EXPECTED_TASK_SHA256="$2"; EXPECTED_TASK_SHA256_SET=1; COMPLETION_OPTION_SET=1; shift 2 ;;
+    --operator-consent) [ "$#" -ge 2 ] || fail "--operator-consent requires value"; OPERATOR_CONSENT="$2"; shift 2 ;;
+    --decision-artifact) [ "$#" -ge 2 ] || fail "--decision-artifact requires a path"; DECISION_ARTIFACT="$2"; shift 2 ;;
+    --expected-decision-artifact-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-decision-artifact-sha256 requires a value"
+      EXPECTED_DECISION_ARTIFACT_SHA256="$2"; shift 2 ;;
     --completion-bundle)
       [ "$#" -ge 2 ] || fail "--completion-bundle requires a file"
       COMPLETION_BUNDLE="$2"; COMPLETION_OPTION_SET=1; shift 2 ;;
@@ -336,7 +365,7 @@ while [ "$#" -gt 0 ]; do
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    accept-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify)
+    accept-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|cancel|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -364,6 +393,35 @@ case "$ACTION" in
     [ "$COMPLETION_OTHER_OPTION" = 0 ] ||
       fail "completion options cannot be mixed with legacy actions/landing options"
     ;;
+  cancel)
+    [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] ||
+      fail "cancel is parent-only"
+    [ "$ID" ] && [ "$EXPECTED_TASK_SHA256_SET" = 1 ] &&
+      [ -n "$EXPECTED_PLAN_SHA256" ] && [ "$OPERATOR_CONSENT" = cancel ] &&
+      { [ "$EXPECTED_STATE" = ready ] || [ "$EXPECTED_STATE" = blocked ]; } &&
+      [ "$EXPECTED_CANCEL_LEASE_SET" = 1 ] &&
+      [ -n "$REASON" ] && [ -n "$DECISION_ARTIFACT" ] &&
+      [ -n "$EXPECTED_DECISION_ARTIFACT_SHA256" ] ||
+      fail "cancel requires exact plan/task CAS, --operator-consent cancel, --reason and decision-artifact digest"
+    [ -z "$COMPLETION_BUNDLE$EXPECTED_COMPLETION_BUNDLE_SHA256" ] &&
+      [ "$CANCEL_OTHER_OPTION" = 0 ] ||
+      fail "cancel options cannot be mixed with completion or unrelated options"
+    [ "${#EXPECTED_PLAN_SHA256}" -eq 64 ] &&
+      [ "${EXPECTED_PLAN_SHA256#*[!0-9a-f]}" = "$EXPECTED_PLAN_SHA256" ] ||
+      fail "cancel requires a lowercase plan SHA-256"
+    [ "${#EXPECTED_TASK_SHA256}" -eq 64 ] &&
+      [ "${EXPECTED_TASK_SHA256#*[!0-9a-f]}" = "$EXPECTED_TASK_SHA256" ] ||
+      fail "cancel requires a lowercase task SHA-256"
+    [ "${#EXPECTED_DECISION_ARTIFACT_SHA256}" -eq 64 ] &&
+      [ "${EXPECTED_DECISION_ARTIFACT_SHA256#*[!0-9a-f]}" = "$EXPECTED_DECISION_ARTIFACT_SHA256" ] ||
+      fail "cancel requires a lowercase decision-artifact SHA-256"
+    [ "$EXPECTED_CANCEL_LEASE" = none ] ||
+      { [ "${#EXPECTED_CANCEL_LEASE}" -ge 1 ] && [ "${#EXPECTED_CANCEL_LEASE}" -le 200 ] &&
+        [ "${EXPECTED_CANCEL_LEASE#*[!A-Za-z0-9._:-]}" = "$EXPECTED_CANCEL_LEASE" ]; } ||
+      fail "cancel requires --expected-lease-id TOKEN or none"
+    [ "${#REASON}" -le 500 ] || fail "cancellation reason exceeds 500 characters"
+    [ "$PLAN_FILE_SET" = 0 ] || fail "cancel is valid only for the canonical repo-local plan"
+    ;;
   *) [ "$COMPLETION_OPTION_SET" = 0 ] ||
        fail "completion options require accept-research or satisfy" ;;
 esac
@@ -379,6 +437,19 @@ STATE_REPO="$(oms_state_root "$REPO")" || fail "bad --repo"
 STATE_REPO="$(cd "${STATE_REPO//$'\r'/}" && pwd -P)" || fail "cannot resolve the plan's repository"
 PLAN_FILE="${PLAN_FILE:-$STATE_REPO/.oms/plan/tasks.json}"
 PLAN_LOCK_FILE=""
+if [ "$ACTION" = cancel ]; then
+  [ "$PLAN_FILE" = "$STATE_REPO/.oms/plan/tasks.json" ] ||
+    fail "cancel is valid only for the canonical repo-local plan"
+  [ -f "$PLAN_FILE" ] && [ ! -L "$PLAN_FILE" ] ||
+    fail "cancel requires an existing regular canonical plan"
+  scan="$(mktemp)" || fail "mktemp failed"
+  printf '%s\n' "$REASON" > "$scan"
+  if agent_memory_file_has_secret_content "$scan"; then
+    rm -f "$scan"
+    fail "cancellation reason looks sensitive; keep credentials and machine paths out of shared state"
+  fi
+  rm -f "$scan"
+fi
 if [ -n "$PROVIDER" ]; then
   PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
     fail "unknown provider: inspect 'oms models' for registered transports"
@@ -443,7 +514,7 @@ if [ "$ACTION" = lint-verify ]; then
 fi
 
 case "$ACTION" in
-  init|retire|apply-proposal|add)
+  init|retire|apply-proposal|add|cancel)
     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
       fail "$ACTION is parent-only; a harness child cannot change plan topology"
     ;;
@@ -573,11 +644,16 @@ export OMS_PLAN_FILE="$PY_PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_LEASE_ID="$LEASE_ID" OMS_AS_JSON="$AS_JSON" OMS_CLAIM_TTL="$CLAIM_TTL" \
   OMS_EXPECTED_PROPOSAL_SHA256="$EXPECTED_PROPOSAL_SHA256" \
   OMS_EXPECTED_PLAN_SHA256="$EXPECTED_PLAN_SHA256" \
+  OMS_EXPECTED_CANCEL_STATE="$EXPECTED_STATE" \
+  OMS_EXPECTED_CANCEL_LEASE="$EXPECTED_CANCEL_LEASE" \
   OMS_ALLOWED_ENVELOPE="$ALLOWED_ENVELOPE" OMS_MAX_TASKS="${MAX_TASKS:-12}" \
   OMS_ACCEPT_FILES="$ACCEPT_FILES" OMS_EXPECTED_STATE="$EXPECTED_STATE" \
   OMS_CHECK_ONLY="$CHECK_ONLY" OMS_APPLY="$APPLY" \
   OMS_DISPOSITION="$DISPOSITION" OMS_RETIRE_PHASE="$RETIRE_PHASE"
 export OMS_EXPECTED_TASK_SHA256="$EXPECTED_TASK_SHA256" \
+  OMS_OPERATOR_CONSENT="$OPERATOR_CONSENT" \
+  OMS_DECISION_ARTIFACT="$DECISION_ARTIFACT" \
+  OMS_EXPECTED_DECISION_ARTIFACT_SHA256="$EXPECTED_DECISION_ARTIFACT_SHA256" \
   OMS_COMPLETION_BUNDLE="$COMPLETION_BUNDLE" \
   OMS_EXPECTED_COMPLETION_BUNDLE_SHA256="$EXPECTED_COMPLETION_BUNDLE_SHA256"
 export OMS_AUTOPILOT_OWNER_ID="$OWNER_ID" OMS_PLAN_MARKERS_DIR="$PY_MARKERS_DIR"
@@ -761,7 +837,7 @@ if stat.S_ISLNK(target_info.st_mode) or not stat.S_ISREG(target_info.st_mode):
     raise SystemExit(2)
 PY
     fail "acceptance requires a safe repo-local plan file"
-elif [ "$ACTION" != retire ] && [ "$PLAN_READ_ONLY" = 0 ]; then
+elif [ "$ACTION" != retire ] && [ "$ACTION" != cancel ] && [ "$PLAN_READ_ONLY" = 0 ]; then
   mkdir -p "$(dirname "$PLAN_FILE")"
   agent_memory_ensure_oms_ignore_for_path "$PLAN_FILE" 2>/dev/null || true
 fi
@@ -1272,7 +1348,7 @@ case "$ACTION" in
       plan_run
     fi
     ;;
-  recover-lease|recover-owner)
+  recover-lease|recover-owner|cancel)
     plan_run_with_marker_and_plan_locks
     ;;
   *) plan_run_with_plan_lock ;;

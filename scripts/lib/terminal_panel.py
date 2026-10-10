@@ -958,7 +958,7 @@ def plan_link(repo, owner, task_id, env, caller, access="read"):
             raise ValueError(result.stderr.strip() or "plan snapshot unavailable")
         task = json.loads(result.stdout, object_pairs_hook=PlanBinding.unique_fields)
         if (not isinstance(task, dict) or task.get("id") != task_id
-                or task.get("state") not in {"ready", "claimed", "running", "review", "landing", "blocked", "done"}):
+                or task.get("state") not in {"ready", "claimed", "running", "review", "landing", "blocked", "done", "cancelled"}):
             raise ValueError("invalid plan snapshot")
         return task
 
@@ -970,6 +970,11 @@ def plan_link(repo, owner, task_id, env, caller, access="read"):
         unprotected("has no recorded task; panel left it unchanged")
         return None
     state, holder = task.get("state"), task.get("claimed_by_participant")
+    if state == "cancelled":
+        unprotected("is cancelled; panel left it unchanged")
+        if access == "write":
+            raise ValueError("plan task %s is cancelled; create a new task to continue" % task_id)
+        return None
     if state not in ("ready", "claimed", "running"):
         unprotected("is %s; panel left it unchanged" % state)
         if access == "write":

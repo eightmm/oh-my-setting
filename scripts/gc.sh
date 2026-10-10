@@ -555,7 +555,7 @@ EOF
             fi
           fi
           ;;
-        ready|review|landing|blocked|done) ;;
+        ready|review|landing|blocked|done|cancelled) ;;
         *)
           echo "warning: gc: plan task $task_id has an invalid state; kept trigger evidence" >&2
           recovery_hard_failure=1

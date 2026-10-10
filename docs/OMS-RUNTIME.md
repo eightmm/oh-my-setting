@@ -236,6 +236,28 @@ can recover; reactivation archives prior completion metadata. No landing fields
 are fabricated. The implementation remains local and uninstalled; worker exit
 does not establish completion.
 
+## Parent-reviewed task cancellation
+
+An operator may close rejected or unreproducible work with
+`oms agent-plan cancel`. Cancellation is available only to the parent for an
+inactive `ready` or `blocked` task. The caller supplies the exact active-plan
+and task digests, expected state and lease (`none` for an empty lease), the
+explicit `--operator-consent cancel`, a bounded reason, and a repo-relative
+decision artifact with its exact SHA-256. Cancellation refuses a changed plan,
+task, state, lease, unsafe artifact, malformed marker set, or live worker
+marker. The transition preserves the task's existing artifact, patch, history,
+and provenance and records the reviewed digests and decision-artifact digest.
+Readers reconstruct the pre-cancellation task from that receipt and reject any
+other task-field change. Active-plan reads and retirement validation reopen the
+bounded repo-relative decision artifact and verify its exact bytes, so that
+artifact must remain available while the cancellation receipt is retained.
+
+`cancelled` is closed for truthful status and superseded-plan retirement, but
+is never verified completion: it does not satisfy dependencies, increment the
+verified count, or make `all_done` true. Retirement archives the exact plan
+bytes and validates cancellation evidence; it does not claim that cancelled
+work was implemented.
+
 Versioned capture references bind complete bounded room and lifecycle prefixes
 to immutable local objects. Historical receipt reads use those captured facts;
 later departure, closure or telemetry cannot rewrite an accepted result. Each
