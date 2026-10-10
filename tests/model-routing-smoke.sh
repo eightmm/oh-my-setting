@@ -640,6 +640,29 @@ OMS_AGENT=claude OMS_TEST_PROVIDER_MODE=policy-success \
   fail 'automatic consult invoked Antigravity after a policy decline'
 
 # The collaboration profile must remain pinned even with a legacy-only catalog.
+printf 'gpt-6.2-astra\ngpt-6.10-astra\ngpt-6.2-sol\ngpt-6.10-sol\ngpt-6.10-nova\ngpt-6..10-luna\n' > "$gen/codex.models"
+for operation in delegate plan; do
+  out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" \
+    OMS_AUTOPILOT_COLLABORATION=auto OMS_MODEL_EXPLICIT='' \
+    OMS_MODEL_OPERATION="$operation" bash -c \
+    '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex || exit; printf "%s" "$OMS_MODEL_PRIMARY"')"
+  case "$operation" in delegate) expected=gpt-6.10-sol ;; *) expected=gpt-6.10-astra ;; esac
+  [ "$out" = "$expected" ] || fail "collaboration must select the newest model in its fixed family: $operation => $out"
+done
+out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" \
+  OMS_AUTOPILOT_COLLABORATION=auto OMS_MODEL_EXPLICIT=gpt-6.2-sol \
+  OMS_MODEL_OPERATION=delegate bash -c \
+  '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex || exit; printf "%s" "$OMS_MODEL_PRIMARY"')"
+[ "$out" = gpt-6.2-sol ] || fail "collaboration rewrote an explicit older GPT-6 pin: $out"
+# An absent requested family keeps its established exact seed; it never borrows
+# a different GPT-6 tier or fabricates a catalog ID.
+printf 'gpt-6.10-astra\ngpt-6.2-nova\ngpt-6..10-sol\n' > "$gen/codex.models"
+out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" \
+  OMS_AUTOPILOT_COLLABORATION=auto OMS_MODEL_EXPLICIT='' \
+  OMS_MODEL_OPERATION=delegate bash -c \
+  '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex || exit; printf "%s" "$OMS_MODEL_PRIMARY"')"
+[ "$out" = gpt-6.1-sol ] || fail "an absent collaboration family must keep its seed: $out"
+printf 'gpt-5.6-nova\ngpt-5.10-nova\n' > "$gen/codex.models"
 for operation in delegate plan; do
   out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" \
     OMS_AUTOPILOT_COLLABORATION=auto OMS_MODEL_EXPLICIT='' \
@@ -656,6 +679,27 @@ for bad in gpt-5.5 gpt-5.6-sol provider-default; do
   if OMS_AUTOPILOT_COLLABORATION=auto OMS_MODEL_EXPLICIT=gpt-6-sol OMS_MODEL_FALLBACK_EXPLICIT="$bad" \
     bash -c '. "'$ROOT'/scripts/lib/model-routing.sh"; oms_model_prepare codex' >/dev/null 2>&1; then
     fail "collaboration accepted fallback $bad"
+  fi
+done
+for current in gpt-6.10-astra gpt-6.2-sol gpt-6.10-luna; do
+  OMS_AUTOPILOT_COLLABORATION=auto bash -c \
+    '. "$1/scripts/lib/model-routing.sh"; oms_collaboration_route_validate codex "$2"' _ "$ROOT" "$current" ||
+    fail "collaboration rejected a newer recognized GPT-6 family model: $current"
+  OMS_AUTOPILOT_COLLABORATION=auto bash -c \
+    '. "$1/scripts/lib/model-routing.sh"; oms_collaboration_route_validate codex gpt-6.1-sol "$2"' _ "$ROOT" "$current" ||
+    fail "collaboration rejected a newer recognized GPT-6 fallback: $current"
+  out="$(OMS_AUTOPILOT_COLLABORATION=auto OMS_MODEL_EXPLICIT="$current" bash -c \
+    '. "$1/scripts/lib/model-routing.sh"; oms_model_prepare codex && printf "%s" "$OMS_MODEL_PRIMARY"' _ "$ROOT")"
+  [ "$out" = "$current" ] || fail "collaboration rewrote an explicit model pin: $out"
+done
+for bad in gpt-6.10-nova gpt-6..10-luna gpt-7.1-sol gpt-6.1-unknown; do
+  if OMS_AUTOPILOT_COLLABORATION=auto bash -c \
+    '. "$1/scripts/lib/model-routing.sh"; oms_collaboration_route_validate codex "$2"' _ "$ROOT" "$bad" >/dev/null 2>&1; then
+    fail "collaboration accepted an unknown or malformed Codex family: $bad"
+  fi
+  if OMS_AUTOPILOT_COLLABORATION=auto bash -c \
+    '. "$1/scripts/lib/model-routing.sh"; oms_collaboration_route_validate codex gpt-6.1-sol "$2"' _ "$ROOT" "$bad" >/dev/null 2>&1; then
+    fail "collaboration accepted an unknown or malformed fallback family: $bad"
   fi
 done
 if OMS_AUTOPILOT_COLLABORATION=auto bash -c \
