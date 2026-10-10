@@ -392,6 +392,11 @@ def bootstrap(provider, repo):
         "When a separate long line of work needs its own main (another provider, or work that must run "
         "alongside this one), start it with oms panel --spawn-main PROVIDER --task \"short task\" instead of "
         "asking the person; it appears on the panel. Ordinary subtasks stay with workers. "
+        "At a meaningful checkpoint, if a confirmed ended main registration is obstructing work (for example, "
+        "a main-start cap response), run oms panel --manage-mains --repo . --json once, optionally with "
+        "--room ID for the selected room. This requires this checkout's open panel, leaves only registrations "
+        "with complete terminal-history, native-binding and window evidence, and reports left, kept and "
+        "uncertain registrations. Do not poll or repeat it without new evidence. "
         "Only the person closes mains: one that finished its line of work, or that started a main no longer needed, "
         "may request a close with oms panel --request-close PARTICIPANT --reason \"...\". "
         "If no task has been supplied, report "
@@ -2005,12 +2010,14 @@ def validate_main_leave(repo, rows, event, expected):
 
 
 def reconcile_mains(repo, session, ident):
-    """On explicit start, leave only confirmed ended, windowless registrations; uncertainty preserves them."""
+    """Leave only confirmed ended, windowless registrations; uncertainty preserves them."""
+    report = {"left": [], "kept": [], "uncertain": []}
     try:
         rows = room.records(repo, ident)
         members = room.project(rows)["participants"]
     except (OSError, ValueError, KeyError, TypeError):
-        return
+        report["uncertain"].append({"participant": None, "reason": "room roster unavailable"})
+        return report
     for member in members:
         if not member.get("joined") or member.get("role") != "main":
             continue
@@ -2020,8 +2027,38 @@ def reconcile_mains(repo, session, ident):
             expected = main_leave_proof(repo, session, ident, rows, who)
             room.append(repo, ident, {"kind": "leave", "participant": who}, "Participant left",
                         expected_main_leave=expected)
-        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-            continue
+            report["left"].append(who)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            reason = str(error)
+            known_preserved = {
+                "main registration is not an original joined owner",
+                "main still has a window",
+                "native binding has a live attempt",
+            }
+            bucket = "kept" if reason in known_preserved else "uncertain"
+            report[bucket].append({"participant": who, "reason": reason if bucket == "kept"
+                                   else "complete leave proof unavailable"})
+    return report
+
+
+def manage_mains(repo, selected_room=None):
+    """Reconcile a selected room through this checkout's already-open panel session."""
+    if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
+        raise ValueError("a worker cannot manage owner sessions; return the need to its parent")
+    session, owner = resolve_session(repo, wait=False)
+    if owner != str(repo):
+        legacy = legacy_session(repo)
+        session, owner = (legacy, str(repo)) if legacy and session_owner(legacy) == str(repo) else (session, owner)
+    if owner != str(repo):
+        raise ValueError("no OMS panel is open for this checkout; open one with oms panel")
+    ident = selected_room or os.environ.get("OMS_ROOM_ID") or recorded_room(session)
+    if not ident:
+        raise ValueError("select an existing room first")
+    room.identifier(ident, "room")
+    if room.status(repo, ident)["closed"]:
+        raise ValueError("selected room is closed")
+    report = reconcile_mains(repo, session, ident)
+    return {"schema": 1, "kind": "oms-panel-main-management", "room": ident, **report}
 
 
 def live_mains(repo, session, room_id):
@@ -4015,6 +4052,8 @@ def main(argv=None):
     parser.add_argument("--launch", help="open one top-level native session")
     parser.add_argument("--spawn-main", metavar="PROVIDER",
                         help="add a main window to this checkout's open panel without attaching; works without a terminal")
+    parser.add_argument("--manage-mains", action="store_true",
+                        help="reconcile confirmed ended mains in the selected room; requires this checkout's open panel")
     parser.add_argument("--request-close", metavar="PARTICIPANT",
                         help="ask the person to close a main of this room; a main cannot close another main itself")
     parser.add_argument("--reason", help="why --request-close asks for the close")
@@ -4064,7 +4103,7 @@ def main(argv=None):
     parser.add_argument("--label", help="short task title for the role board")
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
     args = parser.parse_args(arguments)
-    if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.request_close, args.reopen, args.dispatch, args.routes,
+    if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.manage_mains, args.request_close, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.finalize, args.retry_delivery, args.providers,
                                      args.chats, args.open_chat)) > 1:
         parser.error("choose one panel operation")
@@ -4092,7 +4131,9 @@ def main(argv=None):
         parser.error("--request-close records a request; it has no dry-run")
     if args.spawn_main and args.dry_run:
         parser.error("--spawn-main starts a main; it has no dry-run")
-    if (args.view or args.attention_only) and (args.launch or args.spawn_main or args.reopen or args.json or args.dry_run or args.routes
+    if args.manage_mains and args.dry_run:
+        parser.error("--manage-mains performs reconciliation; it has no dry-run")
+    if (args.view or args.attention_only) and (args.launch or args.spawn_main or args.manage_mains or args.reopen or args.json or args.dry_run or args.routes
             or args.dispatch or args.council or args.results or args.finalize or args.retry_delivery or args.providers
             or args.chats or args.open_chat):
         parser.error("--view and --attention-only apply to the interactive menu or --watch")
@@ -4174,7 +4215,7 @@ def main(argv=None):
                        or not re.fullmatch(r"[A-Za-z0-9_./:-]+", args.model)):
         parser.error("invalid model ID")
     if (args.dispatch or args.council or args.finalize or args.retry_delivery or args.chats or args.open_chat
-            or args.spawn_main or args.request_close or not (
+            or args.spawn_main or args.manage_mains or args.request_close or not (
             args.json or args.dry_run or args.watch or args.routes or args.results or args.providers)) and (
             os.environ.get("OMS_HARNESS_CHILD") == "1"
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
@@ -4228,6 +4269,17 @@ def main(argv=None):
                 print(json.dumps(report))
             else:
                 print("Started %s main in window %s of room %s" % (report["provider"].capitalize(), report["window"], report["room"]))
+            return 0
+        if args.manage_mains:
+            report = manage_mains(repo, args.room)
+            if args.json:
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+            else:
+                def names(rows):
+                    return ", ".join(row if isinstance(row, str) else row.get("participant") or "unknown"
+                                     for row in rows) or "none"
+                print("Main management for room %s: left %s; kept %s; uncertain %s" % (
+                    report["room"], names(report["left"]), names(report["kept"]), names(report["uncertain"])))
             return 0
         if args.request_close:
             report = request_close(repo, args.request_close, args.reason)

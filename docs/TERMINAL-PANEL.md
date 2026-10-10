@@ -41,6 +41,7 @@ oms panel --repo . --room team --watch --view tree
 oms panel --repo . --launch codex --task 'Explain the parser and fix its bounded bug'
 oms panel --repo . --launch claude --resume SESSION_ID
 oms panel --repo . --launch codex --model MODEL --dry-run
+oms panel --repo . --manage-mains --json      # explicit ended-main reconciliation
 oms panel --repo . --results               # summaries first, ordinary scrollable text
 oms panel --repo . --results --task-id ID --json
 oms panel --repo . --room team --chats --json
@@ -79,6 +80,23 @@ worker registrations and history remain. It never starts a replacement or kills 
 window. The six-main cap still applies. A participant lock serializes this cleanup
 with managed resumes, and the room lock checks the observation again before leaving.
 Tmux is observed separately: external window changes are not atomic with room updates.
+
+An agent can request the same conservative reconciliation at a meaningful checkpoint,
+such as when an ended registration is obstructing a new main:
+
+```bash
+oms panel --repo . --manage-mains --json [--room ROOM_ID]
+```
+
+This requires an already-open panel owned by this checkout and reconciles only the
+selected room (`--room`, the current room, or the room recorded by the panel). The
+report lists registrations actually left, known retained registrations, and cases
+where evidence was incomplete or changed. It records room leaves only after the
+existing terminal-history, native-binding, complete-window and room-lock checks
+succeed. It does not start or resume a main, focus or attach to a window, close a
+window, or run during watch/render refresh. Main bootstrap guidance invokes it once
+when new evidence or an obstruction gives a reason; it does not poll or repeatedly
+call reconciliation.
 
 A main never closes another main, because closing ends a native chat and its running work. It
 may ask: `oms panel --request-close PARTICIPANT --reason "..." [--json]` (refused inside

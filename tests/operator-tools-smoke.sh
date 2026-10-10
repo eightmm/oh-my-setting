@@ -7940,11 +7940,20 @@ reconcile_tmux = reconcile_bin / "tmux"
 reconcile_tmux.write_text('''#!/usr/bin/env python3
 import os, sys
 if sys.argv[1] == "has-session":
-    pass
+    raise SystemExit(1 if os.environ.get("RECONCILE_NO_SESSION") else 0)
 elif sys.argv[1] == "show-options":
-    print(os.environ["RECONCILE_REPO"])
+    print(os.environ.get("RECONCILE_OWNER", os.environ["RECONCILE_REPO"]))
 elif sys.argv[1] == "list-windows":
-    print("$8\\ts\\t1\\t@1\\t\\t\\t\\t\\t" + os.environ["RECONCILE_REPO"] + "\\tcontrol\\t\\toms-end")
+    if os.environ.get("RECONCILE_BAD_WINDOWS"):
+        print("truncated")
+    else:
+        session = os.environ.get("RECONCILE_SESSION", "s")
+        mode = os.environ.get("RECONCILE_WINDOW", "control")
+        attempt = os.environ.get("RECONCILE_ATTEMPT", "") if mode == "main" else ""
+        room = os.environ.get("RECONCILE_ROOM", "") if mode == "main" else ""
+        participant = os.environ.get("RECONCILE_PARTICIPANT", "") if mode == "main" else ""
+        owner = "codex" if mode == "main" else ""
+        print("$8\\t" + session + "\\t1\\t@1\\t" + owner + "\\t" + attempt + "\\t" + room + "\\t" + participant + "\\t" + os.environ["RECONCILE_REPO"] + "\\t" + mode + "\\t\\toms-end")
 else:
     raise SystemExit("unexpected tmux mutation")
 ''')
@@ -8147,6 +8156,66 @@ except ValueError:
         except ValueError as error:
             assert "joined" in str(error) or "membership changed" in str(error), error
         assert not started_attempt.called
+    # The explicit CLI resolves only this checkout's existing panel and selected room.
+    cli_room = "cli-manage"
+    room.create(reconcile_repo, cli_room)
+    cli_attempt = panel.events(reconcile_repo, "start", "--provider", "codex", "--tool", "panel-main",
+                               "--ref", "panel_role=main", "--ref", "panel_room_id=" + cli_room,
+                               "--then", "failed", output=True)
+    room.join(reconcile_repo, cli_room, cli_attempt, "codex")
+    cli_env = dict(reconcile_env, RECONCILE_SESSION=panel.session_candidates(reconcile_repo)[0])
+    cli_command = ["bash", str(panel.ENTRY), "panel", "--repo", str(reconcile_repo),
+                   "--manage-mains", "--room", cli_room, "--json"]
+    dispatched = subprocess.run(cli_command, cwd=str(reconcile_repo), env=cli_env,
+                                capture_output=True, text=True, timeout=60)
+    assert dispatched.returncode == 0, (dispatched.stdout, dispatched.stderr)
+    cli_report = json.loads(dispatched.stdout)
+    assert cli_report["left"] == [cli_attempt] and not cli_report["kept"] and not cli_report["uncertain"], cli_report
+    cli_rows = room.records(reconcile_repo, cli_room)
+    cli_again = subprocess.run(cli_command, cwd=str(reconcile_repo), env=cli_env,
+                               capture_output=True, text=True, timeout=60)
+    assert cli_again.returncode == 0, (cli_again.stdout, cli_again.stderr)
+    assert json.loads(cli_again.stdout)["left"] == [] and room.records(reconcile_repo, cli_room) == cli_rows
+    assert not any("kill-window" in line for line in cli_again.stdout.splitlines())
+    # Missing full-window evidence is reported as uncertain and preserves membership.
+    uncertain_room = "cli-uncertain"
+    room.create(reconcile_repo, uncertain_room)
+    uncertain_attempt = panel.events(reconcile_repo, "start", "--provider", "codex", "--tool", "panel-main",
+                                    "--ref", "panel_role=main", "--ref", "panel_room_id=" + uncertain_room,
+                                    "--then", "failed", output=True)
+    room.join(reconcile_repo, uncertain_room, uncertain_attempt, "codex")
+    uncertain_env = dict(cli_env, OMS_ROOM_ID=uncertain_room, RECONCILE_BAD_WINDOWS="1")
+    uncertain_cmd = ["bash", str(panel.ENTRY), "panel", "--repo", str(reconcile_repo), "--manage-mains", "--json"]
+    uncertain = subprocess.run(uncertain_cmd, cwd=str(reconcile_repo), env=uncertain_env,
+                               capture_output=True, text=True, timeout=60)
+    assert uncertain.returncode == 0, (uncertain.stdout, uncertain.stderr)
+    uncertain_report = json.loads(uncertain.stdout)
+    assert uncertain_report["uncertain"] == [{"participant": uncertain_attempt,
+                                              "reason": "complete leave proof unavailable"}], uncertain_report
+    assert room.participant(room.status(reconcile_repo, uncertain_room), uncertain_attempt)["joined"]
+    # A proven remaining window is reported as kept; the tmux mock rejects all mutation commands.
+    kept_room = "cli-kept"
+    room.create(reconcile_repo, kept_room)
+    kept_attempt = panel.events(reconcile_repo, "start", "--provider", "codex", "--tool", "panel-main",
+                                "--ref", "panel_role=main", "--ref", "panel_room_id=" + kept_room,
+                                "--then", "failed", output=True)
+    room.join(reconcile_repo, kept_room, kept_attempt, "codex")
+    kept_env = dict(cli_env, OMS_ROOM_ID=kept_room, RECONCILE_WINDOW="main", RECONCILE_ATTEMPT=kept_attempt,
+                    RECONCILE_ROOM=kept_room, RECONCILE_PARTICIPANT=kept_attempt)
+    kept = subprocess.run(uncertain_cmd, cwd=str(reconcile_repo), env=kept_env,
+                          capture_output=True, text=True, timeout=60)
+    assert kept.returncode == 0, (kept.stdout, kept.stderr)
+    kept_report = json.loads(kept.stdout)
+    assert kept_report["kept"] == [{"participant": kept_attempt, "reason": "main still has a window"}], kept_report
+    assert room.participant(room.status(reconcile_repo, kept_room), kept_attempt)["joined"]
+    absent_session = subprocess.run(uncertain_cmd, cwd=str(reconcile_repo),
+                                    env=dict(cli_env, OMS_ROOM_ID=cli_room, RECONCILE_NO_SESSION="1"),
+                                    capture_output=True, text=True, timeout=60)
+    assert absent_session.returncode == 1 and "no OMS panel is open for this checkout" in absent_session.stderr
+    refused_worker = subprocess.run(uncertain_cmd, cwd=str(reconcile_repo),
+                                    env=dict(cli_env, OMS_ROOM_ID=cli_room, OMS_HARNESS_CHILD="1"),
+                                    capture_output=True, text=True, timeout=60)
+    assert refused_worker.returncode != 0 and "worker cannot open owner sessions" in refused_worker.stderr
 print("main-management: complete evidence, guarded leave, resume exclusion and retained workers passed")
 
 # The cap is checked after the tool check, so hosts without tmux or a CLI (CI) still reach it.
