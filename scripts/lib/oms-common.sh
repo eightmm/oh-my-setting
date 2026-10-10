@@ -1142,6 +1142,14 @@ oms_worker_same_repository() {  # REPO_PHYSICAL OTHER
   [ -n "$repo_common" ] && [ "$repo_common" = "$other_common" ]
 }
 
+# PID 0 probes the caller's process group. Lexical validation preserves decimal
+# padding without integer overflow, including before the kept-marker bypass.
+oms_worker_marker_pid_is_positive_decimal() {  # PID
+  case "$1" in ""|*[!0-9]*) return 1 ;; esac
+  case "$1" in *[1-9]*) return 0 ;; esac
+  return 1
+}
+
 # A parallel delegate owns a temporary linked worktree in the same repository.
 # Its add/remove is harness lifecycle, not a provider reaching into Git
 # metadata. Ignore only registrations backed by a live private marker whose
@@ -1208,7 +1216,7 @@ oms_worker_gitmeta_is_live_managed_worktree() {  # REPO ENTRY CURRENT_WORKTREE [
   marker_worktree="$(oms_harness_read_marker_value "$marker" worktree)"
   marker_temporary="$(oms_harness_read_marker_value "$marker" temporary)"
   [ "$marker_kind" = oh-my-setting-temp ] && [ "$marker_temporary" = 1 ] || return 1
-  case "$marker_pid" in *[!0-9]*|""|0*) return 1 ;; esac  # kill -0 0 would probe our own process group
+  oms_worker_marker_pid_is_positive_decimal "$marker_pid" || return 1
   [ "$allow_kept" = kept ] || kill -0 "$marker_pid" 2>/dev/null || return 1
   repo_physical="$(oms_harness_physical_dir "$repo" 2>/dev/null || true)"
   [ -n "$repo_physical" ] || return 1
@@ -1279,7 +1287,7 @@ oms_worker_gitmeta_is_pending_managed_worktree() {  # REPO WT_PATH CURRENT_WORKT
   marker_worktree="$(oms_harness_read_marker_value "$marker" worktree)"
   marker_temporary="$(oms_harness_read_marker_value "$marker" temporary)"
   [ "$marker_kind" = oh-my-setting-temp ] && [ "$marker_temporary" = 1 ] || return 1
-  case "$marker_pid" in *[!0-9]*|""|0*) return 1 ;; esac  # kill -0 0 would probe our own process group
+  oms_worker_marker_pid_is_positive_decimal "$marker_pid" || return 1
   kill -0 "$marker_pid" 2>/dev/null || return 1
   repo_physical="$(oms_harness_physical_dir "$repo" 2>/dev/null || true)"
   [ -n "$repo_physical" ] || return 1

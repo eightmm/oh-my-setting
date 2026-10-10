@@ -24700,10 +24700,24 @@ test_worker_guard_exempts_a_live_sibling_mid_creation() {
   local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
   local scratch_parent="$managed_root/oh-my-setting-scratch.sibling"
   local agy_parent="$managed_root/oh-my-setting-agy-read.sibling"
+  local live_positive_parent="$managed_root/oh-my-setting-scratch.live-positive"
+  local live_zero_parent="$managed_root/oh-my-setting-scratch.live-zero"
+  local live_body
+  local dead_pid
   local result
 
   make_guard_repo "$project"
   make_live_managed_sibling "$project" "$sibling_parent"
+  live_body="mkdir -p $live_positive_parent && git -C $project worktree add --quiet --detach $live_positive_parent/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=000$$\\nrepo=$project\\nworktree=$live_positive_parent/wt\\ntemporary=1\\n' > $live_positive_parent/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" "$live_body")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a newly registered live sibling with a zero-padded positive pid must remain exempt: $result"
+  live_body="mkdir -p $live_zero_parent && git -C $project worktree add --quiet --detach $live_zero_parent/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=00\\nrepo=$project\\nworktree=$live_zero_parent/wt\\ntemporary=1\\n' > $live_zero_parent/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" "$live_body")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "an all-zero newly registered live marker pid must not exempt a worktree: $result"
+  contains "$result" 'outside its worktree: gitmeta' ||
+    fail "an all-zero newly registered live marker pid should remain a gitmeta violation: $result"
   # The marker is written before `git worktree add`, which registers the entry
   # before the checkout exists: the pre-provider snapshot sees a registered
   # worktree with no checkout, the final capture sees the same entry live.
@@ -24712,18 +24726,39 @@ test_worker_guard_exempts_a_live_sibling_mid_creation() {
   # here the final capture lands inside that window of an add begun mid-run.
   result="$(run_delegate_beside_sibling "$project" "$managed_root" \
     'case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
-mv $sibling_parent/pending $sibling_parent/wt && mkdir -p $scratch_parent && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$project\\nworktree=$scratch_parent/wt\\ntemporary=1\\n' > $scratch_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $scratch_parent/wt HEAD && mv $scratch_parent/wt $scratch_parent/pending && mkdir -p $agy_parent && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$project\\nworktree=$agy_parent/tree\\ntemporary=1\\n' > $agy_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $agy_parent/tree HEAD && mv $agy_parent/tree $agy_parent/pending")"
+mv $sibling_parent/pending $sibling_parent/wt && mkdir -p $scratch_parent && printf 'kind=oh-my-setting-temp\\npid=000$$\\nrepo=$project\\nworktree=$scratch_parent/wt\\ntemporary=1\\n' > $scratch_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $scratch_parent/wt HEAD && mv $scratch_parent/wt $scratch_parent/pending && mkdir -p $agy_parent && printf 'kind=oh-my-setting-temp\\npid=000$$\\nrepo=$project\\nworktree=$agy_parent/tree\\ntemporary=1\\n' > $agy_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $agy_parent/tree HEAD && mv $agy_parent/tree $agy_parent/pending")"
   [ "${result%%	*}" = 0 ] ||
     fail "a live sibling mid-creation must not fail the run: $result"
   if contains "$result" 'outside the worktree'; then
     fail "a live sibling mid-creation should not be reported as a change: $result"
   fi
-  # A marker claiming pid 0 names no owner (kill -0 0 probes our own process group).
+  # All-zero markers name no owner (kill -0 0 probes our own process group).
   local zero_parent="$managed_root/oh-my-setting-scratch.zero"
   result="$(run_delegate_beside_sibling "$project" "$managed_root" \
     'case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
 mkdir -p $zero_parent && printf 'kind=oh-my-setting-temp\\npid=0\\nrepo=$project\\nworktree=$zero_parent/wt\\ntemporary=1\\n' > $zero_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $zero_parent/wt HEAD && mv $zero_parent/wt $zero_parent/pending")"
   [ "${result%%	*}" != 0 ] || fail "a pid-0 marker must not exempt a new worktree: $result"
+
+  # A dead owner can keep its detached scratch after the worker returns. The
+  # kept path still requires a positive decimal pid before allowing that state.
+  dead_pid="$(sh -c 'echo $$')"
+  local kept_parent="$managed_root/oh-my-setting-scratch.kept-positive"
+  local kept_body
+  kept_body="mkdir -p $kept_parent && git -C $project worktree add --quiet --detach $kept_parent/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=000$dead_pid\\nrepo=$project\\nworktree=$kept_parent/wt\\ntemporary=1\\n' > $kept_parent/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" "$kept_body")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a kept sibling with a zero-padded positive pid must remain exempt: $result"
+  contains "$result" 'during this run: kept-sibling' ||
+    fail "a kept padded-pid sibling should retain its soft classification: $result"
+
+  local kept_zero_parent="$managed_root/oh-my-setting-scratch.kept-zero"
+  local kept_zero_body
+  kept_zero_body="mkdir -p $kept_zero_parent && git -C $project worktree add --quiet --detach $kept_zero_parent/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=00\\nrepo=$project\\nworktree=$kept_zero_parent/wt\\ntemporary=1\\n' > $kept_zero_parent/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" "$kept_zero_body")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "an all-zero kept marker pid must not soften a worktree violation: $result"
+  contains "$result" 'outside its worktree: gitmeta' ||
+    fail "an all-zero kept marker pid should remain a gitmeta violation: $result"
 }
 
 # The incident: a parent made a scratch worktree with plain `git worktree add`
