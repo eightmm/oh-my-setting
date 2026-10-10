@@ -10,7 +10,7 @@ import time
 from dashboard_projection import clean, listing, mapping
 from panel_view import wrapped
 
-MAX_MESSAGES, MAX_TEXT, MAX_BODY_LINES = 200, 8000, 400
+MAX_MESSAGES, MAX_TEXT = 200, 8000
 KINDS = ("question", "answer", "handoff", "status")
 
 
@@ -113,9 +113,10 @@ def tab_body(report, width, cap, navigation, unicode=True):
                ("▸ " if unicode else "> ") if r["id"] == state["selected"] else "  "
         body.append((r["id"], mark + r["line"], True))
         if r["id"] == state["open"]:
+            # Each wrapped line consumes at least one of the bounded message characters.
             full = [part for paragraph in r["text"].splitlines()
-                    for part in (wrapped(paragraph, width - 4, 50, MAX_TEXT) if paragraph.strip() else [""])]
-            body += [(r["id"], "    " + part, False) for part in full[:MAX_BODY_LINES]]
+                    for part in (wrapped(paragraph, width - 4, MAX_TEXT, MAX_TEXT) if paragraph.strip() else [""])]
+            body += [(r["id"], "    " + part, False) for part in full]
     if state.pop("reveal", False) and state["selected"] in starts:
         first = starts[state["selected"]]
         if state["selected"] == state["open"] or first < state["scroll"]:

@@ -1389,6 +1389,30 @@ nav, listed = board("messages", 110, 40)
 hit = next(h for h in nav["hits"] if h["action"][0] == "message")
 assert listed.split("\n")[hit["y"] - 1].lstrip().startswith("│") and "line" in listed.split("\n")[hit["y"] - 1], listed
 assert tab_event(("click", 5, hit["y"]), nav) and nav["messages_view"]["open"] == hit["action"][1]
+# Supported room messages keep their tail beyond both former wrapping limits; page keys and the wheel reach it.
+for message_text in ("x\n" * 999 + "TAIL", "word " * 790 + "TAIL", "한글 " * 570 + "TAIL"):
+    assert len(message_text.encode("utf-8")) <= 4000
+    for glyphs in (True, False):
+        nav, unused = board("messages", 80, 40, unicode=glyphs)
+        nav["messages_view"]["log"] = [dict(msg_log[-1], text=message_text)]
+        board("messages", 80, 40, nav=nav, unicode=glyphs)
+        assert tab_event(("enter",), nav)
+        opened = board("messages", 80, 40, nav=nav, unicode=glyphs)[1]
+        assert "TAIL" not in opened, opened
+        assert tab_event(("scroll", panel_messages.MAX_TEXT), nav)
+        tail = board("messages", 80, 40, nav=nav, unicode=glyphs)[1]
+        assert "TAIL" in tail, (len(message_text), glyphs, tail)
+        assert len(tail.splitlines()) == 40 and all(display_width(line) <= 80 for line in tail.splitlines())
+        assert "\x1b" not in tail and (glyphs or not any(ch in tail for ch in BOX_CHARS)), tail
+        last_scroll = nav["messages_view"]["scroll"]
+        assert tab_event(("pageup",), nav)
+        assert "TAIL" not in board("messages", 80, 40, nav=nav, unicode=glyphs)[1]
+        assert tab_event(("pagedown",), nav)
+        assert "TAIL" in board("messages", 80, 40, nav=nav, unicode=glyphs)[1]
+        assert nav["messages_view"]["scroll"] == last_scroll
+        assert tab_event(("escape",), nav) and nav["messages_view"]["open"] is None
+assert len(panel_messages.readable_text("x" * (panel_messages.MAX_TEXT + 1))) == panel_messages.MAX_TEXT
+assert msg_report == before and msg_log[-1]["text"].startswith("line 29"), "reading changed the report or log"
 # The footer lists keys that work: Messages/Debate show their own keys; the tree has no tabs, so no Tab hint or badge line.
 for name, hint in (("messages", "Message"), ("debate", "Seat")):
     nav, text = board(name, 110, 40, managed=True)
