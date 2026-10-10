@@ -3681,13 +3681,27 @@ def exercise_observed_worker_leases():
                                      "codex", "claude", "argv-main", "att_" + "3" * 32, "argv-room")
     captured_dispatch = {}
     route = panel.selected_route("claude", "worker", "light", "auto", "write", "implement")
-    with patch.object(panel, "moved_main", return_value=None), \
+    dispatch_args = (project, "claude", "worker", "light", "auto", "write", "implement",
+                     None, brief, "true", "argv-observer", False, None, route, None, None, None)
+    # The fake provider CLIs live in the fixture PATH, but this in-process
+    # observer check inherits the host PATH. Keep route availability explicit
+    # so CI hosts without Codex or Claude still exercise the real dispatcher.
+    with patch.object(panel.shutil, "which", return_value=None), \
+            patch.object(panel.subprocess, "call") as unavailable_call:
+        try:
+            panel.run_dispatch(*dispatch_args)
+        except ValueError as error:
+            assert "%s is not installed" % route["provider"] in str(error), error
+        else:
+            raise AssertionError("unavailable worker route was accepted")
+        unavailable_call.assert_not_called()
+    with patch.object(panel.shutil, "which", return_value=str(binary / route.get("binary", route["provider"]))), \
+            patch.object(panel, "moved_main", return_value=None), \
             patch.object(panel, "child_environment", return_value={}), \
             patch.object(panel, "native_repository", return_value=project), \
             patch.object(panel, "plan_link", return_value=argv_binding), \
             patch.object(panel.subprocess, "call", side_effect=lambda argv, **kwargs: captured_dispatch.update(argv=argv) or 0):
-        assert panel.run_dispatch(project, "claude", "worker", "light", "auto", "write", "implement",
-                                  None, brief, "true", "argv-observer", False, None, route, None, None, None) == 0
+        assert panel.run_dispatch(*dispatch_args) == 0
     dispatch_argv = captured_dispatch["argv"]
     assert "--observe-plan-binding" in dispatch_argv, dispatch_argv
     assert json.loads(dispatch_argv[dispatch_argv.index("--observe-plan-binding") + 1]) == argv_binding._asdict()
