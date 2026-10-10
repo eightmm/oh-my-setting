@@ -15554,7 +15554,10 @@ test_run_ledger_top_ranks_metrics() {
 EOF
 
   out="$("$SH" top --metric auc --file "$ledger")"
-  printf '%s\n' "$out" | head -n 1 | grep -Fq "auc=0.83" || fail "top should rank the best exit-0 run first"
+  printf '%s\n' "$out" | head -n 1 | grep -Fq "auc=0.83" || {
+    local top_status=("${PIPESTATUS[@]}")
+    fail "top should rank the best exit-0 run first (pipeline status: ${top_status[*]}; output: $out)"
+  }
   if contains "$out" "0.99"; then
     fail "failed runs must be excluded without --all"
   fi
