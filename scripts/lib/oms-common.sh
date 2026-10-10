@@ -1716,13 +1716,18 @@ PY
       # changed. Record each file's length and the hash of exactly those bytes;
       # growth is legitimate, mutation of the prefix is not. Deletion of any
       # state file is a violation regardless of family.
-      OMS_WG_REPO="$repo" python3 - <<'PY'
-import hashlib, os, sys
+      local transient_helper
+      transient_helper="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)/worker-state-transients.py"
+      OMS_WG_REPO="$repo" python3 - "$transient_helper" <<'PY'
+import hashlib, importlib.util, os, sys
 
 root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
 if not os.path.isdir(root):
     raise SystemExit(0)
 rows = []
+spec = importlib.util.spec_from_file_location("_oms_worker_state_transients", sys.argv[1])
+transients = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(transients)
 for base, dirs, files in os.walk(root):
     # Delegation markers are ephemeral owner liveness. A sibling legitimately
     # creates/removes them while this worker runs; the exclusive provider-window
@@ -1735,6 +1740,8 @@ for base, dirs, files in os.walk(root):
         rel = os.path.relpath(path, root).replace(os.sep, "/")
         if os.path.islink(path):
             rows.append("%s LINK" % rel)
+            continue
+        if transients.is_internal_atomic_temp(root, rel):
             continue
         # Append-only by contract: the JSONL families, plus the memory log and
         # its pins. summary.md is derived from shared.md and regenerated, and

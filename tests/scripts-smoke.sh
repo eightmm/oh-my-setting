@@ -23157,6 +23157,181 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
   printf '{"source":"compact"}\n' > "$hint/.oms/hooks/sessions/abc.resume.json"
   result="$(run_guarded_worker "$hint" "rm -f $hint/.oms/hooks/sessions/abc.resume.json")"
   [ "${result%%	*}" = 0 ] || fail "a consumed hook session hint is not worker authority: $result"
+
+  # Known same-directory writer temps are scratch while present in either
+  # provider snapshot. Their cleanup after capture must not look like deleting
+  # a shared target in either the ordinary or exclusive guard.
+  local transient_mode transient transients_body rel
+  local -a transient_paths=(
+    "hooks/sessions/0123456789abcdef0123456789abcdef.json.abc123_4.tmp"
+    "hooks/panel-activity/call-0123456789abcdef01234567.json.abc123_4.tmp"
+    "hooks/relay/claude.json.abc123_4.tmp"
+    "hooks/.oms-replace.abc12345"
+    "memory/.oms-replace.abc123"
+    "plan/tmpabc123_4"
+    "plan/.tasks.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.archive.json.tmp"
+    "plan/.tasks.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.retire-intent.json.tmp"
+    "..gitignore.tmp.123.0123456789abcdef0123456789abcdef"
+    "artifacts/.index.jsonl.tmp.123.0123456789abcdef0123456789abcdef"
+    "artifacts/.index.jsonl.tmp.123"
+    "artifacts/quarantine/.artifact-index-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.raw.tmp.123.0123456789abcdef0123456789abcdef"
+    "hooks/panel-cache/.dashboard.json.tmp.123.0123456789abcdef0123456789abcdef"
+    "artifacts/panel-results/.result-task-0123456789abcdef01234567.json.tmp.123.0123456789abcdef0123456789abcdef"
+    "artifacts/panel-results/.delivery-task-0123456789abcdef01234567-0123456789abcdef-pending.json.tmp.123.0123456789abcdef0123456789abcdef"
+  )
+  for transient_mode in 0 1; do
+    transient="$TMP/guard-state-transient-$transient_mode"
+    transients_body="rm -f"
+    make_guard_repo "$transient"
+    for rel in "${transient_paths[@]}"; do
+      mkdir -p "$(dirname "$transient/.oms/$rel")"
+      printf 'staging bytes\n' > "$transient/.oms/$rel"
+      transients_body="$transients_body $transient/.oms/$rel"
+    done
+    result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE="$transient_mode" \
+      run_guarded_worker "$transient" "$transients_body")"
+    [ "${result%%	*}" = 0 ] ||
+      fail "exclusive=$transient_mode cleanup of captured writer temps should pass: $result"
+    if printf '%s' "$result" | grep -Fq 'shared-state'; then
+      fail "captured writer-temp cleanup was reported as shared-state in mode $transient_mode: $result"
+    fi
+  done
+
+  # The same producer-shaped regular-file staging names may be created after
+  # capture; pre-existing parent directories isolate file classification.
+  for transient_mode in 0 1; do
+    transient="$TMP/guard-state-transient-created-$transient_mode"
+    transients_body=""
+    make_guard_repo "$transient"
+    for rel in "${transient_paths[@]}"; do
+      mkdir -p "$(dirname "$transient/.oms/$rel")"
+      transients_body="$transients_body mkdir -p \$(dirname '$transient/.oms/$rel'); printf 'staging bytes\\n' > '$transient/.oms/$rel';"
+    done
+    result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE="$transient_mode" \
+      run_guarded_worker "$transient" "$transients_body")"
+    [ "${result%%	*}" = 0 ] ||
+      fail "exclusive=$transient_mode creation of producer temps should pass: $result"
+  done
+
+  # The display-once rollover cache permits only valid-date empty regular files.
+  for transient_mode in 0 1; do
+    transient="$TMP/guard-state-hint-rollover-$transient_mode"
+    make_guard_repo "$transient"
+    mkdir -p "$transient/.oms/hooks"
+    : > "$transient/.oms/hooks/state-hint.2026-10-09"
+    result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE="$transient_mode" run_guarded_worker "$transient" \
+      "rm -f '$transient/.oms/hooks/state-hint.2026-10-09'; : > '$transient/.oms/hooks/state-hint.2026-10-10'")"
+    [ "${result%%	*}" = 0 ] ||
+      fail "exclusive=$transient_mode day rollover of empty state hints should pass: $result"
+  done
+
+  # Similar names and non-regular entries remain protected. Isolate controls so
+  # every expected violation is asserted independently.
+  local control expected control_body
+  for transient_mode in 0 1; do
+    for control in stable-session malformed wrong-dir task plan symlink jsonl hint-date hint-content hint-link; do
+      transient="$TMP/guard-state-transient-control-$transient_mode-$control"
+      make_guard_repo "$transient"
+      case "$control" in
+        stable-session)
+          rel="hooks/sessions/0123456789abcdef0123456789abcdef.json"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks/sessions"
+          printf '{"schema":1}\n' > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        malformed)
+          rel="hooks/sessions/0123456789abcdef0123456789abcdef.json.abc1234.tmp"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks/sessions"
+          printf 'lookalike\n' > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        wrong-dir)
+          rel="hooks/other/0123456789abcdef01234567.json.abc123_4.tmp"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks/other"
+          printf 'wrong directory\n' > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        task)
+          rel="task/current.md"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/task"
+          printf 'task scope\n' > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        plan)
+          rel="plan/tasks.json"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/plan"
+          printf '{"tasks":{"t1":{"lease_id":"lease_0123"}}}\n' > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        symlink)
+          rel="hooks/sessions/linked.json.abc123_4.tmp"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks/sessions"
+          ln -s target "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        hint-date)
+          rel="hooks/state-hint.2026-02-30"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks"
+          : > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        hint-content)
+          rel="hooks/state-hint.2026-10-09"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks"
+          printf 'retained content\n' > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        hint-link)
+          rel="hooks/state-hint.2026-10-09"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks"
+          ln -s target "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        jsonl)
+          rel="failures.jsonl"
+          mkdir -p "$transient/.oms"
+          printf '{"schema":1,"fingerprint":"stable"}\n' > "$transient/.oms/$rel"
+          control_body="printf '{\"schema\":1,\"fingerprint\":\"rewritten\"}\\n' > '$transient/.oms/$rel'"
+          if [ "$transient_mode" = 1 ]; then
+            expected="$rel changed"
+          else
+            expected="$rel had existing rows rewritten"
+          fi
+          ;;
+      esac
+      result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE="$transient_mode" \
+        run_guarded_worker "$transient" "$control_body")"
+      [ "${result%%	*}" != 0 ] ||
+        fail "exclusive=$transient_mode control $control should fail: $result"
+      printf '%s' "$result" | grep -Fq "$expected" ||
+        fail "exclusive=$transient_mode did not report protected control $control ($expected): $result"
+    done
+    if [ "$transient_mode" = 1 ]; then
+      transient="$TMP/guard-state-hint-directory-control"
+      make_guard_repo "$transient"
+      mkdir -p "$transient/.oms/hooks/state-hint.2026-10-09"
+      python3 -c "import runpy; m=runpy.run_path('$ROOT/scripts/lib/worker-state-transients.py'); assert not m['is_internal_atomic_temp']('$transient/.oms', 'hooks/state-hint.2026-10-09')" ||
+        fail "a state-hint directory must not be classified as an internal transient"
+      transient="$TMP/guard-state-transient-control-$transient_mode-temp-dir"
+      make_guard_repo "$transient"
+      mkdir -p "$transient/.oms/memory/.oms-replace.abc123"
+      result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$transient" \
+        "rmdir '$transient/.oms/memory/.oms-replace.abc123'")"
+      [ "${result%%	*}" != 0 ] ||
+        fail "a directory matching a producer temp name must remain protected"
+      printf '%s' "$result" | grep -Fq 'memory/.oms-replace.abc123 was deleted' ||
+        fail "a directory matching a producer temp name was exempted: $result"
+    fi
+  done
 }
 
 test_worker_authority_guard_restores_primary_state() {

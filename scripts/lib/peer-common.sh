@@ -480,16 +480,23 @@ ma_export_child_env() {
 ma_authority_state_snapshot() {  # REPO OUTPUT
   local repo="$1"
   local output="$2"
+  local transient_helper
+  transient_helper="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)/worker-state-transients.py"
 
-  OMS_AUTHORITY_REPO="$repo" python3 - <<'PY' > "$output"
+  OMS_AUTHORITY_REPO="$repo" python3 - "$transient_helper" <<'PY' > "$output"
 import hashlib
+import importlib.util
 import json
 import os
 import stat
+import sys
 
 root = os.path.join(os.path.realpath(os.environ["OMS_AUTHORITY_REPO"]), ".oms")
 excluded = {"hooks", "work-journal"}
 rows = []
+spec = importlib.util.spec_from_file_location("_oms_worker_state_transients", sys.argv[1])
+transients = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(transients)
 
 def describe(path, rel, hash_content=True):
     info = os.lstat(path)
@@ -540,6 +547,8 @@ else:
                 rel = os.path.relpath(path, root).replace(os.sep, "/")
                 if base == root and name in excluded:
                     rows.append(describe(path, rel, False))
+                elif transients.is_internal_atomic_temp(root, rel):
+                    continue
                 else:
                     rows.append(describe(path, rel))
 
