@@ -8040,11 +8040,53 @@ def fake_status(repo, ident):
 def fake_history(repo, ident, member=None):
     return [{"attempt_id": "%s-m%s" % (ident, n), "tool": "panel-main", "state": "working",
              "refs": {"panel_room_participant": "%s-m%s" % (ident, n)}} for n in range(4)]
-two_rooms = "\n".join("claude\t%s\t%s-m%s" % (ident, ident, n) for ident in ("ra", "rb") for n in range(3)) + "\nclaude\trb\t"
+two_rooms = "\n".join("claude\t%s\t%s-m%s\t\t\tclaude" % (ident, ident, n)
+                       for ident in ("ra", "rb") for n in range(3)) + "\nclaude\trb\t\t\t\tclaude\n"
 with patch.object(panel, "tmux_command", return_value=["true"]), patch.object(panel.room, "status", fake_status), \
         patch.object(panel, "main_history", fake_history), \
         patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, two_rooms, "")):
     assert panel.live_mains(project, "s", "ra") == 9 and panel.live_mains(project, "s", "rb") == 9, "cap counted one room"
+# A copied room can expose the same attempt through membership-based history lookup;
+# count that native call once while retaining distinct attempts and pending windows.
+alias_status = {"original": {"participants": [{"participant": "shared", "joined": True, "role": "main"}]},
+                "copy": {"participants": [{"participant": "shared", "joined": True, "role": "main"}]}}
+alias_history = {"original": [{"attempt_id": "same", "tool": "panel-main", "state": "working",
+                               "refs": {"panel_room_participant": "shared", "panel_room_id": "original"}},
+                              {"attempt_id": "distinct-original", "tool": "panel-main", "state": "working",
+                               "refs": {"panel_room_participant": "shared", "panel_room_id": "original"}}],
+                 "copy": [{"attempt_id": "same", "tool": "panel-main", "state": "working",
+                           "refs": {"panel_room_participant": "shared", "panel_room_id": "original"}},
+                          {"attempt_id": "distinct-copy", "tool": "panel-main", "state": "working",
+                           "refs": {"panel_room_participant": "shared", "panel_room_id": "copy"}}]}
+alias_windows = "claude\toriginal\tshared\t\t%1\tclaude\nclaude\tcopy\tshared\t\t%2\tclaude\nclaude\tcopy\t\t\t\tcontrol\nclaude\tcopy\t\t\t\tclaude\n"
+with patch.object(panel, "tmux_command", return_value=["true"]), \
+        patch.object(panel.room, "status", side_effect=lambda repo, ident: alias_status[ident]), \
+        patch.object(panel, "main_history", side_effect=lambda repo, ident: alias_history[ident]), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, alias_windows, "")):
+    assert panel.live_mains(project, "s", "original") == 4, "copied attempt duplicated or distinct/pending main lost"
+    assert panel.live_mains(project, "s", "copy") == 4, "copied attempt duplicated or distinct/pending main lost"
+# A native room ref may be foreign to the selected room while the copied-room lookup
+# is the only available observation; retain that known attempt and deduplicate it.
+foreign_windows = "claude\tcopy\tshared\t\t%2\tclaude\n"
+with patch.object(panel, "tmux_command", return_value=["true"]), \
+        patch.object(panel.room, "status", side_effect=lambda repo, ident: alias_status[ident]), \
+        patch.object(panel, "main_history", side_effect=lambda repo, ident: [] if ident == "original" else [alias_history["original"][0]]), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, foreign_windows, "")):
+    assert panel.live_mains(project, "s", "original") == 1, "foreign-room attempt was silently dropped"
+misleading_control = "claude\tr1\t\t\t%3\tcontrol\n"
+with patch.object(panel, "tmux_command", return_value=["true"]), \
+        patch.object(panel.room, "status", return_value={"participants": []}), patch.object(panel, "main_history", return_value=[]), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, misleading_control, "")):
+    assert panel.live_mains(project, "s", "r1") == 1, "control name hid a window with native pane evidence"
+for result in (subprocess.CompletedProcess([], 1, "", "failed"),
+               subprocess.CompletedProcess([], 0, "claude\tr1\tbad\n", "")):
+    with patch.object(panel, "tmux_command", return_value=["true"]), \
+            patch.object(panel.subprocess, "run", return_value=result):
+        try:
+            panel.live_mains(project, "s", "r1")
+            raise AssertionError("unreadable or malformed window evidence was accepted")
+        except ValueError:
+            pass
 with patch.object(panel, "managed_session", return_value=True), patch.object(panel, "panel_session", return_value="s"), \
         patch.object(panel, "session_owner", return_value=str(project)), patch.dict(os.environ, {"OMS_PANEL_SESSION": "s"}), \
         patch.object(panel, "tmux_command", return_value=["true"]), patch.object(panel.room, "append") as left_room, \

@@ -1998,27 +1998,40 @@ def reconcile_mains(repo, session, ident):
 def live_mains(repo, session, room_id):
     """Panel-wide: joined mains with a live panel-main attempt in any room this panel's windows belong to, plus windows opened but not yet enrolled."""
     found = subprocess.run(tmux_command("list-windows", "-t", "=" + session, "-F",
-                                        "#{@oms_panel_owner}\t#{@oms_panel_room}\t#{@oms_panel_room_participant}"),
+                                        "\t".join("#{" + key + "}" for key in
+                                                  ("@oms_panel_owner", "@oms_panel_room",
+                                                   "@oms_panel_room_participant", "@oms_panel_main_attempt",
+                                                   "@oms_panel_native_pane", "window_name"))),
                            capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
-    windows = [r for r in (line.replace("\r", "").split("\t") for line in found.stdout.splitlines())
-            if len(r) == 3 and r[0] in NATIVE_HARNESSES]
+    if found.returncode or not found.stdout.endswith("\n"):
+        raise ValueError("panel windows unavailable")
+    rows = [line.rstrip("\r").split("\t") for line in found.stdout.split("\n")[:-1]]
+    if not rows or any(len(row) != 6 for row in rows):
+        raise ValueError("panel window identity unavailable")
+    windows = [row for row in rows if row[0] in NATIVE_HARNESSES]
     live = set()
     for ident in sorted({room_id} | {r[1] for r in windows if r[1]}):
         try:
             joined = {p["participant"] for p in room.status(repo, ident)["participants"]
                       if p["joined"] and p["role"] == "main"}
             history = main_history(repo, ident)
-        except (ValueError, OSError):
-            if ident == room_id:
-                raise
-            continue
+        except (ValueError, OSError, KeyError, TypeError):
+            raise ValueError("panel main identity unavailable")
         for row in history:
             refs = row.get("refs", {})
             who = refs.get("panel_room_participant", row.get("attempt_id"))
             if (who in joined and row.get("tool") == "panel-main" and row.get("terminal") is not True
                     and row.get("state") in {"starting", "working", "verifying", "review", "waiting_input", "waiting_approval"}):
-                live.add((ident, who))
-    return len(live) + sum(1 for r in windows if not r[2])
+                attempt = row.get("attempt_id")
+                live.add(("attempt", attempt) if isinstance(attempt, str) and attempt
+                         else ("unknown", ident, who))
+    pending = 0
+    for row in windows:
+        owner, ident, participant, attempt, native_pane, name = row
+        control = name == "control" and not attempt and not participant and not native_pane
+        if not control and not participant:
+            pending += 1
+    return len(live) + pending
 
 
 def spawn_main(repo, provider, task=None, model=None, started_by=None):
