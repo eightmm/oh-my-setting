@@ -2893,6 +2893,38 @@ assert whole["main_attempt_id"] == main_attempts["claude"] and whole["admission_
 joined = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
                          "--task-id", "whole-main-result", "--json"]))["rows"][0]
 assert any(c.get("kind") == "delegate" for c in joined["calls"]), joined
+assert joined["title"] == whole["summary"].split("\n")[0]
+assert all(joined[key] is None for key in ("model", "role", "location", "process_state"))
+parent_task = {"task_id": "parent-read", "main_attempt_id": "main-parent", "revision": "a" * 24,
+               "outcome": "completed", "verification": {"status": "passed"},
+               "summary": "Owner summary for the parent read.\nMore detail."}
+unrelated_child = {"task_id": "failed-child", "attempt_id": "att_failed_child", "parent_attempt_id": "main-parent",
+                   "state": "failed", "refs": {"panel_label": "Unrelated failed write", "panel_model": "gpt-test",
+                   "panel_role": "worker", "panel_location": "remote"}}
+failed_call = {"kind": "delegate", "task_id": "failed-child", "attempt_id": "att_failed_child", "exit": 1}
+parent_result_row = {"kind": "panel-result", "task_id": "parent-read"}
+with patch.object(saved, "_records", return_value=([unrelated_child], [parent_result_row, failed_call])), \
+        patch.object(saved, "_load_result", return_value=parent_task):
+    parent = saved.results(project, "parent-read")["rows"][0]
+    assert parent["title"] == "Owner summary for the parent read."
+    assert parent["issue"] is None and parent["outcome"] == "completed"
+    assert parent["verification"]["status"] == "passed"
+    assert parent["model"] is None and parent["role"] is None and parent["location"] is None
+    assert parent["process_state"] is None and parent["calls"] == [{"kind": "delegate", "exit": 1,
+                                                                    "attempt_id": "att_failed_child"}]
+own_task_result = dict(parent_task, task_id="own-task", summary="Own task summary.")
+own_attempt = {"task_id": "own-task", "attempt_id": "att_own_task", "parent_attempt_id": "main-parent",
+               "state": "done", "refs": {"panel_label": "Own task title", "panel_model": "own-model",
+               "panel_role": "reviewer", "panel_location": "local"}}
+own_call = {"kind": "call", "task_id": "own-task", "attempt_id": "att_own_task", "exit": 0}
+with patch.object(saved, "_records", return_value=([own_attempt, unrelated_child],
+        [{"kind": "panel-result", "task_id": "own-task"}, own_call, failed_call])), \
+        patch.object(saved, "_load_result", return_value=own_task_result):
+    own_metadata = saved.results(project, "own-task")["rows"][0]
+    assert (own_metadata["title"], own_metadata["model"], own_metadata["role"],
+            own_metadata["location"], own_metadata["process_state"]) == (
+                "Own task title", "own-model", "reviewer", "local", "done")
+    assert [call["attempt_id"] for call in own_metadata["calls"]] == ["att_own_task"]
 # A task with its own attempts never adopts its main's other children.
 call(final_args, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
 own = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
@@ -8802,6 +8834,26 @@ attention = render(grouped_board, "codex", 120, 80, view="tree", attention_only=
 assert "Needs review (2)" in attention and "Past work" not in attention
 from panel_view import inbox_items
 assert {item["action"] for item in inbox_items(grouped_board)} >= {("result", "review-call"), ("result", "pending-patch")}
+# Reading a call's own handoff handles its failure, but cannot settle a block or admit a patch.
+for sender, recipient, pending, visible in (("adv-worker", "adv-main", [], False),
+                                           ("adv-worker", "adv-main", ["adv-main"], True),
+                                           ("blocked-call", "adv-main", [], True),
+                                           ("adv-worker", "other-main", [], True)):
+    handed_off = deepcopy(grouped_board)
+    handed_off["room"]["messages"] = [{"id": "result-adv-worker", "message_kind": "handoff",
+        "sender": sender, "recipient": recipient, "pending_for": pending}] + [
+        {"id": "result-" + ident, "message_kind": "handoff", "sender": ident,
+         "recipient": "adv-main", "pending_for": []} for ident in ("blocked-call", "review-call", "pending-patch")]
+    frozen_handoff = json.dumps(handed_off, sort_keys=True)
+    for mode in ("tree", "graph"):
+        attention_nav = {"dismissed": True}
+        attention_picture = render(handed_off, "codex", 120, 80, view=mode,
+                                   attention_only=True, navigation=attention_nav)
+        assert (("result", "adv-worker") in attention_nav["items"]) == visible, (mode, sender, recipient, pending, attention_nav)
+        assert ("Broken patch" in attention_picture) == visible, (mode, sender, recipient, pending, attention_picture)
+        assert ("result", "blocked-call") in attention_nav["items"] and "blocked-call" in attention_picture, (mode, attention_nav)
+        assert "Needs review (2)" in attention_picture, (mode, attention_picture)
+    assert json.dumps(handed_off, sort_keys=True) == frozen_handoff
 for mark in ("completed", "accepted"):
     handled = dict(grouped_board, finalized={"adv-task": mark})
     failed = next(m for m in graph_view.nodes(handled) if m["participant"] == "adv-worker")

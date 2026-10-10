@@ -395,7 +395,8 @@ def results(repo, task_id=None, room_participant=None, _shared=False):
     output = []
     capped = False
     for ident in reversed(chosen):
-        matching = [a for a in attempts if a.get('task_id') == ident]
+        metadata_attempts = [a for a in attempts if a.get('task_id') == ident]
+        matching = metadata_attempts
         indexed = [r for r in rows if r.get('task_id') == ident]
         result_rows = [r for r in indexed if r.get('kind') == 'panel-result']
         result = delivery = None
@@ -415,6 +416,8 @@ def results(repo, task_id=None, room_participant=None, _shared=False):
             indexed = [r for r in rows if r.get('task_id') == ident or r.get('attempt_id') in linked]
         if room_participant:
             matching = [a for a in matching if a.get("refs", {}).get("panel_room_participant") == room_participant]
+            metadata_attempts = [a for a in metadata_attempts
+                                 if a.get("refs", {}).get("panel_room_participant") == room_participant]
             linked = {a.get("attempt_id") for a in matching}
             indexed = [r for r in indexed if r.get("attempt_id") in linked]
         if scoped and not matching:
@@ -422,7 +425,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False):
         if len(output) >= 20:
             capped = True
             break
-        last = matching[-1] if matching else {}
+        last = metadata_attempts[-1] if metadata_attempts else {}
         metadata = last.get('refs', {})
         calls = []
         for row in indexed[-30:]:
