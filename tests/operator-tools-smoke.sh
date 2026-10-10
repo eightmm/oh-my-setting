@@ -1099,6 +1099,7 @@ from panel_view import render
 from panel_input import passive_click
 from room_view import render_graph, plan_rows as render_plan_rows
 from panel_view import wrapped
+import panel_results
 
 view = json.loads((temporary / "panel-active.json").read_text())
 view["goal"] = {"text": "패널 개선 / show workers and verify results"}
