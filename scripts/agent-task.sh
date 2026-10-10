@@ -34,6 +34,7 @@ NEXT_STEP=""
 TEXT=""
 USE_STDIN=0
 SOURCE_SESSION=""
+DEDUPE_KEY=""
 
 usage() {
   cat <<'EOF'
@@ -75,6 +76,7 @@ Options:
                     (16-64 lowercase hexadecimal characters).
   --text TEXT       append: append a Current State bullet.
   --stdin           Read append text from stdin.
+  --dedupe-key HASH  append: idempotent note key (64 lowercase hex).
   -h, --help        Show help.
 
 Commands:
@@ -94,6 +96,11 @@ EOF
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --dedupe-key)
+      [ "$#" -ge 2 ] || { echo "error: --dedupe-key requires hash" >&2; exit 2; }
+      DEDUPE_KEY="$2"
+      shift 2
+      ;;
     --repo)
       [ "$#" -ge 2 ] || { echo "error: --repo requires path" >&2; exit 2; }
       REPO="$2"
@@ -232,6 +239,12 @@ while [ "$#" -gt 0 ]; do
 done
 
 ACTION="${ACTION:-show}"
+if [ -n "$DEDUPE_KEY" ]; then
+  [ "$ACTION" = append ] && printf '%s\n' "$DEDUPE_KEY" | grep -Eq '^[0-9a-f]{64}$' || {
+    echo "error: --dedupe-key requires append and a 64-character lowercase hex hash" >&2
+    exit 2
+  }
+fi
 if [ "$AS_JSON" -ne 0 ] && [ "$ACTION" != "status" ]; then
   echo "error: --json is only supported by status" >&2
   exit 2
@@ -306,7 +319,7 @@ replace_if_set() {
   [ -n "$value" ] || return 0
   note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")" || return 1
   write_tmp_text "$note_file" "$value"
-  agent_task_replace_section "$TASK_FILE" "$section" "$note_file"
+  agent_task_replace_section "$TASK_FILE" "$section" "$note_file" || return 1
   rm -f "$note_file"
 }
 
@@ -318,28 +331,28 @@ append_if_set() {
   [ -n "$value" ] || return 0
   note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")" || return 1
   write_tmp_text "$note_file" "$value"
-  agent_task_append_bullet "$TASK_FILE" "$section" "$AGENT" "$note_file"
+  agent_task_append_bullet "$TASK_FILE" "$section" "$AGENT" "$note_file" || return 1
   rm -f "$note_file"
 }
 
 apply_updates() {
-  replace_if_set "## Goal" "$GOAL"
-  replace_if_set "## Verify" "$VERIFY"
+  replace_if_set "## Goal" "$GOAL" || return 1
+  replace_if_set "## Verify" "$VERIFY" || return 1
   if [ -n "$LOOP_ATTEMPTS" ] || [ -n "$LOOP_MAX" ] || [ -n "$DIFF_BUDGET" ] || [ -n "$VERIFY_LEVEL" ]; then
-    agent_task_upsert_loop_state "$TASK_FILE" "$LOOP_ATTEMPTS" "$LOOP_MAX" "$DIFF_BUDGET" "$VERIFY_LEVEL"
+    agent_task_upsert_loop_state "$TASK_FILE" "$LOOP_ATTEMPTS" "$LOOP_MAX" "$DIFF_BUDGET" "$VERIFY_LEVEL" || return 1
   fi
-  append_if_set "## Last Failure" "$LAST_FAILURE"
-  append_if_set "## Verification" "$VERIFICATION_NOTE"
-  replace_if_set "## Current State" "$STATE"
-  append_if_set "## Current State" "${HYPOTHESIS:+Hypothesis: $HYPOTHESIS}"
-  append_if_set "## Current State" "${RESULT_NOTE:+Result: $RESULT_NOTE}"
-  replace_if_set "## Next Step" "$NEXT_STEP"
-  append_if_set "## Constraints" "$CONSTRAINT"
-  append_if_set "## Done Criteria" "$DONE_CRITERIA"
-  append_if_set "## Decisions" "$DECISION"
+  append_if_set "## Last Failure" "$LAST_FAILURE" || return 1
+  append_if_set "## Verification" "$VERIFICATION_NOTE" || return 1
+  replace_if_set "## Current State" "$STATE" || return 1
+  append_if_set "## Current State" "${HYPOTHESIS:+Hypothesis: $HYPOTHESIS}" || return 1
+  append_if_set "## Current State" "${RESULT_NOTE:+Result: $RESULT_NOTE}" || return 1
+  replace_if_set "## Next Step" "$NEXT_STEP" || return 1
+  append_if_set "## Constraints" "$CONSTRAINT" || return 1
+  append_if_set "## Done Criteria" "$DONE_CRITERIA" || return 1
+  append_if_set "## Decisions" "$DECISION" || return 1
   if [ -n "$SOURCE_SESSION" ]; then
-    agent_task_set_metadata "$TASK_FILE" source_session "$SOURCE_SESSION"
-    agent_task_touch_updated "$TASK_FILE"
+    agent_task_set_metadata "$TASK_FILE" source_session "$SOURCE_SESSION" || return 1
+    agent_task_touch_updated "$TASK_FILE" || return 1
   fi
 }
 
@@ -353,8 +366,40 @@ append_text() {
     [ -n "$TEXT" ] || { echo "error: append requires --text or --stdin" >&2; exit 2; }
     write_tmp_text "$note_file" "$TEXT"
   fi
-  agent_task_append_bullet "$TASK_FILE" "## Current State" "$AGENT" "$note_file"
+  if [ -n "$DEDUPE_KEY" ]; then
+    agent_task_append_deduplicated "$TASK_FILE" "## Current State" "$AGENT" "$note_file" "$DEDUPE_KEY" || return 1
+  else
+    agent_task_append_bullet "$TASK_FILE" "## Current State" "$AGENT" "$note_file" || return 1
+  fi
   rm -f "$note_file"
+}
+
+# The override lives only in this subshell and only under the genuine outer
+# operation and packet lock. Every nested mutation still validates its input.
+command_packet_batch() (
+  agent_task_reference_mutation "$TASK_FILE" command_packet_locked \
+    "$GOAL" "$VERIFY" "$LOOP_ATTEMPTS" "$LOOP_MAX" "$DIFF_BUDGET" "$VERIFY_LEVEL" \
+    "$LAST_FAILURE" "$VERIFICATION_NOTE" "$STATE" "$HYPOTHESIS" "$RESULT_NOTE" \
+    "$NEXT_STEP" "$CONSTRAINT" "$DONE_CRITERIA" "$DECISION" "$SOURCE_SESSION"
+)
+
+command_packet_locked() {
+  local transaction_repo="$repo" transaction_file="$TASK_FILE"
+  agent_task_reference_mutation() {
+    local target="$1"
+    shift
+    [ "$target" = "$transaction_file" ] || return 1
+    python3 "$_OMS_TASK_REFERENCE_HELPER" task "$transaction_repo" "$target" "$@" "${OMS_AGENT_TASK_SOURCE_SESSION:-}" || return 1
+    "$@"
+  }
+  local archive_file=""
+  if [ "$ACTION" = rotate ] || { [ "$ACTION" = init ] && [ -s "$TASK_FILE" ] && [ -n "$GOAL" ]; }; then
+    archive_file="$(agent_task_rotate "$TASK_FILE")" || return 1
+    [ -z "$archive_file" ] || echo "task: archived $archive_file"
+  else
+    agent_task_init_file "$TASK_FILE" || return 1
+  fi
+  apply_updates
 }
 
 journal_explicit_task_update() {
@@ -369,13 +414,7 @@ case "$ACTION" in
     ;;
   init)
     ensure_tmpdir
-    if [ -s "$TASK_FILE" ] && [ -n "$GOAL" ]; then
-      archive_file="$(agent_task_rotate "$TASK_FILE")"
-      [ -z "$archive_file" ] || echo "task: archived $archive_file"
-    else
-      agent_task_init_file "$TASK_FILE"
-    fi
-    apply_updates
+    command_packet_batch
     journal_explicit_task_update
     echo "task: initialized $TASK_FILE"
     ;;
@@ -434,8 +473,7 @@ print(json.dumps({
     ;;
   update)
     ensure_tmpdir
-    agent_task_init_file "$TASK_FILE"
-    apply_updates
+    command_packet_batch
     journal_explicit_task_update
     echo "task: updated $TASK_FILE"
     ;;
@@ -570,10 +608,8 @@ print(json.dumps({
     ;;
   rotate)
     ensure_tmpdir
-    archive_file="$(agent_task_rotate "$TASK_FILE")"
-    apply_updates
+    command_packet_batch
     journal_explicit_task_update
-    [ -z "$archive_file" ] || echo "task: archived $archive_file"
     echo "task: initialized $TASK_FILE"
     ;;
   close)

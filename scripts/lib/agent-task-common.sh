@@ -6,16 +6,126 @@
 # shellcheck source=oms-common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/oms-common.sh"
 
+# FILE-only callers need no ambient repository. A packet's explicit .oms
+# namespace wins over an enclosing Git checkout; other files use their owner
+# checkout, or their existing parent when no checkout exists.
+agent_task_reference_root() {
+  local owner kind git_root
+  if [ -n "${REPO:-}" ]; then
+    oms_state_root "$REPO"
+    return
+  fi
+  owner="$(python3 - "$1" <<'PYROOT'
+import os, sys
+parent = os.path.realpath(os.path.dirname(os.path.abspath(sys.argv[1])))
+scope = parent
+while True:
+    owner = os.path.dirname(scope)
+    if os.path.basename(owner) == '.oms' and os.path.basename(scope) in ('task', 'tasks', 'plan', 'artifacts'):
+        root = os.path.dirname(owner)
+        if not os.path.isdir(root):
+            raise SystemExit('task packet repository does not exist')
+        print('packet\t' + root.replace(os.sep, '/'))
+        break
+    if owner == scope:
+        if not os.path.isdir(parent):
+            raise SystemExit('task file parent does not exist; supply its repository')
+        print('file\t' + parent.replace(os.sep, '/'))
+        break
+    scope = owner
+PYROOT
+)" || return 1
+  owner="${owner//$'\r'/}"
+  kind="${owner%%$'\t'*}"
+  owner="${owner#*$'\t'}"
+  owner="$(cd "$owner" && pwd -P)" || return 1
+  if [ "$kind" = packet ]; then
+    git_root="$(git -C "$owner" rev-parse --show-toplevel 2>/dev/null || true)"
+    git_root="${git_root//$'\r'/}"
+    if [ -z "$git_root" ] || [ "$(cd "$git_root" && pwd -P)" != "$owner" ]; then
+      printf '%s\n' "$owner"
+      return
+    fi
+  fi
+  oms_state_root "$owner"
+}
+
+# The foreground registrar observes this shell's native PID, including Bash
+# 3.2 subshells where $$ still names an outer shell. No native caller identity
+# is replaced; the monitor is a directly owned child reaped before return.
+oms_reference_start() {
+  local repo="$1" tool="$2" input="$3" owner_native="" owner_source="" owner_logical="" rest="" monitor_native="" ready_wait=0
+  reference_scope_dir="$(mktemp -d "${TMPDIR:-/tmp}/oms-reference.XXXXXX")" || return 1
+  reference_scope_dir="$(cd "$reference_scope_dir" && pwd -P)" || return 1
+  reference_scope_dir="${reference_scope_dir//$'\r'/}"
+  reference_channel="$reference_scope_dir/scope"
+  : > "$reference_channel"
+  oms_lock_kernel
+  case "$OMS_LOCK_KERNEL" in
+    MINGW*|MSYS*|CYGWIN*)
+      IFS=' ' read -r owner_logical rest < /proc/self/stat || return 1
+      owner_native="$(oms_process_native_pid "$owner_logical")" || return 1
+      owner_native="${owner_native//$'\r'/}"
+      owner_source=msys-proc-v1
+      ;;
+  esac
+  python3 "$_OMS_TASK_REFERENCE_HELPER" begin-owned "$repo" "$tool" "$input" "$reference_channel" "$owner_native" "$owner_source" > "$reference_scope_dir/result" || return 1
+  IFS=' ' read -r reference_operation reference_scope_digest < "$reference_scope_dir/result" || return 1
+  reference_operation="${reference_operation//$'\r'/}"
+  reference_scope_digest="${reference_scope_digest//$'\r'/}"
+  python3 "$_OMS_TASK_REFERENCE_HELPER" monitor "$repo" "$reference_channel" "$reference_scope_digest" </dev/null >/dev/null 2>&1 &
+  reference_monitor=$!
+  case "$OMS_LOCK_KERNEL" in
+    MINGW*|MSYS*|CYGWIN*)
+      # Wait for native Python to publish readiness before reading winpid;
+      # a still-executing MSYS launch bridge is not the monitor generation.
+      while [ ! -e "$reference_channel.ready" ] && [ "$ready_wait" -lt 75 ]; do
+        sleep 0.02
+        ready_wait=$((ready_wait + 1))
+      done
+      ;;
+  esac
+  monitor_native="$(oms_process_native_pid "$reference_monitor")" || return 1
+  monitor_native="${monitor_native//$'\r'/}"
+  python3 "$_OMS_TASK_REFERENCE_HELPER" await-monitor "$repo" "$reference_channel" "$reference_scope_digest" "$monitor_native" > "$reference_scope_dir/proof" || return 1
+  IFS= read -r reference_ready_digest < "$reference_scope_dir/proof" || return 1
+  reference_ready_digest="${reference_ready_digest//$'\r'/}"
+}
+
+oms_reference_stop() {
+  local repo="$1" rc=0
+  [ -n "${reference_scope_digest:-}" ] || return 0
+  python3 "$_OMS_TASK_REFERENCE_HELPER" stop-monitor "$repo" "$reference_channel" "$reference_scope_digest" "${reference_ready_digest:-}" || rc=$?
+  case "$rc" in
+    0|3)
+      # The native generation has exited. Only now can wait be bounded; a
+      # missing/foreign readiness record never licenses signalling a PID.
+      if [ -n "${reference_monitor:-}" ]; then
+        wait "$reference_monitor" || true
+        reference_monitor=""
+      fi
+      ;;
+  esac
+  [ "$rc" = 0 ]
+}
+
 # Preserve the caller's identity: this is a separate local writer operation.
 agent_task_reference_mutation() {
-  local file="$1" repo operation rc=0
+  local file="$1" repo rc=0 finish_rc=0
+  local reference_operation="" reference_scope_dir="" reference_channel=""
+  local reference_scope_digest="" reference_ready_digest="" reference_monitor=""
   shift
-  repo="$(oms_state_root "${REPO:-$PWD}")" || return 1
+  repo="$(agent_task_reference_root "$file")" || return 1
+  repo="${repo//$'\r'/}"
   repo="$(cd "$repo" && pwd -P)" || return 1
-  operation="$(python3 "$_OMS_TASK_REFERENCE_HELPER" begin "$repo" agent-task)" || return 1
-  operation="${operation//$'\r'/}"
-  oms_with_file_lock "$file" agent_task_reference_checked "$repo" "$file" "$operation" "$@" || rc=$?
-  python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$repo" "$operation" "$rc" || return 1
+  if ! oms_reference_start "$repo" agent-task "$file"; then
+    oms_reference_stop "$repo" || true
+    return 1
+  fi
+  oms_with_file_lock "$file" agent_task_reference_checked "$repo" "$file" "$reference_operation" "$@" || rc=$?
+  python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$repo" "$reference_operation" "$rc" || finish_rc=1
+  oms_reference_stop "$repo" || finish_rc=1
+  [ "$finish_rc" = 0 ] || return 1
   return "$rc"
 }
 
@@ -605,6 +715,18 @@ agent_task_append_bullet() {
   agent_task_reference_mutation "$file" agent_task_append_bullet_unlocked "$file" "$section" "$agent" "$content_file"
 }
 
+agent_task_append_deduplicated_unlocked() {
+  python3 "$_OMS_TASK_REFERENCE_HELPER" task-append "$repo" "$operation" "$@"
+}
+
+agent_task_append_deduplicated() {
+  if agent_memory_file_has_sensitive_content "$4"; then
+    echo "error: task note contains sensitive-looking content; not appended" >&2
+    return 3
+  fi
+  agent_task_reference_mutation "$1" agent_task_append_deduplicated_unlocked "$@"
+}
+
 agent_task_file_has_sensitive_content() {
   local file="$1"
   agent_memory_file_has_sensitive_content "$file"
@@ -814,7 +936,7 @@ agent_task_record_outcome() {
     [ -z "$detail" ] || printf '; %s' "$detail"
     printf '\n'
   } > "$note_file"
-  agent_task_append_bullet "$task_file" "## Current State" "$kind" "$note_file" >/dev/null 2>&1 ||
+  REPO="$repo" agent_task_append_bullet "$task_file" "## Current State" "$kind" "$note_file" >/dev/null 2>&1 ||
     echo "warning: task outcome not recorded" >&2
   rm -f "$note_file"
 }

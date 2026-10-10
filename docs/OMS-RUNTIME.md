@@ -93,6 +93,27 @@ the two cleanup authorities distinct: it recommends `agent-task close` only
 for an active task packet, and the read-only `agent-plan retire --check` when
 an all-done plan is the remaining active record.
 
+Compound `agent-task init`, `update`, and `rotate` commands keep one local
+reference operation and packet lock while validating each input before its
+write. Independent file mutations retain separate operation records.
+Each foreground writer owns a native process generation and a private heartbeat
+monitor. While that exact scope and process remain valid, the monitor renews
+its operation every ten seconds, including admission report and outcome writes.
+This supports the default stale threshold; a shorter explicit threshold can
+still expire live work. Closing the scope stops the monitor with bounded waits;
+unknown identity or shutdown keeps unresolved evidence and returns failure.
+
+For prompt retries, `agent-task append --dedupe-key HASH` binds a 64-character
+lowercase hexadecimal key to the original note digest. The note and receipt
+publish together in one atomic packet replacement. An exact replay preserves
+packet bytes; a conflicting note is refused. Each packet holds at most 256
+keys: existing keys remain replayable at capacity, and a new key requires task
+rotation. Hook routing commits its dedupe state only after prompt publication.
+Its existing command timeout includes stdin delivery; owned helper process
+groups or Windows Job Objects contain background writers on exit or timeout.
+Interrupted reference operations remain unresolved until their outcome is
+proved, rather than becoming successful completion evidence.
+
 Retired Soul files are not scanned or included in live-state digests. Existing
 files remain on disk; the compatibility `executor` field is inactive and
 `inspected: false`, and `state.executors` is empty rather than a history listing.

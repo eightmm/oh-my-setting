@@ -14,6 +14,8 @@ ROOT="$(cd "$ROOT" && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
+# shellcheck source=scripts/lib/agent-task-common.sh
+. "$ROOT_LIB/agent-task-common.sh"
 # shellcheck source=scripts/lib/harness-residue.sh
 . "$ROOT_LIB/harness-residue.sh"
 # shellcheck source=scripts/lib/oms-common.sh
@@ -47,6 +49,11 @@ floor_worktree=""
 floor_worktree_created=0
 cleanup_done=0
 reference_operation=""
+reference_scope_dir=""
+reference_channel=""
+reference_scope_digest=""
+reference_ready_digest=""
+reference_monitor=""
 reference_state=""
 managed_input=0
 reference_possible_writes=0
@@ -105,6 +112,7 @@ cleanup() {
     [ "$reference_possible_writes" = 1 ] || reference_outcome=refuse-no-write
     python3 "$ROOT_LIB/landing-reference.py" finish "$reference_state" "$reference_operation" "$reference_outcome" >/dev/null 2>&1 || true
   fi
+  oms_reference_stop "$reference_state" >/dev/null 2>&1 || true
   if [ -n "$floor_worktree" ] && [ "$floor_worktree_created" = 1 ] && [ "$KEEP_WORKTREE" = 0 ]; then
     git -C "$REPO" worktree remove --force "$floor_worktree" >/dev/null 2>&1 || true
   fi
@@ -155,8 +163,7 @@ git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REP
 PATCH="$(cd "$(dirname "$PATCH")" && pwd)/$(basename "$PATCH")"
 reference_state="$(oms_state_root "$REPO")" || fail "cannot resolve reference state"
 reference_state="${reference_state//$'\r'/}"
-reference_operation="$(python3 "$ROOT_LIB/landing-reference.py" begin "$reference_state" patch-admit "$PATCH")" || fail "cannot start reference operation"
-reference_operation="${reference_operation//$'\r'/}"
+oms_reference_start "$reference_state" patch-admit "$PATCH" || fail "cannot start reference operation"
 managed_input="$(python3 "$ROOT_LIB/landing-reference.py" admit "$reference_state" "$PATCH" "${REPORT:-$reference_state/.oms/artifacts/admit/pending.md}")" || fail "unsafe managed admission input"
 managed_input="${managed_input//$'\r'/}"
 if [ "$managed_input" = 1 ] && [ -z "$REPORT" ]; then
@@ -728,6 +735,8 @@ if [ "$managed_input" = 1 ]; then
 fi
 python3 "$ROOT_LIB/landing-reference.py" finish "$reference_state" "$reference_operation" 0 || fail "cannot finish reference operation"
 reference_operation=""
+oms_reference_stop "$reference_state" || fail "cannot stop reference monitor"
+reference_scope_digest=""
 echo "patch-admit: $verdict ($REPORT)" >&2
 printf '%s\n' "$verdict"
 [ "$verdict" = "ADMIT" ]

@@ -2419,7 +2419,7 @@ elif [ "$APPLY" = 1 ]; then
     [ -n "$VERIFY_CMD" ] && land_args+=(--verify "$VERIFY_CMD")
     [ -n "$PLAN_TASK_ID" ] && land_args+=(--plan-task "$PLAN_TASK_ID")
     [ "$ALLOW_RESTRUCTURE" = 1 ] && land_args+=(--allow-restructure)
-    if bash "$land_script" "${land_args[@]}" >/dev/null; then
+    if OMS_HARNESS_DELEGATE_DEPTH="$DELEGATE_DEPTH" bash "$land_script" "${land_args[@]}" >/dev/null; then
       applied=1
     else
       echo "apply skipped: patch-land rejected the patch" >&2

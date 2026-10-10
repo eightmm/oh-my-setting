@@ -1877,6 +1877,8 @@ operation = [event for event in events if event.get('attempt_id') == row['operat
 created = [event for event in operation if event.get('event_type') == 'attempt.created']
 assert len(created) == 1, operation
 assert created[0]['provider'] == 'local' and created[0]['tool'] == 'patch-admit', created
+assert created[0]['refs'].get('reference_scope_sha256'), created
+assert any(event['event_type'] == 'attempt.heartbeat' for event in operation), operation
 assert operation[-1]['to_state'] == 'done', operation
 PYINDEX
     fail "managed scratch admission lost canonical report, native operation or physical base provenance"
@@ -4915,6 +4917,35 @@ EOF
   [ -f "$project/delegated.txt" ] || fail "applied patch should create delegated.txt in main tree"
   assert_file_contains "$project/delegated.txt" "hello from worker"
   assert_one_artifact_contains "$artifact_dir" 'codex-create-delegated-file-*.md' 'worker done'
+}
+
+test_delegate_nested_apply_preserves_parent_only_capture_guard() {
+  local project="$TMP/delegate-nested-apply"
+  local artifact_dir="$TMP/delegate-nested-apply-artifacts"
+  local bin_dir="$TMP/delegate-nested-apply-bin"
+  local home_dir="$TMP/delegate-nested-apply-home"
+  local rc=0
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'must stay in worker worktree\n' > nested.txt
+echo "nested worker done"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_HARNESS_DELEGATE_DEPTH=1 OMS_DELEGATE_MAX_DEPTH=2 \
+    "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --artifact-dir "$artifact_dir" --apply \
+    --allow-restructure --prompt "Create a nested delegated file" 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || fail "a nested worker must not apply a patch through its parent process: rc=$rc output=$out"
+  contains "$out" 'native capture management is parent-only' ||
+    fail "nested apply should remain blocked by the actual ingress-depth guard: $out"
+  [ ! -e "$project/nested.txt" ] || fail "nested apply modified the primary tree"
 }
 
 test_delegate_graph_context_is_opt_in_and_snapshot_bound() {
@@ -19889,6 +19920,7 @@ test_skill_router_auto_records_task_prompts() {
   local payload
   local before
   local after
+  local same_prompt_before
 
   make_committed_repo "$project"
 
@@ -19909,6 +19941,194 @@ test_skill_router_auto_records_task_prompts() {
   after="$(grep -F "User prompt" "$project/.oms/task/current.md" | wc -l | tr -d ' ')"
   [ "$before" = "$after" ] || fail "same turn/prompt should not append twice"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "deduped"'
+
+  same_prompt_before="$(grep -F "이어서 ablation 기록 자동화도 확인해줘" "$project/.oms/task/current.md" | wc -l | tr -d ' ')"
+  payload="$(printf '{"prompt":"이어서 ablation 기록 자동화도 확인해줘","session_id":"auto1","turn_id":"t3","cwd":"%s"}' "$project")"
+  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  [ "$(grep -F "이어서 ablation 기록 자동화도 확인해줘" "$project/.oms/task/current.md" | wc -l | tr -d ' ')" = "$((same_prompt_before + 1))" ] ||
+    fail "the same prompt on a new turn is a new request and must be recorded"
+}
+
+test_skill_router_auto_task_timeout_retries_owned_writer_once() {
+  local d="$TMP/skill-router-auto-task-timeout"
+  local foreign_pid
+  local real_python
+  local prompt='고칠 부분 확인하고 있으면 수정해줘'
+  local scenario project bin_dir wrapper first second prompt_note
+
+  real_python="$(command -v python3)"
+  sleep 120 &
+  foreign_pid=$!
+  trap 'kill "$foreign_pid" 2>/dev/null || true; wait "$foreign_pid" 2>/dev/null || true; cleanup' EXIT
+  for scenario in init-before append-before append-after success-descendant; do
+    prompt_note="User prompt (task/medium): $prompt"
+    project="$d/$scenario/project"
+    bin_dir="$d/$scenario/bin"
+    wrapper="$bin_dir/agent-task-wrapper"
+    make_committed_repo "$project"
+    mkdir -p "$bin_dir"
+    cat > "$wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -u
+mode="${OMS_TEST_DELAY_MODE:-none}"
+operation="${3:-}"
+delay_once() {
+  [ ! -e "$OMS_TEST_DELAY_ONCE" ] || return 0
+  : > "$OMS_TEST_DELAY_ONCE"
+  (sleep 1.5; : > "$OMS_TEST_CHILD_MARKER") &
+  printf '%s\n' "$!" > "$OMS_TEST_CHILD_PID"
+  wait
+}
+if [ "$mode" = init-before ] && [ "$operation" = init ]; then
+  delay_once
+elif [ "$mode" = append-before ] && [ "$operation" = append ]; then
+  delay_once
+elif [ "$mode" = success-descendant ] && [ "$operation" = append ]; then
+  "$OMS_TEST_REAL_AGENT_TASK" "$@"
+  result=$?
+  (sleep 1.5; : > "$OMS_TEST_CHILD_MARKER") &
+  printf '%s\n' "$!" > "$OMS_TEST_CHILD_PID"
+  exit "$result"
+fi
+exec "$OMS_TEST_REAL_AGENT_TASK" "$@"
+EOF
+    cat > "$bin_dir/python3" <<'EOF'
+#!/usr/bin/env bash
+set -u
+if [ "${OMS_TEST_DELAY_MODE:-none}" = append-after ] &&
+   [ "${1:-}" = "$OMS_TEST_LANDING_REFERENCE" ] &&
+   [ "${2:-}" = finish ] && [ ! -e "$OMS_TEST_DELAY_ONCE" ] &&
+   grep -Fq "$OMS_TEST_PROMPT_NOTE" "$3/.oms/task/current.md" 2>/dev/null; then
+  : > "$OMS_TEST_DELAY_ONCE"
+  (sleep 1.5; : > "$OMS_TEST_CHILD_MARKER") &
+  printf '%s\n' "$!" > "$OMS_TEST_CHILD_PID"
+  wait
+fi
+exec "$OMS_TEST_REAL_PYTHON" "$@"
+EOF
+    chmod +x "$wrapper" "$bin_dir/python3"
+
+    invoke_auto_task() {
+      PATH="$bin_dir:$PATH" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT=1 \
+        OMS_HOOK_RESOLVED_REPO="$project" \
+        OMS_TEST_REAL_AGENT_TASK="$ROOT/scripts/agent-task.sh" \
+        OMS_TEST_REAL_PYTHON="$real_python" \
+        OMS_TEST_LANDING_REFERENCE="$ROOT/scripts/lib/landing-reference.py" \
+        OMS_TEST_DELAY_MODE="$1" OMS_TEST_DELAY_ONCE="$d/$scenario/delayed" \
+        OMS_TEST_CHILD_MARKER="$d/$scenario/child-wrote" \
+        OMS_TEST_CHILD_PID="$d/$scenario/child.pid" \
+        OMS_TEST_PROMPT_NOTE="$prompt_note" \
+        python3 - "$ROOT" "$project" "$wrapper" "$prompt" <<'PY'
+import json
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+root, project, wrapper, prompt = sys.argv[1:]
+sys.path.insert(0, str(Path(root) / "scripts" / "lib"))
+import hook_state
+
+payload = {"session_id": "timeout-retry", "turn_id": "t1", "cwd": project}
+with patch.object(hook_state, "agent_task_script", return_value=Path(wrapper)):
+    hook_state.auto_task_record(payload, prompt, hook_state.classify_prompt(prompt))
+state_dir = Path(project) / ".oms" / "hooks" / "sessions"
+states = [json.loads(path.read_text(encoding="utf-8")) for path in state_dir.glob("*.task.json")]
+print(json.dumps(states[-1] if states else {}))
+PY
+    }
+
+    first="$(invoke_auto_task "$scenario")"
+    if [ "$scenario" = success-descendant ]; then
+      python3 -c 'import json,sys; s=json.loads(sys.argv[1]); assert s.get("status") in {"created","appended","rotated"} and s.get("prompt_hash"), s' "$first" ||
+        fail "successful publication must be acknowledged: $first"
+      [ "$(grep -F "$prompt_note" "$project/.oms/task/current.md" | wc -l | tr -d ' ')" = "1" ] ||
+        fail "successful publication must be recorded exactly once"
+      [ -s "$d/$scenario/child.pid" ] || fail "success case did not start its owned descendant"
+      sleep 1.7
+      [ ! -e "$d/$scenario/child-wrote" ] || fail "a successful helper left a detached descendant writing"
+      kill -0 "$foreign_pid" 2>/dev/null || fail "success cleanup killed or altered the unrelated process"
+      continue
+    fi
+    python3 -c 'import json,sys; s=json.loads(sys.argv[1]); assert not s.get("prompt_hash"), s' "$first" ||
+      fail "$scenario timeout must not publish a successful route hash: $first"
+    assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "timeout"'
+    [ -s "$d/$scenario/child.pid" ] || fail "$scenario did not start its owned descendant"
+    sleep 1.7
+    [ ! -e "$d/$scenario/child-wrote" ] || fail "$scenario left a timed-out descendant running"
+    kill -0 "$foreign_pid" 2>/dev/null || fail "$scenario killed or altered the unrelated process"
+
+    second="$(invoke_auto_task none)"
+    python3 -c 'import json,sys; s=json.loads(sys.argv[1]); assert s.get("status") in {"created","appended","rotated"} and s.get("prompt_hash"), s' "$second" ||
+      fail "$scenario retry must commit its prompt only after publication: $second"
+    [ "$(grep -F "$prompt_note" "$project/.oms/task/current.md" | wc -l | tr -d ' ')" = "1" ] ||
+      fail "$scenario retry must publish the same request exactly once"
+    if [ "$scenario" = append-after ]; then
+      python3 - "$ROOT" "$project" <<'PY'
+import sys
+from pathlib import Path
+import runpy
+
+root, project = sys.argv[1:]
+events = runpy.run_path(str(Path(root) / "scripts/lib/agent-events.py"))
+_, projection = events["load_projection"](Path(project))
+unknown = [row for row in projection.values()
+           if row.get("provider") == "local" and row.get("tool") == "agent-task"
+           and row.get("terminal") is not True]
+assert unknown, "timed-out operation evidence must remain nonterminal"
+PY
+    fi
+  done
+  python3 - "$ROOT" <<'PY_STDIN_TIMEOUT' || fail "stdin delivery escaped the agent-task timeout"
+import os, subprocess, sys, tempfile, time
+from pathlib import Path
+from unittest.mock import patch
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts" / "lib"))
+import hook_state
+
+with tempfile.TemporaryDirectory(prefix="oms-hook-stdin-timeout-") as raw:
+    base = Path(raw)
+    helper = base / "agent-task"
+    marker = base / "late-write"
+    pidfile = base / "descendant.pid"
+    helper.write_text(
+        '''#!/usr/bin/env bash
+(sleep 5; : > "$OMS_TEST_MARKER") &
+echo $! > "$OMS_TEST_PIDFILE"; wait
+''',
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    foreign = subprocess.Popen(["sleep", "120"])
+    os.environ.update({
+        "OMS_AUTO_TASK_TIMEOUT": "1",
+        "OMS_TEST_MARKER": str(marker),
+        "OMS_TEST_PIDFILE": str(pidfile),
+    })
+    payload = "가" * 4000
+    assert len(payload.encode("utf-8")) == 12000
+    try:
+        started = time.monotonic()
+        with patch.object(hook_state, "agent_task_script", return_value=helper):
+            result = hook_state.run_agent_task(base, ["append"], payload)
+        elapsed = time.monotonic() - started
+        assert result == 124, result
+        assert elapsed < 2.5, elapsed
+        assert pidfile.is_file(), "fake helper did not start its writer"
+        # Observe past the helper's scheduled write time, so absence proves
+        # cleanup rather than merely a short race window.
+        time.sleep(5.2)
+        assert not marker.exists(), "timed-out stdin writer survived cleanup"
+        assert foreign.poll() is None, "timeout cleanup affected an unrelated process"
+    finally:
+        foreign.terminate()
+        foreign.wait(timeout=3)
+PY_STDIN_TIMEOUT
+  kill "$foreign_pid" 2>/dev/null || true
+  wait "$foreign_pid" 2>/dev/null || true
+  foreign_pid=""
+  trap cleanup EXIT
 }
 
 test_skill_router_auto_task_is_opt_in() {
@@ -21393,6 +21613,225 @@ test_agent_plan_reopen_only_from_blocked() {
 }
 
 test_agent_task_lifecycle_rotation_and_bounded_state() {
+  # Reference liveness belongs to this shell invocation, not begin's transient
+  # Python process or the native caller. A real reconcile overlaps real work.
+  python3 - "$ROOT" "$TMP/reference-heartbeat" <<'PY_HEARTBEAT' || fail "owned reference heartbeat lifecycle"
+import json, os, pathlib, runpy, subprocess, sys, time
+root, fixture = map(pathlib.Path, sys.argv[1:])
+fixture.mkdir()
+helper = root/'scripts/lib/landing-reference.py'
+h = runpy.run_path(str(helper))
+e = h['E']
+repo = fixture/'live'; repo.mkdir()
+packet = repo/'.oms/task/current.md'
+script = r'''
+set -eu
+. "$1/scripts/lib/agent-task-common.sh"
+REPO="$2"
+[ "$OMS_ATTEMPT_ID" = native-caller-unchanged ]
+[ "$OMS_PROVIDER" = codex ]
+callback() {
+  printf '%s\n' "$reference_channel" > "$3/channel"
+  sleep 15
+  mkdir -p "$(dirname "$1")"
+  printf 'actual packet write\n' > "$1"
+}
+agent_task_reference_mutation "$3" callback "$3" unused "$4"
+[ -z "$(jobs -p)" ]
+'''
+legacy = subprocess.check_output([sys.executable,str(helper),'begin',str(repo),'agent-task',str(packet)],text=True).strip()
+env = dict(os.environ, OMS_ATTEMPT_ID='native-caller-unchanged', OMS_PROVIDER='codex')
+with (fixture/'live.log').open('w') as log:
+    driver = subprocess.Popen(['bash','-c',script,'fixture',str(root),str(repo),str(packet),str(fixture)],env=env,stdout=log,stderr=log)
+    holder = None
+    try:
+        deadline = time.monotonic()+20
+        while time.monotonic()<deadline:
+            rows = e['read_rows'](e['event_path'](repo))
+            created = [r for r in rows if r['event_type']=='attempt.created' and r['attempt_id']!=legacy]
+            if created:
+                operation = created[0]['attempt_id']
+                if holder is None and (fixture/'channel').exists():
+                    # Cross a pulse deadline with a genuine competing lock;
+                    # a one-second acquisition timeout must not kill liveness.
+                    lock_code = 'import pathlib,runpy,sys,time; e=runpy.run_path(sys.argv[1]); time.sleep(8)\nwith e["file_lock"](e["event_path"](pathlib.Path(sys.argv[2]))):\n pathlib.Path(sys.argv[3]).write_text("held"); time.sleep(3)\n'
+                    holder = subprocess.Popen([sys.executable,'-c',lock_code,str(root/'scripts/lib/agent-events.py'),str(repo),str(fixture/'held')],stdout=log,stderr=log)
+                pulses = [r for r in rows if r['attempt_id']==operation and r['event_type']=='attempt.heartbeat']
+                if len(pulses)>=2:
+                    break
+            if driver.poll() is not None:
+                raise AssertionError((driver.returncode,(fixture/'live.log').read_text()))
+            time.sleep(.05)
+        else:
+            raise AssertionError('no periodic owned heartbeat')
+        assert holder is not None and holder.wait(timeout=3)==0 and (fixture/'held').exists()
+        assert created[0]['provider']=='local' and created[0]['tool']=='agent-task'
+        assert not created[0].get('parent_attempt_id')
+        subprocess.run([sys.executable,str(root/'scripts/lib/agent-events.py'),'events','--repo',str(repo),
+                        'reconcile','--apply'],check=True,stdout=subprocess.DEVNULL)
+        subprocess.run([sys.executable,str(root/'scripts/lib/agent-events.py'),'events','--repo',str(repo),
+                        'reconcile','--stale-seconds','3','--apply'],check=True,stdout=subprocess.DEVNULL)
+        _, projection = e['load_projection'](repo)
+        assert projection[operation]['state']=='working', projection[operation]
+        assert projection[legacy]['state']=='blocked', projection[legacy]
+        channel = pathlib.Path((fixture/'channel').read_text().strip())
+        ready = json.loads(pathlib.Path(str(channel)+'.ready').read_bytes())
+        assert driver.wait(timeout=8)==0, (fixture/'live.log').read_text()
+        assert not channel.parent.exists(), 'scope channel survived normal cleanup'
+        assert packet.read_text()=='actual packet write\n'
+        _, projection = e['load_projection'](repo)
+        assert projection[operation]['state']=='done'
+        try:
+            current = h['owner_identity'](ready['monitor']['pid'])
+        except (OSError, ValueError):
+            pass
+        else:
+            assert current != ready['monitor'], 'normal monitor was not reaped'
+    finally:
+        if driver.poll() is None:
+            driver.kill(); driver.wait()
+        if holder is not None and holder.poll() is None:
+            holder.kill(); holder.wait()
+# A crashed foreground owner cannot be replaced by a living foreign process.
+crash = fixture/'crash'; crash.mkdir()
+crash_script = r'''
+set -eu
+. "$1/scripts/lib/agent-task-common.sh"
+reference_operation='' reference_scope_dir='' reference_channel='' reference_scope_digest='' reference_monitor=''
+oms_reference_start "$2" agent-task "$2/packet"
+printf '%s\n' "$reference_channel" > "$3"
+IFS= read -r pending
+'''
+with (fixture/'crash.log').open('w') as log:
+    driver = subprocess.Popen(['bash','-c',crash_script,'fixture',str(root),str(crash),str(fixture/'crash-channel')],stdin=subprocess.PIPE,stdout=log,stderr=log)
+    try:
+        deadline=time.monotonic()+5
+        while not (fixture/'crash-channel').exists() and time.monotonic()<deadline:
+            time.sleep(.02)
+        assert (fixture/'crash-channel').exists(), (fixture/'crash.log').read_text()
+        channel=pathlib.Path((fixture/'crash-channel').read_text().strip())
+        raw=channel.read_bytes(); scope=json.loads(raw); ready=json.loads(pathlib.Path(str(channel)+'.ready').read_bytes())
+        # Recomputing the byte digest cannot rebind the registered generation.
+        wrong=json.loads(raw); wrong['binding']['owner']['birth']='forged-generation'
+        changed=h['C']['encoded'](wrong); channel.write_bytes(changed)
+        try:
+            h['scope_pulse'](str(crash),str(channel),h['C']['digest'](changed))
+        except (OSError, ValueError):
+            pass
+        else:
+            raise AssertionError('forged owner generation emitted a heartbeat')
+        channel.write_bytes(raw)
+        driver.kill(); driver.wait(timeout=3)
+        deadline=time.monotonic()+3
+        while time.monotonic()<deadline:
+            try:
+                current=h['owner_identity'](ready['monitor']['pid'])
+            except (OSError, ValueError):
+                break
+            if current!=ready['monitor']:
+                break
+            time.sleep(.05)
+        else:
+            raise AssertionError('monitor survived its owner')
+        before=e['read_rows'](e['event_path'](crash))
+        subprocess.run([sys.executable,str(root/'scripts/lib/agent-events.py'),'events','--repo',str(crash),
+                        'reconcile','--stale-seconds','0','--apply'],check=True,stdout=subprocess.DEVNULL)
+        _, projection=e['load_projection'](crash)
+        assert projection[scope['attempt']]['state']=='blocked'
+        after=e['read_rows'](e['event_path'](crash))
+        assert sum(r['event_type']=='attempt.heartbeat' for r in before)==sum(r['event_type']=='attempt.heartbeat' for r in after)
+    finally:
+        if driver.poll() is None:
+            driver.kill(); driver.wait()
+# Bounded shutdown keeps unknown auxiliary bytes and never targets a replaced
+# readiness record's foreign PID. Linux additionally proves SIGSTOP recovery.
+stop_script = r'''
+set -eu
+. "$1/scripts/lib/agent-task-common.sh"
+reference_operation='' reference_scope_dir='' reference_channel='' reference_scope_digest='' reference_ready_digest='' reference_monitor=''
+oms_reference_start "$2" agent-task "$2/packet"
+channel="$reference_channel"
+if [ "$3" = contended ]; then
+  python3 - "$1" "$2" "$reference_channel" "$reference_scope_digest" <<'PY_STOP_LOCK' &
+import pathlib,runpy,sys,time
+h=runpy.run_path(str(pathlib.Path(sys.argv[1])/'scripts/lib/landing-reference.py'))
+repo=pathlib.Path(sys.argv[2]); channel=pathlib.Path(sys.argv[3])
+append=h['E']['append_row']
+def delayed_append(path, event):
+    (repo/'lock-held').write_text('held')
+    deadline=time.monotonic()+5
+    while not (repo/'close-entered').exists() and time.monotonic()<deadline:
+        time.sleep(.02)
+    assert (repo/'close-entered').exists(), 'close did not use the lifecycle lock'
+    time.sleep(.45)
+    assert channel.exists(), 'scope closed before its in-flight heartbeat append'
+    append(path, event)
+h['E']['append_row']=delayed_append
+assert h['scope_pulse'](str(repo),str(channel),sys.argv[4])
+PY_STOP_LOCK
+  holder=$!
+  while [ ! -e "$2/lock-held" ]; do sleep 0.02; done
+  sleep 1.15
+  # Record the monitor's actual exit, not merely the helper's success: a
+  # normal lock wait must finish cooperatively without a forced signal.
+  wait_result="$2/wait-status"
+  wait() {
+    local wait_rc=0
+    builtin wait "$@" || wait_rc=$?
+    printf '%s\n' "$wait_rc" > "$wait_result"
+    return "$wait_rc"
+  }
+  python3 - "$1" "$2" "$reference_channel" "$reference_scope_digest" "$reference_ready_digest" <<'PY_STOP_SERIAL'
+import contextlib,pathlib,runpy,sys
+h=runpy.run_path(str(pathlib.Path(sys.argv[1])/'scripts/lib/landing-reference.py'))
+lock=h['E']['file_lock']; repo=pathlib.Path(sys.argv[2])
+@contextlib.contextmanager
+def observed_lock(path):
+    assert path==h['E']['event_path'](repo)
+    (repo/'close-entered').write_text('entered')
+    with lock(path):
+        yield
+h['E']['file_lock']=observed_lock
+raise SystemExit(h['stop_monitor'](str(repo),*sys.argv[3:]))
+PY_STOP_SERIAL
+  wait "$reference_monitor"
+  builtin wait "$holder"
+  [ "$(cat "$wait_result")" = 0 ]
+  python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$2" "$reference_operation" refuse-no-write
+  [ -z "$(jobs -p)" ]
+  exit 0
+fi
+if [ "$3" = stopped ]; then kill -STOP "$reference_monitor"; fi
+if [ "$3" = foreign ]; then
+  python3 - "$1" "$reference_channel.ready" "$4" <<'PY_FOREIGN'
+import json, pathlib, runpy, sys
+h=runpy.run_path(str(pathlib.Path(sys.argv[1])/'scripts/lib/landing-reference.py'))
+p=pathlib.Path(sys.argv[2]); row=json.loads(p.read_bytes())
+row['monitor']=h['owner_identity'](int(sys.argv[3])); p.write_bytes(h['C']['encoded'](row))
+PY_FOREIGN
+  python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$2" "$reference_operation" 1
+  if oms_reference_stop "$2"; then exit 91; fi
+  [ ! -e "$channel" ] && [ -f "$channel.ready" ]
+  wait "$reference_monitor" || true
+else
+  python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$2" "$reference_operation" 0
+  oms_reference_stop "$2"
+  [ ! -e "$channel" ]
+fi
+[ -z "$(jobs -p)" ]
+'''
+foreign = subprocess.Popen([sys.executable,'-c','import sys; sys.stdin.read()'],stdin=subprocess.PIPE)
+try:
+    for mode in ['normal','foreign','contended'] + (['stopped'] if sys.platform.startswith('linux') else []):
+        case=fixture/('stop-'+mode); case.mkdir()
+        started=time.monotonic()
+        result=subprocess.run(['bash','-c',stop_script,'fixture',str(root),str(case),mode,str(foreign.pid)],capture_output=True,text=True,timeout=5)
+        assert result.returncode==0, (mode,result.stdout,result.stderr)
+        assert time.monotonic()-started<3.5, mode
+        assert foreign.poll() is None, 'reference cleanup signalled a foreign process'
+finally:
+    foreign.stdin.close(); foreign.wait(timeout=3)
+PY_HEARTBEAT
   local d="$TMP/task-lifecycle"
   local sh="$ROOT/scripts/agent-task.sh"
   local task_id archive
@@ -21402,6 +21841,67 @@ test_agent_task_lifecycle_rotation_and_bounded_state() {
     --source-session 0123456789abcdef >/dev/null
   task_id="$("$sh" --repo "$d" status | awk '$1=="task_id:"{print $2}')"
   [ -n "$task_id" ] || fail "task init should assign a task id"
+  # Compound CLI updates share one actual operation; standalone library
+  # mutations remain independently registered (atomic-state smoke).
+  python3 - "$d" <<'PY_BATCH' || fail "task init did not batch its reference operation"
+import json, pathlib, sys
+rows = [json.loads(line) for line in (pathlib.Path(sys.argv[1])/'.oms/lifecycle/events.jsonl').read_text().splitlines()]
+created = [row for row in rows if row['event_type'] == 'attempt.created']
+assert len(created) == 1 and created[0]['tool'] == 'agent-task', created
+assert rows[-1]['to_state'] == 'done'
+PY_BATCH
+  local dedupe_key
+  dedupe_key="$(printf '%064d' 1)"
+  "$sh" --repo "$d" append --text 'idempotent note' --dedupe-key "$dedupe_key" >/dev/null
+  cp "$d/.oms/task/current.md" "$d/replay-before.md"
+  "$sh" --repo "$d" append --text 'idempotent note' --dedupe-key "$dedupe_key" >/dev/null
+  cmp "$d/replay-before.md" "$d/.oms/task/current.md" || fail "exact append replay mutated packet"
+  if "$sh" --repo "$d" append --text 'different note' --dedupe-key "$dedupe_key" >/dev/null 2>&1; then
+    fail "dedupe key accepted a different note"
+  fi
+  cmp "$d/replay-before.md" "$d/.oms/task/current.md" || fail "dedupe conflict partially wrote packet"
+  if "$sh" --repo "$d" update --goal changed --dedupe-key "$dedupe_key" >/dev/null 2>&1; then
+    fail "non-append command accepted dedupe key"
+  fi
+  python3 - "$ROOT" "$d" <<'PY_DEDUPE' || fail "append receipt integrity/limit contract"
+import hashlib, os, pathlib, runpy, subprocess, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+h = runpy.run_path(str(root/'scripts/lib/landing-reference.py'))
+file = repo/'.oms/task/current.md'; note = repo/'raw-note'; note.write_bytes(b'idempotent note\n')
+key = format(1, '064x')
+assert h['dedupe_state'](str(file),str(note),key)[-1]
+# A bounded, exact cap fixture exercises pre-write refusal; original packet
+# and real indexed writer provenance stay intact.
+original = file.read_bytes()
+records = b''.join(('- append_receipt_'+format(i,'064x')+': '+hashlib.sha256(b'note').hexdigest()+'\n').encode() for i in range(2,257))
+file.write_bytes(original.replace(b'\n## Goal', b'\n'+records+b'\n## Goal',1))
+before = file.read_bytes()
+proc = subprocess.run([str(root/'scripts/agent-task.sh'),'--repo',str(repo),'append','--text','new','--dedupe-key',format(257,'064x')],capture_output=True)
+assert proc.returncode != 0 and file.read_bytes() == before
+subprocess.run([str(root/'scripts/agent-task.sh'),'--repo',str(repo),'append','--text','idempotent note','--dedupe-key',key],check=True,stdout=subprocess.DEVNULL)
+assert file.read_bytes() == before
+file.write_bytes(original)
+# A commit failure leaves neither the new note nor its receipt behind.
+failed_repo = repo/'failed-commit'; failed_file = failed_repo/'.oms/task/current.md'
+failed_file.parent.mkdir(parents=True); failed_file.write_bytes(original)
+operation = subprocess.check_output([sys.executable,str(root/'scripts/lib/landing-reference.py'),'begin',str(failed_repo),'agent-task',str(failed_file)],text=True).strip()
+replace = h['append_deduplicated'].__globals__['os'].replace
+def refuse_commit(*args):
+    raise OSError('injected packet replace failure')
+h['append_deduplicated'].__globals__['os'].replace = refuse_commit
+try:
+    try:
+        h['append_deduplicated'](str(failed_repo),operation,str(failed_file),'## Current State','fixture',str(note),format(258,'064x'))
+    except OSError as error:
+        assert 'injected packet replace failure' in str(error)
+    else:
+        raise AssertionError('append ignored packet publication failure')
+finally:
+    h['append_deduplicated'].__globals__['os'].replace = replace
+assert failed_file.read_bytes() == original
+subprocess.run([sys.executable,str(root/'scripts/lib/landing-reference.py'),'finish',str(failed_repo),operation,'1'],check=True)
+assert not list(failed_file.parent.glob('.oms-replace.*'))
+PY_DEDUPE
   # Capture-first: when this assertion flakes under load, the failure message
   # must carry what status actually said — 'none' (file looked empty),
   # 'active' (reader fell back), or truncated output each name a different
@@ -21462,7 +21962,7 @@ PY_REFERENCE
   local managed="$d/.oms/landing-patches/land-task-reference.patch"
   bash -c '. "$1/scripts/lib/agent-task-common.sh"; REPO="$2"; agent_task_set_metadata "$2/.oms/task/current.md" evidence "$3"' \
     reference-metadata "$ROOT" "$d" "$managed" || fail "managed metadata path was mistaken for an ordinary input file"
-  OMS_ATTEMPT_ID=att_original_native "$sh" --repo "$d" append --text "$managed" >/dev/null ||
+  OMS_ATTEMPT_ID=att_original_native "$sh" --repo "$d" append --text "$managed" --dedupe-key "$dedupe_key" >/dev/null ||
     fail "task packet rejected a valid managed reference"
   "$sh" --repo "$d" init --goal third >/dev/null
   grep -Fl "$managed" "$d/.oms/task/archive/"*.md >/dev/null ||
@@ -21481,6 +21981,17 @@ PY_REFERENCE
     fail "task packet accepted a missing managed generation"
   fi
   [ "$before" = "$(cat "$d/.oms/task/current.md")" ] || fail "failed reference validation changed the packet"
+  if "$sh" --repo "$d" update --goal 'must not partially replace goal' \
+      --next '.oms/landing-patches/land-task-reference.patch' >/dev/null 2>&1; then
+    fail "batched update accepted a missing managed input"
+  fi
+  [ "$before" = "$(cat "$d/.oms/task/current.md")" ] || fail "batch preflight refusal partially changed the packet"
+  if "$sh" --repo "$d" append --text '.oms/landing-patches/land-task-reference.patch' \
+      --dedupe-key "$dedupe_key" >/dev/null 2>&1; then
+    fail "idempotent append accepted a missing managed input"
+  fi
+  [ "$before" = "$(cat "$d/.oms/task/current.md")" ] || fail "dedupe managed refusal changed packet"
+
   python3 - "$ROOT" "$d" <<'PY_REFERENCE'
 import contextlib, io, pathlib, runpy, shutil, subprocess, sys
 root, repo = map(pathlib.Path, sys.argv[1:])

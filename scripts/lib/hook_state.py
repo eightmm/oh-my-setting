@@ -7,10 +7,12 @@ import argparse
 import contextlib
 import functools
 import hashlib
+import importlib.util
 import itertools
 import json
 import os
 import re
+import signal
 import shutil
 import stat
 import subprocess
@@ -604,26 +606,278 @@ def agent_task_script() -> Path:
     return Path(__file__).resolve().parent.parent / "agent-task.sh"
 
 
+_POSIX_AGENT_TASK_SUPERVISOR = r'''
+import os, signal, subprocess, sys, time
+
+command = sys.argv[1:]
+pgid = os.getpgrp()
+child = subprocess.Popen(command, stdin=sys.stdin, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True)
+sys.stdin.close()
+
+def live_members():
+    probe = subprocess.Popen(["ps", "-A", "-o", "pgrp=", "-o", "stat=", "-o", "pid="],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        output, _ = probe.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        probe.kill()
+        probe.wait()
+        raise RuntimeError("cannot verify owned agent-task process group")
+    if probe.returncode != 0:
+        raise RuntimeError("cannot verify owned agent-task process group")
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        try:
+            group, pid = int(fields[0]), int(fields[2])
+        except ValueError:
+            continue
+        # ps itself inherits this process group and may appear in its own
+        # snapshot. Exclude both the stable supervisor and the probe process.
+        if group == pgid and pid not in {os.getpid(), probe.pid} and fields[1][0] != "Z":
+            return True
+    return False
+
+def stop_group():
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 0.25
+    while time.monotonic() < deadline:
+        if not live_members():
+            return
+        time.sleep(0.02)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 0.75
+    while time.monotonic() < deadline:
+        if not live_members():
+            return
+        time.sleep(0.02)
+    raise RuntimeError("owned agent-task process group still has live members")
+
+result = 1
+wait_error = None
+try:
+    result = child.wait()
+except BaseException as exc:
+    wait_error = exc
+try:
+    # A helper can exit successfully after leaving a background writer. Keep
+    # the supervisor alive as the group identity anchor until that writer is
+    # contained and verified gone.
+    stop_group()
+except BaseException:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    raise
+if wait_error is not None:
+    raise wait_error
+sys.exit(result if result >= 0 else 128 - result)
+'''
+
+
+def _agent_task_windows_job() -> tuple[Any, Any]:
+    runner_path = Path(__file__).with_name("attempt-runner.py")
+    spec = importlib.util.spec_from_file_location("oms_hook_attempt_runner", str(runner_path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Windows agent-task process supervision is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, module.WindowsJobObject.create()
+
+
+def _agent_task_group_has_live_members(pgid: int) -> bool:
+    probe = subprocess.run(
+        ["ps", "-A", "-o", "pgrp=", "-o", "stat="],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=1,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError("cannot verify owned agent-task process group")
+    for line in probe.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        try:
+            member_group = int(fields[0])
+        except ValueError:
+            continue
+        if member_group == pgid and fields[1][0] != "Z":
+            return True
+    return False
+
+
+def _terminate_agent_task_group(pgid: int, grace: float = 0.25) -> None:
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    # communicate(timeout) leaves the child unreaped. Keep that leader as the
+    # group identity anchor through a fixed TERM grace and the final signal.
+    time.sleep(grace)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 0.75
+    while time.monotonic() < deadline:
+        if not _agent_task_group_has_live_members(pgid):
+            return
+        time.sleep(0.02)
+    raise RuntimeError("owned agent-task process group still has live members")
+
+
+def _stop_agent_task_process(proc: subprocess.Popen[Any], windows_job: Any = None) -> None:
+    if windows_job is not None:
+        cleanup_error = None
+        try:
+            windows_job.terminate()
+        except Exception as exc:
+            cleanup_error = exc
+        try:
+            windows_job.close()
+        except Exception as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+            try:
+                proc.kill()
+                proc.wait(timeout=3)
+            except Exception as kill_error:
+                if cleanup_error is None:
+                    cleanup_error = kill_error
+        if cleanup_error is not None:
+            raise RuntimeError("owned Windows agent-task process tree did not terminate") from cleanup_error
+        return
+
+    cleanup_error = None
+    try:
+        # Do not poll/wait before the final signal: communicate(timeout) leaves
+        # this leader unreaped, so its PID/PGID remains anchored during cleanup.
+        _terminate_agent_task_group(proc.pid)
+    except Exception as exc:
+        cleanup_error = exc
+    try:
+        proc.wait(timeout=2)
+    except Exception as exc:
+        if cleanup_error is None:
+            cleanup_error = exc
+    if cleanup_error is not None:
+        raise RuntimeError("owned agent-task process group did not terminate") from cleanup_error
+    if _agent_task_group_has_live_members(proc.pid):
+        raise RuntimeError("owned agent-task process group still has live members")
+
+
 def run_agent_task(repo: Path, args: list[str], stdin_text: str | None = None) -> int:
     script = agent_task_script()
     if not script.exists():
         return 127
     timeout = env_int("OMS_AUTO_TASK_TIMEOUT", 2, minimum=1, maximum=10)
+    windows_job = None
+    windows_runner = None
+    proc = None
     try:
-        proc = subprocess.run(
-            [str(script), "--repo", str(repo), *args],
-            input=stdin_text,
-            check=False,
+        creationflags = 0
+        if os.name == "nt":
+            # The existing OMS Job Object supervisor provides an owned tree;
+            # fail closed if that native boundary cannot be established.
+            windows_runner, windows_job = _agent_task_windows_job()
+            creationflags = (
+                windows_runner.WINDOWS_CREATE_NEW_PROCESS_GROUP
+                | windows_runner.WINDOWS_CREATE_SUSPENDED
+            )
+        elif os.name != "posix":
+            return 1
+        argv = [str(script), "--repo", str(repo), *args]
+        if os.name == "nt":
+            bash = shutil.which("bash")
+            if not bash:
+                return 1
+            argv = [bash, *argv]
+        elif os.name == "posix":
+            argv = [
+                sys.executable,
+                "-c",
+                _POSIX_AGENT_TASK_SUPERVISOR,
+                str(script),
+                "--repo",
+                str(repo),
+                *args,
+            ]
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=timeout,
+            start_new_session=(os.name == "posix"),
+            creationflags=creationflags,
         )
+        if windows_job is not None:
+            windows_job.assign(proc)
+            windows_job.resume(proc)
+        try:
+            proc.communicate(input=stdin_text, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _stop_agent_task_process(proc, windows_job)
+            windows_job = None
+            return 124
+        rc = int(proc.returncode)
+        if windows_job is not None:
+            # Closing a kill-on-close job also contains any helper descendants.
+            windows_job.close()
+            windows_job = None
+        return rc
     except subprocess.TimeoutExpired:
         return 124
     except Exception:
         return 1
-    return int(proc.returncode)
+    finally:
+        cleanup_error = None
+        if windows_job is not None:
+            try:
+                windows_job.terminate()
+            except Exception as exc:
+                cleanup_error = exc
+            try:
+                windows_job.close()
+            except Exception as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if proc is not None and proc.returncode is None:
+            if os.name == "nt":
+                # Launch failures before Job Object assignment can leave only
+                # the suspended direct child outside the owned job.
+                try:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                except Exception as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            else:
+                try:
+                    _stop_agent_task_process(proc, windows_job)
+                except Exception as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+        if cleanup_error is not None:
+            raise RuntimeError("could not contain the agent-task process") from cleanup_error
 
 
 def should_auto_task(prompt: str) -> bool:
@@ -645,8 +899,13 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
         state_path = task_route_state_path(hooks_dir, payload)
         prompt_hash = sha256_text(prompt)
         turn_id = str(payload.get("turn_id") or payload.get("turnId") or "")
+        dedupe_key = sha256_text(
+            session_hash(payload) + "\0" + turn_id + "\0" + prompt_hash
+        )
         previous = load_state(state_path)
-        if previous.get("prompt_hash") == prompt_hash:
+        if (previous.get("prompt_hash") == prompt_hash
+                and previous.get("turn_id", "") == turn_id
+                and previous.get("status") in {"created", "appended", "rotated"}):
             append_event(
                 repo,
                 payload,
@@ -678,17 +937,6 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
                 and normalized_goal(explicit_goal) == normalized_goal(task_goal(task_file))
             )
             if same_explicit_goal and not prompt_has_content_after_goal(prompt):
-                write_json_atomic(
-                    state_path,
-                    {
-                        "schema": 1,
-                        "updated_at": utc_now(),
-                        "session": session_hash(payload),
-                        "turn_id": turn_id,
-                        "prompt_hash": prompt_hash,
-                        "status": "deduped",
-                    },
-                )
                 append_event(
                     repo,
                     payload,
@@ -749,37 +997,31 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
                     risk=route["risk"],
                     prompt_hash=prompt_hash,
                 )
-                write_json_atomic(
-                    state_path,
-                    {
-                        "schema": 1,
-                        "updated_at": utc_now(),
-                        "session": session_hash(payload),
-                        "turn_id": turn_id,
-                        "prompt_hash": prompt_hash,
-                        "status": status,
-                    },
-                )
                 return
 
         note = f"User prompt ({route['workflow']}/{route['risk']}): {excerpt}"
-        rc = run_agent_task(repo, ["append", "--agent", agent, "--stdin"], note + "\n")
+        rc = run_agent_task(
+            repo,
+            ["append", "--agent", agent, "--stdin", "--dedupe-key", dedupe_key],
+            note + "\n",
+        )
         if rc == 0:
             run_agent_task(repo, ["update", "--next", "Respond to the latest user request."])
         else:
             status = "timeout" if rc == 124 else "skipped_sensitive_or_error"
 
-        write_json_atomic(
-            state_path,
-            {
-                "schema": 1,
-                "updated_at": utc_now(),
-                "session": session_hash(payload),
-                "turn_id": turn_id,
-                "prompt_hash": prompt_hash,
-                "status": status,
-            },
-        )
+        if rc == 0:
+            write_json_atomic(
+                state_path,
+                {
+                    "schema": 1,
+                    "updated_at": utc_now(),
+                    "session": session_hash(payload),
+                    "turn_id": turn_id,
+                    "prompt_hash": prompt_hash,
+                    "status": status,
+                },
+            )
         append_event(
             repo,
             payload,
