@@ -5,19 +5,21 @@ Default: concise, scoped, evidence-driven.
 ## Communication
 
 - Use the user's language; preserve technical text.
-- Prefer evidence-rich input, concise output; preserve required code,
+- Prefer evidence-rich input and concise output; preserve code,
   specifications, verification, uncertainty and safety detail.
 - Finish changed work with What changed, Why, Evidence, Verification, and
-  Remaining uncertainty; small changes need only sentences, not headings.
+  Remaining uncertainty; small changes need only sentences.
 
 ## Execution
 
 - Inspect source/callers/tests; scale planning to uncertainty.
   Local edits need no full survey.
-- Complete authorized work through implementation, relevant verification and
-  repair of failures caused by the change; stop when done or genuinely blocked.
-  Infer reversible details; ask only about missing scope, authority, interface,
-  or risk decisions. A first implementation is not a completion boundary.
+- Complete authorized goals through implementation, verification and repair;
+  continue while safe work remains. Intermediate reports and worker exits are
+  not completion. Recheck blockers on resume; stale blocked status cannot justify
+  stopping. Stop only when done, explicitly paused, or genuinely blocked; name
+  blockers and continue unaffected work. Infer reversible details; ask only about
+  scope, authority, interface, or risk.
 - When interfaces differ, name both and the one you are taking; proceed within
   authority unless hard to reverse.
 - Preserve unrelated work; report failures, bound retries, continue safe work.
@@ -63,8 +65,8 @@ Default: concise, scoped, evidence-driven.
 
 ## Specification
 
-- Read `PROJECT.md` when present to establish the relevant contract; reuse it
-  while current rather than rereading before every edit. Specific rules override defaults.
+- Read `PROJECT.md` when present for the contract; reuse while current.
+  Specific rules override defaults.
 
 ## Verification
 
