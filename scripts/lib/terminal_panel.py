@@ -1803,13 +1803,8 @@ def managed_session():
         PANEL_SESSION, os.environ.get("OMS_PANEL_SESSION", "")))
 
 
-# Pane text is hashed and discarded; board repaints must not reset native silence.
-MAIN_OUTPUT = {}
-
-
 def main_activity(repo, members, windows=()):
     now, result = time.time(), {}
-    started = time.monotonic()
     mains = [m for m in members if m.get("joined") and m.get("role") == "main"]
     for member in mains[:128]:
         who = member.get("participant")
@@ -1826,45 +1821,6 @@ def main_activity(repo, members, windows=()):
             result[who] = {k: row.get(k) for k in ("state", "since", "updated_at", "attempt", "room")}
         except (OSError, ValueError, TypeError, RecursionError):
             continue
-    session = os.environ.get("OMS_PANEL_SESSION", "")
-    keys = set()
-    for window in windows[:128]:
-        if len(window) != 6:
-            continue
-        _, who, _, native, bound_repo, attempt = window
-        row = result.get(who)
-        if (not row or row["attempt"] != attempt or row["state"] != "busy"
-                or not re.fullmatch(r"%[0-9]+", native)):
-            continue
-        try:
-            if Path(bound_repo).resolve() != repo.resolve():
-                continue
-            key = (str(repo), session, native, attempt)
-            keys.add(key)
-            previous = MAIN_OUTPUT.get(key)
-            if previous and 0 <= now - previous[0] < 10:
-                unchanged = previous[2]
-            else:
-                if time.monotonic() - started >= 3:
-                    continue
-                capture = subprocess.run(tmux_command("capture-pane", "-p", "-t", native, "-S", "0"),
-                                         capture_output=True, check=False, timeout=1, stdin=subprocess.DEVNULL)
-                if capture.returncode or len(capture.stdout) > 1048576:
-                    MAIN_OUTPUT.pop(key, None)
-                    continue
-                digest = hashlib.sha256(capture.stdout).hexdigest()
-                unchanged = previous[2] if previous and previous[1] == digest else now
-                MAIN_OUTPUT[key] = (now, digest, unchanged)
-            if now - row["updated_at"] >= 90 and now - unchanged >= 90:
-                result[who] = dict(row, state="idle", since=max(row["updated_at"], unchanged))
-        except (OSError, ValueError, subprocess.SubprocessError):
-            MAIN_OUTPUT.pop((str(repo), session, native, attempt), None)
-    # Keep only the current bounded busy window set.
-    for key in list(MAIN_OUTPUT):
-        if (key[0] == str(repo) and key not in keys) or now - MAIN_OUTPUT[key][0] > 300:
-            MAIN_OUTPUT.pop(key, None)
-    while len(MAIN_OUTPUT) > 128:
-        MAIN_OUTPUT.pop(next(iter(MAIN_OUTPUT)))
     return result
 
 

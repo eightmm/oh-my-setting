@@ -239,9 +239,9 @@ whole fields of its last two status lines. A notice shows on a short board in pl
 of the key hints. Board text is written for
 people: states read `running`, `finished` or `needs approval`, call exits and
 provider status lines are dropped from messages, and the detail says whether its
-main reviewed a result instead of showing internal fields. A main reads `working`
-during a hook-recorded turn, `idle · Nm` after Stop (or a stale busy signal plus
-90 seconds of unchanged native-pane output), and `live` until its first activity signal. Clicking another main's
+main reviewed a result instead of showing internal fields. A main reads `working` while a matched activity signal is busy, and stays
+`working` until a matched Stop records `idle` or an authoritative terminal state
+wins. Missing activity remains `live`/unknown; pane silence does not infer idle. Clicking another main's
 tab selects it and shows its detail; clicking the tab of the main already shown
 (or its card) opens its proven original conversation. Left/right arrows move
 between mains and move the detail with them. Tabs that do not fit shrink in steps (task text, counts, names, one marker, the

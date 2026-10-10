@@ -1346,6 +1346,11 @@ from panel_tree import render_tree
 tree_nav = {"selected": ("chat", "m2")}
 tree_text = render_tree(msg_report, 110, 40, navigation=tree_nav)
 assert "Tab Next tab" not in tree_text, tree_text
+# A selection from the inbox is valid only if the current tree still exposes it; visible tree selections remain intact.
+stale_inbox_nav = {"selected": ("result", "w1"), "selected_row": 2, "row_ids": ["w1"], "surface": "inbox"}
+render_tree(msg_report, 110, 40, navigation=stale_inbox_nav)
+assert stale_inbox_nav["selected"] is None and "selected_row" not in stale_inbox_nav and "row_ids" not in stale_inbox_nav, stale_inbox_nav
+assert tree_nav["selected"] == ("chat", "m2") and tree_nav["selected"] in tree_nav["items"], tree_nav
 # The watch loop turns an unconsumed Tab into Down, so on the tree it is only a selection move.
 assert not tab_event(("tab",), tree_nav) and not tab_event(("tab",), dict(tree_nav, surface="graph", detail={"target": ("chat", "m2")}))
 helped = render_tree(msg_report, 110, 40, navigation=dict(tree_nav, keys_help=True))
@@ -6303,31 +6308,48 @@ activity_path = activity_repo / ".oms/hooks/panel-activity/activity-main.json"
 activity_path.parent.mkdir(parents=True)
 activity_path.write_text(json.dumps(activity_row))
 activity_windows = [["1", "activity-main", "", "%777", str(activity_repo), "activity-attempt"]]
-panel.MAIN_OUTPUT.clear()
-with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"native prompt", b"")) as capture:
+with patch.object(panel.subprocess, "run", side_effect=AssertionError("pane output cannot determine activity")):
     with patch.object(panel.time, "time", return_value=1000):
         assert "activity-main" in panel.main_activity(activity_repo, [activity_worker] * 129 + [activity_main])
+        activity_before = activity_path.read_bytes()
         first = panel.main_activity(activity_repo, [activity_main, activity_worker], activity_windows)
         assert first["activity-main"]["state"] == "busy"
+        assert first["activity-main"]["since"] == activity_row["since"]
+        assert activity_path.read_bytes() == activity_before, "reading activity must not rewrite hook evidence"
     with patch.object(panel.time, "time", return_value=1005):
         assert panel.main_activity(activity_repo, [activity_main], activity_windows) == first
-        assert capture.call_count == 1, "native captures must be cached"
-    with patch.object(panel.time, "time", return_value=1091):
+    with patch.object(panel.time, "time", return_value=100 + 7 * 24 * 60 * 60):
         silent = panel.main_activity(activity_repo, [activity_main], activity_windows)
-        assert silent["activity-main"]["state"] == "idle" and silent["activity-main"]["since"] == 1000, silent
-    activity_path.write_text(json.dumps(dict(activity_row, updated_at=1090)))
-    with patch.object(panel.time, "time", return_value=1092):
-        assert panel.main_activity(activity_repo, [activity_main], activity_windows)["activity-main"]["state"] == "busy", "a fresh heartbeat prevents silence fallback"
-    activity_path.write_text(json.dumps(activity_row))
-    assert "native prompt" not in repr(panel.MAIN_OUTPUT)
-    assert capture.call_args.args[0][-5:] == ["-p", "-t", "%777", "-S", "0"], capture.call_args
-    capture.return_value = subprocess.CompletedProcess([], 0, b"new native output", b"")
-    with patch.object(panel.time, "time", return_value=1102):
-        assert panel.main_activity(activity_repo, [activity_main], activity_windows)["activity-main"]["state"] == "busy"
-    capture.return_value = subprocess.CompletedProcess([], 1, b"", b"")
+        assert silent["activity-main"]["state"] == "busy", "silence cannot override explicit busy evidence"
+        assert silent["activity-main"]["since"] == activity_row["since"], "silence cannot invent a new activity start"
+    # An explicit Stop is the idle evidence; a resumed attempt starts busy again.
+    activity_path.write_text(json.dumps(dict(activity_row, state="idle", since=115, updated_at=115)))
     with patch.object(panel.time, "time", return_value=1200):
-        assert panel.main_activity(activity_repo, [activity_main], activity_windows)["activity-main"]["state"] == "busy", "a failed capture cannot prove silence"
-    assert not panel.MAIN_OUTPUT
+        stopped = panel.main_activity(activity_repo, [activity_main], activity_windows)
+        assert stopped["activity-main"]["state"] == "idle" and stopped["activity-main"]["since"] == 115, stopped
+    activity_path.write_text(json.dumps(dict(activity_row, attempt="fresh", since=1201, updated_at=1201)))
+    activity_windows[0][-1] = "fresh"
+    with patch.object(panel.time, "time", return_value=1202):
+        restarted = panel.main_activity(activity_repo, [activity_main], activity_windows)
+        assert restarted["activity-main"]["state"] == "busy" and restarted["activity-main"]["attempt"] == "fresh"
+        assert restarted["activity-main"]["since"] == 1201, restarted
+    for bad_row in (None, "{", dict(activity_row, participant="other")):
+        if bad_row is None:
+            activity_path.unlink()
+        elif isinstance(bad_row, str):
+            activity_path.write_text(bad_row)
+        else:
+            activity_path.write_text(json.dumps(bad_row))
+        with patch.object(panel.time, "time", return_value=1300):
+            assert not panel.main_activity(activity_repo, [activity_main], activity_windows), bad_row
+    activity_path.write_text(json.dumps(dict(activity_row, attempt="old")))
+    with patch.object(panel.time, "time", return_value=1300):
+        mismatched = panel.main_activity(activity_repo, [activity_main], activity_windows)
+        assert graph_view.main_state(dict(activity_main, state="working", attempt="fresh",
+                                          panel_activity=mismatched["activity-main"])) == "live marker"
+    assert graph_view.main_state(dict(activity_main, state="exited", attempt="fresh",
+                                      panel_activity=dict(activity_row, attempt="fresh", state="busy"))) == "exited", \
+        "terminal attempt state takes precedence over a matching busy activity row"
 for reading, word in (({}, "live"), ({"activity-main": activity_row}, "working"),
                       ({"activity-main": dict(activity_row, state="idle", since=280)}, "idle · 12m"),
                       ({"activity-main": dict(activity_row, state="idle", since=280, attempt="old")}, "live")):

@@ -284,6 +284,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         hits += [{"y": row + 1, "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
     navigation.update(hits=hits, items=unique, offset=offset, body_rows=len(body), viewport=room_budget,
                       room_id=room.get("id"), positions=positions, geometry=geometry, surface="tree", bands=[])
+    if selected not in unique:
+        navigation["selected"] = None
+        navigation.pop("selected_row", None)
+        navigation.pop("row_ids", None)
     return "\n".join(output)
 
 
