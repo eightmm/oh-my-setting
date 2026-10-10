@@ -6786,10 +6786,16 @@ for case in ('missing', 'duplicate', 'kind', 'exit', 'plan', 'task', 'digest',
 for path in (repo / admission['artifact'], repo / intent['patch']):
     raw = path.read_bytes()
     for altered in (None, raw + b'altered proof\n'):
-        if altered is None: path.unlink()
-        else: path.write_bytes(altered)
-        invoke(satisfied, action='satisfy', ok=False)
-        path.write_bytes(raw)
+        # Keep the original inode for the following valid-product probe;
+        # replacing a native publication with equal bytes loses ownership.
+        preserved = path.with_name(path.name + '.negative-fixture')
+        path.rename(preserved)
+        try:
+            if altered is not None: path.write_bytes(altered)
+            invoke(satisfied, action='satisfy', ok=False)
+        finally:
+            if path.exists(): path.unlink()
+            preserved.rename(path)
 # Existing canonical admissions remain valid against the same real landing.
 # Probe the product reader without publishing a receipt with modified history.
 records = index()
