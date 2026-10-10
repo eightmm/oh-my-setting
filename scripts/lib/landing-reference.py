@@ -76,7 +76,7 @@ def owner_identity(pid):
         try:
             fields = E['process_helpers']['proc_stat_fields'](pid)
             info = os.stat('/proc/' + str(pid))
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, ProcessLookupError) as exc:
             raise OwnerExited('reference owner exited') from exc
         if fields[0] in ('Z', 'X'):
             raise OwnerExited('reference owner exited')
@@ -394,11 +394,17 @@ def terminate_monitor(identity):
         import signal
         if not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
             return False
-        fd = os.pidfd_open(pid)
+        # The observed generation can exit before its native handle opens.
+        try:
+            fd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            return True
         try:
             if owner_identity(pid) != identity:
                 return False
             signal.pidfd_send_signal(fd, signal.SIGKILL)
+            return True
+        except (OwnerExited, ProcessLookupError):
             return True
         finally:
             os.close(fd)

@@ -21672,11 +21672,72 @@ test_agent_task_lifecycle_rotation_and_bounded_state() {
   # Python process or the native caller. A real reconcile overlaps real work.
   python3 - "$ROOT" "$TMP/reference-heartbeat" <<'PY_HEARTBEAT' || fail "owned reference heartbeat lifecycle"
 import json, os, pathlib, runpy, subprocess, sys, time
+from unittest import mock
 root, fixture = map(pathlib.Path, sys.argv[1:])
 fixture.mkdir()
 helper = root/'scripts/lib/landing-reference.py'
 h = runpy.run_path(str(helper))
 e = h['E']
+if sys.platform.startswith('linux'):
+    for vanished in (FileNotFoundError(2, 'gone'), ProcessLookupError(3, 'gone')):
+        with mock.patch.dict(e['process_helpers'],
+                             {'proc_stat_fields': mock.Mock(side_effect=vanished)}):
+            try:
+                h['owner_identity'](os.getpid())
+            except h['OwnerExited']:
+                pass
+            else:
+                raise AssertionError('positive process disappearance was not classified as exited')
+    with mock.patch.dict(e['process_helpers'],
+                         {'proc_stat_fields': mock.Mock(side_effect=PermissionError(13, 'denied'))}):
+        try:
+            h['owner_identity'](os.getpid())
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError('unknown owner was treated as exited')
+    import signal
+    if hasattr(os, 'pidfd_open') and hasattr(signal, 'pidfd_send_signal'):
+        child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'], stdin=subprocess.PIPE)
+        try:
+            identity = h['owner_identity'](child.pid)
+            native_open = os.pidfd_open
+            handles = []
+            def capture_handle(pid):
+                fd = native_open(pid)
+                handles.append(fd)
+                return fd
+            foreign = dict(identity, birth=identity['birth'] + '-different')
+            for owner_result, signal_error, expected, signalled in (
+                    (h['OwnerExited']('gone'), None, True, False),
+                    (identity, ProcessLookupError(3, 'gone'), True, True),
+                    (foreign, None, False, False)):
+                owner = mock.Mock(side_effect=owner_result) if isinstance(owner_result, Exception) else mock.Mock(return_value=owner_result)
+                with mock.patch('os.pidfd_open', capture_handle), \
+                        mock.patch('signal.pidfd_send_signal', side_effect=signal_error) as send, \
+                        mock.patch.dict(h['terminate_monitor'].__globals__, {'owner_identity': owner}):
+                    assert h['terminate_monitor'](identity) is expected
+                    assert bool(send.call_count) is signalled
+                try:
+                    os.fstat(handles[-1])
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError('native process handle leaked')
+            assert child.poll() is None, 'provenance probes sent a real signal'
+            def exit_before_handle(pid):
+                assert pid == child.pid
+                child.stdin.close()
+                assert child.wait(timeout=3) == 0
+                return native_open(pid)
+            with mock.patch('os.pidfd_open', exit_before_handle), \
+                    mock.patch('signal.pidfd_send_signal') as send:
+                assert h['terminate_monitor'](identity)
+                send.assert_not_called()
+        finally:
+            if child.stdin and not child.stdin.closed:
+                child.stdin.close()
+            child.wait(timeout=3)
 # Exercise the protocol declared by the real scope: legacy empty publication
 # or startup-bound pending publication. Each path must cross its own barriers.
 ready_fixture = fixture/'ready-publication'; ready_fixture.mkdir()
