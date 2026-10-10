@@ -556,7 +556,10 @@ A contract fixes:
   or `{"mode": "baseline_stdev", "z": Z}`. A gain must clear the larger of the
   minimum improvement and the band; `baseline_stdev` uses the spread of the
   repeated baseline seeds, and with fewer than two seeds the verdict stays
-  inconclusive. This is the noise-adjusted floor of RRSI (arXiv 2609.24972).
+  inconclusive. This OMS gate is an adaptation motivated by RRSI's
+  stability-aware selection. RRSI's §3.3 rule compares a candidate score with
+  the best observed score minus a delta; it does not define this OMS minimum-gain
+  threshold over a fixed baseline ([RRSI, §3.3](https://arxiv.org/html/2609.24972v3)).
 - no-regression tolerances
 - invariant commands
 
