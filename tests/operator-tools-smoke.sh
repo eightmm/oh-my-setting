@@ -8145,11 +8145,67 @@ with patch.object(panel, "tmux_command", return_value=["true"]), \
         patch.object(panel, "main_history", side_effect=lambda repo, ident: [] if ident == "original" else [alias_history["original"][0]]), \
         patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, foreign_windows, "")):
     assert panel.live_mains(project, "s", "original") == 1, "foreign-room attempt was silently dropped"
+# Window tags are written in stages: an already-counted attempt must not reserve
+# another slot before its participant tag arrives.
+transition_attempt = "transition-attempt"
+transition_record = {"attempt_id": transition_attempt, "tool": "panel-main", "state": "working",
+                     "refs": {"panel_room_id": "r1", "panel_room_participant": "mx"}}
+transition_windows = "claude\tr1\t\t%s\t%%4\tclaude\n" % transition_attempt
+with patch.object(panel, "tmux_command", return_value=["true"]), \
+        patch.object(panel.room, "status", return_value={"participants": [{"participant": "mx", "joined": True, "role": "main"}]}), \
+        patch.object(panel, "main_history", return_value=[transition_record]), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, transition_windows, "")):
+    assert panel.live_mains(project, "s", "r1") == 1, "attempt tag transition double-counted a known call"
+# A joined native window without lifecycle rows has no terminal proof, so keep its
+# tagged attempt as a conservative slot; a terminal lifecycle row releases it.
+unknown_window = "claude\tr1\tmx\t%s\t%%5\tclaude\n" % transition_attempt
+with patch.object(panel, "tmux_command", return_value=["true"]), \
+        patch.object(panel.room, "status", return_value={"participants": [{"participant": "mx", "joined": True, "role": "main"}]}), \
+        patch.object(panel, "main_history", return_value=[]), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, unknown_window, "")):
+    assert panel.live_mains(project, "s", "r1") == 1, "tagged native attempt without history was dropped"
+# An older known live call for the same participant cannot prove that a second,
+# newly tagged attempt is already represented or terminal.
+older_live_record = dict(transition_record, attempt_id="older-live-attempt")
+newer_unknown_window = "claude\tr1\tmx\tnewer-unknown-attempt\t%%6\tclaude\n"
+with patch.object(panel, "tmux_command", return_value=["true"]), \
+        patch.object(panel.room, "status", return_value={"participants": [{"participant": "mx", "joined": True, "role": "main"}]}), \
+        patch.object(panel, "main_history", return_value=[older_live_record]), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, newer_unknown_window, "")):
+    assert panel.live_mains(project, "s", "r1") == 2, "older participant history hid a new unproven attempt"
+terminal_record = dict(transition_record, terminal=True, state="done")
+with patch.object(panel, "tmux_command", return_value=["true"]), \
+        patch.object(panel.room, "status", return_value={"participants": [{"participant": "mx", "joined": True, "role": "main"}]}), \
+        patch.object(panel, "main_history", return_value=[terminal_record]), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, unknown_window, "")):
+    assert panel.live_mains(project, "s", "r1") == 0, "terminal proof did not release a finished window"
+# Duplicate observations with a known attempt identity reserve one slot.
+duplicate_pending = unknown_window + unknown_window
+with patch.object(panel, "tmux_command", return_value=["true"]), \
+        patch.object(panel.room, "status", return_value={"participants": []}), \
+        patch.object(panel, "main_history", return_value=[]), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, duplicate_pending, "")):
+    assert panel.live_mains(project, "s", "r1") == 1, "duplicate pending attempt observations counted twice"
 misleading_control = "claude\tr1\t\t\t%3\tcontrol\n"
 with patch.object(panel, "tmux_command", return_value=["true"]), \
         patch.object(panel.room, "status", return_value={"participants": []}), patch.object(panel, "main_history", return_value=[]), \
         patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, misleading_control, "")):
     assert panel.live_mains(project, "s", "r1") == 1, "control name hid a window with native pane evidence"
+# A proven control sentinel's room option is not a main-room membership and must
+# not make unrelated room evidence part of the panel cap scan.
+control_with_room = "claude\tunreadable-room\t\t\t\tcontrol\n"
+queried_rooms = []
+def status_without_control_room(repo, ident):
+    queried_rooms.append(ident)
+    if ident == "unreadable-room":
+        raise OSError("control-only room must not be read")
+    return {"participants": []}
+with patch.object(panel, "tmux_command", return_value=["true"]), \
+        patch.object(panel.room, "status", side_effect=status_without_control_room), \
+        patch.object(panel, "main_history", return_value=[]), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, control_with_room, "")):
+    assert panel.live_mains(project, "s", "r1") == 0, "control room option created a live-main slot"
+    assert queried_rooms == ["r1"], "control-only room entered the main evidence scan"
 for result in (subprocess.CompletedProcess([], 1, "", "failed"),
                subprocess.CompletedProcess([], 0, "claude\tr1\tbad\n", "")):
     with patch.object(panel, "tmux_command", return_value=["true"]), \

@@ -2017,8 +2017,9 @@ def live_mains(repo, session, room_id):
     rows = [line.rstrip("\r").split("\t") for line in found.stdout.split("\n")[:-1]]
     if not rows or any(len(row) != 6 for row in rows):
         raise ValueError("panel window identity unavailable")
-    windows = [row for row in rows if row[0] in NATIVE_HARNESSES]
-    live = set()
+    windows = [row for row in rows if row[0] in NATIVE_HARNESSES
+               and not (row[5] == "control" and not row[3] and not row[2] and not row[4])]
+    live, terminal_attempts, live_members = set(), set(), {}
     for ident in sorted({room_id} | {r[1] for r in windows if r[1]}):
         try:
             joined = {p["participant"] for p in room.status(repo, ident)["participants"]
@@ -2026,21 +2027,35 @@ def live_mains(repo, session, room_id):
             history = main_history(repo, ident)
         except (ValueError, OSError, KeyError, TypeError):
             raise ValueError("panel main identity unavailable")
+        live_members[ident] = set()
         for row in history:
             refs = row.get("refs", {})
             who = refs.get("panel_room_participant", row.get("attempt_id"))
+            attempt = row.get("attempt_id")
+            if row.get("tool") == "panel-main" and isinstance(attempt, str) and attempt and row.get("terminal") is True:
+                terminal_attempts.add(attempt)
             if (who in joined and row.get("tool") == "panel-main" and row.get("terminal") is not True
                     and row.get("state") in {"starting", "working", "verifying", "review", "waiting_input", "waiting_approval"}):
-                attempt = row.get("attempt_id")
+                if who is not None:
+                    live_members[ident].add(who)
                 live.add(("attempt", attempt) if isinstance(attempt, str) and attempt
                          else ("unknown", ident, who))
-    pending = 0
-    for row in windows:
+    pending = set()
+    for index, row in enumerate(windows):
         owner, ident, participant, attempt, native_pane, name = row
-        control = name == "control" and not attempt and not participant and not native_pane
-        if not control and not participant:
-            pending += 1
-    return len(live) + pending
+        if attempt and attempt in terminal_attempts or attempt and ("attempt", attempt) in live:
+            continue
+        if not attempt and participant and participant in live_members.get(ident, set()):
+            continue
+        if attempt:
+            pending.add(("attempt", attempt))
+        elif participant:
+            pending.add(("participant", ident, participant))
+        elif native_pane:
+            pending.add(("pane", native_pane))
+        else:
+            pending.add(("window", index))
+    return len(live) + len(pending)
 
 
 def spawn_main(repo, provider, task=None, model=None, started_by=None):
