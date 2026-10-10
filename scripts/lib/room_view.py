@@ -764,6 +764,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     interactive = navigation is not None
     navigation = navigation if interactive else {}
     navigation.pop("box", None)
+    navigation["tab_strip_visible"] = True
     room = mapping(report.get("room"))
     members = nodes(report)
     members += native_advisors(report, members)
@@ -1216,6 +1217,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         if plan:
             break
     if plan is None:
+        navigation["tab_strip_visible"] = False
         from panel_view import render
         navigation.update(hits=[], items=[], viewport=0, positions={})
         navigation.pop("full_result", None)
@@ -1582,6 +1584,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     # The box keeps the rows it was given whatever the upper region drew; only an overflowing region shrinks it.
     rows_high = min(dock, max(0, total_rows - len(lines)))
     rows_high = 1 if 0 < rows_high < 3 else rows_high
+    navigation["tab_strip_visible"] = bool(rows_high)
     if rows_high:
         lines.extend([""] * (total_rows - rows_high - len(lines)))
         # One box with tabs: the selected call's detail, the plan, this main's debates, the room's messages.
@@ -1684,10 +1687,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             navigation["box"] = {"y1": top, "y2": top + rows_high - 1, "pages": bool(previewed) or active == "plan"}
     if not body_drawn:
         navigation.pop("full_result", None)
-    if not body_drawn and not menu and not navigation.get("keys_help") and footer[-hint_rows:] == hints:
-        # Without a box body there is nothing to close or open in full.
-        footer[-hint_rows:] = footer_hints(dict(navigation, preview=None, detail=None, full_result=None),
-                                           width, managed, unicode, chosen_member, len(mains), True)
+    if not body_drawn and not menu and footer[-hint_rows:] == hints:
+        # A strip can switch tabs without a body; an absent strip offers neither action.
+        fitted_hints = footer_hints(dict(navigation, preview=None, detail=None, full_result=None, tab_body_visible=False),
+                                    width, managed, unicode, chosen_member, len(mains), True)
+        footer[-hint_rows:] = fitted_hints + [""] * max(0, hint_rows - len(fitted_hints))
     lines += [""] * max(0, height - int(menu) - len(lines) - len(footer))
     lines += [clipped(line, width) for line in footer]
     if bar:
@@ -1746,6 +1750,7 @@ def action(member):
 
 def footer_hints(navigation, width, managed, unicode, member, mains, graph):
     """At most three hints for what is selected, then the fixed panel keys; `?` swaps in the full list of working keys."""
+    tabs = graph and navigation.get("tab_strip_visible", True)
     selected = navigation.get("selected")
     kind = selected[0] if selected else "chat"
     if mapping(navigation.get("preview")).get("target", ("",))[0] == "pair":
@@ -1758,7 +1763,7 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph):
         keys = ["Enter Open", move + " Move", arrows + " Main" if mains > 1 else "",
                 "Space " + ("Pin" if graph else "Fold") if mains else "", "a Ask advisor",
                 "w Worktree" if worktree else "", "f Full result" if navigation.get("full_result") else "",
-                "Tab Next tab" if graph else "", "g Graph", "t Tree", "n New main" if managed else "",
+                "Tab Next tab" if tabs else "", "g Graph", "t Tree", "n New main" if managed else "",
                 "v " + ("Collapse" if navigation.get("expanded") else "Expand"), "b Attention", "Esc Back",
                 "Shift-drag Copy" if managed else "", "F6/F7 Main" if managed else "", toggle if managed else "q Quit", "? Hide"]
         lines = [""]
@@ -1766,8 +1771,8 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph):
             if lines[-1] and display_width(lines[-1] + "  " + key) > width:
                 lines.append("")
             lines[-1] += ("  " if lines[-1] else "") + key
-        return lines[:4] + (["Tab badges: W workers  A advisors  ! needs you  M mail  ? open questions  c context left"] if graph else [])
-    tab = navigation.get("tab") if graph and not navigation.get("detail") else None
+        return lines[:4] + (["Tab badges: W workers  A advisors  ! needs you  M mail  ? open questions  c context left"] if tabs else [])
+    tab = navigation.get("tab") if tabs and navigation.get("tab_body_visible", True) and not navigation.get("detail") else None
     contextual = ([move + " Message", "Enter Open", arrows + " Filter"] if tab == "messages"
                   else [move + " Seat", "Enter Open", arrows + " Target"] if tab == "debate" and not navigation.get("debate_empty")
                   else ["Tab Next tab"] if tab == "debate"
@@ -1776,7 +1781,7 @@ def footer_hints(navigation, width, managed, unicode, member, mains, graph):
                   "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
                   "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "" if kind == "pair" else "Enter Show",
                   "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
-                  "Tab Next tab" if graph and not navigation.get("detail") else "",
+                  "Tab Next tab" if tabs and not navigation.get("detail") else "",
                   ("Space Pin" if graph else "Space Fold") if kind == "chat" and (mains > 1 or not graph) else "Space Fold" if kind == "group" else ""]
     # The panel-wide F-keys stay fixed at the end of every board; board keys fill what is left.
     control = navigation.get("control_window", True)

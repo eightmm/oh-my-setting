@@ -2845,6 +2845,8 @@ def tab_event(event, navigation):
     if navigation.get("surface") != "graph" or navigation.get("detail"):
         return False
     if kind == "tab":
+        if not navigation.get("tab_strip_visible", True):
+            return False
         navigation["tab"] = names[(names.index(tab) + 1) % len(names)]
         return True
     hit = next((h for h in navigation.get("hits", []) if kind == "click" and h["y"] == event[2]

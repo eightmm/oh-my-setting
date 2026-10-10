@@ -5362,6 +5362,42 @@ for rows_high in (19, 16):
     shown = render(flow, "codex", 100, rows_high, view="graph", main_attempt="flow-attempt", navigation=nav)
     assert nav["surface"] == "graph" and "box" not in nav and "full_result" not in nav and len(shown.splitlines()) == rows_high, nav
     assert rows_high == 16 or shown.splitlines()[-2].startswith("╭─ [ Detail ]  Plan"), shown
+# Tabs and body actions follow the drawn dock through resize, including help and the tree fallback.
+for managed in (False, True):
+    for keys_help in (False, True):
+        for initial_tab in ("detail", "plan", "debate", "messages", "between"):
+            nav = {"tab": initial_tab, "keys_help": keys_help}
+            for columns, rows_high in ((76, 16), (76, 19), (100, 30), (76, 16), (50, 10)):
+                shown = render(flow, "codex", columns, rows_high, view="graph", main_attempt="flow-attempt",
+                               navigation=nav, managed=managed)
+                strip = [h for h in nav["hits"] if h["action"] == ("tab", "detail")]
+                box = nav.get("box")
+                assert len(shown.splitlines()) <= rows_high and all(display_width(line) <= columns for line in shown.splitlines()), shown
+                assert all(1 <= h["y"] <= len(shown.splitlines()) and 1 <= h["x1"] <= h["x2"] <= columns
+                           for h in nav["hits"]), nav
+                if not keys_help:
+                    assert bool(strip) == (rows_high in (19, 30)), (columns, rows_high, nav, shown)
+                    assert bool(box) == (rows_high == 30), (columns, rows_high, nav, shown)
+                footer = "\n".join(shown.splitlines()[-5:] if keys_help else shown.splitlines()[-1:])
+                if not box:
+                    assert not any(hint in footer for hint in
+                                   ("wheel Scroll", "↑↓ Message", "↑↓ Seat", "←→ Filter", "←→ Target")), shown
+                    assert not tab_event(("scroll", 1, 1, 1), nav), nav
+                if not strip:
+                    assert "Tab Next tab" not in footer, shown
+                    before_tab = nav["tab"]
+                    assert not tab_event(("tab",), nav) and nav["tab"] == before_tab, nav
+                else:
+                    assert tab_event(("click", strip[0]["x1"], strip[0]["y"]), nav) and nav["tab"] == "detail", nav
+                    assert tab_event(("tab",), nav) and nav["tab"] == "plan", nav
+                    # Keep each tab's body hints when a full box fits.
+                    if box and not keys_help:
+                        nav["tab"] = initial_tab
+                        full = render(flow, "codex", columns, rows_high, view="graph", main_attempt="flow-attempt",
+                                      navigation=nav, managed=managed)
+                        expected = {"plan": "wheel Scroll", "messages": "↑↓ Message"}.get(initial_tab)
+                        assert not expected or expected in full.splitlines()[-1], full
+                nav["tab"] = initial_tab
 # People read the board: call exits become words, machine status lines and markdown marks are dropped.
 import room_view as graph_text
 assert graph_text.readable("Call exit=0; parent acceptance pending.\nstop-reason: provider=codex is_error=0\n**Verification:** `ok`", " ") \
