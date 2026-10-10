@@ -24615,6 +24615,12 @@ mv $sibling_parent/pending $sibling_parent/wt && mkdir -p $scratch_parent && pri
   if contains "$result" 'outside the worktree'; then
     fail "a live sibling mid-creation should not be reported as a change: $result"
   fi
+  # A marker claiming pid 0 names no owner (kill -0 0 probes our own process group).
+  local zero_parent="$managed_root/oh-my-setting-scratch.zero"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
+    'case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
+mkdir -p $zero_parent && printf 'kind=oh-my-setting-temp\\npid=0\\nrepo=$project\\nworktree=$zero_parent/wt\\ntemporary=1\\n' > $zero_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $zero_parent/wt HEAD && mv $zero_parent/wt $zero_parent/pending")"
+  [ "${result%%	*}" != 0 ] || fail "a pid-0 marker must not exempt a new worktree: $result"
 }
 
 # The incident: a parent made a scratch worktree with plain `git worktree add`
