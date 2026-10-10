@@ -258,14 +258,32 @@ grep -Fxq base "$race_repo/file.txt" ||
 # destination, create an intent, or apply bytes after the successful admission.
 mkdir -p "$TMP/capture-collision"
 collision_verify="for candidate in '$TMP'/capture-collision/oms-landing-capture-*/*.patch; do [ -f \"\$candidate\" ] || exit 9; printf foreign > '$race_repo/.oms/landing-patches/'\$(basename \"\$candidate\"); done"
-collision_lines="$(wc -l < "$race_repo/.oms/landings.jsonl" | tr -d ' ')"
+collision_lines="$(python3 - "$race_repo/.oms/landings.jsonl" <<'PY'
+import json, sys
+known_capture_events = {"capture-reserved", "capture-terminal", "capture-release-ready", "capture-released"}
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+unknown = [row.get("event") for row in rows
+           if str(row.get("event", "")).startswith("capture-") and row.get("event") not in known_capture_events]
+assert not unknown, unknown
+print(sum(1 for row in rows if row.get("event") == "intent"))
+PY
+)"
 if TMPDIR="$TMP/capture-collision" "$LAND" --repo "$race_repo" \
   --patch "$frozen_approved_patch" --verify "$collision_verify" >"$TMP/collision.out" 2>&1; then
   fail "publication overwrote an existing destination"
 fi
 grep -Fq 'cannot publish admitted captured patch' "$TMP/collision.out" ||
   fail "collision did not exercise publication failure"
-[ "$(wc -l < "$race_repo/.oms/landings.jsonl" | tr -d ' ')" = "$collision_lines" ] ||
+[ "$(python3 - "$race_repo/.oms/landings.jsonl" <<'PY'
+import json, sys
+known_capture_events = {"capture-reserved", "capture-terminal", "capture-release-ready", "capture-released"}
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+unknown = [row.get("event") for row in rows
+           if str(row.get("event", "")).startswith("capture-") and row.get("event") not in known_capture_events]
+assert not unknown, unknown
+print(sum(1 for row in rows if row.get("event") == "intent"))
+PY
+)" = "$collision_lines" ] ||
   fail "failed publication wrote an intent"
 for collision_capture in "$TMP"/capture-collision/oms-landing-capture-*/*.patch; do
   cmp "$frozen_approved_patch" "$collision_capture" || fail "failed publication lost its admission input"
@@ -1025,7 +1043,7 @@ receipt_cas_lease="$("$PLAN" --repo "$receipt_cas_repo" show --id t1 |
 receipt_cas_review_a_sha="$(python3 -c '
 import hashlib,json,sys
 d=json.load(sys.stdin)
-for name in ("state", "updated", "claim_expired", "claim_age_s"):
+for name in ("state", "updated", "claim_expired", "claim_age_s", "project_contract", "task_sha256"):
     d.pop(name, None)
 print(hashlib.sha256(json.dumps(
  d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
@@ -1078,7 +1096,12 @@ PY
   fail "stale fence did not preserve the superseding review receipt"
 python3 - "$receipt_cas_repo/.oms/landings.jsonl" <<'PY' ||
 import json, sys
-events = [json.loads(line)["event"] for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+known_capture_events = {"capture-reserved", "capture-terminal", "capture-release-ready", "capture-released"}
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+unknown = [row.get("event") for row in rows
+           if str(row.get("event", "")).startswith("capture-") and row.get("event") not in known_capture_events]
+assert not unknown, unknown
+events = [row["event"] for row in rows if row.get("event") not in known_capture_events]
 assert events == ["intent", "abandoned"], events
 PY
   fail "stale receipt fence was not closed by an abandoned landing receipt"
@@ -1096,7 +1119,7 @@ import hashlib, json, pathlib, subprocess, sys
 path, patch, repo, lease, receipt_sha, review_path = sys.argv[1:]
 review = json.load(open(review_path, encoding="utf-8"))
 review["patch"] = patch
-for name in ("state", "updated", "claim_expired", "claim_age_s"):
+for name in ("state", "updated", "claim_expired", "claim_age_s", "project_contract", "task_sha256"):
     review.pop(name, None)
 done_receipt_sha = hashlib.sha256(json.dumps(
     review, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -1156,7 +1179,7 @@ import hashlib, json, pathlib, subprocess, sys
 path, patch, repo, lease, receipt_sha, review_path = sys.argv[1:]
 review = json.load(open(review_path, encoding="utf-8"))
 review["patch"] = patch
-for name in ("state", "updated", "claim_expired", "claim_age_s"):
+for name in ("state", "updated", "claim_expired", "claim_age_s", "project_contract", "task_sha256"):
     review.pop(name, None)
 done_receipt_sha = hashlib.sha256(json.dumps(
     review, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -1241,7 +1264,7 @@ review["repair_artifact"] = ""
 
 def receipt(row):
     row = dict(row)
-    for name in ("state", "updated", "claim_expired", "claim_age_s"):
+    for name in ("state", "updated", "claim_expired", "claim_age_s", "project_contract", "task_sha256"):
         row.pop(name, None)
     raw = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -1352,7 +1375,7 @@ receipt_cas_landing_b_sha="$(python3 - \
   "$TMP/plan-receipt-cas-newer-landing-task.json" <<'PY'
 import hashlib, json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
-for name in ("state", "updated", "claim_expired", "claim_age_s"):
+for name in ("state", "updated", "claim_expired", "claim_age_s", "project_contract", "task_sha256"):
     row.pop(name, None)
 raw = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 print(hashlib.sha256(raw.encode()).hexdigest())
@@ -1375,7 +1398,7 @@ review = json.load(open(review_path, encoding="utf-8"))
 
 def receipt(row):
     row = dict(row)
-    for name in ("state", "updated", "claim_expired", "claim_age_s"):
+    for name in ("state", "updated", "claim_expired", "claim_age_s", "project_contract", "task_sha256"):
         row.pop(name, None)
     raw = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -1487,7 +1510,12 @@ set -e
 grep -Fxq base "$fence_repo/file.txt" || fail "failed plan fence still applied the patch"
 python3 - "$fence_repo/.oms/landings.jsonl" <<'PY' ||
 import json, sys
-events = [json.loads(line)["event"] for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+known_capture_events = {"capture-reserved", "capture-terminal", "capture-release-ready", "capture-released"}
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+unknown = [row.get("event") for row in rows
+           if str(row.get("event", "")).startswith("capture-") and row.get("event") not in known_capture_events]
+assert not unknown, unknown
+events = [row["event"] for row in rows if row.get("event") not in known_capture_events]
 assert events == ["intent", "abandoned"], events
 PY
   fail "plan fence failure was not bracketed by a durable intent and terminal receipt"
@@ -1534,6 +1562,11 @@ python3 - "$lineage_swap_repo/.oms/plan/tasks.json" \
 import json, sys
 plan = json.load(open(sys.argv[1], encoding="utf-8"))
 landings = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+known_capture_events = {"capture-reserved", "capture-terminal", "capture-release-ready", "capture-released"}
+unknown = [row.get("event") for row in landings
+           if str(row.get("event", "")).startswith("capture-") and row.get("event") not in known_capture_events]
+assert not unknown, unknown
+landings = [row for row in landings if row.get("event") not in known_capture_events]
 artifacts = [json.loads(line) for line in open(sys.argv[3], encoding="utf-8") if line.strip()]
 assert plan["plan_id"] == sys.argv[5], plan
 assert [row["event"] for row in landings] == ["intent", "complete"], landings
@@ -1564,7 +1597,14 @@ landing_rows = [json.loads(line) for line in landings.read_text(encoding="utf-8"
                 if line.strip()]
 artifact_rows = [json.loads(line) for line in artifacts.read_text(encoding="utf-8").splitlines()
                  if line.strip()]
-landings.write_text(json.dumps(landing_rows[0]) + "\n", encoding="utf-8")
+known_capture_events = {"capture-reserved", "capture-terminal", "capture-release-ready", "capture-released"}
+unknown = [row.get("event") for row in landing_rows
+           if str(row.get("event", "")).startswith("capture-") and row.get("event") not in known_capture_events]
+assert not unknown, unknown
+crash_rows = [row for row in landing_rows if row.get("event") in ("capture-reserved", "intent")]
+intent_rows = [row for row in landing_rows if row.get("event") == "intent"]
+assert len(intent_rows) == 1, intent_rows
+landings.write_text("".join(json.dumps(row) + "\n" for row in crash_rows), encoding="utf-8")
 artifacts.write_text("".join(json.dumps(row) + "\n" for row in artifact_rows
                              if row.get("kind") != "patch-land"), encoding="utf-8")
 PY
@@ -1574,6 +1614,11 @@ python3 - "$lineage_swap_repo/.oms/landings.jsonl" \
   "$lineage_swap_repo/.oms/artifacts/index.jsonl" "$lineage_old_plan_id" <<'PY' ||
 import json, sys
 landings = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+known_capture_events = {"capture-reserved", "capture-terminal", "capture-release-ready", "capture-released"}
+unknown = [row.get("event") for row in landings
+           if str(row.get("event", "")).startswith("capture-") and row.get("event") not in known_capture_events]
+assert not unknown, unknown
+landings = [row for row in landings if row.get("event") not in known_capture_events]
 artifacts = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
 assert [row["event"] for row in landings] == ["intent", "complete"], landings
 assert all(row.get("plan_id") == sys.argv[3] for row in landings), landings
@@ -1645,7 +1690,12 @@ grep -Fxq 'contract reviewed' "$contract_repo/file.txt" ||
   fail "a contract-bound landing applied its patch but could not finish the task"
 python3 - "$contract_repo/.oms/landings.jsonl" <<'PY' ||
 import json, sys
-events = [json.loads(line)["event"] for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+known_capture_events = {"capture-reserved", "capture-terminal", "capture-release-ready", "capture-released"}
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+unknown = [row.get("event") for row in rows
+           if str(row.get("event", "")).startswith("capture-") and row.get("event") not in known_capture_events]
+assert not unknown, unknown
+events = [row["event"] for row in rows if row.get("event") not in known_capture_events]
 assert events == ["intent", "complete"], events
 PY
   fail "contract-bound landing did not close its durable receipt"
