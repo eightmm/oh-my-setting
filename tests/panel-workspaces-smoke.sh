@@ -209,14 +209,30 @@ try:
                       'native list-keys display rejected for ' + home)
                 check(not any(terminals._same_tmux_tokens(actual, ['bind-key', '-T', table, key, *command[:-1], command[-1] + ' ']) for actual in bound),
                       'native list-keys display too loose for ' + home)
-        # Retired OMS window keys are removed, while an arbitrary user root key survives.
+        # Retired OMS keys stay in place without an atomic compare-and-unbind.
         skip = " ; if-shell -F '#{==:#{@oms_panel_native_pane},}' next-window"
         tmux('bind-key', '-n', 'F6', 'if-shell', '-F', '#{@oms_panel_repo}', 'previous-window', 'send-keys F6')
         tmux('bind-key', '-n', 'F7', 'if-shell', '-F', '#{@oms_panel_repo}', 'next-window' + skip * 2, 'send-keys F7')
+        legacy_keys = {key: tmux('list-keys', '-T', 'root', key) for key in ('F6', 'F7')}
         with patch.object(terminal_panel, 'tmux_command', side_effect=lambda *args: [tmux_bin, '-S', socket, *args]):
             terminal_panel.bind_main_keys()
-        check(not tmux('list-keys', '-T', 'root', 'F6') and not tmux('list-keys', '-T', 'root', 'F7'),
-              'retired OMS window bindings survived')
+        check(all(tmux('list-keys', '-T', 'root', key) == binding for key, binding in legacy_keys.items()),
+              'legacy bindings changed without an atomic ownership guard')
+        real_key_run = subprocess.run
+        keys_reloaded = []
+        def reload_keys(argv, **kwargs):
+            result = real_key_run(argv, **kwargs)
+            if 'list-keys' in argv and not keys_reloaded:
+                for key in legacy_keys:
+                    real_key_run([tmux_bin, '-S', socket, 'bind-key', '-n', key, 'display-message', 'user'], check=True)
+                keys_reloaded.append(True)
+            return result
+        with patch.object(terminal_panel, 'tmux_command', side_effect=lambda *args: [tmux_bin, '-S', socket, *args]), \
+             patch.object(terminal_panel.subprocess, 'run', side_effect=reload_keys):
+            terminal_panel.bind_main_keys()
+        check(all('display-message user' in tmux('list-keys', '-T', 'root', key) for key in legacy_keys),
+              'a reloaded user binding was removed')
+        tmux('unbind-key', '-T', 'root', 'F7')
         # F6 is an arbitrary fixture binding, not a key installed by bind_main_keys.
         tmux('bind-key', '-n', 'F6', 'if-shell', '-F', '#{@oms_panel_repo}', 'run-shell "touch %s"' % marker, 'send-keys F6')
         user_f6 = tmux('list-keys', '-T', 'root', 'F6')

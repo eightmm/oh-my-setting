@@ -2304,6 +2304,7 @@ MAIN_KEYS = (("F9", "select-pane -t :.+"), ("F5", "select-window -t :=control"),
 
 
 def _legacy_main_key(binding, key, command):
+    """Recognize legacy OMS commands; a match alone cannot authorize an unbind."""
     try:
         tokens = shlex.split(binding)
         if (len(tokens) != 9 or tokens[:7] != ["bind-key", "-T", "root", key, "if-shell", "-F", "#{@oms_panel_repo}"]
@@ -2323,13 +2324,10 @@ def bind_main_keys():
     tmux root bindings are server-wide, so a key the user already bound is left alone.
     """
     quiet = dict(capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
-    for key, command in (("F6", "previous-window"), ("F7", "next-window")):
-        try:
-            found = subprocess.run(tmux_command("list-keys", "-T", "root", key), **quiet)
-            if found.returncode == 0 and _legacy_main_key(found.stdout, key, command):
-                subprocess.run(tmux_command("unbind-key", "-T", "root", key), **quiet)
-        except (OSError, subprocess.SubprocessError):
-            continue
+    # tmux has no compare-and-unbind operation. A shell-backed if-shell pauses only
+    # its client queue, so even an exact legacy match can become a user binding
+    # before unbind-key runs. Leave F6/F7 alone until removal can be conditional
+    # on the current binding within the server; another inspection is not a guard.
     try:
         for key, command in MAIN_KEYS:
             found = subprocess.run(tmux_command("list-keys", "-T", "root", key), **quiet)

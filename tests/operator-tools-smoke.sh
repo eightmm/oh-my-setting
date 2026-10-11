@@ -7012,38 +7012,65 @@ for state in ("failed", "timed_out", "abandoned", "orphaned", "review", "blocked
     assert any(i["action"] == ("result", "builder") for i in inbox_items(failure)) == (state in {"review", "waiting_approval"}), state
     member = next(m for m in graph_text.nodes(failure) if m["participant"] == "builder")
     assert (graph_text.call_classifier(failure)(member) == "past") == (state not in {"review", "blocked", "waiting_approval"}), state
-# Root key cleanup removes only the retired OMS window commands, even when inspection fails.
+# Exact legacy recognition is insufficient authority for a separate unbind.
 legacy_f6 = "bind-key -T root F6 if-shell -F '#{@oms_panel_repo}' previous-window 'send-keys F6'\n"
 legacy_f7 = "bind-key -T root F7 if-shell -F '#{@oms_panel_repo}' " + shlex.quote(
     "next-window" + " ; if-shell -F '#{==:#{@oms_panel_native_pane},}' next-window" * 2) + " 'send-keys F7'\n"
-for f6_binding, f7_binding, inspect_error, removed in (
+for f6_binding, f7_binding, inspect_error, matched in (
         (legacy_f6, legacy_f7, None, {"F6", "F7"}),
         ("bind-key -T root F6 next-window\n", legacy_f7, None, {"F7"}),
         (legacy_f6.replace("previous-window", "run-shell 'echo previous-window'"), "", None, set()),
         (legacy_f6.replace("previous-window", "'previous-window ; display-message user'"), "", None, set()),
         (legacy_f6.replace("send-keys F6", "display-message user"), "", None, set()),
         ("bind-key -T root F6 if-shell -F 'unterminated", "", None, set()),
-        (legacy_f6, legacy_f7, 1, {"F7"}),
-        (legacy_f6, legacy_f7, OSError("unavailable"), {"F7"}),
-        (legacy_f6, legacy_f7, subprocess.TimeoutExpired("tmux", 3), {"F7"})):
-    removed_keys = set()
+        (legacy_f6, legacy_f7, 1, {"F6", "F7"}),
+        (legacy_f6, legacy_f7, OSError("unavailable"), {"F6", "F7"}),
+        (legacy_f6, legacy_f7, subprocess.TimeoutExpired("tmux", 3), {"F6", "F7"})):
+    assert {key for key, binding, command in (("F6", f6_binding, "previous-window"),
+                                              ("F7", f7_binding, "next-window"))
+            if panel._legacy_main_key(binding, key, command)} == matched
+    bindings = {"F6": f6_binding, "F7": f7_binding}
     def key_run(argv, **kwargs):
         if argv[1] == "list-keys":
             key = argv[-1]
-            if key == "F6" and inspect_error is not None:
+            if inspect_error is not None:
                 if isinstance(inspect_error, Exception):
                     raise inspect_error
                 return subprocess.CompletedProcess(argv, inspect_error, f6_binding, "")
             binding = {"F6": f6_binding, "F7": f7_binding}.get(key, "")
             return subprocess.CompletedProcess(argv, 0 if binding else 1, binding, "")
-        if argv[1] == "unbind-key":
-            assert argv[2:4] == ["-T", "root"], argv
-            removed_keys.add(argv[-1])
+        assert argv[1] != "unbind-key", argv
+        if argv[1] == "bind-key":
+            assert argv[3] not in bindings, argv
         return subprocess.CompletedProcess(argv, 0, "", "")
     with patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
             patch.object(panel.subprocess, "run", side_effect=key_run):
         panel.bind_main_keys()
-    assert removed_keys == removed, (f6_binding, inspect_error, removed_keys, removed)
+    assert bindings == {"F6": f6_binding, "F7": f7_binding}
+
+# A config reload can replace a legacy binding after the first snapshot. No later
+# cleanup may remove the replacement, even if inspection returns the old command.
+bindings = {"F6": legacy_f6, "F7": legacy_f7}
+replacement_keys = {key: "bind-key -T root " + key + " display-message user\n" for key in bindings}
+keys_reloaded = []
+def reloaded_key_run(argv, **kwargs):
+    snapshot = dict(bindings)
+    if not keys_reloaded:
+        bindings.update(replacement_keys)
+        keys_reloaded.append(True)
+    if argv[1] == "list-keys":
+        binding = snapshot.get(argv[-1], "")
+        return subprocess.CompletedProcess(argv, 0 if binding else 1, binding, "")
+    if argv[1] == "unbind-key":
+        bindings.pop(argv[-1], None)
+    elif argv[1] == "bind-key":
+        assert argv[3] not in replacement_keys, argv
+    return subprocess.CompletedProcess(argv, 0, "", "")
+with patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
+        patch.object(panel.subprocess, "run", side_effect=reloaded_key_run):
+    panel.bind_main_keys()
+assert bindings == replacement_keys, bindings
+
 # An attention-marked window name keeps the geometry fields and the split text apart.
 with patch.object(panel, "tmux_command", side_effect=lambda *a: ["x"]), patch.object(panel.subprocess, "run",
         return_value=subprocess.CompletedProcess([], 0, "1 0 2 100 50 100 25\t! codex\ttop:30\n", "")):
