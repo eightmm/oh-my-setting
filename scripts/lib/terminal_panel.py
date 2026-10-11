@@ -1181,7 +1181,16 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
         member = "call-" + uuid.uuid4().hex[:16]
         room.join(repo, room_id, member, route["provider"], role, route["model"], label or purpose,
                   owns=scopes, parent=caller)
-        room.send(repo, room_id, caller, member, "Assigned: " + (label or purpose), "handoff")
+        delivery_state = room.project(room.records(repo, room_id))
+        if delivery_state["closed"]:
+            raise ValueError("room is closed")
+        room.participant(delivery_state, caller)
+        room.participant(delivery_state, member)
+        if room.message_capacity_reached(delivery_state):
+            print("OMS room assignment delivery unavailable: room message limit reached; "
+                  "keeping the validated room and main.", file=sys.stderr)
+        else:
+            room.send(repo, room_id, caller, member, "Assigned: " + (label or purpose), "handoff")
         env.update(OMS_ROOM_ID=room_id, OMS_ROOM_PARTICIPANT=member, OMS_ROOM_REPO=str(repo),
                    OMS_ROOM_ADMITTED_PARTICIPANT=member)
     argv[argv.index("--repo") + 1] = str(execution)

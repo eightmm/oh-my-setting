@@ -22,9 +22,9 @@ ENTRY = ROOT / "scripts" / "oms"
 ROLES = {"main", "worker", "advisor", "reviewer", "researcher"}
 KINDS = {"question", "answer", "note", "decision", "handoff", "status"}
 MAX_PARTICIPANTS = 32
-# Dispatched calls join with a parent and never free their slot; the message cap
-# (two messages per call) bounds them as well.
+# Call slots stay bounded even when a full mailbox cannot deliver notifications.
 MAX_CALLS = 480
+MAX_MESSAGES = 1024
 MAX_ROOMS = 64
 MAX_SCAN_ENTRIES = 1024
 MAX_SCAN_BYTES = 8 * 1024 * 1024
@@ -217,6 +217,10 @@ def participant(state, value):
     return found
 
 
+def message_capacity_reached(state):
+    return len(state["messages"]) >= MAX_MESSAGES
+
+
 def overlaps(a, b):
     """Declared scopes overlap when equal or one is a path-component prefix of the other; globs compare literally."""
     return a == b or "." in (a, b) or b.startswith(a + "/") or a.startswith(b + "/")
@@ -396,7 +400,7 @@ def validate_event(rows, event, text):
             # result-<call> ids are reserved for a call's own handoff to its parent, which settles it on the board.
             raise ValueError("result-<participant> ids are reserved for that participant's handoff to its parent")
         old = next((m for m in state["messages"] if m["id"] == event["id"]), None)
-        if not old and len(state["messages"]) >= 1024:
+        if not old and message_capacity_reached(state):
             raise ValueError("room message limit reached; start a new bounded room")
         if old:
             if all(old.get(k) == v for k, v in event.items()) and old["text"] == text:

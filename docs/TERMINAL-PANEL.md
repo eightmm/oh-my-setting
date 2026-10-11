@@ -144,6 +144,12 @@ second native main from the menu or with `--launch` keeps the panel's recorded
 room while it is open and has headroom; a full or closed room makes the next
 main start a new room, and an explicit `--room ID` or `o Rooms` choice wins.
 A bare control window shows the panel's recorded room.
+Role dispatch keeps its validated main, room, model and plan binding when the
+room's message limit prevents the informational assignment notice. It reports
+that delivery is unavailable and still runs the call; ordinary room sends keep
+their limit. Result delivery can also be unavailable, with evidence retained in
+the indexed call result. Closed rooms, invalid membership and unrelated send
+failures still refuse dispatch.
 The `o Rooms` menu selects or creates a task-scoped room. It does not enroll
 other sessions merely because they share a repository. Auto uses a connected
 vertical tree for a selected room at 28 columns and 12 rows or larger. All

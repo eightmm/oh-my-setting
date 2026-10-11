@@ -3875,6 +3875,86 @@ def exercise_observed_worker_leases():
     dispatch_argv = captured_dispatch["argv"]
     assert "--observe-plan-binding" in dispatch_argv, dispatch_argv
     assert json.loads(dispatch_argv[dispatch_argv.index("--observe-plan-binding") + 1]) == argv_binding._asdict()
+    # A full mailbox must not replace the validated route with a different room or owner.
+    import io
+    from contextlib import redirect_stderr
+    capacity_route = panel.selected_route("claude", "worker", "light", "auto", "read", "investigate")
+    capacity_env = {"OMS_ROOM_ID": argv_binding.room_id,
+                    "OMS_ROOM_PARTICIPANT": argv_binding.owner_participant,
+                    "OMS_PANEL_MAIN_ATTEMPT": argv_binding.owner_attempt}
+    capacity_args = (project, "claude", "worker", "light", "auto", "read", "investigate",
+                     "Capacity fixture", None, None, argv_binding.task_id, False,
+                     "Capacity call", capacity_route, None, None, None)
+    for scenario in ("normal", "full", "full-write", "closed", "foreign-main", "lost-caller", "lost-child", "send-error"):
+        writing = scenario == "full-write"
+        scopes = ["value.txt"] if writing else None
+        this_args = capacity_args if not writing else (
+            project, "claude", "worker", "light", "auto", "write", "implement", None,
+            brief, "git diff --check", argv_binding.task_id, False, "Capacity call",
+            panel.selected_route("claude", "worker", "light", "auto", "write", "implement"), None, None, scopes)
+        state = {"messages": [{}] * (1 if scenario in {"normal", "send-error"} else 1024),
+                 "closed": scenario == "closed", "participants": [{
+                     "participant": argv_binding.owner_participant, "role": "main",
+                     "provider": "claude", "joined": True}]}
+        main_record = {"tool": "panel-main", "provider": "claude", "terminal": False,
+                       "refs": {"panel_room_participant": argv_binding.owner_participant,
+                                "panel_room_id": "foreign-room" if scenario == "foreign-main" else argv_binding.room_id}}
+        notices, children = [], []
+        def enroll(repo, room_id, member, provider, role, model, label, owns, parent):
+            children.append((room_id, member, provider, role, model, owns, parent))
+            state["participants"].append({"participant": member, "provider": provider,
+                                           "role": role, "joined": True})
+            if scenario in {"lost-caller", "lost-child"}:
+                state["participants"].pop(0 if scenario == "lost-caller" else -1)
+        def notice(repo, room_id, sender, recipient, text, kind, **kwargs):
+            if scenario == "send-error":
+                raise ValueError("unrelated room send failure")
+            if len(state["messages"]) >= 1024:
+                raise ValueError("room message limit reached; start a new bounded room")
+            notices.append((sender, recipient, text))
+        errors = io.StringIO()
+        with patch.object(panel.shutil, "which", return_value="fixture-codex"), \
+                patch.object(panel, "moved_main", return_value=None), \
+                patch.object(panel, "child_environment", side_effect=lambda *args: dict(capacity_env)), \
+                patch.object(panel, "native_repository", return_value=project), \
+                patch.object(panel, "events", return_value=json.dumps(main_record)), \
+                patch.object(panel, "plan_link", return_value=argv_binding) as observed_plan, \
+                patch.object(room, "records", return_value=[]), \
+                patch.object(room, "project", return_value=state), \
+                patch.object(room, "join", side_effect=enroll), \
+                patch.object(room, "send", side_effect=notice), \
+                patch.object(panel, "results", return_value={"rows": []}), \
+                patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+                patch.object(panel.subprocess, "call", return_value=0) as provider_call, redirect_stderr(errors):
+            if scenario not in {"normal", "full", "full-write"}:
+                try:
+                    panel.run_dispatch(*capacity_args)
+                except ValueError as error:
+                    expected = {"closed": "room is closed", "foreign-main": "identities disagree",
+                                "lost-caller": "participant has not joined this room",
+                                "lost-child": "participant has not joined this room",
+                                "send-error": "unrelated room send failure"}[scenario]
+                    assert expected in str(error), (scenario, error)
+                else:
+                    raise AssertionError("invalid capacity dispatch was accepted: " + scenario)
+                provider_call.assert_not_called()
+                continue
+            assert panel.run_dispatch(*this_args) == 0, scenario
+            provider_call.assert_called_once()
+            invoked, child_env = provider_call.call_args.args[0], provider_call.call_args.kwargs["env"]
+            assert json.loads(invoked[invoked.index("--observe-plan-binding") + 1]) == argv_binding._asdict()
+            assert capacity_route["model"] in " ".join(invoked), invoked
+            assert child_env["OMS_ROOM_ID"] == argv_binding.room_id
+            assert child_env["OMS_PANEL_MAIN_ATTEMPT"] == argv_binding.owner_attempt
+            assert child_env["OMS_ROOM_PARTICIPANT"] == children[0][1]
+            assert children[0][0] == argv_binding.room_id and children[0][-1] == argv_binding.owner_participant
+            assert children[0][2:6] == (capacity_route["provider"], "worker", capacity_route["model"], scopes)
+            assert child_env["OMS_PANEL_PURPOSE"] == ("implement" if writing else "investigate")
+            if scenario in {"full", "full-write"}:
+                assert not notices and "assignment delivery unavailable" in errors.getvalue()
+                assert "result delivery unavailable" in errors.getvalue()
+            else:
+                assert notices[0][2] == "Assigned: Capacity call" and not errors.getvalue()
     test_room = room.create(project, "observed-worker-room", "Worker lease producer")
     mains = {}
     for provider in panel.PROVIDERS:
