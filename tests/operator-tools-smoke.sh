@@ -1187,6 +1187,7 @@ fi
 [ "$(cat "$TMP/board-runs")" = 1 ] || fail "outside tmux the board must not loop"
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT" "$TMP" <<'PY' || fail "terminal panel regression failed"
+import hashlib
 import importlib.util
 import json
 import os
