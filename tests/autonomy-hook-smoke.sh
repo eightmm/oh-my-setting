@@ -1263,6 +1263,104 @@ with patch.dict(os.environ, env), patch.object(hook_state.subprocess, "run", sid
     with patch.object(hook_state.time, "time", return_value=117):
         hook_state.record_panel_activity(dict(payload, hook_event_name="UserPromptSubmit"))
     assert path.is_symlink() and target.read_text() == "private"
+
+# No existing check exercised a Pi extension; reuse the panel-activity fixture.
+import shutil
+import subprocess
+from types import SimpleNamespace
+if not shutil.which("node"):
+    print("autonomy-hook-smoke: skip Pi extension check (node absent)")
+else:
+    import room
+    from codex_harness import cli_command, harness_env
+    repo = Path(sys.argv[2]).resolve() / "pi-panel-activity"
+    repo.mkdir()
+    room.create(repo, "pi-room", "Pi hook fixture")
+    room.join(repo, "pi-room", "pi-main", "codex")
+    room.join(repo, "pi-room", "peer", "claude")
+    room.send(repo, "pi-room", "peer", "pi-main", "Mail before Pi starts", message_id="pi-mail")
+    required = {"OMS_PANEL_MAIN_ATTEMPT": "pi-attempt", "OMS_PANEL_SESSION": "oms-pi-fixture",
+                "OMS_PANEL_OWNER": "codex", "OMS_ROOM_ID": "pi-room", "OMS_ROOM_PARTICIPANT": "pi-main",
+                "OMS_ROOM_REPO": str(repo)}
+    with patch.dict(os.environ, required):
+        child_env = harness_env("pi", SimpleNamespace(url="http://fixture.invalid", capability="fixture"), "fixture-model", 200000)
+    assert all(child_env.get(k) == v for k, v in required.items()), child_env.keys()
+    extension = str(Path(sys.argv[1]).resolve() / "pi-oms-extension.mjs")
+    assert extension in cli_command("pi", "fixture-model", [])
+    child_env.update(OMS_AUTO_TASK="1", OMS_LIVE_COLLAB="1", OMS_HOOK_PAYLOAD='{"prompt":"inherited payload"}')
+    subprocess.run(["node", "--input-type=module", "-", extension, str(repo)], env=child_env, check=True,
+                   timeout=30, input=r'''
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+const [extension, repo] = process.argv.slice(2);
+const { default: register } = await import(pathToFileURL(extension));
+const handlers = new Map();
+const pi = { on: (event, handler) => handlers.set(event, handler) };
+for (const overrides of [{ OMS_PANEL_MAIN_ATTEMPT: "" }, { OMS_HARNESS_CHILD: "1" }]) {
+  const original = { ...process.env };
+  Object.assign(process.env, overrides);
+  register(pi);
+  assert.equal(handlers.size, 0);
+  process.env = original;
+}
+register(pi);
+assert.deepEqual([...handlers.keys()], ["before_agent_start", "tool_execution_end", "agent_end"]);
+const ctx = { cwd: repo };
+const activity = join(repo, ".oms/hooks/panel-activity/pi-main.json");
+const row = () => JSON.parse(readFileSync(activity, "utf8"));
+const prompt = "PI PRIVATE PROMPT MUST NOT PERSIST";
+const first = await handlers.get("before_agent_start")({ prompt }, ctx);
+assert.equal(row().state, "busy");
+assert.equal(first.message.customType, "oms-room");
+assert.equal(first.message.display, false);
+assert.match(first.message.content, /Mail before Pi starts/);
+assert.match(first.message.content, /oms room ack/);
+assert.equal("systemPrompt" in first, false);
+assert.ok(Buffer.byteLength(first.message.content) <= 16384);
+const send = `import sys; sys.path.insert(0, sys.argv[1]); import room; from pathlib import Path; room.send(Path(sys.argv[2]), "pi-room", "peer", "pi-main", "Mail after a Pi tool", message_id="pi-tool-mail")`;
+execFileSync("python3", ["-c", send, join(extension, ".."), repo], { stdio: "ignore" });
+// Force a heartbeat beyond the Python throttle without sleeping ten seconds.
+writeFileSync(activity, JSON.stringify({ ...row(), updated_at: 0 }));
+assert.equal(handlers.get("tool_execution_end")({ toolName: "read", result: prompt, args: prompt }, ctx), undefined);
+const deadline = Date.now() + 5000;
+while (row().updated_at === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+assert.ok(row().updated_at > 0);
+assert.equal(row().state, "busy");
+const second = await handlers.get("before_agent_start")({ prompt }, ctx);
+assert.match(second.message.content, /Mail after a Pi tool/);
+// A reloaded extension keeps the enrolled receiver and still gets mail.
+const reloaded = new Map();
+register({ on: (event, handler) => reloaded.set(event, handler) });
+execFileSync("python3", ["-c", send.replace(/Mail after a Pi tool/, "Mail after reload").replace(/pi-tool-mail/, "pi-reload-mail"), join(extension, ".."), repo], { stdio: "ignore" });
+assert.match((await reloaded.get("before_agent_start")({ prompt }, ctx)).message.content, /Mail after reload/);
+// Stop must finish after an outstanding fire-and-forget heartbeat.
+handlers.get("tool_execution_end")({ toolName: "read", result: prompt }, ctx);
+await handlers.get("agent_end")({ messages: [prompt] }, ctx);
+assert.equal(row().state, "idle");
+const before = readFileSync(activity, "utf8");
+process.env.OMS_HARNESS_CHILD = "1";
+assert.equal(await handlers.get("before_agent_start")({ prompt }, ctx), undefined);
+handlers.get("tool_execution_end")({ toolName: "read" }, ctx);
+await handlers.get("agent_end")({}, ctx);
+assert.equal(readFileSync(activity, "utf8"), before);
+delete process.env.OMS_HARNESS_CHILD;
+const scan = path => {
+  for (const item of readdirSync(path, { withFileTypes: true })) {
+    const child = join(path, item.name);
+    if (item.isDirectory()) scan(child);
+    else assert.ok(!readFileSync(child, "utf8").includes(prompt), child);
+  }
+};
+scan(join(repo, ".oms"));
+// Missing Python is fail-open and does not inject an empty message.
+process.env.PATH = "";
+assert.equal(await handlers.get("before_agent_start")({ prompt }, ctx), undefined);
+await handlers.get("agent_end")({}, ctx);
+console.log("autonomy-hook-smoke: Pi extension activity/mail/env check ok");
+''', text=True)
 PYTEST
 }
 
