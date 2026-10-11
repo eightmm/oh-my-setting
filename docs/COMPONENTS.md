@@ -422,8 +422,8 @@ explicit session IDs, and connects either owner to the same consult/delegate/
 review paths. Optional installed tmux keeps native conversations beside shared
 status; the portable inline menu works without it. Provider workers do not gain
 owner or recursive delegation authority. The panel adds an explicit role policy:
-Sol/Opus mains, Luna light workers, Sonnet routine implementation or explanation,
-and Astra/Fable advisors. The native main judges the workload and dispatches
+Sol/Opus mains, Haiku/Luna light research, Sonnet/Luna routine implementation or
+explanation, and Astra/Fable advisors and reviewers. The native main judges the workload and dispatches
 through existing front doors. Separate advisor/worker sections show recorded
 model, task, authority and execution location, bound to the native main's
 lifecycle attempt. Generic provider defaults stay separate from this policy.

@@ -727,7 +727,7 @@ does not switch providers for usage.
 | Tier | Candidates in fallback order |
 | --- | --- |
 | light | `claude-haiku-5-5` low, `gpt-6-luna` low |
-| routine | `claude-sonnet-5-5` medium, `gpt-6.1-sol` medium |
+| routine | `claude-sonnet-5-5` medium, `gpt-6-luna` medium |
 | deep | `claude-opus-5-5` high, `gpt-6.1-sol` high |
 | frontier | `claude-fable-5-1` high, `gpt-6-astra` high |
 
@@ -737,8 +737,8 @@ does not switch providers for usage.
 | `worker`, `builder`, `refactorer`, `documenter` | routine | Codex | read or write | `peer-delegate --role` (`analysis-worker` / `implementation-worker` for `worker`) |
 | `release-engineer` | routine | Codex | read | `peer-delegate --role release-engineer` |
 | `integrator`, `performance-engineer` | deep | Codex | read or write | `peer-delegate --role` |
-| `architect`, `critic`, `verifier`, `security-auditor` | deep | Claude | read | `peer-delegate --role --read-only` |
-| `reviewer` | deep | Claude | read | `peer-review --gate --verify` |
+| `architect`, `critic`, `verifier`, `security-auditor` | frontier | Claude | read | `peer-delegate --role --read-only` |
+| `reviewer` | frontier | Claude | read | `peer-review --gate --verify` |
 | `advisor` | frontier | Claude | read | `advise` |
 
 `--workload light|routine|deep|frontier` overrides the tier for one dispatch and
@@ -799,7 +799,7 @@ oms panel --repo . --dispatch architect --owner claude \
   --label 'Structure the parser' --prompt 'Compare these bounded design options.'
 oms panel --repo . --dispatch security-auditor --owner claude \
   --prompt 'Audit the install script change for privilege and secret handling.'
-oms panel --repo . --dispatch reviewer --owner claude --workload frontier \
+oms panel --repo . --dispatch reviewer --owner claude --workload deep \
   --prompt 'Review the changed parser.' --verify 'bash tests/affected.sh'
 oms panel --repo . --room team --dispatch advisor --owner claude --main opus-main \
   --prompt 'Advise on the parser plan.'
@@ -1125,7 +1125,7 @@ records remain unobserved.
 | 5 Explain | Read-only worker; optional tier, else routine |
 | 6 Implement | Optional tier; scoped brief and verifier required |
 | a Advisor | Optional tier, else frontier; read-only |
-| 7 Review | Optional tier, else deep; mandatory review verifier |
+| 7 Review | Optional tier, else frontier; mandatory review verifier |
 | c Council | Sol, Opus, Astra and Fable discussion; four seats, two provider families |
 | r Results | Numbered result list; choose a number to read summaries, evidence and model answers |
 | f Finalize | Record owner outcome, summary and evidence; request app delivery |

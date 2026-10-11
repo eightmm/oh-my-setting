@@ -2585,8 +2585,8 @@ for role in ("worker", "builder", "refactorer", "documenter", "performance-engin
         assert allocate(owner, role=role, installed=both)["provider"] == "codex"
 assert allocate("claude", role="advisor", installed=both)["model"] == "claude-fable-5-1"
 assert allocate("claude", role="advisor", installed={"codex"})["model"] == "gpt-6-astra"
-assert allocate("claude", role="verifier", installed={"claude"})["model"] == "claude-opus-5-5"
-assert allocate("claude", role="architect", installed=both)["model"] == "claude-opus-5-5"
+assert allocate("claude", role="verifier", installed={"claude"})["model"] == "claude-fable-5-1"
+assert allocate("claude", role="architect", installed=both)["model"] == "claude-fable-5-1"
 for role in ("reviewer", "verifier", "security-auditor", "critic"):
     assert allocate("claude", role=role, installed=both)["provider"] == "codex"
     assert allocate("codex", role=role, installed=both)["provider"] == "claude"
@@ -2657,7 +2657,7 @@ for markers, expected in (({}, "codex"), ({"CODEX_SANDBOX": "1"}, "codex"),
         assert panel.main(["--repo", str(project), "--council", "--task-id", "detected-council",
                            "--label", "Inspect source", "--prompt", "Inspect source.", "--dry-run"]) == 0
         assert detected.call_args.args[1] == expected
-for target, model, effort in (("codex", "gpt-6.1-sol", "medium"), ("claude", "claude-sonnet-5-5", "medium")):
+for target, model, effort in (("codex", "gpt-6-luna", "medium"), ("claude", "claude-sonnet-5-5", "medium")):
     request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "worker",
                "--to", target, "--prompt", "Inspect source.", "--dry-run"]
     planned = json.loads(call(request))
@@ -2671,8 +2671,9 @@ for target in ("grok", "muse"):
                               env=environment, capture_output=True, text=True)
     assert rejected.returncode != 0 and "requires an explicit valid --model" in rejected.stderr
 for role, kind, tier in (("builder", "worker", "routine"), ("integrator", "worker", "deep"),
-                         ("release-engineer", "worker", "routine"), ("critic", "advisor", "deep"),
-                         ("verifier", "reviewer", "deep"), ("researcher", "researcher", "light")):
+                         ("release-engineer", "worker", "routine"), ("critic", "advisor", "frontier"),
+                         ("verifier", "reviewer", "frontier"), ("reviewer", "reviewer", "frontier"),
+                         ("researcher", "researcher", "light")):
     allocated = allocate("claude", role=role, installed=both)
     assert (allocated["kind"], allocated["workload"]) == (kind, tier), allocated
 for bad in ({"role": "verifier", "access": "write"}, {"role": "release-engineer", "access": "write"},
@@ -2961,13 +2962,13 @@ for owner in panel.PROVIDERS:
                                "start", "--provider", owner, "--tool", "panel-main", "--ref", "panel_role=main",
                                "--then", "starting", "--then", "working"]).strip()
 cases = [("codex", "worker", "light", "read", "explain", "gpt-6-luna"),
-         ("codex", "worker", None, "read", "explain", "gpt-6.1-sol"),
+         ("codex", "worker", None, "read", "explain", "gpt-6-luna"),
          ("codex", "worker", "deep", "read", "investigate", "gpt-6.1-sol"),
-         ("claude", "builder", None, "write", None, "gpt-6.1-sol"),
+         ("claude", "builder", None, "write", None, "gpt-6-luna"),
          ("claude", "advisor", None, "read", None, "claude-fable-5-1"),
          ("codex", "advisor", "deep", "read", None, "claude-opus-5-5"),
-         ("claude", "reviewer", None, "read", None, "gpt-6.1-sol"),
-         ("claude", "security-auditor", None, "read", None, "gpt-6.1-sol"),
+         ("claude", "reviewer", None, "read", None, "gpt-6-astra"),
+         ("claude", "security-auditor", None, "read", None, "gpt-6-astra"),
          ("codex", "researcher", None, "read", None, "claude-haiku-5-5"),
          ("claude", "researcher", None, "read", None, "claude-haiku-5-5")]
 for index, (owner, role, workload, access, purpose, expected) in enumerate(cases):
@@ -3045,7 +3046,7 @@ with patch.object(panel, "provider_catalog", return_value=[codex_only]):
     assert panel.selected_route("codex", "worker", "light", "read", "explain")["model"] == "gpt-6-luna"
     assert panel.selected_route("codex", "reviewer", None, "read", None)["provider"] == "codex"
     explicit = panel.selected_route("claude", "worker", None, "read", None, "codex")
-    assert explicit["provider"] == "codex" and explicit["model"] == "gpt-6.2-sol" and explicit["effort"] == "medium"
+    assert explicit["provider"] == "codex" and explicit["model"] == "gpt-6-luna" and explicit["effort"] == "medium"
 recorded = {"codex": {"weekly_used": 90}, "claude": {"weekly_used": None}}
 claude_candidate = {"provider": "claude", "binary": "claude", "installed": True, "models": []}
 with patch.object(panel, "provider_catalog", return_value=[codex_only, claude_candidate]), \
@@ -5059,9 +5060,9 @@ def exercise_observed_worker_leases():
     primary_sha = subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD"], text=True).strip()
     assert source_sha != primary_sha
     print("scratch source HEAD:", source_sha, "canonical HEAD:", primary_sha)
-    scenarios = [("codex", "routine", "codex", "gpt-6.1-sol", "medium", "write", True),
+    scenarios = [("codex", "routine", "codex", "gpt-6-luna", "medium", "write", True),
                  ("claude", "light", "codex", "gpt-6-luna", "low", "write", True),
-                 ("codex", "routine", "codex", "gpt-6.1-sol", "medium", "write", False),
+                 ("codex", "routine", "codex", "gpt-6-luna", "medium", "write", False),
                  ("claude", "light", "codex", "gpt-6-luna", "low", "read", True),
                  ("codex", None, "codex", "gpt-6-luna", "low", "read", True, "researcher")]
     for number, scenario in enumerate(scenarios):
