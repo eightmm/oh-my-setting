@@ -511,6 +511,35 @@ def outcomes(repo, task_ids, _shared=False, _tick=None):
     return found
 
 
+def pending_admissions(repo, task_ids, _tick=None):
+    """Recorded patches without admission; capped evidence stays conservatively pending.
+
+    This is an inbox hint, not verified patch or acceptance evidence. No artifact
+    bytes are read. At the latest-300-attempt/1000-event boundary, an absent
+    patch may have fallen out of coverage, so absence cannot clear the inbox.
+    """
+    wanted = {ident for ident in task_ids if isinstance(ident, str) and ID.fullmatch(ident)}
+    if not wanted:
+        return set()
+    if _tick is not None:
+        attempts, rows = _tick.records()
+    else:
+        from panel_cache import read_shared
+        attempts, rows = read_shared(repo, 'result-records', lambda: _records(repo))
+    patches, admitted = set(), set()
+    for row in rows:
+        ident, kind = row.get('task_id'), row.get('kind')
+        if not isinstance(ident, str) or ident not in wanted:
+            continue
+        if kind in ('patch-admit', 'patch-land'):
+            admitted.add(ident)
+        elif kind in ('ask', 'call', 'consult', 'delegate', 'review', 'ask-synthesis') and row.get('patch'):
+            patches.add(ident)
+    if len(attempts) >= 300 or len(rows) >= 1000:
+        patches.update(wanted)
+    return patches - admitted
+
+
 def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None):
     if task_id and not ID.fullmatch(task_id):
         raise ValueError('invalid task ID')

@@ -1408,7 +1408,7 @@ with patch.object(panel, 'dashboard', side_effect=lambda *a, **k: (deepcopy(tick
         patch.object(panel_results, '_load_result', side_effect=tick_result), \
         patch.object(panel_results, 'completed_tasks', wraps=panel_results.completed_tasks) as completed, \
         patch.object(panel, 'outcomes', wraps=panel.outcomes) as outcomes, \
-        patch.object(panel, 'results', wraps=panel.results) as results, \
+        patch.object(panel_results, 'pending_admissions', wraps=panel_results.pending_admissions) as pending, \
         patch.object(panel_chats, 'windows', wraps=panel_chats.windows) as windows, \
         patch.dict(os.environ, {'OMS_ROOM_ID': 'tick-room', 'TMUX': 'fixture'}):
     for read in (lambda: panel.snapshot(project, 'tick-room')[0],
@@ -1422,7 +1422,7 @@ with patch.object(panel, 'dashboard', side_effect=lambda *a, **k: (deepcopy(tick
         assert report['finalized'] == {'tick-wait': 'accepted'}, report
         assert report['awaiting_admission'] == ['tick-worker'], report
         assert report['room_attempts']['tick-worker']['state'] == 'done', report
-    assert completed.call_count == outcomes.call_count == results.call_count == 2
+    assert completed.call_count == outcomes.call_count == pending.call_count == 2
     tick = windows.call_args.kwargs['_tick']
     assert windows(project, 'tick-room', tick_room, _tick=tick) == {
         'tick-main': [{'window': '@1', 'pane': '%1', 'session': '$1'}]}
@@ -7432,22 +7432,47 @@ admission_room = {"id": "admission-room", "participants": [
 admission_state = {"repo": {"name": "x"}, "attempts": {"recent": [{
     "attempt_id": "admission-worker", "task_id": "admission-task", "state": "done",
     "panel": {"room_id": "admission-room", "room_participant": "admission-worker", "role": "worker", "access": "write"}}]}}
-for recorded in ([{"patch": "change.patch"}], [{"patch": "change.patch"}, {"kind": "patch-admit"}]):
+for pending_tasks in ({"admission-task"}, set()):
     with patch.object(panel, "dashboard", side_effect=lambda *a, **k: (deepcopy(admission_state), 0)), \
             patch.object(room_module, "status", side_effect=lambda *a: deepcopy(admission_room)), \
             patch.object(panel, "managed_session", return_value=False), \
-            patch.object(panel, "results", return_value={"rows": [{"calls": recorded}]}), \
+            patch.object(panel_results, "pending_admissions", return_value=pending_tasks) as pending, \
             patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "[]", "")), \
             patch("panel_metrics.collect", return_value={}), \
             patch.object(panel, "other_rooms", return_value=([], False)), \
             patch.dict(os.environ, {"OMS_ROOM_ID": "admission-room"}):
         watched = panel.read_panel(Path("."), "codex", "graph", False)[0]
         collected, _ = panel.snapshot(Path("."), "admission-room")
-    expected = ["admission-worker"] if len(recorded) == 1 else []
+    expected = ["admission-worker"] if pending_tasks else []
+    assert pending.call_count == 2 and all(call.args[1] == {"admission-task"} for call in pending.call_args_list)
     for report in (watched, collected):
         assert report.get("awaiting_admission") == expected, report
         worker = next(m for m in graph_text.nodes(report) if m["participant"] == "admission-worker")
         assert graph_text.call_classifier(report)(worker) == ("review" if expected else "past")
+# Record-only admission reads every retained call, without loading patch or answer bytes.
+admission_records = [
+    {"kind": "delegate", "task_id": ident, "patch": ".oms/artifacts/change.patch", "patch_sha256": "a" * 64}
+    for ident in ("pending", "admitted", "landed", "many-calls")]
+admission_records += [{"kind": "patch-admit", "task_id": "admitted"},
+                      {"kind": "patch-land", "task_id": "landed"}]
+admission_records += [{"kind": "call", "task_id": "many-calls"} for _ in range(35)]
+with patch.object(panel_results, "_records", return_value=([], admission_records)), \
+        patch.object(panel_results, "_read", side_effect=AssertionError("admission read artifact bytes")), \
+        patch("panel_cache.read_shared", side_effect=lambda repo, key, collect: collect()):
+    assert panel_results.pending_admissions(Path("."), {"pending", "admitted", "landed", "many-calls", "missing"}) == {"pending", "many-calls"}
+    assert panel_results.pending_admissions(Path("."), {"../bad"}) == set()
+    # A coverage boundary is unknown, never evidence that an unseen patch was admitted.
+    with patch.object(panel_results, "_records", return_value=([{}] * 300, admission_records)):
+        assert panel_results.pending_admissions(Path("."), {"missing", "admitted"}) == {"missing"}
+    with patch.object(panel_results, "_records", return_value=([], [{}] * 1000)):
+        assert panel_results.pending_admissions(Path("."), {"missing"}) == {"missing"}
+# Gather the whole linked scope before applying the inbox cap; keep member order.
+admission_members = [{"participant": "w-%s" % n, "role": "worker", "access": "write",
+                      "state": "done", "task_id": "t-%s" % n} for n in range(panel.INBOX_LIMIT + 2)]
+with patch("room_view.nodes", return_value=admission_members), \
+        patch.object(panel_results, "pending_admissions", return_value={m["task_id"] for m in admission_members}) as pending:
+    assert panel.awaiting_admission(Path("."), {}) == [m["participant"] for m in admission_members[:panel.INBOX_LIMIT]]
+    assert pending.call_count == 1 and pending.call_args.args[1] == {m["task_id"] for m in admission_members}
 # Both plan collectors retain tasks beyond their former 20/40 caps for pagination.
 long_tasks = [{"id": "long-%02d" % i, "title": "Plan task %s" % i,
                "state": "ready" if i == 44 else "done"} for i in range(45)]

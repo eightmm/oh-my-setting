@@ -2871,19 +2871,15 @@ def frame_view(repo, provider, state, previous=None, menu=True, main_attempt=Non
 def awaiting_admission(repo, state, _tick=None):
     """Finished write workers whose recorded patch has no admission or landing record yet."""
     from room_view import nodes
-    found = []
-    for member in nodes(state):
-        task = member.get("task_id")
-        if member.get("role") != "worker" or member.get("access") != "write" or member["state"] != "done" or not task:
-            continue
-        try:
-            calls = [call for row in results(repo, task_id=task, _shared=True, _tick=_tick).get("rows", []) for call in row.get("calls", [])]
-        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
-            continue
-        if any(call.get("patch") for call in calls) and not any(
-                call.get("kind") in ("patch-admit", "patch-land") for call in calls):
-            found.append(member["participant"])
-    return found[:INBOX_LIMIT]
+    from panel_results import pending_admissions
+    members = [member for member in nodes(state)
+               if member.get("role") == "worker" and member.get("access") == "write"
+               and member["state"] == "done" and member.get("task_id")]
+    try:
+        pending = pending_admissions(repo, {member["task_id"] for member in members}, _tick=_tick)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
+        return []
+    return [member["participant"] for member in members if member["task_id"] in pending][:INBOX_LIMIT]
 
 
 def show(repo, provider, previous=None, menu=True, clear=True, main_attempt=None,
