@@ -7,7 +7,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$ROOT" <<'PY'
 import contextlib
 import importlib
+import io
 import os
+from pathlib import Path
 import sys
 import types
 from unittest.mock import patch
@@ -238,7 +240,8 @@ check(jb.calls == [], "stale archive generation acted")
 report = {"collection": {"ok": True}, "provider_status": {
     "claude": {"context_left": 3, "weekly_used": 95, "source": "HUD", "participant": "main-a"},
     "codex": {"context_left": 70, "weekly_used": None, "source": "TUI"}},
-    "room": {"participants": [{"parent": None}] * 32, "message_count": 1024},
+    "room": {"participants": [{"participant": "main-%s" % i, "role": "main", "joined": True, "provider": "claude", "parent": None} for i in range(32)], "message_count": 1024},
+    "attempts": {"active_recent": [{"attempt_id": "main-0", "state": "working", "panel": {"role": "main"}}]},
     "private_capacity": {"jobs": {"used": 128, "limit": 128, "archived": 12, "archive_limit": 512}}}
 with patch("subprocess.run", side_effect=AssertionError("health projection executed a command")):
     data = panel_health.project(report)
@@ -246,10 +249,20 @@ with patch("subprocess.run", side_effect=AssertionError("health projection execu
           "full room/slot limits not reported")
     check(next(r for r in data["items"] if r["label"] == "Codex reported weekly use")["status"] == "unknown",
           "unavailable quota became a reading")
-    for width, height in ((1, 1), (15, 5), (40, 12), (100, 40)):
+    for width, height in ((1, 1), (15, 5), (40, 12), (40, 30), (100, 40)):
         text = panel_health.render(report, width, height)
         check(len(text.splitlines()) <= height and all(display_width(line) <= width for line in text.splitlines()),
               "capacity view exceeded its viewport")
+        if (width, height) == (40, 30):
+            claude = next(line for line in text.splitlines() if "Claude main" in line)
+            check("%" in claude and "[" in claude and "Codex" not in text and "Main: 1 live" in text,
+                  "capacity values/providers/main count were not readable")
+    pi_report = dict(report, room={"participants": [{"participant": "pi-main", "role": "main", "joined": True,
+                                                    "provider": "codex"}]}, attempts={"active_recent": [{
+        "attempt_id": "pi-main", "state": "working", "panel": {"role": "main", "harness": "pi"}}]})
+    pi_text = panel_health.render(pi_report, 40, 30)
+    check("Pi: no native reading" in pi_text and "Codex" not in pi_text,
+          "Pi harness was rendered as native Codex capacity")
     report["collection"]["ok"] = False
     check(all(row["status"] == "unknown" and row["used"] is None for row in panel_health.project(report)["items"]
               if row["kind"] in {"context", "quota"}), "stale context/quota was treated as fresh")
@@ -259,11 +272,34 @@ with patch("subprocess.run", side_effect=AssertionError("health projection execu
     with patch.object(terminal_panel.os, "get_terminal_size", return_value=os.terminal_size((100, 40))), \
          patch.object(terminal_panel, "terminal_style", return_value=(False, False, True)):
         text, _, _ = terminal_panel.frame_view("repo", "codex", report, navigation=navigation)
-    check("/ stale" in text and "Jobs slots: -- [unknown]" in text,
+    check("Stale readings; status unknown" in text and "-- [unknown] Jobs slots" in text,
           "held capacity readings were shown as current while another notice was active")
     terminal_panel.stale_notice(navigation, None)
     check(not navigation["capacity_stale"] and navigation["notice"] == "User operation complete",
           "refresh recovery discarded another operation notice")
+# The capacity control stays open on 9; inherited panel variables do not override session detection.
+fresh_report = dict(report, provider_status={"claude": {"context_left": 32, "weekly_used": 70}})
+capacity_keys = iter(["k", "q"])
+def capacity_choice(*args):
+    args[-1].update(state=report, status=0)
+    return next(capacity_keys)
+with patch.dict(os.environ, {"TMUX": "/tmp/x,1,0", "TMUX_PANE": "%999", "OMS_PANEL_SESSION": "oms-x"}), \
+        patch.object(terminal_panel, "managed_session", return_value=False), \
+        patch.object(terminal_panel.subprocess, "run", side_effect=AssertionError("unmanaged capacity control invoked tmux")), \
+        patch.object(terminal_panel, "read_choice", side_effect=capacity_choice), \
+        patch.object(terminal_panel, "read_field", side_effect=["9", ""]), \
+        patch.object(terminal_panel, "snapshot", return_value=(fresh_report, 0)) as snapshots, \
+        patch("panel_metrics.collect", side_effect=lambda state, **kwargs: state["provider_status"]) as readings, \
+        patch.object(terminal_panel, "private_capacity", return_value={}) as private, \
+        patch("panel_cache.TickReads.attempts", return_value=[]), \
+        patch("panel_release.dead_mains", autospec=True, return_value={"releasable": [], "unverifiable": []}) as dead, \
+        patch.object(terminal_panel.shutil, "get_terminal_size", return_value=os.terminal_size((40, 30))), \
+        contextlib.redirect_stdout(io.StringIO()) as capacity_output:
+    check(terminal_panel.interactive(Path("repo")) == 0, "capacity control did not return")
+    check(snapshots.call_count == 1 and readings.call_count == private.call_count == dead.call_count == 2,
+          "9 did not re-collect all capacity readings")
+    check("3% left" in capacity_output.getvalue() and "32% left" in capacity_output.getvalue(),
+          "9 did not redraw changed capacity values")
 check(TerminalInput().decode(b"\x0cku0") == [("repaint",), ("k",), ("u",), ("0",)], "capacity/repaint keys unavailable")
 
 # Launching: argv via shlex, shell syntax literal, bad input refused, session required.

@@ -1497,8 +1497,8 @@ for view in ('auto', 'graph', 'tree'):
             assert not any(word in drawn for word in ('Collection degraded', 'REPO ACCEPT', 'No active', 'Goal:', 'Joined mains', 'Messages:', 'Nothing needs you')), drawn
             assert not any(stale.get(key) for key in ('selected', 'primary', 'preview', 'surface', 'hits', 'items', 'selected_row', 'row_ids', 'detail')), stale
             assert stale['room_id'] == 'one'
-            assert menu is False or width < 28 or height < 20 or '[1] Claude' in drawn and '[9] Refresh' in drawn, drawn
-assert 'Press 9 to read again' in draw(bad[0], 'codex', 100, 28, menu=True)
+            assert '[1] Claude' not in drawn and 'Press 1' not in drawn, drawn
+assert 'o selects a room, 9 retries' in draw(bad[0], 'codex', 100, 28, menu=True)
 assert '\033' in draw(bad[0], 'codex', 100, 28, color=True)
 assert 'unavailable' not in draw(healthy, 'codex', 100, 28, menu=True).split('Actions')[0]
 assert 'Collection degraded' in draw(dict(bad[0], room={'id': 'one', 'participants': [], 'error': 'x'}), 'codex', 100, 28)
@@ -1941,7 +1941,7 @@ assert msg_report == before and msg_log[-1]["text"].startswith("line 29"), "read
 for name, hint in (("messages", "Message"), ("debate", "Seat")):
     nav, text = board(name, 110, 40, managed=True)
     foot = text.split("\n")[-1]
-    assert hint in foot and "Enter Open" in foot and "Ask advisor" not in foot and "Space Pin" not in foot, foot
+    assert hint in foot and ("Enter Expand" if name == "messages" else "Enter Open right") in foot and "Ask advisor" not in foot and "Space Pin" not in foot, foot
     assert tab_event(("tab",), nav) and nav["tab"] != name
 nav, text = board("detail", 110, 40, managed=True)
 assert "Tab Next tab" in text.split("\n")[-1]
@@ -2454,12 +2454,16 @@ with patch.object(panel, "results", side_effect=result_query) as query, \
     panel.browse_results(Path("."))
     assert query.call_args_list[2].args == (Path("."), "two"), query.call_args_list
     assert "SECOND DETAIL" in output.getvalue() and "FIRST DETAIL" not in output.getvalue()
+def empty_control(*args, **kwargs):
+    kwargs["cache"].update(status=0, state={"collection": {"ok": True}, "attempts": {"active_recent": []}})
+    kwargs["navigation"]["main_occupied"] = False
+    return 0
 with patch.object(panel, "managed_session", return_value=False), \
-        patch.object(panel, "show") as display, \
-        patch.object(panel, "read_field", side_effect=["v", "b", "v", "v", "q"]):
+        patch.object(panel, "show", side_effect=empty_control) as display, \
+        patch.object(panel, "read_field", side_effect=["v", "b", "u", "g", "q"]):
     assert panel.interactive(Path(".")) == 0
-    assert [c.kwargs["view"] for c in display.call_args_list] == ["auto", "compact", "compact", "detail", "auto"]
-    assert [c.kwargs["attention_only"] for c in display.call_args_list] == [False, False, True, True, True]
+    assert [c.kwargs["view"] for c in display.call_args_list] == ["auto", "auto", "auto", "auto", "graph"]
+    assert [c.kwargs["attention_only"] for c in display.call_args_list] == [False] * 5
 for setting in ({"TERM": "dumb"}, {"TERM": "xterm", "NO_COLOR": ""}):
     saved = dict(os.environ)
     try:
@@ -3283,7 +3287,7 @@ assert json.loads(call(write_request + ["--dry-run"], opted_in))["route"]["acces
 write_env = dict(opted_in, PANEL_TEST_MODE="write", OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"])
 assert "patch:" in call(write_request, write_env)
 assert (project / "value.txt").read_text() == "old\n"
-with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show"), \
+with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show", side_effect=empty_control), \
         patch.object(panel, "provider_catalog", return_value=list(registered.values())), \
         patch.object(panel, "dispatch", return_value=0) as routed, \
         patch.object(panel.sys, "stdout", io.StringIO()), \
@@ -3711,7 +3715,7 @@ assert closed_parent.returncode != 0 and "identity" in closed_parent.stderr
 
 # Task bodies keep native admission while only their shared display title is withheld.
 for task in ("/review", "../scripts inspect", "Explain " + "/" + "home" + "/fixture/private.py", "x" * 160):
-    with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show"), \
+    with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show", side_effect=empty_control), \
             patch.object(panel, "read_field", side_effect=["t", task, "q"]), \
             patch.object(panel, "ensure_room", return_value="fixture-room") as chosen_room, \
             patch.object(panel, "open_native", return_value=0) as task_open, \
@@ -3722,7 +3726,7 @@ for task in ("/review", "../scripts inspect", "Explain " + "/" + "home" + "/fixt
         assert chosen_room.call_args.kwargs["title"] == expected_title
 
 # More actions opens ordinary scrollable help, even when the viewport is short.
-with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show"), \
+with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show", side_effect=empty_control), \
         patch.object(panel, "read_field", side_effect=["?", "", "q"]), \
         patch.object(panel, "open_native") as help_launch, patch.object(panel, "dispatch") as help_dispatch, \
         patch.object(panel.shutil, "get_terminal_size", return_value=os.terminal_size((32, 12))), \
@@ -3736,7 +3740,7 @@ with patch.object(panel, "managed_session", return_value=False), patch.object(pa
 
 # A lifecycle writer failure cannot kill a running native main or mask its exit.
 from unittest.mock import Mock
-with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show"), \
+with patch.object(panel, "managed_session", return_value=False), patch.object(panel, "show", side_effect=empty_control), \
         patch.object(panel, "read_field", return_value="1"), patch.object(panel, "ensure_room", return_value="fixture-room"), \
         patch.object(panel, "open_native", side_effect=panel.NativeShutdown(15)), patch.dict(os.environ, environment, clear=True):
     try:
@@ -4000,7 +4004,7 @@ if os.name == "posix":
         finished = False
         client_output = bytearray()
         try:
-            def tmux_wait(arguments, expected, timeout=15):
+            def tmux_wait(arguments, expected, timeout=15, absent=()):
                 deadline = time.monotonic() + timeout
                 text = ""
                 while time.monotonic() < deadline:
@@ -4011,7 +4015,7 @@ if os.name == "posix":
                             pass
                     result = subprocess.run(tmux + arguments, capture_output=True, text=True, env=env)
                     text = result.stdout
-                    if result.returncode == 0 and expected in text:
+                    if result.returncode == 0 and expected in text and not any(needle in text for needle in absent):
                         return text
                 raise AssertionError((arguments, expected, text, bytes(client_output[-4000:])))
 
@@ -4021,15 +4025,25 @@ if os.name == "posix":
             tmux_wait(["list-keys", "-T", "root", "F9"], "select-pane")
             tmux_wait(["list-keys", "-T", "root", "F9"], "#{@oms_panel_repo}")
             tmux_wait(["list-keys", "-T", "root", "F5"], "select-window -t :=control")
-            tmux_wait(["list-keys", "-T", "root", "F12"], "OMS panel keys")
+            tmux_wait(["list-keys", "-T", "root", "F5"], "select-window -l")
+            tmux_wait(["list-keys", "-T", "root", "F12"], "window_name")
             subprocess.run(tmux + ["set-environment", "-t", session, "PANEL_TEST_NATIVE_HOLD", "1"], env=env, check=True)
             panes = tmux_wait(["list-panes", "-t", session, "-F", "#{pane_id}\t#{pane_start_command}"], "--watch").splitlines()
             control = next(row.split("\t")[0] for row in panes if "--watch" not in row)
+            unselected = tmux_wait(["capture-pane", "-p", "-t", control], "session room is unset")
+            assert "START" not in unselected and "Press 1" not in unselected, unselected
+            control_room = panel.room.create(project, title="Control fixture")
+            subprocess.run(tmux + ["set-environment", "-t", session, "OMS_ROOM_ID", control_room], env=env, check=True)
             tmux_wait(["capture-pane", "-p", "-t", control], "Press 1 (Claude) or 2 (Pi)")
-            subprocess.run(tmux + ["send-keys", "-t", control, "v"], env=env, check=True)
-            tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_view"], "compact")
-            subprocess.run(tmux + ["send-keys", "-t", control, "b"], env=env, check=True)
-            tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_attention"], "1")
+            control_options = {name: subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", control, name],
+                                                             env=env, text=True).strip()
+                               for name in ("@oms_panel_view", "@oms_panel_attention")}
+            for key in ("v", "b"):
+                subprocess.run(tmux + ["send-keys", "-t", control, key], env=env, check=True)
+                tmux_wait(["capture-pane", "-p", "-t", control], "choose")
+                for name, value in control_options.items():
+                    assert subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", control, name],
+                                                   env=env, text=True).strip() == value
             for owner, key in (("codex", "0"), ("claude", "1")):
                 subprocess.run(tmux + ["send-keys", "-t", control, key], env=env, check=True)
                 tmux_wait(["list-windows", "-t", session, "-F", "#{window_name}"], owner)
@@ -4037,6 +4051,17 @@ if os.name == "posix":
                 listing = tmux_wait(["list-panes", "-t", session + ":" + owner,
                                      "-F", "#{pane_id}"], "\n%").splitlines()[::-1]
                 tmux_wait(["capture-pane", "-p", "-t", listing[0]], "NATIVE_FIXTURE_READY")
+                occupied_control = tmux_wait(["capture-pane", "-p", "-t", control], "[o] Rooms",
+                                             absent=("START", "Press 1"))
+                assert "START" not in occupied_control and "Press 1" not in occupied_control, occupied_control
+                assert subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", listing[1],
+                    "@oms_panel_view"], env=env, text=True).strip() == panel.board_view(control_options["@oms_panel_view"])
+                assert subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", listing[1],
+                    "@oms_panel_attention"], env=env, text=True).strip() == control_options["@oms_panel_attention"]
+                # Compact rendering and the board's b key retain their own coverage.
+                subprocess.run(tmux + ["set-option", "-w", "-t", listing[1], "@oms_panel_view", "compact"], env=env, check=True)
+                subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "b"], env=env, check=True)
+                tmux_wait(["show-option", "-w", "-v", "-t", listing[1], "@oms_panel_attention"], "1")
                 sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]],
                                     "MAIN / " + ("Codex" if owner == "codex" else "Claude Code"))
                 assert "MAIN / " + ("Codex" if owner == "codex" else "Claude Code") in sidebar, sidebar
@@ -4120,6 +4145,14 @@ if os.name == "posix":
                     assert next_launch["argv"][next_launch["argv"].index("--resume") + 1] == native_id
                     subprocess.run(tmux + ["send-keys", "-t", listing[0], "Enter"], env=env, check=True)
                     tmux_wait(["display-message", "-p", "-t", listing[0], "[#{@oms_panel_native_pane}]"], "[]")
+                # The control menu refuses replacements until it reads the terminal owner state.
+                tmux_wait(["capture-pane", "-p", "-t", control], "START")
+            # F5 reaches controls from a native window and returns to that window.
+            subprocess.run(tmux + ["select-window", "-t", session + ":claude"], env=env, check=True)
+            os.write(fd, b"\033[15~")
+            tmux_wait(["display-message", "-p", "-t", session, "#{window_name}"], "control")
+            os.write(fd, b"\033[15~")
+            tmux_wait(["display-message", "-p", "-t", session, "#{window_name}"], "claude")
             # One panel-wide board geometry in cells: both mains end with the same board size, a drag in the active
             # window is recorded and the other main follows; a zoomed board is left alone.
             shared = {}
@@ -4361,11 +4394,12 @@ if os.name == "posix":
             for unused in range(50):
                 board_text = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", menu_room,
                                    "--watch", "--count", "1", "--view", "graph"], watched_env)
-                if "One main active or unverified" in board_text:
+                if "MAIN / " in board_text and "[+ Claude main]" not in board_text and "[+ Codex main]" not in board_text:
                     break
                 time.sleep(.2)
-            # The start bar sits right above the pinned key hints.
-            assert "One main active or unverified" in board_text.splitlines()[-2], board_text
+            # Occupied boards omit start actions while B's retired-main controls still work.
+            assert "[+ Claude main]" not in board_text and "[+ Codex main]" not in board_text, board_text
+            assert "One main active or unverified" not in board_text and board_text.splitlines()[-1].endswith("F12 Keys"), board_text
             subprocess.run(tmux + ["send-keys", "-t", chat_pane, "-l", "r"], env=env, check=True)
             tmux_wait(["capture-pane", "-p", "-J", "-t", chat_pane], "another main is live or unverified")
             # Enter closes the retired main's entire window and its board watcher.
@@ -7918,11 +7952,11 @@ for view_name in ("graph", "tree"):
                 assert footer_line.endswith("F12 Keys" if managed_board else "? Keys"), (view_name, columns, footer_line)
             assert ("F9" in footer_line) == managed_board and ("q Quit" in footer_line) == (not managed_board), footer_line
             assert len(re.split(r"  +", footer_line)) <= 7 and "Esc Back" not in footer_line and "q Chat" not in footer_line, footer_line
-    # A --launch panel has no control window: its boards do not offer F5.
+    # Board footers reserve space for context; F5 stays in full help.
     for control, offered in ((True, True), (False, False)):
         launched = render(flow, "codex", 120, 24, view="graph", main_attempt="flow-attempt",
                           navigation={"control_window": control}, managed=True).splitlines()[-1]
-        assert ("F5 Control" in launched) == offered and launched.endswith("F12 Keys"), launched
+        assert "F5 Control" not in launched and launched.endswith("F12 Keys"), launched
     open_nav = {"preview": {"target": ("chat", "flow-main")}}
     assert "Esc Close" in render(flow, "codex", 157, 24, view=view_name, main_attempt="flow-attempt",
                                  navigation=open_nav, managed=True).splitlines()[-1]
@@ -8329,8 +8363,8 @@ assert TerminalInput().decode(b"f") == [("f",)]
 full_recorded = deepcopy(recorded)
 full_recorded["rows"][0]["calls"][0]["answer"] = "\n".join("full line %s" % i for i in range(80)) + "\nFINAL RETAINED LINE"
 full_nav = {"selected": ("result", "builder"), "preview": {"target": ("result", "builder"), "report": full_recorded}}
-preview_screen = render(done_flow, "codex", 110, 40, view="graph", navigation=full_nav)
-assert "FINAL RETAINED LINE" not in preview_screen and "f Full result" in preview_screen, preview_screen
+preview_screen = render(done_flow, "codex", 110, 40, view="graph", navigation=full_nav, managed=True)
+assert "FINAL RETAINED LINE" not in preview_screen and "Enter Open right" in preview_screen, preview_screen
 full_action = choose(("f",), full_nav)
 assert full_action == ("result", "builder"), full_nav
 assert choose(("enter",), full_nav) is None and full_nav["preview"]["report"] is full_recorded
@@ -8553,6 +8587,13 @@ for columns, rows in ((76, 16), (100, 22), (100, 48)):
         nav = {}
         picture = render(flow_publication, "codex", columns, rows, view="graph", menu=menu, navigation=nav)
         assert "APP DELIVERY" in picture and "submitted" in picture and "unconfirmed" in picture, picture
+        from panel_view import inbox_items
+        assert not any(item["who"] == "Main wake-up delivery failed" for item in inbox_items(flow_publication))
+        failed_publication = deepcopy(flow_publication)
+        failed_publication["room"]["publications"]["claude"].update(status="timeout", attempt="att_private")
+        failed_publication["room"]["publications"]["codex"] = {"status": "rpc_error", "attempt": "att_other"}
+        notices = [item for item in inbox_items(failed_publication) if item["who"] == "Main wake-up delivery failed"]
+        assert len(notices) == 1 and "(unconfirmed)" in notices[0]["what"] and "att_" not in str(notices), notices
         assert len(picture.splitlines()) <= rows - int(menu) and all(display_width(line) <= columns for line in picture.splitlines())
 navigation = {}
 connected = render(tree_room, "codex", 91, 99, view="tree", navigation=navigation)
@@ -8789,6 +8830,13 @@ with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}, "pla
     slow_report, _ = panel.snapshot(long_plan_repo, "long-plan")
 assert slow_report["room"].get("participants") and slow_report["room"].get("repo_tasks_unavailable"), slow_report["room"]
 assert "error" not in slow_report["room"], "a slow plan list must not hide the room and its main"
+with patch.object(panel, "dashboard", return_value=({"collection": {"ok": True}}, 0)), \
+        patch.object(panel, "read_shared", side_effect=lambda repo, key, collect, **kwargs: collect()), \
+        patch.object(room_module, "status", side_effect=ValueError("missing room evidence")), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "{}", "")):
+    unreadable_report, unreadable_status = panel.snapshot(long_plan_repo, "unreadable-room")
+assert unreadable_status == 1 and unreadable_report["room"]["error"] == "room unreadable: ValueError: missing room evidence"
+
 ended_nav = {"expanded_groups": {("past", "flow-main")}}
 render(ended, "codex", 120, 120, view="tree", navigation=ended_nav)
 shown = list(dict.fromkeys(h["action"][1] for h in sorted(ended_nav["hits"], key=lambda h: h["y"]) if h["action"][0] == "result"))
@@ -8999,7 +9047,7 @@ for columns, rows in ((108, 36), (100, 28), (42, 24), (32, 28)):
     assert any(hit["action"] == ("task", "layout") for hit in nav["hits"]), nav
 assert "Claude W 100% · C 0%" in render(dict(usage_board, provider_status={"claude": {
     "weekly_used": 100, "context_left": 0}}), "claude", 32, 28, view="summary")
-empty_room = dict(usage_board, room={"id": "empty", "participants": []})
+empty_room = dict(usage_board, room={"id": "empty", "participants": []}, attempts={"active_recent": [], "recent": []})
 # The control menu is an inbox: empty rooms onboard, failures and waits list under "Needs you", one key acts.
 onboarding = render(empty_room, "codex", 100, 28, view="tree", menu=True)
 assert "Press 1 (Claude) or 2 (Pi) to start the sole main" in onboarding and "Nothing needs you right now" in onboarding
@@ -9022,7 +9070,87 @@ inbox_room = {"repo": {"name": "r"}, "collection": {"ok": True}, "finalized": {}
          "panel": {"role": "worker", "room_participant": "w3", "room_id": "inbox-room", "label": "Write patch"}}]}}
 nav = {}
 inbox = render(inbox_room, "codex", 100, 28, menu=True, navigation=nav)
-assert "Needs you" in inbox and "Nothing needs you" not in inbox and "Press 1 (Claude)" not in inbox, inbox
+assert "Needs you" in inbox and "Nothing needs you" not in inbox and "Press 1" not in inbox and "START" not in inbox, inbox
+for columns, rows in ((50, 18), (80, 40), (127, 40)):
+    for menu_report in (inbox_room, dict(inbox_room, room={"id": "broken", "error": "room unreadable: ValueError: bad room"})):
+        screen = render(menu_report, "claude", columns, rows, menu=True, managed=True)
+        assert "START" not in screen and "Press 1" not in screen, screen
+        assert len(screen.splitlines()) <= rows - 1 and all(display_width(line) <= columns for line in screen.splitlines()), screen
+        if menu_report["room"].get("error"):
+            assert "room unreadable" in screen, screen
+    for stale_report, stale_nav in ((empty_room, {"capacity_stale": True}),
+                                    (dict(empty_room, capacity_stale=True), {}),
+                                    (empty_room, {"room_poll_unknown": True})):
+        screen = render(stale_report, "claude", columns, rows, menu=True, managed=True, navigation=stale_nav)
+        assert "START" not in screen and "Press 1" not in screen and "[1]" not in screen, screen
+        assert stale_nav["main_occupied"], stale_nav
+# Default controls and direct graph/tree renders share occupancy and installed harnesses.
+from room_view import render_graph
+terminal_room = deepcopy(inbox_room)
+terminal_room["attempts"]["active_recent"][0]["state"] = "done"
+unknown_main_room = deepcopy(inbox_room)
+unknown_main_room["attempts"]["active_recent"] = unknown_main_room["attempts"]["active_recent"][1:]
+for columns, rows in ((50, 18), (80, 40), (127, 40)):
+    for renderer in (lambda report, columns, rows, **kwargs: render(report, "claude", columns, rows, **kwargs),
+                     render_graph, render_tree):
+        for menu_nav in ({"installed": ["pi"]}, {"installed": ["pi"], "capacity_stale": True}):
+            occupied_screen = renderer(inbox_room, columns, rows, menu=True, managed=True, navigation=dict(menu_nav))
+            assert not any(key in occupied_screen for key in ("START", "[1]", "[2]", "[0]", "Press 1")), occupied_screen
+            assert "[k]" in occupied_screen and "[q]" in occupied_screen, occupied_screen
+        empty_screen = renderer(empty_room, columns, rows, menu=True, managed=True, navigation={"installed": ["pi"]})
+        assert "[2] Pi" in empty_screen and "[1]" not in empty_screen and "[0]" not in empty_screen, empty_screen
+        assert "[1] Codex" not in empty_screen and "[2] Claude" not in empty_screen, empty_screen
+        occupied_nav = {"installed": ["pi"], "spawn_managed": True}
+        board = renderer(inbox_room, columns, rows, navigation=occupied_nav, managed=True)
+        assert occupied_nav["main_occupied"] and "[+ Pi" not in board, board
+        for menu in (False, True):
+            reused_nav = {"installed": ["pi"], "spawn_managed": True}
+            renderer(inbox_room, columns, rows, menu=menu, navigation=reused_nav, managed=True)
+            assert reused_nav["main_occupied"], reused_nav
+            restored = renderer(terminal_room, columns, rows, menu=menu, navigation=reused_nav, managed=True)
+            assert not reused_nav["main_occupied"], reused_nav
+            assert ("[2] Pi" if menu else "[+ Pi") in restored, restored
+            unknown = renderer(unknown_main_room, columns, rows, menu=menu, navigation=reused_nav, managed=True)
+            assert reused_nav["main_occupied"] and "[2]" not in unknown and "[+ Pi" not in unknown, unknown
+    for fallback_room in ({"id": "broken", "error": "room unreadable: ValueError: bad room"},
+                          {"id": "no-participants", "participants": []}):
+        fallback_report = dict(inbox_room, room=fallback_room)
+        for fallback_nav in (None, {"installed": ["pi"]}):
+            fallback = render(fallback_report, "claude", columns, rows, view="graph", menu=True,
+                              managed=True, navigation=fallback_nav)
+            assert not any(key in fallback for key in ("START", "[1]", "[2]", "[0]", "1 Codex", "2 Claude")), fallback
+            assert "[k]" in fallback and "[q]" in fallback, fallback
+            if fallback_nav is not None:
+                assert fallback_nav["main_occupied"], fallback_nav
+            assert len(fallback.splitlines()) <= rows - 1 and all(display_width(line) <= columns for line in fallback.splitlines()), fallback
+    fallback_nav = {"installed": ["pi"], "main_occupied": True}
+    fallback = render(empty_room, "claude", columns, rows, view="graph", menu=True,
+                      managed=True, navigation=fallback_nav)
+    assert not fallback_nav["main_occupied"] and "[2] Pi" in fallback, fallback
+    assert not any(key in fallback for key in ("[1]", "[0]", "1 Codex", "2 Claude")), fallback
+from room_view import footer_hints
+for columns in (36, 50, 80, 127):
+    help_rows = footer_hints({"keys_help": True, "main_occupied": True}, columns, True, True, None, False)
+    assert "? Hide" in "\n".join(help_rows) and "n New main" not in "\n".join(help_rows), help_rows
+    assert len(help_rows) <= 4 and all(display_width(line) <= columns for line in help_rows), help_rows
+    if columns in (50, 80, 127):
+        for tabs in (False, True):
+            for reader in (False, True):
+                for has_call in (False, True):
+                    hint_nav = {"tab_strip_visible": tabs, "tab": "messages" if tabs else None,
+                                "message_has_call": has_call, "reader_open": reader,
+                                "selected": ("result", "call")}
+                    hints = footer_hints(hint_nav, columns, True, True, None, True)
+                    foot = " ".join(hints)
+                    assert all(display_width(line) <= columns for line in hints), hints
+                    enter_hint = "Enter Expand" if tabs else "Enter Open right"
+                    assert enter_hint in foot, (columns, hint_nav, hints)
+                    if reader:
+                        assert "Esc Close right" in foot, (columns, hint_nav, hints)
+                    if columns >= 80 and tabs and has_call:
+                        assert "f Open right" in foot, (columns, hint_nav, hints)
+                    if columns >= 80 and not tabs:
+                        assert "v Expand" in foot, (columns, hint_nav, hints)
 assert "Sol 6.1 worker for Opus 5.5 · failed: Fix parser" in inbox, inbox
 assert "waiting for approval: Run migration" in inbox and "patch awaits admission: Write patch" in inbox, inbox
 assert "Opus 5.5 main · to all: Which branch?" in inbox and "\033" not in inbox, inbox
@@ -9089,6 +9217,228 @@ for width, height in ((100, 28), (42, 24), (24, 18), (12, 10)):
         closed_cards(drawn, width, glyphs)
 assert "key + Enter" in render(inbox_room, "codex", 100, 28, menu=True, navigation={"line_input": True})
 assert panel.menu_input().decode(b"1\033[B2q ") == [("1",), ("down",), ("2",), ("q",), (" ",)]
+# Starting/resuming while occupied or unreadable refuses before any prompt or room mutation.
+occupied_control = deepcopy(inbox_room)
+occupied_control["attempts"]["active_recent"][0]["attempt_id"] = "att_control_main"
+for status, control_report in ((0, occupied_control), (1, {"collection": {"ok": False}})):
+    choices = iter(["1", "2", "0", "3", "t", "q"])
+    previous_values = []
+    def occupied_choice(*args):
+        args[-1].update(status=status, state=control_report)
+        previous_values.append(args[2])
+        return next(choices)
+    with patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "read_choice", side_effect=occupied_choice), \
+            patch.object(panel, "events", return_value=json.dumps([{"attempt_id": "a1", "tool": "panel-main", "state": "working"}])) as history, \
+            patch.object(panel, "read_field") as prompts, patch.object(panel, "panel_room") as room_change, \
+            patch.object(panel, "open_native") as launches:
+        assert panel.interactive(project) == 0
+        prompts.assert_not_called()
+        room_change.assert_not_called()
+        launches.assert_not_called()
+    if status == 0:
+        assert previous_values[-1] == "error: this panel already has a live main or unverified owner; if crashed: oms panel --release-main att_control_main"
+        history.assert_not_called()
+# A recoverable older attempt does not replace the occupying main in the refusal.
+old_main = {"attempt_id": "att_old_main", "tool": "panel-main", "state": "working", "refs": {"panel_role": "main"}}
+old_hint = "; if that main crashed, release it with oms panel --release-main att_old_main (see k)"
+unknown_hint = "; see capacity screen k for recovery evidence; candidate is unverifiable; release requires confirmed termination"
+for live_row in ({"attempt_id": "att_occupying", "tool": "panel-main", "state": "working", "panel": {"role": "main"}},
+                 {"attempt_id": "att_occupying", "tool": "panel-main", "state": "working", "refs": {"panel_role": "main"}}):
+    with patch("panel_release.refusal_hint", side_effect=lambda rows: old_hint if rows else unknown_hint), \
+            patch("panel_release.heartbeat_fresh", side_effect=lambda row: row["attempt_id"] == "att_occupying"):
+        refusal = panel.live_main_refusal(project, [old_main, live_row])
+        assert refusal.endswith("oms panel --release-main att_occupying"), refusal
+        assert "att_old_main" not in refusal, refusal
+        ambiguous = panel.live_main_refusal(project, [old_main, live_row, dict(live_row, attempt_id="att_other", panel={"role": "main"})])
+        assert "capacity screen k" in ambiguous and "--release-main" not in ambiguous, ambiguous
+# A maximum-length release command stays intact and copyable in the control window.
+maximum_control_attempt = "a" + "._:-09AZaz" * 15 + "._:-09AZa"
+maximum_control_command = "oms panel --release-main " + maximum_control_attempt
+maximum_control = deepcopy(occupied_control)
+maximum_control["attempts"]["active_recent"][0]["attempt_id"] = maximum_control_attempt
+previous_values = []
+choices = iter(["1", "q"])
+def maximum_occupied_choice(*args):
+    args[-1].update(status=0, state=maximum_control)
+    previous_values.append(args[2])
+    return next(choices)
+with patch.object(panel, "managed_session", return_value=False), \
+        patch.object(panel, "read_choice", side_effect=maximum_occupied_choice), \
+        patch.object(panel, "events", return_value=json.dumps([{"attempt_id": "a1",
+                                                               "tool": "panel-main", "state": "working"}])) as history, \
+        patch.object(panel, "read_field") as prompts, patch.object(panel, "panel_room") as room_change, \
+        patch.object(panel, "open_native") as launches:
+    assert panel.interactive(project) == 0
+    prompts.assert_not_called()
+    room_change.assert_not_called()
+    launches.assert_not_called()
+    history.assert_not_called()
+assert previous_values[-1].splitlines()[1] == maximum_control_command, previous_values
+for columns in (50, 100, 200):
+    for rows in (18, 28):
+        for glyphs in (True, False):
+            for colored in (True, False):
+                picture = render(maximum_control, "codex", columns, rows, unicode=glyphs,
+                                 color=colored, menu=True, previous=previous_values[-1], navigation={})
+                rendered_rows = re.sub(r"\x1b\[[0-9;]*m", "", picture).splitlines()
+                command_at = next(i for i, line in enumerate(rendered_rows)
+                                  if line.startswith("oms panel --release-main "))
+                command_rows = rendered_rows[command_at:command_at + (len(maximum_control_command) + columns - 1) // columns]
+                assert "".join(command_rows) == maximum_control_command, picture
+                assert all(display_width(line) <= columns for line in rendered_rows), picture
+                assert "".join(rendered_rows[next(i for i, line in enumerate(rendered_rows)
+                                                  if line.startswith("Last: ")):command_at]) == (
+                    "Last: " + previous_values[-1].splitlines()[0]), picture
+short_refusal = "error: this panel already has a live main or unverified owner; if crashed: oms panel --release-main att_control_main"
+short_picture = render(occupied_control, "codex", 200, 28, menu=True,
+                       previous=short_refusal, navigation={})
+assert short_picture.splitlines().count("Last: " + short_refusal) == 1, short_picture
+for columns in (50, 80, 127):
+    short_picture = render(occupied_control, "claude", columns, 18, menu=True, previous=short_refusal)
+    short_rows = short_picture.splitlines()
+    start = next(i for i, line in enumerate(short_rows) if line.startswith("Last: "))
+    assert "".join(short_rows[start:start + (len("Last: " + short_refusal) + columns - 1) // columns]) == "Last: " + short_refusal, short_picture
+# A healthy read retained after a failed refresh is display evidence only.
+class StaleControlInput:
+    fd = None
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+for columns, rows in ((50, 18), (80, 40), (127, 40)):
+    keys = iter(["9", "1", "2", "0", "3", "t", "q"])
+    def stale_key(prompt, **kwargs):
+        assert prompt == "oms> ", "stale evidence reached an action prompt: " + prompt
+        return next(keys)
+    with patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "menu_input", return_value=StaleControlInput()), \
+            patch.object(panel, "raw_keys", return_value=False), \
+            patch.object(panel, "snapshot", side_effect=[(empty_room, 0)] + [({"collection": {"ok": False}}, 1)] * 6), \
+            patch.object(panel, "events", return_value="[]"), \
+            patch.object(panel, "read_field", side_effect=stale_key), \
+            patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((columns, rows))), \
+            patch.object(panel, "panel_room") as room_change, patch.object(panel, "open_native") as launches, \
+            patch.object(panel.sys, "stdout", io.StringIO()) as stale_control:
+        assert panel.interactive(project) == 0
+        room_change.assert_not_called()
+        launches.assert_not_called()
+        output = stale_control.getvalue()
+        failed_frames = output[output.index("State refresh failed;"):]
+        assert "START" not in failed_frames and "Press 1" not in failed_frames and "[1]" not in failed_frames, failed_frames
+        assert "live main" in failed_frames, failed_frames
+# Failed room queries keep healthy display evidence inert; a successful poll restores starts.
+for poll_failure in (subprocess.CompletedProcess(["tmux"], 1, "", "server unavailable"),
+                     subprocess.TimeoutExpired("tmux", 3),
+                     subprocess.CompletedProcess(["tmux"], 0, "OMS_ROOM_ID=../invalid\n", "")):
+    poll_keys = iter(["9", "1", "t", "2", "0", "3", "1"])
+    poll_frames = []
+    poll_results = iter([poll_failure, subprocess.CompletedProcess(["tmux"], 0, "OMS_ROOM_ID=selected-room\n", "")])
+    def poll_tmux(command, **kwargs):
+        if "show-environment" in command:
+            result = next(poll_results)
+            if isinstance(result, Exception):
+                raise result
+            return result
+        return subprocess.CompletedProcess(command, 0, "", "")
+    def poll_choice(*args):
+        nav, cache = args[-2:]
+        assert os.environ["OMS_ROOM_ID"] == "selected-room"
+        if poll_frames:
+            assert nav["selected"] == ("chat", "selected-main"), nav
+        nav["selected"] = ("chat", "selected-main")
+        cache.update(state=empty_room, status=0)
+        poll_frames.append((args[2], dict(nav)))
+        if len(poll_frames) <= 7:
+            prompts.assert_not_called()
+            room_change.assert_not_called()
+            launches.assert_not_called()
+        choice = next(poll_keys, None)
+        if choice is None:
+            # Managed q only detaches; EOF ends the control loop.
+            raise EOFError
+        return choice
+    with patch.dict(os.environ, {"OMS_PANEL_SESSION": "oms-poll-fixture", "OMS_ROOM_ID": "selected-room"}, clear=True), \
+            patch.object(panel, "managed_session", return_value=True), \
+            patch.object(panel.time, "monotonic", side_effect=[0, 0, 1, 2, 3, 4, 4.5, 5, 5, 6]), \
+            patch.object(panel.subprocess, "run", side_effect=poll_tmux) as polls, \
+            patch.object(panel, "room_open", return_value=True) as open_room, \
+            patch.object(panel, "read_choice", side_effect=poll_choice), \
+            patch.object(panel, "events", return_value="[]"), patch.object(panel, "read_field") as prompts, \
+            patch.object(panel, "panel_room", return_value="selected-room") as room_change, \
+            patch.object(panel, "open_native", return_value=0) as launches:
+        assert panel.interactive(project) == 0
+        queries = [call for call in polls.call_args_list if "show-environment" in call.args[0]]
+        assert len(queries) == 2 and all("OMS_ROOM_ID" not in call.args[0] for call in queries), queries
+        assert "Room selection unknown" in poll_frames[0][0], poll_frames
+        for previous, nav in poll_frames[:6]:
+            assert nav["room_poll_unknown"] and "Room selection unknown" in previous, poll_frames
+            drawn = render(empty_room, "codex", 100, 28, menu=True, navigation=nav)
+            assert "START" not in drawn and "Press 1" not in drawn and "[1]" not in drawn, drawn
+        assert all(not nav.get("room_poll_unknown") for previous, nav in poll_frames[6:]), poll_frames
+        prompts.assert_not_called()
+        room_change.assert_called_once_with(project)
+        launches.assert_called_once_with("claude", project, None, view="auto", attention_only=False)
+        open_room.assert_called_once_with(project, "selected-room")
+# An unset session room clears adoption and blocks launch; a later valid poll adopts again.
+for unset_output in ("", "-OMS_ROOM_ID\n", "OMS_ROOM_ID=\n"):
+    unset_frames = []
+    unset_results = iter([unset_output, "OMS_ROOM_ID=recovered-room\r\n"])
+    def unset_tmux(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, next(unset_results) if "show-environment" in command else "", "")
+    def unset_choice(*args):
+        nav, cache = args[-2:]
+        unset_frames.append(os.environ.get("OMS_ROOM_ID"))
+        assert bool(nav.get("room_poll_unknown")) == (len(unset_frames) == 1), nav
+        cache.update(state=empty_room, status=0)
+        if len(unset_frames) == 1:
+            assert unset_frames[-1] is None, unset_frames
+            return "1"
+        assert unset_frames[-1] == "recovered-room", unset_frames
+        raise EOFError
+    def fresh_room(repo):
+        assert "OMS_ROOM_ID" not in os.environ, dict(os.environ)
+        return "fresh-room"
+    with patch.dict(os.environ, {"OMS_PANEL_SESSION": "oms-poll-fixture", "OMS_ROOM_ID": "selected-room"}, clear=True), \
+            patch.object(panel, "managed_session", return_value=True), \
+            patch.object(panel.time, "monotonic", side_effect=[0, 0, 5, 5]), \
+            patch.object(panel.subprocess, "run", side_effect=unset_tmux), \
+            patch.object(panel, "room_open", return_value=True) as open_room, \
+            patch.object(panel, "read_choice", side_effect=unset_choice), \
+            patch.object(panel, "panel_room", side_effect=fresh_room) as room_change, \
+            patch.object(panel, "open_native", return_value=0) as launches:
+        assert panel.interactive(project) == 0
+        room_change.assert_not_called()
+        launches.assert_not_called()
+        open_room.assert_called_once_with(project, "recovered-room")
+# Existing callers still receive None on failure; a successful unset is not a query failure.
+for code, output in ((1, ""), (0, "-OMS_ROOM_ID\n")):
+    with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(["tmux"], code, output, "")):
+        assert panel.recorded_room("oms-poll-fixture") is None
+        if code == 0:
+            assert panel.recorded_room("oms-poll-fixture", checked=True) is None
+for output, expected in (("OTHER_ROOM_ID=unrelated-room\n", None),
+                         ("OTHER_ROOM_ID=unrelated-room\nOMS_ROOM_ID=selected-room\n", "selected-room")):
+    with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(["tmux"], 0, output, "")) as query:
+        assert panel.recorded_room("oms-poll-fixture", checked=True) == expected
+        assert "OMS_ROOM_ID" not in query.call_args.args[0], query.call_args
+for answer, expected in (("", None), ("1", "selected-room"), ("n", "new-room")):
+    with patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "read_choice", side_effect=["o", "q"]), \
+            patch.object(panel.room, "discover", return_value=([{"id": "selected-room", "title": "Shared"}], False)), \
+            patch.object(panel, "read_field", side_effect=[answer, "New title"]), \
+            patch.object(panel, "ensure_room", return_value="selected-room") as chosen_room, \
+            patch.object(panel.room, "create", return_value="new-room") as created_room, \
+            patch.dict(os.environ, {}, clear=True), patch.object(panel.sys, "stdout", io.StringIO()) as rooms_text:
+        assert panel.interactive(project) == 0
+        assert "1 selected-room / Shared" in rooms_text.getvalue() and "{\"" not in rooms_text.getvalue()
+        assert os.environ.get("OMS_ROOM_ID") == expected
+        assert chosen_room.called == (answer == "1") and created_room.called == (answer == "n")
+with patch.object(panel, "managed_session", return_value=False), \
+        patch.object(panel, "read_choice", side_effect=["o", "q"]), \
+        patch.object(panel.room, "discover", side_effect=SystemExit(2)), \
+        patch.object(panel, "read_field") as prompts:
+    assert panel.interactive(project) == 0
+    prompts.assert_not_called()
+
 # Enter on a result row in the control window opens its recorded result; no watch loop is there to read it.
 class OpenInput:
     fd, batches = 0, [[("enter",)], [("q",)]]
@@ -9117,6 +9467,14 @@ with patch.object(panel, "menu_input", return_value=ReaderInput()), patch.object
     assert panel.read_choice(Path("."), "codex", "ready", "auto", False, reader_nav, {}) == "9"
 assert painted.call_count == 2 and reader_nav["offset"] == 0 and not any(
     c.args[0][0] in ("click", "enter") for c in chosen.call_args_list), (painted.call_count, reader_nav)
+for key, expected in (("k", "k"), ("u", "9")):
+    reader_input = ReaderInput()
+    reader_input.batches = [[(key,)]]
+    reader_nav = {"detail": {"target": ("result", "builder")}, "offset": 2}
+    with patch.object(panel, "menu_input", return_value=reader_input), patch.object(panel, "show"):
+        assert panel.read_choice(Path("."), "codex", "ready", "auto", False, reader_nav, {}) == expected
+    assert "detail" not in reader_nav and reader_nav["offset"] == 0
+
 # A rendered graph preview: a click on plain Detail text repaints nothing; a card click and the wheel still do.
 graph_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
 render(mailed, "codex", 100, 30, view="graph", main_attempt="flow-attempt", navigation=graph_nav)
@@ -10034,7 +10392,8 @@ with patch.dict(os.environ, recovery_env, clear=True):
         try:
             panel.run_native("roomtest", project, resume="fixture-stable-session")
         except ValueError as error:
-            assert "terminal owner" in str(error)
+            assert "live main or unverified owner" in str(error), error
+            assert "--release-main " + active.strip() in str(error) and len(str(error)) <= 140, error
         else:
             raise AssertionError("active successor was ignored")
     panel.events(project, "transition", "--attempt", active, "--state", "cancelled")
@@ -10284,7 +10643,9 @@ running_nav = {"selected": ("chat", "adv-main"), "preview": {"target": ("chat", 
 assert "Built-in advisor: asked " in graph_view.render_graph(dict(board, native_advisors=open_call), 100, 40, navigation=running_nav)
 # The board's last row starts a main: clickable only in a managed panel, never on a static render.
 starter_board = dict(board, room={"id": "adv-room", "participants": [dict(claude_main, model="claude-opus-5-5"), dict(claude_main, participant="adv-sub",
-                     provider="codex", seq=2, consumer=None, model="gpt-6-sol")]})
+                     provider="codex", seq=2, consumer=None, model="gpt-6-sol")]}, collection={"ok": True},
+    attempts={"active_recent": [], "recent": [{"attempt_id": ident, "state": "done", "panel": {
+        "role": "main", "room_id": "adv-room", "room_participant": ident}} for ident in ("adv-main", "adv-sub")]})
 assert "[+ " not in graph_view.render_graph(starter_board, 100, 40, navigation={})
 for bar_width, bar_height in ((80, 30), (157, 40)):
     for bar_unicode in (True, False):
@@ -10579,6 +10940,38 @@ try:
         assert "oms panel --release-main " + working_release in capacity
         assert "oms panel --release-main " + legacy_release not in capacity
         assert "Pi child termination unconfirmed; separate recovery required" in capacity
+        with patch.object(panel, "managed_session", return_value=False), \
+                patch.object(panel, "read_choice", side_effect=["k", "q"]), \
+                patch.object(panel, "read_field", return_value=""), \
+                patch.object(panel, "private_capacity", return_value={}), \
+                patch("panel_metrics.collect", return_value={}), \
+                patch("panel_cache.TickReads.attempts", return_value=[]), \
+                patch.object(panel_release, "dead_mains", return_value=dead), \
+                patch.object(panel.sys, "stdout", io.StringIO()) as control_capacity, \
+                patch.object(panel.shutil, "get_terminal_size", return_value=os.terminal_size((180, 80))):
+            assert panel.interactive(release_repo) == 0
+        assert "Dead mains" in control_capacity.getvalue() and working_release in control_capacity.getvalue()
+        assert len(panel.live_main_refusal(release_repo, [{"attempt_id": working_release, "tool": "panel-main", "state": "waiting_approval"}])) <= 140
+        assert "--release-main " + working_release in panel.live_main_refusal(release_repo, [{
+            "attempt_id": working_release, "tool": "panel-main", "state": "waiting_input"}])
+        for attempt_length in range(1, 161):
+            attempt = "a" * attempt_length
+            assert panel_release.ID.fullmatch(attempt)
+            for state in ("working", "waiting_approval", "waiting_input"):
+                refusal = panel.live_main_refusal(release_repo, [{
+                    "attempt_id": attempt, "tool": "panel-main", "state": state}])
+                command = "oms panel --release-main " + attempt
+                assert len(refusal.splitlines()[0]) <= 140, refusal
+                assert refusal.endswith(command), refusal
+                if len(refusal) > 140:
+                    assert refusal.splitlines()[1:] == [command], refusal
+        maximum_attempt = "a" + "._:-09AZaz" * 15 + "._:-09AZa"
+        assert len(maximum_attempt) == 160 and panel_release.ID.fullmatch(maximum_attempt)
+        maximum_refusal = panel.live_main_refusal(release_repo, [{
+            "attempt_id": maximum_attempt, "tool": "panel-main", "state": "working"}])
+        assert len(maximum_refusal.splitlines()[0]) <= 140, maximum_refusal
+        assert maximum_refusal.splitlines()[1:] == ["oms panel --release-main " + maximum_attempt]
+
         with patch.object(panel_release.subprocess, "run", wraps=panel_release.subprocess.run) as scans:
             reused = panel_release.dead_mains(release_repo, windows={working_release})
             assert {row["attempt"] for row in reused["releasable"]} == {blocked_release, confirmed_exit, unconfirmed_gone, no_server_release, restarted_release, pi_release}
@@ -10743,8 +11136,8 @@ finally:
             child.terminate()
         child.wait(timeout=10)
 occupied = {"installed": ["claude", "pi", "codex"], "spawn_managed": True, "main_occupied": True}
-assert graph_view.spawn_bar(100, occupied)[1] == []
-assert "One main" in graph_view.spawn_bar(100, occupied)[0]
+assert graph_view.spawn_bar(100, occupied) is None
+assert graph_view.spawn_bar(100, dict(occupied, spawn_managed=False)) is None
 armed_bar = graph_view.spawn_bar(100, {"installed": ["claude"], "spawn_managed": True, "spawn_armed": True})
 assert "1 Claude" in armed_bar[0] and "2 Pi" not in armed_bar[0] and "0 Codex" not in armed_bar[0]
 # The exit prompt must discard native CLI typeahead before waiting for fresh keys.
@@ -11161,7 +11554,8 @@ with patch.dict(os.environ, dict(environment, OMS_ROOM_ID=clear_room), clear=Tru
     try:
         panel.run_single_native("claude", project, resume=clear_session)
     except ValueError as error:
-        assert "terminal owner" in str(error)
+        assert "terminal owner" in str(error), error
+        assert "--release-main" not in str(error), error
     else:
         raise AssertionError("current consumer ignored another live main")
 panel.events(project, "transition", "--attempt", foreign_main, "--state", "cancelled")
@@ -11394,6 +11788,7 @@ for columns, rows in ((120, 80), (76, 16)):
     shown = render(published, "codex", columns, rows, view="graph", navigation={
         "group_tree": True, "expanded_groups": {("review", "adv-main")}})
     assert "APP DELIVERY" in shown and "unconfirmed" in shown, shown
+    assert not any(item["who"] == "Main wake-up delivery failed" for item in inbox_items(published))
 native_inspection = render(dict(grouped_board, native_advisors=open_call), "claude", 120, 80, view="graph",
                           navigation={"group_tree": True, "expanded_groups": {("review", "adv-main")}})
 assert "Fable 5.1" in native_inspection and "answer stays in the main transcript" in native_inspection
@@ -11722,7 +12117,7 @@ if soak_seconds:
                 watcher.kill(); watcher.wait(timeout=5)
     assert watcher.returncode == 130
     observed = watch_log.read_text()
-    assert "room evidence unavailable" in observed and "Messages:" in observed
+    assert "room unreadable:" in observed and "Messages:" in observed
     print("panel-soak: %s cycles / %.1fs / addressed delivery, explicit ack, invalid cursors and room-loss recovery" %
           (cycles, time.monotonic() - started), flush=True)
 print("room: addressed handoff, graph bounds, saved receiver intents and native adapter passed")

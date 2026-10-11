@@ -28,7 +28,7 @@ import panel_reader
 import dispatch_supervisor as dispatch_store
 
 from dashboard_projection import clean
-from panel_view import INBOX_LIMIT, menu_rows, render, render_results
+from panel_view import INBOX_LIMIT, main_occupied, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
 from panel_routing import (allocate, command as routed_command, policy, KINDS, MODEL_IDS, TIERS, WRITERS,
                            newest_route_model, route_family)
@@ -2701,13 +2701,24 @@ def room_headroom(repo, ident):
                 state.get("message_count", 0) > room.MAX_MESSAGES - room.MESSAGE_RESERVE)
 
 
-def recorded_room(session):
-    found = subprocess.run(tmux_command("show-environment", "-t", "=" + session, "OMS_ROOM_ID"),
+def recorded_room(session, *, checked=False):
+    command = tmux_command("show-environment", "-t", "=" + session)
+    if not checked:
+        command.append("OMS_ROOM_ID")
+    found = subprocess.run(command,
                            capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
-    value = found.stdout.strip().partition("=")[2] if found.returncode == 0 else ""
+    # A session-wide query succeeds even when OMS_ROOM_ID is absent.
+    if checked:
+        found.check_returncode()
+        value = next((line.partition("=")[2] for line in found.stdout.splitlines()
+                      if line.startswith("OMS_ROOM_ID=")), "")
+    else:
+        value = found.stdout.strip().partition("=")[2] if found.returncode == 0 else ""
     try:
         return room.identifier(value, "room")
     except ValueError:
+        if checked and value:
+            raise
         return None
 
 
@@ -2748,11 +2759,12 @@ def bind_window(pane, launch, view, attention_only):
 
 
 # F9 selects the other pane of the window: the native chat from its board and back.
-KEYS_HELP = ("OMS panel keys: F9 chat/board · F5 control window · F12 this help · "
-             "on a board: Enter open · Tab next tab · k capacity · u/Ctrl+L refresh · a advisor · f full result · t tree · v expand · n start main · ? all")
-# F5/F9/F12 are unbound in Codex 0.160 and Claude Code; F8 is Codex voice, F10/F11 belong to terminal menus.
-MAIN_KEYS = (("F9", "select-pane -t :.+"), ("F5", "select-window -t :=control"),
-             ("F12", 'display-message -d 8000 "%s"' % KEYS_HELP))
+KEYS_HELP = ("1 Claude 2 Pi 0 Codex ? More F5 Back",
+             "F9 Chat/Board F5 Control ? Keys k Capacity")
+# Text inside tmux's conditional cannot contain commas or closing braces.
+MAIN_KEYS = (("F9", "select-pane -t :.+"),
+             ("F5", 'if-shell -F "#{==:#{window_name},control}" "select-window -l" "select-window -t :=control"'),
+             ("F12", 'display-message -d 8000 "#{?#{==:#{window_name},control},%s,%s}"' % KEYS_HELP))
 
 
 def _legacy_main_key(binding, key, command):
@@ -2858,13 +2870,51 @@ def live_mains(repo, session, room_id, pending_window=None):
     return len(live) + sum(1 for r in windows if not r[2])
 
 
+def live_main_refusal(repo, history=None):
+    if history is None:
+        history = json.loads(events(repo, "list", "--json", output=True))
+    import panel_release
+    if not isinstance(history, list) or any(not isinstance(row, dict) for row in history):
+        raise ValueError("main lifecycle status unavailable; existing sessions preserved")
+    candidates = [row for row in history
+                  if (row.get("tool") == "panel-main" or (row.get("panel") or {}).get("role") == "main")
+                  and row.get("terminal") is not True and row.get("state") not in
+                  {"done", "failed", "cancelled", "timed_out", "abandoned"}]
+    hint = panel_release.refusal_hint(candidates)
+    # A projected occupying main identifies the recovery target, not proof of termination.
+    def occupies(row):
+        if (row.get("panel") or {}).get("role") == "main" or "refs" not in row:
+            return True
+        if (row.get("refs") or {}).get("panel_role") == "main":
+            try:
+                return panel_release.heartbeat_fresh(row)
+            except ValueError:
+                pass
+        return False
+    occupying = [row for row in candidates if occupies(row)]
+    attempt = occupying[0].get("attempt_id") if len(occupying) == 1 else None
+    if isinstance(attempt, str) and panel_release.ID.fullmatch(attempt):
+        # An older recoverable attempt must not displace the main occupying this panel.
+        command = "oms panel --release-main " + attempt
+    elif occupying:
+        return "this panel already has a live main or unverified terminal owner" + panel_release.refusal_hint([])
+    elif "oms panel --release-main " in hint:
+        command = hint[hint.index("oms panel"):].replace(" (see k)", "")
+    else:
+        return "this panel already has a live main or unverified terminal owner" + hint
+    summary = "this panel already has a live main or unverified owner; if crashed:"
+    refusal = summary + " " + command
+    # Accepted attempt IDs can exceed the summary limit; keep the command copyable.
+    return refusal if len(refusal) <= 140 else summary + "\n" + command
+
+
 def check_legacy_main(repo):
     """Pre-lease mains must also finish before an inline or host launch can replace them."""
     history = json.loads(events(repo, "list", "--json", output=True))
     if not isinstance(history, list) or any(not isinstance(row, dict) for row in history):
         raise ValueError("main lifecycle status unavailable; existing sessions preserved")
     if any(row.get("tool") == "panel-main" and row.get("terminal") is not True for row in history):
-        raise ValueError("this panel already has a live main or unverified owner; a replacement needs a confirmed terminal owner" + __import__("panel_release").refusal_hint(history))
+        raise ValueError(live_main_refusal(repo, history))
     if shutil.which("tmux"):
         session, owner = resolve_session(repo, wait=False)
         if owner != str(repo):
@@ -2885,7 +2935,7 @@ def check_legacy_main(repo):
                     raise ValueError("current main window status unavailable")
                 pending = value
             if live_mains(repo, session, ident, pending) >= MAX_LIVE_MAINS:
-                raise ValueError("this panel already has a live main; finish it before starting another" + __import__("panel_release").refusal_hint(history))
+                raise ValueError(live_main_refusal(repo, history))
 
 
 def spawn_main(repo, provider, task=None, model=None):
@@ -2911,7 +2961,7 @@ def spawn_single_main(repo, provider, task=None, model=None):
     env["OMS_PANEL_SESSION"] = session
     ident = os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
     if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
-        raise ValueError("this panel already has a live main; finish it before starting another" + __import__("panel_release").refusal_hint(json.loads(events(repo, "list", "--json", output=True))))
+        raise ValueError(live_main_refusal(repo))
     with _lock(repo, "panel-main-session", timeout=.1):
         check_legacy_main(repo)
     pane = add_main_window(repo, session, provider, board_view("auto"), False, env, None, model, task)
@@ -2970,7 +3020,7 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
                 # An explicit --room wins; otherwise new mains default to the panel's open room.
                 os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
                 if live_mains(repo, session, os.environ["OMS_ROOM_ID"]) >= MAX_LIVE_MAINS:
-                    raise ValueError("this panel already has a live main; finish it before starting another" + __import__("panel_release").refusal_hint(json.loads(events(repo, "list", "--json", output=True))))
+                    raise ValueError(live_main_refusal(repo))
                 with _lock(repo, "panel-main-session", timeout=.1):
                     check_legacy_main(repo)
                 created = "window"
@@ -3046,7 +3096,7 @@ def open_native(provider, repo, resume=None, model=None, task=None, view="auto",
         with _lock(repo, "panel-main-start", timeout=3):
             ident = os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
             if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
-                raise ValueError("this panel already has a live main; finish it before starting another" + __import__("panel_release").refusal_hint(json.loads(events(repo, "list", "--json", output=True))))
+                raise ValueError(live_main_refusal(repo))
             with _lock(repo, "panel-main-session", timeout=.1):
                 check_legacy_main(repo)
             window = add_main_window(repo, session, provider, view, attention_only, os.environ.copy(),
@@ -3209,9 +3259,9 @@ def snapshot(repo, room_id=None, _tick=None):
                             [t.get("id") for t in state["room"].get("repo_tasks", [])], _shared=True, _tick=_tick)
                     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                         state["completed_tasks"] = {}
-            except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
                 if ident:
-                    state["room"] = {"id": ident, "error": "room evidence unavailable"}
+                    state["room"] = {"id": ident, "error": "room unreadable: %s: %s" % (type(error).__name__, error)}
                     status = 1
             if state["room"].get("participants"):
                 # Board-only extras, kept in memory; any failure leaves the board as the room alone draws it.
@@ -4003,12 +4053,15 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
         except (OSError, ValueError, subprocess.SubprocessError):
             return False
         if pane:
+            navigation["reader_open"] = True
             navigation["notice"] = "Opened on the right; Esc closes it"
         return bool(pane)
 
     def close_call():
         try:
-            return managed_session() and panel_reader.close_reader(os.environ.get("TMUX_PANE", ""))
+            closed = managed_session() and panel_reader.close_reader(os.environ.get("TMUX_PANE", ""))
+            navigation.pop("reader_open", None)
+            return closed
         except (OSError, subprocess.SubprocessError):
             return False
 
@@ -4094,7 +4147,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     navigation.update(hits=[], items=[], expanded=expanded, installed=installed,
                                       spawn_busy=any(proc.poll() is None for proc, unused, unused2 in spawns),
                                       spawn_managed=managed_session(),
-                                      main_occupied=any(m.get("role") == "main" and m.get("state") not in
+                                      main_occupied=status != 0 or bool(navigation.get("capacity_stale")) or bool(main_occupied(state)) or any(m.get("role") == "main" and m.get("state") not in
                                           {"done", "failed", "cancelled", "timed_out", "abandoned"}
                                           for m in __import__("room_view").nodes(state)))
                     drawn, size, terminal = frame_view(repo, provider, state, menu=False,
@@ -4445,7 +4498,13 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
     with menu_input() as inputs:
         show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
         if inputs.fd is None:
-            return read_field("oms> ")
+            choice = read_field("oms> ")
+            if navigation.get("detail"):
+                navigation.pop("detail", None)
+                navigation["offset"] = 0
+                if choice == "q":
+                    return "9"
+            return "9" if choice == "u" else choice
         deadline = time.monotonic() + 5
         queued = navigation.pop("queued", [])
         while True:
@@ -4463,8 +4522,9 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                             navigation.pop("detail", None)
                             navigation["offset"] = 0
                             return "9"
-                        continue
-                    return event[0]
+                        navigation.pop("detail", None)
+                        navigation["offset"] = 0
+                    return "9" if event[0] == "u" else event[0]
                 if event[0] == "escape":
                     if navigation.pop("detail", None) is None:
                         continue
@@ -4493,12 +4553,28 @@ def interactive(repo, view="auto", attention_only=False):
     previous = "ready"
     navigation = {}
     held = {}
-    if managed_session() and not os.environ.get("OMS_ROOM_ID"):
-        # A bare control window shows the panel's recorded room, when it still exists.
-        adopted = recorded_room(os.environ["OMS_PANEL_SESSION"])
-        if adopted and room_open(repo, adopted):
-            os.environ["OMS_ROOM_ID"] = adopted
+    next_room_poll = 0
     while True:
+        if managed_session() and time.monotonic() >= next_room_poll:
+            next_room_poll = time.monotonic() + 5
+            try:
+                adopted = recorded_room(os.environ["OMS_PANEL_SESSION"], checked=True)
+                if not adopted:
+                    os.environ.pop("OMS_ROOM_ID", None)
+                    raise ValueError("session room is unset")
+                if adopted and not room_open(repo, adopted):
+                    raise ValueError("selected room is unavailable or closed")
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                navigation["room_poll_unknown"] = True
+                previous = "Room selection unknown: " + clean("%s: %s" % (type(error).__name__, error), 100)
+            else:
+                navigation.pop("room_poll_unknown", None)
+                if adopted != os.environ.get("OMS_ROOM_ID"):
+                    if adopted:
+                        os.environ["OMS_ROOM_ID"] = adopted
+                    else:
+                        os.environ.pop("OMS_ROOM_ID", None)
+                    navigation.clear()
         if managed_session():
             subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
                                         "@oms_panel_owner", provider), check=True)
@@ -4512,6 +4588,16 @@ def interactive(repo, view="auto", attention_only=False):
         navigation["line_input"] = not raw_keys()
         try:
             choice = read_choice(repo, provider, previous, view, attention_only, navigation, cache)
+            if choice == "u":
+                choice = "9"
+            if choice in ("1", "2", "0", "3", "t") and (
+                    cache.get("status", 1) != 0 or navigation.get("capacity_stale") or navigation.get("room_poll_unknown")
+                    or cache.get("state", {}).get("capacity_stale") or main_occupied(cache.get("state", {}))
+                    or cache.get("state", {}).get("collection", {}).get("ok") is not True
+                    or cache.get("state", {}).get("room", {}).get("error")):
+                occupied = main_occupied(cache.get("state", {}))
+                raise ValueError("Room selection unknown; wait for a successful room poll" if navigation.get("room_poll_unknown")
+                                 else live_main_refusal(repo, [occupied] if occupied else None))
             if choice != "9":
                 # Keys typed ahead only follow a refresh; any other choice may open a text prompt.
                 navigation.pop("queued", None)
@@ -4521,22 +4607,32 @@ def interactive(repo, view="auto", attention_only=False):
                 continue
             if choice == "?":
                 width = max(1, shutil.get_terminal_size().columns)
-                print("\n".join(menu_rows(width, 40, terminal_style()[2], expanded=True, managed=managed_session())))
+                print("\n".join(menu_rows(width, 40, terminal_style()[2], expanded=True, managed=managed_session(), occupied=navigation.get("main_occupied", True))))
                 read_field("Press Enter to return to the panel: ", required=False)
                 continue
             if choice == "k":
                 from panel_metrics import collect
                 import panel_health
-                report = dict(cache.get("state", {}))
-                report["provider_status"] = collect(report, repo=repo)
-                report["private_capacity"] = private_capacity(repo)
-                size = shutil.get_terminal_size((100, 28))
-                print(panel_health.render(report, size.columns, size.lines))
-                read_field("Press Enter to return to the panel: ", required=False)
+                import panel_release
+                from panel_cache import TickReads
+                while True:
+                    report = dict(cache.get("state", {}))
+                    report["capacity_stale"] = bool(report.get("capacity_stale") or navigation.get("capacity_stale"))
+                    report["provider_status"] = collect(report, repo=repo)
+                    report["private_capacity"] = private_capacity(repo)
+                    report["dead_mains"] = panel_release.dead_mains(repo, _tick=TickReads(repo))
+                    size = shutil.get_terminal_size((100, 28))
+                    print(panel_health.render(report, size.columns, size.lines, footer="Enter returns to controls; 9 refreshes"))
+                    if read_field("Enter to return / 9 Refresh: ", required=False) != "9":
+                        break
+                    state, status = snapshot(repo)
+                    state, status, notice = hold_state(held, state, status, os.environ.get("OMS_ROOM_ID", ""))
+                    stale_notice(navigation, notice)
+                    cache.update(state=state, status=status)
                 continue
             if choice == "q":
                 session = os.environ.get("OMS_PANEL_SESSION", "")
-                if os.environ.get("TMUX") and re.fullmatch(PANEL_SESSION, session):
+                if managed_session():
                     subprocess.run(tmux_command("detach-client", "-s", session), check=True)
                     previous = "detached; existing sessions preserved"
                     continue
@@ -4638,24 +4734,36 @@ def interactive(repo, view="auto", attention_only=False):
             elif choice == "h":
                 browse_chats(repo)
             elif choice == "o":
-                room.main(["list", "--repo", str(repo)])
-                ident = read_field("Room ID (Enter for new room): ", required=False)
-                os.environ["OMS_ROOM_ID"] = ensure_room(repo, ident) if ident else room.create(
-                    repo, title=read_field("Room title: "))
+                try:
+                    rooms, incomplete = room.discover(repo)
+                    width = max(1, shutil.get_terminal_size().columns)
+                    from panel_view import clipped
+                    for index, shared in enumerate(rooms, 1):
+                        print(clipped("%s %s / %s" % (index, shared["id"], shared.get("title") or "Untitled"), width))
+                    if incomplete:
+                        print(clipped("Room scan incomplete; some rooms are unknown", width))
+                    choice_room = read_field("Room number / n New / Enter Cancel: ", required=False)
+                    if not choice_room:
+                        continue
+                    if choice_room == "n":
+                        ident = room.create(repo, title=read_field("Room title: "))
+                    elif choice_room.isdigit() and 1 <= int(choice_room) <= len(rooms):
+                        ident = ensure_room(repo, rooms[int(choice_room) - 1]["id"])
+                    else:
+                        raise ValueError("choose a listed room number or n")
+                    if managed_session():
+                        subprocess.run(tmux_command("set-environment", "-t", "=" + os.environ["OMS_PANEL_SESSION"],
+                                                    "OMS_ROOM_ID", ident), check=True, timeout=3, stdin=subprocess.DEVNULL)
+                    os.environ["OMS_ROOM_ID"] = ident
+                except SystemExit as error:
+                    previous = "room selection failed: exit %s" % error.code
+                    continue
                 previous = "room selected: " + os.environ["OMS_ROOM_ID"]
                 navigation.clear()
             elif choice == "g":
                 view = "graph" if view != "graph" else "auto"
                 navigation["offset"] = 0
                 previous = "view: " + view
-            elif choice == "v":
-                view = {"auto": "compact", "compact": "detail", "detail": "auto", "graph": "auto",
-                        "tree": "auto", "summary": "tree"}[view]
-                navigation["offset"] = 0
-                previous = "view: " + view
-            elif choice == "b":
-                attention_only = not attention_only
-                previous = "attention only" if attention_only else "all recorded activity"
             elif choice == "c":
                 task_id = read_field("Discussion task ID: ")
                 label = read_field("Task title: ")
@@ -4678,7 +4786,9 @@ def interactive(repo, view="auto", attention_only=False):
                 delivered = retry_delivery(repo, task_id)
                 previous = "app delivery: " + delivered["receipt"]["status"]
             elif choice != "9":
-                raise ValueError("choose 1-9, t, a, p, c, r, h, f, n, o, g, v, b, s, e or q")
+                available = menu_rows(200, 100, expanded=True, managed=managed_session(),
+                                      occupied=navigation.get("main_occupied", True))
+                raise ValueError("choose " + ", ".join(re.findall(r"\[([^]]+)\]", " ".join(available))))
         except EOFError:
             return 0
         except NativeShutdown:
@@ -4686,7 +4796,14 @@ def interactive(repo, view="auto", attention_only=False):
         except KeyboardInterrupt:
             previous = "interrupted; inspect the recorded attempt before retrying"
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            previous = "error: " + clean(str(error), 140)
+            message = str(error)
+            if message.startswith("this panel already has a live main or unverified owner;"):
+                lines = message.splitlines()
+                previous = "error: " + "\n".join(
+                    clean(line, len(line) if line.startswith("oms panel --release-main ") else 147)
+                    for line in lines)
+            else:
+                previous = "error: " + clean(message, 140)
 
 
 def main(argv=None):

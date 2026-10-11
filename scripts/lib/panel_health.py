@@ -68,9 +68,37 @@ def alerts(report):
             for item in pressured)] if pressured else []
 
 
-def render(report, width, height):
-    from panel_view import clipped
-    rows = ["OMS / Capacity and recovery" + (" / stale" if report.get("capacity_stale") is True else "")]
+def render(report, width, height, footer=None):
+    from panel_view import clipped, LIVE_STATES
+    from room_view import nodes
+    members = nodes(report)
+    providers = []
+    for member in members:
+        provider = "pi" if member.get("harness") == "pi" else member.get("provider")
+        if provider in {"claude", "codex", "pi"} and provider not in providers:
+            providers.append(provider)
+    rows = ["OMS / Capacity and recovery"]
+    stale = report.get("capacity_stale") is True
+    if stale:
+        rows.append("Stale readings; status unknown")
+    readable = not stale and mapping(report.get("collection")).get("ok") is True
+    for provider in providers:
+        if provider == "pi":
+            rows.append("-- [unknown] Pi: no native reading")
+            continue
+        row = mapping(mapping(report.get("provider_status")).get(provider))
+        known = readable and row.get("source") not in {"cache stale", "unavailable"}
+        context = percent(row.get("context_left")) if known else None
+        weekly = percent(row.get("weekly_used")) if known else None
+        warn = env_int("OMS_CTX_WARN_PCT", 15, minimum=1, maximum=90)
+        urgent = min(env_int("OMS_CTX_URGENT_PCT", 8, minimum=0, maximum=89), warn)
+        status = "unknown" if context is None else "full" if context <= 0 else "urgent" if context <= urgent else "warning" if context <= warn else "ok"
+        rows.append("%s left [%s] %s main" % ("--" if context is None else "%s%%" % context, status, provider.capitalize()))
+        rows.append("%s used [%s] %s weekly" % ("--" if weekly is None else "%s%%" % weekly,
+                    "unknown" if weekly is None else "full" if weekly >= 100 else "warning" if weekly >= 90 else "ok", provider.capitalize()))
+    mains = sum(m.get("role") == "main" and m.get("state") in
+                LIVE_STATES | {"blocked", "waiting_input", "waiting_approval", "review"} for m in members)
+    rows.append("Main: %s live" % mains)
     mains = mapping(report.get("dead_mains"))
     dead = mains.get("releasable") or []
     if dead:
@@ -86,14 +114,15 @@ def render(report, width, height):
             rows.append("  %s / %s / %s / %s / %s [unverifiable]" % tuple(clean(main.get(key), 160) for key in
                         ("attempt", "provider", "state", "age", "label")))
             rows.append("  " + clean(main.get("reason"), 160))
-    data = project(report)
-    for item in data["items"]:
+    for item in project(report)["items"]:
+        if item["kind"] in {"context", "quota"} or item["label"] == "Room mains":
+            continue
         value = "--" if item["used"] is None else "%s/%s" % (item["used"], item["limit"])
-        rows.append("%s: %s [%s]" % (item["label"], value, item["status"]))
+        rows.append("%s [%s] %s" % (value, item["status"], item["label"]))
         if item["status"] != "ok":
             rows.append("  " + item["action"])
-    footer = "k / Esc board; u / Ctrl+L refresh display"
+    footer = footer if footer is not None else "k / Esc board; u / Ctrl+L refresh"
     omitted = max(0, len(rows) - max(0, height - 2))
     if omitted:
-        rows = rows[:max(0, height - 2)] + ["%d more lines; oms panel --health --json has the complete report" % omitted]
+        rows = rows[:max(0, height - 2)] + ["%d more; oms panel --health --json" % omitted]
     return "\n".join(clipped(line, width) for line in (rows + [footer])[:max(0, height)])

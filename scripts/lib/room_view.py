@@ -6,7 +6,7 @@ import time
 
 from dashboard_projection import ELLIPSIS, clean, count as valid_count, display_width, fit, listing, mapping
 from panel_view import (ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
-                        clipped, location_label, status_alerts, worker_rows, wrapped)
+                        clipped, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped)
 
 
 def nodes(report):
@@ -116,12 +116,10 @@ def main_words(member, unicode=True):
 def spawn_bar(width, navigation):
     """The board's fixed last row as (text, [(x1, x2, provider)]); None where the board has no live input."""
     installed = navigation.get("installed")
-    if installed is None:
+    if installed is None or navigation.get("main_occupied"):
         return None
     if not navigation.get("spawn_managed"):
         return "Start a main: needs the tmux panel (oms panel)", []
-    if navigation.get("main_occupied"):
-        return "One main active or unverified; finish it before starting another", []
     if navigation.get("spawn_armed"):
         keys = [("claude", "1 Claude"), ("pi", "2 Pi"), ("codex", "0 Codex")]
         return "Start one main: " + "  ".join(label for name, label in keys if name in installed) + "  Esc cancel", []
@@ -763,6 +761,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     navigation["tab_strip_visible"] = True
     room = mapping(report.get("room"))
     members = nodes(report)
+    navigation["main_occupied"] = bool(
+        navigation.get("room_poll_unknown") or navigation.get("capacity_stale") or report.get("capacity_stale")
+        or room.get("error") or mapping(report.get("collection")).get("ok") is not True
+        or main_occupied(report, members))
     members += native_advisors(report, members)
     labels = main_names(members)
     # Earlier mains of the room stay readable; the live one leads.
@@ -832,7 +834,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if previewed and previewed.get("role") != "main" and not previewed.get("_native"):
         navigation["full_result"] = action(previewed)
     if menu:
-        footer = ["[1] Codex  [2] Claude  [h] Chats  [?] More  [q] " + ("Detach" if managed else "Quit")]
+        footer = menu_rows(
+            width, 1, unicode, navigation.get("menu_help", False), managed,
+            occupied=navigation["main_occupied"], installed=navigation.get("installed"))
     else:
         chosen_member = next((m for m in mains + [c for calls in everyone.values() for c in calls]
                               if action(m) == selected), None)
@@ -1411,47 +1415,56 @@ def action(member):
 
 
 def footer_hints(navigation, width, managed, unicode, member, graph):
-    """At most three hints for what is selected, then the fixed panel keys; `?` swaps in the full list of working keys."""
-    tabs = graph and navigation.get("tab_strip_visible", True)
+    """Selection hints followed by fixed panel keys, with bounded help rows."""
+    tabs = navigation.get("tab_strip_visible")
     selected = navigation.get("selected")
     kind = selected[0] if selected else "chat"
     arrows, move = ("←→", "↑↓") if unicode else ("<>", "^v")
     toggle = "F9 Chat⇄Board" if unicode else "F9 Chat<>Board"
     worktree = bool(member and kind == "result" and str(member.get("location") or "").startswith("worktree:"))
     if navigation.get("keys_help"):
-        keys = ["Enter Open", move + " Move", "Space Fold", "a Ask advisor",
-                "w Worktree" if worktree else "", "f Full result" if navigation.get("full_result") else "",
-                "Tab Next tab" if tabs else "", "g Graph", "t Tree", "n New main" if managed else "",
-                "v " + ("Collapse" if navigation.get("expanded") else "Expand"), "b Attention", "Esc Back",
-                "Shift-drag Copy" if managed else "", toggle if managed else "q Quit", "? Hide"]
+        keys = ["? Hide", "Esc Back", "F5 Control" if managed else "", "k Capacity", "u Refresh",
+                "Enter Expand" if tabs and navigation.get("tab") == "messages" else
+                "Enter Open right" if managed and kind in {"result", "debate"} else "Enter Open",
+                move + " Move", "Space Fold", "a Ask advisor",
+                "w Worktree" if worktree else "", "f Open right" if managed and navigation.get("full_result") else
+                "f Full result" if navigation.get("full_result") else "",
+                "Tab Next tab" if tabs else "", "g Graph", "t Tree",
+                "n New main" if managed and not navigation.get("main_occupied") else "",
+                "v " + ("Collapse" if navigation.get("expanded") else "Expand"), "b Attention",
+                "Shift-drag Copy" if managed else "", toggle if managed else "q Quit", "F12 Keys" if managed else ""]
         lines = [""]
         for key in [k for k in keys if k]:
+            key = clipped(key, width)
             if lines[-1] and display_width(lines[-1] + "  " + key) > width:
                 lines.append("")
             lines[-1] += ("  " if lines[-1] else "") + key
-        return lines[:4]
+        return lines[:max(0, navigation.get("help_rows", 4))]
     tab = navigation.get("tab") if tabs and navigation.get("tab_body_visible", True) and not navigation.get("detail") else None
-    contextual = ([move + " Message", "Enter Open", arrows + " Filter"] if tab == "messages"
-                  else [move + " Seat", "Enter Open", arrows + " Target"] if tab == "debate" and not navigation.get("debate_empty")
+    right = managed and (kind in {"result", "debate"} or navigation.get("preview") and
+                        navigation["preview"].get("target", (None,))[0] in {"result", "debate"})
+    contextual = (["Enter Expand", "f Open right", move + " Message", arrows + " Filter"] if tab == "messages" and navigation.get("message_has_call")
+                  else [move + " Message", "Enter Expand", arrows + " Filter"] if tab == "messages"
+                  else [move + " Seat", "Enter Open right" if managed else "Enter Open", arrows + " Target"] if tab == "debate" and not navigation.get("debate_empty")
                   else ["Tab Next tab"] if tab == "debate"
                   else ["wheel Scroll", "Tab Next tab"] if tab == "plan" else None)
-    contextual = contextual or (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + ["f Full result" if navigation.get("full_result") else "",
+    contextual = contextual or (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + [
+                  "Enter Open right" if right else "",
+                  "f Open right" if managed and navigation.get("full_result") else "f Full result" if navigation.get("full_result") else "",
                   "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
-                  "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "Enter Show",
+                  "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "" if right else "Enter Show",
                   "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
                   "Tab Next tab" if tabs and not navigation.get("detail") else "",
                   "Space Fold" if kind == "group" or kind == "chat" and not graph else ""]
-    # The panel-wide F-keys stay fixed at the end of every board; board keys fill what is left.
-    control = navigation.get("control_window", True)
-    reserved = [toggle] + (["F5 Control"] if control else []) + ["F12 Keys"] if managed else ["q Quit", "? Keys"]
+    if navigation.get("reader_open"):
+        contextual.insert(0, "Esc Close right")
+    if not tabs:
+        contextual.append("v Expand")
+    contextual.sort(key=lambda hint: 0 if hint.startswith("Enter ") or hint.startswith("f ") or hint.startswith("Esc ") else 1)
+    reserved = (["F9", "F12 Keys"] if width < 64 else [toggle, "F12 Keys"]) if managed else ["q Quit", "? Keys"]
     packed = []
     tail = "  ".join(reserved)
     for hint in [h for h in contextual if h]:
         if len(packed) < 3 and display_width("  ".join(packed + [hint] + reserved)) <= width:
             packed.append(hint)
-    if display_width(tail) > width and managed:
-        # Narrow boards keep every panel key visible in short form.
-        reserved = ["F9 F5" if control else "F9", "F12 Keys"]
-        tail = "  ".join(reserved)
-        packed = []
     return ["  ".join(packed + reserved)] if display_width(tail) <= width else [clipped(tail, width)]

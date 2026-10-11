@@ -60,13 +60,32 @@ def location_label(value):
     return value.replace("worktree:oh-my-setting-delegate.", "worktree ").replace("worktree:", "worktree ")
 
 
+def main_occupied(report, members=None):
+    """Return attempt-shaped evidence; joined mains need confirmed termination before replacement."""
+    attempt = next((row for row in listing(mapping(report.get("attempts")).get("active_recent"))
+                    if mapping(row.get("panel")).get("role") == "main"
+                    and row.get("state") not in TERMINAL_STATES), None)
+    if attempt is not None:
+        return attempt
+    if members is None:
+        from room_view import nodes
+        members = nodes(report)
+    member = next((row for row in members if row.get("role") == "main"
+                   and row.get("state") not in TERMINAL_STATES), None)
+    if member is not None:
+        return {"attempt_id": member.get("attempt"), "state": member.get("state"),
+                "panel": {"role": "main", "room_id": mapping(report.get("room")).get("id"),
+                          "room_participant": member.get("participant")}}
+    return None
+
+
 def status_alerts(report):
     alerts = []
     if mapping(report.get("collection")).get("ok") is not True:
         alerts.append("! Collection degraded - some state unknown")
     error = mapping(report.get("room")).get("error")
     if error:
-        alerts.append("! Room: " + clean(error, 160))
+        alerts.append("! Room: " + clean(error, 160) + " - o selects a room, 9 retries")
     if report.get("capacity_alerts"):
         alerts.extend(report["capacity_alerts"])
     return alerts
@@ -84,6 +103,23 @@ def clipped(text, width):
             break
         result += char
     return result
+
+
+def message_rows(text, width):
+    """Preserve message line breaks and wrap by cells without dropping spaces or adding ellipses."""
+    rows = []
+    for line in str(text).splitlines():
+        line = clipped(line, display_width(line))
+        value, cells = "", 0
+        for char in line:
+            step = display_width(char)
+            if value and cells + step > width:
+                rows.append(value)
+                value, cells = "", 0
+            value += char
+            cells += step
+        rows.append(value)
+    return rows
 
 
 def tone(state):
@@ -269,15 +305,23 @@ def box_row(text, width, unicode=True):
     return edge + " " + text + " " * max(0, width - display_width(text) - 3) + edge
 
 
-def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=True):
+def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=True, occupied=False, installed=None):
     """Starting a main, rooms, refresh and quit; the board's own keys are not repeated."""
     quit_label = "Detach" if managed else "Quit"
+    other = "[o] Rooms  [k] Capacity  [9] Refresh  [?] More  [q] " + quit_label
+    harnesses = [("claude", "[1] Claude"), ("pi", "[2] Pi"), ("codex", "[0] Codex")]
+    start_keys = [label for name, label in harnesses if installed is None or name in installed]
+    starts = "  ".join(start_keys + (["[3] Resume", "[t] Task"] if start_keys else []))
     if height < 20 or width < 28:
-        return [clipped("1 Claude  2 Pi  ? More  q " + quit_label, width)]
-    groups = [("START", "[1] Claude  [2] Pi  [0] Codex  [3] Resume  [t] Task"),
-              ("OTHER", "[o] Rooms  [k] Capacity  [9] Refresh  [?] More  [q] " + quit_label)]
+        options = (["[o] Rooms [k] Capacity [9] Refresh [?] [q] " + quit_label,
+                    "[o] [k] [9] [?] [q]"] if occupied else
+                   [" ".join(start_keys + ["[?]", "[q] " + quit_label]),
+                    " ".join(re.findall(r"\[[^]]+\]", " ".join(start_keys)) + ["[?]", "[q]"])])
+        compact = next((line for line in options if display_width(line) <= width), "[?] [q]")
+        return [clipped(compact, width)]
+    groups = ([] if occupied else [("START", starts)] if start_keys else []) + [("OTHER", other)]
     if expanded:
-        groups += [("OPEN", "[h] Chats  [r] Results  [v] Detail  [g] Graph  [b] Attention  [z] Panel"),
+        groups += [("OPEN", "[h] Chats  [r] Results  [g] Graph  [z] Panel"),
                    ("TERMINAL", "[s] Terminals and jobs"),
                    ("WORK", "[5] Explain  [6] Implement  [e] Researcher  [a] Advisor  [7] Review  [c] Council"),
                    ("SETUP", "[4] Main provider  [p] CLIs  [8] Dashboard"),
@@ -285,12 +329,14 @@ def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=T
     mode = "all shortcuts" if expanded else "press a key" if keys else "key + Enter"
     lines = [box_edge("Actions" + (" · " if unicode else " / ") + mode, width, unicode)]
     if width < 60 and not expanded:
-        for line in ("[1] Claude  [2] Pi  [0] Codex", "[t] Task  [o] Rooms", "[9] Refresh  [?] More  [q] " + quit_label):
-            lines += [box_row(part, width, unicode) for part in wrapped(line, width - 4, 2)]
+        compact = ([] if occupied else ["  ".join(start_keys), "[3] Resume  [t] Task"] if start_keys else []) + [other]
+        for line in compact:
+            lines += [box_row(part, width, unicode) for part in wrapped(line, width - 4, 3)]
         return lines + [box_edge("", width, unicode, "bottom")]
+    indent = 9 if expanded else 7
     for label, keys_text in groups:
-        for index, line in enumerate(wrapped(keys_text, max(1, width - 12), 5)):
-            lines.append(box_row((label.ljust(7) if index == 0 else " " * 7) + line, width, unicode))
+        for index, line in enumerate(wrapped(keys_text, max(1, width - indent - 5), 5)):
+            lines.append(box_row((label.ljust(indent) if index == 0 else " " * indent) + line, width, unicode))
     return lines + [box_edge("", width, unicode, "bottom")]
 
 
@@ -370,24 +416,36 @@ def inbox_items(report, unicode=True):
                           "what": "to " + label(target), "style": "alert",
                           "action": ("chat", target["participant"]),
                           "row_id": ("question", str(question.get("id")) if question.get("id") else ("position", index))})
+    failure_statuses = {"failed", "timeout", "timed_out", "error", "rejected", "unavailable", "failed_command",
+                        "rpc_error", "persistence_failure", "absent", "archived", "busy", "invalid_timeout", "uncertain",
+                        "unsupported_platform", "unbound", "ambiguous", "unsafe_endpoint", "empty_message", "oversized"}
+    failed = [mapping(receipt) for receipt in mapping(mapping(report.get("room")).get("publications")).values()
+              if mapping(receipt).get("status") in failure_statuses]
+    if failed:
+        items.append({"stamp": max(receipt.get("ts") or "" for receipt in failed), "glyph": "!",
+                      "who": "Main wake-up delivery failed",
+                      "what": "(unconfirmed)" if any(receipt.get("delivery_unknown") for receipt in failed) else "",
+                      "style": "bad", "action": None, "row_id": ("delivery", "wake-up")})
     return sorted(items, key=lambda item: item["stamp"], reverse=True)
 
 
 def render_inbox(report, width, height, color, unicode, managed, previous, navigation):
     """The control window's menu pane: only what needs the person, then the few actions that start work."""
-    from room_view import nodes
     navigation = navigation if navigation is not None else {}
     sep = " · " if unicode else " / "
     room = mapping(report.get("room"))
     items = inbox_items(report, unicode)
+    occupied = bool(main_occupied(report) or room.get("error") or mapping(report.get("collection")).get("ok") is not True
+                    or report.get("capacity_stale") or navigation.get("capacity_stale") or navigation.get("room_poll_unknown"))
+    navigation["main_occupied"] = occupied
     footer = menu_rows(width, height, unicode, navigation.get("menu_help", False), managed,
-                       keys=not navigation.get("line_input"))
+                       keys=not navigation.get("line_input"), occupied=occupied, installed=navigation.get("installed"))
     if managed and height >= 20:
-        footer.append("F5 control / F12 keys / Ctrl-b d detach")
+        footer.append("F5 Back / F12 keys / Ctrl-b d detach")
     if navigation.get("notice"):
         footer.append(clean(navigation["notice"], 200))
     if len(footer) > height - 1 - 4:
-        footer = [clipped("1 Codex  2 Claude  ? More  q " + ("Detach" if managed else "Quit"), width)]
+        footer = menu_rows(width, 1, unicode, managed=managed, occupied=occupied, installed=navigation.get("installed"))
     budget = max(0, height - 1 - len(footer))
     head = [("✳ " if unicode else "* ") + "OMS control panel / " +
             (clean(room.get("title") or room.get("id")) or mapping(report.get("repo")).get("name") or "repository")]
@@ -406,9 +464,15 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
         head.append(alert)
         styles.append("bad")
     if previous is not None and height >= 12:
-        head.append("Last: " + previous)
-        styles.append("dim")
-    if not any(m.get("role") == "main" for m in nodes(report)):
+        last = message_rows("Last: " + previous, width) if "\n" in previous or "oms panel --release-main " in previous else ["Last: " + previous]
+        if len(last) > 1:
+            keep = max(pinned, budget - 3 - len(last))
+            head, styles = head[:keep], styles[:keep]
+            # Recovery commands must survive the optional-header trimming below.
+            pinned = len(head) + len(last)
+        head.extend(last)
+        styles.extend(["dim"] * len(last))
+    if not occupied:
         for line in wrapped(ONBOARDING, width, 3):
             head.append(line)
             styles.append("main")
@@ -444,7 +508,7 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
     for row_id, item in zip(row_ids[start:start + capacity], window):
         tail = item["tail"] if "tail" in item else age_label(item["stamp"])
         tail = sep + tail if tail else ""
-        text = clipped("%s %s%s%s" % (item["glyph"], item["who"], sep, item["what"]),
+        text = clipped("%s %s%s" % (item["glyph"], item["who"], sep + item["what"] if item["what"] else ""),
                        max(1, content_width - display_width(tail) - 2)) + tail
         body.append((text, item["style"], item["action"], row_id))
     more = len(shown) - len(window) + hidden
@@ -543,23 +607,25 @@ def render_unavailable(report, width, height, color, unicode, previous, menu, ma
     budget = height - int(menu)
     if budget <= 0:
         return ""
+    navigation["main_occupied"] = True
     footer = menu_rows(width, height, unicode, navigation.get("menu_help", False), managed,
-                       keys=not navigation.get("line_input")) if menu else []
+                       keys=not navigation.get("line_input"), occupied=True) if menu else []
     if menu and managed and height >= 20:
-        footer.append("F5 control / F12 keys / Ctrl-b d detach")
+        footer.append("F5 Back / F12 keys / Ctrl-b d detach")
     if navigation.get("notice"):
         footer.append(clean(navigation["notice"], 200))
     if len(footer) > budget - 1:
-        footer = [clipped("1 Codex  2 Claude  ? More  q " + ("Detach" if managed else "Quit"), width)] if menu else []
+        footer = menu_rows(width, 1, unicode, managed=managed, occupied=True) if menu else []
     alert = "! Room state unavailable" if width >= 24 else "! Room state unknown" if width >= 20 else "! Unknown" if width >= 9 else "?"
     head = [(("✳ " if unicode else "* ") + "OMS " + ("control panel" if menu else "dashboard") + " / " +
              (clean(mapping(report.get("repo")).get("name")) or "repository"), "head"),
-            (alert, "bad"),
+            ("! " + clean(mapping(report.get("room")).get("error"), 160) if mapping(report.get("room")).get("error") else alert, "bad"),
             ("This room could not be read; its work and messages are unknown, not empty.", "dim"),
-            (("Press 9 to read again." if menu else "A later refresh may recover it."), "dim")]
-    if previous is not None and height >= 12:
-        head.append(("Last: " + previous, "dim"))
+            (("o selects a room, 9 retries" if menu else "A later refresh may recover it."), "dim")]
     body = max(1, budget - len(footer))
+    if previous is not None and height >= 12:
+        last = message_rows("Last: " + previous, width) if "\n" in previous or "oms panel --release-main " in previous else ["Last: " + previous]
+        head = head[:max(2, body - len(last))] + [(line, "dim") for line in last]
     if body == 1:
         head = [head[1] if width >= 20 else ("?", "bad")]
     lines = []
@@ -606,7 +672,14 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
 
     footer = []
     if menu:
-        footer = menu_rows(width, height, unicode, mapping(navigation).get("menu_help", False), managed)
+        menu_navigation = navigation if navigation is not None else {}
+        occupied = bool(
+            menu_navigation.get("room_poll_unknown") or menu_navigation.get("capacity_stale") or report.get("capacity_stale")
+            or mapping(report.get("room")).get("error") or mapping(report.get("collection")).get("ok") is not True
+            or main_occupied(report))
+        menu_navigation["main_occupied"] = occupied
+        footer = menu_rows(width, height, unicode, menu_navigation.get("menu_help", False), managed,
+                           keys=not menu_navigation.get("line_input"), occupied=occupied, installed=menu_navigation.get("installed"))
         if managed:
             footer.append("F5 control / F12 keys / Ctrl-b d detach")
     sep = " · " if unicode else " / "
@@ -614,7 +687,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     footer.extend([wide if display_width(wide) <= width else "Finished is not accepted" + sep + "some subagents not shown"]
                   if width >= 54 else ["Finished is not accepted", "Some native subagents not shown"])
     if height < 20:
-        footer = (["1 Codex  2 Claude  8 Details  q Quit"] if menu else []) + ["Finished is not accepted"]
+        footer = (footer[:1] if menu else []) + ["Finished is not accepted"]
     alerts = status_alerts(report)
     footer_space = max(0, height - int(menu) - 1 - len(alerts))
     footer = footer[-footer_space:] if footer_space else []

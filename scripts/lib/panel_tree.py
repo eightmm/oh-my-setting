@@ -3,7 +3,7 @@
 from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import usage_line
 from panel_view import (ATTENTION_STATES, PALETTE, activity, box_edge, box_row, clipped,
-                        menu_rows, status_alerts, tone, usage_words, worker_rows, wrapped)
+                        main_occupied, menu_rows, status_alerts, TERMINAL_STATES, tone, usage_words, worker_rows, wrapped)
 from room_view import (action as member_action, call_order, context_note, open_count, footer_hints, live_unread,
                        goal_banner, main_names, model_name, native_advisors, nodes, plan_idle, readable, said,
                        settler, spawn_bar, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
@@ -20,6 +20,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         navigation.update(hits=[], items=[], offset=0, viewport=0, positions={}, room_id=room.get("id"))
         return ""
     members = nodes(report)
+    navigation["main_occupied"] = bool(
+        navigation.get("room_poll_unknown") or navigation.get("capacity_stale") or report.get("capacity_stale")
+        or room.get("error") or mapping(report.get("collection")).get("ok") is not True
+        or main_occupied(report, members))
     names = main_names(members)
     settled, _ = settler(report)
     classify = call_classifier(report)
@@ -149,8 +153,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         call_groups(unlinked, "unlinked", "")
     if not mains and not calls:
         add("No main connected" if room.get("id") else "Select a work room", "dim")
-        if menu:
-            add("Start one main with [1] Claude or [2] Pi", "main")
+        if menu and not navigation["main_occupied"]:
+            add("Start one main", "main")
     tasks = listing(room.get("repo_tasks"))
     if tasks:
         add("Repository tasks", "worker", divider=True)
@@ -172,7 +176,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     for main in mains:
         if main.get("owns"):
             add("  " + (main.get("provider") or "main") + ": " + ", ".join(main["owns"]), "dim")
-    footer = menu_rows(width, height, unicode, navigation.get("menu_help", False), managed) if menu else []
+    footer = menu_rows(width, height, unicode, navigation.get("menu_help", False), managed,
+                       occupied=navigation["main_occupied"], installed=navigation.get("installed")) if menu else []
     if navigation.get("notice"):
         footer.append(clean(navigation["notice"], 200))
     publications = mapping(room.get("publications"))
@@ -191,7 +196,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         footer += shown_hints
         hint_rows = len(shown_hints)
     if len(footer) > height - int(menu) - 4:
-        footer = [clipped("1 Codex  2 Claude  ? More  q Quit", width)] if menu else hints(False)
+        footer = menu_rows(width, 1, unicode, managed=managed, occupied=navigation["main_occupied"],
+                           installed=navigation.get("installed")) if menu else hints(False)
         hint_rows = 0 if menu else len(footer)
     bar = None if menu or height < 8 else spawn_bar(width, navigation)
     if bar:
