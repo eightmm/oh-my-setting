@@ -9223,17 +9223,24 @@ try:
     restarted_release = release_attempt(server=gone_server)
     pi_release = release_attempt(host="inline", native={}, harness="pi")
     pi_env = dict(OMS_PANEL_MAIN_ATTEMPT=pi_release, OMS_ROOM_REPO=str(release_repo), OMS_PANEL_HARNESS="pi")
-    with patch.object(panel_release, "process_refs", return_value=dead_refs):
+    launcher_refs = panel_release.process_refs(os.getpid(), "launcher")
+    assert launcher_refs
+    with patch.object(codex_harness.os, "getpid", return_value=live_release_process.pid):
+        codex_harness.record_panel_child(pi_env, live_release_process.pid)
+    early_pi_row = json.loads(panel_release.events(release_repo, "show", "--attempt", pi_release, "--json"))
+    assert "panel_native_pid" not in early_pi_row["refs"], "early nested Pi claimed an unregistered launcher"
+    panel_release.events(release_repo, "usage", "--attempt", pi_release, "--actor", "panel-main",
+                         *[arg for key, value in launcher_refs.items() for arg in ("--ref", key + "=" + value)])
+    with patch.object(panel_release, "process_refs", side_effect=lambda pid, kind: launcher_refs if kind == "launcher" else dead_refs):
         codex_harness.record_panel_child(pi_env, dead_release_process.pid)
     pi_row = json.loads(panel_release.events(release_repo, "show", "--attempt", pi_release, "--json"))
     assert all(pi_row["refs"][key] == value for key, value in dead_refs.items())
     pi_alive = release_attempt(host="inline", native={}, harness="pi")
     pi_live_env = dict(pi_env, OMS_PANEL_MAIN_ATTEMPT=pi_alive)
-    launcher_refs = panel_release.process_refs(os.getpid(), "launcher")
-    assert launcher_refs
-    empty_pi_refs = {key: value for key, value in pi_row["refs"].items() if not key.startswith("panel_native_")}
+    empty_pi_refs = {key: value for key, value in pi_row["refs"].items() if not key.startswith(("panel_native_", "panel_launcher_"))}
     for protected_refs in (
-            {"panel_native_pid": ""}, {"panel_native_identity": ""},
+            {},
+            dict(launcher_refs, panel_native_pid=""), dict(launcher_refs, panel_native_identity=""),
             dict(launcher_refs, panel_launcher_pid=str(dead_release_process.pid)),
             dict(launcher_refs, panel_launcher_identity="0" * 64),
             {"panel_launcher_pid": launcher_refs["panel_launcher_pid"]},
@@ -9244,8 +9251,42 @@ try:
         assert child_activity.call_count == 1, "protected Pi ownership was overwritten"
     panel_release.events(release_repo, "usage", "--attempt", pi_alive, "--actor", "panel-main",
                          *[arg for key, value in launcher_refs.items() for arg in ("--ref", key + "=" + value)])
-    codex_harness.record_panel_child(pi_live_env, live_release_process.pid)
-    with patch.object(panel_release, "process_refs", return_value=dead_refs):
+    import threading
+    read_started, allow_read, second_read, contender_started = (threading.Event() for _ in range(4))
+    registration_errors = []
+    registration_events = panel_release.events
+    def concurrent_events(repo, *args):
+        if args[0] == "show" and read_started.is_set():
+            second_read.set()
+        result = registration_events(repo, *args)
+        if args[0] == "show" and not read_started.is_set():
+            read_started.set()
+            assert allow_read.wait(5), "registration reader stalled"
+        return result
+    def register_child(pid, contender=False):
+        if contender:
+            contender_started.set()
+        try:
+            codex_harness.record_panel_child(pi_live_env, pid)
+        except Exception as error:
+            registration_errors.append(error)
+    first_registration = threading.Thread(target=register_child, args=(live_release_process.pid,))
+    competing_registration = threading.Thread(target=register_child, args=(os.getpid(), True))
+    with patch.object(panel_release, "events", side_effect=concurrent_events):
+        first_registration.start()
+        try:
+            assert read_started.wait(5), "first registration never read ownership"
+            competing_registration.start()
+            assert contender_started.wait(5)
+            assert not second_read.wait(0.2), "concurrent registrations read the same empty native refs"
+        finally:
+            allow_read.set()
+            first_registration.join(timeout=10)
+            if competing_registration.ident is not None:
+                competing_registration.join(timeout=10)
+    assert not first_registration.is_alive() and not competing_registration.is_alive()
+    assert not registration_errors, registration_errors
+    with patch.object(panel_release, "process_refs", side_effect=lambda pid, kind: launcher_refs if kind == "launcher" else dead_refs):
         codex_harness.record_panel_child(pi_live_env, dead_release_process.pid)
     pi_live_row = json.loads(panel_release.events(release_repo, "show", "--attempt", pi_alive, "--json"))
     assert all(pi_live_row["refs"][key] == value for key, value in live_refs.items()), "nested Pi replaced the original native identity"
@@ -9395,7 +9436,8 @@ try:
                 patch.object(panel, "main_installed", return_value=True), patch.object(panel, "ensure_room", return_value="release-room"), \
                 patch.object(panel.room, "join"), patch.object(panel, "managed_session", return_value=False), \
                 patch.object(panel_host, "herdr_active", return_value=False), patch.object(panel, "bootstrap", return_value="fixture"), \
-                patch.object(panel, "native_command", return_value=["fixture-native"]), patch.object(panel.subprocess, "Popen", return_value=mock_native):
+                patch.object(panel, "native_command", return_value=["fixture-native"]), \
+                patch.object(panel.subprocess, "Popen", return_value=mock_native) as native_launch:
             assert panel._run_native("codex", release_repo) == 0
             start_args = recorded.call_args_list[0].args
             assert "panel_host=inline" in start_args and "panel_wrapper_pid=" + str(os.getpid()) in start_args
@@ -9403,6 +9445,14 @@ try:
             assert any("panel_native_pid=" + str(live_release_process.pid) in call.args for call in recorded.call_args_list)
             assert any("panel_native_exit=confirmed" in call.args for call in recorded.call_args_list)
             recorded.reset_mock()
+            def locked_pi_launch(*args, **kwargs):
+                try:
+                    with panel_results._lock(release_repo, "panel-pi-registration", timeout=0):
+                        raise AssertionError("Pi launcher started before registration lock")
+                except ValueError as error:
+                    assert "panel operation is busy" in str(error)
+                return mock_native
+            native_launch.side_effect = locked_pi_launch
             assert panel._run_native("pi", release_repo) == 0
             assert any("panel_launcher_pid=" + str(live_release_process.pid) in call.args for call in recorded.call_args_list)
             assert any("panel_launcher_exit=confirmed" in call.args for call in recorded.call_args_list)
@@ -9414,7 +9464,7 @@ try:
                 patch.object(codex_harness.shutil, "which", return_value="fixture"), \
                 patch.object(codex_harness, "harness_env", return_value=pi_live_env), \
                 patch.object(codex_harness.subprocess, "Popen", return_value=mock_native), \
-                patch.object(panel_release, "events", side_effect=[json.dumps(dict(pi_row, refs=empty_pi_refs)), ""]) as child_activity, \
+                patch.object(panel_release, "events", side_effect=[json.dumps(dict(pi_row, refs=dict(empty_pi_refs, **launcher_refs))), ""]) as child_activity, \
                 patch.object(codex_harness, "record_panel_child", wraps=codex_harness.record_panel_child) as record_child, \
                 patch.object(sys, "stderr", new_callable=io.StringIO) as child_notice:
             assert codex_harness.main(["pi", "--model", "fixture-model"]) == 0

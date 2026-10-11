@@ -2,6 +2,7 @@
 """Terminal front end; existing OMS tools retain state and mutation authority."""
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -860,18 +861,20 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         except (OSError, ValueError, subprocess.SubprocessError):
             reason = "native_command_failed"
             raise
-        launch_inflight = True
-        try:
-            process = subprocess.Popen(command, cwd=str(execution), env=env)
-        except (OSError, ValueError, subprocess.SubprocessError) as error:
-            launch_inflight = not launch_failed_without_child(error)
-            reason = "native_launch_unconfirmed" if launch_inflight else "native_launch_failed"
-            raise
-        launch_inflight = False
-        native_refs = panel_release.process_refs(process.pid, "launcher" if harness == "pi" else "native")
-        if native_refs:
-            update_activity(repo, "usage", "--attempt", attempt, "--actor", "panel-main",
-                            *[arg for key, value in native_refs.items() for arg in ("--ref", key + "=" + value)])
+        # A Pi child must not register until its genuine launcher identity is durable.
+        with _lock(repo, "panel-pi-registration") if harness == "pi" else nullcontext():
+            launch_inflight = True
+            try:
+                process = subprocess.Popen(command, cwd=str(execution), env=env)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                launch_inflight = not launch_failed_without_child(error)
+                reason = "native_launch_unconfirmed" if launch_inflight else "native_launch_failed"
+                raise
+            launch_inflight = False
+            native_refs = panel_release.process_refs(process.pid, "launcher" if harness == "pi" else "native")
+            if native_refs:
+                update_activity(repo, "usage", "--attempt", attempt, "--actor", "panel-main",
+                                *[arg for key, value in native_refs.items() for arg in ("--ref", key + "=" + value)])
         while True:
             try:
                 status = process.wait(timeout=60)

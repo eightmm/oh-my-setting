@@ -75,27 +75,29 @@ def validate_tail(host, tail):
 
 def record_panel_child(env, pid):
     import panel_release
+    from panel_results import _lock
     attempt, repo = env.get("OMS_PANEL_MAIN_ATTEMPT", ""), env.get("OMS_ROOM_REPO")
     if not repo or not panel_release.ID.fullmatch(attempt) or env.get("OMS_PANEL_HARNESS") != "pi":
         return
     try:
-        row = json.loads(panel_release.events(repo, "show", "--attempt", attempt, "--json"))
-        refs = row.get("refs") or {}
-        if (row.get("tool") != "panel-main" or row.get("provider") != "codex"
-                or refs.get("panel_role") != "main" or refs.get("panel_harness") != "pi"):
-            raise ValueError("Pi panel ownership unavailable")
-        # Nested harnesses inherit the main's attempt; preserve its first native child.
-        if "panel_native_pid" in refs or "panel_native_identity" in refs:
-            return
-        if "panel_launcher_pid" in refs or "panel_launcher_identity" in refs:
+        # The wrapper holds this lock from before launch through launcher registration.
+        with _lock(repo, "panel-pi-registration"):
+            row = json.loads(panel_release.events(repo, "show", "--attempt", attempt, "--json"))
+            refs = row.get("refs") or {}
+            if (row.get("tool") != "panel-main" or row.get("provider") != "codex"
+                    or refs.get("panel_role") != "main" or refs.get("panel_harness") != "pi"):
+                raise ValueError("Pi panel ownership unavailable")
+            # Nested harnesses inherit the attempt, but cannot claim an empty native slot.
             launcher = panel_release.process_refs(os.getpid(), "launcher")
             if not launcher or any(refs.get(key) != value for key, value in launcher.items()):
                 return
-        native = panel_release.process_refs(pid, "native")
-        if not native:
-            raise ValueError("Pi child identity unavailable")
-        panel_release.events(repo, "usage", "--attempt", attempt, "--actor", "panel-main",
-                             *[arg for key, value in native.items() for arg in ("--ref", key + "=" + value)])
+            if "panel_native_pid" in refs or "panel_native_identity" in refs:
+                return
+            native = panel_release.process_refs(pid, "native")
+            if not native:
+                raise ValueError("Pi child identity unavailable")
+            panel_release.events(repo, "usage", "--attempt", attempt, "--actor", "panel-main",
+                                 *[arg for key, value in native.items() for arg in ("--ref", key + "=" + value)])
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         print("OMS: Pi child identity unavailable; this main may need separate recovery.", file=sys.stderr)
 
