@@ -2403,7 +2403,24 @@ def rebind_cleared_session(payload: dict[str, Any]) -> bool:
         return False
     if payload_agent(payload) != provider:
         return False
+    attempt = os.environ.get("OMS_PANEL_MAIN_ATTEMPT")
+    if attempt:
+        from terminal_panel import events, main_history
+
+        owner = next((row for row in main_history(repo.resolve(), ident, member_id)
+                      if row.get("attempt_id") == attempt), None)
+        if (not owner or owner.get("terminal") is not False or owner.get("tool") != "panel-main"
+                or owner.get("provider") != provider or owner.get("refs", {}).get("panel_role") != "main"
+                or owner["refs"].get("panel_room_id") != ident
+                or owner["refs"].get("panel_room_participant", attempt) != member_id
+                or owner["refs"].get("panel_session_digest", member["consumer"]) != member["consumer"]):
+            return False
     room.bind(repo.resolve(), ident, member_id, session, replaces=member["consumer"])
+    if attempt:
+        # Record only after the room's compare-and-swap accepted the provider event.
+        # A failed write leaves restart unable to prove the current binding.
+        events(repo.resolve(), "usage", "--attempt", attempt, "--actor", "panel-main",
+               "--ref", "native_session=" + session, "--ref", "panel_session_digest=" + session_hash(payload))
     return True
 
 

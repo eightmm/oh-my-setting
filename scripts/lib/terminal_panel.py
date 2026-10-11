@@ -164,6 +164,12 @@ def main_installed(harness):
     return bool(shutil.which(native_binary(harness))) and (harness != "pi" or bool(shutil.which("codex")))
 
 
+def main_missing(provider):
+    if provider == "pi":
+        return "Pi main needs the Pi CLI and Codex CLI on PATH (Pi uses Codex inference)"
+    return "%s main needs the %s CLI on PATH" % (provider.capitalize(), native_binary(provider))
+
+
 def ensure_room(repo, ident=None, title="Shared work"):
     ident = ident or os.environ.get("OMS_ROOM_ID")
     if ident:
@@ -405,7 +411,8 @@ def bootstrap(provider, repo):
     ) % (provider, json.dumps(str(repo)), json.dumps(str(ENTRY)), peer, peer, peer, peer, provider)
 
 
-def native_command(provider, repo, resume=None, model=None, task=None, room_id=None, member=None, context_file=None):
+def native_command(provider, repo, resume=None, model=None, task=None, room_id=None, member=None, context_file=None,
+                   session_id=None):
     if provider == "pi":
         if resume:
             raise ValueError("Pi resume needs a verified Pi session binding; start a new Pi main")
@@ -436,6 +443,8 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
     elif provider == "claude":
         if resume:
             command += ["--resume", resume]
+        else:
+            command += ["--session-id", session_id or str(uuid.uuid4())]
         if model:
             command += ["--model", model]
         if default:
@@ -485,39 +494,214 @@ def safe_label(value):
     return label
 
 
+def _main_window(pane):
+    if not re.fullmatch(r"%[0-9]+", pane):
+        raise ValueError("window ownership is unavailable")
+    result = subprocess.run(tmux_command("display-message", "-p", "-t", pane,
+        "#{window_id}\t#{@oms_panel_main_attempt}\t#{@oms_panel_native_pane}\t#{@oms_panel_repo}\t#{@oms_panel_room_participant}"),
+        capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
+    fields = result.stdout.replace("\r", "").rstrip("\n").split("\t")
+    if result.returncode or len(fields) != 5 or not re.fullmatch(r"@[0-9]+", fields[0]):
+        raise ValueError("window ownership is unavailable")
+    return fields
+
+
+def _main_exit_key():
+    from contextlib import ExitStack
+    from panel_input import TerminalInput
+    import select
+    saved = {}
+
+    def interrupt(number, frame):
+        for signum in saved:
+            signal.signal(signum, signal.SIG_IGN)
+        raise NativeShutdown(number)
+
+    try:
+        for name in ("SIGTERM", "SIGHUP"):
+            number = getattr(signal, name, None)
+            if number is not None:
+                saved[number] = signal.signal(number, interrupt)
+        # Register cleanup before entering: a signal may arrive during raw-mode setup.
+        with ExitStack() as cleanup:
+            terminal = TerminalInput()
+            cleanup.callback(terminal.__exit__)
+            inputs = terminal.__enter__()
+            if inputs.fd is None:
+                key = input()
+                return "\n" if not key else key
+            select.select([inputs.fd], [], [])
+            return os.read(inputs.fd, 1).decode("utf-8", errors="replace")
+    finally:
+        for number, previous in saved.items():
+            signal.signal(number, previous)
+
+
+def _main_terminal_owner(provider, repo, session, pane, attempt, ident):
+    window = _main_window(pane)
+    if (session_owner(session) != str(Path(repo).resolve())
+            or window[1:4] != [attempt, "", str(Path(repo).resolve())]):
+        raise ValueError("restart ownership is unverified; existing window preserved")
+    previous = next((row for row in main_history(repo, ident)
+                     if row.get("attempt_id") == attempt), None)
+    if (not previous or previous.get("terminal") is not True
+            or previous.get("tool") != "panel-main"
+            or previous.get("provider") != main_owner(provider)
+            or previous.get("refs", {}).get("panel_role") != "main"
+            or previous.get("refs", {}).get("panel_room_id") != ident
+            or previous.get("refs", {}).get("panel_room_participant", attempt) != window[4]):
+        raise ValueError("previous main has no confirmed terminal owner; restart refused")
+    resume = previous.get("refs", {}).get("native_session") if provider != "pi" else None
+    if provider != "pi":
+        member = room.participant(room.status(repo, ident), window[4])
+        if (not member["joined"] or member["role"] != "main"
+                or member["provider"] != main_owner(provider)
+                or resume and member.get("consumer") and member["consumer"] !=
+                    hashlib.sha256(resume.encode()).hexdigest()[:32]):
+            raise ValueError("current native session binding is unverified; restart refused")
+    return previous
+
+
+def launch_failed_without_child(error):
+    """Popen checks arguments before forking and reaps a child whose exec failed; any other launch error
+    cannot prove that no native process survived."""
+    return isinstance(error, (FileNotFoundError, PermissionError, NotADirectoryError, ValueError))
+
+
 def run_native(provider, repo, resume=None, model=None, task=None):
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
         raise ValueError("workers cannot open native owner sessions")
-    # A process-lifetime lease also covers inline/Herdr launches and racing native children.
-    with _lock(repo, "panel-main-session", timeout=.1):
-        check_legacy_main(repo)
-        return run_single_native(provider, repo, resume, model, task)
+    if resume:
+        # Reject foreign rooms before competing for the process-lifetime lease.
+        # run_single_native repeats this check under the native-session lock.
+        _, bound_rooms = _native_resume_binding(provider, repo, resume)
+        selected = os.environ.get("OMS_ROOM_ID")
+        if len(bound_rooms) == 1 and selected and bound_rooms - {selected}:
+            raise ValueError("native session is bound to another room; resume refused")
+    attempt, ident = None, None
+    pane = os.environ.get("TMUX_PANE", "")
+    session = os.environ.get("OMS_PANEL_SESSION", "")
+    while True:
+        exit_info = {}
+        try:
+            # Release the process-lifetime lease while the terminal exit prompt waits.
+            with _lock(repo, "panel-main-session", timeout=.1):
+                if attempt:
+                    previous = _main_terminal_owner(provider, repo, session, pane, attempt, ident)
+                    if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
+                        raise ValueError("another main is live or unverified; finish it before restarting here")
+                    resume = previous.get("refs", {}).get("native_session") if provider != "pi" else None
+                check_legacy_main(repo)
+                original_room = os.environ.get("OMS_ROOM_ID")
+                try:
+                    if attempt:
+                        os.environ["OMS_ROOM_ID"] = ident
+                    status = run_single_native(provider, repo, resume, model, task, _exit_info=exit_info)
+                finally:
+                    if original_room is None:
+                        os.environ.pop("OMS_ROOM_ID", None)
+                    else:
+                        os.environ["OMS_ROOM_ID"] = original_room
+                if not (managed_session() and sys.stdin.isatty() and sys.stdout.isatty()):
+                    return status
+                # Keep this invocation's identity, even if a window tag has since been replaced.
+                attempt = exit_info.get("attempt")
+                ident = exit_info.get("room")
+                if not attempt or not ident or not re.fullmatch(r"%[0-9]+", pane):
+                    print("Exit window ownership is unavailable; window preserved.", file=sys.stderr)
+                    return status
+                print("%s session exited (%s)." % (provider, status))
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            if not attempt:
+                raise
+            if exit_info.get("attempt") and exit_info.get("room"):
+                try:
+                    # Startup can fail after replacing the window tag. Adopt only
+                    # a terminal owner so the prompt cannot act on a live successor.
+                    _main_terminal_owner(provider, repo, session, pane, exit_info["attempt"], exit_info["room"])
+                except (OSError, ValueError, subprocess.SubprocessError) as ownership_error:
+                    print("Exit window ownership is unverified; window preserved: " + clean(str(ownership_error), 200),
+                          file=sys.stderr)
+                else:
+                    attempt, ident = exit_info["attempt"], exit_info["room"]
+                    status = 1
+            message = ("another main is live or unverified; main-session lease is busy"
+                       if str(error) == "panel operation is busy; retry later" else str(error))
+            print("Restart refused: " + clean(message, 200), file=sys.stderr)
+        while True:
+            print("r resume/restart here · Enter close window", flush=True)
+            try:
+                key = _main_exit_key()
+            except EOFError:
+                return status
+            if key == "r":
+                break
+            if key in ("\r", "\n"):
+                try:
+                    window = _main_window(pane)
+                    if (window[1:4] != [attempt, "", str(Path(repo).resolve())]
+                            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", attempt)):
+                        print("Close refused: attempt, native pane or repository ownership changed; window preserved.",
+                              file=sys.stderr)
+                        return status
+                    # Pin the window and recheck ownership on the server at deletion,
+                    # so moving the pane or replacing the attempt cannot kill a successor.
+                    repository = str(Path(repo).resolve())
+                    # Use only literal format operands; ambiguous paths fail closed.
+                    if not re.fullmatch(r"[^#,:{}\\\x00-\x1f\x7f]+", repository):
+                        raise ValueError("repository path cannot be safely embedded in the close guard")
+                    condition = ("#{&&:#{==:#{@oms_panel_repo},%s},"
+                                 "#{&&:#{==:#{@oms_panel_main_attempt},%s},#{==:#{@oms_panel_native_pane},}}}") % (repository, attempt)
+                    subprocess.run(tmux_command("if-shell", "-F", "-t", window[0], condition,
+                                                "kill-window -t " + window[0]), check=True, timeout=5,
+                                   stdin=subprocess.DEVNULL)
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    print("Close unavailable; window preserved: " + clean(str(error), 140), file=sys.stderr)
+                return status
+            if not key:
+                return status
 
 
-def run_single_native(provider, repo, resume=None, model=None, task=None):
+def _native_resume_binding(provider, repo, resume):
+    digest = hashlib.sha256(resume.encode()).hexdigest()[:32]
+    states, incomplete = room.discover(repo)
+    if incomplete:
+        raise ValueError("native resume ownership discovery is incomplete; inspect existing sessions")
+    bound_rooms = {state["id"] for state in states for enrolled in state["participants"]
+                   if enrolled["provider"] == provider and enrolled["joined"]
+                   and enrolled.get("consumer") == digest}
+    return states, bound_rooms
+
+
+def run_single_native(provider, repo, resume=None, model=None, task=None, _exit_info=None):
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
         raise ValueError("workers cannot open native owner sessions")
     if resume:
         key = hashlib.sha256((provider + "\0" + resume).encode()).hexdigest()[:32]
         with _lock(repo, "panel-native-" + key):
             digest = hashlib.sha256(resume.encode()).hexdigest()[:32]
-            states, incomplete = room.discover(repo)
-            if incomplete:
-                raise ValueError("native resume ownership discovery is incomplete; inspect existing sessions")
+            states, bound_rooms = _native_resume_binding(provider, repo, resume)
             for state in states:
                 for enrolled in state["participants"]:
                     if enrolled["provider"] != provider or digest not in (enrolled.get("consumer"), enrolled.get("initial_consumer")):
                         continue
                     history = main_history(repo, state["id"], enrolled["participant"])
-                    claims = [row for row in history if not row.get("refs", {}).get("panel_session_digest")
+                    current = enrolled.get("consumer") == digest
+                    claims = [row for row in history if current or not row.get("refs", {}).get("panel_session_digest")
                               or row["refs"]["panel_session_digest"] == digest]
                     if (not claims or any(row.get("provider") != provider or row.get("tool") != "panel-main"
                             or row.get("refs", {}).get("panel_role") != "main" or row.get("terminal") is not True
+                            or row.get("refs", {}).get("panel_room_id", state["id"]) != state["id"]
+                            or row.get("refs", {}).get("panel_room_participant", row.get("attempt_id")) != enrolled["participant"]
                             for row in claims)):
                         raise ValueError("native session has no confirmed terminal owner; inspect its existing session before resuming")
-            ident = ensure_room(repo)
-            return _run_native(provider, repo, resume, model, task, ident)
-    return _run_native(provider, repo, resume, model, task)
+            if len(bound_rooms) > 1:
+                raise ValueError("native session is bound to multiple rooms; resume refused")
+            ident = ensure_room(repo, os.environ.get("OMS_ROOM_ID") or next(iter(bound_rooms), None))
+            if bound_rooms - {ident}:
+                raise ValueError("native session is bound to another room; resume refused")
+            return _run_native(provider, repo, resume, model, task, ident, _exit_info=_exit_info)
+    return _run_native(provider, repo, resume, model, task, _exit_info=_exit_info)
 
 
 def main_history(repo, ident, member=None):
@@ -531,14 +715,15 @@ def main_history(repo, ident, member=None):
             or row.get("attempt_id") in enrolled or row.get("refs", {}).get("panel_room_participant") in enrolled]
 
 
-def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None):
+def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None, _exit_info=None):
     harness = provider
     execution = native_repository(repo)
     if not main_installed(harness):
-        raise ValueError("native provider is not installed")
+        raise ValueError(main_missing(harness))
     if harness == "pi" and resume:
         raise ValueError("Pi resume needs a verified Pi session binding; start a new Pi main")
     provider = main_owner(harness)
+    native_session = resume or (str(uuid.uuid4()) if harness == "claude" else None)
     preset = policy()["main"].get(provider, {"model": "provider-default", "effort": "native-settings"})
     room_id = room_id or ensure_room(repo)
     member = None
@@ -549,8 +734,6 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         if prior:
             history = main_history(repo, room_id, prior["participant"])
             if (prior["provider"] != provider or prior["role"] != "main" or not history
-                    or not any(row.get("refs", {}).get("panel_session_digest") == digest
-                               or row.get("attempt_id") == prior["participant"] and prior.get("initial_consumer") == digest for row in history)
                     or any(row.get("tool") != "panel-main" or row.get("provider") != provider
                            or row.get("refs", {}).get("panel_role") != "main" or row.get("terminal") is not True
                            or row.get("refs", {}).get("panel_room_id", room_id) != room_id
@@ -565,42 +748,11 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         # into shared status when it cannot serve as a safe display title.
         label = "Native task not recorded"
     host_refs = panel_host.refs(execution) if panel_host.herdr_active() else {}
-    attempt = events(repo, "start", "--provider", provider, "--tool", "panel-main",
-                     "--ref", "panel_role=main", "--ref", "panel_owner=" + provider,
-                     "--ref", "panel_harness=" + harness,
-                     "--ref", "panel_model=" + (model or preset["model"]),
-                     "--ref", "panel_effort=" + (preset["effort"] if not model or harness == "pi" else "native-settings"),
-                     "--ref", "panel_label=" + label,
-                     "--ref", "panel_location=repository", "--ref", "panel_room_id=" + room_id,
-                     *(["--ref", "panel_session_digest=" + digest] if resume else []),
-                     *(["--ref", "panel_room_participant=" + member] if member else []),
-                     *[arg for key, value in host_refs.items() for arg in ("--ref", key + "=" + value)],
-                     "--then", "starting", "--then", "working", output=True)
-    native_member = member or attempt
-    try:
-        if not member:
-            room.join(repo, room_id, native_member, provider, "main", model or preset["model"], label, resume)
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-        update_activity(repo, "transition", "--attempt", attempt, "--state", "failed", "--actor", "panel-main",
-                        "--reason-code", "room_join_failed")
-        raise
-    env = child_environment(provider, repo)
-    env.update(OMS_PANEL_OWNER=provider, OMS_PANEL_HARNESS=harness)
-    env.update(OMS_ROOM_ID=room_id, OMS_ROOM_PARTICIPANT=native_member, OMS_ROOM_REPO=str(repo))
-    if provider in PROVIDERS and harness != "pi":
-        env["OMS_HOOK_AGENT"] = provider
-    else:
-        env.pop("OMS_HOOK_AGENT", None)
-    env["OMS_PANEL_MAIN_ATTEMPT"] = attempt
-    env["OMS_PANEL_RESULTS"] = "1"
-    # A resumed owner is independent of any worker attempt inherited by the shell.
-    env.pop("OMS_ATTEMPT_ID", None)
-    for key in ("OMS_PANEL_DISPATCH", "OMS_PANEL_ROLE", "OMS_PANEL_PURPOSE", "OMS_PANEL_WORKLOAD", "OMS_PANEL_LABEL", "OMS_ROOM_ADMITTED_PARTICIPANT"):
-        env.pop(key, None)
     status = 1
     process = None
     launch_inflight = False
-    context = tempfile.TemporaryDirectory(prefix="oms-native-context-")
+    context = None
+    reason = "native_exit"
 
     def stop_native():
         if process and process.poll() is None:
@@ -623,7 +775,43 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         # resets on exec; SIG_IGN would instead disable the child's handler.
         pass
 
+    attempt = events(repo, "start", "--provider", provider, "--tool", "panel-main",
+                     "--ref", "panel_role=main", "--ref", "panel_owner=" + provider,
+                     "--ref", "panel_harness=" + harness,
+                     "--ref", "panel_model=" + (model or preset["model"]),
+                     "--ref", "panel_effort=" + (preset["effort"] if not model or harness == "pi" else "native-settings"),
+                     "--ref", "panel_label=" + label,
+                     "--ref", "panel_location=repository", "--ref", "panel_room_id=" + room_id,
+                     *(["--ref", "native_session=" + native_session,
+                        "--ref", "panel_session_digest=" + hashlib.sha256(native_session.encode()).hexdigest()[:32]]
+                       if native_session else []),
+                     *(["--ref", "panel_room_participant=" + member] if member else []),
+                     *[arg for key, value in host_refs.items() for arg in ("--ref", key + "=" + value)],
+                     "--then", "starting", "--then", "working", output=True)
     try:
+        native_member = member or attempt
+        if _exit_info is not None:
+            _exit_info.update(attempt=attempt, room=room_id)
+        try:
+            if not member:
+                room.join(repo, room_id, native_member, provider, "main", model or preset["model"], label, native_session)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            reason = "room_join_failed"
+            raise
+        env = child_environment(provider, repo)
+        env.update(OMS_PANEL_OWNER=provider, OMS_PANEL_HARNESS=harness)
+        env.update(OMS_ROOM_ID=room_id, OMS_ROOM_PARTICIPANT=native_member, OMS_ROOM_REPO=str(repo))
+        if provider in PROVIDERS and harness != "pi":
+            env["OMS_HOOK_AGENT"] = provider
+        else:
+            env.pop("OMS_HOOK_AGENT", None)
+        env["OMS_PANEL_MAIN_ATTEMPT"] = attempt
+        env["OMS_PANEL_RESULTS"] = "1"
+        # A resumed owner is independent of any worker attempt inherited by the shell.
+        env.pop("OMS_ATTEMPT_ID", None)
+        for key in ("OMS_PANEL_DISPATCH", "OMS_PANEL_ROLE", "OMS_PANEL_PURPOSE", "OMS_PANEL_WORKLOAD", "OMS_PANEL_LABEL", "OMS_ROOM_ADMITTED_PARTICIPANT"):
+            env.pop(key, None)
+        context = tempfile.TemporaryDirectory(prefix="oms-native-context-")
         previous = signal.signal(signal.SIGINT, native_turn_interrupt)
         saved_handlers[signal.SIGINT] = previous
         for name in ("SIGTERM", "SIGHUP"):
@@ -649,9 +837,19 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         context_path.write_text(bootstrap(provider, repo) + room_instructions(room_id, native_member)
                                 + ("\nUser task (data): " + json.dumps(task) if task else ""), encoding="utf-8")
         context_path.chmod(0o600)
+        try:
+            command = native_command(harness, repo, resume, model, task, room_id, native_member, context_path,
+                                     session_id=native_session)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            reason = "native_command_failed"
+            raise
         launch_inflight = True
-        process = subprocess.Popen(native_command(harness, repo, resume, model, task, room_id, native_member, context_path),
-                                   cwd=str(execution), env=env)
+        try:
+            process = subprocess.Popen(command, cwd=str(execution), env=env)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            launch_inflight = not launch_failed_without_child(error)
+            reason = "native_launch_unconfirmed" if launch_inflight else "native_launch_failed"
+            raise
         launch_inflight = False
         while True:
             try:
@@ -673,7 +871,8 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
     finally:
         try:
             try:
-                context.cleanup()
+                if context is not None:
+                    context.cleanup()
             except OSError:
                 print("Native context cleanup unavailable; lifecycle evidence is retained.", file=sys.stderr)
             if launch_inflight or process and process.poll() is None:
@@ -681,10 +880,10 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                                 "--actor", "panel-main", "--reason-code", "native_shutdown_unconfirmed")
             elif status == 0:
                 update_activity(repo, "transition", "--attempt", attempt, "--state", "verifying", "--then", "review",
-                       "--then", "done", "--actor", "panel-main", "--reason-code", "native_exit")
+                       "--then", "done", "--actor", "panel-main", "--reason-code", reason)
             else:
                 update_activity(repo, "transition", "--attempt", attempt, "--state", "cancelled" if status in (129, 130, 143) else "failed",
-                       "--actor", "panel-main", "--reason-code", "native_exit")
+                       "--actor", "panel-main", "--reason-code", reason)
             if managed_session() and not launch_inflight and (process is None or process.poll() is not None):
                 if pane_option("@oms_panel_main_attempt") == attempt:
                     try:
@@ -3992,19 +4191,15 @@ def main(argv=None):
             print(json.dumps(reopen_panel(repo)))
             return 0
         if split and args.launch:
-            if not shutil.which("tmux") or not main_installed(args.launch):
-                raise ValueError("native chat board requires tmux and the selected CLI on PATH")
+            if not main_installed(args.launch):
+                raise ValueError(main_missing(args.launch))
+            if not shutil.which("tmux"):
+                raise ValueError("native chat board requires tmux on PATH")
             return split_panel(repo, args.view or "auto", args.attention_only, args.launch, args.resume, args.model, args.task)
         if args.launch:
             if not main_installed(args.launch):
-                raise ValueError("%s is not installed on PATH" % args.launch)
+                raise ValueError(main_missing(args.launch))
             status = run_native(args.launch, repo, args.resume, args.model, args.task)
-            if os.environ.get("TMUX") and os.environ.get("OMS_PANEL_SESSION"):
-                print("%s session exited (%s)." % (args.launch, status))
-                try:
-                    read_field("Press Enter to close this pane: ", required=False)
-                except EOFError:
-                    pass
             return status
         if split:
             if not shutil.which("tmux"):

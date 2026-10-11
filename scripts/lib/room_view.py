@@ -123,7 +123,8 @@ def spawn_bar(width, navigation):
     if navigation.get("main_occupied"):
         return "One main active or unverified; finish it before starting another", []
     if navigation.get("spawn_armed"):
-        return "Start one main: 1 Claude  2 Pi  0 Codex  Esc cancel", []
+        keys = [("claude", "1 Claude"), ("pi", "2 Pi"), ("codex", "0 Codex")]
+        return "Start one main: " + "  ".join(label for name, label in keys if name in installed) + "  Esc cancel", []
     if navigation.get("spawn_busy"):
         return "Starting a main...", []
     if not installed:
