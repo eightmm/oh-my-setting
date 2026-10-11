@@ -439,6 +439,9 @@ overlaps `scripts/lib/room.py`, not `scripts/li`; `.` overlaps everything;
 globs compare literally). Overlaps print one stderr warning and appear as
 `overlaps` in `--dry-run` JSON. The launch is never refused: declarations
 coordinate work, they are not locks. The main detail view shows `Scope: …`.
+Finalizing as `accepted` refuses write-worker patches outside their declared
+scopes (including rename sources and destinations), using glob-aware path matching;
+`completed` remains allowed, and workers without declared scopes keep the existing behavior.
 
 ### Original chats and recovery
 
