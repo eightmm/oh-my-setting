@@ -6,18 +6,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_IDS = {"codex": {"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra"},
-             "claude": {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"}}
-
-
-def research_version(provider, model):
-    pattern = {"codex": r"gpt-(\d+(?:\.\d+)*)-luna", "claude": r"claude-haiku-(\d+(?:-\d+)*)"}.get(provider)
-    match = re.fullmatch(pattern, model) if pattern and isinstance(model, str) else None
-    if not match:
-        return None
-    version = tuple(int(part) for part in re.split(r"[.-]", match[1]))
-    while len(version) > 1 and version[-1] == 0:
-        version = version[:-1]
-    return version
+             "claude": {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-5-5"}}
+TIERS = ("light", "routine", "deep", "frontier")
+# Role strategy -> the board kind recorded as panel_role; acceptance, scopes and continuation key on the kind.
+KINDS = {"worker": "worker", "builder": "worker", "refactorer": "worker", "documenter": "worker",
+         "integrator": "worker", "performance-engineer": "worker", "release-engineer": "worker",
+         "researcher": "researcher", "advisor": "advisor", "architect": "advisor", "critic": "advisor",
+         "reviewer": "reviewer", "verifier": "reviewer", "security-auditor": "reviewer"}
+WRITERS = {"worker", "builder", "refactorer", "documenter", "integrator", "performance-engineer"}
+# Judges of another context's work prefer the provider other than the main's when the tier offers it.
+INDEPENDENT = {"reviewer", "verifier", "security-auditor", "critic"}
+RESEARCH_FAMILIES = {"luna", "haiku"}
 
 
 def route_family(provider, model):
@@ -42,79 +41,73 @@ def newest_route_model(provider, configured, catalog):
     return max(candidates, key=lambda model: (route_family(provider, model)[1], model == configured, model))
 
 
-def newest_research_model(provider, configured, catalog):
-    candidates = {configured, *(item for item in catalog if research_version(provider, item))}
-    if not research_version(provider, configured):
-        raise ValueError("researchers require a versioned Luna or Haiku model")
-    return max(candidates, key=lambda model: (research_version(provider, model), model == configured, model))
+def valid_route(route):
+    return (isinstance(route, dict) and route.get("provider") in MODEL_IDS
+            and route.get("model") in MODEL_IDS[route["provider"]] and route.get("effort") in {"low", "medium", "high"})
 
 
 def policy():
     value = json.loads((ROOT / "config/panel-routing.json").read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("schema") != 1:
+    if not isinstance(value, dict) or value.get("schema") != 2:
         raise ValueError("unsupported panel routing policy")
-    for group, keys in (("main", ("codex", "claude")), ("worker", ("light", "routine")),
-                        ("advisor", ("astra", "fable")), ("researcher", ("codex", "claude"))):
-        for key in keys:
-            route = value.get(group, {}).get(key, {}) if isinstance(value.get(group), dict) else {}
-            if (not isinstance(route, dict) or route.get("provider") not in MODEL_IDS
-                    or (not research_version(route["provider"], route.get("model")) if group == "researcher"
-                        else route.get("model") not in MODEL_IDS[route["provider"]])
-                    or route.get("effort") not in {"low", "medium", "high"}):
-                raise ValueError("invalid panel route: %s/%s" % (group, key))
-            if group == "researcher" and (route["provider"] != key or route["effort"] != "low"):
-                raise ValueError("researchers retain their provider family and low effort")
+    for key in ("codex", "claude"):
+        if not valid_route((value.get("main") or {}).get(key)):
+            raise ValueError("invalid panel route: main/%s" % key)
+    tiers = value.get("tiers") if isinstance(value.get("tiers"), dict) else {}
+    for tier in TIERS:
+        if not isinstance(tiers.get(tier), list) or not tiers[tier] or not all(map(valid_route, tiers[tier])):
+            raise ValueError("invalid panel tier: %s" % tier)
+    roles = value.get("roles")
+    if not isinstance(roles, dict) or set(roles) != set(KINDS) or not set(roles.values()) <= set(TIERS):
+        raise ValueError("panel roles must map every role to a tier")
     return value
 
 
-def allocate(owner, role="worker", workload="routine", seat="auto", access="read", purpose=None):
-    if not owner or role not in ("worker", "advisor", "reviewer", "researcher"):
+def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None):
+    """The first installed candidate of the role's tier; installed=None considers every provider."""
+    if not owner or role not in KINDS:
         raise ValueError("choose a supported main and role")
-    if workload not in ("light", "routine", "main") or access not in ("read", "write"):
-        raise ValueError("invalid workload or access")
-    purpose = purpose or {"worker": "explain", "advisor": "advise", "reviewer": "review", "researcher": "research"}[role]
-    if purpose not in ("explain", "investigate", "implement", "review", "advise", "research"):
-        raise ValueError("invalid task purpose")
-    if seat not in ("auto", "astra", "fable"):
-        raise ValueError("invalid advisor seat")
-    if role != "worker" and access != "read":
-        raise ValueError("advisors and reviewers are read-only")
-    if role == "researcher" and (purpose != "research" or seat != "auto" or workload == "main"):
-        raise ValueError("researchers require research purpose and a cheap read-only route")
-    if role != "researcher" and purpose == "research":
-        raise ValueError("research purpose requires researcher role")
-    if access == "write" and purpose != "implement":
-        raise ValueError("write workers require implement purpose")
-    if ((role == "advisor" and purpose != "advise") or (role == "reviewer" and purpose != "review")
-            or (role == "worker" and access == "read" and purpose not in ("explain", "investigate"))):
-        raise ValueError("task purpose must match the role and access")
-    if role == "worker" and seat != "auto":
-        raise ValueError("advisor seats do not select worker models")
     routes = policy()
-    if role == "researcher":
-        route = routes["researcher"][owner if owner in routes["researcher"] else "codex"]
-        workload = "light"
-    elif role in ("advisor", "reviewer"):
-        chosen = seat if seat != "auto" else "astra" if owner == "claude" else "fable"
-        route = routes["advisor"][chosen]
+    tier = tier or routes["roles"][role]
+    if tier not in TIERS or access not in ("read", "write"):
+        raise ValueError("invalid workload or access")
+    if access == "write" and role not in WRITERS:
+        raise ValueError("%s is read-only" % role)
+    if role == "worker":
+        purpose = purpose or ("implement" if access == "write" else "explain")
+        if purpose not in ("explain", "investigate", "implement") or (purpose == "implement") != (access == "write"):
+            raise ValueError("worker purpose must match access: explain or investigate reads, implement writes")
+    elif purpose:
+        raise ValueError("--purpose applies to plain workers; the role names the task")
     else:
-        if workload == "main" and owner not in routes["main"]:
-            raise ValueError("additional CLI mains need an explicit --to route for main-level work")
-        route = routes["main"][owner] if workload == "main" else routes["worker"][workload]
-    return dict(route, role=role, owner=owner, workload=workload, access=access, purpose=purpose)
+        purpose = {"advisor": "advise", "reviewer": "review", "researcher": "research"}.get(role, role)
+    candidates = routes["tiers"][tier]
+    if role == "researcher":
+        if tier != "light":
+            raise ValueError("researchers use the light tier")
+        candidates = [c for c in candidates if route_family(c["provider"], c["model"])[0] in RESEARCH_FAMILIES]
+    usable = [c for c in candidates if installed is None or c["provider"] in installed]
+    if not usable:
+        raise ValueError("no installed provider serves the %s tier (%s); install one or use --to" % (
+            tier, ", ".join(sorted({c["provider"] for c in candidates})) or "none configured"))
+    if role in INDEPENDENT:
+        usable = sorted(usable, key=lambda c: c["provider"] == owner)
+    route = dict(usable[0], effort="low") if role == "researcher" else dict(usable[0])
+    return dict(route, role=role, kind=KINDS[role], owner=owner, workload=tier, access=access, purpose=purpose)
 
 
 def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=None, resume=None):
+    family = route_family(route["provider"], route["model"])
     if route["role"] == "researcher" and (route["access"] != "read" or route["purpose"] != "research"
-            or route["effort"] != "low" or not research_version(route["provider"], route["model"])
+            or route["effort"] != "low" or not family or family[0] not in RESEARCH_FAMILIES
             or verify or resume):
         raise ValueError("researchers are pinned cheap read-only lookups, without gates or continuation")
     if bool(prompt) == bool(brief):
         raise ValueError("provide exactly one prompt or scoped brief file")
     if route["access"] == "write" and (not brief or not verify or not verify.strip()):
-        raise ValueError("write workers need a scoped brief file and verifier")
-    if resume and route["role"] != "worker":
-        raise ValueError("only workers continue a session")
+        raise ValueError("write roles need a scoped brief file and verifier")
+    if resume and route["role"] not in WRITERS:
+        raise ValueError("only write-capable roles continue a session; judges keep a context apart from the implementer")
     if route["role"] == "reviewer" and (not verify or not verify.strip()):
         raise ValueError("reviewers need a verifier")
     brief_text = None
@@ -140,9 +133,9 @@ def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=No
         return prefix + ["peer-review", "--repo", str(repo), "--providers", target,
                          "--gate", "--verify", verify] + request + effort
     request = ["--brief-file", str(brief)] if brief else ["--prompt", prompt]
-    result = prefix + ["peer-delegate", "--repo", str(repo), "--to", route["provider"],
-                       "--role", "researcher" if route["role"] == "researcher" else
-                       "implementation-worker" if route["access"] == "write" else "analysis-worker",
+    profile = route["role"] if route["role"] != "worker" else (
+        "implementation-worker" if route["access"] == "write" else "analysis-worker")
+    result = prefix + ["peer-delegate", "--repo", str(repo), "--to", route["provider"], "--role", profile,
                        "--no-memory", "--no-task"] + request + model
     if route["access"] == "read":
         result += ["--read-only"]

@@ -25,7 +25,8 @@ import panel_messages
 from dashboard_projection import clean
 from panel_view import CLOSE_PREFIX, INBOX_LIMIT, close_requests, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
-from panel_routing import allocate, command as routed_command, policy, MODEL_IDS, research_version, newest_research_model, newest_route_model, route_family
+from panel_routing import (allocate, command as routed_command, policy, KINDS, MODEL_IDS, TIERS, WRITERS,
+                           newest_route_model, route_family)
 from panel_results import _read, _lock, finalize, outcomes, results, retry_delivery, verified_patch
 from panel_cache import read_shared
 
@@ -139,38 +140,28 @@ def provider_catalog(selection="all"):
             for row in rows]
 
 
-def selected_route(owner, role, workload, seat, access, purpose, target=None, model=None, effort=None):
+def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None):
     if owner not in PROVIDERS:
         owner = provider_catalog(owner)[0]["provider"]
-    route = allocate(owner, role, workload, seat, access, purpose)
-    if role == "researcher":
-        if effort not in (None, "low"):
-            raise ValueError("researchers use low effort")
-        provider = target or route["provider"]
-        if provider not in ("codex", "claude"):
-            raise ValueError("researchers require a supported Luna or Haiku provider")
-        if target and (seat != "auto" or workload != "routine"):
-            raise ValueError("explicit routes omit preset workload and seat")
-        if model and not target:
-            raise ValueError("explicit peer model requires --to")
-        configured = policy()["researcher"][provider]["model"]
-        peer = provider_catalog(provider)[0]
-        chosen = newest_research_model(provider, configured, peer.get("catalog_models", peer.get("models", [])))
-        if model and model != chosen:
+    if effort not in (None, "low", "medium", "high") or role == "researcher" and effort not in (None, "low"):
+        raise ValueError("invalid reasoning effort; researchers use low effort")
+    if model and not target:
+        raise ValueError("explicit peer model requires --to")
+    if target and workload:
+        raise ValueError("--to is an explicit route; omit the --workload tier")
+    if not target or role == "researcher":
+        # Tier routing reads installed providers from the cached registry; a researcher's --to only narrows it.
+        rows = provider_catalog(target or ",".join(sorted({c["provider"] for tier in policy()["tiers"].values()
+                                                           for c in tier})))
+        route = allocate(owner, role, workload, access, purpose, {row["provider"] for row in rows if row["installed"]})
+        peer = next(row for row in rows if row["provider"] == route["provider"])
+        route.update(binary=peer["binary"], model=newest_route_model(
+            route["provider"], route["model"], peer.get("catalog_models", peer.get("models", []))))
+        if model and model != route["model"]:
             raise ValueError("researchers require the newest configured/catalog Luna or Haiku model")
-        return dict(route, provider=provider, binary=peer["binary"], model=chosen, effort="low")
-    if effort not in (None, "low", "medium", "high"):
-        raise ValueError("invalid reasoning effort")
-    if not target:
-        if model:
-            raise ValueError("explicit peer model requires --to")
         # A role route keeps its tier's model; the main may raise or lower effort for one harder or simpler subtask.
-        peer = provider_catalog(route["provider"])[0]
-        route["model"] = newest_route_model(route["provider"], route["model"],
-                                           peer.get("catalog_models", peer.get("models", [])))
         return dict(route, effort=effort) if effort else route
-    if seat != "auto" or workload != "routine":
-        raise ValueError("--to is an explicit route; omit preset workload and advisor seat")
+    route = allocate(owner, role, None, access, purpose)
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", target) or ".." in target:
         raise ValueError("--to selects one registered provider")
     peer = provider_catalog(target)[0]
@@ -242,22 +233,27 @@ def bootstrap(provider, repo):
         "For an explicitly selected additional CLI, inspect oms panel --providers --json, "
         "then use --dispatch with --to PROVIDER, an exact --model when supported, "
         "and optional --reasoning-effort. Profile-controlled CLIs require omitting "
-        "--model. Omit preset workload/seat on an explicit route. "
+        "--model. Omit --workload on an explicit route. "
         "Registry discovery does not authorize calls or prove live session messaging. "
         "Panel role routing is enabled for this session. You retain the user's "
         "goal, architecture, final synthesis and patch acceptance. For this "
         "user's supplied task, classify each bounded subtask yourself from "
-        "source evidence, then use oms panel --dispatch worker --owner %s "
-        "--workload light|routine|main --purpose explain|investigate|implement "
-        "--access read|write --repo . --prompt TEXT (read) or --brief-file PATH "
-        "--verify COMMAND (write). Light, clear tasks use GPT-6 Luna; routine "
-        "implementation and long explanations use Sonnet 5.5; main-level work "
-        "uses this owner's Sol/Opus preset without promoting the worker. "
-        "Add --reasoning-effort high to one dispatch for trust-boundary, cross-file integration or unclear-failure "
-        "work and low for lookups and mechanical edits; otherwise keep the tier default. "
-        "For document or source lookup use oms panel --dispatch researcher --owner %s --access read "
-        "--purpose research --prompt TEXT. It uses the newest configured/catalog Luna or Haiku at low effort, "
-        "returns cited findings and stays read-only; do not promote it or substitute an older model. "
+        "source evidence, then use oms panel --dispatch ROLE --owner %s --repo . --prompt TEXT, or "
+        "--access write --brief-file PATH --verify COMMAND for worker (--purpose explain|investigate|implement), "
+        "builder, refactorer, documenter, integrator or performance-engineer; researcher, advisor, architect, "
+        "critic, reviewer (needs --verify), verifier, security-auditor and release-engineer are read-only. "
+        "Each role takes the first installed model of its capability tier from either provider; never choose "
+        "a provider for a routine call. Override one dispatch with --workload light|routine|deep|frontier, or "
+        "--reasoning-effort high for trust-boundary or unclear-failure work and low for mechanical edits. "
+        "Researcher answers document/source lookups with citations on the newest Haiku or Luna at low effort. "
+        "Use security-auditor for risky changes (permissions, secrets, destructive operations, scripts, hooks, "
+        "install), verifier before declaring completion (original request against final result), integrator "
+        "when merging or resolving conflicts, performance-engineer when performance needs measurement, "
+        "documenter at completion and release-engineer when deploying. Advisor (which direction?), architect "
+        "(how to structure?) and critic (when does it fail?) are separate judgments; call one when needed, "
+        "not all by default. A role is a mandate, not an instance: --continue may carry a builder session into "
+        "refactorer, while reviewer, verifier, security-auditor and critic always get a context apart from the "
+        "implementer. "
         "Act as the control tower: by default delegate implementation, investigation and test repair to "
         "bounded workers (scoped brief with paths, constraints, success criteria and a --verify command), split "
         "separable files or steps into non-overlapping workers run in parallel, and keep scope, briefs, "
@@ -278,12 +274,6 @@ def bootstrap(provider, repo):
         "The sole main lands its work only when publication is authorized: admit worker patches on your own oms/<task> branch in a worktree from "
         "oms scratch-worktree add --repo ., rebase it on the remote target, verify, and run oms land from that "
         "worktree; nobody commits in the shared checkout. "
-        "At material decisions use oms panel --dispatch advisor --owner %s "
-        "--seat astra|fable|auto --repo . --prompt TEXT, choosing the seat by need: astra (GPT-6 Astra) "
-        "for source-level correctness, code paths, tooling and test evidence; fable (Fable 5.1) for design, "
-        "user-facing wording and UX, architecture trade-offs and judgment calls; ask both for an irreversible "
-        "or contested decision. Auto picks the family other than the owner's. Advisors are read-only. "
-        "For a gate use --dispatch reviewer with --verify COMMAND. "
         "Give every subtask a short descriptive --task-id ID and --label TITLE; reuse the exact "
         "reviewed plan task ID when one exists. These calls record "
         "the main relationship, role, model, task and execution location. "
@@ -308,7 +298,7 @@ def bootstrap(provider, repo):
         "may request a close with oms panel --request-close PARTICIPANT --reason \"...\". "
         "If no task has been supplied, report "
         "readiness and wait."
-    ) % (provider, json.dumps(str(repo)), json.dumps(str(ENTRY)), peer, peer, peer, peer, provider, provider, provider)
+    ) % (provider, json.dumps(str(repo)), json.dumps(str(ENTRY)), peer, peer, peer, peer, provider)
 
 
 def native_command(provider, repo, resume=None, model=None, task=None, room_id=None, member=None, context_file=None):
@@ -752,36 +742,36 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
     return found
 
 
-def dispatch(repo, owner, role, workload, seat, access, purpose, prompt=None, brief=None,
+def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
              main=None, continue_task=None, scopes=None):
-    route = selected_route(owner, role, workload, seat, access, purpose, target, model, effort)
+    route = selected_route(owner, role, workload, access, purpose, target, model, effort)
     label = safe_label(label)
     resume = None
     temporary = None
     if continue_task:
-        if role != "worker" or not brief or prompt or task_id:
-            raise ValueError("--continue takes a worker and --brief-file, not --prompt or --task-id")
+        if role not in WRITERS or not brief or prompt or task_id:
+            raise ValueError("--continue takes a write-capable role and --brief-file, not --prompt or --task-id")
         brief, resume, note = continuation(repo, owner, main, continue_task, route, brief, child_environment(owner, repo))
         temporary, task_id = brief, continue_task
         print(note, file=sys.stderr)
     try:
-        return run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, brief, verify, task_id,
+        return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                             dry_run, label, route, main, resume, scopes)
     finally:
         if temporary:
             temporary.unlink()
 
 
-def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, brief, verify, task_id,
+def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes):
     argv = routed_command(ENTRY, repo, route, prompt, brief, verify, task_id, resume)
     plan = {"schema": 1, "kind": "oms-panel-route", "route": route, "argv": argv, "executes": False}
     if scopes:
-        if role != "worker" or access != "write":
-            raise ValueError("--scope declares a write worker's files; use it with --dispatch worker --access write")
+        if role not in WRITERS or access != "write":
+            raise ValueError("--scope declares a write role's files; use it with --access write")
         scopes = list(dict.fromkeys(room.normalize_scope(scope) for scope in scopes))
-        room.declared_scopes(role, scopes)
+        room.declared_scopes(route["kind"], scopes)
     if dry_run and not (scopes and os.environ.get("OMS_ROOM_ID")):
         print(json.dumps(dict(plan, overlaps=[]) if scopes else plan))
         return 0
@@ -797,7 +787,7 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
     if moved:
         env["OMS_ROOM_ID"] = moved[0]
     env.pop("OMS_ATTEMPT_ID", None)
-    env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE=role,
+    env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE=route["kind"],
                OMS_PANEL_PURPOSE=route["purpose"], OMS_PANEL_WORKLOAD=route["workload"])
     if label:
         env["OMS_PANEL_LABEL"] = label
@@ -806,7 +796,7 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
     if task_id:
         env["OMS_TASK_ID"] = task_id
     else:
-        env["OMS_TASK_ID"] = "panel-" + purpose + "-" + uuid.uuid4().hex[:8]
+        env["OMS_TASK_ID"] = "panel-" + route["purpose"] + "-" + uuid.uuid4().hex[:8]
     room_id = env.get("OMS_ROOM_ID")
     if main and not room_id:
         raise ValueError("--main needs a room; select it with --room")
@@ -853,9 +843,9 @@ def run_dispatch(repo, owner, role, workload, seat, access, purpose, prompt, bri
                 print(json.dumps(dict(plan, overlaps=found)))
                 return 0
         member = "call-" + uuid.uuid4().hex[:16]
-        room.join(repo, room_id, member, route["provider"], role, route["model"], label or purpose,
+        room.join(repo, room_id, member, route["provider"], route["kind"], route["model"], label or route["purpose"],
                   owns=scopes, parent=caller)
-        room.send(repo, room_id, caller, member, "Assigned: " + (label or purpose), "handoff")
+        room.send(repo, room_id, caller, member, "Assigned: " + (label or route["purpose"]), "handoff")
         env.update(OMS_ROOM_ID=room_id, OMS_ROOM_PARTICIPANT=member, OMS_ROOM_REPO=str(repo),
                    OMS_ROOM_ADMITTED_PARTICIPANT=member)
     print("%s / %s -> %s / %s / %s / %s" % (owner, role, route["provider"], route["model"],
@@ -884,8 +874,7 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1):
     if not safe_label(label):
         raise ValueError("council needs a task title")
     routes = policy()
-    seats = [routes["main"]["codex"], routes["main"]["claude"],
-             routes["advisor"]["astra"], routes["advisor"]["fable"]]
+    seats = [routes["main"]["codex"], routes["main"]["claude"]] + routes["tiers"]["frontier"]
     targets = ",".join(item["provider"] + ":model=" + item["model"] for item in seats)
     argv = ["bash", str(ENTRY), "peer-ask", "--repo", str(repo),
             "--providers", targets, "--debate", str(rounds), "--deliberation",
@@ -2346,7 +2335,7 @@ def advisor_command(repo, room_id, member):
     """A fresh control-path dispatch for one main: inherited caller identity is removed, never reused."""
     return ["env", "-u", "OMS_ROOM_PARTICIPANT", "-u", "OMS_PANEL_MAIN_ATTEMPT", "-u", "OMS_ATTEMPT_ID",
             "bash", str(ENTRY), "panel", "--repo", str(repo), "--room", room_id, "--dispatch", "advisor",
-            "--owner", member["provider"], "--main", member["participant"], "--seat", "auto",
+            "--owner", member["provider"], "--main", member["participant"],
             "--label", "Advice for " + member["participant"]]
 
 
@@ -3408,13 +3397,11 @@ def interactive(repo, view="auto", attention_only=False):
                 if action in ("delegate", "review"):
                     verify = read_field("Verification command: ")
                 role = "researcher" if choice == "e" else "advisor" if choice == "a" else "reviewer" if choice == "7" else "worker"
-                purpose = {"5": "explain", "6": "implement", "7": "review", "a": "advise", "e": "research"}[choice]
-                workload = (read_field("Workload (light/routine/main) [routine]: ", required=False) or "routine"
-                            if role == "worker" and not explicit else "routine")
-                seat = (read_field("Seat (auto/astra/fable) [auto]: ", required=False) or "auto"
-                        if role in {"advisor", "reviewer"} and not explicit else "auto")
+                purpose = {"5": "explain", "6": "implement"}.get(choice)
+                workload = (read_field("Tier (light/routine/deep/frontier) [role default]: ", required=False) or None
+                            if role != "researcher" and not explicit else None)
                 main = pick_main(repo, provider)
-                status = dispatch(repo, provider, role, workload, seat, "write" if choice == "6" else "read",
+                status = dispatch(repo, provider, role, workload, "write" if choice == "6" else "read",
                                   purpose, prompt, brief, verify, target=target, model=model, effort=effort, main=main)
                 previous = "%s %s exit=%s (not acceptance)" % (provider, role, status)
                 read_field("Press Enter to return to the panel: ", required=False)
@@ -3518,7 +3505,7 @@ def main(argv=None):
     parser.add_argument("--attention-only", action="store_true", help="show only calls awaiting action in the menu or --watch")
     parser.add_argument("--routes", action="store_true", help="show the panel role policy without calling models")
     parser.add_argument("--task", help="task for the native main (requires --launch)")
-    parser.add_argument("--dispatch", choices=("worker", "advisor", "reviewer", "researcher"), help="run one bounded role task")
+    parser.add_argument("--dispatch", choices=tuple(KINDS), metavar="ROLE", help="run one bounded role task: " + ", ".join(KINDS))
     parser.add_argument("--main", help="room participant of the active main that owns this dispatch")
     parser.add_argument("--scope", action="append", metavar="PATH",
                         help="repeatable repo-relative scope a write worker declares; overlaps warn, never lock")
@@ -3536,10 +3523,9 @@ def main(argv=None):
     parser.add_argument("--notify", action="store_true", help="deliver the recorded result to Codex app")
     parser.add_argument("--retry-delivery", action="store_true", help="retry delivery of a saved task result without its original summary file")
     parser.add_argument("--result-id", help="saved result revision for --retry-delivery")
-    parser.add_argument("--workload", choices=("light", "routine", "main"), default="routine")
-    parser.add_argument("--seat", choices=("auto", "astra", "fable"), default="auto")
+    parser.add_argument("--workload", choices=TIERS, help="capability tier instead of the role's default")
     parser.add_argument("--access", choices=("read", "write"), default="read")
-    parser.add_argument("--purpose", choices=("explain", "investigate", "implement", "review", "advise", "research"))
+    parser.add_argument("--purpose", choices=("explain", "investigate", "implement"), help="plain worker task kind")
     parser.add_argument("--prompt", help="bounded read task for --dispatch")
     parser.add_argument("--brief-file", help="scoped task brief for --dispatch")
     parser.add_argument("--continue", dest="continue_task", metavar="TASK_ID",
@@ -3583,8 +3569,7 @@ def main(argv=None):
             or args.dispatch or args.council or args.results or args.finalize or args.retry_delivery or args.providers
             or args.chats or args.open_chat):
         parser.error("--view and --attention-only apply to the interactive menu or --watch")
-    if (args.brief_file or args.purpose or args.workload != "routine" or args.seat != "auto"
-            or args.access != "read") and not args.dispatch:
+    if (args.brief_file or args.purpose or args.workload or args.access != "read") and not args.dispatch:
         parser.error("role task options require --dispatch")
     if args.prompt and not (args.dispatch or args.council):
         parser.error("--prompt requires --dispatch or --council")
@@ -3594,10 +3579,10 @@ def main(argv=None):
         parser.error("--task-id requires a task operation")
     if args.main and not args.dispatch:
         parser.error("--main requires --dispatch")
-    if args.continue_task and (args.dispatch != "worker" or not args.brief_file or args.prompt or args.task_id):
-        parser.error("--continue requires --dispatch worker with --brief-file, and takes no --prompt or --task-id")
-    if args.scope and (args.dispatch != "worker" or args.access != "write"):
-        parser.error("--scope requires --dispatch worker --access write")
+    if args.continue_task and (args.dispatch not in WRITERS or not args.brief_file or args.prompt or args.task_id):
+        parser.error("--continue requires a write-capable --dispatch role with --brief-file, and takes no --prompt or --task-id")
+    if args.scope and (args.dispatch not in WRITERS or args.access != "write"):
+        parser.error("--scope requires a write-capable --dispatch role with --access write")
     if args.main:
         try:
             room.identifier(args.main, "main participant")
@@ -3626,8 +3611,7 @@ def main(argv=None):
     if args.dispatch:
         try:
             owner = args.owner or os.environ.get("OMS_AGENT", "codex")
-            purpose = args.purpose or {"worker": "explain", "advisor": "advise", "reviewer": "review", "researcher": "research"}[args.dispatch]
-            route = selected_route(owner, args.dispatch, args.workload, args.seat, args.access, purpose,
+            route = selected_route(owner, args.dispatch, args.workload, args.access, args.purpose,
                                    args.to, args.model, args.reasoning_effort)
             # A prompt-less advisor call asks its single question interactively before routing.
             pending = args.dispatch == "advisor" and not (args.prompt or args.brief_file or args.dry_run)
@@ -3733,7 +3717,7 @@ def main(argv=None):
                 show_providers(rows)
             return 0
         if args.routes:
-            print(json.dumps(policy(), indent=2))
+            print(json.dumps(dict(policy(), writers=sorted(WRITERS), kinds=KINDS), indent=2))
             return 0
         if args.council:
             return council(repo, args.owner, args.task_id, args.label, args.prompt,
@@ -3764,7 +3748,6 @@ def main(argv=None):
             if args.prompt and (len(args.prompt.encode("utf-8")) > MAX_PROMPT or "\0" in args.prompt):
                 raise ValueError("prompt exceeds the panel input contract")
             owner = args.owner or os.environ.get("OMS_AGENT", "codex")
-            purpose = args.purpose or {"worker": "explain", "advisor": "advise", "reviewer": "review", "researcher": "research"}[args.dispatch]
             asked = args.dispatch == "advisor" and not (args.prompt or brief or args.dry_run)
             if asked:
                 if not sys.stdin.isatty():
@@ -3774,7 +3757,7 @@ def main(argv=None):
                 args.prompt = read_field("Question: ")
                 if len(args.prompt.encode("utf-8")) > MAX_PROMPT or "\0" in args.prompt:
                     raise ValueError("prompt exceeds the panel input contract")
-            status = dispatch(repo, owner, args.dispatch, args.workload, args.seat, args.access, purpose,
+            status = dispatch(repo, owner, args.dispatch, args.workload, args.access, args.purpose,
                               args.prompt, brief, args.verify, args.task_id, args.dry_run, args.label,
                               args.to, args.model, args.reasoning_effort, main=args.main,
                               continue_task=args.continue_task, scopes=args.scope)

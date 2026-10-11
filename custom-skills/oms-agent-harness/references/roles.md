@@ -44,8 +44,8 @@ one-shot repair and one-use approval checks remain in force.
 ## Cheap research and existing specialties
 
 A panel `researcher` is a read-only child of a main for bounded document/source
-lookup and cited summaries. Use the newest configured/catalog Luna or Haiku at
-low effort, pinned to its exact model ID. No write scopes, implementation, review
+lookup and cited summaries. It uses the light tier's newest configured/catalog
+Haiku or Luna at low effort, pinned to its exact model ID. No write scopes, implementation, review
 gate, continuation or automatic model escalation are permitted. Catalog discovery
 does not prove live access or authorize spending; the main retains all decisions.
 
@@ -75,6 +75,12 @@ publication authority. Project and global overrides retain precedence.
 | `performance-engineer` | Analyze performance and benchmark when necessary | Authorized bounded measurements and assigned paths |
 | `documenter` | Record behavior, decisions and completion handoff | Assigned documentation paths |
 | `release-engineer` | Prepare packaging, deployment and rollback when releasing | Read-only preparation; execution needs separate authorization |
+
+In the terminal panel, `oms panel --dispatch ROLE` accepts `worker`, `researcher`
+and every role above; the model comes from the role's capability tier (light,
+routine, deep, frontier) across installed providers, not from a provider choice.
+Only `worker`, `builder`, `refactorer`, `documenter`, `integrator` and
+`performance-engineer` may take `--access write`.
 
 Resolve only the roles needed for the task. Advisor asks which direction is good,
 Architect asks how to structure it, and Critic asks where it fails; these are

@@ -31,7 +31,7 @@ TASK_NAMES = {"peer-delegate": "Implement patch", "delegate": "Implement patch",
               "review": "Review changes", "peer-review": "Review changes"}
 MODEL_NAMES = {"gpt-6.1-sol": "Sol 6.1", "gpt-6-sol": "Sol 6", "gpt-6-luna": "Luna 6", "gpt-6-astra": "Astra 6",
                "claude-opus-5-5": "Opus 5.5", "claude-sonnet-5-5": "Sonnet 5.5",
-               "claude-fable-5-1": "Fable 5.1"}
+               "claude-fable-5-1": "Fable 5.1", "claude-haiku-5-5": "Haiku 5.5"}
 PURPOSE_NAMES = {"implement": "Implement patch", "explain": "Explain code",
                  "investigate": "Inspect source", "review": "Review changes", "advise": "Advise decision"}
 LIVE_STATES = {"starting", "working", "verifying", "live marker"}

@@ -1312,9 +1312,11 @@ def panel_status_hint(payload: dict[str, Any], room_id: str) -> str:
 
 def panel_main_base(payload: dict[str, Any], room: str) -> str:
     return ("[oms panel] You are a control-tower main. Delegate implementation, investigation and test repair: "
-            "oms panel --dispatch worker --owner %s%s --workload light|routine|main --purpose implement|investigate|explain "
+            "oms panel --dispatch ROLE --owner %s%s (worker --purpose implement|investigate|explain, builder, refactorer, "
+            "researcher, reviewer, verifier, security-auditor and the other roles; each picks its capability tier, "
+            "--workload light|routine|deep|frontier overrides it) "
             "--access write --brief-file PATH --verify COMMAND (or --access read --prompt TEXT), with --task-id and --label "
-            "and --reasoning-effort high for trust boundaries, cross-file integration or unclear failures, low for lookups "
+            "and --reasoning-effort high for trust boundaries or unclear failures, low for lookups "
             "and mechanical edits, otherwise the tier default; "
             "run independent workers in parallel. Keep scope, briefs, review, patch admission, integration and "
             "coordination with other mains yourself; declare your scope with oms room scope --owns PATH before editing shared files "

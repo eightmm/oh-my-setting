@@ -1957,20 +1957,43 @@ for name in ("grok", "antigravity", "muse"):
 assert registered["muse"]["access"] == ["read"]
 assert registered["codex"]["native_launch"] and registered["claude"]["native_launch"]
 assert shlex.split(panel.shell_command(["bash", str(panel.ENTRY), str(project)]))[1:] == ["bash", str(panel.ENTRY), str(project)]
-assert allocate("claude", workload="light")["model"] == "gpt-6-luna"
-assert allocate("codex", workload="routine")["model"] == "claude-sonnet-5-5"
-assert allocate("codex", workload="main")["model"] == "gpt-6.1-sol"
-assert allocate("claude", workload="main")["model"] == "claude-opus-5-5"
-assert allocate("claude", role="advisor")["model"] == "gpt-6-astra"
-assert allocate("codex", role="advisor")["model"] == "claude-fable-5-1"
-assert allocate("codex", role="advisor", seat="astra")["model"] == "gpt-6-astra"
-assert allocate("claude", role="advisor", seat="fable")["model"] == "claude-fable-5-1"
+# Tier routing is provider-agnostic: the first installed candidate, with independence only as a tie-break.
+both = {"claude", "codex"}
+assert allocate("codex", tier="light", installed=both)["model"] == "claude-haiku-5-5"
+assert allocate("claude", tier="light", installed={"codex"})["model"] == "gpt-6-luna"
+assert allocate("codex", installed=both)["model"] == "claude-sonnet-5-5"
+assert allocate("claude", installed={"codex"})["model"] == "gpt-6.1-sol"
+assert allocate("claude", role="advisor", installed=both)["model"] == "claude-fable-5-1"
+assert allocate("claude", role="advisor", installed={"codex"})["model"] == "gpt-6-astra"
+assert allocate("claude", role="reviewer", installed=both)["model"] == "gpt-6.1-sol"
+assert allocate("codex", role="security-auditor", installed=both)["model"] == "claude-opus-5-5"
+assert allocate("claude", role="verifier", installed={"claude"})["model"] == "claude-opus-5-5"
+assert allocate("claude", role="architect", installed=both)["model"] == "claude-opus-5-5"
+routes = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--routes"]))
+assert set(routes["tiers"]) == set(panel.TIERS) and set(routes["roles"]) == set(routes["kinds"]) == set(panel.KINDS)
+assert routes["writers"] == sorted(panel.WRITERS) and report["routing"]["roles"] == routes["roles"]
+for role, kind, tier in (("builder", "worker", "routine"), ("integrator", "worker", "deep"),
+                         ("release-engineer", "worker", "routine"), ("critic", "advisor", "deep"),
+                         ("verifier", "reviewer", "deep"), ("researcher", "researcher", "light")):
+    allocated = allocate("claude", role=role, installed=both)
+    assert (allocated["kind"], allocated["workload"]) == (kind, tier), allocated
+for bad in ({"role": "verifier", "access": "write"}, {"role": "release-engineer", "access": "write"},
+            {"role": "builder", "purpose": "explain"}, {"tier": "main"}, {"installed": set()},
+            {"role": "researcher", "tier": "deep"}):
+    try:
+        allocate("claude", installed=bad.pop("installed", both), **bad)
+        raise AssertionError("invalid allocation accepted: %r" % bad)
+    except ValueError as error:
+        assert "install one" in str(error) or bad, error
 for owner in panel.PROVIDERS:
     arguments = panel.native_command(owner, project)
     expected = "gpt-6.1-sol" if owner == "codex" else "claude-opus-5-5"
     assert arguments[arguments.index("--model") + 1] == expected, arguments
-    assert "--dispatch worker" in panel.bootstrap(owner, project)
-    assert "--dispatch advisor" in panel.bootstrap(owner, project)
+    assert "--dispatch ROLE" in panel.bootstrap(owner, project) and "--workload light|routine|deep|frontier" in panel.bootstrap(owner, project)
+    assert all(trigger in panel.bootstrap(owner, project) for trigger in (
+        "security-auditor for risky changes", "verifier before declaring completion", "integrator when merging",
+        "documenter at completion", "release-engineer when deploying", "not all by default", "a context apart"))
+    assert "--seat" not in panel.bootstrap(owner, project) and "Astra" not in panel.bootstrap(owner, project)
     assert "control tower: by default delegate" in panel.bootstrap(owner, project)
     assert "exactly one live main" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
     assert "The sole main lands its work" in panel.bootstrap(owner, project) and "oms scratch-worktree add" in panel.bootstrap(owner, project)
@@ -2038,19 +2061,21 @@ for owner in panel.PROVIDERS:
     main_attempts[owner] = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
                                "start", "--provider", owner, "--tool", "panel-main", "--ref", "panel_role=main",
                                "--then", "starting", "--then", "working"]).strip()
-cases = [("claude", "worker", "light", "read", "explain", "gpt-6-luna"),
-         ("codex", "worker", "routine", "read", "explain", "claude-sonnet-5-5"),
-         ("codex", "worker", "main", "read", "investigate", "gpt-6.1-sol"),
-         ("claude", "worker", "main", "write", "implement", "claude-opus-5-5"),
-         ("claude", "advisor", "routine", "read", "advise", "gpt-6-astra"),
-         ("codex", "advisor", "routine", "read", "advise", "claude-fable-5-1"),
-         ("claude", "reviewer", "routine", "read", "review", "gpt-6-astra"),
-         ("codex", "researcher", "routine", "read", "research", "gpt-6-luna"),
-         ("claude", "researcher", "routine", "read", "research", "claude-haiku-5-5")]
+cases = [("codex", "worker", "light", "read", "explain", "claude-haiku-5-5"),
+         ("codex", "worker", None, "read", "explain", "claude-sonnet-5-5"),
+         ("codex", "worker", "deep", "read", "investigate", "claude-opus-5-5"),
+         ("claude", "builder", None, "write", None, "claude-sonnet-5-5"),
+         ("claude", "advisor", None, "read", None, "claude-fable-5-1"),
+         ("codex", "advisor", "deep", "read", None, "claude-opus-5-5"),
+         ("claude", "reviewer", None, "read", None, "gpt-6.1-sol"),
+         ("claude", "security-auditor", None, "read", None, "gpt-6.1-sol"),
+         ("codex", "researcher", None, "read", None, "claude-haiku-5-5"),
+         ("claude", "researcher", None, "read", None, "claude-haiku-5-5")]
 for index, (owner, role, workload, access, purpose, expected) in enumerate(cases):
     request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", role,
-               "--owner", owner, "--workload", workload, "--access", access, "--purpose", purpose,
-               "--task-id", "panel-route-%s" % index, "--label", "Inspect fixture source %s" % index]
+               "--owner", owner, "--access", access, "--task-id", "panel-route-%s" % index,
+               "--label", "Inspect fixture source %s" % index]
+    request += (["--workload", workload] if workload else []) + (["--purpose", purpose] if purpose else [])
     if access == "write":
         request += ["--brief-file", str(brief), "--verify", "test \"$(tail -1 value.txt)\" = new"]
     else:
@@ -2060,6 +2085,9 @@ for index, (owner, role, workload, access, purpose, expected) in enumerate(cases
     before = subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"])
     route = json.loads(call(request + ["--dry-run"]))
     assert route["route"]["model"] == expected and route["executes"] is False, route
+    if role not in {"advisor", "reviewer"}:
+        assert route["argv"][route["argv"].index("--role") + 1] == (
+            role if role != "worker" else "analysis-worker"), route["argv"]
     env = dict(environment, OMS_AGENT=owner, OMS_PANEL_MAIN_ATTEMPT=main_attempts[owner])
     if access == "write":
         env["PANEL_TEST_MODE"] = "write"
@@ -2072,12 +2100,14 @@ for index, (owner, role, workload, access, purpose, expected) in enumerate(cases
     attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
     attempt = next(row for row in attempts if row.get("task_id") == "panel-route-%s" % index)
     refs = attempt["refs"]
-    assert refs["panel_role"] == role and refs["panel_model"] == expected, attempt
+    assert refs["panel_role"] == panel.KINDS[role] and refs["panel_model"] == expected, attempt
+    assert refs["panel_purpose"] == route["route"]["purpose"] and (role == "worker" or refs["panel_purpose"] in (
+        role, "advise", "review", "research")), refs
     assert refs["panel_effort"] == route["route"]["effort"], refs
     assert refs["panel_access"] == access and refs["panel_label"] == "Inspect fixture source %s" % index, refs
     assert attempt["parent_attempt_id"] == main_attempts[owner], attempt
     assert attempt["state"] == ("review" if access == "write" else "done"), attempt
-    assert refs["panel_location"].startswith("worktree:") if role in {"worker", "researcher"} else refs["panel_location"] == "repository", refs
+    assert refs["panel_location"].startswith("worktree:") if role not in {"advisor", "reviewer"} else refs["panel_location"] == "repository", refs
     assert str(home) not in json.dumps(refs) and str(project) not in json.dumps(refs), refs
     if role == "advisor":
         retained = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
@@ -2092,42 +2122,51 @@ for index, (owner, role, workload, access, purpose, expected) in enumerate(cases
         assert any("model_reasoning_effort" in arg and route["route"]["effort"] in arg
                    for arg in observed["argv"]), observed
     assert observed["parent"] == main_attempts[owner], observed
-    if role in {"worker", "researcher"}:
+    if role not in {"advisor", "reviewer"}:
         assert observed["cwd"] != str(project), observed
     else:
         assert observed["cwd"] == str(project), observed
 
 # A researcher keeps the cheap family, read-only strategy and source evidence.
-from panel_routing import newest_research_model, research_version
-assert newest_research_model("codex", "gpt-6-luna", ["gpt-6.2-luna", "gpt-6.10-luna", "gpt-7-astra"]) == "gpt-6.10-luna"
-assert newest_research_model("claude", "claude-haiku-5-5", ["claude-haiku-5-6", "claude-opus-9-9"]) == "claude-haiku-5-6"
-assert research_version("codex", "provider-default") is None
-with patch.object(panel, "provider_catalog", return_value=[{"provider": "codex", "binary": "codex",
-        "models": ["gpt-6-sol"], "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-7-astra"]}]):
-    assert panel.selected_route("codex", "worker", "main", "auto", "read", "investigate")["model"] == "gpt-6.2-sol"
-    assert panel.selected_route("codex", "worker", "light", "auto", "read", "explain")["model"] == "gpt-6-luna"
-with patch.object(panel, "provider_catalog", return_value=[{"provider": "codex", "binary": "codex",
-        "models": ["gpt-6-luna"], "catalog_models": ["gpt-6-luna"] * 20 + ["gpt-6.2-luna"]}]):
-    assert panel.selected_route("codex", "researcher", "routine", "auto", "read", "research")["model"] == "gpt-6.2-luna"
+from panel_routing import newest_route_model
+assert newest_route_model("codex", "gpt-6-luna", ["gpt-6.2-luna", "gpt-6.10-luna", "gpt-7-astra"]) == "gpt-6.10-luna"
+assert newest_route_model("claude", "claude-haiku-5-5", ["claude-haiku-5-6", "claude-opus-9-9"]) == "claude-haiku-5-6"
+codex_only = {"provider": "codex", "binary": "codex", "installed": True, "models": ["gpt-6-sol"],
+              "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-7-astra"]}
+with patch.object(panel, "provider_catalog", return_value=[codex_only]):
+    assert panel.selected_route("codex", "worker", "deep", "read", "investigate")["model"] == "gpt-6.2-sol"
+    assert panel.selected_route("codex", "worker", "light", "read", "explain")["model"] == "gpt-6-luna"
+    assert panel.selected_route("codex", "reviewer", None, "read", None)["provider"] == "codex"
+with patch.object(panel, "provider_catalog", return_value=[dict(codex_only, installed=False)]):
+    try:
+        panel.selected_route("codex", "worker", None, "read", None)
+        raise AssertionError("a route was chosen with no installed provider")
+    except ValueError as error:
+        assert "no installed provider serves the routine tier" in str(error), error
+with patch.object(panel, "provider_catalog", return_value=[dict(codex_only, models=["gpt-6-luna"],
+        catalog_models=["gpt-6-luna"] * 20 + ["gpt-6.2-luna"])]):
+    assert panel.selected_route("codex", "researcher", None, "read", None)["model"] == "gpt-6.2-luna"
 try:
     panel.room.declared_scopes("researcher", ["src"])
     raise AssertionError("researcher write scope was accepted")
 except ValueError:
     pass
-for owner in panel.PROVIDERS:
-    preset = panel.selected_route(owner, "researcher", "routine", "auto", "read", "research")
+for target in ("codex", "claude"):
+    preset = panel.selected_route("claude", "researcher", None, "read", None, target)
     command = panel.routed_command(panel.ENTRY, project, preset, prompt="Find cited evidence.")
     assert "--read-only" in command and command[command.index("--role") + 1] == "researcher"
-    assert preset["effort"] == "low" and preset["workload"] == "light"
-    for options in (("routine", "read", "implement", None, None, None),
-                    ("routine", "write", "research", None, None, None),
-                    ("main", "read", "research", None, None, None),
-                    ("routine", "read", "research", None, None, "high"),
-                    ("routine", "read", "research", "codex", "gpt-6-astra", None),
-                    ("routine", "read", "research", "claude", "provider-default", None)):
-        workload, access, purpose, target, model, effort = options
+    assert preset["provider"] == target and preset["effort"] == "low" and preset["workload"] == "light"
+    for options in ((None, "read", "implement", None, None, None),
+                    (None, "write", None, None, None, None),
+                    ("deep", "read", None, None, None, None),
+                    (None, "read", None, None, None, "high"),
+                    (None, "read", None, "codex", "gpt-6-astra", None),
+                    (None, "read", None, "claude", "provider-default", None),
+                    (None, "read", None, "grok", None, None),
+                    ("light", "read", None, "codex", None, None)):
+        workload, access, purpose, to, model, effort = options
         try:
-            panel.selected_route(owner, "researcher", workload, "auto", access, purpose, target, model, effort)
+            panel.selected_route("claude", "researcher", workload, access, purpose, to, model, effort)
             raise AssertionError("researcher authority/model override was accepted")
         except ValueError:
             pass
@@ -2137,6 +2176,17 @@ for owner in panel.PROVIDERS:
             raise AssertionError("researcher gate/continuation was accepted")
         except ValueError:
             pass
+# Only write-capable roles continue a session; judges keep a context apart from the implementer.
+for role in ("reviewer", "verifier", "security-auditor", "critic", "advisor", "release-engineer"):
+    judge = panel.selected_route("claude", role, None, "read", None)
+    try:
+        panel.routed_command(panel.ENTRY, project, judge, brief=str(brief), verify="true", resume="fixture-session")
+        raise AssertionError("%s resumed a session" % role)
+    except ValueError as error:
+        assert "only write-capable roles continue" in str(error), error
+refactor = panel.selected_route("claude", "refactorer", None, "write", None)
+assert "--resume-session" in panel.routed_command(panel.ENTRY, project, refactor, brief=str(brief), verify="true",
+                                                  resume="fixture-session")
 
 # Lifecycle admission rejects a forged researcher label on a write delegate before the native CLI runs.
 for access, purpose, model, effort in (("write", "research", "gpt-6-luna", "low"),
@@ -2182,7 +2232,7 @@ for target, expected in (("grok", "grok"), ("agy", "antigravity"), ("muse", "mus
 for options in (["--to", "muse"], ["--to", "muse", "--model", "provider-default"],
                 ["--to", "muse,grok", "--model", "fixture"], ["--to", "unregistered", "--model", "fixture"],
                 ["--to", "deepseek", "--model", "fixture"], ["--to", "codex", "--model", "gpt-5.6-sol"],
-                ["--to", "grok", "--model", "fixture", "--seat", "astra"],
+                ["--to", "grok", "--model", "fixture", "--workload", "deep"],
                 ["--model", "fixture"], ["--reasoning-effort", "extreme"],
                 ["--to", "muse", "--model", "fixture", "--access", "write", "--purpose", "implement",
                  "--brief-file", str(brief), "--verify", "test -f value.txt"]):
@@ -2195,7 +2245,7 @@ for options in (["--to", "muse"], ["--to", "muse", "--model", "provider-default"
     assert worker_log.read_bytes() == before
 # A role route keeps its tier's model and takes a per-dispatch effort.
 harder = json.loads(call(external_base + ["--workload", "light", "--reasoning-effort", "high", "--dry-run"]))
-assert harder["route"]["model"] == "gpt-6-luna" and harder["route"]["effort"] == "high", harder
+assert harder["route"]["model"] == "claude-haiku-5-5" and harder["route"]["effort"] == "high", harder
 assert harder["argv"][harder["argv"].index("--reasoning-effort") + 1] == "high", harder["argv"]
 profile_route = json.loads(call(external_base + ["--to", "vibe", "--dry-run"]))
 assert profile_route["route"]["model"] == "provider-default" and "--model" not in profile_route["argv"]
@@ -2267,7 +2317,7 @@ for rounds in (1, 2):
     assert planned["primary_calls"] == 4 * (rounds + 1) and planned["max_calls"] == 8 * (rounds + 1)
     assert planned["families"] == 2 and planned["executes"] is False
     assert planned["argv"][planned["argv"].index("--providers") + 1] == \
-        "codex:model=gpt-6.1-sol,claude:model=claude-opus-5-5,codex:model=gpt-6-astra,claude:model=claude-fable-5-1"
+        "codex:model=gpt-6.1-sol,claude:model=claude-opus-5-5,claude:model=claude-fable-5-1,codex:model=gpt-6-astra"
 assert (project / ".oms/artifacts/index.jsonl").read_bytes() == before_index
 call(council_args, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
 council_attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
@@ -2634,7 +2684,10 @@ for arguments in (["--resume", "--last"], ["--launch", "codex", "--resume", "../
                   ["--council", "--rounds", "3"],
                   ["--dispatch", "advisor", "--access", "write", "--prompt", "change source"],
                   ["--dispatch", "worker", "--access", "write", "--purpose", "implement", "--prompt", "change source"],
-                  ["--dispatch", "worker", "--seat", "fable", "--prompt", "explain"],
+                  ["--dispatch", "worker", "--workload", "main", "--prompt", "explain"],
+                  ["--dispatch", "verifier", "--access", "write", "--brief-file", "b.md", "--verify", "true"],
+                  ["--dispatch", "reviewer", "--continue", "t1", "--brief-file", "b.md"],
+                  ["--dispatch", "builder", "--purpose", "implement", "--prompt", "explain"],
                   ["--dispatch", "advisor", "--purpose", "explain", "--prompt", "explain"],
                   ["--dispatch", "worker", "--continue", "t1", "--prompt", "explain"],
                   ["--dispatch", "worker", "--continue", "t1", "--brief-file", "b.md", "--task-id", "t2"],
@@ -3193,7 +3246,7 @@ answer = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--roo
 assert "artifact:" in answer, answer
 state = room.status(project, shared)
 child = next(p for p in state["participants"] if p["role"] == "worker")
-assert child["parent"] == room_owner and child["model"] == "gpt-6-luna", child
+assert child["parent"] == room_owner and child["model"] == "claude-haiku-5-5", child
 handoff = next(m for m in state["messages"] if m["sender"] == child["participant"])
 assert handoff["recipient"] == room_owner and "parent acceptance pending" in handoff["text"], handoff
 assert "inspected the bounded repository task" in handoff["text"], handoff
@@ -3205,7 +3258,7 @@ stored = home / ".codex/sessions/2026/10/07"
 stored.mkdir(parents=True)
 (stored / ("rollout-2026-10-07T00-00-00-" + session + ".jsonl")).write_text("{}\n")
 worker = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared, "--dispatch", "worker",
-          "--owner", "claude", "--purpose", "investigate", "--workload", "light"]
+          "--owner", "claude", "--purpose", "investigate", "--to", "codex", "--model", "gpt-6-luna"]
 call(worker + ["--prompt", "Inspect value.txt without edits.", "--task-id", "room-continue", "--label", "Inspect"],
      dict(room_env, PANEL_TEST_SESSION=session))
 listed = lambda: json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
@@ -3223,6 +3276,14 @@ text = prompt_log.read_text()
 assert "Your earlier work was on" in text and "New instructions follow." in text and "Task: look at value.txt again." in text, text
 rounds = [a for a in listed() if a["task_id"] == "room-continue" and a["refs"].get("panel_role") == "worker"]
 assert len(rounds) == 2 and rounds[-1]["refs"]["native_session"] == session, rounds
+# One session moves between write-capable roles (worker -> refactorer); a reviewer never resumes it.
+refactor = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared, "--dispatch",
+    "refactorer", "--owner", "claude", "--to", "codex", "--model", "gpt-6-luna", "--access", "write",
+    "--brief-file", str(brief), "--verify", "true", "--continue", "room-continue", "--dry-run"],
+    env=room_env, capture_output=True, text=True)
+assert refactor.returncode == 0 and "native session" in refactor.stderr, refactor
+planned = json.loads(refactor.stdout)["argv"]
+assert planned[planned.index("--role") + 1] == "refactorer" and planned[planned.index("--resume-session") + 1] == session, planned
 fresh = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-inspection"], env=dict(
     room_env, PANEL_TEST_PROMPT=str(prompt_log)), capture_output=True, text=True)
 assert fresh.returncode == 0 and "no resumable session" in fresh.stderr, fresh
@@ -3456,13 +3517,13 @@ assert room.status(project, declared)["pending_count"] == 0
 # than the first main ever joined, and refuses zero or ambiguous ownership.
 control_env = dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project))
 with patch.dict(os.environ, control_env, clear=True), patch.object(panel.subprocess, "call", return_value=0):
-    assert panel.dispatch(project, "claude", "worker", "light", "auto", "read", "investigate",
+    assert panel.dispatch(project, "claude", "worker", "light", "read", "investigate",
                           prompt="Inspect the bounded source", task_id="control-owner", label="Control dispatch") == 0
     newest = room.status(project, shared)["participants"][-1]
     assert newest["parent"] == room_owner
     for owner in ("codex",):
         try:
-            panel.dispatch(project, owner, "worker", "light", "auto", "read", "investigate", prompt="Inspect source")
+            panel.dispatch(project, owner, "worker", "light", "read", "investigate", prompt="Inspect source")
         except ValueError as error:
             assert "unique active main" in str(error)
         else:
@@ -3471,17 +3532,17 @@ with patch.dict(os.environ, control_env, clear=True), patch.object(panel.subproc
                                 "--ref", "panel_room_id=" + shared, "--then", "starting", "--then", "working", output=True)
     room.join(project, shared, second_owner, "claude")
     try:
-        panel.dispatch(project, "claude", "worker", "light", "auto", "read", "investigate", prompt="Inspect source")
+        panel.dispatch(project, "claude", "worker", "light", "read", "investigate", prompt="Inspect source")
     except ValueError as error:
         assert "unique active main" in str(error)
     else:
         raise AssertionError("control dispatch silently chose between two mains")
     # An explicit main resolves the ambiguity but cannot name a non-live caller.
-    assert panel.dispatch(project, "claude", "advisor", "routine", "auto", "read", "advise",
+    assert panel.dispatch(project, "claude", "advisor", None, "read", None,
                           prompt="Advise the second main", main=second_owner) == 0
     assert room.status(project, shared)["participants"][-1]["parent"] == second_owner
     try:
-        panel.dispatch(project, "claude", "advisor", "routine", "auto", "read", "advise",
+        panel.dispatch(project, "claude", "advisor", None, "read", None,
                        prompt="Advise nobody", main="outside-main")
     except ValueError as error:
         assert "unique active main" in str(error)
@@ -3490,7 +3551,7 @@ with patch.dict(os.environ, control_env, clear=True), patch.object(panel.subproc
     # An inherited caller cannot be redirected to another main by --main.
     with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": room_owner}):
         try:
-            panel.dispatch(project, "claude", "advisor", "routine", "auto", "read", "advise",
+            panel.dispatch(project, "claude", "advisor", None, "read", None,
                            prompt="Misattributed advice", main=second_owner)
         except ValueError as error:
             assert "different main" in str(error)
@@ -3505,7 +3566,7 @@ with patch.dict(os.environ, control_env, clear=True), patch.object(panel.subproc
         with patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": moved_sid}):
             if not selected:
                 os.environ.pop("OMS_ROOM_ID")
-            assert panel.dispatch(project, "claude", "advisor", "routine", "auto", "read", "advise",
+            assert panel.dispatch(project, "claude", "advisor", None, "read", None,
                                   prompt="Advise the moved main") == 0
         assert room.status(project, shared)["participants"][-1]["parent"] == second_owner
         assert panel.subprocess.call.call_args.kwargs["env"]["OMS_PANEL_MAIN_ATTEMPT"] == second_owner
@@ -3513,7 +3574,7 @@ with patch.dict(os.environ, control_env, clear=True), patch.object(panel.subproc
                     {"CLAUDE_CODE_SESSION_ID": moved_sid, "OMS_HARNESS_CHILD": "1"}):
         with patch.dict(os.environ, refused):
             try:
-                panel.dispatch(project, "claude", "advisor", "routine", "auto", "read", "advise", prompt="Advise nobody")
+                panel.dispatch(project, "claude", "advisor", None, "read", None, prompt="Advise nobody")
             except ValueError as error:
                 assert "unique active main" in str(error)
             else:
@@ -4325,7 +4386,7 @@ with patch.dict(os.environ, {"OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": "", "OMS
         patch.object(panel.shutil, "which", return_value="/bin/true"), \
         patch.object(panel.subprocess, "call", side_effect=AssertionError("model call without owner")):
     try:
-        panel.dispatch(Path("/tmp/project-a"), "claude", "advisor", "routine", "auto", "read", "advise",
+        panel.dispatch(Path("/tmp/project-a"), "claude", "advisor", None, "read", None,
                        prompt="Who owns this?", main="unknown-main")
     except ValueError as error:
         assert "--main needs a room" in str(error)
@@ -5682,7 +5743,7 @@ standalone_env = {key: value for key, value in environment.items()
                   if key not in {"OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT", "OMS_PANEL_MAIN_ATTEMPT"}}
 with patch.dict(os.environ, standalone_env, clear=True), patch.object(panel.subprocess, "call", return_value=0), \
         patch("sys.stderr", new=io.StringIO()) as standalone_notice:
-    assert panel.dispatch(project, "codex", "worker", "light", "auto", "read", "investigate",
+    assert panel.dispatch(project, "codex", "worker", "light", "read", "investigate",
                           prompt="Inspect source", task_id="standalone-fixture") == 0
     assert "room and main relationship are unrecorded" in standalone_notice.getvalue()
 assert json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),

@@ -311,7 +311,7 @@ Notices disappear on the next input or after ten seconds.
 
 `a` in the watcher asks an advisor for the selected main (or the shown one).
 In tmux it opens a popup that takes one question and runs
-`oms panel --dispatch advisor --main PARTICIPANT --seat auto` without the
+`oms panel --dispatch advisor --main PARTICIPANT` without the
 watcher's inherited caller identity; the dispatch re-proves that main is live,
 and the answer returns to that main's room mail. Outside tmux the board shows
 the command instead. Popups need tmux 3.2 or newer; when the popup cannot open,
@@ -602,16 +602,15 @@ or runtime health check. Models come from the existing cache without refresh.
 
 A main can explicitly select a registered CLI for a bounded worker, advisor
 or reviewer. `--to` requires an exact `--model` for transports supporting per-call
-model selection; omit preset `--workload` and
-`--seat`. An optional `--reasoning-effort` is forwarded through the existing
+model selection; omit the `--workload` tier. An optional `--reasoning-effort` is forwarded through the existing
 provider capability checks. Omitting effort retains the front door's native
 settings. For profile-controlled transports such as Vibe/DeepSeek Harness,
 omit `--model`; the native profile selects it and an exact override is refused.
-Default role allocation remains Sol 6.1/Opus, Luna/Sonnet and Astra/Fable.
+Preset roles route by capability tier, not provider (see Roles below).
 Codex delegated routes accept the exact Sol, Luna and Astra model IDs in the
 panel policy, including Sol 6.1. Model-family versions are distinct from roles. Preset dispatch chooses the newest
 configured/catalog numeric version within its existing family and pins the exact ID;
-a newer Astra never replaces a Luna or Sol worker. Explicit CLI selections retain
+a newer Astra never replaces a Luna or Sol route. Explicit CLI selections retain
 the caller's exact model request. A compact model preview does not limit routing.
 
 ```bash
@@ -653,9 +652,7 @@ The `p CLIs` menu's `n Native` action or `--launch ID` uses this explicit capabi
 unsupported native adapters fail rather than falling back to a headless call.
 This opt-in grants no write/publication authority. The actual Grok/Muse interactive
 interfaces have not been verified; the contract is covered by protocol fixtures.
-Additional mains can use routine/light/advisor routes; main-level worker routing
-requires an explicit target. Owner finalization/council retains Codex/Claude's
-existing policy. No additional daemon, dependency or terminal injection is added.
+Owner finalization/council retains Codex/Claude's existing policy. No additional daemon, dependency or terminal injection is added.
 
 ## Roles and automatic allocation
 
@@ -667,26 +664,49 @@ native user turn; when entering work in the native conversation, the same
 instructions apply. Model selection for each bounded call is part of that task.
 The launcher does not autonomously fan out before the main has a task.
 
-| Role / workload | Exact selected model | Effort | Authority |
+| Main harness | Exact model | Effort |
+| --- | --- | --- |
+| Claude main (default) | `claude-opus-5-5` | high |
+| Codex main / Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
+
+Calls are routed by capability tier, not by provider. Each tier lists candidates
+from both providers in order of fit; a dispatch takes the first whose provider is
+installed (cached registry, no CLI call) and pins the newest catalog version of
+that model family. No installed candidate is a clear error; `--to PROVIDER
+[--model ID]` stays the explicit provider route.
+
+| Tier | Candidates, first preferred |
+| --- | --- |
+| light | `claude-haiku-5-5` low, `gpt-6-luna` low |
+| routine | `claude-sonnet-5-5` medium, `gpt-6.1-sol` medium |
+| deep | `claude-opus-5-5` high, `gpt-6.1-sol` high |
+| frontier | `claude-fable-5-1` high, `gpt-6-astra` high |
+
+| Role | Default tier | Access | Front door |
 | --- | --- | --- | --- |
-| Codex main | `gpt-6.1-sol` (shown as Sol 6.1) | high | Native main permissions |
-| Claude main | `claude-opus-5-5` | high | Native main permissions |
-| Light, clear worker | `gpt-6-luna` | low | Bounded read or isolated write |
-| Researcher | Latest configured/catalog Luna or Haiku | low | Read-only source/document lookup with citations |
-| Routine implementation / long straightforward explanation | `claude-sonnet-5-5` | medium | Bounded read or isolated write |
-| Main-level worker | Owning main's Sol / Opus preset | high | Bounded worker; no promotion |
-| Astra advisor / reviewer | `gpt-6-astra` | high | Read-only |
-| Fable advisor / reviewer | `claude-fable-5-1` | high | Read-only |
+| `researcher` | light (always) | read | `peer-delegate --role researcher` |
+| `worker`, `builder`, `refactorer`, `documenter` | routine | read or write | `peer-delegate --role` (`analysis-worker` / `implementation-worker` for `worker`) |
+| `release-engineer` | routine | read | `peer-delegate --role release-engineer` |
+| `integrator`, `performance-engineer` | deep | read or write | `peer-delegate --role` |
+| `architect`, `critic`, `verifier`, `security-auditor` | deep | read | `peer-delegate --role --read-only` |
+| `reviewer` | deep | read | `peer-review --gate --verify` |
+| `advisor` | frontier | read | `advise` |
+
+`--workload light|routine|deep|frontier` overrides the tier for one dispatch and
+`--reasoning-effort` its effort. Reviewer, verifier, security-auditor and critic
+prefer a same-tier candidate from the provider other than the main's, as a
+tie-break only. Their records keep the board kinds `worker`, `researcher`,
+`advisor` (advisor, architect, critic) and `reviewer` (reviewer, verifier,
+security-auditor) in `panel_role`; the strategy itself is the recorded purpose
+(plain workers record explain/investigate/implement). `oms panel --routes`
+prints the policy with these kinds and the write-capable roles.
 
 [The panel policy](../config/panel-routing.json) is separate from generic OMS
 provider defaults. An explicit native `--model` override preserves native effort
-settings; main-level workers still use the policy preset. Mains choose the advisor
-seat by need: Astra for source-level correctness, code paths, tooling and test
-evidence; Fable for design, user-facing wording and UX, architecture trade-offs and
-judgment; both for an irreversible or contested decision. `--seat auto` selects the
-other family (Astra for a Claude main, Fable for a Codex main). Advisors are useful at material decisions; the bootstrap does
-not ask the main to call both on every turn. A missing provider or unsupported
-model fails that route without silently selecting another model.
+settings. Advisor (which direction?), architect (how to structure?) and critic
+(when does it fail?) are separate judgments; the bootstrap does not ask the main
+to call them together. A missing provider or unsupported model fails that route
+without silently selecting another model.
 
 A panel main acts as the control tower: its bootstrap delegates implementation,
 investigation and test repair to bounded workers by default and keeps scope,
@@ -703,24 +723,26 @@ commits in the shared checkout, and no main waits for a single integrator:
 `oms/*` branches and harness worktrees as soft, and `oms room scope` warns
 about overlapping files before the work starts.
 
-Task complexity and write authority are independent. A write worker needs an
-implementation purpose, scoped brief file and mechanical verifier. Read workers
+Task complexity and write authority are independent. A write role needs a
+scoped brief file and mechanical verifier. Read workers
 use isolated worktrees too. Write workers return a patch for parent inspection
 and admission; the panel does not apply it. Reviewers require a verifier and
 record a review gate. Workers cannot recursively dispatch or open owner sessions.
 Normal native permissions, harness policy and account consent remain in effect.
 
 ```bash
-oms panel --repo . --dispatch worker --owner codex --workload routine \
-  --purpose explain --access read --task-id parser-notes --label 'Explain parser' \
+oms panel --repo . --dispatch worker --owner claude \
+  --purpose explain --task-id parser-notes --label 'Explain parser' \
   --prompt 'Explain the parser using source evidence.' --dry-run
 oms panel --repo . --dispatch worker --owner claude --workload light \
   --purpose investigate --prompt 'Identify the relevant configuration entries.'
-oms panel --repo . --dispatch worker --owner codex --workload main \
-  --purpose implement --access write --brief-file scoped-task.md --verify 'bash tests/affected.sh'
-oms panel --repo . --dispatch advisor --owner claude --seat fable \
-  --label 'Review architecture options' --prompt 'Compare these bounded design options.'
-oms panel --repo . --dispatch reviewer --owner codex --seat astra \
+oms panel --repo . --dispatch builder --owner claude --access write \
+  --brief-file scoped-task.md --verify 'bash tests/affected.sh'
+oms panel --repo . --dispatch architect --owner claude \
+  --label 'Structure the parser' --prompt 'Compare these bounded design options.'
+oms panel --repo . --dispatch security-auditor --owner claude \
+  --prompt 'Audit the install script change for privilege and secret handling.'
+oms panel --repo . --dispatch reviewer --owner claude --workload frontier \
   --prompt 'Review the changed parser.' --verify 'bash tests/affected.sh'
 oms panel --repo . --room team --dispatch advisor --owner claude --main opus-main \
   --prompt 'Advise on the parser plan of the second main.'
@@ -733,9 +755,11 @@ narrows the same live-main proof and is refused for a departed, exited or
 unknown main. A native main always dispatches as itself.
 
 Continue a timed-out or reviewed worker with `--continue TASK_ID` instead of
-re-dispatching from scratch: `oms panel --repo . --dispatch worker --owner codex
---continue TASK_ID --access write --purpose implement --brief-file next.md --verify COMMAND` takes the same role,
-workload and access checks, finds the latest worker of that task owned by this
+re-dispatching from scratch: `oms panel --repo . --dispatch refactorer --owner claude
+--continue TASK_ID --access write --brief-file next.md --verify COMMAND` takes the same role,
+workload and access checks; any write-capable role may continue (a builder session can
+become a refactorer), while reviewer, verifier, security-auditor, critic and the other
+read-only roles never resume. It finds the latest worker of that task owned by this
 main, and starts a new run in a new worktree at the current HEAD that resumes
 the worker's native session (recorded as `refs.native_session` in the attempt,
 never in room text). The brief is prefixed with "Your earlier work was on OLD;
@@ -744,7 +768,7 @@ fits). New instructions follow." A session that is missing, or from a provider
 without resume, falls back to a fresh worker given the previous patch and
 summary, and says so on stderr. A worker that ended by timeout (exit 124) shows
 "timed out · continue with --continue" on its card; there is no `c` key for it, and
-a continued implementation needs `--access write --purpose implement` (the default is read-only); later rounds of one task show "round N".
+a continued implementation needs `--access write` (the default is read-only); later rounds of one task show "round N".
 
 Give each dispatched subtask a descriptive task ID and short `--label`; reuse
 the exact reviewed plan task ID where one exists. Labels are optional for direct
@@ -1028,10 +1052,10 @@ records remain unobserved.
 | 3 Resume | Select Claude or Codex and an exact verified native session ID |
 | 4 Main | Choose the main harness; Pi uses the Codex dispatch owner |
 | t Auto task | Enter a task and open the owning native main |
-| 5 Explain | Read-only worker; choose light / routine / main workload |
-| 6 Implement | Choose workload; scoped brief and verifier required |
-| a Advisor | Choose auto / Astra / Fable, read-only |
-| 7 Review | Choose advisor seat; mandatory review verifier |
+| 5 Explain | Read-only worker; optional tier, else routine |
+| 6 Implement | Optional tier; scoped brief and verifier required |
+| a Advisor | Optional tier, else frontier; read-only |
+| 7 Review | Optional tier, else deep; mandatory review verifier |
 | c Council | Sol, Opus, Astra and Fable discussion; four seats, two provider families |
 | r Results | Numbered result list; choose a number to read summaries, evidence and model answers |
 | f Finalize | Record owner outcome, summary and evidence; request app delivery |
@@ -1195,14 +1219,15 @@ result selection, menu cycling and view inheritance in an existing tmux server.
 
 ## Researcher and supporting strategies
 
-Use `oms panel --dispatch researcher --owner codex --prompt 'Find and cite the relevant contract.'`
-(or `--owner claude`) for one bounded document/source question. The control menu's
+Use `oms panel --dispatch researcher --owner claude --prompt 'Find and cite the relevant contract.'`
+for one bounded document/source question. The control menu's
 expanded `e Researcher` entry uses the same route. Researcher is a separate room
 participant beneath its main; its bounded answer is retained in Results and its
 status appears in tree/graph views. It never becomes a main or a patch approver.
 
-The Codex researcher uses Luna and the Claude researcher uses Haiku. Current
-configured floors are `gpt-6-luna` and `claude-haiku-5-5`. The dispatcher compares
+The researcher takes the light tier's Haiku or Luna candidate, whichever provider
+is installed first (`--to codex|claude` narrows it). Current configured floors are
+`claude-haiku-5-5` and `gpt-6-luna`. The dispatcher compares
 numeric versions within that family against the cached provider catalog and pins
 the newest exact ID. An omitted minor version means zero; `6.10` is newer than
 `6.2`. Cached discovery does not prove account access or live availability. No
@@ -1210,20 +1235,17 @@ paid availability probe runs. If the pinned model cannot run, the task fails
 without an implicit older-model or more expensive-family substitution. A provider
 without a model catalog retains the configured exact ID until policy is refreshed.
 
-Researcher requires read access, research purpose and low effort. Write scopes,
+Researcher requires read access, the light tier and low effort. Write scopes,
 implementation, review gates, worker continuation and high-model/effort overrides
 are refused in routing; lifecycle recording independently rejects research
 metadata on a write call. Source content is data, never task authority. The main
 owns interpretation, architecture and acceptance. Official Haiku model/effort
 spelling is documented in [Claude model configuration](https://code.claude.com/docs/en/model-config).
 
-Additional execution seats are not needed for every specialty. Use the existing
-`test-designer` worker strategy for contract/edge-case tests, `patch-reviewer` for
-independent patch judgment, and `repo-auditor` for bounded source audits.
-Document drafting can stay a scoped implementation-worker task; discovery can
-stay Researcher. A deterministic verifier should run tests directly rather than
-paying another model to repeat a command. Deep correctness or risk decisions
-remain with the main/advisor, with models selected for that task.
+The other strategies dispatch as roles of their own (see the role table above);
+`test-designer`, `patch-reviewer` and `repo-auditor` stay `peer-delegate --role`
+profiles. A deterministic check should run directly rather than paying another
+model to repeat a command.
 
 ## Owned terminals, jobs and history
 

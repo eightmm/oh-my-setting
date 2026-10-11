@@ -12,9 +12,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   conversation keeps its pane beside a read-only OMS sidebar (connected tree,
   card graph or compact list) of joined mains and their advisor, reviewer and
   worker calls, with clicks and keys that navigate without starting a model
-  turn. `oms panel --dispatch worker|advisor|reviewer` routes a bounded task by
-  an explicit role policy (Sol/Opus mains, Luna light and Sonnet routine
-  workers, Astra/Fable advisors) through the existing peer front doors;
+  turn. `oms panel --dispatch ROLE` (worker, researcher, advisor, reviewer and
+  the bundled strategies such as builder, verifier or security-auditor) routes
+  a bounded task by capability tier (light, routine, deep, frontier), taking the
+  first installed Claude or Codex candidate of the tier, through the existing
+  peer front doors;
   `--council` runs the four-seat, two-family debate. `--finalize` records the
   owner's outcome as an immutable indexed result, and `accepted` requires a
   passing `--verify`, hashed `--evidence` and landed patches for every write
