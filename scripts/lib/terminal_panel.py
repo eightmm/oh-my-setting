@@ -2777,7 +2777,11 @@ def read_panel(repo, provider, view, attention_only):
         state["room"] = dict(state["room"], other_rooms=others, other_rooms_incomplete=incomplete)
     state["private_capacity"] = private_capacity(repo)
     import panel_release
-    state["dead_mains"] = panel_release.dead_mains(repo)
+    try:
+        rows = tick.attempts()
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
+        rows = []  # unreadable evidence lists no dead main; the release action rechecks before acting
+    state["dead_mains"] = panel_release.dead_mains(repo, attempts=rows)
     import panel_health
     state["capacity_alerts"] = panel_health.alerts(state)
     return state, status, provider, main_attempt, density, filtered, selected_room

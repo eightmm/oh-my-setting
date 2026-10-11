@@ -104,9 +104,10 @@ def release(repo, attempt):
     return {"attempt": attempt, "previous_state": previous, "state": "abandoned", "reason": REASON}
 
 
-def dead_mains(repo, windows=None):
+def dead_mains(repo, windows=None, attempts=None):
     try:
-        attempts = read_shared(repo, "attempts", lambda: json.loads(events(repo, "list", "--json")))
+        if attempts is None:
+            attempts = read_shared(repo, "attempts", lambda: json.loads(events(repo, "list", "--json")))
         if not isinstance(attempts, list) or any(not isinstance(row, dict) for row in attempts):
             return []
         candidates = [row for row in attempts if row.get("tool") == "panel-main" and row.get("terminal") is False
