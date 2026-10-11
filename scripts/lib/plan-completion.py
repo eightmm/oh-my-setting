@@ -1,6 +1,7 @@
 """Parent-reviewed local completions; legacy landing remains a separate contract."""
 import datetime
 import contextlib
+import functools
 import hashlib
 import json
 import math
@@ -30,10 +31,13 @@ _ATTEMPTS = {}
 _COMMIT_PROOF = None
 _HISTORICAL = {}
 _PREFIXES = {}
+_PREFIX_SOURCES = {}
 _PREFIX_ATTEMPTS = {}
 _ROOM_STATES = {}
+_PROJECT_ATTEMPTS = None
 MAX_STREAM = 16 * 1024 * 1024
 MAX_PREFIX_CACHE = 64 * 1024 * 1024
+ROOM_STAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z')
 
 
 def fail(message):
@@ -202,8 +206,16 @@ def room_records(records, room, content_sha=None):
                 type(row.get('seq')) is not int or row['seq'] != sequence):
             fail('malformed native room history')
         stamp = row.get('ts', '')
-        if (not isinstance(stamp, str) or
-                datetime.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%dT%H:%M:%SZ') != stamp):
+        if not isinstance(stamp, str) or not ROOM_STAMP.fullmatch(stamp):
+            fail('noncanonical native room timestamp')
+        try:
+            parsed_stamp = datetime.datetime.fromisoformat(stamp[:-1])
+            # Some libc strftime implementations do not zero-pad low years.
+            # Retain the old strptime/strftime round-trip at that edge.
+            if parsed_stamp.year < 1000 and (
+                    datetime.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%dT%H:%M:%SZ') != stamp):
+                fail('noncanonical native room timestamp')
+        except ValueError:
             fail('noncanonical native room timestamp')
     state = runpy.run_path(str(HERE / 'room.py'))['project'](records)
     if state['id'] != room:
@@ -211,6 +223,64 @@ def room_records(records, room, content_sha=None):
     if content_sha is not None:
         _ROOM_STATES[key] = state
     return state
+
+
+def project_attempts(records):
+    global _PROJECT_ATTEMPTS
+    if _PROJECT_ATTEMPTS is None:
+        projector = runpy.run_path(str(HERE / 'agent-events.py'))['project_attempts']
+        # Every event still passes validate_event_row. Repeated historical
+        # prefixes reuse only the pure UTC timestamp parse result.
+        parser = projector.__globals__['parse_ts']
+        projector.__globals__['parse_ts'] = functools.lru_cache(maxsize=32768)(parser)
+        _PROJECT_ATTEMPTS = projector
+    return _PROJECT_ATTEMPTS(records)
+
+
+def prefix_rows(repo, source, raw):
+    # Captures of one append-only stream share complete JSONL rows. Projectors
+    # read these rows and build separate state; they do not mutate input rows.
+    candidates = sorted(((cached[0], cached[1]) for key, cached in _PREFIXES.items()
+                         if key[0] == repo and _PREFIX_SOURCES.get(key) == source),
+                        key=lambda candidate: len(candidate[0]), reverse=True)
+    for prior_raw, prior_rows in candidates:
+        if raw.startswith(prior_raw) and prior_raw.endswith(b'\n'):
+            suffix = raw[len(prior_raw):]
+            return list(prior_rows) + (stream_rows(suffix) if suffix else [])
+        if prior_raw.startswith(raw) and raw.endswith(b'\n'):
+            # stream_rows uses splitlines(), so interior CR and CRLF are row
+            # boundaries too. Reuse only at an exact prior row boundary.
+            boundary = 0
+            for count, line in enumerate(prior_raw.splitlines(keepends=True), 1):
+                boundary += len(line)
+                if boundary == len(raw) and count <= len(prior_rows):
+                    return prior_rows[:count]
+                if boundary >= len(raw):
+                    break
+    return stream_rows(raw)
+
+
+def trim_prefix_cache(needed, protected):
+    if sum(len(value[0]) for value in _PREFIXES.values()) + needed <= MAX_PREFIX_CACHE:
+        return
+    # Keep one longest validated spine per canonical source. The newly read
+    # capture is still independently hashed before any parsed rows are shared.
+    longest = {}
+    for key, value in _PREFIXES.items():
+        source = (key[0], _PREFIX_SOURCES[key])
+        if source not in longest or len(value[0]) > len(_PREFIXES[longest[source]][0]):
+            longest[source] = key
+    keep = set(longest.values()) | set(protected)
+    if sum(len(_PREFIXES[key][0]) for key in keep) + needed > MAX_PREFIX_CACHE:
+        keep = set(protected)
+    if sum(len(_PREFIXES[key][0]) for key in keep) + needed > MAX_PREFIX_CACHE:
+        fail('captured prefix cache bound exceeded')
+    for key in list(_PREFIXES):
+        if key not in keep:
+            del _PREFIXES[key]
+            del _PREFIX_SOURCES[key]
+            _PREFIX_ATTEMPTS.pop(key, None)
+    _ROOM_STATES.clear()
 
 
 def load_prefixes(repo, proof):
@@ -226,19 +296,8 @@ def load_prefixes(repo, proof):
     captured = parsed(reference(repo, capture))
     if captured != {key: value for key, value in proof.items() if key != 'capture'}:
         fail('prefix references differ from trusted complete capture')
-    needed = 0
-    for kind in ('room', 'lifecycle'):
-        item = proof[kind]
-        keys(item, ('schema', 'kind', 'source', 'path', 'sha256', 'bytes', 'rows'))
-        if type(item['bytes']) is not int or not 0 < item['bytes'] <= MAX_STREAM:
-            fail('invalid captured stream size')
-        if (repo, item['path'], item['sha256']) not in _PREFIXES:
-            needed += item['bytes']
-    if sum(len(value[0]) for value in _PREFIXES.values()) + needed > MAX_PREFIX_CACHE:
-        _PREFIXES.clear()
-        _PREFIX_ATTEMPTS.clear()
-        _ROOM_STATES.clear()
     result = {}
+    current_keys = []
     for kind in ('room', 'lifecycle'):
         item = proof[kind]
         keys(item, ('schema', 'kind', 'source', 'path', 'sha256', 'bytes', 'rows'))
@@ -250,16 +309,24 @@ def load_prefixes(repo, proof):
                 type(item['rows']) is not int or not 0 < item['rows'] <= MAX_STREAM):
             fail('invalid captured stream boundary or identity')
         key = (repo, item['path'], item['sha256'])
-        if key not in _PREFIXES:
-            raw = reference(repo, {'path': item['path'], 'sha256': item['sha256']}, MAX_STREAM)
-            _PREFIXES[key] = (raw, stream_rows(raw))
+        raw = reference(repo, {'path': item['path'], 'sha256': item['sha256']}, MAX_STREAM)
+        if len(raw) != item['bytes'] or not raw.endswith(b'\n'):
+            fail('captured byte/row boundary mismatch')
+        if key in _PREFIXES:
+            if _PREFIXES[key][0] != raw or _PREFIX_SOURCES[key] != expected:
+                fail('captured stream identity changed during validation')
+        else:
+            trim_prefix_cache(len(raw), current_keys)
+            _PREFIXES[key] = (raw, prefix_rows(repo, expected, raw))
+            _PREFIX_SOURCES[key] = expected
         raw, records = _PREFIXES[key]
         if len(raw) != item['bytes'] or len(records) != item['rows']:
             fail('captured byte/row boundary mismatch')
         if kind == 'room':
             room_records(records, proof['room_id'], item['sha256'])
         elif key not in _PREFIX_ATTEMPTS:
-            _PREFIX_ATTEMPTS[key] = runpy.run_path(str(HERE / 'agent-events.py'))['project_attempts'](records)
+            _PREFIX_ATTEMPTS[key] = project_attempts(records)
+        current_keys.append(key)
         result[(repo, expected)] = (records, item['sha256'])
     return result
 
@@ -292,13 +359,14 @@ def live_prefixes(repo, proof):
         if kind == 'room':
             room_records(records, proof['room_id'], sha(raw))
         else:
-            runpy.run_path(str(HERE / 'agent-events.py'))['project_attempts'](records)
+            project_attempts(records)
 
 
 def reset_streams():
     _STREAMS.clear()
     _ATTEMPTS.clear()
     _PREFIXES.clear()
+    _PREFIX_SOURCES.clear()
     _PREFIX_ATTEMPTS.clear()
     _ROOM_STATES.clear()
 
@@ -306,8 +374,7 @@ def reset_streams():
 def attempts_for(repo):
     if repo not in _ATTEMPTS:
         events, _ = rows(repo, '.oms/lifecycle/events.jsonl')
-        engine = runpy.run_path(str(HERE / 'agent-events.py'))
-        _ATTEMPTS[repo] = (events, engine['project_attempts'](events))
+        _ATTEMPTS[repo] = (events, project_attempts(events))
     return _ATTEMPTS[repo]
 
 

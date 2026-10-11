@@ -6082,6 +6082,7 @@ assert s["stale_review"] == [], s
   make_committed_repo "$completion_repo"
   python3 - "$ROOT" "$completion_repo" <<'PY' || fail "typed local completion contract failed"
 import copy
+import datetime
 import hashlib
 import json
 import os
@@ -6093,6 +6094,7 @@ import sys
 import time
 import shutil
 root, repo = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root / 'scripts/lib'))
 engine = runpy.run_path(str(root / 'scripts/lib/plan-receipt.py'))
 plan_path = repo / '.oms/plan/tasks.json'
 env = dict(os.environ)
@@ -6780,6 +6782,105 @@ for kind in ('room', 'lifecycle'):
     assert h(prefix) == item['sha256'] and len(prefix) == item['bytes']
     assert len(prefix.splitlines()) == item['rows']
     if os.name != 'nt': assert stat.S_IMODE((repo / item['path']).stat().st_mode) == 0o600
+# Each captured file is rehashed even when parsed rows are cached. Exact JSONL
+# row boundaries permit shorter/extended prefixes to share parsed rows only.
+scope = completion_core['load_prefixes'].__globals__
+original_stream_rows = scope['stream_rows']
+original_cache_limit = scope['MAX_PREFIX_CACHE']
+life_raw = (repo / proof['lifecycle']['path']).read_bytes()
+life_lines = life_raw.splitlines(keepends=True)
+assert len(life_lines) >= 3
+room_raw = (repo / proof['room']['path']).read_bytes()
+def variant(raw, count=None):
+    changed = copy.deepcopy(proof)
+    item = changed['lifecycle']
+    digest = h(raw)
+    item.update(path='.oms/plan/completion-prefixes/' + digest + '.jsonl',
+                sha256=digest, bytes=len(raw), rows=raw.count(b'\n') if count is None else count)
+    (repo / item['path']).write_bytes(raw)
+    capture = completion_core['encoded']({k: v for k, v in changed.items() if k != 'capture'})
+    digest = h(capture)
+    changed['capture'] = {'path': '.oms/plan/completion-captures/' + digest + '.json', 'sha256': digest}
+    (repo / changed['capture']['path']).write_bytes(capture)
+    return changed
+short_raw, next_raw = life_lines[0], b''.join(life_lines[:2])
+short, next_prefix = variant(short_raw), variant(next_raw)
+parsed_lengths = []
+def counted_rows(raw):
+    parsed_lengths.append(len(raw))
+    return original_stream_rows(raw)
+scope['stream_rows'] = counted_rows
+try:
+    scope['reset_streams']()
+    scope['load_prefixes'](str(repo), short)
+    parsed_lengths.clear()
+    scope['load_prefixes'](str(repo), next_prefix)
+    assert parsed_lengths == [len(life_lines[1])], parsed_lengths
+    parsed_lengths.clear()
+    scope['load_prefixes'](str(repo), short)
+    assert parsed_lengths == [], 'an exact cached prefix was reparsed'
+    short_path = repo / short['lifecycle']['path']
+    short_path.write_bytes(short_raw[:-2] + bytes([short_raw[-2] ^ 1]) + short_raw[-1:])
+    try:
+        try: scope['load_prefixes'](str(repo), short)
+        except ValueError: pass
+        else: assert False, 'a changed cached prefix escaped its independent hash read'
+    finally:
+        short_path.write_bytes(short_raw)
+    scope['reset_streams']()
+    scope['load_prefixes'](str(repo), next_prefix)
+    parsed_lengths.clear()
+    scope['load_prefixes'](str(repo), short)
+    assert parsed_lengths == [], 'a shorter complete-row prefix was reparsed'
+    mixed_short_raw = life_lines[0][:-1] + b'\r' + life_lines[1][:-1] + b'\r\n'
+    mixed_full_raw = mixed_short_raw + life_lines[2]
+    mixed_short, mixed_full = variant(mixed_short_raw, 2), variant(mixed_full_raw, 3)
+    scope['reset_streams']()
+    scope['load_prefixes'](str(repo), mixed_full)
+    parsed_lengths.clear()
+    scope['load_prefixes'](str(repo), mixed_short)
+    assert parsed_lengths == [], 'mixed CR/CRLF complete rows were not reused'
+    assert len(scope['_PREFIXES'][(str(repo), mixed_short['lifecycle']['path'],
+                                   mixed_short['lifecycle']['sha256'])][1]) == 2
+    room_rows = [json.loads(line) for line in room_raw.splitlines()]
+    for invalid_stamp in ('2026-02-30T00:00:00Z', '2026-10-09T25:00:00Z',
+                          '2026-1-09T00:00:00Z', '2026-10-09T00:00:00+00:00'):
+        invalid_rows = copy.deepcopy(room_rows)
+        invalid_rows[0]['ts'] = invalid_stamp
+        try: scope['room_records'](invalid_rows, room)
+        except ValueError: pass
+        else: assert False, 'noncanonical room timestamp entered a reused prefix'
+    low_year = '0001-01-01T00:00:00Z'
+    old_roundtrip = datetime.datetime.strptime(low_year, '%Y-%m-%dT%H:%M:%SZ')
+    old_accepts = old_roundtrip.strftime('%Y-%m-%dT%H:%M:%SZ') == low_year
+    low_year_rows = copy.deepcopy(room_rows)
+    low_year_rows[0]['ts'] = low_year
+    try: scope['room_records'](low_year_rows, room)
+    except ValueError: assert not old_accepts, 'low-year timestamp tightened from original parser'
+    else: assert old_accepts, 'low-year timestamp widened from original parser'
+    altered = json.loads(short_raw)
+    altered['ts'] = '2026-10-09T00:00:00Z'
+    divergent_raw = completion_core['encoded'](altered)
+    divergent = variant(divergent_raw)
+    parsed_lengths.clear()
+    scope['load_prefixes'](str(repo), divergent)
+    assert parsed_lengths == [len(divergent_raw)], 'divergent bytes reused unrelated parsed rows'
+    for invalid in (variant(short_raw, 2), variant(short_raw[:-1], 1)):
+        try: scope['load_prefixes'](str(repo), invalid)
+        except ValueError: pass
+        else: assert False, 'invalid cached row count or mid-row boundary was accepted'
+    scope['reset_streams']()
+    scope['MAX_PREFIX_CACHE'] = len(room_raw) + len(next_raw) + len(life_raw)
+    scope['load_prefixes'](str(repo), short)
+    scope['load_prefixes'](str(repo), next_prefix)
+    parsed_lengths.clear()
+    scope['load_prefixes'](str(repo), proof)
+    assert parsed_lengths == [len(life_raw) - len(next_raw)], 'eviction lost the exact parsed spine'
+    assert sum(len(value[0]) for value in scope['_PREFIXES'].values()) <= scope['MAX_PREFIX_CACHE']
+finally:
+    scope['stream_rows'] = original_stream_rows
+    scope['MAX_PREFIX_CACHE'] = original_cache_limit
+    scope['reset_streams']()
 # Rehashing a shortened blob/ref cannot replace the separate trusted capture.
 def forged_receipt(mutator):
     forged = copy.deepcopy(receipt)
