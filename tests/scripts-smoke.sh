@@ -17913,12 +17913,14 @@ import sys
 sys.path.insert(0, sys.argv[1])
 import room
 project = Path(sys.argv[2])
-for ident in ("empty", "joined", "left", "closed", "unread", "recent", "malformed"):
+for ident in ("empty", "joined", "left", "closed", "closedjoined", "unread", "recent", "malformed"):
     room.create(project, "gc-room-" + ident, "GC room fixture", creator="creator")
-for ident in ("joined", "left", "closed", "unread"):
+for ident in ("joined", "left", "closed", "closedjoined", "unread"):
     room.join(project, "gc-room-" + ident, "creator", "codex")
 room.append(project, "gc-room-left", {"kind": "leave", "participant": "creator"}, "Left")
+room.append(project, "gc-room-closed", {"kind": "leave", "participant": "creator"}, "Left")
 room.close(project, "gc-room-closed", "creator")
+room.close(project, "gc-room-closedjoined", "creator")
 room.join(project, "gc-room-unread", "reader", "claude")
 room.send(project, "gc-room-unread", "creator", "reader", "Unread", message_id="gc-unread")
 room.append(project, "gc-room-unread", {"kind": "leave", "participant": "reader"}, "Left")
@@ -17938,7 +17940,7 @@ PY
   for room_kind in empty left closed; do
     [ ! -e "$project/.oms/threads/gc-room-$room_kind.jsonl" ] || fail "aged $room_kind room survived"
   done
-  for room_kind in joined unread recent malformed; do
+  for room_kind in joined closedjoined unread recent malformed; do
     [ -f "$project/.oms/threads/gc-room-$room_kind.jsonl" ] || fail "$room_kind room was deleted"
   done
   [ -L "$project/.oms/threads/gc-room-link.jsonl" ] || fail "room GC followed a symlink"

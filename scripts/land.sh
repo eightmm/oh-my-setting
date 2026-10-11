@@ -38,7 +38,8 @@ outside the repo:
           are unchanged since the gate started
   ci      the GitHub run for the pushed commit, polled up to --ci-wait
           seconds (default 1500; 0 skips; needs gh)
-  update  only after CI success, the matching install checkout's update.sh;
+  update  only after CI success and a full gate (an affected gate pushes but
+          does not install), the matching install checkout's update.sh;
           its target must still be the verified SHA. Skipped CI never updates.
   sibling live autopilot runs (proposing, proposal-review, driving) in sibling
           worktrees are reported at intake and waited for before push, up to
@@ -403,6 +404,12 @@ run_job() {
         --exit "$rc" --summary "land: gate failed for $SHORT${failed_stages:+ in ${failed_stages% }} (see $LOG)" >/dev/null 2>&1 || true
       finish failed "gate exit $rc"; return 1
     fi
+    # An affected selection lightens the push; installing still needs a full gate on this SHA.
+    if grep -qs '^check: ok (affected tests; mode=affected)' "$LOG"; then
+      rset gate.scope=affected
+    else
+      rset gate.scope=full
+    fi
     if [ "$(git rev-parse HEAD)" != "$SHA" ] || ! clean_tree; then
       rset push.rc=-1
       finish failed "HEAD or the tree changed while the gate ran; nothing pushed"; return 1
@@ -481,6 +488,11 @@ run_job() {
     rset update.reason=no-update
   elif ! install="$(install_root)"; then
     rset update.reason=no-install-for-remote
+  fi
+  if [ "$UPDATE" -eq 1 ] && [ -n "${install:-}" ] && [ "$(receipt_value gate.scope)" = affected ]; then
+    rset update.reason=affected-gate
+    finish passed "pushed $SHORT; ci $conclusion; install needs a full gate: oms land --gate 'bash scripts/check.sh --parallel'"
+    return 0
   fi
   if [ "$UPDATE" -eq 1 ] && [ -n "${install:-}" ]; then
     if [ "$conclusion" != success ]; then

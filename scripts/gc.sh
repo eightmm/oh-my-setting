@@ -1187,9 +1187,12 @@ try:
         state = room.project(rows)
         if any(message["pending_for"] for message in state["messages"]):
             raise ValueError("unread room mail")
+        # Closing records intent, not that its members ended: a still-joined member keeps the room.
+        if any(member["joined"] for member in state["participants"]):
+            raise ValueError("joined room")
         if state["closed"]:
             kind = "closed-room"
-        elif not state["messages"] and not any(member["joined"] for member in state["participants"]):
+        elif not state["messages"]:
             kind = "empty-room"
         else:
             raise ValueError("active room")

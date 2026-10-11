@@ -35,7 +35,9 @@
 - Before deployment/installing changed OMS code, run `bash scripts/check.sh`
   once. Prefer `oms land`: it checks the committed HEAD and pushes only while
   HEAD and the tracked tree remain unchanged, without a duplicate hook gate.
-  Installation follows successful CI and must target that same SHA.
+  Its default gate is the affected selection; an affected-only gate pushes but
+  never installs. Installation follows a full gate and successful CI and must
+  target that same SHA.
   Direct pushes keep the full hook unless the destination requires CI's
   risk-based `gate`; only then may local quick feedback replace it. Workflow
   presence alone is not branch protection.

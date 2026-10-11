@@ -676,6 +676,13 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
 grep -q ': passed' "$TMP/update-pass.out" || fail "successful update receipt was not passed"
 grep -rqs '"command": *"bash scripts/check.sh --affected --changed-from origin/main --changed-to HEAD"' "$receipt_dir" ||
   fail "the harness checkout's default gate must select against the destination"
+gate 'echo "check: ok (affected tests; mode=affected)"'
+: > "$TMP/events"
+OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/affected-pass.out" 2>&1 ||
+  fail "an affected gate failed to land: $(cat "$TMP/affected-pass.out")"
+[ "$(cat "$TMP/events")" = ci ] || fail "an affected gate must push and wait for CI without installing"
+grep -q 'install needs a full gate' "$TMP/affected-pass.out" || fail "the skipped install must name the full gate"
 
 # Probe the real job function with deterministic wait/push interleavings.
 # Git is stubbed: this cannot publish or mutate the caller's repository.
