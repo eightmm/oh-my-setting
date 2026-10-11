@@ -57,7 +57,7 @@ resumes CI/install only. Concurrent jobs wait up to OMS_LOCK_TIMEOUT (default
 EOF
 }
 
-REPO="$PWD" REMOTE=origin TARGET=main GATE="" WAIT=0 UPDATE=1 CI_WAIT=1500
+REPO="$PWD" REMOTE=origin TARGET=main GATE="" GATE_EXPLICIT=0 WAIT=0 UPDATE=1 CI_WAIT=1500
 SIBLING_WAIT=1800 IGNORE_SIBLINGS=0
 MODE=start JSON=0 ACTIVE_EXIT=0 STAMP="" READY_FILE=""
 while [ "$#" -gt 0 ]; do
@@ -68,7 +68,7 @@ while [ "$#" -gt 0 ]; do
     --repo) REPO="$2"; shift 2 ;;
     --remote) REMOTE="$2"; shift 2 ;;
     --target) TARGET="$2"; shift 2 ;;
-    --gate) GATE="$2"; shift 2 ;;
+    --gate) GATE="$2"; GATE_EXPLICIT=1; shift 2 ;;
     --wait) WAIT=1; shift ;;
     --no-update) UPDATE=0; shift ;;
     --ci-wait) CI_WAIT="$2"; shift 2 ;;
@@ -404,11 +404,11 @@ run_job() {
         --exit "$rc" --summary "land: gate failed for $SHORT${failed_stages:+ in ${failed_stages% }} (see $LOG)" >/dev/null 2>&1 || true
       finish failed "gate exit $rc"; return 1
     fi
-    # An affected selection lightens the push; installing still needs a full gate on this SHA.
-    if grep -qs '^check: ok (affected tests; mode=affected)' "$LOG"; then
-      rset gate.scope=affected
-    else
+    # An affected selection lightens the push; installing needs a gate that proved the full check.
+    if grep -qsE '^check: ok( \(parallel complete gate\)| \(affected tests; mode=full\))?$' "$LOG"; then
       rset gate.scope=full
+    else
+      rset gate.scope=partial
     fi
     if [ "$(git rev-parse HEAD)" != "$SHA" ] || ! clean_tree; then
       rset push.rc=-1
@@ -489,8 +489,8 @@ run_job() {
   elif ! install="$(install_root)"; then
     rset update.reason=no-install-for-remote
   fi
-  if [ "$UPDATE" -eq 1 ] && [ -n "${install:-}" ] && [ "$(receipt_value gate.scope)" = affected ]; then
-    rset update.reason=affected-gate
+  if [ "$UPDATE" -eq 1 ] && [ -n "${install:-}" ] && [ "$(receipt_value gate.scope)" != full ]; then
+    rset update.reason=partial-gate
     finish passed "pushed $SHORT; ci $conclusion; install needs a full gate: oms land --gate 'bash scripts/check.sh --parallel'"
     return 0
   fi
@@ -641,7 +641,8 @@ echo "land: this push changes $(oms_test_growth "$REMOTE/$TARGET" "$SHA" "$REPO"
 STAMP="$(request_stamp "$SHA")"
 RECEIPT="$LAND_DIR/$STAMP.json"
 if [ "$(git -C "$REPO" rev-parse HEAD)" = "$(git -C "$REPO" rev-parse "$REMOTE/$TARGET")" ]; then
-  if ! can_resume; then
+  # An explicit gate may still verify and install the already-pushed SHA.
+  if ! can_resume && [ "$GATE_EXPLICIT" -eq 0 ]; then
     echo "nothing to land: HEAD is already $REMOTE/$TARGET; no matching push receipt to resume"; exit 0
   fi
 fi

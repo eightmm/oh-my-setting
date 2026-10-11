@@ -377,7 +377,7 @@ done
 out="$(OMS_TEST_CI_RESULT=missing python3 "$ROOT/scripts/lib/ci-query.py" fixture/repo "$head" 1 main test.yml)"
 [ "$out" = '0 missing' ] || fail "absent CI must not look green"
 for ci_result in failure skipped success; do
-  gate "echo CI $ci_result probe"
+  gate "echo CI $ci_result probe; echo 'check: ok'"
   : > "$TMP/events"
   ci_wait=1
   [ "$ci_result" != skipped ] || ci_wait=0
@@ -414,7 +414,7 @@ OMS_TEST_CI_RESULT=missing "$LAND" --repo "$repo" --wait --no-update --ci-wait 3
 mkdir -p "$repo/.github/workflows"
 printf 'on: push\n' > "$repo/.github/workflows/test.yml"
 git -C "$repo" add .github/workflows/test.yml
-gate 'echo update failure probe'
+gate 'echo update failure probe; echo "check: ok"'
 if OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wait 1 \
   > "$TMP/update-failed.out" 2>&1; then
   fail "installation failure was reported as a successful landing"
@@ -453,11 +453,14 @@ OMS_TEST_CI_RC=4 OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
 [ "$(cat "$TMP/events")" = update ] || fail "old receipt hid installation rollback"
 : > "$TMP/events"
 
-# A different gate or destination cannot borrow a prior successful receipt.
+# A different gate or destination cannot borrow a prior successful receipt:
+# an explicit gate re-verifies the pushed SHA itself, and a gate without full
+# proof installs nothing.
 OMS_TEST_CI_RC=4 OMS_INSTALL_RECEIPT="$TMP/install.json" \
-  "$LAND" --repo "$repo" --wait --gate true --ci-wait 1 > "$TMP/other-gate.out" 2>&1 ||
-  fail "already-pushed commit with another gate should be a no-op"
-grep -q 'no matching push receipt' "$TMP/other-gate.out" || fail "different gate reused prior evidence"
+  "$LAND" --repo "$repo" --wait --gate 'echo other gate ran' --ci-wait 0 > "$TMP/other-gate.out" 2>&1 ||
+  fail "an explicit gate on an already-pushed commit failed: $(cat "$TMP/other-gate.out")"
+! grep -q 'already pushed and installed' "$TMP/other-gate.out" || fail "different gate reused prior evidence"
+grep -q 'install needs a full gate' "$TMP/other-gate.out" || fail "a gate without full proof installed"
 git clone -q --bare "$TMP/remote.git" "$TMP/other-remote.git"
 git -C "$repo" remote set-url origin "$TMP/other-remote.git"
 OMS_TEST_CI_RC=4 OMS_INSTALL_RECEIPT="$TMP/install.json" \
@@ -667,7 +670,7 @@ grep -q 'land not started (exit 1)' "$TMP/queued-tree-second.out" ||
   fail "dirty-tree startup must preserve its failure status: $(cat "$TMP/queued-tree-second.out")"
 git -C "$repo" checkout -- scripts/check.sh
 
-gate 'echo successful CI and update probe'
+gate 'echo successful CI and update probe; echo "check: ok"'
 : > "$TMP/events"
 OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/update-pass.out" 2>&1 ||
@@ -676,13 +679,25 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
 grep -q ': passed' "$TMP/update-pass.out" || fail "successful update receipt was not passed"
 grep -rqs '"command": *"bash scripts/check.sh --affected --changed-from origin/main --changed-to HEAD"' "$receipt_dir" ||
   fail "the harness checkout's default gate must select against the destination"
-gate 'echo "check: ok (affected tests; mode=affected)"'
+gate 'if [ "$#" = 0 ]; then echo "check: ok"; else echo "check: ok (affected tests; mode=affected)"; fi'
 : > "$TMP/events"
 OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/affected-pass.out" 2>&1 ||
   fail "an affected gate failed to land: $(cat "$TMP/affected-pass.out")"
 [ "$(cat "$TMP/events")" = ci ] || fail "an affected gate must push and wait for CI without installing"
 grep -q 'install needs a full gate' "$TMP/affected-pass.out" || fail "the skipped install must name the full gate"
+# The advertised recovery verifies the already-pushed SHA in full and installs it.
+: > "$TMP/events"
+OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --gate 'bash scripts/check.sh' --wait --ci-wait 1 > "$TMP/full-recovery.out" 2>&1 ||
+  fail "full-gate recovery of a pushed SHA failed: $(cat "$TMP/full-recovery.out")"
+[ "$(cat "$TMP/events")" = "$(printf 'ci\nupdate')" ] || fail "full-gate recovery did not install after CI"
+gate 'echo "check: ok (quick local checks; full CI gate required)"'
+: > "$TMP/events"
+OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --gate 'bash scripts/check.sh --quick' --wait --ci-wait 1 > "$TMP/quick-pass.out" 2>&1 ||
+  fail "a quick gate failed to land: $(cat "$TMP/quick-pass.out")"
+[ "$(cat "$TMP/events")" = ci ] || fail "a gate without full proof must not install"
 
 # Probe the real job function with deterministic wait/push interleavings.
 # Git is stubbed: this cannot publish or mutate the caller's repository.
@@ -736,7 +751,7 @@ fi
 exec "$real_date" "\$@"
 EOF
 chmod +x "$TMP/tick-bin/date"
-gate 'echo tick probe'
+gate 'echo tick probe; echo "check: ok"'
 if PATH="$TMP/tick-bin:$PATH" OMS_TEST_CI_RESULT=success OMS_INSTALL_RECEIPT="$TMP/install.json" \
     "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/tick.out" 2>&1; then
   fail "the tick probe's failing update was reported as success"
