@@ -31,10 +31,11 @@ successful stages are not rerun. One repository lock prevents concurrent gates
 (exit 75 means another landing is active). CI query failures stop with a logged
 error; each query and the polling loop have deadlines.
 
-In OMS itself, `bash scripts/check.sh --parallel` runs the same complete
-coverage through existing CI partitions. For an authorized landing, pass
-`--gate 'bash scripts/check.sh --parallel'` to `oms land`; do not assemble
-background jobs manually. This changes scheduling, not verification scope.
+In OMS itself, `oms land` defaults to the affected selection against the
+destination: it pushes after that gate but installs only after a gate that
+proved the full check. For an authorized release that must install, pass
+`--gate 'bash scripts/check.sh --parallel'` (also valid for a SHA already
+pushed by an affected land); do not assemble background jobs manually.
 
 Before calling reviewers, inspect `git status --short`, the relevant diff or
 explicit base, and any existing verification result. Send the goal, contract,
