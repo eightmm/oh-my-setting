@@ -1046,6 +1046,9 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     if not dry_run and not shutil.which(route.get("binary", route["provider"])):
         raise ValueError("%s is not installed; this exact role route cannot run" % route["provider"])
     env = child_environment(owner, repo)
+    if access == "write" and not env.get("OMS_PEER_TIMEOUT"):
+        # A scoped build plus its own checks outlasts the 30m delegate wall; high effort gets the longest.
+        env["OMS_PEER_TIMEOUT"] = "60m" if route.get("effort") == "high" else "40m"
     parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
     if parent:
         record = json.loads(events(repo, "show", "--attempt", parent, "--json", output=True))

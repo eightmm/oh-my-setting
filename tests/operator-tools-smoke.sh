@@ -2092,6 +2092,7 @@ with open(os.environ["PANEL_TEST_WORKER_LOG"], "a", encoding="utf-8") as f:
                         "parent": os.environ.get("OMS_PANEL_MAIN_ATTEMPT"),
                         "room": os.environ.get("OMS_ROOM_ID"),
                         "room_repo": os.environ.get("OMS_ROOM_REPO"),
+                        "timeout": os.environ.get("OMS_PEER_TIMEOUT"),
                         "participant": os.environ.get("OMS_ROOM_PARTICIPANT")}) + "\\n")
 WORKER
   if [ -n "${LEASE_FIXTURE_ENTERED:-}" ]; then
@@ -4058,7 +4059,9 @@ for task_id, explicit_room, writing, continuing in (
         request += ["--purpose", "investigate", "--prompt", "Inspect value.txt without edits.", "--task-id", task_id]
     if explicit_room:
         request += ["--room", shared]
-    answer = call(request, dict(room_env, PANEL_TEST_MODE="write" if writing else "",
+    # Write calls run without an explicit wall here so the panel's own default is observed.
+    call_env = {key: value for key, value in room_env.items() if not (writing and key == "OMS_PEER_TIMEOUT")}
+    answer = call(request, dict(call_env, PANEL_TEST_MODE="write" if writing else "",
                                PANEL_TEST_VERIFY_LOG=str(verify_log)))
     assert "artifact:" in answer, answer
     observed = json.loads(worker_log.read_text().splitlines()[-1])
@@ -4067,6 +4070,7 @@ for task_id, explicit_room, writing, continuing in (
     assert Path(observed["cwd"]) != other_project and Path(observed["cwd"]) != project, observed
     assert observed["git_common"] == str(other_project / ".git"), observed
     assert not Path(observed["cwd"]).exists(), "cross-repository worker cleanup failed"
+    assert observed["timeout"] == ("40m" if writing else room_env.get("OMS_PEER_TIMEOUT")), observed
     if writing:
         assert verify_log.read_text().strip() == str(other_project / ".git"), "verification used the state repository"
     state = room.status(project, shared)
