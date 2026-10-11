@@ -1,6 +1,6 @@
 # OMS terminal control panel
 
-Run `oms` in a terminal to open the control panel. Native Claude Code or Codex
+Run `oms` in a terminal to open the control panel. Native Claude Code, Pi or Codex
 keeps the conversation pane; the OMS sidebar shows recorded main, advisor and
 worker activity. `oms --help` and bare `oms` with redirected input/output retain
 command help. The panel uses existing OMS state, authentication and front doors.
@@ -12,8 +12,12 @@ When the first read fails, or a window switches to a room it has not successfull
 ## Quick start
 
 1. Run `oms` in a terminal: window 0 is the control window, an inbox for you.
-2. A new panel opens one main, preferring Claude Code, then Pi, then Codex when installed.
-   `OMS_PANEL_MAINS=pi` (one harness name) selects Pi, and an empty value opens only controls. In controls, `1` starts Claude, `2` Pi, and `0` Codex.
+2. A new tmux split panel opens one main, preferring Claude Code, then Pi, then Codex when installed.
+   Inline layouts (without tmux, including Windows Git Bash) and Herdr without `--launch`
+   open controls with Claude preselected by default; press `1` to start it.
+   `OMS_PANEL_MAINS=pi` (one harness name) selects Pi, and an empty value opens only controls.
+   A legacy comma list such as `OMS_PANEL_MAINS=claude,pi` opens no main and prints a stderr warning.
+   In controls, `1` starts Claude, `2` Pi, and `0` Codex.
    Finish the current main before starting a replacement. Existing sessions are preserved.
 3. Panel-wide keys are F-keys only: `F9` swaps focus between the main's chat and its board, `F5` opens the control window, `F12` shows the panel keys (`?` on a board lists the board keys); `Ctrl-b d` detaches.
 4. The control window's **Needs you** lists failed or timed-out calls, calls and mains
@@ -123,8 +127,9 @@ Its default model and effort come from the Codex main preset; `--model` selects 
 Codex catalog model. Pi owns its tools and UI, while OMS records the inference owner as
 `codex` and the harness as `pi`. Pi history is separate: this initial integration refuses
 `--resume` until Pi session ownership can be verified. It has no Codex native hook or
-context/quota reading. At Pi's exit prompt, `r` starts a fresh Pi main; it does not
-resume Pi history. The launch uses Pi's documented
+context/quota reading, but [`scripts/lib/pi-oms-extension.mjs`](../scripts/lib/pi-oms-extension.mjs)
+forwards Pi activity to `hook_state.py` and delivers room mail through its hook context.
+At Pi's exit prompt, `r` starts a fresh Pi main; it does not resume Pi history. The launch uses Pi's documented
 [`--append-system-prompt` argument](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/cli/args.ts)
 to preserve its base instructions and pass the OMS room and sole-main contract.
 
@@ -254,7 +259,7 @@ edges, and a particle on a live edge moves toward its consumer. Child status
 names its main. Cards stay bounded in width instead of stretching a lone worker
 across the terminal.
 
-Three rows are pinned at the top of every board (graph and tree of every main window, and the control
+Three rows are pinned at the top of every board (graph and tree of the sole main window, and the control
 window), in this order, and never scroll away: the header (`OMS · …`), the usage line, then the goal box.
 Groups, the cards, the bottom tab box and the footer follow; status alerts sit under the goal box.
 The usage line always covers both providers (`Claude week 66% · ctx 73% │ Codex --`); a provider without a
@@ -301,9 +306,9 @@ card opens its proven original conversation. Calls with no known main are counte
 warning row (`t` lists them in the tree). Within advisors and within workers, attention states sort
 first. A panel permits one live main across all its rooms; `--launch` and `--spawn-main`
 refuse another while it is active. The control window's board shows the room's live main. PageUp/PageDown scroll the detail
-when one is shown, otherwise every call band by one page. When another open room of the checkout has a live main (for
-example after a full room made a new main start a new room), an `OTHER ROOMS`
-line names it with its live-main (resumed mains count by their participant) and
+when one is shown, otherwise every call band by one page. When the board shows a different room
+from the sole live main's room, an `OTHER ROOMS` line names that room with its
+live-main (resumed mains count by their participant) and
 pending counts, and an incomplete room scan says so; graphs of different rooms
 are never merged, and `o Rooms` in the control window switches. Room scans for
 that line are cached for 30 seconds; liveness comes from the current snapshot.
@@ -467,8 +472,9 @@ see it: `oms room scope --id team --participant opus-main --owns scripts/lib
 `OMS_ROOM_PARTICIPANT` must match; workers cannot); at most sixteen normalized
 repo-relative scopes; advisors and reviewers own none. A write dispatch takes
 repeatable `--scope PATH`; the worker joins with those scopes, and before launch
-the panel compares them with every other joined main's scopes and every live
-write call's (no result handoff, no terminal attempt). Two scopes overlap when
+the panel compares them with every other joined main's scopes (including mains
+from sessions outside this panel) and every live write call's (no result handoff,
+no terminal attempt). Two scopes overlap when
 one equals the other or is a path-component prefix of it (`scripts/lib`
 overlaps `scripts/lib/room.py`, not `scripts/li`; `.` overlaps everything;
 globs compare literally). Overlaps print one stderr warning and appear as
@@ -768,16 +774,16 @@ It works directly only when a brief would cost more than the edit or the step
 needs the main itself. Outside the panel, the global rule still requires an
 explicit request before spawning subagents.
 
-Every main also lands its own work. `oms scratch-worktree add` starts a detached
+The sole panel main also lands its own work. `oms scratch-worktree add` starts a detached
 worktree; create a local, nontracking task branch there with
 `git checkout --no-track -b oms/<task>`, then admit worker patches and rebase on
 the remote target. No upstream is needed. After verification, commit and run
 `oms land` from that worktree only when commit and publication are authorized;
 `oms land` pushes the verified SHA to its target. Nobody commits in the shared
-checkout, and no main waits for a single integrator:
+checkout. Mains in sessions outside this panel may land independently:
 a concurrent `oms land` exits 75 if the lock stays held past `OMS_LOCK_TIMEOUT` (default 300s); retry after the active land finishes.
-The worker guard treats other mains' `oms/*` branches and harness worktrees
-as soft, and `oms room scope` warns about overlapping files before the work
+The worker guard treats `oms/*` branches and harness worktrees belonging to
+mains in other sessions as soft, and `oms room scope` warns about overlapping files before the work
 starts.
 
 Task complexity and write authority are independent. A write role needs a
@@ -892,8 +898,10 @@ The board is always the full-height left pane of the main window (28 percent of 
 window the first time, sized from the terminal that is attaching; optional integer
 `OMS_PANEL_BOARD_PERCENT` overrides this default, clamped to 25–35 percent, with invalid values ignored), with the native
 CLI on its right; a call opened from the board shows in a reader pane above the CLI.
-Herdr uses the same left board.
-The board width is recorded in absolute cells in the session option `@oms_panel_split`
+Herdr uses the same left board, starting at the same 28 percent share and honoring
+`OMS_PANEL_BOARD_PERCENT`. Later Herdr resizing is not recorded or shared;
+`SplitSync` synchronizes widths only in tmux.
+In tmux, the board width is recorded in absolute cells in the session option `@oms_panel_split`
 (`left:<cells>c`; the older percent form is converted on first sight, and an older
 session's `top:` record is replaced), keeping at least 20 cells for the board and for
 the chat. Drag the border and the board keeps the new width; a zoomed board and the
@@ -975,7 +983,10 @@ session is taken over. A live legacy `oms-panel-<12 hex>` session proven for the
 under its name, because its processes carry that name; new panels use the new name. The first `split` creates it with a control window and records the
 checkout on the session. A new panel opened without `--launch` also opens one
 installed main (Claude, then Pi, then Codex) in its own window with a new room;
-`OMS_PANEL_MAINS=codex` names a different harness and an empty value opens none. Reattaching never opens mains again; later launches attach to it (or switch the current
+`OMS_PANEL_MAINS=codex` names a different harness and an empty value opens none.
+A legacy comma list such as `OMS_PANEL_MAINS=claude,pi` opens none and prints a stderr warning.
+Inline and Herdr without `--launch` instead open the control menu with Claude
+preselected by default and wait for `1` to start it. Reattaching never opens mains again; later launches attach to it (or switch the current
 tmux client), and `--launch` adds a native window there instead of opening a
 second session. A session with that name recorded for another checkout is
 refused. A launch that loses a creation race, or arrives before a just-created
@@ -1102,8 +1113,8 @@ seconds rather than animating.
 
 A native window binds children by its recorded main attempt ID. Earlier mains'
 calls stay in the room's tree. The control view shows
-repository-wide records. Its selected Main controls subsequent manual dispatch,
-and its sidebar follows that selection. Main/child links come from explicit
+repository-wide records. Control option `4 Main` chooses the main harness for
+subsequent manual dispatch; Pi uses the Codex dispatch owner. Main/child links come from explicit
 lifecycle metadata, never matching a provider name. Legacy unlinked records stay
 repository-wide. A marker and its attempt are coalesced only by their exact
 execution location. Selected/served attribution uses exact attempt IDs; a model

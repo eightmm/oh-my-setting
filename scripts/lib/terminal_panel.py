@@ -369,7 +369,7 @@ def bootstrap(provider, repo):
         "separable files or steps into as many non-overlapping workers run in parallel as the work allows (there is no call cap), and keep scope, briefs, "
         "architecture, integration, review and patch admission in the sole main. "
         "Work directly only when writing the brief would take longer than the edit, or when the step needs the "
-        "main itself, such as integrating into a shared tree another main has frozen. "
+        "main itself, such as integrating into a shared tree another session has frozen. "
         "Panel mains work from the shared plan (oms agent-plan): claim a ready task, delegate it (--task-id moves it "
         "to running), verify it, carry it through artifact inspection, integration and the required checks, run "
         "oms agent-plan review after acceptance, then record the owner result. "
@@ -2303,12 +2303,33 @@ MAIN_KEYS = (("F9", "select-pane -t :.+"), ("F5", "select-window -t :=control"),
              ("F12", 'display-message -d 8000 "%s"' % KEYS_HELP))
 
 
+def _legacy_main_key(binding, key, command):
+    try:
+        tokens = shlex.split(binding)
+        if (len(tokens) != 9 or tokens[:7] != ["bind-key", "-T", "root", key, "if-shell", "-F", "#{@oms_panel_repo}"]
+                or tokens[8] != "send-keys " + key):
+            return False
+        action = shlex.split(tokens[7])
+    except ValueError:
+        return False
+    # Older panels also skipped up to two windows without a native chat pane.
+    skip = [";", "if-shell", "-F", "#{==:#{@oms_panel_native_pane},}", command]
+    return any(action == [command] + skip * steps for steps in range(3))
+
+
 def bind_main_keys():
     """No-prefix panel keys in OMS panel sessions; elsewhere the key reaches the pane unchanged.
 
     tmux root bindings are server-wide, so a key the user already bound is left alone.
     """
     quiet = dict(capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+    for key, command in (("F6", "previous-window"), ("F7", "next-window")):
+        try:
+            found = subprocess.run(tmux_command("list-keys", "-T", "root", key), **quiet)
+            if found.returncode == 0 and _legacy_main_key(found.stdout, key, command):
+                subprocess.run(tmux_command("unbind-key", "-T", "root", key), **quiet)
+        except (OSError, subprocess.SubprocessError):
+            continue
     try:
         for key, command in MAIN_KEYS:
             found = subprocess.run(tmux_command("list-keys", "-T", "root", key), **quiet)
@@ -2335,6 +2356,9 @@ def legacy_session(repo):
 def panel_mains():
     """The main a new panel opens: the installed one of Claude, Pi, Codex, or the one OMS_PANEL_MAINS names; empty opens none."""
     value = os.environ.get("OMS_PANEL_MAINS")
+    if value is not None and value.strip() and value.strip() not in MAIN_HARNESSES:
+        print("Warning: OMS_PANEL_MAINS accepts a single value: %s (or empty to open no main); no main opened."
+              % ", ".join(MAIN_HARNESSES), file=sys.stderr)
     names = MAIN_HARNESSES if value is None else [value.strip()]
     return next(([name] for name in names if name in MAIN_HARNESSES and main_installed(name)), [])
 
@@ -2556,7 +2580,6 @@ def open_native(provider, repo, resume=None, model=None, task=None, view="auto",
     if panel_host.herdr_active() and os.environ.get("OMS_PANEL_HOST") != "inline":
         with _lock(repo, "panel-main-session", timeout=.1):
             check_legacy_main(repo)
-            pass
         os.environ["OMS_ROOM_ID"] = ensure_room(repo)
         native = ["bash", str(ROOT / "scripts" / "panel.sh"), "--repo", str(execution),
                   "--host", "herdr", "--layout", "inline", "--launch", provider]

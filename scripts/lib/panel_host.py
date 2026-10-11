@@ -169,10 +169,18 @@ def open_native(repo, provider, command, watcher):
            if key in os.environ}
     env["OMS_PANEL_HOST"] = "herdr"
     env["OMS_PANEL_VIEW"] = "graph"
+    # Mirror terminal_panel.board_split's share parser without importing its caller.
+    share = 28
+    configured = os.environ.get("OMS_PANEL_BOARD_PERCENT", "")
+    if re.fullmatch(r"[+-]?[0-9]+", configured):
+        try:
+            share = max(25, min(35, int(configured)))
+        except ValueError:
+            pass
     # layout.apply creates a new tab; it never types into an existing CLI. The board is the left pane.
     leaf = lambda label, argv: {"type": "pane", "label": label, "cwd": str(repo), "command": argv, "env": env}
     request("layout.apply", {"workspace_id": current_pane["workspace_id"], "tab_label": "OMS / " + provider,
-        "focus": True, "root": {"type": "split", "direction": "right", "ratio": .4,
+        "focus": True, "root": {"type": "split", "direction": "right", "ratio": share / 100,
         "first": leaf("OMS team", watcher), "second": leaf(provider, command)}})
 
 

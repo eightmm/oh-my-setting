@@ -899,7 +899,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if room.get("other_rooms_incomplete") and height >= 20 and not others:
         add("OTHER ROOMS / scan incomplete; mains in other rooms may be missing", "alert")
     if others and height >= 20:
-        # Rooms are bounded, so one panel can hold mains in several; never merge their graphs.
+        # Other rooms may hold history or mains outside this panel; keep their graphs separate from this single-main board.
         add("OTHER ROOMS" + (" (scan incomplete)" if room.get("other_rooms_incomplete") else "") + " / " + " | ".join("%s %s live main%s%s" % (clean(r.get("id"), 24), r.get("mains"),
             "s" if r.get("mains") != 1 else "",
             " / %s pending" % r["pending"] if r.get("pending") else "") for r in others[:3]) +

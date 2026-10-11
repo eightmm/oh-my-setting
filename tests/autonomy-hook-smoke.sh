@@ -818,6 +818,14 @@ with patch.object(hook_state, "percent_left_from_cache", return_value=10), \
 tower = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 assert "control-tower main" in tower and "--owner claude --room binding-room" in tower, tower
 assert "trust boundaries" in tower, tower
+for trigger in ("security-auditor for risky changes (permissions, secrets, destructive operations, scripts, hooks, install)",
+                "verifier before declaring completion (original request against final result)",
+                "integrator when merging or resolving conflicts", "performance-engineer when performance needs measurement",
+                "documenter at completion", "release-engineer when deploying",
+                "Advisor (which direction?), architect (how to structure?) and critic (when does it fail?) are separate judgments; call one when needed, not all by default",
+                "A role is a mandate, not an instance", "coordination yourself as the sole panel main",
+                "Never commit in the shared checkout another session uses"):
+    assert trigger in tower, (trigger, tower)
 assert "Land your own work only when publication is authorized" in tower, tower
 assert "oms scratch-worktree add starts detached" in tower and "No upstream is needed" in tower, tower
 assert "git checkout --no-track -b oms/<task>" in tower and "pushes the verified SHA to its target" in tower, tower

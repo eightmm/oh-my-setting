@@ -2699,7 +2699,8 @@ for owner in panel.PROVIDERS:
     assert "--dispatch ROLE" in panel.bootstrap(owner, project) and "--workload light|routine|deep|frontier" in panel.bootstrap(owner, project)
     assert all(trigger in panel.bootstrap(owner, project) for trigger in (
         "security-auditor for risky changes", "verifier before declaring completion", "integrator when merging",
-        "documenter at completion", "release-engineer when deploying", "not all by default", "a context apart"))
+        "performance-engineer when performance needs measurement", "documenter at completion",
+        "release-engineer when deploying", "not all by default", "a context apart"))
     assert "--seat" not in panel.bootstrap(owner, project) and "Astra" not in panel.bootstrap(owner, project)
     assert "control tower: by default delegate" in panel.bootstrap(owner, project)
     assert "exactly one live main" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
@@ -5960,7 +5961,16 @@ for who in ("scope-advisor", "scope-live", "scope-done"):
     room.append(project, shared, {"kind": "leave", "participant": who}, "Left")
 import hook_state
 with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": room_owner, "OMS_PANEL_SESSION": "oms-fixture"}):
-    assert "oms room scope" in hook_state.panel_main_hint({"hook_event_name": "UserPromptSubmit"})
+    tower = hook_state.panel_main_hint({"hook_event_name": "UserPromptSubmit"})
+    assert "oms room scope" in tower
+    for trigger in ("security-auditor for risky changes (permissions, secrets, destructive operations, scripts, hooks, install)",
+                    "verifier before declaring completion (original request against final result)",
+                    "integrator when merging or resolving conflicts", "performance-engineer when performance needs measurement",
+                    "documenter at completion", "release-engineer when deploying",
+                    "Advisor (which direction?), architect (how to structure?) and critic (when does it fail?) are separate judgments; call one when needed, not all by default",
+                    "A role is a mandate, not an instance", "coordination yourself as the sole panel main",
+                    "Never commit in the shared checkout another session uses"):
+        assert trigger in tower, (trigger, tower)
 # Same task reuse cannot return another participant's artifact as the result.
 assert not panel.results(project, "room-inspection", "unrelated-participant")["rows"][0]["calls"]
 participant_results = panel.results(project, room_participant=child["participant"])
@@ -6555,10 +6565,15 @@ with patch.object(panel, "session_owner", return_value=None), patch.object(panel
     order = [c.args[0][1:5] for c in tmux_calls.call_args_list]
     assert ["set-environment", "-t", "=" + panel.panel_session(race_repo), "OMS_ROOM_ID"] in order
     assert any(c.args[0][1:3] == ["select-window", "-t"] and c.args[0][3] == "%2" for c in tmux_calls.call_args_list)
-with patch.dict(os.environ, {"OMS_PANEL_MAINS": ""}):
+with patch.dict(os.environ, {"OMS_PANEL_MAINS": ""}), patch.object(panel.sys, "stderr", new_callable=io.StringIO) as warnings:
     assert panel.panel_mains() == []
-with patch.dict(os.environ, {"OMS_PANEL_MAINS": "claude,pi"}), patch.object(panel.shutil, "which", return_value="/x"):
-    assert panel.panel_mains() == []
+    assert warnings.getvalue() == ""
+for invalid in ("claude,pi", "unknown"):
+    with patch.dict(os.environ, {"OMS_PANEL_MAINS": invalid}), patch.object(panel.shutil, "which", return_value="/x"), \
+            patch.object(panel.sys, "stderr", new_callable=io.StringIO) as warnings:
+        assert panel.panel_mains() == []
+        assert warnings.getvalue().splitlines() == [
+            "Warning: OMS_PANEL_MAINS accepts a single value: claude, pi, codex (or empty to open no main); no main opened."]
 for configured, available, expected in ((None, {"claude", "pi", "codex"}, ["claude"]),
                                       (None, {"pi", "codex"}, ["pi"]),
                                       (None, {"pi"}, []),
@@ -6997,6 +7012,38 @@ for state in ("failed", "timed_out", "abandoned", "orphaned", "review", "blocked
     assert any(i["action"] == ("result", "builder") for i in inbox_items(failure)) == (state in {"review", "waiting_approval"}), state
     member = next(m for m in graph_text.nodes(failure) if m["participant"] == "builder")
     assert (graph_text.call_classifier(failure)(member) == "past") == (state not in {"review", "blocked", "waiting_approval"}), state
+# Root key cleanup removes only the retired OMS window commands, even when inspection fails.
+legacy_f6 = "bind-key -T root F6 if-shell -F '#{@oms_panel_repo}' previous-window 'send-keys F6'\n"
+legacy_f7 = "bind-key -T root F7 if-shell -F '#{@oms_panel_repo}' " + shlex.quote(
+    "next-window" + " ; if-shell -F '#{==:#{@oms_panel_native_pane},}' next-window" * 2) + " 'send-keys F7'\n"
+for f6_binding, f7_binding, inspect_error, removed in (
+        (legacy_f6, legacy_f7, None, {"F6", "F7"}),
+        ("bind-key -T root F6 next-window\n", legacy_f7, None, {"F7"}),
+        (legacy_f6.replace("previous-window", "run-shell 'echo previous-window'"), "", None, set()),
+        (legacy_f6.replace("previous-window", "'previous-window ; display-message user'"), "", None, set()),
+        (legacy_f6.replace("send-keys F6", "display-message user"), "", None, set()),
+        ("bind-key -T root F6 if-shell -F 'unterminated", "", None, set()),
+        (legacy_f6, legacy_f7, 1, {"F7"}),
+        (legacy_f6, legacy_f7, OSError("unavailable"), {"F7"}),
+        (legacy_f6, legacy_f7, subprocess.TimeoutExpired("tmux", 3), {"F7"})):
+    removed_keys = set()
+    def key_run(argv, **kwargs):
+        if argv[1] == "list-keys":
+            key = argv[-1]
+            if key == "F6" and inspect_error is not None:
+                if isinstance(inspect_error, Exception):
+                    raise inspect_error
+                return subprocess.CompletedProcess(argv, inspect_error, f6_binding, "")
+            binding = {"F6": f6_binding, "F7": f7_binding}.get(key, "")
+            return subprocess.CompletedProcess(argv, 0 if binding else 1, binding, "")
+        if argv[1] == "unbind-key":
+            assert argv[2:4] == ["-T", "root"], argv
+            removed_keys.add(argv[-1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    with patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
+            patch.object(panel.subprocess, "run", side_effect=key_run):
+        panel.bind_main_keys()
+    assert removed_keys == removed, (f6_binding, inspect_error, removed_keys, removed)
 # An attention-marked window name keeps the geometry fields and the split text apart.
 with patch.object(panel, "tmux_command", side_effect=lambda *a: ["x"]), patch.object(panel.subprocess, "run",
         return_value=subprocess.CompletedProcess([], 0, "1 0 2 100 50 100 25\t! codex\ttop:30\n", "")):
@@ -7539,7 +7586,7 @@ assert next(m for m in graph_text.nodes(beaten) if m["participant"] == "old-00")
 assert re.search(r"\d\d-\d\d (Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d\d:\d\d$", graph_text.render_graph(flow, 120, 40).splitlines()[0])
 board_text = graph_text.render_graph(words, 120, 40)
 assert "Plan:" not in board_text, board_text
-# An active plan puts its goal and progress under the header, usage and main tabs of both boards and the held task on its main's card.
+# An active plan puts its goal and progress below the header and usage on both single-main boards and the held task on the main's card.
 shown_main = next(m["participant"] for m in graph_text.nodes(words) if m.get("role") == "main")
 words["provider_status"] = {"claude": {"weekly_used": 12, "context_left": 80}, "codex": {"weekly_used": 30}}
 words["plan"] = {"present": True, "goal": "Ship the shared plan board", "task_count": 9, "idle_days": 3,
@@ -7745,7 +7792,7 @@ for columns, rows in ((100, 28), (24, 18)):
     assert duplicate_nav["selected_row"] == first
     choose(("scroll", 2, 1, 1), duplicate_nav)
     assert duplicate_nav["selected"] == ("result", "w1")
-# The control list has no folds or main tabs: Space, Left and Right change nothing there.
+# The single-main board's control list has no folds: Space, Left and Right change nothing there.
 nav["selected"] = ("chat", "m1")
 for key in (" ", "left", "right"):
     assert choose((key,), nav) is None and nav["selected"] == ("chat", "m1") and "collapsed" not in nav, key
@@ -8067,7 +8114,13 @@ if os.name == "posix":
             panel.open_native("codex", project)
             layout = next(c["params"] for c in reversed(host_calls) if c["method"] == "layout.apply")
             # Herdr keeps the board as the left pane too.
-            assert "tab_id" not in layout and layout["root"]["ratio"] == .4
+            assert "tab_id" not in layout and layout["root"]["ratio"] == .28
+            for configured, ratio in (("30", .30), ("1", .25), ("99", .35), ("-1", .25),
+                                      ("+35", .35), ("garbage", .28), ("28.5", .28), ("2_8", .28)):
+                with patch.dict(os.environ, {"OMS_PANEL_BOARD_PERCENT": configured}):
+                    panel_host.open_native(project, "codex", layout["root"]["second"]["command"],
+                                           layout["root"]["first"]["command"])
+                assert host_calls[-1]["params"]["root"]["ratio"] == ratio
             assert layout["root"]["direction"] == "right" and "--watch" in layout["root"]["first"]["command"]
             main_command = layout["root"]["second"]["command"]
             assert str(panel.ENTRY.parent / "panel.sh") in main_command and "--launch" in main_command

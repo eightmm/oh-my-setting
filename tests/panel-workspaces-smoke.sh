@@ -209,8 +209,20 @@ try:
                       'native list-keys display rejected for ' + home)
                 check(not any(terminals._same_tmux_tokens(actual, ['bind-key', '-T', table, key, *command[:-1], command[-1] + ' ']) for actual in bound),
                       'native list-keys display too loose for ' + home)
-        # What bind_main_keys installs for a main: a root key tied to the repository marker.
+        # Retired OMS window keys are removed, while an arbitrary user root key survives.
+        skip = " ; if-shell -F '#{==:#{@oms_panel_native_pane},}' next-window"
+        tmux('bind-key', '-n', 'F6', 'if-shell', '-F', '#{@oms_panel_repo}', 'previous-window', 'send-keys F6')
+        tmux('bind-key', '-n', 'F7', 'if-shell', '-F', '#{@oms_panel_repo}', 'next-window' + skip * 2, 'send-keys F7')
+        with patch.object(terminal_panel, 'tmux_command', side_effect=lambda *args: [tmux_bin, '-S', socket, *args]):
+            terminal_panel.bind_main_keys()
+        check(not tmux('list-keys', '-T', 'root', 'F6') and not tmux('list-keys', '-T', 'root', 'F7'),
+              'retired OMS window bindings survived')
+        # F6 is an arbitrary fixture binding, not a key installed by bind_main_keys.
         tmux('bind-key', '-n', 'F6', 'if-shell', '-F', '#{@oms_panel_repo}', 'run-shell "touch %s"' % marker, 'send-keys F6')
+        user_f6 = tmux('list-keys', '-T', 'root', 'F6')
+        with patch.object(terminal_panel, 'tmux_command', side_effect=lambda *args: [tmux_bin, '-S', socket, *args]):
+            terminal_panel.bind_main_keys()
+        check(tmux('list-keys', '-T', 'root', 'F6') == user_f6, 'user root F6 binding changed')
         tmux('new-session', '-d', '-s', 'foreign', '-x', '90', '-y', '28', 'cat -v')
         foreign_pane = tmux('display-message', '-p', '-t', 'foreign', '#{pane_id}')
         pid, master = pty.fork()
@@ -300,7 +312,7 @@ try:
         press(b'\x1b[17~')
         press(b'\x1b[18~')
         wait_for(shell_pane, '^[[17~')
-        check('^[[18~' in screen(shell_pane) and not marker.exists(), 'F6/F7 did not pass through to the workspace shell')
+        check('^[[18~' in screen(shell_pane) and not marker.exists(), 'fixture F6 and unbound F7 did not pass through to the workspace shell')
         press(b'\x1bOS')
         check(tmux('display-message', '-p', '-t', ws, '#{pane_id}') == control, 'F4 did not focus the control pane')
         tmux('select-window', '-t', shell_window)
@@ -309,7 +321,7 @@ try:
         check(client_session() == 'origin' and tmux('display-message', '-p', '-t', 'origin', '#{pane_id}') == origin_pane,
               'F5 did not return to the origin pane')
         press(b'\x1b[17~')
-        check(marker.exists(), 'original root F6 binding no longer works')
+        check(marker.exists(), 'user fixture root F6 binding no longer works')
 
         # Reuse: same caller, same workspace.
         again = controls(origin_pane)

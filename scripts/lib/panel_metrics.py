@@ -124,7 +124,7 @@ def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
                     (m["participant"] == main_attempt or m.get("attempt") == main_attempt)]
         # Earlier mains of the room stay in its record; nodes() orders the live, then the newest, first.
         selected = selected or candidates[:1]
-        row = {"main_count": len(candidates), "context_left": None, "weekly_used": None, "source": "unavailable"}
+        row = {"context_left": None, "weekly_used": None, "source": "unavailable"}
         if provider == "codex":
             row.update(native_models=current, native_model_checked=repo is not None)
         if selected:
