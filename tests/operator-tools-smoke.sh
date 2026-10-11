@@ -2127,6 +2127,21 @@ for role, rule in routes["roles"].items():
     assert routes["chosen"][role] == {k: expected[k] for k in ("provider", "model", "effort")}
     assert rule["tier"] == expected["workload"]
 from panel_routing import policy
+configured = policy()
+assert configured["pool"] == {"max_running": 3, "max_rework_rounds": 2}
+without_pool = dict(configured)
+del without_pool["pool"]
+with patch("panel_routing.Path.read_text", return_value=json.dumps(without_pool)):
+    assert policy()["pool"] == configured["pool"]
+for invalid_pool in (None, [], {"max_running": 0}, {"max_running": True},
+                     {"max_rework_rounds": "2"}, {"unexpected": 1}):
+    with patch("panel_routing.Path.read_text", return_value=json.dumps(dict(configured, pool=invalid_pool))):
+        try:
+            policy()
+        except ValueError as error:
+            assert "positive integers" in str(error)
+        else:
+            raise AssertionError("invalid pool policy accepted")
 for invalid in ("routine", {"tier": "missing"}, {"tier": "routine", "prefer": "grok"},
                 {"tier": []}, {"tier": "routine", "prefer": None}, {"tier": "routine", "extra": True}):
     malformed = deepcopy(policy())
@@ -3847,6 +3862,73 @@ handoff = next(m for m in state["messages"] if m["sender"] == child["participant
 assert handoff["recipient"] == room_owner and "parent acceptance pending" in handoff["text"], handoff
 assert "inspected the bounded repository task" in handoff["text"], handoff
 assert (project / "value.txt").read_text() == "old\n", "room cannot widen worker write access"
+# A screened summary must still settle the room call, under the same result message id.
+sensitive_summary = "pass" + "word=fixture-value"
+room.join(project, shared, "screen-call", "codex", "worker", parent=room_owner)
+with patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": sensitive_summary}]}]}):
+    panel.deliver_result(project, shared, "screen-call", room_owner, "screen-task", 143)
+screened = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-screen-call")
+assert "Call exit=143" in screened["text"] and "--results --task-id screen-task" in screened["text"]
+assert sensitive_summary not in screened["text"]
+import io
+from contextlib import redirect_stderr
+conflict = io.StringIO()
+with redirect_stderr(conflict):
+    panel.deliver_result(project, shared, "screen-call", room_owner, "screen-task", 1)
+assert "message-id conflict: result-screen-call" in conflict.getvalue()
+if os.name == "posix":
+    import signal
+    import panel_terminals
+    # Exercise the real child, handlers and ledger without a provider call: leave an active attempt on TERM.
+    interrupted_file = temporary / "interrupted-attempt"
+    cleaned_file = temporary / "interrupted-cleaned"
+    interrupted_child = temporary / "interrupted-child.py"
+    interrupted_child.write_text('''import os, signal, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import terminal_panel as panel
+import room
+def stop(number, frame):
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    time.sleep(0.1)
+    Path(sys.argv[3]).write_text("cleaned")
+    sys.exit(143)
+signal.signal(signal.SIGTERM, stop)
+repo, ident, member = Path(os.environ["OMS_ROOM_REPO"]), os.environ["OMS_ROOM_ID"], os.environ["OMS_ROOM_PARTICIPANT"]
+room.scope(repo, ident, member, ["value.txt"])
+attempt = panel.events(repo, "start", "--provider", "codex", "--tool", "peer-delegate", "--task-id", "interrupted-task",
+                       "--parent-attempt-id", os.environ["OMS_PANEL_MAIN_ATTEMPT"],
+                       "--ref", "panel_role=worker", "--ref", "panel_room_id=" + ident,
+                       "--ref", "panel_room_participant=" + member, "--then", "starting", "--then", "working", output=True)
+Path(sys.argv[2]).write_text(attempt)
+os.kill(os.getppid(), signal.SIGTERM)
+time.sleep(60)
+''')
+    saved = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    with patch.dict(os.environ, room_env, clear=True), \
+            patch.object(panel, "routed_command", return_value=[sys.executable, str(interrupted_child),
+                         str(root / "scripts/lib"), str(interrupted_file), str(cleaned_file), "--repo", str(project)]):
+        interrupted_route = panel.selected_route("claude", "worker", "light", "read", "investigate")
+        assert panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
+                                  "interrupted-task", False, "Interrupted call", interrupted_route,
+                                  None, None, None) == 143
+    assert all(signal.getsignal(number) == handler for number, handler in saved.items())
+    interrupted = json.loads(panel.events(project, "show", "--attempt", interrupted_file.read_text(), "--json", output=True))
+    assert interrupted["state"] == "cancelled" and interrupted["reason_code"] == "panel_call_interrupted", interrupted
+    member = interrupted["refs"]["panel_room_participant"]
+    settled = room.status(project, shared)
+    assert cleaned_file.read_text() == "cleaned" and settled["call_results"][member]["exit"] == 143
+    assert room.participant(settled, member)["joined"] and panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"]) == []
+    # Force-stop follows the 20-second grace and rejects a reused PID or unknown identity.
+    for identity_matches in (True, False):
+        stopped = Mock(pid=123, poll=lambda: None)
+        stopped.wait.side_effect = [subprocess.TimeoutExpired("fixture", 20), 0]
+        with patch.object(panel_terminals, "process", return_value={"group": 123}), \
+                patch.object(panel_terminals, "matches", return_value=identity_matches), \
+                patch.object(panel.os, "killpg") as force, redirect_stderr(io.StringIO()):
+            panel._stop_dispatch(stopped, "original-identity")
+        assert stopped.terminate.call_count == 1 and stopped.wait.call_args_list[0].kwargs == {"timeout": 20}
+        assert force.call_count == int(identity_matches)
 # A room in A keeps its parent, call and results when the worker executes in B,
 # whether the caller selects the room explicitly or inherits it.
 other_project = temporary / "dispatch work repo"
@@ -3919,6 +4001,13 @@ assert "source repository protected surfaces changed: tracked" in tamper.stderr,
 assert (other_project / "value.txt").read_text() == "old\noutside worker\n", "fixture did not exercise source protection"
 assert (project / "value.txt").read_text() == "old\n", "source mutation reached the state repository"
 (other_project / "value.txt").write_text("old\n")
+def finish_fixture_reviews():
+    # The fixture main accepts finished calls between independent phases, releasing its running pool slots.
+    for row in json.loads(panel.events(project, "list", "--json", output=True)):
+        if row.get("parent_attempt_id") == room_owner and row.get("state") == "review":
+            panel.events(project, "transition", "--attempt", row["attempt_id"], "--state", "done",
+                         "--reason-code", "fixture_complete")
+finish_fixture_reviews()
 # A dispatch with a shared-plan task ID moves that task for the calling main only: dry-run leaves it ready, the
 # claim records the main, and every further worker of the same main reuses the running lease.
 plan_cli = ["bash", str(panel.ENTRY), "agent-plan", "--repo", str(project)]
@@ -3984,6 +4073,7 @@ missing_before = worker_log.read_bytes()
 legacy = subprocess.run(write_plan_dispatch + ["--task-id", "plan-not-recorded", "--label", "Legacy write"],
                         env=room_env, capture_output=True, text=True)
 assert legacy.returncode == 0 and worker_log.read_bytes() != missing_before, legacy
+finish_fixture_reviews()
 call(plan_cli + ["review", "--id", "plan-link", "--lease-id", held["lease_id"]])
 closed = subprocess.run(plan_dispatch, env=room_env, capture_output=True, text=True)
 assert closed.returncode == 0 and plan_task()["state"] == "review" and "plan plan-link is review" in closed.stderr, closed
@@ -4012,7 +4102,7 @@ def exercise_observed_worker_leases():
     # observer check inherits the host PATH. Keep route availability explicit
     # so CI hosts without Codex or Claude still exercise the real dispatcher.
     with patch.object(panel.shutil, "which", return_value=None), \
-            patch.object(panel.subprocess, "call") as unavailable_call:
+            patch.object(panel.subprocess, "Popen") as unavailable_call:
         try:
             panel.run_dispatch(*dispatch_args)
         except ValueError as error:
@@ -4026,7 +4116,8 @@ def exercise_observed_worker_leases():
             patch.object(panel, "native_repository", return_value=project), \
             patch.object(panel, "plan_link", return_value=argv_binding), \
             patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as preflight, \
-            patch.object(panel.subprocess, "call", side_effect=lambda argv, **kwargs: captured_dispatch.update(argv=argv) or 0):
+            patch.object(panel.subprocess, "Popen", side_effect=lambda argv, **kwargs:
+                         captured_dispatch.update(argv=argv) or Mock(pid=0, wait=lambda: 0, poll=lambda: 0)):
         assert panel.run_dispatch(*dispatch_args) == 0
     preview_argv = preflight.call_args.args[0]
     assert preview_argv[-1] == "--dry-run" and "--observe-plan-binding" not in preview_argv
@@ -4035,7 +4126,7 @@ def exercise_observed_worker_leases():
     dispatch_argv = captured_dispatch["argv"]
     assert "--observe-plan-binding" in dispatch_argv, dispatch_argv
     assert json.loads(dispatch_argv[dispatch_argv.index("--observe-plan-binding") + 1]) == argv_binding._asdict()
-    # A full mailbox must not replace the validated route with a different room or owner.
+    # Capacity refusals leave enrollment and plan claims untouched; failed assignment rolls enrollment back.
     import io
     from contextlib import redirect_stderr
     capacity_route = panel.selected_route("claude", "worker", "light", "read", "investigate")
@@ -4045,21 +4136,37 @@ def exercise_observed_worker_leases():
     capacity_args = (project, "claude", "worker", "read",
                      "Capacity fixture", None, None, argv_binding.task_id, False,
                      "Capacity call", capacity_route, None, None, None)
-    for scenario in ("normal", "full", "full-write", "closed", "foreign-main", "lost-caller", "lost-child", "send-error"):
+    for scenario in ("normal", "full", "full-write", "calls-full", "pool-full", "closed", "foreign-main",
+                     "lost-caller", "lost-child", "send-error"):
         writing = scenario == "full-write"
         scopes = ["value.txt"] if writing else None
         this_args = capacity_args if not writing else (
             project, "claude", "worker", "write", None,
             brief, "git diff --check", argv_binding.task_id, False, "Capacity call",
             panel.selected_route("claude", "worker", "light", "write", "implement"), None, None, scopes)
-        state = {"messages": [{}] * (1 if scenario in {"normal", "send-error"} else 1024),
+        state = {"messages": [{}] * (room.MAX_MESSAGES - 1 if scenario in {"full", "full-write"} else 1),
                  "closed": scenario == "closed", "participants": [{
                      "participant": argv_binding.owner_participant, "role": "main",
                      "provider": "claude", "joined": True}]}
+        if scenario == "calls-full":
+            state["participants"] += [{"participant": "full-%d" % i, "parent": argv_binding.owner_participant,
+                                       "joined": False} for i in range(room.MAX_CALLS)]
+        participants_before = len(state["participants"])
         main_record = {"tool": "panel-main", "provider": "claude", "terminal": False,
                        "refs": {"panel_room_participant": argv_binding.owner_participant,
                                 "panel_room_id": "foreign-room" if scenario == "foreign-main" else argv_binding.room_id}}
-        notices, children = [], []
+        notices, children, leaves = [], [], []
+        def rollback(repo, room_id, event, text):
+            leaves.append(event)
+            for participant in state["participants"]:
+                if participant["participant"] == event["participant"]:
+                    participant["joined"] = False
+        live_rows = [{"parent_attempt_id": argv_binding.owner_attempt, "terminal": False,
+                      "refs": {"panel_role": "worker"}} for _ in range(3)] if scenario == "pool-full" else []
+        # Other mains and terminal calls do not spend this main's running budget.
+        live_rows += [{"parent_attempt_id": "other-main", "terminal": False, "refs": {"panel_role": "worker"}},
+                      {"parent_attempt_id": argv_binding.owner_attempt, "terminal": True,
+                       "refs": {"panel_role": "worker"}}]
         def enroll(repo, room_id, member, provider, role, model, label, owns, parent):
             children.append((room_id, member, provider, role, model, owns, parent))
             state["participants"].append({"participant": member, "provider": provider,
@@ -4067,7 +4174,7 @@ def exercise_observed_worker_leases():
             if scenario in {"lost-caller", "lost-child"}:
                 state["participants"].pop(0 if scenario == "lost-caller" else -1)
         def notice(repo, room_id, sender, recipient, text, kind, **kwargs):
-            if scenario == "send-error":
+            if scenario == "send-error" and text.startswith("Assigned:"):
                 raise ValueError("unrelated room send failure")
             if len(state["messages"]) >= 1024:
                 raise ValueError("room message limit reached; start a new bounded room")
@@ -4077,20 +4184,27 @@ def exercise_observed_worker_leases():
                 patch.object(panel, "moved_main", return_value=None), \
                 patch.object(panel, "child_environment", side_effect=lambda *args: dict(capacity_env)), \
                 patch.object(panel, "native_repository", return_value=project), \
-                patch.object(panel, "events", return_value=json.dumps(main_record)), \
+                patch.object(panel, "events", side_effect=lambda repo, operation, *args, **kwargs:
+                             json.dumps(main_record if operation == "show" else live_rows)), \
                 patch.object(panel, "plan_link", return_value=argv_binding) as observed_plan, \
                 patch.object(room, "records", return_value=[]), \
                 patch.object(room, "project", return_value=state), \
                 patch.object(room, "join", side_effect=enroll), \
                 patch.object(room, "send", side_effect=notice), \
+                patch.object(room, "append", side_effect=rollback), \
                 patch.object(panel, "results", return_value={"rows": []}), \
                 patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
-                patch.object(panel.subprocess, "call", return_value=0) as provider_call, redirect_stderr(errors):
-            if scenario not in {"normal", "full", "full-write"}:
+                patch.object(panel.subprocess, "Popen", return_value=Mock(pid=0, wait=lambda: 0, poll=lambda: 0)) \
+                    as provider_call, redirect_stderr(errors):
+            if scenario != "normal":
                 try:
-                    panel.run_dispatch(*capacity_args)
+                    panel.run_dispatch(*this_args)
                 except ValueError as error:
                     expected = {"closed": "room is closed", "foreign-main": "identities disagree",
+                                "full": "room %s is full" % argv_binding.room_id,
+                                "full-write": "room %s is full" % argv_binding.room_id,
+                                "calls-full": "room %s is full" % argv_binding.room_id,
+                                "pool-full": "max_running=3; wait for a call to settle",
                                 "lost-caller": "participant has not joined this room",
                                 "lost-child": "participant has not joined this room",
                                 "send-error": "unrelated room send failure"}[scenario]
@@ -4098,9 +4212,16 @@ def exercise_observed_worker_leases():
                 else:
                     raise AssertionError("invalid capacity dispatch was accepted: " + scenario)
                 provider_call.assert_not_called()
+                if scenario in {"full", "full-write", "calls-full", "pool-full", "closed"}:
+                    assert len(state["participants"]) == participants_before and not children
+                    observed_plan.assert_not_called()
+                if scenario == "send-error":
+                    assert leaves == [{"kind": "leave", "participant": children[0][1]}]
+                    assert not next(p for p in state["participants"] if p["participant"] == children[0][1])["joined"]
                 continue
             assert panel.run_dispatch(*this_args) == 0, scenario
             provider_call.assert_called_once()
+            assert provider_call.call_args.kwargs["start_new_session"] == (os.name == "posix")
             invoked, child_env = provider_call.call_args.args[0], provider_call.call_args.kwargs["env"]
             assert json.loads(invoked[invoked.index("--observe-plan-binding") + 1]) == argv_binding._asdict()
             assert capacity_route["model"] in " ".join(invoked), invoked
@@ -4110,11 +4231,7 @@ def exercise_observed_worker_leases():
             assert children[0][0] == argv_binding.room_id and children[0][-1] == argv_binding.owner_participant
             assert children[0][2:6] == (capacity_route["provider"], "worker", capacity_route["model"], scopes)
             assert child_env["OMS_PANEL_PURPOSE"] == ("implement" if writing else "investigate")
-            if scenario in {"full", "full-write"}:
-                assert not notices and "assignment delivery unavailable" in errors.getvalue()
-                assert "result delivery unavailable" in errors.getvalue()
-            else:
-                assert notices[0][2] == "Assigned: Capacity call" and not errors.getvalue()
+            assert notices[0][2] == "Assigned: Capacity call" and not errors.getvalue()
     test_room = room.create(project, "observed-worker-room", "Worker lease producer")
     mains = {}
     for provider in panel.PROVIDERS:
@@ -4427,6 +4544,12 @@ foreign = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "ro
                          env=dict(room_env, OMS_PANEL_MAIN_ATTEMPT=main_attempts["claude"]),
                          capture_output=True, text=True)
 assert foreign.returncode != 0 and "no worker" in foreign.stderr, foreign
+third = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-continue"], env=room_env,
+                       capture_output=True, text=True)
+assert third.returncode == 0, third
+escalated = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-continue"], env=room_env,
+                          capture_output=True, text=True)
+assert escalated.returncode != 0 and "task room-continue reached 2 rework rounds; escalate:" in escalated.stderr
 # Continuation survives retained results that omit the task and never inlines patch bytes it cannot verify.
 import hashlib
 last_round = [a for a in listed() if a["task_id"] == "room-inspection" and a["refs"].get("panel_role") == "worker"][-1]
@@ -4686,7 +4809,15 @@ assert room.status(project, declared)["pending_count"] == 0
 # Control-window dispatch resolves the chosen provider's active main, rather
 # than the first main ever joined, and refuses zero or ambiguous ownership.
 control_env = dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project))
-with patch.dict(os.environ, control_env, clear=True), patch.object(panel.subprocess, "call", return_value=0):
+control_launch = {}
+real_popen = panel.subprocess.Popen
+def observe_control_launch(argv, *args, **kwargs):
+    if argv[:3] == [sys.executable, "-c", "pass"]:
+        control_launch.update(env=kwargs["env"])
+    return real_popen(argv, *args, **kwargs)
+with patch.dict(os.environ, control_env, clear=True), \
+        patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
+        patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch):
     assert panel.dispatch(project, "claude", "worker", "light", "read", "investigate",
                           prompt="Inspect the bounded source", task_id="control-owner", label="Control dispatch") == 0
     newest = room.status(project, shared)["participants"][-1]
@@ -4739,7 +4870,7 @@ with patch.dict(os.environ, control_env, clear=True), patch.object(panel.subproc
             assert panel.dispatch(project, "claude", "advisor", None, "read", None,
                                   prompt="Advise the moved main") == 0
         assert room.status(project, shared)["participants"][-1]["parent"] == second_owner
-        assert panel.subprocess.call.call_args.kwargs["env"]["OMS_PANEL_MAIN_ATTEMPT"] == second_owner
+        assert control_launch["env"]["OMS_PANEL_MAIN_ATTEMPT"] == second_owner
     for refused in ({"CLAUDE_CODE_SESSION_ID": "0d9e8f7a-6b5c-4d3e-2f1a-0b9c8d7e6f5a"},
                     {"CLAUDE_CODE_SESSION_ID": moved_sid, "OMS_HARNESS_CHILD": "1"}):
         with patch.dict(os.environ, refused):
@@ -4808,6 +4939,7 @@ room.join(project, shared, "scope-live", "codex", role="worker", parent=room_own
 room.join(project, shared, "scope-done", "codex", role="worker", parent=room_owner, owns=["scripts/lib/panel_view.py"])
 room.send(project, shared, "scope-done", room_owner, "Call exit=0; parent acceptance pending.", kind="handoff",
           message_id="result-scope-done")
+scope_before_preview = room.records(project, shared)
 scoped_dispatch = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
                                   "--dispatch", "worker", "--owner", "claude", "--access", "write", "--purpose", "implement",
                                   "--brief-file", str(brief), "--verify", "test -f value.txt", "--scope", "./scripts/lib/",
@@ -4817,7 +4949,7 @@ scoped_plan = json.loads(scoped_dispatch.stdout)
 assert sorted((o["participant"], o["scope"]) for o in scoped_plan["overlaps"]) == sorted(
     [(other_main, "scripts/lib/room.py"), ("scope-live", "scripts")]), scoped_plan
 assert scoped_dispatch.stderr.count("Scope overlap") == 1 and other_main in scoped_dispatch.stderr, scoped_dispatch.stderr
-assert not any(p["participant"].startswith("call-") and p.get("owns") for p in room.status(project, shared)["participants"])
+assert room.records(project, shared) == scope_before_preview, "scope preview changed the room"
 unscoped = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared, "--dispatch", "worker",
                             "--owner", "claude", "--access", "write", "--purpose", "implement", "--brief-file", str(brief),
                             "--verify", "test -f value.txt", "--dry-run"], room_env))
@@ -4836,7 +4968,7 @@ clean_prompt = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(
                               env=dry_env, capture_output=True, text=True, timeout=60)
 assert clean_prompt.returncode == 0 and json.loads(clean_prompt.stdout)["executes"] is False, clean_prompt
 room_before_scan = room.status(project, shared)["participants"]
-sensitive_prompt = "Inspect source.\npass" + "word=fixture-value"
+sensitive_prompt = "Inspect source.\n" + sensitive_summary
 blocked_prompt = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
                                  "--dispatch", "worker", "--owner", "claude", "--access", "read",
                                  "--purpose", "investigate", "--prompt", sensitive_prompt, "--dry-run"],
@@ -6858,7 +6990,8 @@ assert "unacknowledged addressed messages" in binding and "--after CURSOR" in bi
 assert "--id current-room --participant stable-main --message MESSAGE_ID" in binding
 standalone_env = {key: value for key, value in environment.items()
                   if key not in {"OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT", "OMS_PANEL_MAIN_ATTEMPT"}}
-with patch.dict(os.environ, standalone_env, clear=True), patch.object(panel.subprocess, "call", return_value=0), \
+with patch.dict(os.environ, standalone_env, clear=True), \
+        patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
         patch("sys.stderr", new=io.StringIO()) as standalone_notice:
     assert panel.dispatch(project, "codex", "worker", "light", "read", "investigate",
                           prompt="Inspect source", task_id="standalone-fixture") == 0
