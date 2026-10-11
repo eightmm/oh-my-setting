@@ -919,12 +919,15 @@ cleanup_delegated_worktree() {
 }
 
 cleanup() {
-  local status="${1:-0}"
+  local status="${1:-0}" verify_result="exit ${verify_status:-unknown}"
+  if [ "$DRY_RUN" = 1 ] && [ -n "$VERIFY_CMD" ]; then
+    verify_result="NOT RUN (dry run)"
+  fi
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
   if [ "$INCLUDE_TASK" = 1 ]; then
     agent_task_record_outcome "$REPO" peer-delegate "$TO" "$status" "${artifact:-}" \
-      "${patch_file:-}" "worker=$TO exit ${worker_status:-unknown}; verify=exit ${verify_status:-unknown}" || true
+      "${patch_file:-}" "worker=$TO exit ${worker_status:-unknown}; verify=$verify_result" || true
   fi
   if [ "$TERMINALIZE_RESUMED_REPAIR" = 1 ] &&
     [ "$plan_started" = 1 ] && [ "$plan_finalized" = 0 ]; then
@@ -1740,11 +1743,28 @@ EOF
 # Capture the patch before running --verify so verification byproducts
 # (caches, build output) do not leak into the patch.
 capture_patch() {
+  local changed_paths changed_path changed_count=0 changed_list="" changed_line
   worker_worktree_require_identity "patch capture" || return 1
-  [ "$WORKER_ACCESS" = write ] || return 0
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
     GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
-    -c core.fsmonitor=false -C "$worktree" add -A
+    -c core.fsmonitor=false -C "$worktree" add -A || return 1
+  if [ "$WORKER_ACCESS" = read ]; then
+    changed_paths="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+      GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c diff.external= \
+      -C "$worktree" diff --no-ext-diff --no-textconv --cached --name-only)" || return 1
+    [ -n "$changed_paths" ] || return 0
+    while IFS= read -r changed_path; do
+      changed_count=$((changed_count + 1))
+      [ "$changed_count" -gt 20 ] || changed_list="${changed_list:+$changed_list }$changed_path"
+    done <<EOF
+$changed_paths
+EOF
+    [ "$changed_count" -le 20 ] || changed_list="$changed_list ... (+$((changed_count - 20)) more)"
+    changed_line="read-only worker changed files: $changed_list"
+    printf '%s\n' "$changed_line" >&2
+    printf '\n%s\n' "$changed_line" >> "$artifact"
+    return 1
+  fi
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
     GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c diff.external= \
     -C "$worktree" diff --no-ext-diff --no-textconv --cached --binary \
@@ -2097,6 +2117,8 @@ fi
 if [ -n "$VERIFY_CMD" ]; then
   printf '\n\n## Verify\n\n- command: %s\n\n' "$VERIFY_CMD" >> "$artifact"
   if [ "$DRY_RUN" = "1" ]; then
+    # Empty is not run; receipts must not claim a successful verification.
+    verify_status=""
     printf 'DRY RUN: verify skipped.\n' >> "$artifact"
   elif [ "$worker_boundary_failed" = 1 ]; then
     printf 'SKIPPED: worker changed Git execution config/index state.\n' >> "$artifact"
@@ -2430,7 +2452,7 @@ fi
 printf '\n\n## Exit\n\n%s\n' "$worker_status" >> "$artifact"
 
 index_exit=0
-if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
+if [ "$worker_status" -ne 0 ] || [ "${verify_status:-0}" -ne 0 ]; then
   index_exit=1
 fi
 OMS_INDEX_REPAIR_REPLAY_JSON="$repair_replay_json" \
@@ -2441,7 +2463,7 @@ plan_reviewed=0
 if [ "$APPLY" = 1 ] && [ "$DRY_RUN" = 1 ]; then
   echo "apply skipped: dry run" >&2
 elif [ "$APPLY" = 1 ]; then
-  if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
+  if [ "$worker_status" -ne 0 ] || [ "${verify_status:-0}" -ne 0 ]; then
     echo "apply skipped: worker or verify failed" >&2
   elif [ ! -s "$patch_file" ]; then
     echo "apply skipped: empty patch" >&2
@@ -2473,7 +2495,13 @@ if [ -n "$THREAD_ID" ]; then
   if [ -n "$thread_turn" ]; then
     {
       printf 'Delegated write task to %s: worker exit %s' "$TO" "$worker_status"
-      [ -z "$VERIFY_CMD" ] || printf ', verify exit %s' "$verify_status"
+      if [ -n "$VERIFY_CMD" ]; then
+        if [ -z "$verify_status" ]; then
+          printf ', verify NOT RUN (dry run)'
+        else
+          printf ', verify exit %s' "$verify_status"
+        fi
+      fi
       printf '.\n'
       if [ -s "$patch_file" ]; then
         printf 'Patch (not applied unless stated): %s\n' "$(ma_artifact_relpath "$REPO" "$patch_file")"
@@ -2491,7 +2519,11 @@ fi
 echo "worker: $TO exit $worker_status"
 echo "route: $TO / ${OMS_MODEL_SELECTED:-provider-default} / effort=${OMS_REASONING_SELECTED:-native-settings} / $WORKER_ACCESS"
 if [ -n "$VERIFY_CMD" ]; then
-  echo "verify: exit $verify_status"
+  if [ -z "$verify_status" ]; then
+    echo "verify: NOT RUN (dry run)"
+  else
+    echo "verify: exit $verify_status"
+  fi
 fi
 if [ "$REPAIR" -gt 0 ]; then
   echo "repair: $repair_used/$REPAIR round(s) used"
@@ -2516,7 +2548,7 @@ if [ "$KEEP_WORKTREE" = 1 ]; then
   echo "worktree kept: $worktree"
 fi
 
-if [ "$worker_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; then
+if [ "$worker_status" -ne 0 ] || [ "${verify_status:-0}" -ne 0 ]; then
   if [ "$INTERACTIVE" = 1 ]; then
     python3 - "$artifact" "$patch_file" "$worker_status" "$verify_status" <<'PY' >&3
 import json, sys
