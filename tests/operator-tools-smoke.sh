@@ -4679,6 +4679,43 @@ time.sleep(60)
         subtree.terminate()
         subtree.wait(timeout=5)
     assert panel._dispatch_descendants_gone(snapshot)
+    # An advisor-shaped shell exits on TERM while its foreground child and a
+    # provider in another process group survive. Reaping that shell is not teardown.
+    advisor_pids = temporary / "advisor-subtree.json"
+    advisor_child = temporary / "advisor-subtree.py"
+    advisor_child.write_text('''import json, os, signal, subprocess, sys, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen([sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"],
+                         start_new_session=True)
+Path(sys.argv[1]).write_text(json.dumps([os.getpid(), child.pid]))
+time.sleep(60)
+''')
+    advisor = subprocess.Popen(["bash", "-c", "trap ':' EXIT; \"$@\"", "advisor",
+                                sys.executable, str(advisor_child), str(advisor_pids)], start_new_session=True)
+    advisor_records = []
+    try:
+        deadline = time.monotonic() + 5
+        while not advisor_pids.exists() and advisor.poll() is None and time.monotonic() < deadline:
+            time.sleep(.02)
+        child_pids = json.loads(advisor_pids.read_text())
+        advisor_identity = panel_terminals.process(advisor.pid)["identity"]
+        advisor_records = panel._dispatch_descendants(advisor.pid)
+        assert advisor_records and {row["pid"] for row in advisor_records} >= set(child_pids), advisor_records
+        evidence = {"descendants": advisor_records}
+        advisor.terminate()
+        advisor.wait(timeout=5)
+        verified = panel._stop_dispatch(advisor, advisor_identity, term_sent=True, evidence=evidence)
+        assert all(not panel_terminals.matches(row["pid"], row["identity"]) for row in advisor_records), "advisor subtree survived"
+        assert verified == (panel._dispatch_group_gone(advisor.pid)
+                            and panel._dispatch_descendants_gone(advisor_records)), "unverified advisor exit settled"
+    finally:
+        for row in advisor_records:
+            if panel_terminals.matches(row["pid"], row["identity"]):
+                os.killpg(row["group"], signal.SIGKILL)
+        if advisor.poll() is None:
+            advisor.kill()
+        advisor.wait(timeout=5)
     # Force-stop follows the grace; signaling alone is not evidence that a process group exited.
     for identity_matches, descendants in ((True, []), (False, []), (True, None)):
         stopped = Mock(pid=123, poll=lambda: None)
@@ -4695,9 +4732,30 @@ time.sleep(60)
     disappeared = Mock(pid=123, poll=lambda: None)
     disappeared.terminate.side_effect = ProcessLookupError
     with patch.object(panel_terminals, "process_gone", return_value=True), \
+            patch.object(panel, "_dispatch_descendants", return_value=[]), \
             patch.object(panel, "_dispatch_group_gone", return_value=True):
-        assert panel._stop_dispatch(disappeared, "original-identity") is True
+        assert panel._stop_dispatch(disappeared, "original-identity", evidence={"descendants": []}) is True
     disappeared.wait.assert_not_called()
+    # A dead leader bypasses the wait timeout. Still escalate its surviving group,
+    # and signal a detached group only while the recorded process identity matches.
+    for descendant_matches, current_group in ((True, 456), (False, 456), (True, 789)):
+        stopped = Mock(pid=123, poll=lambda: None)
+        stopped.wait.return_value = -signal.SIGTERM
+        provider = {"pid": 456, "identity": "provider-identity", "group": 456}
+        with patch.object(panel, "_dispatch_descendants", return_value=[provider]), \
+                patch.object(panel_terminals, "matches", return_value=descendant_matches), \
+                patch.object(panel_terminals, "process_gone", return_value=False), \
+                patch.object(panel, "_dispatch_group_gone", return_value=False), \
+                patch.object(panel.os, "getpgid", return_value=current_group), \
+                patch.object(panel.time, "monotonic", side_effect=range(0, 100, 6)), \
+                patch.object(panel.os, "killpg") as force:
+            evidence = {}
+            assert panel._stop_dispatch(stopped, "original-identity", evidence=evidence) is False
+        expected = {(123, signal.SIGTERM), (123, signal.SIGKILL)}
+        if descendant_matches and current_group == 456:
+            expected.update({(456, signal.SIGTERM), (456, signal.SIGKILL)})
+        assert {tuple(call.args) for call in force.call_args_list} == expected, force.call_args_list
+        assert evidence["forced"] and evidence["descendants"] == [provider]
     real_popen = subprocess.Popen
     for scenario in ("unknown-identity", "kill-unconfirmed", "provider-alive", "leader-only"):
         pending = Mock(pid=2147483647, poll=lambda: 0 if scenario == "leader-only" else None)
@@ -4730,6 +4788,7 @@ time.sleep(60)
                 patch.object(panel_terminals, "matches", return_value=True), \
                 patch.object(panel, "_dispatch_descendants", return_value=[provider] if scenario == "provider-alive" else []), \
                 patch.object(panel, "_dispatch_group_gone", side_effect=lambda pid: scenario == "provider-alive" and pid == pending.pid), \
+                patch.object(panel.os, "getpgid", side_effect=lambda pid: pid), \
                 patch.object(panel.os, "killpg") as force, redirect_stderr(io.StringIO()) as notices:
             try:
                 status = panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
@@ -4748,9 +4807,10 @@ time.sleep(60)
             record = json.loads(panel._read(project, panel._dispatch_call_path(member)))
             assert record["pid"] == pending.pid and record["identity"] == (observation or {}).get("identity")
             assert any(o["participant"] == member for o in panel.scope_overlaps(project, shared, state, room_owner, ["value.txt"]))
-            assert force.call_count == int(scenario in {"kill-unconfirmed", "provider-alive"})
+            assert force.call_count == {"unknown-identity": 0, "kill-unconfirmed": 1,
+                                        "provider-alive": 3, "leader-only": 2}[scenario]
             deferred = panel._dispatch_pending(project, record)
-            assert deferred["forced"] == (scenario in {"kill-unconfirmed", "provider-alive"})
+            assert deferred["forced"] == (scenario in {"kill-unconfirmed", "provider-alive", "leader-only"})
             if scenario == "provider-alive":
                 assert deferred["descendants"] == [provider]
             # A stale or premature final handoff cannot release an active child's scope.

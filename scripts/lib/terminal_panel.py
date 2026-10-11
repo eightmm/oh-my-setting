@@ -1575,18 +1575,80 @@ def _reconcile_dispatch(repo, room_id, state, caller, parent):
             continue
 
 
+def _stop_dispatch_groups(process, identity, evidence, before_force=None):
+    """A reaped session leader can leave foreground and detached provider groups alive."""
+    if os.name != "posix":
+        return bool(not evidence.get("forced") and _dispatch_exited(process, identity, reaped=True))
+
+    def gone():
+        return (_dispatch_exited(process, identity, reaped=True)
+                and _dispatch_descendants_gone(evidence.get("descendants")))
+
+    if gone():
+        return True
+    import panel_terminals
+
+    def signal_groups(number):
+        groups = set()
+        # start_new_session made this child both session and group leader;
+        # its group remains ours while it exists, even after the child is reaped.
+        if not _dispatch_group_gone(process.pid):
+            groups.add(process.pid)
+        records = evidence.get("descendants")
+        if isinstance(records, list) and len(records) <= 256:
+            for row in records:
+                if (isinstance(row, dict) and set(row) == {"pid", "identity", "group"}
+                        and type(row["pid"]) is int and row["pid"] > 0
+                        and type(row["group"]) is int and row["group"] > 0
+                        and isinstance(row["identity"], str) and row["identity"]
+                        and panel_terminals.matches(row["pid"], row["identity"])):
+                    try:
+                        if os.getpgid(row["pid"]) == row["group"]:
+                            groups.add(row["group"])
+                    except ProcessLookupError:
+                        pass
+        for group in groups:
+            try:
+                os.killpg(group, number)
+            except ProcessLookupError:
+                pass
+        return bool(groups)
+
+    if not evidence.get("forced"):
+        evidence["forced"] = True
+        if before_force:
+            before_force()
+    for number, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 1)):
+        if not signal_groups(number):
+            return gone()
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            if gone():
+                return True
+            time.sleep(.05)
+    return gone()
+
+
 def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_force=None):
     evidence = evidence if evidence is not None else {}
     if type(process.poll()) is int:
-        return _dispatch_exited(process, identity, reaped=True)
+        if (_dispatch_exited(process, identity, reaped=True)
+                and _dispatch_descendants_gone(evidence.get("descendants", []))):
+            return True
+        return _stop_dispatch_groups(process, identity, evidence, before_force)
     try:
         if not term_sent:
             _observe_dispatch_descendants(process, evidence)
             process.terminate()
         status = process.wait(timeout=20)
-        return _dispatch_exited(process, identity, reaped=type(status) is int)
+        if type(status) is not int:
+            return False
+        return _stop_dispatch_groups(process, identity, evidence, before_force)
     except ProcessLookupError:
-        return _dispatch_exited(process, identity)
+        if type(process.poll()) is int:
+            return _stop_dispatch_groups(process, identity, evidence, before_force)
+        return (_dispatch_exited(process, identity)
+                and _dispatch_descendants_gone(evidence.get("descendants")))
     except subprocess.TimeoutExpired:
         # The delegate's TERM trap owns worktree cleanup; force only its original session after that grace.
         if os.name == "posix":
@@ -1595,7 +1657,8 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
             if (not identity or not current or current["group"] != process.pid
                     or not panel_terminals.matches(process.pid, identity)):
                 print("OMS call shutdown could not verify the child identity; force-stop skipped.", file=sys.stderr)
-                return _dispatch_exited(process, identity)
+                return (_dispatch_exited(process, identity)
+                        and _dispatch_descendants_gone(evidence.get("descendants")))
             try:
                 _observe_dispatch_descendants(process, evidence)
                 evidence["forced"] = True
@@ -1605,16 +1668,16 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
                     return False
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
-                return (_dispatch_exited(process, identity)
-                        and _dispatch_descendants_gone(evidence.get("descendants")))
+                pass
         else:
             evidence["forced"] = True
             if before_force:
                 before_force()
             process.kill()
         status = process.wait(timeout=5)
-        return (_dispatch_exited(process, identity, reaped=type(status) is int)
-                and _dispatch_descendants_gone(evidence.get("descendants")))
+        if type(status) is not int:
+            return False
+        return _stop_dispatch_groups(process, identity, evidence, before_force)
 
 
 def _settle_dispatch(repo, room_id, member, status):

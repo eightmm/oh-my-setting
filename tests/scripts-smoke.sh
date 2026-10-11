@@ -3576,10 +3576,8 @@ EOF
 
 test_peer_review_signal_cleans_provider_processes() {
   local project="$TMP/review-signal-cleanup"
-  local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
   local home_dir="$project/home"
-  local peer_pid provider_pid provider_state rc=0 i=0
 
   make_committed_repo "$project"
   mkdir -p "$bin_dir" "$home_dir"
@@ -3592,91 +3590,52 @@ EOF
   chmod +x "$bin_dir/claude"
 
   HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PEER_TIMEOUT=5m \
-    "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$artifact_dir" \
-    --providers claude --gate --no-verify --no-diff --prompt "Wait for signal" \
-    > "$project/out" 2>&1 &
-  peer_pid=$!
-  while [ ! -s "$home_dir/provider.pid" ] && [ "$i" -lt 50 ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if [ ! -s "$home_dir/provider.pid" ]; then
-    kill -TERM "$peer_pid" 2>/dev/null || true
-    wait "$peer_pid" 2>/dev/null || true
-    fail "fake review provider did not start"
-  fi
-  provider_pid="$(sed -n 1p "$home_dir/provider.pid")"
-  kill -TERM "$peer_pid"
-  wait "$peer_pid" || rc=$?
-  [ "$rc" = 143 ] || fail "TERM should exit peer-review with 143, got $rc"
-  # A deferring subreaper (acceptance's supervise) holds the killed provider
-  # as an unreaped zombie, and kill -0 stays true for that corpse forever:
-  # judge process state — gone or zombie is dead, only runnable survives.
-  i=0
-  while [ "$i" -lt 30 ]; do
-    provider_state="$(ps -o stat= -p "$provider_pid" 2>/dev/null | tr -d '[:space:]' || true)"
-    case "$provider_state" in ''|Z*) break ;; esac
-    sleep 0.1
-    i=$((i + 1))
-  done
-  case "$provider_state" in
-    ''|Z*) ;;
-    *)
-      kill -KILL "$provider_pid" 2>/dev/null || true
-      fail "peer-review TERM left provider process $provider_pid alive"
-      ;;
-  esac
+    python3 - "$ROOT" "$project" <<'PY_SIGNAL'
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
 
-  # HUP and INT use the same teardown contract and keep their conventional
-  # shell exit codes. Re-run short-lived fixtures to pin the handler wiring.
-  local signal expected
-  for signal in HUP INT; do
-    rm -f "$home_dir/provider.pid"
-    if [ "$signal" = INT ]; then
-      # Non-interactive shells start asynchronous children with SIGINT ignored;
-      # reset it in a tiny exec wrapper so this exercises peer-review's INT
-      # trap rather than Bash's background-job launch semantics.
-      HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PEER_TIMEOUT=5m \
-        python3 -c 'import os,signal,sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])' \
-        "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$artifact_dir-$signal" \
-        --providers claude --gate --no-verify --no-diff --prompt "Wait for $signal" \
-        > "$project/out-$signal" 2>&1 &
-    else
-      HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PEER_TIMEOUT=5m \
-        "$ROOT/scripts/peer-review.sh" --repo "$project" --artifact-dir "$artifact_dir-$signal" \
-        --providers claude --gate --no-verify --no-diff --prompt "Wait for $signal" \
-        > "$project/out-$signal" 2>&1 &
-    fi
-    peer_pid=$!
-    i=0
-    while [ ! -s "$home_dir/provider.pid" ] && [ "$i" -lt 50 ]; do
-      sleep 0.1
-      i=$((i + 1))
-    done
-    [ -s "$home_dir/provider.pid" ] || fail "$signal provider did not start"
-    provider_pid="$(sed -n 1p "$home_dir/provider.pid")"
-    kill -"$signal" "$peer_pid"
-    rc=0
-    wait "$peer_pid" || rc=$?
-    case "$signal" in HUP) expected=129 ;; INT) expected=130 ;; esac
-    [ "$rc" = "$expected" ] || fail "$signal should exit $expected, got $rc"
-    # Same zombie-aware probe as the TERM case: a subreaper-held corpse is
-    # not a survivor.
-    i=0
-    while [ "$i" -lt 30 ]; do
-      provider_state="$(ps -o stat= -p "$provider_pid" 2>/dev/null | tr -d '[:space:]' || true)"
-      case "$provider_state" in ''|Z*) break ;; esac
-      sleep 0.1
-      i=$((i + 1))
-    done
-    case "$provider_state" in
-      ''|Z*) ;;
-      *)
-        kill -KILL "$provider_pid" 2>/dev/null || true
-        fail "peer-review $signal left provider process $provider_pid alive"
-        ;;
-    esac
-  done
+root, project = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root / "scripts/lib"))
+import panel_terminals
+# Reset background-shell inheritance before exec so the INT trap is exercised.
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+for command, arguments in (("peer-review", ["--providers", "claude", "--gate", "--no-verify", "--no-diff"]),
+                           ("advise", ["--to", "claude", "--no-failures"])):
+    for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        pid_file = Path(os.environ["HOME"]) / "provider.pid"
+        pid_file.unlink(missing_ok=True)
+        provider = None
+        with (project / (command + "-" + str(number) + ".log")).open("w") as log:
+            peer = subprocess.Popen(["bash", str(root / "scripts" / (command + ".sh")),
+                                     "--repo", str(project), "--artifact-dir", str(project / "artifacts"),
+                                     "--prompt", "Wait for signal"] + arguments,
+                                    stdout=log, stderr=log, start_new_session=True)
+            try:
+                deadline = time.monotonic() + 10
+                while not pid_file.exists() and peer.poll() is None and time.monotonic() < deadline:
+                    time.sleep(.05)
+                assert pid_file.exists(), (command, number, "provider did not start")
+                provider = panel_terminals.process(int(pid_file.read_text()))
+                assert provider, (command, number, "provider identity unavailable")
+                os.kill(peer.pid, number)
+                status = peer.wait(timeout=10)
+                assert status == 128 + number, (command, number, status)
+                deadline = time.monotonic() + 3
+                while panel_terminals.matches(provider["pid"], provider["identity"]) and time.monotonic() < deadline:
+                    time.sleep(.05)
+                assert not panel_terminals.matches(provider["pid"], provider["identity"]), (command, number, "provider survived")
+            finally:
+                # A failed regression must not leave the fake provider at its five-minute wall.
+                if provider and panel_terminals.matches(provider["pid"], provider["identity"]):
+                    os.killpg(provider["group"], signal.SIGKILL)
+                if peer.poll() is None:
+                    os.killpg(peer.pid, signal.SIGKILL)
+                peer.wait(timeout=5)
+PY_SIGNAL
 }
 
 test_peer_review_gate_missing_exits() {

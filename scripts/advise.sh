@@ -231,7 +231,17 @@ else
 fi
 
 advise_tmpdir="$(mktemp -d)" || fail "mktemp failed"
+cleanup_signal() {
+  local code="$1"
+  trap - EXIT HUP INT TERM
+  ma_kill_jobs
+  rm -rf "$advise_tmpdir"
+  exit "$code"
+}
 trap 'rm -rf "$advise_tmpdir"' EXIT
+trap 'cleanup_signal 129' HUP
+trap 'cleanup_signal 130' INT
+trap 'cleanup_signal 143' TERM
 ma_read_guard_begin "$advise_tmpdir" || fail "cannot freeze advisor repositories"
 advisor_prompt="$advise_tmpdir/advise-prompt.md"
 
@@ -308,6 +318,7 @@ ma_call_read_peer "" "$PREVIEW" \
   --repo "$REPO" \
   --artifact-dir "${ARTIFACT_DIR:-$REPO/.oms/artifacts/advise}" \
   --prompt-file "$advisor_prompt" \
-  ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"} || status=$?
+  ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"} &
+wait "$!" || status=$?
 ma_read_guard_assert || status=2
 exit "$status"
