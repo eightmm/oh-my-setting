@@ -145,9 +145,17 @@ def stop_sequences(body):
     return stops
 
 
-def subscription_request(body, model, effort):
+def subscription_request(body, model, effort, supported_efforts=None):
     if not isinstance(body, dict):
         raise BridgeError("Request must be a JSON object")
+    supported = tuple(supported_efforts) if supported_efforts is not None else (effort,)
+    reasoning = body.get("reasoning")
+    requested = reasoning.get("effort") if isinstance(reasoning, dict) else None
+    if requested in ("none", "minimal"):
+        requested = next((level for level in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+                          if level in supported), effort)
+    if requested in supported and isinstance(requested, str):
+        effort = requested
     result = dict(body)
     inputs = result.get("input")
     if isinstance(inputs, str):

@@ -15,6 +15,44 @@ from codex_messages import MessageStream, from_messages, json_text, message, sub
 
 
 MAX_BODY = 16 * 1024 * 1024
+MAX_ERROR_BODY = 64 * 1024
+
+
+class UpstreamError(BridgeError):
+    def __init__(self, category, status, reset=None):
+        code, message = {
+            "quota": ("usage_limit_reached", "Codex usage limit reached"),
+            "context_length": ("context_length_exceeded", "Codex maximum context length exceeded"),
+            "transient": ("server_error", "Codex server error; temporarily unavailable"),
+            "auth": ("authentication_error", "Codex subscription authentication failed"),
+            "other": ("upstream_error", "Codex upstream request failed"),
+        }[category]
+        super().__init__(message, status)
+        self.error = {"type": code, "code": code, "message": message}
+        self.error.update(reset or {})
+        self.retry = category == "transient"
+
+
+def classify(body=None, status=None):
+    """Classify structured upstream errors without retaining upstream free text."""
+    row = body if isinstance(body, dict) else {}
+    if isinstance(row.get("response"), dict):
+        row = row["response"]
+    if isinstance(row.get("error"), dict):
+        row = row["error"]
+    tokens = [row.get("code"), row.get("type")]
+    if any(token in ("usage_limit_reached", "usage_limit_exceeded", "usage_not_included", "insufficient_quota", "quota_exceeded") for token in tokens):
+        reset = {key: row[key] for key in ("resets_at", "resets_in_seconds", "reset_at")
+                 if type(row.get(key)) in (int, float) and 0 <= row[key] <= 2 ** 53 - 1}
+        return UpstreamError("quota", 429, reset)
+    if "context_length_exceeded" in tokens:
+        return UpstreamError("context_length", 400)
+    if status in (401, 403) or any(token in ("authentication_error", "invalid_api_key", "unauthorized", "permission_denied") for token in tokens):
+        return UpstreamError("auth", 403 if status == 403 else 401)
+    if (status == 429 or (status is not None and status >= 500) or body is None
+            or any(token in ("rate_limit_exceeded", "rate_limit_error", "server_error", "server_overloaded", "server_is_overloaded") for token in tokens)):
+        return UpstreamError("transient", 429 if status == 429 else 502)
+    return UpstreamError("other", status if status in (400, 404, 422) else 502)
 
 
 class SubscriptionBackend:
@@ -23,7 +61,10 @@ class SubscriptionBackend:
 
     def open(self, body):
         for refresh in (False, True):
-            token, account_id = self.broker.credentials(refresh=refresh)
+            try:
+                token, account_id = self.broker.credentials(refresh=refresh)
+            except BridgeError as exc:
+                raise classify({}, exc.status) from None
             connection = http.client.HTTPSConnection("chatgpt.com", timeout=90)
             try:
                 connection.request("POST", "/backend-api/codex/responses", json_text(body).encode(),
@@ -33,14 +74,23 @@ class SubscriptionBackend:
                 response = connection.getresponse()
             except (OSError, http.client.HTTPException):
                 connection.close()
-                raise BridgeError("Cannot connect to the Codex subscription backend", 502) from None
+                raise classify(status=502) from None
             if response.status == 401 and not refresh:
                 connection.close()
                 continue
             if response.status != 200:
-                status = response.status if response.status in (400, 401, 403, 429) else 502
-                connection.close()
-                raise BridgeError("Codex subscription backend rejected the request (HTTP %s)" % status, status)
+                try:
+                    data = response.read(MAX_ERROR_BODY)
+                    try:
+                        body = json.loads(data) if data else None
+                    except (ValueError, UnicodeError):
+                        body = {}
+                    error = classify(body, response.status)
+                except (OSError, http.client.HTTPException):
+                    error = classify(status=response.status)
+                finally:
+                    connection.close()
+                raise error
             # The legacy backend can omit Content-Type on a valid SSE response.
             # Validate the bounded event framing and completion in response_events.
             return connection, response
@@ -80,9 +130,10 @@ def response_events(response):
 class Gateway(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, backend, model, effort):
+    def __init__(self, backend, model, effort, supported_efforts=None):
         super().__init__(("127.0.0.1", 0), Handler)
         self.backend, self.model, self.effort = backend, model, effort
+        self.supported_efforts = supported_efforts
         self.capability = secrets.token_urlsafe(32)
         self.slots = threading.BoundedSemaphore(8)
         self.connections = set()
@@ -140,13 +191,13 @@ class Handler(BaseHTTPRequestHandler):
                 (hmac.compare_digest(auth.encode(), ("Bearer " + self.server.capability).encode()) or
                  hmac.compare_digest(key.encode(), self.server.capability.encode())))
 
-    def send_json(self, status, row):
+    def send_json(self, status, row, retry=False):
         data = json_text(row).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         if status >= 400:
-            self.send_header("x-should-retry", "false")
+            self.send_header("x-should-retry", "true" if retry else "false")
         self.end_headers()
         self.wfile.write(data)
 
@@ -176,7 +227,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise BridgeError("Request must be an object with a boolean stream flag")
             wants_stream = body.get("stream", False)
             translated = from_messages(body) if path == "/v1/messages" else body
-            outbound = subscription_request(translated, self.server.model, self.server.effort)
+            outbound = subscription_request(translated, self.server.model, self.server.effort,
+                                            self.server.supported_efforts)
             connection, response = self.server.backend.open(outbound)
             with self.server.connection_lock:
                 self.server.connections.add(connection)
@@ -231,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     kind = event.get("type", "")
                     if kind in ("error", "response.failed"):
-                        raise BridgeError("Codex inference failed", 502)
+                        raise classify(event)
                     terminal = kind in ("response.completed", "response.incomplete")
                     if terminal:
                         expected = "completed" if kind == "response.completed" else "incomplete"
@@ -251,11 +303,14 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 cancelled.set()
         except BridgeError as exc:
-            error = {"error": {"type": "api_error", "message": str(exc)}}
+            error = {"error": exc.error if isinstance(exc, UpstreamError) else {"type": "api_error", "message": str(exc)}}
             if streaming:
+                if path == "/v1/responses":
+                    error.update(error["error"])
+                    error["type"] = "error"
                 self.sse("error", error)
             else:
-                self.send_json(exc.status, error)
+                self.send_json(exc.status, error, retry=isinstance(exc, UpstreamError) and exc.retry)
         except (ValueError, TypeError, KeyError, UnicodeError):
             error = {"error": {"type": "invalid_request_error", "message": "Invalid bridge request or response"}}
             if streaming:

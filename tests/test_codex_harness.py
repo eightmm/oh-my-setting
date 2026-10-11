@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 from codex_auth_broker import AuthBroker, BridgeError
-from codex_bridge import Gateway, MAX_BODY, SubscriptionBackend, response_events
+from codex_bridge import Gateway, MAX_BODY, MAX_ERROR_BODY, SubscriptionBackend, classify, response_events
 from codex_harness import cli_command, harness_env, main, validate_tail
 from codex_messages import MessageStream, from_messages, message, subscription_request
 
@@ -50,8 +50,8 @@ class FakeBackend:
 
 
 @contextlib.contextmanager
-def gateway(backend=None):
-    instance = Gateway(backend or FakeBackend(), "gpt-fixture", "low")
+def gateway(backend=None, supported_efforts=None):
+    instance = Gateway(backend or FakeBackend(), "gpt-fixture", "low", supported_efforts)
     thread = threading.Thread(target=instance.serve_forever, daemon=True)
     thread.start()
     try:
@@ -61,15 +61,15 @@ def gateway(backend=None):
         thread.join(timeout=2)
 
 
-def post(server, body, path="/v1/messages?beta=true", headers=None):
+def post(server, body, path="/v1/messages?beta=true", headers=None, include_headers=False):
     connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
     auth = {"Authorization": "Bearer " + server.capability, "Content-Type": "application/json"}
     auth.update(headers or {})
     connection.request("POST", path, json.dumps(body), headers=auth)
     result = connection.getresponse()
-    status, data = result.status, result.read()
+    status, data, response_headers = result.status, result.read(), dict(result.getheaders())
     connection.close()
-    return status, data
+    return (status, data, response_headers) if include_headers else (status, data)
 
 
 class MessageContractTests(unittest.TestCase):
@@ -109,6 +109,15 @@ class MessageContractTests(unittest.TestCase):
         self.assertTrue(result["stream"])
         self.assertEqual(result["instructions"], "rules\n\nextra")
         self.assertNotIn("max_output_tokens", result)
+        supported = ["high", "low", "medium"]
+        for requested, expected in (("high", "high"), ("medium", "medium"), ("none", "low"),
+                                    ("minimal", "low"), ("unsupported", "medium"), ([], "medium")):
+            with self.subTest(requested=requested):
+                outgoing = subscription_request({"input": "hi", "reasoning": {"effort": requested}},
+                                                "gpt-fixture", "medium", supported)
+                self.assertEqual(outgoing["reasoning"], {"effort": expected, "summary": "auto"})
+        self.assertEqual(subscription_request({"input": "hi", "reasoning": {"effort": "none"}},
+                         "gpt-fixture", "high", ["high", "medium"])["reasoning"]["effort"], "medium")
         with self.assertRaises(BridgeError):
             subscription_request({"input": "x", "previous_response_id": "other"}, "gpt-fixture", "low")
 
@@ -211,6 +220,9 @@ class GatewayTests(unittest.TestCase):
                     self.assertEqual(json.loads(data)["id"], "resp_fixture")
             self.assertEqual(len(server.backend.calls), 4)
             self.assertTrue(all(row["model"] == "gpt-fixture" for row in server.backend.calls))
+        with gateway(supported_efforts=["low", "high"]) as server:
+            self.assertEqual(post(server, {"input": "hi", "reasoning": {"effort": "high"}}, "/v1/responses")[0], 200)
+            self.assertEqual(server.backend.calls[0]["reasoning"]["effort"], "high")
 
     def test_auth_origin_host_size_and_endpoint_rejections_do_not_call_backend(self):
         body = {"messages": [{"role": "user", "content": "hi"}]}
@@ -225,13 +237,75 @@ class GatewayTests(unittest.TestCase):
     def test_truncated_and_failed_streams_are_not_success_and_errors_are_sanitized(self):
         invalid = completed()
         invalid["response"]["status"] = "failed"
-        for events in (text_events()[:1], [invalid], [{"type": "response.failed", "response": {"error": {"message": "secret payload"}}}]):
-            with self.subTest(events=events), gateway(FakeBackend(events)) as server:
-                status, data = post(server, {"messages": [{"role": "user", "content": "hi"}], "stream": True})
-                self.assertEqual(status, 200)
-                self.assertIn(b"event: error", data)
-                self.assertNotIn(b"event: message_stop", data)
-                self.assertNotIn(b"secret payload", data)
+        for events, expected_code in ((text_events()[:1], None), ([invalid], None),
+                ([{"type": "response.failed", "response": {"error": {"message": "secret payload"}}}], "upstream_error"),
+                ([{"type": "response.failed", "response": {"error": {"code": "context_length_exceeded", "message": "secret payload"}}}], "context_length_exceeded"),
+                ([{"type": "error", "code": "rate_limit_exceeded", "message": "secret payload"}], "server_error"),
+                ([{"type": "error", "error": {"type": "usage_limit_reached", "resets_at": 1800000000,
+                                               "message": "secret payload"}}], "usage_limit_reached")):
+            for path in ("/v1/messages", "/v1/responses"):
+                with self.subTest(events=events, path=path), gateway(FakeBackend(events)) as server:
+                    body = {"messages": [{"role": "user", "content": "hi"}]} if path.endswith("messages") else {"input": "hi"}
+                    status, data, headers = post(server, dict(body, stream=True), path, include_headers=True)
+                    self.assertEqual(status, 200)
+                    self.assertNotIn("x-should-retry", headers)
+                    self.assertIn(b"event: error", data)
+                    self.assertNotIn(b"event: message_stop", data)
+                    self.assertNotIn(b"secret payload", data)
+                    if expected_code:
+                        payload = json.loads(data.split(b"event: error\ndata: ")[1].split(b"\n")[0])
+                        self.assertEqual(payload["error"]["code"], expected_code)
+                        if path.endswith("responses"):
+                            self.assertEqual(payload["code"], expected_code)
+
+        broker = unittest.mock.Mock()
+        broker.credentials.return_value = ("private-access", "private-account")
+        cases = [
+            (429, {"error": {"type": "usage_limit_reached", "resets_at": 1800000000,
+                            "resets_in_seconds": 60, "message": "secret payload"}}, "usage_limit_reached", False),
+            (429, {"error": {"code": "rate_limit_exceeded", "message": "secret payload"}}, "server_error", True),
+            (503, None, "server_error", True),
+            (400, {"error": {"message": "context_length_exceeded secret payload"}}, "upstream_error", False),
+            (400, {"error": {"code": "context_length_exceeded", "message": "secret payload"}}, "context_length_exceeded", False),
+            (403, {"error": {"message": "secret payload"}}, "authentication_error", False),
+        ]
+        for upstream_status, upstream_body, code, retry in cases:
+            connection = unittest.mock.Mock()
+            response = connection.getresponse.return_value
+            response.status = upstream_status
+            response.read.return_value = json.dumps(upstream_body).encode() if upstream_body is not None else b""
+            for stream in (False, True):
+                with self.subTest(status=upstream_status, stream=stream), \
+                        patch("codex_bridge.http.client.HTTPSConnection", return_value=connection), \
+                        gateway(SubscriptionBackend(broker)) as server:
+                    status, data, headers = post(server, {"input": "hi", "stream": stream},
+                                                 "/v1/responses", include_headers=True)
+                    self.assertNotEqual(status, 200)
+                    self.assertEqual(json.loads(data)["error"]["code"], code)
+                    self.assertEqual(headers["x-should-retry"], "true" if retry else "false")
+                    self.assertNotIn(b"secret payload", data)
+                    self.assertNotIn(b"private-access", data)
+                    if code == "usage_limit_reached":
+                        self.assertEqual(json.loads(data)["error"]["resets_at"], 1800000000)
+                        self.assertEqual(json.loads(data)["error"]["resets_in_seconds"], 60)
+                    response.read.assert_called_with(MAX_ERROR_BODY)
+                    connection.close.assert_called()
+        oversized = io.BytesIO(b"x" * (MAX_ERROR_BODY + 20))
+        connection.getresponse.return_value = oversized
+        oversized.status = 400
+        with patch("codex_bridge.http.client.HTTPSConnection", return_value=connection), self.assertRaises(BridgeError):
+            SubscriptionBackend(broker).open({"input": "hi"})
+        self.assertEqual(oversized.tell(), MAX_ERROR_BODY)
+        self.assertNotIn("resets_at", classify({"error": {"code": "usage_limit_reached", "resets_at": "secret payload"}}, 429).error)
+        for reset in (True, -1, float("nan"), float("inf"), 2 ** 53):
+            with self.subTest(reset=reset):
+                self.assertNotIn("resets_at", classify({"error": {"code": "usage_limit_reached", "resets_at": reset}}, 429).error)
+        self.assertEqual(classify({"error": {"type": "usage_not_included", "resets_at": 1800000000.5}}, 429).error["resets_at"], 1800000000.5)
+        broker.credentials.side_effect = BridgeError("secret payload", 401)
+        with self.assertRaises(BridgeError) as caught:
+            SubscriptionBackend(broker).open({"input": "hi"})
+        self.assertEqual(caught.exception.error["code"], "authentication_error")
+        self.assertNotIn("secret payload", str(caught.exception))
 
     def test_upstream_credentials_only_go_to_fixed_origin_and_401_refresh_is_bounded(self):
         broker = unittest.mock.Mock()
@@ -257,6 +331,8 @@ class GatewayTests(unittest.TestCase):
 
 class LaunchTests(unittest.TestCase):
     def test_cli_route_and_child_environment_do_not_export_subscription_tokens(self):
+        command = cli_command("pi", "gpt-fixture", ["--print", "hi"], "high")
+        self.assertEqual(command[-4:], ["--thinking", "high", "--print", "hi"])
         inherited = dict.fromkeys(("OPENAI_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"), "private")
         with gateway() as server, patch.dict(os.environ, dict(inherited, HTTP_PROXY="http://proxy.invalid")):
             for host in ("codex", "pi", "claude"):
@@ -283,6 +359,21 @@ class LaunchTests(unittest.TestCase):
                 self.assertEqual(pi_env["OMS_PANEL_HARNESS"], "pi")
                 self.assertNotIn("OMS_HOOK_AGENT", pi_env)
 
+        for requested, default, resolved in (([], "medium", "medium"), (["--effort", "high"], "medium", "high"),
+                                             ([], None, "low")):
+            with self.subTest(requested=requested), \
+                    patch.dict(os.environ, {"OMS_HARNESS_CHILD": "0", "OMS_HARNESS_DELEGATE_DEPTH": "0"}), \
+                    patch("codex_harness.AuthBroker") as broker, patch("codex_harness.Gateway") as bridge, \
+                    patch("codex_harness.shutil.which", return_value="fixture"), \
+                    patch("codex_harness.subprocess.Popen") as child, patch("codex_harness.record_panel_child"), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                broker.return_value.model.return_value = {"defaultReasoningEffort": default, "supportedReasoningEfforts": [
+                    {"reasoningEffort": "high"}, {"reasoningEffort": "low"}, {"reasoningEffort": "medium"}]}
+                child.return_value.wait.return_value = 0
+                self.assertEqual(main(["pi", "--model", "gpt-fixture"] + requested), 0)
+                self.assertEqual(child.call_args.args[0][-2:], ["--thinking", resolved])
+                self.assertEqual(bridge.call_args.args[2:], (resolved, ["high", "low", "medium"]))
+
     def test_route_override_and_nested_worker_denied(self):
         for host, args in (("codex", ["--config", "model_provider=other"]), ("claude", ["--model=other"]), ("pi", ["--api-key", "private"])):
             with self.subTest(host=host), self.assertRaises(BridgeError):
@@ -293,6 +384,13 @@ class LaunchTests(unittest.TestCase):
                     patch("codex_harness.AuthBroker") as broker, contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(main(["claude", "--model", "gpt-fixture", "--dry-run"]), 2)
                 broker.assert_not_called()
+        with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "0", "OMS_HARNESS_DELEGATE_DEPTH": "0"}), \
+                patch("codex_harness.AuthBroker") as broker, patch("codex_harness.shutil.which", return_value="fixture"), \
+                patch("codex_harness.subprocess.Popen") as child, contextlib.redirect_stderr(io.StringIO()):
+            broker.return_value.model.return_value = {"defaultReasoningEffort": "unsupported", "supportedReasoningEfforts": [
+                {"reasoningEffort": "high"}]}
+            self.assertEqual(main(["pi", "--model", "gpt-fixture"]), 2)
+            child.assert_not_called()
 
     def test_dispatcher_dry_run_does_not_start_auth_or_model_processes(self):
         root = Path(__file__).resolve().parents[1]

@@ -15,14 +15,15 @@ from codex_auth_broker import AuthBroker, BridgeError, subscription_env
 from codex_bridge import Gateway, SubscriptionBackend
 
 
-def cli_command(host, model, tail):
+def cli_command(host, model, tail, effort=None):
     if host == "codex":
-        return ["codex", "--model", model, "-c", 'model_provider="openai"'] + tail
+        reasoning = ["-c", 'model_reasoning_effort="%s"' % effort] if effort else []
+        return ["codex"] + reasoning + ["--model", model, "-c", 'model_provider="openai"'] + tail
     if host == "claude":
         return ["claude", "--model", model] + tail
     return ["pi", "--extension", str(Path(__file__).with_name("pi-codex-extension.mjs")),
             "--extension", str(Path(__file__).with_name("pi-oms-extension.mjs")),
-            "--provider", "oms-codex", "--model", model] + tail
+            "--provider", "oms-codex", "--model", model] + (["--thinking", effort] if effort else []) + tail
 
 
 def harness_env(host, gateway, model, window):
@@ -99,7 +100,7 @@ def main(argv=None):
                "The Claude/Pi bridge is experimental; the selected harness owns tool permissions.")
     parser.add_argument("harness", choices=("codex", "pi", "claude"))
     parser.add_argument("--model", required=True, help="exact model ID in the installed Codex catalog")
-    parser.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), default="low")
+    parser.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), default=None)
     parser.add_argument("--context-window", type=int, default=200000, help="Pi context estimate (default: conservative 200000)")
     parser.add_argument("--check", action="store_true", help="check executable, subscription login, exact model and bridge RPC")
     parser.add_argument("--dry-run", action="store_true", help="print launch argv without reading credentials or starting a CLI")
@@ -117,27 +118,29 @@ def main(argv=None):
         if not 1024 <= args.context_window <= 2000000:
             raise BridgeError("context-window must be between 1024 and 2000000")
         validate_tail(args.harness, tail)
-        command = cli_command(args.harness, args.model, tail)
-        if args.harness == "codex":
-            command[1:1] = ["-c", 'model_reasoning_effort="%s"' % args.effort]
         if args.dry_run:
             print(json.dumps({"harness": args.harness, "model_provider": "codex", "auth": "chatgpt-subscription",
-                              "model": args.model, "argv": command}, ensure_ascii=False))
+                              "model": args.model, "argv": cli_command(args.harness, args.model, tail, args.effort)}, ensure_ascii=False))
             return 0
         if not shutil.which("codex") or not shutil.which(args.harness):
             raise BridgeError("Both Codex CLI and the selected harness must already be installed")
         broker = AuthBroker()
         broker.credentials()
         model = broker.model(args.model)
-        efforts = [row.get("reasoningEffort") for row in model.get("supportedReasoningEfforts", [])]
-        if efforts and args.effort not in efforts:
+        efforts = [row.get("reasoningEffort") for row in model.get("supportedReasoningEfforts") or []]
+        effort = args.effort or model.get("defaultReasoningEffort")
+        if effort is None:
+            effort = next((level for level in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+                           if level in efforts), None)
+        if (effort is not None and not isinstance(effort, str)) or (efforts and effort not in efforts):
             raise BridgeError("The selected model does not support this reasoning effort")
+        command = cli_command(args.harness, args.model, tail, effort)
         if args.check:
             print(json.dumps({"harness": args.harness, "model_provider": "codex", "auth": "chatgpt-subscription",
                               "model": args.model, "catalog_verified": True, "inference_verified": False}))
             return 0
         if args.harness != "codex":
-            gateway = Gateway(SubscriptionBackend(broker), args.model, args.effort)
+            gateway = Gateway(SubscriptionBackend(broker), args.model, effort, efforts or [effort])
             threading.Thread(target=gateway.serve_forever, daemon=True).start()
         env = harness_env(args.harness, gateway, args.model, args.context_window)
         print("OMS: %s harness / Codex %s / existing ChatGPT subscription" % (args.harness, args.model), file=sys.stderr)
