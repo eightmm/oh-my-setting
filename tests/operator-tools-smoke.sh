@@ -5642,6 +5642,92 @@ for path, digest in ((".oms/artifacts/cont.patch", "0" * 64), (".oms/artifacts/l
     text = prompt_of(with_patch(path, digest))
     assert "tampered-marker" not in text, text
     assert "could not be verified" in text, text
+
+def exercise_main_lineage():
+    def main_row(ident, member, owner="claude", state="done", terminal=True):
+        return {"attempt_id": ident, "provider": owner, "tool": "panel-main", "state": state,
+                "terminal": terminal, "created_at": "2026-10-10T00:00:00Z",
+                "refs": {"panel_role": "main", "panel_room_participant": member, "panel_owner": owner}}
+    old = main_row("lineage-old", "lineage-stable")
+    resumed = main_row("lineage-resumed", "lineage-stable", state="working", terminal=False)
+    live_old = main_row("lineage-live-old", "lineage-live")
+    live = main_row("lineage-live", "lineage-live", state="working", terminal=False)
+    foreign = main_row("lineage-foreign", "lineage-foreign", owner="codex")
+    blocked = main_row("lineage-blocked", "lineage-blocked", state="blocked", terminal=False)
+    unknown = main_row("lineage-unknown", "lineage-unknown", terminal=None)
+    workers = [{"attempt_id": "lineage-worker-%d" % n, "task_id": "lineage-task-%d" % n,
+                "parent_attempt_id": old["attempt_id"], "provider": "codex", "state": "working" if n == 11 else "review",
+                "terminal": False, "sequence": 1, "prompt": "PRIVATE-LINEAGE-PROMPT",
+                "refs": {"panel_role": "worker", "panel_label": "Inspect fixture %d" % n,
+                         "prompt": "PRIVATE-LINEAGE-PROMPT"}} for n in range(12)]
+    settled = dict(workers[0], attempt_id="lineage-settled", task_id="lineage-settled", state="done", terminal=True)
+    live_worker = dict(workers[0], attempt_id="lineage-live-worker", task_id="lineage-live-task",
+                       parent_attempt_id=live_old["attempt_id"])
+    foreign_worker = dict(workers[0], attempt_id="lineage-foreign-worker", task_id="lineage-foreign-task",
+                          parent_attempt_id=foreign["attempt_id"])
+    rows = [old, resumed, live_old, live, foreign, blocked, unknown] + workers + [settled, live_worker, foreign_worker]
+    caller = dict(environment, OMS_PANEL_MAIN_ATTEMPT=resumed["attempt_id"], OMS_ROOM_PARTICIPANT="lineage-stable")
+    def continue_task(task, env):
+        out, native, note = panel.continuation(project, "claude", None, task, {"provider": "codex"}, brief, env)
+        try:
+            assert "A fresh worker continues earlier work" in out.read_text()
+        finally:
+            out.unlink()
+    def refuse(task, env):
+        try:
+            continue_task(task, env)
+        except ValueError as error:
+            assert "no worker" in str(error), error
+        else:
+            raise AssertionError("foreign worker was continued")
+    def ledger(repo, *args, output=False):
+        return "lineage-next" if args[0] == "start" else json.dumps(rows)
+    with patch.object(panel, "events", side_effect=ledger), patch.object(panel, "results", return_value={"rows": []}):
+        assert panel.lineage_ids(project, "claude", "lineage-stable", "lineage-resumed") == {
+            "lineage-old", "lineage-resumed"}
+        continue_task("lineage-task-0", caller)
+        refuse("lineage-task-0", dict(caller, OMS_PANEL_MAIN_ATTEMPT="lineage-live", OMS_ROOM_PARTICIPANT="lineage-live"))
+        refuse("lineage-live-task", caller)
+        refuse("lineage-foreign-task", caller)
+        assert not panel.lineage_ids(project, "claude", "wrong-participant", "lineage-resumed")
+        rows.append(dict(old))
+        assert not panel.lineage_ids(project, "claude", "lineage-stable", "lineage-resumed"), "duplicate owner evidence"
+        rows.pop()
+        rows.append(main_row("lineage-ambiguous", "lineage-stable", state="working", terminal=False))
+        assert not panel.lineage_ids(project, "claude", "lineage-stable", "lineage-resumed"), "multiple live owners"
+        rows.pop()
+        resumed.update(state="done", terminal=True)
+        successor = main_row("lineage-next", "lineage-next", state="working", terminal=False)
+        successor["created_at"] = "2026-10-11T00:00:00Z"
+        rows.append(successor)
+        assert panel.lineage_ids(project, "claude", "lineage-next", "lineage-next") == {
+            "lineage-old", "lineage-resumed", "lineage-next"}
+        continue_task("lineage-task-0", dict(caller, OMS_PANEL_MAIN_ATTEMPT="lineage-next", OMS_ROOM_PARTICIPANT="lineage-next"))
+        later = main_row("lineage-later", "lineage-later")
+        later["created_at"] = "2026-10-12T00:00:00Z"
+        rows.append(later)
+        assert "lineage-later" not in panel.lineage_ids(project, "claude", "lineage-next", "lineage-next")
+        captured = []
+        def native_context(*args, **kwargs):
+            captured.append(args[7].read_text())
+            return ["fixture-native"]
+        with patch.dict(os.environ, environment, clear=True), patch.object(panel, "main_installed", return_value=True), \
+                patch.object(panel.room, "join"), patch.object(panel, "managed_session", return_value=False), \
+                patch.object(panel, "update_activity"), patch.object(panel, "native_command", side_effect=native_context), \
+                patch.object(panel.subprocess, "Popen") as process:
+            process.return_value.wait.return_value = process.return_value.poll.return_value = 0
+            assert panel._run_native("claude", project, room_id="lineage-room") == 0
+        summary = captured[0].split("Unsettled lineage workers (data): ", 1)[1].splitlines()[0]
+        calls = json.loads(summary)
+        assert len(calls) == 10 and any(c["task_id"] == "lineage-task-11" for c in calls), calls
+        assert {c["state"] for c in calls} == {"review", "working"}, calls
+        assert all(set(c) == {"task_id", "role", "state", "label"} for c in calls), calls
+        assert not {"lineage-settled", "lineage-live-task", "lineage-foreign-task"} & {c["task_id"] for c in calls}
+        assert "PRIVATE-LINEAGE-PROMPT" not in captured[0], captured[0]
+        assert "--continue TASK_ID" in captured[0]
+    print("main lineage: resumed/successor continuation, live/foreign/unknown refusal and bounded prompt-free context passed")
+
+exercise_main_lineage()
 # A status message is a declaration: no mail, no unread, latest per sender kept past the 12-message window;
 # unread counts ignore participants who left.
 declared = room.create(project, title="Declared status")
