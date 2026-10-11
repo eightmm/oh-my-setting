@@ -9229,7 +9229,26 @@ try:
     assert all(pi_row["refs"][key] == value for key, value in dead_refs.items())
     pi_alive = release_attempt(host="inline", native={}, harness="pi")
     pi_live_env = dict(pi_env, OMS_PANEL_MAIN_ATTEMPT=pi_alive)
+    launcher_refs = panel_release.process_refs(os.getpid(), "launcher")
+    assert launcher_refs
+    empty_pi_refs = {key: value for key, value in pi_row["refs"].items() if not key.startswith("panel_native_")}
+    for protected_refs in (
+            {"panel_native_pid": ""}, {"panel_native_identity": ""},
+            dict(launcher_refs, panel_launcher_pid=str(dead_release_process.pid)),
+            dict(launcher_refs, panel_launcher_identity="0" * 64),
+            {"panel_launcher_pid": launcher_refs["panel_launcher_pid"]},
+            {"panel_launcher_identity": launcher_refs["panel_launcher_identity"]}):
+        protected_row = dict(pi_row, refs=dict(empty_pi_refs, **protected_refs))
+        with patch.object(panel_release, "events", return_value=json.dumps(protected_row)) as child_activity:
+            codex_harness.record_panel_child(pi_live_env, live_release_process.pid)
+        assert child_activity.call_count == 1, "protected Pi ownership was overwritten"
+    panel_release.events(release_repo, "usage", "--attempt", pi_alive, "--actor", "panel-main",
+                         *[arg for key, value in launcher_refs.items() for arg in ("--ref", key + "=" + value)])
     codex_harness.record_panel_child(pi_live_env, live_release_process.pid)
+    with patch.object(panel_release, "process_refs", return_value=dead_refs):
+        codex_harness.record_panel_child(pi_live_env, dead_release_process.pid)
+    pi_live_row = json.loads(panel_release.events(release_repo, "show", "--attempt", pi_alive, "--json"))
+    assert all(pi_live_row["refs"][key] == value for key, value in live_refs.items()), "nested Pi replaced the original native identity"
     ledger = release_repo / ".oms/lifecycle/events.jsonl"
     for release_id, extra_env, extra_args, expected in (
             (working_release, {"OMS_RELEASE_PANE": working_release}, [], "live tagged tmux"),
@@ -9395,7 +9414,7 @@ try:
                 patch.object(codex_harness.shutil, "which", return_value="fixture"), \
                 patch.object(codex_harness, "harness_env", return_value=pi_live_env), \
                 patch.object(codex_harness.subprocess, "Popen", return_value=mock_native), \
-                patch.object(panel_release, "events", side_effect=[json.dumps(pi_row), ""]) as child_activity, \
+                patch.object(panel_release, "events", side_effect=[json.dumps(dict(pi_row, refs=empty_pi_refs)), ""]) as child_activity, \
                 patch.object(codex_harness, "record_panel_child", wraps=codex_harness.record_panel_child) as record_child, \
                 patch.object(sys, "stderr", new_callable=io.StringIO) as child_notice:
             assert codex_harness.main(["pi", "--model", "fixture-model"]) == 0

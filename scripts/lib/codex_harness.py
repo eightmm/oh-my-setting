@@ -84,6 +84,13 @@ def record_panel_child(env, pid):
         if (row.get("tool") != "panel-main" or row.get("provider") != "codex"
                 or refs.get("panel_role") != "main" or refs.get("panel_harness") != "pi"):
             raise ValueError("Pi panel ownership unavailable")
+        # Nested harnesses inherit the main's attempt; preserve its first native child.
+        if "panel_native_pid" in refs or "panel_native_identity" in refs:
+            return
+        if "panel_launcher_pid" in refs or "panel_launcher_identity" in refs:
+            launcher = panel_release.process_refs(os.getpid(), "launcher")
+            if not launcher or any(refs.get(key) != value for key, value in launcher.items()):
+                return
         native = panel_release.process_refs(pid, "native")
         if not native:
             raise ValueError("Pi child identity unavailable")
