@@ -19976,29 +19976,30 @@ test_skill_router_auto_records_task_prompts() {
   local after
   local same_prompt_before
 
+  # This case checks recording semantics; the next case owns deadline assertions.
   make_committed_repo "$project"
 
   payload="$(printf '{"prompt":"고칠 부분 확인하고 있으면 수정해줘","session_id":"auto1","turn_id":"t1","cwd":"%s"}' "$project")"
-  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT=10 bash "$ROOT/scripts/skill-router.sh" >/dev/null
   assert_file_contains "$project/.oms/task/current.md" "Respond to user request:"
   assert_file_contains "$project/.oms/task/current.md" "User prompt (task/medium): 고칠 부분 확인하고 있으면 수정해줘"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "auto_task"'
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "created"'
 
   payload="$(printf '{"prompt":"이어서 ablation 기록 자동화도 확인해줘","session_id":"auto1","turn_id":"t2","cwd":"%s"}' "$project")"
-  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT=10 bash "$ROOT/scripts/skill-router.sh" >/dev/null
   assert_file_contains "$project/.oms/task/current.md" "이어서 ablation 기록 자동화도 확인해줘"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "appended"'
 
   before="$(grep -F "User prompt" "$project/.oms/task/current.md" | wc -l | tr -d ' ')"
-  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT=10 bash "$ROOT/scripts/skill-router.sh" >/dev/null
   after="$(grep -F "User prompt" "$project/.oms/task/current.md" | wc -l | tr -d ' ')"
   [ "$before" = "$after" ] || fail "same turn/prompt should not append twice"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "deduped"'
 
   same_prompt_before="$(grep -F "이어서 ablation 기록 자동화도 확인해줘" "$project/.oms/task/current.md" | wc -l | tr -d ' ')"
   payload="$(printf '{"prompt":"이어서 ablation 기록 자동화도 확인해줘","session_id":"auto1","turn_id":"t3","cwd":"%s"}' "$project")"
-  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT=10 bash "$ROOT/scripts/skill-router.sh" >/dev/null
   [ "$(grep -F "이어서 ablation 기록 자동화도 확인해줘" "$project/.oms/task/current.md" | wc -l | tr -d ' ')" = "$((same_prompt_before + 1))" ] ||
     fail "the same prompt on a new turn is a new request and must be recorded"
 }
