@@ -9442,6 +9442,30 @@ assert graph_view.spawn_bar(100, occupied)[1] == []
 assert "One main" in graph_view.spawn_bar(100, occupied)[0]
 armed_bar = graph_view.spawn_bar(100, {"installed": ["claude"], "spawn_managed": True, "spawn_armed": True})
 assert "1 Claude" in armed_bar[0] and "2 Pi" not in armed_bar[0] and "0 Codex" not in armed_bar[0]
+# The exit prompt must discard native CLI typeahead before waiting for fresh keys.
+from unittest.mock import Mock
+for flush_error in (None, OSError("unsupported terminal"), ImportError("no termios")):
+    order = []
+    def flush_exit_input(fd, queue):
+        assert (fd, queue) == (42, 0)
+        order.append("flush")
+        if flush_error is not None:
+            raise flush_error
+    def wait_exit_input(readers, writers, errors):
+        assert (readers, writers, errors) == ([42], [], [])
+        assert order == ["flush"], order
+        order.append("select")
+    def read_exit_input(fd, size):
+        assert (fd, size) == (42, 1)
+        assert order == ["flush", "select"], order
+        return b"r"
+    with patch("panel_input.TerminalInput") as exit_input, \
+            patch.dict(sys.modules, termios=Mock(TCIFLUSH=0, tcflush=flush_exit_input)), \
+            patch("select.select", side_effect=wait_exit_input), \
+            patch.object(panel.os, "read", side_effect=read_exit_input):
+        exit_input.return_value.__enter__.return_value.fd = 42
+        assert panel._main_exit_key() == "r"
+        exit_input.return_value.__exit__.assert_called_once_with()
 # Closing an exit prompt requires all three window fields and a successful lookup.
 exit_options = {"@oms_panel_main_attempt": "exit-attempt", "@oms_panel_room": shared,
                 "@oms_panel_room_participant": "exit-attempt",

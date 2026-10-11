@@ -532,6 +532,12 @@ def _main_exit_key():
             if inputs.fd is None:
                 key = input()
                 return "\n" if not key else key
+            try:
+                import termios
+                # Native CLI typeahead must not close or restart its exit window.
+                termios.tcflush(inputs.fd, termios.TCIFLUSH)
+            except (ImportError, OSError):
+                pass
             select.select([inputs.fd], [], [])
             return os.read(inputs.fd, 1).decode("utf-8", errors="replace")
     finally:
