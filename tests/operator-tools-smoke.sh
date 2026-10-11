@@ -4577,12 +4577,14 @@ assert "message-id conflict: result-screen-call" in conflict.getvalue()
 def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner, room_env):
     import io
     import signal
+    import stat
     from contextlib import redirect_stderr
     from unittest.mock import Mock, patch
     from panel_routing import allocate
     if os.name != "posix":
         return
     import panel_terminals
+    original_members = {p["participant"] for p in room.status(project, shared)["participants"]}
     # PID zero is a process-group selector, not a child identity (argv-observer
     # uses that sentinel). Never let an invalid or self PID reach signal APIs.
     for pid in (0, -1, os.getpid()):
@@ -4593,96 +4595,444 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
         groups.assert_not_called()
         pids.assert_not_called()
         invalid.terminate.assert_not_called()
-    # BEGIN receipt-only scope regression (also runnable as an isolated case).
-    receipt_member = "call-" + "e" * 16
-    room.join(project, shared, receipt_member, "codex", "worker", parent=room_owner)
-    room.scope(project, shared, receipt_member, ["value.txt"])
-    receipt_state = room.status(project, shared)
-    receipt_row = room.participant(receipt_state, receipt_member)
-    receipt_child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    # Controller provenance survives a fresh CLI; repository substitutions never do.
+    route = allocate("claude", "worker", "light", "read", "investigate")
+    def dispatch_case(code, task, platform=None):
+        with patch.dict(os.environ, room_env, clear=True), \
+                patch.object(panel.shutil, "which", return_value=sys.executable), \
+                patch.object(panel, "routed_command", return_value=[sys.executable, "-c", code, "--repo", str(project)]), \
+                patch.object(panel, "plan_link", return_value=None), \
+                redirect_stderr(io.StringIO()) as notices:
+            before = {p["participant"] for p in room.status(project, shared)["participants"]}
+            if platform:
+                with patch.object(panel.sys, "platform", platform):
+                    status = panel.run_dispatch(project, "claude", "worker", "read", "Inspect", None, None,
+                                                task, False, None, route, None, None, ["value.txt"])
+            else:
+                status = panel.run_dispatch(project, "claude", "worker", "read", "Inspect", None, None,
+                                            task, False, None, route, None, None, None)
+            state = room.status(project, shared)
+            member = next(p for p in state["participants"] if p["participant"] not in before)
+            return status, member, notices.getvalue()
+
+    if sys.platform == "linux":
+        from contextlib import contextmanager
+        import ctypes
+        libc, previous = ctypes.CDLL(None, use_errno=True), ctypes.c_int()
+        assert libc.prctl(37, ctypes.byref(previous), 0, 0, 0) == 0, "parent subreaper state unreadable"
+
+        @contextmanager
+        def recorded_fixture(task, body=None):
+            name = "call-" + panel.uuid.uuid4().hex[:16]
+            room.join(project, shared, name, "codex", "worker", parent=room_owner)
+            room.scope(project, shared, name, ["value.txt"])
+            member = room.participant(room.status(project, shared), name)
+            call = panel._prepare_dispatch_call(project, shared, name, room_owner)
+            digest = panel._dispatch_exit_record(call, 0)["launch_sha256"]
+            release = temporary / (name + ".release")
+            ready = temporary / (name + ".ready")
+            attempt_path = temporary / (name + ".attempt")
+            header = ("import os,sys,time,subprocess; from pathlib import Path\n"
+                      "sys.path.insert(0," + repr(str(root / "scripts/lib")) + ")\n"
+                      "import terminal_panel as panel, room\n"
+                      "repo=Path(os.environ['OMS_ROOM_REPO']); ident=os.environ['OMS_ROOM_ID']; "
+                      "member=os.environ['OMS_ROOM_PARTICIPANT']\n"
+                      "attempt=panel.events(repo,'start','--provider','codex','--tool','peer-delegate',"
+                      "'--task-id'," + repr(task) + ",'--parent-attempt-id',os.environ['OMS_PANEL_MAIN_ATTEMPT'],"
+                      "'--ref','panel_role=worker','--ref','panel_room_id='+ident,"
+                      "'--ref','panel_room_participant='+member,'--then','starting','--then','working',output=True)\n"
+                      "Path(" + repr(str(attempt_path)) + ").write_text(attempt)\n"
+                      "release=" + repr(str(release)) + "; ready=" + repr(str(ready)) + "\n")
+            body = body or ("Path(ready).write_text(str(os.getpid()))\n"
+                            "while not Path(release).exists(): time.sleep(.02)\n")
+            env = dict(room_env, OMS_ROOM_PARTICIPANT=name, OMS_ROOM_ADMITTED_PARTICIPANT=name)
+            process = subprocess.Popen([sys.executable, str(root / "scripts/lib/dispatch_supervisor.py"),
+                                        str(project), name, digest, sys.executable, "-c", header + body],
+                                       env=env, start_new_session=True)
+            try:
+                panel.dispatch_store.write(project, name + "-process.json", {"pid": process.pid}, exclusive=True)
+                deadline = time.monotonic() + 10
+                while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(.02)
+                assert ready.exists(), "normal child did not become ready"
+                assert process.poll() is None, "fixture supervisor exited before its descendants"
+                panel._record_dispatch_pending(project, call, 1, task, {"descendants": panel._dispatch_descendants(process.pid)})
+                row = json.loads(panel.events(project, "show", "--attempt", attempt_path.read_text(), "--json", output=True))
+                yield dict(name=name, member=member, call=call, process=process, release=release,
+                           ready=ready, row=row, digest=digest)
+            finally:
+                release.touch()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    process.wait(timeout=25)
+                state = room.status(project, shared)
+                if room.participant(state, name)["joined"]:
+                    room.append(project, shared, {"kind": "leave", "participant": name}, "Recorded fixture complete")
+                current = json.loads(panel.events(project, "show", "--attempt", row["attempt_id"], "--json", output=True)) if 'row' in locals() else None
+                if current and not current["terminal"]:
+                    panel.events(project, "transition", "--attempt", row["attempt_id"], "--state", "cancelled",
+                                 "--reason-code", "fixture_complete")
+
+        # Public artifacts never replace positive controller proof, even with terminal ledger rows.
+        with recorded_fixture("receipt-ports") as fixture:
+            name, member, call, process = (fixture[k] for k in ("name", "member", "call", "process"))
+            state = room.status(project, shared)
+            repository_receipt = project / panel._dispatch_call_path(name, True)
+            repository_pending = project / panel._dispatch_pending_path(name)
+            repository_receipt.write_text(json.dumps(panel._dispatch_exit_record(call, 0)))
+            assert re.fullmatch(r"[0-9a-f]{64}", fixture["digest"]), "receipt digest format lost"
+            assert not panel._dispatch_call_finished(project, shared, member), "receipt released a live process"
+            assert any(row["participant"] == name for row in panel.scope_overlaps(
+                project, shared, state, room_owner, ["value.txt"])), "forged live receipt suppressed scope overlap"
+            with patch.object(panel, "main_history", return_value=[dict(fixture["row"], terminal=True)]):
+                assert any(row["participant"] == name for row in panel.scope_overlaps(
+                    project, shared, state, room_owner, ["value.txt"])), "terminal attempt released unverified scope"
+            with patch.object(panel_terminals, "process", return_value=None):
+                assert not panel._dispatch_call_finished(project, shared, member), "receipt bypassed unknown leader identity"
+            assert fixture["row"]["state"] == "working" and not fixture["row"]["terminal"], "live fixture was settled"
+            assert name not in state["call_results"], "live call delivered a completion result"
+            binding = panel.dispatch_store.read(project, name + "-process.json")
+            assert binding["pid"] == process.pid, "controller did not bind the actual Popen PID"
+            assert panel._dispatch_supervisor_receipt(project, call)["pid"] == process.pid, "supervisor receipt names another process"
+            for descendants in (None, []):
+                repository_pending.write_text(json.dumps(dict(call, exit=0, task_id="receipt-ports", forced=False,
+                                                               descendants=descendants)))
+                assert not panel._dispatch_call_finished(project, shared, member), "forged empty observation released scope"
+            repository_pending.unlink()
+            repository_pending.write_text(json.dumps(dict(call, exit=143, task_id="receipt-ports", forced=True, descendants=[])))
+            assert not panel._dispatch_call_finished(project, shared, member), "new sibling pending artifact released scope"
+            room.send(project, shared, name, room_owner, "Call exit=143; parent acceptance pending.",
+                      kind="handoff", message_id="result-" + name)
+            assert any(row["participant"] == name for row in panel.scope_overlaps(
+                project, shared, room.status(project, shared), room_owner, ["value.txt"])), "premature handoff released live scope"
+            with patch.dict(os.environ, room_env, clear=True):
+                panel._reconcile_dispatch(project, shared, room.status(project, shared), room_owner, room_owner)
+            current = json.loads(panel.events(project, "show", "--attempt", fixture["row"]["attempt_id"], "--json", output=True))
+            assert current["state"] == "working" and not current["terminal"], "live receipt reconciled"
+            fixture["release"].touch()
+            assert process.wait(timeout=5) == 0, "quick supervisor completion failed"
+            receipt = panel._dispatch_supervisor_receipt(project, call)
+            assert receipt["all_reaped"] and receipt["exit"] == 0, "supervisor did not attest child exhaustion"
+            assert panel._dispatch_call_finished(project, shared, member), "confirmed termination kept scope"
+            assert panel._dispatch_descendants(process.pid) == [], "absent leader prevented session observation"
+            assert not any(row["participant"] == name for row in panel.scope_overlaps(
+                project, shared, state, room_owner, ["value.txt"])), "verified proof kept completed scope"
+            private = panel.dispatch_store.store(project)
+            receipt_name = name + "-supervisor.json"
+            for forged in (dict(receipt, launch_sha256="0" * 64),
+                           {key: value for key, value in receipt.items() if key != "launch_sha256"},
+                           dict(receipt, pid=process.pid + 1), dict(receipt, all_reaped=False), dict(receipt, exit=True)):
+                panel.dispatch_store.write(project, receipt_name, forged)
+                assert not panel._dispatch_call_finished(project, shared, member), "mismatched/legacy receipt accepted"
+                assert any(row["participant"] == name for row in panel.scope_overlaps(
+                    project, shared, state, room_owner, ["value.txt"])), "invalid proof suppressed scope overlap"
+            panel.dispatch_store.write(project, receipt_name, receipt)
+            assert panel._dispatch_call_finished(project, shared, member), "authentic gone descendants kept scope"
+            pending_name = name + "-pending.json"
+            pending = panel.dispatch_store.read(project, pending_name)
+            for invalid in ({}, dict(pending, task_id="../foreign"), dict(pending, launch_sha256="0" * 64)):
+                panel.dispatch_store.write(project, pending_name, invalid)
+                assert not panel._dispatch_call_finished(project, shared, member), "receipt bypassed invalid pending evidence"
+            (private / pending_name).unlink()
+            assert not panel._dispatch_call_finished(project, shared, member), "missing observation released scope"
+            assert any(row["participant"] == name for row in panel.scope_overlaps(
+                project, shared, state, room_owner, ["value.txt"])), "missing observation suppressed scope overlap"
+            panel.dispatch_store.write(project, pending_name, pending)
+            repository_receipt.unlink()
+            assert panel._dispatch_call_finished(project, shared, member), "independent exit evidence required a receipt"
+            # A fresh controller accepts durable evidence, but never reconstructs authority from repository bytes.
+            probe = ("import json,sys; from pathlib import Path; sys.path.insert(0,sys.argv[1]); "
+                     "import terminal_panel as p; repo=Path(sys.argv[2]); m=json.loads(sys.argv[4]); "
+                     "expected=sys.argv[5]=='yes'; "
+                     "assert p._dispatch_call_finished(repo,sys.argv[3],m)==expected; "
+                     "assert any(r['participant']==m['participant'] for r in "
+                     "p.scope_overlaps(repo,sys.argv[3],{'participants':[m]},m['parent'],['value.txt']))!=expected")
+            args = [sys.executable, "-c", probe, str(root / "scripts/lib"), str(project), shared, json.dumps(member)]
+            fresh = subprocess.run(args + ["yes"], capture_output=True, text=True)
+            assert fresh.returncode == 0, "completed scope reappeared in a new controller: " + fresh.stderr
+            anchor_name = name + "-launch.json"
+            anchor = panel.dispatch_store.read(project, anchor_name)
+            (private / anchor_name).unlink()
+            assert not panel._dispatch_call_finished(project, shared, member), "restart trusted repository evidence"
+            fresh = subprocess.run(args + ["no"], capture_output=True, text=True)
+            assert fresh.returncode == 0, "restart released unverified scope: " + fresh.stderr
+            assert any(row["participant"] == name for row in panel.scope_overlaps(
+                project, shared, state, room_owner, ["value.txt"])), "restart released unverified scope"
+            panel.dispatch_store.write(project, anchor_name, anchor)
+            assert panel._dispatch_call_finished(project, shared, member), "restored authentic proof kept scope"
+            with recorded_fixture("receipt-replay") as other:
+                panel.dispatch_store.write(project, other["name"] + "-supervisor.json", receipt)
+                assert not panel._dispatch_call_finished(project, shared, other["member"]), "receipt replayed against another launch"
+            launch_path = project / panel._dispatch_call_path(name)
+            original_launch = launch_path.read_bytes()
+            launch_path.write_text(json.dumps(dict(call, nonce="different-launch")))
+            assert not panel._dispatch_call_finished(project, shared, member), "receipt replayed against a substituted launch"
+            try:
+                panel._record_dispatch_call(project, shared, name, room_owner, process, None, 0)
+            except ValueError:
+                refused_exit = True
+            else:
+                refused_exit = False
+            assert refused_exit, "exit writer accepted a substituted launch"
+            launch_path.write_bytes(original_launch)
+            assert not panel._dispatch_call_finished(project, shared, member), "identical bytes repaired a changed launch"
+
+        # Session/group membership and snapshots cannot hide an adopted survivor or authorize release.
+        for topology in ("group", "session", "shared"):
+            detached = topology == "session"
+            body = ("child_code='import os,time; from pathlib import Path; "
+                    + ("os.setpgrp(); " if topology == "group" else "") +
+                    "Path(' + repr(ready) + ').write_text(str(os.getpid())); "
+                    "\\nwhile not Path(' + repr(release) + ').exists(): time.sleep(.02)\\n'\n"
+                    "subprocess.Popen([sys.executable,'-c',child_code],start_new_session=" + repr(detached) + ")\n"
+                    "while not Path(ready).exists(): time.sleep(.01)\n")
+            with recorded_fixture("survivor-" + topology, body) as fixture:
+                name, member, call, process = (fixture[k] for k in ("name", "member", "call", "process"))
+                deadline = time.monotonic() + 5
+                while panel._dispatch_supervisor_receipt(project, call)["exit"] is None and time.monotonic() < deadline:
+                    time.sleep(.02)
+                receipt = panel._dispatch_supervisor_receipt(project, call)
+                child = int(fixture["ready"].read_text())
+                assert receipt["exit"] == 0 and not receipt["all_reaped"], "provider exit bypassed a surviving descendant"
+                assert process.poll() is None, "supervisor abandoned a surviving descendant"
+                assert panel_terminals.process(child)["parent"] == process.pid, "orphan was not adopted"
+                assert (os.getsid(child) == process.pid) is (not detached), "session topology did not match fixture"
+                assert (os.getpgid(child) == child) is (topology != "shared"), "detached group was not observed"
+                if topology == "group":
+                    assert os.getsid(child) == process.pid and os.getpgid(child) == child, "same-session group survivor escaped fixture"
+                snapshots = [panel._dispatch_descendants(process.pid) for unused in range(2)]
+                assert len(snapshots) >= 2 and all(snapshots), snapshots
+                snapshot = snapshots[-1]
+                assert any(row["pid"] == child for row in snapshot), "snapshot missed the survivor"
+                assert not panel._dispatch_descendants_gone(snapshot), "live descendant was called gone"
+                evidence = {}
+                with patch.object(panel, "_dispatch_descendants", side_effect=[snapshot, None, []]):
+                    for unused in range(3):
+                        panel._observe_dispatch_descendants(process, evidence)
+                assert evidence["descendants"] == snapshot, "failed scan discarded recorded descendants"
+                assert evidence["observation_failed"], "failed scan repaired itself from empty evidence"
+                pending_status = {"group": 143, "session": 1, "shared": 0}[topology]
+                panel._record_dispatch_pending(project, call, pending_status, "survivor-" + topology, evidence)
+                assert panel._dispatch_pending(project, call)["descendants"] is None, "failed scan became complete pending evidence"
+                with patch.object(panel, "_dispatch_group_gone", return_value=True), \
+                        patch.object(panel, "_dispatch_session_gone", return_value=True):
+                    assert not panel._dispatch_call_finished(project, shared, member), "receipt bypassed a surviving group"
+                assert not panel._dispatch_call_finished(project, shared, member), "receipt bypassed a surviving descendant"
+                state = room.status(project, shared)
+                assert name not in state["call_results"] and not fixture["row"]["terminal"], "survivor received terminal settlement"
+                assert any(row["participant"] == name for row in panel.scope_overlaps(
+                    project, shared, state, room_owner, ["value.txt"])), "surviving descendant released scope"
+                with patch.dict(os.environ, room_env, clear=True):
+                    panel._reconcile_dispatch(project, shared, state, room_owner, room_owner)
+                assert name not in room.status(project, shared)["call_results"], "live session reconciled"
+                assert not panel._read(project, panel._dispatch_call_path(name, True), missing=True), "survivor received exit receipt"
+                fixture["release"].touch()
+                assert process.wait(timeout=5) == 0, "surviving child was not reaped"
+                assert panel._dispatch_call_finished(project, shared, member), "gone descendants kept scope"
+                assert panel._dispatch_descendants_gone(snapshot), "reaped descendants stayed live"
+                assert panel._dispatch_session_gone(process.pid), "reaped session remained populated"
+                next_status, next_member, next_notice = dispatch_case("pass", "after-survivor-" + topology)
+                assert next_status == 0, "next dispatch failed after authentic descendant exit: " + next_notice
+                current = json.loads(panel.events(project, "show", "--attempt", fixture["row"]["attempt_id"], "--json", output=True))
+                after = room.status(project, shared)
+                assert current["terminal"] and current["state"] == ("cancelled" if pending_status == 143 else "failed"), "reaped survivor did not reconcile"
+                assert current["reason_code"] == "panel_call_interrupted", "reconciliation lost its reason code"
+                assert after["call_results"][name]["exit"] == pending_status, "deferred status did not survive reconciliation"
+                if topology == "shared":
+                    assert current["terminal"] and after["call_results"][name]["exit"] == 0, "observed normal tree lost successful settlement"
+                assert not any(row["participant"] == name for row in panel.scope_overlaps(
+                    project, shared, after, room_owner, ["value.txt"])), "reaped survivor kept scope"
+                assert panel._dispatch_released(project, call), "reconciliation did not persist release"
+                assert room.participant(after, name)["joined"], "settlement changed participant identity"
+                fresh = subprocess.run([sys.executable, "-c", probe, str(root / "scripts/lib"), str(project), shared,
+                                        json.dumps(member), "yes"], capture_output=True, text=True)
+                assert fresh.returncode == 0, "reconciled scope reappeared after restart: " + fresh.stderr
+        after_subreaper = ctypes.c_int()
+        assert libc.prctl(37, ctypes.byref(after_subreaper), 0, 0, 0) == 0, "parent subreaper state unreadable after calls"
+        assert after_subreaper.value == previous.value, "per-call supervisors changed the controller's subreaper state"
+    # Missing evidence and every failed observation stay unknown, including an earlier empty scan.
+    assert not panel._dispatch_recorded_gone(None)
+    evidence = {}
+    with patch.object(panel, "_dispatch_descendants", side_effect=[[], None, []]):
+        for unused in range(3):
+            panel._observe_dispatch_descendants(Mock(pid=2147483647), evidence)
+        assert evidence["descendants"] == [] and evidence["observation_failed"]
+    # Refusal happens before Popen, with exactly the same enrollment rollback as spawn failure.
+    real_launch = subprocess.Popen
+    refused_launches = []
+    def refuse_provider(argv, *args, **kwargs):
+        if "dispatch_supervisor.py" in " ".join(map(str, argv)) or argv[:3] == [sys.executable, "-c", "pass"]:
+            refused_launches.append(argv)
+            raise AssertionError("provider started after refused launch")
+        return real_launch(argv, *args, **kwargs)
+    for failure in (OSError("launch denied"), ValueError("launch substituted")):
+        with patch.dict(os.environ, room_env, clear=True), \
+                patch.object(panel.shutil, "which", return_value=sys.executable), \
+                patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
+                patch.object(panel, "plan_link", return_value=None), \
+                patch.object(panel, "_prepare_dispatch_call", side_effect=failure), \
+                patch.object(panel.subprocess, "Popen", side_effect=refuse_provider):
+            before = {p["participant"] for p in room.status(project, shared)["participants"]}
+            try:
+                panel.run_dispatch(project, "claude", "worker", "read", "Inspect", None, None,
+                                   "launch-refused", False, None, route, None, None, None)
+            except (OSError, ValueError) as error:
+                assert error is failure
+            else:
+                raise AssertionError("launch record failure started a provider")
+            assert not refused_launches
+            added = [p for p in room.status(project, shared)["participants"] if p["participant"] not in before]
+            assert len(added) == 1 and not added[0]["joined"]
+            refused = added[0]["participant"]
+            assert refused not in room.status(project, shared)["call_results"], "refused launch delivered a result"
+            assert not panel._read(project, panel._dispatch_pending_path(refused), missing=True), "refused launch retained pending evidence"
+            assert not panel._dispatch_call_record(project, shared, added[0]), "refused launch left trusted call evidence"
+    member = "call-" + "e" * 16
+    precreated = project / panel._dispatch_call_path(member)
+    precreated.write_text('{"pid":2147483647}')
     try:
-        receipt_identity = panel_terminals.process(receipt_child.pid)["identity"]
-        panel._record_dispatch_call(project, shared, receipt_member, room_owner, receipt_child, receipt_identity)
-        launch = panel._dispatch_call_record(project, shared, receipt_row)
-        pending_path = project / panel._dispatch_pending_path(receipt_member)
-        panel._record_dispatch_pending(project, launch, 0, "receipt-fixture",
-                                       {"descendants": panel._dispatch_descendants(receipt_child.pid)})
-        # Even a correctly bound receipt written for the live launch is insufficient.
-        panel._record_dispatch_call(project, shared, receipt_member, room_owner, receipt_child, receipt_identity, 0)
-        with patch.object(panel, "main_history", return_value=[]):
-            assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt released a live process"
-            assert any(row["participant"] == receipt_member for row in panel.scope_overlaps(
-                project, shared, receipt_state, room_owner, ["value.txt"])), "forged live receipt suppressed scope overlap"
-    finally:
-        receipt_child.terminate()
-        receipt_child.wait(timeout=5)
-    with patch.object(panel, "main_history", return_value=[{
-            "terminal": True, "refs": {"panel_role": "worker", "panel_room_participant": receipt_member}}]), \
-            patch.object(panel, "_dispatch_call_finished", return_value=False):
-        assert any(row["participant"] == receipt_member for row in panel.scope_overlaps(
-            project, shared, receipt_state, room_owner, ["value.txt"])), "terminal attempt released unverified scope"
-    receipt_path = project / panel._dispatch_call_path(receipt_member, True)
-    receipt_bytes = receipt_path.read_bytes()
-    receipt = json.loads(receipt_bytes)
-    assert re.fullmatch(r"[0-9a-f]{64}", receipt["launch_sha256"])
-    assert panel._dispatch_call_finished(project, shared, receipt_row), "confirmed termination kept scope"
-    with patch.object(panel, "_dispatch_group_gone", return_value=False):
-        assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt bypassed a surviving group"
-    with patch.object(panel_terminals, "process_gone", return_value=False):
-        assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt bypassed unknown leader identity"
-    for forged in (dict(receipt, launch_sha256="0" * 64),
-                   {key: value for key, value in receipt.items() if key != "launch_sha256"},
-                   dict(receipt, pid=receipt_child.pid + 1)):
-        receipt_path.write_text(json.dumps(forged))
-        assert not panel._dispatch_call_finished(project, shared, receipt_row), "mismatched/legacy receipt accepted"
-    receipt_path.write_bytes(receipt_bytes)
-    launch = panel._dispatch_call_record(project, shared, receipt_row)
-    pending_path = project / panel._dispatch_pending_path(receipt_member)
-    pending_path.unlink()
-    panel._record_dispatch_pending(project, launch, 143, "receipt-fixture",
-        {"forced": True, "descendants": [{"pid": 2147483646, "identity": "detached", "group": 2147483646}]})
-    with patch.object(panel_terminals, "process_gone", side_effect=lambda pid, identity: pid == receipt_child.pid), \
-            patch.object(panel, "_dispatch_group_gone", return_value=True):
-        assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt bypassed a surviving descendant"
-    with patch.object(panel_terminals, "process_gone", return_value=True), \
-            patch.object(panel, "_dispatch_group_gone", return_value=True):
-        assert panel._dispatch_call_finished(project, shared, receipt_row), "gone descendants kept scope"
-    trusted_pending = pending_path.read_bytes()
-    for descendants in (None, []):
-        pending_path.write_text(json.dumps(dict(launch, exit=143, task_id="receipt-fixture",
-                                              forced=False, descendants=descendants)))
-        assert not panel._dispatch_call_finished(project, shared, receipt_row), "forged empty observation released scope"
-    # A newly created sibling pending artifact has no controller provenance either.
-    pending_path.write_text(json.dumps(dict(launch, exit=143, task_id="receipt-fixture", forced=True, descendants=[])))
-    with patch.object(panel, "_DISPATCH_OBSERVATIONS", {}):
-        assert not panel._dispatch_call_finished(project, shared, receipt_row), "new sibling pending artifact released scope"
-    pending_path.write_bytes(trusted_pending)
-    assert panel._dispatch_call_finished(project, shared, receipt_row), "authentic gone descendants kept scope"
-    with patch.object(panel, "_DISPATCH_OBSERVATIONS", {}):
-        assert not panel._dispatch_call_finished(project, shared, receipt_row), "restart trusted repository evidence"
-        assert any(row["participant"] == receipt_member for row in panel.scope_overlaps(
-            project, shared, receipt_state, room_owner, ["value.txt"])), "restart released unverified scope"
-    pending_path.write_text("{}")
-    assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt bypassed invalid pending evidence"
-    pending_path.unlink()
-    launch_path = project / panel._dispatch_call_path(receipt_member)
-    launch_bytes = launch_path.read_bytes()
-    launch_path.write_text(json.dumps(dict(launch, identity="different-launch")))
-    assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt replayed against another launch"
-    try:
-        panel._record_dispatch_call(project, shared, receipt_member, room_owner, receipt_child, receipt_identity, 0)
+        panel._prepare_dispatch_call(project, shared, member, room_owner)
     except ValueError:
         pass
     else:
-        raise AssertionError("exit writer accepted a substituted launch")
-    launch_path.write_bytes(launch_bytes)
-    receipt_path.unlink()
-    assert not panel._dispatch_call_finished(project, shared, receipt_row), "missing observation released scope"
-    panel._record_dispatch_pending(project, launch, 0, "receipt-fixture", {"descendants": []})
-    assert panel._dispatch_call_finished(project, shared, receipt_row), "independent exit evidence required a receipt"
-    receipt_path.write_bytes(receipt_bytes)
-    room.append(project, shared, {"kind": "leave", "participant": receipt_member}, "Receipt fixture complete")
-    # END receipt-only scope regression.
+        raise AssertionError("precreated launch record accepted")
+    precreated.unlink()
+    if sys.platform == "linux":
+        status, member, notice = dispatch_case("pass", "subreaper-quick")
+        assert status == 0, notice
+        name = member["participant"]
+        assert room.status(project, shared)["call_results"][name]["exit"] == 0, "quick call lost its successful result"
+        call = panel._dispatch_call_record(project, shared, member)
+        assert call and panel._dispatch_call_finished(project, shared, member)
+        assert not room.participant(room.status(project, shared), name)["owns"]
+        # Fresh interpreter checks durable receipt, including a stale projected scope.
+        probe = ('import sys,json; from pathlib import Path; sys.path.insert(0,sys.argv[1]); '
+                 'import terminal_panel as p; '
+                 'assert p._dispatch_call_finished(Path(sys.argv[2]),sys.argv[3],json.loads(sys.argv[4]))')
+        fresh = subprocess.run([sys.executable, "-c", probe, str(root / "scripts/lib"), str(project), shared,
+                                json.dumps(member)], capture_output=True, text=True)
+        assert fresh.returncode == 0, fresh.stderr
+        launch_path = project / panel._dispatch_call_path(name)
+        assert stat.S_IMODE(launch_path.stat().st_mode) == 0o600
+        original = launch_path.read_bytes()
+        launch_path.write_text(json.dumps(dict(call, pid=2147483647)))
+        assert not panel._dispatch_call_finished(project, shared, member), "substituted launch released scope"
+        # Restoring bytes cannot undo the generation change.
+        launch_path.write_bytes(original)
+        assert not panel._dispatch_call_finished(project, shared, member)
+
+        status, member, notice = dispatch_case("pass", "subreaper-missing")
+        assert status == 0, notice
+        call = panel._dispatch_call_record(project, shared, member)
+        private = panel.dispatch_store.store(project)
+        pending_path = private / (member["participant"] + "-pending.json")
+        pending = pending_path.read_bytes()
+        pending_path.unlink()
+        assert not panel._dispatch_call_finished(project, shared, member)
+        # A repository receipt/pending cannot replace missing controller evidence.
+        (project / panel._dispatch_pending_path(member["participant"])).write_text(json.dumps(dict(call, descendants=[])))
+        assert not panel._dispatch_call_finished(project, shared, member)
+        pending_path.write_bytes(pending)
+        pending_path.chmod(0o600)
+        assert panel._dispatch_call_finished(project, shared, member)
+
+        # Controller TERM reaches the supervised provider and keeps reaping proof alive.
+        import threading
+        ready = temporary / "supervised-term.ready"
+        cleaned = temporary / "supervised-term.cleaned"
+        cancel_code = ("import signal,subprocess,sys,time; from pathlib import Path\n"
+                       "def cleanup(n,f):\n"
+                       "    subprocess.run([sys.executable,'-c','import time; time.sleep(.3)'],check=True)\n"
+                       "    Path(" + repr(str(cleaned)) + ").touch()\n"
+                       "    sys.exit(0)\n"
+                       "signal.signal(signal.SIGTERM,cleanup)\n"
+                       "Path(" + repr(str(ready)) + ").touch(); time.sleep(60)")
+        def cancel_when_ready():
+            deadline = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(.02)
+            if ready.exists():
+                os.kill(os.getpid(), signal.SIGTERM)
+        cancellation = threading.Thread(target=cancel_when_ready)
+        cancellation.start()
+        try:
+            dispatch_case(cancel_code, "subreaper-term")
+        except panel.NativeShutdown as error:
+            assert error.exit_code == 143
+        else:
+            raise AssertionError("controller TERM was swallowed")
+        finally:
+            cancellation.join(timeout=12)
+        assert not cancellation.is_alive() and cleaned.exists(), "TERM interrupted provider cleanup"
+        stopped = next(p for p in reversed(room.status(project, shared)["participants"])
+                       if p.get("label") == "investigate")
+        assert panel._dispatch_call_finished(project, shared, stopped), "TERM destroyed exhaustion proof"
+        assert room.status(project, shared)["call_results"][stopped["participant"]]["exit"] == 143
+
+        # A double fork creates an orphan in a new session between observations.
+        pid_file, release_file = temporary / "subreaper-orphan.pid", temporary / "subreaper-release"
+        code = '''import os,time
+from pathlib import Path
+if os.fork() == 0:
+    os.setsid()
+    if os.fork() == 0:
+        Path(PID).write_text(str(os.getpid()))
+        while not Path(RELEASE).exists(): time.sleep(.02)
+        os._exit(0)
+    os._exit(0)
+os.wait()
+while not Path(PID).exists(): time.sleep(.01)
+'''.replace("PID", repr(str(pid_file))).replace("RELEASE", repr(str(release_file)))
+        try:
+            with patch.object(panel, "_dispatch_descendants", return_value=None):
+                status, member, notice = dispatch_case(code, "subreaper-orphan")
+            assert status == 1 and "settlement pending" in notice and "Manual clear" in notice, notice
+            name = member["participant"]
+            call = panel._dispatch_call_record(project, shared, member)
+            receipt = panel._dispatch_supervisor_receipt(project, call)
+            orphan = int(pid_file.read_text())
+            assert os.getsid(orphan) != receipt["pid"]
+            assert panel_terminals.process(orphan)["parent"] == receipt["pid"], "orphan escaped subreaper"
+            room.scope(project, shared, name, ["value.txt"])
+            assert not panel._dispatch_call_finished(project, shared, member)
+            assert any(row["participant"] == name for row in panel.scope_overlaps(
+                project, shared, room.status(project, shared), room_owner, ["value.txt"]))
+            release_file.touch()
+            deadline = time.monotonic() + 5
+            while not panel._dispatch_call_finished(project, shared, member) and time.monotonic() < deadline:
+                time.sleep(.05)
+            assert panel._dispatch_call_finished(project, shared, member), "reaped orphan remained pending"
+            assert panel_terminals.process_gone(orphan, None) or not Path('/proc/' + str(orphan)).exists()
+            panel._settle_dispatch(project, shared, name, 1)
+            assert panel._dispatch_released(project, call)
+            assert not any(row["participant"] == name for row in panel.scope_overlaps(
+                project, shared, room.status(project, shared), room_owner, ["value.txt"]))
+            fresh = subprocess.run([sys.executable, "-c", probe, str(root / "scripts/lib"), str(project), shared,
+                                    json.dumps(member)], capture_output=True, text=True)
+            assert fresh.returncode == 0, fresh.stderr
+        finally:
+            release_file.touch()
+    # Unsupported backends cannot claim whole-tree termination from a leader or snapshot.
+    for platform in ("darwin", "win32", "freebsd"):
+        with patch.dict(os.environ, room_env, clear=True), \
+                patch.object(panel.shutil, "which", return_value=sys.executable), \
+                patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
+                patch.object(panel, "plan_link", return_value=None), \
+                patch.object(panel.sys, "platform", platform), redirect_stderr(io.StringIO()) as notice:
+            before = {p["participant"] for p in room.status(project, shared)["participants"]}
+            assert panel.run_dispatch(project, "claude", "worker", "read", "Inspect", None, None,
+                                      "unsupported", False, None, route, None, None, None) == 1
+            member = next(p for p in room.status(project, shared)["participants"] if p["participant"] not in before)
+            with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": member["participant"]}):
+                room.scope(project, shared, member["participant"], ["value.txt"])
+            assert not panel._dispatch_call_finished(project, shared, member)
+            assert "Manual clear" in notice.getvalue() and "--clear" in notice.getvalue()
+    # Each negative case has finished; isolate the menu's all-scope release contract.
+    for row in room.status(project, shared)["participants"]:
+        if row["participant"] not in original_members and row["joined"]:
+            room.append(project, shared, {"kind": "leave", "participant": row["participant"]}, "Negative fixture complete")
     # Exercise the real child, handlers and ledger without a provider call: leave an active attempt on TERM.
     interrupted_file = temporary / "interrupted-attempt"
     cleaned_file = temporary / "interrupted-cleaned"
@@ -4705,41 +5055,60 @@ attempt = panel.events(repo, "start", "--provider", "codex", "--tool", "peer-del
                        "--ref", "panel_role=worker", "--ref", "panel_room_id=" + ident,
                        "--ref", "panel_room_participant=" + member, "--then", "starting", "--then", "working", output=True)
 Path(sys.argv[2]).write_text(attempt)
-os.kill(os.getppid(), signal.SIGTERM)
+os.kill(int(sys.argv[4]), signal.SIGTERM)
 time.sleep(60)
 ''')
-    saved = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
-    with patch.dict(os.environ, room_env, clear=True), \
-            patch.object(panel.shutil, "which", return_value=sys.executable), \
-            patch.object(panel, "routed_command", return_value=[sys.executable, str(interrupted_child),
-                         str(root / "scripts/lib"), str(interrupted_file), str(cleaned_file), "--repo", str(project)]):
-        interrupted_route = allocate("claude", "worker", "light", "read", "investigate", {"codex"})
-        def menu_dispatch(*args, **kwargs):
-            return panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
-                                      "interrupted-task", False, "Interrupted call", interrupted_route,
-                                      None, None, None)
-        with patch.object(panel, "dispatch", side_effect=menu_dispatch), \
-                patch.object(panel, "managed_session", return_value=False), \
-                patch.object(panel, "panel_mains", return_value=["claude"]), \
-                patch.object(panel, "raw_keys", return_value=False), \
-                patch.object(panel, "read_choice", return_value="5") as menu_choice, \
-                patch.object(panel, "read_field", side_effect=["Inspect source", "light"]) as menu_fields:
-            try:
-                panel.interactive(project)
-            except panel.NativeShutdown as error:
-                assert error.exit_code == 143
-            else:
-                raise AssertionError("dispatch menu swallowed TERM after settlement")
-            assert menu_choice.call_count == 1 and menu_fields.call_count == 2, "menu paused after TERM"
-    assert all(signal.getsignal(number) == handler for number, handler in saved.items())
-    interrupted = json.loads(panel.events(project, "show", "--attempt", interrupted_file.read_text(), "--json", output=True))
-    assert interrupted["state"] == "cancelled" and interrupted["reason_code"] == "panel_call_interrupted", interrupted
-    member = interrupted["refs"]["panel_room_participant"]
-    settled = room.status(project, shared)
-    assert cleaned_file.read_text() == "cleaned" and settled["call_results"][member]["exit"] == 143
-    assert room.participant(settled, member)["joined"] and panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"]) == []
-    with patch.object(panel, "main_history", return_value=[dict(interrupted, state="review", terminal=False)]):
-        assert panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"]) == [], "verified exit receipt did not release scope"
+    menu_backends = ("linux", "darwin") if sys.platform == "linux" else (sys.platform,)
+    for menu_backend in menu_backends:
+        cleaned_file.unlink(missing_ok=True)
+        interrupted_file.unlink(missing_ok=True)
+        saved = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+        with patch.dict(os.environ, room_env, clear=True), \
+                patch.object(panel.sys, "platform", menu_backend), \
+                redirect_stderr(io.StringIO()) as menu_notices, \
+                patch.object(panel.shutil, "which", return_value=sys.executable), \
+                patch.object(panel, "routed_command", return_value=[sys.executable, str(interrupted_child),
+                             str(root / "scripts/lib"), str(interrupted_file), str(cleaned_file), str(os.getpid()), "--repo", str(project)]):
+            interrupted_route = allocate("claude", "worker", "light", "read", "investigate", {"codex"})
+            def menu_dispatch(*args, **kwargs):
+                return panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
+                                          "interrupted-task", False, "Interrupted call", interrupted_route,
+                                          None, None, None)
+            with patch.object(panel, "dispatch", side_effect=menu_dispatch), \
+                    patch.object(panel, "managed_session", return_value=False), \
+                    patch.object(panel, "panel_mains", return_value=["claude"]), \
+                    patch.object(panel, "raw_keys", return_value=False), \
+                    patch.object(panel, "read_choice", return_value="5") as menu_choice, \
+                    patch.object(panel, "read_field", side_effect=["Inspect source", "light"]) as menu_fields:
+                try:
+                    panel.interactive(project)
+                except panel.NativeShutdown as error:
+                    assert error.exit_code == 143
+                else:
+                    raise AssertionError("dispatch menu swallowed TERM after settlement")
+                assert menu_choice.call_count == 1 and menu_fields.call_count == 2, "menu paused after TERM"
+        assert all(signal.getsignal(number) == handler for number, handler in saved.items())
+        interrupted = json.loads(panel.events(project, "show", "--attempt", interrupted_file.read_text(), "--json", output=True))
+        member = interrupted["refs"]["panel_room_participant"]
+        settled = room.status(project, shared)
+        if menu_backend == "linux":
+            assert interrupted["state"] == "cancelled" and interrupted["reason_code"] == "panel_call_interrupted", interrupted
+            assert cleaned_file.read_text() == "cleaned" and settled["call_results"][member]["exit"] == 143
+            assert room.participant(settled, member)["joined"] and panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"]) == []
+            with patch.object(panel, "main_history", return_value=[dict(interrupted, state="review", terminal=False)]):
+                assert panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"]) == [], "verified exit receipt did not release scope"
+        else:
+            assert cleaned_file.read_text() == "cleaned", "unsupported backend interrupted provider cleanup"
+            assert interrupted["state"] == "working" and not interrupted["terminal"], "unsupported menu settled without tree proof"
+            assert member not in settled["call_results"], "unsupported menu delivered a final result"
+            assert "settlement pending" in menu_notices.getvalue() and "Manual clear" in menu_notices.getvalue()
+            assert room.participant(settled, member)["joined"] and any(row["participant"] == member for row in
+                panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"])), "unsupported menu released scope"
+            with patch.object(panel, "main_history", return_value=[dict(interrupted, state="review", terminal=False)]):
+                assert any(row["participant"] == member for row in panel.scope_overlaps(
+                    project, shared, settled, room_owner, ["value.txt"])), "unsupported stale projection released scope"
+            panel.events(project, "transition", "--attempt", interrupted["attempt_id"], "--state", "cancelled",
+                         "--reason-code", "fixture_complete")
     # HUP follows TERM out of run_dispatch; the turn-interrupt paths retain exit 130.
     for interruption in (panel.NativeShutdown(signal.SIGHUP), panel.NativeShutdown(signal.SIGINT), KeyboardInterrupt()):
         finished = Mock(pid=2147483647, poll=lambda: 0)
@@ -4759,182 +5128,7 @@ time.sleep(60)
                 assert interruption is error and error.exit_code == 129
             else:
                 assert code == 130
-    # Reap a quick call before identity lookup or its first descendant observation.
-    real_popen = subprocess.Popen
-    for observed in (True, False):
-        quick = []
-        def launch_quick(argv, *args, **kwargs):
-            process = real_popen(argv, *args, **kwargs)
-            if argv[:3] == [sys.executable, "-c", "pass"]:
-                process.wait(timeout=5)
-                quick.append((process, kwargs["env"]["OMS_ROOM_PARTICIPANT"]))
-            return process
-        with patch.dict(os.environ, room_env, clear=True), \
-                patch.object(panel.shutil, "which", return_value=sys.executable), \
-                patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
-                patch.object(panel.subprocess, "Popen", side_effect=launch_quick), \
-                patch.object(panel, "_dispatch_descendants", side_effect=panel._dispatch_descendants if observed else lambda pid: None):
-            assert panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
-                                      "quick-exit", False, "Quick call", interrupted_route, None, None, None) == 0
-        process, member = quick[0]
-        state = room.status(project, shared)
-        call = panel._dispatch_call_record(project, shared, room.participant(state, member))
-        assert call["identity"] is None and process.returncode == 0
-        assert state["call_results"][member]["exit"] == 0
-        assert panel._dispatch_call_finished(project, shared, room.participant(state, member))
-        assert panel._dispatch_descendants(process.pid) == [], "absent leader prevented session observation"
-        room.append(project, shared, {"kind": "leave", "participant": member}, "Quick-exit fixture complete")
-    # The normal wait loop records a detached child while alive, then verifies its reaped exit.
-    normal_child = temporary / "normal-observed-child.py"
-    normal_child.write_text('''import os, subprocess, sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-import terminal_panel as panel
-import room
-repo, ident, member = Path(os.environ["OMS_ROOM_REPO"]), os.environ["OMS_ROOM_ID"], os.environ["OMS_ROOM_PARTICIPANT"]
-room.scope(repo, ident, member, ["value.txt"])
-attempt = panel.events(repo, "start", "--provider", "codex", "--tool", "peer-delegate", "--task-id", sys.argv[4],
-                       "--parent-attempt-id", os.environ["OMS_PANEL_MAIN_ATTEMPT"],
-                       "--ref", "panel_role=worker", "--ref", "panel_room_id=" + ident,
-                       "--ref", "panel_room_participant=" + member, "--then", "starting", "--then", "working", output=True)
-Path(sys.argv[2]).write_text(attempt)
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2.2)"], start_new_session=True)
-Path(sys.argv[3]).write_text("ready")
-child.wait(timeout=10)
-''')
-    real_popen, real_snapshot, real_record = subprocess.Popen, panel._dispatch_descendants, panel._record_dispatch_call
-    real_session_gone = panel._dispatch_session_gone
-    for failure in ("complete", "incomplete", "record-unavailable"):
-        incomplete = failure == "incomplete"
-        task = "normal-observed-" + failure
-        attempt_file, ready_file = temporary / (task + ".attempt"), temporary / (task + ".ready")
-        snapshots = []
-        def launch_observed(argv, *args, **kwargs):
-            process = real_popen(argv, *args, **kwargs)
-            if str(normal_child) in argv:
-                deadline = time.monotonic() + 5
-                while not ready_file.exists() and process.poll() is None and time.monotonic() < deadline:
-                    time.sleep(.02)
-                assert ready_file.exists(), "normal child did not become ready"
-            return process
-        def observe_snapshot(pid):
-            snapshot = real_snapshot(pid)
-            snapshots.append(snapshot)
-            return None if incomplete and len(snapshots) == 2 else snapshot
-        with patch.dict(os.environ, room_env, clear=True), \
-                patch.object(panel.shutil, "which", return_value=sys.executable), \
-                patch.object(panel, "routed_command", return_value=[sys.executable, str(normal_child),
-                             str(root / "scripts/lib"), str(attempt_file), str(ready_file), task, "--repo", str(project)]), \
-                patch.object(panel.subprocess, "Popen", side_effect=launch_observed), \
-                patch.object(panel, "_dispatch_descendants", side_effect=observe_snapshot), \
-                patch.object(panel, "_dispatch_session_gone", side_effect=(lambda pid: False) if incomplete else real_session_gone), \
-                patch.object(panel, "_record_dispatch_call", side_effect=ValueError("fixture record unavailable")
-                             if failure == "record-unavailable" else real_record), \
-                redirect_stderr(io.StringIO()) as notices:
-            assert panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
-                                      task, False, "Observed normal call", interrupted_route,
-                                      None, None, None) == int(failure != "complete")
-        assert len(snapshots) >= 2 and all(snapshots), snapshots
-        row = json.loads(panel.events(project, "show", "--attempt", attempt_file.read_text(), "--json", output=True))
-        member = row["refs"]["panel_room_participant"]
-        state = room.status(project, shared)
-        call = panel._dispatch_call_record(project, shared, room.participant(state, member))
-        with patch.object(panel, "_dispatch_session_gone", side_effect=(lambda pid: False) if incomplete else real_session_gone):
-            overlaps = panel.scope_overlaps(project, shared, state, room_owner, ["value.txt"])
-        if failure == "record-unavailable":
-            assert call is None and not row["terminal"] and member not in state["call_results"]
-            assert not panel._read(project, panel._dispatch_pending_path(member), missing=True)
-            assert any(item["participant"] == member for item in overlaps)
-            assert "owner cleanup is required" in notices.getvalue()
-            panel.events(project, "transition", "--attempt", row["attempt_id"], "--state", "cancelled",
-                         "--reason-code", "fixture_complete")
-            continue
-        pending = panel._dispatch_pending(project, call)
-        if incomplete:
-            assert pending["descendants"] and not row["terminal"], "failed scan discarded recorded descendants"
-            assert member not in state["call_results"] and "settlement pending" in notices.getvalue()
-            assert any(item["participant"] == member for item in overlaps)
-            with patch.dict(os.environ, room_env, clear=True), \
-                    patch.object(panel, "_dispatch_session_gone", return_value=False):
-                panel._reconcile_dispatch(project, shared, state, room_owner, room_owner)
-            assert member not in room.status(project, shared)["call_results"], "unreadable session reconciled"
-            with patch.dict(os.environ, room_env, clear=True):
-                panel._reconcile_dispatch(project, shared, state, room_owner, room_owner)
-            assert room.status(project, shared)["call_results"][member]["exit"] == 1
-            room.append(project, shared, {"kind": "leave", "participant": member}, "Recovered observation fixture complete")
-        else:
-            assert pending["descendants"] and panel._dispatch_descendants_gone(pending["descendants"])
-            assert row["terminal"] and state["call_results"][member]["exit"] == 0
-            assert not any(item["participant"] == member for item in overlaps)
-    if sys.platform == "linux":
-        # Adopt the orphan for fixture cleanup: its session still belongs to the reaped call.
-        import ctypes
-        libc, previous = ctypes.CDLL(None, use_errno=True), ctypes.c_int()
-        assert libc.prctl(37, ctypes.byref(previous), 0, 0, 0) == 0
-        assert libc.prctl(36, 1, 0, 0, 0) == 0
-        task = "session-grandchild"
-        attempt_file, ready_file = temporary / (task + ".attempt"), temporary / (task + ".pid")
-        session_child = temporary / "session-grandchild.py"
-        grandchild_code = ("import os,sys,time; from pathlib import Path; os.setpgrp(); "
-                           "Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)")
-        intermediate_code = ("import subprocess,sys,time; from pathlib import Path; "
-                             "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]]); "
-                             "\nwhile not Path(sys.argv[2]).exists(): time.sleep(.01)\n")
-        session_child.write_text(normal_child.read_text().split("child = subprocess.Popen(", 1)[0] +
-            "subprocess.run([sys.executable, '-c', " + repr(intermediate_code) + ", " +
-            repr(grandchild_code) + ", sys.argv[3]], check=True)\n")
-        session_leaders, grandchild, grandchild_reaped = [], None, False
-        def launch_session(argv, *args, **kwargs):
-            process = real_popen(argv, *args, **kwargs)
-            if str(session_child) in argv:
-                process.wait(timeout=10)
-                session_leaders.append(process)
-            return process
-        try:
-            with patch.dict(os.environ, room_env, clear=True), \
-                    patch.object(panel.shutil, "which", return_value=sys.executable), \
-                    patch.object(panel, "routed_command", return_value=[sys.executable, str(session_child),
-                                 str(root / "scripts/lib"), str(attempt_file), str(ready_file), task, "--repo", str(project)]), \
-                    patch.object(panel.subprocess, "Popen", side_effect=launch_session), \
-                    patch.object(panel, "_dispatch_descendants", return_value=None), \
-                    redirect_stderr(io.StringIO()) as notices:
-                assert panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
-                                          task, False, "Session survivor", interrupted_route, None, None, None) == 1
-            grandchild = int(ready_file.read_text())
-            leader = session_leaders[0]
-            assert os.getsid(grandchild) == leader.pid and os.getpgid(grandchild) == grandchild
-            assert panel._dispatch_group_gone(leader.pid) and not panel._dispatch_session_gone(leader.pid)
-            assert any(row["pid"] == grandchild for row in panel._dispatch_descendants(leader.pid))
-            row = json.loads(panel.events(project, "show", "--attempt", attempt_file.read_text(), "--json", output=True))
-            member = row["refs"]["panel_room_participant"]
-            state = room.status(project, shared)
-            assert not row["terminal"] and member not in state["call_results"]
-            assert "settlement pending" in notices.getvalue()
-            assert any(item["participant"] == member for item in panel.scope_overlaps(project, shared, state, room_owner, ["value.txt"]))
-            with patch.dict(os.environ, room_env, clear=True):
-                panel._reconcile_dispatch(project, shared, state, room_owner, room_owner)
-            assert member not in room.status(project, shared)["call_results"], "live session reconciled"
-            os.kill(grandchild, signal.SIGTERM)
-            assert os.waitpid(grandchild, 0)[0] == grandchild
-            grandchild, grandchild_reaped = None, True
-            assert panel._dispatch_session_gone(leader.pid)
-            with patch.dict(os.environ, room_env, clear=True):
-                panel._reconcile_dispatch(project, shared, room.status(project, shared), room_owner, room_owner)
-            row = json.loads(panel.events(project, "show", "--attempt", row["attempt_id"], "--json", output=True))
-            state = room.status(project, shared)
-            assert row["terminal"] and state["call_results"][member]["exit"] == 1
-            assert not any(item["participant"] == member for item in panel.scope_overlaps(project, shared, state, room_owner, ["value.txt"]))
-            room.append(project, shared, {"kind": "leave", "participant": member}, "Session-grandchild fixture complete")
-        finally:
-            if grandchild is None and not grandchild_reaped and ready_file.exists():
-                grandchild = int(ready_file.read_text())
-            if grandchild is not None:
-                try:
-                    os.kill(grandchild, signal.SIGKILL)
-                    os.waitpid(grandchild, 0)
-                except (ProcessLookupError, ChildProcessError):
-                    pass
-            assert libc.prctl(36, previous.value, 0, 0, 0) == 0
+    # Keep direct teardown safety coverage below; it assists cancellation, never scope release.
     # Observe a real provider in a new session, with its parent reaping it during fixture cleanup.
     subtree_file = temporary / "provider-subtree.pid"
     subtree_child = temporary / "provider-subtree.py"
@@ -4993,6 +5187,7 @@ time.sleep(60)
         for unused in range(3):
             panel._observe_dispatch_descendants(Mock(pid=2147483647), evidence)
             assert evidence["descendants"] == [provider], "failed/later scan forgot a recorded child"
+            assert bool(evidence.get("observation_failed")) == (unused > 0)
     for pid in (None, 0, -1, True):
         assert not panel._dispatch_session_gone(pid) and not panel._dispatch_leader_gone(pid, None)
     # An advisor-shaped shell exits on TERM while its foreground child and a
@@ -5104,7 +5299,7 @@ time.sleep(60)
                     patch.object(panel_terminals, "matches", return_value=False), \
                     patch.object(panel, "_dispatch_group_gone", return_value=True):
                 assert panel._stop_dispatch(stopped, "original-identity", term_sent=True,
-                                            evidence={"descendants": descendants}) is gone
+                                            evidence={"descendants": descendants}) is (gone and descendants is not None)
             assert stopped.wait.call_count == int(not already_reaped)
     # Force-stop follows the grace; signaling alone is not evidence that a process group exited.
     for identity_matches, descendants in ((True, []), (False, []), (True, None)):
@@ -5157,6 +5352,8 @@ time.sleep(60)
             expected.update({(456, signal.SIGTERM), (456, signal.SIGKILL)})
         assert {tuple(call.args) for call in force.call_args_list} == expected, force.call_args_list
         assert evidence["forced"] and evidence["descendants"] == [provider]
+    # Port the seven pending lifecycle regressions: a dead leader, incomplete scan,
+    # unconfirmed kill and graceful provider exit cannot replace exhaustion proof.
     real_popen = subprocess.Popen
     normal_scenarios = {"leader-only", "normal-provider-alive", "normal-unobserved"}
     provider_scenarios = {"provider-alive", "normal-provider-alive", "graceful-provider-alive"}
@@ -5164,7 +5361,7 @@ time.sleep(60)
                      "normal-provider-alive", "normal-unobserved", "graceful-provider-alive"):
         pending = Mock(pid=2147483647, poll=lambda: 0 if scenario in normal_scenarios else None)
         pending.wait.side_effect = ([0] if scenario in normal_scenarios else
-                                   [panel.NativeShutdown(signal.SIGTERM), subprocess.TimeoutExpired("fixture", 20)] +
+                                   [panel.NativeShutdown(signal.SIGTERM), subprocess.TimeoutExpired("fixture", 25)] +
                                    ([subprocess.TimeoutExpired("fixture", 5)] if scenario == "kill-unconfirmed" else
                                     [-signal.SIGKILL] if scenario == "provider-alive" else []))
         if scenario == "graceful-provider-alive":
@@ -5173,7 +5370,7 @@ time.sleep(60)
             pending.wait.side_effect = [subprocess.TimeoutExpired("fixture", 1), 0]
         pending_attempt = []
         def pending_child(argv, *args, **kwargs):
-            if argv[:3] != [sys.executable, "-c", "pass"]:
+            if "dispatch_supervisor.py" not in " ".join(map(str, argv)):
                 return real_popen(argv, *args, **kwargs)
             env = kwargs["env"]
             member = env["OMS_ROOM_PARTICIPANT"]
@@ -5199,7 +5396,6 @@ time.sleep(60)
                                           [[provider], []] if scenario == "normal-provider-alive" else None),
                              return_value=[provider] if scenario in provider_scenarios else []), \
                 patch.object(panel, "_dispatch_group_gone", side_effect=lambda pid: (scenario in provider_scenarios or scenario == "normal-unobserved") and pid == pending.pid), \
-                patch.object(panel.time, "monotonic", side_effect=range(0, 100, 6)), \
                 patch.object(panel, "_dispatch_session_gone", return_value=scenario != "normal-unobserved"), \
                 patch.object(panel.os, "getpgid", side_effect=lambda pid: pid), \
                 patch.object(panel.os, "getsid", side_effect=lambda pid: pid), \
@@ -5220,18 +5416,16 @@ time.sleep(60)
             assert status == (1 if scenario in normal_scenarios else 143), (scenario, row)
             assert member not in state["call_results"] and "settlement pending" in notices.getvalue()
             assert not panel._read(project, panel._dispatch_call_path(member, True), missing=True)
-            record = json.loads(panel._read(project, panel._dispatch_call_path(member)))
-            assert record["pid"] == pending.pid and record["identity"] == (observation or {}).get("identity")
+            record = panel._dispatch_call_record(project, shared, room.participant(state, member))
+            binding = panel.dispatch_store.read(project, member + "-process.json")
+            assert binding["pid"] == pending.pid, "pending call bound another process"
             assert any(o["participant"] == member for o in panel.scope_overlaps(project, shared, state, room_owner, ["value.txt"]))
-            assert force.call_count == {"unknown-identity": 0, "kill-unconfirmed": 1,
-                                        "provider-alive": 3, "leader-only": 0,
-                                        "normal-provider-alive": 0, "normal-unobserved": 0,
-                                        "graceful-provider-alive": 2}[scenario]
+            force.assert_not_called()  # The supervisor must survive controller cancellation.
             deferred = panel._dispatch_pending(project, record)
-            assert deferred["forced"] == (scenario in {"kill-unconfirmed", "provider-alive", "graceful-provider-alive"})
+            assert deferred["forced"] is False, "controller claimed supervisor force evidence"
             assert not panel._dispatch_call_finished(project, shared, room.participant(state, member))
             if scenario == "normal-unobserved":
-                assert deferred["descendants"] == []
+                assert deferred["descendants"] is None, "failed observation was trusted as empty"
             if scenario in {"normal-provider-alive", "normal-unobserved"}:
                 assert pending.wait.call_args_list[0].kwargs == {"timeout": 1}
                 assert pending.wait.call_count == 2
@@ -5243,28 +5437,14 @@ time.sleep(60)
                           kind="handoff", message_id="result-" + member)
             assert any(o["participant"] == member for o in panel.scope_overlaps(
                 project, shared, room.status(project, shared), room_owner, ["value.txt"]))
-        if scenario in provider_scenarios:
-            # No board read settles the pending call; once its detached provider exits, the next dispatch
-            # settles the old attempt before launching. Concurrent calls are not capped.
-            with patch.dict(os.environ, room_env, clear=True), \
-                    patch.object(panel.shutil, "which", return_value=sys.executable), \
-                    patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]):
-                with patch.object(panel_terminals, "process_gone", return_value=True), \
-                        patch.object(panel, "_dispatch_group_gone", return_value=True):
-                    assert panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
-                                              "after-pending", False, "Next call", interrupted_route, None, None, None) == 0
-                reconciled = json.loads(panel.events(project, "show", "--attempt", pending_attempt[0], "--json", output=True))
-                after = room.status(project, shared)
-                expected_status = 1 if scenario in normal_scenarios else 143
-                assert reconciled["state"] == ("failed" if expected_status == 1 else "cancelled")
-                assert reconciled["reason_code"] == "panel_call_interrupted"
-                assert after["call_results"][member]["exit"] == expected_status
-                assert not any(o["participant"] == member for o in panel.scope_overlaps(project, shared, after, room_owner, ["value.txt"]))
-        else:
-            # Explicit fixture cleanup keeps unresolved children out of unrelated pool/scope cases.
-            panel.events(project, "transition", "--attempt", pending_attempt[0], "--state", "cancelled",
-                         "--reason-code", "fixture_complete")
-    print("dispatch exit evidence: menu TERM, unknown identity, unconfirmed kill, surviving groups and action-time reconciliation passed")
+        panel.events(project, "transition", "--attempt", pending_attempt[0], "--state", "cancelled",
+                     "--reason-code", "fixture_complete")
+    # Negative lifetime fixtures intentionally reserve scopes. Finish their membership
+    # so subsequent layout fixtures measure presentation rather than this test's pending calls.
+    for member in room.status(project, shared)["participants"]:
+        if member["participant"] not in original_members and member["joined"]:
+            room.append(project, shared, {"kind": "leave", "participant": member["participant"]}, "Dispatch fixture complete")
+    print("dispatch exit evidence: prelaunch refusal, durable receipts, missing evidence, subreaper orphan and unsupported pending passed")
 
 exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner, room_env)
 # A room in A keeps its parent, call and results when the worker executes in B,
@@ -5482,7 +5662,8 @@ def exercise_observed_worker_leases():
             patch.object(panel, "child_environment", return_value={}), \
             patch.object(panel, "native_repository", return_value=project), \
             patch.object(panel, "plan_link", return_value=argv_binding), \
-            patch.object(panel, "_dispatch_descendants", return_value=[]), \
+            patch.multiple(panel, _dispatch_descendants=Mock(return_value=[]), \
+                           _dispatch_call_finished=Mock(return_value=True)), \
             patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as preflight, \
             patch.object(panel.subprocess, "Popen", side_effect=lambda argv, **kwargs:
                          captured_dispatch.update(argv=argv) or Mock(pid=0, wait=lambda **kwargs: 0, poll=lambda: 0)):
@@ -5564,7 +5745,8 @@ def exercise_observed_worker_leases():
                 patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
                 patch("panel_terminals.process", return_value=None), \
                 patch.multiple(panel, _dispatch_group_gone=Mock(return_value=True), \
-                               _dispatch_descendants=Mock(return_value=[])), \
+                               _dispatch_descendants=Mock(return_value=[]), \
+                               _dispatch_call_finished=Mock(return_value=True), _settle_dispatch=Mock()), \
                 patch.object(panel.subprocess, "Popen", side_effect=OSError("fixture spawn failure")
                              if scenario == "spawn-error" else None,
                              return_value=Mock(pid=123, wait=lambda **kwargs: 0, poll=lambda: 0)) \
@@ -6547,7 +6729,8 @@ control_env = dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project))
 control_launch = {}
 real_popen = panel.subprocess.Popen
 def observe_control_launch(argv, *args, **kwargs):
-    if argv[:3] == [sys.executable, "-c", "pass"]:
+    if (argv[:3] == [sys.executable, "-c", "pass"]
+            or argv[5:8] == [sys.executable, "-c", "pass"]):
         control_launch.update(env=kwargs["env"])
     return real_popen(argv, *args, **kwargs)
 with patch.dict(os.environ, control_env, clear=True), \
@@ -8629,9 +8812,14 @@ for order_width, order_height in ((100, 30), (100, 40), (160, 60)):
         other = "Codex" if provider == "claude" else "Claude"
         assert "%s week 41%% · ctx 70%%" % provider.title() in usage_row and other + " --" in usage_row, usage_row
         assert render(one, provider, order_width, order_height, view="tree", navigation={}).splitlines()[1] == usage_row
-# Short boards keep all three pinned rows: the box shrinks to one row before anything is dropped.
+# Keep the short graph fixture within its card capacity; negative dispatch actors
+# above must not select the separately covered compact fallback.
+short_words = deepcopy(words)
+short_words["room"]["participants"] = [m for m in words["room"]["participants"] if m["participant"] == shown_main]
+short_words["workers"] = {}
+short_words["council"] = {}
 for short in (12, 14, 18):
-    short_rows = graph_text.render_graph(words, 100, short).splitlines()
+    short_rows = graph_text.render_graph(short_words, 100, short).splitlines()
     assert short_rows[0].startswith("OMS · ") and "week" in short_rows[1] and short_rows[2].startswith("[ GOAL  Ship") \
         and short_rows[2].endswith(" 6/9 verified · 1 review · 2 claimed ]"), short_rows[:4]
 long_goal = deepcopy(words)

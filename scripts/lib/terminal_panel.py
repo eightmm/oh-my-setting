@@ -25,13 +25,14 @@ import panel_host
 import panel_debate
 import panel_messages
 import panel_reader
+import dispatch_supervisor as dispatch_store
 
 from dashboard_projection import clean
 from panel_view import INBOX_LIMIT, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
 from panel_routing import (allocate, command as routed_command, policy, KINDS, MODEL_IDS, TIERS, WRITERS,
                            newest_route_model, route_family)
-from panel_results import _read, _write, _lock, finalize, outcomes, results, retry_delivery, verified_patch
+from panel_results import DURABLE, _read, _write, _lock, finalize, outcomes, results, retry_delivery, verified_patch
 from panel_cache import read_shared
 from room_repository import EXECUTION_ENV, native_repository, state_repository, work_repository
 
@@ -1526,14 +1527,18 @@ def _dispatch_descendants(pid):
 
 def _observe_dispatch_descendants(process, evidence):
     current = _dispatch_descendants(process.pid)
+    if current is None:
+        evidence["observation_failed"] = True
+        evidence.setdefault("descendants", None)
+        return
     if "descendants" not in evidence:
         evidence["descendants"] = current
-    elif current is not None:
-        # Never discard recorded detached children when a later scan fails.
-        if evidence["descendants"] and len(evidence["descendants"]) > 256:
-            return
+    else:
+        # Retain known children for teardown, without treating a gap as complete evidence.
         known = {(row["pid"], row["identity"]): row for row in (evidence["descendants"] or []) + current}
-        evidence["descendants"] = list(known.values())
+        evidence["descendants"] = list(known.values()) if len(known) <= 256 else None
+        if len(known) > 256:
+            evidence["observation_failed"] = True
 
 
 def _dispatch_descendants_gone(records):
@@ -1552,10 +1557,6 @@ def _dispatch_descendants_gone(records):
 
 
 def _dispatch_recorded_gone(records):
-    # POSIX session observation supplies missing initial evidence for quick calls.
-    # Windows has no session proof and retains its existing missing-snapshot behavior.
-    if records is None and os.name == "posix":
-        records = []
     return _dispatch_descendants_gone(records)
 
 
@@ -1574,66 +1575,88 @@ def _dispatch_exit_record(call, status):
     return dict(call, exit=status, launch_sha256=hashlib.sha256(launch).hexdigest())
 
 
+def _prepare_dispatch_call(repo, room_id, member, caller):
+    call = {"schema": 2, "kind": "oms-panel-call", "room": room_id, "participant": member,
+            "parent": caller, "nonce": uuid.uuid4().hex,
+            "backend": "subreaper" if sys.platform == "linux" else "unsupported"}
+    path = Path(repo) / _dispatch_call_path(member)
+    # The existing durable writer anchors parents, refuses links and creates 0600.
+    # Even an empty precreated file must refuse launch, rather than become evidence.
+    try:
+        DURABLE["atomic_mutate"](str(path), lambda old: dispatch_store.encoded(call), str(repo),
+                                 missing_ok=True, create_parent=True, expected_exists=False,
+                                 label="dispatch launch")
+    except SystemExit as error:
+        raise ValueError("dispatch launch record refused") from error
+    dispatch_store.write(repo, member + "-launch.json",
+                         {"call": call, "generation": dispatch_store.generation(path)}, exclusive=True)
+    return call
+
+
 def _record_dispatch_call(repo, room_id, member, caller, process, identity, status=None):
-    if type(process.pid) is not int or process.pid <= 0:
-        raise ValueError("dispatch child PID unavailable")
-    record = {"schema": 1, "kind": "oms-panel-call", "room": room_id, "participant": member,
-              "parent": caller, "pid": process.pid, "identity": identity, "session": os.name == "posix"}
-    if status is not None:
-        launch = _dispatch_call_record(repo, room_id, {"participant": member, "parent": caller})
-        if launch != record or type(status) is not int:
-            raise ValueError("dispatch exit does not match its launch record")
-        record = _dispatch_exit_record(launch, status)
-    # Separate immutable receipts retain the original process identity for a later reconciler.
-    _write(repo, _dispatch_call_path(member, status is not None), record)
+    call = _dispatch_call_record(repo, room_id, {"participant": member, "parent": caller})
+    if not call or type(status) is not int:
+        raise ValueError("dispatch exit does not match its launch record")
+    _write(repo, _dispatch_call_path(member, True), _dispatch_exit_record(call, status))
 
 
 def _dispatch_call_record(repo, room_id, member):
     try:
-        call = json.loads(_read(repo, _dispatch_call_path(member["participant"]), 4096, missing=True))
-        if (not isinstance(call, dict)
-                or set(call) != {"schema", "kind", "room", "participant", "parent", "pid", "identity", "session"}
-                or type(call.get("schema")) is not int or call["schema"] != 1 or call.get("kind") != "oms-panel-call"
-                or call.get("room") != room_id or call.get("participant") != member["participant"]
-                or call.get("parent") != member.get("parent") or type(call.get("pid")) is not int
-                or call["pid"] <= 0 or type(call.get("session")) is not bool
-                or call["session"] != (os.name == "posix")
-                or call.get("identity") is not None and not isinstance(call["identity"], str)):
+        name = member["participant"]
+        path = Path(repo) / _dispatch_call_path(name)
+        anchor = dispatch_store.read(repo, name + "-launch.json")
+        data = _read(repo, _dispatch_call_path(name), 4096)
+        call = anchor["call"]
+        if (anchor["generation"] != dispatch_store.generation(path)
+                or data != dispatch_store.encoded(call)
+                or set(call) != {"schema", "kind", "room", "participant", "parent", "nonce", "backend"}
+                or call["schema"] != 2 or call["kind"] != "oms-panel-call"
+                or call["room"] != room_id or call["participant"] != name
+                or call["parent"] != member.get("parent")):
             return None
         return call
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return None
 
 
-# Repository artifacts cannot authenticate an observation from another controller.
-# Keep only this controller's exact successful writes; restart/recovery stays reserved.
-_DISPATCH_OBSERVATIONS = {}
-
-
 def _record_dispatch_pending(repo, call, status, task_id, evidence):
+    current = _dispatch_call_record(repo, call["room"], call)
+    if current != call:
+        raise ValueError("dispatch launch changed after launch")
     pending = dict(call, exit=status, task_id=task_id, forced=bool(evidence.get("forced")),
-                   descendants=evidence.get("descendants"))
-    _write(repo, _dispatch_pending_path(call["participant"]), pending)
-    key = (str(Path(repo).resolve()), call["participant"])
-    _DISPATCH_OBSERVATIONS[key] = json.dumps(pending, sort_keys=True, allow_nan=False)
-    if len(_DISPATCH_OBSERVATIONS) > 2048:
-        del _DISPATCH_OBSERVATIONS[next(iter(_DISPATCH_OBSERVATIONS))]
-
-
-def _dispatch_pending_observed(repo, pending):
-    key = (str(Path(repo).resolve()), pending["participant"])
-    return _DISPATCH_OBSERVATIONS.get(key) == json.dumps(pending, sort_keys=True, allow_nan=False)
+                   descendants=None if evidence.get("observation_failed") else evidence.get("descendants"), launch_sha256=_dispatch_exit_record(call, status)["launch_sha256"])
+    dispatch_store.write(repo, call["participant"] + "-pending.json", pending)
+    # The immutable repository copy is diagnostic; only the private current record is authority.
+    try:
+        _write(repo, _dispatch_pending_path(call["participant"]), pending)
+    except (OSError, ValueError):
+        pass
 
 
 def _dispatch_pending(repo, call):
-    pending = json.loads(_read(repo, _dispatch_pending_path(call["participant"]), 65536, missing=True))
-    if (not isinstance(pending, dict) or set(pending) != set(call) | {"exit", "task_id", "forced", "descendants"}
+    pending = dispatch_store.read(repo, call["participant"] + "-pending.json")
+    if (not isinstance(pending, dict) or set(pending) != set(call) | {"exit", "task_id", "forced", "descendants", "launch_sha256"}
             or any(pending[key] != value for key, value in call.items())
             or type(pending["exit"]) is not int or type(pending["forced"]) is not bool
+            or pending["launch_sha256"] != _dispatch_exit_record(call, pending["exit"])["launch_sha256"]
             or not isinstance(pending["task_id"], str)
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", pending["task_id"])):
         raise ValueError("invalid pending call record")
     return pending
+
+
+def _dispatch_supervisor_receipt(repo, call):
+    if call["backend"] != "subreaper":
+        return None
+    receipt = dispatch_store.read(repo, call["participant"] + "-supervisor.json")
+    binding = dispatch_store.read(repo, call["participant"] + "-process.json")
+    digest = _dispatch_exit_record(call, 0)["launch_sha256"]
+    if (set(receipt) != {"launch_sha256", "pid", "all_reaped", "exit"}
+            or receipt["launch_sha256"] != digest or receipt["pid"] != binding["pid"]
+            or type(receipt["all_reaped"]) is not bool
+            or receipt["exit"] is not None and type(receipt["exit"]) is not int):
+        return None
+    return receipt
 
 
 def _dispatch_call_finished(repo, room_id, member):
@@ -1641,24 +1664,20 @@ def _dispatch_call_finished(repo, room_id, member):
     if not call:
         return False
     try:
-        receipt = _read(repo, _dispatch_call_path(member["participant"], True), 4096, missing=True)
-        if receipt:
-            exited = json.loads(receipt)
-            if (not isinstance(exited, dict) or type(exited.get("exit")) is not int
-                    or exited != _dispatch_exit_record(call, exited["exit"])):
-                return False
-        # A matching receipt binds the outcome to a launch, but cannot attest
-        # termination: artifacts may be written directly by another call.
-        pending = _dispatch_pending(repo, call)
-        if (not _dispatch_pending_observed(repo, pending)
-                or not _dispatch_recorded_gone(pending["descendants"])):
-            return False
-        if call["session"]:
-            return (_dispatch_leader_gone(call["pid"], call["identity"])
-                    and _dispatch_group_gone(call["pid"]) and _dispatch_session_gone(call["pid"]))
+        _dispatch_pending(repo, call)
+        receipt = _dispatch_supervisor_receipt(repo, call)
+        return bool(receipt and receipt["all_reaped"] and type(receipt["exit"]) is int)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-        pass
-    return False
+        return False
+
+
+def _dispatch_released(repo, call):
+    try:
+        released = dispatch_store.read(repo, call["participant"] + "-settled.json")
+        return (released.get("released") is True and type(released.get("exit")) is int
+                and released.get("launch_sha256") == _dispatch_exit_record(call, 0)["launch_sha256"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def _reconcile_dispatch(repo, room_id, state, caller, parent):
@@ -1670,13 +1689,13 @@ def _reconcile_dispatch(repo, room_id, state, caller, parent):
         live = [row for row in rows if row.get("parent_attempt_id") == parent and not row.get("terminal")
                 and row.get("refs", {}).get("panel_room_participant") == member["participant"]
                 and row.get("refs", {}).get("panel_room_id", room_id) == room_id]
-        if not live:
-            continue
         call = _dispatch_call_record(repo, room_id, member)
         if not call:
             continue
         try:
             pending = _dispatch_pending(repo, call)
+            if not live and (not member.get("owns") or _dispatch_released(repo, call)):
+                continue
             if (any(row.get("task_id") != pending["task_id"] for row in live)
                     or not _dispatch_call_finished(repo, room_id, member)):
                 continue
@@ -1716,12 +1735,14 @@ def _stop_dispatch_groups(process, identity, evidence, before_force=None, reaped
     """A reaped session leader can leave foreground and detached provider groups alive."""
     if os.name != "posix":
         return bool(not evidence.get("forced") and _dispatch_exited(process, identity, reaped=reaped)
-                    and _dispatch_recorded_gone(evidence.get("descendants")))
+                    and not evidence.get("observation_failed")
+                and _dispatch_recorded_gone(evidence.get("descendants")))
     if type(process.pid) is not int or process.pid <= 0 or process.pid == os.getpid():
         return False
 
     def gone():
         return (_dispatch_exited(process, identity, reaped=reaped)
+                and not evidence.get("observation_failed")
                 and _dispatch_recorded_gone(evidence.get("descendants")))
 
     if gone():
@@ -1791,6 +1812,7 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
     _observe_dispatch_session(process, identity, evidence)
     if type(process.poll()) is int:
         if (_dispatch_exited(process, identity, reaped=True)
+                and not evidence.get("observation_failed")
                 and _dispatch_recorded_gone(evidence.get("descendants"))):
             return True
         if not term_sent and not interrupted:
@@ -1808,6 +1830,7 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
         if type(process.poll()) is int:
             return _stop_dispatch_groups(process, identity, evidence, before_force)
         return (_dispatch_exited(process, identity)
+                and not evidence.get("observation_failed")
                 and _dispatch_recorded_gone(evidence.get("descendants")))
     except subprocess.TimeoutExpired:
         # The delegate's TERM trap owns worktree cleanup; force only its original session after that grace.
@@ -1840,6 +1863,9 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
 
 
 def _settle_dispatch(repo, room_id, member, status):
+    participant = room.participant(room.status(repo, room_id), member)
+    if not _dispatch_call_finished(repo, room_id, participant):
+        raise ValueError("dispatch containment receipt unavailable")
     rows = json.loads(events(repo, "list", "--json", output=True))
     for row in rows:
         refs = row.get("refs", {})
@@ -1848,6 +1874,14 @@ def _settle_dispatch(repo, room_id, member, status):
             update_activity(repo, "transition", "--attempt", row["attempt_id"],
                             "--state", "cancelled" if status in {129, 130, 143} else "failed",
                             "--reason-code", "panel_call_interrupted", "--actor", "panel-dispatch")
+    # Room scope declarations belong to their participant. Mark controller release
+    # privately instead of impersonating the child to mutate its declaration.
+    call = _dispatch_call_record(repo, room_id, participant)
+    if not call:
+        raise ValueError("dispatch launch changed during settlement")
+    dispatch_store.write(repo, member + "-settled.json",
+                         {"released": True, "exit": status,
+                          "launch_sha256": _dispatch_exit_record(call, 0)["launch_sha256"]})
 
 
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
@@ -2001,6 +2035,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                                             route["effort"] or "native-settings", access) +
           " task_id=" + task_id, flush=True)
     status, process, identity = 1, None, None
+    launch = None
+    control_member = member or "call-" + uuid.uuid4().hex[:16]
     spawn_failed = False
     term_sent = False
     shutdown = None
@@ -2008,11 +2044,9 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     saved_handlers = {}
 
     def record_pending():
-        if member:
-            call = _dispatch_call_record(repo, room_id, {"participant": member, "parent": caller})
-            if not call:
-                raise ValueError("dispatch process record unavailable")
-            _record_dispatch_pending(repo, call, status, task_id, evidence)
+        if not launch:
+            raise ValueError("dispatch process record unavailable")
+        _record_dispatch_pending(repo, launch, status, task_id, evidence)
 
     def interrupt(signum, frame):
         nonlocal term_sent
@@ -2034,22 +2068,36 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             if number is not None:
                 saved_handlers[number] = signal.signal(number, interrupt)
         try:
-            process = subprocess.Popen(argv, cwd=str(execution), env=env, start_new_session=os.name == "posix")
-        except OSError:
-            spawn_failed = True
+            launch = _prepare_dispatch_call(repo, room_id, control_member, caller)
+            command = argv
+            if launch and launch["backend"] == "subreaper":
+                digest = _dispatch_exit_record(launch, 0)["launch_sha256"]
+                command = [sys.executable, str(Path(__file__).with_name("dispatch_supervisor.py")),
+                           str(repo), control_member, digest] + argv
+            process = subprocess.Popen(command, cwd=str(execution), env=env, start_new_session=os.name == "posix")
+            if launch:
+                dispatch_store.write(repo, control_member + "-process.json", {"pid": process.pid}, exclusive=True)
+        except (OSError, ValueError):
+            spawn_failed = process is None
+            if process is not None and process.poll() is None:
+                process.terminate()
+                term_sent = True
             raise
         if os.name == "posix":
             import panel_terminals
             current = panel_terminals.process(process.pid)
             identity = current["identity"] if current else None
             _observe_dispatch_session(process, identity, evidence)
-        if member:
-            try:
-                _record_dispatch_call(repo, room_id, member, caller, process, identity)
-            except (OSError, ValueError):
-                print("OMS call process record unavailable; unverified scopes remain reserved.", file=sys.stderr)
         while True:
             _observe_dispatch_descendants(process, evidence)
+            if launch and launch["backend"] == "subreaper":
+                try:
+                    receipt = _dispatch_supervisor_receipt(repo, launch)
+                    if receipt and receipt["exit"] is not None:
+                        status = receipt["exit"]
+                        break
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
             try:
                 status = process.wait(timeout=1)
                 break
@@ -2070,7 +2118,18 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         try:
             exit_verified = False
             try:
-                if process:
+                if process and launch:
+                    if (term_sent or status in {129, 130, 143}) and process.poll() is None:
+                        if not term_sent:
+                            process.terminate()
+                        try:
+                            process.wait(timeout=25)
+                        except subprocess.TimeoutExpired:
+                            pass
+                    # Snapshots may assist shutdown but never establish whole-tree exhaustion.
+                    record_pending()
+                    exit_verified = _dispatch_call_finished(repo, room_id, launch)
+                elif process:
                     exit_verified = _stop_dispatch(process, identity, term_sent, evidence, record_pending,
                                                    interrupted=status in {129, 130, 143})
             except (OSError, ValueError, subprocess.SubprocessError):
@@ -2102,6 +2161,16 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 except (OSError, ValueError):
                     print("OMS call pending record unavailable; owner cleanup is required.", file=sys.stderr)
                 print("OMS call settlement pending: child exit is unverified; attempt and scope retained.", file=sys.stderr)
+                print("Manual clear after independently stopping every provider descendant: OMS_ROOM_PARTICIPANT= oms room scope --repo " +
+                      shlex.quote(str(repo)) + " --id " + room_id + " --participant " + member + " --clear", file=sys.stderr)
+                print("Cancel matching attempts with oms agent-events --repo " + shlex.quote(str(repo)) +
+                      " transition --attempt ATTEMPT_ID --state cancelled --reason-code manual_clear; " +
+                      "then oms room leave --repo " + shlex.quote(str(repo)) + " --id " + room_id +
+                      " --participant " + member + ".", file=sys.stderr)
+            elif process and not exit_verified:
+                status = status or 1
+                print("OMS call settlement pending: whole-tree termination is unverified; manually stop all provider descendants.",
+                      file=sys.stderr)
         finally:
             for number, previous in saved_handlers.items():
                 signal.signal(number, previous)
