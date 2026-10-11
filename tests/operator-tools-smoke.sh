@@ -2093,6 +2093,7 @@ with open(os.environ["PANEL_TEST_WORKER_LOG"], "a", encoding="utf-8") as f:
                         "room": os.environ.get("OMS_ROOM_ID"),
                         "room_repo": os.environ.get("OMS_ROOM_REPO"),
                         "timeout": os.environ.get("OMS_PEER_TIMEOUT"),
+                        "state_repo": os.environ.get("OMS_STATE_REPO"),
                         "participant": os.environ.get("OMS_ROOM_PARTICIPANT")}) + "\\n")
 WORKER
   if [ -n "${LEASE_FIXTURE_ENTERED:-}" ]; then
@@ -2542,7 +2543,7 @@ rows = json.loads(call(["bash", str(panel.ENTRY), "artifact-index", "--repo", st
 assert {r["provider"] for r in rows if r["kind"] == "delegate"} == set(panel.PROVIDERS)
 assert {r["provider"] for r in rows if r["kind"] == "review"} == set(panel.PROVIDERS)
 
-# Exercise exact role routes through the real provider runner, with one
+# Same-repository dispatch retains its per-role execution locations, with one
 # recorded main per caller and read/write authority tested independently.
 main_attempts = {}
 for owner in panel.PROVIDERS:
@@ -4470,7 +4471,18 @@ def exercise_observed_worker_leases():
             if child_process.poll() is None:
                 child_process.terminate()
             child_process.communicate(timeout=15)
-    # Non-worker backends retain canonical execution/state; they do not implement the delegate split.
+    # One cross-repository read regression: dirty state A and a different scratch source B.
+    untracked_state = project / "state-only-untracked.txt"
+    untracked_state.write_text("owner state stays here\n")
+    source_value = (source / "value.txt").read_text()
+    (source / "value.txt").write_text(source_value + "pending scratch review\n")
+    with (project / ".git/info/exclude").open("a") as exclude:
+        exclude.write("\n__pycache__/\n")
+    state_status = subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"])
+    source_status = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"])
+    source_diff = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD"])
+    read_prompt = temporary / "scratch-read-prompt"
+    read_verify = temporary / "scratch-read-verify"
     main_member, main_attempt = mains["claude"]
     canonical_env = dict(environment, OMS_ROOM_ID=test_room, OMS_ROOM_REPO=str(project),
                          OMS_ROOM_PARTICIPANT=main_member, OMS_PANEL_MAIN_ATTEMPT=main_attempt,
@@ -4482,10 +4494,26 @@ def exercise_observed_worker_leases():
                    "--prompt", "Inspect value.txt; judge only the supplied source evidence.", "--task-id", task_id]
         if role == "reviewer":
             request += ["--verify", "test -f value.txt"]
-        answer = call(request, canonical_env)
+        preview = json.loads(call(request + ["--dry-run"], canonical_env))
+        assert preview["argv"][preview["argv"].index("--repo") + 1] == str(source), preview
+        if role == "reviewer":
+            request[request.index("--verify") + 1] = ('mkdir -p __pycache__ verify-temp-dir; '
+                'printf cache > __pycache__/x.pyc; printf output > verify-temp-dir/output; '
+                'pwd -P > "$PANEL_TEST_VERIFY_LOG"; git rev-parse HEAD >> "$PANEL_TEST_VERIFY_LOG"')
+        read_env = dict(canonical_env, PANEL_TEST_PROMPT=str(read_prompt),
+                        PANEL_TEST_VERIFY_LOG=str(read_verify))
+        answer = call(request, read_env)
         assert ("artifact:" if role == "advisor" else "artifacts:") in answer, answer
         observed = json.loads(worker_log.read_text().splitlines()[-1])
-        assert observed["cwd"] == str(project) and observed["parent"] == main_attempt and observed["room"] == test_room, observed
+        assert observed["cwd"] == str(source) and observed["parent"] == main_attempt and observed["room"] == test_room, observed
+        assert observed["room_repo"] == observed["state_repo"] == str(project), observed
+        if role == "reviewer":
+            assert read_verify.read_text().splitlines() == [str(source), source_sha], "verify did not execute in B"
+            assert "+pending scratch review" in read_prompt.read_text(), "review diff came from A"
+            assert (source / "__pycache__/x.pyc").read_text() == "cache"
+            assert (source / "verify-temp-dir/output").read_text() == "output"
+            subprocess.run(["git", "-C", str(source), "check-ignore", "-q", "__pycache__/x.pyc"], check=True)
+            shutil.rmtree(source / "verify-temp-dir")
         enrolled = room.participant(room.project(room.records(project, test_room)), observed["participant"])
         assert enrolled["role"] == role and enrolled["parent"] == main_member, enrolled
         report = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
@@ -4494,7 +4522,68 @@ def exercise_observed_worker_leases():
         indexed = [r for r in json.loads(call(["bash", str(panel.ENTRY), "artifact-index", "--repo", str(project),
                     "list", "1000", "--json"]))["rows"] if r.get("task_id") == task_id]
         assert indexed and any(r.get("artifact") and (project / r["artifact"]).is_file() for r in indexed), indexed
-        assert not (source / ".oms/artifacts/index.jsonl").exists(), "non-worker artifacts split into scratch"
+        assert all(source_sha.startswith(r["base_sha"]) for r in indexed), indexed
+        if role == "reviewer":
+            scope_path = re.search(r"^review-scope: (.+)$", answer, re.M).group(1)
+            scope = json.loads(Path(scope_path).read_text())
+            assert scope["head"] == source_sha and scope["base"] == source_sha and scope["paths"] == ["value.txt"], scope
+            import hashlib
+            assert scope["diff_sha256"] == hashlib.sha256(source_diff).hexdigest(), scope
+        attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
+        attempt = next(a for a in attempts if a.get("task_id") == task_id)
+        assert attempt["parent_attempt_id"] == main_attempt and attempt["refs"]["panel_location"].startswith("worktree:"), attempt
+        assert not (source / ".oms").exists(), "read records split into B"
+        assert subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"]) == state_status
+        assert subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"]) == source_status
+        assert (source / "value.txt").read_text() == source_value + "pending scratch review\n"
+        assert untracked_state.read_text() == "owner state stays here\n"
+        assert (project / "value.txt").read_text() == "old\n", "read pass edited A source"
+        mutations = [(project / "value.txt", False), (project / "value.txt", True),
+                     (source / "value.txt", False)]
+        if role == "reviewer":
+            mutations.append((source / "__pycache__/x.pyc", False))
+        for target, strict in mutations:
+            original = target.read_bytes()
+            result = subprocess.run(request, env=dict(read_env, PANEL_TEST_MODE="primary-write",
+                PANEL_TEST_PRIMARY=str(target), OMS_WORKER_GUARD_STRICT="1" if strict else "0"),
+                capture_output=True, text=True, timeout=90)
+            if target.parent == project and not strict:
+                assert result.returncode == 0 and "warning: read pass observed state repository changes: tracked" in result.stderr, result
+            else:
+                assert result.returncode != 0 and "protected" in result.stderr, result
+            assert target.read_bytes() != original, "read guard mutation fixture did not execute"
+            target.write_bytes(original)
+            shutil.rmtree(source / "verify-temp-dir", ignore_errors=True)
+        if role == "reviewer":
+            input_untracked = source / "review-input-untracked.txt"
+            input_untracked.write_text("not verifier output\n")
+            worker_before = worker_log.read_bytes()
+            result = subprocess.run(request, env=read_env, capture_output=True, text=True, timeout=90)
+            assert result.returncode != 0 and "cannot review untracked file content" in result.stderr, result
+            assert worker_log.read_bytes() == worker_before, "untracked input reached a reviewer"
+            input_untracked.unlink()
+    shutil.rmtree(source / "__pycache__")
+    # Cross-repository council pointers bind A; isolated seats still receive private copies.
+    isolated_context = temporary / "scratch-read-isolated-context"
+    isolated_context.mkdir()
+    context = call(["bash", "-c", '''set -eu
+    . "$1/scripts/lib/peer-common.sh"
+    REPO="$2"; MA_READ_SOURCE_REPO="$3"; prompt_file="$4"
+    ma_prepare_council_context
+    ma_stage_council_context "$5"
+    ma_export_child_env codex test "$REPO" "" read
+    printf '%s\\n' "$MA_COUNCIL_CONTEXT_REL" "$OMS_STATE_REPO"
+    ma_cleanup_council_context
+    ''', "context", str(root), str(project), str(source), str(read_prompt), str(isolated_context)],
+        dict(canonical_env, OMS_PANEL_DISPATCH="1"))
+    pointer, state_root = context.strip().splitlines()
+    assert pointer.startswith("$OMS_STATE_REPO/.oms/delegations/") and state_root == str(project), context
+    relative_context = pointer.removeprefix("$OMS_STATE_REPO/")
+    assert (isolated_context / relative_context / "request.md").is_file()
+    assert (isolated_context / ".oms/artifacts" / Path(relative_context).name / "request.md").is_file()
+    assert not (source / ".oms").exists()
+    untracked_state.unlink()
+    (source / "value.txt").write_text(source_value)
     # Snapshot failure is a frontend refusal, even before an observer binding can be selected.
     task_id = "frontend-owned"
     call(plan_api + ["init", "--goal", "Frontend snapshot refusal"])

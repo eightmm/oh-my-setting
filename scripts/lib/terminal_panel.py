@@ -1022,9 +1022,10 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     if os.environ.get("OMS_ROOM_REPO"):
         repo = repository(os.environ["OMS_ROOM_REPO"])
     execution = repo
-    if route["kind"] in {"worker", "researcher"}:
-        execution = (work_repository(work_repo or source_repo) if work_repo is not None or source_repo != repo
-                     else native_repository(repo))
+    if work_repo is not None or source_repo != repo:
+        execution = work_repository(work_repo or source_repo)
+    elif route["kind"] in {"worker", "researcher"}:
+        execution = native_repository(repo)
     if dry_run:
         _validate_dry_run_inputs(prompt, brief)
     if task_id is None:

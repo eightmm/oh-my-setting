@@ -188,6 +188,7 @@ elif [ -z "$PROMPT" ]; then
 fi
 [ -d "$REPO" ] || fail "repo not found: $REPO"
 REPO="$(cd "$REPO" && pwd)"
+ma_resolve_read_repositories advise || fail "cannot resolve advisor source and state repositories"
 if [ "$ALLOW_SENSITIVE" -eq 1 ] && [ "$INCLUDE_SESSION" -eq 0 ]; then
   fail "--allow-sensitive only applies to the --session digest"
 fi
@@ -196,8 +197,9 @@ oms_require_peer_owner || exit $?
 
 strategy_file=""
 if [ "$INCLUDE_STRATEGY" -eq 1 ]; then
-  strategy_file="$("$SCRIPT_DIR/agent-role.sh" --repo "$REPO" --name "$STRATEGY" resolve)" ||
+  strategy_file="$("$SCRIPT_DIR/agent-role.sh" --repo "$MA_READ_SOURCE_REPO" --name "$STRATEGY" resolve)" ||
     fail "advisor strategy not found: $STRATEGY"
+  strategy_file="${strategy_file//$'\r'/}"
 fi
 
 # Default advisor: the first available provider that is not the caller, so
@@ -230,6 +232,7 @@ fi
 
 advise_tmpdir="$(mktemp -d)" || fail "mktemp failed"
 trap 'rm -rf "$advise_tmpdir"' EXIT
+ma_read_guard_begin "$advise_tmpdir" || fail "cannot freeze advisor repositories"
 advisor_prompt="$advise_tmpdir/advise-prompt.md"
 
 # --session: the digest is a mechanical extract (no model call) of the calling
@@ -306,4 +309,5 @@ ma_call_read_peer "" "$PREVIEW" \
   --artifact-dir "${ARTIFACT_DIR:-$REPO/.oms/artifacts/advise}" \
   --prompt-file "$advisor_prompt" \
   ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"} || status=$?
+ma_read_guard_assert || status=2
 exit "$status"

@@ -642,17 +642,18 @@ else
 fi
 oms_require_peer_owner || exit $?
 REPO="$(cd "$REPO" && pwd)"
-git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
+ma_resolve_read_repositories review || fail "cannot resolve review source and state repositories"
+git -C "$MA_READ_SOURCE_REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $MA_READ_SOURCE_REPO"
 if [ -n "$BASE_REF" ]; then
-  git -C "$REPO" rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null ||
+  git -C "$MA_READ_SOURCE_REPO" rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null ||
     fail "invalid --base ref: $BASE_REF"
 fi
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/review}"
 
 # Mechanical gate backstop: default to the project's own check contract so a
 # GATE: pass self-report alone cannot pass a diff that fails the checks.
-if [ "$GATE" -eq 1 ] && [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" -eq 0 ] && [ -x "$REPO/scripts/check.sh" ]; then
-  VERIFY_CMD="$(oms_default_verify_command "$REPO/scripts/check.sh" "$ML_PRESET")" || exit 2
+if [ "$GATE" -eq 1 ] && [ -z "$VERIFY_CMD" ] && [ "$NO_VERIFY" -eq 0 ] && [ -x "$MA_READ_SOURCE_REPO/scripts/check.sh" ]; then
+  VERIFY_CMD="$(oms_default_verify_command "$MA_READ_SOURCE_REPO/scripts/check.sh" "$ML_PRESET")" || exit 2
   echo "gate auto-verify: $VERIFY_CMD (disable with --no-verify)"
 fi
 
@@ -675,6 +676,7 @@ prompt_file="$(mktemp)" || fail "mktemp failed"
 gate_verify_temp="$(mktemp)" || fail "mktemp failed"
 debate_dir=""
 MA_COUNCIL_CONTEXT_DIR=""
+read_guard_temp="$(mktemp -d)" || fail "mktemp failed"
 cleanup_done=0
 cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
@@ -684,6 +686,7 @@ cleanup() {
     rm -rf "$debate_dir"
   fi
   ma_cleanup_council_context
+  rm -rf "$read_guard_temp"
 }
 cleanup_signal() {
   local code="$1"
@@ -735,16 +738,25 @@ trap cleanup EXIT
 trap 'cleanup_signal 129' HUP
 trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
+ma_read_guard_begin "$read_guard_temp" || fail "cannot freeze review repositories"
 
 # Run the mechanical backstop before creating any repository-local review
 # artifacts or indexes. A verifier that asserts `.oms`/status purity therefore
 # judges the submitted tree, not peer-review's own bookkeeping.
 gate_verify_exit=0
 gate_verify_ran=0
+review_verifier_outputs=0
 if [ "$GATE" -eq 1 ] && [ -n "$VERIFY_CMD" ]; then
   if [ "$DRY_RUN" = "1" ]; then
     echo "gate verify: skipped (dry run)"
   else
+    if [ -n "${MA_READ_GUARD_DIR:-}" ] && [ "$NO_DIFF" -eq 0 ]; then
+      ma_safe_status "$MA_READ_SOURCE_REPO" > "$status_file"
+      if grep -q '^??' "$status_file"; then
+        fail "blocking gate cannot review untracked file content; add intent-to-add or stage it so the complete diff is visible"
+      fi
+      review_verifier_outputs=1
+    fi
     gate_verify_ran=1
     {
       printf '# gate verify\n\n'
@@ -754,7 +766,7 @@ if [ "$GATE" -eq 1 ] && [ -n "$VERIFY_CMD" ]; then
     } > "$gate_verify_temp"
     set +e
     (
-      cd "$REPO" || exit 1
+      cd "$MA_READ_SOURCE_REPO" || exit 1
       unset OMS_MODEL_OPERATION OMS_MODEL_OPERATION_REQUEST
       unset OMS_MODEL_EXPLICIT OMS_MODEL_FALLBACK_EXPLICIT
       unset OMS_REASONING_EFFORT_REQUEST OMS_REASONING_FALLBACK_EXPLICIT
@@ -766,6 +778,10 @@ if [ "$GATE" -eq 1 ] && [ -n "$VERIFY_CMD" ]; then
   fi
 fi
 
+if [ "$gate_verify_ran" -eq 1 ]; then
+  ma_read_guard_rebaseline_source || fail "review verification changed protected Git execution state"
+fi
+ma_read_guard_assert || fail "review verification changed protected repository state"
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
 
@@ -773,21 +789,21 @@ if [ "$NO_DIFF" -eq 0 ]; then
   # External diff/textconv are mechanically disabled below. Clean filters are
   # different: Git may execute them while preparing an ordinary diff, so raw
   # config inspection rejects filters, includes, and fsmonitor first.
-  oms_git_assert_safe_execution_config "$REPO" diff-read ||
+  oms_git_assert_safe_execution_config "$MA_READ_SOURCE_REPO" diff-read ||
     fail "unsafe Git execution config blocks review diff capture"
-  review_source_before="$(oms_git_tracked_state_fingerprint "$REPO")" || fail "cannot freeze review source"
-  review_head_before="$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null || true)"
-  ma_safe_status "$REPO" > "$status_file"
-  diff_base="$(ma_git_diff_base "$REPO")"
+  review_source_before="$(oms_git_tracked_state_fingerprint "$MA_READ_SOURCE_REPO")" || fail "cannot freeze review source"
+  review_head_before="$(git -C "$MA_READ_SOURCE_REPO" rev-parse --verify HEAD 2>/dev/null || true)"
+  ma_safe_status "$MA_READ_SOURCE_REPO" > "$status_file"
+  diff_base="$(ma_git_diff_base "$MA_READ_SOURCE_REPO")"
   # The checkout is worker-writable. Never let diff.external, a per-path
   # external driver, or textconv execute under the reviewer's authority or
   # substitute forged bytes for the review/gate digest.
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
     GIT_CONFIG_NOSYSTEM=1 \
-    git -c core.fsmonitor=false -c diff.external= -C "$REPO" \
+    git -c core.fsmonitor=false -c diff.external= -C "$MA_READ_SOURCE_REPO" \
     diff --no-ext-diff --no-textconv \
     "$diff_base" -- "${MA_SAFE_PATHS[@]}" > "$raw_diff_file" ||
-    fail "git diff failed for $REPO"
+    fail "git diff failed for $MA_READ_SOURCE_REPO"
   if contains_sensitive_content "$raw_diff_file"; then
     echo "external review skipped: sensitive-looking diff content detected" >&2
     exit 3
@@ -802,18 +818,22 @@ if [ "$NO_DIFF" -eq 0 ]; then
   ma_emit_bounded_prompt_file "$raw_diff_file" "$diff_budget" "git diff" \
     "OMS_PROMPT_DIFF_BYTES" > "$diff_file"
   if grep -q '^??' "$status_file"; then
-    if [ "$GATE" -eq 1 ]; then
+    if [ "$GATE" -eq 1 ] && [ "$review_verifier_outputs" -eq 0 ]; then
       echo "error: blocking gate cannot review untracked file content; add intent-to-add or stage it so the complete diff is visible" >&2
       exit 2
     fi
-    echo "warning: untracked files are listed in status but their content is not in the diff (git add -N <file> to include new files)" >&2
+    if [ "$review_verifier_outputs" -eq 1 ]; then
+      echo "warning: verifier-created untracked outputs are listed in status but their content is not in the diff" >&2
+    else
+      echo "warning: untracked files are listed in status but their content is not in the diff (git add -N <file> to include new files)" >&2
+    fi
   fi
 else
   : > "$diff_file"
   : > "$raw_diff_file"
 fi
 
-write_prompt "$prompt_file" "$REPO" "$PROMPT" "$diff_file" "$status_file"
+write_prompt "$prompt_file" "$MA_READ_SOURCE_REPO" "$PROMPT" "$diff_file" "$status_file"
 # Freeze the reviewed-diff identity now: the typed outcome row must bind the
 # exact bytes the seats judged, not whatever the tree holds at exit.
 REVIEW_DIFF_SHA=""
@@ -828,7 +848,7 @@ export OMS_OPERATION_ID="${OMS_OPERATION_ID:-review-$timestamp}"
 # An outcome names exactly what was reviewed; parent recovery in another
 # checkout is never implied by a passing campaign review.
 review_scope_file="$ARTIFACT_DIR/_scope-$timestamp.json"
-python3 - "$REPO" "${diff_base:-}" "$REVIEW_DIFF_SHA" "$NO_DIFF" "${MA_SAFE_PATHS[@]}" > "$review_scope_file" <<'PYSCOPE' || fail "cannot record review scope"
+python3 - "$MA_READ_SOURCE_REPO" "${diff_base:-}" "$REVIEW_DIFF_SHA" "$NO_DIFF" "${MA_SAFE_PATHS[@]}" > "$review_scope_file" <<'PYSCOPE' || fail "cannot record review scope"
 import json, os, subprocess, sys
 repo, base, digest, omitted = sys.argv[1:5]
 git = ["git", "-c", "core.fsmonitor=false", "-C", repo]
@@ -844,8 +864,8 @@ print(json.dumps({"schema": 1, "kind": "review-scope", "base": base,
     "diff_included": omitted != "1", "external_recovery": "not-covered"}, sort_keys=True))
 PYSCOPE
 if [ "$NO_DIFF" -eq 0 ]; then
-  [ "$(oms_git_tracked_state_fingerprint "$REPO")" = "$review_source_before" ] &&
-    [ "$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null || true)" = "$review_head_before" ] ||
+  [ "$(oms_git_tracked_state_fingerprint "$MA_READ_SOURCE_REPO")" = "$review_source_before" ] &&
+    [ "$(git -C "$MA_READ_SOURCE_REPO" rev-parse --verify HEAD 2>/dev/null || true)" = "$review_head_before" ] ||
     fail "source changed while capturing review scope"
 fi
 echo "review-scope: $review_scope_file"
@@ -901,7 +921,7 @@ elif [ -n "$SYNTHESIZE" ]; then
     else
       export OMS_MODEL_OPERATION=review-synthesis
       synth_status=0
-      ma_run_routed_provider "$SYNTHESIZE" read "$synth_prompt_file" "$synth_file" "$REPO" \
+      ma_run_routed_provider "$SYNTHESIZE" read "$synth_prompt_file" "$synth_file" "$MA_READ_SOURCE_REPO" \
         peer-review-synthesis "$REPO" "$OMS_OPERATION_ID" || synth_status=$?
       if [ "$synth_status" -eq 0 ]; then
         echo "ok: synthesis ($SYNTHESIZE)"
@@ -922,6 +942,8 @@ if [ "$EXPORT_ONLY" -eq 1 ]; then
   echo "synthesis: $synth_file"
   exit 0
 fi
+
+ma_read_guard_assert || fail "review changed protected repository state"
 
 record_review_outcome() {
   local review_rc="$1"

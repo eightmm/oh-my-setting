@@ -2046,10 +2046,12 @@ conversation_boundary_check() {
   worker_execution_boundary_check || return 2
   changed="$(worker_protected_surface_diff)" || return 2
   for surface in $(printf '%s' "$changed" | tr ',' ' '); do
-    case "$surface" in
-      files|tracked|remote-refs|work-branches|kept-sibling|sibling-cleanup|branch-tracking) [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] || return 2 ;;
-      *) echo "error: conversation changed owner surface: $surface" >&2; return 2 ;;
-    esac
+    if oms_worker_surface_is_soft "$surface"; then
+      [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] || return 2
+    else
+      echo "error: conversation changed owner surface: $surface" >&2
+      return 2
+    fi
   done
 }
 if [ "$INTERACTIVE" = 1 ]; then
@@ -2323,16 +2325,11 @@ if [ -n "$worker_guard_dir" ]; then
   worker_guard_hard=""
   worker_guard_soft=""
   for guard_surface in $(printf '%s' "$worker_guard_changed" | tr ',' ' '); do
-    case "$guard_surface" in
-      files|tracked|remote-refs|work-branches|kept-sibling|sibling-cleanup|branch-tracking)
-        if [ "${OMS_WORKER_GUARD_STRICT:-0}" = "1" ]; then
-          worker_guard_hard="${worker_guard_hard:+$worker_guard_hard, }$guard_surface"
-        else
-          worker_guard_soft="${worker_guard_soft:+$worker_guard_soft, }$guard_surface"
-        fi
-        ;;
-      *) worker_guard_hard="${worker_guard_hard:+$worker_guard_hard, }$guard_surface" ;;
-    esac
+    if oms_worker_surface_is_soft "$guard_surface" && [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ]; then
+      worker_guard_soft="${worker_guard_soft:+$worker_guard_soft, }$guard_surface"
+    else
+      worker_guard_hard="${worker_guard_hard:+$worker_guard_hard, }$guard_surface"
+    fi
   done
   if [ -n "$worker_guard_soft" ]; then
     echo "warning: the repository changed outside the worktree during this run: $worker_guard_soft" >&2

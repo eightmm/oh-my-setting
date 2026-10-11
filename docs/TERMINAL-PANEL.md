@@ -60,9 +60,10 @@ still requires the user's authority; a local result can be completed first.
 
 Use the shared `OMS_ROOM_REPO` for plan and result records when editing elsewhere.
 For `--dispatch`, it selects the state repository for the room, main attempt,
-and call results; `--repo` still selects the worker's source and execution
-repository. `--room` selects a room without changing `OMS_ROOM_REPO`. With no
-`OMS_ROOM_REPO`, that room resolves in `--repo`.
+and call results; `--repo` still selects the source and execution repository
+for workers, researchers, advisors and reviewers. Review diff/HEAD checks and
+verification also run in that source repository. `--room` selects a room without
+changing `OMS_ROOM_REPO`. With no `OMS_ROOM_REPO`, that room resolves in `--repo`.
 An owner result saved with `--finalize --outcome completed --verify COMMAND`
 binds to the current plan and task. Plan displays **completed locally** for a
 matching passing result, including one recorded outside a panel session, while
