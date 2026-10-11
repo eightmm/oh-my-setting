@@ -2183,6 +2183,14 @@ for bad in ({"role": "verifier", "access": "write"}, {"role": "release-engineer"
         assert "install one" in str(error) or bad, error
 for owner in panel.PROVIDERS:
     arguments = panel.native_command(owner, project)
+    if owner == "claude":
+        import uuid
+        native_id = arguments[arguments.index("--session-id") + 1]
+        assert str(uuid.UUID(native_id, version=4)) == native_id and uuid.UUID(native_id).version == 4
+        resumed_argv = panel.native_command(owner, project, resume=native_id)
+        assert "--session-id" not in resumed_argv and resumed_argv[resumed_argv.index("--resume") + 1] == native_id
+    else:
+        assert "--session-id" not in arguments
     expected = "gpt-6.1-sol" if owner == "codex" else "claude-opus-5-5"
     assert arguments[arguments.index("--model") + 1] == expected, arguments
     assert "--dispatch ROLE" in panel.bootstrap(owner, project) and "--workload light|routine|deep|frontier" in panel.bootstrap(owner, project)
@@ -2217,6 +2225,14 @@ try:
 except ValueError as error:
     assert "verified Pi session binding" in str(error)
 assert "--owner codex" in panel.watch_shell(project, "pi") and "--owner pi" not in panel.watch_shell(project, "pi")
+assert "Codex CLI" in panel.main_missing("pi") and "Pi CLI" in panel.main_missing("pi")
+for harness in panel.MAIN_HARNESSES:
+    with patch.object(panel, "main_installed", return_value=False):
+        try:
+            panel._run_native(harness, project)
+            raise AssertionError("missing harness started")
+        except ValueError as error:
+            assert str(error) == panel.main_missing(harness)
 with patch.dict(os.environ, environment, clear=True), patch.object(panel.shutil, "which", return_value="/x"), \
         patch.object(panel, "ensure_room", return_value="pi-room"), patch.object(panel, "events", return_value="pi-attempt") as pi_events, \
         patch.object(panel.room, "join") as pi_join, patch.object(panel, "managed_session", return_value=False), \
@@ -3423,6 +3439,47 @@ if os.name == "posix":
                 assert subprocess.check_output(tmux + ["show-option", "-t", session, "-v", "mouse"], env=env, text=True).strip() == "on"
                 subprocess.run(tmux + ["send-keys", "-t", listing[0], "Enter"], env=env, check=True)
                 tmux_wait(["capture-pane", "-p", "-t", listing[0]], owner + " session exited (0)")
+                tmux_wait(["capture-pane", "-p", "-t", listing[0]], "r resume/restart here")
+                if owner == "claude":
+                    before_windows = subprocess.check_output(tmux + ["list-windows", "-t", session, "-F", "#{window_id}"],
+                                                             env=env, text=True)
+                    first_attempt = subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", listing[0],
+                                                                   "@oms_panel_main_attempt"], env=env, text=True).strip()
+                    first_main = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
+                                                  "show", "--attempt", first_attempt, "--json"], env))
+                    assert first_main["terminal"] and first_main["reason_code"] == "native_exit", first_main
+                    native_id = first_main["refs"]["native_session"]
+                    assert uuid.UUID(native_id).version == 4
+                    first_launch = json.loads(log.read_text().splitlines()[-1])
+                    assert first_launch["argv"][first_launch["argv"].index("--session-id") + 1] == native_id
+                    subprocess.run(tmux + ["send-keys", "-t", listing[0], "-l", "r"], env=env, check=True)
+                    deadline = time.monotonic() + 15
+                    while True:
+                        next_attempt = subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", listing[0],
+                                                                      "@oms_panel_main_attempt"], env=env, text=True).strip()
+                        if next_attempt != first_attempt:
+                            break
+                        assert time.monotonic() < deadline, "restart did not replace the attempt"
+                        time.sleep(.1)
+                    tmux_wait(["display-message", "-p", "-t", listing[0], "#{@oms_panel_native_pane}"], listing[0])
+                    next_main = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
+                                                 "show", "--attempt", next_attempt, "--json"], env))
+                    assert next_main["refs"]["native_session"] == native_id
+                    assert next_main["refs"]["panel_room_participant"] == first_attempt
+                    assert subprocess.check_output(tmux + ["list-windows", "-t", session, "-F", "#{window_id}"],
+                                                   env=env, text=True) == before_windows, "restart added a window"
+                    assert subprocess.check_output(tmux + ["display-message", "-p", "-t", listing[0], "#{pane_pid}"],
+                                                   env=env, text=True) == native_pid, "restart replaced the pane"
+                    deadline = time.monotonic() + 15
+                    while True:
+                        next_launch = json.loads(log.read_text().splitlines()[-1])
+                        if "--resume" in next_launch["argv"]:
+                            break
+                        assert time.monotonic() < deadline, "restart did not resume the native session"
+                        time.sleep(.1)
+                    assert next_launch["argv"][next_launch["argv"].index("--resume") + 1] == native_id
+                    subprocess.run(tmux + ["send-keys", "-t", listing[0], "Enter"], env=env, check=True)
+                    tmux_wait(["display-message", "-p", "-t", listing[0], "[#{@oms_panel_native_pane}]"], "[]")
             # One panel-wide board geometry in cells: both mains end with the same board size, a drag in the active
             # window is recorded and the other main follows; a zoomed board is left alone.
             shared = {}
@@ -3462,8 +3519,8 @@ if os.name == "posix":
             tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_owner"], "codex")
             tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "Codex --")
             records = [json.loads(line) for line in log.read_text().splitlines()]
-            assert {r["agent"] for r in records[-2:]} == set(panel.PROVIDERS)
-            assert all(r["cwd"] == str(project.resolve()) for r in records[-2:])
+            assert [r["agent"] for r in records[-3:]] == ["codex", "claude", "claude"]
+            assert all(r["cwd"] == str(project.resolve()) for r in records[-3:])
             # Select the destination with a real attached client on another session.
             # Provenance rejection is covered by the catalog fixtures below.
             other = subprocess.check_output(tmux + ["new-session", "-d", "-s", "fixture-navigation",
@@ -3668,6 +3725,15 @@ if os.name == "posix":
                 time.sleep(.2)
             # The start bar sits right above the pinned key hints.
             assert "One main active or unverified" in board_text.splitlines()[-2], board_text
+            subprocess.run(tmux + ["send-keys", "-t", chat_pane, "-l", "r"], env=env, check=True)
+            tmux_wait(["capture-pane", "-p", "-J", "-t", chat_pane], "another main is live or unverified")
+            # Enter closes the retired main's entire window and its board watcher.
+            subprocess.run(tmux + ["send-keys", "-t", chat_pane, "Enter"], env=env, check=True)
+            deadline = time.monotonic() + 15
+            while top_window in subprocess.check_output(tmux + ["list-windows", "-t", session, "-F", "#{window_id}"],
+                                                        env=env, text=True).splitlines():
+                assert time.monotonic() < deadline, "Enter left the old board window running"
+                time.sleep(.1)
             subprocess.run(tmux + ["detach-client", "-s", session], env=env, check=True)
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
@@ -7945,6 +8011,56 @@ with patch.object(panel, "events", return_value=json.dumps([{"tool": "panel-main
 occupied = {"installed": ["claude", "pi", "codex"], "spawn_managed": True, "main_occupied": True}
 assert graph_view.spawn_bar(100, occupied)[1] == []
 assert "One main" in graph_view.spawn_bar(100, occupied)[0]
+armed_bar = graph_view.spawn_bar(100, {"installed": ["claude"], "spawn_managed": True, "spawn_armed": True})
+assert "1 Claude" in armed_bar[0] and "2 Pi" not in armed_bar[0] and "0 Codex" not in armed_bar[0]
+# Closing an exit prompt requires all three window fields and a successful lookup.
+exit_options = {"@oms_panel_main_attempt": "exit-attempt", "@oms_panel_room": shared,
+                "@oms_panel_room_participant": "exit-attempt",
+                "@oms_panel_repo": str(project.resolve())}
+def exited_native(*args, **kwargs):
+    kwargs["_exit_info"].update(attempt="exit-attempt", room=shared)
+    return 0
+for fields, query_status, closes in ((["exit-attempt", "", str(project.resolve())], 0, True),
+                                    (["successor", "", str(project.resolve())], 0, False),
+                                    (["exit-attempt", "%42", str(project.resolve())], 0, False),
+                                    (["exit-attempt", "", "/foreign/repository"], 0, False),
+                                    (["exit-attempt", "", str(project.resolve())], 1, False)):
+    window_options = dict(exit_options, **{"@oms_panel_main_attempt": fields[0]})
+    with patch.dict(os.environ, dict(environment, TMUX="fixture", TMUX_PANE="%42", OMS_PANEL_SESSION="oms-exit"), clear=True), \
+            patch.object(panel, "check_legacy_main"), patch.object(panel, "run_single_native", side_effect=exited_native), \
+            patch.object(panel, "managed_session", return_value=True), \
+            patch.object(panel, "pane_option", side_effect=window_options.get), \
+            patch.object(panel.sys.stdin, "isatty", return_value=True), \
+            patch.object(panel.sys.stdout, "isatty", return_value=True), \
+            patch("panel_input.TerminalInput") as exit_input, patch("builtins.input", return_value=""), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], query_status, "\t".join(fields) + "\r\n", "")) as close_query:
+        exit_input.return_value.__enter__.return_value.fd = None
+        assert panel.run_native("claude", project) == 0
+        kills = [call for call in close_query.call_args_list if "kill-window" in call.args[0]]
+        assert bool(kills) == closes, (fields, query_status, kills)
+# Restart refuses an unverified session/window or nonterminal previous attempt;
+# a Pi restart deliberately ignores even a recorded session id and starts fresh.
+for harness, owner, terminal, succeeds in (("claude", None, True, False),
+                                           ("claude", str(project.resolve()), False, False),
+                                           ("pi", str(project.resolve()), True, True)):
+    previous = {"attempt_id": "exit-attempt", "terminal": terminal, "provider": panel.main_owner(harness),
+                "tool": "panel-main", "refs": {"panel_role": "main", "panel_room_id": shared,
+                                               "native_session": "recorded-session"}}
+    with patch.dict(os.environ, dict(environment, TMUX="fixture", TMUX_PANE="%42", OMS_PANEL_SESSION="oms-exit"), clear=True), \
+            patch.object(panel, "check_legacy_main"), patch.object(panel, "run_single_native", side_effect=exited_native) as restart_main, \
+            patch.object(panel, "managed_session", return_value=True), \
+            patch.object(panel, "pane_option", side_effect=exit_options.get), \
+            patch.object(panel, "session_owner", return_value=owner), patch.object(panel, "live_mains", return_value=0), \
+            patch.object(panel, "main_history", return_value=[previous]), \
+            patch.object(panel.sys.stdin, "isatty", return_value=True), \
+            patch.object(panel.sys.stdout, "isatty", return_value=True), \
+            patch("panel_input.TerminalInput") as exit_input, patch("builtins.input", side_effect=["r", EOFError]):
+        exit_input.return_value.__enter__.return_value.fd = None
+        assert panel.run_native(harness, project) == 0
+        assert restart_main.call_count == (2 if succeeds else 1)
+        if succeeds:
+            assert restart_main.call_args.args[2] is None, "Pi restarted using an unverified session binding"
 with patch.object(panel.shutil, "which", return_value="/x"), \
         patch.object(panel, "resolve_session", return_value=("legacy-panel", str(project))), \
         patch.object(panel, "recorded_room", return_value="r1"), patch.object(panel, "live_mains", return_value=1), \

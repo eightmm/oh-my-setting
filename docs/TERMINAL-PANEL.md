@@ -92,12 +92,27 @@ oms panel --repo . --launch pi --task 'short task'
 when any panel room has a live main. It permits a replacement after terminal evidence
 confirms the previous main ended. Unknown window/lifecycle state refuses replacement.
 
+Fresh Claude mains receive a panel-generated UUID via `--session-id`, retained as
+the attempt's `native_session` reference. Resumed Claude mains keep `--resume`
+and that reference, so restarting keeps the same room participant and unread mail.
+Codex starts with its existing flags; a recorded native session can be resumed.
+After a native main exits in its panel window, the chat pane shows
+`r resume/restart here · Enter close window`. Press `r` to relaunch in that pane,
+resuming its recorded session or starting fresh when no session is recorded.
+The previous attempt must be terminal, and startup rechecks the sole-main limit
+and resume ownership under the main-session lock. Another live main or unverified
+ownership refuses restart and returns to the prompt. Enter closes the whole
+window, including its board watcher, only while the attempt tag and repository
+still match and the native pane marker is unset; otherwise the window is preserved.
+Without a terminal, native launch retains its existing exit behavior.
+
 Pi uses the existing `oms harness pi` bridge and requires both Pi and Codex CLI on PATH.
 Its default model and effort come from the Codex main preset; `--model` selects an exact
 Codex catalog model. Pi owns its tools and UI, while OMS records the inference owner as
 `codex` and the harness as `pi`. Pi history is separate: this initial integration refuses
 `--resume` until Pi session ownership can be verified. It has no Codex native hook or
-context/quota reading. The launch uses Pi's documented
+context/quota reading. At Pi's exit prompt, `r` starts a fresh Pi main; it does not
+resume Pi history. The launch uses Pi's documented
 [`--append-system-prompt` argument](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/cli/args.ts)
 to preserve its base instructions and pass the OMS room and sole-main contract.
 

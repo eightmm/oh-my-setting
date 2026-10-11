@@ -164,6 +164,12 @@ def main_installed(harness):
     return bool(shutil.which(native_binary(harness))) and (harness != "pi" or bool(shutil.which("codex")))
 
 
+def main_missing(provider):
+    if provider == "pi":
+        return "Pi main needs the Pi CLI and Codex CLI on PATH (Pi uses Codex inference)"
+    return "%s main needs the %s CLI on PATH" % (provider.capitalize(), native_binary(provider))
+
+
 def ensure_room(repo, ident=None, title="Shared work"):
     ident = ident or os.environ.get("OMS_ROOM_ID")
     if ident:
@@ -405,7 +411,8 @@ def bootstrap(provider, repo):
     ) % (provider, json.dumps(str(repo)), json.dumps(str(ENTRY)), peer, peer, peer, peer, provider)
 
 
-def native_command(provider, repo, resume=None, model=None, task=None, room_id=None, member=None, context_file=None):
+def native_command(provider, repo, resume=None, model=None, task=None, room_id=None, member=None, context_file=None,
+                   session_id=None):
     if provider == "pi":
         if resume:
             raise ValueError("Pi resume needs a verified Pi session binding; start a new Pi main")
@@ -436,6 +443,8 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
     elif provider == "claude":
         if resume:
             command += ["--resume", resume]
+        else:
+            command += ["--session-id", session_id or str(uuid.uuid4())]
         if model:
             command += ["--model", model]
         if default:
@@ -488,13 +497,95 @@ def safe_label(value):
 def run_native(provider, repo, resume=None, model=None, task=None):
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
         raise ValueError("workers cannot open native owner sessions")
-    # A process-lifetime lease also covers inline/Herdr launches and racing native children.
-    with _lock(repo, "panel-main-session", timeout=.1):
-        check_legacy_main(repo)
-        return run_single_native(provider, repo, resume, model, task)
+    attempt, ident = None, None
+    pane = os.environ.get("TMUX_PANE", "")
+    session = os.environ.get("OMS_PANEL_SESSION", "")
+    while True:
+        exit_info = {}
+        try:
+            # Release the process-lifetime lease while the terminal exit prompt waits.
+            with _lock(repo, "panel-main-session", timeout=.1):
+                if attempt:
+                    if (session_owner(session) != str(Path(repo).resolve())
+                            or pane_option("@oms_panel_main_attempt") != attempt
+                            or pane_option("@oms_panel_native_pane")
+                            or pane_option("@oms_panel_repo") != str(Path(repo).resolve())):
+                        raise ValueError("restart ownership is unverified; existing window preserved")
+                    if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
+                        raise ValueError("another main is live or unverified; finish it before restarting here")
+                    previous = next((row for row in main_history(repo, ident)
+                                     if row.get("attempt_id") == attempt), None)
+                    if (not previous or previous.get("terminal") is not True
+                            or previous.get("tool") != "panel-main"
+                            or previous.get("provider") != main_owner(provider)
+                            or previous.get("refs", {}).get("panel_role") != "main"
+                            or previous.get("refs", {}).get("panel_room_id") != ident
+                            or previous.get("refs", {}).get("panel_room_participant", attempt)
+                               != pane_option("@oms_panel_room_participant")):
+                        raise ValueError("previous main has no confirmed terminal owner; restart refused")
+                    resume = previous.get("refs", {}).get("native_session") if provider != "pi" else None
+                check_legacy_main(repo)
+                original_room = os.environ.get("OMS_ROOM_ID")
+                try:
+                    if attempt:
+                        os.environ["OMS_ROOM_ID"] = ident
+                    status = run_single_native(provider, repo, resume, model, task, _exit_info=exit_info)
+                finally:
+                    if original_room is None:
+                        os.environ.pop("OMS_ROOM_ID", None)
+                    else:
+                        os.environ["OMS_ROOM_ID"] = original_room
+                if not (managed_session() and sys.stdin.isatty() and sys.stdout.isatty()):
+                    return status
+                # Keep this invocation's identity, even if a window tag has since been replaced.
+                attempt = exit_info.get("attempt")
+                ident = exit_info.get("room")
+                if not attempt or not ident or not re.fullmatch(r"%[0-9]+", pane):
+                    print("Exit window ownership is unavailable; window preserved.", file=sys.stderr)
+                    return status
+                print("%s session exited (%s)." % (provider, status))
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            if not attempt:
+                raise
+            message = ("another main is live or unverified; main-session lease is busy"
+                       if str(error) == "panel operation is busy; retry later" else str(error))
+            print("Restart refused: " + clean(message, 200), file=sys.stderr)
+        from panel_input import TerminalInput
+        import select
+        while True:
+            print("r resume/restart here · Enter close window", flush=True)
+            with TerminalInput() as inputs:
+                if inputs.fd is None:
+                    try:
+                        key = input()
+                    except EOFError:
+                        return status
+                    key = "\n" if not key else key
+                else:
+                    select.select([inputs.fd], [], [])
+                    key = os.read(inputs.fd, 1).decode("utf-8", errors="replace")
+            if key == "r":
+                break
+            if key in ("\r", "\n"):
+                try:
+                    window = subprocess.run(tmux_command("display-message", "-p", "-t", pane,
+                        "#{@oms_panel_main_attempt}\t#{@oms_panel_native_pane}\t#{@oms_panel_repo}"),
+                        capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
+                    fields = window.stdout.replace("\r", "").rstrip("\n").split("\t")
+                    if (window.returncode or fields != [attempt, "", str(Path(repo).resolve())]):
+                        print("Close refused: attempt, native pane or repository ownership changed; window preserved.",
+                              file=sys.stderr)
+                        return status
+                    subprocess.run(tmux_command("kill-window", "-t", pane), check=True, timeout=5,
+                                   stdin=subprocess.DEVNULL)
+                except (OSError, subprocess.SubprocessError) as error:
+                    print("Close unavailable; window preserved: " + clean(str(error), 140), file=sys.stderr)
+                return status
+            if not key:
+                return status
 
 
-def run_single_native(provider, repo, resume=None, model=None, task=None):
+def run_single_native(provider, repo, resume=None, model=None, task=None, _exit_info=None):
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
         raise ValueError("workers cannot open native owner sessions")
     if resume:
@@ -516,8 +607,8 @@ def run_single_native(provider, repo, resume=None, model=None, task=None):
                             for row in claims)):
                         raise ValueError("native session has no confirmed terminal owner; inspect its existing session before resuming")
             ident = ensure_room(repo)
-            return _run_native(provider, repo, resume, model, task, ident)
-    return _run_native(provider, repo, resume, model, task)
+            return _run_native(provider, repo, resume, model, task, ident, _exit_info=_exit_info)
+    return _run_native(provider, repo, resume, model, task, _exit_info=_exit_info)
 
 
 def main_history(repo, ident, member=None):
@@ -531,14 +622,15 @@ def main_history(repo, ident, member=None):
             or row.get("attempt_id") in enrolled or row.get("refs", {}).get("panel_room_participant") in enrolled]
 
 
-def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None):
+def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None, _exit_info=None):
     harness = provider
     execution = native_repository(repo)
     if not main_installed(harness):
-        raise ValueError("native provider is not installed")
+        raise ValueError(main_missing(harness))
     if harness == "pi" and resume:
         raise ValueError("Pi resume needs a verified Pi session binding; start a new Pi main")
     provider = main_owner(harness)
+    native_session = resume or (str(uuid.uuid4()) if harness == "claude" else None)
     preset = policy()["main"].get(provider, {"model": "provider-default", "effort": "native-settings"})
     room_id = room_id or ensure_room(repo)
     member = None
@@ -572,14 +664,18 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                      "--ref", "panel_effort=" + (preset["effort"] if not model or harness == "pi" else "native-settings"),
                      "--ref", "panel_label=" + label,
                      "--ref", "panel_location=repository", "--ref", "panel_room_id=" + room_id,
-                     *(["--ref", "panel_session_digest=" + digest] if resume else []),
+                     *(["--ref", "native_session=" + native_session,
+                        "--ref", "panel_session_digest=" + hashlib.sha256(native_session.encode()).hexdigest()[:32]]
+                       if native_session else []),
                      *(["--ref", "panel_room_participant=" + member] if member else []),
                      *[arg for key, value in host_refs.items() for arg in ("--ref", key + "=" + value)],
                      "--then", "starting", "--then", "working", output=True)
     native_member = member or attempt
+    if _exit_info is not None:
+        _exit_info.update(attempt=attempt, room=room_id)
     try:
         if not member:
-            room.join(repo, room_id, native_member, provider, "main", model or preset["model"], label, resume)
+            room.join(repo, room_id, native_member, provider, "main", model or preset["model"], label, native_session)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         update_activity(repo, "transition", "--attempt", attempt, "--state", "failed", "--actor", "panel-main",
                         "--reason-code", "room_join_failed")
@@ -650,7 +746,8 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                                 + ("\nUser task (data): " + json.dumps(task) if task else ""), encoding="utf-8")
         context_path.chmod(0o600)
         launch_inflight = True
-        process = subprocess.Popen(native_command(harness, repo, resume, model, task, room_id, native_member, context_path),
+        process = subprocess.Popen(native_command(harness, repo, resume, model, task, room_id, native_member, context_path,
+                                                  session_id=native_session),
                                    cwd=str(execution), env=env)
         launch_inflight = False
         while True:
@@ -3974,19 +4071,15 @@ def main(argv=None):
             print(json.dumps(reopen_panel(repo)))
             return 0
         if split and args.launch:
-            if not shutil.which("tmux") or not main_installed(args.launch):
-                raise ValueError("native chat board requires tmux and the selected CLI on PATH")
+            if not main_installed(args.launch):
+                raise ValueError(main_missing(args.launch))
+            if not shutil.which("tmux"):
+                raise ValueError("native chat board requires tmux on PATH")
             return split_panel(repo, args.view or "auto", args.attention_only, args.launch, args.resume, args.model, args.task)
         if args.launch:
             if not main_installed(args.launch):
-                raise ValueError("%s is not installed on PATH" % args.launch)
+                raise ValueError(main_missing(args.launch))
             status = run_native(args.launch, repo, args.resume, args.model, args.task)
-            if os.environ.get("TMUX") and os.environ.get("OMS_PANEL_SESSION"):
-                print("%s session exited (%s)." % (args.launch, status))
-                try:
-                    read_field("Press Enter to close this pane: ", required=False)
-                except EOFError:
-                    pass
             return status
         if split:
             if not shutil.which("tmux"):
