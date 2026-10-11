@@ -94,7 +94,7 @@ def status_alerts(report):
 def clipped(text, width):
     # Preserve layout spaces; clean() deliberately collapses them in data labels.
     text = "".join(" " if ch in "\t\n\r" else "?" if unicodedata.category(ch)[0] == "C"
-                   else ch for ch in str(text)[:2000])
+                   else ch for ch in str(text)[:2000] if ch not in "\ufe0e\ufe0f")
     if width >= 3:
         return fit(text, width)
     result = ""
@@ -920,48 +920,292 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         add(line, "dim" if line.startswith(("OMS", "Native", "tmux", "A finished", "Finished", "Some")) else "main")
     return "\n".join(lines[:height - int(menu)])
 
-def render_results(report, width=100, compact=False):
-    """Scroll ordinary text: summaries first, then retained answers and evidence."""
+def _result_blocks(text):
+    """Classify the reader's list/code/pipe-table subset; retain original lines."""
+    source = str(text).split("\n")
+    containers, leaf, fence = [], "prose", ""
+    paragraph = False
+    delimiter_row = -1
+    next_nonblank = 0
+
+    def opener(value):
+        match = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", value)
+        if match and not (match[1][0] == "`" and "`" in match[2]):
+            return match[1]
+        return ""
+
+    def item(value):
+        match = re.match(r"^ {0,3}([-+*]|[0-9]{1,9}[.)])(?= |$)", value)
+        if not match:
+            return None
+        rest = value[match.end():]
+        padding = len(rest) - len(rest.lstrip(" "))
+        # Five or more spaces start code after one marker-padding space.
+        padding = padding if 1 <= padding <= 4 and rest.strip() else 1
+        return match, match.end() + padding
+
+    def cells(value, single=False):
+        # Escaped pipes belong to their cell, including in inline code spans.
+        parts, start, escaped = [], 0, False
+        for index, char in enumerate(value):
+            if char == "|" and not escaped:
+                parts.append(value[start:index])
+                start = index + 1
+            escaped = char == "\\" and not escaped
+        if not parts:
+            return [value] if single else []
+        parts.append(value[start:])
+        if not parts[0].strip():
+            parts.pop(0)
+        if parts and not parts[-1].strip():
+            parts.pop()
+        return parts
+
+    def table_start(index, value):
+        header = cells(value)
+        if not header or index + 1 == len(source):
+            return False
+        following = source[index + 1].expandtabs(4)
+        matched, offset = container_content(following)
+        following = following[offset:]
+        if matched != len(containers) or len(following) - len(following.lstrip(" ")) > 3:
+            return False
+        delimiter = cells(following, single=True)
+        return len(header) == len(delimiter) and all(
+            re.fullmatch(r" *:?-+:? *", cell) for cell in delimiter)
+
+    def quote(value):
+        return re.match(r"^ {0,3}> ?", value)
+
+    def block_start(value, table=False):
+        return (re.match(r"^ {0,3}#{1,6}(?: |$)", value) or
+                re.fullmatch(r" {0,3}(?:\*(?: *\*){2,}|-(?: *-){2,}|_(?: *_){2,}) *", value) or
+                re.match(r"^ {0,3}(?:<!--|<\?|<![A-Z]|<!\[CDATA\[|(?i:"
+                         r"<(?:script|pre|style|textarea)(?= |>|$)|</?(?:"
+                         r"address|article|aside|base|basefont|blockquote|body|caption|center|col|"
+                         r"colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|"
+                         r"form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|"
+                         r"menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|"
+                         r"section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul"
+                         r")(?= |/?>|$)))", value) or
+                (table and re.fullmatch(
+                    r" {0,3}(?:</[A-Za-z][A-Za-z0-9-]* *>|"
+                    r"<(?!(?i:script|style|pre|textarea)(?=[ />]))[A-Za-z][A-Za-z0-9-]*"
+                    r"(?: +[A-Za-z_:][A-Za-z0-9_.:-]*(?: *= *(?:[^\x00\x09-\x0d \"'=<>`]+|"
+                    r"'[^'\x00]*'|\"[^\"\x00]*\"))?)* */?>) *", value)))
+
+    def container_content(line):
+        offset = 0
+        for matched, entry in enumerate(containers):
+            value = line[offset:]
+            if entry[0] == "quote":
+                mark = quote(value)
+                if not mark:
+                    return matched, offset
+                offset += mark.end()
+            elif not value.strip(" "):
+                if entry[2]:
+                    return matched, offset
+            elif len(value) - len(value.lstrip(" ")) >= entry[1]:
+                offset += entry[1]
+            else:
+                return matched, offset
+        return len(containers), offset
+
+    for index, original in enumerate(source):
+        line = original.expandtabs(4)
+        matched, container = container_content(line)
+        value = line[container:]
+        blank = not value.strip(" ")
+        leading = len(value) - len(value.lstrip(" "))
+        if leaf == "fence" and matched == len(containers):
+            closing = re.fullmatch(r" {0,3}" + re.escape(fence[0]) +
+                                   "{%d,} *" % len(fence), value)
+            if closing:
+                leaf, fence = "prose", ""
+            yield original, "code"
+            continue
+        if leaf == "code" and matched == len(containers):
+            if blank and next_nonblank <= index:
+                next_nonblank = len(source)
+                for following_index in range(index + 1, len(source)):
+                    following = source[following_index].expandtabs(4)
+                    count, offset = container_content(following)
+                    if count != len(containers) or following[offset:].strip(" "):
+                        next_nonblank = following_index
+                        break
+            following = line
+            if blank:
+                following = source[next_nonblank].expandtabs(4) if next_nonblank < len(source) else ""
+            count, offset = container_content(following)
+            if count == len(containers) and following[offset:].startswith("    "):
+                yield original, "code"
+                continue
+        if blank:
+            del containers[matched:]
+            paragraph, leaf = False, "prose"
+            yield original, "prose"
+            continue
+
+        marker = item(value)
+        # Only paragraph text may lazily omit enclosing list indentation.
+        # A sibling item ends that paragraph regardless of its start number or content.
+        interrupts = opener(value) or marker or quote(value) or block_start(value)
+        if matched < len(containers) and paragraph and not interrupts:
+            yield original, "prose"
+            continue
+        if matched < len(containers):
+            del containers[matched:]
+            paragraph, leaf = False, "prose"
+        elif leaf in ("fence", "code"):
+            paragraph, leaf = False, "prose"
+
+        if leaf == "table" and (index == delimiter_row or
+                (leading <= 3 and not opener(value) and not marker and not quote(value) and
+                 not block_start(value, table=True))):
+            yield original, "table"
+            continue
+        if leaf == "table":
+            leaf = "prose"
+
+        # Setext underlines close a paragraph before list-marker recognition.
+        if paragraph and re.fullmatch(r" {0,3}(?:=+|-+) *", value):
+            paragraph = False
+            yield original, "prose"
+            continue
+        while marker or quote(value):
+            quoted = quote(value)
+            if quoted:
+                containers.append(["quote", 0, False])
+                container += quoted.end()
+                value = line[container:]
+                paragraph = False
+                marker = item(value)
+                continue
+            match, content = marker
+            if block_start(value):
+                break
+            if paragraph and (not value[content:].strip() or
+                              (match[1][0].isdigit() and int(match[1][:-1]) != 1)):
+                break
+            container += content
+            containers.append(["list", content, not value[content:].strip()])
+            value = line[container:]
+            paragraph = False
+            marker = item(value)
+        for entry in containers[:-1] if not value.strip() else containers:
+            entry[2] = False
+        mark = opener(value)
+        if mark:
+            leaf, fence, paragraph = "fence", mark, False
+            kind = "code"
+        elif not paragraph and value.startswith("    "):
+            leaf, paragraph = "code", False
+            kind = "code"
+        elif leading <= 3 and table_start(index, value):
+            leaf, paragraph, delimiter_row = "table", False, index + 1
+            kind = "table"
+        else:
+            paragraph = bool(value.strip()) and not block_start(value)
+            kind = "prose"
+        yield original, kind
+
+
+def _result_structured(line, width, indent=""):
+    from dashboard_projection import ELLIPSIS
+    # Keep terminal controls inert without clipping retained printable content.
+    line = "".join("?" if ch != "\t" and unicodedata.category(ch)[0] == "C" else ch for ch in line)
+    prefix, piece, used = indent, [], 0
+    for char in line:
+        cells = 8 - (display_width(prefix) + used) % 8 if char == "\t" else display_width(char)
+        if used + cells > width - display_width(prefix):
+            yield prefix + "".join(piece)
+            prefix, piece, used = indent + ("↪ " if ELLIPSIS[0] == "…" else "+ "), [], 0
+            cells = 8 - display_width(prefix) % 8 if char == "\t" else cells
+        piece.append(char)
+        used += cells
+    yield prefix + "".join(piece)
+
+
+def render_results(report, width=100, compact=False, heading=None):
+    """Scroll ordinary text, preserving the layout of retained code and tables."""
+    from room_view import MACHINE, changed_lines, readable, said
     width = max(8, min(200, width))
-    lines = [clipped("OMS / Results", width)]
+    lines = [clipped(heading or "OMS / Results", width)]
+
     def add(text, indent="", limit=None):
         text = str(text)
         for line in wrapped(text, width - len(indent), limit or max(1, len(text)),
                             max_chars=max(400, len(text))):
             lines.append(indent + line)
+
+    def prose(text, indent=""):
+        # readable() strips markdown and leading spaces, so structured pieces bypass it.
+        ordinary = []
+
+        def flush():
+            for line in ordinary:
+                text = readable(line, paragraphs=True)
+                if text:
+                    spaces = line[:len(line) - len(line.lstrip(" \t"))]
+                    safe = clipped(spaces + text, max(2000, display_width(spaces + text)))
+                    if display_width(indent + safe) <= width:
+                        lines.append(indent + safe)
+                    else:
+                        add(text, indent + clipped(spaces, max(0, width - len(indent) - 1)))
+                elif not line.strip():
+                    lines.append("")
+            ordinary[:] = []
+
+        for line, kind in _result_blocks(text):
+            if kind != "prose":
+                flush()
+                lines.extend(_result_structured(line, width, indent))
+            elif not MACHINE.match(line.strip()):
+                ordinary.append(line)
+        flush()
+
     rows = listing(report.get("rows"))
     if not rows:
         add("No result in the retained evidence window." if report.get("truncated") else
             "No retained results. Finalize a task to record its owner summary.")
     for number, row in enumerate(rows, 1):
         lines.append("")
+        check = mapping(row.get("verification")).get("status")
+        outcome = {"accepted": "Accepted by its main", "completed": "Completed; the main recorded a summary",
+                   "failed": "Marked failed by its main"}.get(row.get("outcome"), "Not reviewed by its main yet")
+        checks = "checks " + str(check).replace("_", " ") if check and check != "not_run" else "no checks run"
+        delivery = row.get("delivery")
         if compact:
-            add("%s. %s [%s]" % (number, row.get("title") or row.get("task_id") or "Task",
-                                row.get("outcome") or "owner decision pending"), limit=3)
-            add("Verify: %s / App: %s" % (mapping(row.get("verification")).get("status") or "not run",
-                                        row.get("delivery") or "not_requested"), "   ", 2)
+            add("%s. %s [%s]" % (number, row.get("title") or row.get("task_id") or "Task", outcome), limit=3)
+            add("Verify: " + checks, "   ", 2)
+            if delivery and delivery != "not_requested":
+                add("App: " + delivery, "   ", 2)
             continue
-        add(row.get("title") or row.get("task_id") or "Task", limit=3)
+        calls = listing(row.get("calls"))
+        latest = mapping(calls[-1]) if calls else {}
+        model = row.get("model") or latest.get("served_model") or latest.get("selected_model") or latest.get("requested_model")
+        purpose = PURPOSE_NAMES.get(row.get("purpose")) or TASK_NAMES.get(latest.get("kind")) or PURPOSE_NAMES.get(row.get("role")) or "Work"
+        add(" · ".join((MODEL_NAMES.get(model, model) or "unrecorded model", purpose,
+                        said(row.get("process_state")), row.get("title") or row.get("task_id") or "Task")))
         add("Task: " + (row.get("task_id") or "unknown"), limit=3)
-        add("Outcome: %s | process: %s | verify: %s" % (
-            row.get("outcome") or "owner decision pending", row.get("process_state") or "unrecorded",
-            mapping(row.get("verification")).get("status") or "not run"))
-        add("App: %s%s" % (row.get("delivery") or "not_requested",
-                           " / delivery uncertain; inspect before retry" if row.get("delivery_unknown") else ""))
+        add("Outcome: " + outcome + " · " + checks)
+        for line in changed_lines(row):
+            add(line)
+        if delivery and delivery != "not_requested":
+            add("App: %s%s" % (delivery, " / delivery uncertain; inspect before retry" if row.get("delivery_unknown") else ""))
         if row.get("issue"):
             add(row["issue"])
         if row.get("summary"):
-            for paragraph in row["summary"].splitlines():
-                add(paragraph, "  ")
+            prose(row["summary"], "  ")
         else:
             add("Owner summary pending. Model exit does not establish acceptance.", "  ")
-        for call in listing(row.get("calls")):
+        for call in calls:
             model = call.get("served_model") or call.get("selected_model") or call.get("requested_model")
             add("%s / %s / exit %s" % (MODEL_NAMES.get(model, model) or "unrecorded model",
                 call.get("kind") or "call", call.get("exit", "unknown")), "  ", 3)
             if call.get("answer"):
-                for paragraph in call["answer"].splitlines():
-                    add(paragraph, "    ")
+                prose(call["answer"], "    ")
                 if call.get("answer_truncated"):
                     add("Answer exceeds the retained preview limit; full source: " +
                         str(call.get("artifact") or "unavailable"), "    ")

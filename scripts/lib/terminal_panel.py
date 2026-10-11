@@ -4229,8 +4229,14 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         elif event[0] == "escape" and navigation.get("health_view"):
                             navigation["health_view"] = False
                         elif tab_event(event, navigation):
-                            pass
-                        elif (event[0] == "f" and navigation.get("tab") == "debate" and navigation.get("surface") == "graph"
+                            target = navigation.pop("open_call", None)
+                            if target:
+                                try:
+                                    if not open_call(target):
+                                        navigate(repo, target, state, navigation, size.columns)
+                                except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                                    navigation["notice"] = clean(str(error), 160)
+                        elif (event[0] == "f" and navigation.get("tab") == "debate" and navigation.get("surface") in {"graph", "tree"}
                                 and not navigation.get("detail") and (navigation.get("debate_view") or {}).get("shown")):
                             navigation["notice"] = "Opening recorded result..."
                             size = redraw()
@@ -5085,13 +5091,21 @@ def main(argv=None):
                 if participant:
                     read["rows"] = [row for row in read["rows"] if row.get("calls")]
                 return read
+            def reader(width):
+                from room_view import ROLES, model_name, said
+                read = report()
+                row = next(iter(read["rows"]), {})
+                heading = ("%s %s · %s" % (ROLES.get(row.get("role"), "Worker"), model_name(row),
+                                            said(row.get("process_state")))) if participant else None
+                return render_results(read, width, heading=heading)
+
             board = os.environ.get(panel_reader.BOARD, "")
             if args.json:
                 print(json.dumps(report(), ensure_ascii=False, indent=2))
             elif panel_reader.PANE.fullmatch(board) and sys.stdin.isatty() and sys.stdout.isatty():
-                return panel_reader.page(lambda width: render_results(report(), width), board)
+                return panel_reader.page(reader, board)
             else:
-                print(render_results(report(), shutil.get_terminal_size().columns))
+                print(reader(shutil.get_terminal_size().columns))
             return 0
         if args.finalize:
             report = finalize(repo, args.owner, args.task_id, args.summary_file, args.outcome,

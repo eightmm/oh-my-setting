@@ -322,20 +322,26 @@ def joined_seconds(call):
         return None
 
 
-def live_unread(report, members, settled):
-    """Unread mail addressed to mains and to their calls still working or waiting; the board and the tree both state it.
+def live_readers(report, members, settled):
+    """Participants that can still read mail, shared by message rows and unread totals.
 
     Calls stay joined after they end, so a broadcast to "all" stays pending for them forever; only a call that can
     still read its mail counts."""
     mains = [m for m in members if m.get("role") == "main"]
-    owners = {key for m in mains for key in (m["participant"], m.get("attempt")) if key}
     # A call in review or blocked has ended its process; broadcasts that keep arriving for it are never read.
     reading = LIVE_STATES | {"waiting_input", "waiting_approval"}
-    ids = {m["participant"] for m in mains} | {m["participant"] for m in members if m.get("role") != "main"
-                                              and m.get("parent") in owners and m.get("state") in reading
-                                              and not settled(m)}
-    return sum(valid_count(mapping(p).get("pending")) or 0
-               for p in listing(mapping(report.get("room")).get("pairs")) if mapping(p).get("recipient") in ids)
+    return {m["participant"] for m in mains} | {m["participant"] for m in members if m.get("role") != "main"
+                                               and m.get("state") in reading and not settled(m)}
+
+
+def live_unread(report, members, settled):
+    """Unread messages for live readers; a capped projection renders its lower bound as N+."""
+    ids = live_readers(report, members, settled)
+    room = mapping(report.get("room"))
+    projected = "pending_messages" in room
+    count = sum(bool(ids.intersection(listing(mapping(message).get("pending_for"))))
+                for message in listing(room.get("pending_messages" if projected else "messages")))
+    return "%s+" % count if projected and room.get("pending_messages_truncated") else count
 
 
 def plan_idle(report):
@@ -526,12 +532,35 @@ MACHINE = re.compile(r"^(stop-reason:|model-route:|model-result:|usage detail:|t
                      r"##\s*(output|exit|verify)\b|---\s*(begin|end) )", re.I)
 
 
-def who(member, labels=None):
+def who(member, labels=None, task=False):
     """A participant named with its role, so a Sol worker never reads like the Sol main."""
     if not member:
         return "someone"
     name = mapping(labels).get(member.get("participant")) or model_name(member)
-    return name + " " + ROLES.get(member.get("role"), "Worker").lower()
+    name += " " + ROLES.get(member.get("role"), "Worker").lower()
+    title = clean(member.get("title"))
+    if task and member.get("role") != "main" and title and title not in ("Native task not recorded", "Task unrecorded"):
+        name += " · " + clipped(title, 28)
+    return name
+
+
+def changed_lines(row):
+    """The latest retained patch's bounded file summary, ahead of the answer."""
+    changes = next((mapping(c.get("changes")) for c in reversed(listing(row.get("calls")))
+                    if mapping(c).get("changes")), {})
+    if changes.get("issue"):
+        return ["Changed files: unavailable (" + clean(changes["issue"]) + ")"]
+    total = valid_count(changes.get("count"))
+    if total is None:
+        return []
+    lines = ["Changed files: %s (+%s -%s)" % (total, valid_count(changes.get("added")) or 0,
+                                            valid_count(changes.get("removed")) or 0)]
+    files = listing(changes.get("files"))[:12]
+    lines += ["  %s +%s -%s" % (clean(f[0]), f[1], f[2]) for f in files
+              if isinstance(f, (list, tuple)) and len(f) == 3]
+    if total > 12:
+        lines.append("  and %s more files" % (total - 12))
+    return lines
 
 
 def said(state):
@@ -1272,7 +1301,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         if active == "debate":
             seen[shown_main] = digest
         marks = {"debate": (" •" if unicode else " *") if digest and seen.get(shown_main) != digest else "",
-                 "messages": " %d unread" % unread_total if unread_total else ""}
+                 "messages": " %s unread" % unread_total if unread_total else ""}
         texts = [("[ %s ]" if key == active else "%s") % (name + marks.get(key, "")) for key, name in TABS]
         edge = box_edge("  ".join(texts), width, unicode)
         column, span = 3, None
@@ -1378,12 +1407,11 @@ PLAN_ORDER = {"done": 0, "cancelled": 1, "review": 2, "landing": 2, "running": 3
 
 
 def plan_rows(report, labels, width, unicode):
-    """The shared repository plan: its goal, then one row per task, completed work first."""
-    goal = mapping(report.get("goal")).get("text")
+    """The shared repository plan's tasks, completed work first."""
     tasks = listing(mapping(report.get("room")).get("repo_tasks"))
     glyphs = (dict(done="✓", cancelled="×", review="◐", landing="◐", running="●", claimed="●", ready="○", blocked="✗") if unicode else
               dict(done="+", cancelled="x", review="~", landing="~", running="*", claimed="*", ready="o", blocked="x"))
-    rows = [(line, None) for line in wrapped("Goal: " + goal, width, 2)] if goal else []
+    rows = []
     for t in sorted((mapping(t) for t in tasks), key=lambda t: PLAN_ORDER.get(t.get("state"), 5)):
         by = t.get("claimed_by_participant")
         word = clean(t.get("state"), 20) or "unknown"
@@ -1404,9 +1432,14 @@ def plan_rows(report, labels, width, unicode):
         # A finished task has no owner or check left to act on, so those columns would only read as warnings.
         parts = [glyphs.get("done" if locally_done else t.get("state"), "?") + " " + clean(t.get("id"), 40),
                  word, clean(t.get("title"), 120) or "untitled"]
+        extra = []
         if t.get("state") != "done" and not locally_done:
-            parts += [clean(labels.get(by) or by, 40) if by else "unclaimed", clean(t.get("verify"), 80) or "no verify"]
+            extra = [clean(labels.get(by) or by, 40) if by else "unclaimed", clean(t.get("verify"), 80) or "no verify"]
+        if width >= 100:
+            parts += extra
         rows.append((" · ".join(parts), ("task", t.get("id")) if t.get("id") else None))
+        if width < 100 and extra:
+            rows.append(("  " + " · ".join(extra), None))
     return rows or [("No repository plan recorded", None)]
 
 

@@ -315,18 +315,21 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
 
 
 def render_detail(report, detail, width, height, navigation, managed=False):
-    heading = ["OMS / " + detail["title"], usage_line(report, width)]
+    from panel_view import _result_blocks, _result_structured
+    heading = [clipped("OMS / " + detail["title"], width), clipped(usage_line(report, width), width)]
     if "report" in detail:
         from panel_view import render_results
-        text = render_results(detail["report"], width)
+        # The result reader already wrapped and sanitized every line at this width.
+        body = render_results(detail["report"], width).split("\n")
     else:
-        text = detail["text"]
-    body = [part for line in text.splitlines()
-            for part in wrapped(line, width, max(1, len(line)), max_chars=max(400, len(line)))]
+        body = []
+        for line, kind in _result_blocks(detail["text"]):
+            body.extend(_result_structured(line, width) if kind != "prose" else
+                        wrapped(line, width, max(1, len(line)), max_chars=max(400, len(line))))
     budget = max(0, height - len(heading) - 2)
     offset = min(max(0, navigation.get("offset", 0)), max(0, len(body) - budget))
     navigation.update(hits=[], items=[], offset=offset, viewport=budget, body_rows=len(body), bands=[])
     lines = heading[:max(0, height - 2)] + body[offset:offset + budget]
-    lines += ["%s-%s / %s rows" % (offset + 1, min(len(body), offset + budget), len(body)),
-              "Esc Back  PgUp/PgDn Scroll" + ("  F9 Chat/Board" if managed else "  q Quit")]
-    return "\n".join(clipped(line, width) for line in lines[-height:])
+    lines += [clipped("%s-%s / %s rows" % (offset + 1, min(len(body), offset + budget), len(body)), width),
+              clipped("Esc Back  PgUp/PgDn Scroll" + ("  F9 Chat/Board" if managed else "  q Quit"), width)]
+    return "\n".join(lines[-height:])

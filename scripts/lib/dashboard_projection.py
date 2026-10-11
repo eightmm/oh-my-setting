@@ -42,7 +42,7 @@ def clean(value, limit=MAX_LABEL):
         return None
     text = "".join(" " if ch in "\t\n\r" or unicodedata.category(ch)[0] == "Z"
                    else "?" if unicodedata.category(ch)[0] == "C" else ch
-                   for ch in str(value))
+                   for ch in str(value) if ch not in "\ufe0e\ufe0f")
     text = " ".join(text.split())
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
@@ -363,8 +363,14 @@ def build(directory, repo_name, repo_path="", now=None):
     return report
 
 
+def char_width(ch):
+    if unicodedata.category(ch) in ("Mn", "Me") or "\u1160" <= ch <= "\u11ff":
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
 def display_width(text):
-    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+    return sum(char_width(ch) for ch in text)
 
 
 ELLIPSIS = ["..."]
@@ -378,10 +384,10 @@ def use_unicode(flag):
 def fit(text, width):
     if display_width(text) <= width:
         return text
-    mark = ELLIPSIS[0]
+    mark = ELLIPSIS[0][:max(0, width)]
     out, used = [], 0
     for ch in text:
-        step = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        step = char_width(ch)
         if used + step > width - len(mark):
             break
         out.append(ch)

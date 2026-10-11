@@ -1691,6 +1691,7 @@ msg_log = [{"id": "n%d" % i, "sender": "m1" if i % 3 else "m3", "recipient": "m2
             "message_kind": "question" if i % 5 == 0 else "note", "ts": "2026-10-0%dT10:%02d:00Z" % (6 if i < 5 else 7, i),
             "pending_for": ["m2"] if i == 29 else [], "text": "line %d\nsecond \x1b[31mred" % i} for i in range(30)]
 msg_log[28]["text"] = "long " + "word " * 80 + "END\n\nparagraph two"
+msg_log[28]["pending_for"] = ["m2"]
 ask = ".oms/artifacts/ask/"
 msg_report = {"collection": {"ok": True}, "attempts": {"active_recent": [
     {"attempt_id": "a%d" % n, "state": "working", "panel": {"room_id": "r", "room_participant": "m%d" % n, "role": "main"}} for n in (1, 2, 3)],
@@ -1757,13 +1758,13 @@ hit = next(h for h in nav["hits"] if h["action"] == ("tab", "messages"))
 assert tab_event(("click", hit["x1"], hit["y"]), nav) and nav["tab"] == "messages"
 assert choose(("click", hit["x1"], hit["y"]), nav) == ("tab", "messages") and nav["selected"] == ("chat", "m2")
 assert nav["box"]["y1"] == hit["y"] and msg_report == before
-# Plan: goal first, then completed, review, running, ready, blocked, with the claimant by board name or provider.
+# Plan: no repeated goal; completed, review, running, ready, blocked; narrow metadata is on a second row.
 nav, plan = board("plan")
 plan_rows = [line for line in plan.split("\n") if "Goal:" in line or " t-" in line]
-assert "Goal: Ship the tabbed panel" in plan_rows[0], plan
-assert [row.split(" · ")[0].split()[-1] for row in plan_rows[1:]] == ["t-ver", "t-rev", "t-run", "t-rdy", "t-blk"], plan_rows
-assert "t-ver · done · Verified one" in plan and "Verified one · unclaimed" not in plan and "make d" not in plan and "t-run · running 9h stale · Running one · Opus 5.5 · make c" in plan, plan
-assert "t-rev · review · Review one · unclaimed ·" in plan and "codex ·" not in plan and "claude ·" not in plan, plan
+assert not any("Goal:" in line for line, _ in render_plan_rows(msg_report, {}, 80, True)), plan
+assert [row.split(" · ")[0].split()[-1] for row in plan_rows] == ["t-ver", "t-rev", "t-run", "t-rdy", "t-blk"], plan_rows
+assert "t-ver · done · Verified one" in plan and "Verified one · unclaimed" not in plan and "make d" not in plan and "t-run · running 9h stale · Running one" in plan and "Opus 5.5 · make c" in plan, plan
+assert "t-rev · review · Review one" in plan and "unclaimed · make e" in plan and "codex ·" not in plan and "claude ·" not in plan, plan
 task_hits = [h["action"] for h in nav["hits"] if h["action"][0] == "task"]
 assert task_hits == [("task", t) for t in ("t-ver", "t-rev", "t-run", "t-rdy", "t-blk")], task_hits
 # Recorded completion metadata is visible only for terminal rows; unknown/malformed kinds stay plain done.
@@ -1887,7 +1888,7 @@ assert not any(ch in ascii_debate for ch in BOX_CHARS), ascii_debate
 assert "(changed in round 2: (c) -> (a))" in " ".join(ascii_debate.replace("|", " ").split()), ascii_debate
 # Messages: names, local times, unread marks, filters, in-place full text; reading never writes; the dot clears once the Debate tab was seen.
 nav, shown = board("messages", 110, 24)
-assert "Filter: all" in shown and "line 29" in shown and "Opus 5.5 main → Sol 6.1 main" in shown and "· unread" in shown and "\x1b" not in shown, shown
+assert "Filter: needs you" in shown and "line 29" in shown and "Opus 5.5 main → Sol 6.1 main" in shown and "· unread" in shown and "\x1b" not in shown, shown
 assert "loading earlier" not in shown, shown
 nav["messages_view"]["reading"] = True
 assert "loading earlier messages" in board("messages", 110, 24, nav=nav)[1]
@@ -1900,14 +1901,20 @@ board("messages", 110, 40, nav=nav)
 assert tab_event(("up",), nav) and tab_event(("enter",), nav)
 opened_message = board("messages", 80, 60, nav=nav)[1]
 assert "END" in opened_message and "paragraph two" in opened_message and opened_message.count("word") > 70, opened_message
-assert tab_event(("enter",), nav) and nav["messages_view"]["open"] is None
+assert tab_event(("enter",), nav) and nav["messages_view"]["open"] is not None
+assert "no call" in nav["notice"] and "open_call" not in nav
+assert tab_event(("escape",), nav)
 # Esc closes an open message and nothing else; with none open it is left to the board.
 assert tab_event(("enter",), nav) and nav["messages_view"]["open"] is not None
 assert tab_event(("escape",), nav) and nav["messages_view"]["open"] is None and not tab_event(("escape",), nav)
 nav["selected"] = ("chat", "m3")
 assert tab_event(("right",), nav)
 narrowed = board("messages", 110, 40, nav=nav)[1]
-assert "Filter: to/from Luna 6 main" in narrowed and "Sol 6.1 main" not in narrowed and "line 27" in narrowed and "line 29" not in narrowed, narrowed
+assert "Filter: by call" in narrowed and not nav["message_ids"], narrowed
+assert tab_event(("right",), nav)
+assert "Filter: all" in board("messages", 110, 40, nav=nav)[1]
+assert tab_event(("right",), nav)
+assert "Filter: to/from me" in board("messages", 110, 40, nav=nav)[1]
 assert board("messages", unicode=False)[1].isascii() and msg_report == before, "reading changed the report"
 nav, listed = board("messages", 110, 40)
 hit = next(h for h in nav["hits"] if h["action"][0] == "message")
@@ -1937,6 +1944,206 @@ for message_text in ("x\n" * 999 + "TAIL", "word " * 790 + "TAIL", "한글 " * 5
         assert tab_event(("escape",), nav) and nav["messages_view"]["open"] is None
 assert len(panel_messages.readable_text("x" * (panel_messages.MAX_TEXT + 1))) == panel_messages.MAX_TEXT
 assert msg_report == before and msg_log[-1]["text"].startswith("line 29"), "reading changed the report or log"
+# Unread totals use the full pending projection, independent of the loaded message window.
+import room
+from unittest.mock import patch
+from room_view import live_unread, nodes, settler
+def pending_projection(count, consumed=0):
+    rows = [{"thread": "r", "text": "T", "seq": 0, "room_event": {"kind": "created"}}]
+    rows += [{"seq": i + 1, "room_event": dict(kind="join", participant=m["participant"],
+              provider=m["provider"], role=m["role"], label=m["participant"])} for i, m in enumerate(msg_members)]
+    rows += [{"seq": i + 4, "ts": msg_log[-1]["ts"], "text": "Pending %d" % i,
+              "room_event": dict(kind="message", id="pending-%d" % i, sender="m3",
+                                 recipient="all", message_kind="note")} for i in range(count)]
+    rows += [{"seq": count + 4 + i, "room_event": dict(kind="received", participant=p,
+              messages=["pending-%d" % n for n in range(consumed)])} for i, p in enumerate(("m1", "m2"))]
+    with patch.object(room, "records", return_value=rows):
+        projection = room.status("unused", "r")
+        log = room.messages("unused", "r")
+    return projection, log
+
+many_pending = deepcopy(msg_report)
+many_pending["room"], many_log = pending_projection(32, consumed=2)
+assert len(many_pending["room"]["messages"]) == 12 and many_pending["room"]["message_count"] == 32
+assert many_pending["room"]["pending_count"] == 60
+assert many_pending["room"]["pending_messages"] == [
+    {"id": m["id"], "pending_for": m["pending_for"]} for m in many_log if m["pending_for"]]
+assert not many_pending["room"]["pending_messages_truncated"]
+readers = room_view.live_readers(many_pending, nodes(many_pending), settler(many_pending)[0])
+all_rows = panel_messages._rows(many_log, str, readers=readers, width=123)
+expected = sum(row["unread"] for row in all_rows)
+assert expected == 30  # broadcasts count once per message, rather than once per recipient
+for loaded in (True, False):
+    many_nav = {"tab": "messages", "messages_view": {
+        "filter": 2, "selected": None, "open": None, "scroll": 0}}
+    if loaded:
+        many_nav["messages_view"]["log"] = many_log
+    many_body = panel_messages.tab_body(many_pending, 123, 40, many_nav)
+    tagged = sum(bool(action) and "unread" in line for line, action, _ in many_body)
+    assert tagged == (expected if loaded else 12), many_body
+    assert live_unread(many_pending, nodes(many_pending), settler(many_pending)[0]) == expected
+    many_board = render(many_pending, "codex", 127, 60, view="graph", navigation=many_nav)
+    assert "Messages %s unread" % expected in many_board, (loaded, many_board)
+    assert "%s unread for live participants" % expected in many_board, (loaded, many_board)
+    assert "%s+ unread" % expected not in many_board, many_board
+legacy_pending = deepcopy(many_pending)
+for key in ("pending_messages", "pending_messages_truncated"):
+    legacy_pending["room"].pop(key)
+assert live_unread(legacy_pending, nodes(legacy_pending), settler(legacy_pending)[0]) == 12
+legacy_board = render(legacy_pending, "codex", 127, 60, view="graph", navigation={"tab": "messages"})
+assert "Messages 12 unread" in legacy_board and "12 unread for live participants" in legacy_board, legacy_board
+for count, expected in ((500, 500), (501, "500+")):
+    capped = deepcopy(msg_report)
+    capped["room"], _ = pending_projection(count)
+    assert len(capped["room"]["pending_messages"]) == 500
+    assert capped["room"]["pending_messages_truncated"] == (count > 500)
+    assert capped["room"]["pending_messages"][0]["id"] == "pending-%d" % (count - 500)
+    assert live_unread(capped, nodes(capped), settler(capped)[0]) == expected
+    capped_board = render(capped, "codex", 127, 60, view="graph", navigation={"tab": "messages"})
+    assert "Messages %s unread" % expected in capped_board, capped_board
+    assert "%s unread for live participants" % expected in capped_board, capped_board
+# A single main needs questions, not worker chatter or result/assignment echoes.
+from room_view import live_readers, live_unread, nodes, settler, who
+single = deepcopy(msg_report)
+single["attempts"] = {"active_recent": [
+    {"attempt_id": "a2", "state": "working", "panel": {"room_id": "r", "room_participant": "m2", "role": "main"}},
+    {"attempt_id": "w", "state": "working", "panel": {"room_id": "r", "room_participant": "w", "role": "worker"}},
+    {"attempt_id": "rv", "task_id": "settled", "state": "review", "panel": {"room_id": "r", "room_participant": "rv", "role": "reviewer"}}]}
+single["finalized"] = {"settled": "accepted"}
+single["room"]["participants"] = [msg_members[1],
+    {"participant": "w", "role": "worker", "joined": True, "parent": "m2", "model": "gpt-6.1-sol", "label": "Fix message reader"},
+    {"participant": "rv", "role": "reviewer", "joined": True, "parent": "m2", "model": "gpt-6-luna"}]
+single_log = [dict(msg_log[0], id=ident, sender=sender, recipient=recipient, targets=[recipient],
+                   message_kind=kind, text=text, pending_for=pending)
+              for ident, sender, recipient, kind, text, pending in (
+                  ("worker-note", "w", "m2", "note", "Routine work", []),
+                  ("result-w", "w", "m2", "handoff", "Call exit=0; parent acceptance pending.", []),
+                  ("assignment", "m2", "w", "handoff", "Assigned: Fix message reader", []),
+                  ("brief", "m2", "rv", "note", "Brief for ended reviewer", ["rv"]),
+                  ("status", "m2", "all", "status", "Main status", []),
+                  ("question", "w", "m2", "question", "Which interface?", ["m2"]))]
+single_log[4]["targets"] = ["m2", "w", "rv"]
+single_log[-1].update(recipient="all", targets=["m2", "w", "rv"], pending_for=["m2", "w", "rv"])
+single["room"].update(messages=single_log, message_count=len(single_log), pairs=[
+    {"recipient": "rv", "pending": 2}, {"recipient": "m2", "pending": 1}, {"recipient": "w", "pending": 1}])
+# Keep the settled brief in all, but it must never acquire an unread tag.
+# A main's nonroutine brief still needs attention, so bound the default case to the first three required messages.
+default_single = deepcopy(single)
+default_single["room"]["messages"] = [single_log[0], single_log[1], single_log[-1]]
+for width in (50, 80, 127):
+    single_nav = {"selected": ("result", "w")}
+    body = panel_messages.tab_body(default_single, width, 30, single_nav)
+    assert "Filter: needs you (1)" in body[0][0] and single_nav["message_ids"] == ["question"], body
+    assert all(display_width(line) <= width for line, _, _ in body), body
+    assert "Which" in body[-1][0] and "question" in body[-1][0]
+    assert single_nav["message_has_call"] and panel_messages.handle(("f",), single_nav)
+    assert single_nav.pop("open_call") == ("result", "w")
+    assert panel_messages.handle(("enter",), single_nav)
+    assert panel_messages.handle(("enter",), single_nav) and single_nav.pop("open_call") == ("result", "w")
+    assert panel_messages.handle(("right",), single_nav)
+    body = panel_messages.tab_body(single, width, 30, single_nav)
+    assert "Filter: by call" in body[0][0] and set(single_nav["message_ids"]) == {"question", "brief"}, body
+    worker_line = next(line for line, action, _ in body if action == ("message", "question"))
+    assert "running" in worker_line and "+1" in worker_line, body
+    single_nav["messages_view"].update(selected="question", tail=False)
+    panel_messages.tab_body(single, width, 30, single_nav)
+    assert panel_messages.handle(("f",), single_nav) and single_nav.pop("open_call") == ("result", "w")
+    assert panel_messages.handle(("right",), single_nav)
+    body = panel_messages.tab_body(single, width, 30, single_nav)
+    assert "Filter: all" in body[0][0]
+    tagged = [line for line, action, _ in body if action and "unread" in line]
+    members = nodes(single)
+    settled, _ = settler(single)
+    assert live_readers(single, members, settled) == {"m2", "w"}
+    assert live_unread(single, members, settled) == len(tagged) == 1, body
+    projected_single = deepcopy(single)
+    projected_single["room"]["pending_messages"] = [
+        {"id": m["id"], "pending_for": m["pending_for"]} for m in single_log if m["pending_for"]]
+    projected_single["room"]["pending_messages_truncated"] = False
+    assert live_unread(projected_single, members, settled) == len(tagged) == 1
+    projected_single["room"]["pending_messages"] = []
+    assert live_unread(projected_single, members, settled) == 0, "empty projection used stale message rows"
+    assert not any("unread" in line for line, action, _ in body if action == ("message", "brief"))
+    single_nav["messages_view"].update(selected="brief", tail=False)
+    panel_messages.tab_body(single, width, 30, single_nav)
+    assert not single_nav["message_has_call"]
+    assert panel_messages.handle(("f",), single_nav) and "open_call" not in single_nav and "no call" in single_nav["notice"]
+    assert panel_messages.handle(("right",), single_nav)
+    assert "Filter: this call" in panel_messages.tab_body(single, width, 30, single_nav)[0][0]
+    assert panel_messages.handle(("right",), single_nav)
+    assert "Filter: needs you" in panel_messages.tab_body(single, width, 30, single_nav)[0][0]
+    full_board = render(single, "codex", width, 60, view="graph", navigation={"tab": "messages"})
+    assert ("Messages 1 unread" if width >= 76 else "Messages: 1 unread") in full_board, full_board
+assert who(members[0]) == who(members[0], task=False)
+worker = next(m for m in members if m["participant"] == "w")
+assert "Fix message reader" in who(worker, task=True) and "Fix message reader" not in who(worker)
+worker["title"] = "Task unrecorded"
+assert who(worker, task=True) == who(worker)
+peer_row = panel_messages._rows([dict(single_log[-1], sender="w", recipient="rv", message_kind="decision")],
+                               str, mains=["m2"], width=127)[0]
+assert "w → rv" in peer_row["line"] and "decision" in peer_row["line"]
+handoff_only = deepcopy(single)
+handoff_only["room"]["messages"] = [single_log[1]]
+handoff_nav = {"messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}}
+handoff_body = panel_messages.tab_body(handoff_only, 80, 10, handoff_nav)
+handoff_line = next(line for line, action, _ in handoff_body if action == ("message", "result-w"))
+assert handoff_nav["message_ids"] == ["result-w"] and "(no notes)" in handoff_line, handoff_body
+assert handoff_nav["message_has_call"] and "Finished." not in handoff_line
+# Joined non-main members without messages stay visible, but have no selectable message action.
+quiet_call = deepcopy(handoff_only)
+quiet_call["room"]["participants"].append({"participant": "quiet", "role": "worker", "joined": True,
+                                         "parent": "m2", "model": "gpt-6-luna", "label": "Quiet call"})
+for width in (24, 50, 80, 127):
+    for glyphs in (True, False):
+        quiet_nav = {"messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}}
+        quiet_body = panel_messages.tab_body(quiet_call, width, 30, quiet_nav, glyphs)
+        quiet_rows = [(line, selected) for line, action, selected in quiet_body[1:] if action is None]
+        # Both the existing reviewer and the new worker have no messages.
+        assert len(quiet_rows) == 2 and not any(selected for _, selected in quiet_rows), (width, glyphs, quiet_body)
+        assert width < 50 or all("(no notes)" in line for line, _ in quiet_rows), (width, glyphs, quiet_body)
+        assert [action for _, action, _ in quiet_body[1:]] == [("message", "result-w"), None, None], quiet_body
+        if width >= 80:
+            assert "reviewer" in quiet_rows[0][0] and "Quiet call" in quiet_rows[1][0], quiet_body
+        assert quiet_nav["message_ids"] == ["result-w"] and None not in quiet_nav["message_calls"], quiet_nav
+        assert all(display_width(line) <= width for line, _, _ in quiet_body), (width, glyphs, quiet_body)
+        empty_call = deepcopy(quiet_call)
+        empty_call["room"]["messages"] = []
+        empty_nav = {"messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}}
+        empty_body = panel_messages.tab_body(empty_call, width, 30, empty_nav, glyphs)
+        assert len(empty_body) == 4 and all(action is None and not selected for _, action, selected in empty_body), empty_body
+        assert not empty_nav["message_ids"] and not empty_nav["message_calls"] and not empty_nav["message_has_call"], empty_nav
+        assert all(display_width(line) <= width for line, _, _ in empty_body), (width, glyphs, empty_body)
+        for key in ("down", "enter", "f"):
+            assert panel_messages.handle((key,), empty_nav)
+            assert empty_nav["messages_view"]["open"] is None and "open_call" not in empty_nav, empty_nav
+approval = deepcopy(single)
+approval["room"]["messages"] = [dict(single_log[-1], id="approval", sender="m2",
+    message_kind="question", text="Assigned: approve this change?")]
+approval_nav = {}
+approval_body = panel_messages.tab_body(approval, 80, 10, approval_nav)
+assert approval_nav["message_ids"] == ["approval"] and "approve this change?" in approval_body[-1][0], approval_body
+# A known call recipient alone does not turn a question into an assignment handoff.
+assert not panel_messages.routine(dict(approval["room"]["messages"][0], recipient="w"),
+                                  single["room"], {m["participant"]: m for m in members})
+for width in (24, 42, 50, 80, 127):
+    for glyphs in (True, False):
+        for text in ("approval text " * 20, "ok ✔️ e\u0301 각 \u1160 " * 20):
+            narrow = deepcopy(single)
+            narrow["room"]["messages"][-1]["text"] = text
+            narrow["room"]["participants"][1]["label"] = text
+            narrow_nav = {"selected": ("result", "w")}
+            for filter_index in range(4):
+                narrow_nav["messages_view"] = {"filter": filter_index, "selected": None, "open": None, "scroll": 0}
+                body = panel_messages.tab_body(narrow, width, 30, narrow_nav, glyphs)
+                assert all(display_width(line) <= width for line, _, _ in body), (width, glyphs, body)
+                if filter_index == 2:
+                    tagged = [line for line, action, _ in body if action and "unread" in line]
+                    assert live_unread(narrow, nodes(narrow), settler(narrow)[0]) == len(tagged) == 1, body
+                if filter_index == 0:
+                    assert panel_messages.handle(("enter",), narrow_nav)
+                    expanded = panel_messages.tab_body(narrow, width, 30, narrow_nav, glyphs)
+                    assert all(display_width(line) <= width for line, _, _ in expanded), expanded
+
 # The footer lists keys that work: Messages/Debate show their own keys; the tree has no tabs, so no Tab hint or badge line.
 for name, hint in (("messages", "Message"), ("debate", "Seat")):
     nav, text = board(name, 110, 40, managed=True)
@@ -3448,10 +3655,381 @@ row = reopened["rows"][0]
 assert row["acceptance"] and row["summary"].startswith("결과 화면") and row["delivery"] == "not_requested"
 assert any(c.get("answer", "").startswith("Answer:") for c in row["calls"]), row
 assert all("--prompt" not in c.get("answer", "") for c in row["calls"])
-for width in (24, 42, 100):
-    readable = render_results(reopened, width)
-    assert "\033" not in readable and all(display_width(line) <= width for line in readable.splitlines())
-    assert "Outcome:" in readable and "결과 화면" in readable
+result_layout = deepcopy(reopened)
+result_layout["rows"][0]["calls"][-1]["changes"] = {"count": 3, "added": 4, "removed": 2,
+    "files": [["one.py", 2, 1], ["two.py", 1, 1], ["three.py", 1, 0]]}
+long_code = '  print("' + 'A' * 160 + '")'
+long_table = '| ' + 'B' * 160 + ' | tail |'
+wide_code = '  ' + '한글☀️e\u0301' * 60
+retained_code = '  ' + 'C' * 2100 + '  end  '
+
+# Each row declares its block kind and the exact displayed prose, or None for
+# filtered machine prose. Code/table rows must reconstruct the original bytes.
+def p(line, displayed=None):
+    return (line, 'prose', line if displayed is None else displayed)
+
+
+def c(line):
+    return (line, 'code', line)
+
+
+def t(line):
+    return (line, 'table', line)
+
+
+cases = [
+    ('fenced long/literal/machine/control lines', [c(line) for line in (
+        '```py', '  x = 1', '    y = 2', long_code, '    `literal`  **token**  ',
+        '> literal code ' + 'D' * 160, wide_code, retained_code, '~~~',
+        'stop-reason: literal-data', 'model-route: literal-data', '\tmodel-route: tabbed',
+        'control\x1b[31m\x00', '```')]),
+    ('long table row', [t(line) for line in ('| a | b |', '| --- | --- |', long_table)]),
+    ('indented literal and tab code', [c(line) for line in (
+        '    indented  text', '    foo__bar = "__"  **token**  `literal`  ' + 'E' * 160 + '  ',
+        '\tfoo__bar = "__"  **token**  `literal`  ' + 'F' * 160 + '  ',
+        '    model-route: literal-data', '    stop-reason: literal-data')]),
+    ('machine prose', [('stop-reason: machine', 'prose', None),
+                       ('  model-route: machine', 'prose', None), p('**visible**', 'visible')]),
+    ('list then top-level fence closes list', [p('- item'), c('```'), c('fenced'), c('```'),
+        c('    foo__bar = `literal`'), c('    model-route: literal-data')]),
+    ('blank/dedent closes list', [p('- item'), p(''), p('**outside**', 'outside'), p(''),
+        c('    **literal**'), c('    model-route: literal-data')]),
+    ('six-space backticks stay paragraph text', [p('- item'),
+        p('      ```', '      '), p('  **continuation**', '  continuation'),
+        ('  model-route: prose', 'prose', None)]),
+    ('six-space backticks after blank are indented code', [p('- item'), p(''),
+        c('      ```'), c('      foo__bar = `literal` **token**'), c('      ```'),
+        p('  **continuation**', '  continuation')]),
+    ('four-space backticks cannot close fence', [c('```'), c('    ```'),
+        c('model-route: literal-data'), c('```'), p('**outside**', 'outside')]),
+    ('list starts with fence', [c('- ```py'), c('  foo__bar = `literal` **token**'), c('  ```'),
+        p('    **continuation**', '    continuation'), ('    model-route: prose', 'prose', None)]),
+    ('nested lists/lazy continuation', [p('- item'), p('  - nested'),
+        p('**lazy**', 'lazy'), p(''), c('        - foo__bar = `literal` **token**'),
+        p('  **parent**', '  parent'), p(''), c('      parent__code = `literal`')]),
+    ('indented code cannot interrupt paragraph', [p('**paragraph**', 'paragraph'),
+        p('    **literal**', '    literal'),
+        ('    model-route: prose', 'prose', None)]),
+    ('fence closes at container loss', [c('- ~~~'), c('  literal'), p('**outside**', 'outside'),
+        p('    **paragraph**', '    paragraph')]),
+    ('fence run/closing suffix rules', [c('````py'), c('```'), c('~~~~'), c('```` suffix'),
+        c('   `````  '), p('**outside**', 'outside')]),
+    ('invalid backtick info string is prose', [p('```py`bad', 'pybad'),
+        p('    **paragraph**', '    paragraph')]),
+    ('pipe rows without delimiter are prose', [p('| **header** | `value` |', '| header | value |'),
+        p('| __row__ | value |', '| row | value |')]),
+    ('delimiter cell count mismatch is prose', [p('| **a** | b |', '| a | b |'), p('| --- |'),
+        p('| __row__ |', '| row |')]),
+    ('delimiter alone is prose', [p('| --- | --- |'), p('| **row** | b |', '| row | b |')]),
+    ('ordered interruption requires one', [p('paragraph'), p('10. item'), p(''),
+        c('    foo__bar = `literal`')]),
+    ('ordered leading-zero interruption', [p('paragraph'), p('01. item'), p(''),
+        p('    **item**', '    item'), ('    model-route: prose', 'prose', None)]),
+    ('marker padding starts code', [c('-     foo__bar = `literal`'), c('      **literal**')]),
+    ('empty list item content column', [p('-'), c('  ```'), c('  foo__bar'), c('  ```'),
+        p('  **continuation**', '  continuation')]),
+    ('ordered sibling starts fence', [p('1. first'), c('2. ~~~'),
+        c('   model-route: literal'), c('   ~~~')]),
+    ('empty item ends at extra blank (CommonMark 280)', [p('-'), p(''),
+        c('    model-route: literal')]),
+    ('pipe-free body row (GFM 202)', [t('| a | b |'), t('| --- | --- |'),
+        t('model-route: literal'), p(''), ('model-route: prose', 'prose', None)]),
+    ('one-cell delimiter without pipe', [t('| a |'), t('---'), t('model-route: literal')]),
+    ('quoted list fence', [c('> 1. ~~~'), c('>    model-route: literal'), c('>    ~~~'),
+        p(''), c('    model-route: outside')]),
+    ('quoted indented chunks (CommonMark 111)', [c('>     **literal**'), c('> '), c('>'),
+        c('>     model-route: literal'), p(''), p('outside')]),
+    ('quoted table', [t('> | a | b |'), t('> | --- | --- |'), t('> model-route: literal'),
+        p(''), ('model-route: prose', 'prose', None)]),
+    ('lazy list text cannot start table', [p('- first'), p('| a | b |'), p('| --- | --- |'),
+        ('model-route: prose', 'prose', None)]),
+    ('thematic break is not list item', [p('- - -'), c('    model-route: literal')]),
+    # Official block examples; rendering retains source rather than emitting HTML.
+    ('CommonMark 0.31.2 example 107', [
+        c('    a simple'), c('      indented code block')]),
+    ('CommonMark 0.31.2 example 108', [
+        p('  - foo'), p(''), p('    bar')]),
+    ('CommonMark 0.31.2 example 109', [
+        p('1.  foo'), p(''), p('    - bar')]),
+    ('CommonMark 0.31.2 example 110', [
+        c('    <a/>'), c('    *hi*'), c(''), c('    - one')]),
+    ('CommonMark 0.31.2 example 111', [
+        c('    chunk1'), c(''), c('    chunk2'), c('  '), c(' '), c(' '), c('    chunk3')]),
+    ('CommonMark 0.31.2 example 112', [
+        c('    chunk1'), c('      '), c('      chunk2')]),
+    ('CommonMark 0.31.2 example 113', [
+        p('Foo'), p('    bar'), p('')]),
+    ('CommonMark 0.31.2 example 114', [
+        c('    foo'), p('bar')]),
+    ('CommonMark 0.31.2 example 115', [
+        p('# Heading', 'Heading'), c('    foo'), p('Heading'), p('------'), c('    foo'), p('----')]),
+    ('CommonMark 0.31.2 example 116', [
+        c('        foo'), c('    bar')]),
+    ('CommonMark 0.31.2 example 117', [
+        p(''), p('    '), c('    foo'), p('    '), p('')]),
+    ('CommonMark 0.31.2 example 118', [
+        c('    foo  ')]),
+    ('CommonMark 0.31.2 example 119', [
+        c('```'), c('<'), c(' >'), c('```')]),
+    ('CommonMark 0.31.2 example 120', [
+        c('~~~'), c('<'), c(' >'), c('~~~')]),
+    ('CommonMark 0.31.2 example 121', [
+        p('``', ''), p('foo'), p('``', '')]),
+    ('CommonMark 0.31.2 example 122', [
+        c('```'), c('aaa'), c('~~~'), c('```')]),
+    ('CommonMark 0.31.2 example 123', [
+        c('~~~'), c('aaa'), c('```'), c('~~~')]),
+    ('CommonMark 0.31.2 example 124', [
+        c('````'), c('aaa'), c('```'), c('``````')]),
+    ('CommonMark 0.31.2 example 125', [
+        c('~~~~'), c('aaa'), c('~~~'), c('~~~~')]),
+    ('CommonMark 0.31.2 example 126', [
+        c('```')]),
+    ('CommonMark 0.31.2 example 127', [
+        c('`````'), c(''), c('```'), c('aaa')]),
+    ('CommonMark 0.31.2 example 128', [
+        c('> ```'), c('> aaa'), p(''), p('bbb')]),
+    ('CommonMark 0.31.2 example 129', [
+        c('```'), c(''), c('  '), c('```')]),
+    ('CommonMark 0.31.2 example 130', [
+        c('```'), c('```')]),
+    ('CommonMark 0.31.2 example 131', [
+        c(' ```'), c(' aaa'), c('aaa'), c('```')]),
+    ('CommonMark 0.31.2 example 132', [
+        c('  ```'), c('aaa'), c('  aaa'), c('aaa'), c('  ```')]),
+    ('CommonMark 0.31.2 example 133', [
+        c('   ```'), c('   aaa'), c('    aaa'), c('  aaa'), c('   ```')]),
+    ('CommonMark 0.31.2 example 134', [
+        c('    ```'), c('    aaa'), c('    ```')]),
+    ('CommonMark 0.31.2 example 135', [
+        c('```'), c('aaa'), c('  ```')]),
+    ('CommonMark 0.31.2 example 136', [
+        c('   ```'), c('aaa'), c('  ```')]),
+    ('CommonMark 0.31.2 example 137', [
+        c('```'), c('aaa'), c('    ```')]),
+    ('CommonMark 0.31.2 example 138', [
+        p('``` ```', ''), p('aaa')]),
+    ('CommonMark 0.31.2 example 139', [
+        c('~~~~~~'), c('aaa'), c('~~~ ~~')]),
+    ('CommonMark 0.31.2 example 140', [
+        p('foo'), c('```'), c('bar'), c('```'), p('baz')]),
+    ('CommonMark 0.31.2 example 141', [
+        p('foo'), p('---'), c('~~~'), c('bar'), c('~~~'), p('# baz', 'baz')]),
+    ('CommonMark 0.31.2 example 142', [
+        c('```ruby'), c('def foo(x)'), c('  return 3'), c('end'), c('```')]),
+    ('CommonMark 0.31.2 example 143', [
+        c('~~~~    ruby startline=3 $%@#$'), c('def foo(x)'), c('  return 3'), c('end'), c('~~~~~~~')]),
+    ('CommonMark 0.31.2 example 144', [
+        c('````;'), c('````')]),
+    ('CommonMark 0.31.2 example 145', [
+        p('``` aa ```', 'aa'), p('foo')]),
+    ('CommonMark 0.31.2 example 146', [
+        c('~~~ aa ``` ~~~'), c('foo'), c('~~~')]),
+    ('CommonMark 0.31.2 example 147', [
+        c('```'), c('``` aaa'), c('```')]),
+    ('CommonMark 0.31.2 example 253', [
+        p('A paragraph'), p('with two lines.'), p(''), c('    indented code'), p(''), p('> A block quote.')]),
+    ('CommonMark 0.31.2 example 254', [
+        p('1.  A paragraph'), p('    with two lines.'), p(''), c('        indented code'), p(''),
+        p('    > A block quote.')]),
+    ('CommonMark 0.31.2 example 255', [
+        p('- one'), p(''), p(' two')]),
+    ('CommonMark 0.31.2 example 256', [
+        p('- one'), p(''), p('  two')]),
+    ('CommonMark 0.31.2 example 257', [
+        p(' -    one'), p(''), c('     two')]),
+    ('CommonMark 0.31.2 example 258', [
+        p(' -    one'), p(''), p('      two')]),
+    ('CommonMark 0.31.2 example 259', [
+        p('   > > 1.  one'), p('>>'), p('>>     two')]),
+    ('CommonMark 0.31.2 example 260', [
+        p('>>- one'), p('>>'), p('  >  > two')]),
+    ('CommonMark 0.31.2 example 261', [
+        p('-one'), p(''), p('2.two')]),
+    ('CommonMark 0.31.2 example 262', [
+        p('- foo'), p(''), p(''), p('  bar')]),
+    ('CommonMark 0.31.2 example 263', [
+        p('1.  foo'), p(''), c('    ```'), c('    bar'), c('    ```'), p(''), p('    baz'), p(''),
+        p('    > bam')]),
+    ('CommonMark 0.31.2 example 264', [
+        p('- Foo'), p(''), c('      bar'), c(''), c(''), c('      baz')]),
+    ('CommonMark 0.31.2 example 265', [
+        p('123456789. ok')]),
+    ('CommonMark 0.31.2 example 266', [
+        p('1234567890. not ok')]),
+    ('CommonMark 0.31.2 example 267', [
+        p('0. ok')]),
+    ('CommonMark 0.31.2 example 268', [
+        p('003. ok')]),
+    ('CommonMark 0.31.2 example 269', [
+        p('-1. not ok')]),
+    ('CommonMark 0.31.2 example 270', [
+        p('- foo'), p(''), c('      bar')]),
+    ('CommonMark 0.31.2 example 271', [
+        p('  10.  foo'), p(''), c('           bar')]),
+    ('CommonMark 0.31.2 example 272', [
+        c('    indented code'), p(''), p('paragraph'), p(''), c('    more code')]),
+    ('CommonMark 0.31.2 example 273', [
+        c('1.     indented code'), p(''), p('   paragraph'), p(''), c('       more code')]),
+    ('CommonMark 0.31.2 example 274', [
+        c('1.      indented code'), p(''), p('   paragraph'), p(''), c('       more code')]),
+    ('CommonMark 0.31.2 example 275', [
+        p('   foo'), p(''), p('bar')]),
+    ('CommonMark 0.31.2 example 276', [
+        p('-    foo'), p(''), p('  bar')]),
+    ('CommonMark 0.31.2 example 277', [
+        p('-  foo'), p(''), p('   bar')]),
+    ('CommonMark 0.31.2 example 278', [
+        p('-'), p('  foo'), p('-'), c('  ```'), c('  bar'), c('  ```'), p('-'), c('      baz')]),
+    ('CommonMark 0.31.2 example 279', [
+        p('-   ', '-'), p('  foo')]),
+    ('CommonMark 0.31.2 example 280', [
+        p('-'), p(''), p('  foo')]),
+    ('CommonMark 0.31.2 example 281', [
+        p('- foo'), p('-'), p('- bar')]),
+    ('CommonMark 0.31.2 example 282', [
+        p('- foo'), p('-   ', '-'), p('- bar')]),
+    ('CommonMark 0.31.2 example 283', [
+        p('1. foo'), p('2.'), p('3. bar')]),
+    ('CommonMark 0.31.2 example 284', [
+        p('*')]),
+    ('CommonMark 0.31.2 example 285', [
+        p('foo'), p('*'), p(''), p('foo'), p('1.')]),
+    ('CommonMark 0.31.2 example 286 (short prose)', [
+        p(' 1.  A paragraph'), p('     two lines.'), p(''), c('         indented code'), p(''),
+        p('     > quote.')]),
+    ('CommonMark 0.31.2 example 287 (short prose)', [
+        p('  1.  A paragraph'), p('      two lines.'), p(''), c('          indented code'), p(''),
+        p('      > quote.')]),
+    ('CommonMark 0.31.2 example 288 (short prose)', [
+        p('   1.  A paragraph'), p('       two lines.'), p(''), c('           indented code'), p(''),
+        p('       > quote.')]),
+    ('CommonMark 0.31.2 example 289', [
+        c('    1.  A paragraph'), c('        with two lines.'), c(''), c('            indented code'), c(''),
+        c('        > A block quote.')]),
+    ('CommonMark 0.31.2 example 290 (short prose)', [
+        p('  1.  A paragraph'), p('two lines.'), p(''), c('          indented code'), p(''),
+        p('      > quote.')]),
+    ('CommonMark 0.31.2 example 291', [
+        p('  1.  A paragraph'), p('    with two lines.')]),
+    ('CommonMark 0.31.2 example 292', [
+        p('> 1. > Blockquote'), p('continued here.')]),
+    ('CommonMark 0.31.2 example 293', [
+        p('> 1. > Blockquote'), p('> continued here.')]),
+    ('CommonMark 0.31.2 example 294', [
+        p('- foo'), p('  - bar'), p('    - baz'), p('      - boo')]),
+    ('CommonMark 0.31.2 example 295', [
+        p('- foo'), p(' - bar'), p('  - baz'), p('   - boo')]),
+    ('CommonMark 0.31.2 example 296', [
+        p('10) foo'), p('    - bar')]),
+    ('CommonMark 0.31.2 example 297', [
+        p('10) foo'), p('   - bar')]),
+    ('CommonMark 0.31.2 example 298', [
+        p('- - foo')]),
+    ('CommonMark 0.31.2 example 299', [
+        p('1. - 2. foo')]),
+    ('CommonMark 0.31.2 example 300', [
+        p('- # Foo'), p('- Bar'), p('  ---'), p('  baz')]),
+    ('GFM example 198', [
+        t('| foo | bar |'), t('| --- | --- |'), t('| baz | bim |')]),
+    ('GFM example 199', [
+        t('| abc | defghi |'), t(':-: | -----------:'), t('bar | baz')]),
+    ('GFM example 200', [
+        t('| f\\|oo  |'), t('| ------ |'), t('| b `\\|` az |'), t('| b **\\|** im |')]),
+    ('GFM example 201', [
+        t('| abc | def |'), t('| --- | --- |'), t('| bar | baz |'), p('> bar')]),
+    ('GFM example 202', [
+        t('| abc | def |'), t('| --- | --- |'), t('| bar | baz |'), t('bar'), p(''), p('bar')]),
+    ('GFM example 203', [
+        p('| abc | def |'), p('| --- |'), p('| bar |')]),
+    ('GFM example 204', [
+        t('| abc | def |'), t('| --- | --- |'), t('| bar |'), t('| bar | baz | boo |')]),
+    ('GFM example 205', [
+        t('| abc | def |'), t('| --- | --- |')]),
+]
+for terminator in ('# heading | tail', '---', '* * *', '> quote | tail', '- item | tail',
+                   '2. item | tail', '-', '2.', '<div> | tail', '<!-- | tail -->',
+                   '<!DOCTYPE> | tail', '<a>', '<a title="x">', '</a>'):
+    cases.append(('table block boundary %s' % terminator, [t('| a | b |'), t('| --- | --- |'),
+        p(terminator, 'heading | tail' if terminator.startswith('#') else terminator),
+        p(''), ('model-route: prose', 'prose', None)]))
+for row in ('<a> | tail', '<a bad=>', '<!doctype> | tail', '<script/>'):
+    cases.append(('inline HTML stays table row %s' % row, [t('| a | b |'), t('| --- | --- |'), t(row)]))
+for first, marker, indent in (('1. first', '20.', '    '), ('- first', '2)', '   '),
+                              ('- first\n  1. nested', '  2.', '     ')):
+    cases.append(('ordered sibling %s/%s' % (first, marker), [p(line) for line in first.split('\n')] +
+        [c(marker + ' ~~~'), c(indent + 'model-route: literal'), c(indent + '~~~')]))
+for marker, indent in (('-', '    '), ('1.', '    '), ('-\n  -', '      '), ('> -', '>     ')):
+    cases.append(('empty item blank boundary %s' % marker, [p(line) for line in marker.split('\n')] +
+        [p('> ', '>') if marker.startswith('>') else p(''), c(indent + 'model-route: literal')]))
+for item, column in (('- item', 2), ('10. item', 4), ('- item\n  - nested', 4)):
+    prefix = [p(line) for line in item.split('\n')]
+    for leading in (column, column + 3):
+        spaces = ' ' * leading
+        cases.append(('blank-separated item paragraph %s/%s' % (item, leading), prefix + [p(''),
+            p(spaces + '**paragraph**', spaces + 'paragraph'), (spaces + 'model-route: prose', 'prose', None)]))
+    spaces = ' ' * (column + 4)
+    cases.append(('item indented code %s' % item, prefix + [p(''),
+        c(spaces + '**literal** ' + 'G' * 160), c(spaces + 'model-route: literal-data')]))
+    for fence in ('```', '~~~'):
+        for gap in ([], [p('')]):
+            cases.append(('nested fence %s/%s/%s' % (item, fence, bool(gap)), prefix + gap +
+                [c(' ' * column + fence + 'text'), c(''), c(' ' * column + 'foo__bar'),
+                 c(' ' * column + fence), p(' ' * column + '**continuation**', ' ' * column + 'continuation'),
+                 (' ' * column + 'model-route: prose', 'prose', None)]))
+for left, right in (('| ', ' |'), ('', ''), ('| ', ''), ('', ' |')):
+    table_lines = [left + row + right for row in (
+        'header | value', ':--- | ---:', 'a | b', '**literal** | ' + '한글' * 80 + '  end  ',
+        'model-route: literal-data | tail', r'escaped\|pipe | tail')]
+    cases.append(('edge pipes %r/%r' % (left, right), [t(line) for line in table_lines]))
+    cases.append(('nested table %r/%r' % (left, right), [p('- item')] +
+        [t('  ' + line) for line in table_lines] + [t('    **continuation**')]))
+
+from panel_view import _result_blocks
+from dashboard_projection import ELLIPSIS, use_unicode
+import unicodedata
+previous_unicode = ELLIPSIS[0] == '…'
+for glyphs in (True, False):
+    use_unicode(glyphs)
+    marker = '↪ ' if glyphs else '+ '
+    for width in (24, 42, 50, 80, 100, 127):
+        result_text = render_results(result_layout, width, heading='Worker Sol 6.1 · finished')
+        assert '\033' not in result_text and all(display_width(line) <= width for line in result_text.splitlines())
+        assert 'Outcome:' in result_text and '결과 화면' in result_text and 'Changed files: 3' in result_text
+        assert 'not_requested' not in result_text, result_text
+        assert result_text.index('Changed files:') < result_text.index('결과 화면'), result_text
+        for name, fixture in cases:
+            source = '\n'.join(row[0] for row in fixture)
+            assert list(_result_blocks(source)) == [(row[0], row[1]) for row in fixture], name
+            for field, indent in (('summary', '  '), ('answer', '    ')):
+                row = {field: source} if field == 'summary' else {'summary': 'BODY', 'calls': [{'answer': source}]}
+                rendered = render_results({'rows': [row]}, width).split('\n')
+                assert all(display_width(line.expandtabs(8)) <= width for line in rendered), (name, width, glyphs, rendered)
+                reference = {field: 'BODY'} if field == 'summary' else {'summary': 'BODY', 'calls': [{'answer': 'BODY'}]}
+                reference_rows = render_results({'rows': [reference]}, width).split('\n')
+                start = max(i for i, line in enumerate(reference_rows) if line == indent + 'BODY')
+                body = rendered[start:-2]
+                cursor = 0
+                for original, kind, expected in fixture:
+                    if kind == 'prose':
+                        if expected is None or (original.strip() and not expected.strip()):
+                            continue
+                        expected = indent + expected if original.strip() else ''
+                        assert body[cursor] == expected, (name, field, width, original, body[cursor], expected)
+                        cursor += 1
+                    else:
+                        expected = ''.join('?' if char != '\t' and unicodedata.category(char)[0] == 'C' else char
+                                           for char in original)
+                        assert body[cursor].startswith(indent), (name, body[cursor])
+                        restored = body[cursor][len(indent):]
+                        cursor += 1
+                        while len(restored) < len(expected):
+                            assert body[cursor].startswith(indent + marker), (name, body[cursor])
+                            restored += body[cursor][len(indent + marker):]
+                            cursor += 1
+                        assert restored == expected, (name, field, width, restored, expected)
+                assert cursor == len(body), (name, field, body[cursor:])
+use_unicode(previous_unicode)
 failure = subprocess.run(final_args[:-4] + ["--verify", "false", "--evidence", "value.txt"],
                          cwd=project, env=environment, capture_output=True, text=True)
 assert failure.returncode != 0 and "verifier failed" in failure.stderr
@@ -3991,7 +4569,8 @@ if os.name == "posix":
                            (shlex.quote(actual_tmux), shlex.quote(socket)))
         wrapper.chmod(0o755)
         tmux = [actual_tmux, "-L", socket]
-        subprocess.run(tmux + ["new-session", "-d", "-s", "fixture-existing", "sleep 60"],
+        # Keep the unrelated session alive through the native/reader fixtures; cleanup kills the private server.
+        subprocess.run(tmux + ["new-session", "-d", "-s", "fixture-existing", "sleep 600"],
                        env=dict(environment, TERM="xterm"), check=True)
         # Mains are opened one by one from the menu here; automatic opening is checked separately.
         env = dict(environment, TERM="xterm", OMS_PANEL_NO_ANIMATION="1", NO_COLOR="",
@@ -4335,7 +4914,7 @@ if os.name == "posix":
             assert reader_at[1] == chat_at[1] and int(reader_at[2]) < int(chat_at[2]), rows
             assert next(row for row in rows if row[0] == graph_pane)[1] == "0", rows
             # The reused reader's previous view already has the close footer.
-            tmux_wait(["capture-pane", "-p", "-t", reader], "OMS / Results")
+            tmux_wait(["capture-pane", "-p", "-t", reader], "Worker unknown · unknown")
             tmux_wait(["capture-pane", "-p", "-t", reader], "q/Esc close")
             with patch.dict(os.environ, reopen_env, clear=True):
                 assert panel.panel_reader.open_reader(graph_pane, panel.reader_shell(
@@ -8157,7 +8736,14 @@ assert fit("abcdefghij", 6) == "abcde…"
 use_unicode(False)
 assert fit("abcdefghij", 6) == "abc..."
 use_unicode(True)
-from panel_view import activity
+from panel_view import activity, box_row, clipped
+from dashboard_projection import char_width, clean
+sample = "ok ✔️ é 각"
+assert display_width(sample) == 9 and char_width("\u1160") == char_width("\u11ff") == char_width("\u0301") == 0
+assert clean(sample) == clipped(sample, 20) == "ok ✔ é 각"
+for box_width in (8, 14, 24):
+    assert display_width(box_row(sample, box_width, True)) == box_width
+assert display_width(fit(sample + " long tail", 8)) <= 8
 assert activity("waiting_approval") == "⚑" and activity("waiting_approval", unicode=False) == "A" and activity("waiting_input") == "?"
 # A failed call marks its own main's window with "! "; a handled failure or another main's call does not.
 alarm = deepcopy(flow)
@@ -8281,7 +8867,7 @@ picture = render(same_model, "codex", 110, 40, view="graph", main_attempt="flow-
 assert "From Sol 6 worker: Failed (exit 1)." in picture and "Messages to Sol 6 main" in picture, picture
 sent_board = render(same_model, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                     navigation={"dismissed": True, "tab": "messages"})
-assert "Sol 6 worker → Sol 6 main  · Failed (exit 1)." in sent_board, sent_board
+assert "Sol 6 worker · Same model worker → Sol 6 main · Failed (exit 1)." in sent_board, sent_board
 # A finished call stays reachable after scrolling past the main's active team rows.
 done_flow = deepcopy(flow)
 for attempt in done_flow["attempts"]["active_recent"]:
@@ -8436,7 +9022,7 @@ counted["room"]["pairs"] = [{"sender": "flow-main", "recipient": "flow-other", "
                             {"sender": "flow-main", "recipient": "explorer", "sent": 3, "pending": 3}]
 counted["room"]["participants"][0]["label"] = "Native task not recorded"
 counted["room"]["messages"] = [{"sender": "flow-other", "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 180)),
-                                "targets": ["flow-main"], "text": "Call exit=0; parent acceptance pending.\nRebasing the parser"},
+                                "targets": ["flow-main"], "pending_for": ["flow-other"], "text": "Call exit=0; parent acceptance pending.\nRebasing the parser"},
                                {"id": "result-explorer", "sender": "explorer", "recipient": "flow-attempt", "message_kind": "handoff", "targets": ["flow-main"], "pending_for": [], "text": "Call exit=1;"}]
 for attempt in counted["attempts"]["active_recent"]:
     if attempt["attempt_id"] == "explorer":
@@ -8450,6 +9036,8 @@ ended_members = [{"participant": "um", "role": "main"}, {"participant": "ur", "r
                  {"participant": "ub", "role": "worker", "parent": "um", "state": "blocked"},
                  {"participant": "uw", "role": "worker", "parent": "um", "state": "working"}]
 ended_pairs = {"room": {"pairs": [{"recipient": who, "pending": n} for who, n in (("ur", 40), ("ub", 7), ("uw", 2), ("um", 1))]}}
+ended_pairs["room"]["messages"] = [{"pending_for": ["ur", "ub"]}, {"pending_for": ["uw", "um"]},
+                                     {"pending_for": ["uw"]}, {"pending_for": ["um"]}]
 assert graph_text.live_unread(ended_pairs, ended_members, lambda m: False) == 3
 assert "no status yet" in picture and "Latest sent" not in picture, picture
 assert "explorer" not in picture and "Past work (1)" in picture, picture
@@ -9573,6 +10161,37 @@ for width in (100, 28, 60):
     screen = render_detail(tree_room, detail, width, 200, {})
     assert "Answer line 39" in screen and "END_OF_ANSWER" in screen, screen
     assert all(display_width(line) <= width for line in screen.splitlines()), screen
+# Detail paging must preserve the reader's already wrapped blocks without another clean()/clipped() pass.
+from dashboard_projection import ELLIPSIS, use_unicode
+previous_unicode = ELLIPSIS[0] == '…'
+structured_lines = ['```text', '  a\t=  1  ', '  ' + '한글' * 80 + '  END  ',
+                    'stop-reason: literal-data', 'control\x1b[31m\x00', '```', '',
+                    '| header | value |', '| --- | --- |', '| repeated  spaces | ' + 'x' * 160 + '  |  ',
+                    '', '    indented\tcode  ' + 'z' * 160 + '  ']
+structured_source = '\n'.join(structured_lines)
+for glyphs in (True, False):
+    use_unicode(glyphs)
+    marker = '↪ ' if glyphs else '+ '
+    for width in (24, 50, 80, 100):
+        retained = {'rows': [{'summary': structured_source, 'calls': [{'answer': structured_source}]}]}
+        expected = render_results(retained, width).split('\n')
+        screen = render_detail(tree_room, {'title': 'RECORDED RESULTS', 'report': retained}, width, 1000, {})
+        assert screen.split('\n')[2:-2] == expected, (glyphs, width, screen)
+        screen = render_detail(tree_room, {'title': 'RAW DETAIL', 'text': structured_source}, width, 1000, {})
+        body = screen.split('\n')[2:-2]
+        assert all(display_width(line.expandtabs(8)) <= width for line in screen.split('\n')), screen
+        cursor = 0
+        for original in structured_lines:
+            safe = original.replace('\x1b', '?').replace('\x00', '?')
+            restored = body[cursor]
+            cursor += 1
+            while len(restored) < len(safe):
+                assert body[cursor].startswith(marker), (width, original, body[cursor])
+                restored += body[cursor][len(marker):]
+                cursor += 1
+            assert restored == safe, (width, restored, safe)
+        assert cursor == len(body), body[cursor:]
+use_unicode(previous_unicode)
 limited_result = deepcopy(long_result)
 limited_result["rows"][0]["calls"][0]["answer_truncated"] = True
 assert "retained preview limit" in render_results(limited_result, 100)

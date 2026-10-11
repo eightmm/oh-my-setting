@@ -749,6 +749,11 @@ def status(repo, room):
             pair["sent"] += 1
             pair["pending"] += int(target in message["pending_for"])
     state["pairs"] = list(pairs.values())
+    # Live readers are known only to the panel; retain pending recipients beyond the text window.
+    pending = [{"id": message["id"], "pending_for": message["pending_for"]}
+               for message in state["messages"] if message["pending_for"]]
+    state["pending_messages"] = pending[-500:]
+    state["pending_messages_truncated"] = len(pending) > 500
     state["messages"] = state["messages"][-12:]
     return state
 
