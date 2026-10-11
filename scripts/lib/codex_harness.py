@@ -21,6 +21,7 @@ def cli_command(host, model, tail):
     if host == "claude":
         return ["claude", "--model", model] + tail
     return ["pi", "--extension", str(Path(__file__).with_name("pi-codex-extension.mjs")),
+            "--extension", str(Path(__file__).with_name("pi-oms-extension.mjs")),
             "--provider", "oms-codex", "--model", model] + tail
 
 

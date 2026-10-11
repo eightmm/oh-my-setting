@@ -1613,6 +1613,25 @@ def panel_main_base(payload: dict[str, Any], room: str) -> str:
             % (payload_agent(payload), " --room " + room if room else ""))
 
 
+def cmd_panel_hook(_: argparse.Namespace) -> int:
+    """Pi safe points: presence and prompt hints, without prompt routing/storage.
+
+    Tool events only refresh presence: discarding mail output there would advance
+    its delivery cursor without showing it to the agent.
+    """
+    if not is_panel_main() or is_harness_child():
+        return 0
+    payload, _ = load_payload()
+    record_panel_activity(payload)
+    if (payload.get("hook_event_name") or payload.get("hookEventName")) == "UserPromptSubmit":
+        for hint in (panel_main_hint, live_thread_hint):
+            with contextlib.suppress(Exception):
+                message = hint(payload)
+                if message:
+                    print(message)
+    return 0
+
+
 def cmd_route(args: argparse.Namespace) -> int:
     payload, _ = load_payload()
     if is_harness_child():
@@ -2628,6 +2647,7 @@ def main() -> int:
     compact.set_defaults(func=cmd_compact_events)
     sub.add_parser("relay").set_defaults(func=cmd_relay)
     sub.add_parser("relay-hint").set_defaults(func=cmd_relay_hint)
+    sub.add_parser("panel-hook").set_defaults(func=cmd_panel_hook)
     args = parser.parse_args()
     return int(args.func(args))
 
