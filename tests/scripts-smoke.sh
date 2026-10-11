@@ -614,17 +614,20 @@ for invalid in ("ownerless", "duplicate", "symlink", "hardlink", "oversize", "pr
     finally:
         path.unlink(); backup.unlink(); path.write_bytes(original)
 # Freeze a production panel snapshot, replace its lease via the API, then run the actual peer command.
-real_launch = subprocess.call
-def replace_before_launch(argv, **kwargs):
+real_launch = subprocess.Popen
+def replace_before_launch(argv, *args, **kwargs):
+    # The panel launches its call with Popen; every other process (including run()) passes through.
+    if not isinstance(argv, list) or "--observe-plan-binding" not in argv:
+        return real_launch(argv, *args, **kwargs)
     frozen = json.loads(argv[argv.index("--observe-plan-binding") + 1])
     run(plan + ["release", "--id", "lease-bound", "--lease-id", frozen["lease_id"]])
     run(plan + ["claim", "--id", "lease-bound", "--provider", "claude"])
     assert current()["lease_id"] != frozen["lease_id"]
     kwargs["env"] = dict(kwargs["env"], LEASE_NEGATIVE_STARTED=str(started))
-    return real_launch(argv, **kwargs)
+    return real_launch(argv, *args, **kwargs)
 brief = repo / "lease-brief.md"
 brief.write_text("Inspect file.txt without edits; return evidence.\n")
-with patch.dict(os.environ, env, clear=True), patch.object(panel.subprocess, "call", side_effect=replace_before_launch):
+with patch.dict(os.environ, env, clear=True), patch.object(panel.subprocess, "Popen", side_effect=replace_before_launch):
     assert panel.dispatch(repo, "claude", "worker", None, "write", "implement", brief=brief, verify=":",
                           task_id="lease-bound", target="codex", model="gpt-6-luna", effort="low") != 0
 assert not started.exists()
