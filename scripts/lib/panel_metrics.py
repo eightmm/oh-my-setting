@@ -122,14 +122,12 @@ def collect(report, main_attempt=None, now=None, repo=None):
         candidates = [m for m in mains if m.get("provider") == provider]
         selected = [m for m in candidates if main_attempt and
                     (m["participant"] == main_attempt or m.get("attempt") == main_attempt)]
-        if not selected:
-            live = [m for m in candidates if m["state"] not in {"done", "failed", "cancelled", "timed_out", "abandoned"}]
-            selected = live if live else candidates
-        row = {"main_count": len(candidates), "context_left": None, "weekly_used": None,
-               "source": "main ambiguous" if len(selected) > 1 else "unavailable"}
+        # Earlier mains of the room stay in its record; nodes() orders the live, then the newest, first.
+        selected = selected or candidates[:1]
+        row = {"main_count": len(candidates), "context_left": None, "weekly_used": None, "source": "unavailable"}
         if provider == "codex":
             row.update(native_models=current, native_model_checked=repo is not None)
-        if len(selected) == 1:
+        if selected:
             main = selected[0]
             native = current.get(main["participant"], {})
             bound_live = (provider == "codex" and repo is not None and main.get("consumer")
@@ -150,18 +148,6 @@ def collect(report, main_attempt=None, now=None, repo=None):
             row.update(reading)
             if main["state"] in {"done", "failed", "cancelled", "timed_out", "abandoned"}:
                 row["context_left"] = None
-        elif len(selected) > 1:
-            # Weekly use belongs to the account, so any of these mains can show it; context stays per main.
-            weeks = []
-            for main in selected:
-                reading = cached(main.get("consumer"), now) if provider == "claude" else {}
-                targets = panes.get(main["participant"], [])
-                if reading.get("weekly_used") is None and len(targets) == 1:
-                    reading = pane_reading(targets[0], provider)
-                if percent(reading.get("weekly_used")) is not None:
-                    weeks.append(percent(reading.get("weekly_used")))
-            if weeks:
-                row.update(weekly_used=max(weeks), source="account")
         output[provider] = row
     return output
 

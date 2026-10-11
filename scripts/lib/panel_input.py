@@ -211,7 +211,7 @@ def choose(event, navigation):
         hit = hit_at(event, navigation)
         if hit and not hit.get("passive"):
             target = hit["action"]
-            if target[0] in ("pin", "tab", "message", "seat", "group"):
+            if target[0] in ("tab", "message", "seat", "group"):
                 if target[0] == "group":
                     navigation["selected"] = target
                 return target
@@ -220,10 +220,7 @@ def choose(event, navigation):
                 navigation["selected_row"] = hit.get("row_id")
             if hit.get("fold") and event[1] <= 2:
                 return ("fold", target[1])
-            # A first click selects a main tab or previews a call; repeating it opens.
-            if hit.get("select") and navigation.get("primary") != target:
-                preview_target(navigation, target)
-                return None
+            # A first click previews a call; repeating it opens.
             if hit.get("preview") and target[0] != "chat":
                 # A call's content stays in the board's detail area; no separate screen opens.
                 preview_target(navigation, target)
@@ -257,22 +254,10 @@ def choose(event, navigation):
                 and target[0] in ("result", "debate")
                 and (navigation.get("preview") or {}).get("target") == target):
             return target
-    elif navigation.get("surface") == "inbox" and kind in (" ", "left", "right"):
-        pass  # The control list has no folds or main tabs; these keys must not silently move or record anything.
-    elif kind in ("left", "right"):
-        mains = [item for item in items if item[0] == "chat"]
-        current = next((item for item in (selected, navigation.get("primary")) if item in mains), None)
-        if mains:
-            index = mains.index(current) + (1 if kind == "right" else -1) if current else 0
-            navigation["selected"] = mains[index % len(mains)]
-            if navigation.get("surface") == "graph":
-                # The detail follows an explicit main change and starts at its top.
-                navigation["preview"] = {"target": navigation["selected"]}
-                navigation.setdefault("band_offsets", {})["detail"] = 0
     elif kind == " " and selected in items and selected[0] == "group":
         return selected
-    elif kind == " " and selected in items and selected[0] == "chat":
-        return ("pin" if navigation.get("surface") == "graph" else "fold", selected[1])
+    elif kind == " " and selected in items and selected[0] == "chat" and navigation.get("surface") not in ("graph", "inbox"):
+        return ("fold", selected[1])
     elif kind == "scroll" and len(event) > 3 and not navigation.get("detail") and any(
             b["y1"] <= event[3] <= b["y2"] and b["x1"] <= event[2] <= b["x2"] for b in navigation.get("bands", [])):
         band = next(b for b in navigation["bands"] if b["y1"] <= event[3] <= b["y2"] and b["x1"] <= event[2] <= b["x2"])

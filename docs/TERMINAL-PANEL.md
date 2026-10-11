@@ -12,10 +12,9 @@ When the first read fails, or a window switches to a room it has not successfull
 
 1. Run `oms` in a terminal: window 0 is the control window, an inbox for you.
 2. A new panel opens one main, preferring Claude Code, then Pi, then Codex when installed.
-   `OMS_PANEL_MAINS=pi` selects Pi; a legacy comma list is fallback order and opens at most one,
-   while an empty value opens only controls. In controls, `1` starts Claude, `2` Pi, and `0` Codex.
+   `OMS_PANEL_MAINS=pi` (one harness name) selects Pi, and an empty value opens only controls. In controls, `1` starts Claude, `2` Pi, and `0` Codex.
    Finish the current main before starting a replacement. Existing sessions are preserved.
-3. Panel-wide keys are F-keys only: `F6`/`F7` step between mains, `F9` swaps focus between a main's chat and its board, `F5` opens the control window, `F12` shows the panel keys (`?` on a board lists the board keys); `Ctrl-b d` detaches.
+3. Panel-wide keys are F-keys only: `F9` swaps focus between the main's chat and its board, `F5` opens the control window, `F12` shows the panel keys (`?` on a board lists the board keys); `Ctrl-b d` detaches.
 4. The control window's **Needs you** lists failed or timed-out calls, calls and mains
    waiting for approval or input, broadcasts from mains and patches awaiting admission.
 5. Arrow keys or a click select a row; Enter or a click opens that main's chat
@@ -72,8 +71,8 @@ when no main is active. A click, or `n` then `1` (Claude), `2` (Pi) or `0` (Code
 sole main without leaving the current window. While a main is active or its lifecycle is
 unverified, the row explains the limit and offers no start targets. Startup is serialized;
 an invocation-scoped lease also prevents concurrent inline/Herdr/native main processes.
-Parallel tasks use workers, advisors and reviewers under this main. Previously opened
-multiple-main panels remain visible and usable; they cannot add a main while one is live.
+Parallel tasks use workers, advisors and reviewers under this main. Mains that ended
+stay on record in the room; the board draws the live one, and the tree lists earlier ones.
 
 To start a main in an empty existing panel without a terminal:
 
@@ -96,17 +95,8 @@ context/quota reading. The launch uses Pi's documented
 [`--append-system-prompt` argument](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/cli/args.ts)
 to preserve its base instructions and pass the OMS room and sole-main contract.
 
-A main never closes another main, because closing ends a native chat and its running work. It
-may only ask: `oms panel --request-close PARTICIPANT --reason "..." [--json]` (refused inside
-workers, for a target that is not a joined main of the caller's room, and without a dry-run)
-records a `question` room message from the caller to that main whose text starts with
-`Close requested: `. The control window lists each open request under "Needs you" as
-"Close #3 Opus 5.5 · requested by #1 Opus 5.5 · reason · running calls 1 · unread 2 · 14:20".
-With the row selected (the inbox title then ends `x closes`), `x` asks "Close #3 Opus 5.5? running calls 1 — press x again to confirm,
-Esc to cancel"; the second `x` records the main leaving the room and kills its tmux window, only
-when `@oms_panel_main_attempt` and `@oms_panel_room_participant` prove the window is that main's
-in this checkout's panel session. The row is replaced by "Closed 14:20 by the person" until the next
-refresh. The native CLI keeps its history where it already stores it.
+Only the person ends a main, from its native chat; the native CLI keeps its history where it
+already stores it.
 
 ## Shared work rooms and the graph
 
@@ -133,10 +123,10 @@ main start a new room, and an explicit `--room ID` or `o Rooms` choice wins.
 A bare control window shows the panel's recorded room.
 The `o Rooms` menu selects or creates a task-scoped room. It does not enroll
 other sessions merely because they share a repository. Auto uses a connected
-vertical tree for a selected room at 28 columns and 12 rows or larger. All
-joined mains have rows; empty role cards are omitted. Explicit parent IDs
+vertical tree for a selected room at 28 columns and 12 rows or larger. Every
+joined main of the room, the live one first, has rows; empty role cards are omitted. Explicit parent IDs
 connect advisors, reviewers and workers under their own main. Calls whose
-parent is outside the shown mains stay in `UNLINKED`. Scrolling exposes rows
+parent is outside the room's mains stay in `UNLINKED`. Scrolling exposes rows
 outside the viewport. `--view tree` selects this layout directly. `g Graph`
 retains the card graph at 76 columns and 16 rows. When an interactive graph
 cannot fit or collection warnings are present, panes of at least 28 columns
@@ -177,7 +167,7 @@ retain the existing control-menu chat/result selection.
 The graph shows joined mains, advisors/reviewers, workers, a mailbox, the
 repository's canonical task board, declared scopes and the latest room log.
 A running council launched by a shown main appears in the advisor card as
-`Debate` (`DEB` in a narrow lane) with its answering seat count; its seats never stand in for the main.
+`Debate` (`DEB` on a narrow card) with its answering seat count; its seats never stand in for the main.
 The default tree keeps the same evidence in a `COUNCIL` branch; clicking it
 reads that task's results scoped to its main participant.
 Only explicit parent IDs draw call connections. Lifecycle state drives moving
@@ -192,9 +182,7 @@ unrecorded`; OMS does not infer a task from the native chat. `WORK STATUS` is
 a summary, not another agent. The main is the central card and shows its
 coordination role. Advisors/reviewers sit above it and join its top edge;
 workers branch from its bottom edge. Each child connects to the main itself,
-so workers do not appear to report to an advisor. In lanes, advisors and
-reviewers sit above their main and each running worker has its own box below
-it. Per-main `Needs review (N)` groups contain lifecycle `review` calls and
+so workers do not appear to report to an advisor. `Needs review (N)` groups contain lifecycle `review` calls and
 completed write calls awaiting patch admission. `Past work (N)` contains
 `done`/`cancelled` calls, failures already handled under the existing read or
 finalization rules, and old unknown calls eligible for the existing display
@@ -218,7 +206,7 @@ across the terminal.
 
 Three rows are pinned at the top of every board (graph and tree of every main window, and the control
 window), in this order, and never scroll away: the header (`OMS · …`), the usage line, then the goal box.
-Main tabs, groups, lanes, the bottom tab box and the footer follow; status alerts sit under the goal box.
+Groups, the cards, the bottom tab box and the footer follow; status alerts sit under the goal box.
 The usage line always covers both providers (`Claude week 66% · ctx 73% │ Codex --`); a provider without a
 reading reads `Codex --`, whichever main the window belongs to. The goal box is a card titled `GOAL` with the
 plan goal on at most two rows and the progress right-aligned on the title row
@@ -227,36 +215,24 @@ board under 20 rows (or when the pinned rows would starve the body) the box shri
 `[ GOAL  <goal>  <bar> <counts> ]`, before any pinned row is dropped. Clicking the box selects the
 `("tab", "plan")` target on every row it draws. Without an active plan (none, no goal, or idle for 7 days)
 it is a one-row dim box, `[ GOAL · none · oms agent-plan init --goal TEXT ]`. While `oms land status --json` reports `active: true` (a probe of the land lock, never the receipt), one more row reads `LANDING <sha7> · <step> · <N>m`. `oms agent-plan claim` run by a panel main
-also records its room participant (`claimed_by_participant`), so two mains of one provider differ; a
-main's lane card then shows `Task: <id> · <state>`, `Now: <declared status>` and an activity line
-(`2 workers running · 1 needs you · last message 3m ago`), or a dim `no status yet`; it is six rows
-tall on boards of 32 or more rows and shrinks to four on short ones. Every prompt of a panel main
+also records its room participant (`claimed_by_participant`); the main's card then adds
+`Task: <id> · <state>` beside its title, or, without a recorded title, `Now: <declared status>`
+(with its age past 30 minutes and `(stale)` past an hour) or a dim `no status yet`. Every prompt of a panel main
 carries a `[oms plan]` sentence (goal, progress, the main's task, the next ready task and its claim
 command) and, when its declared status is missing or older than 20 minutes, a reminder to set it.
 
-Main tabs show each main's state, model, a distinguishing title, worker and
-advisor counts (`W3 A2`), attention count (`!1`) and unread mail addressed to
-that main (`M2`), including mail from other mains; zero counts are omitted. A
-long title keeps its tail, which tells mains apart, and gives up the shared
-prefix first. A question to a main with no linked answer (`oms room send --kind answer
---reply-to ID`) adds `?N` to its tab, `? N open` to its card and a `? ` window-name
+A main is named by its model; an earlier main of the room on the same model adds its
+participant id tail (`Opus 5.5 #9f3c`). A question to a main with no linked answer
+(`oms room send --kind answer --reply-to ID`) adds `? N open` to its card and a `? ` window-name
 prefix (`! ` wins). The recipient's hooks list open questions by id and name, from five
 minutes on every hook and `overdue` from fifteen; the asker's own hook records one
 `remind-<id>-1` note at ten minutes and `-2` at thirty, and the control window's
 `Needs you` list shows the question from twenty minutes. A `--kind answer` without
 `--reply-to` links the one open question from that recipient, or is refused with the ids.
 
-The bottom box has five tabs: Detail, Plan, Debate, Messages and Between. The Messages tab is a
-filtered room log; the Between tab shows one vertex per main and a labeled connection for each
-pair with recorded mail. Pair counts show sent mail in each direction and, when nonzero, unread
-mail (`new`); pairs with unread mail come first, then the most recent exchange. With two to six
-mains the tab draws a polygon when it fits, otherwise it lists pairs and may show `+N more pair(s)`;
-without a recorded exchange it says `No mail between mains yet`. Clicking a pair count or row
-opens that pair in Detail with up to its last six messages, oldest first, from the main-message
-snapshot; older messages may be absent from that snapshot. This opens Detail once per selection,
-after which the reader can return to Between. The pair detail does not make Messages a pair
-summary. The top of the board carries no between-mains line. When no main in a lane row has an advisor or reviewer, the per-lane
-`◇ Advisors: none active` rows are dropped (the footer offers `a Ask advisor`). The pinned usage line
+The bottom box has four tabs: Detail, Plan, Debate and Messages; the Messages tab is a
+filtered room log. A main without an advisor or reviewer shows one dim
+`◇ Advisors: none active · a asks one` row above its card. The pinned usage line
 (`Claude week 66% · ctx 73% │ Codex week 2% · ctx 84%`) holds the readings; the model-call totals
 stay in the tree USAGE card. Truncation reads `…` (`...` in ASCII mode).
 `⚑` (ASCII `A`) marks a call waiting for approval, `?` one waiting for input.
@@ -270,24 +246,11 @@ provider status lines are dropped from messages, and the detail says whether its
 main reviewed a result instead of showing internal fields. A main reads `working`
 during a hook-recorded turn, `idle · Nm` after Stop, `quiet · Nm` after a stale
 busy signal plus 90 seconds of unchanged native-pane output, and `live` until its
-first activity signal. Quiet output does not prove that the model stopped. Clicking another main's
-tab selects it and shows its detail; clicking the tab of the main already shown
-(or its card) opens its proven original conversation. Left/right arrows move
-between mains and move the detail with them. Tabs that do not fit shrink in steps (task text, counts, names, one marker, the
-number), then scroll: `‹ N` and `N ›` count the hidden tabs on each side, are drawn in
-the alert colour when a hidden main needs you, and select the nearest hidden main when
-clicked. Calls with no known main are grouped under `unlinked`. Within advisors and within workers, attention states sort
-first, and lane rows name the state (`! failed REV ...`). Lane heads select
-first, like tabs. `[+]` on a tab, or Space on a selected main, pins it; with two or
-more pins the board shows side-by-side lanes, one per main with its calls on
-single lines. A panel now permits one live main across all its rooms; `--launch` and `--spawn-main`
-refuse another while it is active. For preserved legacy panels, four to six mains fill two rows of lanes
-(2+2, 3+2, 3+3, window order left to right, then the next row) when each lane keeps
-30 columns and the board is tall enough; otherwise lanes stay in one row. `[+ All]` pins every main. Every live watcher board (control and
-native windows) shows every main as lanes until pins are chosen, when they all
-fit (about 30 columns each); `[x All]` returns a window to its focused graph,
-and `v` keeps the overview when the board is expanded. Pins are kept per window in
-`@oms_panel_pins`; pins naming no main of the current room are ignored. PageUp/PageDown scroll the detail
+first activity signal. Quiet output does not prove that the model stopped. Clicking the main's
+card opens its proven original conversation. Calls with no known main are counted on one
+warning row (`t` lists them in the tree). Within advisors and within workers, attention states sort
+first. A panel permits one live main across all its rooms; `--launch` and `--spawn-main`
+refuse another while it is active. The control window's board shows the room's live main. PageUp/PageDown scroll the detail
 when one is shown, otherwise every call band by one page. When another open room of the checkout has a live main (for
 example after a full room made a new main start a new room), an `OTHER ROOMS`
 line names it with its live-main (resumed mains count by their participant) and
@@ -297,15 +260,15 @@ that line are cached for 30 seconds; liveness comes from the current snapshot.
 The bottom box (tab, previewed target and detail scroll) is one state of the panel
 session, kept in `@oms_panel_bottom` (at most 512 bytes of JSON; invalid values and targets naming
 nobody in the room are ignored). A change in any window's board reaches every board within one
-refresh, and F6/F7 or arriving at a window moves only that board's own main, never the bottom box.
+refresh, and arriving at a window never moves the bottom box.
 Terminals attached to the same panel session share its current window, so
-navigating from one client also moves the other. The wheel scrolls only the band, lane or detail under the
+navigating from one client also moves the other. The wheel scrolls only the band or detail under the
 pointer.
 
 The footer shows at most three hints chosen by the selection (a main: `Enter Chat`,
-`a Ask advisor`, `Space Pin`; a call: `Enter Show`, `w Worktree` when it applies;
+`a Ask advisor`; a call: `Enter Show`, `w Worktree` when it applies;
 `Esc Close` while a preview or detail is open; on the Messages and Debate tabs the arrows, `Enter` and the filter or target keys) and always ends with the fixed panel keys
-`F6/F7 Main  F9 Chat⇄Board  F5 Control  F12 Keys` (`q Quit` and `? Keys` on a standalone watcher). `?` swaps in the full list of keys
+`F9 Chat⇄Board  F5 Control  F12 Keys` (`q Quit` and `? Keys` on a standalone watcher). `?` swaps in the full list of keys
 that work in that view, with `v Expand` or `v Collapse` following the board's state.
 Notices disappear on the next input or after ten seconds.
 
@@ -414,14 +377,14 @@ A panel role dispatch joins its worker/advisor/reviewer, records its room and
 participant in lifecycle refs, supplies the room interface in the scoped
 context, and returns a bounded artifact-backed handoff to its caller. A handoff
 reports the call exit and pending parent acceptance. It does not merge native
-histories or write source files in another main's worktree.
+histories or write source files in the main's worktree.
 Native instructions include explicit room and participant arguments for tools
 that do not inherit the CLI environment. Role dispatch uses `--room ID` to
 resolve the verified active main; missing or ambiguous ownership is refused.
 A standalone dispatch without room/main binding remains available and reports
 that its relationship is unrecorded.
 
-Mains declare what they are editing so other mains and their dispatches can
+Mains declare what they are editing so their dispatches and other sessions can
 see it: `oms room scope --id team --participant opus-main --owns scripts/lib
 --owns docs/TERMINAL-PANEL.md` replaces that participant's declared scopes and
 `--clear` empties them. Only the participant itself may declare (the inherited
@@ -559,7 +522,7 @@ oms room join --repo . --id team --participant opus-app --provider claude \
 
 `current` resolves only the session's exported
 `CLAUDE_CODE_MESSAGING_SOCKET` in the bounded native registry. It never selects
-the most recent session. Another main can then send the room snapshot:
+the most recent session. A room participant can then send the room snapshot:
 
 ```bash
 oms room publish --repo . --id team --app claude --to opus-app --allow-wakeup
@@ -690,7 +653,7 @@ model fails that route without silently selecting another model.
 
 A panel main acts as the control tower: its bootstrap delegates implementation,
 investigation and test repair to bounded workers by default and keeps scope,
-briefs, integration, review, patch admission and coordination with other mains.
+briefs, integration, review, patch admission and coordination.
 It works directly only when a brief would cost more than the edit or the step
 needs the main itself. Outside the panel, the global rule still requires an
 explicit request before spawning subagents.
@@ -723,12 +686,11 @@ oms panel --repo . --dispatch advisor --owner claude --seat fable \
 oms panel --repo . --dispatch reviewer --owner codex --seat astra \
   --prompt 'Review the changed parser.' --verify 'bash tests/affected.sh'
 oms panel --repo . --room team --dispatch advisor --owner claude --main opus-main \
-  --prompt 'Advise on the parser plan of the second main.'
+  --prompt 'Advise on the parser plan.'
 ```
 
-From the control window, a dispatch belongs to the provider's single active
-main in the room. When several mains of that provider are live, the control
-menu lists them by number and `--main PARTICIPANT` names one; either choice only
+From the control window, a dispatch belongs to the room's active main of that
+provider. `--main PARTICIPANT` names it explicitly (the board's `a` uses it); it only
 narrows the same live-main proof and is refused for a departed, exited or
 unknown main. A native main always dispatches as itself.
 
@@ -769,7 +731,7 @@ and plan claim, so it is advised to compact in place (`/compact`) instead of
 migrating to a fresh session; nothing is compacted for it. After a compact or
 clear it gets one `[oms panel] resumed after ...` line with its window, model,
 room, plan task, open questions, running workers and declared status (ids,
-counts and names only). The board shows `ctx N%` on each main's card and tab
+counts and names only). The board shows `ctx N%` on the main's card
 when known, with `compact soon` at 15% or less.
 
 ## Layout and activity
@@ -799,9 +761,8 @@ That placement is chosen once, when the panel's first main window opens its boar
 The board size is one setting for the whole panel, recorded in absolute cells in the
 session option `@oms_panel_split` (`<top|left>:<cells>c`; the older percent form is
 converted on first sight). Every main window's board, active or not, resizes itself to
-those cells (keeping at least 20 cells for the board and for the chat), so `F6`/`F7`
-between mains only moves the `▸` cursor. Drag the border in any main window and the
-other main windows (and mains opened later) take the new width; a zoomed board and the
+those cells (keeping at least 20 cells for the board and for the chat). Drag the border in a main window and
+the other main windows (and mains opened later) take the new width; a zoomed board and the
 control window are left alone.
 A watcher whose OMS sources change re-executes itself once they compile, so
 updated boards need no manual restart. `--position side` retains a 28 percent
@@ -814,8 +775,8 @@ of a worker result, verifier or owner acceptance.
 
 The graph fits from 76 columns by 16 rows. Advisors/reviewers sit above their
 exact main, and its workers sit below, with activity moving on verified parent
-connections. A selected main controls this view; arrow/Tab navigation reaches
-additional mains and calls. Unlinked calls stay unlinked and are available in
+connections. The live main, or a selected one, controls this view; arrow/Tab navigation reaches
+its calls. Unlinked calls stay unlinked and are available in
 the tree (`t`). Model-call usage stays at the top, while taller views show
 provider readings, recorded messages or repository tasks. Missing router,
 progress, locks or billing data is never invented. Smaller interactive panes
@@ -879,10 +840,9 @@ name is held by another checkout or by a session OMS did not create, the panel u
 `oms-<project>-` plus the first 6 hex digits of the SHA-256 of the resolved path, and neither
 session is taken over. A live legacy `oms-panel-<12 hex>` session proven for the checkout stays in use
 under its name, because its processes carry that name; new panels use the new name. The first `split` creates it with a control window and records the
-checkout on the session. A new panel opened without `--launch` also opens every
-installed main CLI (Codex, Claude) in its own window, sharing one new room;
-`OMS_PANEL_MAINS=claude` (comma list, in that order, first one selected) or an
-empty value limits this. Reattaching never opens mains again; later launches attach to it (or switch the current
+checkout on the session. A new panel opened without `--launch` also opens one
+installed main (Claude, then Pi, then Codex) in its own window with a new room;
+`OMS_PANEL_MAINS=codex` names a different harness and an empty value opens none. Reattaching never opens mains again; later launches attach to it (or switch the current
 tmux client), and `--launch` adds a native window there instead of opening a
 second session. A session with that name recorded for another checkout is
 refused. A launch that loses a creation race, or arrives before a just-created
@@ -893,8 +853,8 @@ has participant/message headroom; otherwise, or when `--room` is given, the
 existing room rules apply. Rooms stay bounded and task-scoped; the panel
 outlives them. Separate tmux servers are separate scopes. Each native conversation gets
 its own sidebar with state refreshed every five seconds. Existing windows and tmux settings
-are preserved, with one addition: `F6`/`F7` move to the previous/next main window, `F9` selects the other pane
-of the window, `F5` opens the control window and `F12` shows the key list, all without the prefix (F8 is Codex's voice key and F10/F11 belong to terminal menus), and the board lays its main columns out in that window order. tmux key bindings are server-wide, so the binding acts only in sessions that carry the panel's `@oms_panel_repo` marker,
+are preserved, with one addition: `F9` selects the other pane
+of the window, `F5` opens the control window and `F12` shows the key list, all without the prefix (F8 is Codex's voice key and F10/F11 belong to terminal menus). tmux key bindings are server-wide, so the binding acts only in sessions that carry the panel's `@oms_panel_repo` marker,
 passes the key through unchanged in every other session, and is not installed when the key is
 already bound by the user (a binding OMS installed earlier under the old session-name test is replaced). With default bindings, `Ctrl-b w` picks a window and `Ctrl-b d`
 detaches while work continues. Quit in the control pane also detaches. Failed
@@ -921,8 +881,8 @@ wrapped lines, so long titles need not compete with location and purpose.
 No absolute home paths or transcripts are added to panel metadata.
 
 Activity has three levels: a recorded MAIN, its ADVISORS / REVIEWERS / WORKERS,
-then each call and its task title. The repository view keeps separate native
-mains in separate cards, in stable attempt-ID order with UNLINKED last. The
+then each call and its task title. The repository view keeps each recorded native
+main in its own card, in stable attempt-ID order with UNLINKED last. The
 available space expands cards with attention calls first; a card that cannot
 fit is a one-line summary with its leading attention/task title and role counts.
 A native window uses its main card as the root.
@@ -947,8 +907,8 @@ filter enabled. These flags apply only to the menu or watch, not model operation
 
 The top has one `Claude` row and one `Codex` row, each prioritizing weekly
 **used** percentage and the selected main's context **left** percentage.
-The exact current main wins; otherwise a unique joined main is required.
-Multiple candidates show `main ambiguous`, and missing readings show `--`.
+The exact current main wins; otherwise the live, then the newest, main of that
+provider in the room. Missing readings show `--`.
 Claude's existing session HUD cache supplies reported context and optional
 `seven_day` usage, with a ten-minute TTL and expired reset values suppressed.
 The consumer hash selects that session's cache; no newest-session guess is
@@ -1006,8 +966,8 @@ output and `TERM=dumb` stay plain in every mode. The watch restores the terminal
 on exit or interruption. The control menu redraws in place on keys and every five
 seconds rather than animating.
 
-A native window binds children by its recorded main attempt ID. Other mains'
-activity is counted separately and available in Details. The control view shows
+A native window binds children by its recorded main attempt ID. Earlier mains'
+calls stay in the room's tree. The control view shows
 repository-wide records. Its selected Main controls subsequent manual dispatch,
 and its sidebar follows that selection. Main/child links come from explicit
 lifecycle metadata, never matching a provider name. Legacy unlinked records stay
@@ -1048,8 +1008,7 @@ view fits the current pane width/height. Redirected watch output appends plain
 snapshots; `--count N` bounds it. Native launch needs an installed, authenticated
 provider. `installed` means executable found on PATH, not verified login or model
 availability. Shared OMS references carry evidence across providers; native
-conversations remain separate. Multiple mains do not serialize edits: coordinate
-main writes and use isolated workers for implementation.
+conversations remain separate. Use isolated workers for implementation.
 
 ## Discussion and results
 
@@ -1061,10 +1020,10 @@ failed seats remain visible and the owner still decides the outcome. All seats
 are read-only. There is no model fallback or additional synthesis-model call.
 
 The board's bottom is one box whose top edge is a tab strip: Detail, Plan,
-Debate, Messages and Between. The selected tab is bracketed; a `•` after Debate marks a
+Debate and Messages. The selected tab is bracketed; a `•` after Debate marks a
 debate running or finished since the tab was last opened, and a number after
 Messages counts the unread mail for live participants. A click on a tab name or
-Tab (Detail, Plan, Debate, Messages, Between, then around) switches; a tab never changes
+Tab (Detail, Plan, Debate, Messages, then around) switches; a tab never changes
 by itself, and the box stays after Esc. The box is reserved before the upper
 layout is drawn, with spare padding above it. It persists when empty or dismissed.
 On supported ordinary layouts (80x40, 157x60 and 126x90), its bounds stay fixed
@@ -1072,7 +1031,7 @@ as calls come and go. Physically short terminals adapt the readable body, strip,
 or tree fallback to available space. The tabs stay clickable when only the strip fits.
 
 The tree shows a main's `? N open` questions and `cN%` context left on its status line,
-like the graph. When the tree is taller than the screen, mains other than this window's
+like the graph. When the tree is taller than the screen, earlier mains other than this window's
 and the selected one fold to that line so every main stays visible; selecting one
 (arrows or click) unfolds it.
 
@@ -1189,7 +1148,7 @@ The same operator suite covers council routes, durable results, verifier and
 patch lineage, privacy refusal and delivery deduplication/retry after interruption.
 The notifier suite covers unloaded and busy receivers, shell wrappers, early
 events, lost acknowledgements and correlated persisted output.
-The operator suite also verifies multiple-main hierarchy, legacy ownership,
+The operator suite also verifies the main hierarchy with earlier mains on record, legacy ownership,
 separate review groups, compact/detail budgets, attention filtering, numbered
 result selection, menu cycling and view inheritance in an existing tmux server.
 

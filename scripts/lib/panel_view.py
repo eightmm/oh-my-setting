@@ -7,7 +7,6 @@ import unicodedata
 from dashboard_projection import (clean, count, display_width, fit, listing, mapping, number, use_unicode,
                                   wrap_label as wrapped)
 from panel_routing import policy
-from room import CLOSE_PREFIX
 
 
 
@@ -304,44 +303,11 @@ def age_label(stamp, now=None):
             else "%sh" % (seconds // 3600) if seconds < 86400 else "%sd" % (seconds // 86400))
 
 
-def close_requests(report, unicode=True):
-    """Open requests from a main to close a main, one per target; only the person acts on them."""
-    from room_view import clock_stamp, nodes
-    members = nodes(report)
-    mains = {m["participant"]: m for m in members if m.get("role") == "main"}
-    windows = mapping(report.get("main_windows"))
-    room_state = mapping(report.get("room"))
-    pending = listing(room_state.get("messages"))
-    shown = {m.get("id") for m in pending if isinstance(m, dict)}
-    pending = [m for m in listing(room_state.get("close_requests")) if m.get("id") not in shown] + pending
-
-    def name(member):
-        label = MODEL_NAMES.get(member.get("model"), member.get("model")) or member.get("provider") or "unknown"
-        return ("#%s " % windows[member["participant"]] if windows.get(member["participant"]) else "") + label
-    found = {}
-    for message in pending:
-        target = mains.get(message.get("recipient"))
-        text = str(message.get("text") or "")
-        if (target is None or message.get("message_kind") != "question" or message.get("answered")
-                or not text.startswith(CLOSE_PREFIX)):
-            continue
-        sender = mains.get(message.get("sender"))
-        calls = sum(1 for m in members if m.get("parent") == target["participant"] and m["state"] in LIVE_STATES)
-        unread = sum(1 for m in pending if target["participant"] in listing(m.get("pending_for"))
-                     and not str(m.get("text") or "").startswith(CLOSE_PREFIX))
-        found[target["participant"]] = {
-            "participant": target["participant"], "label": name(target),
-            "by": name(sender) if sender else clean(message.get("sender"), 40) or "unknown",
-            "reason": clean(text[len(CLOSE_PREFIX):], 80) or "no reason given", "calls": calls, "unread": unread,
-            "ts": message.get("ts") or "", "clock": clock_stamp(message.get("ts"))}
-    return list(found.values())
-
-
 def inbox_items(report, unicode=True):
     """What the person must act on, newest first: failures, waits, broadcasts from mains, patches to admit."""
     from room_view import failure_handled, handled_results, main_names, nodes, readable
     members = nodes(report)
-    titles = main_names(report, members)
+    titles = main_names(members)
     name = lambda m: MODEL_NAMES.get(m.get("model"), m.get("model")) or m.get("provider") or "unknown"
     mains = {ident: m for m in members if m.get("role") == "main"
              for ident in (m["participant"], m.get("attempt")) if ident}
@@ -395,17 +361,7 @@ def inbox_items(report, unicode=True):
                           "what": "to " + label(target), "style": "alert",
                           "action": ("chat", target["participant"]),
                           "row_id": ("question", str(question.get("id")) if question.get("id") else ("position", index))})
-    for request in close_requests(report, unicode):
-        items.append({"stamp": request["ts"], "glyph": "✕" if unicode else "x", "who": "Close " + request["label"],
-                      "what": sep_join(unicode, "requested by " + request["by"], request["reason"],
-                                       "running calls %s" % request["calls"], "unread %s" % request["unread"]),
-                      "tail": request["clock"], "style": "alert", "action": ("close", request["participant"]),
-                      "row_id": ("close", request["participant"])})
     return sorted(items, key=lambda item: item["stamp"], reverse=True)
-
-
-def sep_join(unicode, *parts):
-    return (" · " if unicode else " / ").join(parts)
 
 
 def render_inbox(report, width, height, color, unicode, managed, previous, navigation):
@@ -418,7 +374,7 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
     footer = menu_rows(width, height, unicode, navigation.get("menu_help", False), managed,
                        keys=not navigation.get("line_input"))
     if managed and height >= 20:
-        footer.append("F6/F7 previous/next main / Ctrl-b 0 control / Ctrl-b d detach")
+        footer.append("F5 control / F12 keys / Ctrl-b d detach")
     if navigation.get("notice"):
         footer.append(clean(navigation["notice"], 200))
     if len(footer) > height - 1 - 4:
@@ -467,15 +423,13 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
                             row_ids[0] if shown else None)
     selected = navigation["selected"] = shown[row_ids.index(selected_row)]["action"] if selected_row else None
     navigation["selected_row"] = selected_row
-    note = clean(navigation.get("closed_note"), 120)
-    available -= bool(note)
     capacity = available - (1 if len(shown) + bool(hidden) > available else 0) if shown else 1
     capacity = max(0, capacity)
     index = row_ids.index(selected_row) if selected_row else 0
     start = min(max(0, index - capacity + 1), max(0, len(shown) - capacity))
     window = shown[start:start + capacity]
     content_width = width - 4 if boxed else width
-    body = [(note, "dim", None)] if note else []
+    body = []
     if not shown:
         body.append(("Nothing needs you right now", "dim", None))
     for row_id, item in zip(row_ids[start:start + capacity], window):
@@ -492,8 +446,7 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
         lines.append(clipped(text, width))
         lines[-1] = (PALETTE[style] + lines[-1] + "\033[0m") if color else lines[-1]
     if boxed:
-        title = "Needs you" + (sep + "%s" % len(items) if items else "") + (sep + "Up/Down, Enter opens" + (", x closes" if any(i["action"][0] == "close" for i in items) else "")
-                                                                          if items and not navigation.get("line_input") else "")
+        title = "Needs you" + (sep + "%s" % len(items) if items else "") + (sep + "Up/Down, Enter opens" if items and not navigation.get("line_input") else "")
         lines.append((PALETTE["alert" if items else "dim"] if color else "") + box_edge(title, width, unicode) + ("\033[0m" if color else ""))
     for entry in body:
         text, style, action = entry[:3]
@@ -573,7 +526,7 @@ def room_unreadable(report):
 def render_unavailable(report, width, height, color, unicode, previous, menu, managed, navigation):
     """Bounded status view for a room whose first read has failed."""
     # Nothing from the prior room remains selectable or clickable.
-    for key in ("selected", "primary", "preview", "surface", "bands", "band_offsets", "mains", "box",
+    for key in ("selected", "primary", "preview", "surface", "bands", "band_offsets", "box",
                 "full_result", "graph_selected", "main_attempt", "body_rows", "preview_signature", "geometry",
                 "selected_row", "row_ids", "detail"):
         navigation.pop(key, None)
@@ -584,7 +537,7 @@ def render_unavailable(report, width, height, color, unicode, previous, menu, ma
     footer = menu_rows(width, height, unicode, navigation.get("menu_help", False), managed,
                        keys=not navigation.get("line_input")) if menu else []
     if menu and managed and height >= 20:
-        footer.append("F6/F7 previous/next main / Ctrl-b 0 control / Ctrl-b d detach")
+        footer.append("F5 control / F12 keys / Ctrl-b d detach")
     if navigation.get("notice"):
         footer.append(clean(navigation["notice"], 200))
     if len(footer) > budget - 1:
@@ -601,7 +554,7 @@ def render_unavailable(report, width, height, color, unicode, previous, menu, ma
     if body == 1:
         head = [head[1] if width >= 20 else ("?", "bad")]
     lines = []
-    for text, style in head[:body] + [(line, "dim" if line.startswith("F6") else "main") for line in footer]:
+    for text, style in head[:body] + [(line, "dim" if line.startswith("F5") else "main") for line in footer]:
         text = clipped(text, width)
         lines.append(PALETTE[style] + text + "\033[0m" if color else text)
     return "\n".join(lines[:budget])
@@ -646,7 +599,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     if menu:
         footer = menu_rows(width, height, unicode, mapping(navigation).get("menu_help", False), managed)
         if managed:
-            footer.append("F6/F7 previous/next main / Ctrl-b 0 control / Ctrl-b d detach")
+            footer.append("F5 control / F12 keys / Ctrl-b d detach")
     sep = " · " if unicode else " / "
     wide = "A finished call is not accepted until its main records it" + sep + "native subagents other than the built-in advisor are not shown"
     footer.extend([wide if display_width(wide) <= width else "Finished is not accepted" + sep + "some subagents not shown"]
@@ -737,7 +690,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         members = nodes(report)
         mains = [member for member in members if member.get("role") == "main"]
         if mains:
-            labels = main_names(report, members)
+            labels = main_names(members)
             names = [labels[member["participant"]] for member in mains[:2]]
             add("Joined mains %s / %s%s" % (len(mains), ", ".join(names),
                 " +%s" % (len(mains) - 2) if len(mains) > 2 else ""), "dim")

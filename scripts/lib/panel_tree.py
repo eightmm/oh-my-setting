@@ -6,7 +6,7 @@ from panel_view import (ATTENTION_STATES, PALETTE, activity, box_edge, box_row, 
                         menu_rows, status_alerts, tone, usage_words, worker_rows, wrapped)
 from room_view import (action as member_action, call_order, context_note, open_count, call_span, footer_hints, live_unread,
                        goal_banner, main_names, model_name, native_advisors, nodes, plan_idle, readable, said,
-                       settler, spawn_bar, window_order, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
+                       settler, spawn_bar, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
 
 
 def render_tree(report, width, height, color=False, unicode=True, frame=None, menu=False,
@@ -20,15 +20,14 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         navigation.update(hits=[], items=[], offset=0, viewport=0, positions={}, room_id=room.get("id"))
         return ""
     members = nodes(report)
-    names = main_names(report, members)
+    names = main_names(members)
     settled, _ = settler(report)
     classify = call_classifier(report)
     expanded = navigation.get("expanded_groups", set())
     current = next((m["participant"] for m in members if main_attempt and
                     (m["participant"] == main_attempt or m.get("attempt") == main_attempt)), None)
-    # This window's main leads so its team stays on screen; the rest keep the F6/F7 window order.
-    mains = sorted(window_order(report, [m for m in members if m.get("role") == "main"]),
-                   key=lambda m: m["participant"] != current)
+    # This window's main leads so its team stays on screen; earlier mains of the room follow.
+    mains = sorted([m for m in members if m.get("role") == "main"], key=lambda m: m["participant"] != current)
     calls = [m for m in members if m.get("role") != "main"] + native_advisors(report, members)
     owners = {ident: m for m in mains for ident in (m["participant"], m.get("attempt")) if ident}
     for row in worker_rows(report):
@@ -169,7 +168,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             for target, receipt in list(publications.items())[-3:]))
     def hints(help_open):
         chosen = next((m for m in members if member_action(m) == selected), None)
-        return footer_hints(dict(navigation, keys_help=help_open), width, managed, unicode, chosen, len(mains), False)
+        return footer_hints(dict(navigation, keys_help=help_open), width, managed, unicode, chosen, False)
 
     hint_rows = 0
     if not menu:
@@ -218,7 +217,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     room_budget = max(0, budget - len(head) - (2 if boxed else 0))
     body = rows
     if len(body) > room_budget > 0 and not navigation.get("_auto_fold"):
-        # Too short for everything: mains other than this window's and the selected one drop to their status line, kept only if that puts every main on screen and leaves a call to select.
+        # Too short for everything: earlier mains other than the selected one drop to their status line, kept only if that puts every main on screen and leaves a call to select.
         keep = {current} | {m["participant"] for m in mains if selected and (
             selected == ("chat", m["participant"]) or any(
                 member_action(c) == selected for c in calls

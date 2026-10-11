@@ -24,7 +24,7 @@ def project(report):
         owner = clean(row.get("participant"), 80)
         title = provider.capitalize() + (" / " + owner if owner else "")
         readable = mapping(report.get("collection")).get("ok") is True and row.get("source") not in {
-            "cache stale", "main ambiguous", "unavailable"}
+            "cache stale", "unavailable"}
         warn = env_int("OMS_CTX_WARN_PCT", 15, minimum=1, maximum=90)
         urgent = min(env_int("OMS_CTX_URGENT_PCT", 8, minimum=0, maximum=89), warn)
         add("context", title + " context used", None if context is None else 100 - context, 100,

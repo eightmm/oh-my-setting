@@ -40,7 +40,7 @@ def _people(report, navigation):
     """(name_of, mains, me, selected main) from the board's own names."""
     from room_view import main_names, nodes, who
     members = nodes(report)
-    labels = main_names(report, members)
+    labels = main_names(members)
     index = {m["participant"]: m for m in members}
     mains = [m["participant"] for m in members if m.get("role") == "main"]
     owners = {key: m["participant"] for m in members if m.get("role") == "main"
@@ -56,9 +56,8 @@ def _people(report, navigation):
             return "everyone"
         if ident not in index:
             return clean(ident, 40) or "unknown"
-        # A numbered main is unique; any other name carries its role, so a Sol worker never reads like the Sol main.
-        label = labels.get(ident) or ""
-        return clean(label if label.startswith("#") else who(index[ident], labels), 60)
+        # Every name carries its role, so a Sol worker never reads like the Sol main.
+        return clean(who(index[ident], labels), 60)
     return name_of, mains, me, selected
 
 
