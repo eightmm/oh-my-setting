@@ -2990,10 +2990,18 @@ for index, (owner, role, workload, access, purpose, expected) in enumerate(cases
     env = dict(environment, OMS_AGENT=owner, OMS_PANEL_MAIN_ATTEMPT=main_attempts[owner])
     if access == "write":
         env["PANEL_TEST_MODE"] = "write"
+        call(["git", "config", "diff.mnemonicPrefix", "true"])
     answer = call(request, env)
     if access == "write":
         assert "patch:" in answer, answer
         write_patch = re.search(r"^patch: (.+)$", answer, re.M).group(1)
+        from panel_results import _patch_paths, _diffstat
+        captured = Path(write_patch).read_bytes()
+        assert _patch_paths(captured) == ["value.txt"]
+        stat = _diffstat(project, {"patch": Path(write_patch).relative_to(project).as_posix(),
+                                  "patch_sha256": hashlib.sha256(captured).hexdigest()})
+        assert stat["files"] == [["value.txt", 1, 0]], stat
+        call(["git", "config", "--unset", "diff.mnemonicPrefix"])
     assert (project / "value.txt").read_text() == "old\n", "role task edited primary"
     assert subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"]) == before
     attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))

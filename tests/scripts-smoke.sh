@@ -5046,6 +5046,7 @@ test_delegate_fake_worker_apply() {
   local home_dir="$TMP/delegate-apply-home"
 
   make_committed_repo "$project"
+  git -C "$project" config diff.noprefix true
   mkdir -p "$bin_dir" "$home_dir"
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash

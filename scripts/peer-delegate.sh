@@ -1767,7 +1767,8 @@ EOF
   fi
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
     GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c diff.external= \
-    -C "$worktree" diff --no-ext-diff --no-textconv --cached --binary \
+    -c diff.noprefix=false -c diff.mnemonicPrefix=false -C "$worktree" \
+    diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --cached --binary \
     > "$patch_file"
 }
 
