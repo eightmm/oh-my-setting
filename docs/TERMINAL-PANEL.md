@@ -14,7 +14,9 @@ When the first read fails, or a window switches to a room it has not successfull
 1. Run `oms` in a terminal: window 0 is the control window, an inbox for you.
 2. A new tmux split panel opens one main, preferring Claude Code, then Pi, then Codex when installed.
    Inline layouts (without tmux, including Windows Git Bash) and Herdr without `--launch`
-   open controls with Claude preselected by default; press `1` to start it.
+   open controls, preselecting nonempty `OMS_PANEL_HARNESS`, otherwise the new-panel main
+   (the installed `OMS_PANEL_MAINS` name or first installed Claude/Pi/Codex), falling back to Claude.
+   Press the selected harness's key (`1` Claude, `2` Pi, `0` Codex) to start it.
    `OMS_PANEL_MAINS=pi` (one harness name) selects Pi, and an empty value opens only controls.
    A legacy comma list such as `OMS_PANEL_MAINS=claude,pi` opens no main and prints a stderr warning.
    In controls, `1` starts Claude, `2` Pi, and `0` Codex.
@@ -985,8 +987,11 @@ checkout on the session. A new panel opened without `--launch` also opens one
 installed main (Claude, then Pi, then Codex) in its own window with a new room;
 `OMS_PANEL_MAINS=codex` names a different harness and an empty value opens none.
 A legacy comma list such as `OMS_PANEL_MAINS=claude,pi` opens none and prints a stderr warning.
-Inline and Herdr without `--launch` instead open the control menu with Claude
-preselected by default and wait for `1` to start it. Reattaching never opens mains again; later launches attach to it (or switch the current
+Inline and Herdr without `--launch` instead open the control menu, preselecting nonempty
+`OMS_PANEL_HARNESS`, otherwise the new-panel main (the installed `OMS_PANEL_MAINS` name
+or first installed Claude/Pi/Codex), falling back to Claude. Press the selected harness's
+key (`1` Claude, `2` Pi, `0` Codex) to start it.
+Reattaching never opens mains again; later launches attach to it (or switch the current
 tmux client), and `--launch` adds a native window there instead of opening a
 second session. A session with that name recorded for another checkout is
 refused. A launch that loses a creation race, or arrives before a just-created
