@@ -4836,6 +4836,16 @@ finish_fixture_reviews()
 # claim records the main, and every further worker of the same main reuses the running lease.
 plan_cli = ["bash", str(panel.ENTRY), "agent-plan", "--repo", str(project)]
 call(plan_cli + ["init", "--goal", "dispatch moves the plan"])
+call(plan_cli + ["add", "--id", "cross-repo-plan", "--title", "Plan only in the state repository"])
+assert not (other_project / ".oms/plan/tasks.json").exists(), "cross-repo task must exist only in the state repository"
+plan_hint_request = ["bash", str(panel.ENTRY), "peer-delegate", "--to", "codex",
+                     "--plan-task", "cross-repo-plan", "--prompt", "Inspect value.txt.", "--no-verify", "--dry-run"]
+plan_hint = call(plan_hint_request + ["--repo", str(other_project)], dict(room_env, OMS_PANEL_DISPATCH="1"))
+assert "plan task cross-repo-plan belongs to panel state repository %s" % project in plan_hint, plan_hint
+assert "patch is based on %s's HEAD" % other_project in plan_hint, plan_hint
+assert "oms patch-land" not in plan_hint, "cross-repo plan hint suggested unsupported landing: " + plan_hint
+same_repo_hint = call(plan_hint_request + ["--repo", str(project)], dict(room_env, OMS_PANEL_DISPATCH="1"))
+assert "oms patch-land --repo %s --patch " % project in same_repo_hint and "--plan-task cross-repo-plan" in same_repo_hint, same_repo_hint
 call(plan_cli + ["add", "--id", "plan-link", "--title", "Plan-linked dispatch"])
 plan_dispatch = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
                  "--dispatch", "worker", "--owner", "claude", "--purpose", "investigate", "--workload", "light",

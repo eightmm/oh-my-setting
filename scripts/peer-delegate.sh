@@ -2535,10 +2535,12 @@ if [ "$WORKER_ACCESS" = read ]; then
 elif [ "$applied" = 1 ]; then
   echo "applied: yes (review with: git -C $REPO diff)"
 else
-  # The printed next step is the admission front door, never a gate bypass:
+  # Printed landing commands use the admission front door, never a gate bypass:
   # a raw `git apply` would land an unreviewed patch outside patch-land's
   # dirty-tree refusal, lock, and admission checks.
-  if [ -n "$PLAN_TASK_ID" ]; then
+  if [ -n "$PLAN_TASK_ID" ] && [ "$delegate_worktree_repo" != "$REPO" ]; then
+    echo "applied: no (review patch; plan task $PLAN_TASK_ID belongs to panel state repository $REPO; patch is based on $delegate_worktree_repo's HEAD; cross-repository plan landing requires owner coordination)"
+  elif [ -n "$PLAN_TASK_ID" ]; then
     echo "applied: no (review patch, then: oms patch-land --repo $delegate_worktree_repo --patch $patch_file --plan-task $PLAN_TASK_ID)"
   else
     echo "applied: no (review patch, then: oms patch-land --repo $delegate_worktree_repo --patch $patch_file)"
