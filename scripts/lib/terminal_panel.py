@@ -1483,13 +1483,21 @@ def _dispatch_pending_path(member):
     return _dispatch_call_path(member)[:-5] + "-pending.json"
 
 
+def _dispatch_exit_record(call, status):
+    launch = json.dumps(call, ensure_ascii=False, sort_keys=True, allow_nan=False).encode("utf-8")
+    return dict(call, exit=status, launch_sha256=hashlib.sha256(launch).hexdigest())
+
+
 def _record_dispatch_call(repo, room_id, member, caller, process, identity, status=None):
     if type(process.pid) is not int or process.pid <= 0:
         raise ValueError("dispatch child PID unavailable")
     record = {"schema": 1, "kind": "oms-panel-call", "room": room_id, "participant": member,
               "parent": caller, "pid": process.pid, "identity": identity, "session": os.name == "posix"}
     if status is not None:
-        record["exit"] = status
+        launch = _dispatch_call_record(repo, room_id, {"participant": member, "parent": caller})
+        if launch != record or type(status) is not int:
+            raise ValueError("dispatch exit does not match its launch record")
+        record = _dispatch_exit_record(launch, status)
     # Separate immutable receipts retain the original process identity for a later reconciler.
     _write(repo, _dispatch_call_path(member, status is not None), record)
 
@@ -1527,15 +1535,17 @@ def _dispatch_call_finished(repo, room_id, member):
     if not call:
         return False
     try:
-        try:
-            exited = json.loads(_read(repo, _dispatch_call_path(member["participant"], True), 4096, missing=True))
-        except (OSError, ValueError):
-            exited = None
-        if isinstance(exited, dict) and type(exited.get("exit")) is int and exited == dict(call, exit=exited["exit"]):
-            return True
+        receipt = _read(repo, _dispatch_call_path(member["participant"], True), 4096, missing=True)
+        if receipt:
+            exited = json.loads(receipt)
+            if (not isinstance(exited, dict) or type(exited.get("exit")) is not int
+                    or exited != _dispatch_exit_record(call, exited["exit"])):
+                return False
+        # A matching receipt binds the outcome to a launch, but cannot attest
+        # termination: artifacts may be written directly by another call.
         if _read(repo, _dispatch_pending_path(member["participant"]), 65536, missing=True):
             pending = _dispatch_pending(repo, call)
-            if pending["forced"] and not _dispatch_descendants_gone(pending["descendants"]):
+            if not _dispatch_descendants_gone(pending["descendants"]):
                 return False
         if call["session"] and call.get("identity"):
             import panel_terminals
@@ -1565,7 +1575,7 @@ def _reconcile_dispatch(repo, room_id, state, caller, parent):
             if (any(row.get("task_id") != pending["task_id"] for row in live)
                     or not _dispatch_call_finished(repo, room_id, member)):
                 continue
-            _write(repo, _dispatch_call_path(member["participant"], True), dict(call, exit=pending["exit"]))
+            _write(repo, _dispatch_call_path(member["participant"], True), _dispatch_exit_record(call, pending["exit"]))
             try:
                 _settle_dispatch(repo, room_id, member["participant"], pending["exit"])
             finally:

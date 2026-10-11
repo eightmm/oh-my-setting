@@ -4583,6 +4583,74 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
     if os.name != "posix":
         return
     import panel_terminals
+    # BEGIN receipt-only scope regression (also runnable as an isolated case).
+    receipt_member = "call-" + "e" * 16
+    room.join(project, shared, receipt_member, "codex", "worker", parent=room_owner)
+    room.scope(project, shared, receipt_member, ["value.txt"])
+    receipt_state = room.status(project, shared)
+    receipt_row = room.participant(receipt_state, receipt_member)
+    receipt_child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    try:
+        receipt_identity = panel_terminals.process(receipt_child.pid)["identity"]
+        panel._record_dispatch_call(project, shared, receipt_member, room_owner, receipt_child, receipt_identity)
+        # Even a correctly bound receipt written for the live launch is insufficient.
+        panel._record_dispatch_call(project, shared, receipt_member, room_owner, receipt_child, receipt_identity, 0)
+        with patch.object(panel, "main_history", return_value=[]):
+            assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt released a live process"
+            assert any(row["participant"] == receipt_member for row in panel.scope_overlaps(
+                project, shared, receipt_state, room_owner, ["value.txt"])), "forged live receipt suppressed scope overlap"
+    finally:
+        receipt_child.terminate()
+        receipt_child.wait(timeout=5)
+    receipt_path = project / panel._dispatch_call_path(receipt_member, True)
+    receipt_bytes = receipt_path.read_bytes()
+    receipt = json.loads(receipt_bytes)
+    assert re.fullmatch(r"[0-9a-f]{64}", receipt["launch_sha256"])
+    assert panel._dispatch_call_finished(project, shared, receipt_row), "confirmed termination kept scope"
+    with patch.object(panel, "_dispatch_group_gone", return_value=False):
+        assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt bypassed a surviving group"
+    with patch.object(panel_terminals, "process_gone", return_value=False):
+        assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt bypassed unknown leader identity"
+    for forged in (dict(receipt, launch_sha256="0" * 64),
+                   {key: value for key, value in receipt.items() if key != "launch_sha256"},
+                   dict(receipt, pid=receipt_child.pid + 1)):
+        receipt_path.write_text(json.dumps(forged))
+        assert not panel._dispatch_call_finished(project, shared, receipt_row), "mismatched/legacy receipt accepted"
+    receipt_path.write_bytes(receipt_bytes)
+    launch = panel._dispatch_call_record(project, shared, receipt_row)
+    pending_path = project / panel._dispatch_pending_path(receipt_member)
+    pending_path.write_text(json.dumps(dict(launch, exit=143, task_id="receipt-fixture", forced=True,
+                                          descendants=[{"pid": 2147483646, "identity": "detached", "group": 2147483646}])))
+    with patch.object(panel_terminals, "process_gone", side_effect=lambda pid, identity: pid == receipt_child.pid), \
+            patch.object(panel, "_dispatch_group_gone", return_value=True):
+        assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt bypassed a surviving descendant"
+    with patch.object(panel_terminals, "process_gone", return_value=True), \
+            patch.object(panel, "_dispatch_group_gone", return_value=True):
+        assert panel._dispatch_call_finished(project, shared, receipt_row), "gone descendants kept scope"
+    for descendants in (None, []):
+        pending_path.write_text(json.dumps(dict(launch, exit=143, task_id="receipt-fixture",
+                                              forced=False, descendants=descendants)))
+        assert panel._dispatch_call_finished(project, shared, receipt_row) is (descendants == []), \
+            "unknown descendants released scope or complete evidence was refused"
+    pending_path.write_text("{}")
+    assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt bypassed invalid pending evidence"
+    pending_path.unlink()
+    launch_path = project / panel._dispatch_call_path(receipt_member)
+    launch_bytes = launch_path.read_bytes()
+    launch_path.write_text(json.dumps(dict(launch, identity="different-launch")))
+    assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt replayed against another launch"
+    try:
+        panel._record_dispatch_call(project, shared, receipt_member, room_owner, receipt_child, receipt_identity, 0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("exit writer accepted a substituted launch")
+    launch_path.write_bytes(launch_bytes)
+    receipt_path.unlink()
+    assert panel._dispatch_call_finished(project, shared, receipt_row), "independent exit evidence required a receipt"
+    receipt_path.write_bytes(receipt_bytes)
+    room.append(project, shared, {"kind": "leave", "participant": receipt_member}, "Receipt fixture complete")
+    # END receipt-only scope regression.
     # Exercise the real child, handlers and ledger without a provider call: leave an active attempt on TERM.
     interrupted_file = temporary / "interrupted-attempt"
     cleaned_file = temporary / "interrupted-cleaned"

@@ -6,6 +6,10 @@ import re
 import stat
 
 
+def is_panel_call_record(rel):
+    return re.fullmatch(r"artifacts/panel-call-[0-9a-f]{16}(?:-(?:exit|pending))?\.json", rel) is not None
+
+
 def is_internal_atomic_temp(root, rel):
     """Return true only for a regular file matching a known writer temp."""
     parent, _, name = rel.rpartition("/")

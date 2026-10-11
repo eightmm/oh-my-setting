@@ -27228,6 +27228,33 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
   grep -Fq '"fingerprint":"abc"' "$rewrite/.oms/failures.jsonl" ||
     fail "rewritten shared state should be restored"
 
+  # Concurrent mode still protects immutable panel launch/outcome records;
+  # presence-only tracking previously accepted both rewrites and appends.
+  local panel_records="$TMP/guard-state-panel-records"
+  local panel_record mutation mutation_body
+  make_guard_repo "$panel_records"
+  mkdir -p "$panel_records/.oms/artifacts"
+  printf '*\n' > "$panel_records/.oms/.gitignore"
+  printf '{"pid":1}\n' > "$panel_records/.oms/artifacts/sibling.json"
+  for panel_record in panel-call-eeeeeeeeeeeeeeee.json \
+    panel-call-eeeeeeeeeeeeeeee-exit.json panel-call-eeeeeeeeeeeeeeee-pending.json; do
+    for mutation in rewrite append symlink fifo; do
+      rm -f "$panel_records/.oms/artifacts/$panel_record"
+      printf '{"pid":1}\n' > "$panel_records/.oms/artifacts/$panel_record"
+      case "$mutation" in
+        rewrite) mutation_body="printf '{\"pid\":2}\\n' > '$panel_records/.oms/artifacts/$panel_record'" ;;
+        append) mutation_body="printf 'extra\\n' >> '$panel_records/.oms/artifacts/$panel_record'" ;;
+        symlink) mutation_body="rm -f '$panel_records/.oms/artifacts/$panel_record'; ln -s sibling.json '$panel_records/.oms/artifacts/$panel_record'" ;;
+        fifo) mutation_body="rm -f '$panel_records/.oms/artifacts/$panel_record'; mkfifo '$panel_records/.oms/artifacts/$panel_record'" ;;
+      esac
+      result="$(run_guarded_worker "$panel_records" "$mutation_body")"
+      [ "${result%%	*}" != 0 ] || fail "$mutation of panel controller state should fail: $result"
+      contains "$result" "artifacts/$panel_record controller record" ||
+        fail "panel controller mutation should name its immutable record: $result"
+    done
+    rm -f "$panel_records/.oms/artifacts/$panel_record"
+  done
+
   local removed="$TMP/guard-state-deleted"
   make_guard_repo "$removed"
   mkdir -p "$removed/.oms"

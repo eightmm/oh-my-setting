@@ -758,7 +758,7 @@ oms_worker_state_violations() {
 
   [ -f "$before" ] || return 0
   OMS_WG_REPO="$repo" OMS_WG_BEFORE="$before" python3 - <<'PY'
-import hashlib, json, os
+import hashlib, json, os, stat
 
 root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
 problems = []
@@ -834,6 +834,28 @@ with open(os.environ["OMS_WG_BEFORE"], encoding="utf-8", errors="replace") as f:
         path = os.path.join(root, rel)
         if not os.path.exists(path):
             problems.append("%s was deleted" % rel)
+            continue
+        if kind == "IMMUTABLE" and len(parts) == 4:
+            try:
+                size = int(parts[2])
+                flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                with os.fdopen(os.open(path, flags), "rb") as handle:
+                    info = os.fstat(handle.fileno())
+                    if os.path.islink(path) or not stat.S_ISREG(info.st_mode) or info.st_size != size:
+                        problems.append("%s controller record changed" % rel)
+                        continue
+                    digest, remaining = hashlib.sha256(), size
+                    while remaining > 0:
+                        chunk = handle.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                        digest.update(chunk)
+                    changed = remaining != 0 or bool(handle.read(1)) or digest.hexdigest() != parts[3]
+                if changed:
+                    problems.append("%s controller record changed" % rel)
+            except (OSError, ValueError):
+                problems.append("%s controller record became unreadable" % rel)
             continue
         if kind != "APPEND" or len(parts) != 4:
             continue
@@ -2136,7 +2158,11 @@ for base, dirs, files in os.walk(root):
         # (hook_state.py panel_main_hint unlinks it) while a worker runs.
         if rel.startswith("hooks/sessions/") and rel.endswith(".resume.json"):
             continue
-        if not append_only:
+        # Existing launch/exit/pending records are immutable controller state.
+        # New sibling records remain possible while another controller runs;
+        # scope release independently probes their recorded process identities.
+        immutable = transients.is_panel_call_record(rel)
+        if not append_only and not immutable:
             rows.append("%s EXISTS" % rel)
             continue
         try:
@@ -2150,7 +2176,7 @@ for base, dirs, files in os.walk(root):
                         break
                     remaining -= len(chunk)
                     digest.update(chunk)
-            rows.append("%s APPEND %d %s" % (rel, size, digest.hexdigest()))
+            rows.append("%s %s %d %s" % (rel, "IMMUTABLE" if immutable else "APPEND", size, digest.hexdigest()))
         except OSError:
             rows.append("%s UNREADABLE" % rel)
 for row in rows:
