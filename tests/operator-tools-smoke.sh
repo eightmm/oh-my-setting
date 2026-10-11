@@ -5235,7 +5235,7 @@ def exercise_observed_worker_leases():
     source_value = (source / "value.txt").read_text()
     (source / "value.txt").write_text(source_value + "pending scratch review\n")
     with (project / ".git/info/exclude").open("a") as exclude:
-        exclude.write("\n__pycache__/\n")
+        exclude.write("\n__pycache__/\n.oms\n")
     state_status = subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"])
     source_status = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"])
     source_diff = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD"])
@@ -5265,6 +5265,9 @@ def exercise_observed_worker_leases():
                         OMS_STATE_REPO=str(project),
                         OMS_CODEX_HARNESS_CAPABILITY="fixture-capability", OMS_HARNESS_BRIDGE="1",
                         ANTHROPIC_BASE_URL="http://fixture.invalid")
+        if role == "reviewer":
+            read_env.update([("OMS_OWNER_TOKEN", "fixture-owner"),
+                             ("ANTHROPIC_AUTH_TOKEN", "fixture-bridge-token")])
         answer = call(request, read_env)
         assert ("artifact:" if role == "advisor" else "artifacts:") in answer, answer
         observed = json.loads(worker_log.read_text().splitlines()[-1])
@@ -5278,8 +5281,9 @@ def exercise_observed_worker_leases():
                 "OMS_CODEX_HARNESS_CAPABILITY", "OMS_ATTEMPT_ID", "OMS_PLAN_LEASE_ID",
                 "OMS_HARNESS_BRIDGE", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"}), verifier_env
             verify_receipts = list((project / ".oms/artifacts/review").glob("_verify-*.md"))
-            assert any("unset owner environment:" in p.read_text() and "OMS_STATE_REPO" in p.read_text()
-                       for p in verify_receipts), "verifier environment removal was not reported"
+            assert any(all(name in content for name in ("unset owner environment:", "OMS_STATE_REPO",
+                "OMS_OWNER_TOKEN", "ANTHROPIC_AUTH_TOKEN"))
+                for content in (p.read_text() for p in verify_receipts)), "verifier environment removal was not reported"
             assert "+pending scratch review" in read_prompt.read_text(), "review diff came from A"
             assert (source / "__pycache__/x.pyc").read_text() == "cache"
             assert (source / "verify-temp-dir/output").read_text() == "output"
@@ -5374,6 +5378,48 @@ def exercise_observed_worker_leases():
                 else:
                     assert (source / ".oms").exists(), "verifier control mutation did not execute"
                     shutil.rmtree(source / ".oms")
+            if os.name != "nt":
+                # An unchanged ignored link can hide control writes in the
+                # verifier-output surface, so refuse it before verification.
+                target_root = source / "__pycache__/control-target"
+                target = target_root / "plan/tasks.json"
+                target.parent.mkdir(parents=True)
+                target.write_text("original control\n")
+                (target_root / ".gitignore").write_text("*\n")
+                verify_marker = temporary / "scratch-symlink-verifier-ran"
+                for kind in ("root", "directory", "file"):
+                    control_root = source / ".oms"
+                    if kind == "root":
+                        link, destination = control_root, target_root
+                    else:
+                        control_root.mkdir()
+                        (control_root / ".gitignore").write_text("*\n")
+                        if kind == "directory":
+                            link, destination = control_root / "plan", target.parent
+                        else:
+                            (control_root / "plan").mkdir()
+                            link, destination = control_root / "plan/tasks.json", target
+                    link.symlink_to(destination, target_is_directory=kind != "file")
+                    original_link = os.readlink(link)
+                    worker_before = worker_log.read_bytes()
+                    symlink_request = list(request)
+                    symlink_request[symlink_request.index("--verify") + 1] = (
+                        'printf forged > .oms/plan/tasks.json; printf ran > "$PANEL_TEST_SYMLINK_VERIFY_LOG"')
+                    result = subprocess.run(symlink_request,
+                        env=dict(read_env, PANEL_TEST_SYMLINK_VERIFY_LOG=str(verify_marker)),
+                        capture_output=True, text=True, timeout=90)
+                    assert result.returncode != 0 and "protected" in result.stderr and "symlink" in result.stderr, (kind, result)
+                    assert ".oms" in result.stderr, (kind, result.stderr)
+                    assert worker_log.read_bytes() == worker_before, "control symlink reached a reviewer"
+                    assert not verify_marker.exists(), "control symlink reached the verifier"
+                    assert os.readlink(link) == original_link and target.read_text() == "original control\n"
+                    if kind == "root":
+                        link.unlink()
+                    else:
+                        shutil.rmtree(control_root)
+                shutil.rmtree(target_root)
+            else:
+                print("SKIP: protected control symlink fixtures require native symlink support")
             input_untracked = source / "review-input-untracked.txt"
             input_untracked.write_text("not verifier output\n")
             worker_before = worker_log.read_bytes()

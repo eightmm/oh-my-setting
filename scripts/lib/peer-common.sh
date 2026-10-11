@@ -649,6 +649,11 @@ def describe(path, rel, hash_content=True):
     info = os.lstat(path)
     mode = stat.S_IMODE(info.st_mode)
     if stat.S_ISLNK(info.st_mode):
+        # Link identity cannot bind control bytes written through its target.
+        if strict:
+            label = os.path.basename(root) if rel == "." else os.path.join(os.path.basename(root), rel)
+            print("error: strict protected control state refuses symlink: %s" % label, file=sys.stderr)
+            raise SystemExit(2)
         return [rel, "link", mode, os.readlink(path)]
     if stat.S_ISDIR(info.st_mode):
         return [rel, "dir", mode, ""]
