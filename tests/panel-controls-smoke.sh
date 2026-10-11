@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 PYTHONDONTWRITEBYTECODE=1 python3 -I - "$ROOT" <<'PY'
 import contextlib
 import importlib

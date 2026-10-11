@@ -2,6 +2,8 @@
 set -euo pipefail
 # A new canonical suite: no existing test exercises the workspace session, its key table or its controller.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-workspaces.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 OMS_WS_TEST_ROOT="$ROOT" OMS_WS_TEST_TMP="$TMP" python3 - <<'PY'

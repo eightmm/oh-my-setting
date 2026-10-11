@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
-unset HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID \
-  OMS_PANEL_HOST OMS_PANEL_VIEW OMS_PANEL_COLOR
-# The suite runs as a top-level operator even inside a panel window or a write worker, whose
-# child/room bindings would otherwise turn its room fixtures into refusals.
-unset TMUX TMUX_PANE OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH OMS_STATE_REPO OMS_PLAN_LEASE_ID
-for oms_inherited in $(compgen -e | grep -E '^OMS_(PANEL|ROOM)_' || true); do unset "$oms_inherited"; done
 
 # Focused regressions for the read-only collaboration dashboard, content-free OTLP
 # JSONL export, explicit editor launch adapters, and retired semantic-eval
 # migration. Every fixture lives below TMP; no real provider or GUI is called.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
+# Interactive fixtures allocate and answer their own private PTYs.
+exec < /dev/null
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-operator-tools.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
@@ -4257,8 +4255,9 @@ if os.name == "posix":
             reader_at = next(row for row in rows if row[0] == reader)
             assert reader_at[1] == chat_at[1] and int(reader_at[2]) < int(chat_at[2]), rows
             assert next(row for row in rows if row[0] == graph_pane)[1] == "0", rows
+            # The reused reader's previous view already has the close footer.
+            tmux_wait(["capture-pane", "-p", "-t", reader], "OMS / Results")
             tmux_wait(["capture-pane", "-p", "-t", reader], "q/Esc close")
-            assert "OMS / Results" in subprocess.check_output(tmux + ["capture-pane", "-p", "-t", reader], env=env, text=True)
             with patch.dict(os.environ, reopen_env, clear=True):
                 assert panel.panel_reader.open_reader(graph_pane, panel.reader_shell(
                     project, ("debate", ("fixture-task", "fixture-seat")), graph_pane), project) == reader
@@ -10344,18 +10343,23 @@ if os.name != "nt":
         "p.check_legacy_main=lambda repo: None\np.managed_session=lambda: True\n"
         "def exited(*args,**kw): kw['_exit_info'].update(attempt='exit-attempt',room='exit-room'); return 0\n"
         "p.run_single_native=exited\n"
-        "if len(sys.argv)>3:\n"
+        "if sys.argv[3]=='wait':\n"
+        " import select\n"
+        " def wait(*args,**kw): os.kill(os.getpid(),int(sys.argv[4]))\n"
+        " select.select=wait\n"
+        "else:\n"
         " import panel_input\n"
         " original=panel_input.TerminalInput.__enter__\n"
         " def enter(self):\n"
-        "  result=original(self); os.kill(os.getpid(),int(sys.argv[3])); return result\n"
+        "  result=original(self); os.kill(os.getpid(),int(sys.argv[4])); return result\n"
         " panel_input.TerminalInput.__enter__=enter\n"
         "try: p.run_native('claude',Path(sys.argv[2]))\n"
         "except p.NativeShutdown as e: sys.exit(e.exit_code)\n")
     for number in (signal.SIGTERM, signal.SIGHUP):
-        terminal([sys.executable, "-c", prompt_script, str(root / "scripts/lib"), str(project)], b"", b"\033[?1000l",
-                 trigger=b"\033[?1000h", signal_after=number, expected_exit=128 + number)
-        terminal([sys.executable, "-c", prompt_script, str(root / "scripts/lib"), str(project), str(number)], b"", b"\033[?1000l",
+        # Deliver shutdown at the exact input stage, independent of PTY output buffering.
+        terminal([sys.executable, "-c", prompt_script, str(root / "scripts/lib"), str(project), "wait", str(number)], b"", b"\033[?1000l",
+                 expected_exit=128 + number)
+        terminal([sys.executable, "-c", prompt_script, str(root / "scripts/lib"), str(project), "enter", str(number)], b"", b"\033[?1000l",
                  expected_exit=128 + number)
 with patch.object(panel.shutil, "which", return_value="/x"), \
         patch.object(panel, "resolve_session", return_value=("legacy-panel", str(project))), \

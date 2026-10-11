@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-autonomy-hook.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 export HOME="$TMP/home"
@@ -15,12 +17,10 @@ mkdir -p "$HOME" "$XDG_CACHE_HOME" "$TMPDIR"
 # these for gate runs; scrub them here too so a direct run from a council
 # seat or worker shell sees the same suite. A test that needs child
 # semantics sets the variables explicitly.
-unset OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
-  OMS_HARNESS_CALL_ID OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
+unset OMS_HARNESS_ORIGIN OMS_HARNESS_PARENT_AGENT \
+  OMS_HARNESS_CALL_ID OMS_ATTEMPT_ID \
   OMS_LEASE_ID OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_APPROVAL_ID \
-  OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE OMS_HARNESS_DELEGATE_DEPTH \
-  OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO OMS_ROOM_ADMITTED_PARTICIPANT OMS_HOOK_AGENT OMS_AGENT TMUX TMUX_PANE
-for oms_inherited in $(compgen -e | grep -E '^OMS_(PANEL|ROOM)_' || true); do unset "$oms_inherited"; done
+  OMS_LANDING_ID OMS_WORKER_AUTHORITY_EXCLUSIVE OMS_HOOK_AGENT OMS_AGENT
 
 fail() {
   echo "autonomy-hook-smoke: $*" >&2
