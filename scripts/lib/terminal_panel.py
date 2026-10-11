@@ -538,7 +538,7 @@ def _main_exit_key():
                 termios.tcflush(inputs.fd, termios.TCIFLUSH)
             except ImportError:
                 pass
-            except (OSError, termios.error):
+            except (OSError, getattr(termios, "error", OSError)):
                 pass
             select.select([inputs.fd], [], [])
             return os.read(inputs.fd, 1).decode("utf-8", errors="replace")
