@@ -3916,9 +3916,23 @@ time.sleep(60)
             patch.object(panel, "routed_command", return_value=[sys.executable, str(interrupted_child),
                          str(root / "scripts/lib"), str(interrupted_file), str(cleaned_file), "--repo", str(project)]):
         interrupted_route = allocate("claude", "worker", "light", "read", "investigate", {"codex"})
-        assert panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
-                                  "interrupted-task", False, "Interrupted call", interrupted_route,
-                                  None, None, None) == 143
+        def menu_dispatch(*args, **kwargs):
+            return panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
+                                      "interrupted-task", False, "Interrupted call", interrupted_route,
+                                      None, None, None)
+        with patch.object(panel, "dispatch", side_effect=menu_dispatch), \
+                patch.object(panel, "managed_session", return_value=False), \
+                patch.object(panel, "panel_mains", return_value=["claude"]), \
+                patch.object(panel, "raw_keys", return_value=False), \
+                patch.object(panel, "read_choice", return_value="5") as menu_choice, \
+                patch.object(panel, "read_field", side_effect=["Inspect source", "light"]) as menu_fields:
+            try:
+                panel.interactive(project)
+            except panel.NativeShutdown as error:
+                assert error.exit_code == 143
+            else:
+                raise AssertionError("dispatch menu swallowed TERM after settlement")
+            assert menu_choice.call_count == 1 and menu_fields.call_count == 2, "menu paused after TERM"
     assert all(signal.getsignal(number) == handler for number, handler in saved.items())
     interrupted = json.loads(panel.events(project, "show", "--attempt", interrupted_file.read_text(), "--json", output=True))
     assert interrupted["state"] == "cancelled" and interrupted["reason_code"] == "panel_call_interrupted", interrupted
@@ -3928,16 +3942,62 @@ time.sleep(60)
     assert room.participant(settled, member)["joined"] and panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"]) == []
     with patch.object(panel, "main_history", return_value=[dict(interrupted, state="review", terminal=False)]):
         assert panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"]) == [], "verified exit receipt did not release scope"
+    # HUP follows TERM out of run_dispatch; the turn-interrupt paths retain exit 130.
+    for interruption in (panel.NativeShutdown(signal.SIGHUP), panel.NativeShutdown(signal.SIGINT), KeyboardInterrupt()):
+        finished = Mock(pid=2147483647, poll=lambda: 0)
+        finished.wait.side_effect = interruption
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(panel.shutil, "which", return_value=sys.executable), \
+                patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
+                patch.object(panel, "plan_link", return_value=None), \
+                patch.object(panel.subprocess, "Popen", return_value=finished), \
+                patch.object(panel_terminals, "process", return_value=None), \
+                patch.object(panel, "_dispatch_group_gone", return_value=True):
+            try:
+                code = panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
+                                          "interrupt-contract", False, None, interrupted_route, None, None, None)
+            except panel.NativeShutdown as error:
+                assert interruption is error and error.exit_code == 129
+            else:
+                assert code == 130
+    # Observe a real provider in a new session, with its parent reaping it during fixture cleanup.
+    subtree_file = temporary / "provider-subtree.pid"
+    subtree_child = temporary / "provider-subtree.py"
+    subtree_child.write_text('''import signal, subprocess, sys, time
+from pathlib import Path
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+def stop(number, frame):
+    child.terminate()
+    child.wait(timeout=5)
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+Path(sys.argv[1]).write_text(str(child.pid))
+time.sleep(60)
+''')
+    subtree = subprocess.Popen([sys.executable, str(subtree_child), str(subtree_file)], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5
+        while not subtree_file.exists() and subtree.poll() is None and time.monotonic() < deadline:
+            time.sleep(.02)
+        detached = int(subtree_file.read_text())
+        snapshot = panel._dispatch_descendants(subtree.pid)
+        assert snapshot and any(row["pid"] == row["group"] == detached for row in snapshot), snapshot
+        assert not panel._dispatch_descendants_gone(snapshot)
+    finally:
+        subtree.terminate()
+        subtree.wait(timeout=5)
+    assert panel._dispatch_descendants_gone(snapshot)
     # Force-stop follows the grace; signaling alone is not evidence that a process group exited.
-    for identity_matches in (True, False):
+    for identity_matches, descendants in ((True, []), (False, []), (True, None)):
         stopped = Mock(pid=123, poll=lambda: None)
         stopped.wait.side_effect = [subprocess.TimeoutExpired("fixture", 20), 0]
-        with patch.object(panel_terminals, "process", return_value={"group": 123}), \
+        with patch.object(panel, "_dispatch_descendants", return_value=descendants), \
+                patch.object(panel_terminals, "process", return_value={"group": 123}), \
                 patch.object(panel_terminals, "matches", return_value=identity_matches), \
                 patch.object(panel_terminals, "process_gone", return_value=False), \
                 patch.object(panel, "_dispatch_group_gone", return_value=True), \
                 patch.object(panel.os, "killpg") as force, redirect_stderr(io.StringIO()):
-            assert panel._stop_dispatch(stopped, "original-identity") is identity_matches
+            assert panel._stop_dispatch(stopped, "original-identity") is (identity_matches and descendants is not None)
         assert stopped.terminate.call_count == 1 and stopped.wait.call_args_list[0].kwargs == {"timeout": 20}
         assert force.call_count == int(identity_matches)
     disappeared = Mock(pid=123, poll=lambda: None)
@@ -3947,11 +4007,12 @@ time.sleep(60)
         assert panel._stop_dispatch(disappeared, "original-identity") is True
     disappeared.wait.assert_not_called()
     real_popen = subprocess.Popen
-    for scenario in ("unknown-identity", "kill-unconfirmed", "leader-only"):
+    for scenario in ("unknown-identity", "kill-unconfirmed", "provider-alive", "leader-only"):
         pending = Mock(pid=2147483647, poll=lambda: 0 if scenario == "leader-only" else None)
         pending.wait.side_effect = ([0] if scenario == "leader-only" else
                                    [panel.NativeShutdown(signal.SIGTERM), subprocess.TimeoutExpired("fixture", 20)] +
-                                   ([subprocess.TimeoutExpired("fixture", 5)] if scenario == "kill-unconfirmed" else []))
+                                   ([subprocess.TimeoutExpired("fixture", 5)] if scenario == "kill-unconfirmed" else
+                                    [-signal.SIGKILL] if scenario == "provider-alive" else []))
         pending_attempt = []
         def pending_child(argv, *args, **kwargs):
             if argv[:3] != [sys.executable, "-c", "pass"]:
@@ -3966,18 +4027,26 @@ time.sleep(60)
                     "--ref", "panel_room_participant=" + member, "--then", "starting", "--then", "working", output=True))
             return pending
         observation = ({"identity": "original-identity", "group": pending.pid, "state": "S"}
-                       if scenario == "kill-unconfirmed" else None)
+                       if scenario != "unknown-identity" else None)
+        provider = {"pid": 2147483646, "identity": "provider-identity", "group": 2147483646}
         with patch.dict(os.environ, room_env, clear=True), \
                 patch.object(panel.shutil, "which", return_value=sys.executable), \
                 patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
                 patch.object(panel.subprocess, "Popen", side_effect=pending_child), \
                 patch.object(panel_terminals, "process", return_value=observation), \
-                patch.object(panel_terminals, "process_gone", return_value=False), \
+                patch.object(panel_terminals, "process_gone", side_effect=lambda pid, identity: scenario == "provider-alive" and pid == pending.pid), \
                 patch.object(panel_terminals, "matches", return_value=True), \
-                patch.object(panel, "_dispatch_group_gone", return_value=False), \
+                patch.object(panel, "_dispatch_descendants", return_value=[provider] if scenario == "provider-alive" else []), \
+                patch.object(panel, "_dispatch_group_gone", side_effect=lambda pid: scenario == "provider-alive" and pid == pending.pid), \
                 patch.object(panel.os, "killpg") as force, redirect_stderr(io.StringIO()) as notices:
-            status = panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
-                                        scenario, False, "Pending child", interrupted_route, None, None, None)
+            try:
+                status = panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
+                                            scenario, False, "Pending child", interrupted_route, None, None, None)
+            except panel.NativeShutdown as error:
+                assert scenario != "leader-only" and error.exit_code == 143
+                status = error.exit_code
+            else:
+                assert scenario == "leader-only", "dispatch swallowed shutdown"
             row = json.loads(panel.events(project, "show", "--attempt", pending_attempt[0], "--json", output=True))
             member = row["refs"]["panel_room_participant"]
             state = room.status(project, shared)
@@ -3987,16 +4056,52 @@ time.sleep(60)
             record = json.loads(panel._read(project, panel._dispatch_call_path(member)))
             assert record["pid"] == pending.pid and record["identity"] == (observation or {}).get("identity")
             assert any(o["participant"] == member for o in panel.scope_overlaps(project, shared, state, room_owner, ["value.txt"]))
-            assert force.call_count == int(scenario == "kill-unconfirmed")
+            assert force.call_count == int(scenario in {"kill-unconfirmed", "provider-alive"})
+            deferred = panel._dispatch_pending(project, record)
+            assert deferred["forced"] == (scenario in {"kill-unconfirmed", "provider-alive"})
+            if scenario == "provider-alive":
+                assert deferred["descendants"] == [provider]
             # A stale or premature final handoff cannot release an active child's scope.
-            room.send(project, shared, member, room_owner, "Call exit=143; parent acceptance pending.",
-                      kind="handoff", message_id="result-" + member)
+            if scenario != "provider-alive":
+                room.send(project, shared, member, room_owner, "Call exit=143; parent acceptance pending.",
+                          kind="handoff", message_id="result-" + member)
             assert any(o["participant"] == member for o in panel.scope_overlaps(
                 project, shared, room.status(project, shared), room_owner, ["value.txt"]))
-        # Explicit fixture cleanup keeps unresolved children out of unrelated pool/scope cases.
-        panel.events(project, "transition", "--attempt", pending_attempt[0], "--state", "cancelled",
-                     "--reason-code", "fixture_complete")
-    print("dispatch exit evidence: confirmed TERM, unknown identity, unconfirmed kill and surviving group passed")
+        if scenario == "provider-alive":
+            # No board read settles the pending call. At capacity the next dispatch names it;
+            # once its detached provider exits, that action settles the old attempt before launching.
+            following = Mock(pid=2147483645, wait=lambda: 0, poll=lambda: 0)
+            with patch.dict(os.environ, room_env, clear=True), \
+                    patch.object(panel, "policy", return_value={"pool": {"max_running": 1}}), \
+                    patch.object(panel.shutil, "which", return_value=sys.executable), \
+                    patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
+                    patch.object(panel.subprocess, "Popen", side_effect=lambda argv, *a, **kw:
+                                 following if argv[:3] == [sys.executable, "-c", "pass"] else real_popen(argv, *a, **kw)) as launch, \
+                    patch.object(panel_terminals, "process", return_value=None), \
+                    patch.object(panel_terminals, "process_gone", side_effect=lambda pid, identity: pid == pending.pid), \
+                    patch.object(panel, "_dispatch_group_gone", side_effect=lambda pid: pid != provider["group"]):
+                try:
+                    panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
+                                       "after-pending", False, "Next call", interrupted_route, None, None, None)
+                except ValueError as error:
+                    assert "max_running=1" in str(error) and member in str(error) and "retry dispatch" in str(error)
+                else:
+                    raise AssertionError("live detached provider lost its pool slot")
+                assert all(call.args[0][:3] != [sys.executable, "-c", "pass"] for call in launch.call_args_list)
+                with patch.object(panel_terminals, "process_gone", return_value=True), \
+                        patch.object(panel, "_dispatch_group_gone", return_value=True):
+                    assert panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
+                                              "after-pending", False, "Next call", interrupted_route, None, None, None) == 0
+                reconciled = json.loads(panel.events(project, "show", "--attempt", pending_attempt[0], "--json", output=True))
+                after = room.status(project, shared)
+                assert reconciled["state"] == "cancelled" and reconciled["reason_code"] == "panel_call_interrupted"
+                assert after["call_results"][member]["exit"] == 143
+                assert not any(o["participant"] == member for o in panel.scope_overlaps(project, shared, after, room_owner, ["value.txt"]))
+        else:
+            # Explicit fixture cleanup keeps unresolved children out of unrelated pool/scope cases.
+            panel.events(project, "transition", "--attempt", pending_attempt[0], "--state", "cancelled",
+                         "--reason-code", "fixture_complete")
+    print("dispatch exit evidence: menu TERM, unknown identity, unconfirmed kill, surviving groups and action-time reconciliation passed")
 
 exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner, room_env)
 # A room in A keeps its parent, call and results when the worker executes in B,
@@ -4276,7 +4381,7 @@ def exercise_observed_worker_leases():
                                 "full": "room %s is full" % argv_binding.room_id,
                                 "full-write": "room %s is full" % argv_binding.room_id,
                                 "calls-full": "room %s is full" % argv_binding.room_id,
-                                "pool-full": "max_running=3; wait for a call to settle",
+                                "pool-full": "max_running=3; live/pending calls:",
                                 "lost-caller": "participant has not joined this room",
                                 "lost-child": "participant has not joined this room",
                                 "send-error": "unrelated room send failure"}[scenario]

@@ -420,6 +420,13 @@ participant in lifecycle refs, supplies the room interface in the scoped
 context, and returns a bounded artifact-backed handoff to its caller. A handoff
 reports the call exit and pending parent acceptance. It does not merge native
 histories or write source files in the main's worktree.
+
+If an exit cannot be verified, the attempt and write scope remain held with no
+final handoff. The next dispatch reconciles pending calls whose recorded process
+identities and, after a forced stop, provider groups are proven gone. Pool-limit
+refusals name unresolved calls; stop any remaining providers and verify cleanup
+before cancelling their attempts. TERM/HUP ends the panel after dispatch cleanup.
+
 Native instructions include explicit room and participant arguments for tools
 that do not inherit the CLI environment. Role dispatch uses `--room ID` to
 resolve the verified active main; missing or ambiguous ownership is refused.
