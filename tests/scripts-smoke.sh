@@ -25119,6 +25119,23 @@ EOF
     --to codex --prompt x --no-verify 2>&1)" || rc=$?
   [ "$rc" = 0 ] || fail "a stat-only primary index refresh stopped the worker (rc=$rc): $out"
   if contains "$out" 'execution-state'; then fail "stat refresh named the execution-state boundary: $out"; fi
+  # The parser proves an index or declines it: a bad checksum, cut padding or an
+  # endless v4 prefix count returns no signature, quickly, so the raw digest decides.
+  (. "$ROOT/scripts/lib/oms-common.sh" && python3 -I -B - "$OMS_GIT_INDEX_SIGNATURE_PY" <<'PY') ||
+import hashlib, struct, sys, time
+exec(sys.argv[1])
+def wrap(body):
+    return body + hashlib.sha1(body).digest()
+entry = b"\0" * 24 + struct.pack(">I", 0o100644) + b"\0" * 12 + b"\x11" * 20 + struct.pack(">H", 1)
+good = wrap(b"DIRC" + struct.pack(">II", 2, 1) + entry + b"a\0")
+assert index_signature(good, 20)
+assert index_signature(good[:-1] + bytes([good[-1] ^ 1]), 20) is None
+assert index_signature(wrap(b"DIRC" + struct.pack(">II", 2, 1) + entry + b"a"), 20) is None
+started = time.time()
+assert index_signature(wrap(b"DIRC" + struct.pack(">II", 4, 1) + entry + b"\xff" * 200000 + b"\0a\0"), 20) is None
+assert time.time() - started < 1
+PY
+    fail "the guard's index parser accepted a malformed index or ran unbounded"
 }
 
 test_delegate_preflights_strict_execution_config() {

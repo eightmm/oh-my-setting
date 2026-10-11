@@ -357,7 +357,8 @@ def index_signature(data, oid_size):
             strip = byte & 0x7F
             at += 1
             while byte & 0x80:
-                if at >= end:
+                # The strip count only grows: stop before a long run builds an oversized integer.
+                if at >= end or strip > len(previous):
                     return None
                 byte = data[at]
                 strip = ((strip + 1) << 7) | (byte & 0x7F)
