@@ -24,7 +24,7 @@ import panel_messages
 import panel_reader
 
 from dashboard_projection import clean
-from panel_view import CLOSE_PREFIX, INBOX_LIMIT, close_requests, menu_rows, render, render_results
+from panel_view import INBOX_LIMIT, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
 from panel_routing import (allocate, command as routed_command, policy, KINDS, MODEL_IDS, TIERS, WRITERS,
                            newest_route_model, route_family)
@@ -94,7 +94,6 @@ def room_instructions(ident, member):
     return ("\nYou are joined to OMS room " + ident + " as " + member + ". "
             "Read oms room show --id " + ident + " first to locate joined participants and declared scopes. "
             "This panel permits one live main; delegate bounded parallel work to workers. "
-            "Preserve any legacy peers and coordinate their declared scopes before editing shared files. "
             "Use oms room updates --id " + ident + " --participant " + member +
             " for addressed messages at safe points; retain its cursor. "
             "Use oms room send --id " + ident + " --participant " + member +
@@ -295,8 +294,6 @@ def bootstrap(provider, repo):
         "Inspect oms panel --results before reporting completion. "
         "Keep exactly one live main in this panel. Parallel lines of work use bounded workers; "
         "do not start another main. Claude Code is the preferred main harness; Pi is an explicit alternative. "
-        "Only the person closes mains: one that finished its line of work, or that started a main no longer needed, "
-        "may request a close with oms panel --request-close PARTICIPANT --reason \"...\". "
         "If no task has been supplied, report "
         "readiness and wait."
     ) % (provider, json.dumps(str(repo)), json.dumps(str(ENTRY)), peer, peer, peer, peer, provider)
@@ -461,9 +458,6 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         # into shared status when it cannot serve as a safe display title.
         label = "Native task not recorded"
     host_refs = panel_host.refs(repo) if panel_host.herdr_active() else {}
-    started_by = os.environ.pop("OMS_PANEL_STARTED_BY", "")
-    if not re.fullmatch(PARTICIPANT, started_by):
-        started_by = ""
     attempt = events(repo, "start", "--provider", provider, "--tool", "panel-main",
                      "--ref", "panel_role=main", "--ref", "panel_owner=" + provider,
                      "--ref", "panel_harness=" + harness,
@@ -471,7 +465,6 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                      "--ref", "panel_effort=" + (preset["effort"] if not model or harness == "pi" else "native-settings"),
                      "--ref", "panel_label=" + label,
                      "--ref", "panel_location=repository", "--ref", "panel_room_id=" + room_id,
-                     *(["--ref", "panel_started_by=" + started_by] if started_by else []),
                      *(["--ref", "panel_session_digest=" + digest] if resume else []),
                      *(["--ref", "panel_room_participant=" + member] if member else []),
                      *[arg for key, value in host_refs.items() for arg in ("--ref", key + "=" + value)],
@@ -545,9 +538,6 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                                         "@oms_panel_room_participant", native_member), check=True)
             subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
                                         "@oms_panel_repo", str(Path(repo).resolve())), check=True)
-            if started_by:
-                subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
-                                            "@oms_panel_started_by", started_by), check=True)
         context_path = Path(context.name) / "context.txt"
         context_path.write_text(bootstrap(provider, repo) + room_instructions(room_id, native_member)
                                 + ("\nUser task (data): " + json.dumps(task) if task else ""), encoding="utf-8")
@@ -888,24 +878,7 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=1):
     return argv
 
 
-def pick_main(repo, provider):
-    """The control menu's live main for a call: the only one, or the person's numbered choice; None outside a room."""
-    room_id = os.environ.get("OMS_ROOM_ID")
-    if not room_id or os.environ.get("OMS_ROOM_PARTICIPANT"):
-        return None
-    mains = active_mains(repo, room_id, room.project(room.records(repo, room_id)), provider)
-    if len(mains) <= 1:
-        return None
-    names = sorted(mains)
-    for number, ident in enumerate(names, 1):
-        print("%s. %s / %s" % (number, ident, clean(mains[ident].get("refs", {}).get("panel_label"), 80)))
-    picked = read_field("Main for this call (number): ")
-    if not picked.isdigit() or not 1 <= int(picked) <= len(names):
-        raise ValueError("choose a listed main")
-    return names[int(picked) - 1]
-
-
-def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=False, main=None):
+def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=False):
     if owner not in PROVIDERS:
         raise ValueError("choose a supported council owner")
     argv = council_command(repo, prompt, task_id, label, thread, rounds)
@@ -922,8 +895,6 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=
     if not parent and room_id and not env.get("OMS_ROOM_PARTICIPANT"):
         # The control window has no inherited identity: bind the debate to a live main so Debate shows it.
         found = active_mains(repo, room_id, room.project(room.records(repo, room_id)), owner)
-        if main:
-            found = {main: found[main]} if main in found else {}
         if len(found) != 1:
             raise ValueError("select a unique active main in this room before starting a council")
         parent = next(iter(found.values()))["attempt_id"]
@@ -1413,10 +1384,9 @@ def panel_room(repo, session=None, title="Shared work"):
     return ident
 
 
-def launch_command(repo, session, launch, resume=None, model=None, task=None, started_by=None):
-    command = panel_environment() + ["OMS_PANEL_SESSION=" + session] + (
-        ["OMS_PANEL_STARTED_BY=" + started_by] if started_by else []) + ["bash", str(ENTRY),
-              "panel", "--repo", str(repo), "--host", "inline", "--launch", launch]
+def launch_command(repo, session, launch, resume=None, model=None, task=None):
+    command = panel_environment() + ["OMS_PANEL_SESSION=" + session, "bash", str(ENTRY),
+                                     "panel", "--repo", str(repo), "--host", "inline", "--launch", launch]
     for flag, value in (("--resume", resume), ("--model", model), ("--task", task)):
         if value:
             command += [flag, value]
@@ -1429,34 +1399,28 @@ def bind_window(pane, launch, view, attention_only):
         subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_" + key, value), check=True)
 
 
-# F6/F7/F9 are unbound in Claude Code's default keybindings and in Codex 0.160.1's built-in keymap
-# (F9 appears there only in a test remap); Alt/Shift arrows edit or queue input there.
 # F9 selects the other pane of the window: the native chat from its board and back.
-KEYS_HELP = ("OMS panel keys: F6/F7 previous/next main · F9 chat/board · F5 control window · F12 this help · "
-             "on a board: Enter open · Tab next tab · k capacity · u/Ctrl+L refresh · a advisor · f full result · t tree · v expand · n start main · ? all · "
-             "tab badges: W workers, A advisors, ! needs you, M mail, ? open questions, c context left")
+KEYS_HELP = ("OMS panel keys: F9 chat/board · F5 control window · F12 this help · "
+             "on a board: Enter open · Tab next tab · k capacity · u/Ctrl+L refresh · a advisor · f full result · t tree · v expand · n start main · ? all")
 # F5/F9/F12 are unbound in Codex 0.160 and Claude Code; F8 is Codex voice, F10/F11 belong to terminal menus.
-MAIN_KEYS = (("F7", "next-window", 2), ("F6", "previous-window", 2), ("F9", "select-pane -t :.+", 0),
-             ("F5", "select-window -t :=control", 0), ("F12", 'display-message -d 8000 "%s"' % KEYS_HELP, 0))
-# Windows without a native chat pane (control, worktree shells) are stepped over, up to two in a row.
-NOT_MAIN = "#{==:#{@oms_panel_native_pane},}"
+MAIN_KEYS = (("F9", "select-pane -t :.+"), ("F5", "select-window -t :=control"),
+             ("F12", 'display-message -d 8000 "%s"' % KEYS_HELP))
 
 
 def bind_main_keys():
-    """No-prefix main switching in OMS panel sessions; elsewhere the key reaches the pane unchanged.
+    """No-prefix panel keys in OMS panel sessions; elsewhere the key reaches the pane unchanged.
 
     tmux root bindings are server-wide, so a key the user already bound is left alone.
     """
     quiet = dict(capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
     try:
-        for key, command, steps in MAIN_KEYS:
+        for key, command in MAIN_KEYS:
             found = subprocess.run(tmux_command("list-keys", "-T", "root", key), **quiet)
             # An earlier OMS binding matched the session name; replace it with the marker test.
             if found.returncode == 0 and "oms-panel-*" not in found.stdout and "@oms_panel_repo" not in found.stdout:
                 continue
-            skip = " ; if-shell -F '%s' %s" % (NOT_MAIN, command)
             subprocess.run(tmux_command("bind-key", "-n", key, "if-shell", "-F", "#{@oms_panel_repo}",
-                                        command + skip * steps, "send-keys " + key), **quiet)
+                                        command, "send-keys " + key), **quiet)
     except (OSError, subprocess.SubprocessError):
         # Keys are a convenience: a missing or unresponsive tmux leaves the panel's own flow to report it.
         return
@@ -1473,17 +1437,16 @@ def legacy_session(repo):
 
 
 def panel_mains():
-    """One installed main, Claude first; a legacy comma list supplies fallback order, empty disables it."""
+    """The main a new panel opens: the installed one of Claude, Pi, Codex, or the one OMS_PANEL_MAINS names; empty opens none."""
     value = os.environ.get("OMS_PANEL_MAINS")
-    names = MAIN_HARNESSES if value is None else [name.strip() for name in value.split(",") if name.strip()]
-    return next(([name] for name in dict.fromkeys(names) if name in MAIN_HARNESSES and main_installed(name)), [])
+    names = MAIN_HARNESSES if value is None else [value.strip()]
+    return next(([name] for name in names if name in MAIN_HARNESSES and main_installed(name)), [])
 
 
-def add_main_window(repo, session, launch, view, attention_only, env, resume=None, model=None, task=None,
-                    started_by=None):
+def add_main_window(repo, session, launch, view, attention_only, env, resume=None, model=None, task=None):
     pane = subprocess.check_output(tmux_command("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "=" + session + ":",
                                    "-n", launch, "-c", str(repo),
-                                   launch_command(repo, session, launch, resume, model, task, started_by)),
+                                   launch_command(repo, session, launch, resume, model, task)),
                                    env=env, text=True).strip()
     bind_window(pane, launch, view, attention_only)
     board_split(pane, repo, watch_shell(repo, launch))
@@ -1491,7 +1454,6 @@ def add_main_window(repo, session, launch, view, attention_only, env, resume=Non
 
 
 MAX_LIVE_MAINS = 1
-PARTICIPANT = r"[A-Za-z0-9._-]{1,128}"
 
 
 def live_mains(repo, session, room_id, pending_window=None):
@@ -1556,21 +1518,19 @@ def check_legacy_main(repo):
                 raise ValueError("this panel already has a live main; finish it before starting another")
 
 
-def spawn_main(repo, provider, task=None, model=None, started_by=None):
+def spawn_main(repo, provider, task=None, model=None):
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
         raise ValueError("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
     with _lock(repo, "panel-main-start", timeout=3):
-        return spawn_single_main(repo, provider, task, model, started_by)
+        return spawn_single_main(repo, provider, task, model)
 
 
-def spawn_single_main(repo, provider, task=None, model=None, started_by=None):
+def spawn_single_main(repo, provider, task=None, model=None):
     """Add a main window to this checkout's existing panel without attaching or taking focus."""
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
         raise ValueError("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
     if not shutil.which("tmux") or not main_installed(provider):
         raise ValueError("starting a main needs tmux and the %s CLI on PATH" % provider)
-    if started_by is not None and not re.fullmatch(PARTICIPANT, started_by):
-        raise ValueError("invalid starting participant")
     session, owner = resolve_session(repo, wait=False)
     if owner != str(repo):
         legacy = legacy_session(repo)
@@ -1584,69 +1544,11 @@ def spawn_single_main(repo, provider, task=None, model=None, started_by=None):
         raise ValueError("this panel already has a live main; finish it before starting another")
     with _lock(repo, "panel-main-session", timeout=.1):
         check_legacy_main(repo)
-    pane = add_main_window(repo, session, provider, board_view("auto"), False, env, None, model, task, started_by)
+    pane = add_main_window(repo, session, provider, board_view("auto"), False, env, None, model, task)
     index = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{window_index}"),
                            capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL).stdout.strip()
     return {"window": int(index) if index.isdigit() else None, "provider": provider,
             "owner": main_owner(provider), "room": ident}
-
-
-def request_close(repo, target, reason=None):
-    """Record a main's request that the person close a main; nothing is closed here."""
-    sender, ident = os.environ.get("OMS_ROOM_PARTICIPANT"), os.environ.get("OMS_ROOM_ID")
-    if not sender or not ident:
-        raise ValueError("a close request must come from a main joined to a room")
-    room.identifier(target, "participant")
-    joined = {p["participant"]: p for p in room.status(repo, ident)["participants"] if p["joined"]}
-    if joined.get(sender, {}).get("role") != "main":
-        raise ValueError("only a joined main can request a close")
-    if joined.get(target, {}).get("role") != "main":
-        raise ValueError("%s is not a joined main of room %s" % (target, ident))
-    room.send(repo, ident, sender, target, CLOSE_PREFIX + (clean(reason, 300) or "no reason given"), kind="question")
-    return {"requested": target, "by": sender, "room": ident}
-
-
-def close_main(repo, ident, participant):
-    """Close one main at the person's key press: record it leaving, then kill only the window proven to be its own."""
-    session = os.environ.get("OMS_PANEL_SESSION", "")
-    if not managed_session() or session != panel_session(repo) or session_owner(session) != str(repo):
-        raise ValueError("closing a main needs this checkout's open tmux panel")
-    if not any(p["participant"] == participant and p["joined"] and p["role"] == "main"
-               for p in room.status(repo, ident)["participants"]):
-        raise ValueError("that main already left this room")
-    found = subprocess.run(tmux_command("list-windows", "-t", "=" + session, "-F",
-                                        "#{window_id}\t#{@oms_panel_main_attempt}\t#{@oms_panel_room_participant}\t#{@oms_panel_room}"),
-                           capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
-    tagged = [r for r in (line.replace("\r", "").split("\t") for line in found.stdout.splitlines())
-              if len(r) == 4 and r[2] == participant]
-    attempts = {row.get("attempt_id") for row in main_history(repo, ident, participant) if row.get("tool") == "panel-main"}
-    proven = [r for r in tagged if r[1] and r[1] in attempts and r[3] == ident]
-    if len(tagged) != len(proven):
-        raise ValueError("no single window is proven to be that main's; nothing closed")
-    if len(proven) != 1:
-        raise ValueError("no single window is proven to be that main's; nothing closed")
-    subprocess.run(tmux_command("kill-window", "-t", proven[0][0]), check=True, timeout=5, stdin=subprocess.DEVNULL)
-    room.append(repo, ident, {"kind": "leave", "participant": participant}, "Participant left")
-
-
-def close_selected(repo, navigation, state, unicode):
-    """The x key: the first press on a Close row asks, the second (within 10s) closes; returns the status line."""
-    selected = navigation.get("selected") or ("",)
-    request = next((r for r in close_requests(state, unicode) if ("close", r["participant"]) == selected), None)
-    if request is None:
-        return "Select a Close request in Needs you first"
-    armed = navigation.pop("close_armed", None)
-    if armed is None or armed[0] != request["participant"] or time.monotonic() - armed[1] > 10:
-        navigation["close_armed"] = (request["participant"], time.monotonic())
-        navigation["notice"] = "Close %s? running calls %s %s press x again to confirm, Esc to cancel" % (
-            request["label"], request["calls"], "—" if unicode else "-")
-        return "close not confirmed"
-    ident = navigation.get("room_id") or os.environ.get("OMS_ROOM_ID")
-    close_main(repo, ident, request["participant"])
-    stamp = time.strftime("%H:%M")
-    navigation["closed_note"] = "Closed %s by the person · %s" % (stamp, request["label"]) if unicode else \
-        "Closed %s by the person / %s" % (stamp, request["label"])
-    return "closed %s" % request["label"]
 
 
 def split_panel(repo, view="auto", attention_only=False, launch=None, resume=None, model=None, task=None, retry=True):
@@ -1840,9 +1742,9 @@ def main_activity(repo, members, windows=()):
     session = os.environ.get("OMS_PANEL_SESSION", "")
     keys = set()
     for window in windows[:128]:
-        if len(window) != 6:
+        if len(window) != 4:
             continue
-        _, who, _, native, bound_repo, attempt = window
+        who, native, bound_repo, attempt = window
         row = result.get(who)
         if (not row or row["attempt"] != attempt or row["state"] != "busy"
                 or not re.fullmatch(r"%[0-9]+", native)):
@@ -1905,15 +1807,6 @@ def snapshot(repo, room_id=None):
         if ident:
             try:
                 state["room"] = room.status(repo, ident)
-                try:
-                    # status() keeps the newest twelve messages; the Between-mains detail reads the mail between mains.
-                    mains = {p["participant"] for p in state["room"].get("participants", []) if p.get("role") == "main"}
-                    state["room"]["main_messages"] = [
-                        {key: m.get(key) for key in ("id", "sender", "recipient", "targets", "ts", "text", "message_kind")}
-                        for m in room.project(room.records(repo, ident))["messages"]
-                        if m.get("sender") in mains and mains.intersection(m.get("targets") or [])][-60:]
-                except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
-                    pass
                 if state.get("plan", {}).get("present"):
                     run = subprocess.run(["bash", str(ENTRY), "agent-plan", "--repo", str(repo), "list", "--json"],
                                          capture_output=True, text=True, timeout=5, check=False)
@@ -1933,22 +1826,17 @@ def snapshot(repo, room_id=None):
                 # Board-only extras, kept in memory; any failure leaves the board as the room alone draws it.
                 state.pop("native_advisors", None)
                 state.pop("finalized", None)
-                state.pop("main_windows", None)
-                state.pop("main_starters", None)
                 state.pop("room_attempts", None)
                 rows = []
                 if managed_session():
-                    # The board lays mains out in window order so F6/F7 step to the neighbouring column.
+                    # The main's window names its chat pane, read for busy/idle activity.
                     try:
                         found = subprocess.run(tmux_command("list-windows", "-t", "=" + os.environ["OMS_PANEL_SESSION"], "-F",
-                                                            "#{window_index}\t#{@oms_panel_room_participant}\t#{@oms_panel_started_by}\t"
-                                                            "#{@oms_panel_native_pane}\t#{@oms_panel_repo}\t#{@oms_panel_main_attempt}"),
+                                                            "#{@oms_panel_room_participant}\t#{@oms_panel_native_pane}\t"
+                                                            "#{@oms_panel_repo}\t#{@oms_panel_main_attempt}"),
                                                capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
                         rows = [line.replace("\r", "").split("\t") for line in found.stdout.splitlines()]
-                        rows = [row for row in rows[:128] if len(row) in (3, 6)]
-                        state["main_windows"] = {row[1]: int(row[0]) for row in reversed(rows)
-                                                 if row[0].isdigit() and row[1]}
-                        state["main_starters"] = {row[1]: row[2] for row in rows if row[1] and row[2]}
+                        rows = [row for row in rows[:128] if len(row) == 4]
                     except (OSError, subprocess.SubprocessError):
                         pass
                 state["main_activity"] = {who: row for who, row in main_activity(
@@ -2181,22 +2069,6 @@ def navigate(repo, action, state, navigation, width):
         folded = navigation.setdefault("collapsed", set())
         folded.discard(ident) if ident in folded else folded.add(ident)
         return
-    if kind == "pin":
-        mains = navigation.get("mains", [])
-        pinned = navigation.get("pinned")
-        pinned = navigation.get("auto_pins") or [] if pinned is None else pinned
-        if ident == "*":
-            # All means automatic, so a main that joins later is shown too, not a frozen list.
-            navigation["pinned"] = [] if set(mains) <= set(pinned) else None
-        else:
-            navigation["pinned"] = [m for m in pinned if m != ident] + ([] if ident in pinned else [ident])
-        return
-    if kind == "pair":
-        navigation["preview"] = {"target": action}
-        return
-    if kind == "close":
-        navigation["notice"] = "Press x to close this main (asks once more)"
-        return
     room_id = navigation.get("room_id")
     if not room_id or managed_session() and pane_option("@oms_panel_room") != room_id:
         raise ValueError("room selection changed; refresh before navigating")
@@ -2385,7 +2257,7 @@ def tab_event(event, navigation):
 
 BOTTOM_OPTION = "@oms_panel_bottom"
 BOTTOM_LIMIT = 512
-BOTTOM_KINDS = {"chat", "result", "debate", "pair"}
+BOTTOM_KINDS = {"chat", "result", "debate"}
 
 
 def bottom_state(navigation):
@@ -2423,7 +2295,7 @@ def read_bottom(raw):
     if target is not None:
         if not (isinstance(target, list) and len(target) == 2 and target[0] in BOTTOM_KINDS):
             return None
-        if target[0] in {"debate", "pair"}:
+        if target[0] == "debate":
             if not (isinstance(target[1], list) and len(target[1]) == 2 and all(ident(i) for i in target[1])):
                 return None
             target = (target[0], tuple(target[1]))
@@ -2450,9 +2322,7 @@ def apply_bottom(navigation, state, shared):
         navigation.pop("preview", None)
         return
     members = {m.get("participant") for m in state.get("room", {}).get("participants") or [] if isinstance(m, dict)}
-    named = target[1] if target[0] in {"debate", "pair"} else (target[1],)
-    if target[0] == "debate":
-        named = named[1:]
+    named = target[1][1:] if target[0] == "debate" else (target[1],)
     if all(who in members for who in named):
         if (navigation.get("preview") or {}).get("target") != target:
             navigation["preview"] = {"target": target}
@@ -2470,7 +2340,7 @@ def publish_bottom(navigation, before):
                        check=False, timeout=2, stdin=subprocess.DEVNULL)
 
 
-def refreshed_navigation(navigation, state, saved_pins=None, bottom=None):
+def refreshed_navigation(navigation, state, bottom=None):
     """Apply a new snapshot: another room resets the view; an open preview re-reads its evidence."""
     ident = state.get("room", {}).get("id")
     if navigation.get("room_id") and ident and navigation["room_id"] != ident:
@@ -2486,12 +2356,7 @@ def refreshed_navigation(navigation, state, saved_pins=None, bottom=None):
         navigation["preview_signature"] = signature
     if (navigation.get("debate_view") or {}).get("shown"):
         navigation["debate_view"]["refresh"] = True
-    # The session's saved pins apply when they change, so a pin made in one window reaches every board.
-    if saved_pins and saved_pins != navigation.get("saved_pins"):
-        navigation["saved_pins"] = saved_pins
-        navigation["pinned"] = [] if saved_pins == "-" else None if saved_pins == "*" else [
-            ident for ident in saved_pins.split(",") if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", ident)]
-    # Likewise the bottom box: a tab, target or scroll chosen in one window reaches every board in one refresh.
+    # The bottom box is the session's: a tab, target or scroll chosen in one window reaches every board in one refresh.
     shared = read_bottom(bottom)
     if shared and shared != navigation.get("bottom_seen"):
         navigation["bottom_seen"] = shared
@@ -2710,9 +2575,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
         return tuple(as_tuple(item) for item in value) if isinstance(value, list) else value
     if isinstance(kept, dict) and kept.get("room_id"):
         navigation.update({key: as_tuple(value) for key, value in kept.items()
-                           if key in ("room_id", "selected", "pinned", "dismissed", "tab") and value is not None})
-        if isinstance(navigation.get("pinned"), tuple):
-            navigation["pinned"] = list(navigation["pinned"])
+                           if key in ("room_id", "selected", "dismissed", "tab") and value is not None})
         if kept.get("preview"):
             navigation["preview"] = {"target": as_tuple(kept["preview"])}
     saved_handlers = {}
@@ -2804,9 +2667,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         read_filtered = navigation["attention"]
                     if not background or revision == submitted_revision:
                         density, filtered = read_density, read_filtered
-                    navigation = refreshed_navigation(navigation, state, managed_session() and
-                                                      session_option("@oms_panel_pins"),
-                                                      managed_session() and session_option(BOTTOM_OPTION))
+                    navigation = refreshed_navigation(navigation, state, managed_session() and session_option(BOTTOM_OPTION))
                     stale_notice(navigation, notice)
                     if managed_session() and state.get("collection", {}).get("ok") is True and main_attempt:
                         alert = (main_needs_attention(state, main_attempt), main_has_open_questions(state, main_attempt))
@@ -2820,7 +2681,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     if inputs.fd is not None and not count and reload_ready(stamps):
                         # The re-executed watcher keeps what the person selected, so a reload never moves it.
                         os.environ["OMS_PANEL_RESUME"] = json.dumps({key: navigation.get(key) for key in (
-                            "room_id", "selected", "pinned", "dismissed", "tab")} | {
+                            "room_id", "selected", "dismissed", "tab")} | {
                             "preview": (navigation.get("preview") or {}).get("target")})
                         raise ReloadWatcher()
                     if REJECTED_RELOAD.pop("notice", False):
@@ -2828,8 +2689,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
 
                 def redraw():
                     nonlocal last
-                    # The live board overviews every main that fits, in every window.
-                    navigation.update(hits=[], items=[], expanded=expanded, overview=True, installed=installed,
+                    navigation.update(hits=[], items=[], expanded=expanded, installed=installed,
                                       spawn_busy=any(proc.poll() is None for proc, unused, unused2 in spawns),
                                       spawn_managed=managed_session(),
                                       main_occupied=any(m.get("role") == "main" and m.get("state") not in
@@ -2860,7 +2720,6 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     except (OSError, ValueError):
                         resized = False
                     if managed_session() and inputs.fd is not None and time.monotonic() >= next_focus:
-                        # F6/F7 only moves this board's own main; the bottom box is the session's shared state.
                         next_focus = time.monotonic() + 1
                         splits.tick(panel_geometry())
                     if resized:
@@ -2994,20 +2853,6 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                     navigation["notice"] = ("Opening chat..." if action[0] == "chat" else
                                                             "Opening recorded result...")
                                     size = redraw()
-                                if action[0] == "pin":
-                                    try:
-                                        navigate(repo, action, state, navigation, size.columns)
-                                        if managed_session():
-                                            # Pins are one choice for the whole panel session, so every window's board agrees.
-                                            navigation["saved_pins"] = ("*" if navigation["pinned"] is None
-                                                                        else ",".join(navigation["pinned"]) or "-")
-                                            subprocess.run(tmux_command("set-option", "-t", os.environ.get("OMS_PANEL_SESSION", ""),
-                                                "@oms_panel_pins", navigation["saved_pins"]),
-                                                check=False, timeout=2, stdin=subprocess.DEVNULL)
-                                    except (OSError, ValueError, subprocess.SubprocessError) as error:
-                                        navigation["notice"] = clean(str(error), 160)
-                                    size = redraw()
-                                    continue
                                 try:
                                     if action[0] == "chat":
                                         close_call()
@@ -3080,8 +2925,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             previews.start(messages_read)
                     if navigation.get("opening") and not previews.pending:
                         previews.start(lambda target=navigation["opening"]: read_evidence(repo, target))
-                    elif preview and preview["target"][0] in ("chat", "pair"):
-                        # Main and pair detail are drawn from the room snapshot; no evidence read is needed.
+                    elif preview and preview["target"][0] == "chat":
+                        # Main detail is drawn from the room snapshot; no evidence read is needed.
                         preview.setdefault("report", {})
                         preview.pop("refresh", None)
                     elif preview and ("report" not in preview or preview.pop("refresh", False)) and not previews.pending:
@@ -3217,16 +3062,12 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                         continue
                     return event[0]
                 if event[0] == "escape":
-                    cancelled = navigation.pop("close_armed", None)
-                    if cancelled:
-                        navigation.pop("notice", None)
-                    if navigation.pop("detail", None) is None and not cancelled:
+                    if navigation.pop("detail", None) is None:
                         continue
                     navigation["offset"] = 0
                     show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
                     continue
                 navigation.pop("notice", None)
-                navigation.pop("close_armed", None)
                 if (navigation.get("detail") and event[0] in ("enter", "click")) or passive_click(event, navigation):
                     continue  # Ignored input; repainting would only flicker text the person is selecting.
                 action = choose(event, navigation)
@@ -3270,13 +3111,6 @@ def interactive(repo, view="auto", attention_only=False):
             if choice != "9":
                 # Keys typed ahead only follow a refresh; any other choice may open a text prompt.
                 navigation.pop("queued", None)
-            if choice not in ("x", "9"):
-                navigation.pop("close_armed", None)
-            if choice == "9":
-                navigation.pop("closed_note", None)
-            if choice == "x":
-                previous = close_selected(repo, navigation, cache.get("state", {}), terminal_style()[2])
-                continue
             if choice == "z":
                 report = reopen_panel(repo)
                 previous = "panel " + report["status"] + "; input session preserved"
@@ -3388,9 +3222,8 @@ def interactive(repo, view="auto", attention_only=False):
                 purpose = {"5": "explain", "6": "implement"}.get(choice)
                 workload = (read_field("Tier (light/routine/deep/frontier) [role default]: ", required=False) or None
                             if role != "researcher" and not explicit else None)
-                main = pick_main(repo, provider)
                 status = dispatch(repo, provider, role, workload, "write" if choice == "6" else "read",
-                                  purpose, prompt, brief, verify, target=target, model=model, effort=effort, main=main)
+                                  purpose, prompt, brief, verify, target=target, model=model, effort=effort)
                 previous = "%s %s exit=%s (not acceptance)" % (provider, role, status)
                 read_field("Press Enter to return to the panel: ", required=False)
             elif choice == "8":
@@ -3423,7 +3256,7 @@ def interactive(repo, view="auto", attention_only=False):
                 task_id = read_field("Discussion task ID: ")
                 label = read_field("Task title: ")
                 prompt = read_field("Question for the four seats: ")
-                status = council(repo, provider, task_id, label, prompt, main=pick_main(repo, provider))
+                status = council(repo, provider, task_id, label, prompt)
                 previous = "council exit=%s / owner decision pending" % status
                 read_field("Press Enter to return: ", required=False)
             elif choice == "f":
@@ -3472,9 +3305,6 @@ def main(argv=None):
     parser.add_argument("--launch", help="open the sole main (claude preferred, pi or codex)")
     parser.add_argument("--spawn-main", metavar="PROVIDER",
                         help="start the sole main in an empty panel without attaching; works without a terminal")
-    parser.add_argument("--request-close", metavar="PARTICIPANT",
-                        help="ask the person to close a main of this room; a main cannot close another main itself")
-    parser.add_argument("--reason", help="why --request-close asks for the close")
     parser.add_argument("--reopen", action="store_true", help="restore an existing tmux board without restarting its input CLI")
     parser.add_argument("--resume", help="resume an exact native session ID (requires --launch)")
     parser.add_argument("--model", help="exact model for --launch or --dispatch --to")
@@ -3524,7 +3354,7 @@ def main(argv=None):
     args = parser.parse_args(arguments)
     if args.health and (args.dry_run or args.view or args.attention_only):
         parser.error("--health is a read-only report; use --repo, --room and optional --json")
-    if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.request_close, args.reopen, args.dispatch, args.routes,
+    if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.finalize, args.retry_delivery, args.providers,
                                      args.chats, args.open_chat, args.health)) > 1:
         parser.error("choose one panel operation")
@@ -3548,10 +3378,6 @@ def main(argv=None):
         parser.error("--count requires --watch")
     if args.no_animation and not args.watch:
         parser.error("--no-animation requires --watch")
-    if args.reason is not None and not args.request_close:
-        parser.error("--reason requires --request-close")
-    if args.request_close and args.dry_run:
-        parser.error("--request-close records a request; it has no dry-run")
     if args.spawn_main and args.dry_run:
         parser.error("--spawn-main starts a main; it has no dry-run")
     if (args.view or args.attention_only) and (args.launch or args.spawn_main or args.reopen or args.json or args.dry_run or args.routes
@@ -3626,7 +3452,7 @@ def main(argv=None):
                        or not re.fullmatch(r"[A-Za-z0-9_./:-]+", args.model)):
         parser.error("invalid model ID")
     if (args.dispatch or args.council or args.finalize or args.retry_delivery or args.chats or args.open_chat
-            or args.spawn_main or args.request_close or not (
+            or args.spawn_main or not (
             args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health)) and (
             os.environ.get("OMS_HARNESS_CHILD") == "1"
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
@@ -3679,19 +3505,11 @@ def main(argv=None):
         if args.spawn_main:
             if args.spawn_main not in MAIN_HARNESSES:
                 args.spawn_main = provider_catalog(args.spawn_main)[0]["provider"]
-            report = spawn_main(repo, args.spawn_main, args.task, args.model,
-                                os.environ.get("OMS_ROOM_PARTICIPANT") or None)
+            report = spawn_main(repo, args.spawn_main, args.task, args.model)
             if args.json:
                 print(json.dumps(report))
             else:
                 print("Started %s main in window %s of room %s" % (report["provider"].capitalize(), report["window"], report["room"]))
-            return 0
-        if args.request_close:
-            report = request_close(repo, args.request_close, args.reason)
-            if args.json:
-                print(json.dumps(report))
-            else:
-                print("Requested the person to close %s (room %s)" % (report["requested"], report["room"]))
             return 0
         if args.providers:
             rows = provider_catalog()

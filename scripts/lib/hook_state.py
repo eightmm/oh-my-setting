@@ -1321,7 +1321,7 @@ def panel_main_base(payload: dict[str, Any], room: str) -> str:
             "run independent workers in parallel. Keep scope, briefs, review, patch admission, integration and "
             "coordination with other mains yourself; declare your scope with oms room scope --owns PATH before editing shared files "
             "and pass --scope PATH to write workers. Edit directly only when the brief would take longer than the edit "
-            "or the step needs the main itself. Call other mains by window and model, such as #1 Opus 5.5 or #2 Sol 6.1. "
+            "or the step needs the main itself. "
             "Land your own work only when publication is authorized: commit on an oms/<task> branch in oms scratch-worktree add, rebase on the remote "
             "target, then oms land from that worktree; never commit in the shared checkout another main uses. "
             "Carry the authorized goal through worker recovery, integration, checks and owner finalization; "

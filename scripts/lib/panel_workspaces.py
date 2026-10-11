@@ -2,7 +2,7 @@
 
 The workspace is never a main: it has its own private 'workspaces' record, a session-local
 key table (F4 controls, F5 origin) and no room or model involvement. Root keys and global
-tmux options are untouched, so shell keys such as F6/F7 reach the shell.
+tmux options are untouched, so the other function keys reach the shell.
 """
 
 import os
@@ -18,7 +18,7 @@ import uuid
 import panel_terminals as terminals
 
 SESSION_PREFIX = "oms_ws_"
-HELP = "F4 controls   F5 back to origin   (other keys, including F6/F7, go to the shell)"
+HELP = "F4 controls   F5 back to origin   (other keys go to the shell)"
 KEYS = (("F4", "focus"), ("F5", "origin"))
 ACTIONS = tuple(action for _, action in KEYS)
 
