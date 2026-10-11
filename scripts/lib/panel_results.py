@@ -127,7 +127,10 @@ def _patch_paths(patch_bytes_or_path):
             else Path(patch_bytes_or_path).read_bytes())
     paths, fallback, names = {}, [], []
     remaining = 0
-    for line in data.decode('utf-8', 'surrogateescape').splitlines():
+    lines = data.decode('utf-8', 'surrogateescape').split('\n')
+    if lines[-1] == '':
+        lines.pop()
+    for line in lines:
         if line.startswith('diff --git '):
             paths.update(dict.fromkeys(names or fallback))
             names, remaining = [], 0
@@ -180,7 +183,10 @@ def _diffstat(repo, row):
     paths = _patch_paths(data)
     files = {path: [clean(path, 160), 0, 0] for path in paths}
     current, header, remaining = None, True, 0
-    for line in data.decode('utf-8', 'surrogateescape').splitlines():
+    lines = data.decode('utf-8', 'surrogateescape').split('\n')
+    if lines[-1] == '':
+        lines.pop()
+    for line in lines:
         if line.startswith('diff --git '):
             current = _patch_paths(line.encode('utf-8', 'surrogateescape'))[-1]
             header = True
@@ -190,9 +196,11 @@ def _diffstat(repo, row):
                 current = name
         elif header and line.startswith('--- '):
             current = _patch_name(line[4:].split('\t', 1)[0])
-        elif line.startswith('@@'):
+        elif line.startswith('@@ '):
             header = False
             match = re.match(r'@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@', line)
+            if not match:
+                raise ValueError('patch paths unavailable: invalid hunk header')
             remaining = sum(int(value) if value is not None else 1 for value in match.groups())
         elif not header:
             if current in files and line.startswith('+'):

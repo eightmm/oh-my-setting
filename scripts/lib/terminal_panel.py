@@ -1362,7 +1362,7 @@ def deliver_result(repo, room_id, member, caller, task_id, status):
         report = results(repo, task_id, member)
         calls = report["rows"][0].get("calls", []) if report["rows"] else []
         summary = next((c.get("answer") for c in reversed(calls) if c.get("answer")), summary)
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         pass
     prefix = "Call exit=%d; parent acceptance pending.\n" % status
     message = (prefix + str(summary)).encode("utf-8")[:3800].decode("utf-8", "ignore")

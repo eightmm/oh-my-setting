@@ -4562,6 +4562,12 @@ with patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer":
 screened = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-screen-call")
 assert "Call exit=143" in screened["text"] and "--results --task-id screen-task" in screened["text"]
 assert sensitive_summary not in screened["text"]
+room.join(project, shared, "missing-summary-call", "codex", "worker", parent=room_owner)
+with patch.object(panel, "results", side_effect=AttributeError("invalid patch summary")):
+    panel.deliver_result(project, shared, "missing-summary-call", room_owner, "screen-task", 1)
+fallback = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-missing-summary-call")
+assert "Call exit=1; parent acceptance pending." in fallback["text"]
+assert "Result evidence unavailable" in fallback["text"]
 import io
 from contextlib import redirect_stderr
 conflict = io.StringIO()
@@ -6604,6 +6610,42 @@ two_files = (b"diff --git a/one.txt b/one.txt\n--- a/one.txt\n+++ b/one.txt\n@@ 
 (patch_dir / "fixture-two.patch").write_bytes(two_files)
 assert panel_results._diffstat(project, {"patch": ".oms/artifacts/delegate/fixture-two.patch",
     "patch_sha256": hashlib.sha256(two_files).hexdigest()})["files"] == [["one.txt", 2, 1], ["two.txt", 1, 1]]
+# Git frames patch lines with LF even when file content contains other line separators.
+line_repo = temporary / "diffstat-lines"
+line_repo.mkdir()
+subprocess.run(["git", "init", "-q", str(line_repo)], check=True)
+line_content = {"formfeed.txt": "hi\x0c@@y\n", "separator.txt": "hello\u2028@@x\n"}
+for name in line_content:
+    (line_repo / name).write_bytes(b"")
+subprocess.run(["git", "-C", str(line_repo), "add", "--", *line_content], check=True)
+for name, content in line_content.items():
+    (line_repo / name).write_bytes(content.encode("utf-8"))
+line_patch = subprocess.run(["git", "-C", str(line_repo), "diff", "--binary", "--", *line_content],
+                            capture_output=True, check=True).stdout
+assert all(("+" + content).encode("utf-8") in line_patch for content in line_content.values()), line_patch
+(patch_dir / "fixture-lines.patch").write_bytes(line_patch)
+line_row = {"patch": ".oms/artifacts/delegate/fixture-lines.patch",
+            "patch_sha256": hashlib.sha256(line_patch).hexdigest()}
+assert panel_results._patch_paths(line_patch) == list(line_content)
+assert panel_results._diffstat(project, line_row) == {
+    "files": [[name, 1, 0] for name in line_content], "count": 2, "added": 2, "removed": 0}
+invalid_hunk = line_patch.replace(b"@@ -0,0 +1 @@", b"@@ -x +1 @@", 1)
+assert invalid_hunk != line_patch
+(patch_dir / "fixture-invalid-hunk.patch").write_bytes(invalid_hunk)
+invalid_row = {"kind": "delegate", "task_id": "invalid-hunk",
+               "patch": ".oms/artifacts/delegate/fixture-invalid-hunk.patch",
+               "patch_sha256": hashlib.sha256(invalid_hunk).hexdigest()}
+for parse in (lambda: panel_results._patch_paths(invalid_hunk),
+              lambda: panel_results._diffstat(project, invalid_row)):
+    try:
+        parse()
+    except ValueError as error:
+        assert str(error) == "patch paths unavailable: invalid hunk header", error
+    else:
+        raise AssertionError("invalid hunk header accepted")
+with patch.object(panel_results, "_records", return_value=([], [invalid_row])):
+    assert panel_results.results(project)["rows"][0]["calls"][0]["changes"] == {
+        "issue": "patch evidence unavailable"}
 for bad in (dict(patch_row, patch_sha256="0" * 64), dict(patch_row, patch="../outside.patch")):
     try:
         panel_results._diffstat(project, bad)
