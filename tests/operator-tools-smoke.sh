@@ -5241,6 +5241,7 @@ def exercise_observed_worker_leases():
     source_diff = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD"])
     read_prompt = temporary / "scratch-read-prompt"
     read_verify = temporary / "scratch-read-verify"
+    read_verify_env = temporary / "scratch-read-verify-env"
     main_member, main_attempt = mains["claude"]
     canonical_env = dict(environment, OMS_ROOM_ID=test_room, OMS_ROOM_REPO=str(project),
                          OMS_ROOM_PARTICIPANT=main_member, OMS_PANEL_MAIN_ATTEMPT=main_attempt,
@@ -5257,9 +5258,13 @@ def exercise_observed_worker_leases():
         if role == "reviewer":
             request[request.index("--verify") + 1] = ('mkdir -p __pycache__ verify-temp-dir; '
                 'printf cache > __pycache__/x.pyc; printf output > verify-temp-dir/output; '
+                'compgen -e > "$PANEL_TEST_VERIFY_ENV"; '
                 'pwd -P > "$PANEL_TEST_VERIFY_LOG"; git rev-parse HEAD >> "$PANEL_TEST_VERIFY_LOG"')
         read_env = dict(canonical_env, PANEL_TEST_PROMPT=str(read_prompt),
-                        PANEL_TEST_VERIFY_LOG=str(read_verify))
+                        PANEL_TEST_VERIFY_LOG=str(read_verify), PANEL_TEST_VERIFY_ENV=str(read_verify_env),
+                        OMS_STATE_REPO=str(project),
+                        OMS_CODEX_HARNESS_CAPABILITY="fixture-capability", OMS_HARNESS_BRIDGE="1",
+                        ANTHROPIC_BASE_URL="http://fixture.invalid")
         answer = call(request, read_env)
         assert ("artifact:" if role == "advisor" else "artifacts:") in answer, answer
         observed = json.loads(worker_log.read_text().splitlines()[-1])
@@ -5267,6 +5272,14 @@ def exercise_observed_worker_leases():
         assert observed["room_repo"] == observed["state_repo"] == str(project), observed
         if role == "reviewer":
             assert read_verify.read_text().splitlines() == [str(source), source_sha], "verify did not execute in B"
+            verifier_env = set(read_verify_env.read_text().splitlines())
+            assert not any(n.startswith(("OMS_ROOM_", "OMS_PANEL_")) for n in verifier_env), verifier_env
+            assert not verifier_env.intersection({"OMS_STATE_REPO", "OMS_OWNER_TOKEN",
+                "OMS_CODEX_HARNESS_CAPABILITY", "OMS_ATTEMPT_ID", "OMS_PLAN_LEASE_ID",
+                "OMS_HARNESS_BRIDGE", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"}), verifier_env
+            verify_receipts = list((project / ".oms/artifacts/review").glob("_verify-*.md"))
+            assert any("unset owner environment:" in p.read_text() and "OMS_STATE_REPO" in p.read_text()
+                       for p in verify_receipts), "verifier environment removal was not reported"
             assert "+pending scratch review" in read_prompt.read_text(), "review diff came from A"
             assert (source / "__pycache__/x.pyc").read_text() == "cache"
             assert (source / "verify-temp-dir/output").read_text() == "output"
@@ -5313,6 +5326,54 @@ def exercise_observed_worker_leases():
             target.write_bytes(original)
             shutil.rmtree(source / "verify-temp-dir", ignore_errors=True)
         if role == "reviewer":
+            # A verifier runs before reviewers: its outputs may become the files
+            # baseline, but its source/control writes must stop the review.
+            def git_path(name):
+                path = Path(call(["git", "-C", str(source), "rev-parse", "--git-path", name]).strip())
+                return path if path.is_absolute() else source / path
+            git_snapshots = {name: (git_path(name), git_path(name).read_bytes())
+                             for name in ("HEAD", "index", "config")}
+            hook = git_path("hooks") / "sec-13-hook"
+            hook_verify = ('ln -s /dev/null "$(git rev-parse --git-path hooks)/sec-13-hook"'
+                           if os.name != "nt" else
+                           'printf hook > "$(git rev-parse --git-path hooks)/sec-13-hook"')
+            protected_verifiers = [
+                ("tracked", "printf verifier-edit >> value.txt", None),
+                ("HEAD", 'printf "%s\\n" "$(git rev-parse HEAD)" > "$(git rev-parse --git-path HEAD)"; '
+                    'printf "\\n" >> "$(git rev-parse --git-path HEAD)"', None),
+                ("index", "git add value.txt", None),
+                ("config", "git config --local sec13.fixture changed", None),
+                ("hooks", hook_verify, None),
+                (".oms", "mkdir -p .oms/plan; printf forged > .oms/plan/tasks.json", None),
+                (".oms", "printf forged >> .oms/control.jsonl", "control.jsonl"),
+                (".oms", "printf forged > .oms/plan/tasks.json", "plan/tasks.json"),
+            ]
+            for surface, verify, existing in protected_verifiers:
+                shutil.rmtree(source / "verify-temp-dir", ignore_errors=True)
+                if existing:
+                    control = source / ".oms" / existing
+                    control.parent.mkdir(parents=True, exist_ok=True)
+                    (source / ".oms/.gitignore").write_text("*\n")
+                    control.write_text("original\n")
+                worker_before = worker_log.read_bytes()
+                malicious_request = list(request)
+                malicious_request[malicious_request.index("--verify") + 1] = verify
+                result = subprocess.run(malicious_request, env=read_env, capture_output=True, text=True, timeout=90)
+                assert result.returncode != 0 and "protected" in result.stderr and surface in result.stderr, result
+                assert worker_log.read_bytes() == worker_before, "verifier mutation reached a reviewer"
+                if surface == "tracked":
+                    assert (source / "value.txt").read_text().endswith("verifier-edit")
+                    (source / "value.txt").write_text(source_value + "pending scratch review\n")
+                elif surface in git_snapshots:
+                    target, original = git_snapshots[surface]
+                    assert target.read_bytes() != original
+                    target.write_bytes(original)
+                elif surface == "hooks":
+                    assert hook.is_symlink() if os.name != "nt" else hook.is_file()
+                    hook.unlink()
+                else:
+                    assert (source / ".oms").exists(), "verifier control mutation did not execute"
+                    shutil.rmtree(source / ".oms")
             input_untracked = source / "review-input-untracked.txt"
             input_untracked.write_text("not verifier output\n")
             worker_before = worker_log.read_bytes()

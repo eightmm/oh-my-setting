@@ -770,6 +770,29 @@ if [ "$GATE" -eq 1 ] && [ -n "$VERIFY_CMD" ]; then
       unset OMS_MODEL_OPERATION OMS_MODEL_OPERATION_REQUEST
       unset OMS_MODEL_EXPLICIT OMS_MODEL_FALLBACK_EXPLICIT
       unset OMS_REASONING_EFFORT_REQUEST OMS_REASONING_FALLBACK_EXPLICIT
+      if [ -n "${MA_READ_GUARD_DIR:-}" ]; then
+        # The verifier belongs to source B, not the panel/control owner in A.
+        # Removing capabilities limits accidental authority use; the read
+        # guard still detects direct writes because this is not a sandbox.
+        verify_unset=""
+        verify_bridge="${OMS_HARNESS_BRIDGE:-0}"
+        while IFS= read -r verify_env; do
+          case "$verify_env" in
+            OMS_ROOM_*|OMS_STATE_REPO|OMS_PANEL_*|OMS_TOKEN|OMS_TOKEN_*|OMS_*_TOKEN|OMS_*_TOKEN_*|\
+            OMS_*CAPABILITY*|OMS_*OWNER*|OMS_APPROVAL_ID|OMS_LANDING_ID|OMS_CODEX_HARNESS_*|OMS_HARNESS_BRIDGE|\
+            OMS_PLAN_*|OMS_LEASE_ID|OMS_EXECUTOR_ID|OMS_ATTEMPT_ID|OMS_SOUL_SHA256|\
+            OMS_WORKER_AUTHORITY_EXCLUSIVE|OMS_OPERATION_ID|OMS_HARNESS_CALL_ID) ;;
+            ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL)
+              [ "$verify_bridge" = 1 ] || continue ;;
+            *) continue ;;
+          esac
+          unset "$verify_env"
+          verify_unset="${verify_unset:+$verify_unset, }$verify_env"
+        done <<EOF
+$(compgen -e)
+EOF
+        printf 'unset owner environment: %s\n' "${verify_unset:-none}"
+      fi
       run_verify_with_timeout bash -c "$VERIFY_CMD"
     ) >> "$gate_verify_temp" 2>&1
     gate_verify_exit=$?
@@ -779,7 +802,7 @@ if [ "$GATE" -eq 1 ] && [ -n "$VERIFY_CMD" ]; then
 fi
 
 if [ "$gate_verify_ran" -eq 1 ]; then
-  ma_read_guard_rebaseline_source || fail "review verification changed protected Git execution state"
+  ma_read_guard_rebaseline_source || fail "review verification changed protected Git execution config/index state or output capture failed"
 fi
 ma_read_guard_assert || fail "review verification changed protected repository state"
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"

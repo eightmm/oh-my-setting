@@ -98,11 +98,25 @@ ma_read_source_repo() {
 }
 
 ma_read_guard_snapshot_source() {
+  local head_file hooks_dir
   oms_git_assert_safe_execution_config "$MA_READ_SOURCE_REPO" diff-read || return 2
   oms_git_assert_plain_index "$MA_READ_SOURCE_REPO" || return 2
   oms_worker_surface_snapshot "$MA_READ_SOURCE_REPO" "$MA_READ_GUARD_DIR/source" || return 2
   oms_git_execution_state_snapshot "$MA_READ_SOURCE_REPO" "$MA_READ_GUARD_DIR/source/git-execution-state" || return 2
   MA_READ_SOURCE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/source/git-execution-state")" || return 2
+  head_file="$(git -C "$MA_READ_SOURCE_REPO" rev-parse --git-path HEAD | tr -d '\r')" || return 2
+  case "$head_file" in /*|[A-Za-z]:/*) ;; *) head_file="$MA_READ_SOURCE_REPO/$head_file" ;; esac
+  MA_READ_SOURCE_HEAD_FILE="$(cd "${head_file%/*}" && pwd -P)/${head_file##*/}" || return 2
+  MA_READ_SOURCE_HEAD_SHA="$(oms_sha256_file "$MA_READ_SOURCE_HEAD_FILE")" || return 2
+  hooks_dir="$(git -C "$MA_READ_SOURCE_REPO" rev-parse --git-path hooks | tr -d '\r')" || return 2
+  case "$hooks_dir" in /*|[A-Za-z]:/*) ;; *) hooks_dir="$MA_READ_SOURCE_REPO/$hooks_dir" ;; esac
+  MA_READ_SOURCE_HOOKS_DIR="$(cd "${hooks_dir%/*}" && pwd -P)/${hooks_dir##*/}" || return 2
+  ma_authority_state_snapshot "$MA_READ_SOURCE_REPO" "$MA_READ_GUARD_DIR/source/hooks-state" strict "$MA_READ_SOURCE_HOOKS_DIR" || return 2
+  MA_READ_SOURCE_HOOKS_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/source/hooks-state")" || return 2
+  # Source B has no bookkeeping rights: even new files or appends in .oms
+  # are control mutations, unlike concurrent owner records in state A.
+  ma_authority_state_snapshot "$MA_READ_SOURCE_REPO" "$MA_READ_GUARD_DIR/source/control-state" strict || return 2
+  MA_READ_SOURCE_CONTROL_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/source/control-state")" || return 2
 }
 
 ma_read_guard_begin() {  # PRIVATE_DIR
@@ -119,10 +133,13 @@ ma_read_guard_begin() {  # PRIVATE_DIR
 
 ma_read_guard_rebaseline_source() {
   [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
-  # Verification may create outputs, but cannot change the Git execution boundary.
+  # Verification may create outputs. Preserve every pre-verify protected
+  # baseline so those outputs cannot hide source or control mutations.
   oms_git_execution_state_assert_unchanged "$MA_READ_SOURCE_REPO" \
     "$MA_READ_GUARD_DIR/source/git-execution-state" "$MA_READ_SOURCE_EXECUTION_SHA" || return 2
-  ma_read_guard_snapshot_source
+  oms_worker_surface_capture_one "$MA_READ_SOURCE_REPO" files \
+    > "$MA_READ_GUARD_DIR/source/files.after" || return 2
+  mv "$MA_READ_GUARD_DIR/source/files.after" "$MA_READ_GUARD_DIR/source/files"
 }
 
 ma_read_guard_assert() {
@@ -132,6 +149,22 @@ ma_read_guard_assert() {
     root="$REPO" digest="$MA_READ_STATE_EXECUTION_SHA"
     [ "$name" != source ] || { root="$MA_READ_SOURCE_REPO"; digest="$MA_READ_SOURCE_EXECUTION_SHA"; }
     oms_git_execution_state_assert_unchanged "$root" "$MA_READ_GUARD_DIR/$name/git-execution-state" "$digest" || return 2
+    if [ "$name" = source ]; then
+      if [ "$(oms_sha256_file "$MA_READ_SOURCE_HEAD_FILE")" != "$MA_READ_SOURCE_HEAD_SHA" ]; then
+        echo 'error: read pass changed source repository protected surface: HEAD' >&2
+        return 2
+      fi
+      ma_authority_state_snapshot "$root" "$MA_READ_GUARD_DIR/source/hooks-state.after" strict "$MA_READ_SOURCE_HOOKS_DIR" || return 2
+      if [ "$(oms_sha256_file "$MA_READ_GUARD_DIR/source/hooks-state.after")" != "$MA_READ_SOURCE_HOOKS_SHA" ]; then
+        echo 'error: read pass changed source repository protected surface: hooks' >&2
+        return 2
+      fi
+      ma_authority_state_snapshot "$root" "$MA_READ_GUARD_DIR/source/control-state.after" strict || return 2
+      if [ "$(oms_sha256_file "$MA_READ_GUARD_DIR/source/control-state.after")" != "$MA_READ_SOURCE_CONTROL_SHA" ]; then
+        echo 'error: read pass changed source repository protected surface: .oms control state' >&2
+        return 2
+      fi
+    fi
     oms_git_assert_safe_execution_config "$root" diff-read || return 2
     oms_git_assert_plain_index "$root" || return 2
     changed="$(oms_worker_surface_diff "$root" "$MA_READ_GUARD_DIR/$name" | tr -d '\r')" || return 2
@@ -590,13 +623,13 @@ ma_export_child_env() {
 # Ambient hook and Work Journal contents are excluded: only their top-level
 # type/mode stays protected because neither subtree is landing, lease, scope,
 # or approval data.
-ma_authority_state_snapshot() {  # REPO OUTPUT
+ma_authority_state_snapshot() {  # REPO OUTPUT [strict [ROOT]]
   local repo="$1"
   local output="$2"
   local transient_helper
   transient_helper="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)/worker-state-transients.py"
 
-  OMS_AUTHORITY_REPO="$repo" python3 - "$transient_helper" <<'PY' > "$output"
+  OMS_AUTHORITY_REPO="$repo" python3 - "$transient_helper" "${3:-}" "${4:-}" <<'PY' > "$output"
 import hashlib
 import importlib.util
 import json
@@ -604,8 +637,9 @@ import os
 import stat
 import sys
 
-root = os.path.join(os.path.realpath(os.environ["OMS_AUTHORITY_REPO"]), ".oms")
-excluded = {"hooks", "work-journal"}
+root = sys.argv[3] or os.path.join(os.path.realpath(os.environ["OMS_AUTHORITY_REPO"]), ".oms")
+strict = sys.argv[2] == "strict"
+excluded = set() if strict else {"hooks", "work-journal"}
 rows = []
 spec = importlib.util.spec_from_file_location("_oms_worker_state_transients", sys.argv[1])
 transients = importlib.util.module_from_spec(spec)
@@ -637,7 +671,10 @@ else:
     # The root row is authoritative, and a worker-planted root symlink must
     # never turn this scanner into a traversal of an external target.
     if root_row[1] == "dir":
-        for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        def scan_error(error):
+            raise error
+        for base, dirs, files in os.walk(root, topdown=True, followlinks=False,
+                                         onerror=scan_error if strict else None):
             if base == root:
                 kept = []
                 for name in sorted(dirs):
@@ -660,7 +697,7 @@ else:
                 rel = os.path.relpath(path, root).replace(os.sep, "/")
                 if base == root and name in excluded:
                     rows.append(describe(path, rel, False))
-                elif transients.is_internal_atomic_temp(root, rel):
+                elif not strict and transients.is_internal_atomic_temp(root, rel):
                     continue
                 else:
                     rows.append(describe(path, rel))
