@@ -24922,6 +24922,33 @@ EOF
     fail "hidden index mutation did not name raw boundary: $out"
 }
 
+test_delegate_tolerates_primary_index_stat_refresh() {
+  # Another session's `git status` rewrites the primary index with fresh stat
+  # data; only staged content or hiding flags are the worker's business.
+  local project="$TMP/worker-index-refresh"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local out rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+touch -t 200001010000 "$project/file.txt"
+git -C "$project" update-index --refresh >/dev/null 2>&1 || true
+git -C "$project" status --porcelain >/dev/null
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
+    --to codex --prompt x --no-verify 2>&1)" || rc=$?
+  [ "$rc" = 0 ] || fail "a stat-only primary index refresh stopped the worker (rc=$rc): $out"
+  if contains "$out" 'execution-state'; then fail "stat refresh named the execution-state boundary: $out"; fi
+}
+
 test_delegate_preflights_strict_execution_config() {
   local project="$TMP/worker-exec-config-preflight"
   local marker="$project/preflight-marker-fired"

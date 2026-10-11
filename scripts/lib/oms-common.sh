@@ -346,12 +346,18 @@ $index_path"
   # branch-tracking delta can be read against them; they are the bytes row 0
   # hashes, and the assert re-binds them to that digest.
   rm -f "$out.config"
-  OMS_GIT_EXEC_PATHS="$paths" OMS_GIT_EXEC_COPY="$tmp.config" python3 - <<'PY' > "$tmp" || {
+  # The index row records its staged content, not stat bytes `git status` refreshes.
+  local oid_size=20
+  [ "$(git -C "$root" rev-parse --show-object-format 2>/dev/null | tr -d '\r')" != sha256 ] || oid_size=32
+  OMS_GIT_EXEC_PATHS="$paths" OMS_GIT_EXEC_COPY="$tmp.config" OMS_GIT_EXEC_INDEX="$index_path" \
+    OMS_GIT_EXEC_OID="$oid_size" python3 - "$OMS_COMMON_LIB_DIR" <<'PY' > "$tmp" || {
 import base64
 import hashlib
 import os
 import stat
 import sys
+sys.path.insert(0, sys.argv[1])
+from git_index_signature import signature as index_signature
 
 for number, path in enumerate(os.environ["OMS_GIT_EXEC_PATHS"].splitlines()):
     if not path:
@@ -371,6 +377,13 @@ for number, path in enumerate(os.environ["OMS_GIT_EXEC_PATHS"].splitlines()):
     if info.st_size > 64 * 1024 * 1024:
         print("%s\toversized:%d" % (key, info.st_size))
         raise SystemExit(2)
+    if path == os.environ["OMS_GIT_EXEC_INDEX"]:
+        oid = int(os.environ["OMS_GIT_EXEC_OID"])
+        with open(path, "rb") as handle:
+            content = index_signature(handle.read(), oid)
+        if content:
+            print("%s\tindex:%d:%s" % (key, oid, content))
+            continue
     digest = hashlib.sha256()
     copy = None
     if number == 0:
@@ -456,12 +469,25 @@ oms_git_execution_state_assert_unchanged() {  # REPO SNAPSHOT EXPECTED_SHA
     echo "Git execution-state snapshot changed or became unreadable" >&2
     return 2
   fi
-  if ! changed_config="$(python3 - "$snapshot" "$snapshot.config" <<'PY'
+  if ! changed_config="$(python3 - "$snapshot" "$snapshot.config" "$OMS_COMMON_LIB_DIR" <<'PY'
 import base64
 import hashlib
 import os
 import stat
 import sys
+sys.path.insert(0, sys.argv[3])
+from git_index_signature import signature as index_signature
+
+def staged(path, oid):
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 64 * 1024 * 1024:
+            return None
+        with open(path, "rb") as handle:
+            content = index_signature(handle.read(), oid)
+    except OSError:
+        return None
+    return content and "index:%d:%s" % (oid, content)
 
 def signature(path):
     try:
@@ -498,6 +524,10 @@ for number, row in enumerate(rows):
     except (ValueError, UnicodeError):
         raise SystemExit(2)
     if not os.path.isabs(path):
+        raise SystemExit(2)
+    if expected.startswith("index:"):
+        if staged(path, int(expected.split(":")[1])) == expected:
+            continue
         raise SystemExit(2)
     current = signature(path)
     if current == expected:
