@@ -581,7 +581,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         from panel_tree import render_tree
         return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
                            main_attempt, navigation, summary=view == "summary", managed=managed)
-    if view == "graph" and width >= 76 and height >= 16 and not status_alerts(report):
+    if view == "graph" and width >= 76 and height >= 16:
         from room_view import render_graph
         return render_graph(report, width, height, color, unicode, frame, menu, attention_only, main_attempt, navigation, managed)
     if (view == "graph" and navigation is not None and mapping(report.get("room")).get("participants")

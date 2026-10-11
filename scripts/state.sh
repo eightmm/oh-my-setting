@@ -410,9 +410,10 @@ def attempt_summary(item):
         "parent_attempt_id"
     ) if item.get(key) not in (None, "")}
     refs = item.get("refs") or {}
-    if refs.get("panel_role") in ("main", "worker", "advisor", "reviewer"):
+    if refs.get("panel_role") in ("main", "worker", "advisor", "reviewer", "researcher"):
         summary["refs"] = {key: refs[key] for key in (
-            "panel_role", "panel_owner", "panel_purpose", "panel_workload",
+            "panel_role", "panel_owner", "panel_harness", "panel_room_id", "panel_room_participant",
+            "panel_purpose", "panel_workload",
             "panel_model", "panel_effort", "panel_location", "panel_access", "panel_label"
         ) if key in refs}
     return summary

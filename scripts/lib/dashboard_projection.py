@@ -100,7 +100,7 @@ def load_source(directory, name, repo_path=""):
 
 def panel_metadata(row):
     refs = mapping(row.get("refs"))
-    if refs.get("panel_role") not in ("main", "worker", "advisor", "reviewer"):
+    if refs.get("panel_role") not in ("main", "worker", "advisor", "reviewer", "researcher"):
         return {}
     return {"panel": {key: clean(refs.get("panel_" + key), 160) or None for key in (
         "role", "owner", "harness", "purpose", "workload", "model", "effort", "location", "access", "label", "room_id", "room_participant"

@@ -1300,7 +1300,7 @@ def reader_shell(repo, target, board):
                                                 "--repo", str(repo)] + panel_reader.target_args(target))
 
 
-BOARD_SHARE = 40  # percent of the window width a first board takes
+BOARD_SHARE = 28  # percent of the window width a first board takes
 MIN_BOARD = MIN_CHAT = 20
 
 
@@ -1363,9 +1363,16 @@ def board_split(pane, repo, command):
     stored = parse_split(parts[2])
     # A detached session still has tmux's 80x24 window; the terminal that is about to attach is the better size.
     sized = window if attached else terminal_window()
-    width = "%d%%" % BOARD_SHARE
+    share = BOARD_SHARE
+    configured = os.environ.get("OMS_PANEL_BOARD_PERCENT", "")
+    if re.fullmatch(r"[+-]?[0-9]+", configured):
+        try:
+            share = max(25, min(35, int(configured)))
+        except ValueError:
+            pass
+    width = "%d%%" % share
     if sized:
-        cells = split_cells(stored or ("left", BOARD_SHARE, True), sized[0])
+        cells = split_cells(stored or ("left", share, True), sized[0])
         width = str(cells) if attached else "%d%%" % max(1, min(99, (200 * cells + sized[0]) // (2 * sized[0])))
         if session and parts[1] != "control" and (stored is None or stored[2]):
             subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_split", split_text(cells)),

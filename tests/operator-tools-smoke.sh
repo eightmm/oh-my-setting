@@ -353,13 +353,15 @@ from pathlib import Path
 ledger = Path(sys.argv[1]) / ".oms/lifecycle/events.jsonl"
 rows = [json.loads(line) for line in ledger.read_text().splitlines()]
 created, cancelled = rows[0], rows[-1]
-rows.append(dict(created, attempt_id="att_still_active", event_id="levt_active", task_id="panel-ui"))
+panel_refs = {"panel_role": "researcher", "panel_harness": "codex", "panel_room_id": "research-room",
+              "panel_room_participant": "research-call"}
+rows.append(dict(created, attempt_id="att_still_active", event_id="levt_active", task_id="panel-ui", refs=panel_refs))
 for index in range(10):
     identity = "att_new_%s" % index
     rows.extend([dict(created, attempt_id=identity, event_id="levt_new_%s" % index,
                       ts="2026-09-01T00:00:%02dZ" % (index * 2)),
                  dict(cancelled, attempt_id=identity, event_id="levt_end_%s" % index,
-                      seq=2, ts="2026-09-01T00:00:%02dZ" % (index * 2 + 1))])
+                      seq=2, refs=panel_refs, ts="2026-09-01T00:00:%02dZ" % (index * 2 + 1))])
 ledger.write_text("".join(json.dumps(row) + "\n" for row in rows))
 marker = Path(sys.argv[1]) / ".oms/delegations/live.json"
 row = json.loads(marker.read_text())
@@ -374,6 +376,9 @@ import json, sys
 report = json.load(open(sys.argv[1]))
 assert all(row["attempt_id"] != "att_still_active" for row in report["attempts"]["recent"])
 assert report["attempts"]["active_recent"][0]["attempt_id"] == "att_still_active"
+for attempt in (report["attempts"]["active_recent"][0], report["attempts"]["recent"][0]):
+    assert {key: attempt["panel"][key] for key in ("role", "harness", "room_id", "room_participant")} == {
+        "role": "researcher", "harness": "codex", "room_id": "research-room", "room_participant": "research-call"}, attempt
 marker = report["delegations"][0]
 assert (marker["task_id"], marker["requested_model"], marker["reasoning_effort"]) == (
     "panel-ui", "model-for-live-worker", "high"), marker
@@ -476,6 +481,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/scripts/lib/dashboard_projection.py" 
 import json, runpy, subprocess, sys
 from pathlib import Path
 module = runpy.run_path(sys.argv[1])
+assert module["panel_metadata"]({"refs": {"panel_role": "researcher",
+    "panel_room_participant": "research-call"}, "parent_attempt_id": "main-call"})["panel"]["room_participant"] == "research-call"
+assert module["panel_metadata"]({"refs": {"panel_role": "unrecognized"}}) == {}
 report = json.load(open(sys.argv[2], encoding="utf-8"))
 report["operations"]["recent"] *= 4
 report["attempts"]["recent"] *= 4
@@ -1195,7 +1203,7 @@ assert panel_debate._sentence("I'm keeping (a), the `!` marker is cheaper. More.
 assert panel_debate._sentence('He said "stop! now" ok. More') == 'He said "stop! now" ok.'
 assert [panel_debate.choice(t) for t in ("저는 (a)를 고릅니다.", "B: safest", "A good idea", "Yes, ship", "revise", "none")] == \
     ["(a)", "(b)", None, "yes", "revise", None]
-assert TerminalInput().decode(b"\t") == [("tab",)] and TerminalInput().decode(b"dm") == []
+assert TerminalInput().decode(b"0\t") == [("0",), ("tab",)] and TerminalInput().decode(b"dm") == []
 msg_members = [{"participant": "m1", "role": "main", "joined": True, "model": "claude-opus-5-5", "seq": 1, "provider": "claude", "attempt": "a1"},
                {"participant": "m2", "role": "main", "joined": True, "model": "gpt-6.1-sol", "seq": 2, "provider": "codex", "attempt": "a2"},
                {"participant": "m3", "role": "main", "joined": True, "model": "gpt-6-luna", "seq": 3, "provider": "codex", "attempt": "a3"}]
@@ -4806,32 +4814,41 @@ with patch.object(panel_chats.room, "status", return_value=fast_room), \
         patch.object(panel_chats, "terminal_commands", return_value=[["tmux", "select-pane", "-t", "%1"]]):
     assert panel_chats.plan(Path("."), "flow-room", "flow-main")["method"] == "existing-terminal"
 for columns, rows in ((110, 44), (100, 24), (76, 18), (76, 21)):
-    for glyphs in (False, True):
-        for menu in (False, True):
-            nav = {}
-            picture = render(flow, "codex", columns, rows, view="graph", unicode=glyphs, menu=menu,
-                             main_attempt="flow-attempt", navigation=nav)
-            assert "MAIN / Sol 6" in picture and "ADVISOR / Astra" in picture and "WORKER / Luna" in picture, picture
-            assert picture.index("ADVISOR / Astra") < picture.index("MAIN / Sol 6") < picture.index("WORKER / Luna"), picture
-            assert "ONLY OTHER OWNER" not in picture and "NO PARENT PROOF" not in picture, picture
-            assert len(picture.splitlines()) <= rows - int(menu), picture
-            assert all(display_width(line) <= columns for line in picture.splitlines()), picture
-            target = next(hit for hit in nav["hits"] if hit["action"] == ("result", "builder"))
-            # A call's content shows in the board's detail area; clicking again opens no other screen.
-            assert choose(("click", target["x1"], target["y"]), nav) is None
-            assert nav["preview"] == {"target": ("result", "builder")}
-            assert choose(("click", target["x1"], target["y"]), nav) is None
-            nav["surface"] = "graph"
-            assert choose(("enter",), nav) is None and nav["preview"]["target"] == ("result", "builder")
-            nav.pop("preview")
-            # Keys reach only this board's main and its calls, never an earlier main's.
-            assert all(item[1] not in ("flow-other", "foreign-child") for item in nav["items"]), nav["items"]
-            choose(("end",), nav)
-            render(flow, "claude", columns, rows, view="graph", unicode=glyphs, menu=menu,
-                   main_attempt="flow-attempt", navigation=nav)
-            assert any(hit["action"] == nav["selected"] for hit in nav["hits"]), nav
-            if not glyphs:
-                assert "╭" not in picture and "─" not in picture
+    for alert in (None, "! Capacity full", "! Collection degraded - some state unknown"):
+        graph_report = deepcopy(flow)
+        if alert == "! Capacity full":
+            graph_report["capacity_alerts"] = [alert]
+        elif alert:
+            graph_report["collection"]["ok"] = False
+        for glyphs in (False, True):
+            for menu in (False, True):
+                nav = {}
+                picture = render(graph_report, "codex", columns, rows, view="graph", unicode=glyphs, menu=menu,
+                                 main_attempt="flow-attempt", navigation=nav)
+                assert nav["surface"] == "graph", (alert, nav)
+                if alert:
+                    assert alert in picture, picture
+                assert "MAIN / Sol 6" in picture and "ADVISOR / Astra" in picture and "WORKER / Luna" in picture, picture
+                assert picture.index("ADVISOR / Astra") < picture.index("MAIN / Sol 6") < picture.index("WORKER / Luna"), picture
+                assert "ONLY OTHER OWNER" not in picture and "NO PARENT PROOF" not in picture, picture
+                assert len(picture.splitlines()) <= rows - int(menu), picture
+                assert all(display_width(line) <= columns for line in picture.splitlines()), picture
+                target = next(hit for hit in nav["hits"] if hit["action"] == ("result", "builder"))
+                # A call's content shows in the board's detail area; clicking again opens no other screen.
+                assert choose(("click", target["x1"], target["y"]), nav) is None
+                assert nav["preview"] == {"target": ("result", "builder")}
+                assert choose(("click", target["x1"], target["y"]), nav) is None
+                nav["surface"] = "graph"
+                assert choose(("enter",), nav) is None and nav["preview"]["target"] == ("result", "builder")
+                nav.pop("preview")
+                # Keys reach only this board's main and its calls, never an earlier main's.
+                assert all(item[1] not in ("flow-other", "foreign-child") for item in nav["items"]), nav["items"]
+                choose(("end",), nav)
+                render(graph_report, "claude", columns, rows, view="graph", unicode=glyphs, menu=menu,
+                       main_attempt="flow-attempt", navigation=nav)
+                assert any(hit["action"] == nav["selected"] for hit in nav["hits"]), nav
+                if not glyphs:
+                    assert "╭" not in picture and "─" not in picture
 assert render(flow, "codex", 100, 24, view="graph", frame=0) != render(flow, "codex", 100, 24, view="graph", frame=1)
 # The tree keeps this window's main first; earlier mains of the room follow.
 tree = render(flow, "codex", 110, 40, view="tree", main_attempt="flow-attempt")
@@ -4934,25 +4951,34 @@ assert panel.split_cells(("left", 30, False), 30) == 15
 assert panel.split_resize(("left", 25, False), 25, 50) is None and panel.split_resize(("left", 25, False), 24, 50) is None
 assert panel.split_resize(("left", 25, False), 22, 50) == 25 and panel.split_resize(("left", 20, False), 25, 50) == 20
 assert panel.split_resize(("left", 40, True), 25, 50) == 20
-def board_calls(display, terminal=None):
+def board_calls(display, terminal=None, percent=""):
     def answer(command, **kwargs):
         return subprocess.CompletedProcess(command, 0, display if "display-message" in command else "", "")
-    with patch.object(panel, "terminal_window", return_value=terminal), \
+    with patch.dict(os.environ, {"OMS_PANEL_BOARD_PERCENT": percent}), \
+            patch.object(panel, "terminal_window", return_value=terminal), \
             patch.object(panel.subprocess, "run", side_effect=answer) as tmux_run:
         panel.board_split("%1", Path("/repo"), "board")
     return [call.args[0][1:] for call in tmux_run.call_args_list if "display-message" not in call.args[0]]
 def left_split(width):
     return ["split-window", "-f", "-h", "-b", "-l", width, "-t", "%1", "-c", "/repo", "board"]
-record_left = ["set-option", "-t", "$1", "@oms_panel_split", "left:80c"]
-assert board_calls("200 50 1 $1\tcodex\t") == [record_left, left_split("80")]
+record_left = ["set-option", "-t", "$1", "@oms_panel_split", "left:56c"]
+legacy_left = ["set-option", "-t", "$1", "@oms_panel_split", "left:80c"]
+assert board_calls("200 50 1 $1\tcodex\t") == [record_left, left_split("56")]
 assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
-assert board_calls("200 50 1 $1\tcodex\tleft:40") == [record_left, left_split("80")]
-assert board_calls("200 50 1 $1\tcodex\ttop:12c") == [record_left, left_split("80")], "an older top record was kept"
-assert board_calls("200 50 1 $1\tcontrol\t") == [left_split("80")]
+assert board_calls("200 50 1 $1\tcodex\tleft:40") == [legacy_left, left_split("80")]
+assert board_calls("200 50 1 $1\tcodex\ttop:12c") == [record_left, left_split("56")], "an older top record was kept"
+assert board_calls("200 50 1 $1\tcontrol\t") == [left_split("56")]
 # A detached session still reports tmux's 80x24: the attaching terminal sizes the board and the record.
 assert board_calls("80 24 0 $1\tcodex\t", terminal=(240, 59)) == [
-    ["set-option", "-t", "$1", "@oms_panel_split", "left:96c"], left_split("40%")]
-assert board_calls("80 24 0 $1\tcodex\t") == [left_split("40%")]
+    ["set-option", "-t", "$1", "@oms_panel_split", "left:67c"], left_split("28%")]
+assert board_calls("80 24 0 $1\tcodex\t") == [left_split("28%")]
+for configured, cells in (("25", 50), ("35", 70), ("1", 50), ("99", 70), ("-1", 50),
+                          ("garbage", 56), ("28.5", 56), ("2_8", 56)):
+    assert board_calls("200 50 1 $1\tcodex\t", percent=configured) == [
+        ["set-option", "-t", "$1", "@oms_panel_split", "left:%dc" % cells], left_split(str(cells))]
+    assert board_calls("200 50 1 $1\tclaude\tleft:90c", percent=configured) == [left_split("90")]
+assert board_calls("50 24 1 $1\tcodex\t", percent="25") == [
+    ["set-option", "-t", "$1", "@oms_panel_split", "left:20c"], left_split("20")]
 def sync_run(sync, *reads):
     with patch.dict(os.environ, {"OMS_PANEL_SESSION": "s", "TMUX_PANE": "%1"}), \
             patch.object(panel.subprocess, "run") as tmux_run:

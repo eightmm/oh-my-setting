@@ -105,7 +105,7 @@ class TerminalInput:
                 output.append(("tab",))
             elif value == b"\x0c":
                 output.append(("repaint",))
-            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"f", b"?", b"n", b"1", b"2", b"k", b"u"):
+            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"f", b"?", b"n", b"0", b"1", b"2", b"k", b"u"):
                 output.append((value.decode(),))
         if not self.pending:
             self.escape_since = None

@@ -262,7 +262,7 @@ with patch("subprocess.run", side_effect=AssertionError("health projection execu
     terminal_panel.stale_notice(navigation, None)
     check(not navigation["capacity_stale"] and navigation["notice"] == "User operation complete",
           "refresh recovery discarded another operation notice")
-check(TerminalInput().decode(b"\x0cku") == [("repaint",), ("k",), ("u",)], "capacity/repaint keys unavailable")
+check(TerminalInput().decode(b"\x0cku0") == [("repaint",), ("k",), ("u",), ("0",)], "capacity/repaint keys unavailable")
 
 # Launching: argv via shlex, shell syntax literal, bad input refused, session required.
 jb, sh = Jobs([]), Shells([])

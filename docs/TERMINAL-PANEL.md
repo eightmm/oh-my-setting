@@ -816,8 +816,9 @@ main ownership and exact pane/terminal/socket identity; reused panes and
 unproven sessions are rejected. Numeric footer readings retain their reported
 scope and unknown values. A socket error does not stop the native sibling.
 
-The board is always the full-height left pane of the main window (40 percent of the
-window the first time, sized from the terminal that is attaching), with the native
+The board is always the full-height left pane of the main window (28 percent of the
+window the first time, sized from the terminal that is attaching; optional integer
+`OMS_PANEL_BOARD_PERCENT` overrides this default, clamped to 25–35 percent, with invalid values ignored), with the native
 CLI on its right; a call opened from the board shows in a reader pane above the CLI.
 Herdr uses the same left board.
 The board width is recorded in absolute cells in the session option `@oms_panel_split`
