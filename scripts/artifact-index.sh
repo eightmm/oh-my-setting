@@ -752,7 +752,7 @@ if [ "$ACTION" = "prune" ]; then
   artifact_index_prune_locked() {
   local tmp py_tmp
 
-  # Stale sweep: drop rows whose referenced artifact or patch is gone. This is
+  # Stale sweep: drop unpinned rows whose artifact or patch is gone. This is
   # what `validate` reports and what nothing could repair — the retention prune
   # is a cap on row count, so any keep value either spares stale rows or
   # discards good ones, and the global rules forbid editing .oms by hand.
@@ -780,10 +780,12 @@ def present(row):
 
 parsed = []
 snapshot = store["read_index"](repo, index)
+pins = store["completion_pins"](repo)
 for line in snapshot.splitlines(keepends=True):
     parsed.append((line, json.loads(line.decode("utf-8"))))
 
-candidates = [item for item in parsed if present(item[1])]
+candidates = [item for item in parsed
+              if pins is None or item[1].get("event_id") in pins or present(item[1])]
 while candidates:
     id_indices = {}
     for ordinal, (_line, row) in enumerate(candidates):
@@ -802,6 +804,11 @@ while candidates:
         if row.get("kind") == "artifact-resolution":
             target_index = by_id.get(row.get("resolves_event_id"))
             if target_index is None or target_index >= ordinal:
+                if pins is None or row.get("event_id") in pins:
+                    candidates = parsed
+                    filtered = parsed
+                    changed = False
+                    break
                 changed = True
                 continue
         filtered.append(item)
@@ -822,7 +829,7 @@ else:
     # and predict/report that separately instead of calling it stale cleanup.
     survivors = after
     bounded = store["_bounded"](
-        kept, max(survivors, 1), store["MAX_INDEX_BYTES"])
+        kept, max(survivors, 1), store["MAX_INDEX_BYTES"], repo=repo)
     final = len(bounded.splitlines())
     byte_drops = survivors - final
     if dry_run:
@@ -866,14 +873,18 @@ snapshot = store["read_index"](repo, index)
 lines = snapshot.splitlines(keepends=True)
 before = len(lines)
 if before > keep or len(snapshot) > store["MAX_INDEX_BYTES"]:
-    body = store["_bounded"](lines, keep, store["MAX_INDEX_BYTES"])
+    body = store["_bounded"](lines, keep, store["MAX_INDEX_BYTES"], repo=repo)
 else:
     body = snapshot
 kept = len(body.splitlines())
 
 if body == snapshot:
-    print("artifact-index: %d rows, within keep=%d; nothing pruned" %
-          (before, keep))
+    if before > keep:
+        print("artifact-index: %d rows, completion evidence retained above keep=%d; nothing pruned" %
+              (before, keep))
+    else:
+        print("artifact-index: %d rows, within keep=%d; nothing pruned" %
+              (before, keep))
 elif dry:
     print("artifact-index: would prune %d -> %d rows" % (before, kept))
 else:

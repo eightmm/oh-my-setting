@@ -14,6 +14,7 @@ def retained_lines(
     keep: int,
     max_bytes: Optional[int] = None,
     required_event_ids: Sequence[str] = (),
+    pinned_event_ids: Optional[Sequence[str]] = (),
 ) -> list[bytes]:
     """Keep the newest complete lineage groups inside both retention bounds.
 
@@ -21,6 +22,9 @@ def retained_lines(
     used by the append transaction for rows that are about to become durable;
     those rows (and a resolution's target) either survive together or the
     mutation fails before replacing the ledger.
+
+    Completion pins survive the count limit. An unreadable pin namespace
+    (``None``) preserves every row; the durable byte ceiling still applies.
     """
     if keep <= 0:
         raise ValueError("keep must be positive")
@@ -112,6 +116,19 @@ def retained_lines(
         if len(selected) == keep or (
                 max_bytes is not None and selected_bytes(selected) == max_bytes):
             break
+    if pinned_event_ids is None:
+        selected.update(range(len(source)))
+    else:
+        for event_id in pinned_event_ids:
+            for index in id_indices.get(event_id, ()):
+                group = group_for(index)
+                if not group:
+                    # Uncertain lineage cannot justify deleting evidence.
+                    selected.update(range(len(source)))
+                    break
+                selected.update(group)
+    if max_bytes is not None and selected_bytes(selected) > max_bytes:
+        raise ValueError("completion-pinned artifact rows exceed byte retention")
     return [line for index, line in enumerate(source) if index in selected]
 
 

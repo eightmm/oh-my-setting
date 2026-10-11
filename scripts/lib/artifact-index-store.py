@@ -7,7 +7,9 @@ import argparse
 import datetime
 import hashlib
 import json
+import itertools
 import os
+import re
 import runpy
 import stat
 import sys
@@ -228,6 +230,7 @@ def _salvage_body(
     receipt_base: dict,
     keep: int,
     high: int,
+    repo: Optional[str] = None,
 ) -> Tuple[bytes, dict]:
     """Reach a stable compacted-row count while requiring the receipt."""
     compacted = 0
@@ -244,6 +247,7 @@ def _salvage_body(
                 keep,
                 MAX_INDEX_BYTES,
                 [receipt["event_id"]],
+                repo=repo,
             )
         else:
             body = candidate_body
@@ -389,7 +393,7 @@ def salvage_index(repo: str, index: str, *, apply: bool = False) -> dict:
         0,
         receipt_event,
     )
-    repaired, receipt = _salvage_body(recovered, receipt_base, keep, high)
+    repaired, receipt = _salvage_body(recovered, receipt_base, keep, high, root)
     result = {
         "healthy": False,
         "applied": apply,
@@ -436,11 +440,80 @@ def _row_bytes(row: object) -> Tuple[bytes, str]:
     return data, event_id
 
 
+def _unique_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate completion receipt key")
+        result[key] = value
+    return result
+
+
+def completion_references(repo: str) -> Optional[Tuple[set[str], set[str]]]:
+    """An uncertain receipt scan pins everything instead of discarding proof."""
+    try:
+        probe = DURABLE["canonical_repo_path"](
+            repo, ".oms/plan/completions/.probe", "completion retention pins")
+        directory = os.path.dirname(probe)
+        try:
+            with os.scandir(directory) as entries:
+                names = [entry.name for entry in itertools.islice(entries, 4097)]
+        except FileNotFoundError:
+            return set(), set()
+        if len(names) > 4096:
+            return None
+        pins = set()
+        paths = set()
+        total = 0
+        for name in names:
+            if not re.fullmatch(r"[0-9a-f]{64}\.json", name):
+                return None
+            raw = DURABLE["read_no_follow"](
+                repo, ".oms/plan/completions/" + name, "completion retention pin",
+                max_bytes=4 * 1024 * 1024)
+            total += len(raw)
+            if total > 64 * 1024 * 1024 or hashlib.sha256(raw).hexdigest() != name[:-5]:
+                return None
+            receipt = json.loads(raw, parse_constant=_reject_json_constant,
+                                 object_pairs_hook=_unique_keys)
+            if not isinstance(receipt, dict) or not isinstance(receipt.get("bundle"), dict):
+                return None
+            for kind in ("research", "main_research"):
+                info = receipt["bundle"].get(kind)
+                if info is None:
+                    continue
+                if (not isinstance(info, dict) or info.get("classification") != "research-only" or
+                        not isinstance(info.get("index_event_id"), str) or not info["index_event_id"]):
+                    return None
+                pins.add(info["index_event_id"])
+                artifact = info.get("artifact")
+                if (not isinstance(artifact, dict) or not isinstance(artifact.get("path"), str) or
+                        not artifact["path"]):
+                    return None
+                paths.add(artifact["path"])
+                row = receipt.get("snapshot", {}).get("evidence", {}).get("index", {})
+                if not isinstance(row, dict):
+                    return None
+                for field in ("artifact", "patch", "source"):
+                    value = row.get(field)
+                    if isinstance(value, str) and value:
+                        paths.add(value)
+        return pins, paths
+    except (OSError, ValueError, TypeError, AttributeError, SystemExit):
+        return None
+
+
+def completion_pins(repo: str) -> Optional[set[str]]:
+    references = completion_references(repo)
+    return references[0] if references is not None else None
+
+
 def _bounded(
     lines: Iterable[bytes],
     keep: int,
     max_bytes: int,
     required_event_ids: Sequence[str] = (),
+    repo: Optional[str] = None,
 ) -> bytes:
     try:
         retained = RETENTION["retained_lines"](
@@ -448,11 +521,12 @@ def _bounded(
             keep,
             max_bytes=max_bytes,
             required_event_ids=required_event_ids,
+            pinned_event_ids=completion_pins(repo) if repo is not None else (),
         )
     except ValueError as exc:
         fail(str(exc))
     body = b"".join(retained)
-    if len(retained) > keep or len(body) > max_bytes:
+    if len(body) > max_bytes:
         fail("retention could not satisfy the durable bounds")
     return body
 
@@ -522,7 +596,7 @@ def append_rows(
         candidate = old_lines + encoded
         candidate_body = b"".join(candidate)
         if len(candidate) > high or len(candidate_body) > MAX_INDEX_BYTES:
-            return _bounded(candidate, keep, MAX_INDEX_BYTES, required)
+            return _bounded(candidate, keep, MAX_INDEX_BYTES, required, repo)
         return candidate_body
 
     return mutate_index(
@@ -546,7 +620,7 @@ def replace_bytes(
 ) -> bytes:
     keep, _high = retention_limits(keep, keep)
     lines = _validated_lines(body)
-    bounded = _bounded(lines, keep, MAX_INDEX_BYTES, required_event_ids)
+    bounded = _bounded(lines, keep, MAX_INDEX_BYTES, required_event_ids, repo)
     return mutate_index(
         repo,
         index,
@@ -595,7 +669,11 @@ def delete_orphans(
         root, os.path.join(artifacts_root, ".boundary"), "artifact root"
     )
 
-    referenced = set()
+    completion_refs = completion_references(root)
+    if completion_refs is None:
+        return [], 0
+    referenced = {os.path.realpath(os.path.join(root, value))
+                  for value in completion_refs[1]}
     for line in _validated_lines(kept_body):
         row = json.loads(line.decode("utf-8"))
         for key in ("artifact", "patch", "source"):

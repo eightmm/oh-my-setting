@@ -6922,6 +6922,47 @@ assert 'bounded verifier output' not in json.dumps(receipt)
 
 assert 'landing' not in done and 'landed_commit' not in done
 stable = plan_path.read_bytes(); invoke(bundle); assert plan_path.read_bytes() == stable
+# Evicted index rows are recoverable only from an existing immutable receipt.
+index_file = repo / '.oms/artifacts/index.jsonl'
+before_eviction = index_file.read_bytes()
+event_id = bundle['research']['index_event_id']
+index_file.write_bytes(b''.join(line for line in before_eviction.splitlines(keepends=True)
+                               if json.loads(line)['event_id'] != event_id))
+assert event_id not in {row['event_id'] for row in index()}
+assert json.loads(ap('show', '--id', bundle['task_id']))['state'] == 'done'
+assert any(task['id'] == bundle['task_id'] and task['state'] == 'done'
+           for task in json.loads(ap('list', '--json'))['tasks'])
+assert 'state: done' in ap('brief', '--id', bundle['task_id'])
+ap('add', '--id', 'eviction-independent', '--title', 'Independent task')
+ap('claim', '--id', 'eviction-independent', '--provider', 'codex')
+plan_path.write_bytes(stable)
+assert index_file.read_bytes() != before_eviction, 'fallback restored an index row'
+artifact = repo / bundle['research']['artifact']['path']
+artifact_raw = artifact.read_bytes()
+completion_core = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+for damaged in (b'changed accepted report\n', None):
+    if damaged is None:
+        artifact.unlink()
+    else:
+        artifact.write_bytes(damaged)
+    completion_core['reset_streams']()
+    assert completion_core['validate_done'](str(repo), plan(), done, allow_unverified=True) is False
+    # Callers that do not handle the per-task verdict remain fail-closed.
+    ap('list', '--json', ok=False)
+    assert plan_path.read_bytes() == stable
+    artifact.write_bytes(artifact_raw)
+completion_core['reset_streams']()
+assert completion_core['validate_done'](str(repo), plan(), done, allow_unverified=True) is True
+assert json.loads(ap('show', '--id', bundle['task_id']))['state'] == 'done'
+# Conflicting live rows still veto the receipt, even after recovery worked.
+frozen_row = receipt['snapshot']['evidence']['index']
+evicted_bytes = index_file.read_bytes()
+conflicting = dict(frozen_row, artifact_sha256='0' * 64)
+index_file.write_bytes(evicted_bytes + json.dumps(conflicting).encode() + b'\n')
+ap('list', '--json', ok=False)
+index_file.write_bytes(evicted_bytes + (json.dumps(frozen_row) + '\n').encode() * 2)
+ap('list', '--json', ok=False)
+index_file.write_bytes(before_eviction)
 # Every first capture is the full canonical EOF; blobs retain the exact bytes.
 completion_core = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
 proof = receipt['snapshot']['provenance']
@@ -11160,6 +11201,78 @@ test_artifact_index_prune() {
   "$ROOT/scripts/artifact-index.sh" --repo "$project" prune 2 >/dev/null
   perms="$(stat -c '%a' "$index" 2>/dev/null || stat -f '%Lp' "$index" 2>/dev/null)"
   [ "$perms" = "640" ] || fail "prune must preserve file permissions (got $perms)"
+
+  python3 - "$ROOT" "$project" <<'PY' || fail "completion-pinned retention failed"
+import hashlib, json, os, runpy, subprocess, sys
+from pathlib import Path
+root, repo = map(Path, sys.argv[1:])
+index = repo / '.oms/artifacts/index.jsonl'
+receipts = repo / '.oms/plan/completions'
+receipts.mkdir(parents=True)
+store = runpy.run_path(str(root / 'scripts/lib/artifact-index-store.py'))
+rows = []
+for number, kind in enumerate(('research', 'main_research')):
+    artifact = '.oms/artifacts/pinned-%d.md' % number
+    (repo / artifact).write_text('accepted report\n')
+    row = {'event_id': 'evt_pin%d' % number, 'kind': 'ask', 'artifact': artifact}
+    rows.append(row)
+    receipt = {'bundle': {kind: {'classification': 'research-only', 'index_event_id': row['event_id'],
+                                'artifact': {'path': artifact, 'sha256': hashlib.sha256((repo / artifact).read_bytes()).hexdigest()}}},
+               'snapshot': {'evidence': {'index': row}}}
+    raw = json.dumps(receipt).encode()
+    (receipts / (hashlib.sha256(raw).hexdigest() + '.json')).write_bytes(raw)
+rows.extend({'event_id': 'evt_recent%d' % number} for number in range(4))
+index.write_bytes(b''.join(json.dumps(row).encode() + b'\n' for row in rows))
+def prune(*args):
+    result = subprocess.run(['bash', str(root / 'scripts/artifact-index.sh'), '--repo', str(repo),
+                             'prune', '1', *args], env=dict(os.environ, OMS_ARTIFACT_ORPHAN_GRACE='0'),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    assert result.returncode == 0, result.stderr.decode()
+    return result.stdout.decode()
+before = index.read_bytes()
+assert 'would prune 6 -> 3' in prune('--dry-run')
+assert index.read_bytes() == before
+prune('--files')
+assert {json.loads(line)['event_id'] for line in index.read_bytes().splitlines()} == {
+    'evt_pin0', 'evt_pin1', 'evt_recent3'}
+assert all((repo / row['artifact']).exists() for row in rows[:2])
+# Automatic high-water compaction uses the same pins and allows a larger count.
+store['append_rows'](str(repo), str(index), [{'event_id': 'evt_appended'}], keep=1, high=1)
+assert {json.loads(line)['event_id'] for line in index.read_bytes().splitlines()} == {
+    'evt_pin0', 'evt_pin1', 'evt_appended'}
+# A stale sweep cannot remove a completion's referenced row.
+(repo / rows[0]['artifact']).unlink()
+prune('--stale')
+assert 'evt_pin0' in {json.loads(line)['event_id'] for line in index.read_bytes().splitlines()}
+(repo / rows[0]['artifact']).write_text('accepted report\n')
+# A previously evicted row cannot turn a frozen artifact into an orphan.
+index.write_text(json.dumps({'event_id': 'evt_newest'}) + '\n')
+prune('--files')
+assert all((repo / row['artifact']).exists() for row in rows[:2])
+# Unreadable or oversized receipt scans keep more evidence, never less.
+bad = receipts / ('0' * 64 + '.json')
+bad.write_bytes(b'{')
+index.write_bytes(before)
+prune('--files')
+assert index.read_bytes() == before
+bad.unlink()
+bad.symlink_to(next(receipts.iterdir()).name)
+prune()
+assert index.read_bytes() == before
+bad.unlink()
+bad.write_bytes(b' ' * (4 * 1024 * 1024 + 1))
+prune()
+assert index.read_bytes() == before
+bad.unlink()
+# Pins may exceed the count floor, but never the durable byte bound.
+try:
+    store['_bounded'](before.splitlines(keepends=True), 1, 1, repo=str(repo))
+except SystemExit as exc:
+    assert exc.code == 2
+else:
+    raise AssertionError('completion pins bypassed the byte bound')
+assert index.read_bytes() == before
+PY
 }
 
 

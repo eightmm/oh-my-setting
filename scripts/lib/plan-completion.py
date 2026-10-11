@@ -866,7 +866,7 @@ def verifier_argv(command, files):
     return commands
 
 
-def requirements(repo, bundle):
+def requirements(repo, bundle, unavailable_evidence=None):
     mapping = bundle['requirements']
     if not isinstance(mapping, list) or not 1 <= len(mapping) <= 64:
         fail('complete reviewed requirement/deliverable map required')
@@ -887,23 +887,33 @@ def requirements(repo, bundle):
         if not isinstance(evidence, list) or not 1 <= len(evidence) <= 16:
             fail('each obligation needs nonempty specific evidence')
         for ref in evidence:
-            reference(repo, ref)
+            if unavailable_evidence is not None and ref == unavailable_evidence:
+                keys(ref, ('path', 'sha256'))
+                relative(ref['path'])
+                digest(ref['sha256'])
+            else:
+                reference(repo, ref)
     reviewed = bundle['reviewed_obligations']
     if not isinstance(reviewed, list) or set(reviewed) != ids or len(reviewed) != len(ids):
         fail('partial requirement map')
 
 
-def research(repo, bundle, task, plan_id):
+def research(repo, bundle, task, plan_id, frozen_index=None, unavailable_evidence=None):
     keys(bundle['research'], ('classification', 'artifact', 'index_event_id', 'attempt_id', 'parent_attempt_id'))
     info = bundle['research']
     if info['classification'] != 'research-only' or task.get('patch') or task.get('landing') or task.get('landed_commit'):
         fail('research requires explicitly reviewed research-only work without code landing')
     artifact = info['artifact']
-    reference(repo, artifact)
+    if unavailable_evidence is None or artifact != unavailable_evidence:
+        reference(repo, artifact)
     if task.get('artifact') != artifact['path']:
         fail('research artifact differs from original task evidence')
     index, _ = rows(repo, '.oms/artifacts/index.jsonl')
     matched = [row for row in index if row.get('event_id') == info['index_event_id']]
+    if not matched and isinstance(frozen_index, dict) and frozen_index.get('event_id') == info['index_event_id']:
+        # Retention cannot restore an evicted row. Only an already validated,
+        # content-addressed receipt can supply its frozen producer facts.
+        matched = [frozen_index]
     if len(matched) != 1:
         fail('indexed artifact identity unavailable')
     row = matched[0]
@@ -1318,7 +1328,7 @@ def commit_product(repo, bundle, task):
             'receipt': receipt, 'receipt_raw_sha256': sha(raw), 'artifact': artifact}
 
 
-def review_contract(state_repo, bundle, task, plan_id, action):
+def review_contract(state_repo, bundle, task, plan_id, action, unavailable_evidence=None):
     required = ('schema', 'kind', 'plan_id', 'task_id', 'task_sha256', 'plan_sha256', 'state',
                 'lease_id', 'owner', 'original_contract', 'review_summary', 'reviewed_obligations',
                 'requirements', 'base_commit', 'source_envelope', 'source_manifest', 'verifier')
@@ -1371,7 +1381,7 @@ def review_contract(state_repo, bundle, task, plan_id, action):
         fail('original already contains completion fields')
     if task.get('landing') or task.get('landed_commit'):
         fail('original code landing cannot be relabelled as a local completion')
-    requirements(state_repo, bundle)
+    requirements(state_repo, bundle, unavailable_evidence)
     manifest = bundle['source_manifest']
     envelope = bundle['source_envelope']
     if (not isinstance(manifest, list) or not 1 <= len(manifest) <= 256 or
@@ -1513,7 +1523,7 @@ def strict_plan(repo, path):
     return plan
 
 
-def validate_done(repo, plan, task, commit_proof=None):
+def validate_done(repo, plan, task, commit_proof=None, allow_unverified=False):
     global _COMMIT_PROOF
     if commit_proof is not None:
         _COMMIT_PROOF = commit_proof
@@ -1535,13 +1545,34 @@ def validate_done(repo, plan, task, commit_proof=None):
     original = receipt['original_task']
     bundle = receipt['bundle']
     action = next(name for name, kind in KINDS.items() if kind == receipt['completion_kind'])
-    review_contract(repo, bundle, original, plan.get('plan_id'), action)
+    recorded = receipt['snapshot'].get('evidence', {})
+    frozen_index = None
+    unavailable_evidence = None
+    if receipt['completion_kind'] == 'research-accepted':
+        info = bundle['research']
+        keys(info, ('classification', 'artifact', 'index_event_id', 'attempt_id', 'parent_attempt_id'))
+        text(info['index_event_id'], 'indexed artifact event id')
+        index, _ = rows(repo, '.oms/artifacts/index.jsonl')
+        if not any(row.get('event_id') == info['index_event_id'] for row in index):
+            frozen_index = recorded.get('index')
+            if not isinstance(frozen_index, dict) or frozen_index.get('event_id') != info['index_event_id']:
+                fail('receipt lacks exact frozen indexed artifact identity')
+            artifact = info['artifact']
+            keys(artifact, ('path', 'sha256'))
+            relative(artifact['path'])
+            digest(artifact['sha256'])
+            try:
+                available = sha(read(repo, artifact['path'])) == artifact['sha256']
+            except (OSError, ValueError, SystemExit):
+                available = False
+            if not available:
+                unavailable_evidence = artifact
+    review_contract(repo, bundle, original, plan.get('plan_id'), action, unavailable_evidence)
     if receipt['snapshot'].get('manifest_sha256') != sha(encoded(bundle['source_manifest'])):
         fail('receipt source manifest digest mismatch')
     if receipt['completion_kind'] == 'research-accepted':
         with historical_prefixes(repo, receipt['snapshot']['provenance']):
-            actual = research(repo, bundle, original, plan.get('plan_id'))
-        recorded = receipt['snapshot'].get('evidence', {})
+            actual = research(repo, bundle, original, plan.get('plan_id'), frozen_index, unavailable_evidence)
         if any(actual[k] != recorded.get(k) for k in ('index', 'attempt', 'parent', 'attempt_events_sha256', 'ancillary_patch')):
             fail('immutable research provenance changed')
     elif receipt['completion_kind'] == 'main-research-accepted':
@@ -1568,6 +1599,11 @@ def validate_done(repo, plan, task, commit_proof=None):
         fail('completion receipt original task digest mismatch')
     if receipt['bundle']['original_contract'] != RECEIPT['projection'](original):
         fail('completion receipt original obligation mismatch')
+    if unavailable_evidence is not None:
+        if allow_unverified:
+            return False
+        fail('evicted research artifact unavailable or digest changed: ' + unavailable_evidence['path'])
+    return True
 
 
 def prior_receipt(repo, bundle_sha):
