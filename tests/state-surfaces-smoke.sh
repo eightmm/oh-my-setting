@@ -92,6 +92,19 @@ room.join(repo, "room", "sibling", "claude", "worker", "claude-sonnet-5-5", pare
 room.send(repo, "room", "opus", "helper", "Inspect the worker scope", "question", message_id="worker-question")
 room.send(repo, "room", "sibling", "helper", "Inspect the sibling scope", "question", message_id="sibling-question")
 os.environ.update(OMS_HARNESS_CHILD="1", OMS_ROOM_ID="room", OMS_ROOM_PARTICIPANT="helper")
+import subprocess
+from unittest.mock import patch
+import hook_state
+for guard in ({"OMS_HARNESS_CHILD": "1", "OMS_HARNESS_DELEGATE_DEPTH": "0"},
+              {"OMS_HARNESS_CHILD": "0", "OMS_HARNESS_DELEGATE_DEPTH": "1"}):
+    with patch.dict(os.environ, guard):
+        cli = subprocess.run([sys.executable, str(root / "scripts/lib/room.py"), "send", "--repo", str(repo),
+                              "--text", "Default parent CLI note"], capture_output=True, text=True)
+        assert cli.returncode == 0 and json.loads(cli.stdout)["recipient"] == "opus", cli.stderr or cli.stdout
+        text, bad = call("oms_peer_start", kind="message", thread="room", participant="helper",
+                         prompt="Default parent MCP note")
+        assert not bad and json.loads(text)["recipient"] == "opus", text
+        assert not hook_state.panel_status_hint({"cwd": str(repo)}, "room"), "no child broadcast status hint"
 for recipient in ("all", "sibling"):
     before_refused = len(room.records(repo, "room"))
     text, bad = call("oms_peer_start", kind="message", thread="room", participant="helper",
@@ -115,6 +128,14 @@ os.environ["OMS_ROOM_PARTICIPANT"] = "opus"
 assert call("oms_peer_start", kind="message", thread="room", participant="opus", prompt="Inherited main identity")[1]
 for key in ("OMS_HARNESS_CHILD", "OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT"):
     os.environ.pop(key)
+with patch.dict(os.environ, {"OMS_ROOM_REPO": str(repo), "OMS_ROOM_PARTICIPANT": "opus"}):
+    assert "--to all" in hook_state.panel_status_hint({"cwd": str(repo)}, "room"), "main status hint retained"
+text, bad = call("oms_peer_start", kind="message", thread="room", participant="opus", prompt="Default main broadcast")
+assert not bad and json.loads(text)["recipient"] == "all", text
+cli = subprocess.run([sys.executable, str(root / "scripts/lib/room.py"), "send", "--repo", str(repo),
+                      "--id", "room", "--participant", "opus", "--text", "Default main CLI broadcast"],
+                     capture_output=True, text=True)
+assert cli.returncode == 0 and json.loads(cli.stdout)["recipient"] == "all", cli.stderr or cli.stdout
 assert not (repo / ".oms/artifacts/mcp").exists(), "room messages never start another model"
 assert len(m.tool_definitions()) == 12, "do not grow core tool discovery"
 if os.name != "nt":
