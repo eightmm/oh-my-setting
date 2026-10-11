@@ -24,6 +24,11 @@ from process_liveness import pid_alive
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
 STATES = {"blocked", "working"}
 REASON = "panel_main_released"
+MAX_TICK_PROBES = 16
+
+
+class LiveTmuxMain(ValueError):
+    pass
 
 
 def refusal_hint(attempts):
@@ -114,7 +119,7 @@ def start_refs(execution, managed):
         try:
             refs.update(tmux_identity())
         except (OSError, ValueError, subprocess.SubprocessError):
-            pass
+            print("OMS: tmux ownership binding unavailable; this main may need separate recovery.", file=sys.stderr)
     else:
         refs["panel_host"] = "inline"
     return refs
@@ -136,7 +141,7 @@ def heartbeat_fresh(row):
     return ages[0] < int(interval) or ages[1] < int(ttl)
 
 
-def prove_host_absent(refs, attempt, tagged=None, server=None):
+def prove_host_absent(refs, attempt, tagged=None, server=None, _tmux=None):
     host = refs.get("panel_host")
     if host == "inline":
         if identity_gone(refs, "wrapper"):
@@ -144,14 +149,19 @@ def prove_host_absent(refs, attempt, tagged=None, server=None):
         raise ValueError("main liveness unproven; inline wrapper termination is unconfirmed")
     if host == "tmux":
         if (not isinstance(refs.get("panel_pane_id"), str) or not re.fullmatch(r"%[0-9]+", refs["panel_pane_id"])
-                or not all(refs.get(key) for key in ("panel_socket_digest", "panel_tmux_server_pid", "panel_tmux_server_identity"))):
+                or not isinstance(refs.get("panel_socket_digest"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", refs["panel_socket_digest"])):
             raise ValueError("main liveness unproven; tmux ownership binding unavailable")
+        if identity_gone(refs, "tmux_server"):
+            return
+        if _tmux is not None:
+            server, tagged = _tmux()
         server = tmux_identity() if server is None else server
         if any(refs.get(key) != value for key, value in server.items()):
             raise ValueError("main liveness unproven; tmux server ownership changed")
         tagged = tagged_attempts() if tagged is None else tagged
         if attempt in tagged:
-            raise ValueError("main liveness unproven; main still has a live tagged tmux window or pane")
+            raise LiveTmuxMain("main liveness unproven; main still has a live tagged tmux window or pane")
         return
     if host != "herdr":
         raise ValueError("main liveness unproven; recorded host ownership unavailable")
@@ -173,6 +183,8 @@ def prove_native_absent(row):
     if (row.get("reason_code") != "native_shutdown_unconfirmed" and refs.get("panel_native_exit") == "confirmed"
             and re.fullmatch(r"-?[0-9]+", refs.get("panel_native_exit_code", ""))):
         return
+    if refs.get("panel_harness") == "pi":
+        raise ValueError("main liveness unproven; Pi child termination unconfirmed; separate recovery required")
     raise ValueError("main liveness unproven; native termination is unconfirmed")
 
 
@@ -210,11 +222,26 @@ def release(repo, attempt):
     return {"attempt": attempt, "previous_state": previous, "state": "abandoned", "reason": REASON}
 
 
-def classify(attempts, windows=None):
+def classify(attempts, windows=None, max_probes=None):
     found = {"releasable": [], "unverifiable": []}
     if not isinstance(attempts, list) or any(not isinstance(row, dict) for row in attempts):
         return found
     tagged, server, tmux_error = windows, None, None
+    probes = 0
+
+    def tmux_status():
+        nonlocal tagged, server, tmux_error
+        if tmux_error:
+            raise ValueError(tmux_error)
+        if server is None:
+            try:
+                server = tmux_identity()
+                tagged = tagged_attempts(windows)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                tmux_error = "main liveness unproven; tmux status unavailable"
+                raise ValueError(tmux_error)
+        return server, tagged
+
     for row in attempts:
         refs, attempt = row.get("refs") or {}, row.get("attempt_id")
         if (row.get("tool") != "panel-main" or row.get("terminal") is not False or row.get("state") not in STATES
@@ -229,20 +256,13 @@ def classify(attempts, windows=None):
                 continue
             if refs.get("panel_role") != "main":
                 raise ValueError("main liveness unproven; panel main role binding unavailable")
-            if refs.get("panel_host") == "tmux":
-                if tmux_error:
-                    raise ValueError(tmux_error)
-                if server is None:
-                    try:
-                        server = tmux_identity()
-                        tagged = tagged_attempts(windows)
-                    except (OSError, ValueError, subprocess.SubprocessError):
-                        tmux_error = "main liveness unproven; tmux status unavailable"
-                        raise ValueError(tmux_error)
-                if attempt in tagged:
-                    continue
-            prove_host_absent(refs, attempt, tagged, server)
+            if max_probes is not None and probes >= max_probes:
+                raise ValueError("main liveness unproven; verification pending (refresh probe limit)")
+            probes += 1
+            prove_host_absent(refs, attempt, _tmux=tmux_status)
             prove_native_absent(row)
+        except LiveTmuxMain:
+            continue
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             item["reason"] = clean(str(error), 160)
             found["unverifiable"].append(item)
@@ -251,10 +271,11 @@ def classify(attempts, windows=None):
     return found
 
 
-def dead_mains(repo, windows=None):
+def dead_mains(repo, windows=None, _tick=None):
     try:
-        attempts = read_shared(repo, "attempts", lambda: json.loads(events(repo, "list", "--json")))
-        return classify(attempts, windows)
+        attempts = _tick.attempts() if _tick is not None else read_shared(
+            repo, "attempts", lambda: json.loads(events(repo, "list", "--json")))
+        return classify(attempts, windows, max_probes=MAX_TICK_PROBES)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return {"releasable": [], "unverifiable": []}
 
