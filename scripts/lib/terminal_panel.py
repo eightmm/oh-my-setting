@@ -534,12 +534,17 @@ def _main_exit_key():
                 return "\n" if not key else key
             try:
                 import termios
-                # Native CLI typeahead must not close or restart its exit window.
-                termios.tcflush(inputs.fd, termios.TCIFLUSH)
             except ImportError:
-                pass
-            except (OSError, getattr(termios, "error", OSError)):
-                pass
+                termios = None
+            if termios is not None:
+                flush_error = getattr(termios, "error", None)
+                flush_errors = (OSError,) + ((flush_error,) if isinstance(flush_error, type)
+                                             and issubclass(flush_error, BaseException) else ())
+                try:
+                    # Native CLI typeahead must not close or restart its exit window.
+                    termios.tcflush(inputs.fd, termios.TCIFLUSH)
+                except flush_errors:
+                    pass
             select.select([inputs.fd], [], [])
             return os.read(inputs.fd, 1).decode("utf-8", errors="replace")
     finally:
