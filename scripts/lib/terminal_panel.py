@@ -1760,7 +1760,7 @@ def check_legacy_main(repo):
     if not isinstance(history, list) or any(not isinstance(row, dict) for row in history):
         raise ValueError("main lifecycle status unavailable; existing sessions preserved")
     if any(row.get("tool") == "panel-main" and row.get("terminal") is not True for row in history):
-        raise ValueError("this panel already has a live main or unverified owner; a replacement needs a confirmed terminal owner")
+        raise ValueError("this panel already has a live main or unverified owner; a replacement needs a confirmed terminal owner" + __import__("panel_release").refusal_hint(history))
     if shutil.which("tmux"):
         session, owner = resolve_session(repo, wait=False)
         if owner != str(repo):
@@ -1781,7 +1781,7 @@ def check_legacy_main(repo):
                     raise ValueError("current main window status unavailable")
                 pending = value
             if live_mains(repo, session, ident, pending) >= MAX_LIVE_MAINS:
-                raise ValueError("this panel already has a live main; finish it before starting another")
+                raise ValueError("this panel already has a live main; finish it before starting another; if that main crashed, release it with oms panel --release-main ATTEMPT (see k)")
 
 
 def spawn_main(repo, provider, task=None, model=None):
@@ -1807,7 +1807,7 @@ def spawn_single_main(repo, provider, task=None, model=None):
     env["OMS_PANEL_SESSION"] = session
     ident = os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
     if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
-        raise ValueError("this panel already has a live main; finish it before starting another")
+        raise ValueError("this panel already has a live main; finish it before starting another; if that main crashed, release it with oms panel --release-main ATTEMPT (see k)")
     with _lock(repo, "panel-main-session", timeout=.1):
         check_legacy_main(repo)
     pane = add_main_window(repo, session, provider, board_view("auto"), False, env, None, model, task)
@@ -1866,7 +1866,7 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
                 # An explicit --room wins; otherwise new mains default to the panel's open room.
                 os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
                 if live_mains(repo, session, os.environ["OMS_ROOM_ID"]) >= MAX_LIVE_MAINS:
-                    raise ValueError("this panel already has a live main; finish it before starting another")
+                    raise ValueError("this panel already has a live main; finish it before starting another; if that main crashed, release it with oms panel --release-main ATTEMPT (see k)")
                 with _lock(repo, "panel-main-session", timeout=.1):
                     check_legacy_main(repo)
                 created = "window"
@@ -1943,7 +1943,7 @@ def open_native(provider, repo, resume=None, model=None, task=None, view="auto",
         with _lock(repo, "panel-main-start", timeout=3):
             ident = os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
             if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
-                raise ValueError("this panel already has a live main; finish it before starting another")
+                raise ValueError("this panel already has a live main; finish it before starting another; if that main crashed, release it with oms panel --release-main ATTEMPT (see k)")
             with _lock(repo, "panel-main-session", timeout=.1):
                 check_legacy_main(repo)
             window = add_main_window(repo, session, provider, view, attention_only, os.environ.copy(),
@@ -2720,6 +2720,8 @@ def read_panel(repo, provider, view, attention_only):
         others, incomplete = other_rooms(repo, state["room"].get("id"), live)
         state["room"] = dict(state["room"], other_rooms=others, other_rooms_incomplete=incomplete)
     state["private_capacity"] = private_capacity(repo)
+    import panel_release
+    state["dead_mains"] = panel_release.dead_mains(repo)
     import panel_health
     state["capacity_alerts"] = panel_health.alerts(state)
     return state, status, provider, main_attempt, density, filtered, selected_room
@@ -3580,6 +3582,7 @@ def main(argv=None):
     parser.add_argument("--to", help="explicit registered CLI target for --dispatch")
     parser.add_argument("--reasoning-effort", choices=("low", "medium", "high"), help="effort for this dispatch; a role route keeps its model")
     parser.add_argument("--providers", action="store_true", help="read registered CLI capabilities without running providers")
+    parser.add_argument("--release-main", metavar="ATTEMPT", help="release a crashed main after proving its terminal owner absent")
     parser.add_argument("--health", action="store_true", help="read context, reported quota, room bounds and private slot/history capacity")
     parser.add_argument("--json", action="store_true", help="read-only availability and shared OMS state")
     parser.add_argument("--watch", action="store_true", help="read-only activity tree, refreshed every five seconds")
@@ -3621,6 +3624,9 @@ def main(argv=None):
     parser.add_argument("--label", help="short task title for the role board")
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
     args = parser.parse_args(arguments)
+    if args.release_main is not None:
+        import panel_release
+        return panel_release.cli_main(arguments)
     if args.health and (args.dry_run or args.view or args.attention_only):
         parser.error("--health is a read-only report; use --repo, --room and optional --json")
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.reopen, args.dispatch, args.routes,
