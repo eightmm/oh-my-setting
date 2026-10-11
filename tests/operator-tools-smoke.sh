@@ -6391,10 +6391,21 @@ def exercise_main_lineage():
     workers[0]["refs"].update(panel_room_id="lineage-room", panel_room_participant="call-0000000000000000",
                               native_session="lineage-safe-session")
     from types import SimpleNamespace
-    panel._record_dispatch_call(project, "lineage-room", "call-0000000000000000", "lineage-stable",
-                                SimpleNamespace(pid=987654321), "lineage-process-identity")
-    panel._record_dispatch_call(project, "lineage-room", "call-0000000000000000", "lineage-stable",
-                                SimpleNamespace(pid=987654321), "lineage-process-identity", 0)
+    process = SimpleNamespace(pid=987654321)
+    name = workers[0]["refs"]["panel_room_participant"]
+    # Trusted-controller fixtures; live subreaper exhaustion is covered above.
+    with patch.object(panel.sys, "platform", "linux"):
+        launch = panel._prepare_dispatch_call(project, "lineage-room", name, "lineage-stable")
+    def completion(call):
+        panel.dispatch_store.write(project, call["participant"] + "-process.json", {"pid": process.pid})
+        receipt = {"launch_sha256": panel._dispatch_exit_record(call, 0)["launch_sha256"],
+                   "pid": process.pid, "all_reaped": True, "exit": 0}
+        panel.dispatch_store.write(project, call["participant"] + "-supervisor.json", receipt)
+        panel._record_dispatch_pending(project, call, 0, "lineage-task-0", {"descendants": []})
+        panel._record_dispatch_call(project, "lineage-room", call["participant"], "lineage-stable",
+                                    process, "lineage-process-identity", 0)
+        return receipt
+    receipt = completion(launch)
     settled = dict(workers[0], attempt_id="lineage-settled", task_id="lineage-settled", state="done", terminal=True)
     live_worker = dict(workers[0], attempt_id="lineage-live-worker", task_id="lineage-live-task",
                        parent_attempt_id=live_old["attempt_id"])
@@ -6437,16 +6448,72 @@ def exercise_main_lineage():
                 workers[0].update(state=state, terminal=terminal)
                 refuse_exit()
             workers[0].update(state="done", terminal=True)
-            gone.return_value = False
+            # Schema 2 has no PID/session fields: only bound exhaustion is authority.
+            with patch("panel_terminals.process_gone", return_value=False), \
+                    patch.object(panel, "_dispatch_group_gone", return_value=False):
+                assert continue_task("lineage-task-0", caller) == "lineage-safe-session"
+            receipt_name = name + "-supervisor.json"
+            for invalid in (dict(receipt, all_reaped=False), dict(receipt, exit=None), dict(receipt, exit=True),
+                            dict(receipt, pid=process.pid + 1), dict(receipt, launch_sha256="0" * 64)):
+                panel.dispatch_store.write(project, receipt_name, invalid)
+                refuse_exit()
+            private = panel.dispatch_store.store(project)
+            (private / receipt_name).unlink()
             refuse_exit()
-            gone.return_value = True
-            group_gone.return_value = False
+            panel.dispatch_store.write(project, receipt_name, receipt)
+            pending_name = name + "-pending.json"
+            pending = panel.dispatch_store.read(project, pending_name)
+            for invalid in ({}, dict(pending, task_id="../foreign"), dict(pending, launch_sha256="0" * 64)):
+                panel.dispatch_store.write(project, pending_name, invalid)
+                refuse_exit()
+            (private / pending_name).unlink()
             refuse_exit()
-            group_gone.return_value = True
+            panel.dispatch_store.write(project, pending_name, pending)
             with patch.object(panel, "_dispatch_call_record", return_value=None):
                 refuse_exit()
-            with patch("panel_terminals.process_gone", side_effect=PermissionError("identity unavailable")):
+            anchor = panel.dispatch_store.read(project, name + "-launch.json")
+            member = {"participant": name, "parent": "lineage-stable"}
+            for invalid in (dict(launch, schema=True), dict(launch, schema=3), dict(launch, nonce=None),
+                            dict(launch, backend="unknown"), dict(launch, pid=process.pid),
+                            {key: value for key, value in launch.items() if key != "nonce"}):
+                with patch.object(panel.dispatch_store, "read", return_value=dict(anchor, call=invalid)), \
+                        patch.object(panel, "_read", return_value=panel.dispatch_store.encoded(invalid)):
+                    assert panel._dispatch_call_record(project, "lineage-room", member) is None
+                    refuse_exit()
+            assert panel._dispatch_call_record(project, "other-room", member) is None
+            assert panel._dispatch_call_record(project, "lineage-room", dict(member, parent="other-main")) is None
+            # Legacy records retain all liveness refusals, and need private proof too.
+            legacy_name = "call-0000000000000001"
+            legacy = {"schema": 1, "kind": "oms-panel-call", "room": "lineage-room", "participant": legacy_name,
+                      "parent": "lineage-stable", "pid": process.pid, "identity": "lineage-process-identity",
+                      "session": True}
+            panel._write(project, panel._dispatch_call_path(legacy_name), legacy)
+            legacy_anchor = {"call": legacy, "generation": panel.dispatch_store.generation(
+                project / panel._dispatch_call_path(legacy_name))}
+            workers[0]["refs"]["panel_room_participant"] = legacy_name
+            refuse_exit()
+            if os.name == "posix":
+                panel.dispatch_store.write(project, legacy_name + "-launch.json", legacy_anchor)
                 refuse_exit()
+                legacy_receipt = completion(legacy)
+                with patch.object(panel, "_dispatch_session_gone", return_value=True) as session_gone:
+                    assert continue_task("lineage-task-0", caller) == "lineage-safe-session"
+                    gone.return_value = False
+                    refuse_exit()
+                    gone.return_value = True
+                    group_gone.return_value = False
+                    refuse_exit()
+                    group_gone.return_value = True
+                    session_gone.return_value = False
+                    refuse_exit()
+                    session_gone.return_value = True
+                    with patch("panel_terminals.process_gone", side_effect=PermissionError("identity unavailable")):
+                        refuse_exit()
+                    panel.dispatch_store.write(project, legacy_name + "-supervisor.json", receipt)
+                    refuse_exit()
+                    panel.dispatch_store.write(project, legacy_name + "-supervisor.json", legacy_receipt)
+                    assert continue_task("lineage-task-0", caller) == "lineage-safe-session"
+            workers[0]["refs"]["panel_room_participant"] = name
         refuse("lineage-task-0", dict(caller, OMS_PANEL_MAIN_ATTEMPT="lineage-live", OMS_ROOM_PARTICIPANT="lineage-live"))
         refuse("lineage-live-task", caller)
         refuse("lineage-foreign-task", caller)
@@ -6502,7 +6569,7 @@ def exercise_main_lineage():
         assert "PRIVATE-LINEAGE-PROMPT" not in captured[0], captured[0]
         assert next(c for c in calls if c["task_id"] == "lineage-task-11")["label"] == "Inspect fixture 11", calls
         assert "--continue TASK_ID" in captured[0]
-    print("main lineage: resumed/successor continuation, live/foreign/unknown refusal and bounded prompt-free context passed")
+    print("main lineage: schema-2/verified legacy continuation, live/foreign/unknown refusal and bounded prompt-free context passed")
 
 exercise_main_lineage()
 # A status message is a declaration: no mail, no unread, latest per sender kept past the 12-message window;

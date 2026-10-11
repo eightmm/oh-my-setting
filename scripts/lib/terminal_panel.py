@@ -1069,7 +1069,6 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None):
 
     def historical_worker_exited(row):
         from panel_view import TERMINAL_STATES
-        import panel_terminals
         parent = next((r for r in rows if r.get("attempt_id") == row.get("parent_attempt_id")), {})
         if parent.get("terminal") is False:
             return True
@@ -1083,11 +1082,7 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None):
         if not isinstance(room_id, str) or not room_id or not member["parent"]:
             return False
         try:
-            call = _dispatch_call_record(repo, room_id, member)
-            return bool(call and call["session"] and call.get("identity")
-                        and _dispatch_call_finished(repo, room_id, member)
-                        and panel_terminals.process_gone(call["pid"], call["identity"])
-                        and _dispatch_group_gone(call["pid"]))
+            return _dispatch_call_finished(repo, room_id, member)
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
             return False
 
@@ -1607,13 +1602,28 @@ def _dispatch_call_record(repo, room_id, member):
         anchor = dispatch_store.read(repo, name + "-launch.json")
         data = _read(repo, _dispatch_call_path(name), 4096)
         call = anchor["call"]
-        if (anchor["generation"] != dispatch_store.generation(path)
-                or data != dispatch_store.encoded(call)
-                or set(call) != {"schema", "kind", "room", "participant", "parent", "nonce", "backend"}
-                or call["schema"] != 2 or call["kind"] != "oms-panel-call"
+        if (not isinstance(call, dict) or type(call.get("schema")) is not int
+                or call["schema"] not in {1, 2}
+                or anchor["generation"] != dispatch_store.generation(path)
+                or call["kind"] != "oms-panel-call"
                 or call["room"] != room_id or call["participant"] != name
                 or call["parent"] != member.get("parent")):
             return None
+        fields = {"schema", "kind", "room", "participant", "parent"}
+        if call["schema"] == 2:
+            if (set(call) != fields | {"nonce", "backend"} or data != dispatch_store.encoded(call)
+                    or not isinstance(call["nonce"], str) or not re.fullmatch(r"[0-9a-f]{32}", call["nonce"])
+                    or call["backend"] not in {"subreaper", "unsupported"}):
+                return None
+        else:
+            # Old repository records alone cannot establish controller provenance.
+            # Retain their writer's newline only with the same private launch anchor.
+            if (set(call) != fields | {"pid", "identity", "session"}
+                    or data != dispatch_store.encoded(call) + b"\n"
+                    or type(call["pid"]) is not int or call["pid"] <= 0
+                    or type(call["session"]) is not bool or not call["session"] or os.name != "posix"
+                    or not isinstance(call["identity"], str) or not call["identity"]):
+                return None
         return call
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return None
@@ -1646,13 +1656,14 @@ def _dispatch_pending(repo, call):
 
 
 def _dispatch_supervisor_receipt(repo, call):
-    if call["backend"] != "subreaper":
+    if call["schema"] == 2 and call["backend"] != "subreaper":
         return None
     receipt = dispatch_store.read(repo, call["participant"] + "-supervisor.json")
     binding = dispatch_store.read(repo, call["participant"] + "-process.json")
     digest = _dispatch_exit_record(call, 0)["launch_sha256"]
     if (set(receipt) != {"launch_sha256", "pid", "all_reaped", "exit"}
             or receipt["launch_sha256"] != digest or receipt["pid"] != binding["pid"]
+            or call["schema"] == 1 and binding["pid"] != call["pid"]
             or type(receipt["all_reaped"]) is not bool
             or receipt["exit"] is not None and type(receipt["exit"]) is not int):
         return None
@@ -1666,7 +1677,13 @@ def _dispatch_call_finished(repo, room_id, member):
     try:
         _dispatch_pending(repo, call)
         receipt = _dispatch_supervisor_receipt(repo, call)
-        return bool(receipt and receipt["all_reaped"] and type(receipt["exit"]) is int)
+        if not (receipt and receipt["all_reaped"] and type(receipt["exit"]) is int):
+            return False
+        if call["schema"] == 1:
+            import panel_terminals
+            return (panel_terminals.process_gone(call["pid"], call["identity"])
+                    and _dispatch_group_gone(call["pid"]) and _dispatch_session_gone(call["pid"]))
+        return True
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return False
 
