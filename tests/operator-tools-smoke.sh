@@ -8115,6 +8115,7 @@ for failure_step, recovery in ([("write", key) for key in
         elif command[1] == "if-shell":
             failure_closes.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
+    assert panel.launch_failed_without_child(FileNotFoundError("missing")) and not panel.launch_failed_without_child(OSError(5, "I/O"))
     def failure_process(command, **kwargs):
         if command[0] != "fixture-native":
             return real_popen(command, **kwargs)

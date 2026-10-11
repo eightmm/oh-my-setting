@@ -562,6 +562,12 @@ def _main_terminal_owner(provider, repo, session, pane, attempt, ident):
     return previous
 
 
+def launch_failed_without_child(error):
+    """Popen checks arguments before forking and reaps a child whose exec failed; any other launch error
+    cannot prove that no native process survived."""
+    return isinstance(error, (FileNotFoundError, PermissionError, NotADirectoryError, ValueError))
+
+
 def run_native(provider, repo, resume=None, model=None, task=None):
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
         raise ValueError("workers cannot open native owner sessions")
@@ -840,10 +846,9 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         launch_inflight = True
         try:
             process = subprocess.Popen(command, cwd=str(execution), env=env)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            # Popen rejected the launch; an interrupt during launch remains unconfirmed.
-            launch_inflight = False
-            reason = "native_launch_failed"
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            launch_inflight = not launch_failed_without_child(error)
+            reason = "native_launch_unconfirmed" if launch_inflight else "native_launch_failed"
             raise
         launch_inflight = False
         while True:
