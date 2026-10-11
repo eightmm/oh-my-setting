@@ -1,5 +1,8 @@
 """Disposable, repository-bound panel reads; room selection stays in the caller."""
 
+import calendar
+import copy
+import datetime
 import hashlib
 import json
 import math
@@ -143,6 +146,111 @@ def read_shared(repo, key, collect, cacheable=None):
                 return cached['value']
             return collect()
         if str(error) == 'panel lock unavailable':
+            return collect()
+        raise
+    except (OSError, SystemExit):
+        return collect()
+
+
+def read_plan_list(repo, collect):
+    """Share stat-bound list reads, refreshing ages and fencing TTL expiry.
+
+    Expired claims require fresh worker/PID evidence. Typed completions and
+    cancellations validate external receipts/artifacts, so retain their full
+    read path rather than walking those namespaces on every board tick.
+    """
+    repo = Path(repo).resolve()
+    if not (repo / '.oms/hooks').is_dir():
+        return collect()
+
+    # agent-plan redirects managed scratch worktrees to their main checkout.
+    # snapshot normally already receives that canonical state repository.
+    if repo.name == 'wt' and repo.parent.name.startswith('oh-my-setting-scratch.'):
+        return collect()
+
+    def stamp():
+        entries = []
+        for path in (repo / '.oms', repo / '.oms/plan', repo / '.oms/plan/tasks.json',
+                     repo / '.oms/plan/completions', repo / 'PROJECT.md',
+                     ROOT / 'scripts/agent-plan.sh', ROOT / 'scripts/lib/agent_plan_core.py',
+                     ROOT / 'scripts/lib/agent-plan-engine.py',
+                     ROOT / 'scripts/lib/task-assignment.py', ROOT / 'scripts/lib/project-state.py',
+                     Path(__file__)):
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                entries.append((str(path), None))
+                continue
+            # Leaf/ancestor symlinks can change their targets without changing lstat.
+            if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+                return None
+            entries.append((str(path), info.st_dev, info.st_ino, info.st_mode,
+                            info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+        entries.append(('ttl', os.environ.get('OMS_PLAN_CLAIM_TTL')))
+        return hashlib.sha256(_body(entries)).hexdigest()
+
+    def refreshed(value):
+        value = copy.deepcopy(value)
+        now = int(time.time())
+        default = os.environ.get('OMS_PLAN_CLAIM_TTL', '3600')
+        default = int(default) if default.isascii() and default.isdigit() else 3600
+        for task in value['tasks']:
+            if any(field in task for field in ('completion_kind', 'completion_receipt', 'cancellation')):
+                return None
+            state = task.get('state')
+            if state not in ('claimed', 'running', 'review'):
+                continue
+            anchor = None
+            fields = ('updated',) if state == 'review' else ('claimed_at', 'updated')
+            for field in fields:
+                try:
+                    anchor = calendar.timegm(datetime.datetime.strptime(
+                        task.get(field, ''), '%Y-%m-%dT%H:%M:%SZ').timetuple())
+                    break
+                except (ValueError, TypeError):
+                    continue
+            if anchor is None:
+                continue
+            age = now - anchor
+            ttl = task.get('ttl', '')
+            ttl = int(ttl) if isinstance(ttl, str) and ttl.isdigit() else default
+            if state == 'claimed' and age >= ttl:
+                return None
+            task['claim_age_s'] = age
+        return value
+
+    identity = hashlib.sha256(str(repo).encode()).hexdigest()
+    relative = DIRECTORY + '/plan-list.json'
+    try:
+        generation = stamp()
+        if generation is None:
+            return collect()
+        cached = _load(repo, relative, identity, generation)
+        if cached:
+            value = refreshed(cached['value'])
+            if value is not None and stamp() == generation:
+                return value
+        with _lock(repo, 'panel-cache-plan-list', timeout=0):
+            cached = _load(repo, relative, identity, generation)
+            if cached:
+                value = refreshed(cached['value'])
+                if value is not None and stamp() == generation:
+                    return value
+            value = collect()
+            if stamp() == generation and refreshed(value) is not None:
+                data = {'schema': 1, 'repo': identity, 'fingerprint': generation,
+                        'created': time.time(), 'value': value,
+                        'sha256': hashlib.sha256(_body(value)).hexdigest()}
+                try:
+                    path = DURABLE['canonical_repo_path'](str(repo), relative, 'panel cache', True)
+                    DURABLE['atomic_mutate'](path, lambda old: _body(data), str(repo),
+                                            missing_ok=True, create_parent=True,
+                                            max_input=MAX_BYTES, max_output=MAX_BYTES, label='panel cache')
+                except (OSError, ValueError, SystemExit):
+                    pass
+            return value
+    except ValueError as error:
+        if str(error) in ('panel operation is busy; retry later', 'panel lock unavailable'):
             return collect()
         raise
     except (OSError, SystemExit):

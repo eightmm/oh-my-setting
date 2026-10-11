@@ -948,6 +948,116 @@ entry['created'] = 10 ** 400
 path.write_text(json.dumps(entry), encoding='utf-8')
 assert board() == {'number': 8}, 'overflowing cache timestamp did not trigger recollection'
 
+# Plan reads outlive the dashboard interval, including across board processes.
+plan_worker = worker.replace("cache.read_shared(repo, 'dashboard', compute)",
+                             "cache.read_plan_list(repo, lambda: {'tasks': [compute()]})")
+def plan_board(now):
+    return json.loads(subprocess.check_output(
+        [sys.executable, '-c', plan_worker, sys.argv[1], str(project), str(counter), str(now)],
+        text=True, timeout=5))
+now = int(time.time())
+assert plan_board(now) == plan_board(now + 5) == plan_board(now + 10) == {'tasks': [{'number': 9}]}
+replacement = plan.with_suffix('.tmp')
+replacement.write_text(plan.read_text(), encoding='utf-8')
+replacement.replace(plan)
+assert plan_board(now + 15) == {'tasks': [{'number': 10}]}, 'same-size replacement was missed'
+os.utime(plan, ns=(plan.stat().st_atime_ns, plan.stat().st_mtime_ns + 1_000_000))
+assert plan_board(now + 20) == {'tasks': [{'number': 11}]}, 'mtime change was missed'
+
+# Measure real agent-plan invocations on fixture state only, using simulated
+# five-second tick clocks so this regression needs no sleep or live repository.
+plan.write_text(json.dumps({'schema': 3, 'tasks': {
+    'cache-task': {'id': 'cache-task', 'state': 'ready', 'depends': [], 'title': 'fixture'}}}), encoding='utf-8')
+plan_cache = project / cache.DIRECTORY / 'plan-list.json'
+plan_cache.unlink()
+real_run = subprocess.run
+calls = []
+def run_plan(command, **kwargs):
+    if 'agent-plan' in command:
+        started = time.perf_counter()
+        result = real_run(command, **kwargs)
+        calls.append((time.perf_counter() - started) * 1000)
+        return result
+    return subprocess.CompletedProcess(command, 0, '{}', '')
+def measure(reader):
+    calls.clear()
+    started = time.perf_counter()
+    with patch.object(panel, 'dashboard', return_value=({'plan': {'present': True}}, 0)), \
+            patch.object(panel.room, 'status', side_effect=lambda repo, ident: {'id': ident}), \
+            patch.object(panel_results, 'completed_tasks', return_value={}), \
+            patch.object(panel, 'read_shared', side_effect=lambda repo, key, collect, **kwargs: collect()), \
+            patch.object(cache, 'read_plan_list', side_effect=reader), \
+            patch.object(panel.subprocess, 'run', side_effect=run_plan):
+        for tick in range(3):
+            with patch.object(cache.time, 'time', return_value=now + tick * 5):
+                state, status = panel.snapshot(project, 'board-%d' % tick)
+                assert status == 0 and state['room']['repo_tasks'][0]['id'] == 'cache-task', state
+    return len(calls), (time.perf_counter() - started) * 1000
+baseline = measure(lambda repo, collect: collect())
+cached = measure(cache.read_plan_list)
+assert baseline[0] == 3 and cached[0] == 1, (baseline, cached)
+os.utime(plan, ns=(plan.stat().st_atime_ns, plan.stat().st_mtime_ns + 1_000_000))
+touched = measure(cache.read_plan_list)
+assert touched[0] == 1, touched
+print('plan-list fixture: before=%d calls %.1f ms; after=%d calls %.1f ms; touched=%d calls %.1f ms'
+      % (baseline + cached + touched))
+
+with patch.object(cache, 'fingerprint', side_effect=AssertionError('plan cache walked the repository')):
+    assert cache.read_plan_list(project, lambda: None)['tasks'][0]['id'] == 'cache-task'
+def raced_plan():
+    plan.write_text(plan.read_text() + ' ', encoding='utf-8')
+    return {'tasks': []}
+plan_cache.unlink()
+assert cache.read_plan_list(project, raced_plan) == {'tasks': []}
+assert not plan_cache.exists(), 'plan changed during collection was published'
+for evidence in ({'completion_receipt': {}}, {'cancellation': {}}):
+    assert cache.read_plan_list(project, lambda: {'tasks': [evidence]}) == {'tasks': [evidence]}
+    assert not plan_cache.exists(), 'external validation was cached'
+completions = project / '.oms/plan/completions'
+completions.mkdir()
+assert cache.read_plan_list(project, lambda: {'tasks': []}) == {'tasks': []}
+assert plan_cache.exists(), 'empty completion namespace prevented reuse'
+completions.rmdir()
+
+# Refresh ages locally; at the exact TTL boundary consult the engine again.
+plan_cache.unlink(missing_ok=True)
+anchor = int(time.time()) - 20
+claim = {'id': 'claim', 'state': 'claimed', 'depends': [], 'title': 'fixture',
+         'claimed_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(anchor)), 'ttl': '10',
+         'claim_expired': False, 'claim_age_s': 0}
+stored_claim = dict(claim)
+stored_claim.pop('claim_expired')
+stored_claim.pop('claim_age_s')
+plan.write_text(json.dumps({'schema': 3, 'tasks': {'claim': stored_claim}}), encoding='utf-8')
+with patch.object(cache.time, 'time', return_value=anchor):
+    assert cache.read_plan_list(project, lambda: {'tasks': [claim]})['tasks'][0]['claim_expired'] is False
+with patch.object(cache.time, 'time', return_value=anchor + 5):
+    assert cache.read_plan_list(project, lambda: None)['tasks'][0]['claim_age_s'] == 5
+with patch.object(cache.time, 'time', return_value=anchor + 10):
+    with patch.object(panel, 'dashboard', return_value=({'plan': {'present': True}}, 0)), \
+            patch.object(panel.room, 'status', return_value={'id': 'ttl'}), \
+            patch.object(panel_results, 'completed_tasks', return_value={}), \
+            patch.object(panel, 'read_shared', side_effect=lambda repo, key, collect, **kwargs: collect()), \
+            patch.object(panel.subprocess, 'run', side_effect=run_plan) as command:
+        state, status = panel.snapshot(project, 'ttl')
+        assert status == 0 and state['room']['repo_tasks'][0]['claim_expired'] is True
+        assert command.call_count == 2, 'expired claim did not reach agent-plan'
+
+# Failed reads leave the room drawn and retry on the following tick.
+plan_cache.unlink()
+with patch.object(panel, 'dashboard', return_value=({'plan': {'present': True}}, 0)), \
+        patch.object(panel.room, 'status', return_value={'id': 'retry'}), \
+        patch.object(panel_results, 'completed_tasks', return_value={}), \
+        patch.object(panel, 'read_shared', side_effect=lambda repo, key, collect, **kwargs: collect()), \
+        patch.object(panel.subprocess, 'run', side_effect=[
+            subprocess.CompletedProcess([], 0, '{}', ''), subprocess.CompletedProcess([], 1, '', ''),
+            subprocess.CompletedProcess([], 0, '{}', ''), subprocess.CompletedProcess([], 0, '{"tasks": []}', '')]) as command:
+    state, status = panel.snapshot(project, 'retry')
+    assert status == 0 and state['room']['repo_tasks_unavailable'] is True
+    assert not plan_cache.exists(), 'failed read was cached'
+    state, status = panel.snapshot(project, 'retry')
+    assert status == 0 and state['room']['repo_tasks'] == [] and command.call_count == 4
+
 # The board still selects its own room, and result queries share the same
 # generation without retaining scoped answer text or skipping digest checks.
 path.unlink()
