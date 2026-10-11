@@ -118,13 +118,13 @@ def event_shape(event):
     kind = event.get("kind")
     required = {"created": (), "join": ("participant", "provider", "role", "label"), "bind": ("participant", "consumer"),
                 "scope": ("participant",), "describe": ("participant", "label"),
-                "leave": ("participant",), "message": ("id", "sender", "recipient", "message_kind"),
+                "leave": ("participant",), "closed": ("participant",), "message": ("id", "sender", "recipient", "message_kind"),
                 "received": ("participant",), "publication": ("id", "digest", "status")}
     if not event:
         return
     if kind not in required or any(not isinstance(event.get(key), str) for key in required[kind]):
         raise ValueError("invalid persisted room event")
-    for key in ("model", "consumer", "previous", "parent", "reply_to", "task_id", "turn_id", "target"):
+    for key in ("model", "consumer", "previous", "parent", "reply_to", "task_id", "turn_id", "target", "participant"):
         if event.get(key) is not None and not isinstance(event[key], str):
             raise ValueError("invalid room event field")
     for key in ("owns", "messages"):
@@ -206,7 +206,8 @@ def project(rows):
     return {"schema": 1, "kind": "oms-room", "id": created["thread"],
             "title": created.get("text", "Shared work"), "owner": owner,
             "task_id": created["room_event"].get("task_id"),
-            "closed": any(row.get("role") == "closed" for row in rows),
+            "creator": created["room_event"].get("participant"),
+            "closed": any(row.get("role") == "closed" or row.get("room_event", {}).get("kind") == "closed" for row in rows),
             "participants": list(members.values()), "messages": messages, "publication": publication,
             "publications": publications,
             "delivery": "next safe point or explicit poll; acknowledgment is not approval"}
@@ -243,16 +244,17 @@ def declared_scopes(role, scopes):
 
 def validate_event(rows, event, text):
     """Validate while thread.sh holds its existing file lock; no membership grants authority."""
-    if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "bind", "scope", "describe", "leave", "message", "received", "publication"}:
+    if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "bind", "scope", "describe", "leave", "closed", "message", "received", "publication"}:
         raise ValueError("invalid room event")
     event_shape(event)
     kind = event["kind"]
-    keys = {"created": {"kind", "task_id"},
+    keys = {"created": {"kind", "task_id", "participant"},
             "join": {"kind", "participant", "provider", "model", "role", "label", "consumer", "owns", "parent"},
             "bind": {"kind", "participant", "consumer", "previous"},
             "scope": {"kind", "participant", "owns"},
             "describe": {"kind", "participant", "label"},
             "leave": {"kind", "participant"},
+            "closed": {"kind", "participant"},
             "message": {"kind", "id", "sender", "recipient", "message_kind", "reply_to"},
             "received": {"kind", "participant", "messages"},
             "publication": {"kind", "id", "digest", "status", "delivery_unknown", "turn_id", "retry", "target"}}[kind]
@@ -275,13 +277,23 @@ def validate_event(rows, event, text):
     if kind == "created":
         if len(rows) != 1 or rows[0].get("live") is not True or any(row.get("room_event") for row in rows):
             raise ValueError("room already exists")
+        if event.get("participant"):
+            identifier(event["participant"], "creator")
         if event.get("task_id"):
             identifier(event["task_id"], "task")
         return True
     state = project(rows)
     if child and participant(state, os.environ.get("OMS_ROOM_PARTICIPANT"))["role"] == "main":
         raise ValueError("a worker cannot speak as a native main")
-    if state["closed"]:
+    if kind == "closed":
+        who = identifier(event["participant"], "participant")
+        caller = os.environ.get("OMS_ROOM_PARTICIPANT")
+        if caller and (caller != who or os.environ.get("OMS_ROOM_ID") != rows[0].get("thread")):
+            raise ValueError("close must name this session's participant and room")
+        if who != state["creator"]:
+            participant(state, who)
+        return not state["closed"]
+    if state["closed"] and kind != "received":
         raise ValueError("room is closed")
     if kind == "describe":
         member = participant(state, event["participant"])
@@ -438,17 +450,19 @@ def append(repo, room, event, text):
                    "--room-event", json.dumps(event, ensure_ascii=False))
 
 
-def create(repo, room=None, title="Shared work", task_id=None):
+def create(repo, room=None, title="Shared work", task_id=None, creator=None):
     room = identifier(room or "room-" + uuid.uuid4().hex[:12], "room")
     if task_id:
         identifier(task_id, "task")
     if not title.strip() or len(title.encode("utf-8")) > 1000:
         raise ValueError("room title needs 1..1000 bytes")
-    validate_event([{"live": True, "thread": room}], {"kind": "created", **({"task_id": task_id} if task_id else {})}, title)
+    event = {"kind": "created", **({"task_id": task_id} if task_id else {}),
+             **({"participant": identifier(creator, "creator")} if creator else {})}
+    validate_event([{"live": True, "thread": room}], event, title)
     if (Path(repo) / ".oms/threads" / (room + ".jsonl")).exists():
         raise ValueError("room id already exists; join it explicitly")
     command(repo, "new", "--id", room, "--live", "--topic", title)
-    append(repo, room, {"kind": "created", **({"task_id": task_id} if task_id else {})}, title)
+    append(repo, room, event, title)
     return room
 
 
@@ -470,6 +484,12 @@ def join(repo, room, who, provider, role="main", model=None, label=None, native_
         event["parent"] = parent
     append(repo, room, event, "Joined: " + event["label"])
     return event
+
+
+def close(repo, room, who):
+    event = {"kind": "closed", "participant": identifier(who, "participant")}
+    append(repo, room, event, "Room closed")
+    return {"status": "closed"}
 
 
 def describe(repo, room, who, label):
@@ -588,8 +608,6 @@ def updates(repo, room, who, after="", budget=8192, limit=50, *, state=None):
             or type(limit) is not int or not 1 <= limit <= 200):
         raise ValueError("updates requires bytes 1..65536 and turns 1..200")
     state = state if state is not None else project(records(repo, room))
-    if state["closed"]:
-        raise ValueError("room is closed")
     member = participant(state, who)
     if after:
         delta = thread_live.updates(repo, room, after, budget, limit, allow_first_row_over_budget=True)
@@ -773,7 +791,7 @@ def publish(repo, ident, retry=False, app="codex", recipient=None, allow_wakeup=
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="OMS work rooms: shared threads, addressed messages and explicit consumption.")
-    parser.add_argument("action", choices=("new", "join", "bind", "scope", "describe", "leave", "send", "updates", "ack", "show", "list", "publish"))
+    parser.add_argument("action", choices=("new", "join", "bind", "scope", "describe", "leave", "close", "send", "updates", "ack", "show", "list", "publish"))
     parser.add_argument("--repo", default=os.environ.get("OMS_ROOM_REPO") or os.getcwd())
     parser.add_argument("--id", default=os.environ.get("OMS_ROOM_ID"))
     parser.add_argument("--participant", default=os.environ.get("OMS_ROOM_PARTICIPANT"))
@@ -816,7 +834,7 @@ def main(argv=None):
                 parser.error("describe accepts only --repo, --id, --participant, --label and --json")
     if args.action not in {"new", "list"} and not args.id:
         parser.error("this operation needs a room id")
-    if args.action in {"join", "bind", "scope", "describe", "leave", "send", "updates", "ack"} and not args.participant:
+    if args.action in {"join", "bind", "scope", "describe", "leave", "close", "send", "updates", "ack"} and not args.participant:
         parser.error("this operation needs a participant")
     if args.action == "scope" and bool(args.owns) == args.clear:
         parser.error("scope needs --owns PATH (repeatable) or --clear")
@@ -835,7 +853,7 @@ def main(argv=None):
         if args.action == "new":
             if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
                 raise ValueError("a worker cannot create a room")
-            result = {"id": create(repo, args.id, args.topic, args.task_id)}
+            result = {"id": create(repo, args.id, args.topic, args.task_id, args.participant)}
         elif args.action == "join":
             result = join(repo, args.id, args.participant, args.provider, args.role, args.model, args.label,
                           args.native_session, args.owns, args.parent)
@@ -848,6 +866,8 @@ def main(argv=None):
         elif args.action == "leave":
             append(repo, args.id, {"kind": "leave", "participant": args.participant}, "Participant left")
             result = {"status": "left"}
+        elif args.action == "close":
+            result = close(repo, args.id, args.participant)
         elif args.action == "send":
             if bool(args.text) == bool(args.text_file):
                 raise ValueError("send needs exactly one text or text-file")
@@ -869,8 +889,8 @@ def main(argv=None):
             result = {"status": "consumed", "approval": False}
         elif args.action == "list":
             states, incomplete = discover(repo)
-            found = [dict({k: state[k] for k in ("id", "title", "owner")}, message_count=len(state["messages"]))
-                     for state in states if not state["closed"]]
+            found = [dict({k: state[k] for k in ("id", "title", "owner", "closed")}, message_count=len(state["messages"]))
+                     for state in states]
             result = {"rooms": found, "scan_limit": MAX_ROOMS, "incomplete": incomplete}
         else:
             result = status(repo, args.id)

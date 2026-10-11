@@ -98,6 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
+      native: ${{ steps.plan.outputs.native }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -143,7 +144,7 @@ jobs:
             bash scripts/check.sh --affected --changed-from "$DIFF_BASE" --changed-to HEAD \
               --ci-output "$GITHUB_OUTPUT"
           else
-            echo 'mode=full' >> "$GITHUB_OUTPUT"
+            printf 'mode=full\nnative=true\n' >> "$GITHUB_OUTPUT"
             if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
               printf '\n### OMS verification selection\n\nFull check: scheduled/manual run or unavailable base revision.\n' >> "$GITHUB_STEP_SUMMARY"
             fi
@@ -152,20 +153,15 @@ jobs:
   # Exercise the same install -> update -> uninstall contract on every
   # supported host and ownership mode. Linux auto is already a focused stage;
   # do not run the same fixture twice on a full gate. Keep Linux copy and the
-  # native macOS/Windows legs, which exercise different platform behavior.
+  # native macOS/Windows legs for native-risk changes and weekly/manual runs.
+  # The matrix omits those hosts only when the plan explicitly permits it.
   install_e2e:
     needs: affected_plan
-    if: needs.affected_plan.outputs.mode == 'full'
+    if: needs.affected_plan.outputs.mode == 'full' || needs.affected_plan.outputs.native == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            link_mode: copy
-          - os: macos-latest
-            link_mode: auto
-          - os: windows-latest
-            link_mode: auto
+        include: ${{ fromJSON(needs.affected_plan.outputs.native == 'true' && '[{"os":"ubuntu-latest","link_mode":"copy"},{"os":"macos-latest","link_mode":"auto"},{"os":"windows-latest","link_mode":"auto"}]' || '[{"os":"ubuntu-latest","link_mode":"copy"}]') }}
     runs-on: ${{ matrix.os }}
     name: native (${{ matrix.os }}, ${{ matrix.link_mode }})
     defaults:
@@ -221,7 +217,7 @@ jobs:
   # grammar, but only a real 3.9 interpreter proves the no-tomllib HUD path.
   python39:
     needs: affected_plan
-    if: needs.affected_plan.outputs.mode == 'full'
+    if: needs.affected_plan.outputs.native == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -249,6 +245,7 @@ jobs:
           SMOKE_SHARD_RESULT: ${{ needs.smoke_shard.result }}
           AFFECTED_PLAN_RESULT: ${{ needs.affected_plan.result }}
           AFFECTED_MODE: ${{ needs.affected_plan.outputs.mode }}
+          AFFECTED_NATIVE: ${{ needs.affected_plan.outputs.native }}
           INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
           PYTHON39_RESULT: ${{ needs.python39.result }}
         run: |
@@ -266,14 +263,22 @@ jobs:
           for result in \
             "$LINT_RESULT" \
             "$FOCUSED_RESULT" \
-            "$SMOKE_SHARD_RESULT" \
-            "$INSTALL_E2E_RESULT" \
-            "$PYTHON39_RESULT"; do
+            "$SMOKE_SHARD_RESULT"; do
             if [ "$result" != "$expected" ]; then
               echo "required job result: $result (expected $expected)" >&2
               status=1
             fi
           done
+          case "$AFFECTED_NATIVE" in
+            true) native_expected=success; install_expected=success ;;
+            false)
+              native_expected=skipped
+              install_expected="$expected"
+              ;;
+            *) native_expected=invalid; install_expected=invalid; status=1 ;;
+          esac
+          [ "$INSTALL_E2E_RESULT" = "$install_expected" ] || status=1
+          [ "$PYTHON39_RESULT" = "$native_expected" ] || status=1
           if [ "$status" -ne 0 ]; then
             echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT" >&2
           fi

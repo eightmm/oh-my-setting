@@ -373,6 +373,15 @@ oms room ack --repo . --id team --participant opus-main --message api-question
 oms room describe --repo . --id team --participant sol-main --label 'Improve result navigation'
 ```
 
+`oms room close --id team --participant sol-main` records a typed `closed`
+event. A joined member or the recorded creator may close a room; workers cannot.
+New rooms record the creator when `new --participant` or the inherited participant
+is supplied. Existing rooms without that field require joined membership.
+Closed rooms reject join/send, appear with `closed: true` in show/list, and retain
+read/ack access for enrolled recipients. `oms gc --apply --days N` removes aged
+closed rooms and empty rooms without joined participants under the thread lock;
+unread mail, unknown joined presence, recent or malformed logs are preserved.
+
 `describe` updates an enrolled main's work title without leaving the room or
 moving its native session, join time, mailbox anchor or unread messages. An
 explicit title takes precedence over its launch title; existing `status` messages

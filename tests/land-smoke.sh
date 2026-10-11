@@ -315,6 +315,15 @@ grep -q '"state": "passed"' "$receipt" || fail "signal probe landing did not pas
 grep -Eq 'SigIgn:.*[0-9a-f]*[01489]$' "$(log_of "$receipt")" ||
   fail "the detached gate must see SIGINT and SIGQUIT unignored: $(grep SigIgn "$(log_of "$receipt")")"
 
+# The source checkout selects affected checks even before an install receipt
+# exists. A project template without this engine retains its plain default.
+mkdir -p "$repo/scripts/lib"
+: > "$repo/scripts/lib/check-parallel.sh"
+git -C "$repo" add scripts/lib/check-parallel.sh
+gate 'test "$*" = "--affected --changed-from origin/main --changed-to HEAD"'
+OMS_INSTALL_RECEIPT="$TMP/no-install-receipt.json" "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 \
+  > "$TMP/source-default.out" 2>&1 || fail "source checkout did not select its affected gate"
+
 # A successful push does not hide a failed installation refresh.
 install="$TMP/install"
 git init -q "$install"
@@ -665,8 +674,8 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
   fail "successful CI and update failed to land"
 [ "$(cat "$TMP/events")" = "$(printf 'ci\nupdate')" ] || fail "successful update did not follow CI"
 grep -q ': passed' "$TMP/update-pass.out" || fail "successful update receipt was not passed"
-grep -rqs '"command": *"bash scripts/check.sh --parallel"' "$receipt_dir" ||
-  fail "the harness checkout's default gate must run --parallel"
+grep -rqs '"command": *"bash scripts/check.sh --affected --changed-from origin/main --changed-to HEAD"' "$receipt_dir" ||
+  fail "the harness checkout's default gate must select against the destination"
 
 # Probe the real job function with deterministic wait/push interleavings.
 # Git is stubbed: this cannot publish or mutate the caller's repository.

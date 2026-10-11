@@ -17819,7 +17819,7 @@ test_delegation_liveness_in_state() {
 test_gc_reclaims_safely() {
   local project="$TMP/gc"
   local gc_err="$project/gc.err"
-  local hook_project hook_case before after rc lock_mode lock_force_mkdir lock_target holder_pid python_real python_crlf_dir
+  local room_kind hook_project hook_case before after rc lock_mode lock_force_mkdir lock_target holder_pid python_real python_crlf_dir
 
   gc_hook_digest() {
     python3 -c 'import hashlib,sys
@@ -17903,6 +17903,45 @@ PY
   [ ! -f "$project/.oms/task/archive/current-old.md" ] || fail "gc should remove an aged task archive"
   [ ! -d "$project/.oms/runs/oldrun" ] || fail "gc should remove an aged capsule"
   [ ! -s "$project/.oms/failures.jsonl" ] || fail "gc should compact an all-resolved old ledger to empty"
+
+  # Work rooms reuse the thread lock and preserve unread mail, including mail
+  # addressed to a member who has left. Unknown joined presence is retained.
+  python3 - "$ROOT/scripts/lib" "$project" <<'PY'
+import os
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+import room
+project = Path(sys.argv[2])
+for ident in ("empty", "joined", "left", "closed", "unread", "recent", "malformed"):
+    room.create(project, "gc-room-" + ident, "GC room fixture", creator="creator")
+for ident in ("joined", "left", "closed", "unread"):
+    room.join(project, "gc-room-" + ident, "creator", "codex")
+room.append(project, "gc-room-left", {"kind": "leave", "participant": "creator"}, "Left")
+room.close(project, "gc-room-closed", "creator")
+room.join(project, "gc-room-unread", "reader", "claude")
+room.send(project, "gc-room-unread", "creator", "reader", "Unread", message_id="gc-unread")
+room.append(project, "gc-room-unread", {"kind": "leave", "participant": "reader"}, "Left")
+room.close(project, "gc-room-unread", "creator")
+malformed = project / ".oms/threads/gc-room-malformed.jsonl"
+with malformed.open("a") as handle:
+    handle.write('{broken\\n')
+for path in (project / ".oms/threads").glob("gc-room-*.jsonl"):
+    if "recent" not in path.name:
+        os.utime(path, (1, 1))
+# A symlink must never authorize deletion of its target.
+(project / ".oms/threads/gc-room-link.jsonl").symlink_to(project / ".oms/threads/gc-room-closed.jsonl")
+PY
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 ) > "$project/room-dry.out" 2>&1 || fail "room GC dry-run failed"
+  [ -f "$project/.oms/threads/gc-room-empty.jsonl" ] || fail "dry-run swept a room"
+  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply ) > "$project/room-apply.out" 2>&1 || fail "room GC apply failed"
+  for room_kind in empty left closed; do
+    [ ! -e "$project/.oms/threads/gc-room-$room_kind.jsonl" ] || fail "aged $room_kind room survived"
+  done
+  for room_kind in joined unread recent malformed; do
+    [ -f "$project/.oms/threads/gc-room-$room_kind.jsonl" ] || fail "$room_kind room was deleted"
+  done
+  [ -L "$project/.oms/threads/gc-room-link.jsonl" ] || fail "room GC followed a symlink"
 
   # No marker and a verified dead marker permit normal cleanup. Every
   # ambiguous marker shape defers both transient operations byte-for-byte.

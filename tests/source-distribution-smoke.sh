@@ -66,7 +66,7 @@ fi
 
 workflow="$ROOT/.github/workflows/test.yml"
 for host in ubuntu-latest macos-latest windows-latest; do
-  grep -Fq "os: $host" "$workflow" ||
+  grep -Fq "\"os\":\"$host\"" "$workflow" ||
     fail "install lifecycle matrix must cover $host"
 done
 
@@ -119,7 +119,7 @@ EOF
 # Copy mode is the Windows ownership contract. Proving it only on the Windows
 # runner means the slowest leg in the matrix is the first to report a broken
 # marker or a lost backup, so a Linux leg forces the same path early.
-grep -Fq 'link_mode: copy' "$workflow" ||
+grep -Fq '"link_mode":"copy"' "$workflow" ||
   fail "install lifecycle matrix must exercise copy mode outside Windows"
 # The macOS job is the only stock Bash 3.2 parser and the only BSD userland in
 # CI. Both catch a class nothing else does, and both have already shipped
@@ -223,7 +223,7 @@ if not required:
     raise SystemExit("workflow defines no verification jobs to gate on")
 assert "portability_macos" not in jobs and "windows_durable_writer" not in jobs, \
     "native checks should reuse their lifecycle runner, not provision duplicate hosts"
-native = workflow_text.split("\n  install_e2e:\n", 1)[1].split("\n  python39:\n", 1)[0]
+native_body = workflow_text.split("\n  install_e2e:\n", 1)[1].split("\n  python39:\n", 1)[0]
 for command, host in (
     ("bash tests/windows-durable-writer-smoke.sh", "Windows"),
     ("bash tests/scripts-smoke.sh --only test_process_liveness_uses_non_destructive_windows_probe", "Windows"),
@@ -232,7 +232,7 @@ for command, host in (
     ("OMS_BASH32_BIN=/bin/bash bash tests/scripts-smoke.sh --only test_shared_fast_mode_detection_gates_auto_verify", "macOS"),
     ("bash tests/bsd-portability-smoke.sh", "macOS"),
 ):
-    step = next((part for part in native.split("      - name:")
+    step = next((part for part in native_body.split("      - name:")
                  if "run: " + command in part or
                  ("run: |\n" in part and "\n          " + command + "\n" in part)), "")
     assert step and "!cancelled() && runner.os == '%s'" % host in step, (command, host)
@@ -271,19 +271,36 @@ script = body.split("        run: |\n", 1)[1]
 script = "\n".join(line[10:] for line in script.splitlines())
 full_jobs = required - {"affected_plan"}
 for mode in ("full", "affected"):
-    env = dict(os.environ, AFFECTED_MODE=mode, AFFECTED_PLAN_RESULT="success")
-    env.update({name.upper() + "_RESULT": "success" if mode == "full" else "skipped"
-                for name in full_jobs})
-    def passes(values):
-        return subprocess.run(["bash", "-eu", "-c", script], env=values,
-                              capture_output=True).returncode == 0
-    assert passes(env), (mode, "valid planned skips rejected")
-    for name in required:
-        key = name.upper() + "_RESULT"
-        for result in ("success", "skipped", "failure", "cancelled", ""):
-            if result != env[key]:
-                assert not passes(dict(env, **{key: result})), (mode, name, result)
-    assert not passes(dict(env, AFFECTED_MODE="unknown"))
+    for native in ("true", "false"):
+        env = dict(os.environ, AFFECTED_MODE=mode, AFFECTED_NATIVE=native, AFFECTED_PLAN_RESULT="success")
+        env.update({name.upper() + "_RESULT": "success" if mode == "full" else "skipped"
+                    for name in full_jobs})
+        env["PYTHON39_RESULT"] = "success" if native == "true" else "skipped"
+        env["INSTALL_E2E_RESULT"] = "success" if native == "true" or mode == "full" else "skipped"
+        def passes(values):
+            return subprocess.run(["bash", "-eu", "-c", script], env=values,
+                                  capture_output=True).returncode == 0
+        assert passes(env), (mode, native, "valid planned skips rejected")
+        for name in required:
+            key = name.upper() + "_RESULT"
+            for result in ("success", "skipped", "failure", "cancelled", ""):
+                if result != env[key]:
+                    assert not passes(dict(env, **{key: result})), (mode, native, name, result)
+        assert not passes(dict(env, AFFECTED_MODE="unknown"))
+        for invalid in ("", "unknown"):
+            assert not passes(dict(env, AFFECTED_NATIVE=invalid))
+
+# Execute the native matrix alternatives as data and pin the plan expression.
+import json
+matrix = native_body.split("        include: ", 1)[1].splitlines()[0]
+assert "fromJSON(needs.affected_plan.outputs.native == 'true' && " in matrix
+alternatives = re.findall(r"'(\[.*?\])'", matrix)
+assert len(alternatives) == 2
+assert json.loads(alternatives[0]) == [
+    {"os": "ubuntu-latest", "link_mode": "copy"},
+    {"os": "macos-latest", "link_mode": "auto"},
+    {"os": "windows-latest", "link_mode": "auto"}]
+assert json.loads(alternatives[1]) == [{"os": "ubuntu-latest", "link_mode": "copy"}]
 
 # Every expensive job follows the same decision. Run the planner shell with
 # bounded Git/check stubs to verify events and absent-base fallback offline.
@@ -292,9 +309,10 @@ workflow_text = "\n".join(lines)
 for name in full_jobs:
     job = workflow_text.split("\n  " + name + ":\n", 1)[1].split("\n  #", 1)[0]
     job = re.split(r"\n  [A-Za-z0-9_-]+:\n", job, maxsplit=1)[0]
-    mode = "full"
     assert "    needs: affected_plan\n" in job, name
-    assert "    if: needs.affected_plan.outputs.mode == '%s'\n" % mode in job, name
+    condition = {"install_e2e": "needs.affected_plan.outputs.mode == 'full' || needs.affected_plan.outputs.native == 'true'",
+                 "python39": "needs.affected_plan.outputs.native == 'true'"}.get(name, "needs.affected_plan.outputs.mode == 'full'")
+    assert "    if: %s\n" % condition in job, name
 plan_body = workflow_text.split("\n  affected_plan:\n", 1)[1].split("\n  install_e2e:\n", 1)[0]
 plan_script = plan_body.split("      - name: select and verify affected changes\n", 1)[1].split("        run: |\n", 1)[1]
 plan_script = "\n".join(line[10:] for line in plan_script.splitlines()
@@ -337,7 +355,7 @@ with tempfile.TemporaryDirectory(prefix="oms-ci-plan-") as tmp:
     (root / "scripts").mkdir()
     (root / "scripts/check.sh").write_text(
         'echo invoked >> "$PROBE_LOG"\n[ "$PROBE_MODE" != invalid ] || exit 2\n'
-        'printf "mode=%s\\n" "$PROBE_MODE" >> "$GITHUB_OUTPUT"\n', encoding="utf-8")
+        'printf "mode=%s\\nnative=false\\n" "$PROBE_MODE" >> "$GITHUB_OUTPUT"\n', encoding="utf-8")
     for event, base, selected, expected, invoked in (
         ("pull_request", "valid", "affected", "affected", True),
         ("push", "valid", "affected", "affected", True),
@@ -359,7 +377,37 @@ with tempfile.TemporaryDirectory(prefix="oms-ci-plan-") as tmp:
         assert (result.returncode == 0) == (expected is not None), (event, result.stderr)
         if expected is not None:
             assert "mode=" + expected in output.read_text(), (event, base)
+            assert "native=" + ("false" if invoked else "true") in output.read_text(), (event, base)
         assert log.read_text().splitlines() == (["invoked"] if invoked else []), (event, base, "repeated or missing selection")
+checker = (pathlib.Path(sys.argv[1]).parents[2] / "scripts/check.sh").read_text()
+selector = checker.split("prepare_affected_gate() {", 1)[1].split("\nif [ \"$RUN_QUICK\"", 1)[0]
+selector = "prepare_affected_gate() {" + selector
+with tempfile.TemporaryDirectory(prefix="oms-native-plan-") as tmp:
+    root = pathlib.Path(tmp)
+    changed = root / "paths"
+    for paths, expected in ((["README.md"], "false"), (["AGENTS.md"], "false"),
+                            (["AGENTS.md", "scripts/install-tools.sh"], "true"),
+                            (["scripts/lib/room.py"], "true"), (["tests/bsd-portability-smoke.sh"], "true"),
+                            ([".github/workflows/test.yml"], "true"), (["scripts/lib/oms-common.sh"], "true"),
+                            (['"scripts/lib/quoted path.py"'], "true")):
+        changed.write_text("\n".join(paths) + "\n")
+        probe = r'''git() {
+          case "$1 $2" in
+            'diff --name-only') cat "$PROBE_PATHS" ;;
+            'diff --quiet'|'ls-files --others') return 0 ;;
+            'rev-parse '* ) echo identical-tree ;;
+            *) return 2 ;;
+          esac
+        }
+        AFFECTED_MODE=; AFFECTED_REASONS=; AFFECTED_TESTS=(); AFFECTED_CASE_LANGS=()
+        AFFECTED_CASE_PATHS=(); AFFECTED_CASE_SELECTORS=(); QUICK_FROM=base; QUICK_TO=HEAD
+        CHECK_RUNTIME="$PROBE_ROOT"; SKIP_LINT=0
+        ''' + selector + '\nprepare_affected_gate\nprintf "%s\\n" "$AFFECTED_NATIVE"\n'
+        result = subprocess.run(["bash", "-eu", "-c", probe], cwd=tmp,
+                                env=dict(os.environ, PROBE_PATHS=str(changed), PROBE_ROOT=tmp),
+                                capture_output=True, text=True)
+        assert result.returncode == 0 and result.stdout.strip() == expected, (paths, result.stdout, result.stderr)
+
 PY
 
 for mode in --focused-only --scripts-smoke-only --quick --affected; do

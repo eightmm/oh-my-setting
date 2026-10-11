@@ -171,7 +171,8 @@ manifest) then the test suites. With no arguments it runs both.
                         fall back to the complete gate, including lint.
   --print-affected-mode With --affected, print affected or full after planning
                         and exit without running test stages.
-  --ci-output FILE      With --affected, append mode=affected|full to FILE.
+  --ci-output FILE      With --affected, append mode=affected|full and
+                        native=true|false to FILE.
                         Run affected checks here; defer full checks to CI lanes.
   --changed-from REF    Base tree for --quick or --affected.
   --changed-to REF      Target tree for --quick or --affected.
@@ -542,9 +543,23 @@ prepare_affected_gate() {
   local selector_changes="$CHECK_RUNTIME/affected-selector-changes"
   local kind first second third path docs_only=1 scoped_only=1 models=0
 
+  AFFECTED_NATIVE=false
+  # Read the complete path set separately: the mode selector can stop at its
+  # first full boundary, but a later path can still require native coverage.
+  git diff --name-only --no-renames "$QUICK_FROM" "$QUICK_TO" -- > "$selector_changes"
+  while IFS= read -r path; do
+    case "$path" in
+      .github/workflows/*|install.sh|scripts/*.sh|scripts/*.py|scripts/oms|\
+      plugins/*|rules/*|config/*|templates/*.sh|tests/*.py|tests/scripts-smoke.sh|\
+      tests/*install*|tests/*update*|tests/*portability*|\
+      tests/*windows*|tests/*python*|tests/*runtime*|tests/*hook*|tests/*bash32*|\
+      \"*|*\\*)
+        AFFECTED_NATIVE=true ;;
+    esac
+  done < "$selector_changes"
+
   # Include both sides of renames: moving executable code into docs is not a
   # documentation-only change. Unknown/quoted paths take the conservative path.
-  git diff --name-only --no-renames "$QUICK_FROM" "$QUICK_TO" -- > "$selector_changes"
   while IFS= read -r path; do
     case "$path" in
       README.md|README.ko.md|docs/*.md) ;;
@@ -586,6 +601,7 @@ prepare_affected_gate() {
       [ -n "$(git ls-files --others --exclude-standard)" ]; then
     AFFECTED_MODE=full
     AFFECTED_REASONS=workspace-differs-from-head
+    AFFECTED_NATIVE=true
   fi
   if [ "$AFFECTED_MODE" = full ]; then
     : # The selector cannot be the sole judge of changes to its own boundary.
@@ -659,7 +675,7 @@ fi
 if [ "$RUN_AFFECTED" = 1 ]; then
   prepare_affected_gate
   if [ -n "$CI_OUTPUT" ]; then
-    printf 'mode=%s\n' "$AFFECTED_MODE" >> "$CI_OUTPUT"
+    printf 'mode=%s\nnative=%s\n' "$AFFECTED_MODE" "$AFFECTED_NATIVE" >> "$CI_OUTPUT"
     if [ "$AFFECTED_MODE" = full ]; then
       verify_oms_state
       exit 0

@@ -39,6 +39,9 @@
   Direct pushes keep the full hook unless the destination requires CI's
   risk-based `gate`; only then may local quick feedback replace it. Workflow
   presence alone is not branch protection.
-- CI scopes PRs and main pushes alike. Full selections plus weekly/manual runs
-  verify the native Linux/macOS/Windows lifecycle, stock Bash 3.2/BSD userland,
-  and Python 3.9. Only skips authorized by the plan can pass the stable gate.
+- CI scopes PRs and main pushes alike. Full selections keep Linux lint, focused,
+  smoke and copy lifecycle coverage. Native macOS/Windows lifecycle, stock Bash
+  3.2/BSD and Python 3.9 run for install/lifecycle/portability/Python compatibility
+  changes and weekly/manual runs. Only plan-authorized skips pass the stable
+  gate. In this repository `oms land` defaults to affected checks against the
+  destination; explicit `--gate` wins and CI remains authoritative.

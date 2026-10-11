@@ -57,7 +57,8 @@ stale open runs (no spine event in --days; a close event is appended), run
 capsules of runs that are NOT open, abandoned change-guards (dead owner pid
 or aged snapshot), terminal/draft executor souls, retired failure rows
 (resolved, or automatic hook rows past OMS_HOOK_FAIL_TTL — the same predicate
-fail-ledger reads with), closed conversation threads;
+fail-ledger reads with), closed conversation threads, closed work rooms and empty
+rooms without joined participants (unread room mail is always retained);
 artifact index rows are delegated to
 artifact-index prune; orphaned artifact files are left alone unless
 --delete-orphan-files says otherwise. Never touches live runs, the active task, unresolved
@@ -1164,19 +1165,58 @@ if [ -f "$guard_file" ]; then
   fi
 fi
 
-# 4b) Closed conversation threads older than --days. An open thread is never
-#     swept regardless of age: it is the only record of what the agents agreed,
-#     and the current pointer expires on its own TTL.
+# 4b) Recheck age and room mail under the same lock as thread appends. Unknown
+#     enrollment stays live for retention; an explicit leave removes it.
+gc_thread_unlocked() {
+  python3 - "$ROOT_LIB" "$STATE_ROOT" "$1" "$cutoff" "$DRY_RUN" <<'PY'
+import os
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+import room
+repo, filename, cutoff, dry_run = Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5] == "1"
+try:
+    ident = room.identifier(filename.stem, "thread")
+    with room.thread_live.open_thread(repo, ident) as handle:
+        before = os.fstat(handle.fileno())
+        if before.st_mtime >= cutoff:
+            raise ValueError("recent thread")
+        data = handle.read(room.thread_live.MAX_FILE + 1)
+        rows = room.decode_records(data, ident)
+    if any(row.get("room_event") for row in rows):
+        state = room.project(rows)
+        if any(message["pending_for"] for message in state["messages"]):
+            raise ValueError("unread room mail")
+        if state["closed"]:
+            kind = "closed-room"
+        elif not state["messages"] and not any(member["joined"] for member in state["participants"]):
+            kind = "empty-room"
+        else:
+            raise ValueError("active room")
+    elif any(row.get("role") == "closed" for row in rows):
+        kind = "closed-thread"
+    else:
+        raise ValueError("open thread")
+    current = filename.lstat()
+    generation = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    if generation(before) != generation(current):
+        raise ValueError("thread changed")
+    if not dry_run:
+        filename.unlink()
+    print("- %s: %s" % (kind, filename))
+except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+    pass  # Incomplete or unsafe evidence never authorizes deletion.
+PY
+}
 if [ -d "$OMS/threads" ]; then
   cutoff=$(( $(date +%s) - DAYS * 86400 ))
   for f in "$OMS/threads"/*.jsonl; do
-    [ -e "$f" ] || continue
-    if ! grep -q '"role": *"closed"' "$f" 2>/dev/null; then
-      continue
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    thread_gc_out="$(oms_with_file_lock "$f" gc_thread_unlocked "$f")" || fail "thread cleanup failed"
+    if [ -n "$thread_gc_out" ]; then
+      printf '%s\n' "$thread_gc_out"
+      removed=$((removed + 1))
     fi
-    mtime="$(python3 -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' "$f" 2>/dev/null || echo 0)"
-    [ "$mtime" -lt "$cutoff" ] || continue
-    note_remove "closed-thread" "$f"
   done
 fi
 

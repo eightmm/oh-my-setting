@@ -940,7 +940,7 @@ Host ancestry aliases remain supported. This is not a same-user filesystem sandb
 |---|---|
 | `agent-events`, `agent-supervisor` | Append-only attempt lifecycle and bounded `trusted-local` execution. Resume creates a child attempt; reconcile closes stale supervisor-owned queues that lost their runtime record. The supervisor never lands, commits, or pushes. |
 | `approval-inbox` | Private, version-CAS approval outside `.oms`; a patch grant binds the exact base, bytes, attempt when present, lease, profile, verifier hash/mode, ML mode and admission exceptions, then is consumed once. `expire --apply` closes unused grants; stale reservations reconcile dry-run first to terminal `interrupted` with an unknown outcome. Patch landing defers to `patch-land --recover`. |
-| `land` | One detached job per landing: gate (in a detached worktree of the verified SHA, so untracked files and the live session's `.oms` writes stay out; `check.sh --parallel` in the harness checkout itself), `git push --no-verify` of the verified SHA, CI success, then `oms update` guarded to that SHA when the repo is the harness checkout, receipt beside its gate log under `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/` read by `oms land status`. Refuses dirty or diverged trees and never pushes a HEAD that moved during the gate. Sibling worktrees of the same repository whose autopilot receipt is live (`proposing`, `proposal-review`, `driving`) are reported at intake and waited for before the push, up to `--sibling-wait` seconds (default 1800); at the deadline the landing ends `blocked` without moving shared refs, and `--ignore-siblings` records the override. |
+| `land` | One detached job per landing: gate (in a detached worktree of the verified SHA, so untracked files and the live session's `.oms` writes stay out; `check.sh --affected --changed-from REMOTE/TARGET --changed-to HEAD` in the harness checkout itself, with full fallback and explicit `--gate` override), `git push --no-verify` of the verified SHA, CI success, then `oms update` guarded to that SHA when the repo is the harness checkout, receipt beside its gate log under `$XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/` read by `oms land status`. Refuses dirty or diverged trees and never pushes a HEAD that moved during the gate. Sibling worktrees of the same repository whose autopilot receipt is live (`proposing`, `proposal-review`, `driving`) are reported at intake and waited for before the push, up to `--sibling-wait` seconds (default 1800); at the deadline the landing ends `blocked` without moving shared refs, and `--ignore-siblings` records the override. |
 | `init` | Creates repo-local `.oms` state and its ignore guard, then registers the canonical repo root with `oms tick`. The non-fatal summary says `registered`, `already registered`, or `not registered`; an unavailable tick helper or unwritable registry never prevents local initialization. |
 | `tick` | Hourly unattended sweep of registered repos: `oms init` registers a newly initialized repo automatically, while `oms tick register` remains available for an adopted repo. The sweep performs journal sync, attempt reconcile, threads idle over 7d closed, active goal-less task packets closed after 7d, idle all-done plans retired after 14d, mechanically recovered or exactly superseded artifact failures resolved, and single stale failure-ledger rows retired after `OMS_TICK_FAILURE_STALE_DAYS` (14d). `OMS_TICK_RETIRE=0` opts out of task/plan/failure retirement but not artifact resolution; gc remains opt-in with `OMS_TICK_GC=1`. Each receipt and `swept` line reports `tasks_closed`, `plans_retired`, `artifacts_resolved`, `artifacts_superseded`, and `failures_retired`; a stale Codex plugin cache is refreshed. `install` wires a systemd user timer or a cron line this checkout owns. |
 | `open-in` | Probed VS Code/Stably Orca/Codex launch plans. The redundant `ops-cockpit` aggregate was retired; use `inbox`, then the relevant state, approval, or artifact telemetry query. Historical records are unchanged. |
@@ -1192,13 +1192,18 @@ references without its CI orchestration, installation or CLI-help probes.
 `--quick` is partial feedback, not a substitute for affected or release checks.
 
 CI selects once and runs affected tests plus changed-file lint in that same
-job for PRs and main pushes. Full selections and weekly/manual runs fan out to
-the existing lanes and additionally exercise
-install/update/uninstall on Linux, macOS, and Windows Git Bash, BSD fixtures on
-macOS, and real Python 3.9 compatibility. The stable `gate` accepts only planned
-skips. Require it in branch protection before enabling a local quick push hook;
+job for PRs and main pushes. Full selections fan out to the existing Linux
+lint, four focused lanes, four smoke shards and copy lifecycle runner. The
+selector also emits `native=true|false`: install/lifecycle, shell portability,
+Python compatibility, shared runtime/configuration and workflow changes require
+macOS/Windows lifecycle, macOS Bash 3.2/BSD fixtures and real Python 3.9.
+Weekly/manual runs and unavailable-base fallbacks require all native jobs.
+The install matrix omits native hosts only on an explicit `native=false` plan;
+the stable `gate` rejects missing, failed or cancelled required results and
+accepts only planned skips. Require it in branch protection before enabling a local quick push hook;
 having a workflow alone does not protect the branch. Deployment via `oms land`
-still verifies the exact committed tree with one full gate, pushes its SHA,
+verifies the exact committed tree with affected checks against `REMOTE/TARGET`
+(full fallback when selected; explicit `--gate` wins), pushes its SHA,
 waits for CI success, then updates only to that SHA. Failed or skipped CI cannot
 refresh the installation. A moving update target is rejected by the updater.
 Retrying the same commit, destination and gate resumes CI/install from its

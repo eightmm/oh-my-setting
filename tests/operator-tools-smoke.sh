@@ -2395,11 +2395,13 @@ with patch.dict(os.environ, dict(selected_env, **{repo_paths.EXECUTION_ENV: str(
             raise AssertionError("ordinary linked worktree inherited canonical execution authority")
 room.command(shared_root, "close", "--id", shared_id)
 for closed_command in (["panel", "--room", shared_id],
-                       ["room", "join", "--participant", "resolution-owner"],
-                       ["room", "updates", "--participant", "resolution-owner"]):
+                       ["room", "join", "--participant", "resolution-owner"]):
     refused = subprocess.run(["bash", str(panel.ENTRY)] + closed_command + ["--repo", str(working_root), "--json"],
                              env=selected_env, capture_output=True, text=True, timeout=30)
     assert refused.returncode and "closed" in refused.stderr, refused
+closed_read = json.loads(call(["bash", str(panel.ENTRY), "room", "updates", "--participant", "resolution-owner",
+                               "--repo", str(working_root), "--json"], selected_env))
+assert not closed_read["turns"], "closed-room reads remain available"
 print("PASS: native scratch-state resolver and execution directory boundaries")
 
 
@@ -3684,6 +3686,52 @@ if os.name == "posix":
 # The canonical operator suite also covers the room front door and native open contract.
 import room
 import codex_app_notify
+# Typed close is authorized by enrollment or creation and retains unread mail.
+closed_room = room.create(project, "typed-close", "Close contract", creator="creator")
+room.join(project, closed_room, "close-writer", "codex")
+room.join(project, closed_room, "close-reader", "claude")
+room.send(project, closed_room, "close-writer", "close-reader", "Preserve until read", message_id="close-mail")
+for who in ("outsider",):
+    try:
+        room.close(project, closed_room, who)
+    except ValueError as error:
+        assert "not joined" in str(error)
+    else:
+        raise AssertionError("nonmember closed the room")
+room.close(project, closed_room, "creator")
+assert room.status(project, closed_room)["closed"]
+assert room.records(project, closed_room)[-1]["room_event"] == {"kind": "closed", "participant": "creator"}
+closed_rows = room.records(project, closed_room)
+room.close(project, closed_room, "creator")
+assert room.records(project, closed_room) == closed_rows, "close is idempotent"
+for operation in (lambda: room.join(project, closed_room, "late", "codex"),
+                  lambda: room.send(project, closed_room, "close-writer", "close-reader", "Late mail")):
+    try:
+        operation()
+    except ValueError as error:
+        assert "room is closed" in str(error)
+    else:
+        raise AssertionError("closed room accepted new enrollment/mail")
+assert room.updates(project, closed_room, "close-reader")["turns"][0]["room_event"]["id"] == "close-mail"
+room.acknowledge(project, closed_room, "close-reader", ["close-mail"])
+assert not room.status(project, closed_room)["messages"][0]["pending_for"]
+listed_rooms = json.loads(call(["bash", str(room.ENTRY), "room", "list", "--repo", str(project), "--json"], environment))
+assert next(r for r in listed_rooms["rooms"] if r["id"] == closed_room)["closed"]
+member_close = room.create(project, "member-close", "Member close")
+room.join(project, member_close, "joined-closer", "codex")
+closed_cli = json.loads(call(["bash", str(room.ENTRY), "room", "close", "--repo", str(project),
+                              "--id", member_close, "--participant", "joined-closer", "--json"], environment))
+assert closed_cli["status"] == "closed"
+assert room.status(project, member_close)["closed"]
+for env in ({"OMS_HARNESS_CHILD": "1", "OMS_ROOM_ID": member_close, "OMS_ROOM_PARTICIPANT": "joined-closer"},
+            {"OMS_ROOM_ID": member_close, "OMS_ROOM_PARTICIPANT": "foreign-caller"}):
+    with patch.dict(os.environ, env):
+        try:
+            room.close(project, member_close, "joined-closer")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("child or foreign binding closed the room")
 # A new participant starts after enrollment, even when history exceeds its first byte budget.
 mail_room = room.create(project, "enrollment-mail", "Enrollment mailbox")
 room.join(project, mail_room, "mail-writer", "codex")
