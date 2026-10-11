@@ -7456,16 +7456,17 @@ admission_records = [
 admission_records += [{"kind": "patch-admit", "task_id": "admitted"},
                       {"kind": "patch-land", "task_id": "landed"}]
 admission_records += [{"kind": "call", "task_id": "many-calls"} for _ in range(35)]
+admission_records += [{"kind": "call", "task_id": "no-patch"}]
 with patch.object(panel_results, "_records", return_value=([], admission_records)), \
         patch.object(panel_results, "_read", side_effect=AssertionError("admission read artifact bytes")), \
         patch("panel_cache.read_shared", side_effect=lambda repo, key, collect: collect()):
-    assert panel_results.pending_admissions(Path("."), {"pending", "admitted", "landed", "many-calls", "missing"}) == {"pending", "many-calls"}
+    assert panel_results.pending_admissions(Path("."), {"pending", "admitted", "landed", "many-calls", "no-patch", "missing"}) == {"pending", "many-calls"}
     assert panel_results.pending_admissions(Path("."), {"../bad"}) == set()
-    # A coverage boundary is unknown, never evidence that an unseen patch was admitted.
+    # Only tasks without any retained rows are unknown at the coverage boundary.
     with patch.object(panel_results, "_records", return_value=([{}] * 300, admission_records)):
-        assert panel_results.pending_admissions(Path("."), {"missing", "admitted"}) == {"missing"}
-    with patch.object(panel_results, "_records", return_value=([], [{}] * 1000)):
-        assert panel_results.pending_admissions(Path("."), {"missing"}) == {"missing"}
+        assert panel_results.pending_admissions(Path("."), {"pending", "missing", "admitted", "landed", "no-patch"}) == {"pending", "missing"}
+    with patch.object(panel_results, "_records", return_value=([], admission_records + [{}] * (1000 - len(admission_records)))):
+        assert panel_results.pending_admissions(Path("."), {"pending", "missing", "admitted", "landed", "no-patch"}) == {"pending", "missing"}
 # Gather the whole linked scope before applying the inbox cap; keep member order.
 admission_members = [{"participant": "w-%s" % n, "role": "worker", "access": "write",
                       "state": "done", "task_id": "t-%s" % n} for n in range(panel.INBOX_LIMIT + 2)]
