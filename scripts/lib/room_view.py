@@ -226,11 +226,13 @@ def call_classifier(report):
     """Display buckets only; admission and lifecycle evidence retain their own authority."""
     settled, _ = settler(report)
     awaiting = set(listing(report.get("awaiting_admission")))
+    # Only a call with a main to sit above can linger there.
+    mains = {key for m in nodes(report) if m.get("role") == "main" for key in (m["participant"], m.get("attempt")) if key}
 
     def classify(call):
         if call["state"] == "review" and not settled(call) or (call["state"] == "done" and call.get("participant") in awaiting):
             return "review"
-        return "past" if settled(call) else "live"
+        return "past" if settled(call) and not (call.get("parent") in mains and lingering(call)) else "live"
     return classify
 
 
@@ -258,6 +260,9 @@ def clock_stamp(ts, today=None):
 def call_span(call, arrow="->"):
     """"14:02 -> 14:31 finished" / "14:05 -> running"; the times come from the room, the end state from the call."""
     state = call["state"]
+    if call.get("_native"):
+        # The built-in advisor keeps only local clock times.
+        return "answered " + call["_finished"] if call.get("_finished") else "asked %s %s running" % (call["_native"], arrow)
     words = said(state)
     if state == "failed" and call.get("guard"):
         words = "guard stop"
@@ -274,6 +279,21 @@ def call_span(call, arrow="->"):
     if not start:
         return (words + " " + end).strip()
     return "%s %s %s%s" % (start, arrow, end + " " if end else "", words)
+
+
+JUDGE_LINGER = 1800  # panel_chats.ADVISOR_MAX_AGE: the built-in advisor's answer window
+
+
+def lingering(call):
+    """An answered advisor, reviewer or debate stays above its main for half an hour before Past work."""
+    if call.get("role") not in {"advisor", "reviewer", "council"} or call["state"] != "done":
+        return False
+    if str(call.get("participant", "")).startswith("native-advisor-"):
+        return True  # panel_chats already drops answers older than the window
+    try:
+        return time.time() - calendar.timegm(time.strptime(str(call.get("ended")), "%Y-%m-%dT%H:%M:%SZ")) <= JUDGE_LINGER
+    except ValueError:
+        return False
 
 
 def joined_seconds(call):
@@ -345,11 +365,15 @@ def goal_box(report, width, unicode, compact):
     goal, done, total, review, claimed = summary
     filled = min(10, 10 * done // total) if total else 0
     bar = ("▕" + "█" * filled + "░" * (10 - filled) + "▏") if unicode else "[" + "#" * filled + "." * (10 - filled) + "]"
+    by_state = mapping(mapping(report.get("plan")).get("by_state"))
+    cancelled = valid_count(by_state.get("cancelled")) or 0
     counts = "%s/%s verified" % (done, total)
     locally_done = sum(1 for task in listing(mapping(report.get("room")).get("repo_tasks"))
                       if task.get("state") != "done" and task.get("id") in mapping(report.get("completed_tasks")))
     if locally_done:
         counts += sep + "%s locally completed" % locally_done
+    if cancelled:
+        counts += sep + "%s cancelled" % cancelled
     # A claim is not proof of running work, and work waiting for review is progress: review outlives the bar.
     reviewing = sep + "%s review" % review if review else ""
     options = [bar + " " + counts + reviewing + sep + "%s claimed" % claimed, bar + " " + counts + reviewing,
@@ -675,6 +699,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     interactive = navigation is not None
     navigation = navigation if interactive else {}
     navigation.pop("box", None)
+    navigation["tab_strip_visible"] = True
     room = mapping(report.get("room"))
     members = nodes(report)
     members += native_advisors(report, members)
@@ -718,7 +743,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     everyone = teams
     teams = {key: [c for c in calls if classify(c) == "live"] for key, calls in teams.items()}
     children = teams[primary["participant"]] if primary else []
-    judges = [m for m in children if m.get("role") in {"advisor", "reviewer", "council"}]
+    # Running judges first; answered ones linger after them.
+    judges = sorted((m for m in children if m.get("role") in {"advisor", "reviewer", "council"}),
+                    key=lambda m: m["state"] in FINISHED)
     workers = [m for m in children if m.get("role") in {"worker", "researcher"}]
     unlinked = [m for m in members if m.get("role") != "main" and m.get("parent") not in owners]
     if attention_only:
@@ -960,6 +987,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         if plan:
             break
     if plan is None:
+        navigation["tab_strip_visible"] = False
         from panel_view import render
         navigation.update(hits=[], items=[], viewport=0, positions={})
         navigation.pop("full_result", None)
@@ -1154,6 +1182,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     # The box keeps the rows it was given whatever the upper region drew; only an overflowing region shrinks it.
     rows_high = min(dock, max(0, total_rows - len(lines)))
     rows_high = 1 if 0 < rows_high < 3 else rows_high
+    navigation["tab_strip_visible"] = bool(rows_high)
     if rows_high:
         lines.extend([""] * (total_rows - rows_high - len(lines)))
         # One box with tabs: the selected call's detail, the plan, this main's debates, the room's messages.
@@ -1245,10 +1274,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             navigation["box"] = {"y1": top, "y2": top + rows_high - 1, "pages": bool(previewed) or active == "plan"}
     if not body_drawn:
         navigation.pop("full_result", None)
-    if not body_drawn and not menu and not navigation.get("keys_help") and footer[-hint_rows:] == hints:
-        # Without a box body there is nothing to close or open in full.
-        footer[-hint_rows:] = footer_hints(dict(navigation, preview=None, detail=None, full_result=None),
-                                           width, managed, unicode, chosen_member, True)
+    if not body_drawn and not menu and footer[-hint_rows:] == hints:
+        # A strip can switch tabs without a body; an absent strip offers neither action.
+        fitted_hints = footer_hints(dict(navigation, preview=None, detail=None, full_result=None, tab_body_visible=False),
+                                    width, managed, unicode, chosen_member, True)
+        footer[-hint_rows:] = fitted_hints + [""] * max(0, hint_rows - len(fitted_hints))
     lines += [""] * max(0, height - int(menu) - len(lines) - len(footer))
     lines += [clipped(line, width) for line in footer]
     if bar:
@@ -1273,19 +1303,27 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
 
 TABS = (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"))
-PLAN_ORDER = {"done": 0, "review": 1, "landing": 1, "running": 2, "claimed": 2, "ready": 3, "blocked": 4}
+PLAN_ORDER = {"done": 0, "cancelled": 1, "review": 2, "landing": 2, "running": 3, "claimed": 3, "ready": 4, "blocked": 5}
 
 
 def plan_rows(report, labels, width, unicode):
-    """The shared repository plan: its goal, then one row per task, verified work first."""
+    """The shared repository plan: its goal, then one row per task, completed work first."""
     goal = mapping(report.get("goal")).get("text")
     tasks = listing(mapping(report.get("room")).get("repo_tasks"))
-    glyphs = (dict(done="✓", review="◐", landing="◐", running="●", claimed="●", ready="○", blocked="✗") if unicode else
-              dict(done="+", review="~", landing="~", running="*", claimed="*", ready="o", blocked="x"))
+    glyphs = (dict(done="✓", cancelled="×", review="◐", landing="◐", running="●", claimed="●", ready="○", blocked="✗") if unicode else
+              dict(done="+", cancelled="x", review="~", landing="~", running="*", claimed="*", ready="o", blocked="x"))
     rows = [(line, None) for line in wrapped("Goal: " + goal, width, 2)] if goal else []
     for t in sorted((mapping(t) for t in tasks), key=lambda t: PLAN_ORDER.get(t.get("state"), 5)):
         by = t.get("claimed_by_participant")
         word = clean(t.get("state"), 20) or "unknown"
+        if word == "done":
+            kind = t.get("completion_kind")
+            if kind == "research-accepted":
+                word = "done (research)"
+            elif kind == "main-research-accepted":
+                word = "done (main research)"
+            elif kind == "satisfied-by":
+                word = "done (satisfied by)"
         locally_done = t.get("id") in mapping(report.get("completed_tasks")) and t.get("state") != "done"
         if locally_done:
             word = "completed locally · plan " + word
@@ -1307,6 +1345,7 @@ def action(member):
 
 def footer_hints(navigation, width, managed, unicode, member, graph):
     """At most three hints for what is selected, then the fixed panel keys; `?` swaps in the full list of working keys."""
+    tabs = graph and navigation.get("tab_strip_visible", True)
     selected = navigation.get("selected")
     kind = selected[0] if selected else "chat"
     arrows, move = ("←→", "↑↓") if unicode else ("<>", "^v")
@@ -1315,7 +1354,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
     if navigation.get("keys_help"):
         keys = ["Enter Open", move + " Move", "Space Fold", "a Ask advisor",
                 "w Worktree" if worktree else "", "f Full result" if navigation.get("full_result") else "",
-                "Tab Next tab" if graph else "", "g Graph", "t Tree", "n New main" if managed else "",
+                "Tab Next tab" if tabs else "", "g Graph", "t Tree", "n New main" if managed else "",
                 "v " + ("Collapse" if navigation.get("expanded") else "Expand"), "b Attention", "Esc Back",
                 "Shift-drag Copy" if managed else "", toggle if managed else "q Quit", "? Hide"]
         lines = [""]
@@ -1324,7 +1363,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                 lines.append("")
             lines[-1] += ("  " if lines[-1] else "") + key
         return lines[:4]
-    tab = navigation.get("tab") if graph and not navigation.get("detail") else None
+    tab = navigation.get("tab") if tabs and navigation.get("tab_body_visible", True) and not navigation.get("detail") else None
     contextual = ([move + " Message", "Enter Open", arrows + " Filter"] if tab == "messages"
                   else [move + " Seat", "Enter Open", arrows + " Target"] if tab == "debate" and not navigation.get("debate_empty")
                   else ["Tab Next tab"] if tab == "debate"
@@ -1333,7 +1372,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                   "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
                   "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "Enter Show",
                   "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
-                  "Tab Next tab" if graph and not navigation.get("detail") else "",
+                  "Tab Next tab" if tabs and not navigation.get("detail") else "",
                   "Space Fold" if kind == "group" or kind == "chat" and not graph else ""]
     # The panel-wide F-keys stay fixed at the end of every board; board keys fill what is left.
     control = navigation.get("control_window", True)

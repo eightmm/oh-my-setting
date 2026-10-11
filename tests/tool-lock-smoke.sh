@@ -723,7 +723,7 @@ grep -Fq 'npm.$name.native.$native_platform.integrity' \
 grep -Fq 'install-npm-payload' "$ROOT/scripts/install-tools.sh" ||
   fail "verified native npm payloads are not installed through the safe helper"
 shim_body="$(sed -n '/^write_npm_shim()/,/^}/p' "$ROOT/scripts/install-tools.sh")"
-if printf '%s\n' "$shim_body" | grep -Fq 'nvm.sh'; then
+if printf '%s\n' "$shim_body" | grep >/dev/null -F 'nvm.sh'; then
   fail "provider shims source mutable nvm code without revalidating it"
 fi
 

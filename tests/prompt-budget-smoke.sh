@@ -219,12 +219,12 @@ test_status_budget_caps_lines() {
   out="$(OMS_PROMPT_STATUS_LINES=10 ma_safe_status "$repo")"
   [ "$(printf '%s\n' "$out" | grep -c '^ M ')" -eq 10 ] ||
     fail "status should keep exactly the budgeted lines: $out"
-  printf '%s\n' "$out" | grep -Fq '[status truncated: 10 of 25 lines shown' ||
+  printf '%s\n' "$out" | grep >/dev/null -F '[status truncated: 10 of 25 lines shown' ||
     fail "status truncation must be marked: $out"
   out="$(ma_safe_status "$repo")"
   [ "$(printf '%s\n' "$out" | grep -c '^ M ')" -eq 25 ] ||
     fail "a status inside the budget must pass through whole: $out"
-  if printf '%s\n' "$out" | grep -Fq '[status truncated'; then
+  if printf '%s\n' "$out" | grep >/dev/null -F '[status truncated'; then
     fail "an untruncated status must not carry a marker: $out"
   fi
 }

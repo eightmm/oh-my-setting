@@ -21,6 +21,7 @@ ROOT="$(cd "$ROOT" && pwd)"
 # read the primary repo's shared state instead of the throwaway checkout's.
 REPO="${OMS_STATE_REPO:-$PWD}"
 PLAN_FILE=""
+PLAN_FILE_SET=0
 ACTION=""
 ID=""
 TITLE=""
@@ -66,6 +67,20 @@ AS_JSON=0
 PROPOSAL=""
 EXPECTED_PROPOSAL_SHA256=""
 EXPECTED_PLAN_SHA256=""
+EXPECTED_TASK_SHA256=""
+EXPECTED_TASK_SHA256_SET=0
+EXPECTED_CANCEL_LEASE=""
+EXPECTED_CANCEL_LEASE_SET=0
+OPERATOR_CONSENT=""
+DECISION_ARTIFACT=""
+EXPECTED_DECISION_ARTIFACT_SHA256=""
+COMPLETION_OPTION_SET=0
+LEASE_ID_SET=0
+COMPLETION_BUNDLE=""
+EXPECTED_COMPLETION_BUNDLE_SHA256=""
+APPROVE_REVIEWED_BUNDLE=0
+MAIN_REVIEW_APPROVAL=""
+EXPECTED_MAIN_REVIEW_APPROVAL_SHA256=""
 ALLOWED_ENVELOPE=""
 MAX_TASKS=""
 ACCEPT_FILES=""
@@ -76,6 +91,8 @@ CHECK_ONLY=0
 APPLY=0
 DISPOSITION=""
 RETIRE_PHASE="${OMS_PLAN_RETIRE_PHASE:-}"
+COMPLETION_OTHER_OPTION=0
+CANCEL_OTHER_OPTION=0
 
 usage() {
   cat <<'EOF'
@@ -136,12 +153,34 @@ Commands:
                                      recomputed from the landed tree; all
                                      other entries keep their frozen hashes,
                                      and each refreeze appends a typed row.
+  cancel --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA
+         --expected-state ready|blocked --expected-lease-id TOKEN|none
+         --operator-consent cancel --reason TEXT
+         --decision-artifact REPO_RELATIVE_FILE
+         --expected-decision-artifact-sha256 SHA
+                                     Parent-only cancellation of an inactive
+                                     ready/blocked task. Preserves task evidence;
+                                     cancelled is closed, never verified or a
+                                     dependency-satisfying state.
          --id ID --landed-commit SHA  Complete reviewed work integrated by
                                      commit. Requires an exact-SHA oms land
                                      receipt with passed gate/push/CI and
-                                     reachability from its local target ref.
-                                     Typed patch-land remains the default
-                                     for single patches.
+                                     reachability from its local target ref,
+                                     the task's current lease when one is
+                                     given, and, for a task with allowed
+                                     paths, a landed range (previous pushed
+                                     receipt..SHA) that touches them.
+                                     --artifact/--patch supply evidence a
+                                     review lacked. Typed patch-land remains
+                                     the default for single patches.
+  accept-research|approve-main-research|accept-main-research|satisfy --id ID --lease-id TOKEN --expected-state STATE
+         --expected-plan-sha256 SHA256 --expected-task-sha256 SHA256
+         --completion-bundle REPO_RELATIVE_FILE
+         --expected-completion-bundle-sha256 SHA256
+                                     Parent-reviewed local completion with exact
+                                     owner, obligations, immutable provenance,
+                                     source and executed verifier bindings.
+                                     No code landing is attributed to this task.
   lint-verify --verify CMD --allowed "p1,p2"
                                      Lint a verify/acceptance command against
                                      the admission floor: content reads of
@@ -174,7 +213,8 @@ Commands:
                                      held; review/landing evidence is untouched.
   reclaim [--ttl SECONDS] [--include-running] [--include-review]
                                      Requeue claimed tasks whose TTL since
-                                     claimed_at expired (dead-worker recovery).
+                                     claimed_at expired, unless exact live or
+                                     unproven worker evidence vetoes recovery.
                                      A numeric per-task ttl wins over --ttl
                                      (default 3600). running needs the opt-in
                                      flag. review holds a finished artifact
@@ -209,14 +249,19 @@ Commands:
 State: ready -> claimed -> running -> review -> landing -> done. An explicit
 repair moves review -> claimed without minting a lease. Any -> blocked (block);
 blocked -> ready (reopen); claimed/running/review -> ready (release).
+Parent cancellation moves an inactive ready/blocked task to cancelled with
+the exact plan/task and decision-artifact digests. Cancelled tasks are closed,
+not verified, and never satisfy dependencies.
 Tasks are stored in REPO/.oms/plan/tasks.json (override with --file).
 
 A claim whose last heartbeat (claimed_at, refreshed by touch) is older than
 OMS_PLAN_CLAIM_TTL seconds (default 3600; a numeric per-task --ttl wins) is a
-dead worker's, and every read says so: list/status/brief tag it EXPIRED, show
-adds claim_expired, and ready/next offer the task again — next --claim fences
-the old worker by minting a new lease. Reads never write; reclaim (and
-plan-run's pre-flight call to it) is what frees the stored row.
+recovery candidate only if no exact task+current lease marker is live or
+unproven. Eligible claims read as EXPIRED in list/status/brief and show's
+claim_expired; ready/next offer them again, and next --claim mints a new lease
+to fence the old holder. Reclaim uses the same worker protection, including
+opted-in running tasks. Reads never write or renew claims; reclaim (and
+plan-run's pre-flight call to it) frees the stored row.
 EOF
 }
 
@@ -227,8 +272,16 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 # Parse: first non-option token is the command.
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --repo|--file|--id|--lease-id|--expected-state|--expected-lease-id|--expected-plan-sha256|--expected-task-sha256|--completion-bundle|--expected-completion-bundle-sha256|--approve-reviewed-bundle|--main-review-approval|--expected-main-review-approval-sha256|--json|--operator-consent|--decision-artifact|--expected-decision-artifact-sha256) ;;
+    --*) COMPLETION_OTHER_OPTION=1 ;;
+  esac
+  case "$1" in
+    --repo|--id|--expected-plan-sha256|--expected-task-sha256|--expected-state|--expected-lease-id|--operator-consent|--reason|--decision-artifact|--expected-decision-artifact-sha256) ;;
+    --*) CANCEL_OTHER_OPTION=1 ;;
+  esac
+  case "$1" in
     --repo) [ "$#" -ge 2 ] || fail "--repo requires path"; REPO="$2"; shift 2 ;;
-    --file) [ "$#" -ge 2 ] || fail "--file requires path"; PLAN_FILE="$2"; shift 2 ;;
+    --file) [ "$#" -ge 2 ] || fail "--file requires path"; PLAN_FILE="$2"; PLAN_FILE_SET=1; shift 2 ;;
     --id) [ "$#" -ge 2 ] || fail "--id requires value"; ID="$2"; shift 2 ;;
     --title) [ "$#" -ge 2 ] || fail "--title requires text"; TITLE="$2"; shift 2 ;;
     --goal) [ "$#" -ge 2 ] || fail "--goal requires text"; GOAL="$2"; shift 2 ;;
@@ -276,6 +329,7 @@ while [ "$#" -gt 0 ]; do
     --owner-id) [ "$#" -ge 2 ] || fail "--owner-id requires a value"; OWNER_ID="$2"; shift 2 ;;
     --markers-dir) [ "$#" -ge 2 ] || fail "--markers-dir requires a path"; MARKERS_DIR="$2"; shift 2 ;;
     --expected-state) [ "$#" -ge 2 ] || fail "--expected-state requires a value"; EXPECTED_STATE="$2"; shift 2 ;;
+    --expected-lease-id) [ "$#" -ge 2 ] || fail "--expected-lease-id requires a value"; EXPECTED_CANCEL_LEASE="$2"; EXPECTED_CANCEL_LEASE_SET=1; shift 2 ;;
     --check) CHECK_ONLY=1; shift ;;
     --apply) APPLY=1; shift ;;
     --disposition) [ "$#" -ge 2 ] || fail "--disposition requires a value"; DISPOSITION="$2"; shift 2 ;;
@@ -286,6 +340,20 @@ while [ "$#" -gt 0 ]; do
     --expected-plan-sha256)
       [ "$#" -ge 2 ] || fail "--expected-plan-sha256 requires a value"
       EXPECTED_PLAN_SHA256="$2"; shift 2 ;;
+    --expected-task-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-task-sha256 requires a value"
+      EXPECTED_TASK_SHA256="$2"; EXPECTED_TASK_SHA256_SET=1; COMPLETION_OPTION_SET=1; shift 2 ;;
+    --operator-consent) [ "$#" -ge 2 ] || fail "--operator-consent requires value"; OPERATOR_CONSENT="$2"; shift 2 ;;
+    --decision-artifact) [ "$#" -ge 2 ] || fail "--decision-artifact requires a path"; DECISION_ARTIFACT="$2"; shift 2 ;;
+    --expected-decision-artifact-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-decision-artifact-sha256 requires a value"
+      EXPECTED_DECISION_ARTIFACT_SHA256="$2"; shift 2 ;;
+    --completion-bundle)
+      [ "$#" -ge 2 ] || fail "--completion-bundle requires a file"
+      COMPLETION_BUNDLE="$2"; COMPLETION_OPTION_SET=1; shift 2 ;;
+    --expected-completion-bundle-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-completion-bundle-sha256 requires a value"
+      EXPECTED_COMPLETION_BUNDLE_SHA256="$2"; COMPLETION_OPTION_SET=1; shift 2 ;;
     --allowed-envelope)
       [ "$#" -ge 2 ] || fail "--allowed-envelope requires paths"
       ALLOWED_ENVELOPE="$2"; shift 2 ;;
@@ -293,14 +361,21 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--max-tasks requires a count"
       MAX_TASKS="$2"; shift 2 ;;
     --state) [ "$#" -ge 2 ] || fail "--state requires value"; STATE_FILTER="$2"; shift 2 ;;
-    --lease-id) [ "$#" -ge 2 ] || fail "--lease-id requires value"; LEASE_ID="$2"; shift 2 ;;
+    --lease-id) [ "$#" -ge 2 ] || fail "--lease-id requires value"; LEASE_ID="$2"; LEASE_ID_SET=1; shift 2 ;;
     --claim) CLAIM=1; shift ;;
     --refreeze-acceptance) REFREEZE_ACCEPTANCE=1; shift ;;
     --include-running) INCLUDE_RUNNING=1; shift ;;
+    --approve-reviewed-bundle) APPROVE_REVIEWED_BUNDLE=1; COMPLETION_OPTION_SET=1; shift ;;
+    --main-review-approval)
+      [ "$#" -ge 2 ] || fail "--main-review-approval requires a value"
+      MAIN_REVIEW_APPROVAL="$2"; COMPLETION_OPTION_SET=1; shift 2 ;;
+    --expected-main-review-approval-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-main-review-approval-sha256 requires a value"
+      EXPECTED_MAIN_REVIEW_APPROVAL_SHA256="$2"; COMPLETION_OPTION_SET=1; shift 2 ;;
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify)
+    accept-research|approve-main-research|accept-main-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify|cancel)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -317,6 +392,61 @@ if [ -n "$LANDED_COMMIT" ]; then
   [ "$EXPECTED_LANDING_RECEIPT_SHA256_SET" = 0 ] && [ "$REFREEZE_ACCEPTANCE" = 0 ] ||
     fail "--landed-commit cannot be combined with typed patch-land finish options"
 fi
+case "$ACTION" in
+  accept-research|approve-main-research|accept-main-research|satisfy)
+    [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] ||
+      fail "$ACTION is parent-only"
+    [ "$LEASE_ID_SET" = 1 ] && [ -n "$ID" ] && [ -n "$LEASE_ID" ] && [ -n "$EXPECTED_STATE" ] &&
+      [ -n "$EXPECTED_PLAN_SHA256" ] && [ -n "$EXPECTED_TASK_SHA256" ] &&
+      [ -n "$COMPLETION_BUNDLE" ] && [ -n "$EXPECTED_COMPLETION_BUNDLE_SHA256" ] ||
+      fail "$ACTION requires the complete plan/task/lease/state and bundle CAS"
+    [ "$COMPLETION_OTHER_OPTION" = 0 ] ||
+      fail "completion options cannot be mixed with legacy actions/landing options"
+    ;;
+  cancel)
+    [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] ||
+      fail "cancel is parent-only"
+    [ "$ID" ] && [ "$EXPECTED_TASK_SHA256_SET" = 1 ] &&
+      [ -n "$EXPECTED_PLAN_SHA256" ] && [ "$OPERATOR_CONSENT" = cancel ] &&
+      { [ "$EXPECTED_STATE" = ready ] || [ "$EXPECTED_STATE" = blocked ]; } &&
+      [ "$EXPECTED_CANCEL_LEASE_SET" = 1 ] &&
+      [ -n "$REASON" ] && [ -n "$DECISION_ARTIFACT" ] &&
+      [ -n "$EXPECTED_DECISION_ARTIFACT_SHA256" ] ||
+      fail "cancel requires exact plan/task CAS, --operator-consent cancel, --reason and decision-artifact digest"
+    [ -z "$COMPLETION_BUNDLE$EXPECTED_COMPLETION_BUNDLE_SHA256" ] &&
+      [ "$CANCEL_OTHER_OPTION" = 0 ] ||
+      fail "cancel options cannot be mixed with completion or unrelated options"
+    [ "${#EXPECTED_PLAN_SHA256}" -eq 64 ] &&
+      [ "${EXPECTED_PLAN_SHA256#*[!0-9a-f]}" = "$EXPECTED_PLAN_SHA256" ] ||
+      fail "cancel requires a lowercase plan SHA-256"
+    [ "${#EXPECTED_TASK_SHA256}" -eq 64 ] &&
+      [ "${EXPECTED_TASK_SHA256#*[!0-9a-f]}" = "$EXPECTED_TASK_SHA256" ] ||
+      fail "cancel requires a lowercase task SHA-256"
+    [ "${#EXPECTED_DECISION_ARTIFACT_SHA256}" -eq 64 ] &&
+      [ "${EXPECTED_DECISION_ARTIFACT_SHA256#*[!0-9a-f]}" = "$EXPECTED_DECISION_ARTIFACT_SHA256" ] ||
+      fail "cancel requires a lowercase decision-artifact SHA-256"
+    [ "$EXPECTED_CANCEL_LEASE" = none ] ||
+      { [ "${#EXPECTED_CANCEL_LEASE}" -ge 1 ] && [ "${#EXPECTED_CANCEL_LEASE}" -le 200 ] &&
+        [ "${EXPECTED_CANCEL_LEASE#*[!A-Za-z0-9._:-]}" = "$EXPECTED_CANCEL_LEASE" ]; } ||
+      fail "cancel requires --expected-lease-id TOKEN or none"
+    [ "${#REASON}" -le 500 ] || fail "cancellation reason exceeds 500 characters"
+    [ "$PLAN_FILE_SET" = 0 ] || fail "cancel is valid only for the canonical repo-local plan"
+    ;;
+  *) [ "$COMPLETION_OPTION_SET" = 0 ] ||
+       fail "completion options require accept-research, accept-main-research or satisfy" ;;
+esac
+case "$ACTION" in
+  approve-main-research)
+    [ "$APPROVE_REVIEWED_BUNDLE" = 1 ] && [ -z "$MAIN_REVIEW_APPROVAL$EXPECTED_MAIN_REVIEW_APPROVAL_SHA256" ] ||
+      fail "approve-main-research requires --approve-reviewed-bundle and no acceptance token" ;;
+  accept-main-research)
+    [ "$APPROVE_REVIEWED_BUNDLE" = 0 ] || fail "approval and acceptance are separate actions"
+    { [ -z "$MAIN_REVIEW_APPROVAL" ] && [ -z "$EXPECTED_MAIN_REVIEW_APPROVAL_SHA256" ]; } ||
+      { [ -n "$MAIN_REVIEW_APPROVAL" ] && [ -n "$EXPECTED_MAIN_REVIEW_APPROVAL_SHA256" ]; } ||
+      fail "main review approval requires its exact digest" ;;
+  *) [ "$APPROVE_REVIEWED_BUNDLE" = 0 ] && [ -z "$MAIN_REVIEW_APPROVAL$EXPECTED_MAIN_REVIEW_APPROVAL_SHA256" ] ||
+       fail "main approval flags require their matching main research action" ;;
+esac
 PLAN_READ_ONLY=0
 case "$ACTION" in
   show|evidence-snapshot|list|ready|status|brief) PLAN_READ_ONLY=1 ;;
@@ -324,8 +454,24 @@ case "$ACTION" in
 esac
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve the physical repository"
-PLAN_FILE="${PLAN_FILE:-$REPO/.oms/plan/tasks.json}"
+# A parent's scratch worktree reads and writes the main checkout's plan; REPO stays the tree it works on.
+STATE_REPO="$(oms_state_root "$REPO")" || fail "bad --repo"
+STATE_REPO="$(cd "${STATE_REPO//$'\r'/}" && pwd -P)" || fail "cannot resolve the plan's repository"
+PLAN_FILE="${PLAN_FILE:-$STATE_REPO/.oms/plan/tasks.json}"
 PLAN_LOCK_FILE=""
+if [ "$ACTION" = cancel ]; then
+  [ "$PLAN_FILE" = "$STATE_REPO/.oms/plan/tasks.json" ] ||
+    fail "cancel is valid only for the canonical repo-local plan"
+  [ -f "$PLAN_FILE" ] && [ ! -L "$PLAN_FILE" ] ||
+    fail "cancel requires an existing regular canonical plan"
+  scan="$(mktemp)" || fail "mktemp failed"
+  printf '%s\n' "$REASON" > "$scan"
+  if agent_memory_file_has_secret_content "$scan"; then
+    rm -f "$scan"
+    fail "cancellation reason looks sensitive; keep credentials and machine paths out of shared state"
+  fi
+  rm -f "$scan"
+fi
 if [ -n "$PROVIDER" ]; then
   PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
     fail "unknown provider: inspect 'oms models' for registered transports"
@@ -352,7 +498,8 @@ python_path_for_host() {  # PATH
 }
 
 PY_REPO="$(python_path_for_host "$REPO")" || fail "cannot normalize repository path for Python"
-if [ -n "$LANDED_COMMIT" ]; then
+PY_STATE_REPO="$(python_path_for_host "$STATE_REPO")" || fail "cannot normalize repository path for Python"
+if [ -n "$LANDED_COMMIT" ] || [ "$ACTION" = satisfy ]; then
   # Match land.sh's shared-worktree state directory using shell path spelling;
   # native Windows Python paths must not change the cksum repository identity.
   common_dir="$(git -C "$REPO" rev-parse --git-common-dir | tr -d '\r')" || fail "cannot resolve land state directory"
@@ -389,7 +536,7 @@ if [ "$ACTION" = lint-verify ]; then
 fi
 
 case "$ACTION" in
-  init|retire|apply-proposal|add)
+  init|retire|apply-proposal|add|cancel)
     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
       fail "$ACTION is parent-only; a harness child cannot change plan topology"
     ;;
@@ -493,7 +640,7 @@ fi
 # `next --claim` from different agents cannot both win the same task (the write
 # itself is atomic, but the read-decide-write critical section is not).
 export OMS_PLAN_FILE="$PY_PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
-  OMS_REPO="$PY_REPO" \
+  OMS_REPO="$PY_REPO" OMS_STATE_REPO="$PY_STATE_REPO" \
   OMS_ID="$ID" OMS_TITLE="$TITLE" OMS_GOAL="$GOAL" OMS_PROVIDER="$PROVIDER" \
   OMS_TTL="$TTL" OMS_REASON="$REASON" OMS_ARTIFACT="$ARTIFACT" OMS_PATCH="$PATCH" \
   OMS_REFREEZE_ACCEPTANCE="$REFREEZE_ACCEPTANCE" \
@@ -519,15 +666,37 @@ export OMS_PLAN_FILE="$PY_PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_LEASE_ID="$LEASE_ID" OMS_AS_JSON="$AS_JSON" OMS_CLAIM_TTL="$CLAIM_TTL" \
   OMS_EXPECTED_PROPOSAL_SHA256="$EXPECTED_PROPOSAL_SHA256" \
   OMS_EXPECTED_PLAN_SHA256="$EXPECTED_PLAN_SHA256" \
+  OMS_EXPECTED_CANCEL_STATE="$EXPECTED_STATE" \
+  OMS_EXPECTED_CANCEL_LEASE="$EXPECTED_CANCEL_LEASE" \
   OMS_ALLOWED_ENVELOPE="$ALLOWED_ENVELOPE" OMS_MAX_TASKS="${MAX_TASKS:-12}" \
   OMS_ACCEPT_FILES="$ACCEPT_FILES" OMS_EXPECTED_STATE="$EXPECTED_STATE" \
   OMS_CHECK_ONLY="$CHECK_ONLY" OMS_APPLY="$APPLY" \
   OMS_DISPOSITION="$DISPOSITION" OMS_RETIRE_PHASE="$RETIRE_PHASE"
+export OMS_EXPECTED_TASK_SHA256="$EXPECTED_TASK_SHA256" \
+  OMS_OPERATOR_CONSENT="$OPERATOR_CONSENT" \
+  OMS_DECISION_ARTIFACT="$DECISION_ARTIFACT" \
+  OMS_EXPECTED_DECISION_ARTIFACT_SHA256="$EXPECTED_DECISION_ARTIFACT_SHA256" \
+  OMS_COMPLETION_BUNDLE="$COMPLETION_BUNDLE" \
+  OMS_EXPECTED_COMPLETION_BUNDLE_SHA256="$EXPECTED_COMPLETION_BUNDLE_SHA256" \
+  OMS_APPROVE_REVIEWED_BUNDLE="$APPROVE_REVIEWED_BUNDLE" \
+  OMS_MAIN_REVIEW_APPROVAL="$MAIN_REVIEW_APPROVAL" \
+  OMS_EXPECTED_MAIN_REVIEW_APPROVAL_SHA256="$EXPECTED_MAIN_REVIEW_APPROVAL_SHA256"
 export OMS_AUTOPILOT_OWNER_ID="$OWNER_ID" OMS_PLAN_MARKERS_DIR="$PY_MARKERS_DIR"
 export OMS_TASK_ASSIGNMENT="$ASSIGNMENT"
 
 plan_run() {
-python3 "$ROOT/scripts/lib/agent-plan-engine.py" "$PROPOSAL" "$ROOT/scripts/lib/plan-receipt.py" \
+  local entry
+  entry="$ROOT/scripts/lib/agent-plan-engine.py"
+  if { [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ "$ACTION" = approve-main-research ] || [ "$ACTION" = satisfy ]; } &&
+     [ "${OMS_COMPLETION_PHASE:-}" != verify ]; then
+    python3 "$ROOT/scripts/lib/plan-completion.py" --locked-plan "$entry" "$PROPOSAL" \
+      "$ROOT/scripts/lib/plan-receipt.py" "$ROOT/scripts/lib/verify-floor-lint.py" \
+      "$ROOT/scripts/lib/process_liveness.py" "$ROOT/scripts/lib/plan-retire.py" \
+      "$ROOT/scripts/lib/path_scope.py" "$ROOT/scripts/lib/project-state.py" \
+      "$ROOT/scripts/lib/task-assignment.py" </dev/null
+    return $?
+  fi
+python3 "$entry" "$PROPOSAL" "$ROOT/scripts/lib/plan-receipt.py" \
   "$ROOT/scripts/lib/verify-floor-lint.py" \
   "$ROOT/scripts/lib/process_liveness.py" \
   "$ROOT/scripts/lib/plan-retire.py" \
@@ -551,9 +720,79 @@ plan_run_with_plan_lock() {
   oms_with_file_lock "$PLAN_LOCK_FILE" plan_run
 }
 plan_run_with_marker_and_plan_locks() {
-  oms_with_file_lock "$REPO/.oms/delegations/.marker-set-lock-target" \
+  oms_with_file_lock "$STATE_REPO/.oms/delegations/.marker-set-lock-target" \
     plan_run_with_plan_lock
 }
+
+if [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ "$ACTION" = approve-main-research ] || [ "$ACTION" = satisfy ]; then
+  # Landings -> thread -> marker-set -> plan -> native lifecycle writer lock. No writer
+  # takes these locks in reverse; the verifier holds none of them.
+  completion_state_repo="${OMS_STATE_REPO:-$REPO}"
+  completion_state_repo="$(cd "${completion_state_repo//$'\r'/}" && pwd -P)" ||
+    fail "cannot resolve completion state repository"
+  if [ "$PLAN_FILE_SET" = 0 ]; then
+    PLAN_FILE="$completion_state_repo/.oms/plan/tasks.json"
+    PY_PLAN_FILE="$(python_path_for_host "$PLAN_FILE")" || fail "cannot normalize completion plan path"
+    export OMS_PLAN_FILE="$PY_PLAN_FILE"
+  fi
+  completion_py_state_repo="$(python_path_for_host "$completion_state_repo")" ||
+    fail "cannot normalize completion state repository"
+  export OMS_STATE_REPO="$completion_py_state_repo"
+  completion_room_id="${OMS_ROOM_ID:-}"
+  if { [ "$ACTION" = accept-main-research ] || [ "$ACTION" = approve-main-research ]; } &&
+     { [ -n "$MAIN_REVIEW_APPROVAL" ] || [ "$ACTION" = approve-main-research ] || [ -z "$completion_room_id" ]; }; then
+    completion_room_id="$(python3 "$ROOT/scripts/lib/plan-completion.py" --main-review-room \
+      "$completion_py_state_repo" "$COMPLETION_BUNDLE" "$EXPECTED_COMPLETION_BUNDLE_SHA256" | tr -d '\r')" ||
+      fail "cannot resolve the declared main review room"
+    export OMS_ROOM_ID="$completion_room_id"
+  fi
+  if [ "$ACTION" = accept-main-research ] || [ "$ACTION" = approve-main-research ]; then
+    [[ "$completion_room_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$ ]] || fail "invalid main review room identity"
+  else
+    [[ "$completion_room_id" =~ ^room-[0-9a-f]{12}$ ]] || fail "invalid completion room identity"
+  fi
+  completion_thread_parent="$(cd "$completion_state_repo/.oms/threads" && pwd -P)" ||
+    fail "cannot resolve completion room parent"
+  completion_thread_parent="$(printf '%s' "$completion_thread_parent" | tr -d '\r')"
+  [ "$completion_thread_parent" = "$completion_state_repo/.oms/threads" ] ||
+    fail "completion room parent must be canonical"
+  [ "$PLAN_FILE" = "$completion_state_repo/.oms/plan/tasks.json" ] ||
+    fail "completion requires the canonical active plan"
+  oms_git_assert_safe_execution_config "$REPO" || fail "unsafe executable Git config is active"
+  oms_git_assert_plain_index "$REPO" || fail "hidden Git index flags are active"
+  completion_run_with_marker_lock() {
+    oms_with_file_lock "$completion_state_repo/.oms/delegations/.marker-set-lock-target" \
+      plan_run_with_plan_lock
+  }
+  completion_run_with_thread_lock() {
+    oms_with_file_lock "$completion_thread_parent/$completion_room_id.jsonl" \
+      completion_run_with_marker_lock
+  }
+  completion_run_locked() {
+    oms_with_file_lock "$completion_state_repo/.oms/landings.jsonl" \
+      completion_run_with_thread_lock
+  }
+  OMS_COMPLETION_PHASE=preflight
+  export OMS_COMPLETION_PHASE
+  completion_snapshot_file="$(mktemp)" || fail "cannot create completion snapshot"
+  trap 'rm -f "$completion_snapshot_file"' EXIT
+  OMS_COMPLETION_SNAPSHOT_FILE="$(python_path_for_host "$completion_snapshot_file")" ||
+    fail "cannot normalize completion snapshot path"
+  export OMS_COMPLETION_SNAPSHOT_FILE
+  completion_run_locked > "$completion_snapshot_file" || exit $?
+  completion_resume="$(python3 "$ROOT/scripts/lib/plan-completion.py" --resume | tr -d '\r')" ||
+    fail "invalid completion preflight"
+  OMS_COMPLETION_VERIFICATION='{}'
+  if [ "$completion_resume" != 1 ]; then
+    OMS_COMPLETION_PHASE=verify
+    OMS_COMPLETION_VERIFICATION="$(plan_run)" || exit $?
+  fi
+  export OMS_COMPLETION_VERIFICATION
+  OMS_COMPLETION_PHASE=finalize
+  export OMS_COMPLETION_PHASE
+  completion_run_locked
+  exit $?
+fi
 
 if [ "$ACTION" = retire ]; then
   if [ "$APPLY" = 0 ]; then
@@ -638,7 +877,7 @@ if stat.S_ISLNK(target_info.st_mode) or not stat.S_ISREG(target_info.st_mode):
     raise SystemExit(2)
 PY
     fail "acceptance requires a safe repo-local plan file"
-elif [ "$ACTION" != retire ] && [ "$PLAN_READ_ONLY" = 0 ]; then
+elif [ "$ACTION" != retire ] && [ "$ACTION" != cancel ] && [ "$PLAN_READ_ONLY" = 0 ]; then
   mkdir -p "$(dirname "$PLAN_FILE")"
   agent_memory_ensure_oms_ignore_for_path "$PLAN_FILE" 2>/dev/null || true
 fi
@@ -1149,7 +1388,7 @@ case "$ACTION" in
       plan_run
     fi
     ;;
-  recover-lease|recover-owner)
+  recover-lease|recover-owner|cancel)
     plan_run_with_marker_and_plan_locks
     ;;
   *) plan_run_with_plan_lock ;;

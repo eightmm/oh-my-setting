@@ -845,9 +845,9 @@ test_missing_codex_degrades_and_dead_ref_is_fail_closed() {
   [ "$rc" -ne 0 ] || fail "a dead pinned ref followed the default branch without consent: $out"
   [ "$(git -C "$installed" rev-parse HEAD)" = "$before_dead_ref" ] ||
     fail "a dead pinned ref changed the installed commit"
-  printf '%s' "$out" | grep -Fq 'cannot resolve pinned install ref: ghost-branch' ||
+  printf '%s' "$out" | grep >/dev/null -F 'cannot resolve pinned install ref: ghost-branch' ||
     fail "the dead-ref failure did not name the pin: $out"
-  printf '%s' "$out" | grep -Fq -- '--fallback-to-edge' ||
+  printf '%s' "$out" | grep >/dev/null -F -- '--fallback-to-edge' ||
     fail "the dead-ref failure did not name the explicit recovery: $out"
 
   env -u NVM_DIR HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \

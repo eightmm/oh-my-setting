@@ -568,18 +568,16 @@ oms_provider_model_family() {
 # with its native CLI and muddies family-diversity accounting. Empty means the
 # provider has no family of its own (an aggregator), and every family in its
 # catalog stands on its own.
-# The one seed routing keeps: the price order within a generation, top first.
-# Prices rot (5.6 was repriced twice in six weeks); the order does not, and a
-# new generation arrives unseeded, so it routes as the provider default until
-# someone looks. Claude's CLI lists nothing, so its seed is the model line
-# itself and answers for any generation asked. It names exact ids, not the
-# floating aliases: OMS routes Claude only through Fable 5.1 and Opus 5.5
-# (user decision 2026-09-23), so a new release waits for this line to move.
+# Seeds define Codex role-family cost order; routing substitutes the newest
+# exact catalog ID in each known family. Other entries remain generation
+# scoped. Claude's CLI lists nothing, so its seed is the model line itself and
+# answers for any generation asked. Its exact IDs preserve the 2026-09-23
+# decision to route only through Fable 5.1 and Opus 5.5.
 oms_provider_price_order() {
   local provider generation="${2:-}"
   provider="$(oms_provider_normalize "$1")" || return $?
   case "$provider:$generation" in
-    codex:6.1) printf 'gpt-6.1-sol\n' ;;
+    codex:6.1) printf 'gpt-6-astra gpt-6-sol gpt-6-luna\n' ;;
     codex:6.0) printf 'gpt-6-astra gpt-6-sol gpt-6-luna\n' ;;
     codex:5.6) printf 'gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna\n' ;;
     antigravity:3.7) printf 'gemini-3.7-flash-high gemini-3.7-flash-medium gemini-3.7-flash-low\n' ;;

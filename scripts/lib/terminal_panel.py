@@ -11,11 +11,13 @@ import re
 import shlex
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import time
 import threading
 import tempfile
+from typing import NamedTuple
 import room
 import uuid
 import panel_host
@@ -30,6 +32,7 @@ from panel_routing import (allocate, command as routed_command, policy, KINDS, M
                            newest_route_model, route_family)
 from panel_results import _read, _lock, finalize, outcomes, results, retry_delivery, verified_patch
 from panel_cache import read_shared
+from room_repository import EXECUTION_ENV, native_repository, state_repository, work_repository
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "scripts" / "oms"
@@ -37,6 +40,79 @@ PROVIDERS = ("codex", "claude")
 MAIN_HARNESSES = ("claude", "pi", "codex")
 MAX_PROMPT = 65536
 SESSION_ID = r"[A-Za-z0-9][A-Za-z0-9_-]{0,159}"
+OUTBOUND_SCANNER = ROOT / "scripts" / "lib" / "peer-common.sh"
+
+
+class PlanBinding(NamedTuple):
+    plan_id: str
+    task_id: str
+    lease_id: str
+    claim_provider: str
+    owner_provider: str
+    owner_participant: str
+    owner_attempt: str
+    room_id: str
+
+    @staticmethod
+    def unique_fields(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise ValueError("duplicate plan observation field")
+            result[name] = value
+        return result
+
+    @classmethod
+    def parse(cls, value):
+        if not isinstance(value, str) or len(value.encode("utf-8")) > 4096:
+            raise ValueError("plan observation exceeds 4096 bytes")
+        fields = json.loads(value, object_pairs_hook=cls.unique_fields)
+        if not isinstance(fields, dict) or set(fields) != set(cls._fields):
+            raise ValueError("plan observation requires exactly the binding fields")
+        formats = dict(plan_id=r"plan_[0-9a-f]{32}", lease_id=r"lease_[0-9a-f]{32}",
+                       task_id=r"[A-Za-z0-9._-]{1,160}", owner_attempt=r"att_[0-9a-f]{32}",
+                       owner_participant=r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}",
+                       room_id=r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}",
+                       claim_provider=r"[a-z0-9][a-z0-9._-]{0,63}",
+                       owner_provider=r"[a-z0-9][a-z0-9._-]{0,63}")
+        for name, pattern in formats.items():
+            if not isinstance(fields[name], str) or not re.fullmatch(pattern, fields[name]):
+                raise ValueError("invalid plan observation " + name)
+        return cls(**fields)
+
+    def validate(self, repo, env, route):
+        """Recheck observation under the caller's marker-set and canonical plan fences."""
+        import runpy
+        plan = json.loads(_read(repo, ".oms/plan/tasks.json", 4 * 1024 * 1024),
+                          object_pairs_hook=self.unique_fields)
+        task = plan["tasks"][self.task_id]
+        if (plan.get("plan_id") != self.plan_id or task.get("id") != self.task_id
+                or task.get("lease_id") != self.lease_id or task.get("state") not in {"claimed", "running"}
+                or task.get("provider") != self.claim_provider
+                or task.get("claimed_by_participant") != self.owner_participant):
+            raise ValueError("plan observation no longer matches its claim")
+        if (env.get("OMS_AGENT") != self.owner_provider or env.get("OMS_PANEL_MAIN_ATTEMPT") != self.owner_attempt
+                or env.get("OMS_ROOM_ID") != self.room_id
+                or Path(env.get("OMS_ROOM_REPO", "")).resolve() != repo.resolve()
+                or env.get("OMS_TASK_ID") != self.task_id
+                or not env.get("OMS_ROOM_PARTICIPANT")
+                or env.get("OMS_ROOM_ADMITTED_PARTICIPANT") != env.get("OMS_ROOM_PARTICIPANT")):
+            raise ValueError("foreign plan observation caller")
+        state = room.project(room.records(repo, self.room_id))
+        main = active_mains(repo, self.room_id, state, self.owner_provider).get(self.owner_participant)
+        child = room.participant(state, env["OMS_ROOM_PARTICIPANT"])
+        if (state["closed"] or not main or main.get("attempt_id") != self.owner_attempt
+                or main.get("refs", {}).get("panel_room_id", self.room_id) != self.room_id
+                or main.get("refs", {}).get("panel_room_participant", main.get("attempt_id")) != self.owner_participant
+                or not child["joined"] or child["role"] not in {"worker", "researcher"}
+                or env.get("OMS_PANEL_ROLE", "worker") != child["role"]
+                or child.get("parent") != self.owner_participant
+                or child["provider"] != route["provider"] or child.get("model") != route["model"]):
+            raise ValueError("plan observation main/room/admitted child mismatch")
+        assignment = runpy.run_path(str(ROOT / "scripts/lib/task-assignment.py"))["validate"](task.get("assignment", {}))
+        for field in ("provider", "model", "reasoning_effort", "fallback_model"):
+            if field in assignment and assignment[field] != route[field]:
+                raise ValueError("reviewed assignment mismatch: " + field)
 
 
 class NativeShutdown(KeyboardInterrupt):
@@ -95,7 +171,8 @@ def room_instructions(ident, member):
             "Read oms room show --id " + ident + " first to locate joined participants and declared scopes. "
             "This panel permits one live main; delegate bounded parallel work to workers. "
             "Use oms room updates --id " + ident + " --participant " + member +
-            " for addressed messages at safe points; retain its cursor. "
+            " for unacknowledged addressed messages at safe points; retain its cursor. "
+            "Use --after CURSOR to read the ordered stream delta after a saved cursor. "
             "Use oms room send --id " + ident + " --participant " + member +
             " --to PARTICIPANT --kind question|answer|note --text TEXT "
             "and --reply-to MESSAGE_ID for answers. After consuming, use oms room ack "
@@ -192,18 +269,12 @@ def show_providers(rows):
 
 
 def repository(value):
-    path = Path(value).resolve(strict=True)
-    if not path.is_dir():
-        raise ValueError("repository must be a directory")
-    result = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, timeout=5, check=False, stdin=subprocess.DEVNULL,
-    )
-    return Path(result.stdout.strip()).resolve() if result.returncode == 0 else path
+    return state_repository(value)
 
 
 def child_environment(provider, repo):
-    env = os.environ.copy()
+    env = {name: value for name, value in os.environ.items()
+           if name not in {"OMS_PANEL_EXECUTION_ROOT", "OMS_INDEX_BASE_REPO", "DELEGATE_SOURCE_REPO"} and not name.startswith(("OMS_DL_", "OMS_OBSERVE_PLAN_", "OMS_OBSERVER_"))}
     env["OMS_AGENT"] = provider
     env["OMS_PANEL_REPO"] = str(repo)
     env["OMS_PANEL_ENTRYPOINT"] = str(ENTRY)
@@ -260,8 +331,9 @@ def bootstrap(provider, repo):
         "architecture, integration, review and patch admission in the sole main. "
         "Work directly only when writing the brief would take longer than the edit, or when the step needs the "
         "main itself, such as integrating into a shared tree another main has frozen. "
-        "Panel mains work from the shared plan (oms agent-plan): claim a ready task, delegate it, verify it, "
-        "carry it through artifact inspection, integration and the required checks, then record the owner result. "
+        "Panel mains work from the shared plan (oms agent-plan): claim a ready task, delegate it (--task-id moves it "
+        "to running), verify it, carry it through artifact inspection, integration and the required checks, run "
+        "oms agent-plan review after acceptance, then record the owner result. "
         "A worker exit or review handoff is an intermediate step: continue the current authorized goal until it is "
         "done or a concrete scope, authority or runtime blocker remains. State that blocker and its next action. "
         "Use the shared OMS_ROOM_REPO for plan and result records even while editing in a scratch worktree. "
@@ -271,9 +343,12 @@ def bootstrap(provider, repo):
         "To know whether a land is running, use oms land status --repo PATH (active: true) - never pgrep. "
         "Before editing shared files, declare your scope with oms room scope --owns PATH, and pass "
         "--scope PATH to write workers; overlaps warn, they never lock. "
-        "The sole main lands its work only when publication is authorized: admit worker patches on your own oms/<task> branch in a worktree from "
-        "oms scratch-worktree add --repo ., rebase it on the remote target, verify, and run oms land from that "
-        "worktree; nobody commits in the shared checkout. "
+        "The sole main lands its work only when publication is authorized: oms scratch-worktree add --repo . starts "
+        "detached. Create a local nontracking branch with git checkout --no-track -b oms/<task>, admit worker patches "
+        "there, and rebase on the remote target. No upstream is needed. After verification, commit and run oms land "
+        "from that worktree; it pushes the verified SHA to its target. A concurrent land exits 75 if the lock stays "
+        "held past OMS_LOCK_TIMEOUT (default 300s); retry after the active land finishes. "
+        "Nobody commits in the shared checkout. "
         "Give every subtask a short descriptive --task-id ID and --label TITLE; reuse the exact "
         "reviewed plan task ID when one exists. These calls record "
         "the main relationship, role, model, task and execution location. "
@@ -338,7 +413,7 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
         if task:
             command += ["--", task]
     else:
-        command = [native_binary(provider), "open", "--workdir", str(repo),
+        command = [native_binary(provider), "open", "--workdir", str(native_repository(repo)),
                    "--context-file", str(context_file or "OMS_CONTEXT_FILE")]
         if model:
             command += ["--model", model]
@@ -427,6 +502,7 @@ def main_history(repo, ident, member=None):
 
 def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None):
     harness = provider
+    execution = native_repository(repo)
     if not main_installed(harness):
         raise ValueError("native provider is not installed")
     if harness == "pi" and resume:
@@ -457,7 +533,7 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         # A native user task may reference private files; never copy that text
         # into shared status when it cannot serve as a safe display title.
         label = "Native task not recorded"
-    host_refs = panel_host.refs(repo) if panel_host.herdr_active() else {}
+    host_refs = panel_host.refs(execution) if panel_host.herdr_active() else {}
     attempt = events(repo, "start", "--provider", provider, "--tool", "panel-main",
                      "--ref", "panel_role=main", "--ref", "panel_owner=" + provider,
                      "--ref", "panel_harness=" + harness,
@@ -544,7 +620,7 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         context_path.chmod(0o600)
         launch_inflight = True
         process = subprocess.Popen(native_command(harness, repo, resume, model, task, room_id, native_member, context_path),
-                                   cwd=str(repo), env=env)
+                                   cwd=str(execution), env=env)
         launch_inflight = False
         while True:
             try:
@@ -655,7 +731,12 @@ def continuation(repo, owner, main, task_id, route, brief, env):
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"], capture_output=True,
                           text=True, check=False, stdin=subprocess.DEVNULL).stdout.strip()
     old = last.get("base_sha") or "an earlier commit"
-    patch = call.get("patch")
+    # A digest proves which bytes were recorded, not that the worker call
+    # completed successfully. Only an exact attempt-linked success may expose
+    # a prior patch to the next worker.
+    eligible_result = (call.get("attempt_id") == last.get("attempt_id")
+                       and type(call.get("exit")) is int and call.get("exit") == 0)
+    patch = call.get("patch") if eligible_result else None
     where = ""
     if patch:
         # Absolute machine paths never leave in a prompt (the outbound scrubber refuses them), and the new
@@ -678,7 +759,7 @@ def continuation(repo, owner, main, task_id, route, brief, env):
                     % (old, head, where))
         note = "continuing round %d of %s in its native session" % (len(earlier) + 1, task_id)
     else:
-        summary = clean(str(call.get("answer") or "no summary recorded"), 1500)
+        summary = clean(str(call.get("answer") or "no summary recorded"), 1500) if eligible_result else "no verified summary recorded"
         reason = ("the earlier worker ran on %s, not %s" % (last.get("provider"), route["provider"])
                   if session and last.get("provider") != route["provider"] else
                   "the earlier session is not recorded or no longer on disk")
@@ -754,10 +835,161 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             temporary.unlink()
 
 
+def plan_link(repo, owner, task_id, env, caller, access="read"):
+    """Start a main's owned task; freeze observation without giving its worker plan authority."""
+    base = ["bash", str(ENTRY), "agent-plan", "--repo", str(repo)]
+    plan_env = dict(env, OMS_ROOM_PARTICIPANT=caller) if caller else dict(env)
+    for name in ("OMS_LEASE_ID", "OMS_PLAN_LEASE_ID"):
+        plan_env.pop(name, None)
+
+    def plan(*args):
+        return subprocess.run(base + list(args), capture_output=True, text=True, check=False,
+                              stdin=subprocess.DEVNULL, env=plan_env, timeout=60)
+
+    def read_plan():
+        raw = _read(repo, ".oms/plan/tasks.json", 4 * 1024 * 1024, missing=True)
+        if not raw and not (repo / ".oms/plan/tasks.json").exists():
+            return {"tasks": {}}
+        document = json.loads(raw, object_pairs_hook=PlanBinding.unique_fields)
+        if not isinstance(document, dict) or not isinstance(document.get("tasks"), dict):
+            raise ValueError("invalid plan task table")
+        return document
+
+    def snapshot():
+        # The core reader is a compatibility reader; fence unsafe files before invoking it.
+        read_plan()
+        result = plan("evidence-snapshot", "--id", task_id)
+        if result.returncode:
+            # agent_plan_core.get_task/die exits 2; the oms front door appends this usage hint.
+            if (result.returncode == 2 and result.stderr.splitlines() == ["error: no such task: " + task_id,
+                        "hint: run `oms agent-plan --help` for usage"]
+                    and not result.stdout.strip() and task_id not in read_plan()["tasks"]):
+                return None
+            raise ValueError(result.stderr.strip() or "plan snapshot unavailable")
+        task = json.loads(result.stdout, object_pairs_hook=PlanBinding.unique_fields)
+        if (not isinstance(task, dict) or task.get("id") != task_id
+                or task.get("state") not in {"ready", "claimed", "running", "review", "landing", "blocked", "done", "cancelled"}):
+            raise ValueError("invalid plan snapshot")
+        return task
+
+    def unprotected(reason):
+        print("plan %s %s; plan protection is absent" % (task_id, reason), file=sys.stderr)
+
+    task = snapshot()
+    if task is None:
+        unprotected("has no recorded task; panel left it unchanged")
+        return None
+    state, holder = task.get("state"), task.get("claimed_by_participant")
+    if state == "cancelled":
+        unprotected("is cancelled; panel left it unchanged")
+        if access == "write":
+            raise ValueError("plan task %s is cancelled; create a new task to continue" % task_id)
+        return None
+    if state not in ("ready", "claimed", "running"):
+        unprotected("is %s; panel left it unchanged" % state)
+        if access == "write":
+            raise ValueError("plan task %s is not this main's to run; reopen or claim it before "
+                             "dispatching a write worker" % task_id)
+        return None
+    if state != "ready" and holder != caller:
+        unprotected("is %s by another claimant; panel left it unchanged" % state if holder else
+                    "has an ownerless claim (another claimant); panel left it unchanged")
+        if access == "write":
+            raise ValueError("plan task %s is not this main's to run; reopen or claim it before "
+                             "dispatching a write worker" % task_id)
+        return None
+    ident, attempt = env.get("OMS_ROOM_ID"), env.get("OMS_PANEL_MAIN_ATTEMPT")
+    if not caller or not ident or not attempt:
+        unprotected("has no owned main relationship; panel left it unchanged")
+        if access == "write":
+            raise ValueError("plan task %s is not this main's to run; reopen or claim it before "
+                             "dispatching a write worker" % task_id)
+        return None
+    main = active_mains(repo, ident, room.project(room.records(repo, ident)), owner).get(caller)
+    if not main or main["attempt_id"] != attempt:
+        raise ValueError("plan observation requires the current room main")
+    if state == "ready":
+        result = plan("claim", "--id", task_id, "--provider", owner)
+        if result.returncode:
+            raise ValueError(result.stderr.strip() or "claim failed")
+        task = snapshot()
+        if task is None:
+            raise ValueError("plan task disappeared after claim")
+        state, holder = task.get("state"), task.get("claimed_by_participant")
+    if state not in ("claimed", "running") or holder != caller:
+        raise ValueError("plan claim changed while selecting observation")
+    binding = PlanBinding.parse(json.dumps(dict(plan_id=task.get("plan_id"), task_id=task_id,
+        lease_id=task.get("lease_id"), claim_provider=task.get("provider"), owner_provider=owner,
+        owner_participant=caller, owner_attempt=attempt, room_id=ident)))
+    if task.get("claimed_by_participant") != caller:
+        raise ValueError("plan claimant changed while selecting observation")
+    if task.get("state") == "claimed":
+        result = plan("start", "--id", task_id, "--lease-id", binding.lease_id)
+        if result.returncode:
+            raise ValueError(result.stderr.strip() or "start failed")
+    print("plan %s running (lease %s): after acceptance oms agent-plan review --id %s --lease-id %s "
+          "--artifact PATH [--patch PATH]; after oms land: oms agent-plan finish --id %s --landed-commit SHA"
+          % (task_id, binding.lease_id, task_id, binding.lease_id, task_id), file=sys.stderr)
+    return binding
+
+
+def _read_dispatch_brief(path):
+    """Read a bounded regular brief without following a symlink."""
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise ValueError("brief must be a readable regular file of at most 64 KiB")
+        if info.st_size > MAX_PROMPT or not info.st_mode & 0o444:
+            raise ValueError("brief must be a readable regular file of at most 64 KiB")
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(opened.st_mode) or
+                    (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)):
+                raise ValueError("brief changed while being read")
+            content = handle.read(MAX_PROMPT + 1)
+    except OSError as error:
+        raise ValueError("brief must be a readable regular file of at most 64 KiB") from error
+    if len(content) > MAX_PROMPT:
+        raise ValueError("brief must be a readable regular file of at most 64 KiB")
+    return content
+
+
+def _validate_dry_run_inputs(prompt, brief):
+    """Use the shared outbound scanner before returning any dispatch plan."""
+    if prompt and (len(prompt.encode("utf-8")) > MAX_PROMPT or "\0" in prompt):
+        raise ValueError("prompt exceeds the panel input contract")
+    inputs = []
+    if prompt:
+        inputs.append(prompt.encode("utf-8"))
+    if brief:
+        inputs.append(_read_dispatch_brief(Path(brief)))
+    if not inputs:
+        return
+    with tempfile.TemporaryDirectory(prefix="oms-panel-scan-") as temporary:
+        for index, content in enumerate(inputs):
+            candidate = Path(temporary) / ("input-%d" % index)
+            candidate.write_bytes(content)
+            checked = subprocess.run(
+                ["bash", "-c", '. "$1"; ma_validate_outbound_prompt "$2"',
+                 "oms-outbound-scan", str(OUTBOUND_SCANNER), str(candidate)],
+                stdout=subprocess.DEVNULL, stderr=None, check=False)
+            if checked.returncode:
+                if checked.returncode == 3:
+                    raise ValueError("outbound dispatch input contains sensitive-looking content")
+                raise ValueError("outbound dispatch input could not be validated")
+
+
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes):
+    if dry_run:
+        _validate_dry_run_inputs(prompt, brief)
+    if task_id is None:
+        task_id = "panel-" + route["purpose"] + "-" + uuid.uuid4().hex[:8]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id):
+        raise ValueError("invalid task ID")
     argv = routed_command(ENTRY, repo, route, prompt, brief, verify, task_id, resume)
-    plan = {"schema": 1, "kind": "oms-panel-route", "route": route, "argv": argv, "executes": False}
+    plan = {"schema": 1, "kind": "oms-panel-route", "route": route, "task_id": task_id,
+            "argv": argv, "executes": False}
     if scopes:
         if role not in WRITERS or access != "write":
             raise ValueError("--scope declares a write role's files; use it with --access write")
@@ -768,6 +1000,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         return 0
     if not dry_run and not shutil.which(route.get("binary", route["provider"])):
         raise ValueError("%s is not installed; this exact role route cannot run" % route["provider"])
+    execution = native_repository(repo) if route["kind"] in {"worker", "researcher"} else repo
     env = child_environment(owner, repo)
     parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
     if parent:
@@ -784,15 +1017,12 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         env["OMS_PANEL_LABEL"] = label
     else:
         env.pop("OMS_PANEL_LABEL", None)
-    if task_id:
-        env["OMS_TASK_ID"] = task_id
-    else:
-        env["OMS_TASK_ID"] = "panel-" + route["purpose"] + "-" + uuid.uuid4().hex[:8]
+    env["OMS_TASK_ID"] = task_id
     room_id = env.get("OMS_ROOM_ID")
     if main and not room_id:
         raise ValueError("--main needs a room; select it with --room")
     if not room_id and not parent:
-        print("Standalone dispatch: room and main relationship are unrecorded.", file=sys.stderr)
+        print("Standalone dispatch: room and main relationship are unrecorded; plan protection is absent.", file=sys.stderr)
     member = None
     caller = env.get("OMS_ROOM_PARTICIPANT")
     if room_id:
@@ -833,15 +1063,51 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             if dry_run:
                 print(json.dumps(dict(plan, overlaps=found)))
                 return 0
+    if access == "write":
+        # Delegate's dry-run validates the same brief and route without starting a worker.
+        # Give it no room/plan identity so a refused preview cannot claim or enroll this call.
+        preview = list(argv)
+        preview[preview.index("--repo") + 1] = str(execution)
+        preview[preview.index("--task-id", preview.index("--verify") + 2) + 1] = "preflight-" + uuid.uuid4().hex[:16]
+        preview_env = {name: value for name, value in env.items()
+                       if not name.startswith(("OMS_ROOM_", "OMS_PANEL_", "OMS_OBSERVE_PLAN_", "OMS_DL_"))
+                       and name not in {"OMS_TASK_ID", "OMS_ATTEMPT_ID", "OMS_PARENT_ATTEMPT_ID",
+                                        "OMS_PLAN_ID", "OMS_PLAN_TASK_ID", "OMS_LEASE_ID", "OMS_PLAN_LEASE_ID"}}
+        # Keep canonical artifact routing, but not the caller or child identity.
+        preview_env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_REPO=str(repo))
+        checked = subprocess.run(preview + ["--dry-run"], cwd=str(execution), env=preview_env,
+                                 capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+        if checked.returncode:
+            print("Delegate preflight refused before task claim or worker enrollment.", file=sys.stderr)
+            if checked.stderr:
+                print(checked.stderr.rstrip(), file=sys.stderr)
+            return checked.returncode
+    # Observe and claim with the caller's main identity before enrolling a child.
+    # A joined child must never become the apparent owner of its own plan task.
+    binding = plan_link(repo, owner, task_id, env, caller, access)
+    if binding and route["kind"] in {"worker", "researcher"}:
+        argv += ["--observe-plan-binding", json.dumps(binding._asdict(), separators=(",", ":"))]
+    if room_id:
         member = "call-" + uuid.uuid4().hex[:16]
         room.join(repo, room_id, member, route["provider"], route["kind"], route["model"], label or route["purpose"],
                   owns=scopes, parent=caller)
-        room.send(repo, room_id, caller, member, "Assigned: " + (label or route["purpose"]), "handoff")
+        delivery_state = room.project(room.records(repo, room_id))
+        if delivery_state["closed"]:
+            raise ValueError("room is closed")
+        room.participant(delivery_state, caller)
+        room.participant(delivery_state, member)
+        if room.message_capacity_reached(delivery_state):
+            print("OMS room assignment delivery unavailable: room message limit reached; "
+                  "keeping the validated room and main.", file=sys.stderr)
+        else:
+            room.send(repo, room_id, caller, member, "Assigned: " + (label or route["purpose"]), "handoff")
         env.update(OMS_ROOM_ID=room_id, OMS_ROOM_PARTICIPANT=member, OMS_ROOM_REPO=str(repo),
                    OMS_ROOM_ADMITTED_PARTICIPANT=member)
+    argv[argv.index("--repo") + 1] = str(execution)
     print("%s / %s -> %s / %s / %s / %s" % (owner, role, route["provider"], route["model"],
-                                            route["effort"] or "native-settings", access), flush=True)
-    status = subprocess.call(argv, cwd=str(repo), env=env)
+                                            route["effort"] or "native-settings", access) +
+          " task_id=" + task_id, flush=True)
+    status = subprocess.call(argv, cwd=str(execution), env=env)
     if member:
         try:
             report = results(repo, env["OMS_TASK_ID"], member)
@@ -1015,7 +1281,7 @@ def panel_environment():
     return ["env"] + [name + "=" + os.environ[name] for name in
                       ("OMS_PANEL_NO_ANIMATION", "OMS_PANEL_COLOR", "NO_COLOR", "OMS_CODEX_NOTIFY", "OMS_CLAUDE_NOTIFY",
                        "OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_PANEL_HOST", "OMS_PANEL_VIEW",
-                       "OMS_PANEL_THEME", "COLORFGBG") if name in os.environ]
+                       "OMS_PANEL_THEME", "COLORFGBG", EXECUTION_ENV) if name in os.environ]
 
 
 def board_view(view):
@@ -1445,7 +1711,7 @@ def panel_mains():
 
 def add_main_window(repo, session, launch, view, attention_only, env, resume=None, model=None, task=None):
     pane = subprocess.check_output(tmux_command("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "=" + session + ":",
-                                   "-n", launch, "-c", str(repo),
+                                   "-n", launch, "-c", str(native_repository(repo)),
                                    launch_command(repo, session, launch, resume, model, task)),
                                    env=env, text=True).strip()
     bind_window(pane, launch, view, attention_only)
@@ -1620,7 +1886,7 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
             else:
                 shell = panel_shell(repo, session, view, attention_only)
             pane = subprocess.check_output(tmux_command("new-session", "-d", "-P", "-F", "#{pane_id}",
-                                          "-s", session, "-n", launch or "control", "-c", str(repo), shell), env=env, text=True).strip()
+                                          "-s", session, "-n", launch or "control", "-c", str(native_repository(repo)), shell), env=env, text=True).strip()
             created = "session"
             subprocess.run(tmux_command("set-environment", "-t", "=" + session,
                                         "OMS_PANEL_SESSION", session), check=True)
@@ -1653,6 +1919,7 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
 
 
 def open_native(provider, repo, resume=None, model=None, task=None, view="auto", attention_only=False):
+    execution = native_repository(repo)
     if not main_installed(provider):
         raise ValueError("%s is not installed on PATH (Pi also needs Codex CLI)" % provider)
     session = os.environ.get("OMS_PANEL_SESSION", "")
@@ -1661,16 +1928,16 @@ def open_native(provider, repo, resume=None, model=None, task=None, view="auto",
             check_legacy_main(repo)
             pass
         os.environ["OMS_ROOM_ID"] = ensure_room(repo)
-        native = ["bash", str(ROOT / "scripts" / "panel.sh"), "--repo", str(repo),
+        native = ["bash", str(ROOT / "scripts" / "panel.sh"), "--repo", str(execution),
                   "--host", "herdr", "--layout", "inline", "--launch", provider]
         for flag, value in (("--resume", resume), ("--model", model), ("--task", task)):
             if value:
                 native += [flag, value]
-        watcher = ["bash", str(ENTRY), "panel", "--repo", str(repo), "--host", "herdr",
+        watcher = ["bash", str(ENTRY), "panel", "--repo", str(execution), "--host", "herdr",
                    "--watch", "--owner", main_owner(provider)]
         if attention_only:
             watcher.append("--attention-only")
-        panel_host.open_native(repo, provider, native, watcher)
+        panel_host.open_native(execution, provider, native, watcher)
         return 0
     if os.environ.get("TMUX") and re.fullmatch(PANEL_SESSION, session):
         with _lock(repo, "panel-main-start", timeout=3):
@@ -2239,6 +2506,8 @@ def tab_event(event, navigation):
     if navigation.get("surface") != "graph" or navigation.get("detail"):
         return False
     if kind == "tab":
+        if not navigation.get("tab_strip_visible", True):
+            return False
         navigation["tab"] = names[(names.index(tab) + 1) % len(names)]
         return True
     hit = next((h for h in navigation.get("hits", []) if kind == "click" and h["y"] == event[2]
@@ -2590,7 +2859,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
         if expanded == enabled:
             return
         if panel_host.herdr_active():
-            panel_host.current(repo)
+            panel_host.current(native_repository(repo))
             panel_host.zoom(enabled)
         elif managed_session():
             # resize-pane -Z toggles; the person may have unzoomed with prefix+z or by selecting another pane.
@@ -3430,6 +3699,11 @@ def main(argv=None):
                                    args.to, args.model, args.reasoning_effort)
             # A prompt-less advisor call asks its single question interactively before routing.
             pending = args.dispatch == "advisor" and not (args.prompt or args.brief_file or args.dry_run)
+            if args.brief_file:
+                brief_path = Path(args.brief_file).expanduser()
+                if not brief_path.is_absolute():
+                    brief_path = Path(args.repo).expanduser() / brief_path
+                _read_dispatch_brief(brief_path)
             routed_command(ENTRY, args.repo, route, "pending question" if pending else args.prompt,
                            args.brief_file, args.verify, args.task_id)
         except (ValueError, OSError) as error:
@@ -3459,10 +3733,14 @@ def main(argv=None):
         parser.error("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
     try:
         repo = repository(args.repo)
+        requested_worktree = work_repository(args.repo)
+        if requested_worktree != repo:
+            os.environ[EXECUTION_ENV] = str(requested_worktree)
+        execution = native_repository(repo)
         if args.host != "auto":
             os.environ["OMS_PANEL_HOST"] = args.host
         if args.host == "herdr" and not (args.json or args.dry_run):
-            panel_host.current(repo)
+            panel_host.current(execution)
         if args.host == "tmux" and args.layout == "inline":
             raise ValueError("--host tmux conflicts with --layout inline")
         if args.room:
@@ -3554,9 +3832,8 @@ def main(argv=None):
             if brief:
                 if not brief.is_absolute():
                     brief = repo / brief
+                _read_dispatch_brief(brief)
                 brief = brief.resolve(strict=True)
-                if not brief.is_file() or brief.stat().st_size > MAX_PROMPT:
-                    raise ValueError("brief must be a regular file of at most 64 KiB")
             if args.prompt and (len(args.prompt.encode("utf-8")) > MAX_PROMPT or "\0" in args.prompt):
                 raise ValueError("prompt exceeds the panel input contract")
             owner = args.owner or os.environ.get("OMS_AGENT", "codex")

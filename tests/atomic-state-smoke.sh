@@ -14,6 +14,11 @@ mkdir -p "$TMP/home" "$TMP/locks"
 export HOME="$TMP/home"
 export OMS_LOCK_DIR="$TMP/locks"
 export OMS_LOCK_FORCE_MKDIR=1
+# FILE-only calls must not publish into an unrelated caller checkout.
+unset REPO
+mkdir -p "$TMP/caller"
+git -C "$TMP/caller" init -q
+cd "$TMP/caller"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -61,6 +66,39 @@ while [ "$i" -le 300 ]; do
 done
 wait "$writer"
 [ "$empty" = 0 ] || fail "a reader observed an empty task file during writes"
+
+python3 - "$TMP/repo" "$TMP/caller" <<'PYOPERATIONS' || fail "FILE-only operations escaped the packet namespace"
+import json, pathlib, stat, sys
+repo, caller = map(pathlib.Path, sys.argv[1:])
+assert not (caller / '.oms').exists()
+ledger = repo / '.oms/lifecycle/events.jsonl'
+assert stat.S_ISREG(ledger.lstat().st_mode) and ledger.stat().st_nlink == 1
+rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+created = [row for row in rows if row['event_type'] == 'attempt.created']
+assert len(created) == 102, len(created)
+for row in created:
+    assert row['provider'] == 'local' and row['tool'] == 'agent-task'
+    assert row['refs']['reference_writer'] == 'landing-reference-v1'
+    events = [event for event in rows if event['attempt_id'] == row['attempt_id']]
+    assert events[-1]['to_state'] == 'done', events[-1]
+assert not (repo / '.oms/task/.oms').exists()
+PYOPERATIONS
+
+# Generic FILE paths select their Git root or standalone parent. Explicit repo
+# still owns --file semantics, and positional outcome repo beats ambient REPO.
+mkdir -p "$TMP/git-owner/sub" "$TMP/standalone" "$TMP/explicit"
+git -C "$TMP/git-owner" init -q
+agent_task_init_file "$TMP/git-owner/sub/packet.md"
+agent_task_init_file "$TMP/standalone/packet.md"
+REPO="$TMP/explicit" agent_task_set_metadata "$TMP/standalone/packet.md" status verified
+printf 'outcome\n' > "$TMP/repo/result.md"
+REPO="$TMP/caller" agent_task_record_outcome "$TMP/repo" fixture local 0 "$TMP/repo/result.md"
+[ -f "$TMP/git-owner/.oms/lifecycle/events.jsonl" ] &&
+  [ ! -e "$TMP/git-owner/sub/.oms" ] &&
+  [ -f "$TMP/standalone/.oms/lifecycle/events.jsonl" ] &&
+  [ -f "$TMP/explicit/.oms/lifecycle/events.jsonl" ] &&
+  [ ! -e "$TMP/caller/.oms" ] || fail "FILE namespace or explicit repository precedence changed"
+grep -q 'fixture local exit=0' "$file" || fail "positional repository outcome was not recorded"
 
 # The derived memory summary has unlocked prompt readers, so its refresh must
 # also land as one same-directory rename: truncate-then-append exposed a

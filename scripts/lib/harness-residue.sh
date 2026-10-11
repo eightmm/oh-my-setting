@@ -6,10 +6,12 @@
 
 OMS_HARNESS_RESIDUE_REMOVED=0
 OMS_HARNESS_RESIDUE_WOULD_REMOVE=0
+OMS_HARNESS_RESIDUE_KEPT=0
 
 oms_harness_residue_reset() {
   OMS_HARNESS_RESIDUE_REMOVED=0
   OMS_HARNESS_RESIDUE_WOULD_REMOVE=0
+  OMS_HARNESS_RESIDUE_KEPT=0
 }
 
 oms_harness_tmp_base() {
@@ -177,6 +179,56 @@ EOF
   return 0
 }
 
+OMS_HARNESS_RESIDUE_KEEP_REASON=""
+
+# A dead owner does not make its worktree disposable: a crashed run can leave
+# the only copy of uncommitted edits, an unreferenced commit, or ignored .oms
+# records there. Sets OMS_HARNESS_RESIDUE_KEEP_REASON when the worktree must be
+# kept; anything git cannot answer is kept too. Never moves or rewrites it.
+oms_harness_worktree_keep_reason() {  # WORKTREE
+  local wt="$1"
+  local status=""
+  local head=""
+  local record=""
+
+  OMS_HARNESS_RESIDUE_KEEP_REASON=""
+  if ! status="$(git -c core.fsmonitor=false -C "$wt" --no-optional-locks \
+      status --porcelain --untracked-files=normal 2>/dev/null)"; then
+    OMS_HARNESS_RESIDUE_KEEP_REASON="status is unreadable"
+    return 0
+  fi
+  if [ -n "$status" ]; then
+    OMS_HARNESS_RESIDUE_KEEP_REASON="has uncommitted or untracked files"
+    return 0
+  fi
+  head="$(git -C "$wt" rev-parse -q --verify HEAD 2>/dev/null || true)"
+  head="${head//$'\r'/}"
+  if [ -n "$head" ] && [ -z "$(git -C "$wt" for-each-ref --count=1 \
+      --contains "$head" --format=x refs/heads refs/tags refs/remotes \
+      2>/dev/null)" ]; then
+    OMS_HARNESS_RESIDUE_KEEP_REASON="HEAD ${head:0:12} is on no branch, tag or remote ref"
+    return 0
+  fi
+  # .oms is ignored, so status cannot see it; a symlinked .oms belongs elsewhere
+  # and worktree removal does not follow it.
+  [ -d "$wt/.oms" ] && [ ! -L "$wt/.oms" ] || return 0
+  for record in plan/tasks.json failures.jsonl landings.jsonl artifacts/index.jsonl; do
+    [ -s "$wt/.oms/$record" ] || continue
+    OMS_HARNESS_RESIDUE_KEEP_REASON="holds .oms/$record"
+    return 0
+  done
+}
+
+# Returns 0 when the dead residue's worktree is verified for removal (see
+# oms_harness_safe_residue_worktree) and sets the keep reason for it.
+oms_harness_classify_dead_residue() {  # BASE DIR MARKER
+  OMS_HARNESS_RESIDUE_KEEP_REASON=""
+  oms_harness_safe_residue_worktree "$1" "$2" \
+    "$(oms_harness_read_marker_value "$3" repo)" \
+    "$(oms_harness_read_marker_value "$3" worktree)" || return 1
+  oms_harness_worktree_keep_reason "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE"
+}
+
 oms_harness_count_stale_worktrees() {
   local repo="$1"
   local count=0
@@ -305,9 +357,11 @@ oms_harness_tmp_residue_count() {
       temporary="$(oms_harness_read_marker_value "$marker" temporary)"
       [ "$temporary" = "1" ] || continue
       pid="$(oms_harness_read_marker_value "$marker" pid)"
-      if ! oms_file_lock_pid_alive "$pid"; then
-        count=$((count + 1))
-      fi
+      oms_file_lock_pid_alive "$pid" && continue
+      # Kept work is not residue: counting it would warn with a remedy that
+      # cannot act on it.
+      oms_harness_classify_dead_residue "$base" "$dir" "$marker" || true
+      [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ] || count=$((count + 1))
     done
   done <<EOF
 $(oms_harness_temp_bases)
@@ -321,9 +375,8 @@ oms_harness_cleanup_temp_dirs() {
   local dir
   local marker
   local pid
-  local repo
+  local safe
   local temporary
-  local worktree
 
   while IFS= read -r base; do
     [ -d "$base" ] || continue
@@ -339,15 +392,21 @@ oms_harness_cleanup_temp_dirs() {
       pid="$(oms_harness_read_marker_value "$marker" pid)"
       oms_file_lock_pid_alive "$pid" && continue
 
+      safe=0
+      oms_harness_classify_dead_residue "$base" "$dir" "$marker" && safe=1
+      if [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
+        printf 'kept: %s (dead harness temp dir; worktree %s)\n' \
+          "$dir" "$OMS_HARNESS_RESIDUE_KEEP_REASON"
+        OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
+        continue
+      fi
       if [ "$dry_run" = "1" ]; then
         printf 'would remove: %s (dead harness temp dir)\n' "$dir"
         OMS_HARNESS_RESIDUE_WOULD_REMOVE=$((OMS_HARNESS_RESIDUE_WOULD_REMOVE + 1))
         continue
       fi
 
-      repo="$(oms_harness_read_marker_value "$marker" repo)"
-      worktree="$(oms_harness_read_marker_value "$marker" worktree)"
-      if oms_harness_safe_residue_worktree "$base" "$dir" "$repo" "$worktree"; then
+      if [ "$safe" = 1 ]; then
         # Both arguments are physical paths established above. In particular,
         # the remove target is the expected residue child, never marker input.
         git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" worktree remove --force \
@@ -373,6 +432,120 @@ oms_harness_cleanup_residue() {
   fi
   oms_harness_cleanup_dead_locks "$dry_run"
   oms_harness_cleanup_temp_dirs "$dry_run"
+}
+
+# A delegate killed by SIGKILL never runs its cleanup trap, so its liveness
+# marker stays and reads as an ORPHAN forever; gc only runs on request. Each
+# delegate start therefore reaps markers whose pid is proven dead and that no
+# recovery path needs: task/lease/executor/autopilot-coupled markers stay for
+# gc's plan recovery. Validation mirrors gc's delegation_marker_snapshot. The
+# set lock is only tried, never waited for, and every entry that is not
+# provably safe is kept, so a delegate run never stalls or fails here.
+oms_harness_reap_dead_delegation_markers() {  # PHYSICAL_REPO
+  local repo="$1"
+
+  [ -d "$repo/.oms/delegations" ] && [ ! -L "$repo/.oms/delegations" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  oms_try_file_lock "$repo/.oms/delegations/.marker-set-lock-target" \
+    oms_harness_reap_dead_delegation_markers_locked "$repo" \
+    "$OMS_FILE_LOCK_LIB_DIR/process_liveness.py" >/dev/null 2>&1 || true
+}
+
+oms_harness_reap_dead_delegation_markers_locked() {  # REPO LIVENESS_PY
+  python3 - "$1" "$2" <<'PY'
+import json, os, random, re, runpy, stat, sys
+
+repo = os.path.realpath(sys.argv[1])
+liveness = runpy.run_path(sys.argv[2])
+pid_alive = liveness["pid_alive"]
+native_proven = liveness["persisted_native_pid_is_proven"]
+marker_dir = os.path.join(repo, ".oms", "delegations")
+safe_name = re.compile(r"^[A-Za-z0-9._-]+\.json$")
+limit = 64 * 1024
+flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+
+info = os.lstat(marker_dir)
+if (not stat.S_ISDIR(info.st_mode) or
+        os.path.normcase(os.path.realpath(marker_dir)) !=
+        os.path.normcase(os.path.abspath(marker_dir))):
+    raise SystemExit(0)
+names = []
+with os.scandir(marker_dir) as iterator:
+    for entry in iterator:
+        if len(names) >= 65536:
+            break
+        if safe_name.fullmatch(entry.name):
+            names.append(entry.name)
+# Bounded per run but still progressing: a shuffled sample lets successive
+# starts drain a backlog that kept entries at the front would otherwise block.
+random.shuffle(names)
+
+def reapable(path):
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+        return None
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or
+                (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+            return None
+        payload = os.read(descriptor, limit + 1)
+        if len(payload) > limit or os.read(descriptor, 1):
+            return None
+    finally:
+        os.close(descriptor)
+    marker = json.loads(payload.decode("utf-8"))
+    if not isinstance(marker, dict):
+        return None
+    schema = marker.get("schema")
+    pid = marker.get("pid")
+    native_pid = marker.get("native_pid")
+    if (isinstance(schema, bool) or schema not in {1, 2, 3, 4} or
+            isinstance(pid, bool) or not isinstance(pid, int) or
+            not 0 < pid <= 0x7FFFFFFF):
+        return None
+    if "native_pid" in marker and (
+            isinstance(native_pid, bool) or not isinstance(native_pid, int)
+            or not 0 < native_pid <= 0xFFFFFFFF):
+        return None
+    if schema == 4 and "native_pid" not in marker:
+        return None
+    if not native_proven(native_pid, marker.get("native_pid_source")):
+        return None
+    for key in ("task_id", "lease_id", "executor_id", "autopilot_owner_id"):
+        if marker.get(key, ""):
+            return None
+    if pid_alive(pid, native_pid=native_pid):
+        return None
+    return (opened.st_dev, opened.st_ino, opened.st_size)
+
+removed = 0
+for name in names[:4096]:
+    path = os.path.join(marker_dir, name)
+    try:
+        identity = reapable(path)
+        if identity is None:
+            continue
+        final = os.lstat(path)
+        if (not stat.S_ISREG(final.st_mode) or
+                (final.st_dev, final.st_ino, final.st_size) != identity):
+            continue
+        os.unlink(path)
+        removed += 1
+    except Exception:
+        continue
+if removed:
+    try:
+        directory = os.open(marker_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError:
+        pass
+PY
 }
 
 oms_harness_count_unindexed_artifacts() {

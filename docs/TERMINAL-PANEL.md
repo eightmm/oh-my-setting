@@ -122,6 +122,12 @@ A native main launched from the menu joins the selected work room. Starting a re
 main from the menu or with `--launch` keeps the panel's recorded room while it is open and has headroom; a full or closed room makes the next
 main start a new room, and an explicit `--room ID` or `o Rooms` choice wins.
 A bare control window shows the panel's recorded room.
+Role dispatch keeps its validated main, room, model and plan binding when the
+room's message limit prevents the informational assignment notice. It reports
+that delivery is unavailable and still runs the call; ordinary room sends keep
+their limit. Result delivery can also be unavailable, with evidence retained in
+the indexed call result. Closed rooms, invalid membership and unrelated send
+failures still refuse dispatch.
 The `o Rooms` menu selects or creates a task-scoped room. It does not enroll
 other sessions merely because they share a repository. Auto uses a connected
 vertical tree for a selected room at 28 columns and 12 rows or larger. Every
@@ -342,6 +348,15 @@ Incomplete or ambiguous discovery never establishes a unique receiver; the room
 inventory reports `incomplete`. Exact explicit selection bypasses inventory
 lookup. Closed/left rooms do not
 deliver. Membership is a routing record, not authentication or an OS sandbox.
+
+For an existing tmux main, the session's selected room can also receive coordination
+mail when that room explicitly enrolls the same main, native consumer, provider,
+model and role. The session must belong to the same repository. Hooks retain the
+original room's cursor and use a separate cursor for coordination mail; neither
+delivery acknowledges messages. Existing process environment, attempts, leases,
+dispatch and acceptance authority keep their original binding. Selecting a room
+alone does not enroll a receiver or transfer its work. This requires the updated
+hook code; older installed hooks continue to read the process's original room.
 
 ```bash
 oms room join --repo . --id team --participant sol-main --provider codex \
@@ -690,13 +705,17 @@ It works directly only when a brief would cost more than the edit or the step
 needs the main itself. Outside the panel, the global rule still requires an
 explicit request before spawning subagents.
 
-Every main also lands its own work. It admits worker patches on its own
-`oms/<task>` branch in a worktree from `oms scratch-worktree add`, rebases on
-the remote target, verifies and runs `oms land` from that worktree. Nobody
-commits in the shared checkout, and no main waits for a single integrator:
-`oms land`'s lock serialises the pushes, the worker guard treats other mains'
-`oms/*` branches and harness worktrees as soft, and `oms room scope` warns
-about overlapping files before the work starts.
+Every main also lands its own work. `oms scratch-worktree add` starts a detached
+worktree; create a local, nontracking task branch there with
+`git checkout --no-track -b oms/<task>`, then admit worker patches and rebase on
+the remote target. No upstream is needed. After verification, commit and run
+`oms land` from that worktree only when commit and publication are authorized;
+`oms land` pushes the verified SHA to its target. Nobody commits in the shared
+checkout, and no main waits for a single integrator:
+a concurrent `oms land` exits 75 if the lock stays held past `OMS_LOCK_TIMEOUT` (default 300s); retry after the active land finishes.
+The worker guard treats other mains' `oms/*` branches and harness worktrees
+as soft, and `oms room scope` warns about overlapping files before the work
+starts.
 
 Task complexity and write authority are independent. A write role needs a
 scoped brief file and mechanical verifier. Read workers
@@ -727,6 +746,14 @@ From the control window, a dispatch belongs to the room's active main of that
 provider. `--main PARTICIPANT` names it explicitly (the board's `a` uses it); it only
 narrows the same live-main proof and is refused for a departed, exited or
 unknown main. A native main always dispatches as itself.
+
+A `--task-id` that names a shared-plan task moves it for the calling main: a
+ready task is claimed and started, a claimed one is started, and later workers
+of the same main reuse the running lease. A task another provider or main holds,
+or one already in review or done, is left unchanged with a warning; `--dry-run`
+never moves it. Stderr names the next verbs, `oms agent-plan review` after
+acceptance and `finish --landed-commit SHA` after `oms land`. The panel never
+passes `--plan-task`, whose per-worker transitions assume one worker per task.
 
 Continue a timed-out or reviewed worker with `--continue TASK_ID` instead of
 re-dispatching from scratch: `oms panel --repo . --dispatch refactorer --owner claude
@@ -931,8 +958,9 @@ role dividers report hidden calls and the overflow line shows nonzero counts
 with `8 Details`. Small panes use borderless summaries. Press `b` to
 toggle attention-only: waiting input, waiting approval, blocked, review and
 orphaned calls, plus retained failed terminal outcomes. Filtered calls are
-counted rather than changing their states. Both controls affect presentation,
-not the main identity or dispatch authority. A native window inherits these
+counted rather than changing their states. Settled calls classified as Past work
+remain hidden. Both controls affect presentation, not the main identity or
+dispatch authority. A native window inherits these
 settings when opened, and the control sidebar follows subsequent menu changes.
 CLI `--view` overrides a watch's window density; `--attention-only` keeps its
 filter enabled. These flags apply only to the menu or watch, not model operations.
@@ -1080,8 +1108,10 @@ line is cut at about 140 columns), `(changed in round 2: (c) -> (a))` only when
 the seat's choice token such as (a), A, yes/no or proceed/revise differs between
 rounds, Agreement/Disagreement only when the synthesis has such headings, and
 the owner's recorded decision. Up/Down moves the seat cursor, Enter shows that
-seat's full answer in the tab, Esc returns, and `f` opens the full recorded
-result reader. Evidence is read in the background.
+seat's retained answer in the tab. If only part of that round's source answer
+was retained, the tab shows a truncation notice and the recorded source artifact
+path. Esc returns, and `f` opens the full recorded result reader. Evidence is
+read in the background.
 
 Messages lists the room's last 200 messages, oldest first, one row each with
 local time (date when from another day), sender and recipient by the board's

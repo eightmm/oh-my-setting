@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import runpy
 import subprocess
+import sys
 import time
 import uuid
 
@@ -307,6 +308,18 @@ def _deliver(repo, payload, relative, rows, retry=False):
     return delivered
 
 
+def _plan_hint(repo, task_id):
+    # No land receipt exists here, so the plan is never finished automatically.
+    try:
+        shown = subprocess.run(['bash', str(ENTRY), 'agent-plan', '--repo', str(repo), 'show', '--id', task_id],
+                               capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=60)
+        if not shown.returncode and json.loads(shown.stdout).get('state') not in ('done', None):
+            print('plan %s is not done: after oms land run oms agent-plan finish --id %s --landed-commit SHA'
+                  % (task_id, task_id), file=sys.stderr)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
+
 def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=None, notify=False):
     _owner()
     if owner not in ('codex', 'claude') or not ID.fullmatch(task_id) or outcome not in ('completed', 'accepted', 'failed'):
@@ -361,6 +374,8 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
         if not any(r.get('kind') == 'panel-result' and r.get('artifact') == relative for r in rows):
             _register(repo, owner, task_id, path)
         delivery = _deliver(repo, payload, relative, rows) if notify else _last_delivery(repo, rows, task_id, payload['revision'])
+        if outcome == 'accepted':
+            _plan_hint(repo, task_id)
         return dict(payload, artifact=relative, delivery=delivery)
 
 
@@ -428,7 +443,8 @@ def results(repo, task_id=None, room_participant=None, _shared=False):
     output = []
     capped = False
     for ident in reversed(chosen):
-        matching = [a for a in attempts if a.get('task_id') == ident]
+        metadata_attempts = [a for a in attempts if a.get('task_id') == ident]
+        matching = metadata_attempts
         indexed = [r for r in rows if r.get('task_id') == ident]
         result_rows = [r for r in indexed if r.get('kind') == 'panel-result']
         result = delivery = None
@@ -448,6 +464,8 @@ def results(repo, task_id=None, room_participant=None, _shared=False):
             indexed = [r for r in rows if r.get('task_id') == ident or r.get('attempt_id') in linked]
         if room_participant:
             matching = [a for a in matching if a.get("refs", {}).get("panel_room_participant") == room_participant]
+            metadata_attempts = [a for a in metadata_attempts
+                                 if a.get("refs", {}).get("panel_room_participant") == room_participant]
             linked = {a.get("attempt_id") for a in matching}
             indexed = [r for r in indexed if r.get("attempt_id") in linked]
         if scoped and not matching:
@@ -455,7 +473,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False):
         if len(output) >= 20:
             capped = True
             break
-        last = matching[-1] if matching else {}
+        last = metadata_attempts[-1] if metadata_attempts else {}
         metadata = last.get('refs', {})
         calls = []
         for row in indexed[-30:]:

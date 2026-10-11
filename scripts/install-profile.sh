@@ -218,9 +218,10 @@ if [ "$check_rc" -ne 0 ] && [ "$ALLOW_MISSING" -ne 1 ]; then
   exit "$check_rc"
 fi
 
-receipt_parent="${RECEIPT%/*}"
-[ "$receipt_parent" != "$RECEIPT" ] || receipt_parent=.
-[ -n "$receipt_parent" ] || receipt_parent=/
+# One process per apply buys dirname's slash trimming: ${RECEIPT%/*} turns
+# "/link//receipt" into "/link/" (and "/link/sub/" into "/link/sub"), and -L
+# follows a trailing slash instead of refusing the symlinked directory.
+receipt_parent="$(dirname -- "$RECEIPT")"
 [ ! -L "$receipt_parent" ] || fail "receipt directory must not be a symbolic link"
 umask 077
 mkdir -p "$receipt_parent"

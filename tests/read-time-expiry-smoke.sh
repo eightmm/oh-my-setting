@@ -114,15 +114,15 @@ printf '%s\n' "$list_out" | grep -F 'oms-test-hook-fresh' | grep -Fq OPEN ||
   fail "fresh hook row lost its OPEN tag"
 printf '%s\n' "$list_out" | grep -F 'oms-test-verify-old' | grep -Fq OPEN ||
   fail "aged non-hook row lost its OPEN tag"
-printf '%s\n' "$list_out" | grep -Fq 'retired:' || fail "list did not explain the retirement"
+printf '%s\n' "$list_out" | grep >/dev/null -F 'retired:' || fail "list did not explain the retirement"
 
 # --unresolved answers "what is still failing", so a retired row is not there.
 un_out="$("$LEDGER_SH" --repo "$repo" list --unresolved)"
-if printf '%s\n' "$un_out" | grep -Fq 'oms-test-hook-old'; then
+if printf '%s\n' "$un_out" | grep >/dev/null -F 'oms-test-hook-old'; then
   fail "retired hook row still counted as unresolved"
 fi
-printf '%s\n' "$un_out" | grep -Fq 'oms-test-hook-fresh' || fail "--unresolved lost the live hook row"
-printf '%s\n' "$un_out" | grep -Fq 'oms-test-verify-old' || fail "--unresolved lost the live verify row"
+printf '%s\n' "$un_out" | grep >/dev/null -F 'oms-test-hook-fresh' || fail "--unresolved lost the live hook row"
+printf '%s\n' "$un_out" | grep >/dev/null -F 'oms-test-verify-old' || fail "--unresolved lost the live verify row"
 
 "$LEDGER_SH" --repo "$repo" list --json | python3 -c '
 import json, sys
@@ -141,8 +141,8 @@ assert rows["oms-test-verify-old --flag"]["expired"] is False
 record 'oms-test-hint --flag' hook >/dev/null
 age_rows 'oms-test-hint' "$FORTY_DAYS"
 hint_out="$(record 'oms-test-hint --flag' hook)"
-printf '%s\n' "$hint_out" | grep -Fq 'recorded' || fail "second hint row was not recorded"
-if printf '%s\n' "$hint_out" | grep -Fq 'has failed'; then
+printf '%s\n' "$hint_out" | grep >/dev/null -F 'recorded' || fail "second hint row was not recorded"
+if printf '%s\n' "$hint_out" | grep >/dev/null -F 'has failed'; then
   fail "the advise hint counted a retired hook row: $hint_out"
 fi
 
@@ -150,7 +150,7 @@ fi
 # PART 2: gc reclaims exactly what reads retired, on its own retention floor.
 # ---------------------------------------------------------------------------
 gc_out="$("$GC_SH" --repo "$repo" --days 30 --apply)"
-printf '%s\n' "$gc_out" | grep -Fq 'failures: compact' || fail "gc did not compact the ledger: $gc_out"
+printf '%s\n' "$gc_out" | grep >/dev/null -F 'failures: compact' || fail "gc did not compact the ledger: $gc_out"
 if grep -Fq 'oms-test-hook-old' "$ledger"; then
   fail "gc kept a hook row that is both expired and past the retention floor"
 fi
@@ -210,7 +210,7 @@ printf 'this line is not-json evidence\n' >> "$mal_repo/.oms/failures.jsonl"
 mal_out="$("$GC_SH" --repo "$mal_repo" --days 30 --apply)"
 grep -Fq 'not-json evidence' "$mal_repo/.oms/failures.jsonl" ||
   fail "gc erased a malformed ledger line instead of preserving it"
-printf '%s\n' "$mal_out" | grep -Fq 'failures: compaction refused' ||
+printf '%s\n' "$mal_out" | grep >/dev/null -F 'failures: compaction refused' ||
   fail "gc did not name its refusal on a malformed ledger: $mal_out"
 
 lock_repo="$TMP/lock-repo"
@@ -238,7 +238,7 @@ done
 }
 lock_out="$(OMS_LOCK_FORCE_MKDIR=1 "$GC_SH" --repo "$lock_repo" --days 30 --apply)"
 wait "$lock_holder"
-printf '%s\n' "$lock_out" | grep -Fq 'failures: skipped' ||
+printf '%s\n' "$lock_out" | grep >/dev/null -F 'failures: skipped' ||
   fail "gc compacted the ledger under a live writer lock: $lock_out"
 grep -Fq 'oms-test-lock-resolved' "$lock_repo/.oms/failures.jsonl" ||
   fail "gc dropped rows despite skipping under a live lock"
@@ -348,8 +348,8 @@ assert json.load(sys.stdin)["claim_expired"] is False
 ready_out="$("$PLAN" --repo "$prepo" ready 2>/dev/null)"
 [ "$ready_out" = t1 ] || fail "ready did not offer the expired claim (got: $ready_out)"
 next_out="$("$PLAN" --repo "$prepo" next 2>&1)"
-printf '%s\n' "$next_out" | grep -Fq 'Task t1' || fail "next did not select the expired claim"
-printf '%s\n' "$next_out" | grep -Fq EXPIRED || fail "next brief hid the expiry"
+printf '%s\n' "$next_out" | grep >/dev/null -F 'Task t1' || fail "next did not select the expired claim"
+printf '%s\n' "$next_out" | grep >/dev/null -F EXPIRED || fail "next brief hid the expiry"
 "$PLAN" --repo "$prepo" status | grep -Fq 'expired claim t1' ||
   fail "status did not report the expired claim"
 "$PLAN" --repo "$prepo" status | grep -Fq 'ready now: t1' ||

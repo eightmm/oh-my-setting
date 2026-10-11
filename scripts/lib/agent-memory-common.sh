@@ -10,6 +10,9 @@ AGENT_MEMORY_DB_HELPER="$AGENT_MEMORY_COMMON_LIB_DIR/agent-memory-db.py"
 . "$AGENT_MEMORY_COMMON_LIB_DIR/oms-common.sh"
 # shellcheck source=provider-registry.sh
 . "$AGENT_MEMORY_COMMON_LIB_DIR/provider-registry.sh"
+# shellcheck source=harness-residue.sh
+declare -F oms_harness_safe_residue_worktree >/dev/null ||
+  . "$AGENT_MEMORY_COMMON_LIB_DIR/harness-residue.sh"
 
 # Normalize a repo argument to its git worktree root so shared state does not
 # silently fork when a command runs from a subdirectory (repo/src/.oms vs
@@ -23,6 +26,46 @@ oms_repo_root() {
   else
     (cd "$repo" && pwd)
   fi
+}
+
+# Where a parent's shared .oms state belongs, as opposed to the tree its
+# commands operate on (oms_repo_root). A parent session working in its own
+# `oms scratch-worktree` keeps plan, ledger and landing rows in the checkout
+# that owns the git common dir, so they reach the shared board and survive
+# scratch removal. The scratch must verify as one (marker beside it, matching
+# registration) and the first `git worktree list` entry must own the common
+# dir. Workers and every other linked worktree keep their own root:
+# the worker guard's .oms surface is worktree-local. Unverifiable -> own root.
+oms_state_root() {
+  local root="" physical="" parent="" managed="" marker="" kind="" temporary=""
+  local common="" main=""
+  root="$(oms_repo_root "$1")" || return 1
+  root="${root//$'\r'/}"
+  if [ "${OMS_HARNESS_CHILD:-0}" = 0 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] &&
+    physical="$(oms_harness_physical_dir "$root" 2>/dev/null)" &&
+    managed="$(oms_harness_physical_dir "$(oms_harness_delegate_worktree_root)" 2>/dev/null)"; then
+    parent="${physical%/wt}"
+    marker="$parent/.oh-my-setting-tmp"
+    case "$parent" in "$managed"/oh-my-setting-scratch.*) ;; *) parent="" ;; esac
+    if [ -n "$parent" ] && [ "$physical" = "$parent/wt" ] && [ -f "$marker" ] && [ ! -L "$marker" ]; then
+      kind="$(oms_harness_read_marker_value "$marker" kind)"
+      temporary="$(oms_harness_read_marker_value "$marker" temporary)"
+      if [ "$kind" = oh-my-setting-temp ] && [ "$temporary" = 1 ] &&
+        oms_harness_safe_residue_worktree "$managed" "$parent" \
+          "$(oms_harness_read_marker_value "$marker" repo)" \
+          "$(oms_harness_read_marker_value "$marker" worktree)" &&
+        common="$(oms_harness_git_path_physical "$physical" --git-common-dir)" &&
+        main="$(git -C "$physical" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')" &&
+        main="$(oms_harness_physical_dir "${main//$'\r'/}" 2>/dev/null)" &&
+        [ "$main" != "$physical" ] &&
+        [ "$(git -C "$main" rev-parse --is-bare-repository 2>/dev/null)" = false ] &&
+        [ "$(oms_harness_git_path_physical "$main" --git-dir 2>/dev/null)" = "$common" ]; then
+        printf '%s\n' "$main"
+        return 0
+      fi
+    fi
+  fi
+  printf '%s\n' "$root"
 }
 
 # Best-effort identity of the agent CLI running this process, for attribution
@@ -281,8 +324,18 @@ agent_memory_sensitive_report() {  # FILE
   local file="$1"
   local begin end tier re line number region
   local prompt_lines context_lines prompt_count context_count
+  local wrap_lines wrap_count brief_first=0 brief_last=0
 
   [ -s "$file" ] || return 0
+  # Optional FIRST:LAST of the caller's own text inside a composed prompt
+  # (set by the delegate wrapper). Without it, lines are file-relative.
+  case "${OMS_SCAN_BRIEF_RANGE:-}" in
+    [0-9]*:[0-9]*)
+      brief_first="${OMS_SCAN_BRIEF_RANGE%%:*}"
+      brief_last="${OMS_SCAN_BRIEF_RANGE##*:}"
+      case "$brief_first$brief_last" in *[!0-9]*) brief_first=0 ;; esac
+      [ "$brief_first" -le "$brief_last" ] 2>/dev/null || brief_first=0 ;;
+  esac
   # `|| true`: a prompt with no harness context has no marker, grep exits 1,
   # and under pipefail the assignment would end the command substitution this
   # report runs inside -- silently dropping the whole diagnostic.
@@ -297,6 +350,7 @@ agent_memory_sensitive_report() {  # FILE
       re="$(agent_memory_machine_re)"
     fi
     prompt_lines=""; context_lines=""; prompt_count=0; context_count=0
+    wrap_lines=""; wrap_count=0
     while IFS= read -r line; do
       number="${line%%:*}"
       case "$number" in *[!0-9]*|"") continue ;; esac
@@ -308,14 +362,23 @@ agent_memory_sensitive_report() {  # FILE
       if [ "$region" = context ]; then
         context_count=$((context_count + 1))
         [ "$context_count" -gt 3 ] || context_lines="${context_lines:+$context_lines, }$number"
+      elif [ "$brief_first" -gt 0 ] && { [ "$number" -lt "$brief_first" ] || [ "$number" -gt "$brief_last" ]; }; then
+        wrap_count=$((wrap_count + 1))
+        [ "$wrap_count" -gt 3 ] || wrap_lines="${wrap_lines:+$wrap_lines, }$number"
       else
+        [ "$brief_first" -eq 0 ] || number=$((number - brief_first + 1))
         prompt_count=$((prompt_count + 1))
         [ "$prompt_count" -gt 3 ] || prompt_lines="${prompt_lines:+$prompt_lines, }$number"
       fi
     done <<EOF
 $(agent_memory_scan_input "$file" 2>/dev/null | grep -Ein "$re" | cut -d: -f1)
 EOF
-    agent_memory_sensitive_report_line "$tier" "your prompt" "$prompt_lines" "$prompt_count"
+    if [ "$brief_first" -gt 0 ]; then
+      agent_memory_sensitive_report_line "$tier" "your brief" "$prompt_lines" "$prompt_count"
+      agent_memory_sensitive_report_line "$tier" "the delegate role/wrapper text" "$wrap_lines" "$wrap_count"
+    else
+      agent_memory_sensitive_report_line "$tier" "your prompt" "$prompt_lines" "$prompt_count"
+    fi
     agent_memory_sensitive_report_line "$tier" "attached harness context" "$context_lines" "$context_count"
   done
 }

@@ -53,7 +53,6 @@ long-terminal attempts, archived task packets,
 handoff digests, local tracked-state checkpoints, hook events/sessions,
 terminal supervisor runtime records outside the repository (durable lifecycle
 events and attempt specs remain),
-terminal frozen landing patches no longer referenced by the artifact index,
 stale open runs (no spine event in --days; a close event is appended), run
 capsules of runs that are NOT open, abandoned change-guards (dead owner pid
 or aged snapshot), terminal/draft executor souls, retired failure rows
@@ -63,7 +62,9 @@ artifact index rows are delegated to
 artifact-index prune; orphaned artifact files are left alone unless
 --delete-orphan-files says otherwise. Never touches live runs, the active task, unresolved
 failures, active experiment claims, or plan tasks in review. The append-only
-experiment board is left intact.
+experiment board is left intact. Legacy/unknown/referenced landing evidence is
+retained. New native capture generations are collected only with private anchor
+ownership, a writer terminal seal, complete reference checks and quiescence.
 EOF
 }
 
@@ -109,12 +110,9 @@ note_remove() {  # note_remove KIND PATH
   fi
 }
 
-# 0.5) A landing freezes caller-owned patch bytes before admission so verifier
-# code cannot swap the approved object. Keep that snapshot while recovery is
-# outstanding and while the artifact index still cites it; once both durable
-# records say it is terminal/unreferenced, it is transient storage like an old
-# supervisor log. The same non-blocking landing lock prevents GC from racing a
-# live apply or recovery. A busy landing is expected and simply defers cleanup.
+# 0.5) Validate legacy retention inputs without treating shared terminal rows
+# as ownership. The managed-generation collector below additionally requires
+# the native writer's retained private inode anchor and terminal seal.
 landing_patch_gc_locked() {
   python3 - "$STATE_ROOT" "$OMS/landings.jsonl" "$OMS/artifacts/index.jsonl" \
     "$DAYS" "$DRY_RUN" <<'PY'
@@ -158,6 +156,10 @@ with landing_lines:
         if not isinstance(landing_id, str) or not landing_id:
             raise SystemExit("landing row %d has no landing_id" % line_number)
         event = row.get("event")
+        if event in ("capture-reserved", "capture-terminal", "capture-release-ready", "capture-released"):
+            # These are validated against private ownership by the native
+            # collector; they are never legacy landing terminal authority.
+            continue
         if event == "intent":
             if not isinstance(row.get("patch"), str) or not row["patch"]:
                 raise SystemExit("landing intent %s has no patch" % landing_id)
@@ -217,8 +219,6 @@ if index_lines is not None:
                     referenced.add(real)
 
 cutoff = time.time() - int(days_raw) * 86400
-dry_run = dry_raw == "1"
-removed = False
 for path in sorted(terminal_paths - active_paths - referenced):
     name = os.path.basename(path)
     if not (name.startswith("land-") and name.endswith(".patch")):
@@ -229,19 +229,7 @@ for path in sorted(terminal_paths - active_paths - referenced):
         continue
     if not stat.S_ISREG(info.st_mode) or info.st_mtime > cutoff:
         continue
-    print("- landing-patch: %s" % path)
-    if not dry_run:
-        os.unlink(path)
-        removed = True
-if removed:
-    try:
-        directory = os.open(patch_root, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except OSError:
-        pass
+    print("- landing-patch: retained (ownership unproven): %s" % path)
 PY
 }
 
@@ -253,9 +241,6 @@ if [ -f "$OMS/landings.jsonl" ] && [ -d "$OMS/landing-patches" ]; then
   case "$landing_gc_status" in
     0)
       [ -z "$landing_gc_out" ] || printf '%s\n' "$landing_gc_out"
-      landing_gc_changes="$(printf '%s\n' "$landing_gc_out" |
-        awk '/^- landing-patch: / {n++} END {print n+0}')"
-      removed=$((removed + landing_gc_changes))
       ;;
     75) echo "- landing-patch: skipped while a landing or recovery is active" ;;
     *) echo "error: gc: frozen landing patch maintenance failed" >&2; exit "$landing_gc_status" ;;
@@ -269,6 +254,21 @@ fi
 #    bounded/no-follow digest+identity CAS preserves a generation replaced by
 #    a non-cooperative same-UID writer; OS sandboxing remains the only complete
 #    control for a swap in the final lstat/unlink syscall window.
+# The helper's gc entrypoint takes landings -> marker-set -> plan itself, then
+# lifecycle -> artifact-index. Keep the nonblocking landing-busy result used by
+# the legacy sweep while avoiding nested acquisition of the same outer locks.
+if [ -f "$OMS/landings.jsonl" ]; then
+  managed_gc_status=0
+  managed_gc_out="$(python3 "$ROOT_LIB/landing-capture.py" gc "$STATE_ROOT" \
+    "$DAYS" "$((1 - DRY_RUN))")" || managed_gc_status=$?
+  case "$managed_gc_status" in
+    0) [ -z "$managed_gc_out" ] || printf '%s\n' "$managed_gc_out" ;;
+    75) echo "- managed-landing-capture: skipped while a landing or lifecycle writer lock is active" ;;
+    *) echo "error: managed landing retention refused unknown state" >&2; exit "$managed_gc_status" ;;
+  esac
+fi
+
+
 delegation_set_lock="$STATE_ROOT/.oms/delegations/.marker-set-lock-target"
 delegation_dir_is_safe() {  # DIRECTORY
   python3 - "$1" "$STATE_ROOT" <<'PY'
@@ -289,11 +289,12 @@ if (not stat.S_ISDIR(info.st_mode) or
 PY
 }
 
-delegation_marker_names() {  # DIRECTORY
-  python3 - "$1" "$STATE_ROOT" <<'PY'
+delegation_marker_names() {  # DIRECTORY [STRICT]
+  python3 - "$1" "$STATE_ROOT" "${2:-}" <<'PY'
 import os, re, stat, sys
 path = os.path.abspath(sys.argv[1])
 repo = os.path.realpath(sys.argv[2])
+strict = sys.argv[3] == "strict"
 expected = os.path.join(repo, ".oms", "delegations")
 safe_name = re.compile(r"^[A-Za-z0-9._-]+\.json$")
 try:
@@ -317,13 +318,16 @@ for entry in sorted(entries, key=lambda item: item.name):
     if not entry.name.endswith(".json"):
         continue
     if not safe_name.fullmatch(entry.name):
+        if strict:
+            sys.stderr.write("warning: gc: unsafe delegation marker name kept\n")
+            raise SystemExit(2)
         sys.stderr.write("warning: gc: unsafe delegation marker name kept\n")
         continue
     print(entry.name)
 PY
 }
 
-delegation_marker_names_locked() {  # DIRECTORY
+delegation_marker_names_locked() {  # DIRECTORY [STRICT]
   local directory_rc=0
   delegation_dir_is_safe "$1" || directory_rc=$?
   case "$directory_rc" in
@@ -331,7 +335,7 @@ delegation_marker_names_locked() {  # DIRECTORY
     1) return 1 ;;
     *) return 20 ;;
   esac
-  delegation_marker_names "$1" || return 21
+  delegation_marker_names "$1" "${2:-}" || return 21
 }
 
 delegation_marker_snapshot() {  # MARKER
@@ -570,7 +574,7 @@ EOF
             fi
           fi
           ;;
-        ready|review|landing|blocked|done) ;;
+        ready|review|landing|blocked|done|cancelled) ;;
         *)
           echo "warning: gc: plan task $task_id has an invalid state; kept trigger evidence" >&2
           recovery_hard_failure=1
@@ -706,8 +710,13 @@ fi
 # 2.2) Hook state is deliberately transient. Compact only parseable old rows;
 # invalid/unparseable rows are preserved for diagnosis. Apply uses a
 # same-directory atomic replace under the shared file lock so a live hook can
-# never observe a truncated file.
+# never observe a truncated file. Hold the marker-set lock across the marker
+# check and both cleanup operations: worker publication uses this lock, so a
+# new worker cannot start between the check and the rewrite/deletion. The
+# nested event-file lock follows marker-set -> events; hook appenders take only
+# the event-file lock.
 hook_events="$OMS/hooks/events.jsonl"
+hook_sessions="$OMS/hooks/sessions"
 compact_hook_events() {
   local path="$1"
   local cutoff="$2"
@@ -717,29 +726,89 @@ compact_hook_events() {
   [ "$apply" = 0 ] || compact_args+=(--apply)
   python3 "$ROOT_LIB/cached-main.py" "$ROOT_LIB/hook_state.py" "${compact_args[@]}"
 }
-if [ -f "$hook_events" ] && [ ! -L "$hook_events" ]; then
-  hook_counts="$(compact_hook_events "$hook_events" "$cutoff_epoch" "$((1 - DRY_RUN))")"
-  hook_before="$(printf '%s' "$hook_counts" | cut -f1)"
-  hook_after="$(printf '%s' "$hook_counts" | cut -f2)"
-  case "$hook_before" in *[!0-9]*|"") echo "error: gc: could not compact hook events" >&2; exit 1 ;; esac
-  case "$hook_after" in *[!0-9]*|"") echo "error: gc: could not compact hook events" >&2; exit 1 ;; esac
-  if [ "$hook_after" -lt "$hook_before" ]; then
-    printf -- '- hook-events: compact %s -> %s rows\n' "$hook_before" "$hook_after"
-    removed=$((removed + hook_before - hook_after))
-  fi
-fi
+hook_state_cleanup_locked() {
+  local marker_names marker_names_rc marker_name marker_snapshot marker_rc marker_state
+  local hook_counts hook_before hook_after hook_session hook_mtime removed_before
 
-if [ -d "$OMS/hooks/sessions" ] && [ ! -L "$OMS/hooks/sessions" ]; then
-  for hook_session in "$OMS/hooks/sessions"/*; do
-    if [ ! -f "$hook_session" ] || [ -L "$hook_session" ]; then
-      continue
+  marker_names_rc=0
+  marker_names="$(delegation_marker_names_locked "$delegation_dir" strict)" || marker_names_rc=$?
+  marker_names="${marker_names//$'\r'/}"
+  case "$marker_names_rc" in
+    0) ;;
+    1) marker_names="" ;;
+    *) return 20 ;;
+  esac
+  while IFS= read -r marker_name; do
+    [ -n "$marker_name" ] || continue
+    marker_rc=0
+    marker_snapshot="$(delegation_marker_snapshot "$delegation_dir/$marker_name")" || marker_rc=$?
+    marker_snapshot="${marker_snapshot//$'\r'/}"
+    [ "$marker_rc" -eq 0 ] || return 21
+    marker_state="${marker_snapshot%%$'\t'*}"
+    [ "$marker_state" = dead ] || return 22
+  done <<EOF_HOOK_MARKERS
+$marker_names
+EOF_HOOK_MARKERS
+
+  removed_before="$removed"
+  if [ -f "$hook_events" ] && [ ! -L "$hook_events" ]; then
+    hook_counts="$(compact_hook_events "$hook_events" "$cutoff_epoch" "$((1 - DRY_RUN))")" || return 30
+    hook_counts="${hook_counts//$'\r'/}"
+    hook_before="$(printf '%s' "$hook_counts" | cut -f1)"
+    hook_after="$(printf '%s' "$hook_counts" | cut -f2)"
+    case "$hook_before" in *[!0-9]*|"") return 31 ;; esac
+    case "$hook_after" in *[!0-9]*|"") return 31 ;; esac
+    if [ "$hook_after" -lt "$hook_before" ]; then
+      printf -- '- hook-events: compact %s -> %s rows\n' "$hook_before" "$hook_after"
+      removed=$((removed + hook_before - hook_after))
     fi
-    hook_mtime="$(python3 -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' \
-      "$hook_session" 2>/dev/null || true)"
-    case "$hook_mtime" in *[!0-9]*|"") continue ;; esac
-    [ "$hook_mtime" -lt "$cutoff_epoch" ] || continue
-    note_remove "hook-session" "$hook_session"
-  done
+  fi
+
+  if [ -d "$hook_sessions" ] && [ ! -L "$hook_sessions" ]; then
+    for hook_session in "$hook_sessions"/*; do
+      if [ ! -f "$hook_session" ] || [ -L "$hook_session" ]; then
+        continue
+      fi
+      hook_mtime="$(python3 -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' \
+        "$hook_session" 2>/dev/null || true)"
+      hook_mtime="${hook_mtime//$'\r'/}"
+      case "$hook_mtime" in *[!0-9]*|"") continue ;; esac
+      [ "$hook_mtime" -lt "$cutoff_epoch" ] || continue
+      note_remove "hook-session" "$hook_session"
+    done
+  fi
+  printf '__OMS_GC_HOOK_REMOVED__%s\n' "$((removed - removed_before))"
+}
+
+if { [ -f "$hook_events" ] && [ ! -L "$hook_events" ]; } ||
+   { [ -d "$hook_sessions" ] && [ ! -L "$hook_sessions" ]; }; then
+  hook_cleanup_status=0
+  hook_cleanup_out="$(oms_with_file_lock "$delegation_set_lock" hook_state_cleanup_locked)" || \
+    hook_cleanup_status=$?
+  case "$hook_cleanup_status" in
+    0)
+      hook_cleanup_changes="$(printf '%s\n' "$hook_cleanup_out" |
+        sed -n 's/^__OMS_GC_HOOK_REMOVED__\([0-9][0-9]*\)$/\1/p' | tail -n 1)"
+      case "$hook_cleanup_changes" in
+        *[!0-9]*|"") echo "error: gc: could not account for hook cleanup" >&2; exit 1 ;;
+      esac
+      hook_cleanup_out="$(printf '%s\n' "$hook_cleanup_out" |
+        sed '/^__OMS_GC_HOOK_REMOVED__[0-9][0-9]*$/d')"
+      [ -z "$hook_cleanup_out" ] || printf '%s\n' "$hook_cleanup_out"
+      removed=$((removed + hook_cleanup_changes))
+      ;;
+    20|21|22|75)
+      echo "warning: gc: hook cleanup skipped while a delegation is live or marker evidence/lock is unverified (rc=$hook_cleanup_status)" >&2
+      ;;
+    30|31)
+      echo "error: gc: could not compact hook events; hook sessions were kept" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: gc: could not safely complete hook cleanup (rc=$hook_cleanup_status)" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # 2.3) Handoff digests older than --days.

@@ -393,21 +393,61 @@ oms_model_generation_newer() {
   [ "$((10#$a_major))" -eq "$((10#$b_major))" ] && [ "$((10#$a_minor))" -gt "$((10#$b_minor))" ]
 }
 
-# Catalog entries a route may pick on its own: the provider's own family (or,
-# for an aggregator, each family for itself) at that family's newest
-# generation. A family whose names carry no generation is kept whole — there is
-# nothing to compare — while an unversioned name beside versioned siblings
-# cannot prove it is current and drops. A previous generation or a re-hosted
-# foreign family still runs when named with --model; it is never chosen.
+# Codex role families have independent version numbers. Accept only exact,
+# versioned IDs for the three role families whose price order the registry knows.
+oms_codex_route_family() {
+  local model="$1" version major minor family
+  case "$model" in gpt-*-astra|gpt-*-sol|gpt-*-luna) ;; *) return 1 ;; esac
+  case "$model" in
+    *-astra) version="${model#gpt-}"; version="${version%-astra}"; family=astra ;;
+    *-sol) version="${model#gpt-}"; version="${version%-sol}"; family=sol ;;
+    *-luna) version="${model#gpt-}"; version="${version%-luna}"; family=luna ;;
+  esac
+  case "$version" in ''|*[!0-9.]*) return 1 ;; esac
+  case "$version" in *.*.*|.*|*.) return 1 ;; esac
+  major="${version%%.*}"
+  [ -n "$major" ] || return 1
+  if [ "$major" = "$version" ]; then minor=0
+  else minor="${version#*.}"; [ -n "$minor" ] || return 1
+  fi
+  case "$major$minor" in *[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$family"
+}
+
+# Codex's known Astra, Sol and Luna families route at each family's newest
+# numeric version. Other providers retain the existing provider-family rule.
+# Previous generations and re-hosted foreign families still run when named.
 # Same exit contract as oms_capability_models: 1 means the catalog is unknown.
 oms_capability_routable_models() {
-  local provider="$1" primary catalog model family generation i j superseded
+  local provider="$1" primary catalog model family generation i j superseded codex_tiers
   local -a models=() families=() generations=()
   provider="$(oms_provider_normalize "$provider")" || return 2
   catalog="$(oms_capability_models "$provider")" || return 1
   primary="$(oms_provider_primary_family "$provider")"
+  codex_tiers=0
+  if [ "$provider" = codex ]; then
+    while IFS= read -r model; do
+      [ -n "$(oms_codex_route_family "$model" 2>/dev/null || true)" ] && codex_tiers=1
+    done <<EOF
+$catalog
+EOF
+  fi
   while IFS= read -r model; do
     [ -n "$model" ] || continue
+    if [ "$provider" = codex ]; then
+      family="$(oms_codex_route_family "$model" 2>/dev/null || true)"
+      if [ -n "$family" ]; then
+        generation="$(oms_model_generation "$model" 2>/dev/null || true)"
+        [ -n "$generation" ] || continue
+        models+=("$model")
+        families+=("codex-$family")
+        generations+=("$generation")
+        continue
+      fi
+      # Preserve legacy own-family/unknown-generation catalogs when no known
+      # role family is present; recognized role catalogs exclude unknown IDs.
+      [ "$codex_tiers" -eq 0 ] || continue
+    fi
     family="$(oms_provider_model_family "$provider" "$model")"
     # A name the classifier cannot place, on a CLI with a family of its own,
     # is taken as that family: not knowing a name is no evidence it is

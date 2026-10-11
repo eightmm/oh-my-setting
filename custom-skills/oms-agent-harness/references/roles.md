@@ -15,7 +15,7 @@ success criteria, and expected output.
 Put task-specific behavior directly in the brief; do not launch another model
 to generate instructions. Roles specialize the task, never its authority.
 Use `oms consult --to PROVIDER` for an independent read, or
-`oms peer-delegate --read-only --role repo-auditor` for a clean-HEAD audit.
+`oms peer-delegate --to PROVIDER --read-only --role repo-auditor` for a clean-HEAD audit.
 
 ## Brief and return
 

@@ -759,6 +759,9 @@ EOF
   make_repo "$repo" "$bare"
   : > "$repo/git.log"; : > "$repo/gh.log"
   local topology_started topology_finished topology_elapsed
+  # Each probe injects a 10s TERM-ignoring delay behind a 1s timeout. Finishing
+  # under that delay proves the kill; a tighter wall only measures host load
+  # (a parallel gate alone pushes process start-up past 4s).
   "$REAL_GIT" -C "$repo" config oms.test.mergeBaseDelay true
   topology_started="$(date +%s)"
   rc=0
@@ -773,7 +776,7 @@ EOF
   [ -f "$repo/.git/merge-base-delay-started" ] &&
     [ ! -f "$repo/.git/merge-base-delay-completed" ] ||
     fail "merge-base timeout did not kill the TERM-ignoring traversal"
-  [ "$topology_elapsed" -le 4 ] ||
+  [ "$topology_elapsed" -lt 10 ] ||
     fail "merge-base traversal exceeded hard wall: ${topology_elapsed}s"
   "$REAL_GIT" -C "$repo" config --unset oms.test.mergeBaseDelay
 
@@ -791,7 +794,7 @@ EOF
   [ -f "$repo/.git/rev-count-delay-started" ] &&
     [ ! -f "$repo/.git/rev-count-delay-completed" ] ||
     fail "rev-list count timeout did not kill the TERM-ignoring traversal"
-  [ "$topology_elapsed" -le 4 ] ||
+  [ "$topology_elapsed" -lt 10 ] ||
     fail "rev-list count traversal exceeded hard wall: ${topology_elapsed}s"
   "$REAL_GIT" -C "$repo" config --unset oms.test.countDelay
 
@@ -817,7 +820,7 @@ EOF
   [ -f "$repo/.git/verifier-delay-started" ] &&
     [ ! -f "$repo/.git/verifier-delay-completed" ] ||
     fail "TERM-ignoring verifier was allowed to finish"
-  [ "$topology_elapsed" -le 4 ] ||
+  [ "$topology_elapsed" -lt 10 ] ||
     fail "TERM-ignoring verifier exceeded hard wall: ${topology_elapsed}s"
 
   rc=0
@@ -1266,7 +1269,8 @@ EOF
     exec "$ROOT/scripts/draft-pr.sh" --repo "$repo" publish --intent "$intent"
   ) > "$repo/cancel-publish.out" 2>&1 &
   local cancel_pid=$! cancel_seen=0 cancel_try=0
-  while [ "$cancel_try" -lt 100 ]; do
+  # Breaks as soon as the push starts; the cap only has to outlast a loaded host.
+  while [ "$cancel_try" -lt 600 ]; do
     if [ -e "$repo/.git/push-delay-started" ]; then
       cancel_seen=1
       break

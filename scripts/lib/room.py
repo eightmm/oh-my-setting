@@ -15,14 +15,14 @@ import uuid
 import thread_live
 from dashboard_projection import clean
 from path_scope import normalize as normalize_scope
+from room_repository import state_repository
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "scripts" / "oms"
 ROLES = {"main", "worker", "advisor", "reviewer", "researcher"}
 KINDS = {"question", "answer", "note", "decision", "handoff", "status"}
 MAX_PARTICIPANTS = 32
-# Dispatched calls join with a parent and never free their slot; the message cap
-# (two messages per call) bounds them as well.
+# Call slots stay bounded even when a full mailbox cannot deliver notifications.
 MAX_CALLS = 480
 MAX_MESSAGES = 1024
 MAIN_RESERVE = 8
@@ -220,6 +220,10 @@ def participant(state, value):
     return found
 
 
+def message_capacity_reached(state):
+    return len(state["messages"]) >= MAX_MESSAGES
+
+
 def overlaps(a, b):
     """Declared scopes overlap when equal or one is a path-component prefix of the other; globs compare literally."""
     return a == b or "." in (a, b) or b.startswith(a + "/") or a.startswith(b + "/")
@@ -395,7 +399,7 @@ def validate_event(rows, event, text):
             # result-<call> ids are reserved for a call's own handoff to its parent, which settles it on the board.
             raise ValueError("result-<participant> ids are reserved for that participant's handoff to its parent")
         old = next((m for m in state["messages"] if m["id"] == event["id"]), None)
-        if not old and len(state["messages"]) >= MAX_MESSAGES:
+        if not old and message_capacity_reached(state):
             raise ValueError("room message limit reached; start a new bounded room")
         if old:
             if all(old.get(k) == v for k, v in event.items()) and old["text"] == text:
@@ -580,28 +584,73 @@ def visible(row, who, joined_seq=0):
 
 
 def updates(repo, room, who, after="", budget=8192, limit=50, *, state=None):
+    if (type(budget) is not int or not 1 <= budget <= thread_live.MAX_ROW
+            or type(limit) is not int or not 1 <= limit <= 200):
+        raise ValueError("updates requires bytes 1..65536 and turns 1..200")
     state = state if state is not None else project(records(repo, room))
     if state["closed"]:
         raise ValueError("room is closed")
     member = participant(state, who)
-    if not after:
-        # Preserve the native cursor's identity and digest; only its first position changes.
-        with thread_live.open_thread(repo, room) as handle:
-            scanned = 0
-            while scanned <= thread_live.MAX_FILE:
-                line = handle.readline(thread_live.MAX_ROW + 1)
-                scanned += len(line)
-                if not line or not line.endswith(b"\n") or len(line) > thread_live.MAX_ROW or scanned > thread_live.MAX_FILE:
-                    raise ValueError("room enrollment turn is unavailable")
-                row = json.loads(line)
-                if row.get("seq") == member["seq"]:
-                    if (row.get("thread") != room or row.get("room_event", {}).get("kind") != "join"
-                            or row["room_event"].get("participant") != who):
-                        raise ValueError("room enrollment turn changed")
-                    after = thread_live.cursor_for(handle, room, handle.tell())
+    if after:
+        delta = thread_live.updates(repo, room, after, budget, limit, allow_first_row_over_budget=True)
+        return dict(delta, turns=[r for r in delta["turns"] if visible(r, who, member["seq"])])
+
+    known = {message["id"] for message in state["messages"]}
+    unread = {message["id"] for message in state["messages"]
+              if who in message["targets"] and who not in message["received_by"]}
+    with thread_live.open_thread(repo, room) as handle:
+        scanned = 0
+        enrollment = None
+        while scanned <= thread_live.MAX_FILE:
+            line = handle.readline(thread_live.MAX_ROW + 1)
+            scanned += len(line)
+            if not line or not line.endswith(b"\n") or len(line) > thread_live.MAX_ROW or scanned > thread_live.MAX_FILE:
+                raise ValueError("room enrollment turn is unavailable")
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError("invalid room row")
+            if row.get("seq") == member["seq"]:
+                if (row.get("thread") != room or row.get("room_event", {}).get("kind") != "join"
+                        or row["room_event"].get("participant") != who):
+                    raise ValueError("room enrollment turn changed")
+                enrollment = thread_live.cursor_for(handle, room, handle.tell())
+                break
+        if enrollment is None:
+            raise ValueError("room enrollment turn is unavailable")
+
+        turns, used = [], 0
+        cursor = enrollment
+        more_unread = False
+        while scanned <= thread_live.MAX_FILE:
+            offset = handle.tell()
+            line = handle.readline(thread_live.MAX_ROW + 1)
+            if not line:
+                cursor = thread_live.cursor_for(handle, room, offset)
+                break
+            scanned += len(line)
+            if not line.endswith(b"\n") or len(line) > thread_live.MAX_ROW or scanned > thread_live.MAX_FILE:
+                raise ValueError("room log is oversized or has an incomplete turn")
+            row = json.loads(line)
+            if not isinstance(row, dict) or row.get("thread") != room:
+                raise ValueError("invalid room row")
+            event = row.get("room_event", {})
+            # A cached projection cannot classify a new message's audience or
+            # receipts. Leave it for the next read instead of skipping it.
+            if event.get("kind") == "message" and event.get("id") not in known:
+                cursor = thread_live.cursor_for(handle, room, offset)
+                more_unread = True
+                break
+            if visible(row, who, member["seq"]) and event.get("id") in unread:
+                if len(turns) >= limit or (turns and used + len(line) > budget):
+                    more_unread = True
                     break
-    delta = thread_live.updates(repo, room, after, budget, limit, allow_first_row_over_budget=True)
-    return dict(delta, turns=[r for r in delta["turns"] if visible(r, who, member["seq"])])
+                turns.append(row)
+                used += len(line)
+                cursor = thread_live.cursor_for(handle, room, handle.tell())
+        else:
+            raise ValueError("room log exceeds the bounded file size")
+        return {"schema": 1, "thread": room, "turns": turns,
+                "cursor": cursor, "has_more": more_unread}
 
 
 def acknowledge(repo, room, who, mids):
@@ -782,13 +831,7 @@ def main(argv=None):
     if args.app == "claude" and args.to == "all":
         parser.error("Claude app publishing needs --to PARTICIPANT")
     try:
-        repo = Path(args.repo).resolve(strict=True)
-        if not repo.is_dir():
-            raise ValueError("repository must be a directory")
-        root = subprocess.run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
-                              capture_output=True, text=True, check=False, timeout=5)
-        if root.returncode == 0:
-            repo = Path(root.stdout.strip()).resolve()
+        repo = state_repository(args.repo)
         if args.action == "new":
             if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
                 raise ValueError("a worker cannot create a room")

@@ -115,7 +115,7 @@ real risks; documentation density and style alone are not findings.
   use `oms peer-review --gate`. A complexity finding needs a
   concrete duplicate facility, unnecessary dependency or layer, speculative
   flexibility, or a narrower behavior-equivalent replacement.
-- Authorized delegated repository audit: use `oms peer-delegate --read-only --role repo-auditor`
+- Authorized delegated repository audit: use `oms peer-delegate --to PROVIDER --read-only --role repo-auditor`
   with a bounded surface. Rank evidence-backed removals; omit code-golf and
   style.
 - Implementation: the shared delegate prompt carries the compact doctrine;

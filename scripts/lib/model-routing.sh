@@ -24,13 +24,22 @@ oms_model_validate_name() {
 # This opt-in campaign authorizes two transports, not arbitrary recovery peers.
 # Empty Codex routes are pinned by the caller before any catalog/default logic.
 oms_collaboration_route_validate() {
-  local provider="$1" model="$2" fallback="${3:-}"
+  local provider="$1" model="$2" fallback="${3:-}" family
   case "$provider" in
     claude) return 0 ;;
     codex)
-      case "$model" in gpt-6-astra|gpt-6.1-sol|gpt-6-sol|gpt-6-luna) ;; *)
-        echo 'error: auto collaboration requires an exact GPT-6 Codex model' >&2; return 2 ;; esac
-      case "$fallback" in ''|gpt-6-astra|gpt-6.1-sol|gpt-6-sol|gpt-6-luna) return 0 ;; esac
+      case "$model" in gpt-6-*|gpt-6.*) ;; *)
+        echo 'error: auto collaboration requires a recognized GPT-6 Codex model' >&2; return 2 ;; esac
+      family="$(oms_codex_route_family "$model" 2>/dev/null || true)"
+      [ -n "$family" ] || {
+        echo 'error: auto collaboration requires a recognized GPT-6 Codex model' >&2
+        return 2
+      }
+      [ -z "$fallback" ] && return 0
+      case "$fallback" in gpt-6-*|gpt-6.*) ;; *)
+        echo 'error: auto collaboration forbids a non-GPT-6 fallback' >&2; return 2 ;; esac
+      family="$(oms_codex_route_family "$fallback" 2>/dev/null || true)"
+      [ -n "$family" ] && return 0
       echo 'error: auto collaboration forbids a non-GPT-6 fallback' >&2 ;;
     *) echo 'error: auto collaboration authorizes only codex and claude' >&2 ;;
   esac
@@ -150,10 +159,36 @@ oms_model_role_rank() {
 # catalog when one exists. Emit the catalog spelling, not the seed spelling,
 # so a normalized alias cannot turn into a model the provider did not list.
 oms_model_role_ranked_candidates() {
-  local provider="$1" routable generation order candidate key model model_name
-  local first
+  local provider="$1" routable generation order candidate key model model_name family
+  local first codex_tiers
   [ "${OMS_ROLE_ROUTING:-1}" != 0 ] || return 1
   routable="$(oms_capability_routable_models "$provider" 2>/dev/null || true)"
+  codex_tiers=0
+  if [ "$provider" = codex ]; then
+    while IFS= read -r candidate; do
+      [ -n "$(oms_codex_route_family "${candidate%%	*}" 2>/dev/null || true)" ] && codex_tiers=1
+    done <<EOF
+$routable
+EOF
+  fi
+  if [ "$provider" = codex ] && [ "$codex_tiers" -eq 1 ]; then
+    order="$(oms_provider_price_order codex 6.0 2>/dev/null || true)"
+    # shellcheck disable=SC2086 # Registry seed contains fixed family IDs.
+    for candidate in $order; do
+      family="$(oms_codex_route_family "$candidate" 2>/dev/null || true)"
+      [ -n "$family" ] || continue
+      while IFS= read -r model; do
+        [ -n "$model" ] || continue
+        model_name="${model%%	*}"
+        [ "$(oms_codex_route_family "$model_name" 2>/dev/null || true)" = "$family" ] || continue
+        printf '%s\n' "$model_name"
+        break
+      done <<EOF
+$routable
+EOF
+    done
+    return 0
+  fi
   generation=""
   if [ -n "$routable" ]; then
     first="$(printf '%s\n' "$routable" | sed -n '1p')"
@@ -185,7 +220,7 @@ EOF
 
 # Select this operation's role preset from the ranked candidates.
 oms_model_role_default() {
-  local provider="$1" role ranked
+  local provider="$1" role ranked candidate codex_sol
   [ "${OMS_ROLE_ROUTING:-1}" != 0 ] || return 1
   role="$(oms_model_role_rank)" || return 1
   ranked="$(oms_model_role_ranked_candidates "$provider")" || return 1
@@ -193,7 +228,15 @@ oms_model_role_default() {
   # Catalog spellings may contain spaces; select whole newline-delimited names.
   case "$role" in
     routine-worker) printf '%s\n' "$ranked" | tail -n 1 ;;
-    worker) printf '%s\n' "$ranked" | head -n 2 | tail -n 1 ;;
+    worker)
+      if [ "$provider" = codex ]; then
+        codex_sol="$(printf '%s\n' "$ranked" | while IFS= read -r candidate; do
+          [ "$(oms_codex_route_family "${candidate%%	*}" 2>/dev/null || true)" = sol ] && { printf '%s\n' "$candidate"; break; }
+        done)"
+        [ -z "$codex_sol" ] || { printf '%s\n' "$codex_sol"; return 0; }
+      fi
+      printf '%s\n' "$ranked" | head -n 2 | tail -n 1
+      ;;
     *) printf '%s\n' "$ranked" | head -n 1 ;;
   esac
 }
@@ -202,8 +245,9 @@ oms_model_role_default() {
 # only then higher ranks. This preserves availability without making the first
 # recovery an accidental cost escalation.
 oms_model_role_recovery_chain() {
-  local provider="$1" current="$2" ranked candidate key current_key
+  local provider="$1" current="$2" ranked candidate key current_key i
   local lower="" higher="" after=0
+  local -a higher_candidates=()
   ranked="$(oms_model_role_ranked_candidates "$provider")" || return 1
   current_key="$(oms_model_catalog_key "$current")"
   while IFS= read -r candidate; do
@@ -220,7 +264,20 @@ oms_model_role_recovery_chain() {
 $ranked
 EOF
   [ -z "$lower" ] || printf '%s\n' "$lower"
-  [ -z "$higher" ] || printf '%s\n' "$higher"
+  if [ "$provider" = codex ] && [ -n "$higher" ]; then
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] && higher_candidates+=("$candidate")
+    done <<EOF
+$higher
+EOF
+    i=$((${#higher_candidates[@]} - 1))
+    while [ "$i" -ge 0 ]; do
+      printf '%s\n' "${higher_candidates[$i]}"
+      i=$((i - 1))
+    done
+  else
+    [ -z "$higher" ] || printf '%s\n' "$higher"
+  fi
 }
 
 oms_model_prepare() {
@@ -228,15 +285,25 @@ oms_model_prepare() {
   local explicit_fallback="${OMS_MODEL_FALLBACK_EXPLICIT:-}"
   local effort_requested="${OMS_REASONING_EFFORT_REQUEST:-auto}"
   local effort_fallback_explicit="${OMS_REASONING_FALLBACK_EXPLICIT:-}"
-  local candidate filtered_chain="" standing role_model role_chain floor
+  local candidate candidate_name candidate_family routable filtered_chain="" standing role_model role_chain floor
 
   provider="$(oms_provider_normalize "$provider")" || return $?
   if [ "${OMS_AUTOPILOT_COLLABORATION:-off}" = auto ]; then
     if [ "$provider" = codex ] && [ -z "$explicit" ]; then
       case "${OMS_MODEL_OPERATION:-}" in
-        delegate) explicit=gpt-6.1-sol ;;
-        *) explicit=gpt-6-astra ;;
+        delegate) candidate_family=sol; explicit=gpt-6.1-sol ;;
+        *) candidate_family=astra; explicit=gpt-6-astra ;;
       esac
+      routable="$(oms_capability_routable_models codex 2>/dev/null || true)"
+      while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        candidate_name="${candidate%%	*}"
+        [ "$(oms_codex_route_family "$candidate_name" 2>/dev/null || true)" = "$candidate_family" ] || continue
+        explicit="$candidate_name"
+        break
+      done <<EOF
+$routable
+EOF
       OMS_MODEL_EXPLICIT="$explicit"
     fi
     oms_collaboration_route_validate "$provider" "$explicit" "$explicit_fallback" || return $?

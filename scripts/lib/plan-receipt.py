@@ -11,7 +11,7 @@ compute the digest here and nowhere else.
 
 Excluded fields are exactly those that are not part of the reviewed task
 record: `state` and `updated` move on every transition the fence exists to
-allow, and `claim_expired`/`claim_age_s`/`project_contract` are computed by
+allow, and `claim_expired`/`claim_age_s`/`project_contract`/`task_sha256` are computed by
 `show` for readers and never stored on the task. `project_contract` is
 plan-level in particular: binding a plan to its PROJECT.md is the autopilot
 spec CAS's job, not the task fence's. Stored fields the receipt must keep —
@@ -26,7 +26,7 @@ import json
 from typing import Any
 
 
-VOLATILE = ("state", "updated", "claim_expired", "claim_age_s", "project_contract")
+VOLATILE = ("state", "updated", "claim_expired", "claim_age_s", "project_contract", "task_sha256")
 
 
 def projection(task: dict[str, Any]) -> dict[str, Any]:

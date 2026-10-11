@@ -86,7 +86,7 @@ lane_union="$( (bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 1/4 
   bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 4/4 --list-stages) | sort)"
 [ "$full_stages" = "$lane_union" ] ||
   fail "focused lanes must partition the stage list exactly (no drop, no double)"
-printf '%s\n' "$full_stages" | grep -Fxq install-lifecycle ||
+printf '%s\n' "$full_stages" | grep >/dev/null -Fx install-lifecycle ||
   fail "Linux auto lifecycle must remain in the focused gate"
 # Exercise the local orchestrator without recursively running the full gate.
 (
@@ -500,7 +500,7 @@ install_out="$(HOME="$install_probe/home" PATH="$install_probe/bin:/usr/bin:/bin
   bash "$ROOT/install.sh" 2>&1)" || install_status=$?
 [ "$install_status" -eq 2 ] ||
   fail "OH_MY_SETTING_INSTALL_TOOLS=0 must be rejected as invalid configuration: $install_out"
-printf '%s' "$install_out" | grep -Fq 'tool installation is required' ||
+printf '%s' "$install_out" | grep >/dev/null -F 'tool installation is required' ||
   fail "tool-install rejection did not explain the required contract"
 [ ! -s "$install_probe/network.log" ] ||
   fail "tool-install rejection reached a network-facing command"

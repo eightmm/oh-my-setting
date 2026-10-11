@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 import json
 import os
 import stat
@@ -21,6 +22,58 @@ from oms_runtime.execution import run as run_backend
 from runtime_test_base import RuntimeFixtureBase
 
 class RuntimeFixture(RuntimeFixtureBase):
+
+    def test_experiment_comparison_freezes_evaluation_contract(self) -> None:
+        base = self._experiment()
+        base['invariant_pack'] = [
+            {'name': 'equivariance', 'command': ['check-equivariance'], 'required': True},
+            {'name': 'format', 'command': ['check-format'], 'required': False},
+        ]
+        equivalent = copy.deepcopy(base)
+        equivalent['success']['no_regression']['memory'] = 0.5
+        del equivalent['invariant_pack'][0]['required']
+        self.assertTrue(experiment.compare(base, equivalent)['comparable'])
+
+        cases = []
+        candidate = copy.deepcopy(base)
+        candidate['success']['min_improvement'] = 0.0
+        cases.append((candidate, 'success'))
+        candidate = copy.deepcopy(base)
+        del candidate['success']['no_regression']['memory']
+        cases.append((candidate, 'success'))
+        candidate = copy.deepcopy(base)
+        candidate['success']['no_regression']['memory']['max_regression'] = 0.6
+        cases.append((candidate, 'success'))
+        candidate = copy.deepcopy(base)
+        candidate['success']['noise_band'] = {'mode': 'fixed', 'delta': 0.1}
+        cases.append((candidate, 'success'))
+        candidate = copy.deepcopy(base)
+        candidate['invariant_pack'].pop(0)
+        cases.append((candidate, 'invariant_pack'))
+        candidate = copy.deepcopy(base)
+        candidate['invariant_pack'][0]['required'] = False
+        cases.append((candidate, 'invariant_pack'))
+        candidate = copy.deepcopy(base)
+        candidate['invariant_pack'][0]['command'] = ['different-check']
+        cases.append((candidate, 'invariant_pack'))
+        candidate = copy.deepcopy(base)
+        candidate['invariant_pack'].append(
+            {'name': 'new-check', 'command': ['check-new'], 'required': True},
+        )
+        cases.append((candidate, 'invariant_pack'))
+        for candidate, expected_field in cases:
+            with self.subTest(expected_field=expected_field):
+                result = experiment.compare(base, candidate)
+                self.assertFalse(result['comparable'])
+                self.assertEqual([issue['field'] for issue in result['issues']], [expected_field])
+
+        tolerance_left = self._experiment()
+        tolerance_right = self._experiment()
+        tolerance_left['controlled_variables']['parameter_count'] = 1000
+        tolerance_right['controlled_variables']['parameter_count'] = 1005
+        tolerance_left['controlled_variables']['parameter_count_tolerance'] = 0.01
+        tolerance_right['controlled_variables']['parameter_count_tolerance'] = 0.01
+        self.assertTrue(experiment.compare(tolerance_left, tolerance_right)['comparable'])
 
     def test_evidence_revocation_is_append_only(self) -> None:
         bound = evidence.bind(self.repo, 'project-safe', 'evt-api', 'verified')

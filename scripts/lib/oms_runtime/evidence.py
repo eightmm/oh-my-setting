@@ -15,6 +15,11 @@ from .projection import build_base_envelope, finalize_envelope
 VALID_STATUSES = {"verified", "failed", "inconclusive", "skipped_with_reason", "stale"}
 PLAN_ID_RE = re.compile(r"^plan_[0-9a-f]{32}$")
 ACTIVE_TASK_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
+ADVISORY_RECEIPT_KINDS = {
+    "call", "ask", "review", "ask-synthesis", "review-synthesis",
+    "review-outcome", "call-export", "ask-export", "review-export",
+    "call-import", "ask-import", "review-import", "delegate-import",
+}
 
 
 def _artifact_paths(repo: Path) -> List[Path]:
@@ -59,6 +64,52 @@ def criterion_refs(row: Mapping[str, Any]) -> List[str]:
 
 
 def outcome(row: Mapping[str, Any]) -> Optional[str]:
+    kind = str(row.get("kind", "")).lower()
+    status = str(row.get("status", row.get("state", row.get("verdict", "")))).lower()
+    failed_statuses = ("fail", "failed", "error", "rejected", "reject", "blocked", "denied")
+    if kind in ADVISORY_RECEIPT_KINDS:
+        if status in failed_statuses:
+            return "failed"
+        for key in ("exit", "exit_code", "verify_exit"):
+            value = row.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int) and value != 0:
+                return "failed"
+            if isinstance(value, str) and value.lstrip("-").isdigit() and int(value) != 0:
+                return "failed"
+        if status in ("skipped", "skipped_with_reason"):
+            return "skipped_with_reason"
+        return "inconclusive"
+    if kind == "review-verify":
+        # The typed producer records `exit`; `verify_exit` is corroborating
+        # legacy metadata and may be absent. A lone verify_exit cannot prove a
+        # command was run, while either recorded nonzero exit remains failure.
+        verify_exit = row.get("verify_exit")
+        if status in failed_statuses:
+            return "failed"
+        for value in (row.get("exit"), verify_exit):
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int) and value != 0:
+                return "failed"
+            if isinstance(value, str) and value.lstrip("-").isdigit() and int(value) != 0:
+                return "failed"
+        exit_code = row.get("exit")
+        if type(exit_code) is int and exit_code == 0:
+            return "verified"
+        if isinstance(exit_code, str) and exit_code == "0":
+            return "verified"
+        return "inconclusive"
+    if kind in ("acceptance", "patch-admit"):
+        if status in failed_statuses:
+            return "failed"
+        exit_code = row.get("exit")
+        if type(exit_code) is int:
+            return "verified" if exit_code == 0 else "failed"
+        if isinstance(exit_code, str) and exit_code.lstrip("-").isdigit():
+            return "verified" if int(exit_code) == 0 else "failed"
+        return "inconclusive"
     if row.get("kind") == "delegate" and row.get("context_verification") in ("none", "dry-run", "command"):
         # New delegate receipts distinguish a completed worker from a tested
         # result. A zero placeholder verifier exit cannot override a failure.
@@ -78,6 +129,18 @@ def outcome(row: Mapping[str, Any]) -> Optional[str]:
         # Legacy delegate receipts: the worker's own failure outranks a zero
         # verify_exit, which the generic loop below would read first.
         return "failed"
+    if row.get("kind") == "delegate":
+        # Legacy delegate receipts use the paired worker/verifier exits as
+        # their typed command result. A status or lone verifier field cannot
+        # establish that the command-backed check ran.
+        if status in failed_statuses:
+            return "failed"
+        worker, verifier = row.get("exit"), row.get("verify_exit")
+        if type(worker) is int and worker != 0:
+            return "failed"
+        if type(verifier) is int and verifier != 0:
+            return "failed"
+        return "verified" if type(worker) is int and type(verifier) is int else "inconclusive"
     status = str(row.get("status", row.get("state", row.get("verdict", "")))).lower()
     if status in ("pass", "passed", "success", "succeeded", "verified", "done", "approved", "admit", "admitted"):
         return "verified"
@@ -241,13 +304,37 @@ def bind(repo: Path, criterion_id: str, ref: str, status: str, *, evidence_type:
 
 
 def _evidence_item(row: Mapping[str, Any], repo: Path, *, support: str, head: str, resolved: Collection[str] = ()) -> Dict[str, Any]:
-    status = outcome(row) or str(row.get("status", "inconclusive"))
+    status = (str(row.get("status", "inconclusive")) if support == "explicit-binding"
+              else outcome(row) or str(row.get("status", "inconclusive")))
     stale = _stale(row, repo, head)
     if status == "failed" and row.get("_source") == INDEX_SOURCE and row.get("event_id") in resolved:
         stale = True
     if stale:
         status = "stale"
-    return {"evidence_ref": evidence_ref(row) or bounded_line(row.get("binding_id", ""), 160), "binding_id": bounded_line(row.get("binding_id", ""), 160), "kind": bounded_line(row.get("kind", row.get("evidence_type", "artifact")), 80), "provider": bounded_line(row.get("provider", ""), 80), "status": status, "stale": stale, "ts": bounded_line(row.get("ts", row.get("created_at", "")), 40), "scope_digest": bounded_line(row.get("scope_digest", row.get("reviewed_diff_sha256", row.get("patch_sha256", ""))), 80), "support": support, "source": bounded_line(row.get("_source", ""), 200), "_ordinal": int(row.get("_ordinal", 0)) if isinstance(row.get("_ordinal", 0), int) else 0}
+    kind = str(row.get("kind", row.get("evidence_type", ""))).lower()
+    if support == "explicit-binding":
+        signal = "parent_attestation"
+    elif kind in ADVISORY_RECEIPT_KINDS or kind == "delegate" and row.get("context_verification") == "none":
+        signal = "advisory"
+    elif kind == "delegate":
+        signal = ("execution_feedback" if row.get("context_verification") == "command"
+                  and type(row.get("exit")) is int and type(row.get("verify_exit")) is int
+                  else "execution_feedback" if row.get("context_verification") is None
+                  and type(row.get("exit")) is int and type(row.get("verify_exit")) is int
+                  else "unknown")
+    elif kind == "review-verify":
+        signal = ("execution_feedback" if type(row.get("exit")) is int or
+                  isinstance(row.get("exit"), str) and row.get("exit").lstrip("-").isdigit()
+                  else "unknown")
+    elif kind in ("acceptance", "patch-admit"):
+        signal = ("execution_feedback" if type(row.get("exit")) is int or
+                  isinstance(row.get("exit"), str) and row.get("exit").lstrip("-").isdigit()
+                  else "unknown")
+    elif support in ("patch-admission-receipt", "fresh-task-gate", "plan-acceptance-receipt"):
+        signal = "execution_feedback"
+    else:
+        signal = "unknown"
+    return {"evidence_ref": evidence_ref(row) or bounded_line(row.get("binding_id", ""), 160), "binding_id": bounded_line(row.get("binding_id", ""), 160), "kind": bounded_line(row.get("kind", row.get("evidence_type", "artifact")), 80), "provider": bounded_line(row.get("provider", ""), 80), "status": status, "signal": signal, "stale": stale, "ts": bounded_line(row.get("ts", row.get("created_at", "")), 40), "scope_digest": bounded_line(row.get("scope_digest", row.get("reviewed_diff_sha256", row.get("patch_sha256", ""))), 80), "support": support, "source": bounded_line(row.get("_source", ""), 200), "_ordinal": int(row.get("_ordinal", 0)) if isinstance(row.get("_ordinal", 0), int) else 0}
 
 
 def _item_sort_key(item: Mapping[str, Any]) -> tuple:
@@ -263,7 +350,24 @@ def _project_status(items: Sequence[Mapping[str, Any]]) -> str:
     if not fresh:
         return "stale"
     latest_key = _item_sort_key(fresh[-1])
-    statuses = [str(item.get("status")) for item in fresh if _item_sort_key(item) == latest_key]
+    latest_items = [item for item in fresh if _item_sort_key(item) == latest_key]
+    statuses = [str(item.get("status")) for item in latest_items]
+    if "failed" in statuses:
+        return "failed"
+    if all(item.get("signal") == "advisory" for item in latest_items):
+        executed = [item for item in fresh
+                    if item.get("signal") in ("execution_feedback", "parent_attestation")]
+        if executed:
+            executed.sort(key=_item_sort_key)
+            executed_key = _item_sort_key(executed[-1])
+            executed_statuses = [str(item.get("status")) for item in executed
+                                 if _item_sort_key(item) == executed_key]
+            for candidate in ("failed", "verified", "inconclusive", "skipped_with_reason"):
+                if candidate in executed_statuses:
+                    return candidate
+        elif any(item.get("status") == "stale" and item.get("signal") in
+                 ("execution_feedback", "parent_attestation") for item in ordered):
+            return "stale"
     for candidate in ("failed", "verified", "inconclusive", "skipped_with_reason"):
         if candidate in statuses:
             return candidate
@@ -367,7 +471,7 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None) -> Dict
         task_ref = "task-verification:%s" % task.get("task_id", "")
         for criterion in criteria:
             if criterion.get("source") == "task" and not by_criterion.get(str(criterion.get("id"))):
-                by_criterion[str(criterion.get("id"))].append({"evidence_ref": task_ref, "kind": "task-verification", "provider": "", "status": "verified", "stale": False, "ts": bounded_line(task.get("metadata", {}).get("updated", task.get("metadata", {}).get("last_activity", "")), 40) if isinstance(task.get("metadata"), dict) else "", "scope_digest": task.get("verify_digest", ""), "support": "fresh-task-gate", "source": ".oms/task/current.md", "_ordinal": len(rows) + len(active_bindings) + 1})
+                by_criterion[str(criterion.get("id"))].append({"evidence_ref": task_ref, "kind": "task-verification", "provider": "", "status": "verified", "signal": "execution_feedback", "stale": False, "ts": bounded_line(task.get("metadata", {}).get("updated", task.get("metadata", {}).get("last_activity", "")), 40) if isinstance(task.get("metadata"), dict) else "", "scope_digest": task.get("verify_digest", ""), "support": "fresh-task-gate", "source": ".oms/task/current.md", "_ordinal": len(rows) + len(active_bindings) + 1})
     projected: List[Dict[str, Any]] = []
     counts: collections.Counter = collections.Counter()
     for criterion in criteria:

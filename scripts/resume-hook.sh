@@ -216,9 +216,12 @@ side = ", ".join(t % n for t, n in (("+%d retiring on TTL", retiring),
 if actionable:
     newest = max(actionable, key=lambda row: row.get("ts") or "")
     bits = ["- failures: %d actionable%s" % (len(actionable), " (%s)" % side if side else "")]
+    fp = newest.get("fingerprint")
     summary = (newest.get("summary") or newest.get("cmd") or "").strip()
     if summary:
         bits.append("latest: %s" % summary[:120])
+    if fp:
+        bits.append("fp: %s (oms fail-ledger show --fingerprint %s)" % (fp, fp))
     nxt = (newest.get("next") or "").strip()
     if nxt:
         bits.append("next: %s" % nxt[:120])
@@ -226,7 +229,7 @@ if actionable:
 else:
     bits = ["%d one-shot hook failure(s), auto-retire on TTL" % retiring] if retiring else []
     if stale:
-        bits.append("%d stale on an older commit (oms fail-ledger list)" % stale)
+        bits.append("%d stale on an older commit (oms fail-ledger list --unresolved)" % stale)
     print("- failures: " + "; ".join(bits))
 ' )" || fail_line=""
   fail_line="${fail_line//$'\r'/}"

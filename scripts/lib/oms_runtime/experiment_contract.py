@@ -190,6 +190,9 @@ def compare(left: Mapping[str, Any], right: Mapping[str, Any]) -> Dict[str, Any]
         issues.append({'field': 'metrics', 'left': a['metrics'], 'right': b['metrics']})
     if a['seeds'] != b['seeds']:
         issues.append({'field': 'seeds', 'left': a['seeds'], 'right': b['seeds']})
+    for field in ('success', 'invariant_pack'):
+        if a[field] != b[field]:
+            issues.append({'field': field, 'left': a[field], 'right': b[field]})
     return {'schema': RUNTIME_SCHEMA, 'comparable': not issues, 'issues': issues, 'left_digest': a['contract_digest'], 'right_digest': b['contract_digest']}
 
 def _experiment_id(value: str) -> str:

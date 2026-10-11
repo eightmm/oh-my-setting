@@ -93,6 +93,27 @@ the two cleanup authorities distinct: it recommends `agent-task close` only
 for an active task packet, and the read-only `agent-plan retire --check` when
 an all-done plan is the remaining active record.
 
+Compound `agent-task init`, `update`, and `rotate` commands keep one local
+reference operation and packet lock while validating each input before its
+write. Independent file mutations retain separate operation records.
+Each foreground writer owns a native process generation and a private heartbeat
+monitor. While that exact scope and process remain valid, the monitor renews
+its operation every ten seconds, including admission report and outcome writes.
+This supports the default stale threshold; a shorter explicit threshold can
+still expire live work. Closing the scope stops the monitor with bounded waits;
+unknown identity or shutdown keeps unresolved evidence and returns failure.
+
+For prompt retries, `agent-task append --dedupe-key HASH` binds a 64-character
+lowercase hexadecimal key to the original note digest. The note and receipt
+publish together in one atomic packet replacement. An exact replay preserves
+packet bytes; a conflicting note is refused. Each packet holds at most 256
+keys: existing keys remain replayable at capacity, and a new key requires task
+rotation. Hook routing commits its dedupe state only after prompt publication.
+Its existing command timeout includes stdin delivery; owned helper process
+groups or Windows Job Objects contain background writers on exit or timeout.
+Interrupted reference operations remain unresolved until their outcome is
+proved, rather than becoming successful completion evidence.
+
 Retired Soul files are not scanned or included in live-state digests. Existing
 files remain on disk; the compatibility `executor` field is inactive and
 `inspected: false`, and `state.executors` is empty rather than a history listing.
@@ -160,6 +181,159 @@ missing
 ```
 
 Completion is evidence coverage, not model self-confidence.
+
+## Reviewed plan completion
+
+These operations record reviewed research acceptance and satisfaction.
+Existing `finish`, patch
+admission/`patch-land`, and committed land/gate/push/CI completion retain their
+current evidence and landing rules. These records do not claim a landing for
+the original task, and pending research or replacement tasks are not closed
+automatically.
+
+| Operation | `completion_kind` |
+|---|---|
+| `oms agent-plan accept-research` | `research-accepted` |
+| `oms agent-plan accept-main-research` | `main-research-accepted` |
+| `oms agent-plan satisfy` | `satisfied-by` |
+
+Before writing a new completion kind into a shared plan, publish and verify
+the compatible controller, complete its authorized same-SHA installation, and
+confirm that every active reader uses that controller. Older readers reject
+unknown active completion fields and can block unrelated plan commands. A
+source-only trial belongs in disposable state. If a new kind was written too
+early, the compatible parent can use the existing `agent-plan block` operation
+to preserve the immutable receipt in `completion-reactivated` history and
+reopen the task; this DONE transition has no task-level CAS. After reader
+migration, acceptance needs fresh current plan/task bundles and approvals.
+
+These completion commands use the same compare-and-swap, lease, state, and bundle flags;
+use the exact operation spelling shown above:
+
+```bash
+oms agent-plan accept-research \
+  --id TASK_ID --lease-id LEASE_ID --expected-state STATE \
+  --expected-plan-sha256 PLAN_SHA256 --expected-task-sha256 TASK_SHA256 \
+  --completion-bundle REPO_RELATIVE_FILE \
+  --expected-completion-bundle-sha256 BUNDLE_SHA256
+
+oms agent-plan satisfy \
+  --id TASK_ID --lease-id LEASE_ID --expected-state STATE \
+  --expected-plan-sha256 PLAN_SHA256 --expected-task-sha256 TASK_SHA256 \
+  --completion-bundle REPO_RELATIVE_FILE \
+  --expected-completion-bundle-sha256 BUNDLE_SHA256
+```
+
+Replace placeholders with the current task's exact IDs, state, digests, lease,
+and bundle digest. `REPO_RELATIVE_FILE` is a path relative to the repository.
+The current claimed owner must invoke the parent-only operation from its
+verified native main room. The declared task owner and the actual native parent
+provider are recorded separately; neither is inferred from a title, model, or
+similar source.
+
+Initial native enrollment uses its exact attempt ID as participant when the
+participant ref is absent. A resumed main uses its explicit preserved ref;
+empty, conflicting or malformed refs are rejected. Historical READ ancestry
+and the current caller's unique active ownership are checked separately.
+
+The schema-1 bundle binds current plan/task/state/lease digests and the original
+task contract, exact declared owner, parent review summary, and a complete map
+of obligations, deliverables, source paths, and evidence. It names a full base
+commit and an explicit source envelope manifest with file content digests,
+modes, and absences/deletions. The frozen verifier command and its file
+identities are included and executed. A nonempty stored verifier must match
+exactly; a legacy empty verifier requires explicit reviewed adoption. Source,
+evidence, and verifier bindings are checked before and after execution.
+
+Research requires explicit `research-only` classification and the original
+artifact's indexed, successful terminal read attempt with its original parent
+and artifact digest. Write, failed, and unproven producers are rejected.
+Missing legacy lineage requires explicit reviewed adoption of that artifact
+and original obligation; adoption cannot override contradictory provenance.
+An ancillary zero-byte patch from a proven read is metadata only, never
+landing evidence.
+
+
+Main READ acceptance covers an original report-only research obligation that a
+current main independently reviewed. It preserves the report bytes and indexed
+producer facts, including failures, and records `main-reviewed-external`
+provenance. A failed producer requires an explicit review of that failure;
+acceptance does not turn it into a successful child. Missing task or plan
+lineage requires exact reviewed adoption of the original index and contract.
+Product implementation, repair, landing and publication obligations cannot be
+closed by accepting a report. `main-authored` is unsupported without independent
+author evidence; a completion approval alone proves review.
+
+A native panel main uses its verified current room and attempt binding. Desktop
+mains use two separate commands. First, the main explicitly runs
+`oms agent-plan approve-main-research --approve-reviewed-bundle` with the same
+CAS and bundle flags. It executes the frozen verifier and checks the report,
+source and CAS before and after execution. It leaves the task open and outputs
+an immutable approval reference. The main then runs
+`oms agent-plan accept-main-research` with those flags plus
+`--main-review-approval APPROVAL_PATH` and
+`--expected-main-review-approval-sha256 APPROVAL_SHA256`.
+
+Use `const r = await tools.exec_command(<JSON>); text(r.output);` as the
+direct approval call. Its JSON object contains string fields `cmd` and
+`workdir`, with an optional integer `yield_time_ms` from 250 through 30000.
+The command must finish within that tool interval so the original call returns
+the completed native output. A later polled or replayed output cannot replace
+the original completed approval.
+
+Desktop acceptance requires the same chat's recorded policy approval followed
+by its completed approving command, successful native execution and exact
+output reference. The marker binds a fresh nonce, the exact task, lease, plan,
+bundle, reviewed inputs and controller code. A different local parent may
+consume that already approved operation; its UID is recorded separately from
+the original approving chat. Copied environment session IDs confer no reviewer
+identity. Source, task or lease changes require a fresh approval. Immutable
+completion receipts retain historical reviewer proof so later room closure
+cannot erase an accepted result. These are local consistency checks within
+cooperating OMS storage, not authentication against hostile same-UID code.
+
+Satisfaction requires an independently `done` same-plan successor with real
+admitted `patch-land` evidence, or exact committed land receipt proof of passed
+gate, push, CI, and target-ref reachability. Current product bytes, modes, and
+deletions must match, with complete obligation mapping. Partial coverage,
+cycles, satisfaction chains, unrelated or foreign evidence, and no-op patches
+are rejected. Archived or cross-plan successors are unsupported.
+
+Success records an immutable content-addressed receipt and digest reference,
+preserves history, and marks the task `done` with distinct completion metadata
+and Plan labels. Exact replay is idempotent and interrupted receipt publication
+can recover; reactivation archives prior completion metadata. No landing fields
+are fabricated. Worker exit does not establish completion.
+
+## Parent-reviewed task cancellation
+
+An operator may close rejected or unreproducible work with
+`oms agent-plan cancel`. Cancellation is available only to the parent for an
+inactive `ready` or `blocked` task. The caller supplies the exact active-plan
+and task digests, expected state and lease (`none` for an empty lease), the
+explicit `--operator-consent cancel`, a bounded reason, and a repo-relative
+decision artifact with its exact SHA-256. Cancellation refuses a changed plan,
+task, state, lease, unsafe artifact, malformed marker set, or live worker
+marker. The transition preserves the task's existing artifact, patch, history,
+and provenance and records the reviewed digests and decision-artifact digest.
+Readers reconstruct the pre-cancellation task from that receipt and reject any
+other task-field change. Active-plan reads and retirement validation reopen the
+bounded repo-relative decision artifact and verify its exact bytes, so that
+artifact must remain available while the cancellation receipt is retained.
+
+`cancelled` is closed for truthful status and superseded-plan retirement, but
+is never verified completion: it does not satisfy dependencies, increment the
+verified count, or make `all_done` true. Retirement archives the exact plan
+bytes and validates cancellation evidence; it does not claim that cancelled
+work was implemented.
+
+Versioned capture references bind complete bounded room and lifecycle prefixes
+to immutable local objects. Historical receipt reads use those captured facts;
+later departure, closure or telemetry cannot rewrite an accepted result. Each
+mutation still checks current authority. The actual room and lifecycle writer
+locks cover final authority validation through receipt and plan publication;
+the verifier runs outside them. Hashes establish local consistency and do not
+authenticate missing chronology or coordinated storage rewrites.
 
 ## ContextManifest
 
@@ -473,7 +647,10 @@ A contract fixes:
   or `{"mode": "baseline_stdev", "z": Z}`. A gain must clear the larger of the
   minimum improvement and the band; `baseline_stdev` uses the spread of the
   repeated baseline seeds, and with fewer than two seeds the verdict stays
-  inconclusive. This is the noise-adjusted floor of RRSI (arXiv 2609.24972).
+  inconclusive. This OMS gate is an adaptation motivated by RRSI's
+  stability-aware selection. RRSI's §3.3 rule compares a candidate score with
+  the best observed score minus a delta; it does not define this OMS minimum-gain
+  threshold over a fixed baseline ([RRSI, §3.3](https://arxiv.org/html/2609.24972v3)).
 - no-regression tolerances
 - invariant commands
 
@@ -482,6 +659,25 @@ silently attributed to a new command. `--allow-existing-metrics` is explicit and
 still requires the file fingerprint to change. Summaries are `supported`,
 `not_supported`, or `inconclusive`; missing seeds, no-regression metrics, or
 required invariant results keep the verdict inconclusive.
+
+This supports an inference-time improvement loop: state a falsifiable
+hypothesis, compare a fixed baseline and candidate under the same contract,
+verify the resulting execution, then have the parent review and adopt any
+change. The comparison is only as strong as its controls and receipts; it does
+not create an independent holdout or an operating-system sandbox. Static
+invariants describe properties checked by their declared commands, while
+executed feedback describes observed outcomes under the recorded run. Model
+judgments can help explain or propose a change, but agreement between models
+and a model's stated confidence are advisory signals, not substitutes for
+either kind of check. Intrinsic model confidence is also not a calibrated
+probability of success. These are different evidence sources, not a single
+ranked scale. This is an OMS workflow proposal informed by the
+[RSI survey](https://arxiv.org/abs/2607.07663), not a claim that OMS has
+measured scientific improvement.
+
+Experiment comparison identity includes the normalized `success` criteria and
+`invariant_pack` as well as controls, metrics, and seeds. A comparison that
+changes its success threshold or invariant definitions is not like-for-like.
 
 ## Effectiveness telemetry
 
@@ -546,6 +742,34 @@ measurements. Previously cached rows/snapshots are retained, not retroactively
 rewritten. Snapshots label `measurement_basis`; `compare` withholds affected
 rate/usage/duration deltas when the bases differ, rather than presenting a
 measurement change as an improvement.
+
+Skill changes can be evaluated before adoption with the additive candidate
+comparison mode, for example:
+
+```bash
+oms skill-forge eval oms-example --suite path/to/skill-suite.json \
+  --candidate candidates/oms-example --allow-host-commands --json
+```
+
+The candidate is compared with the active version using the same suite bytes;
+both arms enable the skill. The explicit host-command flag remains required.
+The evaluator checks the current and candidate skill bundle bytes, suite bytes,
+and `skill-lifecycle` implementation bytes before/after execution. It records
+content-free digests and aggregate results, including `comparison.mode`,
+`comparison.baseline_sha256`, and `comparison.treatment_sha256`. This does not
+freeze external router, task, or verifier commands, and does not establish an
+independent evaluator, holdout, or OS sandbox. Evaluation does not install or
+promote the candidate: parent review and existing adoption controls still
+apply. This staged evaluation follows the motivation of
+[SkillsBench](https://arxiv.org/abs/2602.12670); OMS has not measured scientific
+or general task improvement from it.
+
+Model-only call, ask, review, or synthesis completion is advisory evidence; a
+successful provider operation does not by itself verify a requirement. Use the
+existing command-backed verification receipts and parent review/admission path
+for execution evidence and adoption. Proposed experience graphs, automatic
+skill promotion or evolution archives, and adaptive routing remain future work;
+they are not current runtime behavior.
 
 ## Optional interoperability adapters
 

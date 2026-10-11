@@ -48,7 +48,7 @@ def plan_facts(repo: Path) -> Dict[str, Any]:
     if not isinstance(status, Mapping):
         raise GraphError("canonical plan status projection is unavailable")
     result: Dict[str, Any] = {}
-    for key in ("present", "all_done", "has_unfinished"):
+    for key in ("present", "all_done", "all_closed", "has_unfinished"):
         value = status.get(key)
         if not isinstance(value, bool):
             raise GraphError("canonical plan status has invalid %s" % key)

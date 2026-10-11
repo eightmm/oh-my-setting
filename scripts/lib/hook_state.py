@@ -7,10 +7,12 @@ import argparse
 import contextlib
 import functools
 import hashlib
+import importlib.util
 import itertools
 import json
 import os
 import re
+import signal
 import shutil
 import stat
 import subprocess
@@ -604,26 +606,278 @@ def agent_task_script() -> Path:
     return Path(__file__).resolve().parent.parent / "agent-task.sh"
 
 
+_POSIX_AGENT_TASK_SUPERVISOR = r'''
+import os, signal, subprocess, sys, time
+
+command = sys.argv[1:]
+pgid = os.getpgrp()
+child = subprocess.Popen(command, stdin=sys.stdin, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True)
+sys.stdin.close()
+
+def live_members():
+    probe = subprocess.Popen(["ps", "-A", "-o", "pgrp=", "-o", "stat=", "-o", "pid="],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        output, _ = probe.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        probe.kill()
+        probe.wait()
+        raise RuntimeError("cannot verify owned agent-task process group")
+    if probe.returncode != 0:
+        raise RuntimeError("cannot verify owned agent-task process group")
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        try:
+            group, pid = int(fields[0]), int(fields[2])
+        except ValueError:
+            continue
+        # ps itself inherits this process group and may appear in its own
+        # snapshot. Exclude both the stable supervisor and the probe process.
+        if group == pgid and pid not in {os.getpid(), probe.pid} and fields[1][0] != "Z":
+            return True
+    return False
+
+def stop_group():
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 0.25
+    while time.monotonic() < deadline:
+        if not live_members():
+            return
+        time.sleep(0.02)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 0.75
+    while time.monotonic() < deadline:
+        if not live_members():
+            return
+        time.sleep(0.02)
+    raise RuntimeError("owned agent-task process group still has live members")
+
+result = 1
+wait_error = None
+try:
+    result = child.wait()
+except BaseException as exc:
+    wait_error = exc
+try:
+    # A helper can exit successfully after leaving a background writer. Keep
+    # the supervisor alive as the group identity anchor until that writer is
+    # contained and verified gone.
+    stop_group()
+except BaseException:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    raise
+if wait_error is not None:
+    raise wait_error
+sys.exit(result if result >= 0 else 128 - result)
+'''
+
+
+def _agent_task_windows_job() -> tuple[Any, Any]:
+    runner_path = Path(__file__).with_name("attempt-runner.py")
+    spec = importlib.util.spec_from_file_location("oms_hook_attempt_runner", str(runner_path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Windows agent-task process supervision is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, module.WindowsJobObject.create()
+
+
+def _agent_task_group_has_live_members(pgid: int) -> bool:
+    probe = subprocess.run(
+        ["ps", "-A", "-o", "pgrp=", "-o", "stat="],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=1,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError("cannot verify owned agent-task process group")
+    for line in probe.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        try:
+            member_group = int(fields[0])
+        except ValueError:
+            continue
+        if member_group == pgid and fields[1][0] != "Z":
+            return True
+    return False
+
+
+def _terminate_agent_task_group(pgid: int, grace: float = 0.25) -> None:
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    # communicate(timeout) leaves the child unreaped. Keep that leader as the
+    # group identity anchor through a fixed TERM grace and the final signal.
+    time.sleep(grace)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 0.75
+    while time.monotonic() < deadline:
+        if not _agent_task_group_has_live_members(pgid):
+            return
+        time.sleep(0.02)
+    raise RuntimeError("owned agent-task process group still has live members")
+
+
+def _stop_agent_task_process(proc: subprocess.Popen[Any], windows_job: Any = None) -> None:
+    if windows_job is not None:
+        cleanup_error = None
+        try:
+            windows_job.terminate()
+        except Exception as exc:
+            cleanup_error = exc
+        try:
+            windows_job.close()
+        except Exception as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+            try:
+                proc.kill()
+                proc.wait(timeout=3)
+            except Exception as kill_error:
+                if cleanup_error is None:
+                    cleanup_error = kill_error
+        if cleanup_error is not None:
+            raise RuntimeError("owned Windows agent-task process tree did not terminate") from cleanup_error
+        return
+
+    cleanup_error = None
+    try:
+        # Do not poll/wait before the final signal: communicate(timeout) leaves
+        # this leader unreaped, so its PID/PGID remains anchored during cleanup.
+        _terminate_agent_task_group(proc.pid)
+    except Exception as exc:
+        cleanup_error = exc
+    try:
+        proc.wait(timeout=2)
+    except Exception as exc:
+        if cleanup_error is None:
+            cleanup_error = exc
+    if cleanup_error is not None:
+        raise RuntimeError("owned agent-task process group did not terminate") from cleanup_error
+    if _agent_task_group_has_live_members(proc.pid):
+        raise RuntimeError("owned agent-task process group still has live members")
+
+
 def run_agent_task(repo: Path, args: list[str], stdin_text: str | None = None) -> int:
     script = agent_task_script()
     if not script.exists():
         return 127
     timeout = env_int("OMS_AUTO_TASK_TIMEOUT", 2, minimum=1, maximum=10)
+    windows_job = None
+    windows_runner = None
+    proc = None
     try:
-        proc = subprocess.run(
-            [str(script), "--repo", str(repo), *args],
-            input=stdin_text,
-            check=False,
+        creationflags = 0
+        if os.name == "nt":
+            # The existing OMS Job Object supervisor provides an owned tree;
+            # fail closed if that native boundary cannot be established.
+            windows_runner, windows_job = _agent_task_windows_job()
+            creationflags = (
+                windows_runner.WINDOWS_CREATE_NEW_PROCESS_GROUP
+                | windows_runner.WINDOWS_CREATE_SUSPENDED
+            )
+        elif os.name != "posix":
+            return 1
+        argv = [str(script), "--repo", str(repo), *args]
+        if os.name == "nt":
+            bash = shutil.which("bash")
+            if not bash:
+                return 1
+            argv = [bash, *argv]
+        elif os.name == "posix":
+            argv = [
+                sys.executable,
+                "-c",
+                _POSIX_AGENT_TASK_SUPERVISOR,
+                str(script),
+                "--repo",
+                str(repo),
+                *args,
+            ]
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=timeout,
+            start_new_session=(os.name == "posix"),
+            creationflags=creationflags,
         )
+        if windows_job is not None:
+            windows_job.assign(proc)
+            windows_job.resume(proc)
+        try:
+            proc.communicate(input=stdin_text, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _stop_agent_task_process(proc, windows_job)
+            windows_job = None
+            return 124
+        rc = int(proc.returncode)
+        if windows_job is not None:
+            # Closing a kill-on-close job also contains any helper descendants.
+            windows_job.close()
+            windows_job = None
+        return rc
     except subprocess.TimeoutExpired:
         return 124
     except Exception:
         return 1
-    return int(proc.returncode)
+    finally:
+        cleanup_error = None
+        if windows_job is not None:
+            try:
+                windows_job.terminate()
+            except Exception as exc:
+                cleanup_error = exc
+            try:
+                windows_job.close()
+            except Exception as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if proc is not None and proc.returncode is None:
+            if os.name == "nt":
+                # Launch failures before Job Object assignment can leave only
+                # the suspended direct child outside the owned job.
+                try:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                except Exception as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            else:
+                try:
+                    _stop_agent_task_process(proc, windows_job)
+                except Exception as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+        if cleanup_error is not None:
+            raise RuntimeError("could not contain the agent-task process") from cleanup_error
 
 
 def should_auto_task(prompt: str) -> bool:
@@ -645,8 +899,13 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
         state_path = task_route_state_path(hooks_dir, payload)
         prompt_hash = sha256_text(prompt)
         turn_id = str(payload.get("turn_id") or payload.get("turnId") or "")
+        dedupe_key = sha256_text(
+            session_hash(payload) + "\0" + turn_id + "\0" + prompt_hash
+        )
         previous = load_state(state_path)
-        if previous.get("prompt_hash") == prompt_hash:
+        if (previous.get("prompt_hash") == prompt_hash
+                and previous.get("turn_id", "") == turn_id
+                and previous.get("status") in {"created", "appended", "rotated"}):
             append_event(
                 repo,
                 payload,
@@ -678,17 +937,6 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
                 and normalized_goal(explicit_goal) == normalized_goal(task_goal(task_file))
             )
             if same_explicit_goal and not prompt_has_content_after_goal(prompt):
-                write_json_atomic(
-                    state_path,
-                    {
-                        "schema": 1,
-                        "updated_at": utc_now(),
-                        "session": session_hash(payload),
-                        "turn_id": turn_id,
-                        "prompt_hash": prompt_hash,
-                        "status": "deduped",
-                    },
-                )
                 append_event(
                     repo,
                     payload,
@@ -749,37 +997,31 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
                     risk=route["risk"],
                     prompt_hash=prompt_hash,
                 )
-                write_json_atomic(
-                    state_path,
-                    {
-                        "schema": 1,
-                        "updated_at": utc_now(),
-                        "session": session_hash(payload),
-                        "turn_id": turn_id,
-                        "prompt_hash": prompt_hash,
-                        "status": status,
-                    },
-                )
                 return
 
         note = f"User prompt ({route['workflow']}/{route['risk']}): {excerpt}"
-        rc = run_agent_task(repo, ["append", "--agent", agent, "--stdin"], note + "\n")
+        rc = run_agent_task(
+            repo,
+            ["append", "--agent", agent, "--stdin", "--dedupe-key", dedupe_key],
+            note + "\n",
+        )
         if rc == 0:
             run_agent_task(repo, ["update", "--next", "Respond to the latest user request."])
         else:
             status = "timeout" if rc == 124 else "skipped_sensitive_or_error"
 
-        write_json_atomic(
-            state_path,
-            {
-                "schema": 1,
-                "updated_at": utc_now(),
-                "session": session_hash(payload),
-                "turn_id": turn_id,
-                "prompt_hash": prompt_hash,
-                "status": status,
-            },
-        )
+        if rc == 0:
+            write_json_atomic(
+                state_path,
+                {
+                    "schema": 1,
+                    "updated_at": utc_now(),
+                    "session": session_hash(payload),
+                    "turn_id": turn_id,
+                    "prompt_hash": prompt_hash,
+                    "status": status,
+                },
+            )
         append_event(
             repo,
             payload,
@@ -1260,25 +1502,62 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
     goal = plain_line(data.get("goal"), 80)
     if not tasks:
         return ""
-    stamps = []
-    for t in tasks:
-        with contextlib.suppress(ValueError, TypeError):
-            stamps.append(datetime.strptime(str(t.get("updated")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
-    if stamps and time.time() - max(stamps) >= 7 * 86400:
-        return ""
-    done = {t["id"] for t in tasks if t.get("state") == "done"}
     me = os.environ.get("OMS_ROOM_PARTICIPANT", "")
     owned = [t for t in tasks if me and t.get("claimed_by_participant") == me
              and t.get("state") in ("claimed", "running", "review", "landing")]
     phases = {"review": 0, "claimed": 1, "running": 2, "landing": 2}
     mine = max(owned, key=lambda t: (phases[t["state"]], str(t.get("updated", ""))), default=None)
+    worker_holds = [t for t in tasks if me and t.get("claimed_by_participant") == me
+                    and t.get("state") in ("claimed", "running")]
+    clock = time.time()
+    stamps = []
+    for t in tasks:
+        with contextlib.suppress(ValueError, TypeError):
+            stamps.append(datetime.strptime(str(t.get("updated")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
+    if stamps and clock - max(stamps) >= 7 * 86400 and not worker_holds:
+        return ""
+    done = {t["id"] for t in tasks if t.get("state") == "done"}
     ready = next((t for t in sorted(tasks, key=lambda t: str(t.get("created", "")))
                   if t.get("state") == "ready" and all(d in done for d in t.get("depends") or [])), None)
-    parts = ["Goal: %s" % goal if goal else "Goal: (none recorded)", "%d of %d verified" % (len(done), len(tasks))]
+    cancelled = sum(1 for task in tasks if task.get("state") == "cancelled")
+    progress = "%d of %d verified" % (len(done), len(tasks))
+    if cancelled:
+        progress += " · %d cancelled" % cancelled
+    parts = ["Goal: %s" % goal if goal else "Goal: (none recorded)", progress]
     if mine:
-        parts.append("yours: %s (%s)" % (plain_line(mine["id"], 40), plain_line(mine.get("state"), 12)))
+        mine_id = plain_line(mine["id"], 40)
+        parts.append("yours: %s (%s) → oms agent-plan brief --id %s" % (
+            mine_id, plain_line(mine.get("state"), 12), mine_id))
         if mine.get("state") == "review":
             parts.append("check retained results first; inspect the artifact, integrate and verify; record the owner result before stopping")
+    if worker_holds:
+        known_ages = []
+        for held in worker_holds:
+            with contextlib.suppress(TypeError, ValueError, OverflowError):
+                anchor = datetime.strptime(held.get("claimed_at", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                seconds = clock - anchor.timestamp()
+                if seconds >= 0:
+                    known_ages.append((int(seconds), held))
+        age, held = max(known_ages, key=lambda item: item[0]) if known_ages else (None, worker_holds[0])
+        # Normalize decimal text without converting a potentially thousands-
+        # digit TTL to one integer. The comparison below retains its exact value.
+        ttl = "3600"
+        for value in (os.environ.get("OMS_PLAN_CLAIM_TTL", ""), held.get("ttl", "")):
+            if isinstance(value, str) and value.isdecimal():
+                ttl = "".join(str(int(digit)) for digit in value).lstrip("0") or "0"
+        ttl_display = ttl + "s" if len(ttl) <= 12 else ttl[:12] + "…s (%d digits)" % len(ttl)
+        note = "claim age: %ss / ttl %s" % (age, ttl_display) if age is not None else "claim age: unknown"
+        if held is not mine:
+            note += " (task %s)" % plain_line(held["id"], 40)
+        parts.append(note)
+        # age*5 >= ttl*4 is the 80% threshold. Decimal length/order avoids
+        # interpreter integer digit limits and never truncates authority tokens.
+        limit = str(age * 5 // 4) if age is not None else ""
+        near_expiry = age is not None and (len(ttl) < len(limit) or len(ttl) == len(limit) and ttl <= limit)
+        task_id, lease = held["id"], held.get("lease_id", "")
+        if (near_expiry and isinstance(lease, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", lease)
+                and re.fullmatch(r"[A-Za-z0-9._-]{1,40}", task_id)):
+            parts.append("refresh: oms agent-plan touch --id %s --lease-id %s" % (task_id, lease))
     if ready:
         parts.append("next ready: %s %s → oms agent-plan claim --id %s --provider %s" % (
             plain_line(ready["id"], 40), plain_line(ready.get("title"), 40), plain_line(ready["id"], 40),
@@ -1322,8 +1601,10 @@ def panel_main_base(payload: dict[str, Any], room: str) -> str:
             "coordination with other mains yourself; declare your scope with oms room scope --owns PATH before editing shared files "
             "and pass --scope PATH to write workers. Edit directly only when the brief would take longer than the edit "
             "or the step needs the main itself. "
-            "Land your own work only when publication is authorized: commit on an oms/<task> branch in oms scratch-worktree add, rebase on the remote "
-            "target, then oms land from that worktree; never commit in the shared checkout another main uses. "
+            "Land your own work only when publication is authorized: oms scratch-worktree add starts detached; create a "
+            "local nontracking branch with git checkout --no-track -b oms/<task>, then commit, rebase on the remote target, "
+            "and run oms land from that worktree. No upstream is needed; oms land pushes the verified SHA to its target. "
+            "Never commit in the shared checkout another main uses. "
             "Carry the authorized goal through worker recovery, integration, checks and owner finalization; "
             "a worker exit or review handoff does not end your turn. Continue remaining actionable work, or report "
             "the concrete blocker and next action. Record plan progress and --finalize results in OMS_ROOM_REPO "
@@ -1515,6 +1796,99 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
     record_panel_activity(payload, repo)
     if is_harness_child() or os.environ.get("OMS_LIVE_COLLAB", "1") == "0":
         return ""
+    coordination = coordination_room(payload, repo)
+    if coordination is None:
+        return _live_thread_hint(payload, repo)
+    pending = []
+    # Complete optional host work before advancing the primary room's cursor.
+    extra = _live_thread_hint(payload, repo, coordination=coordination, pending=pending)
+    primary = _live_thread_hint(payload, repo, pending=pending)
+    if pending:
+        with contextlib.suppress(Exception):
+            with event_file_lock(pending[0][0], timeout=0.05):
+                ready = []
+                for path, expected, value in pending:
+                    try:
+                        before = path.lstat()
+                    except FileNotFoundError:
+                        current = {}
+                    else:
+                        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 4096:
+                            continue
+                        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+                        with os.fdopen(descriptor, "rb") as handle:
+                            opened = os.fstat(handle.fileno())
+                            if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+                                continue
+                            raw = handle.read(4097)
+                        if len(raw) > 4096:
+                            continue
+                        try:
+                            current = json.loads(raw)
+                        except (ValueError, RecursionError):
+                            current = {}
+                        if not isinstance(current, dict):
+                            current = {}
+                    if current == expected:
+                        ready.append((path, value))
+                # Revalidate every cursor before writing any: an optional cache
+                # replacement must not block after primary mail has advanced.
+                for path, value in ready:
+                    write_json_atomic(path, value)
+    return "\n".join(part for part in (primary, extra) if part)
+
+
+def coordination_room(payload: dict[str, Any], repo: Path | None = None):
+    """Read mail from the panel's new room without moving execution authority."""
+    if not all(os.environ.get(key) for key in ("TMUX", "TMUX_PANE", "OMS_PANEL_SESSION",
+                                              "OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT")):
+        return None
+    if not (payload.get("session_id") or payload.get("sessionId")):
+        return None
+    try:
+        import room
+        import terminal_panel
+
+        selected_repo = repo if repo is not None else hook_repo(payload)
+        if selected_repo is None:
+            return None
+        selected_repo = Path(os.environ.get("OMS_ROOM_REPO", str(selected_repo))).resolve()
+        session = os.environ["OMS_PANEL_SESSION"]
+        pane = os.environ["TMUX_PANE"]
+        if not re.fullmatch(r"%[0-9]+", pane):
+            return None
+        deadline = time.monotonic() + 0.35
+        query = subprocess.run(terminal_panel.tmux_command(
+            "display-message", "-p", "-t", pane,
+            "#{session_name}\t#{@oms_panel_repo}\t#{OMS_ROOM_ID}"),
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=0.2, check=False)
+        values = query.stdout.replace("\r", "").rstrip("\n").split("\t")
+        if query.returncode or len(values) != 3 or time.monotonic() >= deadline:
+            return None
+        actual_session, owner, ident = values
+        if actual_session != session or not owner or Path(owner).resolve() != selected_repo:
+            return None
+        ident = room.identifier(ident, "room")
+        if not ident or ident == os.environ["OMS_ROOM_ID"]:
+            return None
+        who, consumer = os.environ["OMS_ROOM_PARTICIPANT"], session_hash(payload)
+        original, original_state = room._selected(selected_repo, consumer, os.environ["OMS_ROOM_ID"], who)
+        binding, state = room._selected(selected_repo, consumer, ident, who)
+        if not original or not binding:
+            return None
+        before, after = room.participant(original_state, who), room.participant(state, who)
+        if (before.get("role") != "main" or before.get("provider") != payload_agent(payload)
+                or before.get("consumer") != consumer
+                or any(after.get(key) != before.get(key) for key in ("role", "provider", "model", "consumer"))):
+            return None
+        return (selected_repo, binding, state, deadline) if time.monotonic() < deadline else None
+    except Exception:
+        return None
+
+
+def _live_thread_hint(payload: dict[str, Any], repo: Path | None = None, *, coordination=None, pending=None) -> str:
+    if is_harness_child() or os.environ.get("OMS_LIVE_COLLAB", "1") == "0":
+        return ""
     if not (payload.get("session_id") or payload.get("sessionId")):
         return ""
     repo = repo if repo is not None else hook_repo(payload)
@@ -1525,8 +1899,13 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
         import room
 
         room_repo = Path(os.environ.get("OMS_ROOM_REPO", str(repo))).resolve()
-        binding, room_state = room._selected(room_repo, session_hash(payload), os.environ.get("OMS_ROOM_ID"),
-                                             os.environ.get("OMS_ROOM_PARTICIPANT"))
+        if coordination is None:
+            binding, room_state = room._selected(room_repo, session_hash(payload), os.environ.get("OMS_ROOM_ID"),
+                                                 os.environ.get("OMS_ROOM_PARTICIPANT"))
+        else:
+            room_repo, binding, room_state, deadline = coordination
+            if time.monotonic() >= deadline:
+                return ""
         if (binding is None and not os.environ.get("OMS_ROOM_ID")
                 and (payload.get("hook_event_name") or payload.get("hookEventName")) == "UserPromptSubmit"):
             # A main already moved to the background service heals on its next prompt.
@@ -1571,7 +1950,8 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
                 event = {}
             if isinstance(event, dict) and event.get("kind") == "created":
                 return ""
-        path = thread_live.safe_path(repo, ".oms/hooks/sessions/" + session_hash(payload) + ".thread.json", True)
+        suffix = "." + tid if coordination is not None else ""
+        path = thread_live.safe_path(repo, ".oms/hooks/sessions/" + session_hash(payload) + suffix + ".thread.json", True)
         if path.exists() or path.is_symlink():
             info = path.lstat()
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
@@ -1633,7 +2013,7 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
                     + "Delivery is not acknowledgment. After consuming, record: oms thread ack --id "
                     + tid + " --consumer " + consumer + " --after " + delta["cursor"]
                 )
-            if room_member:
+            if room_member and coordination is None:
                 # Mail still waiting beyond this batch is not yet delivered, so it cannot be an unacked delivery.
                 reach = max((row["seq"] for row in delta["turns"]), default=0) if delta["has_more"] else None
                 try:
@@ -1644,7 +2024,13 @@ def live_thread_hint(payload: dict[str, Any], repo: Path | None = None) -> str:
                     reminders = ""  # reminders are advisory; the delivered turns still go out
                 message = "\n".join(part for part in (message, reminders) if part)
             if delta["cursor"] != after:
-                write_json_atomic(path, {"thread": tid, "participant": room_member, "cursor": delta["cursor"]})
+                if coordination is not None and time.monotonic() >= deadline:
+                    return ""
+                value = {"thread": tid, "participant": room_member, "cursor": delta["cursor"]}
+                if pending is None:
+                    write_json_atomic(path, value)
+                else:
+                    pending.append((path, state, value))
         return message
     except Exception:
         return ""  # Optional collaboration cannot block tools or ordinary replies.

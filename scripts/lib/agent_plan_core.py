@@ -26,12 +26,13 @@ process_pid_alive = process_liveness["pid_alive"]
 persisted_native_pid_is_proven = process_liveness[
     "persisted_native_pid_is_proven"
 ]
-within_envelope = _load(sys.argv[6])["within_envelope"]
+path_scope = _load(sys.argv[6])
+within_envelope = path_scope["within_envelope"]
 project_state_snapshot = _load(sys.argv[7])["snapshot"]
 validate_assignment = _load(sys.argv[8])["validate"]
 def env(k): return os.environ.get(k, "")
 
-STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done"}
+STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done", "cancelled"}
 ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 PLAN_ID_RE = re.compile(r"^plan_[0-9a-f]{32}$")
 OWNER_RE = re.compile(r"^owner_[0-9a-f]{32}$")
@@ -39,11 +40,33 @@ OWNER_RE = re.compile(r"^owner_[0-9a-f]{32}$")
 def die(msg):
     sys.stderr.write("error: %s\n" % msg); sys.exit(2)
 
+_completion_module = None
+
+def completion_module():
+    global _completion_module
+    if _completion_module is None:
+        _completion_module = _load(os.path.join(os.path.dirname(__file__), "plan-completion.py"))
+    return _completion_module
+
+
 def load():
     if not os.path.exists(path):
         return {"schema": SCHEMA, "goal": "", "accept": "", "tasks": {}}
-    with open(path, encoding="utf-8") as fh:
-        d = json.load(fh)
+    state_root = os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
+    canonical = os.path.join(state_root, ".oms", "plan", "tasks.json")
+    # Once typed receipts exist, readers must bound the plan read before
+    # decoding it; a replaced FIFO cannot reveal its completion fields.
+    typed_namespace = (same_absolute_path(path, canonical) and
+                       os.path.lexists(os.path.join(state_root, ".oms", "plan", "completions")))
+    if act in {"accept-research", "approve-main-research", "accept-main-research", "satisfy"} or typed_namespace:
+        completion = completion_module()
+        try:
+            d = completion["strict_plan"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), path)
+        except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
+            die(str(exc))
+    else:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
     d.setdefault("tasks", {})
     d.setdefault("accept", "")   # schema 2 plans predate the acceptance contract
     d["schema"] = SCHEMA
@@ -61,6 +84,16 @@ def load():
         task.setdefault("executor_id", "")
         task.setdefault("executor_soul_sha256", "")
         task.setdefault("autopilot_owner_id", "")
+    for task_id, task in d["tasks"].items():
+        validate_cancellation(state_root, task_id, task)
+    if any("completion_kind" in t or "completion_receipt" in t for t in d["tasks"].values()):
+        completion = completion_module()
+        try:
+            completion["strict_plan"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), path)
+            for task in d["tasks"].values():
+                completion["validate_done"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), d, task, commit_landing_proof)
+        except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
+            die(str(exc))
     return d
 
 def ensure_plan_id(d):
@@ -81,6 +114,51 @@ def save(d):
         os.replace(tmp, path)   # atomic
     except Exception:
         os.unlink(tmp); raise
+
+def exact_task_sha256(task):
+    raw = json.dumps(task, sort_keys=True, ensure_ascii=False,
+                     separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+def validate_cancellation(repo_root, task_id, task):
+    receipt = task.get("cancellation")
+    if task.get("state") != "cancelled":
+        if receipt is not None:
+            die("task %s has cancellation evidence without cancelled state" % task_id)
+        return
+    required = {"schema", "kind", "ts", "operator_consent", "reason", "state",
+                "original_updated", "lease_id_sha256", "plan_sha256", "task_sha256",
+                "decision_artifact", "decision_artifact_sha256"}
+    if (not isinstance(receipt, dict) or set(receipt) != required or
+            type(receipt.get("schema")) is not int or receipt.get("schema") != 1 or
+            receipt.get("kind") != "operator-cancellation" or
+            not isinstance(receipt.get("ts"), str) or not receipt["ts"] or
+            receipt.get("operator_consent") != "cancel" or
+            receipt.get("state") not in {"ready", "blocked"} or
+            not isinstance(receipt.get("original_updated"), str) or
+            not isinstance(task.get("updated"), str) or task.get("updated") != receipt.get("ts") or
+            not isinstance(receipt.get("reason"), str) or not 0 < len(receipt["reason"]) <= 500 or
+            any(ord(char) < 32 or ord(char) == 127 for char in receipt["reason"]) or
+            any(not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get(key, "")))
+                for key in ("lease_id_sha256", "plan_sha256", "task_sha256", "decision_artifact_sha256"))):
+        die("task %s has invalid cancellation evidence" % task_id)
+    original = dict(task)
+    original.pop("cancellation", None)
+    original["state"] = receipt["state"]
+    original["updated"] = receipt["original_updated"]
+    if (hashlib.sha256(str(original.get("lease_id", "")).encode("utf-8")).hexdigest() != receipt["lease_id_sha256"] or
+            exact_task_sha256(original) != receipt["task_sha256"]):
+        die("task %s cancellation evidence does not reconstruct its original task" % task_id)
+    rel = receipt.get("decision_artifact")
+    if (not isinstance(rel, str) or not rel or len(rel) > 240 or rel.startswith("/") or
+            "\\" in rel or any(part in ("", ".", "..") for part in rel.split("/"))):
+        die("task %s has an invalid cancellation decision-artifact path" % task_id)
+    filename = os.path.join(repo_root, *rel.split("/"))
+    if not same_absolute_path(os.path.realpath(filename), filename):
+        die("task %s cancellation decision artifact traverses a symlink" % task_id)
+    raw = read_regular_bytes(filename, "cancellation decision artifact", 64 * 1024)
+    if hashlib.sha256(raw).hexdigest() != receipt["decision_artifact_sha256"]:
+        die("task %s cancellation decision artifact digest changed" % task_id)
 
 def split_list(s):
     return [x.strip() for x in re.split(r"[,\s]+", s) if x.strip()]
@@ -112,7 +190,7 @@ def read_regular_bytes(filename, label, maximum):
     finally:
         os.close(fd)
 
-def commit_landing_proof(sha):
+def commit_landing_proof(sha, expected_receipt_sha256=None):
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
         die("--landed-commit must be a full lowercase commit SHA")
     directory = env("OMS_LAND_RECEIPTS_DIR")
@@ -127,6 +205,8 @@ def commit_landing_proof(sha):
         if not name.startswith(sha + "-") or not name.endswith(".json"):
             continue
         raw = read_regular_bytes(os.path.join(directory, name), "oms land receipt", 1024 * 1024)
+        if expected_receipt_sha256 is not None and hashlib.sha256(raw).hexdigest() != expected_receipt_sha256:
+            continue
         try:
             receipt = json.loads(raw)
         except (ValueError, UnicodeError):
@@ -164,6 +244,47 @@ def commit_landing_proof(sha):
     if passed:
         die("landed commit %s is not reachable from a passed receipt's local pushed target ref" % sha)
     die("no passed oms land receipt for %s with gate/push ok and CI success" % sha)
+
+def landed_range_paths(sha):
+    """Files the landing of sha changed. The range starts at the nearest
+    first-parent ancestor with its own pushed land receipt (the tip that land
+    pushed onto); with none, it is sha's own commit against its first parent."""
+    directory = env("OMS_LAND_RECEIPTS_DIR")
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        names = []
+    pushed = set()
+    for name in names:
+        prior = name.split("-", 1)[0]
+        if (prior == sha or not name.endswith(".json") or
+                not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", prior)):
+            continue
+        raw = read_regular_bytes(os.path.join(directory, name), "oms land receipt", 1024 * 1024)
+        try:
+            receipt = json.loads(raw)
+        except (ValueError, UnicodeError):
+            continue
+        push = receipt.get("push") if isinstance(receipt, dict) else None
+        if (isinstance(push, dict) and receipt.get("sha") == prior and
+                type(push.get("rc")) is int and push["rc"] == 0):
+            pushed.add(prior)
+    git_env = dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="")
+    def git(*args):
+        try:
+            run = subprocess.run(["git", "-C", env("OMS_REPO")] + list(args),
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 env=git_env, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            run = exc
+        if not isinstance(run, subprocess.CompletedProcess) or run.returncode != 0:
+            die("cannot list files changed by landed commit %s; retry where its history is local" % sha)
+        return run.stdout.decode("utf-8", "surrogateescape")
+    chain = git("rev-list", "--first-parent", "--max-count=1000", sha).split()
+    base = next((c for c in chain[1:] if c in pushed), chain[1] if len(chain) > 1 else "")
+    diff = ["diff-tree", "-r", "-z", "--name-only", "--no-commit-id"]
+    paths = git(*(diff + ([base, sha] if base else ["--root", sha]))).split("\0")
+    return ("%s..%s" % (base, sha) if base else "root commit %s" % sha), [x for x in paths if x]
 
 def reject_controls(value, label):
     if any(unicodedata.category(ch) in ("Cc", "Cf", "Cs") for ch in value):
@@ -254,8 +375,12 @@ def marker_json_is_finite(value):
         return all(marker_json_is_finite(item) for item in value)
     return True
 
+def state_repo():
+    """The checkout that owns plan state; a parent's scratch worktree shares the main checkout's."""
+    return os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
+
 def worker_marker_dir():
-    repo_root = os.path.realpath(env("OMS_REPO"))
+    repo_root = state_repo()
     expected = os.path.join(repo_root, ".oms", "delegations")
     supplied = env("OMS_PLAN_MARKERS_DIR") or expected
     marker_dir = os.path.abspath(supplied)
@@ -407,17 +532,33 @@ def claim_age(t):
         return None
     return int((now_dt - anchor).total_seconds())
 
+_ttl_worker_markers = None
+_ttl_worker_veto = {}
+
+def ttl_worker_protected(t):
+    """A stale clock cannot override recovery's exact live/unproven evidence.
+    Call only after TTL expiry; cache the strict directory read and each lease
+    probe for this invocation. Malformed unrelated records still fail closed.
+    """
+    global _ttl_worker_markers
+    if _ttl_worker_markers is None:
+        _ttl_worker_markers = load_worker_markers()
+    identity = (t["id"], t.get("lease_id", ""))
+    if identity not in _ttl_worker_veto:
+        exact = exact_lease_markers(_ttl_worker_markers, *identity)
+        _ttl_worker_veto[identity] = any(
+            not worker_marker_is_typed(row) or marker_pid_alive(row)
+            for row in exact)
+    return _ttl_worker_veto[identity]
+
 def claim_expired(t):
-    """Read-time view of a claim: past its TTL it belongs to a worker nobody
-    has heard from, so it is not a live hold on the task. Reads present that
-    and change nothing (the same way agent-thread treats an expired CURRENT
-    pointer); reclaim is what rewrites the row."""
+    """Read-only TTL recovery eligibility, subject to exact worker protection."""
     if t.get("state") != "claimed":
         return False
     age = claim_age(t)
     if age is None:
         return False
-    return age >= claim_ttl_for(t)
+    return age >= claim_ttl_for(t) and not ttl_worker_protected(t)
 
 def review_expired(t):
     if t.get("state") != "review":
@@ -509,7 +650,7 @@ if act == "next" and env("OMS_CLAIM") == "1":
     needs_retirement_guard = True
 if act in {"recover-lease", "recover-owner"} and env("OMS_CHECK_ONLY") == "1":
     needs_retirement_guard = False
-canonical_plan = os.path.join(os.path.realpath(env("OMS_REPO")), ".oms", "plan", "tasks.json")
+canonical_plan = os.path.join(state_repo(), ".oms", "plan", "tasks.json")
 if not same_absolute_path(path, canonical_plan):
     needs_retirement_guard = False
 if needs_retirement_guard:
@@ -522,15 +663,51 @@ if needs_retirement_guard:
         "durable_jsonl": os.path.join(os.path.dirname(sys.argv[5]), "durable-jsonl.py"),
     }
     if act == "retire":
+        if os.path.exists(path):
+            completion = completion_module()
+            try:
+                state_root = os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
+                retirement_plan = completion["strict_plan"](state_root, path)
+                for task in retirement_plan["tasks"].values():
+                    if "completion_kind" in task or "completion_receipt" in task:
+                        completion["validate_done"](state_root, retirement_plan, task, commit_landing_proof)
+            except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
+                die(str(exc))
         retirement["run"](retirement_context)
         sys.exit(0)
-    retirement["cleanup_completed_retirement"](retirement_context)
+    # The verifier phase is read-only and intentionally runs outside locks;
+    # cleanup is fenced by both locked preflight and locked finalization.
+    if act != "approve-main-research" and not (act in {"accept-research", "accept-main-research", "satisfy"} and env("OMS_COMPLETION_PHASE") == "verify"):
+        retirement["cleanup_completed_retirement"](retirement_context)
 if act == "accept":
+    if os.path.exists(path):
+        acceptance_plan = json.loads(read_regular_bytes(path, "acceptance plan", 4 * 1024 * 1024))
+        acceptance_tasks = acceptance_plan.get("tasks", {}) if isinstance(acceptance_plan, dict) else {}
+        if isinstance(acceptance_tasks, dict) and any(
+                isinstance(task, dict) and ("completion_kind" in task or "completion_receipt" in task)
+                for task in acceptance_tasks.values()):
+            load()
     sys.exit(0)
 
 d = load()
 tasks = d["tasks"]
 CONTRACT_VERDICT = project_contract_verdict(d)
+
+if act in {"accept-research", "approve-main-research", "accept-main-research", "satisfy"}:
+    require_project_contract_authority()
+    completion = completion_module()
+    try:
+        if env("OMS_COMPLETION_PHASE") == "verify":
+            completion["execute"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")),
+                                  env("OMS_COMPLETION_BUNDLE"), env("OMS_EXPECTED_COMPLETION_BUNDLE_SHA256"),
+                                  commit_landing_proof)
+        else:
+            completion["run"]({"action": act, "path": path, "plan": d, "ts": ts,
+                           "markers": load_worker_markers, "typed": worker_marker_is_typed,
+                           "alive": marker_pid_alive, "commit_proof": commit_landing_proof})
+    except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
+        die(str(exc))
+    sys.exit(0)
 
 if act == "init":
     d = {"schema": SCHEMA, "plan_id": "plan_" + secrets.token_hex(16),
@@ -883,12 +1060,98 @@ def get_task(i):
     if not t: die("no such task: %s" % i)
     return t
 
-if act in ("claim", "start", "finish", "review", "repair", "land", "block", "release", "recover-lease", "reopen", "show", "evidence-snapshot", "touch"):
+if act in ("claim", "start", "finish", "review", "repair", "land", "block", "release", "recover-lease", "reopen", "show", "evidence-snapshot", "touch", "cancel"):
     i = require_id(); t = get_task(i)
+    if act in {"review", "finish"}:
+        candidate_patch = env("OMS_PATCH") or t.get("patch", "")
+        if candidate_patch:
+            candidate_path = os.path.abspath(os.path.join(state_repo(), candidate_patch))
+            if os.path.dirname(candidate_path) == os.path.join(os.path.realpath(state_repo()),
+                                                               ".oms", "landing-patches"):
+                # The plan writer lock excludes capture GC. Refuse a new pin
+                # if collection already won; ordinary patch paths are unchanged.
+                capture = _load(os.path.join(os.path.dirname(__file__), "landing-capture.py"))
+                capture["read_patch"](state_repo(), candidate_path)
     if act in {"claim", "start", "review", "repair", "land", "finish"} and (
             t.get("executor_id") or t.get("executor_soul_sha256")):
         die("Soul executor receipt is retired; preserve the old evidence and create a fresh plan task")
-    if act == "touch":
+    if act == "cancel":
+        if env("OMS_HARNESS_CHILD") == "1" or env("OMS_HARNESS_DELEGATE_DEPTH") not in ("", "0"):
+            die("cancel is parent-only")
+        if env("OMS_OPERATOR_CONSENT") != "cancel":
+            die("cancel requires explicit operator consent")
+        reason = env("OMS_REASON")
+        reject_controls(reason, "cancellation reason")
+        if not reason or len(reason) > 500:
+            die("cancellation reason must be 1..500 characters")
+        if t.get("state") not in ("ready", "blocked"):
+            die("task %s is %s; cancellation requires an inactive ready/blocked task" % (i, t.get("state")))
+        expected_state = env("OMS_EXPECTED_CANCEL_STATE")
+        expected_lease = env("OMS_EXPECTED_CANCEL_LEASE")
+        expected_lease = "" if expected_lease == "none" else expected_lease
+        if (expected_state not in ("ready", "blocked") or
+                t.get("state") != expected_state or
+                t.get("lease_id", "") != expected_lease):
+            die("task state or lease changed after cancellation was reviewed")
+        if "cancellation" in t:
+            die("task %s already has cancellation evidence" % i)
+        expected_plan = env("OMS_EXPECTED_PLAN_SHA256")
+        expected_task = env("OMS_EXPECTED_TASK_SHA256")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_plan):
+            die("cancel requires an exact --expected-plan-sha256")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_task):
+            die("cancel requires an exact --expected-task-sha256")
+        raw_plan = read_regular_bytes(path, "active plan", 1024 * 1024)
+        if hashlib.sha256(raw_plan).hexdigest() != expected_plan:
+            die("active plan changed after cancellation was reviewed")
+        if exact_task_sha256(t) != expected_task:
+            die("task changed after cancellation was reviewed")
+        repo_root = state_repo()
+        canonical = os.path.join(repo_root, ".oms", "plan", "tasks.json")
+        try:
+            parent_info = os.lstat(os.path.dirname(canonical))
+            target_info = os.lstat(path)
+        except OSError as exc:
+            die("cannot inspect canonical cancellation plan: %s" % exc)
+        if (not same_absolute_path(path, canonical) or
+                not same_absolute_path(os.path.realpath(path), canonical) or
+                not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode) or
+                not stat.S_ISREG(target_info.st_mode) or stat.S_ISLNK(target_info.st_mode)):
+            die("cancel requires the canonical repo-local plan file")
+        decision_rel = env("OMS_DECISION_ARTIFACT")
+        if not isinstance(decision_rel, str) or len(decision_rel) > 240:
+            die("decision artifact path must be a bounded repo-relative path")
+        decision_rel = clean_rel(decision_rel, "decision artifact path")
+        decision_path = os.path.join(repo_root, *decision_rel.split("/"))
+        if not same_absolute_path(os.path.realpath(decision_path), decision_path):
+            die("decision artifact path must not traverse a symlink")
+        decision_raw = read_regular_bytes(decision_path, "decision artifact", 64 * 1024)
+        decision_sha = hashlib.sha256(decision_raw).hexdigest()
+        expected_decision_sha = env("OMS_EXPECTED_DECISION_ARTIFACT_SHA256")
+        if (not re.fullmatch(r"[0-9a-f]{64}", expected_decision_sha) or
+                decision_sha != expected_decision_sha):
+            die("decision artifact digest changed or is not the reviewed SHA-256")
+        markers = load_worker_markers()
+        if any(not worker_marker_is_typed(marker) for marker in markers):
+            die("worker marker set is malformed or unproven; cancellation refused")
+        matching = [marker for marker in markers if marker.get("task_id") == i]
+        if any(not marker.get("task_id") for marker in markers):
+            die("worker marker lacks task identity; cancellation refused")
+        for marker in matching:
+            if marker_pid_alive(marker):
+                die("task %s has a live worker marker; cancellation refused" % i)
+        t["cancellation"] = {
+            "schema": 1, "kind": "operator-cancellation", "ts": ts,
+            "operator_consent": "cancel", "reason": reason,
+            "state": expected_state,
+            "original_updated": t.get("updated", ""),
+            "lease_id_sha256": hashlib.sha256(expected_lease.encode("utf-8")).hexdigest(),
+            "plan_sha256": expected_plan, "task_sha256": expected_task,
+            "decision_artifact": decision_rel,
+            "decision_artifact_sha256": decision_sha,
+        }
+        t["state"] = "cancelled"
+    elif act == "touch":
         # Heartbeat: a live worker refreshes claimed_at so reclaim's TTL clock
         # restarts and it is not mistaken for a dead worker mid-run.
         if t["state"] not in ("claimed", "running"):
@@ -981,7 +1244,8 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
             die("--expected-review-patch-sha256 must be a lowercase SHA-256")
         patch_path = stored_patch
         if not os.path.isabs(patch_path):
-            patch_path = os.path.join(env("OMS_REPO"), patch_path)
+            # Stored review evidence lives with the plan, not in the tree being landed.
+            patch_path = os.path.join(state_repo(), patch_path)
         digest = hashlib.sha256()
         try:
             with open(patch_path, "rb") as handle:
@@ -1013,12 +1277,28 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
     elif act == "finish" and env("OMS_LANDED_COMMIT"):
         if t["state"] != "review":
             die("task %s is %s; --landed-commit finish requires review" % (i, t["state"]))
+        # A review recorded without evidence takes it here instead of a release and a new claim.
+        t.update(artifact=env("OMS_ARTIFACT") or t.get("artifact", ""), patch=env("OMS_PATCH") or t.get("patch", ""))
         if not t.get("artifact") or not t.get("patch"):
-            die("task %s review is missing artifact/patch evidence" % i)
+            die("task %s review is missing artifact/patch evidence; pass --artifact and --patch" % i)
+        require_current_lease(t)
         history = t.get("history", [])
         if not isinstance(history, list):
             die("task %s history must be a list" % i)
         landing = commit_landing_proof(env("OMS_LANDED_COMMIT"))
+        allowed = t.get("allowed_paths") or []
+        if allowed:
+            try:
+                scope = path_scope["validate_patterns"](
+                    path_scope["normalize"](a, "allowed path") for a in allowed)
+            except ValueError as exc:
+                die("task %s allowed_paths are invalid: %s" % (i, exc))
+            span, changed = landed_range_paths(landing["sha"])
+            if not any(path_scope["matches"](p, a) for p in changed for a in scope):
+                die("landed commit %s does not land task %s: %s changed none of its allowed_paths (%s); "
+                    "changed: %s. Finish against the SHA whose land pushed this task's work"
+                    % (landing["sha"], i, span, ", ".join(allowed),
+                       ", ".join(changed[:5]) + (" ..." if len(changed) > 5 else "") or "nothing"))
         history.append({"schema": 1, "kind": "finish", "ts": ts,
                         "state": "done", "landing": landing})
         t.update(state="done", landing=landing, history=history)
@@ -1051,7 +1331,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
             repo_root = os.path.realpath(env("OMS_REPO") or os.path.dirname(
                 os.path.dirname(os.path.dirname(os.path.abspath(path)))))
             if isinstance(contract, dict) and patch_rel:
-                patch_abs = os.path.join(repo_root, *patch_rel.split("/")) \
+                patch_abs = os.path.join(state_repo() if env("OMS_STATE_REPO") else repo_root, *patch_rel.split("/")) \
                     if not os.path.isabs(patch_rel) else patch_rel
                 touched = set()
                 try:
@@ -1118,6 +1398,14 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         if not r: die("--reason is required for block")
         if t["state"] in ("claimed", "running", "review", "landing"):
             require_current_lease(t)
+        if t.get("completion_kind"):
+            if (env("OMS_HARNESS_CHILD") == "1" or
+                    env("OMS_HARNESS_DELEGATE_DEPTH") not in ("", "0")):
+                die("reactivating a completed task is parent-only")
+            history = t.setdefault("history", [])
+            history.append({"schema": 1, "kind": "completion-reactivated", "ts": ts,
+                            "completion_kind": t.pop("completion_kind"),
+                            "completion_receipt": t.pop("completion_receipt"), "reason": r})
         t.update(state="blocked", reason=r)
     elif act == "release":
         # Requeue a claimed/running task (e.g. the worker died) back to ready.
@@ -1165,6 +1453,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         if act == "evidence-snapshot":
             view["plan_id"] = d.get("plan_id", "")
         view["claim_expired"] = claim_expired(t)
+        view["task_sha256"] = exact_task_sha256(t)
         if t.get("state") in ("claimed", "running", "review"):
             age = claim_age(t)
             if age is not None:
@@ -1261,6 +1550,8 @@ if act == "reclaim":
         age = int((now_dt - anchor).total_seconds())
         if age < ttl_s:
             continue
+        if t["state"] in ("claimed", "running") and ttl_worker_protected(t):
+            continue
         prov = t.get("provider", "") or "?"
         was = t["state"]
         clear_claim(t)
@@ -1334,6 +1625,7 @@ if act == "list":
         for t in ordered:
             if sf and t["state"] != sf: continue
             view = dict(t)
+            view["task_sha256"] = exact_task_sha256(t)
             view["claim_expired"] = claim_expired(t)
             if t.get("state") in ("claimed", "running", "review"):
                 age = claim_age(t)
@@ -1350,6 +1642,8 @@ if act == "list":
         # The state column keeps saying what is stored; the tag says how that
         # stored state reads now.
         tag = (" EXPIRED(%s)" % expiry_note(t)) if claim_expired(t) else ""
+        if review_expired(t):
+            tag = " STALE(review %dh old)" % (claim_age(t) // 3600)
         print("%-10s %-9s %s%s%s%s" % (t["id"], t["state"], t["title"], prov, dep, tag))
     sys.exit(0)
 
@@ -1366,11 +1660,20 @@ if act == "status":
                     for t in ordered if review_expired(t)]
     if env("OMS_AS_JSON") == "1":
         count = len(tasks)
+        verified_count = by.get("done", 0)
+        cancelled_count = by.get("cancelled", 0)
+        closed_count = verified_count + cancelled_count
+        unfinished_count = count - closed_count
+        plan_raw = read_regular_bytes(path, "active plan", 1024 * 1024) if os.path.exists(path) else b""
         print(json.dumps({
             "schema": 1, "present": os.path.exists(path),
+            "plan_sha256": hashlib.sha256(plan_raw).hexdigest() if plan_raw else "",
             "task_count": count, "nonempty": count > 0,
             "all_done": count > 0 and all(t.get("state") == "done" for t in tasks.values()),
-            "has_unfinished": any(t.get("state") != "done" for t in tasks.values()),
+            "all_closed": count > 0 and unfinished_count == 0,
+            "has_unfinished": unfinished_count > 0,
+            "verified_count": verified_count, "cancelled_count": cancelled_count,
+            "closed_count": closed_count, "unfinished_count": unfinished_count,
             "by_state": by, "actionable": claimable,
             "contract": CONTRACT_VERDICT,
             "stale": stale, "stale_review": stale_review,
@@ -1400,15 +1703,26 @@ if act == "status":
             print("acceptance: %s at %s (base %s)" % (
                 last.get("status", "?"), last.get("ts", "?"),
                 str(last.get("base_sha", "?"))[:12]))
-    order = ["ready", "claimed", "running", "review", "landing", "blocked", "done"]
+    order = ["ready", "claimed", "running", "review", "landing", "blocked", "done", "cancelled"]
     print("tasks: %d  [%s]" % (len(tasks),
         " ".join("%s=%d" % (s, by[s]) for s in order if by.get(s))))
+    verified_count = by.get("done", 0)
+    cancelled_count = by.get("cancelled", 0)
+    closed_count = verified_count + cancelled_count
+    unfinished_count = len(tasks) - closed_count
+    print("closed: %d/%d  verified: %d  cancelled: %d  unfinished: %d" % (
+        closed_count, len(tasks), verified_count, cancelled_count, unfinished_count))
     print("ready now: %s" % (" ".join(claimable) if claimable else "(none)"))
     if not CONTRACT_VERDICT["satisfied"]:
         print("contract blocker: %s" % CONTRACT_VERDICT["blocker"])
     for t in ordered:
         if claim_expired(t):
             print("expired claim %s: %s" % (t["id"], expiry_note(t)))
+    # Nothing reclaims a review by default, so an abandoned one would sit
+    # unseen in text output while JSON readers already flag it.
+    for r in stale_review:
+        print("stale review %s: %dh without a verdict (oms agent-plan reclaim --include-review)"
+              % (r["id"], r["age_seconds"] // 3600))
     blocked = [t for t in ordered if t["state"] == "blocked"]
     for t in blocked:
         print("blocked %s: %s" % (t["id"], t.get("reason", "")))

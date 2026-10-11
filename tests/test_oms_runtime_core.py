@@ -315,8 +315,11 @@ class RuntimeFixture(RuntimeFixtureBase):
         dependency = self.repo / 'scripts' / 'sample.py'
         bound = evidence.bind(self.repo, 'project-safe', 'evt-api', 'verified', dependencies=['scripts/sample.py'])
         self.assertEqual(bound['criterion_id'], 'project-safe')
-        statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
+        projected = evidence.build_coverage(self.repo)
+        statuses = {item['id']: item['status'] for item in projected['criteria']}
         self.assertEqual(statuses['project-safe'], 'verified')
+        project_safe = next(item for item in projected['criteria'] if item['id'] == 'project-safe')
+        self.assertEqual(project_safe['evidence'][-1]['signal'], 'parent_attestation')
         unrelated = self.repo / 'unrelated.txt'
         unrelated.write_text('unrelated change\n', encoding='utf-8')
         subprocess.run(['git', '-C', str(self.repo), 'add', 'unrelated.txt'], check=True)
@@ -628,6 +631,9 @@ class RuntimeFixture(RuntimeFixtureBase):
         statuses = {item['id']: item['status'] for item in row['criteria']}
         plan_id = 'criterion-plan-acceptance-' + accept_digest[:10]
         self.assertEqual(statuses[plan_id], 'verified')
+        gate = next(e for c in row['criteria'] if c['id'] == plan_id
+                    for e in c.get('evidence', []) if e['evidence_ref'] == 'evt-gate')
+        self.assertEqual(gate['signal'], 'execution_feedback')
         # patch_sha256 is an accepted scope digest spelling: an existing
         # patch-admit row proves scope without being rewritten to a new field.
         supports = {item['id']: [e.get('support') for e in item.get('evidence', [])] for item in row['criteria']}
@@ -646,6 +652,117 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(_completion_state({'present': True, 'status': 'cancelled'}, complete), 'cancelled')
         self.assertEqual(_completion_state({'present': True, 'status': 'active'}, incomplete), 'active')
         self.assertEqual(_completion_state({'present': False, 'status': ''}, incomplete), 'none')
+
+    def test_receipt_strength_preserves_typed_gates_and_downgrades_advisory_success(self) -> None:
+        import hashlib
+        criterion = 'criterion-plan-acceptance-' + hashlib.sha256(
+            'python3 -m unittest'.encode('utf-8')).hexdigest()[:10]
+        index = self.repo / '.oms' / 'artifacts' / 'index.jsonl'
+        advisory_kinds = (
+            'call', 'ask', 'review', 'ask-synthesis', 'review-synthesis',
+            'review-outcome', 'call-export', 'ask-export', 'review-export',
+            'call-import', 'ask-import', 'review-import', 'delegate-import',
+        )
+        advisory_rows = [
+            {'schema': 1, 'event_id': 'evt-advisory-%d' % ordinal,
+             'kind': kind, 'exit': 0, 'status': 'approved',
+             'covers': [criterion], 'ts': '2026-10-01T00:00:%02dZ' % ordinal}
+            for ordinal, kind in enumerate(advisory_kinds)
+        ]
+        advisory_rows[0]['status'] = 'verified'
+        unbound_advisory = {'schema': 1, 'event_id': 'evt-unbound-ask-synth',
+                            'kind': 'ask-synthesis', 'exit': 0,
+                            'status': 'verified', 'ts': '2026-10-01T00:01:00Z'}
+        unknown = {'schema': 1, 'event_id': 'evt-unbound-legacy',
+                   'kind': 'legacy-receipt', 'status': 'inconclusive',
+                   'ts': '2026-10-01T00:01:01Z'}
+        index.write_text(''.join(json.dumps(row) + '\n'
+                                  for row in advisory_rows + [unbound_advisory, unknown]),
+                         encoding='utf-8')
+        projected = evidence.build_coverage(self.repo)
+        item = next(row for row in projected['criteria'] if row['id'] == criterion)
+        self.assertEqual(item['status'], 'inconclusive')
+        self.assertFalse(projected['complete'])
+        self.assertEqual({row['signal'] for row in item['evidence']}, {'advisory'})
+        self.assertEqual(evidence.outcome(advisory_rows[0]), 'inconclusive')
+        self.assertEqual(evidence.outcome(dict(advisory_rows[0], exit=1)), 'failed')
+        unbound_items = {row['evidence_ref']: row
+                         for row in projected['unbound_evidence']}
+        self.assertEqual(unbound_items['evt-unbound-ask-synth']['signal'], 'advisory')
+        self.assertEqual(unbound_items['evt-unbound-legacy']['signal'], 'unknown')
+        failed_advisory = dict(advisory_rows[0], event_id='evt-advisory-fail',
+                               exit=1, ts='2026-10-01T00:01:02Z')
+        index.write_text(json.dumps(failed_advisory) + '\n', encoding='utf-8')
+        projected = evidence.build_coverage(self.repo)
+        item = next(row for row in projected['criteria'] if row['id'] == criterion)
+        self.assertEqual(item['status'], 'failed')
+
+        # A historical typed review-verify's real exit is sufficient; the
+        # duplicate verify_exit is optional corroboration, not a new contract.
+        gate = {'schema': 1, 'event_id': 'evt-gate-pass', 'kind': 'review-verify',
+                'exit': 0, 'status': 'verified', 'covers': [criterion],
+                'ts': '2026-10-01T00:02:00Z'}
+        self.assertEqual(evidence.outcome(gate), 'verified')
+        fake_gate = {'kind': 'review-verify', 'status': 'verified', 'verify_exit': 0}
+        self.assertEqual(evidence.outcome(fake_gate), 'inconclusive')
+        self.assertEqual(evidence._evidence_item(
+            fake_gate, self.repo, support='explicit-artifact', head='')['signal'],
+            'unknown')
+        self.assertEqual(evidence.outcome(dict(gate, verify_exit=1)), 'failed')
+
+        later_advisory = dict(advisory_rows[0], event_id='evt-advisory-later',
+                              ts='2026-10-01T00:03:00Z')
+        index.write_text(''.join(json.dumps(row) + '\n'
+                                  for row in (gate, later_advisory)), encoding='utf-8')
+        projected = evidence.build_coverage(self.repo)
+        item = next(row for row in projected['criteria'] if row['id'] == criterion)
+        self.assertEqual(item['status'], 'verified')
+        self.assertEqual(item['evidence'][-1]['signal'], 'advisory')
+
+        stale_gate = dict(gate, event_id='evt-gate-stale', verified_head='f' * 40)
+        index.write_text(''.join(json.dumps(row) + '\n'
+                                  for row in (stale_gate, later_advisory)),
+                         encoding='utf-8')
+        projected = evidence.build_coverage(self.repo)
+        item = next(row for row in projected['criteria'] if row['id'] == criterion)
+        self.assertEqual(item['status'], 'stale')
+
+        failed_gate = dict(gate, event_id='evt-gate-fail', exit=1,
+                           verify_exit=1, status='verified',
+                           ts='2026-10-01T00:04:00Z')
+        later_advisory = dict(later_advisory, event_id='evt-advisory-after-fail',
+                              ts='2026-10-01T00:05:00Z')
+        index.write_text(''.join(json.dumps(row) + '\n'
+                                  for row in (gate, failed_gate, later_advisory)),
+                         encoding='utf-8')
+        projected = evidence.build_coverage(self.repo)
+        item = next(row for row in projected['criteria'] if row['id'] == criterion)
+        self.assertEqual(item['status'], 'failed')
+
+        delegate_rows = (
+            {'kind': 'delegate', 'context_verification': 'none',
+             'exit': 0, 'status': 'verified'},
+            {'kind': 'delegate', 'context_verification': 'dry-run',
+             'exit': 0, 'verify_exit': 0},
+            {'kind': 'delegate', 'context_verification': 'command',
+             'exit': 0, 'verify_exit': 0},
+        )
+        projected_signals = [evidence._evidence_item(
+            row, self.repo, support='explicit-artifact', head='')
+            ['signal'] for row in delegate_rows]
+        self.assertEqual(projected_signals, ['advisory', 'unknown',
+                                             'execution_feedback'])
+        legacy_delegate = {'kind': 'delegate', 'exit': 0, 'verify_exit': 0,
+                           'status': 'verified'}
+        # The legacy producer's paired worker/verifier exits are its typed
+        # command receipt; a lone declared verifier field is not.
+        self.assertEqual(evidence.outcome(legacy_delegate), 'verified')
+        self.assertEqual(evidence._evidence_item(
+            legacy_delegate, self.repo, support='explicit-artifact', head='')
+            ['signal'], 'execution_feedback')
+        self.assertEqual(evidence.outcome(
+            {'kind': 'delegate', 'verify_exit': 0, 'status': 'verified'}),
+            'inconclusive')
 
     def test_valid_resolution_downgrades_failure_to_stale_never_verified(self) -> None:
         import hashlib
@@ -860,6 +977,9 @@ class RuntimeFixture(RuntimeFixtureBase):
                         'schema': 1,
                         'event_id': 'evt-task-cover',
                         'kind': 'review-verify',
+                        # This fixture models the producer's executed command
+                        # receipt; kind/status alone is not execution evidence.
+                        'exit': 0,
                         'status': 'verified',
                         'covers': ['task-tests'],
                     }
@@ -903,6 +1023,7 @@ class RuntimeFixture(RuntimeFixtureBase):
             [item['support'] for item in successor['evidence']],
             ['fresh-task-gate'],
         )
+        self.assertEqual(successor['evidence'][0]['signal'], 'execution_feedback')
 
     def test_projection_subprocess_cost_does_not_scale_with_evidence_rows(self) -> None:
         # The staleness judgment once ran `git rev-parse` per evidence row —

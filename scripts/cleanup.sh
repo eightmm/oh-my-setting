@@ -62,9 +62,9 @@ oms_harness_cleanup_residue "$repo_dir" "$DRY_RUN"
 
 if [ "$DRY_RUN" -eq 1 ]; then
   total=$((OMS_OPS_WOULD_REMOVE + OMS_HARNESS_RESIDUE_WOULD_REMOVE))
-  printf '\ncleanup: %s removable item(s) found\n' "$total"
+  printf '\ncleanup: %s removable item(s) found, %s kept with work\n' "$total" "${OMS_HARNESS_RESIDUE_KEPT:-0}"
 else
   total=$((OMS_OPS_REMOVED + OMS_HARNESS_RESIDUE_REMOVED))
-  printf '\ncleanup: removed %s item(s)\n' "$total"
+  printf '\ncleanup: removed %s item(s), %s kept with work\n' "$total" "${OMS_HARNESS_RESIDUE_KEPT:-0}"
   "$ROOT/scripts/skill-doctor.sh"
 fi

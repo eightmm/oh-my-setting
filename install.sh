@@ -362,7 +362,8 @@ else
       return 75
     fi
     mkdir -p "$parent" || return
-    parent="$(cd "$parent" && pwd -P)" || return
+    # Physical like the library copy: the re-exec compares this exported string.
+    parent="$(CDPATH='' cd -P -- "$parent" && pwd -P)" || return
     printf '%s/%s\n' "$parent" "$name"
   }
 

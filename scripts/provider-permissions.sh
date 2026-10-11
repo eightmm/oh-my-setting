@@ -174,6 +174,14 @@ fi
 # even under Windows Python (Git Bash passes POSIX paths to Antigravity), and
 # reject every character that can terminate or widen the rule. NUL cannot be
 # present in an argv value; all other control characters are rejected below.
+# With no settings file and no ownership sidecar there is nothing to revoke, so
+# an install that failed before its Python runtime existed stays removable.
+if [ "$MODE" = remove ] && [ ! -e "$SETTINGS" ] && [ ! -L "$SETTINGS" ] &&
+  [ ! -e "$SETTINGS.oh-my-setting-permissions.json" ] &&
+  [ ! -L "$SETTINGS.oh-my-setting-permissions.json" ]; then
+  echo "provider-permissions: no Antigravity settings or managed grants; nothing to remove"
+  exit 0
+fi
 command -v python3 >/dev/null 2>&1 ||
   fail "python3 is required to validate provider permission paths"
 # On a Windows host, HOME/XDG/TMPDIR-derived defaults arrive in the native or

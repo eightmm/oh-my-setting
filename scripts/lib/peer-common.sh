@@ -239,6 +239,9 @@ ma_agy_read_dir() {
   # signal (Ctrl-C mid-call) is still reclaimable by cleanup.sh / doctor, the
   # same residue path delegate and patch-admit use.
   base="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-agy-read.XXXXXX")" || return 1
+  # Mark before registering, so a concurrent worker guard sees a marked, live
+  # entry at every instant of the add rather than an unexplained new worktree.
+  [ -z "$repo" ] || oms_harness_mark_tmpdir "$base" "$repo" "$base/tree" 2>/dev/null || true
   if [ -n "$repo" ] &&
      oms_git_assert_safe_execution_config "$repo" diff-read >/dev/null 2>&1 &&
      git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 &&
@@ -246,7 +249,6 @@ ma_agy_read_dir() {
        GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
        -c core.fsmonitor=false -C "$repo" \
        worktree add --detach "$base/tree" HEAD >/dev/null 2>&1; then
-    oms_harness_mark_tmpdir "$base" "$repo" "$base/tree" 2>/dev/null || true
     printf '%s/tree\n' "$base"
   else
     oms_harness_mark_tmpdir "$base" "$repo" "" 2>/dev/null || true
@@ -480,16 +482,23 @@ ma_export_child_env() {
 ma_authority_state_snapshot() {  # REPO OUTPUT
   local repo="$1"
   local output="$2"
+  local transient_helper
+  transient_helper="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)/worker-state-transients.py"
 
-  OMS_AUTHORITY_REPO="$repo" python3 - <<'PY' > "$output"
+  OMS_AUTHORITY_REPO="$repo" python3 - "$transient_helper" <<'PY' > "$output"
 import hashlib
+import importlib.util
 import json
 import os
 import stat
+import sys
 
 root = os.path.join(os.path.realpath(os.environ["OMS_AUTHORITY_REPO"]), ".oms")
 excluded = {"hooks", "work-journal"}
 rows = []
+spec = importlib.util.spec_from_file_location("_oms_worker_state_transients", sys.argv[1])
+transients = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(transients)
 
 def describe(path, rel, hash_content=True):
     info = os.lstat(path)
@@ -540,6 +549,8 @@ else:
                 rel = os.path.relpath(path, root).replace(os.sep, "/")
                 if base == root and name in excluded:
                     rows.append(describe(path, rel, False))
+                elif transients.is_internal_atomic_temp(root, rel):
+                    continue
                 else:
                     rows.append(describe(path, rel))
 
@@ -964,7 +975,8 @@ ma_append_artifact_index() {
   # Lineage: the commit the run was based on, and the optional plan/task id
   # (OMS_TASK_ID) that triggered it. Both let a row be traced back to its work.
   local base_sha=""
-  base_sha="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || true)"
+  # A scratch worktree's row is stored in the main checkout but based on the scratch's HEAD.
+  base_sha="$(git -C "${OMS_INDEX_BASE_REPO:-$repo}" rev-parse --short HEAD 2>/dev/null || true)"
 
   OMS_INDEX_PROMPT_BYTES="$prompt_bytes" \
   OMS_INDEX_BASE_SHA="$base_sha" OMS_INDEX_TASK_ID="${OMS_TASK_ID:-}" \
@@ -973,7 +985,7 @@ ma_append_artifact_index() {
   OMS_INDEX_CONTEXT_BUNDLE_SHA256="${OMS_INDEX_CONTEXT_BUNDLE_SHA256:-}" \
   OMS_INDEX_CONTEXT_SELECTED_BYTES="${OMS_INDEX_CONTEXT_SELECTED_BYTES:-}" \
   OMS_INDEX_CONTEXT_DEBT="${OMS_INDEX_CONTEXT_DEBT:-}" \
-  OMS_INDEX_OPERATION_ID="${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}" \
+  OMS_INDEX_OPERATION_ID="${OMS_INDEX_OPERATION_ID:-${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}}" \
   OMS_INDEX_RUN_ID="${OMS_RUN_ID:-}" OMS_INDEX_DELEGATION_ID="${OMS_DELEGATION_ID:-}" \
   OMS_INDEX_ATTEMPT_ID="${OMS_ATTEMPT_ID:-${OMS_LAST_ATTEMPT_ID:-}}" \
   OMS_INDEX_PARENT_EVENT_ID="${OMS_PARENT_EVENT_ID:-}" \
@@ -1020,7 +1032,11 @@ def path_fields(label, raw):
         internal = os.path.commonpath([real_repo, real]) == real_repo
     except ValueError:
         internal = False
-    digest = file_hash(path)
+    # Index publication is a pin. Validate managed payloads while this real
+    # index lock excludes GC; a stale path must not create a dangling new pin.
+    managed = runpy.run_path(os.path.join(os.environ["OMS_INDEX_TRACE_LIB"], "landing-capture.py"))
+    payload = managed["indexed_bytes"](real_repo, real)
+    digest = hashlib.sha256(payload).hexdigest() if payload is not None else file_hash(path)
     if internal:
         relative = os.path.relpath(real, real_repo).replace(os.sep, "/")
         return ({label: relative, label + "_sha256": digest}
@@ -1028,7 +1044,11 @@ def path_fields(label, raw):
     ext = {"name": os.path.basename(path), "owned": False}
     if digest:
         ext["sha256"] = digest
-    return {label + "_external": ext}
+    fields = {label + "_external": ext}
+    # Supersession compares patch digests independently of path ownership.
+    if label == "patch" and digest:
+        fields["patch_sha256"] = digest
+    return fields
 
 operation_id = safe_id(os.environ.get("OMS_INDEX_OPERATION_ID", "")) or ("op_" + uuid.uuid4().hex)
 run_id = safe_id(os.environ.get("OMS_INDEX_RUN_ID", ""))

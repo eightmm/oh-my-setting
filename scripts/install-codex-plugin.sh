@@ -60,6 +60,11 @@ done
 oms_install_require_owner "$ROOT" "modify the Codex plugin" || exit 1
 
 [ "$REMOVE" = "1" ] || command -v codex >/dev/null 2>&1 || fail "codex command is required"
+# The plugin, marketplace, HUD and usage entries all live in config.toml.
+if [ "$REMOVE" = 1 ] && [ ! -e "$CODEX_CONFIG" ] && [ ! -L "$CODEX_CONFIG" ]; then
+  echo "codex-plugin: nothing to remove ($CODEX_CONFIG absent)"
+  exit 0
+fi
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 [ -f "$MARKETPLACE_FILE" ] || fail "missing marketplace: $MARKETPLACE_FILE"
 [ -d "$MARKETPLACE_ROOT" ] || fail "missing marketplace root: $MARKETPLACE_ROOT"

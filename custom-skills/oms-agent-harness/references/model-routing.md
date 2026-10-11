@@ -39,20 +39,25 @@ background advisor or require another model call for routine completion.
 1. Run `oms models` for cached catalogs and per-model effort scales. Use
    `--refresh` only when a live probe is needed.
 2. No `--model` means provider default — except for a write worker
-   (`peer-delegate`, `plan-run`, autopilot), which takes the second price
-   rank of the routable set (`gpt-6.1-sol`, the seeded Claude worker, the medium Gemini
-   line). This is a stable worker preset; it is not computed relative to an
+   (`peer-delegate`, `plan-run`, autopilot), which takes its seeded role rank
+   (the Codex Sol family, the seeded Claude worker, the medium Gemini line).
+   Codex Astra, Sol, and Luna each use the newest numeric version in the local
+   known catalog; their cost order remains Astra, Sol, Luna across versions.
+   Standard Codex workers use Sol when available, routine work uses Luna when
+   available, and recognized capacity recovery tries cheaper ranks first.
+   Missing families are not invented. This is a stable worker preset; it is
+   not computed relative to an
    account-specific provider default. Judging calls keep that provider
-   default. Recovery tries cheaper seeded candidates before higher ones. The
-   order within a generation is the registry's one seed
-   (`oms_provider_price_order`); an unseeded generation routes as the
-   provider default and says so. `OMS_ROLE_ROUTING=0` switches this off.
+   default. Recovery tries cheaper candidates before higher ones. Other
+   providers use the registry's generation seed (`oms_provider_price_order`);
+   an unseeded generation routes as the provider default and says so.
+   `OMS_ROLE_ROUTING=0` switches this off.
    An effective `--model NAME` is exact and never switches to a catalog entry
    or provider default. For assigned plan tasks, the reviewed assignment owns
    that effective route; run-wide model options are defaults for unassigned tasks.
    For a substantial routine task with known paths, constraints and a verifier,
    pass `peer-delegate --workload routine`: select the lowest seeded routable
-   rank, not the standard second rank. The parent decides from repository
+   rank, not the standard worker route. The parent decides from repository
    evidence; no extra classifier call or prompt-keyword heuristic runs.
    `--model` still wins, `OMS_ROLE_ROUTING=0` still disables presets, and an
    unknown generation still uses provider default. This is not a spending cap:
@@ -75,8 +80,10 @@ background advisor or require another model call for routine completion.
    when a model safeguard or unavailable-name error explicitly permits
    recovery. Policy, auth, permission, context, and verification failures do
    not route around the result.
-   Only the routable set is a candidate: the provider's own family at its
-   newest generation (`oms models` lists the rest apart). A previous
+   Only the routable set is a candidate: Codex's known Astra, Sol, and Luna
+   families use their newest numeric version; other providers keep the
+   provider-family newest-generation rule (`oms models` lists the rest apart).
+   Unknown or malformed Codex families are not automatic routes. A previous
    generation or a model another vendor re-hosts through the CLI runs only
    when named with `--model`, with a warning; it is never chosen, and
    `model-doctor` warns when a configured default has fallen outside the set.

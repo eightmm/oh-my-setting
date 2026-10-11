@@ -58,7 +58,9 @@ APPROVAL_VERSION=""
 APPROVAL_CONSUMING_VERSION=""
 SOURCE_PATCH=""
 FROZEN_PATCH=""
-FROZEN_PATCH_PERSIST=0
+CAPTURE_PATCH=""
+CAPTURE_PERSIST=0
+CAPTURE_HELPER="$ROOT_LIB/landing-capture.py"
 LANDING_BASE=""
 intent_plan_receipt_sha=""
 intent_plan_done_receipt_sha=""
@@ -162,14 +164,20 @@ done
 REPO="$(cd "$REPO" && pwd -P)" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 
-LANDINGS="$REPO/.oms/landings.jsonl"
+# Landing records, frozen patches and lineage live in one state root; a
+# parent's scratch shares the main checkout's, so each intent names the tree
+# it was judged against and recovery replays only its own tree's intents.
+STATE_REPO="$(oms_state_root "$REPO")" && STATE_REPO="$(cd "$STATE_REPO" && pwd -P)" ||
+  fail "cannot resolve the landing state root for $REPO"
+LANDINGS="$STATE_REPO/.oms/landings.jsonl"
 
 landing_append() {  # landing_append EVENT [KEY=VALUE...]
   local event="$1"
   shift
   mkdir -p "$(dirname "$LANDINGS")"
-  agent_memory_ensure_oms_ignore "$REPO" 2>/dev/null || true
+  agent_memory_ensure_oms_ignore "$STATE_REPO" 2>/dev/null || true
   OMS_LD_EVENT="$event" OMS_LD_ID="$LANDING_ID" OMS_LD_FILE="$LANDINGS" \
+    OMS_LD_WORKTREE="$REPO" \
     OMS_LD_PATCH="$intent_patch" OMS_LD_PATCH_SHA="$intent_patch_sha" \
     OMS_LD_BASE_SHA="$intent_base_sha" OMS_LD_TASK="$intent_task" \
     OMS_LD_PLAN_ID="$intent_plan_id" \
@@ -199,6 +207,7 @@ row = {
     "approval": os.environ["OMS_LD_APPROVAL"],
     "approval_version": os.environ["OMS_LD_APPROVAL_VERSION"],
     "receipt_sha": os.environ["OMS_LD_RECEIPT_SHA"],
+    "worktree": os.environ["OMS_LD_WORKTREE"],
 }
 plan_id = os.environ.get("OMS_LD_PLAN_ID", "")
 if plan_id:
@@ -227,6 +236,12 @@ if directory_fd is not None:
     finally:
         os.close(directory_fd)
 PY
+  local append_status=$?
+  [ "$append_status" = 0 ] || return "$append_status"
+  case "$event" in
+    complete|abandoned)
+      python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" "$event" || return $? ;;
+  esac
 }
 
 landing_receipt_hash() {
@@ -263,7 +278,8 @@ PY
 # requires its exact optional value and recovery carries it from the first intent.
 landing_outstanding() {
   [ -f "$LANDINGS" ] || return 0
-  OMS_LD_FILE="$LANDINGS" python3 <<'PY'
+  OMS_LD_FILE="$LANDINGS" OMS_LD_WORKTREE="$REPO" \
+    OMS_LD_LOCAL="$([ "$STATE_REPO" = "$REPO" ] && echo 1 || echo 0)" python3 <<'PY'
 import hashlib, json, os
 
 receipt_fields = (
@@ -301,6 +317,10 @@ with open(os.environ["OMS_LD_FILE"], encoding="utf-8", errors="replace") as f:
         if not lid:
             continue
         if row.get("event") == "intent":
+            owner = row.get("worktree")
+            if (owner != os.environ["OMS_LD_WORKTREE"] if isinstance(owner, str) and owner
+                    else os.environ["OMS_LD_LOCAL"] != "1"):
+                continue
             if lid not in intents:
                 order.append(lid)
                 intents[lid] = row
@@ -602,9 +622,9 @@ landing_lineage_exists() {  # landing_lineage_exists PATCH SHA256 TASK PLAN_ID
   local digest="$2"
   local task="${3:-}"
   local plan_id="${4:-}"
-  local index="${OMS_ARTIFACT_INDEX:-$REPO/.oms/artifacts/index.jsonl}"
+  local index="${OMS_ARTIFACT_INDEX:-$STATE_REPO/.oms/artifacts/index.jsonl}"
   [ -f "$index" ] && [ -n "$digest" ] && [ "$digest" != unknown ] || return 1
-  python3 - "$REPO" "$index" "$patch" "$digest" "$task" "$plan_id" <<'PY'
+  python3 - "$STATE_REPO" "$index" "$patch" "$digest" "$task" "$plan_id" <<'PY'
 import json, os, sys
 
 repo = os.path.abspath(sys.argv[1])
@@ -676,8 +696,8 @@ record_landing_lineage_once() {  # record_landing_lineage_once PATCH SHA TASK PL
     status=$?
   fi
   [ "$status" = 1 ] || return "$status"
-  OMS_TASK_ID="$task" OMS_INDEX_PLAN_ID="$plan_id" \
-    ma_append_artifact_index "$REPO" patch-land "" 0 "" "$patch"
+  OMS_TASK_ID="$task" OMS_INDEX_PLAN_ID="$plan_id" OMS_INDEX_BASE_REPO="$REPO" \
+    ma_append_artifact_index "$STATE_REPO" patch-land "" 0 "" "$patch"
 }
 
 # Recovery is a bookkeeping pass, never a second apply: it decides from the
@@ -687,7 +707,7 @@ if [ "$RECOVER" = 1 ]; then
   # Recovery observes and mutates the same intent/tree/receipt transaction as
   # a live landing. It must never decide that a not-yet-applied live intent was
   # abandoned, and two recoveries must not write duplicate receipts.
-  if ! oms_hold_file_lock "$REPO/.oms/landings.jsonl"; then
+  if ! oms_hold_file_lock "$LANDINGS"; then
     fail "another landing or recovery is in progress in $REPO; retry when it finishes"
   fi
   trap 'oms_release_held_file_lock' EXIT
@@ -729,10 +749,20 @@ if [ "$RECOVER" = 1 ]; then
       continue
     fi
     if [ "$intent_has_complete" = 1 ] && complete_terminal_converged; then
+      # Only actual receipt convergence can repair a missing native seal.
+      if ! python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" complete; then
+        needs_manual=$((needs_manual + 1))
+        continue
+      fi
       echo "patch-land: $LANDING_ID already complete (durable receipts converged)" >&2
       continue
     fi
     if [ "$intent_has_abandoned" = 1 ] && abandoned_terminal_converged; then
+      # Only actual receipt convergence can repair a missing native seal.
+      if ! python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" abandoned; then
+        needs_manual=$((needs_manual + 1))
+        continue
+      fi
       echo "patch-land: $LANDING_ID already abandoned (durable receipts converged)" >&2
       continue
     fi
@@ -961,7 +991,7 @@ fi
     fail "plan task $PLAN_TASK review has no stored patch evidence"
   case "$PLAN_REVIEW_PATCH" in
     /*) ;;
-    *) PLAN_REVIEW_PATCH="$REPO/$PLAN_REVIEW_PATCH" ;;
+    *) PLAN_REVIEW_PATCH="$STATE_REPO/$PLAN_REVIEW_PATCH" ;;
   esac
   PLAN_REVIEW_PATCH="$(cd "$(dirname "$PLAN_REVIEW_PATCH")" && pwd -P)/$(basename "$PLAN_REVIEW_PATCH")" ||
     fail "cannot resolve stored review patch for plan task $PLAN_TASK"
@@ -1051,38 +1081,30 @@ if [ "$REQUEST_APPROVAL" = 1 ]; then
 fi
 
 # One landing at a time per repository. Acquire before validating an approval
-# or reading the base, then freeze the caller-owned patch into private durable
-# state. Admission, intent, apply, lineage, and recovery all use these exact
-# bytes; verifier code may mutate the original pathname without changing the
-# approved object.
-if ! oms_hold_file_lock "$REPO/.oms/landings.jsonl"; then
+# or reading the base. Capture outside shared state: a rejected admission must
+# not publish a file that cleanup could remove during another worker's guard.
+# Admission and publication use these bytes, never a later copy of the caller.
+if ! oms_hold_file_lock "$LANDINGS"; then
   fail "another landing or recovery is in progress in $REPO; retry when it finishes"
 fi
 patch_land_cleanup() {
-  if [ -n "$FROZEN_PATCH" ] && [ "$FROZEN_PATCH_PERSIST" = 0 ]; then
-    rm -f "$FROZEN_PATCH" "$FROZEN_PATCH.tmp" 2>/dev/null || true
+  if [ -n "$CAPTURE_PATCH" ] && [ "$CAPTURE_PERSIST" = 0 ]; then
+    python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" before-admission ||
+      echo "warning: unproven capture remains reserved" >&2
   fi
   oms_release_held_file_lock
 }
 trap 'patch_land_cleanup' EXIT
 
 LANDING_ID="land-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM:-0}"
-agent_memory_ensure_oms_ignore "$REPO" || fail "cannot initialize private landing state"
-FROZEN_DIR="$REPO/.oms/landing-patches"
-mkdir -p "$FROZEN_DIR" || fail "cannot create private landing patch directory"
-chmod 700 "$FROZEN_DIR" 2>/dev/null || true
+agent_memory_ensure_oms_ignore "$STATE_REPO" || fail "cannot initialize private landing state"
+FROZEN_DIR="$STATE_REPO/.oms/landing-patches"
 FROZEN_PATCH="$FROZEN_DIR/$LANDING_ID.patch"
-if ! (umask 077; cp "$SOURCE_PATCH" "$FROZEN_PATCH.tmp"); then
-  fail "cannot freeze patch bytes before admission"
-fi
-if ! mv "$FROZEN_PATCH.tmp" "$FROZEN_PATCH"; then
-  rm -f "$FROZEN_PATCH.tmp" 2>/dev/null || true
-  fail "cannot publish frozen patch bytes before admission"
-fi
-chmod 600 "$FROZEN_PATCH" 2>/dev/null || true
-PATCH="$FROZEN_PATCH"
-PATCH_SHA="$(oms_sha256_file "$PATCH" 2>/dev/null || true)"
-[ -n "$PATCH_SHA" ] || fail "cannot hash frozen patch: $PATCH"
+CAPTURE_PATCH="$(python3 "$CAPTURE_HELPER" allocate "$STATE_REPO" "$SOURCE_PATCH" "$LANDING_ID" "$PATCH_SHA" "$REPO")" ||
+  fail "cannot reserve and capture patch bytes before admission"
+CAPTURE_PATCH="${CAPTURE_PATCH//$'\r'/}"
+PATCH="$CAPTURE_PATCH"
+
 frozen_patch_matches() {
   local current_sha
   current_sha="$(oms_sha256_file "$PATCH" 2>/dev/null || true)"
@@ -1158,10 +1180,8 @@ fi
 # cycle), so they feed the shared failure memory: fingerprint by patch content
 # so the same rejected patch warns any later agent before it re-lands.
 land_fingerprint_cmd() {
-  local sha
-  sha="$(oms_sha256_file "$PATCH" 2>/dev/null || true)"
-  [ -n "$sha" ] || sha="$(basename "$SOURCE_PATCH")"
-  printf 'patch-land %s' "$sha"
+  # Admission identity survives disposal of its proved ephemeral input.
+  printf 'patch-land %s' "$PATCH_SHA"
 }
 known_reject_fp=""
 check_out="$( (cd "$REPO" && "$ROOT/scripts/fail-ledger.sh" check --cmd "$(land_fingerprint_cmd)") 2>&1 || true)"
@@ -1205,7 +1225,19 @@ admit_cmd=("$ROOT/scripts/patch-admit.sh" --patch "$PATCH" --repo "$REPO")
 [ "$ALLOW_VERIFIER_CHANGE" = 1 ] && admit_cmd+=(--allow-verifier-change)
 [ "$ALLOW_TEST_REDUCTION" = 1 ] && admit_cmd+=(--allow-test-reduction)
 [ "$ALLOW_RESTRUCTURE" = 1 ] && admit_cmd+=(--allow-restructure)
+# Admission may persist a report even when it fails. Keep its actual input path
+# and bytes available; uncertain receipt writes are not permission to unlink.
+CAPTURE_PERSIST=1
 if ! "${admit_cmd[@]}" >/dev/null; then
+  # A verifier can change its private input before the stricter producer
+  # witness refuses it. Diagnose those bytes without sealing or deleting them.
+  frozen_patch_matches ||
+    fail "frozen patch changed during admission; verified bytes were not applied"
+  # The outer landings lock is still held here. Acquire only the remaining
+  # existing reader fences; no public skip-lock or force-cleanup capability.
+  python3 -c 'import runpy,sys; runpy.run_path(sys.argv[1])["cleanup_rejected"](sys.argv[2],sys.argv[3])' \
+    "$CAPTURE_HELPER" "$STATE_REPO" "$LANDING_ID" ||
+    echo "warning: private rejected capture remains reserved" >&2
   echo "patch-land: REJECTED by admission gate; not applied" >&2
   # Durable record: without this a later agent re-runs the whole delegate +
   # admit cycle for a patch already known to fail.
@@ -1229,6 +1261,14 @@ if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=all)" ]; then
   fail "tree became dirty during admission; re-admit against the current tree"
 fi
 
+# Keep the private publication anchor: it proves the live inode generation
+# independently of shared terminal hints, filenames, and equal-byte replacements.
+if ! python3 "$CAPTURE_HELPER" publish "$STATE_REPO" "$CAPTURE_PATCH" "$FROZEN_PATCH"; then
+  fail "cannot publish admitted captured patch; refusing to apply"
+fi
+PATCH="$FROZEN_PATCH"
+frozen_patch_matches || fail "published patch changed; refusing to apply"
+
 [ -z "$APPROVAL_ID" ] || APPROVAL_CONSUMING_VERSION="$((APPROVAL_VERSION + 1))"
 intent_patch="$PATCH"
 intent_patch_sha="$PATCH_SHA"
@@ -1245,14 +1285,16 @@ intent_receipt_sha="$(landing_receipt_hash)" ||
 # Fail closed: an unrecordable intent means a crash after the apply would be
 # indistinguishable from nothing having happened, which is the exact failure
 # the transaction exists to prevent. Refuse rather than apply blind.
-FROZEN_PATCH_PERSIST=1
 # Operator verifier-change consent rides the durable intent so a --recover
 # replay of the finish carries it too; the extra key stays outside the
 # canonical receipt hash, so pre-field intents remain hash-compatible.
 intent_consent_extra=""
 [ "$ALLOW_VERIFIER_CHANGE" = 0 ] || intent_consent_extra="verifier_change_consent=true"
 if ! landing_append intent ${intent_consent_extra:+"$intent_consent_extra"}; then
-  FROZEN_PATCH_PERSIST=0
+  # A complete journal with no intent is a distinct native producer outcome.
+  # Keep the canonical publication now; only aged quiescent GC may collect it.
+  python3 "$CAPTURE_HELPER" seal "$STATE_REPO" "$LANDING_ID" publication-without-intent ||
+    echo "warning: publication outcome remains unproven and reserved" >&2
   fail "cannot record the landing intent in $LANDINGS; refusing to apply"
 fi
 

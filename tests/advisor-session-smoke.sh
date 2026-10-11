@@ -111,7 +111,7 @@ if out="$(
 )"; then
   fail "sensitive session digest must fail the advise call by default"
 fi
-printf '%s' "$out" | grep -qi 'sensitive' ||
+printf '%s' "$out" | grep >/dev/null -i 'sensitive' ||
   fail "sensitive refusal must say why: $out"
 
 # 4b. --allow-sensitive lifts only session-handoff's refusal; agent-call's
@@ -126,7 +126,7 @@ if out="$(
 )"; then
   fail "--allow-sensitive must not bypass the outbound scrub"
 fi
-printf '%s' "$out" | grep -q 'blocked' ||
+printf '%s' "$out" | grep >/dev/null 'blocked' ||
   fail "outbound scrub block must be named, not a silent failure: $out"
 
 # 5. --allow-sensitive without --session is a dangling flag, not a no-op.
@@ -149,7 +149,7 @@ if out="$(
 )"; then
   fail "--session with an unknown caller must fail"
 fi
-printf '%s' "$out" | grep -q 'OMS_AGENT' ||
+printf '%s' "$out" | grep >/dev/null 'OMS_AGENT' ||
   fail "unknown-caller failure must name the fix: $out"
 
 echo "advisor-session-smoke: ok"

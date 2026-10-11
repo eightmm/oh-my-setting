@@ -13,6 +13,9 @@ export OMS_CODEX_NOTIFY=0
 # OMS_WORKER_GUARD_STRICT=1 for its own workers (autopilot acceptance does)
 # must not turn the soft-surface cases strict.
 unset OMS_WORKER_GUARD_STRICT OMS_WORKER_GUARD_OFF
+# Run from a panel main's shell, the suite must not act as that main or room member.
+unset OMS_PANEL_MAIN_ATTEMPT OMS_PANEL_SESSION OMS_PANEL_REPO OMS_PANEL_HOST \
+  OMS_PANEL_ENTRYPOINT OMS_PANEL_RESULTS OMS_ROOM_ID OMS_ROOM_PARTICIPANT OMS_ROOM_REPO
 
 source_oms_fingerprint() {
   if [ ! -d "$ROOT/.oms" ]; then
@@ -100,6 +103,13 @@ assert_file_contains() {
   local file="$1"
   local text="$2"
   grep -Fq -- "$text" "$file" || fail "$file does not contain: $text"
+}
+
+# A builtin substring match: `printf | grep -q` fails under pipefail when grep
+# exits at its match while printf is still writing a long value.
+contains() {
+  case "$1" in *"$2"*) return 0 ;; esac
+  return 1
 }
 
 assert_not_exists() {
@@ -198,13 +208,9 @@ agent_plan_finish_landed() {
   local receipt
 
   receipt="$("$plan" --repo "$repo" show --id "$id" | python3 -c '
-import hashlib,json,sys
-d=json.load(sys.stdin)
-for name in ("state", "updated", "claim_expired", "claim_age_s"):
-    d.pop(name, None)
-print(hashlib.sha256(json.dumps(
- d,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest())
-')"
+import json,runpy,sys
+print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
+' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')"
   "$plan" --repo "$repo" finish --id "$id" \
     --expected-landing-receipt-sha256 "$receipt"
 }
@@ -225,7 +231,7 @@ test_poll_interval_adapts_to_elapsed_and_remaining() {
   [ "$(OMS_POLL_MAX_SECONDS=4 oms_poll_interval_seconds 180 300)" = "4" ] ||
     fail "OMS_POLL_MAX_SECONDS should cap long waits"
   out="$(OMS_POLL_VERBOSE=1 oms_poll_log_next unit 7 2 5 2>&1)"
-  printf '%s' "$out" | grep -Fq 'oh-my-setting poll: unit elapsed=7s next=2s remaining=5s' ||
+  contains "$out" 'oh-my-setting poll: unit elapsed=7s next=2s remaining=5s' ||
     fail "verbose poll log should include label, elapsed, next, and remaining"
 }
 
@@ -486,6 +492,8 @@ test_delegate_marker_set_lock_does_not_grow_per_run() {
   mkdir -p "$bin_dir" "$home_dir"
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) echo 'fixture --effort low medium high'; exit 0 ;; esac
+if [ -n "${LEASE_NEGATIVE_STARTED:-}" ]; then printf 'started\n' > "$LEASE_NEGATIVE_STARTED"; fi
 cat >/dev/null
 printf 'worker edit\n' >> file.txt
 echo done
@@ -523,6 +531,109 @@ EOF
   [ -z "$(find "$lock_dir" -maxdepth 1 -type f \
     -name '*.json.*.lock' -print -quit 2>/dev/null)" ] ||
     fail "gc left a permanent per-marker flock inode"
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" OMS_LOCK_DIR="$lock_dir" \
+    PATH="$bin_dir:/usr/bin:/bin" python3 - "$ROOT" "$project" <<'OBSERVATION'
+import os, sys, json, subprocess
+from pathlib import Path
+from unittest.mock import patch
+root, repo = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root / "scripts/lib"))
+import terminal_panel as panel
+import room
+env = {k: v for k, v in os.environ.items() if not k.startswith(("OMS_PANEL_", "OMS_ROOM_", "OMS_DL_", "OMS_OBSERVER_", "OMS_OBSERVE_PLAN_"))
+       and k not in {"OMS_STATE_REPO", "OMS_PLAN_LEASE_ID", "OMS_ATTEMPT_ID", "OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH"}}
+env.update(OMS_AGENT="claude", OMS_CAPABILITY_SKIP_MODELS="1", OMS_ROLE_ROUTING="0")
+entry = ["bash", str(root / "scripts/oms")]
+plan = entry + ["agent-plan", "--repo", str(repo)]
+def run(argv, use_env=None, ok=True):
+    result = subprocess.run(argv, cwd=repo, env=use_env or env, capture_output=True, text=True, timeout=30)
+    if ok:
+        assert result.returncode == 0, (argv, result.returncode, result.stdout, result.stderr)
+    return result
+with patch.dict(os.environ, env, clear=True):
+    ident = room.create(repo, "lease-observation-negative", "Observation boundary")
+    main = "lease-main"
+    attempt = run(entry + ["agent-events", "--repo", str(repo), "start", "--provider", "claude", "--tool", "panel-main",
+                          "--ref", "panel_role=main", "--ref", "panel_room_id=" + ident,
+                          "--ref", "panel_room_participant=" + main, "--then", "starting", "--then", "working"]).stdout.strip()
+    room.join(repo, ident, main, "claude", "main")
+    room.join(repo, ident, "lease-child", "codex", "worker", "gpt-6-luna", parent=main)
+env.update(OMS_ROOM_ID=ident, OMS_ROOM_REPO=str(repo), OMS_ROOM_PARTICIPANT=main, OMS_PANEL_MAIN_ATTEMPT=attempt)
+run(plan + ["init", "--goal", "Validated observation"])
+run(plan + ["add", "--id", "lease-bound", "--title", "Bound task", "--assignment",
+            json.dumps(dict(provider="codex", model="gpt-6-luna", reasoning_effort="low"))])
+run(plan + ["claim", "--id", "lease-bound", "--provider", "claude"])
+def current():
+    task = json.loads(run(plan + ["evidence-snapshot", "--id", "lease-bound"]).stdout)
+    return dict(plan_id=task["plan_id"], task_id=task["id"], lease_id=task["lease_id"], claim_provider=task["provider"],
+                owner_provider="claude", owner_participant=main, owner_attempt=attempt, room_id=ident)
+started = repo / "observer-provider-started"
+child_env = dict(env, OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE="worker", OMS_ROOM_PARTICIPANT="lease-child",
+                 OMS_ROOM_ADMITTED_PARTICIPANT="lease-child", LEASE_NEGATIVE_STARTED=str(started))
+peer = ["bash", str(root / "scripts/peer-delegate.sh"), "--repo", str(repo), "--to", "codex", "--model", "gpt-6-luna",
+        "--reasoning-effort", "low", "--prompt", "Inspect file.txt.", "--task-id", "lease-bound", "--no-verify"]
+def refuse(binding, extra=(), use_env=None, contains=None):
+    result = run(peer + ["--observe-plan-binding", binding] + list(extra), use_env or child_env, ok=False)
+    assert result.returncode != 0 and not started.exists(), (binding, result.stdout, result.stderr)
+    assert not list((repo / ".oms/delegations").glob("*.json"))
+    if contains:
+        assert contains in result.stderr, result.stderr
+binding = current()
+for raw in ("{}", "[]", "null", "{", "z" * 4097, json.dumps(binding)[:-1] + ',"task_id":"lease-bound"}',
+            json.dumps(dict(binding, lease_id="lease_" + "0" * 32)), json.dumps(dict(binding, plan_id="plan_" + "0" * 32)),
+            json.dumps(dict(binding, task_id="lease-bound; printf injected")), json.dumps(dict(binding, room_id="foreign")),
+            json.dumps(dict(binding, claim_provider="claude")), json.dumps(dict(binding, owner_provider="codex")),
+            json.dumps(dict(binding, owner_attempt="att_" + "0" * 32)), json.dumps(dict(binding, injected=True))):
+    refuse(raw)
+refuse(json.dumps(binding), ["--observe-plan-binding", json.dumps(binding)], contains="duplicate --observe-plan-binding")
+refuse(json.dumps(binding), ["--plan-task", "lease-bound"], contains="excludes plan-task")
+refuse(json.dumps(binding), use_env=dict(child_env, OMS_ROOM_ADMITTED_PARTICIPANT="foreign-child"))
+refuse(json.dumps(binding), use_env=dict(child_env, OMS_ROOM_REPO=str(repo.parent)))
+# Private hostile plan bytes, never shared control state.
+path = repo / ".oms/plan/tasks.json"
+original = path.read_bytes()
+for invalid in ("ownerless", "duplicate", "symlink", "hardlink", "oversize", "provider", "model", "reasoning_effort"):
+    backup = path.with_name("lease-fixture-backup")
+    backup.write_bytes(original)
+    try:
+        data = json.loads(original)
+        if invalid == "ownerless":
+            data["tasks"]["lease-bound"].pop("claimed_by_participant")
+            path.write_text(json.dumps(data))
+        elif invalid == "duplicate":
+            path.write_text(original.decode().rstrip()[:-1] + ',"plan_id":"' + binding["plan_id"] + '"}')
+        elif invalid in ("symlink", "hardlink"):
+            path.unlink()
+            if invalid == "symlink": path.symlink_to(backup.name)
+            else: os.link(backup, path)
+        elif invalid == "oversize": path.write_bytes(b" " * (4 * 1024 * 1024 + 1))
+        else:
+            data["tasks"]["lease-bound"]["assignment"][invalid] = {"provider":"claude", "model":"gpt-6-astra", "reasoning_effort":"high"}[invalid]
+            path.write_text(json.dumps(data))
+        refuse(json.dumps(binding), contains="assignment mismatch" if invalid in ("provider", "model", "reasoning_effort") else None)
+    finally:
+        path.unlink(); backup.unlink(); path.write_bytes(original)
+# Freeze a production panel snapshot, replace its lease via the API, then run the actual peer command.
+real_launch = subprocess.call
+def replace_before_launch(argv, **kwargs):
+    frozen = json.loads(argv[argv.index("--observe-plan-binding") + 1])
+    run(plan + ["release", "--id", "lease-bound", "--lease-id", frozen["lease_id"]])
+    run(plan + ["claim", "--id", "lease-bound", "--provider", "claude"])
+    assert current()["lease_id"] != frozen["lease_id"]
+    kwargs["env"] = dict(kwargs["env"], LEASE_NEGATIVE_STARTED=str(started))
+    return real_launch(argv, **kwargs)
+brief = repo / "lease-brief.md"
+brief.write_text("Inspect file.txt without edits; return evidence.\n")
+with patch.dict(os.environ, env, clear=True), patch.object(panel.subprocess, "call", side_effect=replace_before_launch):
+    assert panel.dispatch(repo, "claude", "worker", "light", "auto", "write", "implement", brief=brief,
+                          verify=":", task_id="lease-bound") != 0
+assert not started.exists()
+run(entry + ["agent-events", "--repo", str(repo), "transition", "--attempt", attempt,
+             "--state", "cancelled", "--reason-code", "fixture-terminal"])
+refuse(json.dumps(current()), contains="main/room/admitted child mismatch")
+print("observation negatives: malformed/duplicate/stale/foreign/injected/unsafe plan/assignment and real panel replacement barrier passed")
+OBSERVATION
+
 }
 
 setup_doctor_home() {
@@ -811,13 +922,13 @@ test_project_doctor_warns_missing_check() {
 
   "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "doctor should pass fresh ml apply"
-  printf '%s' "$out" | grep -Fq 'verification contract present' ||
+  contains "$out" 'verification contract present' ||
     fail "doctor should confirm check.sh presence"
 
   rm "$project/scripts/check.sh"
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "missing check.sh should warn, not fail"
-  printf '%s' "$out" | grep -Fq 'scripts/check.sh missing' ||
+  contains "$out" 'scripts/check.sh missing' ||
     fail "doctor should warn about missing check.sh"
 }
 
@@ -837,7 +948,7 @@ test_project_doctor_warns_structure_drift() {
   dd if=/dev/zero of="$project/data/huge-untracked.bin" bs=1 count=0 seek=20971520 2>/dev/null
 
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "clean scaffold should pass doctor"
-  if printf '%s' "$out" | grep -Eq "move into src/|move there|over 10MB|gitignored dirs"; then
+  if printf '%s' "$out" | grep >/dev/null -E "move into src/|move there|over 10MB|gitignored dirs"; then
     fail "exempt files / untracked data must not raise drift warnings: $out"
   fi
 
@@ -852,8 +963,8 @@ test_project_doctor_warns_structure_drift() {
 
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "structure drift must warn, not fail"
-  printf '%s' "$out" | grep -Fq 'train_root.py' || fail "missing stray-python warning"
-  printf '%s' "$out" | grep -Fq 'NOTES.md' || fail "missing markdown-outside-docs warning"
+  contains "$out" 'train_root.py' || fail "missing stray-python warning"
+  contains "$out" 'NOTES.md' || fail "missing markdown-outside-docs warning"
   case "$out" in *'exp.ipynb'*) ;; *) fail "missing notebook warning" ;; esac
   case "$out" in *'src/ layout'*) ;; *) fail "missing src layout warning" ;; esac
   case "$out" in *'gitignored dirs'*) ;; *) fail "missing tracked-in-ignored warning" ;; esac
@@ -864,7 +975,7 @@ test_project_doctor_warns_structure_drift() {
   for i in $(seq 1 100); do printf 'x\n' > "$project/data/f$i.bin"; done
   git -C "$project" add -f data >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "doctor should still warn-pass"
-  printf '%s' "$out" | grep -Fq 'gitignored dirs' ||
+  contains "$out" 'gitignored dirs' ||
     fail "many tracked ignored files must still warn (pipefail/head)"
 
   # A small tracked symlink to a big target must not be flagged.
@@ -872,7 +983,7 @@ test_project_doctor_warns_structure_drift() {
   ln -s .big-target "$project/link.ckpt"
   git -C "$project" add -f link.ckpt >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "doctor should still warn-pass"
-  if printf '%s' "$out" | grep -Fq 'link.ckpt'; then
+  if contains "$out" 'link.ckpt'; then
     fail "tracked symlink must not be measured by its target size"
   fi
 }
@@ -887,7 +998,7 @@ test_project_doctor_warns_unregistered_experiments() {
   # Fresh ml scaffold has the section and no ledger: quiet.
   assert_file_contains "$project/PROJECT.md" '## Experiment Pre-Registration'
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "fresh scaffold should pass"
-  if printf '%s' "$out" | grep -q 'no .## Experiment Pre-Registration'; then
+  if printf '%s' "$out" | grep >/dev/null 'no .## Experiment Pre-Registration'; then
     fail "scaffolded section present: must not warn"
   fi
 
@@ -896,7 +1007,7 @@ test_project_doctor_warns_unregistered_experiments() {
   mkdir -p "$project/docs"
   printf '{"ts":"2026-06-11T00:00:00Z","exit":0}\n' > "$project/docs/EXPERIMENTS.jsonl"
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "missing pre-reg should warn, not fail"
-  printf '%s' "$out" | grep -q 'Experiment Pre-Registration' ||
+  printf '%s' "$out" | grep >/dev/null 'Experiment Pre-Registration' ||
     fail "ledger without pre-registration section must warn"
 }
 
@@ -908,23 +1019,23 @@ test_project_doctor_warns_empty_contract_past_draft() {
 
   # Fresh apply is draft: the contract warnings must stay silent.
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "fresh general apply should pass"
-  if printf '%s' "$out" | grep -q 'past draft but'; then
+  if printf '%s' "$out" | grep >/dev/null 'past draft but'; then
     fail "draft PROJECT.md must not raise contract warnings"
   fi
 
   # Promote past draft while leaving commands/verification empty: warn.
   sed -i 's/^- State: draft/- State: active/' "$project/PROJECT.md"
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "empty contract should warn, not fail"
-  printf '%s' "$out" | grep -Fq 'Commands (Setup/Test/Run) are empty' ||
+  contains "$out" 'Commands (Setup/Test/Run) are empty' ||
     fail "doctor should warn about empty commands"
-  printf '%s' "$out" | grep -Fq "'Success criteria' is empty" ||
+  contains "$out" "'Success criteria' is empty" ||
     fail "doctor should warn about empty success criteria"
 
   # Fill the contract: warnings clear.
   sed -i 's/^- Test:$/- Test: pytest/; s/^- Success criteria:$/- Success criteria: tests pass/' \
     "$project/PROJECT.md"
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "filled contract should pass"
-  if printf '%s' "$out" | grep -q 'past draft but'; then
+  if printf '%s' "$out" | grep >/dev/null 'past draft but'; then
     fail "filled contract must not warn: $out"
   fi
 }
@@ -943,7 +1054,7 @@ test_project_doctor_warns_empty_ml_scientific_contract() {
   sed -i 's/^- State: draft/- State: active/; s/^- Test:$/- Test: bash scripts\/check.sh fast/; s/^- Success criteria:$/- Success criteria: checks pass/' \
     "$project/PROJECT.md"
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "ML contract warning should not fail doctor"
-  printf '%s' "$out" | grep -Fq 'ML scientific contract fields are empty' ||
+  contains "$out" 'ML scientific contract fields are empty' ||
     fail "doctor should warn about missing ML scientific contract fields"
 }
 
@@ -964,17 +1075,17 @@ test_review_verdicts_subcommand() {
 
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/mixed")" && rc=0 || rc=$?
   [ "$rc" = "2" ] || fail "incomplete artifact should yield exit 2, got $rc"
-  printf '%s' "$out" | grep -Fq 'codex: pass (confidence 0.9)' ||
+  contains "$out" 'codex: pass (confidence 0.9)' ||
     fail "stated confidence should ride the verdict line: $out"
-  printf '%s' "$out" | grep -Fq 'claude: fail' || fail "missing claude fail"
-  printf '%s' "$out" | grep -Fq 'antigravity: incomplete' || fail "missing incomplete detection"
+  contains "$out" 'claude: fail' || fail "missing claude fail"
+  contains "$out" 'antigravity: incomplete' || fail "missing incomplete detection"
 
   printf '# codex review\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' \
     > "$dir/allpass/codex-x-$run.md"
   printf '# synthesis\n' > "$dir/allpass/_synthesis-x-$run.md"
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/allpass")" && rc=0 || rc=$?
   [ "$rc" = "0" ] || fail "all-pass run should exit 0, got $rc"
-  if printf '%s' "$out" | grep -q '_synthesis'; then
+  if printf '%s' "$out" | grep >/dev/null '_synthesis'; then
     fail "synthesis artifact must not be treated as a provider"
   fi
 
@@ -990,7 +1101,7 @@ test_review_verdicts_subcommand() {
     > "$dir/died/codex-x-$run.md"
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/died")" && rc=0 || rc=$?
   [ "$rc" = "2" ] || fail "a dead seat's GATE line must not gate (want exit 2, got $rc)"
-  printf '%s' "$out" | grep -Fq 'codex: no-verdict (provider exited 124' ||
+  contains "$out" 'codex: no-verdict (provider exited 124' ||
     fail "dead seat must be named with its exit: $out"
 
   # A max_tokens stop exits 0 with finished-looking sentences; the recorded
@@ -1000,7 +1111,7 @@ test_review_verdicts_subcommand() {
     > "$dir/maxtok/claude-x-$run.md"
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/maxtok")" && rc=0 || rc=$?
   [ "$rc" = "2" ] || fail "a max_tokens seat's GATE line must not gate (want exit 2, got $rc)"
-  printf '%s' "$out" | grep -Fq 'claude: no-verdict (incomplete answer: provider=claude reason=max_tokens' ||
+  contains "$out" 'claude: no-verdict (incomplete answer: provider=claude reason=max_tokens' ||
     fail "truncated seat must be named with its stop reason: $out"
 
   mkdir -p "$dir/agy-timeout"
@@ -1032,9 +1143,9 @@ test_review_verdicts_subcommand() {
 
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/debate")" && rc=0 || rc=$?
   [ "$rc" = "1" ] || fail "debate run with a final-round fail should exit 1, got $rc"
-  printf '%s' "$out" | grep -Fq 'codex: pass' || fail "codex must be judged on final round (r2 pass)"
-  printf '%s' "$out" | grep -Fq 'claude: fail' || fail "claude must be judged on final round (r1 fail)"
-  printf '%s' "$out" | grep -Fq 'antigravity: pass' || fail "slug containing -r9 must be treated as base artifact"
+  contains "$out" 'codex: pass' || fail "codex must be judged on final round (r2 pass)"
+  contains "$out" 'claude: fail' || fail "claude must be judged on final round (r1 fail)"
+  contains "$out" 'antigravity: pass' || fail "slug containing -r9 must be treated as base artifact"
 }
 
 test_review_verdicts_json_mode() {
@@ -1121,7 +1232,7 @@ EOF
 
   out="$(OMS_JOB_DIGEST_POLL=0 PATH="$bin:$PATH" "$ROOT/scripts/job-digest.sh" --wait 12345 "$dir/run.log" 2>"$dir/werr")" ||
     fail "--wait digest should succeed once the job leaves the queue"
-  printf '%s' "$out" | grep -Fq '# Job digest' || fail "wait mode should still emit a digest"
+  contains "$out" '# Job digest' || fail "wait mode should still emit a digest"
   assert_file_contains "$dir/werr" "no longer queued"
   assert_file_contains "$dir/werr" "transiently"
   # Polled 5 times: queued, contact-error, invalid-user, not-found (all retry),
@@ -1187,12 +1298,12 @@ EOF
   rc=$?
   set -e
   [ "$rc" -eq 124 ] || fail "spent wait budget should exit 124, got $rc"
-  printf '%s' "$out" | grep -Fq 'wait: pending' || fail "pending digest should report an incomplete observation"
-  printf '%s' "$out" | grep -Fq 'outcome unknown, not verified' ||
+  contains "$out" 'wait: pending' || fail "pending digest should report an incomplete observation"
+  contains "$out" 'outcome unknown, not verified' ||
     fail "failed accounting must read as unknown, not success"
-  printf '%s' "$out" | grep -Fq '## Tail' || fail "failed sacct must not abort the log sections"
+  contains "$out" '## Tail' || fail "failed sacct must not abort the log sections"
   assert_file_contains "$dir/werr" 'queue state may be unknown'
-  if printf '%s' "$out" | grep -Fq 'still queued'; then
+  if contains "$out" 'still queued'; then
     fail "failed queue queries cannot prove that the job is still queued"
   fi
   [ ! -e "$dir/scancel.log" ] || fail "observer timeout must never cancel or resubmit the job"
@@ -1244,9 +1355,9 @@ EOF
     fail "byte-capped digest should succeed"
   size="$(printf '%s\n' "$out" | wc -c | tr -d ' ')"
   [ "$size" -le 2048 ] || fail "digest exceeded --max-bytes (got $size)"
-  printf '%s' "$out" | grep -Fq 'omitted by --max-bytes 2048' || fail "byte cap should mark the omission"
-  printf '%s' "$out" | grep -Fq 'ERROR: short cause line' || fail "byte cap should keep the short cause line"
-  printf '%s' "$out" | grep -Fq '마지막 줄 ok' || fail "byte cap should keep short lines after the long one"
+  contains "$out" 'omitted by --max-bytes 2048' || fail "byte cap should mark the omission"
+  contains "$out" 'ERROR: short cause line' || fail "byte cap should keep the short cause line"
+  contains "$out" '마지막 줄 ok' || fail "byte cap should keep short lines after the long one"
   if command -v iconv >/dev/null 2>&1; then
     printf '%s\n' "$out" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 ||
       fail "byte-capped digest must stay valid UTF-8"
@@ -1329,7 +1440,7 @@ test_tsp_queue_forwards_basic_subcommands() {
   out="$(TSP_STUB_LOG="$dir/tsp.log" TSP_STUB_ID=77 \
     OMS_TSP_STATE_DIR="$dir/state" PATH="$bin:/usr/bin:/bin" \
     "$ROOT/scripts/tsp-queue.sh" list)"
-  printf '%s' "$out" | grep -Fq '77 finished job' || fail "list should forward to tsp"
+  contains "$out" '77 finished job' || fail "list should forward to tsp"
 
   TSP_STUB_LOG="$dir/tsp.log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" cancel 77 >/dev/null
   TSP_STUB_LOG="$dir/tsp.log" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" logs 77 >"$dir/logs"
@@ -1578,15 +1689,15 @@ test_tsp_queue_logs_bounded_tail() {
   out="$(cd "$project" && OMS_TSP_FORCE_FALLBACK=1 OMS_TSP_FALLBACK_DIR="$project/fallback" \
     OMS_TSP_LOG_LINES=10 PATH="/usr/bin:/bin" \
     "$ROOT/scripts/tsp-queue.sh" logs "$job_id" 2>/dev/null)"
-  printf '%s\n' "$out" | grep -Fq '[showing last 10 of 50 lines' ||
+  printf '%s\n' "$out" | grep >/dev/null -F '[showing last 10 of 50 lines' ||
     fail "bounded logs must name the cut: $out"
-  printf '%s\n' "$out" | grep -Fxq '50' || fail "bounded logs keep the tail: $out"
-  if printf '%s\n' "$out" | grep -Fxq '1'; then
+  printf '%s\n' "$out" | grep >/dev/null -Fx '50' || fail "bounded logs keep the tail: $out"
+  if printf '%s\n' "$out" | grep >/dev/null -Fx '1'; then
     fail "bounded logs must drop the head: $out"
   fi
   out="$(cd "$project" && OMS_TSP_FORCE_FALLBACK=1 OMS_TSP_FALLBACK_DIR="$project/fallback" \
     PATH="/usr/bin:/bin" "$ROOT/scripts/tsp-queue.sh" logs --full "$job_id" 2>/dev/null)"
-  printf '%s\n' "$out" | grep -Fxq '1' || fail "--full must print the whole log: $out"
+  printf '%s\n' "$out" | grep >/dev/null -Fx '1' || fail "--full must print the whole log: $out"
 }
 
 test_tsp_queue_secret_guard_blocks_enqueue() {
@@ -1641,7 +1752,7 @@ test_fail_ledger_list_limit_names_omissions() {
   out="$("$ROOT/scripts/fail-ledger.sh" --repo "$project" list --limit 2)"
   [ "$(printf '%s\n' "$out" | grep -c 'OPEN')" -eq 2 ] ||
     fail "limit should keep 2 rows: $out"
-  printf '%s' "$out" | grep -Fq '1 older fingerprint(s) omitted' ||
+  contains "$out" '1 older fingerprint(s) omitted' ||
     fail "the omission must be named: $out"
   "$ROOT/scripts/fail-ledger.sh" --repo "$project" list --json --limit 2 |
     python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["failures"]) == 2 and d.get("omitted") == 1, d' ||
@@ -1649,6 +1760,197 @@ test_fail_ledger_list_limit_names_omissions() {
   out="$("$ROOT/scripts/fail-ledger.sh" --repo "$project" list)"
   [ "$(printf '%s\n' "$out" | grep -c 'OPEN')" -eq 3 ] ||
     fail "no limit keeps every row: $out"
+}
+
+test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
+  local project="$TMP/state-root-scratch"
+  local managed="$TMP/state-root-managed"
+  local parent="env -u OMS_HARNESS_CHILD -u OMS_HARNESS_DELEGATE_DEPTH OMS_DELEGATE_WORKTREE_ROOT=$TMP/state-root-managed"
+  local probe='. "$1/scripts/lib/agent-memory-common.sh"; oms_state_root "$2"'
+  local scratch second main plain main_head scratch_head second_head committed
+
+  make_committed_repo "$project"
+  main="$(cd "$project" && pwd -P)"
+  scratch="$($parent "$ROOT/scripts/scratch-worktree.sh" add --repo "$project" --owner-pid $$)" ||
+    fail "scratch add failed"
+  git -C "$scratch" switch -q -c scratch-work
+  main_head="$(git -C "$main" rev-parse HEAD)"
+  git -C "$scratch" -c user.name=Test -c user.email=test@example.com commit --quiet --allow-empty -m "scratch base"
+  scratch_head="$(git -C "$scratch" rev-parse HEAD)"
+  mkdir -p "$scratch/src"
+  [ "$($parent bash -c "$probe" _ "$ROOT" "$scratch/src")" = "$main" ] ||
+    fail "a parent's scratch state must resolve to the main checkout"
+  # Workers and unmarked linked worktrees keep the worktree-local root.
+  [ "$($parent OMS_HARNESS_CHILD=1 bash -c "$probe" _ "$ROOT" "$scratch")" = "$scratch" ] ||
+    fail "a harness child in a scratch must keep its own state root"
+  [ "$($parent OMS_HARNESS_DELEGATE_DEPTH=1 bash -c "$probe" _ "$ROOT" "$scratch")" = "$scratch" ] ||
+    fail "a delegated worker in a scratch must keep its own state root"
+  # The parent's gate failures reach the shared ledger and outlive the scratch;
+  # a worker's stay on its own surface.
+  $parent "$ROOT/scripts/fail-ledger.sh" --repo "$scratch/src" record --kind cmd \
+    --cmd scratch-gate --exit 1 --summary parent >/dev/null 2>&1 || fail "parent record failed"
+  grep -q '"summary": "parent"' "$main/.oms/failures.jsonl" && [ ! -e "$scratch/.oms/failures.jsonl" ] ||
+    fail "a parent's scratch failure must land in the main checkout's ledger"
+  $parent OMS_HARNESS_CHILD=1 "$ROOT/scripts/fail-ledger.sh" --repo "$scratch" record --kind cmd \
+    --cmd scratch-gate --exit 1 --summary child >/dev/null 2>&1 || fail "child record failed"
+  grep -q '"summary": "child"' "$scratch/.oms/failures.jsonl" &&
+    ! grep -q '"summary": "child"' "$main/.oms/failures.jsonl" ||
+    fail "a harness child's failure must stay in the scratch's ledger"
+  # The parent's plan commands read and write the main checkout's plan; the scratch gets none.
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal shared >/dev/null || fail "plan init failed"
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch/src" add --id from-scratch --title t >/dev/null ||
+    fail "a parent's scratch plan add failed"
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" claim --id from-scratch --provider codex >/dev/null ||
+    fail "a parent's scratch plan claim failed"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id from-scratch | grep -q '"state": "claimed"' &&
+    [ ! -e "$scratch/.oms/plan/tasks.json" ] || fail "a parent's scratch plan write must land in the main checkout's plan"
+  $parent python3 - "$ROOT/scripts/agent-plan.sh" "$scratch" "$main" <<'PYMARKER' ||
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+cli, scratch, main = sys.argv[1:]
+def invoke(*args):
+    return subprocess.run(["bash", cli, "--repo", scratch, *args], text=True,
+                          capture_output=True, check=True).stdout
+invoke("add", "--id", "live-shared", "--title", "shared marker")
+invoke("claim", "--id", "live-shared", "--provider", "codex", "--ttl", "0")
+lease = json.loads(invoke("show", "--id", "live-shared"))["lease_id"]
+markers = Path(main) / ".oms/delegations"
+markers.mkdir()
+row = dict(schema=3, id="shared-live", pid=os.getpid(), task_id="live-shared", lease_id=lease)
+if os.name == "nt":
+    row.update(native_pid=os.getpid(), native_pid_source="msys-proc-v1")
+marker = markers / "shared-live.json"
+marker.write_text(json.dumps(row))
+assert not json.loads(invoke("show", "--id", "live-shared"))["claim_expired"]
+assert "live-shared" not in invoke("ready").split()
+invoke("reclaim")
+assert json.loads(invoke("show", "--id", "live-shared"))["lease_id"] == lease
+marker.unlink()
+PYMARKER
+    fail "a scratch TTL view ignored the shared plan's live exact marker"
+  # patch-land from the scratch applies there, but its landing row, frozen patch and plan finish
+  # use the main checkout; a relative review patch resolves against the plan's checkout.
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" add --id landed --title t \
+    --verify true --allowed file.txt >/dev/null
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" claim --id landed --provider codex >/dev/null
+  printf 'scratch work\n' >> "$scratch/file.txt"
+  git -C "$scratch" diff > "$main/.oms/scratch-review.patch"
+  git -C "$scratch" checkout -q file.txt
+  cp "$main/.oms/scratch-review.patch" "$TMP/state-root-caller.patch"
+  $parent OMS_ARTIFACT_INDEX="$scratch/.oms/artifacts/custom-index.jsonl" \
+    "$ROOT/scripts/patch-admit.sh" --repo "$scratch" --patch "$main/.oms/scratch-review.patch" \
+    --verify true --report "$TMP/state-root-unmanaged.md" >"$TMP/state-root-admit.log" 2>&1 ||
+    fail "unmanaged scratch admission failed: $(cat "$TMP/state-root-admit.log")"
+  [ -s "$scratch/.oms/artifacts/custom-index.jsonl" ] || fail "unmanaged explicit index override was ignored"
+  cp "$scratch/.oms/artifacts/custom-index.jsonl" "$TMP/state-root-custom-index.before"
+  $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch" review --id landed \
+    --artifact .oms/scratch-review.patch --patch .oms/scratch-review.patch >/dev/null
+  ( cd "$scratch" && $parent "$ROOT/scripts/patch-land.sh" --plan-task landed --verify true >"$TMP/state-root-land.log" 2>&1 ) ||
+    fail "patch-land from a parent's scratch should land: $(cat "$TMP/state-root-land.log")"
+  grep -q 'scratch work' "$scratch/file.txt" && ! grep -q 'scratch work' "$main/file.txt" ||
+    fail "a scratch landing must apply to the scratch tree only"
+  grep -q "\"worktree\": \"$scratch\"" "$main/.oms/landings.jsonl" && [ ! -e "$scratch/.oms/landings.jsonl" ] ||
+    fail "a scratch landing must record its tree in the main checkout's landings"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id landed | grep -q '"state": "done"' ||
+    fail "a scratch landing must finish the main checkout's plan task"
+  cmp "$main/.oms/scratch-review.patch" "$TMP/state-root-caller.patch" || fail "admission changed caller patch bytes"
+  cmp "$scratch/.oms/artifacts/custom-index.jsonl" "$TMP/state-root-custom-index.before" ||
+    fail "managed admission wrote through the unmanaged index override"
+  python3 - "$main" "$scratch" "$scratch_head" <<'PYINDEX' ||
+import hashlib, json, pathlib, sys
+main, scratch = map(pathlib.Path, sys.argv[1:3])
+rows = [json.loads(line) for line in (main / '.oms/artifacts/index.jsonl').read_text().splitlines()]
+rows = [row for row in rows if row.get('kind') == 'patch-admit']
+assert len(rows) == 1, rows
+row = rows[0]
+assert row['exit'] == 0 and 'artifact_external' not in row, row
+report = main / row['artifact']
+assert row['artifact'].startswith('.oms/artifacts/admit/admit-att_'), row
+assert hashlib.sha256(report.read_bytes()).hexdigest() == row['artifact_sha256'], row
+assert sys.argv[3].startswith(row['base_sha']), row
+assert not (scratch / '.oms/artifacts/index.jsonl').exists()
+events = [json.loads(line) for line in (main / '.oms/lifecycle/events.jsonl').read_text().splitlines()]
+operation = [event for event in events if event.get('attempt_id') == row['operation_id']]
+created = [event for event in operation if event.get('event_type') == 'attempt.created']
+assert len(created) == 1, operation
+assert created[0]['provider'] == 'local' and created[0]['tool'] == 'patch-admit', created
+assert created[0]['refs'].get('reference_scope_sha256'), created
+assert any(event['event_type'] == 'attempt.heartbeat' for event in operation), operation
+assert operation[-1]['to_state'] == 'done', operation
+PYINDEX
+    fail "managed scratch admission lost canonical report, native operation or physical base provenance"
+  second="$($parent "$ROOT/scripts/scratch-worktree.sh" add --repo "$project" --owner-pid $$)" ||
+    fail "second scratch add failed"
+  git -C "$second" switch -q -c scratch-foreign
+  [ "$($parent bash -c "$probe" _ "$ROOT" "$second")" = "$main" ] ||
+    fail "the second parent's scratch must share the main checkout's state"
+  second_head="$(git -C "$second" rev-parse HEAD)"
+  # Matching landed bytes cannot transfer the first scratch's commit authority.
+  cp "$scratch/file.txt" "$second/file.txt"
+  if ( cd "$second" && $parent "$ROOT/scripts/goal-drive.sh" --commit-task landed \
+      >"$TMP/state-root-foreign.err" 2>&1 ); then
+    fail "goal-drive must reject another scratch's completed landing receipt"
+  fi
+  grep -Fq 'no exact completed landing receipt' "$TMP/state-root-foreign.err" &&
+    grep -Fq 'landed task receipt is invalid' "$TMP/state-root-foreign.err" &&
+    [ "$(git -C "$second" rev-parse HEAD)" = "$second_head" ] ||
+    fail "a foreign landing must fail receipt validation without committing: $(cat "$TMP/state-root-foreign.err")"
+  # Freeze the existing receipt once; distinct refs make both open intents valid
+  # and non-duplicate, so an unfiltered reader would park on multiple intents.
+  python3 - "$main" "$scratch" "$second" "$scratch_head" <<'PY'
+import hashlib, json, pathlib, sys
+repo = pathlib.Path(sys.argv[1])
+task = json.loads((repo / ".oms/plan/tasks.json").read_text())["tasks"]["landed"]
+patch = pathlib.Path(task["patch"])
+if not patch.is_absolute():
+    patch = repo / patch
+frozen = repo / ".oms/plan/commit-patches/scratch-fixture.patch"
+frozen.parent.mkdir(exist_ok=True)
+frozen.write_bytes(patch.read_bytes())
+row = {"schema": 1, "kind": "commit-intent", "ts": "2026-10-10T00:00:00Z",
+       "cycle": 1, "run_id": "gd-scratch-fixture", "phase": "landed", "reason": "fixture",
+       "task_id": task["id"], "base_sha": sys.argv[4], "title": task["title"],
+       "patch": frozen.relative_to(repo).as_posix(), "paths": ["file.txt"],
+       "patch_sha256": hashlib.sha256(frozen.read_bytes()).hexdigest(),
+       "provider": task["provider"], "lease_id": task["review_lease_id"],
+       "verify_sha256": hashlib.sha256(task["verify"].replace("\r", "").encode()).hexdigest()}
+with (repo / ".oms/plan/progress.jsonl").open("a", encoding="utf-8") as handle:
+    for owner, ref, intent in ((sys.argv[2], "scratch-work", "scratch-own"),
+                               (sys.argv[3], "scratch-foreign", "scratch-other")):
+        handle.write(json.dumps(dict(row, worktree=owner, head_ref="refs/heads/" + ref,
+                                     intent_id=intent)) + "\n")
+PY
+  ( cd "$scratch" && $parent "$ROOT/scripts/goal-drive.sh" --commit-task landed \
+      >"$TMP/state-root-goal.err" 2>&1 ) ||
+    fail "goal-drive must commit its own landed intent despite another scratch's open intent: $(cat "$TMP/state-root-goal.err")"
+  if grep -Eq 'multiple-commit-intents|scratch-other' "$TMP/state-root-goal.err"; then
+    fail "another scratch's intent must be silently ignored: $(cat "$TMP/state-root-goal.err")"
+  fi
+  committed="$(git -C "$scratch" rev-parse HEAD)"
+  [ "$committed" != "$scratch_head" ] &&
+    [ "$(git -C "$scratch" symbolic-ref HEAD)" = refs/heads/scratch-work ] &&
+    [ "$(git -C "$scratch" rev-parse scratch-work)" = "$committed" ] &&
+    [ "$(git -C "$scratch" rev-parse HEAD^)" = "$scratch_head" ] &&
+    git -C "$scratch" show HEAD:file.txt | grep -Fq 'scratch work' ||
+    fail "goal-drive must create a commit containing the landed change on scratch-work"
+  [ "$(git -C "$main" rev-parse HEAD)" = "$main_head" ] &&
+    [ "$(git -C "$second" rev-parse HEAD)" = "$second_head" ] &&
+    [ ! -e "$scratch/.oms/plan/tasks.json" ] && [ ! -e "$scratch/.oms/landings.jsonl" ] ||
+    fail "goal-drive must keep commits on its scratch and durable evidence in the main checkout"
+  python3 - "$main/.oms/plan/progress.jsonl" "$scratch" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+written = [row for row in rows if row.get("kind") == "commit-intent"
+           and row.get("phase") == "committed" and row.get("intent_id") == "scratch-own"]
+assert written and all(row.get("worktree") == sys.argv[2] for row in written), written
+PY
+  plain="$managed/oh-my-setting-scratch.plain/wt"
+  git -C "$project" worktree add --quiet --detach "$plain" HEAD
+  [ "$($parent bash -c "$probe" _ "$ROOT" "$plain")" = "$(cd "$plain" && pwd -P)" ] ||
+    fail "a linked worktree without a scratch marker must keep its own state root"
 }
 
 test_run_ledger_records_and_lists() {
@@ -1664,7 +1966,7 @@ test_run_ledger_records_and_lists() {
   (cd "$project" && "$ROOT/scripts/run-ledger.sh" -- bash -c 'exit 0' >/dev/null 2>&1) ||
     fail "successful command should exit 0"
   out="$(cd "$project" && "$ROOT/scripts/run-ledger.sh" list 5)"
-  printf '%s' "$out" | grep -Fq 'exit=3' || fail "ledger list missing failed run"
+  contains "$out" 'exit=3' || fail "ledger list missing failed run"
 }
 
 test_run_ledger_gate_skip_requires_reason() {
@@ -1694,8 +1996,8 @@ test_run_ledger_gate_skip_requires_reason() {
 
   # The gate decision is visible in list output, including the skip reason.
   out="$(cd "$project" && "$ROOT/scripts/run-ledger.sh" list 5)"
-  printf '%s' "$out" | grep -Fq 'gate=passed' || fail "list should show gate=passed"
-  printf '%s' "$out" | grep -Fq 'gate=skipped(hotfix rerun)' ||
+  contains "$out" 'gate=passed' || fail "list should show gate=passed"
+  contains "$out" 'gate=skipped(hotfix rerun)' ||
     fail "list should show the skip reason"
 
   # A failing applicable gate still aborts the launch (exit 3).
@@ -1796,7 +2098,7 @@ test_run_ledger_records_metrics() {
     fail "non-scalar metric fields must be dropped"
   fi
   out="$(cd "$project" && "$ROOT/scripts/run-ledger.sh" list 1)"
-  printf '%s' "$out" | grep -Fq 'pearson=0.71' || fail "ledger list should show metrics"
+  contains "$out" 'pearson=0.71' || fail "ledger list should show metrics"
 
   # A missing metrics file must not fail the run.
   (cd "$project" && "$ROOT/scripts/run-ledger.sh" --metrics nope.json -- bash -c 'exit 0' >/dev/null 2>"$project/merr") ||
@@ -2022,8 +2324,8 @@ EOF
     --artifact-dir "$artifact_dir" --prompt 'Unknown check mode' 2>&1)"; then
     fail "unbounded default verification must not launch"
   fi
-  printf '%s' "$out" | grep -Fq 'no bounded fast mode' || fail "missing actionable verification error: $out"
-  if printf '%s' "$out" | grep -Fq worker-started; then
+  contains "$out" 'no bounded fast mode' || fail "missing actionable verification error: $out"
+  if contains "$out" worker-started; then
     fail "worker launched before resolving the verification command"
   fi
 }
@@ -2036,9 +2338,9 @@ test_project_doctor_ok_after_apply() {
 
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "project-doctor should pass on freshly applied project: $out"
-  printf '%s' "$out" | grep -Fq 'ml block identical' ||
+  contains "$out" 'ml block identical' ||
     fail "project-doctor should confirm identical ml blocks"
-  printf '%s' "$out" | grep -Fq 'matches current template' ||
+  contains "$out" 'matches current template' ||
     fail "project-doctor should confirm template freshness"
 }
 
@@ -2055,13 +2357,13 @@ test_project_doctor_checks_subdirectory_loaders() {
   if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
     fail "a one-CLI subdirectory loader must fail the doctor: $out"
   fi
-  printf '%s' "$out" | grep -Fq 'sub: general block missing in AGENTS.md' ||
+  contains "$out" 'sub: general block missing in AGENTS.md' ||
     fail "the doctor must name the missing sibling: $out"
 
   "$ROOT/scripts/apply-project-template.sh" general "$project" sub/AGENTS.md sub/CLAUDE.md >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "a paired subdirectory loader should pass: $out"
-  printf '%s' "$out" | grep -Fq 'sub: general block matches current template' ||
+  contains "$out" 'sub: general block matches current template' ||
     fail "the doctor should confirm sub-tier freshness: $out"
 }
 
@@ -2075,7 +2377,7 @@ test_project_doctor_detects_drift() {
   if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
     fail "project-doctor should fail on drifted CLAUDE.md block"
   fi
-  printf '%s' "$out" | grep -Fq 'differs between AGENTS.md and CLAUDE.md' ||
+  contains "$out" 'differs between AGENTS.md and CLAUDE.md' ||
     fail "project-doctor should report block drift"
 }
 
@@ -2089,7 +2391,7 @@ test_project_doctor_detects_missing_block() {
   if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
     fail "project-doctor should fail when CLAUDE.md block is missing"
   fi
-  printf '%s' "$out" | grep -Fq 'missing in CLAUDE.md' ||
+  contains "$out" 'missing in CLAUDE.md' ||
     fail "project-doctor should report missing CLAUDE.md block"
 }
 
@@ -2104,7 +2406,7 @@ test_project_doctor_detects_stale_block() {
   if out="$("$ROOT/scripts/project-doctor.sh" "$project")"; then
     fail "project-doctor should fail on stale blocks"
   fi
-  printf '%s' "$out" | grep -Fq 'stale' ||
+  contains "$out" 'stale' ||
     fail "project-doctor should report stale block"
 }
 
@@ -2213,10 +2515,10 @@ test_doctor_warns_bad_harness_index_json() {
 
   out="$(run_doctor_for_project "$project" "$home_dir")" ||
     fail "doctor warnings must not fail: $out"
-  printf '%s' "$out" | grep -Fq '# harness state' || fail "missing harness section"
-  printf '%s' "$out" | grep -Fq 'warn: artifact index has 1 invalid JSON line(s)' ||
+  contains "$out" '# harness state' || fail "missing harness section"
+  contains "$out" 'warn: artifact index has 1 invalid JSON line(s)' ||
     fail "missing bad JSON warning"
-  printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
+  contains "$out" 'doctor: ok' || fail "doctor should still pass"
 }
 
 
@@ -2230,9 +2532,9 @@ test_doctor_warns_missing_oms_gitignore() {
 
   out="$(run_doctor_for_project "$project" "$home_dir")" ||
     fail "missing .oms/.gitignore must not fail: $out"
-  printf '%s' "$out" | grep -Fq 'warn: .oms/.gitignore missing (re-run any harness command)' ||
+  contains "$out" 'warn: .oms/.gitignore missing (re-run any harness command)' ||
     fail "missing .oms/.gitignore warning"
-  printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
+  contains "$out" 'doctor: ok' || fail "doctor should still pass"
 }
 
 
@@ -2263,11 +2565,11 @@ JSON
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
     OH_MY_SETTING_CODEX_PLUGIN=0 "$ROOT/scripts/doctor.sh")" ||
     fail "a narrow antigravity allow-list is a warning, not a failure: $out"
-  printf '%s' "$out" | grep -Fq 'warn: antigravity will be denied these headlessly' ||
+  contains "$out" 'warn: antigravity will be denied these headlessly' ||
     fail "the doctor should name the missing permissions: $out"
-  printf '%s' "$out" | grep -Fq 'command(*)' ||
+  contains "$out" 'command(*)' ||
     fail "a curated command list does not survive a chained command: $out"
-  printf '%s' "$out" | grep -Fq 'permissions.allow' ||
+  contains "$out" 'permissions.allow' ||
     fail "the warning should say where to fix it: $out"
   # Shell access is not enough: reading a file is a separate permission, and a
   # config that grants every command but no read_file still answers nothing.
@@ -2282,7 +2584,7 @@ JSON
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
     OH_MY_SETTING_CODEX_PLUGIN=0 "$ROOT/scripts/doctor.sh")" ||
     fail "a missing read_file rule is a warning, not a failure: $out"
-  printf '%s' "$out" | grep -Fq 'read_file' ||
+  contains "$out" 'read_file' ||
     fail "the doctor should name the missing file-read permission: $out"
 }
 
@@ -2303,15 +2605,15 @@ test_doctor_clean_harness_state_has_no_warnings() {
 
   out="$(run_doctor_for_project "$project" "$home_dir")" ||
     fail "clean harness state should pass: $out"
-  printf '%s' "$out" | grep -Fq '# harness state' || fail "missing harness section"
-  printf '%s' "$out" | grep -Fq 'ok: artifact index JSONL' || fail "missing JSONL ok"
-  printf '%s' "$out" | grep -Fq 'ok: artifact index references' || fail "missing reference ok"
-  printf '%s' "$out" | grep -Fq 'ok: harness task/memory sensitive scan' ||
+  contains "$out" '# harness state' || fail "missing harness section"
+  contains "$out" 'ok: artifact index JSONL' || fail "missing JSONL ok"
+  contains "$out" 'ok: artifact index references' || fail "missing reference ok"
+  contains "$out" 'ok: harness task/memory sensitive scan' ||
     fail "missing sensitive scan ok"
   # This case owns the harness-state section, not the developer machine's
   # optional external tool versions. Keep host drift from masking its scope.
   harness_out="$(printf '%s\n' "$out" | sed -n '/^# harness state/,$p')"
-  if printf '%s' "$harness_out" | grep -Fq 'warn:'; then
+  if contains "$harness_out" 'warn:'; then
     fail "clean harness state should not warn: $out"
   fi
 }
@@ -2332,9 +2634,9 @@ test_doctor_fails_when_claude_hooks_unregistered() {
   HOME="$home_dir" "$ROOT/scripts/link.sh" >/dev/null
   out="$(PATH="$bin_dir:$PATH" run_doctor_for_project "$project" "$home_dir" 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "doctor must fail when claude hooks are not registered"
-  printf '%s' "$out" | grep -Fq 'claude hooks not registered' ||
+  contains "$out" 'claude hooks not registered' ||
     fail "doctor should name the missing hook registration: $out"
-  printf '%s' "$out" | grep -Fq 'install-claude-hooks.sh' ||
+  contains "$out" 'install-claude-hooks.sh' ||
     fail "doctor should point at the remedy: $out"
 }
 
@@ -2351,9 +2653,9 @@ test_doctor_warns_on_a_damaged_memory_database() {
 
   out="$(run_doctor_for_project "$project" "$home_dir")" ||
     fail "a damaged derived database should warn, not fail doctor: $out"
-  printf '%s' "$out" | grep -Fq 'warn: memory database is invalid' ||
+  contains "$out" 'warn: memory database is invalid' ||
     fail "doctor should report the damaged memory database: $out"
-  printf '%s' "$out" | grep -Fq 'oms agent-memory --repo . rebuild' ||
+  contains "$out" 'oms agent-memory --repo . rebuild' ||
     fail "doctor should name the safe rebuild command: $out"
 }
 
@@ -2393,9 +2695,9 @@ STUB
     GH_CONFIG_DIR="$TMP/doctor-gh-empty-config" \
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_CODEX_PLUGIN=0 \
     "$ROOT/scripts/doctor.sh" 2>&1)" || true
-  printf '%s' "$out" | grep -Fq 'ok: command gh' ||
+  contains "$out" 'ok: command gh' ||
     fail "gh should be checked as a required tool, not an optional one: $out"
-  printf '%s' "$out" | grep -Fq 'warn: gh is not authenticated' ||
+  contains "$out" 'warn: gh is not authenticated' ||
     fail "an unauthenticated gh should be reported: $out"
 
   # And a credentialed gh must stay quiet, or the warning becomes background
@@ -2403,7 +2705,7 @@ STUB
   out="$(cd "$project" && HOME="$home_dir" PATH="$bin_dir:$PATH" \
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_CODEX_PLUGIN=0 \
     "$ROOT/scripts/doctor.sh" 2>&1)" || true
-  if printf '%s' "$out" | grep -Fq 'warn: gh is not authenticated'; then
+  if contains "$out" 'warn: gh is not authenticated'; then
     fail "a credentialed gh must not warn: $out"
   fi
 }
@@ -2429,9 +2731,7 @@ test_doctor_reports_a_provider_cli_that_is_not_logged_in() {
   out="$(cd "$project" && HOME="$home_dir" PATH="$bin_dir:$PATH" \
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_CODEX_PLUGIN=0 \
     "$ROOT/scripts/doctor.sh" 2>&1)" || true
-  if printf '%s' "$out" | grep -Fq 'has no local credential'; then
-    fail "a credentialed provider CLI must not warn: $out"
-  fi
+  case "$out" in *'has no local credential'*) fail "a credentialed provider CLI must not warn: $out" ;; esac
 
   # Logged out: one line per CLI, naming the CLI to log in with.
   rm -f "$home_dir/.claude/.credentials.json" "$home_dir/.codex/auth.json" \
@@ -2439,13 +2739,13 @@ test_doctor_reports_a_provider_cli_that_is_not_logged_in() {
   out="$(cd "$project" && HOME="$home_dir" PATH="$bin_dir:$PATH" \
     XDG_RUNTIME_DIR="$home_dir/runtime" OH_MY_SETTING_CODEX_PLUGIN=0 \
     "$ROOT/scripts/doctor.sh" 2>&1)" || true
+  # Builtin matches: grep -q closing a pipe on the long doctor output fails it under pipefail.
   for cli in claude codex agy; do
-    printf '%s' "$out" | grep -Fq "warn: $cli is installed but has no local credential" ||
-      fail "doctor should report $cli as installed and not logged in: $out"
+    case "$out" in *"warn: $cli is installed but has no local credential"*) ;; *)
+      fail "doctor should report $cli as installed and not logged in: $out" ;; esac
   done
   # Reported, never failed: an interactive login is not an install defect.
-  printf '%s' "$out" | grep -Fq 'doctor: ok' ||
-    fail "a missing provider credential must not fail the doctor: $out"
+  case "$out" in *'doctor: ok'*) ;; *) fail "a missing provider credential must not fail the doctor: $out" ;; esac
 }
 
 test_installer_enables_auto_update_by_default() {
@@ -2509,9 +2809,9 @@ test_doctor_accepts_a_database_the_tool_just_built() {
 
   out="$(run_doctor_for_project "$project" "$home_dir")" ||
     fail "doctor should pass on a freshly built memory database: $out"
-  printf '%s' "$out" | grep -Fq 'ok: memory database schema/integrity' ||
+  contains "$out" 'ok: memory database schema/integrity' ||
     fail "doctor should accept the schema the helper writes: $out"
-  if printf '%s' "$out" | grep -Fq 'warn: memory database is invalid'; then
+  if contains "$out" 'warn: memory database is invalid'; then
     fail "doctor must not call the current schema invalid: $out"
   fi
 }
@@ -2532,7 +2832,7 @@ test_doctor_fails_on_corrupt_operations_state() {
 
   out="$(run_doctor_for_project "$project" "$home_dir")" && rc=0 || rc=$?
   [ "$rc" -ne 0 ] || fail "doctor reported ok over a corrupt lifecycle stream: $out"
-  printf '%s' "$out" | grep -Fq 'lifecycle' ||
+  contains "$out" 'lifecycle' ||
     fail "doctor did not name the corrupt lifecycle stream: $out"
 
   # A clean project still reports the streams as ok.
@@ -2541,7 +2841,7 @@ test_doctor_fails_on_corrupt_operations_state() {
   printf '*\n' > "$clean/.oms/.gitignore"
   out="$(run_doctor_for_project "$clean" "$home_dir")" ||
     fail "clean operations state should pass: $out"
-  printf '%s' "$out" | grep -Fq 'ok: lifecycle and approval streams' ||
+  contains "$out" 'ok: lifecycle and approval streams' ||
     fail "doctor did not report the operations streams: $out"
 
   # A dead or unreadable validator is not a green stream: swallowing its
@@ -2551,7 +2851,7 @@ test_doctor_fails_on_corrupt_operations_state() {
     run_doctor_for_project "$clean" "$home_dir")" && rc=0 || rc=$?
   [ "$rc" -ne 0 ] ||
     fail "doctor reported ok while its operations validator was missing: $out"
-  printf '%s' "$out" | grep -Fq 'operations validator' ||
+  contains "$out" 'operations validator' ||
     fail "doctor did not name the dead validator: $out"
   printf 'exit 3\n' > "$TMP/doctor-ops-broken-verify.sh"
   chmod +x "$TMP/doctor-ops-broken-verify.sh"
@@ -2577,7 +2877,7 @@ EOF
 
   out="$(run_doctor_for_project "$project" "$home_dir")" ||
     fail "artifact validation warning should not fail doctor: $out"
-  printf '%s' "$out" | grep -Fq 'warn: artifact index canonical validation failed' ||
+  contains "$out" 'warn: artifact index canonical validation failed' ||
     fail "doctor should surface canonical artifact contract failures"
 }
 
@@ -2603,9 +2903,9 @@ test_doctor_notes_flock_lock_files_without_removing_them() {
     OMS_LOCK_DIR="$lock_root" OMS_LOCK_FILE_NOTE_AT=1 \
     OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
     fail "a flock lock file must not fail the doctor: $out"
-  printf '%s' "$out" | grep -Fq 'flock lock file(s)' ||
+  contains "$out" 'flock lock file(s)' ||
     fail "doctor should report flock lock files: $out"
-  printf '%s' "$out" | grep -Fq 'not removable by design' ||
+  contains "$out" 'not removable by design' ||
     fail "doctor should say why they stay: $out"
 
   # Reported, and still there afterwards. cleanup must not take them either.
@@ -2641,13 +2941,13 @@ test_doctor_reports_crash_residue_warnings() {
     OMS_LOCK_DIR="$lock_root" \
     XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
     fail "doctor residue warnings must not fail: $out"
-  printf '%s' "$out" | grep -Fq 'warn: 1 dead harness lock dir(s)' ||
+  contains "$out" 'warn: 1 dead harness lock dir(s)' ||
     fail "missing dead lock warning: $out"
-  printf '%s' "$out" | grep -Fq 'warn: 1 unindexed artifact file(s)' ||
+  contains "$out" 'warn: 1 unindexed artifact file(s)' ||
     fail "missing unindexed artifact warning: $out"
-  printf '%s' "$out" | grep -Fq 'hint: run cleanup.sh --apply to remove safe harness residue' ||
+  contains "$out" 'hint: run cleanup.sh --apply to remove safe harness residue' ||
     fail "missing cleanup hint: $out"
-  printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
+  contains "$out" 'doctor: ok' || fail "doctor should still pass"
 }
 
 test_doctor_reports_malformed_run_state() {
@@ -2663,15 +2963,15 @@ test_doctor_reports_malformed_run_state() {
   printf '%s\n' '{"schema":1,"run_id":"r","tool":"t","event":"new"}' > "$project/.oms/runs/spine.jsonl"
   out="$(cd "$project" && HOME="$home_dir" XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
     fail "doctor must not fail on clean run-state: $out"
-  printf '%s' "$out" | grep -Fq 'ok: run-state JSONL' || fail "missing clean run-state line: $out"
+  contains "$out" 'ok: run-state JSONL' || fail "missing clean run-state line: $out"
 
   # Corrupt it: doctor warns (and still passes).
   printf '%s\n' 'NOT JSON{' >> "$project/.oms/runs/spine.jsonl"
   out="$(cd "$project" && HOME="$home_dir" XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 "$ROOT/scripts/doctor.sh")" ||
     fail "doctor run-state warning must not fail: $out"
-  printf '%s' "$out" | grep -Fq 'run-state JSONL file(s) have malformed lines' ||
+  contains "$out" 'run-state JSONL file(s) have malformed lines' ||
     fail "missing malformed run-state warning: $out"
-  printf '%s' "$out" | grep -Fq 'doctor: ok' || fail "doctor should still pass"
+  contains "$out" 'doctor: ok' || fail "doctor should still pass"
 }
 
 test_peer_export_only_and_import_result() {
@@ -2899,7 +3199,7 @@ test_prompt_takers_refuse_a_mistyped_option() {
       --bogus-flag --prompt probe 2>&1)" || rc=$?
     [ "$rc" != "0" ] ||
       fail "$script must refuse a mistyped option, got success: $out"
-    printf '%s\n' "$out" | grep -Fq 'unknown option: --bogus-flag' ||
+    printf '%s\n' "$out" | grep >/dev/null -F 'unknown option: --bogus-flag' ||
       fail "$script must name the mistyped option: $out"
   done
 }
@@ -3169,7 +3469,7 @@ EOF
     --prompt 'Never execute clean filters' 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "peer-review accepted a local clean filter: $out"
   [ ! -e "$marker" ] || fail "peer-review executed a local clean filter"
-  printf '%s' "$out" | grep -Fq 'unsafe Git execution config' ||
+  contains "$out" 'unsafe Git execution config' ||
     fail "clean-filter refusal was unclear: $out"
 
   # Generic safe diff capture also ignores trusted-global filter commands.
@@ -4619,6 +4919,35 @@ EOF
   assert_one_artifact_contains "$artifact_dir" 'codex-create-delegated-file-*.md' 'worker done'
 }
 
+test_delegate_nested_apply_preserves_parent_only_capture_guard() {
+  local project="$TMP/delegate-nested-apply"
+  local artifact_dir="$TMP/delegate-nested-apply-artifacts"
+  local bin_dir="$TMP/delegate-nested-apply-bin"
+  local home_dir="$TMP/delegate-nested-apply-home"
+  local rc=0
+  local out
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'must stay in worker worktree\n' > nested.txt
+echo "nested worker done"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_HARNESS_DELEGATE_DEPTH=1 OMS_DELEGATE_MAX_DEPTH=2 \
+    "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --artifact-dir "$artifact_dir" --apply \
+    --allow-restructure --prompt "Create a nested delegated file" 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || fail "a nested worker must not apply a patch through its parent process: rc=$rc output=$out"
+  contains "$out" 'native capture management is parent-only' ||
+    fail "nested apply should remain blocked by the actual ingress-depth guard: $out"
+  [ ! -e "$project/nested.txt" ] || fail "nested apply modified the primary tree"
+}
+
 test_delegate_graph_context_is_opt_in_and_snapshot_bound() {
   local project="$TMP/delegate-auto-graph"
   local bin_dir="$TMP/delegate-auto-graph-bin"
@@ -4977,7 +5306,7 @@ EOF
   out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
     search --agent claude --text "legacy split")" ||
     fail "database-backed search should migrate existing logs: $out"
-  printf '%s' "$out" | grep -Fq 'Keep the legacy split policy stable.' ||
+  contains "$out" 'Keep the legacy split policy stable.' ||
     fail "migrated search missed the legacy shared entry: $out"
   [ -f "$db" ] || fail "search should create the project memory database"
 
@@ -5134,7 +5463,7 @@ PY
 
   out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" \
     --repo "$project" health 2>/dev/null)" || true
-  printf '%s' "$out" | grep -Fq 'memory health: stale' ||
+  contains "$out" 'memory health: stale' ||
     fail "human health output should name the stale state: $out"
   [ -f "$index" ] || fail "health must never remove the derived index"
 
@@ -5231,7 +5560,7 @@ PY
   out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
     search --text "schema-one")" ||
     fail "schema-one memory should migrate automatically: $out"
-  printf '%s' "$out" | grep -Fq 'Keep the schema-one memory available.' ||
+  contains "$out" 'Keep the schema-one memory available.' ||
     fail "automatic migration lost the existing memory: $out"
 
   python3 - "$db" <<'PY' || fail "schema-one database did not migrate cleanly"
@@ -5287,10 +5616,10 @@ test_agent_memory_records_git_and_task_provenance() {
   assert_file_contains "$project/.oms/memory/shared.md" "task_id: $task_id"
 
   context="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" context)"
-  if printf '%s' "$context" | grep -Fq 'oms-memory'; then
+  if contains "$context" 'oms-memory'; then
     fail "structured provenance must not consume compact provider context"
   fi
-  if printf '%s' "$context" | grep -Fq 'git_sha:'; then
+  if contains "$context" 'git_sha:'; then
     fail "git provenance must stay out of compact provider context"
   fi
 
@@ -5382,13 +5711,13 @@ test_agent_memory_db_preserves_search_and_adds_ranked_recall() {
   out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
     search --text "GVector only")" ||
     fail "database search should preserve substring matching: $out"
-  printf '%s' "$out" | grep -Fq 'Use pgvector only after lexical recall has evidence.' ||
+  contains "$out" 'Use pgvector only after lexical recall has evidence.' ||
     fail "substring search changed during database migration: $out"
 
   out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
     recall --limit 1 --text "sqlite full text")" ||
     fail "ranked recall should return a database result: $out"
-  printf '%s' "$out" | grep -Fq 'SQLite full text recall keeps the local baseline cheap.' ||
+  contains "$out" 'SQLite full text recall keeps the local baseline cheap.' ||
     fail "ranked recall returned the wrong entry: $out"
 
   # The database is derived. Rebuilding it must recover from a damaged index
@@ -5399,7 +5728,7 @@ test_agent_memory_db_preserves_search_and_adds_ranked_recall() {
   out="$(HOME="$home_dir" "$ROOT/scripts/agent-memory.sh" --repo "$project" \
     search --text "local baseline")" ||
     fail "rebuilt database should be searchable: $out"
-  printf '%s' "$out" | grep -Fq 'SQLite full text recall keeps the local baseline cheap.' ||
+  contains "$out" 'SQLite full text recall keeps the local baseline cheap.' ||
     fail "rebuild lost source memory: $out"
 }
 
@@ -5621,6 +5950,20 @@ test_agent_plan_lifecycle() {
     fail "commit finish from claimed must be rejected"
   fi
   assert_file_contains "$d/err" 'requires review'
+  # A review without evidence is not stuck: the commit finish names the flags that supply it.
+  "$SH" --repo "$d" review --id integrated >/dev/null
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then
+    fail "commit finish without review evidence must be rejected"
+  fi
+  assert_file_contains "$d/err" 'pass --artifact and --patch'
+  before="$(cat "$d/.oms/plan/tasks.json")"
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" --artifact artifact.md --patch change.patch >"$d/err" 2>&1; then
+    fail "commit finish without receipt must be rejected"
+  fi
+  assert_file_contains "$d/err" 'no passed oms land receipt'
+  [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "evidence on a rejected finish changed plan"
+  "$SH" --repo "$d" release --id integrated >/dev/null
+  "$SH" --repo "$d" claim --id integrated --provider codex >/dev/null
   "$SH" --repo "$d" review --id integrated --artifact artifact.md --patch change.patch >/dev/null
   before="$(cat "$d/.oms/plan/tasks.json")"
   if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then
@@ -5677,6 +6020,11 @@ PY
     fail "commit finish accepted abbreviated SHA"
   fi
   assert_file_contains "$d/err" 'full lowercase commit SHA'
+  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" --lease-id stale >"$d/err" 2>&1; then
+    fail "commit finish accepted a stale lease"
+  fi
+  assert_file_contains "$d/err" 'lease mismatch'
+  [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "stale lease changed plan"
   # A newer unrelated receipt must not shadow the exact-SHA proof.
   printf '{"schema":1,"state":"failed"}\n' > "$receipt_dir/unrelated.json"
   linked="$TMP/agent-plan-linked"
@@ -5703,6 +6051,1572 @@ assert s["stale_review"] == [], s
     fail "commit finish accepted done instead of review"
   fi
   assert_file_contains "$d/err" 'requires review'
+
+  # A receipt proves a landing, not which task it landed: a scoped task needs
+  # the landed range, back to the previous pushed receipt, to touch its paths.
+  local inside outside
+  "$SH" --repo "$d" add --id scoped --title scoped --allowed "src/" >/dev/null
+  "$SH" --repo "$d" claim --id scoped --provider codex >/dev/null
+  "$SH" --repo "$d" review --id scoped --artifact artifact.md --patch change.patch >/dev/null
+  mkdir -p "$d/src"; printf 'x\n' > "$d/src/a.txt"
+  git -C "$d" add src/a.txt; git -C "$d" commit -qm inside
+  inside="$(git -C "$d" rev-parse HEAD)"
+  printf 'x\n' > "$d/other.txt"
+  git -C "$d" add other.txt; git -C "$d" commit -qm outside
+  outside="$(git -C "$d" rev-parse HEAD)"
+  git -C "$d" update-ref refs/remotes/origin/main HEAD
+  sed "s/$sha/$inside/" "$receipt" > "$receipt_dir/$inside-fixture.json"
+  sed "s/$sha/$outside/" "$receipt" > "$receipt_dir/$outside-fixture.json"
+  before="$(cat "$d/.oms/plan/tasks.json")"
+  if "$SH" --repo "$d" finish --id scoped --landed-commit "$outside" >"$d/err" 2>&1; then
+    fail "commit finish accepted a landing outside the task's allowed_paths"
+  fi
+  assert_file_contains "$d/err" "landed commit $outside does not land task scoped: $inside..$outside"
+  assert_file_contains "$d/err" 'allowed_paths (src/); changed: other.txt'
+  [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "out-of-scope proof changed plan"
+  "$SH" --repo "$d" finish --id scoped --landed-commit "$inside" >/dev/null ||
+    fail "commit finish must accept a landing that touches allowed_paths"
+  # Local completion uses typed lifecycle/index producers and an actual
+  # admitted landing. Self-reported exit/landing labels are not fixtures.
+  local completion_repo="$TMP/completion-contract"
+  make_committed_repo "$completion_repo"
+  python3 - "$ROOT" "$completion_repo" <<'PY' || fail "typed local completion contract failed"
+import copy
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import runpy
+import stat
+import subprocess
+import sys
+import time
+import shutil
+root, repo = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root / 'scripts/lib'))
+engine = runpy.run_path(str(root / 'scripts/lib/plan-receipt.py'))
+plan_path = repo / '.oms/plan/tasks.json'
+env = dict(os.environ)
+for name in list(env):
+    if name.startswith('OMS_'):
+        env.pop(name)
+env['OMS_LOCK_DIR'] = str(repo / '.oms/private-fixture-locks')
+
+def call(script, *args, extra=None, ok=True):
+    result = subprocess.run(['bash', str(root / 'scripts' / script), '--repo', str(repo), *args],
+                            env=dict(env, **(extra or {})), stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=40)
+    if ok and result.returncode:
+        raise AssertionError((args, result.returncode, result.stderr.decode()))
+    if not ok and not result.returncode:
+        raise AssertionError(('accepted invalid completion', args))
+    return (result.stdout + (result.stderr if not ok else b'')).decode().strip()
+
+def ap(*args, **kwargs):
+    return call('agent-plan.sh', *args, **kwargs)
+
+def h(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+def ref(path):
+    return {'path': path, 'sha256': h((repo / path).read_bytes())}
+
+def entry(path):
+    target = repo / path
+    if not target.exists():
+        return {'path': path, 'state': 'absent', 'mode': None, 'sha256': None}
+    return dict(ref(path), state='file', mode='100755' if target.stat().st_mode & stat.S_IXUSR else '100644')
+
+def plan():
+    return json.loads(plan_path.read_bytes())
+
+def index():
+    return [json.loads(line) for line in (repo / '.oms/artifacts/index.jsonl').read_bytes().splitlines()]
+
+def register(kind, task, artifact, attempt='', patch='', base='', exitcode=0):
+    extra = dict(env, OMS_TASK_ID=task, OMS_INDEX_PLAN_ID=plan()['plan_id'],
+                 OMS_ATTEMPT_ID=attempt, OMS_INDEX_BASE_SHA=base, OMS_FIXTURE_INDEX_EXIT=str(exitcode))
+    result = subprocess.run(['bash', '-c', '. "$1"; ma_append_artifact_index "$2" "$3" codex "$OMS_FIXTURE_INDEX_EXIT" "$4" "$5"',
+                             'fixture', str(root / 'scripts/lib/peer-common.sh'), str(repo), kind,
+                             str(repo / artifact), str(repo / patch) if patch else ''],
+                            env=extra, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    assert result.returncode == 0, result.stderr
+    return index()[-1]
+
+ap('init', '--goal', 'typed local completions', '--accept', 'printf accepted > .oms/acceptance-ran')
+(repo / 'verify.sh').write_text("test -s file.txt\nprintf '%s\\n' 'bounded verifier output'\n")
+(repo / 'obsolete.txt').write_text('Old product to delete\n')
+subprocess.run(['git', '-C', str(repo), 'add', 'verify.sh', 'obsolete.txt'], check=True)
+subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'fixture verifier'], env=env, check=True)
+base = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
+room = json.loads(call('room.sh', 'new', '--topic', 'Private completion fixture', '--json'))['id']
+# Native initial enrollment uses the new attempt ID and omits the ref.
+main = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
+            '--ref', 'panel_room_id=' + room, '--ref', 'panel_role=main',
+            '--then', 'starting', '--then', 'working')
+participant = main
+call('room.sh', 'join', '--id', room, '--participant', participant, '--provider', 'codex', '--role', 'main')
+
+env.update(OMS_ROOM_ID=room, OMS_ROOM_PARTICIPANT=participant, OMS_PANEL_MAIN_ATTEMPT=main)
+counter = 0
+def setup(command='bash verify.sh', empty_verify=False, claim_provider='codex', main_report=False, producer_exit=0):
+    global counter
+    read_base = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
+    counter += 1
+    tid = 'research%d' % counter
+    ap('add', '--id', tid, '--title', 'Inspect all original obligations', '--allowed', 'file.txt,verify.sh',
+       '--verify', '' if empty_verify else command,
+       '--role', 'analysis-worker' if main_report else '',
+       '--assignment', json.dumps({'provider': claim_provider, 'workload': 'routine'}))
+    ap('claim', '--id', tid, '--provider', 'codex',
+       extra={'OMS_PANEL_MAIN_ATTEMPT': main, 'OMS_ROOM_PARTICIPANT': participant})
+    artifact = '.oms/artifacts/research/%s.md' % tid
+    (repo / artifact).parent.mkdir(parents=True, exist_ok=True)
+    read_result = subprocess.run(['bash', '-c', 'cat file.txt verify.sh; exit %d' % producer_exit], cwd=str(repo),
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    assert read_result.returncode == producer_exit, read_result.stderr
+    (repo / artifact).write_bytes(read_result.stdout)
+    attempt, ancillary = '', ''
+    if not main_report:
+        attempt = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'peer-ask',
+                   '--task-id', tid, '--parent-attempt-id', main, '--ref', 'panel_access=read',
+                   '--then', 'starting', '--then', 'working')
+        call('agent-events.sh', 'transition', '--attempt', attempt, '--state', 'verifying',
+         '--then', 'review', '--then', 'done')
+        ancillary = '.oms/artifacts/research/%s.patch' % tid
+        (repo / ancillary).write_bytes(b'')
+    row = register('call-import' if main_report else 'ask', tid, artifact, attempt,
+                   patch=ancillary, base=read_base[:7], exitcode=producer_exit)
+    ap('review', '--id', tid, '--artifact', artifact)
+    current = plan()
+    task = current['tasks'][tid]
+    bundle = {'schema': 1, 'kind': 'research-accepted', 'plan_id': current['plan_id'], 'task_id': tid,
+              'task_sha256': engine['digest'](task), 'plan_sha256': h(plan_path.read_bytes()),
+              'state': task['state'], 'lease_id': task['lease_id'],
+              'owner': {'provider': task['provider'], 'participant': participant, 'parent_provider': 'codex'},
+              'original_contract': engine['projection'](task), 'review_summary': 'Reviewed full original task contract',
+              'reviewed_obligations': ['inspect'], 'requirements': [
+                  {'id': 'inspect', 'obligation': task['title'], 'deliverable': 'Complete source findings',
+                   'source_paths': ['file.txt', 'verify.sh'], 'evidence': [ref(artifact)]}],
+              'base_commit': read_base, 'source_envelope': ['file.txt', 'verify.sh'],
+              'source_manifest': [entry('file.txt'), entry('verify.sh')],
+              'verifier': {'command': command, 'files': [entry('verify.sh')],
+                           'adopted': empty_verify, 'review_summary': 'Reviewed verifier and actual frozen inputs'},
+              'research': {'classification': 'research-only', 'artifact': ref(artifact),
+                           'index_event_id': row['event_id'], 'attempt_id': attempt, 'parent_attempt_id': main}}
+    for script in ('drift.py', 'source-drift.sh', 'append-proof.py'):
+        if script in command:
+            bundle['source_envelope'].append(script)
+            bundle['source_manifest'].append(entry(script))
+            bundle['verifier']['files'].append(entry(script))
+    if main_report:
+        bundle.pop('research')
+        bundle['kind'] = 'main-research-accepted'
+        bundle['reviewer'] = {'kind': 'native-panel-main'}
+        bundle['main_research'] = {'classification': 'research-only', 'provenance': 'main-reviewed-external',
+            'artifact': ref(artifact), 'index_event_id': row['event_id'], 'original_deliverable': task['title'],
+            'read_only_contract': 'original-report-only', 'original_producer_status':
+                {key: row.get(key) for key in ('kind', 'exit', 'attempt_id', 'task_id', 'plan_id', 'base_sha')}}
+        if producer_exit:
+            bundle['main_research'].update(provenance='main-reviewed-external',
+                failed_producer_review='The external command failed; current main independently reviewed its report and source')
+        return bundle
+    bundle['legacy_adoption'] = {'artifact': ref(artifact), 'original_contract': bundle['original_contract'],
+                                 'review_summary': 'Current explicit adoption of missing legacy producer binding'}
+    return bundle
+
+def invoke(bundle, action='accept-research', extra=None, ok=True, flags=(), payload=None):
+    path = '.oms/artifacts/completion-bundle.json'
+    raw = json.dumps(bundle).encode() if payload is None else payload
+    (repo / path).write_bytes(raw)
+    return ap(action, '--id', bundle['task_id'], '--lease-id', bundle['lease_id'],
+              '--expected-state', bundle['state'], '--expected-plan-sha256', bundle['plan_sha256'],
+              '--expected-task-sha256', bundle['task_sha256'], '--completion-bundle', path,
+              '--expected-completion-bundle-sha256', h(raw), *flags, extra=extra, ok=ok)
+
+# Actual main review is a separate provenance kind and needs no child attempt.
+main_report = setup(main_report=True)
+assert not main_report['main_research']['original_producer_status']['attempt_id']
+invoke(main_report, action='accept-main-research')
+main_done = plan()['tasks'][main_report['task_id']]
+assert main_done['completion_kind'] == 'main-research-accepted' and main_done['state'] == 'done'
+assert 'landing' not in main_done and not main_done['patch']
+# The completion verifier uses the bounded verifier budget, rejects invalid
+# budgets before launching, and leaves the reviewed task unchanged on timeout.
+verifier_marker = repo / '.oms/artifacts/verifier-budget-launched'
+completion_core = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+parse_timeout = completion_core['verifier_timeout_seconds']
+saved_timeout = os.environ.pop('OMS_PEER_VERIFY_TIMEOUT', None)
+try:
+    assert parse_timeout() == 600
+    for value, expected in [('0.5s', 0.5), ('24h', 86400)]:
+        os.environ['OMS_PEER_VERIFY_TIMEOUT'] = value
+        assert parse_timeout() == expected, value
+    for value in ('0s', '25h', '9' * 400 + 'd'):
+        os.environ['OMS_PEER_VERIFY_TIMEOUT'] = value
+        try:
+            parse_timeout()
+        except ValueError as exc:
+            assert 'OMS_PEER_VERIFY_TIMEOUT' in str(exc), (value, exc)
+        else:
+            raise AssertionError(('accepted invalid verifier budget', value))
+finally:
+    if saved_timeout is not None:
+        os.environ['OMS_PEER_VERIFY_TIMEOUT'] = saved_timeout
+    else:
+        os.environ.pop('OMS_PEER_VERIFY_TIMEOUT', None)
+slow_shell_init = repo / '.oms/artifacts/verifier-budget-env.sh'
+slow_shell_init.write_text('''if [ "${OMS_COMPLETION_PHASE:-}" = verify ]; then
+  printf started > .oms/artifacts/verifier-budget-launched
+  sleep 3
+fi
+''')
+slow_command = 'bash verify.sh'
+timed_bundle = setup(command=slow_command)
+before_timeout = plan_path.read_bytes()
+completion_dir = repo / '.oms/plan/completions'
+receipts_before_timeout = {path.name for path in completion_dir.glob('*.json')}
+timeout_env = {'OMS_PEER_VERIFY_TIMEOUT': '1s', 'BASH_ENV': str(slow_shell_init)}
+timeout_error = invoke(timed_bundle, extra=timeout_env, ok=False)
+assert 'verifier execution timed out' in timeout_error, timeout_error
+assert verifier_marker.is_file(), 'timeout fixture never launched the verifier'
+assert plan_path.read_bytes() == before_timeout, 'timeout completed the reviewed task'
+assert plan()['tasks'][timed_bundle['task_id']]['state'] == 'review'
+assert {path.name for path in completion_dir.glob('*.json')} == receipts_before_timeout, 'timeout published a completion receipt'
+for invalid_budget in ('not-a-duration', '25h'):
+    verifier_marker.unlink(missing_ok=True)
+    invalid_bundle = setup(command=slow_command)
+    before_invalid = plan_path.read_bytes()
+    invalid_env = dict(timeout_env, OMS_PEER_VERIFY_TIMEOUT=invalid_budget)
+    invalid_error = invoke(invalid_bundle, extra=invalid_env, ok=False)
+    assert 'OMS_PEER_VERIFY_TIMEOUT must be a positive finite duration up to 24h' in invalid_error, invalid_error
+    assert not verifier_marker.exists(), 'invalid budget launched the verifier'
+    assert plan_path.read_bytes() == before_invalid, 'invalid budget completed the reviewed task'
+invoke(main_report, action='accept-main-research')
+ap('show', '--id', main_report['task_id'], extra={'OMS_PANEL_MAIN_ATTEMPT': '', 'OMS_ROOM_PARTICIPANT': '', 'OMS_ROOM_ID': ''})
+failed_external = setup(main_report=True, producer_exit=17)
+producer_index_before = (repo / '.oms/artifacts/index.jsonl').read_bytes()
+invoke(failed_external, action='accept-main-research')
+assert (repo / '.oms/artifacts/index.jsonl').read_bytes() == producer_index_before
+external_receipt = json.loads((repo / plan()['tasks'][failed_external['task_id']]['completion_receipt']['path']).read_bytes())
+assert external_receipt['snapshot']['evidence']['index']['exit'] == 17
+assert external_receipt['snapshot']['evidence']['child_provenance_asserted'] is False
+for flaw in ('foreign-index', 'failed-without-review', 'product-deliverable', 'foreign-owner', 'missing-reviewer', 'unsupported-authorship'):
+    bad = setup(main_report=True, producer_exit=17 if flaw == 'failed-without-review' else 0)
+    if flaw == 'foreign-index':
+        row = register('call-import', 'foreign-task', bad['main_research']['artifact']['path'])
+        bad['main_research']['index_event_id'] = row['event_id']
+        bad['main_research']['original_producer_status'] = {key: row.get(key) for key in
+            ('kind', 'exit', 'attempt_id', 'task_id', 'plan_id', 'base_sha')}
+    elif flaw == 'failed-without-review':
+        bad['main_research'].pop('failed_producer_review')
+    elif flaw == 'product-deliverable':
+        current = plan(); task = current['tasks'][bad['task_id']]
+        task['title'] = 'Audit original findings and implement the remaining repair'
+        plan_path.write_text(json.dumps(current))
+        bad.update(plan_sha256=h(plan_path.read_bytes()), task_sha256=engine['digest'](task),
+                   original_contract=engine['projection'](task))
+        bad['main_research']['original_deliverable'] = task['title']
+        bad['requirements'][0]['obligation'] = task['title']
+    elif flaw == 'foreign-owner':
+        bad['owner']['participant'] = 'another-main'
+    elif flaw == 'unsupported-authorship':
+        bad['main_research']['provenance'] = 'main-authored'
+    else:
+        bad.pop('reviewer')
+    unchanged = plan_path.read_bytes()
+    invoke(bad, action='accept-main-research', ok=False)
+    assert plan_path.read_bytes() == unchanged
+
+
+# Partial legacy lineage requires exact reviewed adoption in both directions.
+for missing in ('task_id', 'plan_id'):
+    legacy = setup(main_report=True)
+    original_index = (repo / '.oms/artifacts/index.jsonl').read_bytes()
+    producer_rows = [json.loads(line) for line in original_index.splitlines()]
+    producer_row = next(row for row in producer_rows
+                        if row['event_id'] == legacy['main_research']['index_event_id'])
+    producer_row[missing] = ''
+    (repo / '.oms/artifacts/index.jsonl').write_bytes(b''.join(
+        json.dumps(row, ensure_ascii=False, separators=(',', ':')).encode() + b'\n'
+        for row in producer_rows))
+    legacy['main_research']['original_producer_status'] = {key: producer_row.get(key) for key in
+        ('kind', 'exit', 'attempt_id', 'task_id', 'plan_id', 'base_sha')}
+    unchanged = plan_path.read_bytes()
+    invoke(legacy, action='accept-main-research', ok=False)
+    assert plan_path.read_bytes() == unchanged
+    legacy['legacy_report_binding'] = {
+        'artifact': legacy['main_research']['artifact'],
+        'index_event_id': producer_row['event_id'],
+        'index_sha256': h(json.dumps(producer_row, sort_keys=True, ensure_ascii=False,
+                                   separators=(',', ':'), allow_nan=False).encode() + b'\n'),
+        'original_contract': legacy['original_contract'],
+        'review_summary': 'Reviewed exact original report, producer facts and partial missing lineage'}
+    invoke(legacy, action='accept-main-research')
+    assert plan()['tasks'][legacy['task_id']]['completion_kind'] == 'main-research-accepted'
+
+# Execute the real two-step controller. Only backend/native account records are
+# synthetic: this proves API integration, never a real Desktop approval receipt.
+if os.name == 'posix' and Path('/proc/self').is_dir():
+    import shlex
+    copied = []
+    for directory in ('scripts', 'config'):
+        if (root / directory).is_dir():
+            shutil.copytree(root / directory, repo / directory,
+                            ignore=shutil.ignore_patterns('__pycache__'))
+            copied.append(repo / directory)
+    desktop_home = repo.parent / 'completion-desktop-home'
+    desktop_home.mkdir(mode=0o700)
+    native_store = desktop_home / '.codex/sessions/2026/10/10'
+    native_store.mkdir(parents=True, mode=0o700)
+    for directory in [desktop_home, *native_store.parents]:
+        if directory == desktop_home or desktop_home in directory.parents:
+            directory.chmod(0o700)
+    # The production helper intentionally ignores HOME. Redirect only pwd's
+    # account-home lookup in fixture subprocesses; all provenance checks run.
+    shim = desktop_home / 'fixture-python'
+    shim.mkdir(mode=0o700)
+    (shim / 'sitecustomize.py').write_text(
+        "import os, pwd\n"
+        "_real_getpwuid = pwd.getpwuid\n"
+        "def _fixture_getpwuid(uid):\n"
+        "    row = list(_real_getpwuid(uid)); row[5] = os.environ['HOME']; return pwd.struct_passwd(row)\n"
+        "pwd.getpwuid = _fixture_getpwuid\n")
+    desktop_env = {key: value for key, value in env.items() if not key.startswith('OMS_')}
+    sid = '11111111-2222-4333-8444-555555555555'
+    foreign_sid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    desktop_env.update(HOME=str(desktop_home), PYTHONPATH=str(shim),
+                       CODEX_SESSION_ID=foreign_sid, CODEX_THREAD_ID=foreign_sid)
+    desktop_participant = 'desktop-review-main'
+    call('room.sh', 'join', '--id', room, '--participant', desktop_participant,
+         '--provider', 'codex', '--role', 'main', '--native-session', sid)
+    desktop = setup(main_report=True)
+    current = plan(); original = current['tasks'][desktop['task_id']]
+    original['claimed_by_participant'] = None  # Existing legacy contract, not a transferred owner.
+    plan_path.write_text(json.dumps(current))
+    desktop.update(plan_sha256=h(plan_path.read_bytes()), task_sha256=engine['digest'](original),
+                   original_contract=engine['projection'](original))
+    desktop['owner']['participant'] = desktop_participant
+    desktop['legacy_reviewer_binding'] = {
+        'participant': desktop_participant, 'original_contract': desktop['original_contract'],
+        'review_summary': 'Current main explicitly reviewed this unbound original report contract'}
+    question = '[OMS main-read-completion-v1] Support verified main review of exact READ reports'
+    answer = 'approve'
+    prompt_id = 'call_lifecycle_policy'
+    question_id = json.dumps(['request_user_input_async', prompt_id, 0], separators=(',', ':'))
+    policy = {'policy': 'main-read-completion-v1', 'message_id': 'msg_lifecycle_policy',
+              'question_item_id': question_id, 'question_sha256': h(question.encode()),
+              'answer_sha256': h(answer.encode())}
+    desktop['reviewer'] = {'kind': 'codex-desktop-main', 'room_id': room, 'approval': policy}
+    bundle_path = '.oms/artifacts/desktop-review.json'
+    (repo / bundle_path).write_text(json.dumps(desktop))
+    cas = ['--repo', str(repo), '--id', desktop['task_id'], '--lease-id', desktop['lease_id'],
+           '--expected-state', desktop['state'], '--expected-plan-sha256', desktop['plan_sha256'],
+           '--expected-task-sha256', desktop['task_sha256'], '--completion-bundle', bundle_path,
+           '--expected-completion-bundle-sha256', h((repo / bundle_path).read_bytes())]
+    approve_argv = ['scripts/oms', 'agent-plan', 'approve-main-research', *cas, '--approve-reviewed-bundle']
+    approve_command = shlex.join(approve_argv)
+    unchanged = plan_path.read_bytes()
+    native_path = native_store / ('rollout-2026-10-10T00-00-00-' + sid + '.jsonl')
+    native_rows = [
+        {'type': 'session_meta', 'payload': {'id': sid, 'session_id': sid, 'cwd': str(repo),
+          'originator': 'Codex Desktop', 'source': 'vscode', 'thread_source': 'user'}},
+        {'type': 'response_item', 'payload': {'type': 'function_call', 'name': 'request_user_input_async',
+          'call_id': prompt_id, 'arguments': json.dumps({'questions': [
+              {'title': question, 'options': [answer, 'decline']}]})}},
+        {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+          'id': policy['message_id'], 'content': [{'type': 'input_text', 'text':
+              '<send_user_message_question_reply>\n' + json.dumps([
+                  {'questionItemId': question_id, 'question': question, 'answer': answer}]) +
+              '\n</send_user_message_question_reply>\n'}]}}]
+    def desktop_call(argv, ok=True, refusal=None):
+        result = subprocess.run(argv, cwd=repo, env=desktop_env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        assert (result.returncode == 0) is ok, (argv, result.returncode, result.stderr.decode())
+        if refusal is not None:
+            assert refusal in result.stderr.decode(), result.stderr.decode()
+        return result.stdout.decode()
+    def approve_desktop(call_id):
+        output = desktop_call(approve_argv)
+        assert plan_path.read_bytes() == unchanged, 'approval changed task/lease/state'
+        envelope = json.loads(output)
+        assert envelope['kind'] == 'oms-main-read-approved'
+        approval = envelope['approval']
+        marker_bytes = (repo / approval['path']).read_bytes()
+        assert h(marker_bytes) == approval['sha256']
+        marker = json.loads(marker_bytes)
+        assert marker['authorized_action'] == 'accept-main-research' and len(marker['nonce']) == 64
+        assert marker['verification']['exit'] == 0 and marker['snapshot']['evidence']['reviewer'] == {}
+        assert marker['participant'] == desktop_participant
+        source = 'const r = await tools.exec_command(' + json.dumps(
+            {'cmd': approve_command, 'workdir': str(repo)}) + '); text(r.output);'
+        records = [
+            {'type': 'response_item', 'payload': {'type': 'custom_tool_call', 'name': 'exec',
+              'call_id': call_id, 'status': 'completed', 'input': source}},
+            {'type': 'event_msg', 'payload': {'type': 'item_completed', 'thread_id': sid,
+              'item': {'type': 'CommandExecution', 'id': 'exec-' + call_id, 'process_id': 'fixture-' + call_id,
+                'source': 'unified_exec_startup', 'command': ['/bin/bash', '-lc', approve_command],
+                'cwd': str(repo), 'status': 'completed', 'exit_code': 0, 'aggregated_output': output}}},
+            {'type': 'response_item', 'payload': {'type': 'custom_tool_call_output', 'call_id': call_id,
+              'output': [{'type': 'input_text', 'text': 'Script completed\nWall time 0.1 seconds\nOutput:\n'},
+                         {'type': 'input_text', 'text': output}]}}]
+        argv = ['scripts/oms', 'agent-plan', 'accept-main-research', *cas,
+                '--main-review-approval', approval['path'],
+                '--expected-main-review-approval-sha256', approval['sha256']]
+        return argv, records, repo / approval['path']
+    def write_native(records):
+        native_path.write_bytes(b''.join(json.dumps(row, sort_keys=True, separators=(',', ':')).encode() + b'\n'
+                                        for row in records))
+        native_path.chmod(0o600)
+    accept_argv, completed_rows, marker_path = approve_desktop('call_lifecycle_approve')
+    desktop_call(accept_argv, ok=False, refusal='native session')  # No producer session exists yet.
+    failed_rows = copy.deepcopy(completed_rows)
+    failed_rows[1]['payload']['item']['exit_code'] = 7
+    for producer_rows in (completed_rows[:1], failed_rows,
+                          completed_rows[:2] + [completed_rows[1]] + completed_rows[2:]):
+        write_native(native_rows + producer_rows)
+        desktop_call(accept_argv, ok=False, refusal='approval')
+        assert plan_path.read_bytes() == unchanged
+    write_native(native_rows + completed_rows)
+    marker_original = marker_path.read_bytes()
+    marker_path.write_bytes(marker_original + b' ')
+    desktop_call(accept_argv, ok=False, refusal='evidence digest changed')
+    marker_path.write_bytes(marker_original)
+    for target in (repo / desktop['main_research']['artifact']['path'], repo / 'file.txt'):
+        original_bytes = target.read_bytes()
+        target.write_bytes(original_bytes + b'changed after approval\n')
+        desktop_call(accept_argv, ok=False, refusal=(
+            'source content/mode changed' if target.name == 'file.txt' else 'evidence digest changed'))
+        assert plan_path.read_bytes() == unchanged
+        target.write_bytes(original_bytes)
+    stale = plan(); stale['tasks'][desktop['task_id']]['lease_id'] = 'lease_' + 'f' * 32
+    plan_path.write_text(json.dumps(stale))
+    stale_bytes = plan_path.read_bytes()
+    desktop_call(accept_argv, ok=False, refusal='unbound legacy review')
+    assert plan_path.read_bytes() == stale_bytes
+    plan_path.write_bytes(unchanged)
+    # Restoring report/source bytes cannot restore their ctime identity. A new
+    # explicit approval is required; both real command outputs remain recorded.
+    accept_argv, refreshed_rows, _ = approve_desktop('call_lifecycle_reapprove')
+    write_native(native_rows + completed_rows + refreshed_rows)
+    desktop_call(accept_argv)
+    done = plan()['tasks'][desktop['task_id']]
+    assert done['state'] == 'done' and done['completion_kind'] == 'main-research-accepted'
+    assert done['claimed_by_participant'] is None
+    receipt = json.loads((repo / done['completion_receipt']['path']).read_bytes())
+    reviewer = receipt['snapshot']['evidence']['reviewer']
+    assert reviewer['schema'] == 2 and reviewer['session_id_sha256'] == h(sid.encode())
+    assert reviewer['session_id_sha256'] != h(foreign_sid.encode())
+    assert receipt['executor'] == {'kind': 'local-uid', 'uid': os.getuid()}
+    done_bytes = plan_path.read_bytes()
+    desktop_call(accept_argv)
+    call('room.sh', 'leave', '--id', room, '--participant', desktop_participant)
+    native_path.unlink()
+    desktop_call(accept_argv)
+    desktop_call(['scripts/oms', 'agent-plan', 'show', '--repo', str(repo), '--id', desktop['task_id']])
+    assert plan_path.read_bytes() == done_bytes, 'historical receipt replay rewrote task state'
+    for directory in copied:
+        shutil.rmtree(directory)
+    print('Desktop main READ: real controller plus synthetic native approval lifecycle passed')
+
+# Existing native and literal conditional contracts remain usable without a rewrite.
+for command in ('git diff --check', 'if test -f verify.sh; then bash verify.sh; fi',
+                'bash verify.sh && for oms_terminal_suite in verify.sh; do if test -f "$oms_terminal_suite"; then bash "$oms_terminal_suite" || exit; fi; done'):
+    invoke(setup(command=command))
+# A successful shell status cannot replace actual execution of a frozen verifier.
+skipped = setup(command='false && bash verify.sh; true')
+state_before = plan_path.read_bytes()
+invoke(skipped, ok=False)
+assert plan_path.read_bytes() == state_before
+(repo / '-c').write_text('exit 73\n')
+option_script = setup(command='bash -c true')
+option_script['verifier']['files'] = [entry('-c')]
+option_script['source_envelope'].append('-c')
+option_script['source_manifest'].append(entry('-c'))
+state_before = plan_path.read_bytes()
+invoke(option_script, ok=False)
+assert plan_path.read_bytes() == state_before
+(repo / '-c').unlink()
+initial = setup(claim_provider='claude')
+invoke(initial)
+initial_done = plan()['tasks'][initial['task_id']]
+assert initial_done['state'] == 'done' and initial_done['completion_kind'] == 'research-accepted'
+assert initial_done['claimed_by_participant'] == participant == initial['research']['parent_attempt_id']
+# Typed post-acceptance boundaries deliberately share the READ terminal
+# timestamp. Their append order is later; clock precision grants no authority.
+injection = repo / '.oms/test-injection'; injection.mkdir()
+(injection / 'sitecustomize.py').write_text('''import datetime, os, time
+if os.environ.get("OMS_FIXTURE_TIMESTAMP"):
+    stamp = os.environ["OMS_FIXTURE_TIMESTAMP"]
+    original = time.strftime
+    time.strftime = lambda fmt, *args: stamp if fmt == "%Y-%m-%dT%H:%M:%SZ" else original(fmt, *args)
+    previous = datetime.datetime
+    class Fixed(previous):
+        @classmethod
+        def now(cls, tz=None):
+            value = previous.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+            return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+    datetime.datetime = Fixed
+''')
+clock_source = (injection / 'sitecustomize.py').read_text()
+initial_terminal = next(row['ts'] for row in reversed([json.loads(line) for line in
+                        (repo/'.oms/lifecycle/events.jsonl').read_bytes().splitlines()])
+                        if row.get('attempt_id') == initial['research']['attempt_id'] and row.get('to_state') == 'done')
+clock = {'PYTHONPATH': str(injection), 'OMS_FIXTURE_TIMESTAMP': initial_terminal}
+private_room = repo / '.oms/threads' / (room + '.jsonl')
+original_room = private_room.read_bytes()
+call('room.sh', 'leave', '--id', room, '--participant', participant, extra=clock)
+assert json.loads(private_room.read_bytes().splitlines()[-1])['ts'] == initial_terminal
+ap('show', '--id', initial['task_id']); ap('status', '--json')
+invoke(initial, ok=False)
+call('thread.sh', 'close', '--id', room, '--summary', 'Same-second recorded closure', extra=clock)
+ap('show', '--id', initial['task_id']); ap('status', '--json')
+invoke(initial, ok=False)
+private_room.write_bytes(original_room)
+call('agent-events.sh', 'usage', '--tokens', '1', '--attempt', initial['research']['attempt_id'], extra=clock)
+ap('show', '--id', initial['task_id']); ap('status', '--json')
+# A later terminal duplicate cannot launder an ambiguous historical READ.
+historical_competitor = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
+                             '--ref', 'panel_room_participant=' + participant, '--ref', 'panel_room_id=' + room,
+                             '--ref', 'panel_role=main', '--then', 'starting', '--then', 'working')
+historical_duplicate = setup()
+call('agent-events.sh', 'transition', '--attempt', historical_competitor, '--state', 'verifying', '--then', 'review', '--then', 'done')
+assert 'unique active native owner' in invoke(historical_duplicate, ok=False)
+bundle = setup(claim_provider='claude')
+assert plan()['tasks'][bundle['task_id']]['provider'] == 'claude'
+before = plan_path.read_bytes()
+# Invalid explicit refs never fall back, even when attempt ID equals owner.
+owner_events = repo / '.oms/lifecycle/events.jsonl'
+for value in ('', 'foreign', '.malformed'):
+    frozen_events = owner_events.read_bytes()
+    call('agent-events.sh', 'usage', '--tokens', '0', '--attempt', main, '--ref', 'panel_room_participant=' + value)
+    rejected = invoke(bundle, ok=False)
+    assert 'native participant' in rejected, rejected
+    owner_events.write_bytes(frozen_events)
+# A restored current ref cannot hide a contradictory earlier owner binding.
+frozen_events = owner_events.read_bytes()
+call('agent-events.sh', 'usage', '--tokens', '0', '--attempt', main, '--ref', 'panel_room_participant=foreign')
+call('agent-events.sh', 'usage', '--tokens', '0', '--attempt', main, '--ref', 'panel_room_participant=' + participant)
+assert 'native participant' in invoke(bundle, ok=False)
+owner_events.write_bytes(frozen_events)
+# Gather all related attempts before filtering provider/room/tool/role.
+for key, value in (('provider', 'claude'), ('tool', 'peer-ask'), ('room', 'room-'+'0'*12), ('role', 'advisor')):
+    frozen_events = owner_events.read_bytes()
+    arguments = ['start', '--provider', value if key == 'provider' else 'codex',
+                 '--tool', value if key == 'tool' else 'panel-main',
+                 '--ref', 'panel_room_participant=' + participant,
+                 '--ref', 'panel_room_id=' + (value if key == 'room' else room),
+                 '--ref', 'panel_role=' + (value if key == 'role' else 'main'),
+                 '--then', 'starting', '--then', 'working']
+    conflicting = call('agent-events.sh', *arguments)
+    call('agent-events.sh', 'transition', '--attempt', conflicting, '--state', 'verifying', '--then', 'review', '--then', 'done')
+    assert 'contradictory native' in invoke(bundle, ok=False)
+    owner_events.write_bytes(frozen_events)
+frozen_events = owner_events.read_bytes()
+competing = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
+                 '--ref', 'panel_room_participant=' + participant, '--ref', 'panel_room_id=' + room,
+                 '--ref', 'panel_role=main', '--then', 'starting', '--then', 'working')
+assert 'ambiguous' in invoke(bundle, ok=False)
+owner_events.write_bytes(frozen_events)
+frozen_events = owner_events.read_bytes()
+call('agent-events.sh', 'transition', '--attempt', main, '--state', 'blocked')
+assert 'owner binding' in invoke(bundle, ok=False)
+owner_events.write_bytes(frozen_events)
+assert 'owner binding' in invoke(bundle, extra={'OMS_PANEL_MAIN_ATTEMPT': 'att_'+'0'*32}, ok=False)
+room_events = repo / '.oms/threads' / (room + '.jsonl')
+frozen_room = room_events.read_bytes()
+invalid_room = [json.loads(line) for line in frozen_room.splitlines()]
+invalid_room[0]['ts'] = '2026-1-01T00:00:00Z'
+room_events.write_bytes(b''.join(json.dumps(row).encode() + b'\n' for row in invalid_room))
+assert 'noncanonical native room timestamp' in invoke(bundle, ok=False)
+room_events.write_bytes(frozen_room)
+assert plan_path.read_bytes() == before
+for key, val in [('plan_id', 'plan_' + '0'*32), ('task_sha256', '0'*64), ('plan_sha256', '0'*64),
+                 ('state', 'claimed'), ('lease_id', 'lease_' + '0'*32)]:
+    invalid = copy.deepcopy(bundle); invalid[key] = val
+    invoke(invalid, ok=False)
+    assert plan_path.read_bytes() == before
+invoke(bundle, extra={'OMS_ROOM_PARTICIPANT': 'foreign'}, ok=False)
+invalid = copy.deepcopy(bundle); invalid['owner']['participant'] = 'foreign'
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid.pop('legacy_adoption')
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['requirements'] = []
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['reviewed_obligations'].append('omitted')
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['research']['classification'] = 'worker'
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['research']['parent_attempt_id'] = 'foreign'
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['source_manifest'][0]['sha256'] = '0'*64
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['source_manifest'][0]['mode'] = '100755'
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['verifier']['files'][0]['sha256'] = '0'*64
+invoke(invalid, ok=False)
+invalid = copy.deepcopy(bundle); invalid['base_commit'] = base[:7]
+invoke(invalid, ok=False)
+invoke(bundle, extra={'OMS_HARNESS_CHILD': '1'}, ok=False)
+invoke(bundle, extra={'OMS_HARNESS_DELEGATE_DEPTH': '1'}, ok=False)
+invoke(bundle, flags=('--patch', 'fake.patch'), ok=False)
+invoke(bundle, payload=b'{"schema":1,"schema":1}', ok=False)
+invoke(bundle, payload=b'{"schema":NaN}', ok=False)
+invoke(bundle, payload=b' '*(4*1024*1024+1), ok=False)
+# Actual read producers index an empty ancillary patch, never a product.
+ancillary = repo / index()[-1]['patch']
+for data in (b'nonempty diff', b'changed ancillary'):
+    ancillary.write_bytes(data)
+    invoke(bundle, ok=False)
+ancillary.write_bytes(b'')
+# Even a matching digest cannot turn a nonempty ancillary diff into read proof.
+index_file = repo / '.oms/artifacts/index.jsonl'
+index_bytes = index_file.read_bytes()
+records = [json.loads(line) for line in index_bytes.splitlines()]
+ancillary.write_bytes(b'diff --git a/file.txt b/file.txt\n')
+records[-1]['patch_sha256'] = h(ancillary.read_bytes())
+index_file.write_text(''.join(json.dumps(row)+'\n' for row in records))
+invoke(bundle, ok=False)
+index_file.write_bytes(index_bytes); ancillary.write_bytes(b'')
+invalid = copy.deepcopy(bundle)
+invalid['verifier']['command'] = 'true # verify.sh'
+invalid['original_contract']['verify'] = invalid['verifier']['command']
+invoke(invalid, ok=False)
+# Readers reject every unsafe leaf/ancestor without blocking on a FIFO.
+artifact = repo / bundle['research']['artifact']['path']
+raw = artifact.read_bytes()
+linked = artifact.with_suffix('.copy')
+linked.write_bytes(raw)
+artifact.unlink(); artifact.symlink_to(linked.name)
+invoke(bundle, ok=False)
+artifact.unlink(); os.link(linked, artifact)
+invoke(bundle, ok=False)
+artifact.unlink(); artifact.write_bytes(raw)
+linked.unlink()
+if hasattr(os, 'mkfifo'):
+    artifact.unlink(); os.mkfifo(artifact)
+    invoke(bundle, ok=False)
+    artifact.unlink(); artifact.write_bytes(raw)
+original_dir = artifact.parent
+moved_dir = original_dir.with_name('research-real')
+original_dir.rename(moved_dir); original_dir.symlink_to(moved_dir.name, target_is_directory=True)
+invoke(bundle, ok=False)
+original_dir.unlink(); moved_dir.rename(original_dir)
+# Exact live/unproven markers veto even a complete bundle.
+markers = repo / '.oms/delegations'; markers.mkdir(exist_ok=True)
+marker = markers / 'exact.json'
+marker.write_text(json.dumps({'schema': 1, 'id': 'exact', 'pid': os.getpid(),
+                              'task_id': bundle['task_id'], 'lease_id': bundle['lease_id']}))
+invoke(bundle, ok=False)
+marker.write_text(json.dumps({'schema': 1, 'id': 'exact', 'pid': 'unknown',
+                              'task_id': bundle['task_id'], 'lease_id': bundle['lease_id']}))
+invoke(bundle, ok=False); marker.unlink()
+# Access and failure provenance cannot be laundered by parent adoption.
+events = repo / '.oms/lifecycle/events.jsonl'
+event_bytes = events.read_bytes()
+for mode in ('write', 'failed'):
+    records = [json.loads(line) for line in event_bytes.splitlines()]
+    for row in records:
+        if row.get('attempt_id') == bundle['research']['attempt_id']:
+            if mode == 'write' and row['event_type'] == 'attempt.created':
+                row['refs']['panel_access'] = 'write'
+            if mode == 'failed' and row.get('to_state') == 'done':
+                row['to_state'] = 'failed'
+    events.write_text(''.join(json.dumps(r)+'\n' for r in records))
+    invoke(bundle, ok=False)
+events.write_bytes(event_bytes)
+assert plan_path.read_bytes() == before
+# The active plan itself uses the bounded no-follow reader on this route.
+backup = plan_path.with_name('plan.backup')
+plan_path.rename(backup)
+plan_path.symlink_to(backup.name)
+invoke(bundle, ok=False)
+plan_path.unlink(); backup.rename(plan_path)
+backup.write_bytes(before)
+plan_path.unlink(); os.link(backup, plan_path)
+invoke(bundle, ok=False)
+plan_path.unlink(); plan_path.write_bytes(before); backup.unlink()
+if hasattr(os, 'mkfifo'):
+    plan_path.unlink(); os.mkfifo(plan_path)
+    invoke(bundle, ok=False)
+    plan_path.unlink(); plan_path.write_bytes(before)
+plan_path.write_bytes(b'{"plan_id":"duplicate",' + before.lstrip()[1:])
+invoke(bundle, ok=False)
+plan_path.write_bytes(before)
+# Crash exactly after the durable receipt write, before atomic plan replace.
+injection = repo / '.oms/test-injection'
+(injection / 'sitecustomize.py').write_text('''import os
+original = os.replace
+def replace(src, dst, *args, **kwargs):
+    if str(dst).endswith("tasks.json"):
+        raise OSError("fixture interruption after receipt persistence")
+    return original(src, dst, *args, **kwargs)
+os.replace = replace
+''')
+receipts_before = set((repo / '.oms/plan/completions').glob('*.json'))
+crash = invoke(bundle, extra={'PYTHONPATH': str(injection)}, ok=False)
+assert 'fixture interruption after receipt persistence' in crash, crash
+assert plan_path.read_bytes() == before
+assert len(set((repo / '.oms/plan/completions').glob('*.json')) - receipts_before) == 1
+invoke(bundle)
+done = plan()['tasks'][bundle['task_id']]
+assert done['completion_kind'] == 'research-accepted' and done['state'] == 'done'
+assert done['artifact'] == bundle['research']['artifact']['path'] and not done['patch']
+receipt = json.loads((repo / done['completion_receipt']['path']).read_bytes())
+verification = receipt['verification']
+assert verification['exit'] == 0 and verification['output_bytes'] == len(b'bounded verifier output\n')
+assert verification['output_sha256'] == h(b'bounded verifier output\n')
+assert 'bounded verifier output' not in json.dumps(receipt)
+
+assert 'landing' not in done and 'landed_commit' not in done
+stable = plan_path.read_bytes(); invoke(bundle); assert plan_path.read_bytes() == stable
+# Every first capture is the full canonical EOF; blobs retain the exact bytes.
+completion_core = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+proof = receipt['snapshot']['provenance']
+assert proof['schema'] == 1 and proof['room_id'] == room
+for kind in ('room', 'lifecycle'):
+    item = proof[kind]
+    prefix = (repo / item['path']).read_bytes()
+    assert prefix == (repo / item['source']).read_bytes()
+    assert h(prefix) == item['sha256'] and len(prefix) == item['bytes']
+    assert len(prefix.splitlines()) == item['rows']
+    if os.name != 'nt': assert stat.S_IMODE((repo / item['path']).stat().st_mode) == 0o600
+# Each captured file is rehashed even when parsed rows are cached. Exact JSONL
+# row boundaries permit shorter/extended prefixes to share parsed rows only.
+scope = completion_core['load_prefixes'].__globals__
+original_stream_rows = scope['stream_rows']
+original_cache_limit = scope['MAX_PREFIX_CACHE']
+life_raw = (repo / proof['lifecycle']['path']).read_bytes()
+life_lines = life_raw.splitlines(keepends=True)
+assert len(life_lines) >= 3
+room_raw = (repo / proof['room']['path']).read_bytes()
+def variant(raw, count=None):
+    changed = copy.deepcopy(proof)
+    item = changed['lifecycle']
+    digest = h(raw)
+    item.update(path='.oms/plan/completion-prefixes/' + digest + '.jsonl',
+                sha256=digest, bytes=len(raw), rows=raw.count(b'\n') if count is None else count)
+    (repo / item['path']).write_bytes(raw)
+    capture = completion_core['encoded']({k: v for k, v in changed.items() if k != 'capture'})
+    digest = h(capture)
+    changed['capture'] = {'path': '.oms/plan/completion-captures/' + digest + '.json', 'sha256': digest}
+    (repo / changed['capture']['path']).write_bytes(capture)
+    return changed
+short_raw, next_raw = life_lines[0], b''.join(life_lines[:2])
+short, next_prefix = variant(short_raw), variant(next_raw)
+parsed_lengths = []
+def counted_rows(raw):
+    parsed_lengths.append(len(raw))
+    return original_stream_rows(raw)
+scope['stream_rows'] = counted_rows
+try:
+    scope['reset_streams']()
+    scope['load_prefixes'](str(repo), short)
+    parsed_lengths.clear()
+    scope['load_prefixes'](str(repo), next_prefix)
+    assert parsed_lengths == [len(life_lines[1])], parsed_lengths
+    parsed_lengths.clear()
+    scope['load_prefixes'](str(repo), short)
+    assert parsed_lengths == [], 'an exact cached prefix was reparsed'
+    short_path = repo / short['lifecycle']['path']
+    short_path.write_bytes(short_raw[:-2] + bytes([short_raw[-2] ^ 1]) + short_raw[-1:])
+    try:
+        try: scope['load_prefixes'](str(repo), short)
+        except ValueError: pass
+        else: assert False, 'a changed cached prefix escaped its independent hash read'
+    finally:
+        short_path.write_bytes(short_raw)
+    scope['reset_streams']()
+    scope['load_prefixes'](str(repo), next_prefix)
+    parsed_lengths.clear()
+    scope['load_prefixes'](str(repo), short)
+    assert parsed_lengths == [], 'a shorter complete-row prefix was reparsed'
+    mixed_short_raw = life_lines[0][:-1] + b'\r' + life_lines[1][:-1] + b'\r\n'
+    mixed_full_raw = mixed_short_raw + life_lines[2]
+    mixed_short, mixed_full = variant(mixed_short_raw, 2), variant(mixed_full_raw, 3)
+    scope['reset_streams']()
+    scope['load_prefixes'](str(repo), mixed_full)
+    parsed_lengths.clear()
+    scope['load_prefixes'](str(repo), mixed_short)
+    assert parsed_lengths == [], 'mixed CR/CRLF complete rows were not reused'
+    assert len(scope['_PREFIXES'][(str(repo), mixed_short['lifecycle']['path'],
+                                   mixed_short['lifecycle']['sha256'])][1]) == 2
+    room_rows = [json.loads(line) for line in room_raw.splitlines()]
+    for invalid_stamp in ('2026-02-30T00:00:00Z', '2026-10-09T25:00:00Z',
+                          '2026-1-09T00:00:00Z', '2026-10-09T00:00:00+00:00'):
+        invalid_rows = copy.deepcopy(room_rows)
+        invalid_rows[0]['ts'] = invalid_stamp
+        try: scope['room_records'](invalid_rows, room)
+        except ValueError: pass
+        else: assert False, 'noncanonical room timestamp entered a reused prefix'
+    low_year = '0001-01-01T00:00:00Z'
+    old_roundtrip = datetime.datetime.strptime(low_year, '%Y-%m-%dT%H:%M:%SZ')
+    old_accepts = old_roundtrip.strftime('%Y-%m-%dT%H:%M:%SZ') == low_year
+    low_year_rows = copy.deepcopy(room_rows)
+    low_year_rows[0]['ts'] = low_year
+    try: scope['room_records'](low_year_rows, room)
+    except ValueError: assert not old_accepts, 'low-year timestamp tightened from original parser'
+    else: assert old_accepts, 'low-year timestamp widened from original parser'
+    altered = json.loads(short_raw)
+    altered['ts'] = '2026-10-09T00:00:00Z'
+    divergent_raw = completion_core['encoded'](altered)
+    divergent = variant(divergent_raw)
+    parsed_lengths.clear()
+    scope['load_prefixes'](str(repo), divergent)
+    assert parsed_lengths == [len(divergent_raw)], 'divergent bytes reused unrelated parsed rows'
+    for invalid in (variant(short_raw, 2), variant(short_raw[:-1], 1)):
+        try: scope['load_prefixes'](str(repo), invalid)
+        except ValueError: pass
+        else: assert False, 'invalid cached row count or mid-row boundary was accepted'
+    scope['reset_streams']()
+    scope['MAX_PREFIX_CACHE'] = len(room_raw) + len(next_raw) + len(life_raw)
+    scope['load_prefixes'](str(repo), short)
+    scope['load_prefixes'](str(repo), next_prefix)
+    parsed_lengths.clear()
+    scope['load_prefixes'](str(repo), proof)
+    assert parsed_lengths == [len(life_raw) - len(next_raw)], 'eviction lost the exact parsed spine'
+    assert sum(len(value[0]) for value in scope['_PREFIXES'].values()) <= scope['MAX_PREFIX_CACHE']
+finally:
+    scope['stream_rows'] = original_stream_rows
+    scope['MAX_PREFIX_CACHE'] = original_cache_limit
+    scope['reset_streams']()
+# Rehashing a shortened blob/ref cannot replace the separate trusted capture.
+def forged_receipt(mutator):
+    forged = copy.deepcopy(receipt)
+    mutator(forged)
+    verification = dict(forged['verification']); verification.pop('proof_sha256')
+    verification['snapshot_sha256'] = h(completion_core['encoded'](forged['snapshot']))
+    forged['verification']['proof_sha256'] = h(completion_core['encoded'](verification))
+    raw = completion_core['encoded'](forged)
+    pointer = {'path': '.oms/plan/completions/' + h(raw) + '.json', 'sha256': h(raw)}
+    (repo / pointer['path']).write_bytes(raw)
+    modified = plan()
+    modified['tasks'][bundle['task_id']] = completion_core['completion_task'](forged, pointer)
+    plan_path.write_text(json.dumps(modified))
+    rejected = ap('show', '--id', bundle['task_id'], ok=False)
+    plan_path.write_bytes(stable)
+    (repo / pointer['path']).unlink()
+    return rejected
+
+def shorten(forged):
+    item = forged['snapshot']['provenance']['room']
+    raw = (repo / item['path']).read_bytes().splitlines(keepends=True)[0]
+    path = '.oms/plan/completion-prefixes/' + h(raw) + '.jsonl'
+    (repo / path).write_bytes(raw)
+    item.update(path=path, sha256=h(raw), bytes=len(raw), rows=1)
+assert 'complete capture' in forged_receipt(shorten)
+for key, value in (('schema', 2), ('schema', True), ('repository_sha256', '0'*64),
+                   ('room_id', 'room-'+'0'*12)):
+    assert forged_receipt(lambda r, k=key, v=value: r['snapshot']['provenance'].__setitem__(k, v))
+assert forged_receipt(lambda r: r['snapshot'].pop('provenance'))
+assert forged_receipt(lambda r: r['snapshot']['provenance']['room'].__setitem__('bytes', True))
+assert forged_receipt(lambda r: r['snapshot']['provenance']['lifecycle'].__setitem__('source', '.oms/foreign.jsonl'))
+# Even a fully rehashed fake capture must pass stream sequence/ancestor checks.
+def malformed_prefix(forged, kind, mode):
+    p = forged['snapshot']['provenance']; item = p[kind]
+    raw = (repo / item['path']).read_bytes()
+    records = [json.loads(line) for line in raw.splitlines()]
+    if mode == 'mid-row': raw = raw[:-2]
+    elif mode == 'missing': records.pop(1)
+    elif mode == 'duplicate': records.insert(1, records[0])
+    elif mode == 'duplicate-json':
+        raw = (completion_core['encoded'](records[0]).replace(b'"schema":1', b'"schema":1,"schema":1', 1) +
+               b''.join(raw.splitlines(keepends=True)[1:]))
+    elif mode == 'nonfinite':
+        records[0]['unexpected'] = float('nan')
+    elif mode == 'ancestor':
+        for row in records:
+            if row.get('attempt_id') == bundle['research']['attempt_id'] and row['event_type'] == 'attempt.created':
+                row['parent_attempt_id'] = 'att_'+'0'*32
+    elif mode == 'access':
+        for row in records:
+            if row.get('attempt_id') == bundle['research']['attempt_id'] and row['event_type'] == 'attempt.created':
+                row['refs']['panel_access'] = 'write'
+    if mode not in ('mid-row', 'duplicate-json'):
+        raw = b''.join((json.dumps(row, allow_nan=True)+'\n').encode() for row in records)
+    item.update(path='.oms/plan/completion-prefixes/' + h(raw) + '.jsonl', sha256=h(raw),
+                bytes=len(raw), rows=len(records))
+    (repo / item['path']).write_bytes(raw)
+    capture = completion_core['encoded']({k: v for k, v in p.items() if k != 'capture'})
+    p['capture'] = {'path': '.oms/plan/completion-captures/' + h(capture) + '.json', 'sha256': h(capture)}
+    (repo / p['capture']['path']).write_bytes(capture)
+for kind, mode in (('room', 'mid-row'), ('room', 'missing'), ('room', 'duplicate'),
+                   ('room', 'duplicate-json'), ('lifecycle', 'nonfinite'),
+                   ('lifecycle', 'missing'), ('lifecycle', 'duplicate'),
+                   ('lifecycle', 'ancestor'), ('lifecycle', 'access')):
+    assert forged_receipt(lambda r, k=kind, m=mode: malformed_prefix(r, k, m))
+for kind in ('room', 'lifecycle'):
+    path = repo / proof[kind]['path']; original_prefix = path.read_bytes()
+    middle = len(original_prefix)//2
+    path.write_bytes(original_prefix[:middle] + bytes([original_prefix[middle] ^ 1]) + original_prefix[middle+1:])
+    ap('show', '--id', bundle['task_id'], ok=False)
+    path.write_bytes(original_prefix)
+# Prefix objects use the same bounded no-follow reader as other evidence.
+prefix_path = repo / proof['lifecycle']['path']; prefix_raw = prefix_path.read_bytes()
+prefix_copy = prefix_path.with_suffix('.copy'); prefix_copy.write_bytes(prefix_raw)
+prefix_path.unlink(); prefix_path.symlink_to(prefix_copy.name)
+ap('show', '--id', bundle['task_id'], ok=False)
+prefix_path.unlink(); os.link(prefix_copy, prefix_path)
+ap('show', '--id', bundle['task_id'], ok=False)
+prefix_path.unlink()
+if hasattr(os, 'mkfifo'):
+    os.mkfifo(prefix_path); ap('show', '--id', bundle['task_id'], ok=False); prefix_path.unlink()
+prefix_path.write_bytes(b' '*(16*1024*1024+1))
+ap('show', '--id', bundle['task_id'], ok=False)
+prefix_path.write_bytes(prefix_raw); prefix_path.chmod(0o600); prefix_copy.unlink()
+# Missing/duplicate canonical sequences cannot enter a fresh EOF capture.
+sequence_candidate = setup()
+for source, mode in ((events, 'missing'), (events, 'duplicate'),
+                     (room_events, 'missing'), (room_events, 'duplicate')):
+    original_stream = source.read_bytes(); records = original_stream.splitlines(keepends=True)
+    if mode == 'missing': records.pop(1)
+    else: records.insert(1, records[0])
+    source.write_bytes(b''.join(records))
+    invoke(sequence_candidate, ok=False)
+    source.write_bytes(original_stream)
+# Stop immediately before plan replacement; actual competing writers must
+# enter their own lock wait, then append only after completed publication.
+barrier_bundle = setup()
+barrier_ready = injection / 'publication-ready'; barrier_release = injection / 'publication-release'
+room_wait = injection / 'room-wait'; lifecycle_wait = injection / 'lifecycle-wait'
+(injection / 'sitecustomize.py').write_text('''import inspect, os, time
+from pathlib import Path
+original_replace, original_sleep = os.replace, time.sleep
+def replace(src, dst, *args, **kwargs):
+    if str(dst).endswith("tasks.json") and os.environ.get("OMS_FIXTURE_READY"):
+        Path(os.environ["OMS_FIXTURE_READY"]).touch()
+        deadline = time.monotonic() + 30
+        while not Path(os.environ["OMS_FIXTURE_RELEASE"]).exists():
+            if time.monotonic() > deadline: raise OSError("publication barrier timed out")
+            original_sleep(.01)
+    return original_replace(src, dst, *args, **kwargs)
+def sleep(seconds):
+    marker = os.environ.get("OMS_FIXTURE_LIFECYCLE_WAIT")
+    if marker and any(f.function == "file_lock" and f.filename.endswith("agent-events.py") for f in inspect.stack()):
+        Path(marker).touch()
+    return original_sleep(seconds)
+os.replace, time.sleep = replace, sleep
+''')
+raw = json.dumps(barrier_bundle).encode(); bundle_path = '.oms/artifacts/completion-bundle.json'
+(repo / bundle_path).write_bytes(raw)
+arguments = ['bash', str(root / 'scripts/agent-plan.sh'), '--repo', str(repo), 'accept-research',
+             '--id', barrier_bundle['task_id'], '--lease-id', barrier_bundle['lease_id'],
+             '--expected-state', barrier_bundle['state'], '--expected-plan-sha256', barrier_bundle['plan_sha256'],
+             '--expected-task-sha256', barrier_bundle['task_sha256'], '--completion-bundle', bundle_path,
+             '--expected-completion-bundle-sha256', h(raw)]
+def wait_file(path):
+    deadline = time.monotonic() + 20
+    while not path.exists():
+        assert time.monotonic() < deadline, ('missing fixture barrier', path)
+        time.sleep(.01)
+process = subprocess.Popen(arguments, env=dict(env, PYTHONPATH=str(injection),
+                           OMS_FIXTURE_READY=str(barrier_ready), OMS_FIXTURE_RELEASE=str(barrier_release)),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+wait_file(barrier_ready)
+sleep_wrapper = injection / 'sleep'
+sleep_wrapper.write_text('#!/usr/bin/env bash\n[ -z "${OMS_FIXTURE_ROOM_WAIT:-}" ] || : > "$OMS_FIXTURE_ROOM_WAIT"\nexec "$OMS_FIXTURE_REAL_SLEEP" "$@"\n')
+sleep_wrapper.chmod(0o755)
+waiting_room = subprocess.Popen(['bash', str(root/'scripts/room.sh'), '--repo', str(repo), 'describe',
+                                '--id', room, '--participant', participant, '--label', 'Later owner metadata'],
+                                env=dict(env, PATH=str(injection)+os.pathsep+env['PATH'],
+                                         OMS_FIXTURE_ROOM_WAIT=str(room_wait), OMS_FIXTURE_REAL_SLEEP=shutil.which('sleep')),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+waiting_lifecycle = subprocess.Popen(['bash', str(root/'scripts/agent-events.sh'), '--repo', str(repo),
+                                     'usage', '--tokens', '1', '--attempt', barrier_bundle['research']['attempt_id']],
+                                     env=dict(env, PYTHONPATH=str(injection), OMS_FIXTURE_LIFECYCLE_WAIT=str(lifecycle_wait)),
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+try:
+    wait_file(room_wait); wait_file(lifecycle_wait)
+    assert plan()['tasks'][barrier_bundle['task_id']]['state'] == 'review'
+    assert waiting_room.poll() is None and waiting_lifecycle.poll() is None
+    barrier_release.touch()
+    output, error = process.communicate(timeout=30)
+    assert process.returncode == 0, error
+    assert plan()['tasks'][barrier_bundle['task_id']]['state'] == 'done'
+    for writer in (waiting_room, waiting_lifecycle):
+        output, error = writer.communicate(timeout=30)
+        assert writer.returncode == 0, error
+finally:
+    barrier_release.touch()
+    for child in (process, waiting_room, waiting_lifecycle):
+        if child.poll() is None:
+            try: child.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill(); child.communicate(timeout=5)
+ap('show', '--id', barrier_bundle['task_id']); ap('status', '--json')
+# A resumed main keeps participant ownership; the producer parent may be done.
+terminal_parent = setup()
+call('agent-events.sh', 'transition', '--attempt', main, '--state', 'verifying', '--then', 'review', '--then', 'done')
+assert 'owner binding' in invoke(terminal_parent, ok=False)
+main = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
+            '--ref', 'panel_room_participant=' + participant, '--ref', 'panel_room_id=' + room,
+            '--ref', 'panel_role=main', '--then', 'starting', '--then', 'working')
+env['OMS_PANEL_MAIN_ATTEMPT'] = main
+invoke(terminal_parent)
+assert plan()['tasks'][terminal_parent['task_id']]['state'] == 'done'
+# Later progress on the original parent does not rewrite historical identity.
+call('agent-events.sh', 'usage', '--tokens', '0', '--attempt', participant, '--ref', 'panel_progress=source-reviewed')
+invoke(bundle)
+stable = plan_path.read_bytes()
+invoke(bundle); assert plan_path.read_bytes() == stable
+
+ap('show', '--id', bundle['task_id']); ap('status', '--json')
+(repo / 'file.txt').write_text('Later legitimate source edit\n')
+ap('show', '--id', bundle['task_id']); invoke(bundle)
+(repo / 'file.txt').write_text('base\n')
+# Typed-plan readers reject unsafe plan leaves before decoding any row.
+reader_backup = plan_path.with_name('reader.backup')
+plan_path.rename(reader_backup); plan_path.symlink_to(reader_backup.name)
+ap('show', '--id', bundle['task_id'], ok=False); ap('status', '--json', ok=False)
+plan_path.unlink(); reader_backup.rename(plan_path)
+if hasattr(os, 'mkfifo'):
+    plan_path.unlink(); os.mkfifo(plan_path)
+    ap('show', '--id', bundle['task_id'], ok=False); ap('status', '--json', ok=False)
+    plan_path.unlink(); plan_path.write_bytes(stable)
+# A forged task projection cannot unlock dependencies/counts.
+forged = plan(); forged['tasks'][bundle['task_id']]['completion_receipt']['sha256'] = '0'*64
+plan_path.write_text(json.dumps(forged))
+ap('status', '--json', ok=False); ap('ready', ok=False); ap('retire', '--check', ok=False)
+ap('accept', ok=False)
+assert not (repo / '.oms/acceptance-ran').exists(), 'forged completion executed goal acceptance'
+plan_path.write_bytes(stable)
+ap('accept')
+assert (repo / '.oms/acceptance-ran').read_text() == 'accepted'
+(repo / '.oms/acceptance-ran').unlink()
+# Actual failing verifier and concurrent plan/source drift never create done.
+verification_source = (repo / 'verify.sh').read_bytes()
+(repo / 'verify.sh').write_text('exit 27\n')
+failed_execution = setup()
+assert 'verifier failed (exit 27)' in invoke(failed_execution, ok=False)
+assert plan()['tasks'][failed_execution['task_id']]['state'] != 'done'
+(repo / 'verify.sh').write_bytes(verification_source)
+(repo / 'source-drift.sh').write_text('printf changed >> file.txt\n')
+for command in ('bash verify.sh; false', 'bash verify.sh; bash source-drift.sh',
+                'bash verify.sh; python3 drift.py'):
+    if 'drift.py' in command:
+        (repo / 'drift.py').write_text('import json\np=".oms/plan/tasks.json"\nd=json.load(open(p))\nd["goal"]="drifted"\njson.dump(d,open(p,"w"))\n')
+    candidate = setup(command)
+    invoke(candidate, ok=False)
+    assert plan()['tasks'][candidate['task_id']]['state'] != 'done'
+    if 'source-drift.sh' in command:
+        subprocess.run(['git', '-C', str(repo), 'checkout', '-q', '--', 'file.txt'], check=True)
+# Comments cannot satisfy the frozen verifier-input execution contract.
+commented = setup('true # verify.sh')
+assert 'verifier' in invoke(commented, ok=False)
+# An actual writer can run during verification, but relevant READ changes
+# (including a conflicting ref subsequently restored) cannot be accepted.
+(repo / 'read-ref-drift.py').write_text('''import os, subprocess
+for access in ("write", "read"):
+    subprocess.run(["bash", os.environ["OMS_FIXTURE_EVENTS_SCRIPT"], "--repo", os.getcwd(),
+                    "usage", "--tokens", "0", "--attempt", os.environ["OMS_FIXTURE_READ_ATTEMPT"],
+                    "--ref", "panel_access="+access], check=True)
+''')
+read_drift = setup('bash verify.sh; python3 read-ref-drift.py')
+read_drift['source_envelope'].append('read-ref-drift.py')
+read_drift['source_manifest'].append(entry('read-ref-drift.py'))
+read_drift['verifier']['files'].append(entry('read-ref-drift.py'))
+original_stream = events.read_bytes()
+rejected = invoke(read_drift, extra={'OMS_FIXTURE_EVENTS_SCRIPT': str(root/'scripts/agent-events.sh'),
+                                   'OMS_FIXTURE_READ_ATTEMPT': read_drift['research']['attempt_id']}, ok=False)
+assert 'read-access attempt provenance' in rejected or 'READ' in rejected, rejected
+assert plan()['tasks'][read_drift['task_id']]['state'] != 'done'
+events.write_bytes(original_stream); (repo/'read-ref-drift.py').unlink()
+# Frozen verifier inputs may include an actual sourced dependency.
+(repo / 'extra-input.sh').write_text('. ./frozen-lib.sh\n')
+(repo / 'frozen-lib.sh').write_text('test -s file.txt\n')
+with_input = setup('bash verify.sh; bash extra-input.sh')
+for path in ('extra-input.sh', 'frozen-lib.sh'):
+    with_input['source_envelope'].append(path)
+    with_input['source_manifest'].append(entry(path))
+    with_input['verifier']['files'].append(entry(path))
+invalid = copy.deepcopy(with_input); invalid['verifier']['files'][-1]['sha256'] = '0'*64
+invoke(invalid, ok=False)
+invoke(with_input)
+(repo / 'extra-input.sh').unlink(); (repo / 'frozen-lib.sh').unlink()
+# An empty legacy verifier requires explicit adoption.
+candidate = setup(empty_verify=True)
+invalid = copy.deepcopy(candidate); invalid['verifier']['adopted'] = False
+invoke(invalid, ok=False)
+invoke(candidate)
+(repo / 'drift.py').unlink()
+(repo / 'source-drift.sh').unlink()
+# Unrelated valid index/lifecycle appends do not change relevant proof.
+(repo / 'append-proof.py').write_text('''import json
+for path in (".oms/artifacts/index.jsonl", ".oms/lifecycle/events.jsonl"):
+    rows = [json.loads(line) for line in open(path)]
+    if "artifacts" in path:
+        row = dict(rows[0], event_id="unrelated-valid-index", task_id="unrelated")
+        with open(path, "a") as out: out.write(json.dumps(row)+"\\n")
+    else:
+        rows = [r for r in rows if r.get("attempt_id") == rows[-1].get("attempt_id")]
+        for row in rows:
+            row["attempt_id"] = "att_" + "a"*32
+            row["event_id"] = "evt_" + str(row.get("seq", 0))
+            with open(path, "a") as out: out.write(json.dumps(row)+"\\n")
+''')
+appended = setup('bash verify.sh; python3 append-proof.py')
+invoke(appended)
+(repo / 'append-proof.py').unlink()
+# A satisfied original retains failed/rejected evidence and reason history;
+# successor provenance comes from the real patch-land command, never labels.
+ap('add', '--id', 'original', '--title', 'Deliver complete source product', '--allowed', 'file.txt,verify.sh,obsolete.txt', '--verify', 'bash verify.sh')
+ap('claim', '--id', 'original', '--provider', 'codex', extra={'OMS_PANEL_MAIN_ATTEMPT': main, 'OMS_ROOM_PARTICIPANT': participant})
+rejected_artifact = '.oms/artifacts/rejected.md'
+rejected_patch = '.oms/artifacts/rejected.patch'
+(repo / rejected_artifact).write_text('Original failed candidate evidence\n')
+(repo / rejected_patch).write_text('Rejected original candidate bytes\n')
+ap('review', '--id', 'original', '--artifact', rejected_artifact, '--patch', rejected_patch)
+ap('block', '--id', 'original', '--reason', 'Rejected candidate preserved')
+# Existing legacy task history is part of the exact original contract.
+legacy = plan()
+legacy['tasks']['original']['history'] = [{'schema': 1, 'kind': 'rejected', 'reason': 'Original verifier failed',
+                                         'artifact': ref(rejected_artifact), 'patch': ref(rejected_patch)}]
+plan_path.write_text(json.dumps(legacy))
+ap('add', '--id', 'successor', '--title', 'Implement full replacement', '--allowed', 'file.txt,verify.sh,obsolete.txt', '--verify', 'bash verify.sh')
+ap('claim', '--id', 'successor', '--provider', 'codex')
+patch_path = '.oms/artifacts/product.patch'
+(repo / 'file.txt').write_text('base\nactual replacement\n')
+(repo / 'obsolete.txt').unlink()
+if os.name != 'nt':
+    (repo / 'verify.sh').chmod(0o755)
+(repo / patch_path).write_bytes(subprocess.check_output(['git', '-C', str(repo), 'diff', '--binary']))
+subprocess.run(['git', '-C', str(repo), 'checkout', '-q', '--', 'file.txt', 'verify.sh', 'obsolete.txt'], check=True)
+report = '.oms/artifacts/product-review.md'; (repo / report).write_text('Actual bounded product review\n')
+ap('review', '--id', 'successor', '--artifact', report, '--patch', patch_path)
+call('patch-land.sh', '--plan-task', 'successor', '--verify', 'bash verify.sh', '--allow-verifier-change')
+current = plan(); original = current['tasks']['original']; successor = current['tasks']['successor']
+landings = [json.loads(line) for line in (repo / '.oms/landings.jsonl').read_bytes().splitlines()]
+intent = [r for r in landings if r['event'] == 'intent'][-1]
+admission = [r for r in index() if r['kind'] == 'patch-admit'][-1]
+landed = [r for r in index() if r['kind'] == 'patch-land'][-1]
+assert 'patch' not in admission and admission['patch_external']['owned'] is False
+assert admission['patch_external']['sha256'] == admission['patch_sha256'] == intent['patch_sha']
+assert 'patch_external' not in landed and (repo / landed['patch']).read_bytes() == (repo / intent['patch']).read_bytes()
+satisfied = {'schema': 1, 'kind': 'satisfied-by', 'plan_id': current['plan_id'], 'task_id': 'original',
+             'task_sha256': engine['digest'](original), 'plan_sha256': h(plan_path.read_bytes()),
+             'state': original['state'], 'lease_id': original['lease_id'],
+             'owner': {'provider': 'codex', 'participant': participant, 'parent_provider': 'codex'},
+             'original_contract': engine['projection'](original), 'review_summary': 'Full original product independently reviewed',
+             'reviewed_obligations': ['product'], 'requirements': [
+                 {'id': 'product', 'obligation': original['title'], 'deliverable': 'Complete replacement file',
+                  'source_paths': ['file.txt', 'verify.sh', 'obsolete.txt'], 'evidence': [ref(admission['artifact'])]}],
+             'base_commit': base, 'source_envelope': ['file.txt', 'verify.sh', 'obsolete.txt'],
+             'source_manifest': [entry('file.txt'), entry('verify.sh'), entry('obsolete.txt')],
+             'verifier': {'command': 'bash verify.sh', 'files': [entry('verify.sh')], 'adopted': False,
+                          'review_summary': 'Actual command and frozen verifier reviewed'},
+             'successor': {'product_kind': 'patch-land', 'plan_id': current['plan_id'], 'task_id': 'successor',
+                           'task_sha256': engine['digest'](successor), 'original_contract': engine['projection'](successor),
+                           'landing_id': intent['landing_id'], 'admission_event_id': admission['event_id'],
+                           'land_event_id': landed['event_id']}}
+# Admission diagnostics cannot replace exact owned landing and product proof.
+index_path = repo / '.oms/artifacts/index.jsonl'
+index_raw = index_path.read_bytes()
+for case in ('missing', 'duplicate', 'kind', 'exit', 'plan', 'task', 'digest',
+             'external-missing-digest', 'external-malformed-digest', 'external-digest',
+             'external-owned', 'external-owned-number', 'external-fields', 'external-name',
+             'external-and-owned', 'external-and-empty-owned', 'land-external'):
+    records = index()
+    row = next(r for r in records if r['event_id'] == admission['event_id'])
+    if case == 'missing': records.remove(row)
+    elif case == 'duplicate': records.append(copy.deepcopy(row))
+    elif case == 'kind': row['kind'] = 'patch-land'
+    elif case == 'exit': row['exit'] = 1
+    elif case == 'plan': row['plan_id'] = 'plan_' + '0'*32
+    elif case == 'task': row['task_id'] = 'original'
+    elif case == 'digest': row['patch_sha256'] = '0'*64
+    elif case == 'external-missing-digest': row['patch_external'].pop('sha256')
+    elif case == 'external-malformed-digest': row['patch_external']['sha256'] = 'invalid'
+    elif case == 'external-digest': row['patch_external']['sha256'] = '0'*64
+    elif case == 'external-owned': row['patch_external']['owned'] = True
+    elif case == 'external-owned-number': row['patch_external']['owned'] = 0
+    elif case == 'external-fields': row['patch_external']['path'] = intent['patch']
+    elif case == 'external-name': row['patch_external']['name'] = None
+    elif case == 'external-and-owned': row['patch'] = landed['patch']
+    elif case == 'external-and-empty-owned': row['patch'] = ''
+    elif case == 'land-external':
+        row = next(r for r in records if r['event_id'] == landed['event_id'])
+        row.pop('patch'); row['patch_external'] = copy.deepcopy(admission['patch_external'])
+    index_path.write_bytes(b''.join((json.dumps(r)+'\n').encode() for r in records))
+    rejected = invoke(satisfied, action='satisfy', ok=False)
+    assert any(message in rejected for message in ('successor indexed receipt missing',
+               'successor admission', 'malformed or unsupported object fields',
+               'invalid SHA-256', 'invalid external patch name')), (case, rejected)
+    assert h(plan_path.read_bytes()) == satisfied['plan_sha256'], case
+    index_path.write_bytes(index_raw)
+for path in (repo / admission['artifact'], repo / intent['patch']):
+    raw = path.read_bytes()
+    for altered in (None, raw + b'altered proof\n'):
+        # Keep the original inode for the following valid-product probe;
+        # replacing a native publication with equal bytes loses ownership.
+        preserved = path.with_name(path.name + '.negative-fixture')
+        path.rename(preserved)
+        try:
+            if altered is not None: path.write_bytes(altered)
+            invoke(satisfied, action='satisfy', ok=False)
+        finally:
+            if path.exists(): path.unlink()
+            preserved.rename(path)
+# Existing canonical admissions remain valid against the same real landing.
+# Probe the product reader without publishing a receipt with modified history.
+records = index()
+row = next(r for r in records if r['event_id'] == admission['event_id'])
+row.pop('patch_external'); row['patch'] = landed['patch']
+index_path.write_bytes(b''.join((json.dumps(r)+'\n').encode() for r in records))
+legacy_core = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+legacy_core['satisfaction'](str(repo), satisfied, current['tasks'], current['plan_id'])
+index_path.write_bytes(index_raw)
+# A fresh, truthful manifest of unrelated bytes still lacks product proof.
+(repo / 'file.txt').write_text('unproven replacement\n')
+invalid = copy.deepcopy(satisfied)
+invalid['source_manifest'][0] = entry('file.txt')
+assert 'source content/mode differs from successor product' in invoke(invalid, action='satisfy', ok=False)
+(repo / 'file.txt').write_text('base\nactual replacement\n')
+for key, val in [('plan_id', 'plan_'+'0'*32), ('task_id', 'original'), ('landing_id', 'false'), ('task_sha256', '0'*64)]:
+    invalid = copy.deepcopy(satisfied); invalid['successor'][key] = val
+    invoke(invalid, action='satisfy', ok=False)
+# Independently failed and cyclic successor rows fail even with fresh CAS.
+valid_plan = plan_path.read_bytes()
+for case in ('failed', 'cycle'):
+    changed = plan()
+    if case == 'failed':
+        changed['tasks']['successor']['state'] = 'blocked'
+    else:
+        changed['tasks']['successor']['depends'] = ['original']
+    plan_path.write_text(json.dumps(changed))
+    invalid = copy.deepcopy(satisfied)
+    invalid['plan_sha256'] = h(plan_path.read_bytes())
+    invalid['successor']['task_sha256'] = engine['digest'](changed['tasks']['successor'])
+    invalid['successor']['original_contract'] = engine['projection'](changed['tasks']['successor'])
+    invoke(invalid, action='satisfy', ok=False)
+plan_path.write_bytes(valid_plan)
+invalid = copy.deepcopy(satisfied); invalid['requirements'] = []
+invoke(invalid, action='satisfy', ok=False)
+(repo / 'obsolete.txt').write_text('Stale deletion\n')
+invoke(satisfied, action='satisfy', ok=False)
+(repo / 'obsolete.txt').unlink()
+if os.name != 'nt':
+    (repo / 'verify.sh').chmod(0o644)
+    invoke(satisfied, action='satisfy', ok=False)
+    (repo / 'verify.sh').chmod(0o755)
+(repo / 'file.txt').write_text('stale product\n')
+invoke(satisfied, action='satisfy', ok=False)
+(repo / 'file.txt').write_text('base\nactual replacement\n')
+# Computing an uncommitted product keeps Git objects, refs and index untouched.
+def git_controls():
+    common = Path(subprocess.check_output(['git', '-C', str(repo), 'rev-parse', '--git-common-dir']).decode().strip())
+    if not common.is_absolute(): common = repo / common
+    objects = {str(path.relative_to(common / 'objects')): h(path.read_bytes())
+               for path in (common / 'objects').rglob('*') if path.is_file()}
+    refs = subprocess.check_output(['git', '-C', str(repo), 'show-ref'])
+    return objects, refs, h((common / 'index').read_bytes())
+controls = git_controls()
+invoke(satisfied, action='satisfy')
+assert git_controls() == controls, 'satisfaction mutated shared Git controls'
+closed = plan()['tasks']['original']
+assert closed['completion_kind'] == 'satisfied-by' and closed['reason'] == 'Rejected candidate preserved'
+assert closed.get('patch', '') == original.get('patch', '') and 'landing' not in closed
+assert closed['history'][:-1] == original['history']
+assert closed['artifact'] == rejected_artifact and closed['patch'] == rejected_patch
+assert closed['history'][-1]['original_state'] == 'blocked'
+invoke(satisfied, action='satisfy')
+ap('status', '--json')
+(repo / 'file.txt').write_text('Later legitimate product edit\n')
+ap('show', '--id', 'original'); invoke(satisfied, action='satisfy')
+# Ordinary committed successors use the existing typed commit-finish route.
+(repo / 'file.txt').write_text('base\ncommit replacement\n')
+ap('add', '--id', 'commit-original', '--title', 'Complete committed replacement',
+   '--allowed', 'file.txt,verify.sh,obsolete.txt', '--verify', 'bash verify.sh')
+ap('claim', '--id', 'commit-original', '--provider', 'codex')
+ap('review', '--id', 'commit-original', '--artifact', rejected_artifact, '--patch', rejected_patch)
+ap('block', '--id', 'commit-original', '--reason', 'Original failed committed candidate')
+ap('add', '--id', 'commit-successor', '--title', 'Implement committed replacement',
+   '--allowed', 'file.txt,verify.sh,obsolete.txt', '--verify', 'bash verify.sh')
+ap('claim', '--id', 'commit-successor', '--provider', 'codex')
+commit_patch = '.oms/artifacts/commit-product.patch'
+(repo / commit_patch).write_bytes(subprocess.check_output(['git', '-C', str(repo), 'diff', '--binary', base]))
+commit_artifact = '.oms/artifacts/commit-product.md'
+(repo / commit_artifact).write_text('Reviewed complete committed replacement product\n')
+ap('review', '--id', 'commit-successor', '--artifact', commit_artifact, '--patch', commit_patch)
+subprocess.run(['git', '-C', str(repo), 'add', '-u'], check=True)
+subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'fixture committed product'], env=env, check=True)
+commit = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
+subprocess.run(['git', '-C', str(repo), 'update-ref', 'refs/remotes/origin/main', commit], check=True)
+completion = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+receipt_directory = Path(completion['canonical_land_directory'](str(repo)))
+receipt_directory.mkdir(parents=True, exist_ok=True)
+commit_receipt = receipt_directory / (commit + '-fixture.json')
+passed = {'schema': 1, 'state': 'passed', 'sha': commit, 'remote': 'origin', 'target': 'main',
+          'gate': {'rc': 0}, 'push': {'rc': 0}, 'ci': {'conclusion': 'success'}}
+commit_receipt.write_text(json.dumps(passed))
+ap('finish', '--id', 'commit-successor', '--landed-commit', commit)
+current = plan(); original_commit = current['tasks']['commit-original']; successor_commit = current['tasks']['commit-successor']
+committed = copy.deepcopy(satisfied)
+committed.update(task_id='commit-original', state=original_commit['state'], lease_id=original_commit['lease_id'],
+                 task_sha256=engine['digest'](original_commit), original_contract=engine['projection'](original_commit),
+                 plan_sha256=h(plan_path.read_bytes()), source_manifest=[entry('file.txt'), entry('verify.sh'), entry('obsolete.txt')])
+committed['requirements'][0].update(obligation=original_commit['title'], evidence=[ref(commit_artifact)])
+committed['successor'] = {'product_kind': 'commit', 'plan_id': current['plan_id'], 'task_id': 'commit-successor',
+                          'task_sha256': engine['digest'](successor_commit), 'original_contract': engine['projection'](successor_commit),
+                          'commit_sha': commit, 'land_receipt_sha256': h(commit_receipt.read_bytes())}
+for key, value in [('land_receipt_sha256', '0'*64), ('commit_sha', base), ('plan_id', 'plan_'+'0'*32)]:
+    invalid = copy.deepcopy(committed); invalid['successor'][key] = value
+    invoke(invalid, action='satisfy', ok=False)
+invalid = copy.deepcopy(committed); invalid['successor']['landing_id'] = 'mixed-route'
+invoke(invalid, action='satisfy', ok=False)
+receipt_bytes = commit_receipt.read_bytes()
+for stage in ('ci', 'push'):
+    failed = copy.deepcopy(passed)
+    failed[stage] = {'conclusion': 'failure'} if stage == 'ci' else {'rc': 1}
+    commit_receipt.write_text(json.dumps(failed))
+    invoke(committed, action='satisfy', ok=False)
+commit_receipt.write_bytes(receipt_bytes + b'\n')
+invoke(committed, action='satisfy', ok=False)
+commit_receipt.write_bytes(receipt_bytes)
+other_receipt = receipt_directory / (commit + '-aaa-other.json')
+other_receipt.write_text(json.dumps(dict(passed, request='different-passed-request')))
+(repo / 'file.txt').write_text('foreign or stale content\n')
+invoke(committed, action='satisfy', ok=False)
+(repo / 'file.txt').write_text('base\ncommit replacement\n')
+subprocess.run(['git', '-C', str(repo), 'update-ref', 'refs/remotes/origin/main', base], check=True)
+invoke(committed, action='satisfy', ok=False)
+subprocess.run(['git', '-C', str(repo), 'update-ref', 'refs/remotes/origin/main', commit], check=True)
+invoke(committed, action='satisfy')
+commit_done = plan()['tasks']['commit-original']
+assert commit_done['state'] == 'done' and commit_done['completion_kind'] == 'satisfied-by'
+assert commit_done['artifact'] == rejected_artifact and commit_done['patch'] == rejected_patch
+assert commit_done['history'][:-1] == original_commit.get('history', []) and 'landing' not in commit_done
+invoke(committed, action='satisfy'); ap('status', '--json')
+(repo / 'file.txt').write_text('Later legitimate committed source edit\n')
+ap('show', '--id', 'commit-original'); invoke(committed, action='satisfy')
+# Reactivation archives the identity in history and clears only current refs.
+ap('block', '--id', 'original', '--reason', 'New explicit parent obligation',
+   extra={'OMS_HARNESS_CHILD': '1'}, ok=False)
+ap('block', '--id', 'original', '--reason', 'New explicit parent obligation')
+reactivated = plan()['tasks']['original']
+assert 'completion_kind' not in reactivated and 'completion_receipt' not in reactivated
+assert reactivated['history'][-1]['completion_receipt'] == closed['completion_receipt']
+assert reactivated['history'][:-1] == closed['history']
+ap('reopen', '--id', 'original')
+ap('show', '--id', 'original'); ap('status', '--json')
+# Immutable receipts survive later departure, rejoin and room closure;
+# fresh mutations still reject recycled membership, even with the same owner.
+same_second = setup(); invoke(same_second)
+recycled = setup()
+stamp = next(row['ts'] for row in reversed([json.loads(line) for line in events.read_bytes().splitlines()])
+             if row.get('attempt_id') == same_second['research']['attempt_id'] and row.get('to_state') == 'done')
+(injection / 'sitecustomize.py').write_text(clock_source)
+clock = {'PYTHONPATH': str(injection), 'OMS_FIXTURE_TIMESTAMP': stamp}
+call('room.sh', 'leave', '--id', room, '--participant', participant, extra=clock)
+assert json.loads(room_events.read_bytes().splitlines()[-1])['ts'] == stamp
+ap('show', '--id', same_second['task_id']); ap('status', '--json')
+invoke(recycled, ok=False)
+call('room.sh', 'join', '--id', room, '--participant', participant, '--provider', 'codex', '--role', 'main', extra=clock)
+assert 'recycled' in invoke(recycled, ok=False)
+ap('show', '--id', initial['task_id']); ap('status', '--json')
+call('thread.sh', 'close', '--id', room, '--summary', 'Private owner epoch closed', extra=clock)
+ap('show', '--id', initial['task_id']); ap('status', '--json')
+invoke(recycled, ok=False)
+PY
+
+}
+
+test_agent_plan_cancellation_is_closed_not_verified_and_cas_fenced() {
+  local project="$TMP/agent-plan-cancel"
+  local plan="$ROOT/scripts/agent-plan.sh"
+  local plan_file decision plan_sha task_sha lease state out state_json runtime_json tamper
+  make_committed_repo "$project"
+  "$plan" --repo "$project" init --goal cancellation >/dev/null
+  "$plan" --repo "$project" add --id rejected --title rejected >/dev/null
+  "$plan" --repo "$project" add --id dependent --title dependent --depends rejected >/dev/null
+  decision="$project/decision.md"
+  printf 'Reviewed as rejected and unreproducible.\n' > "$decision"
+  git -C "$project" add decision.md && git -C "$project" commit -qm 'record cancellation decision'
+  plan_file="$project/.oms/plan/tasks.json"
+  plan_sha="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)"
+  "$plan" --repo "$project" show --id rejected > "$project/task.json"
+  task_sha="$(python3 - "$project/task.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding='utf-8'))['task_sha256'])
+PY
+)"
+  lease=none
+  state=ready
+
+  if "$plan" --repo "$project" cancel --id rejected --expected-plan-sha256 "$plan_sha" \
+      --expected-task-sha256 "$task_sha" --expected-state "$state" --expected-lease-id "$lease" \
+      --operator-consent cancel --reason "reviewed rejection" --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$(printf '%064d' 0)" >/dev/null 2>&1; then
+    fail "cancellation accepted a mismatched decision-artifact digest"
+  fi
+  if "$plan" --repo "$project" cancel --id rejected --expected-plan-sha256 "$plan_sha" \
+      --expected-task-sha256 "$task_sha" --expected-state blocked --expected-lease-id "$lease" \
+      --operator-consent cancel --reason "reviewed rejection" --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$(python3 - "$decision" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)" >/dev/null 2>&1; then
+    fail "cancellation accepted a stale task-state CAS"
+  fi
+  if OMS_HARNESS_CHILD=1 "$plan" --repo "$project" cancel --id rejected \
+      --expected-plan-sha256 "$plan_sha" --expected-task-sha256 "$task_sha" \
+      --expected-state "$state" --expected-lease-id "$lease" --operator-consent cancel \
+      --reason "reviewed rejection" --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$(python3 - "$decision" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)" >/dev/null 2>&1; then
+    fail "a harness child cancelled a task"
+  fi
+  mkdir -p "$project/.oms/delegations"
+  python3 - "$project/.oms/delegations/active.json" <<'PY'
+import json, os, sys
+json.dump({"schema": 1, "id": "active", "task_id": "rejected",
+           "lease_id": "", "pid": os.getppid()}, open(sys.argv[1], "w"))
+PY
+  if "$plan" --repo "$project" cancel --id rejected --expected-plan-sha256 "$plan_sha" \
+      --expected-task-sha256 "$task_sha" --expected-state "$state" --expected-lease-id "$lease" \
+      --operator-consent cancel --reason "reviewed rejection" --decision-artifact decision.md \
+      --expected-decision-artifact-sha256 "$(python3 - "$decision" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)" >/dev/null 2>&1; then
+    fail "cancellation accepted a task with a live worker marker"
+  fi
+  rm -f "$project/.oms/delegations/active.json"
+  "$plan" --repo "$project" cancel --id rejected --expected-plan-sha256 "$plan_sha" \
+    --expected-task-sha256 "$task_sha" --expected-state "$state" --expected-lease-id "$lease" \
+    --operator-consent cancel --reason "reviewed rejection" --decision-artifact decision.md \
+    --expected-decision-artifact-sha256 "$(python3 - "$decision" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)" >/dev/null || fail "valid parent cancellation failed"
+  "$plan" --repo "$project" show --id rejected > "$project/cancelled.json"
+  python3 - "$project/cancelled.json" "$task_sha" "$plan_sha" "$decision" <<'PY' || fail "cancellation did not preserve truthful evidence"
+import hashlib, json, sys
+task = json.load(open(sys.argv[1], encoding='utf-8'))
+cancel = task['cancellation']
+assert task['state'] == 'cancelled' and task['task_sha256'] != sys.argv[2], task
+assert cancel['kind'] == 'operator-cancellation' and cancel['operator_consent'] == 'cancel', cancel
+assert cancel['plan_sha256'] == sys.argv[3] and cancel['task_sha256'] == sys.argv[2], cancel
+assert cancel['original_updated']
+assert cancel['decision_artifact'] == 'decision.md', cancel
+assert cancel['decision_artifact_sha256'] == hashlib.sha256(open(sys.argv[4], 'rb').read()).hexdigest(), cancel
+assert task.get('history', []) == [] and task['artifact'] == '' and task['patch'] == '', task
+PY
+  cp "$plan_file" "$TMP/agent-plan-cancel-valid-plan"
+  cp "$decision" "$TMP/agent-plan-cancel-valid-decision"
+  for tamper in original-field receipt-state lease task-digest extra-receipt; do
+    cp "$TMP/agent-plan-cancel-valid-plan" "$plan_file"
+    python3 - "$plan_file" "$tamper" <<'PY'
+import json, sys
+path, mode = sys.argv[1:]
+doc = json.load(open(path, encoding='utf-8'))
+task = doc['tasks']['rejected']
+receipt = task['cancellation']
+if mode == 'original-field': task['artifact'] = 'forged'
+elif mode == 'receipt-state': receipt['state'] = 'blocked'
+elif mode == 'lease': task['lease_id'] = 'forged-lease'
+elif mode == 'task-digest': receipt['task_sha256'] = '0' * 64
+elif mode == 'extra-receipt': receipt['unreviewed'] = True
+with open(path, 'w', encoding='utf-8') as handle: json.dump(doc, handle, indent=2)
+PY
+    if "$plan" --repo "$project" status --json >/dev/null 2>&1; then
+      fail "active status accepted forged cancellation evidence: $tamper"
+    fi
+  done
+  cp "$TMP/agent-plan-cancel-valid-plan" "$plan_file"
+  printf 'tampered decision bytes\n' >> "$decision"
+  if "$plan" --repo "$project" status --json >/dev/null 2>&1; then
+    fail "active status accepted changed cancellation decision bytes"
+  fi
+  cp "$TMP/agent-plan-cancel-valid-decision" "$decision"
+  out="$("$plan" --repo "$project" status --json)"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+s = json.load(sys.stdin)
+assert s["all_done"] is False and s["all_closed"] is False, s
+assert s["verified_count"] == 0 and s["cancelled_count"] == 1, s
+assert s["closed_count"] == 1 and s["unfinished_count"] == 1, s
+assert s["by_state"] == {"cancelled": 1, "ready": 1}, s
+' || fail "cancelled task was miscounted in plan status"
+  state_json="$("$ROOT/scripts/state.sh" --repo "$project" --json)" ||
+    fail "repo state rejected a plan containing cancellation"
+  runtime_json="$("$ROOT/scripts/runtime.sh" --repo "$project" envelope show)" ||
+    fail "runtime projection rejected a plan containing cancellation"
+  printf '%s\n' "$state_json" > "$project/state.json"
+  printf '%s\n' "$runtime_json" > "$project/runtime.json"
+  python3 - "$project/state.json" "$project/runtime.json" <<'PY' || fail "state or runtime hid cancellation semantics"
+import json, sys
+state, runtime = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
+for plan in (state["plan"], runtime["plan"]):
+    assert plan["all_done"] is False and plan["all_closed"] is False, plan
+    assert plan["verified_count"] == 0 and plan["cancelled_count"] == 1, plan
+    assert plan["closed_count"] == 1 and plan["unfinished_count"] == 1, plan
+PY
+  [ -z "$("$plan" --repo "$project" ready)" ] ||
+    fail "cancelled task incorrectly satisfied a dependent task"
+  "$plan" --repo "$project" add --id blocked_cancel --title blocked >/dev/null
+  "$plan" --repo "$project" block --id blocked_cancel --reason rejected >/dev/null
+  python3 - "$plan_file" <<'PY'
+import json, sys
+path = sys.argv[1]
+plan = json.load(open(path, encoding='utf-8'))
+task = plan['tasks']['blocked_cancel']
+task.update({
+    'artifact': '.oms/artifacts/original-review.md',
+    'patch': '.oms/artifacts/original.patch',
+    'provider': 'codex',
+    'lease_id': 'lease_preserved_123',
+    'review_lease_id': 'lease_preserved_123',
+    'autopilot_owner_id': 'owner_' + '1' * 32,
+    'history': [{'schema': 1, 'kind': 'prior-review', 'receipt': 'receipt-sha256'}],
+})
+with open(path, 'w', encoding='utf-8') as handle:
+    json.dump(plan, handle, ensure_ascii=False, indent=2)
+PY
+  "$plan" --repo "$project" show --id blocked_cancel > "$project/blocked.json"
+  task_sha="$(python3 - "$project/blocked.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding='utf-8'))['task_sha256'])
+PY
+)"
+  lease="$(python3 - "$project/blocked.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding='utf-8'))['lease_id'] or 'none')
+PY
+)"
+  plan_sha="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)"
+  "$plan" --repo "$project" cancel --id blocked_cancel --expected-plan-sha256 "$plan_sha" \
+    --expected-task-sha256 "$task_sha" --expected-state blocked --expected-lease-id "$lease" \
+    --operator-consent cancel --reason "blocked work rejected" --decision-artifact decision.md \
+    --expected-decision-artifact-sha256 "$(python3 - "$decision" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)" >/dev/null || fail "valid blocked-task cancellation failed"
+  "$plan" --repo "$project" show --id blocked_cancel | python3 -c '
+import json, sys
+task = json.load(sys.stdin)
+assert task["state"] == "cancelled", task
+assert task["artifact"] == ".oms/artifacts/original-review.md", task
+assert task["patch"] == ".oms/artifacts/original.patch", task
+assert task["lease_id"] == "lease_preserved_123" and task["review_lease_id"] == task["lease_id"], task
+assert task["autopilot_owner_id"] == "owner_" + "1" * 32, task
+assert task["history"] == [{"schema": 1, "kind": "prior-review", "receipt": "receipt-sha256"}], task
+' || fail "cancellation overwrote existing task evidence, lease, owner or history"
 }
 
 test_agent_plan_retire_is_cas_fenced_and_evidence_honest() {
@@ -5713,7 +7627,7 @@ test_agent_plan_retire_is_cas_fenced_and_evidence_honest() {
   local failed_accept_project="$TMP/agent-plan-retire-accept-fail"
   local mutate_accept_project="$TMP/agent-plan-retire-accept-mutate"
   local plan="$ROOT/scripts/agent-plan.sh"
-  local plan_file plan_sha archive receipt out before after rc state duplicate
+  local plan_file plan_sha archive receipt out before after rc state duplicate decision_sha
   local index_before index_after
 
   make_committed_repo "$project"
@@ -5748,7 +7662,7 @@ PY
 )"
   out="$("$plan" --repo "$project" retire)" ||
     fail "retire check should succeed: $out"
-  printf '%s\n' "$out" | grep -Fq "$plan_sha" ||
+  printf '%s\n' "$out" | grep >/dev/null -F "$plan_sha" ||
     fail "retire check did not print the exact plan CAS: $out"
   after="$(python3 - "$plan_file" <<'PY' | tr -d '\r'
 import hashlib, sys
@@ -5923,14 +7837,14 @@ PY
   printf 'tamper\n' >> "$archive"
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" || rc=$?
-  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'plan-retirement' ||
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F 'plan-retirement' ||
     fail "state-verify did not fail closed on a corrupt retirement archive: $out"
   cp "$TMP/agent-plan-retire.archive-good" "$archive"
   duplicate="$(tail -n 1 "$receipt")"
   printf '%s\n' "$duplicate" >> "$receipt"
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" || rc=$?
-  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'duplicate retirement receipts' ||
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F 'duplicate retirement receipts' ||
     fail "state-verify did not reject duplicate plan retirement authority: $out"
 
   # Active authority always wins, even for a non-verifying disposition.
@@ -5989,7 +7903,7 @@ PY
   if [ "$rc" = 0 ]; then
     fail "retire ignored a live task worker marker"
   fi
-  printf '%s\n' "$out" | grep -Fq 'live worker marker prevents retirement' ||
+  printf '%s\n' "$out" | grep >/dev/null -F 'live worker marker prevents retirement' ||
     fail "typed-live marker fixture hit the wrong veto path: $out"
   printf '{"schema":99,"id":"future","pid":%s,"task_id":"t1","lease_id":"","executor_id":""}\n' \
     "$$" > "$marker_project/.oms/delegations/live.json"
@@ -5997,7 +7911,7 @@ PY
   out="$("$plan" --repo "$marker_project" retire --apply \
       --expected-plan-sha256 "$plan_sha" --disposition superseded \
       --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
-  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'malformed or unproven' ||
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'malformed or unproven' ||
     fail "future/unproven matching marker did not fail closed: $out"
 
   python3 - "$marker_project/.oms/plan/tasks.json" <<'PY'
@@ -6024,7 +7938,7 @@ PY
   out="$("$plan" --repo "$marker_project" retire --apply \
       --expected-plan-sha256 "$plan_sha" --disposition superseded \
       --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
-  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'malformed or unproven' ||
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'malformed or unproven' ||
     fail "duplicate task_id marker collapsed past the malformed veto: $out"
   (
     . "$ROOT/scripts/lib/file-lock.sh"
@@ -6037,7 +7951,7 @@ PY
   out="$("$plan" --repo "$marker_project" retire --apply \
       --expected-plan-sha256 "$plan_sha" --disposition superseded \
       --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
-  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'malformed or unproven' ||
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'malformed or unproven' ||
     fail "non-finite marker bypassed the malformed veto: $out"
   (
     . "$ROOT/scripts/lib/file-lock.sh"
@@ -6050,11 +7964,11 @@ PY
   out="$("$plan" --repo "$marker_project" retire --apply \
       --expected-plan-sha256 "$plan_sha" --disposition superseded \
       --reason "a new reviewed contract replaced the old plan" 2>&1)" || rc=$?
-  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'malformed or unproven' ||
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'malformed or unproven' ||
     fail "overflowed float marker bypassed the malformed veto: $out"
 
-  # Superseded retirement is allowed only after every old task is done. It is
-  # archival, never verification, and its receipt makes that negative claim.
+  # Superseded retirement accepts only a fully closed plan. Cancellation is
+  # archival, never verification, and its receipt keeps that distinction.
   make_committed_repo "$superseded_project"
   "$plan" --repo "$superseded_project" init --goal superseded --accept false >/dev/null
   "$plan" --repo "$superseded_project" add --id t1 --title superseded >/dev/null
@@ -6068,14 +7982,30 @@ PY
       --reason "a new reviewed contract replaced the old plan" >/dev/null 2>&1; then
     fail "superseded retirement accepted an unfinished old plan"
   fi
-  python3 - "$superseded_project/.oms/plan/tasks.json" <<'PY'
+  printf 'Reviewed cancellation of the superseded task.\n' > "$superseded_project/decision.md"
+  "$plan" --repo "$superseded_project" show --id t1 > "$superseded_project/task.json"
+  task_sha="$(python3 - "$superseded_project/task.json" <<'PY'
 import json, sys
-path = sys.argv[1]
-row = json.load(open(path, encoding="utf-8"))
-row["tasks"]["t1"]["state"] = "done"
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(row, handle, ensure_ascii=False, indent=2)
+print(json.load(open(sys.argv[1], encoding="utf-8"))["task_sha256"])
 PY
+)"
+  plan_sha="$(python3 - "$superseded_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  decision_sha="$(python3 - "$superseded_project/decision.md" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+  "$plan" --repo "$superseded_project" cancel --id t1 \
+    --expected-plan-sha256 "$plan_sha" --expected-task-sha256 "$task_sha" \
+    --expected-state ready --expected-lease-id none --operator-consent cancel \
+    --reason "reviewed rejection" --decision-artifact decision.md \
+    --expected-decision-artifact-sha256 "$decision_sha" >/dev/null ||
+    fail "superseded task cancellation failed"
+  cp "$superseded_project/.oms/plan/tasks.json" "$TMP/agent-plan-retire-cancelled-original"
   plan_sha="$(python3 - "$superseded_project/.oms/plan/tasks.json" <<'PY' | tr -d '\r'
 import hashlib, sys
 print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
@@ -6084,6 +8014,16 @@ PY
   "$plan" --repo "$superseded_project" retire --apply \
     --expected-plan-sha256 "$plan_sha" --disposition superseded \
     --reason "a new reviewed contract replaced the old plan" >/dev/null
+  cmp -s "$TMP/agent-plan-retire-cancelled-original" \
+    "$superseded_project/.oms/plan/tasks.$plan_sha.archive.json" ||
+    fail "superseded retirement did not preserve cancellation evidence bytes"
+  cp "$superseded_project/decision.md" "$TMP/agent-plan-retire-cancelled-decision"
+  printf 'tampered after retirement\n' >> "$superseded_project/decision.md"
+  rc=0
+  out="$("$ROOT/scripts/state-verify.sh" --repo "$superseded_project" --json 2>&1)" || rc=$?
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'cancellation decision artifact' ||
+    fail "retired cancellation did not recheck decision bytes: $out"
+  cp "$TMP/agent-plan-retire-cancelled-decision" "$superseded_project/decision.md"
   python3 - "$superseded_project/.oms/plan/retirements.jsonl" <<'PY' || fail "superseded retirement claimed completion evidence"
 import json, sys
 row = json.loads(open(sys.argv[1], encoding="utf-8").readline())
@@ -6299,7 +8239,7 @@ PY
 )" = "$different_sha" ] || fail "failed residual-intent next --claim changed the plan"
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$claim_project" --json 2>&1)" || rc=$?
-  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'active plan lineage conflicts' ||
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F 'active plan lineage conflicts' ||
     fail "state-verify trusted a mutated retired plan lineage: $out"
   if "$plan" --repo "$claim_project" retire --apply \
       --expected-plan-sha256 "$plan_sha" --disposition superseded \
@@ -6436,20 +8376,20 @@ with open(path, "wb") as handle:
 PY
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$duplicate_project" --json 2>&1)" || rc=$?
-  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'duplicate JSON key' ||
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F 'duplicate JSON key' ||
     fail "state-verify did not reject a duplicate-key retirement intent: $out"
   rc=0
   out="$("$plan" --repo "$duplicate_project" retire --apply \
     --expected-plan-sha256 "$plan_sha" --disposition superseded \
     --reason "$reason" 2>&1)" || rc=$?
-  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq 'duplicate JSON key' ||
+  [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F 'duplicate JSON key' ||
     fail "retire replay trusted a duplicate-key intent: $out"
   [ -e "$duplicate_project/.oms/plan/tasks.json" ] &&
     [ ! -e "$duplicate_project/.oms/plan/retirements.jsonl" ] ||
     fail "duplicate-key intent replay mutated retirement authority"
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" || rc=$?
-  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'retirement intent(s) remain incomplete' ||
+  [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F 'retirement intent(s) remain incomplete' ||
     fail "state-verify did not expose the interrupted retirement intent: $out"
   "$plan" --repo "$project" retire --apply \
     --expected-plan-sha256 "$plan_sha" --disposition superseded \
@@ -6590,7 +8530,7 @@ PY
     rc=0
     out="$("$ROOT/scripts/state-verify.sh" \
       --repo "$TMP/agent-plan-retire-proof-$variant" --json 2>&1)" || rc=$?
-    [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq 'plan-retirement' ||
+    [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F 'plan-retirement' ||
       fail "state-verify trusted $variant retirement proof corruption: $out"
   done
 
@@ -6664,13 +8604,13 @@ PY
 )"
     rc=0
     out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" || rc=$?
-    [ "$rc" = 1 ] && printf '%s\n' "$out" | grep -Fq "$diagnostic" ||
+    [ "$rc" = 1 ] && printf '%s\n' "$out" | grep >/dev/null -F "$diagnostic" ||
       fail "state-verify accepted or misclassified $variant retirement JSONL: $out"
     rc=0
     out="$("$plan" --repo "$project" retire --apply \
       --expected-plan-sha256 "$plan_sha" --disposition superseded \
       --reason "a reviewed replacement contract superseded this plan" 2>&1)" || rc=$?
-    [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -Fq "$diagnostic" ||
+    [ "$rc" != 0 ] && printf '%s\n' "$out" | grep >/dev/null -F "$diagnostic" ||
       fail "retire mutation accepted or misclassified $variant retirement JSONL: $out"
     after="$(python3 - "$ledger" <<'PY' | tr -d '\r'
 import hashlib, sys
@@ -6703,7 +8643,7 @@ PY
     --expected-plan-sha256 "$plan_sha" --disposition completed-external \
     --reason "equivalent implementation is committed on detached HEAD" 2>&1)" || rc=$?
   [ "$rc" = 0 ] || fail "detached completed-external retirement failed: $out"
-  printf '%s\n' "$out" | grep -Fq 'Traceback' &&
+  printf '%s\n' "$out" | grep >/dev/null -F 'Traceback' &&
     fail "detached retirement leaked a Python traceback: $out"
   [ ! -e "$project/.oms/plan/tasks.json" ] ||
     fail "detached completed-external retirement left its plan active"
@@ -6816,12 +8756,12 @@ test_agent_plan_next_and_brief() {
 
   # brief renders scope + verify.
   out="$("$SH" --repo "$d" brief --id P1)"
-  printf '%s' "$out" | grep -Fq 'allowed_paths: scripts/' || fail "brief missing allowed_paths"
-  printf '%s' "$out" | grep -Fq 'forbidden_paths: install.sh' || fail "brief missing forbidden_paths"
+  contains "$out" 'allowed_paths: scripts/' || fail "brief missing allowed_paths"
+  contains "$out" 'forbidden_paths: install.sh' || fail "brief missing forbidden_paths"
 
   # next --claim atomically claims the first actionable task.
   out="$("$SH" --repo "$d" next --claim --provider codex)"
-  printf '%s' "$out" | grep -Fq '# Task P1' || fail "next should return P1 brief"
+  contains "$out" '# Task P1' || fail "next should return P1 brief"
   "$SH" --repo "$d" show --id P1 | grep -Fq '"state": "claimed"' ||
     fail "next --claim should leave P1 claimed"
 
@@ -8747,7 +10687,7 @@ test_artifact_index_records_call() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"artifact": "artifacts/codex-assess-artifact-indexing-'
 
   out="$($ROOT/scripts/artifact-index.sh --repo "$project" latest)"
-  printf '%s' "$out" | grep -Fq 'call  codex  exit=0' || fail "artifact-index latest missing call row"
+  contains "$out" 'call  codex  exit=0' || fail "artifact-index latest missing call row"
   "$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry --json > "$project/telemetry.json"
   python3 - "$project" <<'PY' || fail "primary prompt byte measurement missing or inconsistent"
 import json, pathlib, sys
@@ -8880,11 +10820,11 @@ PY
   fi
 
   human="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
-  printf '%s' "$human" | grep -Fq 'retained window: 6/6 row(s)' ||
+  contains "$human" 'retained window: 6/6 row(s)' ||
     fail "human telemetry should disclose its retained window: $human"
-  printf '%s' "$human" | grep -Fq 'semantic outcome: mechanical-only' ||
+  contains "$human" 'semantic outcome: mechanical-only' ||
     fail "human telemetry must distinguish mechanical verification from task success: $human"
-  printf '%s' "$human" | grep -Fq 'provider-reported tokens: total=4200 reports=2' ||
+  contains "$human" 'provider-reported tokens: total=4200 reports=2' ||
     fail "human telemetry should expose the measured token subtotal: $human"
   printf '%s\n' '{"kind":"delegate","provider":"codex","exit":0,"verify_exit":0,"context_verification":"none"}' >> "$index"
   "$ROOT/scripts/artifact-index.sh" --repo "$project" --json telemetry |
@@ -8908,15 +10848,15 @@ test_artifact_index_latest_run_groups_rows() {
 EOF
 
   out="$($ROOT/scripts/artifact-index.sh --repo "$project" latest-run)"
-  printf '%s' "$out" | grep -Fq 'run: 20260611T000002Z-20  kind=delegate,review  debate_round=2' ||
+  contains "$out" 'run: 20260611T000002Z-20  kind=delegate,review  debate_round=2' ||
     fail "latest-run missing grouped header: $out"
-  printf '%s' "$out" | grep -Fq 'review  codex  exit=0  artifact=.oms/artifacts/review/codex-new-20260611T000002Z-20-r2.md' ||
+  contains "$out" 'review  codex  exit=0  artifact=.oms/artifacts/review/codex-new-20260611T000002Z-20-r2.md' ||
     fail "latest-run should keep final codex debate row"
-  printf '%s' "$out" | grep -Fq 'review  claude  exit=0' || fail "latest-run missing claude row"
-  printf '%s' "$out" | grep -Fq 'review  antigravity  exit=2' || fail "latest-run missing antigravity row"
-  printf '%s' "$out" | grep -Fq 'delegate  codex  exit=0  verify=0' ||
+  contains "$out" 'review  claude  exit=0' || fail "latest-run missing claude row"
+  contains "$out" 'review  antigravity  exit=2' || fail "latest-run missing antigravity row"
+  contains "$out" 'delegate  codex  exit=0  verify=0' ||
     fail "latest-run missing delegate verify exit"
-  printf '%s' "$out" | grep -Fq 'patch=.oms/artifacts/delegate/codex-new-20260611T000002Z-20.patch' ||
+  contains "$out" 'patch=.oms/artifacts/delegate/codex-new-20260611T000002Z-20.patch' ||
     fail "latest-run missing delegate patch"
   if printf '%s\n' "$out" | grep -F 'review  codex' |
     grep -Fq 'codex-new-20260611T000002Z-20.md'; then
@@ -8925,7 +10865,7 @@ EOF
 
   printf '{"ts":"2026-06-11T00:00:07Z","kind":"call","provider":"codex","exit":0,"artifact":".oms/artifacts/call/unparseable.md"}\n' >> "$index"
   out="$($ROOT/scripts/artifact-index.sh --repo "$project" latest-run)"
-  printf '%s' "$out" | grep -Fq 'call  codex  exit=0  artifact=.oms/artifacts/call/unparseable.md' ||
+  contains "$out" 'call  codex  exit=0  artifact=.oms/artifacts/call/unparseable.md' ||
     fail "latest-run should list unparseable artifact row individually"
 }
 
@@ -8966,18 +10906,18 @@ assert isinstance(row.get("tokens"), int) and row["tokens"] > 0, row
 PY
 
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
-  printf '%s' "$out" | grep -Eq 'token-reports=[1-9]' ||
+  printf '%s' "$out" | grep >/dev/null -E 'token-reports=[1-9]' ||
     fail "telemetry should report the token count: $out"
 
   # The artifact goes; the accounting stays. Coverage of artifacts drops, which
   # is the honest part — the numbers do not.
   rm -rf "$project/.oms/artifacts/call"
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
-  printf '%s' "$out" | grep -Fq 'artifacts=0' ||
+  contains "$out" 'artifacts=0' ||
     fail "artifact coverage should drop once the file is gone: $out"
-  printf '%s' "$out" | grep -Eq 'token-reports=[1-9]' ||
+  printf '%s' "$out" | grep >/dev/null -E 'token-reports=[1-9]' ||
     fail "token accounting must survive artifact deletion: $out"
-  printf '%s' "$out" | grep -Eq 'durations=[1-9]' ||
+  printf '%s' "$out" | grep >/dev/null -E 'durations=[1-9]' ||
     fail "duration accounting must survive artifact deletion: $out"
 }
 
@@ -8993,12 +10933,12 @@ test_artifact_index_prunes_stale_references() {
   printf '{"ts":"2026-06-11T00:00:03Z","kind":"call","exit":0}\n' >> "$index"
 
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale --dry-run)"
-  printf '%s' "$out" | grep -Fq 'would drop 1 stale row' ||
+  contains "$out" 'would drop 1 stale row' ||
     fail "dry-run should report the stale row: $out"
   [ "$(wc -l < "$index")" = "3" ] || fail "dry-run must not change the index"
 
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale)"
-  printf '%s' "$out" | grep -Fq 'dropped 1 stale row' || fail "stale sweep should report: $out"
+  contains "$out" 'dropped 1 stale row' || fail "stale sweep should report: $out"
   [ "$(wc -l < "$index")" = "2" ] || fail "stale sweep should drop exactly the stale row"
   grep -Fq 'present.md' "$index" || fail "a row whose artifact exists must survive"
   grep -Fq 'gone.md' "$index" && fail "the stale row must be gone"
@@ -9007,7 +10947,7 @@ test_artifact_index_prunes_stale_references() {
 
   # Age is not the question, so --keep must not enter into it.
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale)"
-  printf '%s' "$out" | grep -Fq 'no stale references' || fail "second sweep should be a no-op: $out"
+  contains "$out" 'no stale references' || fail "second sweep should be a no-op: $out"
   [ "$(wc -l < "$index")" = "2" ] || fail "a clean index must be left alone"
 
   # A resolution explains why an earlier failure is closed, so it cannot outlive
@@ -9018,7 +10958,7 @@ test_artifact_index_prunes_stale_references() {
   printf '{"ts":"2026-06-11T00:00:05Z","kind":"artifact-resolution","event_id":"evt_res","resolves_event_id":"evt_target"}\n' >> "$index"
   rm -f "$project/.oms/artifacts/ask/resolved.md"
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune --stale)"
-  printf '%s' "$out" | grep -Fq 'dropped 2 stale row' ||
+  contains "$out" 'dropped 2 stale row' ||
     fail "the stale row and its orphaned resolution should go together: $out"
   ! grep -Fq 'evt_res' "$index" || fail "a resolution outlived the row it resolves"
   "$ROOT/scripts/artifact-index.sh" --repo "$project" validate \
@@ -9041,7 +10981,7 @@ test_artifact_index_prune() {
   done
 
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune 3)"
-  printf '%s' "$out" | grep -Fq 'pruned 10 -> 3' || fail "prune should report 10 -> 3"
+  contains "$out" 'pruned 10 -> 3' || fail "prune should report 10 -> 3"
   [ "$(wc -l < "$index")" = "3" ] || fail "prune should keep exactly 3 rows"
   # Newest rows are kept (tail).
   tail -n1 "$index" | grep -Fq '00:10Z' || fail "prune must keep the newest rows"
@@ -9049,7 +10989,7 @@ test_artifact_index_prune() {
 
   # Under the keep count: no-op, exit 0.
   out="$("$ROOT/scripts/artifact-index.sh" --repo "$project" prune 100)" || fail "prune within keep should exit 0"
-  printf '%s' "$out" | grep -Fq 'nothing pruned' || fail "prune within keep should be a no-op"
+  contains "$out" 'nothing pruned' || fail "prune within keep should be a no-op"
   TMPDIR=/nonexistent-oms-tmp "$ROOT/scripts/artifact-index.sh" --repo "$project" prune 100 >/dev/null ||
     fail "prune no-op without --files must not require TMPDIR"
 
@@ -9081,11 +11021,11 @@ EOF
 
   out="$(OMS_ARTIFACT_ORPHAN_GRACE=0 \
     "$ROOT/scripts/artifact-index.sh" --repo "$project" prune 1 --files)"
-  printf '%s' "$out" | grep -Fq 'deleted: .oms/artifacts/call/old.md' ||
+  contains "$out" 'deleted: .oms/artifacts/call/old.md' ||
     fail "prune --files should print deleted artifact"
-  printf '%s' "$out" | grep -Fq 'deleted: .oms/artifacts/delegate/old.patch' ||
+  contains "$out" 'deleted: .oms/artifacts/delegate/old.patch' ||
     fail "prune --files should print deleted patch"
-  printf '%s' "$out" | grep -Fq 'deleted 2 orphan file(s)' ||
+  contains "$out" 'deleted 2 orphan file(s)' ||
     fail "prune --files should print final delete count"
   assert_not_exists "$project/.oms/artifacts/call/old.md"
   assert_not_exists "$project/.oms/artifacts/delegate/old.patch"
@@ -9111,9 +11051,9 @@ EOF
 
   out="$(OMS_ARTIFACT_ORPHAN_GRACE=0 \
     "$ROOT/scripts/artifact-index.sh" --repo "$project" prune 1 --files --dry-run)"
-  printf '%s' "$out" | grep -Fq 'would delete: .oms/artifacts/call/old.md' ||
+  contains "$out" 'would delete: .oms/artifacts/call/old.md' ||
     fail "dry-run should print would-delete artifact"
-  printf '%s' "$out" | grep -Fq 'would delete 1 orphan file(s)' ||
+  contains "$out" 'would delete 1 orphan file(s)' ||
     fail "dry-run should print final would-delete count"
   assert_file_contains "$project/.oms/artifacts/call/old.md" "old artifact"
   assert_file_contains "$project/.oms/artifacts/call/kept.md" "kept artifact"
@@ -9639,6 +11579,18 @@ test_scrubber_refusal_names_tier_and_region() {
     fail "the report should place the machine-tier match in the caller's own prompt: $(cat "$out")"
   grep -Fq 'secret-tier match in attached harness context at line 4' "$out" ||
     fail "the report should place the secret-tier match in the attached context: $(cat "$out")"
+  # Composed delegate prompt: lines inside the brief count from the brief's
+  # first line; role/wrapper lines are labelled apart.
+  {
+    printf 'wrapper line\nrole at /hom%s/someone/r\n## Brief\n\n' 'e'
+    printf 'one-line brief /hom%s/someone/project\n' 'e'
+    printf 'tail\n'
+  } > "$project/composed.txt"
+  OMS_SCAN_BRIEF_RANGE=5:5 bash -c '. "$1/scripts/lib/agent-memory-common.sh"; agent_memory_sensitive_report "$2"' \
+    _ "$ROOT" "$project/composed.txt" > "$project/composed.report" 2>&1
+  grep -Fq 'machine-tier match in your brief at line 1:' "$project/composed.report" &&
+    grep -Fq 'machine-tier match in the delegate role/wrapper text at line 2:' "$project/composed.report" ||
+    fail "brief-relative report wrong: $(cat "$project/composed.report")"
   # The pointer is a line number and a tier, never the matched text.
   ! grep -Fq 'abcdefghijklmnop' "$out" ||
     fail "the report must not echo the matched content"
@@ -10220,10 +12172,10 @@ test_memory_context_omits_sensitive_sections_cleanly() {
   printf -- '- 2026-06-10T00:00:00Z [agent] secret path /hom%s/x\n' "e" > "$pins"
 
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" context 2>/dev/null || true)"
-  if printf '%s' "$out" | grep -q '### project'; then
+  if printf '%s' "$out" | grep >/dev/null '### project'; then
     fail "omitted section must not leave a dangling header"
   fi
-  if printf '%s' "$out" | grep -q 'Shared harness memory follows'; then
+  if printf '%s' "$out" | grep >/dev/null 'Shared harness memory follows'; then
     fail "intro line must not appear when all sections are omitted"
   fi
 }
@@ -10815,7 +12767,7 @@ test_command_help_surfaces_run() {
   local out
 
   out="$("$ROOT/scripts/update.sh" --help)"
-  printf '%s' "$out" | grep -Fq -- '--tools' || fail "update help should expose opt-in tool refresh"
+  contains "$out" '--tools' || fail "update help should expose opt-in tool refresh"
 
   "$ROOT/scripts/artifact-index.sh" --help >/dev/null
   "$ROOT/scripts/import-agent-result.sh" --help >/dev/null
@@ -11008,7 +12960,7 @@ test_release_version_file_and_status_agree() {
     *) fail "VERSION not semver-like: $version" ;;
   esac
   out="$("$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Eq '^- version: [0-9]' || fail "status.sh missing version line"
+  printf '%s' "$out" | grep >/dev/null -E '^- version: [0-9]' || fail "status.sh missing version line"
 }
 
 test_status_probes_provider_versions_only_when_verbose() {
@@ -11063,11 +13015,11 @@ Run smoke tests
 EOF
 
   out="$(OH_MY_SETTING_TASK_FILE="$task" "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq '## Active Task' || fail "status.sh missing active task section"
-  printf '%s' "$out" | grep -Fq -- '- status: active' || fail "status.sh missing active task status"
-  printf '%s' "$out" | grep -Fq -- '- goal: Ship loop hardening' || fail "status.sh missing task goal"
-  printf '%s' "$out" | grep -Fq -- '- loop_attempts: 2' || fail "status.sh missing loop attempts"
-  printf '%s' "$out" | grep -Fq -- '- verification_level: focused-test' || fail "status.sh missing verification level"
+  contains "$out" '## Active Task' || fail "status.sh missing active task section"
+  contains "$out" '- status: active' || fail "status.sh missing active task status"
+  contains "$out" '- goal: Ship loop hardening' || fail "status.sh missing task goal"
+  contains "$out" '- loop_attempts: 2' || fail "status.sh missing loop attempts"
+  contains "$out" '- verification_level: focused-test' || fail "status.sh missing verification level"
 
   cat > "$task" <<'EOF'
 # Active Agent Task
@@ -11093,9 +13045,9 @@ upstream=origin/main
 EOF
 
   out="$(OH_MY_SETTING_AUTO_UPDATE_STATE="$state" "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq '## Auto Update' || fail "status.sh missing auto update section"
-  printf '%s' "$out" | grep -Fq -- '- status: update_available' || fail "status.sh missing auto update status"
-  printf '%s' "$out" | grep -Fq -- '- upstream: origin/main' || fail "status.sh missing auto update upstream"
+  contains "$out" '## Auto Update' || fail "status.sh missing auto update section"
+  contains "$out" '- status: update_available' || fail "status.sh missing auto update status"
+  contains "$out" '- upstream: origin/main' || fail "status.sh missing auto update upstream"
 }
 
 test_auto_update_check_detects_update() {
@@ -11417,13 +13369,13 @@ test_autoupdate_cron_install_and_uninstall() {
   assert_file_contains "$cron_file" "OH_MY_SETTING_CODEX_PLUGIN=0"
 
   out="$(XDG_CONFIG_HOME="$config_home" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq -- '- trigger: cron' || fail "status.sh missing cron trigger"
+  contains "$out" '- trigger: cron' || fail "status.sh missing cron trigger"
 
   # A stale disabled unit file must not hide the active cron trigger.
   mkdir -p "$config_home/systemd/user"
   printf '[Timer]\nOnCalendar=daily\n' > "$config_home/systemd/user/oh-my-setting-autoupdate.timer"
   out="$(XDG_CONFIG_HOME="$config_home" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq -- '- trigger: cron' || fail "disabled systemd file hid active cron trigger"
+  contains "$out" '- trigger: cron' || fail "disabled systemd file hid active cron trigger"
 
   OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/uninstall-autoupdate.sh" >"$TMP/autoupdate-uninstall"
@@ -11638,7 +13590,7 @@ test_autoupdate_malformed_cron_precedes_systemd_status() {
   out="$(XDG_CONFIG_HOME="$config_home" \
     OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/status.sh" 2>/dev/null)"
-  printf '%s\n' "$out" | grep -Fxq -- '- trigger: cron (malformed)' ||
+  printf '%s\n' "$out" | grep >/dev/null -Fx -- '- trigger: cron (malformed)' ||
     fail "active systemd masked malformed cron status: $out"
 }
 
@@ -11805,7 +13757,7 @@ PY
   # Dry-run previews the receipt write without performing it.
   out="$(OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/install-autoupdate.sh" --method cron --dry-run)"
-  printf '%s' "$out" | grep -Fq 'would record auto_update=true' ||
+  contains "$out" 'would record auto_update=true' ||
     fail "dry-run should preview the receipt write: $out"
   python3 - "$receipt" <<'PY'
 import json, sys
@@ -11824,7 +13776,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 PY
   out="$(OMS_INSTALL_RECEIPT="$receipt" OH_MY_SETTING_AUTO_UPDATE_CRON_FILE="$cron_file" \
     "$ROOT/scripts/install-autoupdate.sh" --method cron 2>&1)"
-  printf '%s' "$out" | grep -Fq 'not recorded' ||
+  contains "$out" 'not recorded' ||
     fail "foreign-owner install should note the skipped receipt write: $out"
   python3 - "$receipt" <<'PY'
 import json, sys
@@ -11915,6 +13867,88 @@ PY
     fail "update downgraded the recorded apply mode: $(cat "$marker")"
 }
 
+test_check_affected_selects_python_test_files() {
+  local repo="$TMP/affected-python" base selected out rc
+  make_committed_repo "$repo"
+  mkdir -p "$repo/scripts/lib" "$repo/tests"
+  printf '.oms/\n__pycache__/\n' > "$repo/.gitignore"
+  cp "$ROOT/scripts/check.sh" "$repo/scripts/check.sh"
+  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" "$repo/scripts/lib/"
+  cp -R "$ROOT/scripts/lib/oms_runtime" "$repo/scripts/lib/"
+  cat > "$repo/scripts/graph.sh" <<'SH'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"schema":1,"mode":"affected","reasons":["fixture"],"tests":["tests/test_fixture.py"],"test_cases":[{"path":"tests/test_fixture.py","language":"python","id":"symbol:tests/test_fixture.py::TestFixture.test_selected","name":"selected"}]}
+JSON
+SH
+  chmod +x "$repo/scripts/graph.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/tests/source-distribution-smoke.sh"
+  git -C "$repo" add .gitignore scripts tests/source-distribution-smoke.sh
+  git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m checker >/dev/null
+  base="$(git -C "$repo" rev-parse HEAD)"
+  cat > "$repo/tests/runtime_test_base.py" <<'PY'
+VALUE = "sibling-imported"
+PY
+  mkdir -p "$TMP/affected-python-inherited"
+  printf 'VALUE = "inherited-imported"\n' > "$TMP/affected-python-inherited/inherited_test_base.py"
+  cat > "$repo/tests/test_fixture.py" <<'PY'
+import os
+import unittest
+import inherited_test_base
+from runtime_test_base import VALUE
+from oms_runtime.common import canonical_json
+
+class TestFixture(unittest.TestCase):
+    def test_selected(self):
+        with open(os.environ["OMS_AFFECTED_MARKER"], "a") as handle:
+            handle.write(VALUE + "|" + inherited_test_base.VALUE + "|" + canonical_json({"ok": True}).decode() + "\n")
+
+    def test_unselected_case(self):
+        with open(os.environ["OMS_AFFECTED_MARKER"], "a") as handle:
+            handle.write("unselected-case\n")
+PY
+  cat > "$repo/tests/test_other.py" <<'PY'
+import os
+import unittest
+
+class TestOther(unittest.TestCase):
+    def test_unselected_file(self):
+        with open(os.environ["OMS_AFFECTED_MARKER"], "a") as handle:
+            handle.write("unselected-file\n")
+PY
+  git -C "$repo" add scripts tests
+  git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m fixtures >/dev/null
+  selected="$TMP/affected-python.marker"
+  if out="$(cd "$repo" && PYTHONPATH="$TMP/affected-python-inherited" OMS_AFFECTED_MARKER="$selected" bash scripts/check.sh --affected --no-lint --changed-from "$base" --changed-to HEAD 2>&1)"; then
+    :
+  else
+    fail "affected Python execution with sibling import failed: $out"
+  fi
+  [ "$(cat "$selected")" = 'sibling-imported|inherited-imported|{"ok":true}' ] || fail "affected Python ran an unselected case/file: $(cat "$selected" 2>/dev/null || true)"
+
+  cat > "$repo/tests/test_fixture.py" <<'PY'
+import os
+import unittest
+import inherited_test_base
+from runtime_test_base import VALUE
+from oms_runtime.common import canonical_json
+
+class TestFixture(unittest.TestCase):
+    def test_selected(self):
+        raise AssertionError("selected failure propagated")
+
+    def test_unselected_case(self):
+        with open(os.environ["OMS_AFFECTED_MARKER"], "a") as handle:
+            handle.write("unselected-case\n")
+PY
+  git -C "$repo" add tests/test_fixture.py
+  git -C "$repo" -c user.email=test@example.com -c user.name='Test User' commit -m failing_fixture >/dev/null
+  rc=0
+  out="$(cd "$repo" && PYTHONPATH="$TMP/affected-python-inherited" OMS_AFFECTED_MARKER="$selected" bash scripts/check.sh --affected --no-lint --changed-from "$base" --changed-to HEAD 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "affected Python test failure was swallowed: $out"
+  contains "$out" 'selected failure propagated' || fail "selected Python failure was not reported: $out"
+}
+
 test_check_gate_hard_fails_without_shellcheck() {
   # The gate must FAIL (not silently skip) when shellcheck is absent — the
   # exact false-confidence that hid a session of red CI.
@@ -11928,7 +13962,7 @@ test_check_gate_hard_fails_without_shellcheck() {
   out="$(OMS_SHELLCHECK_BIN=__oms_absent_shellcheck__ \
     "$ROOT/scripts/check.sh" --lint-only 2>&1)" && \
     fail "check.sh must exit nonzero when shellcheck is missing"
-  printf '%s' "$out" | grep -Fq "shellcheck is not installed" ||
+  contains "$out" "shellcheck is not installed" ||
     fail "check.sh missing-tool message absent: $out"
 }
 
@@ -11971,7 +14005,7 @@ test_state_writing_entrypoints_reject_unknown_arguments() {
   for script in link.sh install-hooks.sh check-python.sh skill-doctor.sh; do
     out="$("$ROOT/scripts/$script" --help 2>&1)" ||
       fail "$script --help should exit 0: $out"
-    printf '%s' "$out" | grep -Fq "usage: $script" ||
+    contains "$out" "usage: $script" ||
       fail "$script --help should print its usage: $out"
     if out="$("$ROOT/scripts/$script" --definitely-not-a-flag 2>&1)"; then
       fail "$script must refuse an unknown argument instead of running: $out"
@@ -11982,7 +14016,7 @@ test_state_writing_entrypoints_reject_unknown_arguments() {
   # loop treats it as a path — it exited 127 trying to parse a file named --help.
   out="$("$ROOT/scripts/check-bash32.sh" --help 2>&1)" ||
     fail "check-bash32.sh --help should exit 0: $out"
-  printf '%s' "$out" | grep -Fq 'usage: check-bash32.sh' ||
+  contains "$out" 'usage: check-bash32.sh' ||
     fail "check-bash32.sh should print usage: $out"
   if out="$("$ROOT/scripts/check-bash32.sh" --definitely-not-a-flag 2>&1)"; then
     fail "check-bash32.sh must refuse an unknown option: $out"
@@ -12040,7 +14074,7 @@ EOF
   if out="$("$ROOT/scripts/check-bash32.sh" "$bad" 2>&1)"; then
     fail "the gate must reject an odd-apostrophe heredoc inside \$( ): $out"
   fi
-  printf '%s' "$out" | grep -Fq 'heredoc <<PY inside $( )' ||
+  contains "$out" 'heredoc <<PY inside $( )' ||
     fail "the gate must name the offending heredoc: $out"
 
   "$ROOT/scripts/check-bash32.sh" "$good" >/dev/null 2>&1 ||
@@ -12064,7 +14098,7 @@ EOF
   if out="$("$ROOT/scripts/check-bash32.sh" "$sneaky" 2>&1)"; then
     fail "the gate must reject a paren hidden inside an even quote span: $out"
   fi
-  printf '%s' "$out" | grep -Fq 'paren drift: +1' ||
+  contains "$out" 'paren drift: +1' ||
     fail "the gate must report the paren drift: $out"
 }
 
@@ -12087,18 +14121,18 @@ EOF
   out="$(cd "$ROOT" && OMS_SHELLCHECK_BIN="$shellcheck_stub" \
     bash scripts/check.sh --lint-only 2>&1)" ||
     fail "lint-only gate should pass: $out"
-  printf '%s' "$out" | grep -Fq 'ok: shellcheck' ||
+  contains "$out" 'ok: shellcheck' ||
     fail "lint-only gate must run shellcheck: $out"
-  printf '%s' "$out" | grep -Fq 'check: ok (lint only)' ||
+  contains "$out" 'check: ok (lint only)' ||
     fail "lint-only gate must say what it skipped: $out"
-  if printf '%s' "$out" | grep -Fq 'ok: context-core'; then
+  if contains "$out" 'ok: context-core'; then
     fail "lint-only gate must not run the test suites: $out"
   fi
 
   if out="$(cd "$ROOT" && bash scripts/check.sh --no-lint --lint-only 2>&1)"; then
     fail "a gate that runs nothing must be refused: $out"
   fi
-  printf '%s' "$out" | grep -Fq 'leave nothing to run' ||
+  contains "$out" 'leave nothing to run' ||
     fail "refusal must name the cause: $out"
 }
 
@@ -12109,7 +14143,7 @@ test_python_helpers_are_syntax_checked() {
 
   out="$(cd "$ROOT" && bash scripts/check-python.sh 2>&1)" ||
     fail "python syntax gate should pass: $out"
-  printf '%s' "$out" | grep -Eq 'python-syntax: ok \([0-9]+ files\)' ||
+  printf '%s' "$out" | grep >/dev/null -E 'python-syntax: ok \([0-9]+ files\)' ||
     fail "python syntax gate must report what it checked: $out"
   mkdir -p "$dir"
   printf 'valid = 1\n' > "$dir/good.py"
@@ -12135,7 +14169,7 @@ EOF
   chmod +x "$d/bin/gh"
   out="$(OMS_GH_BIN="$d/bin/gh" "$ROOT/scripts/ci-status.sh" main 2>&1)" && \
     fail "ci-status must exit nonzero on a failed run"
-  printf '%s' "$out" | grep -Fq "failure" || fail "ci-status missing conclusion: $out"
+  contains "$out" "failure" || fail "ci-status missing conclusion: $out"
 
   # A successful latest run -> exit 0.
   cat > "$d/bin/gh" <<'EOF'
@@ -12691,19 +14725,19 @@ test_run_capsule_captures_and_reproduces() {
   # reproduce prints the exact checkout + diff-apply for the captured state.
   local repro
   repro="$(cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" reproduce "$id")"
-  printf '%s' "$repro" | grep -Fq "git checkout" || fail "reproduce missing checkout"
-  printf '%s' "$repro" | grep -Fq "uncommitted.diff" || fail "reproduce missing diff apply"
+  contains "$repro" "git checkout" || fail "reproduce missing checkout"
+  contains "$repro" "uncommitted.diff" || fail "reproduce missing diff apply"
 
   # Env is captured reconstructably (lock or freeze) and reproduce points at it.
   [ -f "$runs/$id/env.uv.lock" ] || [ -f "$runs/$id/env.freeze.txt" ] ||
     fail "no reconstructable env lock saved"
-  printf '%s' "$repro" | grep -Eq 'uv sync|pip install' || fail "reproduce missing env recreate step"
+  printf '%s' "$repro" | grep >/dev/null -E 'uv sync|pip install' || fail "reproduce missing env recreate step"
 
   # verify: clean against the same tree, drift after a change.
   local vout
   vout="$(cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" 2>&1)" ||
     fail "verify should pass on the unchanged tree"
-  printf '%s' "$vout" | grep -Fq "env-python" || fail "verify missing env-drift report"
+  contains "$vout" "env-python" || fail "verify missing env-drift report"
   printf 'changed\n' >> "$proj/file.txt"
   if ( cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" >/dev/null ); then
     fail "verify should report drift after a change"
@@ -12740,7 +14774,7 @@ test_run_capsule_whence_traces_checkpoint() {
   local out
   out="$(cd "$proj" && OMS_RUNS_DIR="$runs" \
     "$ROOT/scripts/run-capsule.sh" whence model.pt 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq "$id" || fail "whence did not find the producing run"
+  contains "$out" "$id" || fail "whence did not find the producing run"
 
   # An unrelated file has no producing run.
   printf 'unrelated\n' > "$proj/other.pt"
@@ -12758,7 +14792,7 @@ test_run_capsule_whence_traces_checkpoint() {
   assert_file_contains "$runs/$id2/capsule.json" '"hashed": true'
   out="$(cd "$proj" && OMS_RUNS_DIR="$runs" \
     "$ROOT/scripts/run-capsule.sh" whence produced.pt 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq "$id2" || fail "whence must trace a run-produced output"
+  contains "$out" "$id2" || fail "whence must trace a run-produced output"
 }
 
 test_data_manifest_check_and_leakage() {
@@ -12794,7 +14828,7 @@ test_data_manifest_check_and_leakage() {
   local out
   out="$( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name leak 2>&1 )" && \
     fail "leakage should exit nonzero on overlap"
-  printf '%s' "$out" | grep -Fq "LEAKAGE" || fail "leakage output missing LEAKAGE marker"
+  contains "$out" "LEAKAGE" || fail "leakage output missing LEAKAGE marker"
 }
 
 test_data_manifest_csv_column() {
@@ -12833,9 +14867,9 @@ test_data_manifest_key_column_leakage() {
   local out rc=0
   out="$( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name c )" || rc=$?
   [ "$rc" = 1 ] || fail "scaffold leakage should exit 1"
-  printf '%s' "$out" | grep -Fq 'ok      train ∩ test: no overlap' ||
+  contains "$out" 'ok      train ∩ test: no overlap' ||
     fail "exact-ID overlap should be clean"
-  printf '%s' "$out" | grep -Fq 'LEAKAGE[scaffold] train ∩ test: 1 shared key(s)' ||
+  contains "$out" 'LEAKAGE[scaffold] train ∩ test: 1 shared key(s)' ||
     fail "scaffold-level leakage must be flagged"
 
   # A missing key column is rejected at create (cannot silently no-op).
@@ -12906,7 +14940,7 @@ test_data_manifest_key_set_drift() {
   local out
   out="$( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" check --name c )" ||
     fail "label-only change must not be drift"
-  printf '%s' "$out" | grep -Fq 'WARN' || fail "expected WARN for byte-only change"
+  contains "$out" 'WARN' || fail "expected WARN for byte-only change"
 
   # Changing the scaffold assignment (ID set still identical) IS drift.
   printf 'id,scaffold,y\nm1,sX,0\nm2,s2,1\n' > "$d/train.csv"
@@ -13168,10 +15202,10 @@ test_experiment_board_lifecycle_and_duplicate_guard() {
   # Active list hides the finished experiment; --all shows it, owner = claimer.
   local active all
   active="$(OMS_EXPERIMENT_BOARD="$board" "$SH" list 2>/dev/null)"
-  printf '%s' "$active" | grep -Fq "$id" && fail "finished experiment must not be active"
+  contains "$active" "$id" && fail "finished experiment must not be active"
   all="$(OMS_EXPERIMENT_BOARD="$board" "$SH" list --all 2>/dev/null)"
-  printf '%s' "$all" | grep -Fq "$id" || fail "--all must show finished experiment"
-  printf '%s' "$all" | grep -Fq "owner=claude" || fail "owner must stay the claimer"
+  contains "$all" "$id" || fail "--all must show finished experiment"
+  contains "$all" "owner=claude" || fail "owner must stay the claimer"
 }
 
 test_experiment_board_stale_reclaim() {
@@ -13281,6 +15315,70 @@ test_patch_admit_admits_clean_patch() {
   assert_file_contains "$repo/no-fast.out" 'no bounded fast mode'
   "$SH" --patch "$repo/change.patch" --repo "$repo" --verify true >/dev/null ||
     fail "explicit verification must override default detection"
+  # Direct managed admission is a real local operation throughout verification.
+  python3 - "$ROOT" "$repo" <<'PY_REFERENCE'
+import hashlib, pathlib, runpy, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+c = runpy.run_path(str(root / 'scripts/lib/landing-capture.py'))
+source = repo / 'change.patch'
+private = c['allocate'](str(repo), str(source), 'land-direct-reference', hashlib.sha256(source.read_bytes()).hexdigest())
+c['publish'](str(repo), private, str(repo / '.oms/landing-patches/land-direct-reference.patch'))
+PY_REFERENCE
+  local managed="$repo/.oms/landing-patches/land-direct-reference.patch"
+  if ln -s "$managed" "$repo/redirected.patch" 2>/dev/null; then
+    if "$SH" --repo "$repo" --patch "$repo/redirected.patch" --verify true >/dev/null 2>&1; then
+      fail "redirected managed admission input bypassed ownership validation"
+    fi
+  fi
+  if "$SH" --repo "$repo" --patch "$managed" --verify true --report "$repo/external.md" >/dev/null 2>&1; then
+    fail "managed admission accepted an external report"
+  fi
+  [ ! -e "$repo/external.md" ] || fail "external managed report was written"
+  python3 - "$ROOT" "$repo" <<'PY_REFERENCE'
+import pathlib, runpy, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+rows = e['read_rows'](e['event_path'](repo))
+ids = [r['attempt_id'] for r in rows if r['event_type'] == 'attempt.created']
+_, attempts = e['load_projection'](repo)
+count = 2 if (repo / 'redirected.patch').is_symlink() else 1
+assert all(attempts[i]['state'] == 'failed' and attempts[i]['terminal'] is True for i in ids[-count:])
+PY_REFERENCE
+  cat > "$repo/observe-reference.py" <<'PY_REFERENCE'
+import pathlib, runpy, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+_, attempts = e['load_projection'](repo)
+import os
+assert os.environ.get('OMS_ATTEMPT_ID') == 'att_original_native'
+assert any(a.get('provider') == 'local' and a.get('tool') == 'patch-admit' and
+           a.get('state') == 'working' and not a.get('parent_attempt_id') for a in attempts.values())
+PY_REFERENCE
+  OMS_ATTEMPT_ID=att_original_native "$SH" --repo "$repo" --patch "$managed" \
+    --verify "python3 '$repo/observe-reference.py' '$ROOT' '$repo'" >/dev/null ||
+    fail "managed direct admission did not keep its own local operation active"
+  # A failed durable pin must leave the operation nonterminal, even with a report.
+  mv "$repo/.oms/artifacts/index.jsonl" "$repo/.oms/artifacts/index.saved"
+  mkdir "$repo/.oms/artifacts/index.jsonl"
+  if "$SH" --repo "$repo" --patch "$managed" --verify true >/dev/null 2>&1; then
+    fail "managed admission ignored index publication failure"
+  fi
+  python3 - "$ROOT" "$repo" <<'PY_REFERENCE'
+import pathlib, runpy, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+_, attempts = e['load_projection'](repo)
+rows = e['read_rows'](e['event_path'](repo))
+last = [r['attempt_id'] for r in rows if r['event_type'] == 'attempt.created'][-1]
+assert attempts[last]['tool'] == 'patch-admit' and attempts[last]['state'] == 'blocked'
+assert attempts[last]['terminal'] is not True
+c = runpy.run_path(str(root / 'scripts/lib/landing-capture.py'))
+# The fixture owns these captures; retain no private temporary directory.
+import shutil
+for item in c['reservations'](str(repo)).values():
+    shutil.rmtree(item['directory'])
+PY_REFERENCE
+
 }
 
 test_patch_admit_scope_uses_canonical_glob_and_deny_precedence() {
@@ -13469,8 +15567,8 @@ test_oms_run_spine_links_and_joins() {
 
   local out
   out="$(OMS_RUN_INDEX="$index" "$SH" show "$id" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq "run-ledger" || fail "show missing ledger link"
-  printf '%s' "$out" | grep -Fq "run-capsule" || fail "show missing capsule link"
+  contains "$out" "run-ledger" || fail "show missing ledger link"
+  contains "$out" "run-capsule" || fail "show missing capsule link"
   OMS_RUN_INDEX="$index" "$SH" ls 2>/dev/null | grep -Fq "$id" || fail "ls missing run"
 
   # Unknown run id -> nonzero.
@@ -13527,9 +15625,9 @@ test_oms_run_diff_compares_capsules() {
     "$cap" run --seed 2 --metrics mB.json --no-ledger -- true >/dev/null 2>&1 ) || fail "run B failed"
 
   out="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" diff "$a" "$b" 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq "metric:auc" || fail "diff missing metric line"
-  printf '%s' "$out" | grep -Fq "0.08" || fail "diff missing metric delta"
-  printf '%s' "$out" | grep -Fq "seeds" || fail "diff missing seeds line"
+  contains "$out" "metric:auc" || fail "diff missing metric line"
+  contains "$out" "0.08" || fail "diff missing metric delta"
+  contains "$out" "seeds" || fail "diff missing seeds line"
   printf '%s\n' "$out" | grep -F "metric:ok" > "$d/okline" || fail "diff missing bool metric"
   if grep -Fq "(Δ" "$d/okline"; then
     fail "bool metrics must not be treated as numeric deltas"
@@ -13557,8 +15655,11 @@ test_run_ledger_top_ranks_metrics() {
 EOF
 
   out="$("$SH" top --metric auc --file "$ledger")"
-  printf '%s\n' "$out" | head -n 1 | grep -Fq "auc=0.83" || fail "top should rank the best exit-0 run first"
-  if printf '%s' "$out" | grep -Fq "0.99"; then
+  printf '%s\n' "$out" | head -n 1 | grep -Fq "auc=0.83" || {
+    local top_status=("${PIPESTATUS[@]}")
+    fail "top should rank the best exit-0 run first (pipeline status: ${top_status[*]}; output: $out)"
+  }
+  if contains "$out" "0.99"; then
     fail "failed runs must be excluded without --all"
   fi
 
@@ -13585,20 +15686,20 @@ test_oms_run_timeline_merges_streams() {
   printf '{"ts":"2026-01-01T03:00:00Z","git_sha":"abc","dirty":0,"exit":0,"duration_s":5,"note":"tl run","cmd":["train"]}\n' > "$d/docs/EXPERIMENTS.jsonl"
 
   out="$(cd "$d" && "$SH" timeline)"
-  printf '%s' "$out" | grep -Fq "runs/spine" || fail "timeline should include the spine stream"
-  printf '%s' "$out" | grep -Fq "artifacts/index" || fail "timeline should include the artifact index stream"
-  printf '%s' "$out" | grep -Fq "ledger" || fail "timeline should include the run ledger"
+  contains "$out" "runs/spine" || fail "timeline should include the spine stream"
+  contains "$out" "artifacts/index" || fail "timeline should include the artifact index stream"
+  contains "$out" "ledger" || fail "timeline should include the run ledger"
   printf '%s\n' "$out" | head -n 1 | grep -Fq "01:00:00Z" || fail "timeline should be time-ordered (oldest first)"
   printf '%s\n' "$out" | tail -n 1 | grep -Fq "03:00:00Z" || fail "the newest event should print last"
 
   out="$(cd "$d" && "$SH" timeline --since 2026-01-01T02:30:00Z)"
-  if printf '%s' "$out" | grep -Fq "spine"; then
+  if contains "$out" "spine"; then
     fail "--since should filter out earlier events"
   fi
-  printf '%s' "$out" | grep -Fq "ledger" || fail "--since should keep later events"
+  contains "$out" "ledger" || fail "--since should keep later events"
 
   out="$(cd "$d" && "$SH" timeline --limit 1)"
-  printf '%s' "$out" | grep -Fq "omitted" || fail "--limit should report omitted earlier events"
+  contains "$out" "omitted" || fail "--limit should report omitted earlier events"
 }
 
 test_agent_plan_reclaim_requeues_stale_claim() {
@@ -13620,20 +15721,103 @@ test_agent_plan_reclaim_requeues_stale_claim() {
   "$SH" --repo "$d" review --id t4 >/dev/null
 
   out="$("$SH" --repo "$d" reclaim)"
-  printf '%s' "$out" | grep -Fq "reclaimed t1" || fail "expired claimed task should be reclaimed"
-  printf '%s' "$out" | grep -Fq "reclaimed 1 task(s)" || fail "only the expired claimed task should be reclaimed by default"
+  contains "$out" "reclaimed t1" || fail "expired claimed task should be reclaimed"
+  contains "$out" "reclaimed 1 task(s)" || fail "only the expired claimed task should be reclaimed by default"
   "$SH" --repo "$d" show --id t1 | grep -Fq '"state": "ready"' || fail "t1 should be requeued to ready"
   "$SH" --repo "$d" show --id t2 | grep -Fq '"state": "claimed"' || fail "a fresh claim must stay claimed"
   "$SH" --repo "$d" show --id t3 | grep -Fq '"state": "running"' || fail "running must require --include-running"
   "$SH" --repo "$d" show --id t4 | grep -Fq '"state": "review"' || fail "review must never be reclaimed"
 
   out="$("$SH" --repo "$d" reclaim --include-running)"
-  printf '%s' "$out" | grep -Fq "reclaimed t3" || fail "--include-running should reclaim the stale running task"
+  contains "$out" "reclaimed t3" || fail "--include-running should reclaim the stale running task"
 
   if "$SH" --repo "$d" reclaim --ttl abc >/dev/null 2>"$d/err"; then
     fail "non-numeric reclaim --ttl must be rejected"
   fi
   assert_file_contains "$d/err" "must be an integer"
+
+  python3 - "$SH" "$d" <<'PY' || fail "worker evidence must fence TTL reuse consistently"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+cli, directory = sys.argv[1:]
+plan = Path(directory) / ".oms/plan/tasks.json"
+markers = Path(directory) / ".oms/delegations"
+markers.mkdir()
+def invoke(*options, expected=0):
+    result = subprocess.run(["bash", cli, "--repo", directory, *options], text=True, capture_output=True)
+    assert result.returncode == expected, (options, result.returncode, result.stderr)
+    return result.stdout
+
+def lease(task):
+    return json.loads(plan.read_text())["tasks"][task]["lease_id"]
+
+def write_marker(name, task, token, pid):
+    row = dict(schema=3, id=name, task_id=task, lease_id=token, pid=pid)
+    if os.name == "nt" and type(pid) is int:
+        row.update(native_pid=pid, native_pid_source="msys-proc-v1")
+    (markers / (name + ".json")).write_text(json.dumps(row))
+
+for task in ("t1", "t3"):
+    invoke("claim", "--id", task, "--provider", "codex", "--ttl", "0")
+    write_marker(task, task, lease(task), os.getpid())
+invoke("start", "--id", "t3", "--lease-id", lease("t3"))
+for task in ("unknown", "unknown-running"):
+    invoke("add", "--id", task, "--title", task)
+    invoke("claim", "--id", task, "--provider", "codex", "--ttl", "0")
+    write_marker(task, task, lease(task), None)
+invoke("start", "--id", "unknown-running", "--lease-id", lease("unknown-running"))
+dead_process = subprocess.Popen([sys.executable, "-c", "pass"])
+dead_process.wait()
+write_marker("old-retry", "t1", lease("t1"), dead_process.pid)
+snapshot = plan.read_bytes()
+for task in ("t1", "t3", "unknown", "unknown-running"):
+    assert not json.loads(invoke("show", "--id", task))["claim_expired"], task
+    assert "EXPIRED" not in invoke("brief", "--id", task)
+assert not any(t["claim_expired"] for t in json.loads(invoke("list", "--json"))["tasks"])
+assert "EXPIRED" not in invoke("list") and "ready now: (none)" in invoke("status")
+status = json.loads(invoke("status", "--json"))
+assert status["stale"] == status["actionable"] == [], status
+assert not invoke("ready").strip()
+invoke("next", expected=3)
+invoke("next", "--claim", "--provider", "claude", expected=3)
+assert "reclaimed 0 task(s)" in invoke("reclaim", "--include-running")
+assert plan.read_bytes() == snapshot, "protected claims were renewed or requeued"
+
+tokens = {}
+for task in ("dead", "dead-running", "wrong-lease", "wrong-task", "markerless"):
+    invoke("add", "--id", task, "--title", task)
+    invoke("claim", "--id", task, "--provider", "codex", "--ttl", "0")
+    tokens[task] = lease(task)
+invoke("start", "--id", "dead-running", "--lease-id", tokens["dead-running"])
+for task in ("dead", "dead-running"):
+    write_marker(task, task, tokens[task], dead_process.pid)
+write_marker("wrong-lease", "wrong-lease", "lease_previous", os.getpid())
+write_marker("wrong-task", "different-task", tokens["wrong-task"], os.getpid())
+recoverable = {"dead", "wrong-lease", "wrong-task", "markerless"}
+assert set(invoke("ready").split()) == recoverable
+assert set(json.loads(invoke("status", "--json"))["actionable"]) == recoverable
+chosen = json.loads(invoke("next", "--claim", "--provider", "claude", "--ttl", "9999", "--json"))
+assert chosen["id"] == "dead" and chosen["lease_id"] != tokens["dead"], chosen
+for action in ("touch", "start"):
+    invoke(action, "--id", "dead", "--lease-id", tokens["dead"], expected=2)
+invoke("touch", "--id", "dead", "--lease-id", chosen["lease_id"])
+assert "reclaimed 4 task(s)" in invoke("reclaim", "--include-running")
+for task in ("dead-running", "wrong-lease", "wrong-task", "markerless"):
+    assert json.loads(invoke("show", "--id", task))["state"] == "ready", task
+
+# Unrelated undecodable records still pass through the canonical strict reader.
+(markers / "unrelated.json").write_text('{"task_id":"unrelated","pid":NaN}')
+snapshot = plan.read_bytes()
+invoke("show", "--id", "dead")  # fresh TTL needs no marker scan
+for options in (("show", "--id", "t1"), ("ready",), ("reclaim", "--include-running"),
+                ("next", "--claim", "--provider", "claude")):
+    invoke(*options, expected=2)
+assert snapshot == plan.read_bytes()
+PY
 }
 
 test_delegate_plan_task_lifecycle() {
@@ -13826,12 +16010,12 @@ PY
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 prompt="$(cat)"
-if printf '%s' "$prompt" | grep -q 'continuing your own previous attempt'; then
-  printf '%s' "$prompt" | grep -q 'Read applicable repository instructions and PROJECT.md' || exit 8
-  printf '%s' "$prompt" | grep -q 'preserve contracts and safety' || exit 8
-  printf '%s' "$prompt" | grep -q 'reuse existing tests, and run affected checks' || exit 8
-  printf '%s' "$prompt" | grep -q 'IMPLEMENTATION-WORKER-STRATEGY' || exit 9
-  if printf '%s' "$prompt" | grep -q 'PRESERVED-PATCH-CONTENT'; then exit 10; fi
+if printf '%s' "$prompt" | grep >/dev/null 'continuing your own previous attempt'; then
+  printf '%s' "$prompt" | grep >/dev/null 'Read applicable repository instructions and PROJECT.md' || exit 8
+  printf '%s' "$prompt" | grep >/dev/null 'preserve contracts and safety' || exit 8
+  printf '%s' "$prompt" | grep >/dev/null 'reuse existing tests, and run affected checks' || exit 8
+  printf '%s' "$prompt" | grep >/dev/null 'IMPLEMENTATION-WORKER-STRATEGY' || exit 9
+  if printf '%s' "$prompt" | grep >/dev/null 'PRESERVED-PATCH-CONTENT'; then exit 10; fi
   [ "$(git show :large.txt | grep -c PRESERVED-PATCH-CONTENT)" = 1000 ] || exit 11
   printf 'fixed\n' > delegated.txt
   echo "worker repaired"
@@ -13934,7 +16118,7 @@ PY
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 prompt="$(cat)"
-if printf '%s' "$prompt" | grep -q 'continuing your own previous attempt'; then
+if printf '%s' "$prompt" | grep >/dev/null 'continuing your own previous attempt'; then
   exit 127
 fi
 printf 'broken\n' > delegated.txt
@@ -14104,7 +16288,7 @@ test_doctor_fails_broken_config_symlink() {
 
   out="$(run_doctor_for_project "$project" "$home_dir" 2>&1)" && rc=0 || rc=$?
   [ "$rc" -ne 0 ] || fail "doctor must fail on a dangling config symlink"
-  printf '%s' "$out" | grep -Fq "broken link: $home_dir/.claude/CLAUDE.md" ||
+  contains "$out" "broken link: $home_dir/.claude/CLAUDE.md" ||
     fail "doctor should diagnose the dangling symlink as a broken link"
 }
 
@@ -14218,7 +16402,7 @@ test_oms_dispatcher_refuses_an_unusable_receipt() {
   if out="$(OMS_INSTALL_RECEIPT="$dir/absent.json" "$dir/bin/oms" list 2>&1)"; then
     fail "oms must not dispatch with no checkout and no receipt: $out"
   fi
-  printf '%s' "$out" | grep -Fq 'cannot locate its checkout' ||
+  contains "$out" 'cannot locate its checkout' ||
     fail "oms must name the broken contract: $out"
 
   # A pre-v0.4 receipt names a root but not under the contract this reads.
@@ -14231,7 +16415,7 @@ test_oms_dispatcher_refuses_an_unusable_receipt() {
   printf '{"schema": 2, "source_root": "%s"}\n' "$ROOT" > "$receipt"
   out="$(OMS_INSTALL_RECEIPT="$receipt" "$dir/bin/oms" list --all 2>&1)" ||
     fail "oms must dispatch through a schema-2 receipt: $out"
-  printf '%s' "$out" | grep -Fq plan-run ||
+  contains "$out" plan-run ||
     fail "receipt dispatch did not reach the real tool list: $out"
 }
 
@@ -14251,7 +16435,7 @@ test_validate_separates_the_two_index_families() {
 
   out="$("$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)" ||
     fail "both index families should validate: $out"
-  printf '%s' "$out" | grep -Fq '0 with errors or invalid rows' ||
+  contains "$out" '0 with errors or invalid rows' ||
     fail "a run-capsule index must not be reported invalid: $out"
 
   # Each family still enforces its own required field.
@@ -14259,7 +16443,7 @@ test_validate_separates_the_two_index_families() {
   if out="$("$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)"; then
     fail "a runs index row without an id must be rejected: $out"
   fi
-  printf '%s' "$out" | grep -Fq "missing required field 'id'" ||
+  contains "$out" "missing required field 'id'" ||
     fail "the runs index must be checked for id: $out"
 
   printf '{"id": "20260101T000000Z-1"}\n' > "$project/.oms/runs/index.jsonl"
@@ -14267,7 +16451,7 @@ test_validate_separates_the_two_index_families() {
   if out="$("$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)"; then
     fail "an artifact index row without a kind must be rejected: $out"
   fi
-  printf '%s' "$out" | grep -Fq "missing required field 'kind'" ||
+  contains "$out" "missing required field 'kind'" ||
     fail "the artifact index must still be checked for kind: $out"
 }
 
@@ -14364,21 +16548,21 @@ test_oms_dispatcher_lists_and_dispatches() {
   # pipefail as soon as the match is found.
   out="$("$bin/oms" list)" || fail "oms list should succeed"
   [ "$out" = "$("$bin/oms" list --frontdoor)" ] || fail "default catalog must be compact"
-  printf '%s' "$out" | grep -Eq '^inbox ' || fail "compact catalog needs inbox"
-  if printf '%s' "$out" | grep -Eq '^agent-run |^herdr-adapter |^semantic-eval '; then
+  printf '%s' "$out" | grep >/dev/null -E '^inbox ' || fail "compact catalog needs inbox"
+  if printf '%s' "$out" | grep >/dev/null -E '^agent-run |^herdr-adapter |^semantic-eval '; then
     fail "default catalog leaked primitive, optional or retired tools"
   fi
   out="$("$bin/oms" list --all)" || fail "expanded catalog should succeed"
-  printf '%s' "$out" | grep -Eq '^run-ledger ' || fail "oms list should include run-ledger"
+  printf '%s' "$out" | grep >/dev/null -E '^run-ledger ' || fail "oms list should include run-ledger"
   for public in agent-events agent-supervisor approval-inbox autopilot draft-pr \
     runtime open-in otel-export; do
-    printf '%s\n' "$out" | grep -Eq "^${public} " ||
+    printf '%s\n' "$out" | grep >/dev/null -E "^${public} " ||
       fail "oms list should include new public tool: $public"
     "$bin/oms" "$public" --help >/dev/null 2>&1 ||
       fail "oms should dispatch new public tool: $public"
   done
   for retired in herdr-adapter a2a-bridge agent-card ops-cockpit agent-run research-runner; do
-    if printf '%s\n' "$out" | grep -Eq "^${retired} "; then
+    if printf '%s\n' "$out" | grep >/dev/null -E "^${retired} "; then
       fail "retired adapter leaked into core catalog: $retired"
     fi
     if "$bin/oms" "$retired" --help >/dev/null 2>&1; then
@@ -14388,11 +16572,11 @@ test_oms_dispatcher_lists_and_dispatches() {
   "$bin/oms" semantic-eval --help >/dev/null || fail "retired evaluator needs migration help"
   for hidden in skill-router turn-guard check-bash32 install-tools multi-agent-ask multi-agent-review multi-agent-delegate \
     generate-slurm-reference generate-slurm-skill github-source import-agent-result install-autoupdate run-capsule tool-lock uninstall-autoupdate write-machine-snapshot; do
-    if printf '%s' "$out" | grep -Eq "^${hidden} "; then
+    if printf '%s' "$out" | grep >/dev/null -E "^${hidden} "; then
       fail "oms list should hide internal/deprecated tool: $hidden"
     fi
   done
-  printf '%s' "$out" | grep -Eq '^snapshot ' || fail "oms list should include snapshot"
+  printf '%s' "$out" | grep >/dev/null -E '^snapshot ' || fail "oms list should include snapshot"
   "$bin/oms" run-ledger --help >/dev/null 2>&1 || fail "oms should dispatch run-ledger via its symlink"
   (cd "$d" && "$bin/oms" run ls >/dev/null 2>&1) || fail "oms run door broke"
   # One spelling per verb: the dispatcher used to accept both a short alias
@@ -14438,28 +16622,28 @@ test_oms_frontdoor_routes_primary_subsystems() {
   all_tools="$("$bin/oms" list --all)" || fail "oms list --all should succeed"
   help_text="$("$bin/oms" --help)" || fail "oms --help should succeed"
   review_help="$("$bin/oms" peer-review --help)" || fail "peer-review --help should succeed"
-  printf '%s\n' "$help_text" | grep -Fq 'reveals core primitives' ||
+  printf '%s\n' "$help_text" | grep >/dev/null -F 'reveals core primitives' ||
     fail "oms help should distinguish the full public catalog from subsystem front doors"
-  printf '%s\n' "$review_help" | grep -Fq 'Plain review persists seat answers as artifacts.' ||
+  printf '%s\n' "$review_help" | grep >/dev/null -F 'Plain review persists seat answers as artifacts.' ||
     fail "peer-review help should not promise a typed gate outcome in plain mode"
-  printf '%s\n' "$review_help" | grep -Fq 'With --gate, enforce and record the typed gate outcome.' ||
+  printf '%s\n' "$review_help" | grep >/dev/null -F 'With --gate, enforce and record the typed gate outcome.' ||
     fail "peer-review help should scope its typed outcome to gate mode"
 
   for primary in autopilot consult dashboard doctor inbox journal land panel patch-admit patch-land \
     peer-delegate peer-review room runtime tick update; do
-    printf '%s\n' "$frontdoors" | grep -Eq "^${primary} " ||
+    printf '%s\n' "$frontdoors" | grep >/dev/null -E "^${primary} " ||
       fail "frontdoor catalog should route the canonical workflow: $primary"
   done
 
-  if printf '%s\n' "$frontdoors" | grep -Eq '^agent-call '; then
+  if printf '%s\n' "$frontdoors" | grep >/dev/null -E '^agent-call '; then
     fail "read primitive should stay behind list --all: agent-call"
   fi
-  printf '%s\n' "$all_tools" | grep -Eq '^agent-call ' ||
+  printf '%s\n' "$all_tools" | grep >/dev/null -E '^agent-call ' ||
     fail "list --all should retain the read primitive: agent-call"
 
   duplicate="$(printf '%s\n' "$frontdoors" | awk '{ seen[$1]++ } END { for (name in seen) if (seen[name] > 1) print name }')"
   [ -z "$duplicate" ] || fail "frontdoor catalog contains duplicate tools: $duplicate"
-  printf '%s\n' "$frontdoors" | grep -Eq '^peer-review .*diff' ||
+  printf '%s\n' "$frontdoors" | grep >/dev/null -E '^peer-review .*diff' ||
     fail "peer-review catalog description should distinguish diff review from peer-ask"
 }
 
@@ -14478,7 +16662,7 @@ test_doctor_detects_foreign_config_link() {
 
   out="$(run_doctor_for_project "$project" "$home_dir" 2>&1)" && rc=0 || rc=$?
   [ "$rc" -ne 0 ] || fail "doctor must fail when a config link resolves to a foreign file"
-  printf '%s' "$out" | grep -Fq "linked elsewhere: $home_dir/.claude/CLAUDE.md" ||
+  contains "$out" "linked elsewhere: $home_dir/.claude/CLAUDE.md" ||
     fail "doctor should diagnose the foreign link target"
 }
 
@@ -14537,7 +16721,7 @@ test_verify_timeout_bounds_hung_verify() {
     OMS_PEER_VERIFY_TIMEOUT=1s run_verify_with_timeout bash -c 'sleep 30'
     echo exit=\$?
   " 2>/dev/null)"
-  printf '%s' "$out" | grep -Fq "exit=124" || fail "a hung verify should fail with timeout exit 124"
+  contains "$out" "exit=124" || fail "a hung verify should fail with timeout exit 124"
 }
 
 test_delegate_worker_does_not_receive_primary_state_env() {
@@ -14719,7 +16903,7 @@ test_change_guard_catches_committed_escape() {
 
   local out
   out="$(cd "$project" && "$ROOT/scripts/change-guard.sh" check 2>&1)" || true
-  printf '%s' "$out" | grep -Fq "outside declared scope: out-of-scope/f.txt" ||
+  contains "$out" "outside declared scope: out-of-scope/f.txt" ||
     fail "committed out-of-scope file must be caught by the scope check"
   if ( cd "$project" && "$ROOT/scripts/change-guard.sh" --strict check >/dev/null 2>&1 ); then
     fail "--strict must fail when a committed change escapes scope"
@@ -14743,7 +16927,7 @@ open(path, "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
 PY
   local out
   out="$(cd "$project" && "$ROOT/scripts/experiment-board.sh" list)"
-  printf '%s' "$out" | grep -q "old .*STALE" || fail "an aged claim should be tagged STALE"
+  printf '%s' "$out" | grep >/dev/null "old .*STALE" || fail "an aged claim should be tagged STALE"
   printf '%s' "$out" | grep "fresh" | grep -q "STALE" && fail "a fresh claim must not be STALE"
   [ "$(cd "$project" && "$ROOT/scripts/experiment-board.sh" list --stale | grep -c .)" -eq 1 ] ||
     fail "--stale should show only the stale claim"
@@ -14798,7 +16982,7 @@ test_delegate_plan_task_hydrates_brief_and_verify() {
   local out
   out="$(cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex --plan-task t1 2>&1)" || fail "plan-task dry-run should succeed"
-  printf '%s' "$out" | grep -Fq "plan-verify: echo custom-verify-marker" ||
+  contains "$out" "plan-verify: echo custom-verify-marker" ||
     fail "verify should be hydrated from the plan task"
   assert_one_artifact_contains "$project/.oms/artifacts/delegate" 'codex-*.md' 'Fix the frobnicator'
 }
@@ -14925,9 +17109,9 @@ PY
 
   local text
   text="$(cd "$project" && "$ROOT/scripts/state.sh")"
-  printf '%s' "$text" | grep -Fq "goal: ship it" || fail "repo-state should show the active task goal"
-  printf '%s' "$text" | grep -Fq "actionable now: a1" || fail "repo-state should list actionable tasks"
-  printf '%s' "$text" | grep -Fq "STALE claims: a2" || fail "repo-state should flag stale plan claims"
+  contains "$text" "goal: ship it" || fail "repo-state should show the active task goal"
+  contains "$text" "actionable now: a1" || fail "repo-state should list actionable tasks"
+  contains "$text" "STALE claims: a2" || fail "repo-state should flag stale plan claims"
 
   # --json is valid and carries the same facts, and it is invocable via oms state.
   ( cd "$project" && "$ROOT/scripts/state.sh" --json ) |
@@ -15039,7 +17223,7 @@ test_delegate_plan_task_hydrates_from_subdir() {
   local out
   out="$(cd "$project/src" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
     --to codex --plan-task t1 2>&1)" || fail "subdir plan-task dry-run should succeed"
-  printf '%s' "$out" | grep -Fq "plan-verify: echo VERIFYMARK" ||
+  contains "$out" "plan-verify: echo VERIFYMARK" ||
     fail "verify must hydrate from the plan task even when run from a subdirectory"
 }
 
@@ -15051,9 +17235,9 @@ test_agent_role_and_delegate_injection() {
   make_committed_repo "$empty_project"
   roles="$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
     "$ROOT/scripts/agent-role.sh" list)"
-  printf '%s\n' "$roles" | grep -Fxq decision-advisor ||
+  printf '%s\n' "$roles" | grep >/dev/null -Fx decision-advisor ||
     fail "agent-role list should include bundled decision-advisor"
-  printf '%s\n' "$roles" | grep -Fxq repo-auditor ||
+  printf '%s\n' "$roles" | grep >/dev/null -Fx repo-auditor ||
     fail "agent-role list should include bundled repo-auditor"
   printf '%s' "$roles" | grep -Fxq researcher ||
     fail "agent-role list should include bundled researcher"
@@ -15276,27 +17460,27 @@ test_fail_ledger_names_an_advisor_after_a_repeat() {
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" record \
     --cmd "$gate" --exit 1 --summary "assert failed" 2>&1)" ||
     fail "first record should succeed"
-  if printf '%s' "$out" | grep -Fq 'oms advise'; then
+  if contains "$out" 'oms advise'; then
     fail "a single failure is not a pattern; no advisor yet: $out"
   fi
 
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" record \
     --cmd "$gate" --exit 1 --summary "assert failed" 2>&1)" ||
     fail "second record should succeed"
-  printf '%s' "$out" | grep -Fq 'has failed 2x unresolved' ||
+  contains "$out" 'has failed 2x unresolved' ||
     fail "the second unresolved failure should be named as a repeat: $out"
-  printf '%s' "$out" | grep -Fq 'oms advise' ||
+  contains "$out" 'oms advise' ||
     fail "the repeat should name the advisor: $out"
-  printf '%s' "$out" | grep -Fq 'if authorized' ||
+  contains "$out" 'if authorized' ||
     fail "the hint must not authorize another model call: $out"
 
   # `check` gates the retry, so it carries the same escalation and keeps exit 3.
   local rc=0
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" check --cmd "$gate" 2>&1)" || rc=$?
   [ "$rc" = 3 ] || fail "check must still exit 3 for a known failure, got $rc"
-  printf '%s' "$out" | grep -Fq 'oms advise' ||
+  contains "$out" 'oms advise' ||
     fail "check should name the advisor on a repeat: $out"
-  printf '%s' "$out" | grep -Fq 'if authorized' ||
+  contains "$out" 'if authorized' ||
     fail "check must preserve the optional advisor boundary: $out"
 
   # A resolve zeroes the run: the next failure is a first failure again.
@@ -15304,7 +17488,7 @@ test_fail_ledger_names_an_advisor_after_a_repeat() {
     fail "resolve should succeed"
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" record \
     --cmd "$gate" --exit 1 2>&1)" || fail "record after resolve should succeed"
-  if printf '%s' "$out" | grep -Fq 'oms advise'; then
+  if contains "$out" 'oms advise'; then
     fail "a resolved fingerprint must start counting again: $out"
   fi
 
@@ -15312,7 +17496,7 @@ test_fail_ledger_names_an_advisor_after_a_repeat() {
   # want an advisor named at all.
   out="$(cd "$project" && OMS_ADVISE_AFTER_FAILURES=0 "$ROOT/scripts/fail-ledger.sh" record \
     --cmd "$gate" --exit 1 2>&1)" || fail "record with the hint disabled should succeed"
-  if printf '%s' "$out" | grep -Fq 'oms advise'; then
+  if contains "$out" 'oms advise'; then
     fail "OMS_ADVISE_AFTER_FAILURES=0 must silence the hint: $out"
   fi
 }
@@ -15558,7 +17742,7 @@ test_fail_ledger_kind_next_how_and_legacy_rows() {
   make_committed_repo "$project"
   out="$(cd "$project" && "$SH" --repo "$project" record --cmd "false" --exit 1 --kind invalid 2>&1)" &&
     fail "unknown fail-ledger kind must fail"
-  printf '%s' "$out" | grep -Fq 'cmd, hook, verify, plan-run, delegate, patch-land' ||
+  contains "$out" 'cmd, hook, verify, plan-run, delegate, patch-land' ||
     fail "kind rejection must name the allowed set: $out"
 
   ( cd "$project" && "$SH" --repo "$project" record --cmd "bash broken.sh" --exit 1 \
@@ -15566,16 +17750,16 @@ test_fail_ledger_kind_next_how_and_legacy_rows() {
     fail "record with --next should succeed"
   out="$(cd "$project" && "$SH" --repo "$project" check --cmd "bash broken.sh" 2>&1)" || rc=$?
   [ "$rc" = 3 ] || fail "check must still return 3 with --next, got $rc"
-  printf '%s' "$out" | grep -Fq 'next: inspect the failing assertion' ||
+  contains "$out" 'next: inspect the failing assertion' ||
     fail "check must surface the recommended next action: $out"
   out="$(cd "$project" && "$SH" --repo "$project" list)" || fail "list with --next should succeed"
-  printf '%s' "$out" | grep -Fq '  next: inspect the failing assertion' ||
+  contains "$out" '  next: inspect the failing assertion' ||
     fail "list must surface --next: $out"
   fp="$(printf '%s\n' "$out" | awk 'NR == 1 { print $1 }')"
   ( cd "$project" && "$SH" --repo "$project" resolve --fingerprint "$fp" --how "fixed the assertion" ) \
     >/dev/null 2>&1 || fail "resolve with --how should succeed"
   out="$(cd "$project" && "$SH" --repo "$project" list)" || fail "list after --how should succeed"
-  printf '%s' "$out" | grep -Fq '  fixed: fixed the assertion' ||
+  contains "$out" '  fixed: fixed the assertion' ||
     fail "list must surface --how on resolved rows: $out"
   out="$(cd "$project" && "$SH" --repo "$project" list --json)" || fail "list --json should succeed"
   printf '%s' "$out" | python3 -c '
@@ -15590,9 +17774,9 @@ assert row["how"] == "fixed the assertion", row
   printf '{"event":"fail","fingerprint":"implicit-schema-row","cmd":"older command","exit":1}\n' \
     >> "$project/.oms/failures.jsonl"
   out="$(cd "$project" && "$SH" --repo "$project" list)" || fail "list should parse old rows"
-  printf '%s' "$out" | grep -Fq 'old command' ||
+  contains "$out" 'old command' ||
     fail "old rows without new fields must still list: $out"
-  printf '%s' "$out" | grep -Fq 'older command' ||
+  contains "$out" 'older command' ||
     fail "legacy rows without an explicit schema must still list: $out"
 }
 
@@ -15628,37 +17812,272 @@ test_delegation_liveness_in_state() {
     > "$project/.oms/delegations/d2.json"
   local out
   out="$(cd "$project" && "$ROOT/scripts/state.sh")"
-  printf '%s' "$out" | grep -Eq "d1.*ORPHAN" || fail "a dead-pid delegation must be flagged as ORPHAN"
-  printf '%s' "$out" | grep -Eq "d2.*live" || fail "a live-pid delegation must show as live"
+  printf '%s' "$out" | grep >/dev/null -E "d1.*ORPHAN" || fail "a dead-pid delegation must be flagged as ORPHAN"
+  printf '%s' "$out" | grep >/dev/null -E "d2.*live" || fail "a live-pid delegation must show as live"
 }
 
 test_gc_reclaims_safely() {
   local project="$TMP/gc"
   local gc_err="$project/gc.err"
+  local hook_project hook_case before after rc lock_mode lock_force_mkdir lock_target holder_pid python_real python_crlf_dir
+
+  gc_hook_digest() {
+    python3 -c 'import hashlib,sys
+h=hashlib.sha256()
+for path in sys.argv[1:]:
+    with open(path,"rb") as handle:
+        h.update(handle.read())
+print(h.hexdigest())' "$@"
+  }
+  gc_hook_seed() {
+    local path="$1"
+    mkdir -p "$path/.oms/hooks/sessions"
+    printf '%s\n' \
+      '{"schema":1,"ts":"2020-01-01T00:00:00Z","action":"old"}' \
+      '{"schema":1,"ts":"2099-01-01T00:00:00Z","action":"new"}' \
+      > "$path/.oms/hooks/events.jsonl"
+    printf '{"session":"old"}\n' > "$path/.oms/hooks/sessions/old.json"
+    python3 - "$path/.oms/hooks/sessions/old.json" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1, 1))
+PY
+  }
+
+  python_real="$(command -v python3)"
+  python_crlf_dir="$TMP/gc-python-crlf"
+  mkdir -p "$python_crlf_dir"
+  cat > "$python_crlf_dir/python3" <<'PYTHON'
+#!/usr/bin/env bash
+if [ "$#" -ge 3 ] && [ "$1" = "-c" ] && [ "$3" = "$CRLF_SESSION" ]; then
+  case "$2" in
+    *getmtime*)
+      value="$("$REAL_PYTHON" "$@")" || exit $?
+      printf '%s\r\n' "$value"
+      exit 0
+      ;;
+  esac
+fi
+exec "$REAL_PYTHON" "$@"
+PYTHON
+  chmod +x "$python_crlf_dir/python3"
+  gc_run_crlf() {
+    local gc_project="$1"
+    shift
+    ( cd "$gc_project" && REAL_PYTHON="$python_real" \
+      CRLF_SESSION="$gc_project/.oms/hooks/sessions/old.json" \
+      PATH="$python_crlf_dir:$PATH" "$ROOT/scripts/gc.sh" "$@" )
+  }
 
   make_committed_repo "$project"
   mkdir -p "$project/.oms/delegations" "$project/.oms/task/archive" "$project/.oms/runs/oldrun"
   printf '{"schema":1,"id":"d1","pid":999999,"state":"running"}\n' > "$project/.oms/delegations/d1.json"
   printf '{"schema":1,"id":"d2","pid":%s,"state":"running"}\n' "$$" > "$project/.oms/delegations/d2.json"
+  kill -0 "$$" 2>/dev/null || fail "test process PID must be independently live"
+  python3 - "$$" "$ROOT/scripts/lib/process_liveness.py" <<'PY' || fail "test PID must be verified live by shared process probe"
+import runpy, sys
+assert runpy.run_path(sys.argv[2])["pid_alive"](int(sys.argv[1]))
+PY
   printf 'x\n' > "$project/.oms/task/archive/current-old.md"
   printf '{}' > "$project/.oms/runs/oldrun/capsule.json"
   printf '%s\n' \
     '{"ts":"2020-01-01T00:00:00Z","fingerprint":"old","event":"fail"}' \
     '{"ts":"2020-01-01T00:00:01Z","fingerprint":"old","event":"resolved"}' \
     > "$project/.oms/failures.jsonl"
+  gc_hook_seed "$project"
   touch -t 202601010000 "$project/.oms/task/archive/current-old.md" "$project/.oms/runs/oldrun"
 
   # Dry-run changes nothing.
-  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 >/dev/null 2>&1 )
+  before="$(gc_hook_digest "$project/.oms/hooks/events.jsonl" "$project/.oms/hooks/sessions/old.json")"
+  gc_run_crlf "$project" --days 30 >/dev/null 2>&1
+  after="$(gc_hook_digest "$project/.oms/hooks/events.jsonl" "$project/.oms/hooks/sessions/old.json")"
+  [ "$before" = "$after" ] || fail "gc dry-run must preserve hook bytes"
   [ -f "$project/.oms/delegations/d1.json" ] || fail "dry-run must not delete anything"
   # Apply reclaims the orphan/old, keeps the live delegation.
-  ( cd "$project" && "$ROOT/scripts/gc.sh" --days 0 --apply >/dev/null 2>"$gc_err" )
-  [ ! -s "$gc_err" ] || fail "gc should compact an all-resolved ledger without stderr: $(cat "$gc_err")"
+  before="$(gc_hook_digest "$project/.oms/hooks/events.jsonl" "$project/.oms/hooks/sessions/old.json")"
+  gc_run_crlf "$project" --days 0 --apply >/dev/null 2>"$gc_err"
+  after="$(gc_hook_digest "$project/.oms/hooks/events.jsonl" "$project/.oms/hooks/sessions/old.json")"
+  [ "$before" = "$after" ] || fail "verified live PID marker must preserve hook bytes"
+  grep -Fq 'hook cleanup skipped' "$gc_err" || fail "live marker should defer hook cleanup: $(cat "$gc_err")"
   [ ! -f "$project/.oms/delegations/d1.json" ] || fail "gc --apply should remove the dead-pid delegation"
   [ -f "$project/.oms/delegations/d2.json" ] || fail "gc must keep a live delegation"
   [ ! -f "$project/.oms/task/archive/current-old.md" ] || fail "gc should remove an aged task archive"
   [ ! -d "$project/.oms/runs/oldrun" ] || fail "gc should remove an aged capsule"
   [ ! -s "$project/.oms/failures.jsonl" ] || fail "gc should compact an all-resolved old ledger to empty"
+
+  # No marker and a verified dead marker permit normal cleanup. Every
+  # ambiguous marker shape defers both transient operations byte-for-byte.
+  for hook_case in no-marker dead unknown malformed symlink unsafe-name; do
+    hook_project="$TMP/gc-hook-$hook_case"
+    make_committed_repo "$hook_project"
+    gc_hook_seed "$hook_project"
+    if [ "$hook_case" != no-marker ]; then
+      mkdir -p "$hook_project/.oms/delegations"
+      case "$hook_case" in
+        dead) printf '{"schema":1,"id":"dead","pid":2147483647}\n' > "$hook_project/.oms/delegations/dead.json" ;;
+        unknown) printf '{"schema":1,"pid":2147483647}\n' > "$hook_project/.oms/delegations/unknown.json" ;;
+        malformed) printf '{broken\n' > "$hook_project/.oms/delegations/malformed.json" ;;
+        symlink)
+          printf '{"schema":1,"id":"target","pid":2147483647}\n' > "$TMP/gc-hook-marker-target"
+          ln -s "$TMP/gc-hook-marker-target" "$hook_project/.oms/delegations/link.json"
+          ;;
+        unsafe-name) printf '{"schema":1,"id":"unsafe","pid":2147483647}\n' > "$hook_project/.oms/delegations/bad name.json" ;;
+      esac
+    fi
+    before="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl" "$hook_project/.oms/hooks/sessions/old.json")"
+    gc_run_crlf "$hook_project" --days 0 --apply >"$hook_project/gc.out" 2>"$hook_project/gc.err" ||
+      fail "hook cleanup fixture failed for $hook_case: $(cat "$hook_project/gc.err")"
+    if [ "$hook_case" = no-marker ] || [ "$hook_case" = dead ]; then
+      [ ! -e "$hook_project/.oms/hooks/sessions/old.json" ] || fail "$hook_case marker case should remove old session"
+      ! grep -Fq '"action":"old"' "$hook_project/.oms/hooks/events.jsonl" ||
+        fail "$hook_case marker case should compact old hook event"
+      grep -Fq '"action":"new"' "$hook_project/.oms/hooks/events.jsonl" ||
+        fail "$hook_case marker case should preserve new hook event"
+    else
+      after="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl" "$hook_project/.oms/hooks/sessions/old.json")"
+      [ "$before" = "$after" ] || fail "$hook_case marker evidence changed hook bytes"
+      grep -Fq 'hook cleanup skipped' "$hook_project/gc.err" ||
+        fail "$hook_case marker evidence did not defer hook cleanup"
+    fi
+  done
+
+  # A failing event compactor remains a hard GC error and cannot fall through
+  # to session deletion. The shim fails only the explicit compact-events call.
+  hook_project="$TMP/gc-hook-compact-failure"
+  make_committed_repo "$hook_project"
+  mkdir -p "$hook_project/.oms/hooks/sessions" "$hook_project/bin"
+  printf '{"schema":1,"ts":"2020-01-01T00:00:00Z","action":"old"}\n' > "$hook_project/.oms/hooks/events.jsonl"
+  printf '{"session":"old"}\n' > "$hook_project/.oms/hooks/sessions/old.json"
+  python3 - "$hook_project/.oms/hooks/sessions/old.json" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1, 1))
+PY
+  before="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl")"
+  python_real="$(command -v python3)"
+  cat > "$hook_project/bin/python3" <<'PYTHON'
+#!/usr/bin/env bash
+case " $* " in
+  *hook_state.py*compact-events*) echo 'simulated compaction failure' >&2; exit 2 ;;
+esac
+exec "$REAL_PYTHON" "$@"
+PYTHON
+  chmod +x "$hook_project/bin/python3"
+  rc=0
+  ( cd "$hook_project" && REAL_PYTHON="$python_real" PATH="$hook_project/bin:$PATH" \
+    "$ROOT/scripts/gc.sh" --days 0 --apply >"$hook_project/gc.out" 2>"$hook_project/gc.err" ) || rc=$?
+  [ "$rc" -ne 0 ] || fail "event compaction failure must fail GC"
+  after="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl")"
+  [ "$before" = "$after" ] || fail "event compaction failure changed hook event bytes"
+  [ -f "$hook_project/.oms/hooks/sessions/old.json" ] ||
+    fail "event compaction failure must keep hook sessions"
+  grep -Fq 'could not compact hook events' "$hook_project/gc.err" ||
+    fail "event compaction failure was not reported: $(cat "$hook_project/gc.err")"
+
+  # Marker-set lock acquisition failure is a defer, with both lock backends.
+  for lock_mode in flock mkdir; do
+    hook_project="$TMP/gc-hook-lock-$lock_mode"
+    lock_force_mkdir=0
+    if [ "$lock_mode" = mkdir ]; then lock_force_mkdir=1; fi
+    make_committed_repo "$hook_project"
+    gc_hook_seed "$hook_project"
+    mkdir -p "$hook_project/.oms/delegations" "$TMP/gc-hook-locks-$lock_mode"
+    lock_target="$hook_project/.oms/delegations/.marker-set-lock-target"
+    OMS_LOCK_DIR="$TMP/gc-hook-locks-$lock_mode" OMS_LOCK_TIMEOUT=4 \
+      OMS_LOCK_FORCE_MKDIR="$lock_force_mkdir" \
+      PROBE_READY="$TMP/gc-hook-lock-ready-$lock_mode" bash -c '
+        . "$1/scripts/lib/file-lock.sh"
+        hold() { : > "$PROBE_READY"; sleep 3; }
+        oms_with_file_lock "$2" hold
+      ' _ "$ROOT" "$lock_target" &
+    holder_pid=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      [ -f "$TMP/gc-hook-lock-ready-$lock_mode" ] && break
+      sleep 0.1
+    done
+    [ -f "$TMP/gc-hook-lock-ready-$lock_mode" ] || fail "$lock_mode marker lock holder did not start"
+    before="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl" "$hook_project/.oms/hooks/sessions/old.json")"
+    lock_rc=0
+    ( cd "$hook_project" && OMS_LOCK_DIR="$TMP/gc-hook-locks-$lock_mode" OMS_LOCK_TIMEOUT=1 \
+      OMS_LOCK_FORCE_MKDIR="$lock_force_mkdir" \
+      "$ROOT/scripts/gc.sh" --days 0 --apply >"$hook_project/gc.out" 2>"$hook_project/gc.err" ) || lock_rc=$?
+    after="$(gc_hook_digest "$hook_project/.oms/hooks/events.jsonl" "$hook_project/.oms/hooks/sessions/old.json")"
+    if [ "$lock_rc" != 0 ] || [ "$before" != "$after" ]; then
+      fail "$lock_mode lock failure changed hook state or failed GC"
+    fi
+    grep -Fq 'hook cleanup skipped' "$hook_project/gc.err" || fail "$lock_mode lock failure was not reported"
+    wait "$holder_pid" || fail "$lock_mode marker lock holder failed"
+  done
+
+  # A publisher starting while GC holds marker-set through event compaction
+  # must wait until the cleanup transaction releases the lock, on both backends.
+  # Observe the compactor boundary before probing: startup work can outlast the
+  # probe loop, and successful probes themselves compete with GC for marker-set.
+  local race_bin="$TMP/gc-hook-start-race-bin" compact_ready ready_attempt
+  mkdir -p "$race_bin"
+  cat > "$race_bin/python3" <<'PYTHON'
+#!/usr/bin/env bash
+if [ "$#" -ge 3 ] && [ "${2##*/}" = hook_state.py ] && [ "$3" = compact-events ]; then
+  : > "$GC_COMPACT_READY"
+fi
+exec "$REAL_PYTHON" "$@"
+PYTHON
+  chmod +x "$race_bin/python3"
+  for lock_mode in flock mkdir; do
+    hook_project="$TMP/gc-hook-start-race-$lock_mode"
+    lock_force_mkdir=0
+    if [ "$lock_mode" = mkdir ]; then lock_force_mkdir=1; fi
+    make_committed_repo "$hook_project"
+    gc_hook_seed "$hook_project"
+    mkdir -p "$hook_project/.oms/hooks/.events-lockdir" "$hook_project/.oms/delegations"
+    lock_target="$hook_project/.oms/delegations/.marker-set-lock-target"
+    compact_ready="$hook_project/compact.ready"
+    OMS_LOCK_DIR="$TMP/gc-hook-start-race-locks-$lock_mode" OMS_LOCK_TIMEOUT=10 \
+      OMS_LOCK_FORCE_MKDIR="$lock_force_mkdir" \
+      REAL_PYTHON="$python_real" GC_COMPACT_READY="$compact_ready" PATH="$race_bin:$PATH" \
+      "$ROOT/scripts/gc.sh" --repo "$hook_project" --days 0 --apply \
+      >"$hook_project/gc.out" 2>"$hook_project/gc.err" &
+    holder_pid=$!
+    ready_attempt=0
+    while [ ! -f "$compact_ready" ] && [ "$ready_attempt" -lt 200 ]; do
+      kill -0 "$holder_pid" 2>/dev/null || break
+      ready_attempt=$((ready_attempt + 1))
+      sleep 0.05
+    done
+    [ -f "$compact_ready" ] || fail "$lock_mode GC did not reach hook compaction: $(cat "$hook_project/gc.err")"
+    lock_rc=0
+    local marker_busy_count=0
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+      if OMS_LOCK_DIR="$TMP/gc-hook-start-race-locks-$lock_mode" \
+        OMS_LOCK_FORCE_MKDIR="$lock_force_mkdir" bash -c '
+          . "$1/scripts/lib/file-lock.sh"
+          oms_try_file_lock "$2" true
+        ' _ "$ROOT" "$lock_target" >/dev/null 2>&1; then
+        marker_busy_count=0
+        sleep 0.05
+      else
+        marker_busy_count=$((marker_busy_count + 1))
+        if [ "$marker_busy_count" -ge 3 ]; then
+          lock_rc=1
+          break
+        fi
+        sleep 0.05
+      fi
+    done
+    [ "$lock_rc" = 1 ] || fail "$lock_mode GC did not hold marker-set while waiting for hook append lock"
+    OMS_LOCK_DIR="$TMP/gc-hook-start-race-locks-$lock_mode" \
+      OMS_LOCK_FORCE_MKDIR="$lock_force_mkdir" bash -c '
+        . "$1/scripts/lib/file-lock.sh"
+        marker_file="$3"
+        publish() { printf "{\"schema\":1,\"id\":\"started\",\"pid\":%s}\n" "$$" > "$marker_file"; }
+        oms_with_file_lock "$2" publish
+      ' _ "$ROOT" "$lock_target" "$hook_project/.oms/delegations/started.json" &
+    local publisher_pid=$!
+    sleep 0.1
+    [ ! -e "$hook_project/.oms/delegations/started.json" ] || fail "worker published inside GC marker-set critical section"
+    rmdir "$hook_project/.oms/hooks/.events-lockdir"
+    wait "$holder_pid" || fail "$lock_mode GC failed in marker publication race fixture: $(cat "$hook_project/gc.err")"
+    wait "$publisher_pid" || fail "$lock_mode marker publisher failed after GC released marker-set lock"
+    [ -f "$hook_project/.oms/delegations/started.json" ] || fail "$lock_mode worker marker was not published after cleanup"
+  done
 }
 
 test_gc_reclaims_aged_handoffs() {
@@ -15672,7 +18091,7 @@ test_gc_reclaims_aged_handoffs() {
   touch -t 202601010000 "$project/.oms/handoffs/old.md"
 
   out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
-  printf '%s' "$out" | grep -Fq "handoff: $project/.oms/handoffs/old.md" ||
+  contains "$out" "handoff: $project/.oms/handoffs/old.md" ||
     fail "dry-run should list the aged handoff: $out"
   [ -f "$project/.oms/handoffs/old.md" ] || fail "dry-run must keep aged handoffs"
   [ -f "$project/.oms/handoffs/fresh.md" ] || fail "dry-run must keep fresh handoffs"
@@ -15694,15 +18113,15 @@ test_oms_init_seeds_and_guides() {
   [ -f "$project/.oms/memory/shared.md" ] || fail "init should seed shared memory"
   [ -f "$project/.oms/memory/memory.sqlite3" ] ||
     fail "init should create the project memory database"
-  printf '%s' "$out" | grep -Fq 'tick registry registered' ||
+  contains "$out" 'tick registry registered' ||
     fail "init should report tick registration: $out"
   [ "$(grep -Fxc "$project" "$registry")" = 1 ] ||
     fail "init should register the repo exactly once"
-  printf '%s' "$out" | grep -Fq "ML repo" || fail "init should tailor the checklist to an ML repo"
-  printf '%s' "$out" | grep -Fq "oms state" || fail "init should point at oms state"
-  printf '%s' "$out" | grep -Fq "oms data-manifest check --name <manifest>" ||
+  contains "$out" "ML repo" || fail "init should tailor the checklist to an ML repo"
+  contains "$out" "oms state" || fail "init should point at oms state"
+  contains "$out" "oms data-manifest check --name <manifest>" ||
     fail "init should show a valid named manifest check command"
-  printf '%s' "$out" | grep -Fq "oms data-manifest leakage --name <manifest>" ||
+  contains "$out" "oms data-manifest leakage --name <manifest>" ||
     fail "init should show a valid named leakage command"
   # Idempotent and migratory: a Markdown-only project gets its derived index
   # back on the next init without changing the source.
@@ -15710,7 +18129,7 @@ test_oms_init_seeds_and_guides() {
   out="$(cd "$project" && "$ROOT/scripts/init.sh")" || fail "init must be idempotent"
   [ -f "$project/.oms/memory/memory.sqlite3" ] ||
     fail "init should migrate an existing Markdown-only memory"
-  printf '%s' "$out" | grep -Fq 'tick registry already registered' ||
+  contains "$out" 'tick registry already registered' ||
     fail "an idempotent init should report the existing tick registration: $out"
   [ "$(grep -Fxc "$project" "$registry")" = 1 ] ||
     fail "an idempotent init should not duplicate the registry entry"
@@ -15732,7 +18151,7 @@ open(sys.argv[1], "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
 PY
   local out
   out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
-  printf '%s' "$out" | grep -Fq "stale-run-close: $rid" || fail "dry-run should report the stale open run"
+  contains "$out" "stale-run-close: $rid" || fail "dry-run should report the stale open run"
   ( cd "$project" && "$ROOT/scripts/run.sh" ls --open | grep -Fq "$rid" ) ||
     fail "dry-run must not close the run"
   ( cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply >/dev/null 2>&1 )
@@ -15809,9 +18228,9 @@ test_gc_dead_marker_cannot_release_live_same_lease() {
     "$$" "$lease" > "$project/.oms/delegations/z-live.json"
 
   dry_out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
-  printf '%s' "$dry_out" | grep -Fq 'live exact worker; kept it' ||
+  contains "$dry_out" 'live exact worker; kept it' ||
     fail "gc dry-run did not apply the locked live-marker veto: $dry_out"
-  if printf '%s' "$dry_out" | grep -Fq 'task t1 (claimed) -> ready'; then
+  if contains "$dry_out" 'task t1 (claimed) -> ready'; then
     fail "gc dry-run falsely planned release of a live same-lease retry: $dry_out"
   fi
   "$sh" --repo "$project" show --id t1 | grep -Fq '"state": "claimed"' ||
@@ -16645,9 +19064,9 @@ test_gc_dead_marker_cannot_fail_live_same_executor() {
     > "$markers/z-live.json"
 
   dry_out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
-  printf '%s' "$dry_out" | grep -Fq 'retired Soul executor exact; keeping legacy marker and evidence' ||
+  contains "$dry_out" 'retired Soul executor exact; keeping legacy marker and evidence' ||
     fail "executor dry-run did not apply the locked live-marker veto: $dry_out"
-  if printf '%s' "$dry_out" | grep -Fq 'orphan-delegation-executor: exact running -> failed'; then
+  if contains "$dry_out" 'orphan-delegation-executor: exact running -> failed'; then
     fail "executor dry-run falsely planned failure of a live retry: $dry_out"
   fi
   grep -Fq '"state":"running"' "$meta" || fail "executor dry-run changed metadata"
@@ -16741,7 +19160,7 @@ test_gc_preserves_unknown_exact_marker_schema() {
   [ "$rc" = 3 ] || fail "schema-4 marker without native pid did not veto plan recovery, got $rc"
 
   dry_out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 2>&1)"
-  if printf '%s' "$dry_out" | grep -Eq 'orphan-delegation-(plan|executor): .* -> (ready|failed)'; then
+  if printf '%s' "$dry_out" | grep >/dev/null -E 'orphan-delegation-(plan|executor): .* -> (ready|failed)'; then
     fail "gc dry-run consumed semantically unproven exact marker evidence: $dry_out"
   fi
   (cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply \
@@ -16955,7 +19374,7 @@ test_gc_keeps_orphan_artifacts_unless_asked() {
   out="$(cd "$project" && OMS_ARTIFACT_ORPHAN_GRACE=0 "$ROOT/scripts/gc.sh" --days 0 --apply)"
   [ -f "$orphan" ] ||
     fail "the routine sweep must not delete an unreferenced artifact: $out"
-  printf '%s' "$out" | grep -Fq 'would delete' &&
+  contains "$out" 'would delete' &&
     fail "the routine sweep must not even plan a file deletion: $out"
 
   out="$(cd "$project" && OMS_ARTIFACT_ORPHAN_GRACE=0 "$ROOT/scripts/gc.sh" --days 0 --apply --delete-orphan-files)"
@@ -17005,7 +19424,7 @@ FIXTURE_PY
   # Compaction of the terminal one is the sweep's existing behavior, asserted
   # here because the two halves have to agree on which streams survive.
   out="$(cd "$project" && OMS_ATTEMPT_STALE_SECONDS=0 "$ROOT/scripts/gc.sh" --days 1 --apply)"
-  printf '%s' "$out" | grep -Fq "stale-attempt: $stuck" ||
+  contains "$out" "stale-attempt: $stuck" ||
     fail "gc should reconcile an attempt that stopped reporting: $out"
   "$events" --repo "$project" show --attempt "$stuck" --json |
     grep -Fq '"state": "blocked"' ||
@@ -17041,7 +19460,7 @@ open(p, "w").writelines(lines)
 PY
   local out
   out="$(cd "$project" && "$ROOT/scripts/gc.sh" --days 30 --apply 2>&1)"
-  printf '%s' "$out" | grep -Fq "stale-change-guard" || fail "gc should report the stale guard"
+  contains "$out" "stale-change-guard" || fail "gc should report the stale guard"
   assert_not_exists "$project/.oms/guards/change-guard.tsv"
 }
 
@@ -17052,13 +19471,13 @@ test_change_guard_status_flags_stale() {
   ( cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . begin >/dev/null )
   local out
   out="$(cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . status)"
-  printf '%s' "$out" | grep -Fq "STALE" && fail "fresh guard must not read as stale"
+  contains "$out" "STALE" && fail "fresh guard must not read as stale"
   out="$(cd "$project" && OMS_GUARD_TTL=0 sh -c 'sleep 1; exec "$0" --repo . status' "$ROOT/scripts/change-guard.sh")"
-  printf '%s' "$out" | grep -Fq "STALE" || fail "aged guard should read as stale with OMS_GUARD_TTL=0"
+  contains "$out" "STALE" || fail "aged guard should read as stale with OMS_GUARD_TTL=0"
   # A dead opt-in owner pid is stale regardless of age.
   ( cd "$project" && OMS_GUARD_PID=999999 "$ROOT/scripts/change-guard.sh" --repo . begin >/dev/null )
   out="$(cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . status)"
-  printf '%s' "$out" | grep -Fq "STALE" || fail "dead owner pid should read as stale"
+  contains "$out" "STALE" || fail "dead owner pid should read as stale"
   ( cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . end >/dev/null )
 }
 
@@ -17072,8 +19491,172 @@ test_patch_land_reject_records_and_resolves_fail_ledger() {
   printf 'change\n' >> "$project/file.txt"
   ( cd "$project" && git diff > "$TMP/land-ledger.patch" && git checkout -- file.txt )
   local rc=0
-  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$TMP/land-ledger.patch" --verify false ) \
-    >/dev/null 2>"$err1" || rc=$?
+  # Explicit ready/release files keep admission paused inside a real observer
+  # window. Poll the barrier with a deadline; elapsed time never implies readiness.
+  rc="$(python3 - "$ROOT" "$project" "$TMP/land-ledger.patch" "$err1" "$TMP" <<'PY'
+import hashlib, json, os, pathlib, runpy, shlex, subprocess, sys, time
+root, project, patch, errors, tmp = sys.argv[1:]
+ready = pathlib.Path(tmp) / "landing-verifier-ready"
+release = pathlib.Path(tmp) / "landing-verifier-release"
+code = "\n".join([
+    "import pathlib,sys,time",
+    "pathlib.Path(%r).write_text('ready')" % str(ready),
+    "release = pathlib.Path(%r)" % str(release),
+    "deadline = time.monotonic() + 30",
+    "while not release.exists():",
+    "    if time.monotonic() >= deadline: raise SystemExit(9)",
+    "    time.sleep(0.05)",
+    "sys.exit(1)",
+])
+verify = "python3 -c " + shlex.quote("exec(" + repr(code) + ")")
+snapshot = os.path.join(tmp, "landing-observer")
+plan_cli = ["bash", root + "/scripts/agent-plan.sh", "--repo", project]
+subprocess.run(plan_cli + ["init", "--goal", "rejected native landing"], check=True, stdout=subprocess.DEVNULL)
+subprocess.run(plan_cli + ["add", "--id", "rejected", "--title", "fixture product change", "--verify", verify,
+                           "--allowed", "file.txt"], check=True, stdout=subprocess.DEVNULL)
+subprocess.run(plan_cli + ["claim", "--id", "rejected", "--provider", "codex"], check=True, stdout=subprocess.DEVNULL)
+review = pathlib.Path(tmp) / 'rejected-native-review.md'; review.write_text('Fixture review evidence\n')
+subprocess.run(plan_cli + ["review", "--id", "rejected", "--artifact", str(review), "--patch", patch],
+               check=True, stdout=subprocess.DEVNULL)
+task_before = pathlib.Path(project, ".oms/plan/tasks.json").read_bytes()
+request = subprocess.check_output(["bash", root + "/scripts/patch-land.sh", "--repo", project,
+                                  "--patch", patch, "--verify", verify, "--plan-task", "rejected", "--request-approval"], text=True).strip()
+approval_cli = ["bash", root + "/scripts/approval-inbox.sh", "--repo", project]
+grant = subprocess.check_output(approval_cli + ["decide", "--approval", request, "--decision", "approve",
+                                                "--expected-version", "1", "--actor", "operator"], text=True).strip()
+approval_before = json.loads(subprocess.check_output(approval_cli + ["show", "--approval", request, "--json"], text=True))
+source_before = pathlib.Path(patch).read_bytes()
+base_before = subprocess.check_output(["git", "-C", project, "rev-parse", "HEAD"])
+with open(errors, "w") as err:
+    worker = subprocess.Popen(["bash", root + "/scripts/patch-land.sh", "--repo", project,
+                               "--patch", patch, "--verify", verify,
+                               "--plan-task", "rejected", "--approval", request, "--approval-version", "2", "--approval-token", grant],
+                              stdout=subprocess.DEVNULL, stderr=err)
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists():
+            assert worker.poll() is None, "landing exited before the verifier barrier"
+            assert time.monotonic() < deadline, "verifier barrier timed out"
+            time.sleep(0.05)
+        subprocess.run(["bash", "-c", '. "$1/scripts/lib/oms-common.sh"; '
+                        'oms_worker_surface_snapshot "$2" "$3"',
+                        "observer", root, project, snapshot], check=True)
+        assert ".gitignore EXISTS" in pathlib.Path(snapshot, "omsstate").read_text()
+        frozen = pathlib.Path(project) / ".oms/landing-patches"
+        assert not list(frozen.glob("*.patch")), "published before ADMIT"
+        release.write_text("go")
+        assert worker.wait(timeout=30) == 1
+        result = subprocess.run(["bash", "-c", '. "$1/scripts/lib/oms-common.sh"; '
+                                 'oms_worker_state_violations "$2" "$3/omsstate"',
+                                 "observer", root, project, snapshot],
+                                check=True, text=True, capture_output=True)
+        assert not result.stdout.strip(), result.stdout
+        assert not list(frozen.glob("*.patch")), "rejection published a canonical patch"
+        index = pathlib.Path(project) / ".oms/artifacts/index.jsonl"
+        rows = [json.loads(line) for line in index.read_text().splitlines()]
+        row = [row for row in rows if row.get("kind") == "patch-admit"][-1]
+        assert row["exit"] == 1 and "patch" not in row
+        assert row["patch_external"]["owned"] is False
+        expected = hashlib.sha256(pathlib.Path(patch).read_bytes()).hexdigest()
+        assert row["patch_sha256"] == row["patch_external"]["sha256"] == expected
+        report = pathlib.Path(project) / row["artifact"]
+        report_bytes = report.read_bytes()
+        capture = pathlib.Path(next(line[len("- patch: "):] for line in report_bytes.decode().splitlines()
+                                    if line.startswith("- patch: ")))
+        assert not str(capture).startswith(project + "/")
+        assert hashlib.sha256(report_bytes).hexdigest() == row["artifact_sha256"]
+        helper = runpy.run_path(root + "/scripts/lib/landing-capture.py")
+        if capture.exists():
+            assert capture.read_bytes() == source_before
+        else:
+            # A managed rejected generation may be collected only after its
+            # actual admission result and terminal release are durably linked.
+            item = helper["find"](project, capture=str(capture))
+            log = helper["rows"](project)
+            encoded, digest = helper["encoded"], helper["digest"]
+            assert item["sha256"] == expected and item["bytes"] == 2 * len(pathlib.Path(patch).read_bytes())
+            assert item["directory"] == str(capture.parent) and not os.path.lexists(item["directory"])
+            assert item["namespace"] == digest(os.path.realpath(project).encode())
+            assert capture.name == item["landing_id"] + ".patch"
+            terminals = [r for r in log if r.get("event") == "capture-terminal" and
+                         r.get("managed_capture") == item]
+            assert len(terminals) == 1 and terminals[0]["reason"] == "admission-rejected"
+            assert not [r for r in log if r.get("event") == "intent" and r.get("landing_id") == item["landing_id"]]
+            engine = runpy.run_path(root + "/scripts/lib/agent-events.py")
+            events = engine["read_rows"](engine["event_path"](pathlib.Path(project)))
+            created = [r for r in events if r.get("attempt_id") == row["operation_id"] and
+                       r.get("event_type") == "attempt.created"]
+            done = [r for r in events if r.get("attempt_id") == row["operation_id"] and
+                    r.get("event_type") == "attempt.state_changed" and r.get("to_state") == "done"]
+            assert len(created) == len(done) == 1
+            assert created[0]["provider"] == "local" and created[0]["tool"] == "patch-admit"
+            assert created[0]["refs"]["reference_writer"] == "landing-reference-v1"
+            assert created[0]["refs"]["reference_input_sha256"] == digest(str(capture).encode())
+            assert report_bytes.decode().splitlines()[0] == "# Patch admission: REJECT"
+            assert row["artifact_sha256"] == digest(report_bytes) and row["exit"] == 1
+            assert engine["parse_ts"](created[0]["ts"]) <= engine["parse_ts"](row["ts"]) <= engine["parse_ts"](done[0]["ts"])
+            proof = dict(version=1, generation=item["generation"], attempt=row["operation_id"],
+                         created_sha256=digest(encoded(created[0])), report=row["artifact"],
+                         report_sha256=digest(report_bytes), index_event_id=row["event_id"],
+                         index_row_sha256=digest(encoded(row)), exit=1)
+            assert terminals[0]["native_terminal_proof"] == {
+                "phase": "admission-rejected", "admission_sha256": digest(encoded(proof))}
+            ready = helper["release_ready"](item, log, project)
+            assert ready is not None and ready["release_proof"]["terminal_event_sha256"] == digest(encoded(terminals[0]))
+            released = [r for r in log if r.get("event") == "capture-released" and
+                        r.get("managed_capture") == item]
+            assert len(released) == 1 and released[0]["release_ready_sha256"] == digest(encoded(ready))
+            assert log.index(terminals[0]) < log.index(ready) < log.index(released[0])
+        if os.name == 'nt':
+            assert capture.exists(), 'unsupported cleanup must preserve private data'
+            assert helper['usage'](project)[0] == 1
+        else:
+            assert not capture.exists(), "proved rejected private staging was not removed"
+            assert not capture.parent.exists(), "rejected generation remains charged"
+            assert helper['usage'](project) == (0, 0)
+        assert pathlib.Path(patch).read_bytes() == source_before and not list(frozen.glob('*.patch'))
+        assert subprocess.check_output(["git", "-C", project, "rev-parse", "HEAD"]) == base_before
+        assert json.loads(subprocess.check_output(approval_cli + ["show", "--approval", request, "--json"], text=True)) == approval_before
+        assert pathlib.Path(project, ".oms/plan/tasks.json").read_bytes() == task_before
+    finally:
+        release.write_text("go")
+        if worker.poll() is None:
+            worker.kill()
+            worker.wait()
+# A contended immediate cleanup cannot inherit an unbounded caller timeout.
+if os.name != 'nt':
+    busy = pathlib.Path(tmp) / 'rejected-cleanup-busy'
+    subprocess.run(['git', 'clone', '-q', '--local', project, str(busy)], check=True)
+    (busy / '.oms/delegations').mkdir(parents=True)
+    lock_ready = pathlib.Path(tmp) / 'rejected-cleanup-lock-ready'
+    lock_release = pathlib.Path(tmp) / 'rejected-cleanup-lock-release'
+    holder = subprocess.Popen(['bash', '-c',
+        '. "$1/scripts/lib/file-lock.sh"; hold() { touch "$3"; while [ ! -e "$4" ]; do sleep 0.05; done; }; '
+        'oms_with_file_lock "$2" hold "$1" "$2" "$3" "$4"',
+        'busy-cleanup', root, str(busy / '.oms/delegations/.marker-set-lock-target'), str(lock_ready), str(lock_release)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 10
+        while not lock_ready.exists():
+            assert holder.poll() is None and time.monotonic() < deadline
+            time.sleep(0.02)
+        started = time.monotonic()
+        refused = subprocess.run(['bash', root + '/scripts/patch-land.sh', '--repo', str(busy),
+                                  '--patch', patch, '--verify', 'false'], env=dict(os.environ, OMS_LOCK_TIMEOUT='60'),
+                                 text=True, capture_output=True, timeout=12)
+        assert refused.returncode == 1 and time.monotonic() - started < 10, refused.stderr
+        assert holder.poll() is None
+        item = next(iter(helper['reservations'](str(busy)).values()))
+        value = helper['certificate'](item)
+        assert pathlib.Path(value['objects']['capture']['path']).exists()
+        assert (busy / value['admission']['report']).exists()
+        assert 'private rejected capture remains reserved' in refused.stderr
+    finally:
+        lock_release.write_text('release')
+        holder.wait(timeout=5)
+print(worker.returncode)
+PY
+)" || fail "concurrent rejection or retained capture check failed"
   [ "$rc" = "1" ] || fail "rejected land should exit 1, got $rc"
   ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list ) | grep -Fq "patch-land REJECT" ||
     fail "rejection should be recorded in the fail-ledger"
@@ -17085,6 +19668,14 @@ test_patch_land_reject_records_and_resolves_fail_ledger() {
   ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) | grep -Fq "patch-land REJECT" &&
     fail "successful land should resolve the recorded rejection"
   assert_file_contains "$project/file.txt" "change"
+  "$ROOT/scripts/artifact-index.sh" --repo "$project" --json unresolved 100 \
+    > "$TMP/land-ledger-index.json"
+  python3 - "$TMP/land-ledger-index.json" <<'PY' || fail "external capture digest lost supersession identity"
+import json, sys
+rows = json.load(open(sys.argv[1]))["rows"]
+failed = [row for row in rows if row.get("kind") == "patch-admit" and row.get("exit") == 1]
+assert len(failed) == 1 and failed[0].get("superseded_by"), failed
+PY
 }
 
 test_patch_land_plan_task_supplies_patch() {
@@ -17167,13 +19758,17 @@ d = json.load(open(p))
 d["tasks"]["t1"]["updated"] = "2020-01-01T00:00:00Z"
 json.dump(d, open(p, "w"))
 PY
+  "$SH" --repo "$d" status | grep -Fq "stale review t1:" ||
+    fail "plain status must name a review nobody has answered"
+  "$SH" --repo "$d" list | grep -Fq "STALE(review" ||
+    fail "plan list must tag a stale review"
   # Aged review is only reclaimed with the opt-in flag.
   "$SH" --repo "$d" reclaim >/dev/null
   "$SH" --repo "$d" show --id t1 | grep -Fq '"state": "review"' ||
     fail "default reclaim must never touch review"
   local out
   out="$("$SH" --repo "$d" reclaim --include-review)"
-  printf '%s' "$out" | grep -Fq "reclaimed t1 from review" || fail "aged review should be reclaimed with the flag"
+  contains "$out" "reclaimed t1 from review" || fail "aged review should be reclaimed with the flag"
   "$SH" --repo "$d" show --id t1 | grep -Fq '"patch": "/tmp/p.patch"' ||
     fail "reclaiming a review must keep its artifact/patch"
 }
@@ -17196,8 +19791,8 @@ PY
   ( cd "$project" && "$ROOT/scripts/change-guard.sh" --repo . begin >/dev/null )
   local out
   out="$(cd "$project" && OMS_GUARD_TTL=0 sh -c 'sleep 1; exec "$0" --repo .' "$ROOT/scripts/state.sh")"
-  printf '%s' "$out" | grep -Fq "STALE review" || fail "repo-state should flag the stale review"
-  printf '%s' "$out" | grep -Fq "Change-guard: ACTIVE (STALE" || fail "repo-state should flag the stale guard"
+  contains "$out" "STALE review" || fail "repo-state should flag the stale review"
+  contains "$out" "Change-guard: ACTIVE (STALE" || fail "repo-state should flag the stale guard"
   ( cd "$project" && "$ROOT/scripts/state.sh" --repo . --json ) |
     python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["plan"]["stale_review"][0]["id"]=="t1"' ||
     fail "stale review should be in the JSON view"
@@ -17281,7 +19876,7 @@ EOF
   chmod +x "$bin/gh"
   local out
   out="$(cd "$project" && OMS_GH_BIN="$bin/gh" "$ROOT/scripts/state.sh" --repo . --refresh-ci)"
-  printf '%s' "$out" | grep -Fq "failure" || fail "--refresh-ci should surface the recorded CI conclusion"
+  contains "$out" "failure" || fail "--refresh-ci should surface the recorded CI conclusion"
   assert_file_contains "$project/.oms/ci.jsonl" '"conclusion": "failure"'
 }
 
@@ -17296,14 +19891,14 @@ test_skill_router_matches_and_dedupes() {
   # Trigger match suggests the mapped skill once.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"r1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-ops" || fail "router should suggest oms-ops"
+  contains "$out" "oms-ops" || fail "router should suggest oms-ops"
   [ -f "$project/.oms/hooks/events.jsonl" ] || fail "router should write hook events"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "skill_hint"'
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"workflow": "task"'
   # A later turn in the same session may need the skill reminder again.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-ops" || fail "router should re-suggest a skill on a later turn"
+  contains "$out" "oms-ops" || fail "router should re-suggest a skill on a later turn"
   # Duplicate delivery of the same hook event stays silent.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
@@ -17311,59 +19906,59 @@ test_skill_router_matches_and_dedupes() {
   # Payloads without turn_id cannot safely persist a per-turn dedupe key.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"r-no-turn","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-ops" || fail "router should hint without turn_id"
+  contains "$out" "oms-ops" || fail "router should hint without turn_id"
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘","session_id":"r-no-turn","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-ops" ||
+  contains "$out" "oms-ops" ||
     fail "router must not suppress later identical prompts when turn_id is absent"
   # Multiple peer intents collapse to the one harness front door.
   out="$(printf '{"prompt":"peer review하고 의견 물어봐","session_id":"r2","turn_id":"t3","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" || fail "peer intents should route to oms-agent-harness"
-  if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
+  contains "$out" "oms-agent-harness" || fail "peer intents should route to oms-agent-harness"
+  if printf '%s' "$out" | grep >/dev/null -E 'peer-(ask|review|delegate)'; then
     fail "retired peer skill names must not be suggested"
   fi
   # The documented natural-language autopilot request must reach the harness
   # skill that owns its proposal approval and remote-write boundaries.
   out="$(printf '{"prompt":"확정된 PROJECT.md를 구현해서 Draft PR까지 만들어줘","session_id":"r3","turn_id":"t4","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "confirmed spec to Draft PR should route to oms-agent-harness"
   out="$(printf '{"prompt":"Implement the confirmed project spec and open a draft PR","session_id":"r4","turn_id":"t5","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "English autopilot paraphrase should route to oms-agent-harness"
   out="$(printf '{"prompt":"확정된 프로젝트 스펙을 구현하고 Draft PR을 만들어줘","session_id":"r5","turn_id":"t6","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "Korean autopilot paraphrase should route to oms-agent-harness"
   out="$(printf '{"prompt":"autopilot 돌려서 남은 일을 끝내줘","session_id":"r6","turn_id":"t7","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "literal English autopilot trigger should route to oms-agent-harness"
   out="$(printf '{"prompt":"오토파일럿 돌려줘","session_id":"r7","turn_id":"t8","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "literal Korean autopilot trigger should route to oms-agent-harness"
   out="$(printf '{"prompt":"자율 코딩으로 구현해줘","session_id":"r8","turn_id":"t9","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "Korean autonomous-coding trigger should route to oms-agent-harness"
   out="$(printf '{"prompt":"확정된 목표대로 알아서 구현하고 검증까지 마무리해줘","session_id":"r9","turn_id":"t10","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "Korean agent-owned implementation request should route to oms-agent-harness"
   out="$(printf '{"prompt":"Take this confirmed goal through implementation and verification","session_id":"r10","turn_id":"t11","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "English agent-owned implementation request should route to oms-agent-harness"
   out="$(printf '{"prompt":"프로젝트 그래프로 코드를 보고 작업하자","session_id":"r11","turn_id":"t12","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "Korean graph-guided coding request should route to oms-agent-harness"
   out="$(printf '{"prompt":"Use the project graph for this coding task","session_id":"r12","turn_id":"t13","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq "oms-agent-harness" ||
+  contains "$out" "oms-agent-harness" ||
     fail "English project-graph request should route to oms-agent-harness"
 }
 
@@ -17377,15 +19972,15 @@ test_skill_router_separates_consultation_from_delegation() {
   make_committed_repo "$project"
   out="$(printf '{"prompt":"codex한테 의견 물어봐","session_id":"ask1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'oms-agent-harness' || fail "consultation should route to oms-agent-harness"
-  if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
+  contains "$out" 'oms-agent-harness' || fail "consultation should route to oms-agent-harness"
+  if printf '%s' "$out" | grep >/dev/null -E 'peer-(ask|review|delegate)'; then
     fail "consultation must not expose a retired peer skill"
   fi
 
   out="$(printf '{"prompt":"codex한테 시켜: README 고쳐","session_id":"write1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'oms-agent-harness' || fail "write delegation should route to oms-agent-harness"
-  if printf '%s' "$out" | grep -Eq 'peer-(ask|review|delegate)'; then
+  contains "$out" 'oms-agent-harness' || fail "write delegation should route to oms-agent-harness"
+  if printf '%s' "$out" | grep >/dev/null -E 'peer-(ask|review|delegate)'; then
     fail "write delegation must not expose a retired peer skill"
   fi
 }
@@ -17410,7 +20005,7 @@ test_skill_router_routes_trust_boundary_precisely() {
       "$prompt" "$i" "$project" |
       TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh" \
         2> "$d/router-stderr.txt")"
-    printf '%s' "$out" | grep -Fq 'oms-trust-boundary' ||
+    contains "$out" 'oms-trust-boundary' ||
       fail "router should suggest oms-trust-boundary for: $prompt (out: $out; stderr: $(cat "$d/router-stderr.txt" 2>/dev/null))"
   done <<'EOF'
 threat model this webhook before release
@@ -17427,7 +20022,7 @@ EOF
     out="$(printf '{"prompt":"%s","session_id":"security-neg-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
       TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    if printf '%s' "$out" | grep -Fq 'oms-trust-boundary'; then
+    if contains "$out" 'oms-trust-boundary'; then
       fail "router must not suggest oms-trust-boundary for: $prompt ($out)"
     fi
   done <<'EOF'
@@ -17456,7 +20051,7 @@ test_skill_router_keeps_trace_off_ordinary_test_talk() {
     out="$(printf '{"prompt":"%s","session_id":"router-pos-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
       TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    printf '%s' "$out" | grep -Fq 'skill hint: oms-trace' ||
+    contains "$out" 'skill hint: oms-trace' ||
       fail "router should suggest oms-trace for: $prompt ($out)"
   done <<'EOF'
 원인 추적 좀 해줘
@@ -17472,7 +20067,7 @@ EOF
     out="$(printf '{"prompt":"%s","session_id":"router-neg-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
       TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    if printf '%s' "$out" | grep -Fq 'oms-trace'; then
+    if contains "$out" 'oms-trace'; then
       fail "router must not suggest oms-trace for: $prompt ($out)"
     fi
   done <<'EOF'
@@ -17493,13 +20088,13 @@ EOF
     out="$(printf '{"prompt":"%s","session_id":"router-near-%s","turn_id":"t1","cwd":"%s"}' \
       "$prompt" "$i" "$project" |
       PATH="$d/bin:$PATH" TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-    if printf '%s' "$out" | grep -Eq 'skill hint:.*oms-(agent-harness|gpu-workstation)'; then
+    if printf '%s' "$out" | grep >/dev/null -E 'skill hint:.*oms-(agent-harness|gpu-workstation)'; then
       fail "generic prompt must not force a specialized skill: $prompt ($out)"
     fi
   done
   out="$(printf '{"prompt":"CUDA OOM","session_id":"router-gpu","turn_id":"t1","cwd":"%s"}' "$project" |
     PATH="$d/bin:$PATH" TMPDIR="$d" OMS_AUTO_TASK_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'oms-gpu-workstation' || fail "real OOM must still route to GPU guidance"
+  contains "$out" 'oms-gpu-workstation' || fail "real OOM must still route to GPU guidance"
 }
 
 test_skill_router_auto_records_task_prompts() {
@@ -17508,26 +20103,217 @@ test_skill_router_auto_records_task_prompts() {
   local payload
   local before
   local after
+  local same_prompt_before
 
+  # This case checks recording semantics; the next case owns deadline assertions.
   make_committed_repo "$project"
 
   payload="$(printf '{"prompt":"고칠 부분 확인하고 있으면 수정해줘","session_id":"auto1","turn_id":"t1","cwd":"%s"}' "$project")"
-  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT=10 bash "$ROOT/scripts/skill-router.sh" >/dev/null
   assert_file_contains "$project/.oms/task/current.md" "Respond to user request:"
   assert_file_contains "$project/.oms/task/current.md" "User prompt (task/medium): 고칠 부분 확인하고 있으면 수정해줘"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "auto_task"'
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "created"'
 
   payload="$(printf '{"prompt":"이어서 ablation 기록 자동화도 확인해줘","session_id":"auto1","turn_id":"t2","cwd":"%s"}' "$project")"
-  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT=10 bash "$ROOT/scripts/skill-router.sh" >/dev/null
   assert_file_contains "$project/.oms/task/current.md" "이어서 ablation 기록 자동화도 확인해줘"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "appended"'
 
   before="$(grep -F "User prompt" "$project/.oms/task/current.md" | wc -l | tr -d ' ')"
-  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT=10 bash "$ROOT/scripts/skill-router.sh" >/dev/null
   after="$(grep -F "User prompt" "$project/.oms/task/current.md" | wc -l | tr -d ' ')"
   [ "$before" = "$after" ] || fail "same turn/prompt should not append twice"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "deduped"'
+
+  same_prompt_before="$(grep -F "이어서 ablation 기록 자동화도 확인해줘" "$project/.oms/task/current.md" | wc -l | tr -d ' ')"
+  payload="$(printf '{"prompt":"이어서 ablation 기록 자동화도 확인해줘","session_id":"auto1","turn_id":"t3","cwd":"%s"}' "$project")"
+  printf '%s' "$payload" | TMPDIR="$d" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT=10 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  [ "$(grep -F "이어서 ablation 기록 자동화도 확인해줘" "$project/.oms/task/current.md" | wc -l | tr -d ' ')" = "$((same_prompt_before + 1))" ] ||
+    fail "the same prompt on a new turn is a new request and must be recorded"
+}
+
+test_skill_router_auto_task_timeout_retries_owned_writer_once() {
+  local d="$TMP/skill-router-auto-task-timeout"
+  local foreign_pid
+  local real_python
+  local prompt='고칠 부분 확인하고 있으면 수정해줘'
+  local scenario project bin_dir wrapper first second prompt_note
+
+  real_python="$(command -v python3)"
+  sleep 120 &
+  foreign_pid=$!
+  trap 'kill "$foreign_pid" 2>/dev/null || true; wait "$foreign_pid" 2>/dev/null || true; cleanup' EXIT
+  for scenario in init-before append-before append-after success-descendant; do
+    prompt_note="User prompt (task/medium): $prompt"
+    project="$d/$scenario/project"
+    bin_dir="$d/$scenario/bin"
+    wrapper="$bin_dir/agent-task-wrapper"
+    make_committed_repo "$project"
+    mkdir -p "$bin_dir"
+    cat > "$wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -u
+mode="${OMS_TEST_DELAY_MODE:-none}"
+operation="${3:-}"
+delay_once() {
+  [ ! -e "$OMS_TEST_DELAY_ONCE" ] || return 0
+  : > "$OMS_TEST_DELAY_ONCE"
+  (sleep 7; : > "$OMS_TEST_CHILD_MARKER") &
+  printf '%s\n' "$!" > "$OMS_TEST_CHILD_PID"
+  wait
+}
+if [ "$mode" = init-before ] && [ "$operation" = init ]; then
+  delay_once
+elif [ "$mode" = append-before ] && [ "$operation" = append ]; then
+  delay_once
+elif [ "$mode" = success-descendant ] && [ "$operation" = append ]; then
+  "$OMS_TEST_REAL_AGENT_TASK" "$@"
+  result=$?
+  (sleep 7; : > "$OMS_TEST_CHILD_MARKER") &
+  printf '%s\n' "$!" > "$OMS_TEST_CHILD_PID"
+  exit "$result"
+fi
+exec "$OMS_TEST_REAL_AGENT_TASK" "$@"
+EOF
+    cat > "$bin_dir/python3" <<'EOF'
+#!/usr/bin/env bash
+set -u
+if [ "${OMS_TEST_DELAY_MODE:-none}" = append-after ] &&
+   [ "${1:-}" = "$OMS_TEST_LANDING_REFERENCE" ] &&
+   [ "${2:-}" = finish ] && [ ! -e "$OMS_TEST_DELAY_ONCE" ] &&
+   grep -Fq "$OMS_TEST_PROMPT_NOTE" "$3/.oms/task/current.md" 2>/dev/null; then
+  : > "$OMS_TEST_DELAY_ONCE"
+  (sleep 7; : > "$OMS_TEST_CHILD_MARKER") &
+  printf '%s\n' "$!" > "$OMS_TEST_CHILD_PID"
+  wait
+fi
+exec "$OMS_TEST_REAL_PYTHON" "$@"
+EOF
+    chmod +x "$wrapper" "$bin_dir/python3"
+
+    invoke_auto_task() {
+      local mode="$1" timeout="${2:-4}"
+      PATH="$bin_dir:$PATH" OMS_AUTO_TASK=1 OMS_AUTO_TASK_TIMEOUT="$timeout" \
+        OMS_HOOK_RESOLVED_REPO="$project" \
+        OMS_TEST_REAL_AGENT_TASK="$ROOT/scripts/agent-task.sh" \
+        OMS_TEST_REAL_PYTHON="$real_python" \
+        OMS_TEST_LANDING_REFERENCE="$ROOT/scripts/lib/landing-reference.py" \
+        OMS_TEST_DELAY_MODE="$mode" OMS_TEST_DELAY_ONCE="$d/$scenario/delayed" \
+        OMS_TEST_CHILD_MARKER="$d/$scenario/child-wrote" \
+        OMS_TEST_CHILD_PID="$d/$scenario/child.pid" \
+        OMS_TEST_PROMPT_NOTE="$prompt_note" \
+        python3 - "$ROOT" "$project" "$wrapper" "$prompt" <<'PY'
+import json
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+root, project, wrapper, prompt = sys.argv[1:]
+sys.path.insert(0, str(Path(root) / "scripts" / "lib"))
+import hook_state
+
+payload = {"session_id": "timeout-retry", "turn_id": "t1", "cwd": project}
+with patch.object(hook_state, "agent_task_script", return_value=Path(wrapper)):
+    hook_state.auto_task_record(payload, prompt, hook_state.classify_prompt(prompt))
+state_dir = Path(project) / ".oms" / "hooks" / "sessions"
+states = [json.loads(path.read_text(encoding="utf-8")) for path in state_dir.glob("*.task.json")]
+print(json.dumps(states[-1] if states else {}))
+PY
+    }
+
+    first="$(invoke_auto_task "$scenario" 4)"
+    if [ "$scenario" = success-descendant ]; then
+      python3 -c 'import json,sys; s=json.loads(sys.argv[1]); assert s.get("status") in {"created","appended","rotated"} and s.get("prompt_hash"), s' "$first" ||
+        fail "successful publication must be acknowledged: $first"
+      [ "$(grep -F "$prompt_note" "$project/.oms/task/current.md" | wc -l | tr -d ' ')" = "1" ] ||
+        fail "successful publication must be recorded exactly once"
+      [ -s "$d/$scenario/child.pid" ] || fail "success case did not start its owned descendant"
+      sleep 8
+      [ ! -e "$d/$scenario/child-wrote" ] || fail "a successful helper left a detached descendant writing"
+      kill -0 "$foreign_pid" 2>/dev/null || fail "success cleanup killed or altered the unrelated process"
+      continue
+    fi
+    python3 -c 'import json,sys; s=json.loads(sys.argv[1]); assert not s.get("prompt_hash"), s' "$first" ||
+      fail "$scenario timeout must not publish a successful route hash: $first"
+    assert_file_contains "$project/.oms/hooks/events.jsonl" '"status": "timeout"'
+    [ -s "$d/$scenario/child.pid" ] || fail "$scenario did not start its owned descendant"
+    sleep 8
+    [ ! -e "$d/$scenario/child-wrote" ] || fail "$scenario left a timed-out descendant running"
+    kill -0 "$foreign_pid" 2>/dev/null || fail "$scenario killed or altered the unrelated process"
+
+    second="$(invoke_auto_task none 4)"
+    python3 -c 'import json,sys; s=json.loads(sys.argv[1]); assert s.get("status") in {"created","appended","rotated"} and s.get("prompt_hash"), s' "$second" ||
+      fail "$scenario retry must commit its prompt only after publication: $second"
+    [ "$(grep -F "$prompt_note" "$project/.oms/task/current.md" | wc -l | tr -d ' ')" = "1" ] ||
+      fail "$scenario retry must publish the same request exactly once"
+    if [ "$scenario" = append-after ]; then
+      python3 - "$ROOT" "$project" <<'PY'
+import sys
+from pathlib import Path
+import runpy
+
+root, project = sys.argv[1:]
+events = runpy.run_path(str(Path(root) / "scripts/lib/agent-events.py"))
+_, projection = events["load_projection"](Path(project))
+unknown = [row for row in projection.values()
+           if row.get("provider") == "local" and row.get("tool") == "agent-task"
+           and row.get("terminal") is not True]
+assert unknown, "timed-out operation evidence must remain nonterminal"
+PY
+    fi
+  done
+  python3 - "$ROOT" <<'PY_STDIN_TIMEOUT' || fail "stdin delivery escaped the agent-task timeout"
+import os, subprocess, sys, tempfile, time
+from pathlib import Path
+from unittest.mock import patch
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts" / "lib"))
+import hook_state
+
+with tempfile.TemporaryDirectory(prefix="oms-hook-stdin-timeout-") as raw:
+    base = Path(raw)
+    helper = base / "agent-task"
+    marker = base / "late-write"
+    pidfile = base / "descendant.pid"
+    helper.write_text(
+        '''#!/usr/bin/env bash
+(sleep 5; : > "$OMS_TEST_MARKER") &
+echo $! > "$OMS_TEST_PIDFILE"; wait
+''',
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    foreign = subprocess.Popen(["sleep", "120"])
+    os.environ.update({
+        "OMS_AUTO_TASK_TIMEOUT": "1",
+        "OMS_TEST_MARKER": str(marker),
+        "OMS_TEST_PIDFILE": str(pidfile),
+    })
+    payload = "가" * 4000
+    assert len(payload.encode("utf-8")) == 12000
+    try:
+        started = time.monotonic()
+        with patch.object(hook_state, "agent_task_script", return_value=helper):
+            result = hook_state.run_agent_task(base, ["append"], payload)
+        elapsed = time.monotonic() - started
+        assert result == 124, result
+        assert elapsed < 2.5, elapsed
+        assert pidfile.is_file(), "fake helper did not start its writer"
+        # Observe past the helper's scheduled write time, so absence proves
+        # cleanup rather than merely a short race window.
+        time.sleep(5.2)
+        assert not marker.exists(), "timed-out stdin writer survived cleanup"
+        assert foreign.poll() is None, "timeout cleanup affected an unrelated process"
+    finally:
+        foreign.terminate()
+        foreign.wait(timeout=3)
+PY_STDIN_TIMEOUT
+  kill "$foreign_pid" 2>/dev/null || true
+  wait "$foreign_pid" 2>/dev/null || true
+  foreign_pid=""
+  trap cleanup EXIT
 }
 
 test_skill_router_auto_task_is_opt_in() {
@@ -17550,7 +20336,7 @@ test_skill_router_plain_question_leaves_no_state() {
   make_committed_repo "$project"
   out="$(printf '{"prompt":"oh-my-setting이 뭐야","session_id":"plain1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'oms-ops' || fail "plain question should still receive a skill hint"
+  contains "$out" 'oms-ops' || fail "plain question should still receive a skill hint"
   assert_not_exists "$project/.oms"
 }
 
@@ -17592,7 +20378,7 @@ test_context_pressure_warns_once_at_low_context() {
 
   out="$(printf '{"prompt":"이어서 계속 봐줘","session_id":"ctxwarn1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq '[oms] context low (~10% left)' ||
+  contains "$out" '[oms] context low (~10% left)' ||
     fail "10% left must trigger the warn advisory: $out"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "context_pressure"'
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"capture": "skipped"'
@@ -17600,7 +20386,7 @@ test_context_pressure_warns_once_at_low_context() {
   # The advisory is once per band per session, not once per prompt.
   out="$(printf '{"prompt":"이어서 계속 봐줘 2","session_id":"ctxwarn1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+  if contains "$out" '[oms] context'; then
     fail "warn band must announce once per session: $out"
   fi
 }
@@ -17617,7 +20403,7 @@ test_context_capture_starts_silently_at_thirty_percent_left() {
   printf '{"schema":1,"used_percentage":72}\n' > "$hud/ctx-$digest.json"
   out="$(printf '{"prompt":"이어서 계속 봐줘","session_id":"ctxcap1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+  if contains "$out" '[oms] context'; then
     fail "28% left is a capture, not an advisory: $out"
   fi
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "context_capture"'
@@ -17631,7 +20417,7 @@ test_context_capture_starts_silently_at_thirty_percent_left() {
   printf '{"schema":1,"used_percentage":90}\n' > "$hud/ctx-$digest.json"
   out="$(printf '{"prompt":"이어서 계속 봐줘 3","session_id":"ctxcap1","turn_id":"t3","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq '[oms] context low (~10% left)' ||
+  contains "$out" '[oms] context low (~10% left)' ||
     fail "the warn band must still announce after an early capture: $out"
 }
 
@@ -17653,10 +20439,10 @@ test_context_pressure_escalates_and_rearms() {
   }
 
   out="$(run_band 90 t1)"
-  printf '%s' "$out" | grep -Fq 'context low' || fail "10% left must warn: $out"
+  contains "$out" 'context low' || fail "10% left must warn: $out"
   # Crossing into the urgent band speaks once more, then latches.
   out="$(run_band 95 t2)"
-  printf '%s' "$out" | grep -Fq 'context nearly exhausted (~5% left)' ||
+  contains "$out" 'context nearly exhausted (~5% left)' ||
     fail "5% left must escalate to urgent: $out"
   out="$(run_band 96 t3)"
   [ -z "$out" ] || fail "urgent band must announce once: $out"
@@ -17665,7 +20451,7 @@ test_context_pressure_escalates_and_rearms() {
   [ -z "$out" ] || fail "recovered context must stay silent: $out"
   grep -Fq '"stage": null' "$state" || fail "recovery must reset the band latch"
   out="$(run_band 88 t5)"
-  printf '%s' "$out" | grep -Fq 'context low (~12% left)' ||
+  contains "$out" 'context low (~12% left)' ||
     fail "a fresh crossing after re-arm must warn again: $out"
 }
 
@@ -17684,7 +20470,7 @@ test_context_pressure_reads_codex_transcript() {
 
   out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxcodex1","turn_id":"t1","cwd":"%s","transcript_path":"%s"}' "$project" "$transcript" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$d/no-cache" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'context low (~11% left)' ||
+  contains "$out" 'context low (~11% left)' ||
     fail "codex transcript token_count must feed the advisory: $out"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"source": "codex"'
 }
@@ -17703,14 +20489,14 @@ test_context_pressure_fails_open() {
   # Kill switch.
   out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxopen1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_PRESSURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+  if contains "$out" '[oms] context'; then
     fail "OMS_CTX_PRESSURE=0 must silence the advisory: $out"
   fi
   # A stale reading is no reading: the cache outlived its TTL.
   touch -d '2 hours ago' "$hud/ctx-$digest.json"
   out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxopen1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+  if contains "$out" '[oms] context'; then
     fail "a stale context cache must stay silent: $out"
   fi
   # Unadopted repos hold no latch state, so they get no advisory at all.
@@ -17720,7 +20506,7 @@ test_context_pressure_fails_open() {
   printf '{"schema":1,"used_percentage":90}\n' > "$hud/ctx-$digest.json"
   out="$(printf '{"prompt":"이 저장소가 뭐야","session_id":"ctxplain1","turn_id":"t1","cwd":"%s"}' "$plain" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms] context'; then
+  if contains "$out" '[oms] context'; then
     fail "an unadopted repo must not receive the advisory: $out"
   fi
   assert_not_exists "$plain/.oms"
@@ -17746,7 +20532,7 @@ test_claude_hud_feeds_context_pressure() {
   # ...consumer: the prompt hook turns it into one advisory line.
   out="$(printf '{"prompt":"계속 진행해줘","session_id":"ctxchain1","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'context low (~9% left)' ||
+  contains "$out" 'context low (~9% left)' ||
     fail "the status-line cache must feed the prompt-time advisory: $out"
   # A payload without a context reading writes no cache.
   printf '{"session_id":"ctxchain2","context_window":{}}' |
@@ -17801,7 +20587,7 @@ test_peer_advisory_warns_incumbent_once_per_neighbor() {
 
   # The incumbent started before the neighbor, so SessionStart never told it.
   out="$(peer_prompt "$d" "$project" incumbent1 t1)"
-  printf '%s' "$out" | grep -Fq '[oms] another session is live in this worktree' ||
+  contains "$out" '[oms] another session is live in this worktree' ||
     fail "a live neighbor must warn the incumbent: $out"
   assert_file_contains "$events" '"action": "peer_advisory"'
   latch="$project/.oms/hooks/sessions/$(session_digest incumbent1).peers.json"
@@ -17809,14 +20595,14 @@ test_peer_advisory_warns_incumbent_once_per_neighbor() {
 
   # Once per neighbor, not once per prompt.
   out="$(peer_prompt "$d" "$project" incumbent1 t2)"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "an announced neighbor must not warn again: $out"
   fi
 
   # A second neighbor is news; the first one's latch survives.
   write_peer_event "$events" peer-b 60
   out="$(peer_prompt "$d" "$project" incumbent1 t3)"
-  printf '%s' "$out" | grep -Fq '[oms] another session is live in this worktree' ||
+  contains "$out" '[oms] another session is live in this worktree' ||
     fail "a newly arrived neighbor must warn: $out"
   assert_file_contains "$latch" "$(session_digest peer-a)"
   assert_file_contains "$latch" "$(session_digest peer-b)"
@@ -17827,9 +20613,9 @@ test_peer_advisory_warns_incumbent_once_per_neighbor() {
   write_peer_event "$events" peer-c 30
   out="$(printf '{"prompt":"계속 진행해줘","session_id":"incumbent2","turn_id":"t1","cwd":"%s"}' "$project" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$hud" OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/skill-router.sh")"
-  printf '%s' "$out" | grep -Fq 'context low (~10% left)' ||
+  contains "$out" 'context low (~10% left)' ||
     fail "the pressure advisory must still fire alongside the peer advisory: $out"
-  printf '%s' "$out" | grep -Fq '[oms] another session is live' ||
+  contains "$out" '[oms] another session is live' ||
     fail "the peer advisory must fire alongside the pressure advisory: $out"
   ctx="$project/.oms/hooks/sessions/$(session_digest incumbent2).ctx.json"
   assert_file_contains "$ctx" '"stage": "warn"'
@@ -17853,7 +20639,7 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   write_peer_event "$events" child-a 30 action=ignored_child origin=peer-delegate status=route
   write_peer_event "$events" child-b 30 origin=peer-review
   out="$(peer_prompt "$d" "$project" quiet1 t1)"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "harness child rows must not read as a live peer: $out"
   fi
   assert_not_exists "$project/.oms/hooks/sessions/$(session_digest quiet1).peers.json"
@@ -17864,7 +20650,7 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   : > "$events"
   write_peer_event "$events" peer-old 4000
   out="$(peer_prompt "$d" "$project" quiet2 t1)"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "a stale neighbor row must stay silent: $out"
   fi
 
@@ -17875,7 +20661,7 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   write_peer_event "$events" peer-ended 40
   write_peer_event "$events" peer-ended 5 hook=SessionEnd action=telemetry
   out="$(peer_prompt "$d" "$project" quiet-ended t1)"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "a cleanly ended neighbor must stay silent: $out"
   fi
 
@@ -17883,7 +20669,7 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   : > "$events"
   write_peer_event "$events" peer-live 30
   out="$(peer_prompt "$d" "$project" quiet3 t1 OMS_PEER_ADVISORY=0)"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "OMS_PEER_ADVISORY=0 must silence the advisory: $out"
   fi
 
@@ -17891,7 +20677,7 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   : > "$events"
   write_peer_event "$events" quiet4 30
   out="$(peer_prompt "$d" "$project" quiet4 t1)"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "own session rows must not read as a peer: $out"
   fi
 
@@ -17901,7 +20687,7 @@ test_peer_advisory_ignores_children_and_stale_rows() {
   make_committed_repo "$plain"
   out="$(printf '{"prompt":"이 저장소가 뭐야","session_id":"quiet5","turn_id":"t1","cwd":"%s"}' "$plain" |
     TMPDIR="$d" OMS_HUD_CACHE_DIR="$d/no-cache" bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms] another session is live'; then
+  if contains "$out" '[oms] another session is live'; then
     fail "an unadopted repo must not receive the advisory: $out"
   fi
   assert_not_exists "$plain/.oms"
@@ -17929,7 +20715,7 @@ test_session_budget_blocks_once_past_the_turn_cap() {
   out="$(printf '%s' "$stop_payload" | OMS_SESSION_BUDGET_TURNS=2 OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/turn-guard.sh")"
   [ -z "$out" ] || fail "one turn is inside a two-turn budget: $out"
   out="$(printf '%s' "$stop_payload" | OMS_SESSION_BUDGET_TURNS=2 OMS_CTX_CAPTURE=0 bash "$ROOT/scripts/turn-guard.sh")"
-  printf '%s' "$out" | grep -Fq '[oms] session budget: 2 turns' ||
+  contains "$out" '[oms] session budget: 2 turns' ||
     fail "the second stop must hit the budget: $out"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "session_budget"'
   # The continuation Stop after a block, and the same band, stay silent.
@@ -17985,11 +20771,11 @@ test_turn_relay_crosses_between_claude_and_codex() {
   # Codex dispatches through the plugin, whose SessionStart has no turn_id.
   out="$(printf '{"hook_event_name":"SessionStart","session_id":"relay-k1","cwd":"%s"}' "$project" |
     OMS_HOOK_AGENT=codex OMS_CODEX_HOME="$d/codex" bash "$ROOT/scripts/resume-hook.sh")"
-  printf '%s' "$out" | grep -Fq '[oms relay] claude finished a turn' ||
+  contains "$out" '[oms relay] claude finished a turn' ||
     fail "a codex session start must see the claude completion: $out"
   out="$(printf '{"prompt":"status?","session_id":"relay-k1","turn_id":"t2","cwd":"%s"}' "$project" |
     OMS_HOOK_AGENT=codex OMS_CODEX_HOME="$d/codex" OMS_HUD_CACHE_DIR="$d/no-cache" bash "$ROOT/scripts/skill-router.sh")"
-  if printf '%s' "$out" | grep -Fq '[oms relay]'; then fail "a completion is shown once per session: $out"; fi
+  if contains "$out" '[oms relay]'; then fail "a completion is shown once per session: $out"; fi
 
   stamp="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   printf '{"type":"session_meta","payload":{"cwd":"%s","source":{"subagent":{"other":"guardian"}}}}\n{"timestamp":"%s","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"allow"}}\n' "$project" "$stamp" > "$day/rollout-guard.jsonl"
@@ -17997,9 +20783,9 @@ test_turn_relay_crosses_between_claude_and_codex() {
   touch "$day/rollout-guard.jsonl"
   out="$(printf '{"hook_event_name":"SessionStart","session_id":"relay-c2","cwd":"%s"}' "$project" |
     OMS_CODEX_HOME="$d/codex" bash "$ROOT/scripts/resume-hook.sh")"
-  printf '%s' "$out" | grep -Fq '[oms relay] codex finished a turn ~0m ago: Codex ran the tests.' ||
+  contains "$out" '[oms relay] codex finished a turn ~0m ago: Codex ran the tests.' ||
     fail "a claude session start must see the codex rollout completion, not a guardian's: $out"
-  if printf '%s' "$out" | grep -Fq 'claude finished'; then fail "an agent never sees its own card: $out"; fi
+  if contains "$out" 'claude finished'; then fail "an agent never sees its own card: $out"; fi
 }
 
 
@@ -18443,34 +21229,34 @@ test_resume_hook_prints_bounded_resume_block() {
 
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")" ||
     fail "resume hook must exit 0"
-  printf '%s\n' "$out" | grep -q '^\[oms resume\]' || fail "missing resume header: $out"
-  printf '%s\n' "$out" | grep -q 'Ship the resume surface' || fail "missing task goal"
-  printf '%s\n' "$out" | grep -q 'next: wire hooks.json' || fail "missing next step"
-  printf '%s\n' "$out" | grep -q 'verify: bash tests/x.sh' || fail "missing verify command"
+  printf '%s\n' "$out" | grep >/dev/null '^\[oms resume\]' || fail "missing resume header: $out"
+  printf '%s\n' "$out" | grep >/dev/null 'Ship the resume surface' || fail "missing task goal"
+  printf '%s\n' "$out" | grep >/dev/null 'next: wire hooks.json' || fail "missing next step"
+  printf '%s\n' "$out" | grep >/dev/null 'verify: bash tests/x.sh' || fail "missing verify command"
   # The plan contract must survive a compaction the way the task packet does:
   # a live plan was previously completely silent at session start.
-  printf '%s\n' "$out" | grep -q 'plan: Unify the writer contract' ||
+  printf '%s\n' "$out" | grep >/dev/null 'plan: Unify the writer contract' ||
     fail "missing plan goal: $out"
-  printf '%s\n' "$out" | grep -q 'accept: bash tests/plan-accept.sh' ||
+  printf '%s\n' "$out" | grep >/dev/null 'accept: bash tests/plan-accept.sh' ||
     fail "missing plan acceptance: $out"
-  printf '%s\n' "$out" | grep -q 'session-handoff show claude-abc.md' ||
+  printf '%s\n' "$out" | grep >/dev/null 'session-handoff show claude-abc.md' ||
     fail "missing handoff pointer"
-  printf '%s\n' "$out" | grep -q 'failures: 1 actionable' || fail "missing failure line"
-  if printf '%s\n' "$out" | grep -q 'peers:'; then
+  printf '%s\n' "$out" | grep >/dev/null 'failures: 1 actionable' || fail "missing failure line"
+  if printf '%s\n' "$out" | grep >/dev/null 'peers:'; then
     fail "resume hook must leave peer warnings to the prompt router: $out"
   fi
-  if printf '%s\n' "$out" | grep -Fq -- '- graph:'; then
+  if printf '%s\n' "$out" | grep >/dev/null -F -- '- graph:'; then
     fail "resume hook must leave graph work to an explicit reader: $out"
   fi
   [ "$(printf '%s\n' "$out" | wc -l)" -le 15 ] || fail "resume block exceeds its line budget"
 
   mkdir -p "$repo/src/nested"
   out="$(printf '{"cwd":"%s/src/nested"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
-  printf '%s' "$out" | grep -Fq 'Ship the resume surface' || fail "nested cwd lost the active task"
+  contains "$out" 'Ship the resume surface' || fail "nested cwd lost the active task"
   [ ! -e "$repo/src/nested/.oms" ] || fail "resume created nested state"
   mkdir -p "$repo/src/nested/.oms"
   out="$(printf '{"cwd":"%s/src/nested"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
-  printf '%s' "$out" | grep -Fq 'Ship the resume surface' || fail "nested state shadowed the repository root"
+  contains "$out" 'Ship the resume surface' || fail "nested state shadowed the repository root"
 
   # Native Windows Python writes CRLF to a pipe. Every value read back into
   # Bash must lose the CR before it participates in path checks or output.
@@ -18486,7 +21272,7 @@ EOF
     PATH="$crlf_bin:/usr/bin:/bin" OMS_TEST_REAL_PYTHON="$real_python" \
       "$ROOT/scripts/resume-hook.sh")" ||
     fail "CRLF resume hook must exit 0"
-  printf '%s\n' "$out" | grep -q 'plan: Unify the writer contract' ||
+  printf '%s\n' "$out" | grep >/dev/null 'plan: Unify the writer contract' ||
     fail "CRLF Python output hid the active plan: $out"
   case "$out" in
     *$'\r'*) fail "resume block retained a carriage return" ;;
@@ -18496,7 +21282,7 @@ EOF
   # a prior version of this hook misread and counted forever.
   ( cd "$repo" && "$ROOT/scripts/fail-ledger.sh" resolve --cmd "pytest -k boom" >/dev/null 2>&1 )
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
-  if printf '%s\n' "$out" | grep -q 'failures:'; then
+  if printf '%s\n' "$out" | grep >/dev/null 'failures:'; then
     fail "a resolved failure must drop out of the resume count: $out"
   fi
 
@@ -18507,7 +21293,7 @@ EOF
   printf 'not json\n' > "$repo/.oms/plan/autopilot-run.json"
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")" ||
     fail "resume hook must exit 0 with a malformed receipt"
-  if printf '%s\n' "$out" | grep -q 'autopilot:'; then
+  if printf '%s\n' "$out" | grep >/dev/null 'autopilot:'; then
     fail "a malformed receipt must not produce an autopilot line: $out"
   fi
   rm -f "$repo/.oms/plan/autopilot-run.json"
@@ -18533,15 +21319,15 @@ os.utime(path, (time.time() - 600, time.time() - 600))
 (repo / '.oms/handoffs/unrelated.md').write_text('- task_id: different\n')
 PY
   out="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
-  printf '%s' "$out" | grep -Fq 'current task snapshot' || fail "matching handoff was not recognized"
-  printf '%s' "$out" | grep -Fq 'show matching.md' || fail "newer unrelated handoff displaced the active task"
+  contains "$out" 'current task snapshot' || fail "matching handoff was not recognized"
+  contains "$out" 'show matching.md' || fail "newer unrelated handoff displaced the active task"
   (cd "$repo" && "$ROOT/scripts/agent-task.sh" update --next "changed next action" >/dev/null)
   out="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
-  printf '%s' "$out" | grep -Fq 'same task, recheck changed state' || fail "changed packet was treated as current"
+  contains "$out" 'same task, recheck changed state' || fail "changed packet was treated as current"
   (cd "$repo" && "$ROOT/scripts/agent-task.sh" update --goal "$(python3 -c 'print("긴목표" * 2000)')" >/dev/null)
   out="$(printf '{"cwd":"%s"}' "$repo" | OMS_RESUME_MAX_BYTES=512 "$ROOT/scripts/resume-hook.sh")"
   [ "$(printf '%s' "$out" | wc -c)" -le 512 ] || fail "resume byte budget exceeded"
-  printf '%s' "$out" | grep -Fq 'resume truncated' || fail "resume truncation was hidden"
+  contains "$out" 'resume truncated' || fail "resume truncation was hidden"
   printf '%s' "$out" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' || fail "resume split a UTF-8 character"
 }
 
@@ -18617,7 +21403,7 @@ EOF
     OMS_TEST_CODEX_REJECTS_USAGE=1 PATH="$bin:/usr/bin:/bin" \
     "$ROOT/scripts/install-codex-plugin.sh" 2>&1)" ||
     fail "rejected usage keys must not fail the Codex plugin install: $out"
-  printf '%s' "$out" | grep -Fq 'codex-usage: rolled back' ||
+  contains "$out" 'codex-usage: rolled back' ||
     fail "installer should roll back usage keys this codex rejects: $out"
   if grep -Eq 'min_wait_timeout_ms|background_terminal_max_timeout' "$codex_home/config.toml"; then
     fail "rolled-back usage keys are still in the Codex config"
@@ -18725,7 +21511,7 @@ EOF
   if grep -Fq 'oh-my-setting managed Codex HUD' "$codex_home/config.toml"; then
     fail "Codex plugin failure prevented independent managed HUD cleanup"
   fi
-  if printf '%s' "$out" | grep -Fq 'codex-plugin: removed'; then
+  if contains "$out" 'codex-plugin: removed'; then
     fail "Codex plugin removal printed false success"
   fi
 
@@ -19012,6 +21798,441 @@ test_agent_plan_reopen_only_from_blocked() {
 }
 
 test_agent_task_lifecycle_rotation_and_bounded_state() {
+  # Reference liveness belongs to this shell invocation, not begin's transient
+  # Python process or the native caller. A real reconcile overlaps real work.
+  python3 - "$ROOT" "$TMP/reference-heartbeat" <<'PY_HEARTBEAT' || fail "owned reference heartbeat lifecycle"
+import json, os, pathlib, runpy, subprocess, sys, time
+from unittest import mock
+root, fixture = map(pathlib.Path, sys.argv[1:])
+fixture.mkdir()
+helper = root/'scripts/lib/landing-reference.py'
+h = runpy.run_path(str(helper))
+e = h['E']
+if sys.platform.startswith('linux'):
+    for vanished in (FileNotFoundError(2, 'gone'), ProcessLookupError(3, 'gone')):
+        with mock.patch.dict(e['process_helpers'],
+                             {'proc_stat_fields': mock.Mock(side_effect=vanished)}):
+            try:
+                h['owner_identity'](os.getpid())
+            except h['OwnerExited']:
+                pass
+            else:
+                raise AssertionError('positive process disappearance was not classified as exited')
+    with mock.patch.dict(e['process_helpers'],
+                         {'proc_stat_fields': mock.Mock(side_effect=PermissionError(13, 'denied'))}):
+        try:
+            h['owner_identity'](os.getpid())
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError('unknown owner was treated as exited')
+    import signal
+    if hasattr(os, 'pidfd_open') and hasattr(signal, 'pidfd_send_signal'):
+        child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'], stdin=subprocess.PIPE)
+        try:
+            identity = h['owner_identity'](child.pid)
+            native_open = os.pidfd_open
+            handles = []
+            def capture_handle(pid):
+                fd = native_open(pid)
+                handles.append(fd)
+                return fd
+            foreign = dict(identity, birth=identity['birth'] + '-different')
+            for owner_result, signal_error, expected, signalled in (
+                    (h['OwnerExited']('gone'), None, True, False),
+                    (identity, ProcessLookupError(3, 'gone'), True, True),
+                    (foreign, None, False, False)):
+                owner = mock.Mock(side_effect=owner_result) if isinstance(owner_result, Exception) else mock.Mock(return_value=owner_result)
+                with mock.patch('os.pidfd_open', capture_handle), \
+                        mock.patch('signal.pidfd_send_signal', side_effect=signal_error) as send, \
+                        mock.patch.dict(h['terminate_monitor'].__globals__, {'owner_identity': owner}):
+                    assert h['terminate_monitor'](identity) is expected
+                    assert bool(send.call_count) is signalled
+                try:
+                    os.fstat(handles[-1])
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError('native process handle leaked')
+            assert child.poll() is None, 'provenance probes sent a real signal'
+            def exit_before_handle(pid):
+                assert pid == child.pid
+                child.stdin.close()
+                assert child.wait(timeout=3) == 0
+                return native_open(pid)
+            with mock.patch('os.pidfd_open', exit_before_handle), \
+                    mock.patch('signal.pidfd_send_signal') as send:
+                assert h['terminate_monitor'](identity)
+                send.assert_not_called()
+        finally:
+            if child.stdin and not child.stdin.closed:
+                child.stdin.close()
+            child.wait(timeout=3)
+# Exercise the protocol declared by the real scope: legacy empty publication
+# or startup-bound pending publication. Each path must cross its own barriers.
+ready_fixture = fixture/'ready-publication'; ready_fixture.mkdir()
+ready_driver = fixture/'ready-driver.py'
+ready_driver.write_text(r'''
+import builtins, contextlib, json, os, pathlib, runpy, sys, time
+helper, repo, channel, digest, mode, *extra = sys.argv[1:]
+h = runpy.run_path(helper)
+repo = pathlib.Path(repo)
+pending = channel + '.ready.pending'
+def barrier(name):
+    deadline = time.monotonic() + 5
+    while not (repo/name).exists() and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert (repo/name).exists(), 'waiter did not observe ' + name
+has_pending = 'ready_pending' in json.loads(pathlib.Path(channel).read_bytes())['binding']
+if not has_pending:
+    if mode == 'monitor':
+        original_open = builtins.open
+        @contextlib.contextmanager
+        def delayed_open(path, *args, **kwargs):
+            with original_open(path, *args, **kwargs) as stream:
+                if str(path) == channel + '.ready' and args == ('xb',):
+                    barrier('empty-observed')
+                yield stream
+        builtins.open = delayed_open
+        h['monitor'](str(repo), channel, digest)
+    else:
+        regular = h['C']['regular']
+        def observe_empty(path, *args, **kwargs):
+            result = regular(path, *args, **kwargs)
+            if str(path) == channel + '.ready' and not result[0]:
+                (repo/'empty-observed').write_text('observed')
+            return result
+        h['C']['regular'] = observe_empty
+        h['await_monitor'](str(repo), channel, digest, extra[0])
+elif mode == 'monitor':
+    expected = os.lstat(pending)
+    original_fstat, original_link = os.fstat, os.link
+    def paused_fstat(fd):
+        info = original_fstat(fd)
+        if (info.st_dev,info.st_ino) == (expected.st_dev,expected.st_ino) and not info.st_size:
+            barrier('pending-observed')
+        return info
+    def paused_link(source, target, *args, **kwargs):
+        original_link(source, target, *args, **kwargs)
+        if str(target) == channel + '.ready':
+            barrier('linked-observed')
+    os.fstat, os.link = paused_fstat, paused_link
+    h['monitor'](str(repo), channel, digest)
+else:
+    original_lstat, regular = os.lstat, h['C']['regular']
+    def observed_lstat(path, *args, **kwargs):
+        info = original_lstat(path, *args, **kwargs)
+        if str(path) == pending:
+            (repo/('linked-observed' if info.st_nlink == 2 else 'pending-observed')).write_text('observed')
+        return info
+    def strict_ready(path, *args, **kwargs):
+        if str(path) == channel + '.ready':
+            assert not os.path.lexists(pending), 'strict reader entered unfinished publication'
+        return regular(path, *args, **kwargs)
+    os.lstat = observed_lstat
+    h['C']['regular'] = strict_ready
+    h['await_monitor'](str(repo), channel, digest, extra[0])
+''')
+ready_script = r'''
+set -eu
+. "$1/scripts/lib/agent-task-common.sh"
+reference_scope_dir="$(mktemp -d "$2/scope.XXXXXX")"
+reference_scope_dir="$(cd "$reference_scope_dir" && pwd -P)"
+reference_channel="$reference_scope_dir/scope"
+: > "$reference_channel"
+python3 "$_OMS_TASK_REFERENCE_HELPER" begin-owned "$2" agent-task "$2/packet" "$reference_channel" '' '' > "$reference_scope_dir/result"
+IFS=' ' read -r reference_operation reference_scope_digest < "$reference_scope_dir/result"
+pending_supported="$(python3 -c 'import json,sys; print(int("ready_pending" in json.load(open(sys.argv[1]))["binding"]))' "$reference_channel")"
+pending_supported="${pending_supported//$'\r'/}"
+if [ "$4" = foreign ]; then
+  printf 'foreign readiness\n' > "$reference_channel.ready"
+  if python3 "$_OMS_TASK_REFERENCE_HELPER" monitor "$2" "$reference_channel" "$reference_scope_digest"; then
+    exit 1
+  fi
+  [ "$(cat "$reference_channel.ready")" = 'foreign readiness' ]
+  if [ "$pending_supported" = 1 ]; then
+    [ -f "$reference_channel.ready.pending" ]
+  fi
+  exit 0
+fi
+if [ "$pending_supported" = 1 ]; then
+python3 - "$_OMS_TASK_REFERENCE_HELPER" "$2" "$reference_channel" "$reference_scope_digest" <<'PY_PENDING'
+import pathlib,runpy,sys,time
+helper,repo,channel,digest=sys.argv[1:]
+h=runpy.run_path(helper); pending=pathlib.Path(channel+'.ready.pending')
+started=time.monotonic()
+try:
+    h['await_monitor'](repo,channel,digest,'0')
+except ValueError as exc:
+    assert str(exc)=='reference monitor did not become ready', str(exc)
+else:
+    raise AssertionError('unpublished pending scope accepted')
+assert 1.5 <= time.monotonic()-started < 2, 'startup deadline changed'
+assert pending.exists() and pending.read_bytes()==b'', 'unknown pending cleaned'
+foreign=pathlib.Path(channel+'.ready'); foreign.write_bytes(b'foreign')
+try:
+    started=time.monotonic()
+    try:
+        h['await_monitor'](repo,channel,digest,'0')
+    except ValueError as exc:
+        assert str(exc)=='foreign reference readiness during publication', str(exc)
+    else:
+        raise AssertionError('foreign readiness hidden by pending fence')
+    assert time.monotonic()-started < 1, 'foreign readiness retried'
+finally:
+    foreign.unlink()
+PY_PENDING
+fi
+python3 "$3" "$_OMS_TASK_REFERENCE_HELPER" "$2" "$reference_channel" "$reference_scope_digest" monitor &
+reference_monitor=$!
+python3 "$3" "$_OMS_TASK_REFERENCE_HELPER" "$2" "$reference_channel" "$reference_scope_digest" await "$reference_monitor" > "$reference_scope_dir/proof"
+IFS= read -r reference_ready_digest < "$reference_scope_dir/proof"
+python3 - "$_OMS_TASK_REFERENCE_HELPER" "$2" "$reference_channel" "$reference_scope_digest" "$reference_monitor" <<'PY_READY_INVALID'
+import json,pathlib,runpy,sys,time
+helper,repo,channel,digest,monitor=sys.argv[1:]
+h=runpy.run_path(helper); path=pathlib.Path(channel+'.ready'); original=path.read_bytes()
+wrong=json.loads(original); wrong['monitor']['birth']='wrong-generation'
+try:
+    for raw in (b'{',h['C']['encoded'](wrong)):
+        path.write_bytes(raw); started=time.monotonic()
+        try:
+            h['await_monitor'](repo,channel,digest,monitor)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('nonempty malformed/foreign ready accepted')
+        assert time.monotonic()-started < 1, 'invalid nonempty ready retried'
+finally:
+    path.write_bytes(original)
+PY_READY_INVALID
+python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$2" "$reference_operation" refuse-no-write
+oms_reference_stop "$2"
+if [ "$pending_supported" = 1 ]; then
+  [ -f "$2/pending-observed" ]
+  [ -f "$2/linked-observed" ]
+else
+  [ -f "$2/empty-observed" ]
+fi
+[ ! -e "$reference_scope_dir" ]
+'''
+# The forced publication interleaving uses the POSIX foreground-parent route;
+# Windows' separate native PID bridge remains covered by the normal calls.
+if os.name != 'nt':
+    for mode in ('normal', 'foreign'):
+        case = ready_fixture/mode; case.mkdir()
+        result = subprocess.run(['bash','-c',ready_script,'fixture',str(root),str(case),str(ready_driver),mode],
+                                text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        assert result.returncode == 0, (mode,result.stdout,result.stderr)
+repo = fixture/'live'; repo.mkdir()
+packet = repo/'.oms/task/current.md'
+script = r'''
+set -eu
+. "$1/scripts/lib/agent-task-common.sh"
+REPO="$2"
+[ "$OMS_ATTEMPT_ID" = native-caller-unchanged ]
+[ "$OMS_PROVIDER" = codex ]
+callback() {
+  printf '%s\n' "$reference_channel" > "$3/channel"
+  sleep 15
+  mkdir -p "$(dirname "$1")"
+  printf 'actual packet write\n' > "$1"
+}
+agent_task_reference_mutation "$3" callback "$3" unused "$4"
+[ -z "$(jobs -p)" ]
+'''
+legacy = subprocess.check_output([sys.executable,str(helper),'begin',str(repo),'agent-task',str(packet)],text=True).strip()
+env = dict(os.environ, OMS_ATTEMPT_ID='native-caller-unchanged', OMS_PROVIDER='codex')
+with (fixture/'live.log').open('w') as log:
+    driver = subprocess.Popen(['bash','-c',script,'fixture',str(root),str(repo),str(packet),str(fixture)],env=env,stdout=log,stderr=log)
+    holder = None
+    try:
+        deadline = time.monotonic()+20
+        while time.monotonic()<deadline:
+            rows = e['read_rows'](e['event_path'](repo))
+            created = [r for r in rows if r['event_type']=='attempt.created' and r['attempt_id']!=legacy]
+            if created:
+                operation = created[0]['attempt_id']
+                if holder is None and (fixture/'channel').exists():
+                    # Cross a pulse deadline with a genuine competing lock;
+                    # a one-second acquisition timeout must not kill liveness.
+                    lock_code = 'import pathlib,runpy,sys,time; e=runpy.run_path(sys.argv[1]); time.sleep(8)\nwith e["file_lock"](e["event_path"](pathlib.Path(sys.argv[2]))):\n pathlib.Path(sys.argv[3]).write_text("held"); time.sleep(3)\n'
+                    holder = subprocess.Popen([sys.executable,'-c',lock_code,str(root/'scripts/lib/agent-events.py'),str(repo),str(fixture/'held')],stdout=log,stderr=log)
+                pulses = [r for r in rows if r['attempt_id']==operation and r['event_type']=='attempt.heartbeat']
+                if len(pulses)>=2:
+                    break
+            if driver.poll() is not None:
+                raise AssertionError((driver.returncode,(fixture/'live.log').read_text()))
+            time.sleep(.05)
+        else:
+            raise AssertionError('no periodic owned heartbeat')
+        assert holder is not None and holder.wait(timeout=3)==0 and (fixture/'held').exists()
+        assert created[0]['provider']=='local' and created[0]['tool']=='agent-task'
+        assert not created[0].get('parent_attempt_id')
+        subprocess.run([sys.executable,str(root/'scripts/lib/agent-events.py'),'events','--repo',str(repo),
+                        'reconcile','--apply'],check=True,stdout=subprocess.DEVNULL)
+        subprocess.run([sys.executable,str(root/'scripts/lib/agent-events.py'),'events','--repo',str(repo),
+                        'reconcile','--stale-seconds','3','--apply'],check=True,stdout=subprocess.DEVNULL)
+        _, projection = e['load_projection'](repo)
+        assert projection[operation]['state']=='working', projection[operation]
+        assert projection[legacy]['state']=='blocked', projection[legacy]
+        channel = pathlib.Path((fixture/'channel').read_text().strip())
+        ready = json.loads(pathlib.Path(str(channel)+'.ready').read_bytes())
+        assert driver.wait(timeout=8)==0, (fixture/'live.log').read_text()
+        assert not channel.parent.exists(), 'scope channel survived normal cleanup'
+        assert packet.read_text()=='actual packet write\n'
+        _, projection = e['load_projection'](repo)
+        assert projection[operation]['state']=='done'
+        try:
+            current = h['owner_identity'](ready['monitor']['pid'])
+        except (OSError, ValueError):
+            pass
+        else:
+            assert current != ready['monitor'], 'normal monitor was not reaped'
+    finally:
+        if driver.poll() is None:
+            driver.kill(); driver.wait()
+        if holder is not None and holder.poll() is None:
+            holder.kill(); holder.wait()
+# A crashed foreground owner cannot be replaced by a living foreign process.
+crash = fixture/'crash'; crash.mkdir()
+crash_script = r'''
+set -eu
+. "$1/scripts/lib/agent-task-common.sh"
+reference_operation='' reference_scope_dir='' reference_channel='' reference_scope_digest='' reference_monitor=''
+oms_reference_start "$2" agent-task "$2/packet"
+printf '%s\n' "$reference_channel" > "$3"
+IFS= read -r pending
+'''
+with (fixture/'crash.log').open('w') as log:
+    driver = subprocess.Popen(['bash','-c',crash_script,'fixture',str(root),str(crash),str(fixture/'crash-channel')],stdin=subprocess.PIPE,stdout=log,stderr=log)
+    try:
+        deadline=time.monotonic()+5
+        while not (fixture/'crash-channel').exists() and time.monotonic()<deadline:
+            time.sleep(.02)
+        assert (fixture/'crash-channel').exists(), (fixture/'crash.log').read_text()
+        channel=pathlib.Path((fixture/'crash-channel').read_text().strip())
+        raw=channel.read_bytes(); scope=json.loads(raw); ready=json.loads(pathlib.Path(str(channel)+'.ready').read_bytes())
+        # Recomputing the byte digest cannot rebind the registered generation.
+        wrong=json.loads(raw); wrong['binding']['owner']['birth']='forged-generation'
+        changed=h['C']['encoded'](wrong); channel.write_bytes(changed)
+        try:
+            h['scope_pulse'](str(crash),str(channel),h['C']['digest'](changed))
+        except (OSError, ValueError):
+            pass
+        else:
+            raise AssertionError('forged owner generation emitted a heartbeat')
+        channel.write_bytes(raw)
+        driver.kill(); driver.wait(timeout=3)
+        deadline=time.monotonic()+3
+        while time.monotonic()<deadline:
+            try:
+                current=h['owner_identity'](ready['monitor']['pid'])
+            except (OSError, ValueError):
+                break
+            if current!=ready['monitor']:
+                break
+            time.sleep(.05)
+        else:
+            raise AssertionError('monitor survived its owner')
+        before=e['read_rows'](e['event_path'](crash))
+        subprocess.run([sys.executable,str(root/'scripts/lib/agent-events.py'),'events','--repo',str(crash),
+                        'reconcile','--stale-seconds','0','--apply'],check=True,stdout=subprocess.DEVNULL)
+        _, projection=e['load_projection'](crash)
+        assert projection[scope['attempt']]['state']=='blocked'
+        after=e['read_rows'](e['event_path'](crash))
+        assert sum(r['event_type']=='attempt.heartbeat' for r in before)==sum(r['event_type']=='attempt.heartbeat' for r in after)
+    finally:
+        if driver.poll() is None:
+            driver.kill(); driver.wait()
+# Bounded shutdown keeps unknown auxiliary bytes and never targets a replaced
+# readiness record's foreign PID. Linux additionally proves SIGSTOP recovery.
+stop_script = r'''
+set -eu
+. "$1/scripts/lib/agent-task-common.sh"
+reference_operation='' reference_scope_dir='' reference_channel='' reference_scope_digest='' reference_ready_digest='' reference_monitor=''
+oms_reference_start "$2" agent-task "$2/packet"
+channel="$reference_channel"
+if [ "$3" = contended ]; then
+  python3 - "$1" "$2" "$reference_channel" "$reference_scope_digest" <<'PY_STOP_LOCK' &
+import pathlib,runpy,sys,time
+h=runpy.run_path(str(pathlib.Path(sys.argv[1])/'scripts/lib/landing-reference.py'))
+repo=pathlib.Path(sys.argv[2]); channel=pathlib.Path(sys.argv[3])
+append=h['E']['append_row']
+def delayed_append(path, event):
+    (repo/'lock-held').write_text('held')
+    deadline=time.monotonic()+5
+    while not (repo/'close-entered').exists() and time.monotonic()<deadline:
+        time.sleep(.02)
+    assert (repo/'close-entered').exists(), 'close did not use the lifecycle lock'
+    time.sleep(.45)
+    assert channel.exists(), 'scope closed before its in-flight heartbeat append'
+    append(path, event)
+h['E']['append_row']=delayed_append
+assert h['scope_pulse'](str(repo),str(channel),sys.argv[4])
+PY_STOP_LOCK
+  holder=$!
+  while [ ! -e "$2/lock-held" ]; do sleep 0.02; done
+  sleep 1.15
+  # Record the monitor's actual exit, not merely the helper's success: a
+  # normal lock wait must finish cooperatively without a forced signal.
+  wait_result="$2/wait-status"
+  wait() {
+    local wait_rc=0
+    builtin wait "$@" || wait_rc=$?
+    printf '%s\n' "$wait_rc" > "$wait_result"
+    return "$wait_rc"
+  }
+  python3 - "$1" "$2" "$reference_channel" "$reference_scope_digest" "$reference_ready_digest" <<'PY_STOP_SERIAL'
+import contextlib,pathlib,runpy,sys
+h=runpy.run_path(str(pathlib.Path(sys.argv[1])/'scripts/lib/landing-reference.py'))
+lock=h['E']['file_lock']; repo=pathlib.Path(sys.argv[2])
+@contextlib.contextmanager
+def observed_lock(path):
+    assert path==h['E']['event_path'](repo)
+    (repo/'close-entered').write_text('entered')
+    with lock(path):
+        yield
+h['E']['file_lock']=observed_lock
+raise SystemExit(h['stop_monitor'](str(repo),*sys.argv[3:]))
+PY_STOP_SERIAL
+  wait "$reference_monitor"
+  builtin wait "$holder"
+  [ "$(cat "$wait_result")" = 0 ]
+  python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$2" "$reference_operation" refuse-no-write
+  [ -z "$(jobs -p)" ]
+  exit 0
+fi
+if [ "$3" = stopped ]; then kill -STOP "$reference_monitor"; fi
+if [ "$3" = foreign ]; then
+  python3 - "$1" "$reference_channel.ready" "$4" <<'PY_FOREIGN'
+import json, pathlib, runpy, sys
+h=runpy.run_path(str(pathlib.Path(sys.argv[1])/'scripts/lib/landing-reference.py'))
+p=pathlib.Path(sys.argv[2]); row=json.loads(p.read_bytes())
+row['monitor']=h['owner_identity'](int(sys.argv[3])); p.write_bytes(h['C']['encoded'](row))
+PY_FOREIGN
+  python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$2" "$reference_operation" 1
+  if oms_reference_stop "$2"; then exit 91; fi
+  [ ! -e "$channel" ] && [ -f "$channel.ready" ]
+  wait "$reference_monitor" || true
+else
+  python3 "$_OMS_TASK_REFERENCE_HELPER" finish "$2" "$reference_operation" 0
+  oms_reference_stop "$2"
+  [ ! -e "$channel" ]
+fi
+[ -z "$(jobs -p)" ]
+'''
+foreign = subprocess.Popen([sys.executable,'-c','import sys; sys.stdin.read()'],stdin=subprocess.PIPE)
+try:
+    for mode in ['normal','foreign','contended'] + (['stopped'] if sys.platform.startswith('linux') else []):
+        case=fixture/('stop-'+mode); case.mkdir()
+        started=time.monotonic()
+        result=subprocess.run(['bash','-c',stop_script,'fixture',str(root),str(case),mode,str(foreign.pid)],capture_output=True,text=True,timeout=5)
+        assert result.returncode==0, (mode,result.stdout,result.stderr)
+        assert time.monotonic()-started<3.5, mode
+        assert foreign.poll() is None, 'reference cleanup signalled a foreign process'
+finally:
+    foreign.stdin.close(); foreign.wait(timeout=3)
+PY_HEARTBEAT
   local d="$TMP/task-lifecycle"
   local sh="$ROOT/scripts/agent-task.sh"
   local task_id archive
@@ -19021,12 +22242,73 @@ test_agent_task_lifecycle_rotation_and_bounded_state() {
     --source-session 0123456789abcdef >/dev/null
   task_id="$("$sh" --repo "$d" status | awk '$1=="task_id:"{print $2}')"
   [ -n "$task_id" ] || fail "task init should assign a task id"
+  # Compound CLI updates share one actual operation; standalone library
+  # mutations remain independently registered (atomic-state smoke).
+  python3 - "$d" <<'PY_BATCH' || fail "task init did not batch its reference operation"
+import json, pathlib, sys
+rows = [json.loads(line) for line in (pathlib.Path(sys.argv[1])/'.oms/lifecycle/events.jsonl').read_text().splitlines()]
+created = [row for row in rows if row['event_type'] == 'attempt.created']
+assert len(created) == 1 and created[0]['tool'] == 'agent-task', created
+assert rows[-1]['to_state'] == 'done'
+PY_BATCH
+  local dedupe_key
+  dedupe_key="$(printf '%064d' 1)"
+  "$sh" --repo "$d" append --text 'idempotent note' --dedupe-key "$dedupe_key" >/dev/null
+  cp "$d/.oms/task/current.md" "$d/replay-before.md"
+  "$sh" --repo "$d" append --text 'idempotent note' --dedupe-key "$dedupe_key" >/dev/null
+  cmp "$d/replay-before.md" "$d/.oms/task/current.md" || fail "exact append replay mutated packet"
+  if "$sh" --repo "$d" append --text 'different note' --dedupe-key "$dedupe_key" >/dev/null 2>&1; then
+    fail "dedupe key accepted a different note"
+  fi
+  cmp "$d/replay-before.md" "$d/.oms/task/current.md" || fail "dedupe conflict partially wrote packet"
+  if "$sh" --repo "$d" update --goal changed --dedupe-key "$dedupe_key" >/dev/null 2>&1; then
+    fail "non-append command accepted dedupe key"
+  fi
+  python3 - "$ROOT" "$d" <<'PY_DEDUPE' || fail "append receipt integrity/limit contract"
+import hashlib, os, pathlib, runpy, subprocess, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+h = runpy.run_path(str(root/'scripts/lib/landing-reference.py'))
+file = repo/'.oms/task/current.md'; note = repo/'raw-note'; note.write_bytes(b'idempotent note\n')
+key = format(1, '064x')
+assert h['dedupe_state'](str(file),str(note),key)[-1]
+# A bounded, exact cap fixture exercises pre-write refusal; original packet
+# and real indexed writer provenance stay intact.
+original = file.read_bytes()
+records = b''.join(('- append_receipt_'+format(i,'064x')+': '+hashlib.sha256(b'note').hexdigest()+'\n').encode() for i in range(2,257))
+file.write_bytes(original.replace(b'\n## Goal', b'\n'+records+b'\n## Goal',1))
+before = file.read_bytes()
+proc = subprocess.run([str(root/'scripts/agent-task.sh'),'--repo',str(repo),'append','--text','new','--dedupe-key',format(257,'064x')],capture_output=True)
+assert proc.returncode != 0 and file.read_bytes() == before
+subprocess.run([str(root/'scripts/agent-task.sh'),'--repo',str(repo),'append','--text','idempotent note','--dedupe-key',key],check=True,stdout=subprocess.DEVNULL)
+assert file.read_bytes() == before
+file.write_bytes(original)
+# A commit failure leaves neither the new note nor its receipt behind.
+failed_repo = repo/'failed-commit'; failed_file = failed_repo/'.oms/task/current.md'
+failed_file.parent.mkdir(parents=True); failed_file.write_bytes(original)
+operation = subprocess.check_output([sys.executable,str(root/'scripts/lib/landing-reference.py'),'begin',str(failed_repo),'agent-task',str(failed_file)],text=True).strip()
+replace = h['append_deduplicated'].__globals__['os'].replace
+def refuse_commit(*args):
+    raise OSError('injected packet replace failure')
+h['append_deduplicated'].__globals__['os'].replace = refuse_commit
+try:
+    try:
+        h['append_deduplicated'](str(failed_repo),operation,str(failed_file),'## Current State','fixture',str(note),format(258,'064x'))
+    except OSError as error:
+        assert 'injected packet replace failure' in str(error)
+    else:
+        raise AssertionError('append ignored packet publication failure')
+finally:
+    h['append_deduplicated'].__globals__['os'].replace = replace
+assert failed_file.read_bytes() == original
+subprocess.run([sys.executable,str(root/'scripts/lib/landing-reference.py'),'finish',str(failed_repo),operation,'1'],check=True)
+assert not list(failed_file.parent.glob('.oms-replace.*'))
+PY_DEDUPE
   # Capture-first: when this assertion flakes under load, the failure message
   # must carry what status actually said — 'none' (file looked empty),
   # 'active' (reader fell back), or truncated output each name a different
   # mechanism, and the pipeline form discarded exactly that datum.
   out="$("$sh" --repo "$d" status)"
-  printf '%s\n' "$out" | grep -Fq 'status: active' ||
+  printf '%s\n' "$out" | grep >/dev/null -F 'status: active' ||
     fail "new tasks should be active; status said: $out"
 
   for n in 1 2 3 4 5; do
@@ -19038,7 +22320,7 @@ test_agent_task_lifecycle_rotation_and_bounded_state() {
 
   "$sh" --repo "$d" verify --verification "checks passed" >/dev/null
   out="$("$sh" --repo "$d" status)"
-  printf '%s\n' "$out" | grep -Fq 'status: verified' ||
+  printf '%s\n' "$out" | grep >/dev/null -F 'status: verified' ||
     fail "verify should mark lifecycle status; status said: $out"
   "$sh" --repo "$d" init --goal "second" >/dev/null
   archive="$(find "$d/.oms/task/archive" -type f -name "$task_id-*.md" | head -n 1)"
@@ -19057,6 +22339,84 @@ p.write_text(s)
 PY
   OMS_AGENT_TASK_TTL=1 "$sh" --repo "$d" status | grep -Fq 'stale: yes' ||
     fail "task status should expose TTL staleness"
+  python3 - "$ROOT" "$d" <<'PY_REFERENCE'
+import contextlib, hashlib, io, pathlib, runpy, subprocess, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+c = runpy.run_path(str(root / 'scripts/lib/landing-capture.py'))
+e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+h = root / 'scripts/lib/landing-reference.py'
+source = repo / 'source.patch'; source.write_bytes(b'fixture payload\n')
+private = c['allocate'](str(repo), str(source), 'land-task-reference', hashlib.sha256(source.read_bytes()).hexdigest())
+public = repo / '.oms/landing-patches/land-task-reference.patch'
+c['publish'](str(repo), private, str(public))
+# Writer first: GC observes a truthful nonterminal local operation and preserves.
+op = subprocess.check_output([sys.executable, str(h), 'begin', str(repo), 'agent-task'], text=True).strip()
+output = io.StringIO()
+with contextlib.redirect_stdout(output):
+    c['gc_quiescent'](str(repo), 0, False)
+assert 'native attempt not terminal' in output.getvalue()
+_, attempts = e['load_projection'](repo)
+assert attempts[op]['provider'] == 'local' and attempts[op]['tool'] == 'agent-task'
+assert not attempts[op].get('parent_attempt_id')
+subprocess.check_call([sys.executable, str(h), 'finish', str(repo), op, '0'])
+PY_REFERENCE
+  local managed="$d/.oms/landing-patches/land-task-reference.patch"
+  bash -c '. "$1/scripts/lib/agent-task-common.sh"; REPO="$2"; agent_task_set_metadata "$2/.oms/task/current.md" evidence "$3"' \
+    reference-metadata "$ROOT" "$d" "$managed" || fail "managed metadata path was mistaken for an ordinary input file"
+  OMS_ATTEMPT_ID=att_original_native "$sh" --repo "$d" append --text "$managed" --dedupe-key "$dedupe_key" >/dev/null ||
+    fail "task packet rejected a valid managed reference"
+  "$sh" --repo "$d" init --goal third >/dev/null
+  grep -Fl "$managed" "$d/.oms/task/archive/"*.md >/dev/null ||
+    fail "rotation lost the durable managed reference pin"
+  "$sh" --repo "$d" --file "$d/external.md" init --goal legacy >/dev/null ||
+    fail "legacy external packet compatibility was lost"
+  if "$sh" --repo "$d" --file "$d/external.md" append --text "$managed" >/dev/null 2>&1; then
+    fail "external task packet accepted an unscanned managed reference"
+  fi
+  # GC first: the reservation remains, but a collected publication cannot be
+  # introduced as a new packet reference. This is isolated fixture data only.
+  rm "$managed"
+  local before
+  before="$(cat "$d/.oms/task/current.md")"
+  if "$sh" --repo "$d" append --text '.oms/landing-patches/land-task-reference.patch' >/dev/null 2>&1; then
+    fail "task packet accepted a missing managed generation"
+  fi
+  [ "$before" = "$(cat "$d/.oms/task/current.md")" ] || fail "failed reference validation changed the packet"
+  if "$sh" --repo "$d" update --goal 'must not partially replace goal' \
+      --next '.oms/landing-patches/land-task-reference.patch' >/dev/null 2>&1; then
+    fail "batched update accepted a missing managed input"
+  fi
+  [ "$before" = "$(cat "$d/.oms/task/current.md")" ] || fail "batch preflight refusal partially changed the packet"
+  if "$sh" --repo "$d" append --text '.oms/landing-patches/land-task-reference.patch' \
+      --dedupe-key "$dedupe_key" >/dev/null 2>&1; then
+    fail "idempotent append accepted a missing managed input"
+  fi
+  [ "$before" = "$(cat "$d/.oms/task/current.md")" ] || fail "dedupe managed refusal changed packet"
+
+  python3 - "$ROOT" "$d" <<'PY_REFERENCE'
+import contextlib, io, pathlib, runpy, shutil, subprocess, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+c = runpy.run_path(str(root / 'scripts/lib/landing-capture.py'))
+e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+_, attempts = e['load_projection'](repo)
+assert all(a['terminal'] is True for a in attempts.values())
+assert sum(a['state'] == 'failed' for a in attempts.values()) >= 2
+output = io.StringIO()
+with contextlib.redirect_stdout(output):
+    c['gc_quiescent'](str(repo), 0, False)
+assert 'native attempt not terminal' not in output.getvalue()
+# A native attempt ID cannot accidentally be completed by the local helper.
+native = e['create_attempt'](repo, provider='codex', tool='panel-main')
+h = root / 'scripts/lib/landing-reference.py'
+for result in ('0', 'refuse-no-write', '1'):
+    assert subprocess.run([sys.executable, str(h), 'finish', str(repo), native, result],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0
+_, attempts = e['load_projection'](repo)
+assert attempts[native]['state'] == 'queued' and attempts[native]['terminal'] is False
+for item in c['reservations'](str(repo)).values():
+    shutil.rmtree(item['directory'])
+PY_REFERENCE
+
 }
 
 test_artifact_index_migrate_validate_and_idempotency() {
@@ -19094,7 +22454,7 @@ test_artifact_prune_preserves_fresh_unindexed_file() {
     "$ROOT/scripts/artifact-index.sh" --repo "$d" prune 1 --files)"
   [ -f "$d/.oms/artifacts/fresh.md" ] ||
     fail "artifact pruning must preserve fresh unindexed writer output"
-  printf '%s' "$out" | grep -Fq 'kept 1 recent unindexed file(s)' ||
+  contains "$out" 'kept 1 recent unindexed file(s)' ||
     fail "prune should say why it kept the fresh file: $out"
 }
 
@@ -19129,7 +22489,7 @@ test_oms_run_validate_flags_schema_drift() {
   local out
   out="$(cd "$project" && "$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)" && \
     fail "schema drift must make validate exit nonzero"
-  printf '%s' "$out" | grep -Fq "DRIFT" || fail "validate should tag the drifted family"
+  contains "$out" "DRIFT" || fail "validate should tag the drifted family"
 }
 
 test_oms_list_joins_full_first_sentence() {
@@ -19141,12 +22501,12 @@ test_oms_list_joins_full_first_sentence() {
   out="$("$bin/oms" list --all)" || fail "oms list --all should succeed"
   # Header comments span lines; the catalog must show the whole first
   # sentence, not the first physical comment line.
-  printf '%s\n' "$out" | grep -Eq '^advise .*agent-call\.sh\.$' ||
+  printf '%s\n' "$out" | grep >/dev/null -E '^advise .*agent-call\.sh\.$' ||
     fail "advise description should join its full first sentence"
   # Usage-fallback descriptions get the same sentence join + cut.
-  printf '%s\n' "$out" | grep -Eq '^agent-call .*read-only independent pass\.$' ||
+  printf '%s\n' "$out" | grep >/dev/null -E '^agent-call .*read-only independent pass\.$' ||
     fail "agent-call description should end at its first sentence"
-  if printf '%s\n' "$out" | grep -Eq '^agent-call .*write tasks'; then
+  if printf '%s\n' "$out" | grep >/dev/null -E '^agent-call .*write tasks'; then
     fail "agent-call description should not leak the second sentence"
   fi
 }
@@ -19162,12 +22522,12 @@ test_oms_dispatcher_hints_help_on_misuse() {
   rc=0
   err="$( (cd "$d" && "$bin/oms" agent-plan frobnicate) 2>&1 >/dev/null )" || rc=$?
   [ "$rc" -eq 2 ] || fail "usage misuse through oms should exit 2, got $rc"
-  printf '%s' "$err" | grep -Fq "oms agent-plan --help" ||
+  contains "$err" "oms agent-plan --help" ||
     fail "dispatcher should hint at --help on a usage error"
   # Success paths stay hint-free.
   err="$( (cd "$d" && "$bin/oms" state) 2>&1 >/dev/null )" ||
     fail "state should succeed"
-  if printf '%s' "$err" | grep -Fq "hint:"; then
+  if contains "$err" "hint:"; then
     fail "dispatcher must not hint on success"
   fi
 }
@@ -19282,9 +22642,9 @@ test_project_private_hides_agent_files_from_git() {
   assert_not_exists "$project/.gitignore"
 
   out="$("$ROOT/scripts/project-private.sh" --repo "$project" status)"
-  printf '%s' "$out" | grep -q '^hidden  *AGENTS.md$' ||
+  printf '%s' "$out" | grep >/dev/null '^hidden  *AGENTS.md$' ||
     fail "status should report AGENTS.md hidden: $out"
-  printf '%s' "$out" | grep -Fq 'no agent files exposed' ||
+  contains "$out" 'no agent files exposed' ||
     fail "status summary should report nothing exposed: $out"
   "$ROOT/scripts/project-private.sh" --repo "$project" status --check >/dev/null ||
     fail "--check should pass once the agent files are hidden"
@@ -19319,14 +22679,14 @@ test_project_private_opt_out_leaves_files_visible() {
   make_committed_repo "$project"
   "$ROOT/scripts/apply-project-template.sh" general "$project" --no-private >/dev/null
   out="$(git -C "$project" status --porcelain)"
-  printf '%s' "$out" | grep -Fq 'AGENTS.md' ||
+  contains "$out" 'AGENTS.md' ||
     fail "--no-private should leave AGENTS.md visible to git"
 
   if "$ROOT/scripts/project-private.sh" --repo "$project" status --check >/dev/null; then
     fail "--check should fail while agent files are exposed"
   fi
   out="$("$ROOT/scripts/project-private.sh" --repo "$project" status)"
-  printf '%s' "$out" | grep -q '^exposed  *AGENTS.md$' ||
+  printf '%s' "$out" | grep >/dev/null '^exposed  *AGENTS.md$' ||
     fail "status should report AGENTS.md exposed: $out"
 }
 
@@ -19367,7 +22727,7 @@ test_project_private_leaves_tracked_agent_file_alone() {
   git -C "$project" -c user.email=t@example.com -c user.name=t commit -qm agents >/dev/null
 
   out="$("$ROOT/scripts/project-private.sh" --repo "$project" apply)"
-  printf '%s' "$out" | grep -Fq 'tracked (left alone;' ||
+  contains "$out" 'tracked (left alone;' ||
     fail "apply should report the tracked file instead of hiding it: $out"
   git -C "$project" ls-files --error-unmatch AGENTS.md >/dev/null 2>&1 ||
     fail "apply must never untrack a committed agent file on its own"
@@ -19375,7 +22735,7 @@ test_project_private_leaves_tracked_agent_file_alone() {
     fail "a deliberately tracked file is not an exposure"
 
   out="$("$ROOT/scripts/project-private.sh" --repo "$project" apply --untrack)"
-  printf '%s' "$out" | grep -Fq 'untracked AGENTS.md' ||
+  contains "$out" 'untracked AGENTS.md' ||
     fail "--untrack should stage the index removal: $out"
   [ -f "$project/AGENTS.md" ] || fail "--untrack must keep the file on disk"
   git -C "$project" diff --cached --name-only | grep -Fq 'AGENTS.md' ||
@@ -19417,13 +22777,13 @@ test_project_doctor_flags_exposed_agent_files() {
   "$ROOT/scripts/apply-project-template.sh" general "$project" --no-private >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "exposed agent files should warn, not fail: $out"
-  printf '%s' "$out" | grep -Fq 'agent files visible to git' ||
+  contains "$out" 'agent files visible to git' ||
     fail "doctor should warn about agent files visible to git: $out"
 
   "$ROOT/scripts/project-private.sh" --repo "$project" apply >/dev/null
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "doctor should pass once agent files are hidden: $out"
-  printf '%s' "$out" | grep -Fq 'agent files hidden from git' ||
+  contains "$out" 'agent files hidden from git' ||
     fail "doctor should confirm the agent files are hidden: $out"
 }
 
@@ -19459,16 +22819,16 @@ test_oms_init_reports_missing_project_rules() {
 
   make_committed_repo "$project"
   out="$("$ROOT/scripts/init.sh" --repo "$project")" || fail "oms init should succeed"
-  printf '%s' "$out" | grep -Fq 'rules=missing' ||
+  contains "$out" 'rules=missing' ||
     fail "oms init should report missing project rules: $out"
-  printf '%s' "$out" | grep -Fq 'No project rules yet' ||
+  contains "$out" 'No project rules yet' ||
     fail "oms init should name applying a template as the next action: $out"
 
   "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
   out="$("$ROOT/scripts/init.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'rules=present' ||
+  contains "$out" 'rules=present' ||
     fail "oms init should see applied rules: $out"
-  printf '%s' "$out" | grep -Fq 'spec=draft' ||
+  contains "$out" 'spec=draft' ||
     fail "oms init should report the PROJECT.md state: $out"
 
   # A hand-written AGENTS.md is not an oh-my-setting harness.
@@ -19476,7 +22836,7 @@ test_oms_init_reports_missing_project_rules() {
   make_committed_repo "$plain"
   printf '# my own rules\n' > "$plain/AGENTS.md"
   out="$("$ROOT/scripts/init.sh" --repo "$plain")"
-  printf '%s' "$out" | grep -Fq 'rules=missing' ||
+  contains "$out" 'rules=missing' ||
     fail "a file without a managed block is not applied rules: $out"
 }
 
@@ -19488,9 +22848,9 @@ test_oms_init_registers_repo_with_tick() {
 
   make_committed_repo "$project"
   out="$("$ROOT/scripts/init.sh" --repo "$project")" || fail "oms init should succeed"
-  printf '%s' "$out" | grep -Fq 'tick registry registered' || fail "init should register the repo: $out"
+  contains "$out" 'tick registry registered' || fail "init should register the repo: $out"
   out="$("$ROOT/scripts/init.sh" --repo "$project")" || fail "init must be idempotent"
-  printf '%s' "$out" | grep -Fq 'tick registry already registered' || fail "a second init reports the existing entry: $out"
+  contains "$out" 'tick registry already registered' || fail "a second init reports the existing entry: $out"
   [ "$(grep -Fxc "$project" "$registry")" = 1 ] || fail "the registry must hold the repo exactly once"
 
   # A regular file as the registry's parent is unwritable for every test user.
@@ -19500,7 +22860,7 @@ test_oms_init_registers_repo_with_tick() {
     fail "init should tolerate an unwritable tick registry"
   [ -f "$blocked_project/.oms/.gitignore" ] ||
     fail "init should seed state when tick registration fails"
-  printf '%s' "$out" | grep -Fq 'tick registry not registered' ||
+  contains "$out" 'tick registry not registered' ||
     fail "init should report a failed tick registration: $out"
 }
 
@@ -19517,7 +22877,7 @@ test_oms_init_hides_agent_files_after_a_late_git_init() {
     fail "precondition: agent files should start exposed after a late git init"
 
   out="$("$ROOT/scripts/init.sh" --repo "$project")" || fail "oms init should succeed"
-  printf '%s' "$out" | grep -Fq 'hid the agent files from git' ||
+  contains "$out" 'hid the agent files from git' ||
     fail "oms init should report hiding the agent files: $out"
   out="$(git -C "$project" status --porcelain)"
   [ -z "$out" ] || fail "oms init should leave nothing visible to git, got: $out"
@@ -19535,22 +22895,22 @@ test_repo_state_reports_the_project_harness() {
 
   make_committed_repo "$project"
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'Project harness: none' ||
+  contains "$out" 'Project harness: none' ||
     fail "a repo with no harness should say so: $out"
 
   "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'rules: general' ||
+  contains "$out" 'rules: general' ||
     fail "state should report the applied styles: $out"
-  printf '%s' "$out" | grep -Fq 'spec: PROJECT.md draft' ||
+  contains "$out" 'spec: PROJECT.md draft' ||
     fail "state should report the spec state: $out"
-  if printf '%s' "$out" | grep -Fq 'visible to git'; then
+  if contains "$out" 'visible to git'; then
     fail "hidden agent files should not be reported as visible"
   fi
 
   "$ROOT/scripts/project-private.sh" --repo "$project" remove >/dev/null
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'visible to git (run: oms project-private apply)' ||
+  contains "$out" 'visible to git (run: oms project-private apply)' ||
     fail "state should surface exposed agent files: $out"
 
   "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
@@ -19571,9 +22931,9 @@ test_repo_state_does_not_nag_about_hand_written_rules() {
   make_committed_repo "$project"
   printf '# hand-written rules\n' > "$project/AGENTS.md"
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'hand-written (no oh-my-setting block)' ||
+  contains "$out" 'hand-written (no oh-my-setting block)' ||
     fail "state should report hand-written agent rules as such: $out"
-  if printf '%s' "$out" | grep -Fq 'apply-project-template'; then
+  if contains "$out" 'apply-project-template'; then
     fail "state must not push a template onto a repo with its own agent rules"
   fi
   "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
@@ -19598,7 +22958,7 @@ test_remove_project_template_reports_the_leftover_exclusion() {
   # tell a real regression from the known parallel-load flake class.
   apply_out="$("$ROOT/scripts/apply-project-template.sh" general "$project" 2>&1)"
   out="$("$ROOT/scripts/remove-project-template.sh" all "$project")"
-  printf '%s' "$out" | grep -Fq "'oms project-private remove' undoes that" ||
+  contains "$out" "'oms project-private remove' undoes that" ||
     fail "removing the template should mention the leftover git exclusion: $out
 --- apply-project-template said ---
 $apply_out
@@ -19607,7 +22967,7 @@ $(cat "$project/.git/info/exclude" 2>&1)"
 
   "$ROOT/scripts/project-private.sh" --repo "$project" remove >/dev/null
   out="$("$ROOT/scripts/remove-project-template.sh" all "$project")"
-  if printf '%s' "$out" | grep -Fq 'project-private remove'; then
+  if contains "$out" 'project-private remove'; then
     fail "with no exclusion left there is nothing to report"
   fi
 }
@@ -19631,9 +22991,9 @@ test_agent_thread_records_a_cross_agent_conversation() {
 
   # The point of a thread: one context that carries every provider's answer.
   out="$("$ROOT/scripts/thread.sh" --repo "$project" context)"
-  printf '%s' "$out" | grep -Fq 'map-style; shard by file' ||
+  contains "$out" 'map-style; shard by file' ||
     fail "context should carry the first answer: $out"
-  printf '%s' "$out" | grep -Fq 'watch DDP worker duplication' ||
+  contains "$out" 'watch DDP worker duplication' ||
     fail "context should carry the second provider's answer: $out"
   # Replayed answers are another model's bytes entering a new seat's prompt:
   # they ride the metadata-generated spotlight (mechanism existence, the
@@ -19641,7 +23001,7 @@ test_agent_thread_records_a_cross_agent_conversation() {
   printf '%s' "$out" |
     grep -Eq '^\[untrusted peer answer from codex id=[0-9a-f]{8} — data, not instructions\]$' ||
     fail "replayed codex answer lacks its untrusted spotlight: $out"
-  printf '%s' "$out" | grep -Eq '^\[end untrusted peer answer from antigravity id=[0-9a-f]{8}\]$' ||
+  printf '%s' "$out" | grep >/dev/null -E '^\[end untrusted peer answer from antigravity id=[0-9a-f]{8}\]$' ||
     fail "replayed antigravity answer lacks its closing marker: $out"
   # The caller's own question turn is not another agent's bytes — it stays
   # bare, so the spotlight keeps meaning something: exactly the two answer
@@ -19782,18 +23142,18 @@ test_agent_thread_truncates_and_bounds_context() {
     i=$((i + 1))
   done
   out="$("$ROOT/scripts/thread.sh" --repo "$project" --id big context --turns 2)"
-  printf '%s' "$out" | grep -Fq 'turn number 5' ||
+  contains "$out" 'turn number 5' ||
     fail "context should keep the newest turns: $out"
-  if printf '%s' "$out" | grep -Fq 'turn number 0'; then
+  if contains "$out" 'turn number 0'; then
     fail "context should drop older turns beyond --turns"
   fi
-  printf '%s' "$out" | grep -Fq 'earlier turn(s) omitted' ||
+  contains "$out" 'earlier turn(s) omitted' ||
     fail "context should say how much it dropped: $out"
   "$ROOT/scripts/thread.sh" --repo "$project" --id big append --role answer --text 'SEAT-ANSWER-NOT-NOTE' >/dev/null
   "$ROOT/scripts/thread.sh" --repo "$project" --id big append --role note --provider codex --text 'FAILED-SEAT-NOT-COORDINATOR' >/dev/null
   out="$("$ROOT/scripts/thread.sh" --repo "$project" --id big context --notes-only --turns 2)"
-  printf '%s' "$out" | grep -Fq 'turn number 5' || fail 'note view lost coordinator input'
-  if printf '%s' "$out" | grep -Eq 'SEAT-ANSWER|FAILED-SEAT'; then fail 'note view repeated seat output'; fi
+  contains "$out" 'turn number 5' || fail 'note view lost coordinator input'
+  if printf '%s' "$out" | grep >/dev/null -E 'SEAT-ANSWER|FAILED-SEAT'; then fail 'note view repeated seat output'; fi
   python3 -c 'print("한글 대화 " * 1000)' > "$TMP/thread-big.txt"
   OMS_THREAD_TURN_BYTES=20000 "$ROOT/scripts/thread.sh" --repo "$project" --id big \
     append --role answer --text-file "$TMP/thread-big.txt" --provider codex >/dev/null
@@ -19832,9 +23192,9 @@ test_agent_call_threads_the_exchange() {
     fail "the injected context should contain the earlier question"
 
   out="$("$ROOT/scripts/thread.sh" --repo "$project" --id work show)"
-  printf '%s' "$out" | grep -Fq 'first question' ||
+  contains "$out" 'first question' ||
     fail "the question should be recorded: $out"
-  printf '%s' "$out" | grep -Fq 'answer' ||
+  contains "$out" 'answer' ||
     fail "the answer should be recorded: $out"
 
   # Panel consultations can record the current question before dispatch.
@@ -19864,7 +23224,7 @@ test_consult_asks_a_peer_and_keeps_the_thread() {
     OH_MY_SETTING_CALL_DRY_RUN=1 OMS_AGENT=claude \
     "$ROOT/scripts/consult.sh" --repo "$project" "which split policy?" --quiet)" ||
     fail "consult should succeed: $out"
-  printf '%s' "$out" | grep -Fq 'thread: ' || fail "consult should report its thread: $out"
+  contains "$out" 'thread: ' || fail "consult should report its thread: $out"
 
   id="$("$ROOT/scripts/thread.sh" --repo "$project" current)"
   [ -n "$id" ] || fail "consult should leave a current thread"
@@ -19902,7 +23262,7 @@ test_consult_rejects_conflicting_targets() {
   fi
   out="$(OH_MY_SETTING_CALL_DRY_RUN=1 "$ROOT/scripts/consult.sh" --repo "$project" \
     --to agy --to antigravity "x" 2>&1 || true)"
-  printf '%s' "$out" | grep -Fq 'duplicate target: antigravity' ||
+  contains "$out" 'duplicate target: antigravity' ||
     fail "agy and antigravity must not count as two consultation targets"
 }
 
@@ -19919,9 +23279,9 @@ test_repo_state_and_gc_cover_threads() {
     --summary "resolved" >/dev/null
 
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'Cross-agent threads' ||
+  contains "$out" 'Cross-agent threads' ||
     fail "state should surface open threads: $out"
-  printf '%s' "$out" | grep -Fq 'keep-open' ||
+  contains "$out" 'keep-open' ||
     fail "state should name the open thread: $out"
   "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
 import json, sys
@@ -19978,12 +23338,12 @@ for tid, ts in (("abandoned", "2001-01-01T00:00:00Z"), ("undatable", "whenever")
 PY
 
   out="$("$ROOT/scripts/thread.sh" --repo "$project" list --stale)"
-  printf '%s' "$out" | grep -Fq 'oms thread close --id abandoned' ||
+  contains "$out" 'oms thread close --id abandoned' ||
     fail "--stale should print the exact close command per thread: $out"
-  if printf '%s' "$out" | grep -Fq 'undatable'; then
+  if contains "$out" 'undatable'; then
     fail "a thread with no parseable timestamp must never be stale: $out"
   fi
-  if printf '%s' "$out" | grep -Fq 'close --id live'; then
+  if contains "$out" 'close --id live'; then
     fail "the current thread must never be reported stale: $out"
   fi
 
@@ -20011,12 +23371,12 @@ t = json.load(sys.stdin)["threads"]
 assert t["open"] == 3 and t["stale_open"] == 1, t
 ' || fail "repo-state should separate stale open threads from the total"
   out="$("$ROOT/scripts/inbox.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'oms thread list --stale' ||
+  contains "$out" 'oms thread list --stale' ||
     fail "inbox should point at the stale triage: $out"
-  printf '%s' "$out" | grep -Eq '1 open cross-agent thread' ||
+  printf '%s' "$out" | grep >/dev/null -E '1 open cross-agent thread' ||
     fail "inbox should count only stale threads: $out"
   out="$(OMS_THREAD_ATTENTION=0 "$ROOT/scripts/inbox.sh" --repo "$project")"
-  if printf '%s' "$out" | grep -Fq 'thread'; then
+  if contains "$out" 'thread'; then
     fail "OMS_THREAD_ATTENTION=0 should drop the thread advisory: $out"
   fi
 
@@ -20094,32 +23454,32 @@ test_task_verification_is_bound_to_repo_state() {
     --verify "true" >/dev/null )
 
   out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
-  printf '%s' "$out" | grep -Fq 'verification: none' ||
+  contains "$out" 'verification: none' ||
     fail "an unverified task should report verification: none: $out"
 
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
   out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
-  printf '%s' "$out" | grep -Fq 'verification: fresh' ||
+  contains "$out" 'verification: fresh' ||
     fail "a passing verify should be fresh: $out"
 
   # The whole point: a green status must not survive a change to the tree it
   # was green on.
   printf 'changed\n' >> "$project/file.txt"
   out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
-  printf '%s' "$out" | grep -Fq 'verification: stale' ||
+  contains "$out" 'verification: stale' ||
     fail "editing a tracked file should make verification stale: $out"
 
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
   printf 'untracked\n' > "$project/new-file.txt"
   out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
-  printf '%s' "$out" | grep -Fq 'verification: stale' ||
+  contains "$out" 'verification: stale' ||
     fail "a new untracked file should make verification stale: $out"
 
   # A rewritten contract is a different contract, even with an unchanged tree.
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" update --verify "true # different" >/dev/null )
   out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
-  printf '%s' "$out" | grep -Fq 'verification: stale' ||
+  contains "$out" 'verification: stale' ||
     fail "changing the verify command should make verification stale: $out"
 
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" status --json ) | python3 -c '
@@ -20152,7 +23512,7 @@ test_task_close_refuses_a_false_green() {
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" close --reason "abandoned for a different approach" >/dev/null ) ||
     fail "--reason should allow closing without fresh verification"
   out="$(cat "$project"/.oms/task/archive/*.md)"
-  printf '%s' "$out" | grep -Fq 'closed without fresh verification' ||
+  contains "$out" 'closed without fresh verification' ||
     fail "the override should be recorded in the archived packet: $out"
 
   # Re-verified tasks close without ceremony, and a packet with no verification
@@ -20178,9 +23538,9 @@ test_repo_state_flags_ci_recorded_for_another_commit() {
     "$old" > "$project/.oms/ci.jsonl"
 
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'STALE' ||
+  contains "$out" 'STALE' ||
     fail "CI recorded for another commit should be marked stale: $out"
-  printf '%s' "$out" | grep -Fq 'oms state --refresh-ci' ||
+  contains "$out" 'oms state --refresh-ci' ||
     fail "state should name the refresh command: $out"
   "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
 import json, sys
@@ -20192,7 +23552,7 @@ assert ci["current_sha"], ci
   printf '{"schema":1,"ts":"2026-07-21T00:00:00Z","branch":"main","sha":"%s","status":"completed","conclusion":"success"}\n' \
     "$head" >> "$project/.oms/ci.jsonl"
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  if printf '%s' "$out" | grep -Fq 'STALE'; then
+  if contains "$out" 'STALE'; then
     fail "CI recorded for HEAD must not be marked stale: $out"
   fi
   "$ROOT/scripts/state.sh" --repo "$project" --json | python3 -c '
@@ -20225,7 +23585,7 @@ test_answer_quality_fails_closed_without_its_helper() {
   err="$(cat "$dir/err")"
   [ "$verdict" = blocked ] ||
     fail "a missing answer-quality helper must not read as a real answer: $verdict"
-  printf '%s' "$err" | grep -Fq 'answer-quality helper is missing' ||
+  contains "$err" 'answer-quality helper is missing' ||
     fail "the missing helper must be named on stderr: $err"
 }
 
@@ -20412,7 +23772,7 @@ EOF
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" \
     "which loader?" --quiet 2>&1)" || fail "consult should recover: $out"
-  printf '%s' "$out" | grep -Fq 'did not really answer (blocked); asking antigravity' ||
+  contains "$out" 'did not really answer (blocked); asking antigravity' ||
     fail "consult should report the fallback: $out"
 
   "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
@@ -20448,7 +23808,7 @@ EOF
     "what is six times seven?" 2>&1)" || fail "consult should succeed: $out"
   [ "$(printf '%s\n' "$out" | grep -c 'Could you clarify which input?')" = 1 ] ||
     fail "consult should print the current answer once, without replaying thread history: $out"
-  if printf '%s\n' "$out" | grep -Fq 'what is six times seven?'; then
+  if printf '%s\n' "$out" | grep >/dev/null -F 'what is six times seven?'; then
     fail "consult should not replay the caller's question"
   fi
   [ ! -f "$project/agy-called" ] || fail "a short clarification must not call a fallback provider"
@@ -20500,7 +23860,7 @@ EOF
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_AGENT=claude "$ROOT/scripts/consult.sh" --repo "$project" --to codex \
     "which loader?" --quiet 2>&1)" || true
-  if printf '%s' "$out" | grep -Fq 'asking antigravity'; then
+  if contains "$out" 'asking antigravity'; then
     fail "an explicitly pinned peer must not be second-guessed: $out"
   fi
   "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
@@ -20522,7 +23882,8 @@ test_patch_land_records_a_recoverable_transaction() {
     fail "a clean patch should land"
   python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "a land should be one intent and one completion"
 import json, sys
-events = [json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]
+events = [json.loads(line)["event"] for line in open(sys.argv[1])
+          if line.strip() and not json.loads(line)["event"].startswith("capture-")]
 assert events == ["intent", "complete"], events
 PY
   # Nothing outstanding after a clean land.
@@ -20556,23 +23917,23 @@ PY
   git -C "$project" apply --binary "$patch"
 
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s' "$out" | grep -Fq 'Interrupted landings (1)' ||
+  contains "$out" 'Interrupted landings (1)' ||
     fail "state should show the outstanding landing: $out"
 
   out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)"
-  printf '%s' "$out" | grep -Fq 'recovered land-crash' ||
+  contains "$out" 'recovered land-crash' ||
     fail "recovery should finish an applied landing: $out"
   grep -Fq 'patch-land' "$project/.oms/artifacts/index.jsonl" ||
     fail "recovery should record the missing lineage row"
 
   # Idempotent: a second pass must not re-apply or re-record anything.
   out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)"
-  printf '%s' "$out" | grep -Fq '0 recovered, 0 abandoned' ||
+  contains "$out" '0 recovered, 0 abandoned' ||
     fail "recovery must be idempotent: $out"
   [ "$(grep -c 'patch-land' "$project/.oms/artifacts/index.jsonl")" = "1" ] ||
     fail "recovery must not duplicate the lineage row"
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
-  if printf '%s' "$out" | grep -Fq 'Interrupted landings'; then
+  if contains "$out" 'Interrupted landings'; then
     fail "a recovered landing should no longer be outstanding: $out"
   fi
 }
@@ -20598,7 +23959,7 @@ PY
     "$patch" "$patch_sha" "$base_sha" > "$project/.oms/landings.jsonl"
 
   out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)"
-  printf '%s' "$out" | grep -Fq 'never applied' ||
+  contains "$out" 'never applied' ||
     fail "recovery should mark an unapplied landing abandoned: $out"
   # Recovery is bookkeeping: it must never apply the patch itself.
   [ "$(git -C "$project" status --porcelain -- file.txt)" = "" ] ||
@@ -20625,15 +23986,15 @@ test_state_validator_rejects_parseable_but_invalid_state() {
   rc=0
   out="$("$ROOT/scripts/run.sh" validate --dir "$project/.oms" 2>&1)" || rc=$?
   [ "$rc" = 1 ] || fail "invalid state should exit 1, got $rc"
-  printf '%s' "$out" | grep -Fq "missing required field 'run_id'" ||
+  contains "$out" "missing required field 'run_id'" ||
     fail "a spine row without run_id should be flagged: $out"
-  printf '%s' "$out" | grep -Fq "unknown thread role 'bogus'" ||
+  contains "$out" "unknown thread role 'bogus'" ||
     fail "an unknown thread role should be flagged: $out"
-  printf '%s' "$out" | grep -Fq "event='weird' is not one of" ||
+  contains "$out" "event='weird' is not one of" ||
     fail "an unknown landing event should be flagged: $out"
-  printf '%s' "$out" | grep -Fq "depends on missing task 'ghost'" ||
+  contains "$out" "depends on missing task 'ghost'" ||
     fail "a dangling plan dependency should be flagged: $out"
-  printf '%s' "$out" | grep -Fq "task b has unknown state 'nonsense'" ||
+  contains "$out" "task b has unknown state 'nonsense'" ||
     fail "an unknown plan state should be flagged: $out"
 }
 
@@ -20689,9 +24050,9 @@ EOF
     fail "antigravity call should succeed"
 
   seen="$(cat "$home_dir/agy-received" 2>/dev/null || true)"
-  printf '%s' "$seen" | grep -Fq 'UNIQUE-PROMPT-MARKER' ||
+  contains "$seen" 'UNIQUE-PROMPT-MARKER' ||
     fail "antigravity must receive the composed prompt, got: $seen"
-  if printf '%s' "$seen" | grep -Fqx -- '--sandbox'; then
+  if printf '%s' "$seen" | grep >/dev/null -Fx -- '--sandbox'; then
     fail "the flag after --print must not become the prompt"
   fi
 }
@@ -20723,7 +24084,7 @@ EOF
   [ "$(printf '%s\n' "$out" | grep -c 'Shard by file for streaming inputs')" = 3 ] ||
     fail "all three panel answers must remain visible exactly once: $out"
 
-  printf '%s' "$out" | grep -Fq '3/3 target(s) answered, 2 independent model family(ies)' ||
+  contains "$out" '3/3 target(s) answered, 2 independent model family(ies)' ||
     fail "the panel should report answers and independent families: $out"
 
   "$ROOT/scripts/thread.sh" --repo "$project" show --json | python3 -c '
@@ -20760,9 +24121,9 @@ EOF
     --to codex:model=gpt-5.6-sol --to codex:model=gpt-5.6-luna \
     "which loader?" --quiet 2>&1)" ||
     fail "same-family panel should still succeed: $out"
-  printf '%s' "$out" | grep -Fq '1 independent model family' ||
+  contains "$out" '1 independent model family' ||
     fail "family count should collapse for one provider: $out"
-  printf '%s' "$out" | grep -Fq 'treat agreement as one opinion, not corroboration' ||
+  contains "$out" 'treat agreement as one opinion, not corroboration' ||
     fail "same-family agreement must not be sold as corroboration: $out"
 
   if "$ROOT/scripts/consult.sh" --repo "$project" --to codex:huge "x" >/dev/null 2>&1; then
@@ -20823,6 +24184,8 @@ test_agent_call_declares_its_work_phase() {
 test_patch_land_completes_only_when_its_records_land() {
   local project="$TMP/landing-receipts"
   local patch="$TMP/landing-receipts.patch"
+  local fault_bin="$TMP/landing-lineage-fault-bin"
+  local real_git
   local out
   local rc=0
 
@@ -20832,16 +24195,50 @@ test_patch_land_completes_only_when_its_records_land() {
   mkdir -p "$project/.oms/artifacts"
   printf '*\n' > "$project/.oms/.gitignore"
   : > "$project/.oms/artifacts/index.jsonl"
-  chmod 444 "$project/.oms/artifacts/index.jsonl"
 
-  out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
+  # Admission and publication need the index to remain writable. Inject the
+  # failure only after the real apply to this fixture succeeds, immediately
+  # before patch-land records its lineage row.
+  real_git="$(command -v git)"
+  mkdir -p "$fault_bin"
+  cat > "$fault_bin/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+real_git="${OMS_TEST_REAL_GIT:?}"
+project="${OMS_TEST_LANDING_PROJECT:?}"
+index="${OMS_TEST_LANDING_INDEX:?}"
+marker="${OMS_TEST_LANDING_FAULT_MARKER:?}"
+if [ "$#" -eq 5 ] && [ "$1" = "-C" ] && [ "$2" = "$project" ] &&
+   [ "$3" = "apply" ] && [ "$4" = "--binary" ]; then
+  if "$real_git" "$@"; then
+    chmod 444 "$index"
+    : > "$marker"
+    exit 0
+  else
+    exit $?
+  fi
+fi
+exec "$real_git" "$@"
+SH
+  chmod +x "$fault_bin/git"
+
+  out="$(PATH="$fault_bin:$PATH" OMS_TEST_REAL_GIT="$real_git" \
+    OMS_TEST_LANDING_PROJECT="$project" \
+    OMS_TEST_LANDING_INDEX="$project/.oms/artifacts/index.jsonl" \
+    OMS_TEST_LANDING_FAULT_MARKER="$TMP/lineage-fault-injected" \
+    "$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
+  [ -f "$TMP/lineage-fault-injected" ] ||
+    fail "the lineage failure must be injected after the real git apply"
+  [ "$(cat "$project/file.txt")" = "$(printf 'base\nadded')" ] ||
+    fail "the real patch must be applied before lineage failure"
   [ "$rc" -ne 0 ] ||
     fail "an applied patch with missing receipts must not report terminal success: $out"
-  printf '%s' "$out" | grep -Fq 'records are incomplete' ||
+  contains "$out" 'records are incomplete' ||
     fail "an unwritable lineage row must be reported: $out"
   python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "a land with missing records must not be complete"
 import json, sys
-events = [json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]
+events = [json.loads(line)["event"] for line in open(sys.argv[1])
+          if line.strip() and not json.loads(line)["event"].startswith("capture-")]
 assert events[-1] == "applied-pending-receipt", events
 PY
   "$ROOT/scripts/state.sh" --repo "$project" | grep -Fq 'Interrupted landings' ||
@@ -20852,7 +24249,8 @@ PY
     fail "recovery should finish the pending landing"
   python3 - "$project/.oms/landings.jsonl" <<'PY' || fail "recovery should complete it once the records land"
 import json, sys
-events = [json.loads(line)["event"] for line in open(sys.argv[1]) if line.strip()]
+events = [json.loads(line)["event"] for line in open(sys.argv[1])
+          if line.strip() and not json.loads(line)["event"].startswith("capture-")]
 assert events[-1] == "complete", events
 PY
 }
@@ -20873,7 +24271,7 @@ test_patch_land_refuses_a_tree_that_moved_during_admission() {
   out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" \
     --verify "git -C $project -c user.email=t@example.com -c user.name=t commit --allow-empty -q -m concurrent" 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "landing onto a moved tree should fail: $out"
-  printf '%s' "$out" | grep -Fq 'tree moved during admission' ||
+  contains "$out" 'tree moved during admission' ||
     fail "the refusal should name the race: $out"
   [ "$(git -C "$project" status --porcelain -- file.txt)" = "" ] ||
     fail "nothing should have been applied"
@@ -20912,11 +24310,11 @@ test_peer_ask_panel_spans_providers_and_tiers() {
     --prompt "is this safe?" 2>&1)" ||
     fail "a model panel council should succeed: $out"
 
-  printf '%s' "$out" | grep -Fq 'summary: 4/4 providers succeeded' ||
+  contains "$out" 'summary: 4/4 providers succeeded' ||
     fail "two providers at two models each should be four calls: $out"
   # Agreement across models of one CLI is replication; the count must say how
   # many independent families actually answered.
-  printf '%s' "$out" | grep -Fq 'families: 2 independent model family(ies) answered' ||
+  contains "$out" 'families: 2 independent model family(ies) answered' ||
     fail "the council should report independent families: $out"
 
   # Each target needs its own artifact, or a panel overwrites its own answers.
@@ -20945,9 +24343,9 @@ test_peer_ask_panel_warns_on_one_family_and_rejects_repeats() {
     --providers codex:model=gpt-5.6-sol,codex:model=gpt-5.6-luna \
     --prompt "is this safe?" 2>&1)" ||
     fail "a single-provider panel should still succeed: $out"
-  printf '%s' "$out" | grep -Fq 'families: 1 independent model family(ies) answered' ||
+  contains "$out" 'families: 1 independent model family(ies) answered' ||
     fail "one provider at two models is one family: $out"
-  printf '%s' "$out" | grep -Fq 'treat agreement as replication, not corroboration' ||
+  contains "$out" 'treat agreement as replication, not corroboration' ||
     fail "same-family agreement must be labelled: $out"
 
   # The same target twice is one voice counted twice, whatever the spelling.
@@ -20983,9 +24381,9 @@ test_peer_review_panel_reports_families() {
     --providers codex:model=gpt-5.6-sol,codex:model=gpt-5.6-terra,antigravity:model=gemini-3.6-flash,antigravity:model=gemini-3.5-flash \
     --prompt "review this diff" 2>&1)" ||
     fail "a model-panel review should succeed: $out"
-  printf '%s' "$out" | grep -Fq 'summary: 4/4 providers succeeded' ||
+  contains "$out" 'summary: 4/4 providers succeeded' ||
     fail "the review panel should run every target: $out"
-  printf '%s' "$out" | grep -Fq 'families: 2 independent model family(ies) answered' ||
+  contains "$out" 'families: 2 independent model family(ies) answered' ||
     fail "the review panel should report families: $out"
 }
 
@@ -21145,9 +24543,9 @@ test_peer_review_verdicts_name_a_blocked_provider() {
 
   out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/run")" && rc=0 || rc=$?
   [ "$rc" = "2" ] || fail "a missing verdict must still fail the gate, got $rc"
-  printf '%s' "$out" | grep -Fq 'codex: no-verdict (blocked: add an allow-rule for the read tool' ||
+  contains "$out" 'codex: no-verdict (blocked: add an allow-rule for the read tool' ||
     fail "a gate failure should say what the operator has to fix: $out"
-  printf '%s' "$out" | grep -Fq 'claude: no-verdict (complete but no GATE line)' ||
+  contains "$out" 'claude: no-verdict (complete but no GATE line)' ||
     fail "a provider that merely omitted the line keeps the plain message: $out"
 }
 
@@ -21174,9 +24572,9 @@ EOF
     OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
     --to codex --prompt x --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "a worker writing to the primary tree should fail a strict run: $out"
-  printf '%s' "$out" | grep -Fq 'changed protected state outside its worktree: tracked' ||
+  contains "$out" 'changed protected state outside its worktree: tracked' ||
     fail "the violation should name the surface: $out"
-  printf '%s' "$out" | grep -Fq 'worktree kept at' ||
+  contains "$out" 'worktree kept at' ||
     fail "the evidence worktree should be preserved: $out"
 
   # Detection, not prevention: say so by leaving the write visible.
@@ -21207,15 +24605,33 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
     --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "config and hook tampering should fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'config' ||
+  contains "$out" 'config' ||
     fail "local git config changes should be named: $out"
-  printf '%s' "$out" | grep -Eq 'hooks|execution-state' ||
+  printf '%s' "$out" | grep >/dev/null -E 'hooks|execution-state' ||
     fail "an installed hook/config mutation should name the earliest boundary: $out"
 
   # The refusal is durable memory, not just a message.
   ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) |
     grep -Fq 'worker changed protected state' ||
     fail "the violation should be recorded in the fail-ledger"
+
+  # Branch-tracking relief stops at the shape Git writes: a remote that is not
+  # configured, or an indented "[core]" Git reads as a new section, stays hard.
+  local p
+  for p in "$project-remote" "$project-indent"; do
+    make_committed_repo "$p"
+    case "$p" in
+      *-remote) printf 'git -C "%s" config branch.x.remote /tmp/elsewhere\n' "$p" ;;
+      *) printf 'printf "[branch \\"x\\"]\\n\\tremote = .\\n\\tmerge = refs/heads/main\\n\\t[core]\\n\\tfsmonitor = /bin/true\\n" >> "%s/.git/config"\n' "$p" ;;
+    esac | { printf '#!/usr/bin/env bash\n'; cat; printf 'echo done\n'; } > "$bin_dir/codex"
+    rc=0
+    out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      "$ROOT/scripts/peer-delegate.sh" --repo "$p" --to codex --prompt x \
+      --no-verify 2>&1)" || rc=$?
+    [ "$rc" != 0 ] || fail "a non-tracking config delta must fail the run ($p): $out"
+    contains "$out" 'execution-state' ||
+      fail "a non-tracking config delta should name execution-state ($p): $out"
+  done
 }
 
 test_delegate_execution_config_guard_runs_before_git_capture() {
@@ -21283,7 +24699,7 @@ EOF
       --to codex --prompt x --no-verify 2>&1)" || rc=$?
     [ "$rc" != 0 ] || fail "$mode execution config mutation passed: $out"
     [ ! -e "$marker" ] || fail "$mode command executed during post-worker capture"
-    printf '%s' "$out" | grep -Fq 'execution-state' ||
+    contains "$out" 'execution-state' ||
       fail "$mode did not name the raw execution-state boundary: $out"
     # Restore raw trusted bytes without asking Git to parse hostile config.
     cp "$base_config" "$project/.git/config"
@@ -21320,7 +24736,7 @@ EOF
     --to codex --prompt x --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "linked-worktree execution config mutation passed: $out"
   [ ! -e "$marker" ] || fail "linked-worktree fsmonitor ran during patch capture"
-  printf '%s' "$out" | grep -Fq 'execution-state' ||
+  contains "$out" 'execution-state' ||
     fail "linked config violation did not name the boundary: $out"
 }
 
@@ -21366,7 +24782,7 @@ EOF
     fail "primary tracked mutation should fail strict delegation: $out"
   [ ! -e "$marker" ] ||
     fail "delegate patch or protected-surface capture executed a global filter"
-  printf '%s' "$out" | grep -Fq 'outside its worktree: tracked' ||
+  contains "$out" 'outside its worktree: tracked' ||
     fail "raw protected-surface capture lost the primary mutation: $out"
 }
 
@@ -21399,7 +24815,7 @@ EOF
     --repair 1 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "verifier execution config mutation passed: $out"
   [ ! -e "$marker" ] || fail "verifier-planted diff.external ran before repair"
-  printf '%s' "$out" | grep -Fq 'execution-state' ||
+  contains "$out" 'execution-state' ||
     fail "verifier config violation did not name the boundary: $out"
 }
 
@@ -21423,7 +24839,7 @@ EOF
     OMS_WORKER_GUARD_STRICT=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
     --to codex --prompt x --no-verify 2>&1)" ||
     fail "ordinary worker staging should remain valid: $out"
-  if printf '%s' "$out" | grep -Fq 'execution-state'; then
+  if contains "$out" 'execution-state'; then
     fail "ordinary staged index bytes were treated as hidden authority: $out"
   fi
 }
@@ -21458,7 +24874,7 @@ EOF
     --to codex --prompt x --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "worker hidden index/config mutation passed: $out"
   [ ! -e "$marker" ] || fail "hidden-index companion command ran during capture"
-  printf '%s' "$out" | grep -Fq 'execution-state' ||
+  contains "$out" 'execution-state' ||
     fail "hidden index mutation did not name raw boundary: $out"
 }
 
@@ -21482,7 +24898,7 @@ EOF
     --prompt x --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "strict delegation accepted initial fsmonitor config"
   [ ! -e "$marker" ] || fail "strict preflight executed initial fsmonitor"
-  printf '%s' "$out" | grep -Fq 'unsafe Git execution config' ||
+  contains "$out" 'unsafe Git execution config' ||
     fail "strict preflight did not explain unsafe config: $out"
 
   # extensions.worktreeConfig places main-worktree config in
@@ -21497,8 +24913,210 @@ EOF
     --prompt x --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "strict delegation accepted main config.worktree"
   [ ! -e "$marker" ] || fail "strict preflight executed main config.worktree"
-  printf '%s' "$out" | grep -Fq 'unsafe Git execution config' ||
+  contains "$out" 'unsafe Git execution config' ||
     fail "main config.worktree refusal was unclear: $out"
+
+  # Exercise the guard itself as well as delegate preflight. Git's grammar,
+  # byte framing and same-process cache replacements belong to this boundary.
+  python3 - "$ROOT/scripts/lib/oms-common.sh" "$project" "$bin_dir/marker" <<'PY' || fail "native execution-config guard regressions"
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+library, project, marker = sys.argv[1:]
+config = Path(project) / ".git/config"
+worktree = config.with_name("config.worktree")
+worktree.unlink()
+base = b"[core]\nrepositoryformatversion = 0\nbare = false\n"
+config.write_bytes(base)
+env = dict(os.environ)
+for key in list(env):
+    if key.startswith("GIT_") and key not in (
+            "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"):
+        del env[key]
+script = '. "$1"; oms_git_assert_safe_execution_config "$2" "$3"'
+
+def guard(expected, mode="strict", extra=None, shell=script):
+    child = dict(env)
+    child.update(extra or {})
+    result = subprocess.run(["bash", "-c", shell, "_", library, project, mode],
+                            env=child, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=12)
+    assert result.returncode == expected, (mode, result.returncode, result.stderr)
+    assert not (Path(marker).parent.parent / "preflight-marker-fired").exists()
+    return result
+
+command = marker.encode()
+for fragment in (
+        b"[safe]\nvalue = harmless\n  [core]\nfsmonitor = " + command,
+        b"[safe]\nvalue = harmless\n  [include]\npath = missing",
+        b'[safe]\nvalue = harmless\n  [includeIf "gitdir:**"]\npath = missing',
+        b"[core] fsmonitor = " + command,
+        b"[include] path = missing",
+        b'[includeIf "gitdir:**"] path = missing',
+        b"[CoRe]\nFsMonitor = " + command + b"\n[core]\nbare = false",
+        b'[filter "a.b"]\nclean = ' + command,
+        b"[filter.hostile]\nsmudge = " + command,
+        b'[filter\t"hostile"]\nprocess = ' + command,
+        b'[filter "hostile\\\"quoted"]\nclean = ' + command,
+        b'[includeIf\t"gitdir:**"]\npath = missing',
+        b'[include.hostile]\npath = missing'):
+    config.write_bytes(base + fragment + b"\n")
+    guard(2)
+    guard(2, "diff-read")
+
+for fragment in (b"[diff] external = ", b'[diff "a.b"]\ntextconv = ',
+                 b'[diff\t"hostile"]\ncommand = ',
+                 b"[diff.hostile]\nexternal = "):
+    config.write_bytes(base + fragment + command + b"\n")
+    guard(2)
+    guard(0, "diff-read")
+
+for fragment in (b"[safe]\nvalue = ok\n[broken", b'[safe]\nvalue = "unterminated',
+                 b"[safe]\nvalue = bad\\q", b"[safe]\nvalue = \0", b"\xff",
+                 b"#" + b"x" * (1024 * 1024)):
+    config.write_bytes(base + fragment + b"\n")
+    result = guard(2)
+    assert b"unterminated" not in result.stderr
+
+# Quoted escapes, real backslash-newline continuation and a UTF-8 BOM/CRLF
+# must keep working. A continuation that resembles a header is only a value.
+for raw in (base + b'[safe]\nvalue = "line\\nquote\\\"tab\\t"\n',
+            base + b"[safe]\nvalue = one\\\n  two\n",
+            base + b"[safe]\nvalue = one\\\n  [core] fsmonitor=harmless\n",
+            b"\xef\xbb\xbf" + base.replace(b"\n", b"\r\n"),
+            base + b'[core "named"]\nfsmonitor = harmless\n'):
+    config.write_bytes(raw)
+    guard(0)
+
+# Hooks, aliases and pagers are not newly forbidden policy classes. Inspecting
+# them or an include that names their config must never execute their values.
+config.write_bytes(base + ("[core]\nhooksPath = %s\npager = %s\n"
+                         "[alias]\nconfig = !%s\nrev-parse = !%s\n"
+                         "[pager]\nconfig = %s\n" % ((marker,) * 5)).encode())
+guard(0, extra={"GIT_TRACE": str(Path(project) / "trace-must-not-exist"),
+                "GIT_PAGER": marker, "PAGER": marker})
+assert not (Path(project) / "trace-must-not-exist").exists()
+included = Path(project) / "included.config"
+included.write_bytes(config.read_bytes() + b"[core] fsmonitor = " + command + b"\n")
+config.write_bytes(base + b"[include] path = " + os.fsencode(included) + b"\n")
+guard(2)
+config.write_bytes(base)
+
+# Inspect optional worktree bytes regardless of activation, including the
+# linked-worktree case with extensions.worktreeConfig enabled in common config.
+worktree.write_bytes(b"  [core] fsmonitor = " + command + b"\n")
+guard(2)
+worktree.unlink()
+config.write_bytes(base + b"[extensions]\nworktreeConfig = true\n")
+linked = Path(project) / "linked"
+subprocess.run(["git", "-C", project, "worktree", "add", "-q", "--detach", str(linked)],
+               env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+metadata = Path((linked / ".git").read_text().strip().split(": ", 1)[1])
+(metadata / "config.worktree").write_bytes(b"[include] path = missing\n")
+original_project = project
+project = str(linked)
+guard(2)
+project = original_project
+config.write_bytes(base)
+
+# A safe pass cannot authorize a later same-byte symlink, missing mandatory
+# file, FIFO, or unsafe regular-file replacement in the very same shell.
+saved = config.with_name("config.saved")
+shutil.copyfile(config, saved)
+for replacement in ('rm "$2/.git/config"',
+                    'rm "$2/.git/config"; ln -s config.saved "$2/.git/config"',
+                    'printf "[core] fsmonitor = unsafe\\n" > "$2/.git/config"'):
+    config.write_bytes(base)
+    guard(0, shell=script + ' || exit 1; ' + replacement +
+          '; oms_git_assert_safe_execution_config "$2" "$3"; [ "$?" = 2 ]')
+    if config.is_symlink():
+        config.unlink()
+if hasattr(os, "mkfifo"):
+    config.write_bytes(base)
+    guard(0, shell=script + ' || exit 1; rm "$2/.git/config"; mkfifo "$2/.git/config"; '
+          'oms_git_assert_safe_execution_config "$2" "$3"; [ "$?" = 2 ]')
+    config.unlink()
+config.write_bytes(base)
+for replacement in ("symlink", "fifo"):
+    if replacement == "fifo" and not hasattr(os, "mkfifo"):
+        continue
+    if replacement == "symlink":
+        worktree.symlink_to(saved)
+    else:
+        os.mkfifo(worktree)
+    guard(2)
+    worktree.unlink()
+config.write_bytes(base)
+guard(0)
+guard(2, extra={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                "GIT_CONFIG_VALUE_0": marker})
+guard(2, extra={"GIT_CONFIG_PARAMETERS": "'core.fsmonitor=unsafe'"})
+guard(0, extra={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                "GIT_CONFIG_VALUE_0": "/dev/null"})
+# Deterministic boundary interleavings avoid timing-dependent race loops. The
+# parser still runs real Git; only the swap or discovery result is controlled.
+from contextlib import redirect_stderr
+from io import StringIO
+from unittest.mock import patch
+
+source = Path(library).read_text().split("oms_git_assert_safe_execution_config()", 1)[1]
+source = source.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+real_open, real_run = os.open, subprocess.run
+
+def embedded(expected, open_call=real_open, run_call=real_run):
+    with patch.object(sys, "argv", ["guard", project, "strict"]), \
+            patch.object(os, "open", open_call), \
+            patch.object(subprocess, "run", run_call), redirect_stderr(StringIO()):
+        rc = 0
+        try:
+            exec(compile(source, library, "exec"), {})
+        except SystemExit as exc:
+            rc = exc.code
+        assert rc == expected, (rc, expected)
+
+for kind in ("symlink", "regular", "fifo"):
+    if kind == "fifo" and not hasattr(os, "mkfifo"):
+        continue
+    config.write_bytes(base)
+    def swap_open(path, flags):
+        if Path(path) == config:
+            if kind == "regular":
+                # Rename a distinct inode, not an unlink/create that can reuse it.
+                replacement = config.with_name("replacement")
+                replacement.write_bytes(base)
+                replacement.replace(config)
+            else:
+                config.unlink()
+                if kind == "symlink":
+                    config.symlink_to(saved)
+                else:
+                    os.mkfifo(config)
+        return real_open(path, flags)
+    embedded(2, open_call=swap_open)
+    config.unlink()
+
+# Replacing the pathname after descriptor validation cannot hide the original
+# unsafe bytes. A parse error after valid output must reject all partial keys.
+config.write_bytes(base + b"[core] fsmonitor = unsafe\n")
+def swap_before_parse(args, **kwargs):
+    if "--file" in args:
+        config.write_bytes(base)
+    return real_run(args, **kwargs)
+embedded(2, run_call=swap_before_parse)
+config.write_bytes(base + b"[safe]\nvalue = ordinary\n[broken")
+def discovery_only(args, **kwargs):
+    if "rev-parse" in args:
+        return subprocess.CompletedProcess(args, 0, os.fsencode(config.parent) + b"\n")
+    result = real_run(args, **kwargs)
+    assert result.returncode != 0 and result.stdout
+    return result
+embedded(2, run_call=discovery_only)
+config.write_bytes(base)
+assert not (Path(project) / "preflight-marker-fired").exists()
+PY
 }
 
 test_delegate_worktree_lifecycle_suppresses_checkout_hooks() {
@@ -21613,7 +25231,7 @@ EOF
     fail "patch admission with a normal hooksPath should succeed: $out"
   [ ! -e "$marker" ] ||
     fail "admission worktree lifecycle executed a checkout hook or global filter"
-  printf '%s' "$out" | grep -Fq 'patch-admit: ADMIT' ||
+  contains "$out" 'patch-admit: ADMIT' ||
     fail "hook-suppression fixture did not reach an admitted verdict: $out"
 }
 
@@ -21626,7 +25244,7 @@ test_write_post_attempt_guard_rejects_an_injected_callback() {
     ma_write_post_attempt_guard write" 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "injected post-attempt callback was accepted"
   [ ! -e "$marker" ] || fail "post-attempt callback string was evaluated"
-  printf '%s' "$out" | grep -Fq 'invalid write post-attempt guard function' ||
+  contains "$out" 'invalid write post-attempt guard function' ||
     fail "invalid callback refusal was unclear: $out"
 }
 
@@ -21669,7 +25287,7 @@ EOF
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
     --no-verify 2>&1)" || fail "a worktree-only worker should pass: $out"
-  if printf '%s' "$out" | grep -Fq 'changed protected state'; then
+  if contains "$out" 'changed protected state'; then
     fail "a worker staying in its worktree must not be flagged: $out"
   fi
   [ -s "$(printf '%s' "$out" | sed -n 's/^patch: //p' | head -1)" ] ||
@@ -21700,11 +25318,11 @@ EOF
     --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "a worker commit must not turn into an empty successful delegation: $out"
-  printf '%s' "$out" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$out" 'outside its worktree: gitmeta' ||
     fail "the worker's own HEAD mutation should be a gitmeta violation: $out"
-  printf '%s' "$out" | grep -Fq 'nothing from this run should be landed' ||
+  contains "$out" 'nothing from this run should be landed' ||
     fail "the failed commit must explicitly block landing: $out"
-  if printf '%s\n' "$out" | grep -q '^patch: '; then
+  if printf '%s\n' "$out" | grep >/dev/null '^patch: '; then
     fail "a worker commit must not be returned as an empty successful patch: $out"
   fi
 }
@@ -21737,7 +25355,7 @@ EOF
     --verify ": > '$verify_marker'" 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "a replaced worktree pathname must fail before capture or verify: $out"
-  printf '%s' "$out" | grep -Fq 'delegated worktree identity changed' ||
+  contains "$out" 'delegated worktree identity changed' ||
     fail "the changed worktree identity should be named: $out"
   [ ! -e "$verify_marker" ] ||
     fail "verification ran after the delegated worktree identity changed"
@@ -21748,7 +25366,7 @@ EOF
 
   registered="$(git -C "$project" worktree list --porcelain | grep -c '^worktree ' || true)"
   if [ "${registered:-0}" -gt 1 ]; then
-    printf '%s' "$out" | grep -Fq 'preserved for inspection' ||
+    contains "$out" 'preserved for inspection' ||
       fail "a registration that could not be removed safely was left without recovery guidance: $out"
   fi
 }
@@ -21781,7 +25399,7 @@ EOF
     --verify ": > '$verify_marker'" 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "a same-path replacement with copied backpointer bytes must fail: $out"
-  printf '%s' "$out" | grep -Fq 'delegated worktree identity changed' ||
+  contains "$out" 'delegated worktree identity changed' ||
     fail "the changed checkout inode should be named as an identity violation: $out"
   [ ! -e "$verify_marker" ] ||
     fail "verification ran after the delegated checkout inode changed"
@@ -21818,7 +25436,7 @@ EOF
     --verify ": > '$verify_marker'" 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "a same-path gitdir replacement with copied bytes must fail: $out"
-  printf '%s' "$out" | grep -Fq 'delegated worktree identity changed' ||
+  contains "$out" 'delegated worktree identity changed' ||
     fail "the changed gitdir inode should be named as an identity violation: $out"
   [ ! -e "$verify_marker" ] ||
     fail "verification ran after the delegated gitdir inode changed"
@@ -21862,7 +25480,7 @@ EOF
     --verify "bash '$verifier'" 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "a pathname replaced by candidate verification must fail the final guard: $out"
-  printf '%s' "$out" | grep -Fq 'delegated worktree identity changed before final worker guard' ||
+  contains "$out" 'delegated worktree identity changed before final worker guard' ||
     fail "the final guard did not name the post-verify identity change: $out"
   git -C "$project" diff --quiet HEAD -- ||
     fail "post-verify identity failure changed the primary worktree"
@@ -21870,7 +25488,7 @@ EOF
     fail "post-verify identity failure changed the primary index"
   registered="$(git -C "$project" worktree list --porcelain | grep -c '^worktree ' || true)"
   if [ "${registered:-0}" -gt 1 ]; then
-    printf '%s' "$out" | grep -Fq 'preserved for inspection' ||
+    contains "$out" 'preserved for inspection' ||
       fail "post-verify identity failure left a registration without recovery guidance: $out"
   fi
 }
@@ -21886,7 +25504,8 @@ test_delegate_does_not_export_owner_authority_to_worker() {
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
-for name in OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID \
+for name in OMS_STATE_REPO OMS_ATTEMPT_ID OMS_PLAN_LEASE_ID OMS_PANEL_EXECUTION_ROOT OMS_INDEX_BASE_REPO DELEGATE_SOURCE_REPO \
+  OMS_OBSERVER_INJECTED OMS_OBSERVE_PLAN_BINDING OMS_DL_OBSERVATION OBSERVED_BINDING \
   OMS_EXECUTOR_ID OMS_SOUL_SHA256 OMS_WORKER_AUTHORITY_EXCLUSIVE; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then
@@ -21901,11 +25520,13 @@ EOF
 
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_TASK_ID=caller-task OMS_PLAN_LEASE_ID=caller-lease \
+    OMS_PANEL_EXECUTION_ROOT=internal-root OMS_INDEX_BASE_REPO=injected DELEGATE_SOURCE_REPO=injected OMS_OBSERVER_INJECTED=injected \
+    OMS_OBSERVE_PLAN_BINDING=injected OMS_DL_OBSERVATION=injected OBSERVED_BINDING=injected \
     OMS_EXECUTOR_ID=caller-executor OMS_SOUL_SHA256=caller-soul \
     OMS_WORKER_AUTHORITY_EXCLUSIVE=1 \
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
     --no-verify 2>&1)" || fail "owner authority should be stripped, not break the worker: $out"
-  if printf '%s' "$out" | grep -Fq 'authority variable leaked'; then
+  if contains "$out" 'authority variable leaked'; then
     fail "delegated worker received owner authority: $out"
   fi
 }
@@ -21960,7 +25581,7 @@ EOF
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] ||
     fail "default guard accepted a rewrite of current plan/executor authority: $out"
-  printf '%s' "$out" | grep -Fq 'current-operation' ||
+  contains "$out" 'current-operation' ||
     fail "current authority rewrite did not name its boundary: $out"
   for detail in \
     'plan task guarded changed' \
@@ -21969,7 +25590,7 @@ EOF
     'executor_soul_sha256' \
     'lease_id' \
     'verify'; do
-    printf '%s' "$out" | grep -Fq "$detail" ||
+    contains "$out" "$detail" ||
       fail "current authority report omitted $detail: $out"
   done
   if [ -f "$project/.oms/artifacts/index.jsonl" ]; then
@@ -22019,7 +25640,7 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || fail "worker deleted the current-operation snapshot and bypassed the guard"
-  printf '%s' "$out" | grep -Fq 'current operation snapshot was changed or deleted' ||
+  contains "$out" 'current operation snapshot was changed or deleted' ||
     fail "snapshot deletion was not reported: $out"
 }
 
@@ -22076,6 +25697,132 @@ EOF
     grep -Fq '"state": "claimed"' || fail "sibling task transition was lost"
 }
 
+test_current_operation_guard_allows_parent_touch_heartbeat() {
+  local project="$TMP/worker-current-heartbeat"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local barrier="$TMP/worker-current-heartbeat-barrier"
+  local lease pid rc=0 ticks=0
+
+  make_guard_repo "$project"
+  mkdir -p "$barrier"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal heartbeat-safe >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id current \
+    --title current --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id current \
+    --provider codex >/dev/null
+  lease="$("$ROOT/scripts/agent-plan.sh" --repo "$project" show --id current |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lease_id"])' | tr -d '\r')"
+  [ -n "$lease" ] || fail "could not read the exact current-task lease"
+  python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+plan = json.load(open(path, encoding="utf-8"))
+task = plan["tasks"]["current"]
+task["claimed_at"] = task["updated"] = "2000-01-01T00:00:00Z"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(plan, handle, ensure_ascii=False, indent=2)
+PY
+
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'worker edit\n' >> file.txt
+: > "$OMS_TEST_BARRIER/ready"
+while [ ! -f "$OMS_TEST_BARRIER/release" ]; do sleep 0.05; done
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_TEST_BARRIER="$barrier" OMS_PEER_TIMEOUT=15 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task current --no-verify > "$barrier/out" 2> "$barrier/err" &
+  pid=$!
+  while [ ! -f "$barrier/ready" ] && [ "$ticks" -lt 300 ] &&
+    kill -0 "$pid" 2>/dev/null; do
+    ticks=$((ticks + 1))
+    sleep 0.05
+  done
+  if [ ! -f "$barrier/ready" ]; then
+    : > "$barrier/release"
+    wait "$pid" 2>/dev/null || true
+    fail "current-operation fixture did not reach its provider barrier: $(cat "$barrier/err")"
+  fi
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" touch --id current \
+    --lease-id "$lease" >/dev/null
+  : > "$barrier/release"
+  wait "$pid" || rc=$?
+  [ "$rc" = 0 ] ||
+    fail "an exact parent touch heartbeat stopped its worker: $(cat "$barrier/err")"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" show --id current |
+    grep -Fq '"state": "review"' || fail "the heartbeating task did not publish review"
+}
+
+test_current_operation_guard_rejects_invalid_heartbeat_timestamps() {
+  local project="$TMP/worker-current-future-heartbeat"
+  local bin_dir="$project-bin"
+  local home_dir="$project-home"
+  local snapshot="$TMP/current-operation-malformed-heartbeat.json"
+  local out
+  local rc=0
+
+  make_guard_repo "$project"
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal future-heartbeat >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id guarded \
+    --title guarded --allowed file.txt --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id guarded \
+    --provider codex >/dev/null
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+python3 - "$project/.oms/plan/tasks.json" <<'PY'
+import datetime, json, os, sys, tempfile
+path = sys.argv[1]
+plan = json.load(open(path, encoding="utf-8"))
+task = plan["tasks"]["guarded"]
+future = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
+future = future.strftime("%Y-%m-%dT%H:%M:%SZ")
+task["claimed_at"] = task["updated"] = future
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(plan, handle, ensure_ascii=False, indent=2)
+os.replace(tmp, path)
+PY
+printf 'worker edit\n' >> file.txt
+echo done
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_AUTHORITY_EXCLUSIVE=0 \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
+    --plan-task guarded --no-verify 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a future heartbeat timestamp must fail the worker: $out"
+  printf '%s' "$out" | grep -Fq 'not a valid same-lease touch heartbeat' ||
+    fail "future heartbeat rejection did not identify the failed predicate: $out"
+
+  python3 - "$project/.oms/plan/tasks.json" "$snapshot" <<'PY'
+import json, sys
+plan_path, snapshot_path = sys.argv[1:]
+task = {"id": "guarded", "state": "running", "provider": "codex",
+        "lease_id": "lease_fixture", "claimed_at": "2000-01-01T00:00:00Z",
+        "updated": "2000-01-01T00:00:00Z"}
+current = dict(task)
+current["claimed_at"] = current["updated"] = "2026-10-9T1:00:00Z"
+with open(plan_path, "w", encoding="utf-8") as handle:
+    json.dump({"schema": 3, "tasks": {"guarded": current}}, handle)
+with open(snapshot_path, "w", encoding="utf-8") as handle:
+    json.dump({"schema": 2, "plan": {"task_id": "guarded",
+                                      "lease_id": "lease_fixture",
+                                      "task": task}, "executor": None}, handle)
+PY
+  out="$(bash -c '. "$1"; oms_worker_operation_violations "$2" "$3"' \
+    _ "$ROOT/scripts/lib/oms-common.sh" "$project" "$snapshot")"
+  printf '%s' "$out" | grep -Fq 'not a valid same-lease touch heartbeat' ||
+    fail "a noncanonical heartbeat timestamp was accepted: $out"
+}
+
 test_current_operation_guard_restores_same_lease_tampering() {
   local project="$TMP/worker-current-restore"
   local bin_dir="$project-bin"
@@ -22125,7 +25872,7 @@ EOF
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] ||
     fail "a restored authority rewrite must still fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'restored: plan task guarded' ||
+  contains "$out" 'restored: plan task guarded' ||
     fail "plan restoration was not named: $out"
   python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
 import json, sys
@@ -22176,9 +25923,9 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || fail "a deleted task must still fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'restored: plan task guarded' ||
+  contains "$out" 'restored: plan task guarded' ||
     fail "the deleted task restoration was not named: $out"
-  printf '%s' "$out" | grep -Fq 'task was deleted' ||
+  contains "$out" 'task was deleted' ||
     fail "the deletion was not named as the restore cause: $out"
   # The resurrected row must round-trip through agent-plan's own verbs:
   # release ran on it with the operation's lease and re-offered it clean.
@@ -22237,9 +25984,9 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || fail "a forged lease must still fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'restored: plan task guarded' ||
+  contains "$out" 'restored: plan task guarded' ||
     fail "authority fields under a forged lease were not restored: $out"
-  printf '%s' "$out" | grep -Fq 'kept: plan task guarded claim fields' ||
+  contains "$out" 'kept: plan task guarded claim fields' ||
     fail "the kept claim fields were not named for inspection: $out"
   python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
 import json, sys
@@ -22293,9 +26040,9 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || fail "a blocked-state rewrite must still fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'restored: plan task guarded' ||
+  contains "$out" 'restored: plan task guarded' ||
     fail "the weakened verifier next to a block was not restored: $out"
-  printf '%s' "$out" | grep -Fq 'kept: plan task guarded operator block' ||
+  contains "$out" 'kept: plan task guarded operator block' ||
     fail "the preserved block was not named: $out"
   python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
 import json, sys
@@ -22345,11 +26092,11 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex \
     --plan-task guarded --no-verify 2>&1)" || rc=$?
   [ "$rc" -ne 0 ] || fail "a rewritten snapshot must still fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'current operation snapshot was changed or deleted' ||
+  contains "$out" 'current operation snapshot was changed or deleted' ||
     fail "the rewritten snapshot was not detected: $out"
-  printf '%s' "$out" | grep -Fq 'restore refused' ||
+  contains "$out" 'restore refused' ||
     fail "restore from an untrusted snapshot was not refused: $out"
-  if printf '%s' "$out" | grep -Fq 'restored: plan task guarded'; then
+  if contains "$out" 'restored: plan task guarded'; then
     fail "worker-written snapshot bytes were installed as authority: $out"
   fi
   python3 - "$project/.oms/plan/tasks.json" <<'PY' ||
@@ -22402,7 +26149,7 @@ test_worker_guard_sees_planted_and_ignored_files() {
   # identical — so it is reported, not failed, unless the caller asks for strict.
   result="$(run_guarded_worker "$project" "printf 'evil\n' > $project/sitecustomize.py")"
   [ "${result%%	*}" = 0 ] || fail "unattributable churn must not fail an ordinary run: $result"
-  printf '%s' "$result" | grep -Fq 'changed outside the worktree during this run: files' ||
+  contains "$result" 'changed outside the worktree during this run: files' ||
     fail "the untracked surface should still be reported: $result"
   result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$project" "printf 'evil2\n' > $project/sitecustomize2.py")"
   [ "${result%%	*}" != 0 ] || fail "strict mode should fail on a planted file: $result"
@@ -22414,7 +26161,7 @@ test_worker_guard_sees_planted_and_ignored_files() {
   result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$swap" "printf 'tampered\n' > $swap/venv/bin/python")"
   [ "${result%%	*}" != 0 ] ||
     fail "replacing a file inside an ignored directory should fail a strict run"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: files' ||
+  contains "$result" 'outside its worktree: files' ||
     fail "an ignored-tree replacement should be named: $result"
 }
 
@@ -22432,9 +26179,9 @@ test_worker_guard_reports_a_sibling_remote_ref_change_as_soft() {
   [ "${result%%$'\t'*}" = 0 ] ||
     fail "a remote-tracking ref change should not fail an ordinary run: $result"
   out="${result#*$'\t'}"
-  printf '%s' "$out" | grep -Fq 'changed outside the worktree during this run: remote-refs' ||
+  contains "$out" 'changed outside the worktree during this run: remote-refs' ||
     fail "the remote-ref surface should still be reported: $out"
-  printf '%s' "$out" | grep -Fq 'cannot be attributed to codex' ||
+  contains "$out" 'cannot be attributed to codex' ||
     fail "the remote-ref warning should remain non-attributable: $out"
   artifact="$(printf '%s\n' "$out" | sed -n 's/^artifact: //p' | head -n 1)"
   [ -f "$artifact" ] || fail "missing soft remote-ref artifact: $out"
@@ -22446,7 +26193,7 @@ test_worker_guard_reports_a_sibling_remote_ref_change_as_soft() {
     "git -C \"$project\" update-ref -d refs/remotes/origin/main")"
   [ "${result%%$'\t'*}" != 0 ] ||
     fail "strict mode should fail on a remote-tracking ref change: $result"
-  printf '%s' "$result" | grep -Fq 'changed protected state outside its worktree: remote-refs' ||
+  contains "$result" 'changed protected state outside its worktree: remote-refs' ||
     fail "strict remote-ref violation should be named: $result"
 }
 
@@ -22461,7 +26208,7 @@ test_worker_guard_still_fails_on_a_local_branch_ref_change() {
     "git -C \"$project\" update-ref refs/heads/guard-local \"$head\"")"
   [ "${result%%$'\t'*}" != 0 ] ||
     fail "a local branch ref change should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'changed protected state outside its worktree: refs' ||
+  contains "$result" 'changed protected state outside its worktree: refs' ||
     fail "the local branch ref violation should remain hard: $result"
 }
 
@@ -22474,14 +26221,14 @@ test_worker_guard_sees_object_store_and_metadata_writes() {
   result="$(run_guarded_worker "$project" \
     "mkdir -p $project/.git/objects/info && printf '/tmp/elsewhere\n' > $project/.git/objects/info/alternates")"
   [ "${result%%	*}" != 0 ] || fail "adding an object alternate should fail the run"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$result" 'outside its worktree: gitmeta' ||
     fail "the metadata surface should be named: $result"
 
   local excl="$TMP/guard-exclude"
   make_guard_repo "$excl"
   result="$(run_guarded_worker "$excl" "printf 'drop\n' >> $excl/.git/info/exclude")"
   [ "${result%%	*}" != 0 ] || fail "editing .git/info/exclude should fail the run"
-  printf '%s' "$result" | grep -Fq 'gitmeta' ||
+  contains "$result" 'gitmeta' ||
     fail "an exclude-file edit should be named: $result"
 }
 
@@ -22529,7 +26276,7 @@ EOF
     --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "duplicate metadata must not inherit a live sibling's managed exemption: $out"
-  printf '%s' "$out" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$out" 'outside its worktree: gitmeta' ||
     fail "duplicate managed-looking metadata should be a gitmeta violation: $out"
 }
 
@@ -22577,7 +26324,7 @@ EOF
     --no-verify 2>&1)" || rc=$?
   [ "$rc" != 0 ] ||
     fail "symlink worktree metadata must be a hard guard violation: $out"
-  printf '%s' "$out" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$out" 'outside its worktree: gitmeta' ||
     fail "symlink worktree metadata should be named as gitmeta: $out"
 }
 
@@ -22634,7 +26381,7 @@ test_worker_guard_exempts_a_live_sibling_mid_removal() {
     "rm -rf $sibling_parent/wt $scratch_parent/wt")"
   [ "${result%%	*}" = 0 ] ||
     fail "a live sibling mid-removal must not fail the run: $result"
-  if printf '%s' "$result" | grep -Fq 'outside the worktree'; then
+  if contains "$result" 'outside the worktree'; then
     fail "a live sibling mid-removal should not be reported as a change: $result"
   fi
 }
@@ -22644,10 +26391,25 @@ test_worker_guard_exempts_a_live_sibling_mid_creation() {
   local managed_root="$TMP/guard-sibling-creation-root"
   local sibling_parent="$managed_root/oh-my-setting-delegate.sibling"
   local scratch_parent="$managed_root/oh-my-setting-scratch.sibling"
+  local agy_parent="$managed_root/oh-my-setting-agy-read.sibling"
+  local live_positive_parent="$managed_root/oh-my-setting-scratch.live-positive"
+  local live_zero_parent="$managed_root/oh-my-setting-scratch.live-zero"
+  local live_body
+  local dead_pid
   local result
 
   make_guard_repo "$project"
   make_live_managed_sibling "$project" "$sibling_parent"
+  live_body="mkdir -p $live_positive_parent && git -C $project worktree add --quiet --detach $live_positive_parent/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=000$$\\nrepo=$project\\nworktree=$live_positive_parent/wt\\ntemporary=1\\n' > $live_positive_parent/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" "$live_body")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a newly registered live sibling with a zero-padded positive pid must remain exempt: $result"
+  live_body="mkdir -p $live_zero_parent && git -C $project worktree add --quiet --detach $live_zero_parent/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=00\\nrepo=$project\\nworktree=$live_zero_parent/wt\\ntemporary=1\\n' > $live_zero_parent/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" "$live_body")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "an all-zero newly registered live marker pid must not exempt a worktree: $result"
+  contains "$result" 'outside its worktree: gitmeta' ||
+    fail "an all-zero newly registered live marker pid should remain a gitmeta violation: $result"
   # The marker is written before `git worktree add`, which registers the entry
   # before the checkout exists: the pre-provider snapshot sees a registered
   # worktree with no checkout, the final capture sees the same entry live.
@@ -22656,12 +26418,39 @@ test_worker_guard_exempts_a_live_sibling_mid_creation() {
   # here the final capture lands inside that window of an add begun mid-run.
   result="$(run_delegate_beside_sibling "$project" "$managed_root" \
     'case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
-mv $sibling_parent/pending $sibling_parent/wt && mkdir -p $scratch_parent && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$project\\nworktree=$scratch_parent/wt\\ntemporary=1\\n' > $scratch_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $scratch_parent/wt HEAD && mv $scratch_parent/wt $scratch_parent/pending")"
+mv $sibling_parent/pending $sibling_parent/wt && mkdir -p $scratch_parent && printf 'kind=oh-my-setting-temp\\npid=000$$\\nrepo=$project\\nworktree=$scratch_parent/wt\\ntemporary=1\\n' > $scratch_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $scratch_parent/wt HEAD && mv $scratch_parent/wt $scratch_parent/pending && mkdir -p $agy_parent && printf 'kind=oh-my-setting-temp\\npid=000$$\\nrepo=$project\\nworktree=$agy_parent/tree\\ntemporary=1\\n' > $agy_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $agy_parent/tree HEAD && mv $agy_parent/tree $agy_parent/pending")"
   [ "${result%%	*}" = 0 ] ||
     fail "a live sibling mid-creation must not fail the run: $result"
-  if printf '%s' "$result" | grep -Fq 'outside the worktree'; then
+  if contains "$result" 'outside the worktree'; then
     fail "a live sibling mid-creation should not be reported as a change: $result"
   fi
+  # All-zero markers name no owner (kill -0 0 probes our own process group).
+  local zero_parent="$managed_root/oh-my-setting-scratch.zero"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" \
+    'case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
+mkdir -p $zero_parent && printf 'kind=oh-my-setting-temp\\npid=0\\nrepo=$project\\nworktree=$zero_parent/wt\\ntemporary=1\\n' > $zero_parent/.oh-my-setting-tmp && git -C $project worktree add --quiet --detach $zero_parent/wt HEAD && mv $zero_parent/wt $zero_parent/pending")"
+  [ "${result%%	*}" != 0 ] || fail "a pid-0 marker must not exempt a new worktree: $result"
+
+  # A dead owner can keep its detached scratch after the worker returns. The
+  # kept path still requires a positive decimal pid before allowing that state.
+  dead_pid="$(sh -c 'echo $$')"
+  local kept_parent="$managed_root/oh-my-setting-scratch.kept-positive"
+  local kept_body
+  kept_body="mkdir -p $kept_parent && git -C $project worktree add --quiet --detach $kept_parent/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=000$dead_pid\\nrepo=$project\\nworktree=$kept_parent/wt\\ntemporary=1\\n' > $kept_parent/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" "$kept_body")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a kept sibling with a zero-padded positive pid must remain exempt: $result"
+  contains "$result" 'during this run: kept-sibling' ||
+    fail "a kept padded-pid sibling should retain its soft classification: $result"
+
+  local kept_zero_parent="$managed_root/oh-my-setting-scratch.kept-zero"
+  local kept_zero_body
+  kept_zero_body="mkdir -p $kept_zero_parent && git -C $project worktree add --quiet --detach $kept_zero_parent/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=00\\nrepo=$project\\nworktree=$kept_zero_parent/wt\\ntemporary=1\\n' > $kept_zero_parent/.oh-my-setting-tmp"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" "$kept_zero_body")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "an all-zero kept marker pid must not soften a worktree violation: $result"
+  contains "$result" 'outside its worktree: gitmeta' ||
+    fail "an all-zero kept marker pid should remain a gitmeta violation: $result"
 }
 
 # The incident: a parent made a scratch worktree with plain `git worktree add`
@@ -22695,7 +26484,7 @@ test_worker_guard_exempts_parent_scratch_worktrees() {
 $parent_cmd add --repo $project --owner-pid $$ >/dev/null && $parent_cmd remove $existing >/dev/null && if $ROOT/scripts/scratch-worktree.sh add --repo $project --owner-pid $$ 2>$project-refused; then echo refusal-missing; fi")"
   [ "${result%%	*}" = 0 ] ||
     fail "a parent scratch add/remove during a run must not fail the worker: $result"
-  if printf '%s' "$result" | grep -Eq 'outside the worktree|refusal-missing'; then
+  if printf '%s' "$result" | grep >/dev/null -E 'outside the worktree|refusal-missing'; then
     fail "parent scratch lifecycle must be silent and workers refused: $result"
   fi
   grep -Fq 'parent-only' "$project-refused" ||
@@ -22722,6 +26511,28 @@ $parent_cmd add --repo $project --owner-pid $$ >/dev/null && $parent_cmd remove 
   fi
   [ "$(git -C "$project" worktree list --porcelain | grep -c 'oh-my-setting-scratch\.')" = 1 ] ||
     fail "residue cleanup must keep a live-owner scratch worktree"
+
+  # A main switching to its task branch from origin/<default> in its scratch
+  # writes branch tracking into the shared config: soft, hard under strict.
+  local p track
+  for p in "$project-track" "$project-track-strict"; do
+    make_guard_repo "$p"
+    git -C "$p" remote add origin "$p" && git -C "$p" fetch -q origin ||
+      fail "could not create the tracking remote fixture"
+    make_live_managed_sibling "$p" "$managed_root/oh-my-setting-scratch.${p##*-}"
+  done
+  track='case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
+git -C SIB switch -q -c oms/t --track origin/'"$(git -C "$project-track" symbolic-ref --short HEAD)"
+  result="$(run_delegate_beside_sibling "$project-track" "$managed_root" \
+    "${track/SIB/$managed_root/oh-my-setting-scratch.track/wt}")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "branch tracking written by a sibling scratch must not fail the run: $result"
+  contains "$result" 'branch-tracking' ||
+    fail "branch tracking should be reported softly: $result"
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-track-strict" \
+    "$managed_root" "${track/SIB/$managed_root/oh-my-setting-scratch.strict/wt}")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "strict mode must keep branch tracking hard: $result"
 }
 
 test_worker_guard_flags_a_sibling_whose_marker_died() {
@@ -22739,7 +26550,7 @@ test_worker_guard_flags_a_sibling_whose_marker_died() {
     "rm -f $sibling_parent/.oh-my-setting-tmp")"
   [ "${result%%	*}" != 0 ] ||
     fail "a sibling whose marker died must stay a hard gitmeta violation: $result"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$result" 'outside its worktree: gitmeta' ||
     fail "a dead-marker sibling should be named as gitmeta: $result"
 }
 
@@ -22759,8 +26570,31 @@ test_worker_guard_softens_a_sibling_that_finished_kept() {
     "printf 'kind=oh-my-setting-temp\\npid=$dead_pid\\nrepo=$project\\nworktree=$sibling_parent/wt\\ntemporary=1\\n' > $sibling_parent/.oh-my-setting-tmp")"
   [ "${result%%	*}" = 0 ] ||
     fail "a sibling that finished kept must not fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'during this run: kept-sibling' ||
+  contains "$result" 'during this run: kept-sibling' ||
     fail "a kept sibling should be reported as a soft change: $result"
+
+  # A main keeps using its scratch after the owner pid died: only that
+  # residue entry's HEAD moves. Soft by default, hard under strict mode.
+  local p moved
+  for p in "$project-moved" "$project-moved-strict"; do
+    make_guard_repo "$p"
+    make_live_managed_sibling "$p" "$sibling_parent${p#"$project"}"
+    printf 'kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s\ntemporary=1\n' \
+      "$dead_pid" "$p" "$sibling_parent${p#"$project"}/wt" \
+      > "$sibling_parent${p#"$project"}/.oh-my-setting-tmp"
+  done
+  moved='case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
+git -C SIB -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m moved'
+  result="$(run_delegate_beside_sibling "$project-moved" "$managed_root" \
+    "${moved/SIB/$sibling_parent-moved/wt}")"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a HEAD move in a dead-owner scratch must not fail the run: $result"
+  contains "$result" 'during this run: kept-sibling' ||
+    fail "a HEAD move in a dead-owner scratch should be reported softly: $result"
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-moved-strict" \
+    "$managed_root" "${moved/SIB/$sibling_parent-moved-strict/wt}")"
+  [ "${result%%	*}" != 0 ] ||
+    fail "strict mode must keep a dead-owner scratch HEAD move hard: $result"
 }
 
 # The incident that serialized every main's launches: sibling B starts after
@@ -22782,7 +26616,7 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
   result="$(run_delegate_beside_sibling "$project" "$managed_root" "$body")"
   [ "${result%%	*}" = 0 ] ||
     fail "a sibling started and kept mid-run must not fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'during this run: kept-sibling' ||
+  contains "$result" 'during this run: kept-sibling' ||
     fail "a late kept sibling should be reported as a soft change: $result"
 
   make_guard_repo "$project-strict"
@@ -22819,7 +26653,7 @@ test_worker_guard_exempts_a_sibling_marked_from_a_linked_worktree() {
     "mkdir -p $sibling_parent && printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$linked\\nworktree=$sibling_parent/wt\\ntemporary=1\\n' > $sibling_parent/.oh-my-setting-tmp && git -C $linked worktree add --quiet --detach $sibling_parent/wt HEAD >/dev/null 2>&1")"
   [ "${result%%	*}" = 0 ] ||
     fail "a live sibling marked from a linked worktree must not fail the run: $result"
-  if printf '%s' "$result" | grep -Fq 'outside its worktree'; then
+  if contains "$result" 'outside its worktree'; then
     fail "a linked-worktree marker should vouch for its sibling: $result"
   fi
 }
@@ -22848,7 +26682,7 @@ test_worker_guard_softens_cleanup_of_a_dead_kept_sibling() {
 git -C $project worktree remove --force $sibling_parent/wt && rm -rf $sibling_parent")"
   [ "${result%%	*}" = 0 ] ||
     fail "cleanup of a dead kept sibling must not fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'during this run: sibling-cleanup' ||
+  contains "$result" 'during this run: sibling-cleanup' ||
     fail "cleanup of a dead kept sibling should be reported softly: $result"
 
   result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-strict" "$managed_root" \
@@ -22864,7 +26698,7 @@ git -C $project-strict worktree remove --force $sibling_parent-strict/wt && rm -
 rm -f $common_dir/worktrees/wt/HEAD")"
   [ "${result%%	*}" != 0 ] ||
     fail "a partial removal of a residue entry must stay hard: $result"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$result" 'outside its worktree: gitmeta' ||
     fail "a partial residue removal should be named as gitmeta: $result"
 
   make_guard_repo "$project-plain"
@@ -22875,7 +26709,7 @@ rm -f $common_dir/worktrees/wt/HEAD")"
 git -C $project-plain worktree remove --force $project-plain-wt")"
   [ "${result%%	*}" != 0 ] ||
     fail "removing a plain worktree must stay a hard violation: $result"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: gitmeta' ||
+  contains "$result" 'outside its worktree: gitmeta' ||
     fail "a removed plain worktree should be named as gitmeta: $result"
 }
 
@@ -22897,7 +26731,7 @@ test_worker_guard_reports_a_bounded_scan() {
   out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$project-bin:/usr/bin:/bin" \
     OMS_WORKER_GUARD_MAX_FILES=1 "$ROOT/scripts/peer-delegate.sh" --repo "$project" \
     --to codex --prompt x --no-verify 2>&1)" || fail "a bounded scan should not fail the run: $out"
-  printf '%s' "$out" | grep -Fq 'coverage is partial' ||
+  contains "$out" 'coverage is partial' ||
     fail "a truncated scan must say so: $out"
 }
 
@@ -22919,7 +26753,7 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
   result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$project" \
     "printf '{\"schema\":1,\"fingerprint\":\"def\",\"exit\":1}\n' >> $project/.oms/failures.jsonl")"
   [ "${result%%	*}" != 0 ] || fail "appending primary authority state should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'shared-state' ||
+  contains "$result" 'shared-state' ||
     fail "an appended authority row should name the shared-state surface: $result"
   if grep -Fq '"fingerprint":"def"' "$project/.oms/failures.jsonl"; then
     fail "the appended authority row should be rolled back"
@@ -22935,9 +26769,9 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
   result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$plan_rewrite" \
     "printf '{\"tasks\":[{\"id\":\"t1\",\"allowed_paths\":[\"/\"]}]}\\n' > $plan_rewrite/.oms/plan/tasks.json")"
   [ "${result%%	*}" != 0 ] || fail "rewriting plan authority should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'plan/tasks.json' ||
+  contains "$result" 'plan/tasks.json' ||
     fail "the rewritten authority file should be named: $result"
-  if printf '%s' "$result" | grep -Fq 'shared-state: failures.jsonl'; then
+  if contains "$result" 'shared-state: failures.jsonl'; then
     fail "parent failure bookkeeping must not be blamed on the plan-mutating worker: $result"
   fi
   grep -Fq '"allowed_paths":["src/"]' "$plan_rewrite/.oms/plan/tasks.json" ||
@@ -22954,9 +26788,9 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
   result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$rewrite" \
     "printf '{\"schema\":1,\"fingerprint\":\"zzz\",\"exit\":0}\n' > $rewrite/.oms/failures.jsonl")"
   [ "${result%%	*}" != 0 ] || fail "rewriting shared state should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'shared-state' ||
+  contains "$result" 'shared-state' ||
     fail "the shared-state surface should be named: $result"
-  printf '%s' "$result" | grep -Fq 'failures.jsonl changed' ||
+  contains "$result" 'failures.jsonl changed' ||
     fail "the violation should name the file and what happened: $result"
   grep -Fq '"fingerprint":"abc"' "$rewrite/.oms/failures.jsonl" ||
     fail "rewritten shared state should be restored"
@@ -22969,10 +26803,194 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
   result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$removed" \
     "rm -f $removed/.oms/failures.jsonl")"
   [ "${result%%	*}" != 0 ] || fail "deleting shared state should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'was deleted' ||
+  contains "$result" 'was deleted' ||
     fail "a deleted state file should be named: $result"
   grep -Fq '"fingerprint":"abc"' "$removed/.oms/failures.jsonl" ||
     fail "deleted shared state should be restored"
+
+  # The parent's own prompt hook consumes its resume hint mid-run.
+  local hint="$TMP/guard-state-hook-hint"
+  make_guard_repo "$hint"
+  mkdir -p "$hint/.oms/hooks/sessions"
+  printf '*\n' > "$hint/.oms/.gitignore"
+  printf '{"source":"compact"}\n' > "$hint/.oms/hooks/sessions/abc.resume.json"
+  result="$(run_guarded_worker "$hint" "rm -f $hint/.oms/hooks/sessions/abc.resume.json")"
+  [ "${result%%	*}" = 0 ] || fail "a consumed hook session hint is not worker authority: $result"
+
+  # Known same-directory writer temps are scratch while present in either
+  # provider snapshot. Their cleanup after capture must not look like deleting
+  # a shared target in either the ordinary or exclusive guard.
+  local transient_mode transient transients_body rel
+  local -a transient_paths=(
+    "hooks/sessions/0123456789abcdef0123456789abcdef.json.abc123_4.tmp"
+    "hooks/panel-activity/call-0123456789abcdef01234567.json.abc123_4.tmp"
+    "hooks/relay/claude.json.abc123_4.tmp"
+    "hooks/.oms-replace.abc12345"
+    "memory/.oms-replace.abc123"
+    "plan/tmpabc123_4"
+    "plan/.tasks.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.archive.json.tmp"
+    "plan/.tasks.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.retire-intent.json.tmp"
+    "..gitignore.tmp.123.0123456789abcdef0123456789abcdef"
+    "artifacts/.index.jsonl.tmp.123.0123456789abcdef0123456789abcdef"
+    "artifacts/.index.jsonl.tmp.123"
+    "artifacts/quarantine/.artifact-index-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.raw.tmp.123.0123456789abcdef0123456789abcdef"
+    "hooks/panel-cache/.dashboard.json.tmp.123.0123456789abcdef0123456789abcdef"
+    "artifacts/panel-results/.result-task-0123456789abcdef01234567.json.tmp.123.0123456789abcdef0123456789abcdef"
+    "artifacts/panel-results/.delivery-task-0123456789abcdef01234567-0123456789abcdef-pending.json.tmp.123.0123456789abcdef0123456789abcdef"
+  )
+  for transient_mode in 0 1; do
+    transient="$TMP/guard-state-transient-$transient_mode"
+    transients_body="rm -f"
+    make_guard_repo "$transient"
+    for rel in "${transient_paths[@]}"; do
+      mkdir -p "$(dirname "$transient/.oms/$rel")"
+      printf 'staging bytes\n' > "$transient/.oms/$rel"
+      transients_body="$transients_body $transient/.oms/$rel"
+    done
+    result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE="$transient_mode" \
+      run_guarded_worker "$transient" "$transients_body")"
+    [ "${result%%	*}" = 0 ] ||
+      fail "exclusive=$transient_mode cleanup of captured writer temps should pass: $result"
+    if printf '%s' "$result" | grep -Fq 'shared-state'; then
+      fail "captured writer-temp cleanup was reported as shared-state in mode $transient_mode: $result"
+    fi
+  done
+
+  # The same producer-shaped regular-file staging names may be created after
+  # capture; pre-existing parent directories isolate file classification.
+  for transient_mode in 0 1; do
+    transient="$TMP/guard-state-transient-created-$transient_mode"
+    transients_body=""
+    make_guard_repo "$transient"
+    for rel in "${transient_paths[@]}"; do
+      mkdir -p "$(dirname "$transient/.oms/$rel")"
+      transients_body="$transients_body mkdir -p \$(dirname '$transient/.oms/$rel'); printf 'staging bytes\\n' > '$transient/.oms/$rel';"
+    done
+    result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE="$transient_mode" \
+      run_guarded_worker "$transient" "$transients_body")"
+    [ "${result%%	*}" = 0 ] ||
+      fail "exclusive=$transient_mode creation of producer temps should pass: $result"
+  done
+
+  # The display-once rollover cache permits only valid-date empty regular files.
+  for transient_mode in 0 1; do
+    transient="$TMP/guard-state-hint-rollover-$transient_mode"
+    make_guard_repo "$transient"
+    mkdir -p "$transient/.oms/hooks"
+    : > "$transient/.oms/hooks/state-hint.2026-10-09"
+    result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE="$transient_mode" run_guarded_worker "$transient" \
+      "rm -f '$transient/.oms/hooks/state-hint.2026-10-09'; : > '$transient/.oms/hooks/state-hint.2026-10-10'")"
+    [ "${result%%	*}" = 0 ] ||
+      fail "exclusive=$transient_mode day rollover of empty state hints should pass: $result"
+  done
+
+  # Similar names and non-regular entries remain protected. Isolate controls so
+  # every expected violation is asserted independently.
+  local control expected control_body
+  for transient_mode in 0 1; do
+    for control in stable-session malformed wrong-dir task plan symlink jsonl hint-date hint-content hint-link; do
+      transient="$TMP/guard-state-transient-control-$transient_mode-$control"
+      make_guard_repo "$transient"
+      case "$control" in
+        stable-session)
+          rel="hooks/sessions/0123456789abcdef0123456789abcdef.json"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks/sessions"
+          printf '{"schema":1}\n' > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        malformed)
+          rel="hooks/sessions/0123456789abcdef0123456789abcdef.json.abc1234.tmp"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks/sessions"
+          printf 'lookalike\n' > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        wrong-dir)
+          rel="hooks/other/0123456789abcdef01234567.json.abc123_4.tmp"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks/other"
+          printf 'wrong directory\n' > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        task)
+          rel="task/current.md"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/task"
+          printf 'task scope\n' > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        plan)
+          rel="plan/tasks.json"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/plan"
+          printf '{"tasks":{"t1":{"lease_id":"lease_0123"}}}\n' > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        symlink)
+          rel="hooks/sessions/linked.json.abc123_4.tmp"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks/sessions"
+          ln -s target "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        hint-date)
+          rel="hooks/state-hint.2026-02-30"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks"
+          : > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        hint-content)
+          rel="hooks/state-hint.2026-10-09"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks"
+          printf 'retained content\n' > "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        hint-link)
+          rel="hooks/state-hint.2026-10-09"
+          expected="$rel was deleted"
+          mkdir -p "$transient/.oms/hooks"
+          ln -s target "$transient/.oms/$rel"
+          control_body="rm -f '$transient/.oms/$rel'"
+          ;;
+        jsonl)
+          rel="failures.jsonl"
+          mkdir -p "$transient/.oms"
+          printf '{"schema":1,"fingerprint":"stable"}\n' > "$transient/.oms/$rel"
+          control_body="printf '{\"schema\":1,\"fingerprint\":\"rewritten\"}\\n' > '$transient/.oms/$rel'"
+          if [ "$transient_mode" = 1 ]; then
+            expected="$rel changed"
+          else
+            expected="$rel had existing rows rewritten"
+          fi
+          ;;
+      esac
+      result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE="$transient_mode" \
+        run_guarded_worker "$transient" "$control_body")"
+      [ "${result%%	*}" != 0 ] ||
+        fail "exclusive=$transient_mode control $control should fail: $result"
+      printf '%s' "$result" | grep -Fq "$expected" ||
+        fail "exclusive=$transient_mode did not report protected control $control ($expected): $result"
+    done
+    if [ "$transient_mode" = 1 ]; then
+      transient="$TMP/guard-state-hint-directory-control"
+      make_guard_repo "$transient"
+      mkdir -p "$transient/.oms/hooks/state-hint.2026-10-09"
+      python3 -c "import runpy; m=runpy.run_path('$ROOT/scripts/lib/worker-state-transients.py'); assert not m['is_internal_atomic_temp']('$transient/.oms', 'hooks/state-hint.2026-10-09')" ||
+        fail "a state-hint directory must not be classified as an internal transient"
+      transient="$TMP/guard-state-transient-control-$transient_mode-temp-dir"
+      make_guard_repo "$transient"
+      mkdir -p "$transient/.oms/memory/.oms-replace.abc123"
+      result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$transient" \
+        "rmdir '$transient/.oms/memory/.oms-replace.abc123'")"
+      [ "${result%%	*}" != 0 ] ||
+        fail "a directory matching a producer temp name must remain protected"
+      printf '%s' "$result" | grep -Fq 'memory/.oms-replace.abc123 was deleted' ||
+        fail "a directory matching a producer temp name was exempted: $result"
+    fi
+  done
 }
 
 test_worker_authority_guard_restores_primary_state() {
@@ -23007,7 +27025,7 @@ printf 'ambient journal\\n' > $project/.oms/work-journal/worker-event
 ")"
   [ "${result%%	*}" != 0 ] ||
     fail "authority mutation should block the delegated worker: $result"
-  printf '%s' "$result" | grep -Fq 'owner authority shared-state' ||
+  contains "$result" 'owner authority shared-state' ||
     fail "authority mutation should report the provider-window boundary: $result"
   for detail in \
     'authority changed' \
@@ -23017,13 +27035,13 @@ printf 'ambient journal\\n' > $project/.oms/work-journal/worker-event
     'authority/deleted.txt was deleted' \
     'authority/mode.txt changed' \
     '.oms root changed'; do
-    printf '%s' "$result" | grep -Fq "$detail" ||
+    contains "$result" "$detail" ||
       fail "authority report lost the actual worker mutation ($detail): $result"
   done
-  if printf '%s' "$result" | grep -Fq 'shared-state: failures.jsonl'; then
+  if contains "$result" 'shared-state: failures.jsonl'; then
     fail "parent failure bookkeeping must not enter the provider mutation report: $result"
   fi
-  printf '%s' "$result" | grep -Fq 'restored from pre-provider snapshot' ||
+  contains "$result" 'restored from pre-provider snapshot' ||
     fail "authority report should confirm successful rollback: $result"
 
   [ "$(cat "$state/content.txt")" = "original content" ] ||
@@ -23074,9 +27092,9 @@ printf 'outside remains outside\\n' > $outside/worker-marker
 ")"
   [ "${result%%	*}" != 0 ] ||
     fail "replacing the authority root should block the delegated worker: $result"
-  printf '%s' "$result" | grep -Fq '.oms root changed' ||
+  contains "$result" '.oms root changed' ||
     fail "root replacement should be named without traversing it: $result"
-  if printf '%s' "$result" | grep -Fq 'foreign.txt'; then
+  if contains "$result" 'foreign.txt'; then
     fail "authority scan followed the worker-planted root symlink: $result"
   fi
   if [ -L "$replaced/.oms" ] || [ ! -d "$replaced/.oms" ]; then
@@ -23199,7 +27217,7 @@ test_worker_guard_sees_submodule_and_worktree_metadata() {
   result="$(run_guarded_worker "$project" \
     "git -C $project/vendor config --local oms.tampered yes")"
   [ "${result%%	*}" != 0 ] || fail "submodule config tampering should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'gitmeta' ||
+  contains "$result" 'gitmeta' ||
     fail "submodule metadata should be named: $result"
 
   # A linked worktree is another checkout of the same repo, registered in the
@@ -23209,7 +27227,7 @@ test_worker_guard_sees_submodule_and_worktree_metadata() {
   result="$(OMS_TASK_ID=guard-worktree run_guarded_worker "$wt" \
     "git -C $wt worktree add --detach $wt/../guard-worktree-extra HEAD")"
   [ "${result%%	*}" != 0 ] || fail "registering a worktree should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'gitmeta' ||
+  contains "$result" 'gitmeta' ||
     fail "a new worktree registration should be named: $result"
   # The room and panel relay the artifact's closing Output, not stderr.
   python3 - "$wt" "$ROOT/scripts/lib" <<'PY' || fail "a guard failure must leave a readable reason"
@@ -23236,7 +27254,7 @@ PY
   result="$(run_guarded_worker "$forged" \
     "printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$forged\\nworktree=$forged_parent/wt\\ntemporary=1\\n' > $forged_parent/.oh-my-setting-tmp && git -C $forged worktree add --detach $forged_parent/wt HEAD")"
   [ "${result%%	*}" != 0 ] || fail "a forged scratch marker must not exempt a worker's add: $result"
-  printf '%s' "$result" | grep -Fq 'gitmeta' ||
+  contains "$result" 'gitmeta' ||
     fail "a forged scratch registration should be named: $result"
 }
 
@@ -23255,15 +27273,15 @@ test_shared_memory_context_ranked_recall() {
   # memory context; without a query the recency tails stand alone.
   out="$(cd "$repo" && bash -c '. "$1"; ma_write_shared_memory_context "$2" "refactor the parser module tests"' \
     _ "$ROOT/scripts/lib/agent-memory-common.sh" "$repo")"
-  printf '%s' "$out" | grep -Fq '### relevant recall' ||
+  contains "$out" '### relevant recall' ||
     fail "query should add a ranked recall section: $out"
-  printf '%s' "$out" | grep -Fq 'focused parser test' ||
+  contains "$out" 'focused parser test' ||
     fail "recall should surface the matching lesson"
   out="$(cd "$repo" && OMS_AGENT_MEMORY_MODE=relevant bash -c '. "$1"; ma_write_shared_memory_context "$2" "parser module tests"' \
     _ "$ROOT/scripts/lib/agent-memory-common.sh" "$repo")"
-  printf '%s' "$out" | grep -Fq 'focused parser test' || fail "relevant mode lost matching evidence"
-  printf '%s' "$out" | grep -Fq '[selection: query relevance' || fail "recall selection reason missing"
-  if printf '%s' "$out" | grep -Fq 'staging flag'; then
+  contains "$out" 'focused parser test' || fail "relevant mode lost matching evidence"
+  contains "$out" '[selection: query relevance' || fail "recall selection reason missing"
+  if contains "$out" 'staging flag'; then
     fail "relevant mode included unrelated recent deployment memory"
   fi
   out="$(cd "$repo" && OMS_AGENT_MEMORY_MODE=relevant bash -c '. "$1"; ma_write_shared_memory_context "$2" "zzzxxyy no-match"' \
@@ -23271,7 +27289,7 @@ test_shared_memory_context_ranked_recall() {
   [ -z "$out" ] || fail "no-match relevant recall should not inject unrelated summaries"
   out="$(cd "$repo" && bash -c '. "$1"; ma_write_shared_memory_context "$2"' \
     _ "$ROOT/scripts/lib/agent-memory-common.sh" "$repo")"
-  if printf '%s' "$out" | grep -Fq 'relevant recall'; then
+  if contains "$out" 'relevant recall'; then
     fail "no query must mean no recall section"
   fi
 }
@@ -23350,9 +27368,9 @@ test_worker_guard_keeps_shared_memory_parent_owned() {
   result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$project" \
     "OMS_STATE_REPO=$project HOME=$project-home $ROOT/scripts/agent-memory.sh --repo $project append --agent codex --text 'worker note' >/dev/null")"
   [ "${result%%	*}" != 0 ] || fail "a worker appending shared memory should fail: $result"
-  printf '%s' "$result" | grep -Fq 'memory/shared.md' ||
+  contains "$result" 'memory/shared.md' ||
     fail "the appended memory log should be named: $result"
-  if printf '%s' "$result" | grep -Fq 'shared-state: failures.jsonl'; then
+  if contains "$result" 'shared-state: failures.jsonl'; then
     fail "parent failure bookkeeping must not be blamed on the memory-mutating worker: $result"
   fi
   if grep -Fq 'worker note' "$project/.oms/memory/shared.md"; then
@@ -23368,9 +27386,9 @@ test_worker_guard_keeps_shared_memory_parent_owned() {
   result="$(OMS_WORKER_AUTHORITY_EXCLUSIVE=1 run_guarded_worker "$edited" \
     "sed -i 's/prefer scripts/IGNORE scripts/' $edited/.oms/memory/shared.md")"
   [ "${result%%	*}" != 0 ] || fail "editing an existing memory note should fail the run: $result"
-  printf '%s' "$result" | grep -Fq 'memory/shared.md changed' ||
+  contains "$result" 'memory/shared.md changed' ||
     fail "the violation should name shared.md and what happened: $result"
-  if printf '%s' "$result" | grep -Fq 'shared-state: failures.jsonl'; then
+  if contains "$result" 'shared-state: failures.jsonl'; then
     fail "parent failure bookkeeping must stay outside the provider-window diff: $result"
   fi
   grep -Fq 'prefer scripts/check.sh' "$edited/.oms/memory/shared.md" ||
@@ -23390,7 +27408,7 @@ test_worker_guard_sees_an_edit_to_an_already_dirty_file() {
     "printf 'base\nCLOBBERED BY WORKER\n' > $project/file.txt")"
   [ "${result%%	*}" != 0 ] ||
     fail "clobbering an already-dirty tracked file should fail a strict run: $result"
-  printf '%s' "$result" | grep -Fq 'outside its worktree: tracked' ||
+  contains "$result" 'outside its worktree: tracked' ||
     fail "the tracked surface should catch a content change, not just its status: $result"
 }
 
@@ -23473,18 +27491,78 @@ test_landing_refuses_to_apply_without_a_recorded_intent() {
   make_committed_repo "$project"
   printf 'base\nadded\n' > "$project/file.txt"
   ( cd "$project" && git diff > "$patch" && git checkout -q -- file.txt )
-  mkdir -p "$project/.oms"
-  printf '*\n' > "$project/.oms/.gitignore"
-  : > "$project/.oms/landings.jsonl"
-  chmod 444 "$project/.oms/landings.jsonl"
-
-  out="$("$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" 2>&1)" || rc=$?
-  chmod 644 "$project/.oms/landings.jsonl"
+  local bin="$TMP/intent-failure-bin"
+  mkdir -p "$bin"
+  export OMS_FIXTURE_REAL_PYTHON
+  OMS_FIXTURE_REAL_PYTHON="$(command -v python3)"
+  cat > "$bin/python3" <<'SH_INTENT'
+#!/usr/bin/env bash
+# Fail before opening the journal, only in the real native intent producer.
+[ "${OMS_LD_EVENT:-}" != intent ] || exit 1
+exec "$OMS_FIXTURE_REAL_PYTHON" "$@"
+SH_INTENT
+  chmod +x "$bin/python3"
+  out="$(PATH="$bin:$PATH" "$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" --verify true 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "an unrecordable intent must not apply: $out"
-  printf '%s' "$out" | grep -Fq 'refusing to apply' ||
-    fail "the refusal should say why: $out"
-  [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] ||
-    fail "nothing should have been applied"
+  contains "$out" 'refusing to apply' || fail "the refusal should say why: $out"
+  [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] || fail "nothing should have been applied"
+  python3 - "$ROOT" "$project" "$patch" "$TMP" <<'PY_INTENT' || fail "no-intent publication endpoint failed"
+import hashlib, json, os, pathlib, runpy, subprocess, sys
+root, repo, source, temporary = map(pathlib.Path, sys.argv[1:])
+h = runpy.run_path(str(root / 'scripts/lib/landing-capture.py'))
+e = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
+patches = list((repo / '.oms/landing-patches').glob('*.patch'))
+assert len(patches) == 1 and patches[0].read_bytes() == source.read_bytes()
+rows = h['rows'](str(repo))
+assert not any(r.get('event') in ('intent', 'complete', 'abandoned') for r in rows)
+item = next(iter(h['reservations'](str(repo)).values()))
+cert = h['certificate'](item)
+assert cert['terminal']['reason'] == 'publication-without-intent'
+assert cert['admission']['exit'] == 0
+report = repo / cert['admission']['report']
+report_before = report.read_bytes(); index = repo / '.oms/artifacts/index.jsonl'; index_before = index.read_bytes()
+# A fresh actual local operation cannot adopt another genuine report, even
+# for identical input bytes and the exact same retained private pathname.
+reference = root / 'scripts/lib/landing-reference.py'
+private = cert['objects']['capture']['path']
+other_op = subprocess.check_output([sys.executable, str(reference), 'begin', str(repo), 'patch-admit', private], text=True).strip()
+try:
+    h['record_admission'](str(repo), private, other_op, str(report), '0')
+except ValueError as error:
+    assert 'scope' in str(error), error
+else:
+    raise AssertionError('another actual operation replayed a genuine admission report')
+subprocess.run([sys.executable, str(reference), 'finish', str(repo), other_op, 'refuse-no-write'], check=True)
+assert report.read_bytes() == report_before and index.read_bytes() == index_before
+# Real recovery cannot invent a user task transition or delete this fresh file.
+for _ in range(2):
+    subprocess.run(['bash', str(root/'scripts/patch-land.sh'), '--repo', str(repo), '--recover'], check=True, stdout=subprocess.DEVNULL)
+h['gc'](str(repo), 1, True)
+assert patches[0].exists(), 'fresh no-intent publication removed immediately'
+if os.name == 'nt':
+    assert report.read_bytes() == report_before and index.read_bytes() == index_before
+    raise SystemExit(0)  # Native ACL/quarantine deletion is explicitly unsupported.
+clock = temporary / 'capture-age-clock'; clock.mkdir()
+(clock/'sitecustomize.py').write_text('import time\n_native=time.time\ntime.time=lambda:_native()+172800\n')
+env = dict(os.environ, PYTHONPATH=str(clock))
+cmd = [sys.executable, str(root/'scripts/lib/landing-capture.py'), 'gc', str(repo), '1', '1']
+live = e['create_attempt'](repo, provider='local', tool='capture-observer')
+subprocess.run(cmd, env=env, check=True, stdout=subprocess.DEVNULL)
+assert patches[0].exists(), 'live observer did not preserve aged publication'
+e['append_lifecycle'](repo, e['new_event'](live,0,'attempt.state_changed',from_state=None,to_state='failed',reason_code='fixture-ended'))
+pin = repo / '.oms/plan/pin.md'; pin.parent.mkdir(parents=True,exist_ok=True); pin.write_text(str(patches[0]))
+subprocess.run(cmd, env=env, check=True, stdout=subprocess.DEVNULL)
+assert patches[0].exists(), 'formal pin was mistaken for own admission trace'
+pin.unlink()
+subprocess.run(cmd, env=env, check=True, stdout=subprocess.DEVNULL)
+assert not patches[0].exists() and not pathlib.Path(item['directory']).exists()
+assert h['usage'](str(repo)) == (0, 0)
+assert report.read_bytes() == report_before and index.read_bytes() == index_before
+assert not any(r.get('event') in ('intent', 'complete', 'abandoned') for r in h['rows'](str(repo)))
+assert source.read_bytes() and (repo/'file.txt').read_text() == 'base\n'
+PY_INTENT
+  unset OMS_FIXTURE_REAL_PYTHON
+
 }
 
 test_provider_permissions_grants_only_what_is_missing() {
@@ -23524,7 +27602,7 @@ PY
   out="$(PATH="$bin:$PATH" "$ROOT/scripts/provider-permissions.sh" --check --profile delegate \
     --allow-command npm --worktree-parent /tmp --settings "$settings" 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "a missing unsandboxed grant should not check clean: $out"
-  printf '%s' "$out" | grep -Fq -- '--allow-command npm' ||
+  contains "$out" '--allow-command npm' ||
     fail "following the hint must grant what was reported: $out"
 
   # The sandbox boundary is not something to hand over with one flag.
@@ -23706,10 +27784,10 @@ EOF
       "$ROOT/scripts/provider-permissions.sh --help"; do
     out="$(bash -c "$help_command")" || fail "permission help failed: $help_command"
     for rule in 'read_file(*)' 'command(*)'; do
-      printf '%s' "$out" | grep -Fq "$rule" ||
+      contains "$out" "$rule" ||
         fail "permission consent omitted $rule: $help_command"
     done
-    if printf '%s' "$out" | grep -Fq 'mcp(*)'; then
+    if contains "$out" 'mcp(*)'; then
       fail "permission consent must not advertise an all-MCP grant: $help_command"
     fi
   done
@@ -23785,7 +27863,7 @@ PY
   [ "$rc" -ne 0 ] || fail "invalid permission ownership state was ignored"
   after="$(cksum < "$settings")"
   [ "$before" = "$after" ] || fail "failed permission removal mutated settings"
-  printf '%s' "$out" | grep -Fq 'managed permission state' ||
+  contains "$out" 'managed permission state' ||
     fail "invalid permission ownership failure was not explained: $out"
   rm -f "$managed"
 
@@ -23804,7 +27882,7 @@ PY
       fail "symbolic-link ownership failure mutated settings"
     [ "$victim_before" = "$(cksum < "$victim")" ] ||
       fail "symbolic-link ownership failure mutated its target"
-    printf '%s' "$out" | grep -Fq 'symbolic link' ||
+    contains "$out" 'symbolic link' ||
       fail "symbolic-link ownership refusal was not explained: $out"
     rm -f "$managed" "$victim"
   fi
@@ -23831,7 +27909,7 @@ PY
   [ "$before" = "$(cksum < "$settings")" ] ||
     fail "stale permission-removal journal overwrote concurrent user edits"
   [ -f "$managed" ] || fail "failed permission-removal retry lost ownership state"
-  printf '%s' "$out" | grep -Fq 'settings changed' ||
+  contains "$out" 'settings changed' ||
     fail "stale permission-removal journal failure was not explained: $out"
   rm -f "$managed"
 }
@@ -23852,15 +27930,15 @@ test_provider_permissions_toolchains_follow_the_machine() {
   out="$(PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/provider-permissions.sh" --print \
     --profile delegate --allow-toolchains --worktree-parent /tmp --settings "$settings" 2>&1)" ||
     fail "print should succeed: $out"
-  printf '%s\n' "$out" | grep -Fxq 'unsandboxed(npm)' ||
+  printf '%s\n' "$out" | grep >/dev/null -Fx 'unsandboxed(npm)' ||
     fail "an installed package manager should be granted: $out"
-  if printf '%s\n' "$out" | grep -Fxq 'unsandboxed(cargo)'; then
+  if printf '%s\n' "$out" | grep >/dev/null -Fx 'unsandboxed(cargo)'; then
     fail "cargo is not on this PATH and must not be granted: $out"
   fi
   # Tools that write in-tree, contradict the uv policy, or hold root-equivalent
   # access are out of the list regardless of being installed.
   for excluded in pip conda docker make node git; do
-    if printf '%s\n' "$out" | grep -Fxq "unsandboxed($excluded)"; then
+    if printf '%s\n' "$out" | grep >/dev/null -Fx "unsandboxed($excluded)"; then
       fail "$excluded must not be granted by --allow-toolchains: $out"
     fi
   done
@@ -23876,7 +27954,7 @@ test_provider_permissions_leaves_flag_driven_providers_alone() {
   mkdir -p "$dir" "$bin"
   out="$(PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/provider-permissions.sh" --check 2>&1)" ||
     fail "no antigravity means nothing to do: $out"
-  printf '%s' "$out" | grep -Fq 'not installed' || fail "should say why there is nothing to do: $out"
+  contains "$out" 'not installed' || fail "should say why there is nothing to do: $out"
 }
 
 test_worker_guard_spends_its_budget_on_untracked_before_ignored() {
@@ -24066,7 +28144,7 @@ test_delegate_says_the_worker_cannot_see_uncommitted_work() {
   out="$(HOME="$home_dir" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
     --to codex --repo "$project" --prompt "change the thing" --no-verify 2>&1)" ||
     fail "a dirty caller tree is a note, not a failure: $out"
-  printf '%s' "$out" | grep -Fq 'differ from HEAD' ||
+  contains "$out" 'differ from HEAD' ||
     fail "delegating from a dirty tree should say the worker sees HEAD: $out"
 
   artifact="$(printf '%s' "$out" | sed -n 's/^artifact: //p' | head -n 1)"
@@ -24091,9 +28169,9 @@ test_memory_recall_spans_notes_and_recorded_failures() {
   # recall has to answer the softer question across everything recorded: notes,
   # pins, and what already went wrong.
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt")"
-  printf '%s' "$out" | grep -Fq 'ERROR: state.txt not fixed' ||
+  contains "$out" 'ERROR: state.txt not fixed' ||
     fail "recall should reach the failure ledger: $out"
-  printf '%s' "$out" | grep -Fq 'the gate reads state.txt directly' ||
+  contains "$out" 'the gate reads state.txt directly' ||
     fail "recall should still reach the notes: $out"
 }
 
@@ -24115,7 +28193,7 @@ test_memory_recall_marks_a_resolved_failure() {
     fail "the gate should pass once state.txt is fixed"
 
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt")"
-  printf '%s' "$out" | grep -Fq 'resolved' ||
+  contains "$out" 'resolved' ||
     fail "recall must mark a resolved failure as resolved: $out"
   "$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt" --json |
     grep -Fq '"kind": "failure-resolved"' ||
@@ -24125,7 +28203,7 @@ test_memory_recall_marks_a_resolved_failure() {
   printf 'broken\n' > "$project/state.txt"
   "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 || true
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt" --json)"
-  printf '%s' "$out" | grep -Fq '"kind": "failure"' ||
+  contains "$out" '"kind": "failure"' ||
     fail "a failure recorded after a resolution must recall as open: $out"
 }
 
@@ -24170,10 +28248,10 @@ PY
 
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" search "fixture missing")" ||
     fail "an older database must upgrade rather than error: $out"
-  printf '%s' "$out" | grep -Fq 'ERROR: fixture missing' ||
+  contains "$out" 'ERROR: fixture missing' ||
     fail "the upgraded index should carry failures: $out"
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" search "older note kept")"
-  printf '%s' "$out" | grep -Fq 'older note kept' ||
+  contains "$out" 'older note kept' ||
     fail "re-deriving must not lose what is still in the Markdown: $out"
 }
 
@@ -24192,15 +28270,15 @@ test_task_verify_surfaces_the_advisor_on_a_repeat() {
     --verify "$gate" >/dev/null
 
   out="$("$ROOT/scripts/agent-task.sh" --repo "$project" verify 2>&1)" || true
-  if printf '%s' "$out" | grep -Fq 'oms advise'; then
+  if contains "$out" 'oms advise'; then
     fail "one failed gate is not a pattern: $out"
   fi
 
   out="$("$ROOT/scripts/agent-task.sh" --repo "$project" verify 2>&1)" || true
-  printf '%s' "$out" | grep -Fq 'oms advise' ||
+  contains "$out" 'oms advise' ||
     fail "a gate that failed twice should reach the agent with an advisor: $out"
   # The bookkeeping stays quiet; only the escalation is let through.
-  if printf '%s' "$out" | grep -Fq 'fail-ledger: recorded'; then
+  if contains "$out" 'fail-ledger: recorded'; then
     fail "the recording line should stay silenced: $out"
   fi
 
@@ -24209,7 +28287,7 @@ test_task_verify_surfaces_the_advisor_on_a_repeat() {
     fail "the gate should pass once state.txt is fixed"
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list)" ||
     fail "list should succeed"
-  printf '%s' "$out" | grep -Fq 'resolved' ||
+  contains "$out" 'resolved' ||
     fail "a passing gate should resolve its row: $out"
 }
 
@@ -24229,9 +28307,9 @@ test_task_close_promotes_the_decision_and_the_pitfall() {
   # Both lines were already written during the work. Closing used to keep the
   # goal and drop the two lines a later session could act on.
   out="$(cat "$project/.oms/memory/shared.md")"
-  printf '%s' "$out" | grep -Fq 'decision: ' ||
+  contains "$out" 'decision: ' ||
     fail "the decision already in the packet should survive close: $out"
-  printf '%s' "$out" | grep -Fq 'PATH stub shadowed' ||
+  contains "$out" 'PATH stub shadowed' ||
     fail "the pitfall already in the packet should survive close: $out"
 }
 
@@ -24249,7 +28327,7 @@ test_task_verify_files_and_clears_its_own_failures() {
   # diagnosed twice.
   "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 || true
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved)"
-  printf '%s' "$out" | grep -Fq 'ERROR: state.txt not fixed' ||
+  contains "$out" 'ERROR: state.txt not fixed' ||
     fail "a failed gate should file a row carrying the failing line: $out"
 
   # The readers are already wired: patch-land and plan-run ask this before
@@ -24257,7 +28335,7 @@ test_task_verify_files_and_clears_its_own_failures() {
   # check signals "this failed before" through its exit code, which is why
   # patch-land.sh:305 also takes it with `|| true`.
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" check --cmd "$gate" 2>&1 || true)"
-  printf '%s' "$out" | grep -Fq 'already failed' ||
+  contains "$out" 'already failed' ||
     fail "the existing check path should see the row: $out"
 
   # Same gate, fixed code: the row clears, so the ledger answers "is this still
@@ -24266,7 +28344,7 @@ test_task_verify_files_and_clears_its_own_failures() {
   "$ROOT/scripts/agent-task.sh" --repo "$project" verify >/dev/null 2>&1 ||
     fail "a passing gate must still verify the task"
   out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved)"
-  if printf '%s' "$out" | grep -Fq 'state.txt not fixed'; then
+  if contains "$out" 'state.txt not fixed'; then
     fail "a passing gate should clear its own row: $out"
   fi
 }
@@ -24561,7 +28639,7 @@ EOF
     "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
     --prompt "a task that keeps failing" --model fixture-model --verify false --repair 2 2>&1)" || true
 
-  printf '%s' "$out" | grep -Fq 'advisor consulted after repeated failure' ||
+  contains "$out" 'advisor consulted after repeated failure' ||
     fail "a second failing attempt should pull in an outside opinion: $out"
   artifact="$(printf '%s' "$out" | sed -n 's/^artifact: //p' | head -n 1)"
   grep -Fq 'Advisor (after repeated failure)' "$artifact" ||
@@ -24613,7 +28691,7 @@ test_delegate_does_not_consult_an_advisor_on_a_first_failure() {
   out="$(HOME="$home_dir" PATH="$bin:/usr/bin:/bin" OMS_ADVISOR_PROVIDER=claude OMS_ADVISE_ON_REPEAT=1 \
     "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
     --prompt "fails once" --no-verify --repair 1 2>&1)" || true
-  if printf '%s' "$out" | grep -Fq 'advisor consulted'; then
+  if contains "$out" 'advisor consulted'; then
     fail "a single repair round should not pay for an advisor: $out"
   fi
 }
@@ -24736,9 +28814,9 @@ test_delegate_refuses_to_nest_beyond_the_depth_cap() {
     "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
     --prompt "spawn from inside a worker" --no-verify 2>&1)" || rc=$?
   [ "$rc" = 2 ] || fail "a worker must not spawn its own worker: $out"
-  printf '%s' "$out" | grep -Fq 'does not spawn its own workers' ||
+  contains "$out" 'does not spawn its own workers' ||
     fail "the refusal should say what to do instead: $out"
-  printf '%s' "$out" | grep -Fq 'let the parent fan out' ||
+  contains "$out" 'let the parent fan out' ||
     fail "the refusal should return recursive work to the parent: $out"
 
   # A two-stage job can raise the cap on purpose, in one place.
@@ -24783,12 +28861,12 @@ EOF
   # status, where a caller reading the run can tell "could not act" from "acted
   # and failed".
   [ "$rc" != 0 ] || fail "a blocked worker must not report success: $out"
-  printf '%s' "$out" | grep -Fq 'could not run' ||
+  contains "$out" 'could not run' ||
     fail "the operator needs to be told the worker never acted: $out"
-  printf '%s' "$out" | grep -Fq 'exit 126' ||
+  contains "$out" 'exit 126' ||
     fail "a blocked worker should be distinguishable from a failed one: $out"
   # No rewording of the brief grants a permission, so repair must not burn calls.
-  if printf '%s' "$out" | grep -Fq 'repair 1'; then
+  if contains "$out" 'repair 1'; then
     fail "a blocked worker is not repairable: $out"
   fi
   if grep -R -Fxq unnecessary-verifier-ran "$project/.oms/artifacts/delegate"; then
@@ -24834,7 +28912,7 @@ test_landing_refuses_while_another_landing_holds_the_repo() {
   wait "$holder_pid" 2>/dev/null || true
 
   [ "$rc" != 0 ] || fail "a concurrent landing should be refused: $out"
-  printf '%s' "$out" | grep -Fq 'another landing or recovery is in progress' ||
+  contains "$out" 'another landing or recovery is in progress' ||
     fail "the refusal should name the reason: $out"
   [ -z "$(git -C "$project" status --porcelain -- file.txt)" ] ||
     fail "the refused landing must not have applied anything"
@@ -24863,7 +28941,7 @@ test_landing_recovery_refuses_a_changed_patch() {
 
   out="$("$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1)" || rc=$?
   [ "$rc" != 0 ] || fail "a changed patch should make recovery exit nonzero: $out"
-  printf '%s' "$out" | grep -Fq 'recover this one by hand' ||
+  contains "$out" 'recover this one by hand' ||
     fail "recovery should hand it to a human: $out"
   # Neither outcome may be recorded: the transaction stays outstanding.
   if grep -Eq '"event": ?"(complete|abandoned)"' "$project/.oms/landings.jsonl"; then
@@ -24881,15 +28959,15 @@ test_provider_contract_check_passes_without_providers() {
   out="$(HOME="$home" CODEX_HOME="$home/.codex" PATH="/usr/bin:/bin" \
     bash "$ROOT/scripts/doctor.sh" --contract 2>&1)" ||
     fail "provider-contract should pass with no providers: $out"
-  printf '%s\n' "$out" | grep -q 'ok: loader parity (general)' ||
+  printf '%s\n' "$out" | grep >/dev/null 'ok: loader parity (general)' ||
     fail "general loader parity not verified: $out"
-  printf '%s\n' "$out" | grep -q 'ok: loader parity (ml)' ||
+  printf '%s\n' "$out" | grep >/dev/null 'ok: loader parity (ml)' ||
     fail "ml loader parity (GEMINI adoption + style retire) not verified: $out"
-  printf '%s\n' "$out" | grep -q 'ok: fail-open' ||
+  printf '%s\n' "$out" | grep >/dev/null 'ok: fail-open' ||
     fail "fail-open hook contract not verified: $out"
-  printf '%s\n' "$out" | grep -q 'note: mcp (claude): CLI not installed' ||
+  printf '%s\n' "$out" | grep >/dev/null 'note: mcp (claude): CLI not installed' ||
     fail "missing CLI must be a note, not a failure: $out"
-  printf '%s\n' "$out" | grep -q 'provider-contract: ok' ||
+  printf '%s\n' "$out" | grep >/dev/null 'provider-contract: ok' ||
     fail "missing ok summary: $out"
 }
 
@@ -24920,7 +28998,7 @@ EOF
   out="$(HOME="$home" CODEX_HOME="$home/.codex" PATH="$bin:/usr/bin:/bin" \
     bash "$ROOT/scripts/doctor.sh" --contract 2>&1)" || rc=$?
   [ "$rc" = 1 ] || fail "drifted registrations should exit 1 (rc=$rc): $out"
-  printf '%s\n' "$out" | grep -q 'fail: mcp parity' ||
+  printf '%s\n' "$out" | grep >/dev/null 'fail: mcp parity' ||
     fail "parity drift not reported: $out"
 
   cat > "$home/.codex/config.toml" <<EOF
@@ -24931,7 +29009,7 @@ EOF
   out="$(HOME="$home" CODEX_HOME="$home/.codex" PATH="$bin:/usr/bin:/bin" \
     bash "$ROOT/scripts/doctor.sh" --contract 2>&1)" ||
     fail "aligned registrations should pass: $out"
-  printf '%s\n' "$out" | grep -q 'ok: mcp parity' ||
+  printf '%s\n' "$out" | grep >/dev/null 'ok: mcp parity' ||
     fail "parity ok line missing: $out"
 }
 
@@ -24943,7 +29021,7 @@ test_state_verify_clean_and_unadopted() {
   mkdir -p "$plain"
   out="$("$ROOT/scripts/state-verify.sh" --repo "$plain" 2>&1)" ||
     fail "an unadopted directory must verify clean: $out"
-  printf '%s\n' "$out" | grep -q 'not harness-adopted' ||
+  printf '%s\n' "$out" | grep >/dev/null 'not harness-adopted' ||
     fail "unadopted repos should say so: $out"
 
   make_committed_repo "$project"
@@ -24951,7 +29029,7 @@ test_state_verify_clean_and_unadopted() {
   printf '*\n' > "$project/.oms/.gitignore"
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" 2>&1)" ||
     fail "a minimal adopted repo must verify clean: $out"
-  printf '%s\n' "$out" | grep -q 'state-verify: ok' ||
+  printf '%s\n' "$out" | grep >/dev/null 'state-verify: ok' ||
     fail "missing ok verdict: $out"
 }
 
@@ -24972,9 +29050,9 @@ test_state_verify_reports_unpublished_journal_summaries() {
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" 2>&1)" || rc=$?
   [ "$rc" = 1 ] || fail "an unpublished summary must be a finding (rc=$rc): $out"
-  printf '%s\n' "$out" | grep -q 'warn: work-journal: 1 summary never reached the published journal' ||
+  printf '%s\n' "$out" | grep >/dev/null 'warn: work-journal: 1 summary never reached the published journal' ||
     fail "unpublished summary not reported: $out"
-  printf '%s\n' "$out" | grep -q 'remedy: oms journal sync' ||
+  printf '%s\n' "$out" | grep >/dev/null 'remedy: oms journal sync' ||
     fail "the finding must name the verb that repairs it: $out"
 }
 
@@ -25014,13 +29092,13 @@ EOF
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" 2>&1)" || rc=$?
   [ "$rc" = 1 ] || fail "findings must exit 1 (rc=$rc): $out"
-  printf '%s\n' "$out" | grep -q 'fail: threads: CURRENT names th-missing' ||
+  printf '%s\n' "$out" | grep >/dev/null 'fail: threads: CURRENT names th-missing' ||
     fail "dangling thread pointer not reported: $out"
-  printf '%s\n' "$out" | grep -q 'fail: task: packet is active but carries closed_at' ||
+  printf '%s\n' "$out" | grep >/dev/null 'fail: task: packet is active but carries closed_at' ||
     fail "task contradiction not reported: $out"
-  printf '%s\n' "$out" | grep -q 'fail: oms: .*lock' ||
+  printf '%s\n' "$out" | grep >/dev/null 'fail: oms: .*lock' ||
     fail "in-tree lock not reported: $out"
-  printf '%s\n' "$out" | grep -q 'remedy:' ||
+  printf '%s\n' "$out" | grep >/dev/null 'remedy:' ||
     fail "findings must carry remedies: $out"
 
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" --json 2>&1)" && rc=0 || rc=$?
@@ -25053,21 +29131,25 @@ metadata:
 
 Run the canonical gate before claiming done.
 EOF
-  "$ROOT/scripts/skill-forge.sh" --repo "$project" add \
-    --name oms-repo-build-check --file "$project/skill.md" >/dev/null 2>&1 ||
-    fail "adding a skill with a metadata.verify contract should succeed"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
+    --name oms-repo-build-check --file "$project/skill.md" 2>&1)" ||
+    fail "adding a skill with a metadata.verify contract should succeed: $out"
 
-  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" status)"
-  printf '%s\n' "$out" | grep -q '1 with a verify contract' ||
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" status 2>&1)" ||
+    fail "skill contract status failed: $out"
+  printf '%s\n' "$out" | grep >/dev/null '1 with a verify contract' ||
     fail "status should surface the contract count: $out"
 
-  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts)"
-  printf '%s\n' "$out" | grep -q "oms-repo-build-check	bash scripts/check.sh" ||
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts 2>&1)" ||
+    fail "skill contracts listing failed: $out"
+  printf '%s\n' "$out" | grep >/dev/null "oms-repo-build-check	bash scripts/check.sh" ||
     fail "contracts should list name<TAB>command: $out"
 
   # The close path reminds about the contract; it must never execute it.
-  "$ROOT/scripts/agent-task.sh" --repo "$project" init --goal g >/dev/null 2>&1
-  out="$("$ROOT/scripts/agent-task.sh" --repo "$project" close --reason smoke 2>&1)"
+  out="$("$ROOT/scripts/agent-task.sh" --repo "$project" init --goal g 2>&1)" ||
+    fail "skill contract task initialization failed: $out"
+  out="$("$ROOT/scripts/agent-task.sh" --repo "$project" close --reason smoke 2>&1)" ||
+    fail "skill contract close failed: $out"
   printf '%s\n' "$out" |
     grep -q "declares verify contract: bash scripts/check.sh" ||
     fail "close should remind about the verify contract: $out"
@@ -25087,10 +29169,11 @@ body
 EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" validate legacy-contract 2>&1)" ||
     fail "a legacy top-level verify contract must stay valid: $out"
-  printf '%s\n' "$out" | grep -q 'top-level verify is non-portable' ||
+  printf '%s\n' "$out" | grep >/dev/null 'top-level verify is non-portable' ||
     fail "validate should advise moving the legacy contract: $out"
-  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts)"
-  printf '%s\n' "$out" | grep -q "legacy-contract	make lint" ||
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" contracts 2>&1)" ||
+    fail "legacy skill contracts listing failed: $out"
+  printf '%s\n' "$out" | grep >/dev/null "legacy-contract	make lint" ||
     fail "the legacy contract should still be listed: $out"
 
   # An empty contract is a validation failure in either home, never a
@@ -25107,7 +29190,7 @@ body
 EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" validate bad-contract 2>&1)" &&
     fail "an empty verify contract must fail validation: $out"
-  printf '%s\n' "$out" | grep -q 'verify: declared but empty' ||
+  printf '%s\n' "$out" | grep >/dev/null 'verify: declared but empty' ||
     fail "empty-contract failure not explained: $out"
   mkdir -p "$project/.oms/skills/bad-meta-contract"
   cat > "$project/.oms/skills/bad-meta-contract/SKILL.md" <<'EOF'
@@ -25122,7 +29205,7 @@ body
 EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" validate bad-meta-contract 2>&1)" &&
     fail "an empty metadata.verify contract must fail validation: $out"
-  printf '%s\n' "$out" | grep -q 'metadata verify: declared but empty' ||
+  printf '%s\n' "$out" | grep >/dev/null 'metadata verify: declared but empty' ||
     fail "empty metadata-contract failure not explained: $out"
 }
 
@@ -25145,7 +29228,7 @@ EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
     --name oms-extra-field --file "$project/skill.md" 2>&1)" &&
     fail "an unknown top-level frontmatter field must be rejected at add: $out"
-  printf '%s\n' "$out" | grep -q "non-portable frontmatter field 'author'" ||
+  printf '%s\n' "$out" | grep >/dev/null "non-portable frontmatter field 'author'" ||
     fail "unknown-field rejection not explained: $out"
 
   # A new top-level verify: is steered to metadata rather than stored.
@@ -25161,7 +29244,7 @@ EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
     --name oms-new-legacy --file "$project/skill.md" 2>&1)" &&
     fail "a new top-level verify must be rejected at add: $out"
-  printf '%s\n' "$out" | grep -q 'verify belongs under the metadata: map' ||
+  printf '%s\n' "$out" | grep >/dev/null 'verify belongs under the metadata: map' ||
     fail "top-level verify rejection should point at metadata: $out"
 
   # Spec name and description budgets hold at the gate.
@@ -25176,14 +29259,14 @@ EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
     --name oms-bad--name --file "$project/skill.md" 2>&1)" &&
     fail "consecutive hyphens must be rejected at add: $out"
-  printf '%s\n' "$out" | grep -q 'no consecutive hyphens' ||
+  printf '%s\n' "$out" | grep >/dev/null 'no consecutive hyphens' ||
     fail "name-shape rejection not explained: $out"
   python3 -c "print('---\nname: oms-long-desc\ndescription: ' + 'x'*1100 + '\n---\n\nbody')" \
     > "$project/skill.md"
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add \
     --name oms-long-desc --file "$project/skill.md" 2>&1)" &&
     fail "an over-budget description must be rejected at add: $out"
-  printf '%s\n' "$out" | grep -q '1024-character budget' ||
+  printf '%s\n' "$out" | grep >/dev/null '1024-character budget' ||
     fail "description-budget rejection not explained: $out"
 
   # Read paths stay lenient: a stored skill an older gate accepted keeps
@@ -25201,7 +29284,7 @@ EOF
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" validate stored-nonportable 2>&1)" ||
     fail "a stored non-portable skill must stay valid on read paths: $out"
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" link)"
-  printf '%s\n' "$out" | grep -q '1 skill(s) linked' ||
+  printf '%s\n' "$out" | grep >/dev/null '1 skill(s) linked' ||
     fail "a stored non-portable skill must keep linking: $out"
   [ -L "$project/.claude/skills/stored-nonportable" ] ||
     fail "stored non-portable skill link missing"
@@ -25223,7 +29306,7 @@ test_support_bundle_redacts_and_omits() {
     "$vector" >> "$project/.oms/failures.jsonl"
 
   out="$("$ROOT/scripts/support-bundle.sh" --repo "$project" --dry-run)"
-  printf '%s\n' "$out" | grep -q 'would write' ||
+  printf '%s\n' "$out" | grep >/dev/null 'would write' ||
     fail "dry-run should describe the bundle: $out"
   [ ! -d "$project/.oms/support" ] || fail "dry-run must write nothing"
 
@@ -25422,9 +29505,9 @@ assert row["priority"] == "P3" and "current" in row["summary"], row
   resume_out="$(printf '{"session_id":"me","cwd":"%s"}' "$project" |
     "$ROOT/scripts/resume-hook.sh")" ||
     fail "resume hook rejected imported capsule"
-  printf '%s\n' "$resume_out" | grep -Fq 'portable capsule' ||
+  printf '%s\n' "$resume_out" | grep >/dev/null -F 'portable capsule' ||
     fail "resume hook did not surface imported capsule: $resume_out"
-  printf '%s\n' "$resume_out" | grep -Fq 'current; advisory only' ||
+  printf '%s\n' "$resume_out" | grep >/dev/null -F 'current; advisory only' ||
     fail "resume hook hid capsule status or authority boundary: $resume_out"
 
   printf 'changed\n' >> "$project/file.txt"
@@ -25450,17 +29533,17 @@ assert runtime["healthy"] is True, runtime
 assert row["status"] == "invalid" and row["capsule_id"] == "'"$latest_id"'", row
 ' || fail "invalid advisory capsule disabled canonical runtime: $state_json"
   state_text="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s\n' "$state_text" | grep -Fq \
+  printf '%s\n' "$state_text" | grep >/dev/null -F \
     "imported capsule: $latest_id status=invalid" ||
     fail "state rendered invalid capsule incorrectly: $state_text"
   printf 'not-a-capsule\n' > "$project/.oms/portable/imports/LATEST"
   state_text="$("$ROOT/scripts/state.sh" --repo "$project")"
-  printf '%s\n' "$state_text" | grep -Fq \
+  printf '%s\n' "$state_text" | grep >/dev/null -F \
     'imported capsule: unknown status=invalid' ||
     fail "state rendered a null capsule id instead of unknown: $state_text"
   resume_out="$(printf '{"session_id":"me","cwd":"%s"}' "$project" |
     "$ROOT/scripts/resume-hook.sh")"
-  printf '%s\n' "$resume_out" | grep -Fq \
+  printf '%s\n' "$resume_out" | grep >/dev/null -F \
     'portable capsule unknown (invalid; advisory only' ||
     fail "resume rendered a null capsule id instead of unknown: $resume_out"
 }
@@ -25485,9 +29568,9 @@ with open(repo / ".oms/plan/progress.jsonl", "w", encoding="utf-8") as fh:
         fh.write(json.dumps(r) + "\n")
 PY
   out="$("$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 1 2>&1)" || rc=$?
-  printf '%s' "$out" | grep -Fq 'ignored invalid commit intent legacy-bad' ||
+  contains "$out" 'ignored invalid commit intent legacy-bad' ||
     fail "a current-run (legacy) invalid intent must still warn (rc=$rc): $out"
-  if printf '%s' "$out" | grep -Fq 'foreign-landed'; then
+  if contains "$out" 'foreign-landed'; then
     fail "a closed foreign-run chain must stay silent: $out"
   fi
 }
@@ -25530,7 +29613,7 @@ assert row["all_done"] is False, row
   rc=0
   out="$("$ROOT/scripts/goal-drive.sh" --repo "$project" --max-cycles 1 2>&1)" || rc=$?
   [ "$rc" = 2 ] || fail "goal-drive accepted a zero-task plan (rc=$rc): $out"
-  printf '%s' "$out" | grep -Fq 'no tasks' ||
+  contains "$out" 'no tasks' ||
     fail "zero-task refusal did not explain the missing work contract: $out"
   if [ -f "$project/.oms/plan/progress.jsonl" ] &&
     grep -Eq '"status"[[:space:]]*:[[:space:]]*"(pass|done)"' \
@@ -25560,37 +29643,37 @@ test_project_state_parser_is_shared_and_rejects_typos() {
   rc=0
   out="$("$ROOT/scripts/project-doctor.sh" --strict "$project" 2>&1)" || rc=$?
   [ "$rc" = 1 ] || fail "strict project-doctor accepted an invalid State (rc=$rc): $out"
-  printf '%s' "$out" | grep -Fq 'invalid' ||
+  contains "$out" 'invalid' ||
     fail "project-doctor did not name the invalid State: $out"
 
   out="$("$ROOT/scripts/init.sh" --repo "$project" --no-private)" ||
     fail "init should diagnose an invalid State without crashing"
-  printf '%s' "$out" | grep -Fq 'requires confirmation' ||
+  contains "$out" 'requires confirmation' ||
     fail "init presented an invalid State as an in-place contract: $out"
 
   rc=0
   out="$("$ROOT/scripts/plan-from-spec.sh" --repo "$project" 2>&1)" || rc=$?
   [ "$rc" = 2 ] || fail "plan-from-spec accepted an invalid State (rc=$rc): $out"
-  printf '%s' "$out" | grep -Fq 'invalid' ||
+  contains "$out" 'invalid' ||
     fail "plan-from-spec did not name the invalid State: $out"
 
   rc=0
   out="$("$ROOT/scripts/autopilot.sh" --repo "$project" --base main propose 2>&1)" || rc=$?
   [ "$rc" = 2 ] || fail "autopilot accepted an invalid State (rc=$rc): $out"
-  printf '%s' "$out" | grep -Fq 'invalid' ||
+  contains "$out" 'invalid' ||
     fail "autopilot did not name the invalid State: $out"
 
   sed -i 's/^- State: confirmd/- State: active/' "$project/PROJECT.md"
   out="$("$ROOT/scripts/init.sh" --repo "$project" --no-private)" ||
     fail "init rejected legacy active State"
-  printf '%s' "$out" | grep -Fq 'spec=active' ||
+  contains "$out" 'spec=active' ||
     fail "init changed the public legacy active spelling: $out"
-  if printf '%s' "$out" | grep -Fq 'legacy-active'; then
+  if contains "$out" 'legacy-active'; then
     fail "init leaked the internal typed legacy-active verdict: $out"
   fi
   out="$("$ROOT/scripts/project-doctor.sh" "$project")" ||
     fail "project-doctor rejected legacy active State"
-  printf '%s' "$out" | grep -Fq 'PROJECT.md state: active' ||
+  contains "$out" 'PROJECT.md state: active' ||
     fail "project-doctor changed the public legacy active spelling: $out"
 }
 
@@ -25770,7 +29853,7 @@ test_agent_plan_apply_rejects_noncanonical_project_state() {
       --expected-plan-sha256 absent --goal gate --accept true \
       --allowed-envelope . 2>&1)" || rc=$?
     [ "$rc" = 2 ] || fail "apply-proposal accepted $kind PROJECT State (rc=$rc): $out"
-    printf '%s' "$out" | grep -Fq 'PROJECT.md State' ||
+    contains "$out" 'PROJECT.md State' ||
       fail "apply-proposal $kind refusal did not name PROJECT.md State: $out"
     [ ! -e "$project/.oms/plan/tasks.json" ] ||
       fail "apply-proposal mutated topology for $kind PROJECT State"
@@ -25872,11 +29955,11 @@ assert row["actionable"] == [], row
     fail "ready exposed a task after PROJECT contract drift"
   rc=0
   out="$("$plan" --repo "$project" next 2>&1)" || rc=$?
-  [ "$rc" = 3 ] && printf '%s' "$out" | grep -Fq 'PROJECT.md contract' ||
+  [ "$rc" = 3 ] && contains "$out" 'PROJECT.md contract' ||
     fail "next did not report the contract blocker (rc=$rc): $out"
   rc=0
   out="$("$plan" --repo "$project" claim --id t2 --provider codex 2>&1)" || rc=$?
-  [ "$rc" = 2 ] && printf '%s' "$out" | grep -Fq 'PROJECT.md contract' ||
+  [ "$rc" = 2 ] && contains "$out" 'PROJECT.md contract' ||
     fail "direct claim bypassed PROJECT drift (rc=$rc): $out"
   [ "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$plan_file")" = "$before" ] ||
     fail "a refused drifted claim changed the plan"
@@ -25913,7 +29996,7 @@ assert "inspect_plan_contract" in inbox_actions, inbox_actions
 PY
   out="$("$ROOT/scripts/state.sh" --repo "$project")" ||
     fail "state text could not project a drifted contract"
-  printf '%s' "$out" | grep -Fq 'PROJECT contract: BLOCKED (project-drift' ||
+  contains "$out" 'PROJECT contract: BLOCKED (project-drift' ||
     fail "state text hid the PROJECT contract blocker: $out"
 
   rm -f "$project_file"
@@ -26000,7 +30083,7 @@ assert "EXTERNAL_" not in json.dumps(row), row
 
   state_text="$("$ROOT/scripts/state.sh" --repo "$project")" ||
     fail "state text should report unhealthy symlink projections"
-  if printf '%s' "$state_text" | grep -Fq 'EXTERNAL_'; then
+  if contains "$state_text" 'EXTERNAL_'; then
     fail "state text exposed external symlink authority: $state_text"
   fi
 }
@@ -26026,9 +30109,9 @@ test_failure_ledger_structured_junk_quarantines_visibly() {
     # kill the whole runtime envelope while the inbox's remediation was this
     # very command.
     [ "$rc" = 0 ] || fail "quarantining ledger list returned $rc for $bad: $out"
-    printf '%s' "$out" | grep -Fq 'invalid row' ||
+    contains "$out" 'invalid row' ||
       fail "structured junk was not identified as an invalid row for $bad: $out"
-    printf '%s' "$out" | grep -q '"invalid_rows": *1' ||
+    printf '%s' "$out" | grep >/dev/null '"invalid_rows": *1' ||
       fail "structured junk was not counted in the payload for $bad: $out"
   done
 
@@ -26107,9 +30190,9 @@ assert "raw_output" not in row, row
     XDG_RUNTIME_DIR="$runtime" OH_MY_SETTING_REQUIRE_TOOLS=0 \
     "$ROOT/scripts/doctor.sh" --repo "$project" --remediation-plan \
       --no-model-doctor)" || fail "doctor remediation plan failed"
-  printf '%s' "$plan" | grep -Fq 'local_mutation' ||
+  contains "$plan" 'local_mutation' ||
     fail "doctor plan omitted authority: $plan"
-  printf '%s' "$plan" | grep -Fq 'artifact-index.sh prune --files' ||
+  contains "$plan" 'artifact-index.sh prune --files' ||
     fail "doctor plan omitted the exact remedy: $plan"
 
   if "$ROOT/scripts/doctor.sh" --repo "$project" --json --repair \
@@ -26158,6 +30241,314 @@ rows = [entry for entry in doc["hooks"].get("PostToolUse", [])
         if any("syntax-guard-hook" in hook.get("command", "") for hook in entry.get("hooks", []))]
 assert len(rows) == 1, rows
 assert "apply_patch" in rows[0].get("matcher", ""), rows[0]
+PY
+}
+
+test_codex_desktop_main_reviewer_proof_rejects_forged_context() {
+  python3 - "$ROOT" <<'PY' || fail "completed Desktop main approval provenance accepted a forgery"
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+import tempfile
+from unittest import mock
+
+spec = importlib.util.spec_from_file_location("main_reviewer", pathlib.Path(sys.argv[1]) / "scripts/lib/main_reviewer.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+def rejects(fn, *args):
+    try:
+        fn(*args)
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return
+    raise AssertionError("forged completed approval accepted")
+
+def encoded(*rows):
+    return b"".join(m._canonical(row) + b"\n" for row in rows)
+
+sid = "11111111-2222-4333-8444-555555555555"
+foreign_sid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+consumer = m._sha(sid.encode())[:32]
+repo = "/tmp/reviewer-fixture-repo"
+execution = "/tmp/reviewer-fixture-final-worktree"
+common_sha = m._sha(b"/tmp/shared-git")
+task = "t1"
+bundle_sha = "a" * 64
+question = (m.QUESTION_PREFIX + " 현재는 실제 native child가 생산한 결과만 허용해서, 앱 메인의 완료된 감사 2건을 정당하게 닫을 수 없습니다."
+            " 보완 시 보고서 원문·digest·검토한 소스·검증·실제 승인자 증빙을 요구하고 기존 child 증빙은 그대로 보존하겠습니다."
+            " AGENTS.md의 ‘승인 범위를 넘는 contract/schema 변경은 물어본다’ 규칙에 따라 이 결정만 확인하며, 코드 통합과 push 준비는 계속합니다.")
+assert m._sha(question.encode()) == m.LEGACY_QUESTION_SHA256
+qid = '["request_user_input_async","call_fixture_policy",0]'
+descriptor = {"policy": m.POLICY, "message_id": "msg_approval", "question_item_id": qid,
+              "question_sha256": m._sha(question.encode()), "answer_sha256": m._sha(m.ANSWER.encode())}
+argv = ["env", "OMS_STATE_REPO=" + repo, "scripts/oms", "agent-plan", m.APPROVE_ACTION,
+        "--repo", execution, "--id", task, "--lease-id", "lease", "--expected-state", "review",
+        "--expected-plan-sha256", "b" * 64, "--expected-task-sha256", "c" * 64,
+        "--completion-bundle", ".oms/review/main-read.json",
+        "--expected-completion-bundle-sha256", bundle_sha, "--approve-reviewed-bundle"]
+cmd = m.shlex.join(argv)
+values = m._approve_argv(cmd, execution, task, bundle_sha, argv, repo)
+assert values["--id"] == task
+marker = {"schema": 1, "kind": "oms-main-read-approval-v1", "authorized_action": m.ACTION,
+          "nonce": "d" * 64,
+          "task_id": task, "bundle_sha256": bundle_sha, "room_id": "room", "participant": "main",
+          "lease_id": "lease", "state": "review", "plan_sha256": "b" * 64,
+          "task_sha256": "c" * 64, "snapshot_sha256": "e" * 64,
+          "code_manifest_sha256": "f" * 64, "state_repo_sha256": m._sha(repo.encode()),
+          "execution_repo_sha256": m._sha(execution.encode()), "git_common_sha256": common_sha,
+          "report_sha256": "1" * 64, "index_sha256": "2" * 64, "verifier_sha256": "3" * 64}
+marker_raw = m._canonical(marker) + b"\n"
+marker_sha = m._sha(marker_raw)
+ref = {"path": ".oms/plan/completion-captures/" + marker_sha + ".json", "sha256": marker_sha}
+envelope = m._canonical({"kind": "oms-main-read-approved", "approval": ref}).decode() + "\n"
+request = {"policy": m.POLICY, "execution_repo": execution, "approve_argv": argv,
+           "approval": descriptor, "approved_marker": marker,
+           "expected_snapshot_sha256": marker["snapshot_sha256"],
+           "code_manifest_sha256": marker["code_manifest_sha256"]}
+assert m._approval_marker(ref, request, repo, execution, task, bundle_sha,
+                          "room", "main", common_sha, values)[1] == envelope
+rejects(m._approve_argv, cmd.replace("--approve-reviewed-bundle", ""), execution, task, bundle_sha,
+        argv[:-1], repo)
+rejects(m._approve_argv, cmd.replace("--expected-state review", "--expected-state done"),
+        execution, task, bundle_sha, argv, repo)
+for changed in (dict(marker, bundle_sha256="0" * 64), dict(marker, code_manifest_sha256="0" * 64),
+                dict(marker, plan_sha256="0" * 64), dict(marker, snapshot_sha256="0" * 64)):
+    altered = dict(request, approved_marker=changed)
+    changed_sha = m._sha(m._canonical(changed) + b"\n")
+    changed_ref = {"path": ".oms/plan/completion-captures/" + changed_sha + ".json",
+                   "sha256": changed_sha}
+    rejects(m._approval_marker, changed_ref, altered, repo, execution, task, bundle_sha,
+            "room", "main", common_sha, values)
+
+header = {"type": "session_meta", "payload": {"id": sid, "session_id": sid, "cwd": repo,
+          "originator": "Codex Desktop", "source": "vscode", "thread_source": "user"}}
+prompt = {"type": "response_item", "payload": {"type": "function_call",
+          "name": "request_user_input_async", "call_id": "call_fixture_policy",
+          "arguments": json.dumps({"questions": [{"title": question,
+                                  "options": [m.ANSWER, "기존 child 전용 계약 유지"]}]}, ensure_ascii=False)}}
+reply = "<send_user_message_question_reply>\n" + json.dumps([{
+    "questionItemId": qid, "question": question, "answer": m.ANSWER}], ensure_ascii=False) + "\n</send_user_message_question_reply>\n"
+user = {"type": "response_item", "payload": {"type": "message", "role": "user",
+        "id": "msg_approval", "content": [{"type": "input_text", "text": reply}]}}
+source = 'const r = await tools.exec_command(' + json.dumps({"cmd": cmd, "workdir": execution}) + '); text(r.output);'
+call = {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec",
+        "call_id": "call_prepare", "status": "completed", "input": source}}
+execution_event = {"type": "event_msg", "payload": {"type": "item_completed", "thread_id": sid,
+        "item": {"type": "CommandExecution", "id": "exec-fixture", "process_id": "75966",
+                 "source": "unified_exec_startup", "command": ["/bin/bash", "-lc", cmd],
+                 "cwd": execution, "status": "completed", "exit_code": 0,
+                 "aggregated_output": envelope}}}
+output = {"type": "response_item", "payload": {"type": "custom_tool_call_output",
+          "call_id": "call_prepare", "output": [
+              {"type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"},
+              {"type": "input_text", "text": envelope}]}}
+raw = encoded(header, prompt, user, call, execution_event, output)
+approval, native, header_sha = m._completed_approval_evidence(raw, sid, repo, request, cmd, envelope)
+assert approval["message_id"] == "msg_approval"
+assert native["completion_record_sha256"] == m._sha(encoded(execution_event))
+assert native["output_record_sha256"] == m._sha(encoded(output))
+assert native["workdir_sha256"] == m._sha(execution.encode())
+assert header_sha == m._sha(encoded(header))
+assert m._parse_exec_input(source) == {"cmd": cmd, "workdir": execution}
+for yield_ms in (250, 30000):
+    bounded_source = 'const r = await tools.exec_command(' + json.dumps({
+        "cmd": cmd, "workdir": execution, "yield_time_ms": yield_ms}) + '); text(r.output);'
+    bounded_call = dict(call, payload=dict(call["payload"], input=bounded_source))
+    bounded_raw = encoded(header, prompt, user, bounded_call, execution_event, output)
+    bounded_approval, bounded_native, _ = m._completed_approval_evidence(
+        bounded_raw, sid, repo, request, cmd, envelope)
+    assert bounded_approval == approval
+    assert bounded_native["call_input_sha256"] == m._sha(bounded_source.encode())
+    assert bounded_native["completion_record_sha256"] == native["completion_record_sha256"]
+    assert bounded_native["output_record_sha256"] == native["output_record_sha256"]
+    rejects(m._completed_approval_evidence, encoded(header, prompt, user, bounded_call, output),
+            sid, repo, request, cmd, envelope)
+    failed_event = dict(execution_event, payload=dict(execution_event["payload"],
+                        item=dict(execution_event["payload"]["item"], exit_code=1)))
+    rejects(m._completed_approval_evidence,
+            encoded(header, prompt, user, bounded_call, failed_event, output),
+            sid, repo, request, cmd, envelope)
+    mismatched_output = dict(output, payload=dict(output["payload"], output=[
+        output["payload"]["output"][0], {"type": "input_text", "text": envelope[:-1]}]))
+    rejects(m._completed_approval_evidence,
+            encoded(header, prompt, user, bounded_call, execution_event, mismatched_output),
+            sid, repo, request, cmd, envelope)
+for invalid_yield in (249, 30001, True, 30000.0, "30000", None):
+    rejects(m._parse_exec_input, 'const r = await tools.exec_command(' + json.dumps({
+        "cmd": cmd, "workdir": execution, "yield_time_ms": invalid_yield}) + '); text(r.output);')
+rejects(m._parse_exec_input, 'const r = await tools.exec_command(' + json.dumps({
+    "cmd": cmd, "workdir": execution, "yield_time_ms": 30000,
+    "login": False}) + '); text(r.output);')
+uri_workdir = pathlib.Path(execution).as_uri()
+uri_event = dict(execution_event, payload=dict(execution_event["payload"],
+                 item=dict(execution_event["payload"]["item"], cwd=uri_workdir)))
+uri_raw = encoded(header, prompt, user, call, uri_event, output)
+uri_approval, uri_native, _ = m._completed_approval_evidence(uri_raw, sid, repo, request, cmd, envelope)
+assert uri_approval == approval and uri_native["workdir_sha256"] == m._sha(execution.encode())
+assert uri_native["completion_record_sha256"] == m._sha(encoded(uri_event))
+for wrong_cwd in ("file://localhost" + execution, "file:" + execution,
+                  pathlib.Path(execution + "/../reviewer-fixture-final-worktree").as_uri()):
+    wrong_event = dict(execution_event, payload=dict(execution_event["payload"],
+                       item=dict(execution_event["payload"]["item"], cwd=wrong_cwd)))
+    rejects(m._completed_approval_evidence, encoded(header, prompt, user, call, wrong_event, output),
+            sid, repo, request, cmd, envelope)
+for changed in (
+    (header, prompt, user, call, output),
+    (header, prompt, user, call, dict(execution_event, payload=dict(execution_event["payload"],
+      item=dict(execution_event["payload"]["item"], exit_code=1))), output),
+    (header, prompt, user, call, dict(execution_event, payload=dict(execution_event["payload"],
+      item=dict(execution_event["payload"]["item"], aggregated_output=envelope[:-1]))), output),
+    (header, prompt, user, call, execution_event, execution_event, output),
+    (header, prompt, user, call, execution_event,
+     dict(output, payload=dict(output["payload"], call_id="call_other"))),
+    (header, prompt, user, call, execution_event,
+     dict(output, payload=dict(output["payload"], output=output["payload"]["output"] * 2))),
+    (header, prompt, user, call, dict(execution_event, payload=dict(execution_event["payload"],
+      item=dict(execution_event["payload"]["item"], command=["/bin/bash", "-lc", "other"]))), output),
+    (header, prompt, user, call, dict(execution_event, payload=dict(execution_event["payload"],
+      thread_id=foreign_sid)), output),
+    (header, prompt, user, output, call, execution_event),
+):
+    rejects(m._completed_approval_evidence, encoded(*changed), sid, repo, request, cmd, envelope)
+foreign_header = dict(header, payload=dict(header["payload"], id=foreign_sid, session_id=foreign_sid))
+rejects(m._completed_approval_evidence, encoded(foreign_header, prompt, user, call, execution_event, output),
+        sid, repo, request, cmd, envelope)
+quoted = dict(user, payload=dict(user["payload"], role="assistant"))
+rejects(m._completed_approval_evidence, encoded(header, prompt, quoted, call, execution_event, output),
+        sid, repo, request, cmd, envelope)
+wrong_prompt = dict(prompt, payload=dict(prompt["payload"], arguments=json.dumps({
+    "questions": [{"title": "quoted approval", "options": [m.ANSWER, "deny"]}]})))
+rejects(m._completed_approval_evidence, encoded(header, wrong_prompt, user, call, execution_event, output),
+        sid, repo, request, cmd, envelope)
+
+room_binding = m._sha(m._canonical({"room": "room", "participant": "main",
+                                   "consumer": consumer, "role": "main", "provider": "codex"}))
+rollout = "/tmp/rollout-fixture-" + sid + ".jsonl"
+with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": foreign_sid, "CODEX_SESSION_ID": foreign_sid,
+                              "OMS_ROOM_ID": "foreign-room", "OMS_STATE_REPO": repo}, clear=True), \
+     mock.patch.object(m.os, "getcwd", return_value=execution), \
+     mock.patch.object(m, "_git_identity", return_value="/tmp/shared-git"), \
+     mock.patch.object(m, "_room_approver", return_value=(consumer, room_binding)), \
+     mock.patch.object(m, "_find_rollout", return_value=rollout), \
+     mock.patch.object(m, "_read_record", return_value=uri_raw):
+    proof = m.capture_completed_main_reviewer(repo, task, bundle_sha, "room", "main", ref, request)
+    assert proof["native_consumer"] == consumer
+    assert proof["session_id_sha256"] == m._sha(sid.encode())
+    assert proof["native_approval_execution"]["workdir_sha256"] == m._sha(execution.encode())
+    assert proof["native_approval_execution"]["completion_record_sha256"] == m._sha(encoded(uri_event))
+    assert foreign_sid not in json.dumps(proof)
+    expected = {key: proof[key] for key in (
+        "schema", "policy", "action", "authorized_action", "task_id", "bundle_sha256", "room_id", "participant",
+        "approval_ref", "marker_nonce_sha256", "snapshot_sha256", "code_manifest_sha256",
+        "state_repo_sha256", "execution_repo_sha256", "state_git_namespace_sha256",
+        "source_git_namespace_sha256", "git_common_sha256", "native_consumer",
+        "room_binding_sha256", "approve_invocation_sha256", "proof_sha256")}
+    expected["policy_approval"] = descriptor
+    assert m.verify_captured_main_reviewer(proof, expected)
+    wrong_native = dict(proof["native_approval_execution"], workdir_sha256="0" * 64)
+    wrong_proof = dict(proof, native_approval_execution=wrong_native)
+    wrong_proof["proof_sha256"] = m._sha(m._canonical({k: v for k, v in wrong_proof.items() if k != "proof_sha256"}))
+    assert not m.verify_captured_main_reviewer(wrong_proof, expected)
+    assert not m.verify_captured_main_reviewer(dict(proof, bundle_sha256="0" * 64), expected)
+    assert not m.verify_captured_main_reviewer(proof, dict(expected, code_manifest_sha256="0" * 64))
+    with mock.patch.object(m, "_read_record", return_value=encoded(header, prompt, user, call, output)):
+        rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
+    with mock.patch.object(m, "_read_record", return_value=encoded(foreign_header, prompt, user,
+                                                                      call, execution_event, output)):
+        rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
+    with mock.patch.object(m, "_room_approver", return_value=(m._sha(foreign_sid.encode())[:32], room_binding)):
+        rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
+    with mock.patch.object(m, "_git_identity", side_effect=["/tmp/shared-git", "/tmp/foreign-git"]):
+        rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
+    with mock.patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}):
+        rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
+
+with tempfile.TemporaryDirectory() as home:
+    path = pathlib.Path(home) / "rollout.jsonl"
+    path.write_bytes(raw)
+    assert m.MAX_ROLLOUT == 64 * 1024 * 1024
+    assert m._read_record(str(path), os.getuid(), home) == raw
+    with mock.patch.object(m, "MAX_ROLLOUT", len(raw)):
+        assert m._read_record(str(path), os.getuid(), home) == raw
+    with mock.patch.object(m, "MAX_ROLLOUT", len(raw) - 1), \
+         mock.patch.object(m.os, "read", side_effect=AssertionError("oversized record was read")):
+        rejects(m._read_record, str(path), os.getuid(), home)
+    os.chmod(path, 0o666)
+    rejects(m._read_record, str(path), os.getuid(), home)
+    os.chmod(path, 0o600)
+    os.chmod(path, 0o660)
+    with mock.patch.object(m, "_private_group", return_value=False):
+        rejects(m._read_record, str(path), os.getuid(), home)
+    os.chmod(path, 0o600)
+    replacement = pathlib.Path(home) / "replacement.jsonl"
+    replacement.write_bytes(raw)
+    real_read = m.os.read
+    changed = [False]
+    def replace_after_first_read(fd, n):
+        result = real_read(fd, n)
+        if not changed[0]:
+            changed[0] = True
+            os.replace(replacement, path)
+        return result
+    with mock.patch.object(m.os, "read", side_effect=replace_after_first_read):
+        rejects(m._read_record, str(path), os.getuid(), home)
+    path.write_bytes(raw)
+    changed = [False]
+    def rewrite_same_inode(fd, n):
+        result = real_read(fd, n)
+        if not changed[0]:
+            changed[0] = True
+            with open(path, "r+b") as handle:
+                handle.write(b"X")
+        return result
+    with mock.patch.object(m.os, "read", side_effect=rewrite_same_inode):
+        rejects(m._read_record, str(path), os.getuid(), home)
+    path.write_bytes(raw)
+    alias = pathlib.Path(home) / "alias.jsonl"
+    os.link(path, alias)
+    rejects(m._read_record, str(path), os.getuid(), home)
+    alias.unlink()
+    path.unlink()
+    path.symlink_to("missing")
+    rejects(m._read_record, str(path), os.getuid(), home)
+with tempfile.TemporaryDirectory() as home:
+    parent = pathlib.Path(home) / "active"
+    parent.mkdir()
+    path = parent / "rollout.jsonl"
+    path.write_bytes(raw)
+    replacement = pathlib.Path(home) / "replacement"
+    replacement.mkdir()
+    (replacement / "rollout.jsonl").write_bytes(raw)
+    real_read = m.os.read
+    changed = [False]
+    def replace_parent_after_read(fd, n):
+        result = real_read(fd, n)
+        if not changed[0]:
+            changed[0] = True
+            parent.rename(pathlib.Path(home) / "old")
+            replacement.rename(parent)
+        return result
+    with mock.patch.object(m.os, "read", side_effect=replace_parent_after_read):
+        rejects(m._read_record, str(path), os.getuid(), home)
+with tempfile.TemporaryDirectory() as home:
+    store = pathlib.Path(home) / ".codex"
+    day = store / "sessions/2020/01/01"
+    day.mkdir(parents=True)
+    old = day / ("rollout-old-" + sid + ".jsonl")
+    old.write_bytes(raw)
+    assert m._find_rollout(str(store / "sessions"), consumer, os.getuid(), home, 0) == str(old)
+    archive = store / "archived_sessions"
+    archive.mkdir()
+    duplicate = archive / ("rollout-archived-" + sid + ".jsonl")
+    duplicate.write_bytes(raw)
+    rejects(m._find_rollout, str(store / "sessions"), consumer, os.getuid(), home, 0)
+    duplicate.unlink()
+    with mock.patch.object(m, "MAX_STORE_ENTRIES", 2):
+        rejects(m._find_rollout, str(store / "sessions"), consumer, os.getuid(), home, 0)
+with mock.patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}, clear=True):
+    rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
 PY
 }
 

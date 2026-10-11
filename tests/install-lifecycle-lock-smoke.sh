@@ -248,6 +248,28 @@ trap - EXIT HUP INT TERM
 EOF
 exercise_reclaim_gate standalone "$TMP/standalone-contender.sh"
 
+# The re-exec recognizes its held lock by the exported path string, so the
+# inline copy and the library must spell one lock path identically. A ".."
+# after a symlink is where a logical cd and the kernel disagree; the logical
+# target exists too, so a divergence shows as the other spelling.
+mkdir -p "$TMP/spelling/real/sub" "$TMP/spelling/locks"
+ln -s "$TMP/spelling/real/sub" "$TMP/spelling/link"
+spelling_lock="$TMP/spelling/link/../locks/install-lifecycle.lock.d"
+inline_def="$(sed -n '/^  oms_install_lifecycle_lock_path() {$/,/^  }$/p' "$ROOT/install.sh")"
+case "$inline_def" in
+  *'dirname "$raw"'*) ;;
+  *) fail "install.sh inline lock-path definition not found" ;;
+esac
+inline_path="$(
+  eval "$inline_def"
+  OMS_INSTALL_LIFECYCLE_LOCK="$spelling_lock" oms_install_lifecycle_lock_path
+)" || fail "inline lock path failed for a symlinked parent"
+library_path="$(OMS_INSTALL_LIFECYCLE_LOCK="$spelling_lock" oms_install_lifecycle_lock_path)" ||
+  fail "library lock path failed for a symlinked parent"
+[ "$inline_path" = "$(cd "$TMP/spelling/real" && pwd -P)/locks/install-lifecycle.lock.d" ] &&
+  [ "$library_path" = "$inline_path" ] ||
+  fail "lock path spellings differ: inline=$inline_path library=$library_path"
+
 # A piped installer has no trustworthy source path. An empty BASH_SOURCE must
 # therefore select the inline lock implementation instead of treating the
 # current directory as the checkout and executing a hostile local helper.

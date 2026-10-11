@@ -457,4 +457,73 @@ done
 [ "$spell_dir//source.txt" != "$spell_source" ] ||
   fail "the double-slash spelling must actually differ for this to be a risk"
 
+# Parameter-expansion parents keep the slashes dirname trims. A doubled slash
+# before the receipt name left "link/", and -L follows a trailing slash, so the
+# symlinked-directory refusal never fired. The hpc profile installs nothing,
+# and every path is temporary, so the child guard is not what is under test.
+receipt_root="$TMP/receipt"
+mkdir -p "$receipt_root/real" "$receipt_root/user-home"
+ln -s "$receipt_root/real" "$receipt_root/link"
+receipt_apply() {
+  OMS_HARNESS_CHILD=0 HOME="$receipt_root/user-home" \
+    XDG_CONFIG_HOME="$receipt_root/user-home/.config" \
+    OMS_INSTALL_LIFECYCLE_LOCK="$receipt_root/install-lifecycle.lock.d" \
+    OMS_INSTALL_LIFECYCLE_LOCK_TIMEOUT=1 \
+    "$ROOT/scripts/install-profile.sh" --apply --profile hpc \
+    --primary-provider codex --allow-missing --receipt "$1"
+}
+receipt_rc=0
+receipt_apply "$receipt_root/link//capabilities.json" \
+  >"$receipt_root/link.out" 2>&1 || receipt_rc=$?
+[ "$receipt_rc" = 2 ] &&
+  grep -Fq 'receipt directory must not be a symbolic link' "$receipt_root/link.out" ||
+  fail "a doubled slash bypassed the receipt symlink refusal: $(cat "$receipt_root/link.out")"
+receipt_rc=0
+receipt_apply "$receipt_root/link/sub/" >"$receipt_root/link.out" 2>&1 || receipt_rc=$?
+[ "$receipt_rc" = 2 ] &&
+  grep -Fq 'receipt directory must not be a symbolic link' "$receipt_root/link.out" ||
+  fail "a trailing slash bypassed the receipt symlink refusal: $(cat "$receipt_root/link.out")"
+[ -z "$(ls -A "$receipt_root/real")" ] ||
+  fail "the receipt apply wrote through a symlinked directory"
+receipt_apply "$receipt_root/real//capabilities.json" >/dev/null ||
+  fail "a doubled slash under a real directory must still write the receipt"
+[ -f "$receipt_root/real/capabilities.json" ] ||
+  fail "the doubled-slash control wrote no receipt"
+
+# Libraries sourced by bare name (BASH_SOURCE without a slash) resolve from the
+# current directory, as dirname's "." did.
+for lib in agent-install-state.sh install-contract.sh install-lifecycle-lock.sh file-lock.sh; do
+  bare_dirs="$(cd "$ROOT/scripts/lib" && bash -c '
+    unset ROOT
+    shopt -u sourcepath
+    . "$1" || exit 1
+    printf "%s|%s|%s|%s\n" "${ROOT:-}" "${OMS_INSTALL_CONTRACT_LIB_DIR:-}" \
+      "${OMS_INSTALL_LIFECYCLE_LIB_DIR:-}" "${OMS_FILE_LOCK_LIB_DIR:-}"' _ "$lib" 2>&1)" ||
+    fail "bare-name source of $lib failed: $bare_dirs"
+  case "$lib" in
+    agent-install-state.sh) expected="$ROOT|||" ;;
+    install-contract.sh) expected="|$ROOT/scripts/lib||" ;;
+    install-lifecycle-lock.sh) expected="||$ROOT/scripts/lib|$ROOT/scripts/lib" ;;
+    file-lock.sh) expected="|||$ROOT/scripts/lib" ;;
+  esac
+  [ "$bare_dirs" = "$expected" ] ||
+    fail "bare-name source of $lib resolved '$bare_dirs', want '$expected'"
+done
+
+# Unlink restores the newest backup beside its target. A dotfiles-managed
+# parent directory is a symlink, and find must still look inside it while
+# returning the caller's spelling.
+backup_root="$TMP/backup-parent"
+mkdir -p "$backup_root/real"
+: > "$backup_root/real/target.backup.20250101000000"
+: > "$backup_root/real/target.backup.20250102000000"
+ln -s "$backup_root/real" "$backup_root/link"
+(
+  # shellcheck source=scripts/lib/agent-install-state.sh
+  . "$ROOT/scripts/lib/agent-install-state.sh"
+  found="$(oms_ops_latest_backup "$backup_root/link/target")"
+  [ "$found" = "$backup_root/link/target.backup.20250102000000" ] ||
+    fail "latest backup through a symlinked parent was '$found'"
+)
+
 echo "platform-portability: ok"

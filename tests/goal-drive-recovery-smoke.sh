@@ -568,7 +568,7 @@ stamp_calls="$TMP/deleted-branch-no-commit-calls"
 HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   CALL_LOG="$stamp_calls" "$ROOT/scripts/goal-drive.sh" --repo "$stamp_repo" \
   --to codex --max-cycles 2 > "$TMP/deleted-branch-no-commit-drive.out" 2>&1 ||
-  fail "deleted-branch-no-commit fixture did not complete"
+  fail "deleted-branch-no-commit fixture did not complete (exit=$?): $(tail -12 "$TMP/deleted-branch-no-commit-drive.out")"
 git -C "$stamp_repo" symbolic-ref HEAD refs/heads/main
 git -C "$stamp_repo" reset -q --hard "$stamp_base"
 git -C "$stamp_repo" branch -D work
@@ -1894,7 +1894,7 @@ HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   fail "rename intent did not publish exactly one commit"
 rename_status="$(git -C "$rename_repo" diff-tree --no-commit-id --name-status -r -M \
   "$rename_before" HEAD | tr -d '\r')"
-printf '%s\n' "$rename_status" | grep -Eq '^R[0-9]+[[:space:]]+old\.txt[[:space:]]+new\.txt$' ||
+printf '%s\n' "$rename_status" | grep >/dev/null -E '^R[0-9]+[[:space:]]+old\.txt[[:space:]]+new\.txt$' ||
   fail "rename intent commit did not preserve old/new rename lineage"
 [ -z "$(git -C "$rename_repo" status --porcelain)" ] ||
   fail "rename intent left the repository dirty"

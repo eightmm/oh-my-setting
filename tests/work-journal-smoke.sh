@@ -298,7 +298,7 @@ prompt_digest="$(
   cd "$lifecycle_repo"
   OMS_SKILL_ROUTER_OFF=1 bash "$ROOT/scripts/skill-router.sh" </dev/null
 )"
-printf '%s' "$prompt_digest" | grep -Fq '[work-journal]' ||
+printf '%s' "$prompt_digest" | grep >/dev/null -F '[work-journal]' ||
   fail "first prompt of the day did not surface the bounded journal digest"
 second_prompt_digest="$(
   cd "$lifecycle_repo"
@@ -375,7 +375,7 @@ PY
 
 # The agent read path returns summaries, annotations, and recent events.
 show_today="$("$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --today)"
-printf '%s\n' "$show_today" | grep -q '^# Daily Work Journal — ' ||
+printf '%s\n' "$show_today" | grep >/dev/null '^# Daily Work Journal — ' ||
   fail "journal show --today did not return the daily summary"
 "$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --blockers --json |
   python3 -c 'import json,sys; data = json.load(sys.stdin); assert any(row["text"] == "run the gate" for row in data["next_actions"]), data' ||
@@ -416,7 +416,7 @@ for source_id, occurred_at in (
     )
 PY
 distill_out="$("$ROOT/scripts/journal.sh" distill --repo "$distill_repo")"
-printf '%s\n' "$distill_out" | grep -Fq 'journal distill: 1 lesson(s) promoted, marker advanced' ||
+printf '%s\n' "$distill_out" | grep >/dev/null -F 'journal distill: 1 lesson(s) promoted, marker advanced' ||
   fail "journal distill did not report the promoted blocker"
 shared_memory="$distill_repo/.oms/memory/shared.md"
 [ "$(grep -Fc 'journal-distill:' "$shared_memory")" = 1 ] ||
@@ -453,7 +453,7 @@ git -C "$auto_repo" commit -qm "seed"
 auto_memory="$auto_repo/.oms/memory/shared.md"
 auto_marker="$auto_repo/.oms/work-journal/distill.json"
 auto_out="$(OMS_JOURNAL_AUTODISTILL=0 work_journal_prompt_tick "$auto_repo")"
-if printf '%s\n' "$auto_out" | grep -Fq 'distill:'; then
+if printf '%s\n' "$auto_out" | grep >/dev/null -F 'distill:'; then
   fail "autodistill opt-out still ran the distill: $auto_out"
 fi
 if grep -Fq 'journal-distill:' "$auto_memory"; then
@@ -463,9 +463,9 @@ fi
   fail "autodistill opt-out advanced the once-per-day marker"
 
 auto_out="$(work_journal_prompt_tick "$auto_repo")"
-printf '%s\n' "$auto_out" | grep -Fq '[work-journal] distill: 1 promoted' ||
+printf '%s\n' "$auto_out" | grep >/dev/null -F '[work-journal] distill: 1 promoted' ||
   fail "prompt tick did not distill the never-closed decision: $auto_out"
-printf '%s\n' "$auto_out" | grep -Fq '1 already in shared memory' ||
+printf '%s\n' "$auto_out" | grep >/dev/null -F '1 already in shared memory' ||
   fail "prompt tick did not report the shared-memory dedup skip: $auto_out"
 [ "$(grep -Fc 'journal-distill:' "$auto_memory")" = 1 ] ||
   fail "tick distill did not append exactly one lesson"
@@ -480,7 +480,7 @@ if grep -F 'journal-distill:' "$auto_memory" |
   fail "tick distill duplicated a decision agent-task close already promoted"
 fi
 auto_out="$(work_journal_prompt_tick "$auto_repo")"
-if printf '%s\n' "$auto_out" | grep -Fq 'distill:'; then
+if printf '%s\n' "$auto_out" | grep >/dev/null -F 'distill:'; then
   fail "tick distilled twice in one local day: $auto_out"
 fi
 [ "$(grep -Fc 'journal-distill:' "$auto_memory")" = 1 ] ||
@@ -492,7 +492,7 @@ rm -f "$auto_marker"
 "$ROOT/scripts/agent-task.sh" --repo "$auto_repo" update \
   --decision "digest off must not gate the distill" >/dev/null
 auto_out="$(OMS_WORK_JOURNAL_DIGEST=0 work_journal_prompt_tick "$auto_repo")"
-printf '%s\n' "$auto_out" | grep -Fq '[work-journal] distill: 1 promoted' ||
+printf '%s\n' "$auto_out" | grep >/dev/null -F '[work-journal] distill: 1 promoted' ||
   fail "digest opt-out suppressed the independent distill: $auto_out"
 
 # A distill that cannot write its own marker stays inside the tick: no degraded
@@ -500,7 +500,7 @@ printf '%s\n' "$auto_out" | grep -Fq '[work-journal] distill: 1 promoted' ||
 rm -f "$auto_marker"
 mkdir -p "$auto_marker"
 auto_err="$(work_journal_prompt_tick "$auto_repo" 2>&1 >/dev/null)"
-if printf '%s\n' "$auto_err" | grep -Fq 'degraded'; then
+if printf '%s\n' "$auto_err" | grep >/dev/null -F 'degraded'; then
   fail "a failed distill degraded the tick: $auto_err"
 fi
 [ -d "$auto_marker" ] ||
@@ -555,9 +555,9 @@ digest_out="$(OMS_WORK_JOURNAL_DIGEST=0 work_journal_prompt_tick "$lifecycle_rep
 [ ! -f "$lifecycle_repo/.oms/work-journal/digest.json" ] ||
   fail "digest opt-out advanced the once-per-day marker"
 digest_out="$(work_journal_prompt_tick "$lifecycle_repo")"
-printf '%s\n' "$digest_out" | grep -q '^\[work-journal\]' ||
+printf '%s\n' "$digest_out" | grep >/dev/null '^\[work-journal\]' ||
   fail "prompt digest did not fire on the first prompt of the day"
-printf '%s\n' "$digest_out" | grep -q 'run the gate' ||
+printf '%s\n' "$digest_out" | grep >/dev/null 'run the gate' ||
   fail "prompt digest missed the open next action"
 digest_out="$(work_journal_prompt_tick "$lifecycle_repo")"
 [ -z "$digest_out" ] || fail "prompt digest fired twice in one local day"
@@ -736,7 +736,7 @@ keyring_out="$(PATH="$keyring_bin:$PATH" OMS_CONNECT_INTERACTIVE=1 \
   OMS_TEST_GH_MARKER="$gh_marker" OMS_TEST_NTN_MARKER="$keyring_marker" \
   "$ROOT/scripts/connect-services.sh" --required 2>&1)" ||
   fail "keychain-less connection should fall back to file auth: $keyring_out"
-printf '%s\n' "$keyring_out" | grep -q 'file-based credential store' ||
+printf '%s\n' "$keyring_out" | grep >/dev/null 'file-based credential store' ||
   fail "keychain fallback should be announced: $keyring_out"
 [ -f "$keyring_marker" ] || fail "file-based login did not run"
 python3 - "$XDG_CONFIG_HOME/oh-my-setting/work-journal.json" <<'PY'

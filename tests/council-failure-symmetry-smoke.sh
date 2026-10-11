@@ -135,10 +135,10 @@ PY
 
   # 4. Fail ledger: a later session asks this before spending another call.
   list="$("$ROOT/scripts/fail-ledger.sh" --repo "$project" list)"
-  printf '%s' "$list" | grep -Fq 'codex ask seat returned no answer (exit 124)' ||
+  printf '%s' "$list" | grep >/dev/null -F 'codex ask seat returned no answer (exit 124)' ||
     fail "the seat failure should be in the fail ledger: $list"
-  printf '%s' "$list" | grep -Fq 'count=1' || fail "first failure should count once: $list"
-  printf '%s' "$list" | grep -Fq 'OPEN' || fail "an unresolved seat failure should be open: $list"
+  printf '%s' "$list" | grep >/dev/null -F 'count=1' || fail "first failure should count once: $list"
+  printf '%s' "$list" | grep >/dev/null -F 'OPEN' || fail "an unresolved seat failure should be open: $list"
 
   # 5. Synthesis: the dead seat is named, and its partial stdout is withheld —
   #    a truncation pasted under a provider heading reads as a short opinion.
@@ -156,7 +156,7 @@ PY
   rc="$(run_council "$project" "$bin_dir" seatfail2 "$project/out2" "$project/err2")"
   [ "$rc" = "0" ] || fail "the second run should also reach quorum, got exit $rc"
   list="$("$ROOT/scripts/fail-ledger.sh" --repo "$project" list)"
-  printf '%s' "$list" | grep -Fq 'count=2' ||
+  printf '%s' "$list" | grep >/dev/null -F 'count=2' ||
     fail "repeat failures of the same seat should accumulate: $list"
   [ "$(printf '%s\n' "$list" | grep -c 'count=')" = "1" ] ||
     fail "the same seat timing out twice must be one fingerprint, not two: $list"
@@ -250,7 +250,7 @@ PY
     fail "a failed call must leave one typed non-answer turn in its thread"
 
   list="$("$ROOT/scripts/fail-ledger.sh" --repo "$project" list)"
-  printf '%s' "$list" | grep -Fq 'codex call seat returned no answer (exit 42)' ||
+  printf '%s' "$list" | grep >/dev/null -F 'codex call seat returned no answer (exit 42)' ||
     fail "a failed call belongs in the fail ledger: $list"
 }
 

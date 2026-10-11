@@ -570,6 +570,7 @@ prepare_affected_gate() {
       custom-skills/*.md|templates/*.md|config/models.json) ;;
       install.sh|scripts/install*|scripts/uninstall*|scripts/update*|scripts/doctor.sh|\
       scripts/python-runtime.sh|scripts/land.sh|scripts/patch-admit.sh|scripts/pre-push-check.sh|\
+      scripts/lib/oms-common.sh|\
       scripts/lib/install*|scripts/lib/python-runtime.sh|scripts/lib/*lock*|scripts/lib/*state*|\
       scripts/lib/*artifact*|scripts/lib/oms_runtime/common.py|scripts/lib/oms_runtime/child_policy.py|\
       scripts/lib/durable-jsonl.py|rules/*|config/*|templates/*|custom-skills/*|plugins/*)
@@ -811,7 +812,7 @@ if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
         affected_index=$((affected_index + 1))
       done
       stage "affected:$affected_test" env \
-        "PYTHONPATH=$ROOT/scripts/lib${PYTHONPATH:+:$PYTHONPATH}" \
+        "PYTHONPATH=$ROOT/scripts/lib:$ROOT/tests${PYTHONPATH:+:$PYTHONPATH}" \
         python3 -m unittest "${affected_args[@]}" "$affected_test"
     else
       stage "affected:$affected_test" bash "$affected_test"

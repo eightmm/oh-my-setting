@@ -92,9 +92,6 @@ oms_git_assert_safe_execution_config() {  # REPO [diff-read]
   local root="$1"
   local mode="${2:-strict}"
   local command_problem=""
-  local paths=""
-  local common_dir=""
-  local worktree_dir=""
 
   # Pure shell on purpose: this guard fronts every git call the harness
   # makes, and a python3 start per call was the single largest process cost
@@ -148,141 +145,138 @@ oms_git_assert_safe_execution_config() {  # REPO [diff-read]
     return 2
   fi
 
-  # Resolve only Git's already-established metadata paths. At this point no
-  # repository config has been parsed by this function, and rev-parse does not
-  # load diff/filter/fsmonitor drivers. Canonical physical parents collapse the
-  # alternative path spellings seen under Windows Git Bash; CR comes from
-  # native Windows Python/Git and must not become part of the pathname.
-  common_dir="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null || true)"
-  worktree_dir="$(git -C "$root" rev-parse --git-dir 2>/dev/null || true)"
-  common_dir="${common_dir//$'\r'/}"
-  worktree_dir="${worktree_dir//$'\r'/}"
-  if [ -z "$common_dir" ] || [ -z "$worktree_dir" ]; then
-    echo "cannot inspect repository Git config paths" >&2
-    return 2
-  fi
-  case "$common_dir" in /*|[A-Za-z]:/*) ;; *) common_dir="$root/$common_dir" ;; esac
-  case "$worktree_dir" in /*|[A-Za-z]:/*) ;; *) worktree_dir="$root/$worktree_dir" ;; esac
-  common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || {
-    echo "cannot inspect repository Git config path" >&2
-    return 2
-  }
-  worktree_dir="$(cd "$worktree_dir" 2>/dev/null && pwd -P)" || {
-    echo "cannot inspect worktree Git config path" >&2
-    return 2
-  }
-  paths="$common_dir/config
-$worktree_dir/config.worktree"
-
-  # One process asks this up to nine times for the same repository (70% of
-  # 709 calls were repeats, 2026-10-01). Reuse a pass only for byte-identical
-  # config read by the read builtin, never across processes, and never for a
-  # file holding a NUL byte, which a shell variable cannot represent.
-  local cache_key="$mode|$paths" config_path config_text
-  for config_path in "$common_dir/config" "$worktree_dir/config.worktree"; do
-    if [ -e "$config_path" ] || [ -L "$config_path" ]; then
-      config_text=""
-      if IFS= read -r -d '' config_text < "$config_path" 2>/dev/null; then
-        cache_key=""  # stopped at a NUL byte: always inspect
-        break
-      fi
-      [ -r "$config_path" ] || { cache_key=""; break; }
-      cache_key="$cache_key|present:${#config_text}:$config_text"
-    else
-      cache_key="$cache_key|absent"
-    fi
-  done
-  if [ -n "$cache_key" ] && [ "${OMS_GIT_SAFE_CONFIG_PASSED:-}" = "$cache_key" ]; then
-    return 0
-  fi
-
-  OMS_GIT_CONFIG_PATHS="$paths" OMS_GIT_CONFIG_MODE="$mode" python3 - <<'PY' || return $?
-import configparser
+  root="$(cd "$root" 2>/dev/null && pwd -P)" || return 2
+  python3 - "$root" "$mode" <<'PY'
 import os
-import re
+import shutil
 import stat
+import subprocess
 import sys
 
-paths = [value for value in os.environ["OMS_GIT_CONFIG_PATHS"].splitlines()
-         if value]
-mode = os.environ.get("OMS_GIT_CONFIG_MODE", "strict")
-if mode not in ("strict", "diff-read"):
-    print("cannot inspect repository Git config: unknown inspection mode",
-          file=sys.stderr)
+root, mode = sys.argv[1:]
+
+def refuse(reason):
+    print("cannot inspect repository Git config: " + reason, file=sys.stderr)
     raise SystemExit(2)
 
-def unsafe(section, option):
-    section = section.lower()
-    option = option.lower()
-    def family(name):
-        # Git accepts modern quoted subsections separated by spaces OR tabs,
-        # plus the deprecated dotted form. Match the grammar boundary rather
-        # than one pretty-printed spelling of the section header.
-        return (section == name or section.startswith(name + ".") or
-                re.match(r"^" + re.escape(name) + r"[ \t]+\"", section))
-    if family("include") or family("includeif"):
+if mode not in ("strict", "diff-read"):
+    refuse("unknown inspection mode")
+
+# Keep the trusted runtime environment (including Windows DLL lookup), but no
+# inherited Git configuration, tracing, discovery redirects or command hooks.
+git = shutil.which("git")
+if not git:
+    refuse("Git unavailable")
+git = os.path.abspath(git)
+env = {key: value for key, value in os.environ.items()
+       if not key.upper().startswith("GIT_")}
+env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_SYSTEM=os.devnull,
+           GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_COUNT="0",
+           GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat", LC_ALL="C")
+command = [git, "--no-pager", "-c", "core.hooksPath=/dev/null",
+           "-c", "core.fsmonitor=false"]
+
+# rev-parse does not run drivers, but discovery can read includes before we
+# know the metadata paths. Bound that bootstrap too: a FIFO must not hang the
+# guard. Only the stdin parser below promises not to read include targets.
+def git_output(args, child_env, raw=None):
+    try:
+        result = subprocess.run(command + args, input=raw, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=child_env,
+                                timeout=5, check=False, shell=False)
+    except (OSError, subprocess.TimeoutExpired):
+        refuse("Git inspection failed or timed out")
+    if result.returncode:
+        refuse("Git inspection failed")
+    return result.stdout
+
+paths = []
+for flag, name in (("--git-common-dir", "config"),
+                   ("--git-dir", "config.worktree")):
+    output = git_output(["-C", root, "rev-parse", flag], env)
+    directory = os.fsdecode(output).replace("\r", "").rstrip("\n")
+    if not directory:
+        refuse("missing metadata path")
+    directory = os.path.realpath(os.path.join(root, directory))
+    paths.append(os.path.join(directory, name))
+
+def read_config(path, optional):
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        if optional:
+            return None
+        refuse("missing config")
+    except OSError:
+        refuse("unreadable config")
+    if not stat.S_ISREG(before.st_mode):
+        refuse("non-regular config")
+    limit = 1024 * 1024
+    if before.st_size > limit:
+        refuse("config exceeds 1 MiB")
+    # NOFOLLOW closes the lstat/open symlink race where available. NONBLOCK
+    # avoids hanging on a FIFO swap; fstat and identity checks also cover
+    # platforms without NOFOLLOW. Parse only these bytes, never reopen a path.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        with os.fdopen(os.open(path, flags), "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            current = os.lstat(path)
+            if (not stat.S_ISREG(opened.st_mode) or
+                    not stat.S_ISREG(current.st_mode) or
+                    (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino) or
+                    (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)):
+                refuse("config changed during inspection")
+            raw = handle.read(limit + 1)
+            after = os.fstat(handle.fileno())
+            if (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
+                    after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                refuse("config changed during inspection")
+    except OSError:
+        refuse("unreadable config")
+    if len(raw) > limit:
+        refuse("config exceeds 1 MiB")
+    if b"\0" in raw:
+        refuse("NUL in config")
+    try:
+        raw.decode("utf-8-sig", "strict")
+    except UnicodeError:
+        refuse("invalid config encoding")
+    return raw
+
+def unsafe(key):
+    section, _, tail = key.partition(b".")
+    option = tail.rsplit(b".", 1)[-1]
+    if section in (b"include", b"includeif"):
         return True
-    if section == "core" and option == "fsmonitor":
+    if key == b"core.fsmonitor":
         return True
-    if mode != "diff-read" and section == "diff" and option == "external":
+    if section == b"filter" and option in (b"clean", b"smudge", b"process"):
         return True
-    if family("filter") and option in (
-            "clean", "smudge", "process"):
-        return True
-    # A named diff driver can execute either a command or textconv program.
-    if mode != "diff-read" and family("diff") and option in (
-            "command", "external", "textconv"):
+    if mode != "diff-read" and section == b"diff" and option in (
+            b"command", b"external", b"textconv"):
         return True
     return False
 
-for path in paths:
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        # config.worktree is optional; the common config is not.
-        if path.endswith("config.worktree"):
-            continue
-        print("cannot inspect repository Git config: missing config", file=sys.stderr)
-        raise SystemExit(2)
-    except OSError:
-        print("cannot inspect repository Git config", file=sys.stderr)
-        raise SystemExit(2)
-    if not stat.S_ISREG(info.st_mode):
-        print("cannot inspect repository Git config: non-regular config", file=sys.stderr)
-        raise SystemExit(2)
-    try:
-        if info.st_size > 1024 * 1024:
-            raise ValueError("config exceeds 1 MiB")
-        raw = open(path, "rb").read()
-        if b"\0" in raw:
-            raise ValueError("NUL in config")
-        text = raw.decode("utf-8-sig", "strict")
-    except (OSError, UnicodeError, ValueError) as exc:
-        print("cannot inspect repository Git config: %s" % exc, file=sys.stderr)
-        raise SystemExit(2)
-
-    # Parse the syntax ourselves without interpolation or includes. Git permits
-    # bare booleans; ConfigParser accepts those with allow_no_value.
-    parser = configparser.RawConfigParser(
-        interpolation=None, strict=False, allow_no_value=True,
-        delimiters=("=",), comment_prefixes=("#", ";"),
-        inline_comment_prefixes=None)
-    parser.optionxform = str
-    try:
-        parser.read_string(text)
-    except configparser.Error as exc:
-        print("cannot inspect repository Git config: malformed config (%s)" % exc,
-              file=sys.stderr)
-        raise SystemExit(2)
-    for section in parser.sections():
-        for option, unused in parser.items(section, raw=True):
-            if unsafe(section, option):
-                key = "%s.%s" % (section, option)
-                print("unsafe Git execution config: %s" % key, file=sys.stderr)
-                raise SystemExit(2)
-raise SystemExit(0)
+# No shell cache: every pass validates the descriptors, including optional
+# config.worktree when common-dir equals git-dir and after a previous pass.
+configs = [read_config(path, optional=index == 1)
+           for index, path in enumerate(paths)]
+env["GIT_DIR"] = os.devnull
+for raw in configs:
+    if raw is None:
+        continue
+    keys = git_output(["config", "--no-includes", "--file", "-", "--null",
+                       "--name-only", "--list"], env, raw)
+    if keys and not keys.endswith(b"\0"):
+        refuse("invalid Git key framing")
+    for key in keys.split(b"\0")[:-1]:
+        if unsafe(key):
+            # Subsection names and parser stderr can contain private input.
+            print("unsafe Git execution config", file=sys.stderr)
+            raise SystemExit(2)
 PY
-  [ -z "$cache_key" ] || OMS_GIT_SAFE_CONFIG_PASSED="$cache_key"
 }
 
 # Refuse index hints that deliberately make tracked work invisible to ordinary
@@ -348,14 +342,18 @@ $worktree_dir/config.worktree"
   [ "$mode" = config-only ] || paths="$paths
 $index_path"
 
-  OMS_GIT_EXEC_PATHS="$paths" python3 - <<'PY' > "$tmp" || {
+  # The common config's bytes are kept beside OUT (OUT.config) so a later
+  # branch-tracking delta can be read against them; they are the bytes row 0
+  # hashes, and the assert re-binds them to that digest.
+  rm -f "$out.config"
+  OMS_GIT_EXEC_PATHS="$paths" OMS_GIT_EXEC_COPY="$tmp.config" python3 - <<'PY' > "$tmp" || {
 import base64
 import hashlib
 import os
 import stat
 import sys
 
-for path in os.environ["OMS_GIT_EXEC_PATHS"].splitlines():
+for number, path in enumerate(os.environ["OMS_GIT_EXEC_PATHS"].splitlines()):
     if not path:
         continue
     key = base64.b64encode(os.fsencode(path)).decode("ascii")
@@ -374,16 +372,67 @@ for path in os.environ["OMS_GIT_EXEC_PATHS"].splitlines():
         print("%s\toversized:%d" % (key, info.st_size))
         raise SystemExit(2)
     digest = hashlib.sha256()
+    copy = None
+    if number == 0:
+        copy = open(os.environ["OMS_GIT_EXEC_COPY"], "wb")
     with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+            if copy:
+                copy.write(chunk)
+    if copy:
+        copy.close()
     print("%s\tregular:%o:%d:%s" % (
         key, stat.S_IMODE(info.st_mode), info.st_size, digest.hexdigest()))
 PY
-    rm -f "$tmp"
+    rm -f "$tmp" "$tmp.config"
     return 2
   }
+  if [ -f "$tmp.config" ]; then
+    mv "$tmp.config" "$out.config" || { rm -f "$tmp" "$tmp.config"; return 2; }
+  fi
   mv "$tmp" "$out"
+}
+
+# A sibling main that creates its task branch from a remote-tracking ref writes
+# branch.<name>.remote/merge into the shared config (branch.autoSetupMerge, or
+# push -u). That is the only tolerated delta. Git's own parser reads it:
+# configparser folds an indented "[core]" line into the previous value, Git
+# does not. `git config --file --list` reads no index and runs no configured
+# program, so it is safe on worker-written bytes before the execution check.
+oms_git_config_delta_is_branch_tracking() {  # BEFORE_FILE AFTER_FILE
+  python3 - "$1" "$2" <<'PY'
+import collections, os, re, subprocess, sys
+env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+here = os.path.dirname(os.path.abspath(sys.argv[1]))
+env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(here)
+def rows(path):
+    out = subprocess.run(["git", "config", "--file", path, "--no-includes", "--list", "-z"],
+                         env=env, cwd=here, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                         check=True).stdout
+    # "key\nvalue" or a bare "key" (true): keep the separator so the two differ.
+    return [tuple(r.decode("utf-8", "surrogateescape").partition("\n"))
+            for r in out.split(b"\0") if r]
+try:
+    before, after = rows(sys.argv[1]), rows(sys.argv[2])
+except (OSError, subprocess.CalledProcessError):
+    raise SystemExit(1)
+b, a = collections.Counter(before), collections.Counter(after)
+delta = list((a - b).elements()) + list((b - a).elements())
+remotes = {k[7:-4] for k, _, _ in before if k.startswith("remote.") and k.endswith(".url")}
+if not delta:
+    raise SystemExit(1)
+for key, sep, value in delta:
+    m = re.fullmatch(r"branch\.(.+)\.(remote|merge)", key)
+    if not m or not sep or "\n" in value:
+        raise SystemExit(1)
+    if m.group(2) == "remote" and value != "." and value not in remotes:
+        raise SystemExit(1)
+    if m.group(2) == "merge" and not value.startswith("refs/heads/"):
+        raise SystemExit(1)
+PY
 }
 
 # Compare with the same no-Git raw walk and bind the private snapshot bytes to
@@ -394,6 +443,7 @@ oms_git_execution_state_assert_unchanged() {  # REPO SNAPSHOT EXPECTED_SHA
   local snapshot="$2"
   local expected_sha="$3"
   local actual_sha=""
+  local changed_config=""
 
   # Root is part of the public signature for callers and documents which
   # repository the receipt belongs to. The trusted snapshot contains the
@@ -406,7 +456,7 @@ oms_git_execution_state_assert_unchanged() {  # REPO SNAPSHOT EXPECTED_SHA
     echo "Git execution-state snapshot changed or became unreadable" >&2
     return 2
   fi
-  if ! python3 - "$snapshot" <<'PY'
+  if ! changed_config="$(python3 - "$snapshot" "$snapshot.config" <<'PY'
 import base64
 import hashlib
 import os
@@ -438,17 +488,34 @@ try:
     rows = open(sys.argv[1], "rb").read().splitlines()
 except OSError:
     raise SystemExit(2)
-for row in rows:
+# Row 0 is the common config in both snapshot modes. It alone may change in
+# content, and only against the saved copy that its recorded digest binds.
+for number, row in enumerate(rows):
     try:
         encoded, expected = row.split(b"\t", 1)
         path = os.fsdecode(base64.b64decode(encoded, validate=True))
         expected = expected.decode("ascii", "strict")
     except (ValueError, UnicodeError):
         raise SystemExit(2)
-    if not os.path.isabs(path) or signature(path) != expected:
+    if not os.path.isabs(path):
         raise SystemExit(2)
+    current = signature(path)
+    if current == expected:
+        continue
+    old, new = expected.split(":"), current.split(":")
+    if number != 0 or len(old) != 4 or len(new) != 4 or old[0] != "regular" or old[:2] != new[:2]:
+        raise SystemExit(2)
+    if signature(sys.argv[2]).split(":")[2:] != old[2:]:
+        raise SystemExit(2)
+    sys.stdout.write(path)
 PY
+)"
   then
+    echo "Git execution config or hidden index state changed" >&2
+    return 2
+  fi
+  if [ -n "$changed_config" ] &&
+    ! oms_git_config_delta_is_branch_tracking "$snapshot.config" "$changed_config"; then
     echo "Git execution config or hidden index state changed" >&2
     return 2
   fi
@@ -755,7 +822,7 @@ oms_worker_operation_violations() {  # REPO SNAPSHOT
 
   [ -f "$snapshot" ] || return 0
   OMS_WG_REPO="$repo" OMS_WG_OPERATION_SNAPSHOT="$snapshot" python3 - <<'PY'
-import json, os
+import datetime, json, os
 
 repo = os.environ["OMS_WG_REPO"]
 snapshot_path = os.environ["OMS_WG_OPERATION_SNAPSHOT"]
@@ -774,6 +841,47 @@ def changed_fields(before, after):
         return ["object-shape"]
     return sorted(key for key in set(before) | set(after)
                   if key not in before or key not in after or before[key] != after[key])
+
+def parse_timestamp(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        return None
+    return parsed.replace(tzinfo=datetime.timezone.utc)
+
+def is_touch_heartbeat(before, after, task_id, lease, fields):
+    if not fields or not set(fields).issubset({"claimed_at", "updated"}):
+        return False
+    if before.get("id") != task_id or after.get("id") != task_id:
+        return False
+    provider = before.get("provider")
+    if not isinstance(provider, str) or not provider or after.get("provider") != provider:
+        return False
+    if not isinstance(lease, str) or not lease:
+        return False
+    if before.get("lease_id") != lease or after.get("lease_id") != lease:
+        return False
+    state = before.get("state")
+    if state not in ("claimed", "running") or after.get("state") != state:
+        return False
+
+    heartbeat = parse_timestamp(after.get("claimed_at"))
+    updated = parse_timestamp(after.get("updated"))
+    now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    if heartbeat is None or updated is None or heartbeat != updated or heartbeat > now:
+        return False
+    for key in ("claimed_at", "updated"):
+        prior = before.get(key)
+        if prior in (None, ""):
+            continue
+        prior_timestamp = parse_timestamp(prior)
+        if prior_timestamp is None or heartbeat < prior_timestamp:
+            return False
+    return True
 
 try:
     expected = load_regular(snapshot_path)
@@ -794,10 +902,17 @@ if isinstance(plan_expected, dict):
     except (OSError, TypeError, ValueError, KeyError):
         print("plan task %s was deleted or became unreadable" % task_id)
     else:
-        fields = changed_fields(plan_expected.get("task"), current)
+        expected_task = plan_expected.get("task")
+        fields = changed_fields(expected_task, current)
+        lease = plan_expected.get("lease_id")
+        if fields and is_touch_heartbeat(expected_task, current, task_id, lease, fields):
+            fields = []
         if fields:
-            print("plan task %s changed: %s" % (task_id, ", ".join(fields)))
-        elif current.get("lease_id") != plan_expected.get("lease_id"):
+            detail = ", ".join(fields)
+            if set(fields).issubset({"claimed_at", "updated"}):
+                detail += " (not a valid same-lease touch heartbeat)"
+            print("plan task %s changed: %s" % (task_id, detail))
+        elif current.get("lease_id") != lease:
             print("plan task %s lease no longer matches its operation fence" % task_id)
 
 if expected.get("executor"):
@@ -965,6 +1080,7 @@ oms_worker_surface_diff() {
   local current_worktree_physical="${4:-}"
   local changed=""
   local name
+  local common
 
   for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks; do
     [ -f "$before_dir/$name" ] || continue
@@ -977,6 +1093,14 @@ oms_worker_surface_diff() {
       if [ "$name" = gitmeta ] && oms_worker_gitmeta_only_kept_siblings "$repo" \
         "$before_dir" "$current_worktree_physical"; then
         changed="${changed:+$changed, }$OMS_WG_GITMETA_SOFT"
+        continue
+      fi
+      # Callers pass the execution-state assert first, which binds this copy.
+      if [ "$name" = config ] && [ -f "$before_dir/git-execution-state.config" ] &&
+        common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" &&
+        [ -n "$common" ] && oms_git_config_delta_is_branch_tracking \
+          "$before_dir/git-execution-state.config" "$common/config"; then
+        changed="${changed:+$changed, }branch-tracking"
         continue
       fi
       changed="${changed:+$changed, }$name"
@@ -1016,6 +1140,14 @@ oms_worker_same_repository() {  # REPO_PHYSICAL OTHER
   repo_common="$(oms_harness_git_path_physical "$1" --git-common-dir 2>/dev/null || true)"
   other_common="$(oms_harness_git_path_physical "$other_physical" --git-common-dir 2>/dev/null || true)"
   [ -n "$repo_common" ] && [ "$repo_common" = "$other_common" ]
+}
+
+# PID 0 probes the caller's process group. Lexical validation preserves decimal
+# padding without integer overflow, including before the kept-marker bypass.
+oms_worker_marker_pid_is_positive_decimal() {  # PID
+  case "$1" in ""|*[!0-9]*) return 1 ;; esac
+  case "$1" in *[1-9]*) return 0 ;; esac
+  return 1
 }
 
 # A parallel delegate owns a temporary linked worktree in the same repository.
@@ -1084,7 +1216,7 @@ oms_worker_gitmeta_is_live_managed_worktree() {  # REPO ENTRY CURRENT_WORKTREE [
   marker_worktree="$(oms_harness_read_marker_value "$marker" worktree)"
   marker_temporary="$(oms_harness_read_marker_value "$marker" temporary)"
   [ "$marker_kind" = oh-my-setting-temp ] && [ "$marker_temporary" = 1 ] || return 1
-  case "$marker_pid" in *[!0-9]*|"") return 1 ;; esac
+  oms_worker_marker_pid_is_positive_decimal "$marker_pid" || return 1
   [ "$allow_kept" = kept ] || kill -0 "$marker_pid" 2>/dev/null || return 1
   repo_physical="$(oms_harness_physical_dir "$repo" 2>/dev/null || true)"
   [ -n "$repo_physical" ] || return 1
@@ -1135,10 +1267,12 @@ oms_worker_gitmeta_is_pending_managed_worktree() {  # REPO WT_PATH CURRENT_WORKT
 
   command -v oms_harness_temp_bases >/dev/null 2>&1 || return 1
   command -v oms_harness_read_marker_value >/dev/null 2>&1 || return 1
-  case "$wt_path" in /*/wt) ;; *) return 1 ;; esac
-  residue_dir="${wt_path%/wt}"
-  case "$(basename "$residue_dir")" in
-    oh-my-setting-delegate.*|oh-my-setting-admit.*|oh-my-setting-scratch.*|oh-my-setting-land.*) ;;
+  # Antigravity read passes register <base>/tree; every other harness tree is <base>/wt.
+  case "$wt_path" in /*/wt|/*/tree) ;; *) return 1 ;; esac
+  residue_dir="${wt_path%/*}"
+  case "$(basename "$residue_dir")/${wt_path##*/}" in
+    oh-my-setting-delegate.*/wt|oh-my-setting-admit.*/wt|oh-my-setting-scratch.*/wt|oh-my-setting-land.*/wt) ;;
+    oh-my-setting-agy-read.*/tree) ;;
     *) return 1 ;;
   esac
   residue_physical="$(oms_harness_physical_dir "$residue_dir" 2>/dev/null || true)"
@@ -1153,13 +1287,13 @@ oms_worker_gitmeta_is_pending_managed_worktree() {  # REPO WT_PATH CURRENT_WORKT
   marker_worktree="$(oms_harness_read_marker_value "$marker" worktree)"
   marker_temporary="$(oms_harness_read_marker_value "$marker" temporary)"
   [ "$marker_kind" = oh-my-setting-temp ] && [ "$marker_temporary" = 1 ] || return 1
-  case "$marker_pid" in *[!0-9]*|"") return 1 ;; esac
+  oms_worker_marker_pid_is_positive_decimal "$marker_pid" || return 1
   kill -0 "$marker_pid" 2>/dev/null || return 1
   repo_physical="$(oms_harness_physical_dir "$repo" 2>/dev/null || true)"
   [ -n "$repo_physical" ] || return 1
   oms_worker_same_repository "$repo_physical" "$marker_repo" || return 1
-  case "$marker_worktree" in /*/wt) ;; *) return 1 ;; esac
-  marker_parent="$(oms_harness_physical_dir "${marker_worktree%/wt}" 2>/dev/null || true)"
+  [ "${marker_worktree##*/}" = "${wt_path##*/}" ] || return 1
+  marker_parent="$(oms_harness_physical_dir "${marker_worktree%/*}" 2>/dev/null || true)"
   [ -n "$marker_parent" ] && [ "$marker_parent" = "$residue_physical" ] || return 1
   residue_parent="$(dirname "$residue_physical")"
   while IFS= read -r base; do
@@ -1184,6 +1318,8 @@ EOF
 # another main may unregister a sibling that was already dead and kept at the
 # snapshot (`gitmeta-residue`); name that softly (`sibling-cleanup`) only when
 # every removed line belongs to such an entry and none of its lines remain.
+# A main may keep using its scratch after its owner pid died; a changed HEAD
+# line alone on such a residue entry that still exists is `kept-sibling` too.
 # This is false-positive relief for cooperative parallel runs, not
 # attribution: a same-UID worker can forge the same shape (SECURITY.md). A
 # removed marker, a partial removal, any other changed line, or
@@ -1199,6 +1335,7 @@ oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
   local removed
   local added
   local head
+  local cleaned=""
 
   OMS_WG_GITMETA_SOFT=""
   git_dir="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || printf '')"
@@ -1224,12 +1361,19 @@ oms_worker_gitmeta_only_kept_siblings() {  # REPO BEFORE_DIR CURRENT_WORKTREE
         *) return 1 ;;
       esac
       grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-residue" 2>/dev/null || return 1
+      # A dead-owner scratch its main still uses moves only its HEAD.
+      if [ "$line" != "${line#"worktree worktrees/$entry/HEAD "}" ] &&
+        awk -v k="worktrees/$entry/HEAD" '$1 == "worktree" && $2 == k { f = 1 } END { exit !f }' \
+          "$before_dir/gitmeta-now"; then
+        continue
+      fi
       ! awk -v e="worktrees/$entry" '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
         "$before_dir/gitmeta-now" || return 1
+      cleaned=1
     done <<EOF
 $removed
 EOF
-    OMS_WG_GITMETA_SOFT=sibling-cleanup
+    [ -z "$cleaned" ] || OMS_WG_GITMETA_SOFT=sibling-cleanup
   fi
   [ -n "$added" ] || return 0
   while IFS= read -r line; do
@@ -1241,7 +1385,9 @@ EOF
         ;;
       *) return 1 ;;
     esac
-    if ! grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-exempt" 2>/dev/null; then
+    if ! grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-exempt" 2>/dev/null &&
+      ! { [ "$line" != "${line#"worktree worktrees/$entry/HEAD "}" ] &&
+        grep -Fxq "worktrees/$entry" "$before_dir/gitmeta-residue" 2>/dev/null; }; then
       ! awk -v e="worktrees/$entry" '$2 == e || index($2, e "/") == 1 { found = 1 } END { exit !found }' \
         "$before_dir/gitmeta-before" || return 1
       [ -f "$git_dir/worktrees/$entry/HEAD" ] && [ ! -L "$git_dir/worktrees/$entry/HEAD" ] || return 1
@@ -1622,13 +1768,18 @@ PY
       # changed. Record each file's length and the hash of exactly those bytes;
       # growth is legitimate, mutation of the prefix is not. Deletion of any
       # state file is a violation regardless of family.
-      OMS_WG_REPO="$repo" python3 - <<'PY'
-import hashlib, os, sys
+      local transient_helper
+      transient_helper="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)/worker-state-transients.py"
+      OMS_WG_REPO="$repo" python3 - "$transient_helper" <<'PY'
+import hashlib, importlib.util, os, sys
 
 root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
 if not os.path.isdir(root):
     raise SystemExit(0)
 rows = []
+spec = importlib.util.spec_from_file_location("_oms_worker_state_transients", sys.argv[1])
+transients = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(transients)
 for base, dirs, files in os.walk(root):
     # Delegation markers are ephemeral owner liveness. A sibling legitimately
     # creates/removes them while this worker runs; the exclusive provider-window
@@ -1642,12 +1793,18 @@ for base, dirs, files in os.walk(root):
         if os.path.islink(path):
             rows.append("%s LINK" % rel)
             continue
+        if transients.is_internal_atomic_temp(root, rel):
+            continue
         # Append-only by contract: the JSONL families, plus the memory log and
         # its pins. summary.md is derived from shared.md and regenerated, and
         # plan/executor/run state is rewritten by the harness by design, so
         # those are tracked by presence alone.
         append_only = rel.endswith(".jsonl") or rel in (
             "memory/shared.md", "memory/pins.md")
+        # The resume hint is a cache the parent's own prompt hook consumes
+        # (hook_state.py panel_main_hint unlinks it) while a worker runs.
+        if rel.startswith("hooks/sessions/") and rel.endswith(".resume.json"):
+            continue
         if not append_only:
             rows.append("%s EXISTS" % rel)
             continue
@@ -1699,6 +1856,9 @@ PY
                   "$(readlink "$wt" 2>/dev/null | oms_sha256_stream || printf 'unreadable')"
                 continue
               fi
+              # A sibling worktree removed between find and this test is gone,
+              # not a planted file; recording it would fail the run on cleanup.
+              [ -e "$wt" ] || continue
               if [ ! -d "$wt" ]; then
                 printf 'worktree-entry %s non-directory\n' "${wt#"$git_dir"/}"
                 continue
