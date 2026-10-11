@@ -311,6 +311,86 @@ oms_git_assert_plain_index() {  # REPO
   return 0
 }
 
+# Staged-content signature of a Git index, read without running Git. Another
+# session's `git status` rewrites the index with refreshed stat data and caches;
+# the guard keeps path, mode, object, stage, assume-unchanged, skip-worktree,
+# intent-to-add and other extensions, and drops stat fields and rebuildable
+# caches. The text is captured when this file is sourced, before any provider
+# runs, so a worker editing OMS sources cannot change what the guard executes.
+# Any index this reader cannot prove (bad checksum, bounds, version) returns
+# None and the caller keeps the raw byte digest.
+OMS_GIT_INDEX_SIGNATURE_PY="$(cat <<'PY'
+import hashlib
+import struct
+
+
+def index_signature(data, oid_size):
+    if len(data) < 12 + oid_size or data[:4] != b"DIRC":
+        return None
+    end = len(data) - oid_size
+    if hashlib.new("sha1" if oid_size == 20 else "sha256", data[:end]).digest() != data[end:]:
+        return None
+    version, count = struct.unpack(">II", data[4:12])
+    if version not in (2, 3, 4):
+        return None
+    digest = hashlib.sha256(b"oms-index-v1\0%d\0" % version)
+    at, previous = 12, b""
+    for _ in range(count):
+        start = at
+        if at + 42 + oid_size > end:
+            return None
+        mode = data[at + 24:at + 28]
+        oid = data[at + 40:at + 40 + oid_size]
+        flags, = struct.unpack(">H", data[at + 40 + oid_size:at + 42 + oid_size])
+        at += 42 + oid_size
+        extended = 0
+        if flags & 0x4000:
+            if version < 3 or at + 2 > end:
+                return None
+            extended, = struct.unpack(">H", data[at:at + 2])
+            at += 2
+        stop = -1
+        if version == 4:
+            if at >= end:
+                return None
+            byte = data[at]
+            strip = byte & 0x7F
+            at += 1
+            while byte & 0x80:
+                if at >= end:
+                    return None
+                byte = data[at]
+                strip = ((strip + 1) << 7) | (byte & 0x7F)
+                at += 1
+            stop = data.find(b"\0", at, end)
+            if stop < 0 or strip > len(previous):
+                return None
+            path = previous[:len(previous) - strip] + data[at:stop]
+            at = stop + 1
+        else:
+            stop = data.find(b"\0", at, end)
+            if stop < 0:
+                return None
+            path = data[at:stop]
+            at = start + ((stop - start + 8) // 8) * 8
+            if at > end or data[stop:at].strip(b"\0"):
+                return None
+        previous = path
+        digest.update(struct.pack(">HH", flags & 0xB000, extended) + mode + oid + path + b"\0")
+    while at < end:
+        if at + 8 > end:
+            return None
+        name = data[at:at + 4]
+        size, = struct.unpack(">I", data[at + 4:at + 8])
+        if at + 8 + size > end:
+            return None
+        if name not in (b"TREE", b"UNTR", b"FSMN", b"EOIE", b"IEOT"):
+            digest.update(name + struct.pack(">I", size) + data[at + 8:at + 8 + size])
+        at += 8 + size
+    return digest.hexdigest()
+PY
+)"
+
 # Freeze the raw config files and index visibility bits that can change what a
 # later Git capture sees or executes. This intentionally does not invoke Git:
 # it is the first post-provider check, before status/diff/ls-files can consume
@@ -350,14 +430,13 @@ $index_path"
   local oid_size=20
   [ "$(git -C "$root" rev-parse --show-object-format 2>/dev/null | tr -d '\r')" != sha256 ] || oid_size=32
   OMS_GIT_EXEC_PATHS="$paths" OMS_GIT_EXEC_COPY="$tmp.config" OMS_GIT_EXEC_INDEX="$index_path" \
-    OMS_GIT_EXEC_OID="$oid_size" python3 - "$OMS_COMMON_LIB_DIR" <<'PY' > "$tmp" || {
+    OMS_GIT_EXEC_OID="$oid_size" python3 -I -B - "$OMS_GIT_INDEX_SIGNATURE_PY" <<'PY' > "$tmp" || {
 import base64
 import hashlib
 import os
 import stat
 import sys
-sys.path.insert(0, sys.argv[1])
-from git_index_signature import signature as index_signature
+exec(sys.argv[1])
 
 for number, path in enumerate(os.environ["OMS_GIT_EXEC_PATHS"].splitlines()):
     if not path:
@@ -469,14 +548,13 @@ oms_git_execution_state_assert_unchanged() {  # REPO SNAPSHOT EXPECTED_SHA
     echo "Git execution-state snapshot changed or became unreadable" >&2
     return 2
   fi
-  if ! changed_config="$(python3 - "$snapshot" "$snapshot.config" "$OMS_COMMON_LIB_DIR" <<'PY'
+  if ! changed_config="$(python3 -I -B - "$snapshot" "$snapshot.config" "$OMS_GIT_INDEX_SIGNATURE_PY" <<'PY'
 import base64
 import hashlib
 import os
 import stat
 import sys
-sys.path.insert(0, sys.argv[3])
-from git_index_signature import signature as index_signature
+exec(sys.argv[3])
 
 def staged(path, oid):
     try:
