@@ -101,13 +101,18 @@ Codex starts with its existing flags; a recorded native session can be resumed.
 After a native main exits in its panel window, the chat pane shows
 `r resume/restart here · Enter close window`. Press `r` to relaunch in that pane,
 resuming its recorded session or starting fresh when no session is recorded.
+Fresh Codex restarts start a new session even after the previous session's first
+hook bound its room consumer; that binding is checked only when resuming a stored session.
 The previous attempt must be terminal, and startup rechecks the sole-main limit
 and resume ownership under the main-session lock. Another live main or unverified
 ownership refuses restart and returns to the prompt. Enter closes the whole
 window, including its board watcher, only while the attempt tag and repository
 still match and the native pane marker is unset; otherwise the window is preserved.
-Close pins the window id and rechecks the attempt and native marker on the tmux
-server at deletion. Failed ownership queries preserve the window. SIGTERM/SIGHUP
+Close pins the window id and rechecks the repository, attempt and native marker on the tmux
+server at deletion. Repository paths containing `#`, commas, colons, braces,
+backslashes or control characters preserve the window with a notice because they
+cannot be safely embedded in that guard.
+Failed ownership queries preserve the window. SIGTERM/SIGHUP
 at the prompt restore terminal modes before exiting with 143/129.
 Without a terminal, native launch retains its existing exit behavior.
 
