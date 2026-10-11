@@ -730,6 +730,8 @@ def session_stored(provider, session):
 
 def owning_attempt(repo, owner, main, env):
     """The live panel-main attempt that owns a continued worker; another main's workers never match."""
+    if env.get("OMS_ROOM_REPO"):
+        repo = repository(env["OMS_ROOM_REPO"])
     parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
     if parent:
         return parent
@@ -744,10 +746,13 @@ def owning_attempt(repo, owner, main, env):
     return next(iter(candidates.values()))["attempt_id"]
 
 
-def continuation(repo, owner, main, task_id, route, brief, env):
+def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None):
     """(brief file, native session or None, note) for the next round of one of this main's workers."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id or ""):
         raise ValueError("invalid task ID to continue")
+    head_repo = work_repository(work_repo or repo)
+    if env.get("OMS_ROOM_REPO"):
+        repo = repository(env["OMS_ROOM_REPO"])
     parent = owning_attempt(repo, owner, main, env)
     rows = json.loads(events(repo, "list", "--json", output=True))
     earlier = sorted((row for row in rows if row.get("task_id") == task_id and row.get("parent_attempt_id") == parent
@@ -759,7 +764,7 @@ def continuation(repo, owner, main, task_id, route, brief, env):
     found = results(repo, task_id)["rows"]
     call = next((c for c in reversed(found[0].get("calls", []) if found else [])
                  if c.get("attempt_id") == last["attempt_id"]), {})
-    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"], capture_output=True,
+    head = subprocess.run(["git", "-C", str(head_repo), "rev-parse", "--short=12", "HEAD"], capture_output=True,
                           text=True, check=False, stdin=subprocess.DEVNULL).stdout.strip()
     old = last.get("base_sha") or "an earlier commit"
     # A digest proves which bytes were recorded, not that the worker call
@@ -847,7 +852,7 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
 
 def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
-             main=None, continue_task=None, scopes=None):
+             main=None, continue_task=None, scopes=None, work_repo=None):
     route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main)
     label = safe_label(label)
     resume = None
@@ -855,12 +860,13 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
     if continue_task:
         if role not in WRITERS or not brief or prompt or task_id:
             raise ValueError("--continue takes a write-capable role and --brief-file, not --prompt or --task-id")
-        brief, resume, note = continuation(repo, owner, main, continue_task, route, brief, child_environment(owner, repo))
+        brief, resume, note = continuation(repo, owner, main, continue_task, route, brief,
+                                           child_environment(owner, repo), work_repo)
         temporary, task_id = brief, continue_task
         print(note, file=sys.stderr)
     try:
         return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
-                            dry_run, label, route, main, resume, scopes)
+                            dry_run, label, route, main, resume, scopes, work_repo)
     finally:
         if temporary:
             temporary.unlink()
@@ -1011,7 +1017,14 @@ def _validate_dry_run_inputs(prompt, brief):
 
 
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
-                 dry_run, label, route, main, resume, scopes):
+                 dry_run, label, route, main, resume, scopes, work_repo=None):
+    source_repo = repo
+    if os.environ.get("OMS_ROOM_REPO"):
+        repo = repository(os.environ["OMS_ROOM_REPO"])
+    execution = repo
+    if route["kind"] in {"worker", "researcher"}:
+        execution = (work_repository(work_repo or source_repo) if work_repo is not None or source_repo != repo
+                     else native_repository(repo))
     if dry_run:
         _validate_dry_run_inputs(prompt, brief)
     if task_id is None:
@@ -1019,6 +1032,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id):
         raise ValueError("invalid task ID")
     argv = routed_command(ENTRY, repo, route, prompt, brief, verify, task_id, resume)
+    argv[argv.index("--repo") + 1] = str(execution)
     plan = {"schema": 1, "kind": "oms-panel-route", "route": route, "task_id": task_id,
             "argv": argv, "executes": False}
     if scopes:
@@ -1031,7 +1045,6 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         return 0
     if not dry_run and not shutil.which(route.get("binary", route["provider"])):
         raise ValueError("%s is not installed; this exact role route cannot run" % route["provider"])
-    execution = native_repository(repo) if route["kind"] in {"worker", "researcher"} else repo
     env = child_environment(owner, repo)
     parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
     if parent:
@@ -1105,7 +1118,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                        and name not in {"OMS_TASK_ID", "OMS_ATTEMPT_ID", "OMS_PARENT_ATTEMPT_ID",
                                         "OMS_PLAN_ID", "OMS_PLAN_TASK_ID", "OMS_LEASE_ID", "OMS_PLAN_LEASE_ID"}}
         # Keep canonical artifact routing, but not the caller or child identity.
-        preview_env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_REPO=str(repo))
+        preview_env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_REPO=str(repo), OMS_ROOM_REPO=str(repo))
         checked = subprocess.run(preview + ["--dry-run"], cwd=str(execution), env=preview_env,
                                  capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
         if checked.returncode:
@@ -3805,11 +3818,11 @@ def main(argv=None):
             print(json.dumps(dict(routes, writers=sorted(WRITERS), kinds=KINDS,
                                   owner=caller_owner(), chosen=chosen), indent=2))
             return 0
-        repo = repository(args.repo)
+        repo = repository(os.environ.get("OMS_ROOM_REPO") or args.repo) if args.dispatch else repository(args.repo)
         requested_worktree = work_repository(args.repo if args.repo is not None else os.getcwd())
-        if requested_worktree != repo:
+        if not args.dispatch and requested_worktree != repo:
             os.environ[EXECUTION_ENV] = str(requested_worktree)
-        execution = native_repository(repo)
+        execution = requested_worktree if args.dispatch else native_repository(repo)
         if args.host != "auto":
             os.environ["OMS_PANEL_HOST"] = args.host
         if args.host == "herdr" and not (args.json or args.dry_run):
@@ -3821,7 +3834,6 @@ def main(argv=None):
             if room.status(repo, args.room)["closed"] and not (args.chats or args.open_chat or args.health):
                 raise ValueError("selected room is closed")
             os.environ["OMS_ROOM_ID"] = args.room
-            os.environ["OMS_ROOM_REPO"] = str(repo)
         if args.health:
             import panel_health
             from panel_metrics import collect
@@ -3893,7 +3905,7 @@ def main(argv=None):
             brief = Path(args.brief_file).expanduser() if args.brief_file else None
             if brief:
                 if not brief.is_absolute():
-                    brief = repo / brief
+                    brief = execution / brief
                 _read_dispatch_brief(brief)
                 brief = brief.resolve(strict=True)
             if args.prompt and (len(args.prompt.encode("utf-8")) > MAX_PROMPT or "\0" in args.prompt):
@@ -3911,7 +3923,7 @@ def main(argv=None):
             status = dispatch(repo, owner, args.dispatch, args.workload, args.access, args.purpose,
                               args.prompt, brief, args.verify, args.task_id, args.dry_run, args.label,
                               args.to, args.model, args.reasoning_effort, main=args.main,
-                              continue_task=args.continue_task, scopes=args.scope)
+                              continue_task=args.continue_task, scopes=args.scope, work_repo=execution)
             if asked:
                 read_field("Exit %s; the answer is in the main's room mail. Press Enter to close: " % status,
                            required=False)

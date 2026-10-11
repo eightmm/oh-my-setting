@@ -590,11 +590,15 @@ if [ "${OMS_WORKER_GUARD_STRICT:-0}" = 1 ]; then
   oms_git_assert_plain_index "$REPO" ||
     fail "hidden Git index flags block strict delegation"
 fi
-# Panel scratch sources and canonical state have separate roots; resolve before child depth changes.
+# Worktree ownership and panel state can differ; resolve before child depth changes.
 unset DELEGATE_SOURCE_REPO
 DELEGATE_SOURCE_REPO="$REPO"
+delegate_worktree_repo="$DELEGATE_SOURCE_REPO"
 if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ]; then
-  REPO="$(oms_state_root "$DELEGATE_SOURCE_REPO")" || fail "cannot resolve canonical panel state"
+  delegate_worktree_repo="$(oms_state_root "$DELEGATE_SOURCE_REPO")" || fail "cannot resolve delegated worktree owner"
+  delegate_worktree_repo="${delegate_worktree_repo//$'\r'/}"
+  delegate_worktree_repo="$(cd "$delegate_worktree_repo" && pwd -P)" || fail "cannot resolve physical worktree owner"
+  REPO="$(oms_state_root "${OMS_ROOM_REPO:-$DELEGATE_SOURCE_REPO}")" || fail "cannot resolve canonical panel state"
   REPO="${REPO//$'\r'/}"
   REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve physical panel state"
 fi
@@ -606,7 +610,7 @@ fi
 load_context_pack() {
   local view target_count line i=0
   view="$(PYTHONDONTWRITEBYTECODE=1 python3 \
-    "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" --shell-view --repo "$REPO" "$CONTEXT_PACK" 2>&1 | tr -d '\r')" || {
+    "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" --shell-view --repo "$delegate_worktree_repo" "$CONTEXT_PACK" 2>&1 | tr -d '\r')" || {
     echo "error: context-pack: $view" >&2
     return 2
   }
@@ -807,7 +811,7 @@ fi
 # Resolve a role profile (repo, global, then bundled) and prepend it to the
 # worker brief so the same reusable strategy can drive any provider.
 if [ -n "$ROLE" ]; then
-  role_file="$("$(ma_scripts_dir)/agent-role.sh" --repo "$REPO" --name "$ROLE" resolve 2>/dev/null)" ||
+  role_file="$("$(ma_scripts_dir)/agent-role.sh" --repo "$delegate_worktree_repo" --name "$ROLE" resolve 2>/dev/null)" ||
     fail "no role profile '$ROLE' (create one with agent-role.sh --name $ROLE init)"
   echo "role: $ROLE ($role_file)"
 fi
@@ -828,7 +832,7 @@ load_user_tool_paths
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
 
-oms_harness_prune_stale_worktrees "$REPO" 0 >/dev/null
+oms_harness_prune_stale_worktrees "$delegate_worktree_repo" 0 >/dev/null
 [ "$DRY_RUN" = 1 ] || oms_harness_reap_dead_delegation_markers "$REPO"
 prompt_file="$(mktemp)" || fail "mktemp failed"
 repair_prompt_file="$prompt_file.repair"
@@ -872,7 +876,7 @@ worker_identity_worktree_stat=""
 worker_identity_gitdir_stat=""
 worker_identity_failed=0
 worker_identity_detail=""
-oms_harness_mark_tmpdir "$worktree_parent" "$REPO" "$worktree"
+oms_harness_mark_tmpdir "$worktree_parent" "$delegate_worktree_repo" "$worktree"
 cleanup_delegated_worktree() {
   local cleanup_identity_detail=""
 
@@ -885,12 +889,12 @@ cleanup_delegated_worktree() {
   fi
   [ "$KEEP_WORKTREE" = 0 ] || return 0
   if [ -n "$worker_identity_physical" ] &&
-    cleanup_identity_detail="$(oms_worker_worktree_identity_check "$REPO" "$worktree" \
+    cleanup_identity_detail="$(oms_worker_worktree_identity_check "$delegate_worktree_repo" "$worktree" \
       "$worker_identity_physical" "$worker_identity_git_dir" \
       "$worker_identity_common_dir" "$worker_identity_gitfile_sha" \
       "$worker_identity_backpointer_sha" "$worker_identity_worktree_stat" \
       "$worker_identity_gitdir_stat" 2>/dev/null)"; then
-    if git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1; then
+    if git -C "$delegate_worktree_repo" worktree remove --force "$worktree" >/dev/null 2>&1; then
       worktree_created=0
       rm -rf "$worktree_parent"
       worktree_parent=""
@@ -1007,7 +1011,7 @@ write_minimal_change_doctrine() {
   fi
   write_minimal_change_doctrine
   printf '\n'
-  ma_write_harness_context "$REPO" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$PROMPT"
+  ma_write_harness_context "$delegate_worktree_repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$PROMPT"
   ma_write_thread_context "$REPO" "$THREAD_ID"
   if [ -n "$role_file" ]; then
     printf '## Role\n\n'
@@ -1085,7 +1089,7 @@ GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
   -c core.fsmonitor=false -C "$DELEGATE_SOURCE_REPO" \
   worktree add --detach "$worktree" HEAD >/dev/null 2>&1
 worktree_created=1
-if ! oms_worker_worktree_identity_capture "$REPO" "$worktree"; then
+if ! oms_worker_worktree_identity_capture "$delegate_worktree_repo" "$worktree"; then
   KEEP_WORKTREE=1
   fail "could not establish delegated worktree identity: $OMS_WORKER_IDENTITY_DETAIL"
 fi
@@ -1120,7 +1124,7 @@ if [ "$AUTO_GRAPH_CONTEXT" = 1 ] && [ -z "$CONTEXT_PACK" ] &&
   auto_pack="$worktree_parent/graph-context.json"
   if OMS_PEER_KILL_AFTER=1 \
     ma_run_bounded 10 graph-context python3 -B "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" \
-    --auto "$worktree" "$REPO" "$worktree/.oms/project-graph" "$graph_task" \
+    --auto "$worktree" "$delegate_worktree_repo" "$worktree/.oms/project-graph" "$graph_task" \
     > "$auto_pack" 2> "$worktree_parent/graph-context.log" &&
     CONTEXT_PACK="$auto_pack" load_context_pack && [ "$CONTEXT_PACK_FILES" -gt 0 ]; then
     context_mode=graph
@@ -1483,7 +1487,7 @@ worker_worktree_require_identity() {  # PHASE
   local phase="$1"
   local detail=""
 
-  if detail="$(oms_worker_worktree_identity_check "$REPO" "$worktree" \
+  if detail="$(oms_worker_worktree_identity_check "$delegate_worktree_repo" "$worktree" \
     "$worker_identity_physical" "$worker_identity_git_dir" \
     "$worker_identity_common_dir" "$worker_identity_gitfile_sha" \
     "$worker_identity_backpointer_sha" "$worker_identity_worktree_stat" \
@@ -1876,6 +1880,8 @@ worker_operation_snapshot_sha=""
 worker_guard_worktree_physical=""
 worker_git_execution_snapshot_sha=""
 worker_worktree_execution_snapshot_sha=""
+worker_source_guard_dir=""
+worker_source_execution_snapshot_sha=""
 if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
   # This run's own writes are the harness moving, not the worker: the artifact
   # directory, and our own stdout/stderr when the caller redirected them into
@@ -1924,6 +1930,15 @@ if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
     )"
     [ -n "$worker_worktree_execution_snapshot_sha" ] ||
       fail "could not hash delegated worktree Git execution config snapshot"
+    if [ "$delegate_worktree_repo" != "$REPO" ]; then
+      worker_source_guard_dir="$worker_guard_dir/source"
+      oms_worker_surface_snapshot "$delegate_worktree_repo" "$worker_source_guard_dir" \
+        "$worker_guard_worktree_physical" || fail "could not freeze source repository protected surfaces"
+      oms_git_execution_state_snapshot "$delegate_worktree_repo" \
+        "$worker_source_guard_dir/git-execution-state" || fail "could not freeze source Git execution state"
+      worker_source_execution_snapshot_sha="$(oms_sha256_file "$worker_source_guard_dir/git-execution-state")" ||
+        fail "could not hash source Git execution state"
+    fi
     oms_git_assert_safe_execution_config "$REPO" ||
       fail "unsafe Git execution config blocks delegated provider start"
     oms_git_assert_safe_execution_config "$worktree" ||
@@ -1974,7 +1989,27 @@ worker_execution_boundary_check() {
   # Worker-owned index bytes may legitimately change (`git add`); only hidden
   # visibility flags are forbidden in the isolated checkout.
   oms_git_assert_plain_index "$worktree" || return 2
+  if [ -n "$worker_source_guard_dir" ]; then
+    oms_git_execution_state_assert_unchanged "$delegate_worktree_repo" \
+      "$worker_source_guard_dir/git-execution-state" "$worker_source_execution_snapshot_sha" || return 2
+    oms_git_assert_safe_execution_config "$delegate_worktree_repo" || return 2
+    oms_git_assert_plain_index "$delegate_worktree_repo" || return 2
+  fi
   return 0
+}
+worker_protected_surface_diff() {
+  local changed source_changed
+  changed="$(oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
+    "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")" || return 2
+  if [ -n "$worker_source_guard_dir" ]; then
+    source_changed="$(oms_worker_surface_diff "$delegate_worktree_repo" "$worker_source_guard_dir" \
+      "" "$worker_guard_worktree_physical")" || return 2
+    if [ -n "$source_changed" ]; then
+      echo "source repository protected surfaces changed: $source_changed" >&2
+      changed="${changed:+$changed, }$source_changed"
+    fi
+  fi
+  printf '%s' "$changed"
 }
 if [ -n "$worker_guard_dir" ]; then
   OMS_WRITE_POST_ATTEMPT_GUARD_FN=worker_execution_boundary_check
@@ -1983,8 +2018,7 @@ conversation_boundary_check() {
   local changed surface
   worker_worktree_require_identity "conversation boundary" || return 2
   worker_execution_boundary_check || return 2
-  changed="$(oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
-    "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")" || return 2
+  changed="$(worker_protected_surface_diff)" || return 2
   for surface in $(printf '%s' "$changed" | tr ',' ' '); do
     case "$surface" in
       files|tracked|remote-refs|work-branches|kept-sibling|sibling-cleanup|branch-tracking) [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] || return 2 ;;
@@ -2243,8 +2277,7 @@ if [ -n "$worker_guard_dir" ]; then
   if [ "$worker_boundary_failed" = 1 ]; then
     worker_guard_changed="execution-state"
   else
-    worker_guard_changed="$(oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
-      "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")"
+    worker_guard_changed="$(worker_protected_surface_diff)"
   fi
   if ! worker_worktree_require_identity "final worker guard"; then
     printf '%s\n' "$worker_identity_detail" > "$worker_guard_dir/worktree-identity-detail"

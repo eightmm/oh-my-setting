@@ -1978,14 +1978,16 @@ case "${1:-}:${2:-}" in
 esac
 if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
   python3 - "$@" <<'WORKER'
-import json, os, sys
+import json, os, sys, subprocess
 with open(os.environ["PANEL_TEST_WORKER_LOG"], "a", encoding="utf-8") as f:
     f.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(),
+                        "git_common": subprocess.check_output(["git", "rev-parse", "--git-common-dir"], text=True).strip(),
                         "role": os.environ.get("OMS_PANEL_ROLE"),
                         "purpose": os.environ.get("OMS_PANEL_PURPOSE"),
                         "task_id": os.environ.get("OMS_TASK_ID"),
                         "parent": os.environ.get("OMS_PANEL_MAIN_ATTEMPT"),
                         "room": os.environ.get("OMS_ROOM_ID"),
+                        "room_repo": os.environ.get("OMS_ROOM_REPO"),
                         "participant": os.environ.get("OMS_ROOM_PARTICIPANT")}) + "\\n")
 WORKER
   if [ -n "${LEASE_FIXTURE_ENTERED:-}" ]; then
@@ -2028,6 +2030,9 @@ LEASEWAIT
       echo 'nested owner launch should have failed' >&2
       exit 1
     fi
+  fi
+  if [ "${PANEL_TEST_MODE:-}" = primary-write ]; then
+    printf 'outside worker\\n' >> "$PANEL_TEST_PRIMARY"
   fi
   if [ "${OMS_PANEL_PURPOSE:-}" = advise ]; then
     printf 'Answer: inspected source.\nAlternatives: separate panels.\nEvidence: value.txt exists.\nCounterargument: retained history is bounded.\nRisks: delivery can fail.\nRecommendation: owner records evidence.\nVerification: inspect source.\nChanged from previous round: none.\nRemaining disagreements: none.\n'
@@ -3832,7 +3837,8 @@ room_env.update(OMS_PANEL_MAIN_ATTEMPT=room_owner, OMS_ROOM_PARTICIPANT=room_own
 answer = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
                "--dispatch", "worker", "--owner", "claude", "--purpose", "investigate",
                "--workload", "light", "--prompt", "Inspect value.txt without edits.",
-               "--task-id", "room-inspection", "--label", "Inspect the shared parser"], room_env)
+               "--task-id", "room-inspection", "--label", "Inspect the shared parser"],
+              {name: value for name, value in room_env.items() if name != "OMS_ROOM_REPO"})
 assert "artifact:" in answer, answer
 state = room.status(project, shared)
 child = next(p for p in state["participants"] if p["role"] == "worker")
@@ -3841,6 +3847,78 @@ handoff = next(m for m in state["messages"] if m["sender"] == child["participant
 assert handoff["recipient"] == room_owner and "parent acceptance pending" in handoff["text"], handoff
 assert "inspected the bounded repository task" in handoff["text"], handoff
 assert (project / "value.txt").read_text() == "old\n", "room cannot widen worker write access"
+# A room in A keeps its parent, call and results when the worker executes in B,
+# whether the caller selects the room explicitly or inherits it.
+other_project = temporary / "dispatch work repo"
+subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(project), str(other_project)], check=True)
+(other_project / "dispatch-brief.md").write_text("Task: append new to value.txt.\n")
+cross_brief = other_project / "dispatch-brief.md"
+verify_log = temporary / "cross-repo-verify"
+for task_id, explicit_room, writing, continuing in (
+        ("cross-repo-explicit", True, False, False),
+        ("cross-repo-inherited", False, False, False),
+        ("cross-repo-write", True, True, False),
+        ("cross-repo-write", False, True, True)):
+    request = ["bash", str(panel.ENTRY), "panel", "--repo", str(other_project),
+               "--dispatch", "worker", "--owner", "claude", "--workload", "light"]
+    if writing:
+        request += ["--purpose", "implement", "--access", "write", "--brief-file", cross_brief.name,
+                    "--verify", 'git rev-parse --git-common-dir > "$PANEL_TEST_VERIFY_LOG"',
+                    "--continue" if continuing else "--task-id", task_id]
+    else:
+        request += ["--purpose", "investigate", "--prompt", "Inspect value.txt without edits.", "--task-id", task_id]
+    if explicit_room:
+        request += ["--room", shared]
+    answer = call(request, dict(room_env, PANEL_TEST_MODE="write" if writing else "",
+                               PANEL_TEST_VERIFY_LOG=str(verify_log)))
+    assert "artifact:" in answer, answer
+    observed = json.loads(worker_log.read_text().splitlines()[-1])
+    assert observed["task_id"] == task_id and observed["parent"] == room_owner, observed
+    assert observed["room"] == shared and observed["room_repo"] == str(project), observed
+    assert Path(observed["cwd"]) != other_project and Path(observed["cwd"]) != project, observed
+    assert observed["git_common"] == str(other_project / ".git"), observed
+    assert not Path(observed["cwd"]).exists(), "cross-repository worker cleanup failed"
+    if writing:
+        assert verify_log.read_text().strip() == str(other_project / ".git"), "verification used the state repository"
+    state = room.status(project, shared)
+    enrolled = room.participant(state, observed["participant"])
+    assert enrolled["parent"] == room_owner and enrolled["role"] == "worker", enrolled
+    messages = state["messages"]
+    assert any(m["recipient"] == observed["participant"] and m["text"].startswith("Assigned:") for m in messages), messages
+    assert any(m["sender"] == observed["participant"] and m["recipient"] == room_owner
+               and "inspected the bounded repository task" in m["text"] for m in messages), messages
+    attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
+    attempt = [a for a in attempts if a.get("task_id") == task_id][-1]
+    assert attempt["parent_attempt_id"] == room_owner and attempt["refs"]["panel_room_id"] == shared, attempt
+    assert attempt["refs"]["panel_room_participant"] == observed["participant"], attempt
+    report = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
+                             "--task-id", task_id, "--json"], room_env))
+    assert report["rows"] and any(c.get("answer") for row in report["rows"] for c in row.get("calls", [])), report
+    assert not json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(other_project),
+                               "list", "--json"])), "call attempt split into work repository"
+    assert not (other_project / ".oms/artifacts/index.jsonl").exists(), "call artifact split into work repository"
+    assert (other_project / "value.txt").read_text() == "old\n", "worker edited the source repository"
+    assert (project / "value.txt").read_text() == "old\n", "worker edited the state repository"
+cross_brief.unlink()
+board = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results", "--json"], room_env))
+assert {row["task_id"] for row in board["rows"]} >= {
+    "cross-repo-explicit", "cross-repo-inherited", "cross-repo-write"}, board
+for changed in ({"OMS_ROOM_PARTICIPANT": main_attempts["codex"]},
+                {"OMS_ROOM_REPO": str(temporary / "missing state repo")},
+                {"OMS_PANEL_MAIN_ATTEMPT": main_attempts["codex"]}):
+    before = worker_log.read_bytes()
+    refused = subprocess.run(request, env=dict(room_env, **changed), capture_output=True, text=True, timeout=30)
+    assert refused.returncode != 0 and worker_log.read_bytes() == before, (changed, refused)
+tamper = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(other_project), "--room", shared,
+    "--dispatch", "worker", "--owner", "claude", "--purpose", "investigate", "--workload", "light",
+    "--prompt", "Inspect value.txt without edits.", "--task-id", "cross-repo-guard"],
+    env=dict(room_env, PANEL_TEST_MODE="primary-write", PANEL_TEST_PRIMARY=str(other_project / "value.txt"),
+             OMS_WORKER_GUARD_STRICT="1"), capture_output=True, text=True, timeout=90)
+assert tamper.returncode != 0 and "changed protected state outside its worktree: tracked" in tamper.stderr, tamper
+assert "source repository protected surfaces changed: tracked" in tamper.stderr, tamper.stderr
+assert (other_project / "value.txt").read_text() == "old\noutside worker\n", "fixture did not exercise source protection"
+assert (project / "value.txt").read_text() == "old\n", "source mutation reached the state repository"
+(other_project / "value.txt").write_text("old\n")
 # A dispatch with a shared-plan task ID moves that task for the calling main only: dry-run leaves it ready, the
 # claim records the main, and every further worker of the same main reuses the running lease.
 plan_cli = ["bash", str(panel.ENTRY), "agent-plan", "--repo", str(project)]
@@ -6410,6 +6488,10 @@ with patch("panel_metrics.subprocess.run", side_effect=[
 # The smaller task panel preserves frame-local navigation and never upgrades
 # native process exit to owner acceptance.
 summary_room = deepcopy(tree_room)
+# Earlier calls can evict terminal mains from the bounded dashboard history.
+summary_main = next(p for p in summary_room["room"]["participants"] if p["role"] == "main" and p["joined"])
+summary_room["attempts"]["recent"].append({"attempt_id": "summary-exited-main", "state": "done",
+    "panel": {"role": "main", "room_id": shared, "room_participant": summary_main["participant"]}})
 for attempt in summary_room["attempts"]["active_recent"] + summary_room["attempts"]["recent"]:
     if attempt.get("panel", {}).get("role") == "main":
         attempt["state"] = "done"
