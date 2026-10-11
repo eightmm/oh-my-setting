@@ -2225,6 +2225,8 @@ routes = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(proje
 assert set(routes["tiers"]) == set(panel.TIERS) and set(routes["roles"]) == set(routes["kinds"]) == set(panel.KINDS)
 assert routes["writers"] == sorted(panel.WRITERS) and report["routing"]["roles"] == routes["roles"]
 assert set(routes["chosen"]) == set(panel.KINDS)
+from panel_view import PURPOSE_NAMES
+assert set(routes["roles"]) <= set(PURPOSE_NAMES), "every role strategy needs a board label"
 for role, rule in routes["roles"].items():
     expected = allocate(routes["owner"], role, installed=both)
     assert routes["chosen"][role] == {k: expected[k] for k in ("provider", "model", "effort")}

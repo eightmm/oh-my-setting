@@ -32,7 +32,14 @@ MODEL_NAMES = {"gpt-6.1-sol": "Sol 6.1", "gpt-6-sol": "Sol 6", "gpt-6-luna": "Lu
                "claude-opus-5-5": "Opus 5.5", "claude-sonnet-5-5": "Sonnet 5.5",
                "claude-fable-5-1": "Fable 5.1", "claude-haiku-5-5": "Haiku 5.5"}
 PURPOSE_NAMES = {"implement": "Implement patch", "explain": "Explain code",
-                 "investigate": "Inspect source", "review": "Review changes", "advise": "Advise decision"}
+                 "investigate": "Inspect source", "review": "Review changes", "advise": "Advise decision",
+                 "research": "Look up sources",
+                 # Role strategies record their role as the purpose (routing keeps the four board kinds).
+                 "builder": "Build", "refactorer": "Refactor", "documenter": "Document", "integrator": "Integrate",
+                 "performance-engineer": "Measure performance", "release-engineer": "Prepare release",
+                 "architect": "Structure design", "critic": "Find failure cases", "verifier": "Verify against request",
+                 "security-auditor": "Security audit", "reviewer": "Review changes", "advisor": "Advise decision",
+                 "researcher": "Look up sources", "worker": "Work"}
 LIVE_STATES = {"starting", "working", "verifying", "live marker"}
 ATTENTION_STATES = {"blocked", "waiting_input", "waiting_approval", "review", "orphaned",
                     "failed", "timed_out", "abandoned"}
