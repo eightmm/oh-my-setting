@@ -25142,6 +25142,20 @@ assert index_signature(wrap(b"DIRC" + struct.pack(">II", 4, 1) + entry + b"\xff"
 assert time.time() - started < 1
 PY
     fail "the guard's index parser accepted a malformed index or ran unbounded"
+  # A cache-tree edit alone changes the signature: the owner's next commit would use it.
+  (. "$ROOT/scripts/lib/oms-common.sh" && git -C "$project" write-tree >/dev/null &&
+    python3 -I -B - "$OMS_GIT_INDEX_SIGNATURE_PY" "$project/.git/index" <<'PY') ||
+import hashlib, sys
+exec(sys.argv[1])
+data = open(sys.argv[2], "rb").read()
+at = data.find(b"TREE", 12)
+assert at > 0, "fixture index has no cache-tree"
+forged = bytearray(data[:-20])
+forged[at + 8 + forged[at + 8:].index(b"\n") + 1] ^= 1
+forged = bytes(forged) + hashlib.sha1(bytes(forged)).digest()
+assert index_signature(data, 20) and index_signature(forged, 20) and index_signature(data, 20) != index_signature(forged, 20)
+PY
+    fail "the guard's index signature ignored a cache-tree change"
 }
 
 test_delegate_preflights_strict_execution_config() {

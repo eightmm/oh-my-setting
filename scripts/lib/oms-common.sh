@@ -314,8 +314,8 @@ oms_git_assert_plain_index() {  # REPO
 # Staged-content signature of a Git index, read without running Git. Another
 # session's `git status` rewrites the index with refreshed stat data and caches;
 # the guard keeps path, mode, object, stage, assume-unchanged, skip-worktree,
-# intent-to-add and other extensions, and drops stat fields and rebuildable
-# caches. The text is captured when this file is sourced, before any provider
+# intent-to-add and other extensions including the cache-tree, and drops stat
+# fields, the untracked/fsmonitor caches and offset tables. The text is captured when this file is sourced, before any provider
 # runs, so a worker editing OMS sources cannot change what the guard executes.
 # Any index this reader cannot prove (bad checksum, bounds, version) returns
 # None and the caller keeps the raw byte digest.
@@ -385,7 +385,8 @@ def index_signature(data, oid_size):
         size, = struct.unpack(">I", data[at + 4:at + 8])
         if at + 8 + size > end:
             return None
-        if name not in (b"TREE", b"UNTR", b"FSMN", b"EOIE", b"IEOT"):
+        # TREE stays in: a forged cache-tree would become the owner's next commit tree.
+        if name not in (b"UNTR", b"FSMN", b"EOIE", b"IEOT"):
             digest.update(name + struct.pack(">I", size) + data[at + 8:at + 8 + size])
         at += 8 + size
     return digest.hexdigest()
