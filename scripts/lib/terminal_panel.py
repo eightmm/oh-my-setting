@@ -2347,11 +2347,22 @@ def snapshot(repo, room_id=None, _tick=None):
                 if state.get("plan", {}).get("present"):
                     # The task list is board context: a slow or failed read leaves the room and its mains drawn.
                     try:
-                        run = subprocess.run(["bash", str(ENTRY), "agent-plan", "--repo", str(repo), "list", "--json"],
-                                             capture_output=True, text=True, timeout=15, check=False,
-                                             stdin=subprocess.DEVNULL)
-                        if run.returncode == 0:
-                            state["room"]["repo_tasks"] = json.loads(run.stdout).get("tasks", [])
+                        from panel_cache import read_plan_list
+                        def collect_plan():
+                            try:
+                                run = subprocess.run(["bash", str(ENTRY), "agent-plan", "--repo", str(repo), "list", "--json"],
+                                                     capture_output=True, text=True, timeout=15, check=False,
+                                                     stdin=subprocess.DEVNULL)
+                            except OSError as error:
+                                # Cache-storage fallback must not retry a failed command in the same tick.
+                                raise ValueError("plan list unavailable") from error
+                            if run.returncode != 0:
+                                raise ValueError("plan list unavailable")
+                            value = json.loads(run.stdout)
+                            if not isinstance(value, dict) or not isinstance(value.get("tasks"), list):
+                                raise ValueError("invalid plan list")
+                            return value
+                        state["room"]["repo_tasks"] = read_plan_list(repo, collect_plan)["tasks"]
                     except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
                         state["room"]["repo_tasks_unavailable"] = True
                     try:

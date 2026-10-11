@@ -881,6 +881,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/scripts/lib" "$TMP" <<'PY' || fail "s
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import time
@@ -947,6 +948,381 @@ entry = json.loads(path.read_text())
 entry['created'] = 10 ** 400
 path.write_text(json.dumps(entry), encoding='utf-8')
 assert board() == {'number': 8}, 'overflowing cache timestamp did not trigger recollection'
+
+# Plan reads outlive the dashboard interval, including across board processes.
+plan.write_text('{"tasks": {}}', encoding='utf-8')
+plan_worker = worker.replace("cache.read_shared(repo, 'dashboard', compute)",
+                             "cache.read_plan_list(repo, lambda: {'tasks': [compute()]})")
+def plan_board(now):
+    return json.loads(subprocess.check_output(
+        [sys.executable, '-c', plan_worker, sys.argv[1], str(project), str(counter), str(now)],
+        text=True, timeout=5))
+now = int(time.time())
+assert plan_board(now) == plan_board(now + 5) == plan_board(now + 10) == {'tasks': [{'number': 9}]}
+replacement = plan.with_suffix('.tmp')
+replacement.write_text(plan.read_text(), encoding='utf-8')
+replacement.replace(plan)
+assert plan_board(now + 15) == {'tasks': [{'number': 10}]}, 'same-size replacement was missed'
+os.utime(plan, ns=(plan.stat().st_atime_ns, plan.stat().st_mtime_ns + 1_000_000))
+assert plan_board(now + 20) == {'tasks': [{'number': 11}]}, 'mtime change was missed'
+
+# Measure real agent-plan invocations on fixture state only, using simulated
+# five-second tick clocks so this regression needs no sleep or live repository.
+plan.write_text(json.dumps({'schema': 3, 'tasks': {
+    'cache-task': {'id': 'cache-task', 'state': 'ready', 'depends': [], 'title': 'fixture'}}}), encoding='utf-8')
+plan_cache = project / cache.DIRECTORY / 'plan-list.json'
+plan_cache.unlink()
+real_run = subprocess.run
+calls = []
+def run_plan(command, **kwargs):
+    if 'agent-plan' in command:
+        started = time.perf_counter()
+        result = real_run(command, **kwargs)
+        calls.append((time.perf_counter() - started) * 1000)
+        return result
+    if command[0] == 'git' or command[:2] == ['bash', '-c']:
+        return real_run(command, **kwargs)
+    return subprocess.CompletedProcess(command, 0, '{}', '')
+def measure(reader, repo=project, expected='cache-task', detailed=False):
+    calls.clear()
+    ticks, counts = [], []
+    started = time.perf_counter()
+    with patch.object(panel, 'dashboard', return_value=({'plan': {'present': True}}, 0)), \
+            patch.object(panel.room, 'status', side_effect=lambda repo, ident: {'id': ident}), \
+            patch.object(panel_results, 'completed_tasks', return_value={}), \
+            patch.object(panel, 'read_shared', side_effect=lambda repo, key, collect, **kwargs: collect()), \
+            patch.object(cache, 'read_plan_list', side_effect=reader), \
+            patch.object(panel.subprocess, 'run', side_effect=run_plan):
+        for tick in range(3):
+            tick_start, tick_calls = time.perf_counter(), len(calls)
+            with patch.object(cache.time, 'time', return_value=now + tick * 5):
+                state, status = panel.snapshot(repo, 'board-%d' % tick)
+                assert status == 0 and state['room']['repo_tasks'][0]['id'] == expected, state
+            ticks.append(round((time.perf_counter() - tick_start) * 1000, 1))
+            counts.append(len(calls) - tick_calls)
+    if detailed:
+        return {'tick_ms': ticks, 'tick_calls': counts}
+    return len(calls), (time.perf_counter() - started) * 1000
+baseline = measure(lambda repo, collect: collect())
+cached = measure(cache.read_plan_list)
+assert baseline[0] == 3 and cached[0] == 1, (baseline, cached)
+os.utime(plan, ns=(plan.stat().st_atime_ns, plan.stat().st_mtime_ns + 1_000_000))
+touched = measure(cache.read_plan_list)
+assert touched[0] == 1, touched
+print('plan-list fixture: before=%d calls %.1f ms; after=%d calls %.1f ms; touched=%d calls %.1f ms'
+      % (baseline + cached + touched))
+
+with patch.object(cache, 'fingerprint', side_effect=AssertionError('plan cache walked the repository')):
+    assert cache.read_plan_list(project, lambda: None)['tasks'][0]['id'] == 'cache-task'
+def raced_plan():
+    plan.write_text(plan.read_text() + ' ', encoding='utf-8')
+    return {'tasks': []}
+plan_cache.unlink()
+assert cache.read_plan_list(project, raced_plan) == {'tasks': []}
+assert not plan_cache.exists(), 'plan changed during collection was published'
+completions = project / '.oms/plan/completions'
+completions.mkdir()
+assert cache.read_plan_list(project, lambda: {'tasks': []}) == {'tasks': []}
+assert plan_cache.exists(), 'empty completion namespace prevented reuse'
+completions.rmdir()
+
+# Refresh ages locally; at the exact TTL boundary consult the engine again.
+plan_cache.unlink(missing_ok=True)
+anchor = int(time.time()) - 20
+claim = {'id': 'claim', 'state': 'claimed', 'depends': [], 'title': 'fixture',
+         'claimed_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(anchor)), 'ttl': '10',
+         'claim_expired': False, 'claim_age_s': 0}
+stored_claim = dict(claim)
+stored_claim.pop('claim_expired')
+stored_claim.pop('claim_age_s')
+plan.write_text(json.dumps({'schema': 3, 'tasks': {'claim': stored_claim}}), encoding='utf-8')
+with patch.object(cache.time, 'time', return_value=anchor):
+    assert cache.read_plan_list(project, lambda: {'tasks': [claim]})['tasks'][0]['claim_expired'] is False
+with patch.object(cache.time, 'time', return_value=anchor + 5):
+    assert cache.read_plan_list(project, lambda: None)['tasks'][0]['claim_age_s'] == 5
+with patch.object(cache.time, 'time', return_value=anchor + 10):
+    with patch.object(panel, 'dashboard', return_value=({'plan': {'present': True}}, 0)), \
+            patch.object(panel.room, 'status', return_value={'id': 'ttl'}), \
+            patch.object(panel_results, 'completed_tasks', return_value={}), \
+            patch.object(panel, 'read_shared', side_effect=lambda repo, key, collect, **kwargs: collect()), \
+            patch.object(panel.subprocess, 'run', side_effect=run_plan) as command:
+        state, status = panel.snapshot(project, 'ttl')
+        assert status == 0 and state['room']['repo_tasks'][0]['claim_expired'] is True
+        assert command.call_count == 2, 'expired claim did not reach agent-plan'
+
+# Failed reads leave the room drawn and retry on the following tick.
+plan_cache.unlink()
+with patch.object(panel, 'dashboard', return_value=({'plan': {'present': True}}, 0)), \
+        patch.object(panel.room, 'status', return_value={'id': 'retry'}), \
+        patch.object(panel_results, 'completed_tasks', return_value={}), \
+        patch.object(panel, 'read_shared', side_effect=lambda repo, key, collect, **kwargs: collect()), \
+        patch.object(panel.subprocess, 'run', side_effect=[
+            subprocess.CompletedProcess([], 0, '{}', ''), subprocess.CompletedProcess([], 1, '', ''),
+            subprocess.CompletedProcess([], 0, '{}', ''), subprocess.CompletedProcess([], 0, '{"tasks": []}', '')]) as command:
+    state, status = panel.snapshot(project, 'retry')
+    assert status == 0 and state['room']['repo_tasks_unavailable'] is True
+    assert not plan_cache.exists(), 'failed read was cached'
+    state, status = panel.snapshot(project, 'retry')
+    assert status == 0 and state['room']['repo_tasks'] == [] and command.call_count == 4
+
+# Scale the same real validation path to a mixed closed plan. Synthetic receipt
+# digests/proofs use the canonical codec; every measured collection runs the
+# actual agent-plan validator rather than mocking completion acceptance.
+closed = Path(sys.argv[2]) / 'closed-panel'
+(closed / '.oms/hooks').mkdir(parents=True)
+(closed / '.oms/artifacts').mkdir()
+(closed / '.oms/plan/completions').mkdir(parents=True)
+root = Path(sys.argv[1]).parents[1]
+fixture_env = {key: value for key, value in os.environ.items() if not key.startswith('OMS_')}
+fixture_env['OMS_LOCK_DIR'] = str(closed / '.oms/fixture-locks')
+real_run(['git', '-C', str(closed), 'init', '-q'], check=True, env=fixture_env)
+def fixture_call(script, *args):
+    result = real_run(['bash', str(root / 'scripts' / script), '--repo', str(closed), *args],
+                      capture_output=True, text=True, check=True, timeout=20, env=fixture_env)
+    return result.stdout.strip()
+room_id = json.loads(fixture_call('room.sh', 'new', '--topic', 'Closed plan fixture', '--json'))['id']
+main = fixture_call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
+                    '--ref', 'panel_room_id=' + room_id, '--ref', 'panel_role=main',
+                    '--then', 'starting', '--then', 'working')
+fixture_call('room.sh', 'join', '--id', room_id, '--participant', main, '--provider', 'codex', '--role', 'main')
+core = runpy.run_path(str(root / 'scripts/lib/plan-completion.py'))
+receipt_codec = core['RECEIPT']
+encoded, sha = core['encoded'], core['sha']
+provenance = core['capture_prefixes'](str(closed), room_id)
+namespace = core['namespace'](str(closed))
+(closed / 'verify.sh').write_text(':\n', encoding='utf-8')
+(closed / 'decision.md').write_text('Reviewed cancellation.\n', encoding='utf-8')
+plan_id = 'plan_' + '1' * 32
+closed_tasks, index_rows = {}, []
+stamp = '2026-10-11T00:00:00Z'
+def closed_ref(rel):
+    return {'path': rel, 'sha256': sha((closed / rel).read_bytes())}
+verifier_file = dict(closed_ref('verify.sh'), state='file', mode='100644')
+def original_task(tid):
+    return {'id': tid, 'title': 'Inspect source evidence', 'state': 'review', 'updated': stamp,
+            'created': stamp, 'depends': [], 'provider': 'codex', 'role': 'analysis-worker',
+            'claimed_by_participant': main, 'lease_epoch': 1, 'lease_id': 'lease_' + '2' * 32,
+            'repair_count': 0, 'repair_artifact': '', 'executor_id': '', 'executor_soul_sha256': '',
+            'autopilot_owner_id': '', 'verify': 'bash verify.sh', 'artifact': '.oms/artifacts/' + tid + '.md'}
+def add_completion(number):
+    tid = 'closed-%03d' % number
+    original = original_task(tid)
+    (closed / original['artifact']).write_text('Source evidence for ' + tid + '\n', encoding='utf-8')
+    artifact = closed_ref(original['artifact'])
+    row = dict(event_id='evt-' + tid, kind='call-import', exit=0, artifact=artifact['path'],
+               artifact_sha256=artifact['sha256'], task_id=tid, plan_id=plan_id)
+    index_rows.append(row)
+    bundle = {'schema': 1, 'kind': 'main-research-accepted', 'plan_id': plan_id, 'task_id': tid,
+              'task_sha256': receipt_codec['digest'](original), 'plan_sha256': '3' * 64,
+              'state': original['state'], 'lease_id': original['lease_id'],
+              'owner': {'provider': 'codex', 'participant': main, 'parent_provider': 'codex'},
+              'original_contract': receipt_codec['projection'](original), 'review_summary': 'Reviewed source evidence',
+              'reviewed_obligations': ['inspect'], 'requirements': [{
+                  'id': 'inspect', 'obligation': original['title'], 'deliverable': 'Source findings',
+                  'source_paths': ['verify.sh'], 'evidence': [artifact]}],
+              'base_commit': '4' * 40, 'source_envelope': ['verify.sh'], 'source_manifest': [verifier_file],
+              'verifier': {'command': 'bash verify.sh', 'files': [verifier_file],
+                           'adopted': False, 'review_summary': 'Reviewed frozen verifier'},
+              'reviewer': {'kind': 'native-panel-main'},
+              'main_research': {'classification': 'research-only', 'provenance': 'main-reviewed-external',
+                  'artifact': artifact, 'index_event_id': row['event_id'], 'original_deliverable': original['title'],
+                  'read_only_contract': 'original-report-only', 'original_producer_status':
+                  {key: row.get(key) for key in ('kind', 'exit', 'attempt_id', 'task_id', 'plan_id', 'base_sha')}}}
+    bundle_sha = sha(encoded(bundle))
+    reviewer = {'schema': 1, 'kind': 'native-panel-main', 'participant': main, 'parent_provider': 'codex',
+                'room_id': room_id, 'attempt_id': main, 'bundle_sha256': bundle_sha}
+    evidence = {'index': row, 'artifact': artifact, 'provenance': 'main-reviewed-external',
+                'child_provenance_asserted': False, 'reviewer': reviewer}
+    snapshot = {'head': '4' * 40, 'base_commit': '4' * 40,
+                'manifest_sha256': sha(encoded(bundle['source_manifest'])), 'source_identities': {},
+                'verifier_command_sha256': sha(b'bash verify.sh'), 'repository_sha256': namespace,
+                'evidence': evidence, 'evidence_identities': {}, 'provenance': provenance}
+    verification = {'exit': 0, 'command_sha256': snapshot['verifier_command_sha256'],
+                    'output_sha256': sha(b''), 'output_bytes': 0}
+    verification['proof_sha256'] = sha(encoded(dict(verification, snapshot_sha256=sha(encoded(snapshot)))))
+    receipt = {'schema': 1, 'kind': 'oms-plan-completion', 'completion_kind': 'main-research-accepted',
+               'bundle_sha256': bundle_sha, 'bundle': bundle, 'bundle_raw': encoded(bundle).decode(),
+               'original_task': original, 'original_plan_sha256': bundle['plan_sha256'],
+               'snapshot': snapshot, 'verification': verification, 'ts': stamp}
+    rel = '.oms/plan/completions/' + sha(encoded(receipt)) + '.json'
+    (closed / rel).write_bytes(encoded(receipt))
+    closed_tasks[tid] = core['completion_task'](receipt, closed_ref(rel))
+    return closed / rel
+first_receipt = add_completion(0)
+for number in range(1, 125):
+    add_completion(number)
+for number in range(125, 250):
+    tid = 'closed-%03d' % number
+    original = dict(original_task(tid), state='ready')
+    cancellation = {'schema': 1, 'kind': 'operator-cancellation', 'ts': stamp, 'operator_consent': 'cancel',
+                    'reason': 'Reviewed cancellation', 'state': 'ready', 'original_updated': stamp,
+                    'lease_id_sha256': sha(original['lease_id'].encode()), 'plan_sha256': '3' * 64,
+                    'task_sha256': sha(json.dumps(original, sort_keys=True, ensure_ascii=False,
+                                                separators=(',', ':'), allow_nan=False).encode()),
+                    'decision_artifact': 'decision.md', 'decision_artifact_sha256': closed_ref('decision.md')['sha256']}
+    closed_tasks[tid] = dict(original, state='cancelled', cancellation=cancellation)
+closed_plan = closed / '.oms/plan/tasks.json'
+def save_closed():
+    closed_plan.write_text(json.dumps({'schema': 3, 'plan_id': plan_id, 'tasks': closed_tasks}), encoding='utf-8')
+    (closed / '.oms/artifacts/index.jsonl').write_bytes(b''.join(encoded(row) for row in index_rows))
+save_closed()
+readers = [('round3', cache.read_plan_list)]
+if len(sys.argv) > 3:
+    # Comparative timing is an explicit fixture benchmark, not a repeated CI
+    # baseline. Ordinary regression runs require no historical Git objects.
+    previous = {'__file__': str(Path(sys.argv[1]) / 'panel_cache.py')}
+    exec(Path(sys.argv[3]).read_bytes(), previous)
+    readers = [('round2', previous['read_plan_list']), ('round3', cache.read_plan_list)]
+for label, reader in readers:
+    (closed / cache.DIRECTORY / 'plan-list.json').unlink(missing_ok=True)
+    result = measure(reader, closed, 'closed-000', detailed=True)
+    assert result['tick_calls'] == ([1, 0, 0] if label in ('round2', 'round3') else [1, 1, 1]), result
+    print('closed-plan unchanged %s: %s' % (label, json.dumps(result)))
+add_completion(250)
+save_closed()
+for label, reader in readers:
+    result = measure(reader, closed, 'closed-000', detailed=True)
+    assert result['tick_calls'] == ([1, 0, 0] if label in ('round2', 'round3') else [1, 1, 1]), result
+    print('closed-plan added %s: %s' % (label, json.dumps(result)))
+os.utime(first_receipt, ns=(first_receipt.stat().st_atime_ns, first_receipt.stat().st_mtime_ns + 1_000_000))
+for label, reader in readers:
+    result = measure(reader, closed, 'closed-000', detailed=True)
+    assert result['tick_calls'] == ([1, 0, 0] if label in ('round2', 'round3') else [1, 1, 1]), result
+    print('closed-plan receipt-touched %s: %s' % (label, json.dumps(result)))
+with patch.object(cache, '_plan_inputs', side_effect=AssertionError('dependencies reread on a cache hit')), \
+        patch.object(Path, 'iterdir', side_effect=AssertionError('namespace walked on a cache hit')):
+    assert len(cache.read_plan_list(closed, lambda: None)['tasks']) == 251
+# External HOME/config aliases are normal on macOS and Fedora Atomic. Keep
+# their resolved targets and detect retargeting without accepting repo symlinks.
+outside = Path(sys.argv[2]) / 'external-home'
+outside.mkdir()
+(outside / '.gitconfig').write_text('', encoding='utf-8')
+alias = Path(sys.argv[2]) / 'home-alias'
+alias.symlink_to(outside, target_is_directory=True)
+with patch.dict(os.environ, HOME=str(alias), GIT_CONFIG_GLOBAL=str(alias / '.gitconfig')):
+    result = measure(cache.read_plan_list, closed, 'closed-000', detailed=True)
+    assert result['tick_calls'] == [1, 0, 0], result
+    envelope = {'inputs': cache._plan_inputs(closed)}
+    os.utime(outside / '.gitconfig', None)
+    assert not cache._plan_inputs_current(envelope), 'external config touch was missed'
+    result = measure(cache.read_plan_list, closed, 'closed-000', detailed=True)
+    assert result['tick_calls'] == [1, 0, 0], result
+    envelope = {'inputs': cache._plan_inputs(closed)}
+    replacement_home = Path(sys.argv[2]) / 'replacement-home'
+    replacement_home.mkdir()
+    (replacement_home / '.gitconfig').write_text('', encoding='utf-8')
+    alias.unlink()
+    alias.symlink_to(replacement_home, target_is_directory=True)
+    assert not cache._plan_inputs_current(envelope), 'external alias retarget was missed'
+repo_alias = closed / 'unsafe-alias'
+repo_alias.symlink_to(outside, target_is_directory=True)
+try:
+    cache._plan_input_stamp(repo_alias)
+except ValueError:
+    pass
+else:
+    raise AssertionError('repository symlink became cacheable')
+repo_alias.unlink()
+# Check parser parity with the engine definition without running its CLI body.
+import ast
+engine = ast.parse((root / 'scripts/lib/agent_plan_core.py').read_text())
+parser = next(node for node in engine.body if isinstance(node, ast.FunctionDef) and node.name == 'claim_ttl_for')
+for raw_default in ('', '0', '0010', '3600', '+10', ' 10', '١٠'):
+    default = int(raw_default) if raw_default and all('0' <= digit <= '9' for digit in raw_default) else 3600
+    namespace = {'CLAIM_TTL': default}
+    exec(compile(ast.Module(body=[parser], type_ignores=[]), '<engine TTL>', 'exec'), namespace)
+    with patch.dict(os.environ, OMS_PLAN_CLAIM_TTL=raw_default):
+        for value in ('', '0', '0010', '١٠', '+10', ' 10', 10, None):
+            task = {'ttl': value}
+            assert cache._plan_claim_ttl(task) == namespace['claim_ttl_for'](task), (raw_default, value)
+# Discovery pays the commit namespace resolver once and guards only the pushed
+# ref chain (plus replacement refs), not unrelated refs or the POSIX index.
+receipt_paths = [first_receipt, next(path for path in (closed / '.oms/plan/completions').iterdir() if path != first_receipt)]
+original_receipts = [path.read_bytes() for path in receipt_paths]
+land_directory = Path(sys.argv[2]) / 'land-receipts'
+land_directory.mkdir()
+commit = '5' * 40
+(land_directory / (commit + '-fixture.json')).write_text(json.dumps({'remote': 'origin', 'target': 'main'}))
+remote_ref = closed / '.git/refs/remotes/origin/main'
+remote_ref.parent.mkdir(parents=True)
+resolved_ref = remote_ref.with_name('accepted')
+remote_ref.write_text('ref: refs/remotes/origin/accepted\n')
+resolved_ref.write_text(commit + '\n')
+try:
+    for path, raw in zip(receipt_paths, original_receipts):
+        receipt = json.loads(raw)
+        receipt['completion_kind'] = 'satisfied-by'
+        receipt['bundle']['successor'] = {'product_kind': 'commit', 'commit_sha': commit}
+        path.write_bytes(encoded(receipt))
+    from unittest.mock import Mock
+    resolver = Mock(return_value=str(land_directory))
+    with patch.object(cache.runpy, 'run_path', return_value={'canonical_land_directory': resolver}) as loader:
+        dependencies = cache._plan_inputs(closed)
+    assert loader.call_count == resolver.call_count == 1, 'commit namespace resolved per receipt'
+    paths = {item[0] for item in dependencies}
+    assert {str(remote_ref), str(resolved_ref), str(closed / '.git/packed-refs')}.issubset(paths)
+    envelope = {'inputs': dependencies}
+    os.utime(resolved_ref, ns=(resolved_ref.stat().st_atime_ns, resolved_ref.stat().st_mtime_ns + 1_000_000))
+    assert not cache._plan_inputs_current(envelope), 'resolved Git ref touch was missed'
+    assert str(closed / '.git/refs/heads') not in paths, 'unrelated refs were stamped'
+    assert (str(closed / '.git/index') in paths) == (os.name == 'nt')
+finally:
+    for path, raw in zip(receipt_paths, original_receipts):
+        path.write_bytes(raw)
+    remote_ref.unlink()
+    resolved_ref.unlink()
+
+for changed in (closed / 'decision.md', closed / '.oms/artifacts/closed-000.md',
+                closed / provenance['capture']['path'], closed / provenance['room']['path'],
+                closed / 'verify.sh'):
+    os.utime(changed, ns=(changed.stat().st_atime_ns, changed.stat().st_mtime_ns + 1_000_000))
+    result = measure(cache.read_plan_list, closed, 'closed-000', detailed=True)
+    assert result['tick_calls'] == [1, 0, 0], (changed, result)
+# A changed dependency reaches validation and its rejection does not reuse the
+# previous successful board value or publish a failed collection.
+(closed / 'decision.md').write_text('Changed decision bytes!\n', encoding='utf-8')
+def collect_closed():
+    result = real_run(['bash', str(root / 'scripts/oms'), 'agent-plan', '--repo', str(closed), 'list', '--json'],
+                      capture_output=True, text=True, timeout=15, env=fixture_env)
+    if result.returncode:
+        raise ValueError(result.stderr)
+    return json.loads(result.stdout)
+for tick in range(2):
+    try:
+        cache.read_plan_list(closed, collect_closed)
+    except ValueError as error:
+        assert 'cancellation decision artifact digest changed' in str(error), error
+    else:
+        raise AssertionError('changed decision bypassed actual validation')
+
+# The managed patch reader's private certificate/anchor are validation inputs,
+# even though their bytes live outside the repository. Probe dependency discovery
+# directly; this altered receipt is never presented as an accepted completion.
+import shutil
+capture = core['CAPTURE']
+source_patch = closed / 'fixture.patch'
+source_patch.write_bytes(b'fixture patch bytes\n')
+private_patch = capture['allocate'](str(closed), str(source_patch), 'land-cache-fixture', sha(source_patch.read_bytes()))
+private_dir = Path(private_patch).parent
+receipt_bytes = first_receipt.read_bytes()
+try:
+    publication = closed / '.oms/landing-patches/land-cache-fixture.patch'
+    publication.parent.mkdir()
+    capture['publish'](str(closed), private_patch, str(publication))
+    altered = json.loads(receipt_bytes)
+    altered['bundle']['requirements'][0]['evidence'].append(closed_ref('.oms/landing-patches/land-cache-fixture.patch'))
+    first_receipt.write_bytes(encoded(altered))
+    dependencies = cache._plan_inputs(closed)
+    paths = {item[0] for item in dependencies}
+    assert str(private_dir / 'owner.json') in paths and str(private_dir / 'publication.anchor') in paths, paths
+    assert str(closed / '.oms/landings.jsonl') in paths
+    for changed in (private_dir / 'owner.json', private_dir / 'publication.anchor'):
+        envelope = {'inputs': cache._plan_inputs(closed)}
+        os.utime(changed, ns=(changed.stat().st_atime_ns, changed.stat().st_mtime_ns + 1_000_000))
+        assert not cache._plan_inputs_current(envelope), 'private patch generation input was missed'
+finally:
+    first_receipt.write_bytes(receipt_bytes)
+    shutil.rmtree(private_dir)
 
 # The board still selects its own room, and result queries share the same
 # generation without retaining scoped answer text or skipping digest checks.
