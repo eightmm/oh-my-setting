@@ -283,8 +283,16 @@ def validate_event(rows, event, text):
             identifier(event["task_id"], "task")
         return True
     state = project(rows)
-    if child and participant(state, os.environ.get("OMS_ROOM_PARTICIPANT"))["role"] == "main":
-        raise ValueError("a worker cannot speak as a native main")
+    if child:
+        member = participant(state, os.environ.get("OMS_ROOM_PARTICIPANT"))
+        if member["role"] == "main":
+            raise ValueError("a worker cannot speak as a native main")
+        if kind == "message":
+            if str(event["id"]).startswith("result-"):
+                raise ValueError("result handoffs are written by the panel, not by a worker")
+            parent = member.get("parent")
+            if not parent or event.get("recipient") != parent:
+                raise ValueError("a worker can only message its parent %s" % (parent or "<missing>"))
     if kind == "closed":
         who = identifier(event["participant"], "participant")
         caller = os.environ.get("OMS_ROOM_PARTICIPANT")

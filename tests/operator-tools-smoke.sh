@@ -4601,6 +4601,30 @@ room.join(project, declared, "decl-main", "claude", model="claude-opus-5-5", own
 room.join(project, declared, "decl-peer", "codex", role="worker", parent="decl-main")
 room.join(project, declared, "decl-other", "codex", role="worker", parent="decl-main")
 room.send(project, declared, "decl-main", "all", "Parsing the config", kind="status")
+for guard in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_HARNESS_DELEGATE_DEPTH": "1"}):
+    with patch.dict(os.environ, dict(guard, OMS_ROOM_ID=declared, OMS_ROOM_PARTICIPANT="decl-peer")):
+        for message_id in ("result-decl-peer", "result-decl-other"):
+            before_child_result = len(room.records(project, declared))
+            try:
+                room.send(project, declared, "decl-peer", "decl-main", "Call exit=0;", kind="handoff",
+                          message_id=message_id)
+            except ValueError as error:
+                assert "result handoffs are written by the panel, not by a worker" in str(error), error
+            else:
+                raise AssertionError("a worker wrote a panel result handoff")
+            assert len(room.records(project, declared)) == before_child_result
+        child_note = room.send(project, declared, "decl-peer", "decl-main", "Scoped worker observation")
+    room.acknowledge(project, declared, "decl-main", [child_note["id"]])
+room.join(project, declared, "decl-unparented", "codex", role="worker")
+with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1", "OMS_ROOM_ID": declared,
+                             "OMS_ROOM_PARTICIPANT": "decl-unparented"}):
+    try:
+        room.send(project, declared, "decl-unparented", "decl-main", "Missing parent")
+    except ValueError as error:
+        assert "a worker can only message its parent <missing>" in str(error), error
+    else:
+        raise AssertionError("a worker without an admitted parent sent a message")
+room.append(project, declared, {"kind": "leave", "participant": "decl-unparented"}, "Left")
 room.send(project, declared, "decl-peer", "decl-main", "Call exit=3; parent acceptance pending.\nignored", kind="handoff",
           message_id="result-decl-peer")
 # Another call cannot settle a sibling by sending a result under its name, and a plain note is no result.

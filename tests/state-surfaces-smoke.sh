@@ -88,11 +88,27 @@ assert not json.loads(call("oms_peer_result", thread="room", participant="sol")[
 text, bad = call("oms_peer_start", kind="ack", thread="room", participant="opus", message_ids=["mcp-question"])
 assert not bad and json.loads(text)["approval"] is False, text
 room.join(repo, "room", "helper", "claude", "worker", "claude-sonnet-5-5", parent="opus")
+room.join(repo, "room", "sibling", "claude", "worker", "claude-sonnet-5-5", parent="opus")
 room.send(repo, "room", "opus", "helper", "Inspect the worker scope", "question", message_id="worker-question")
+room.send(repo, "room", "sibling", "helper", "Inspect the sibling scope", "question", message_id="sibling-question")
 os.environ.update(OMS_HARNESS_CHILD="1", OMS_ROOM_ID="room", OMS_ROOM_PARTICIPANT="helper")
+for recipient in ("all", "sibling"):
+    before_refused = len(room.records(repo, "room"))
+    text, bad = call("oms_peer_start", kind="message", thread="room", participant="helper",
+                     to_participant=recipient, prompt="Outside parent scope")
+    assert bad and "a worker can only message its parent opus" in text, text
+    assert len(room.records(repo, "room")) == before_refused
+text, bad = call("oms_peer_start", kind="message", thread="room", participant="helper", to_participant="sibling",
+                 message_kind="answer", reply_to="sibling-question", prompt="Outside parent reply")
+assert bad and "a worker can only message its parent opus" in text, text
+text, bad = call("oms_peer_start", kind="message", thread="room", participant="helper", to_participant="opus",
+                 prompt="Scoped worker note")
+assert not bad, text
 text, bad = call("oms_peer_start", kind="message", thread="room", participant="helper", to_participant="opus",
                  message_kind="answer", reply_to="worker-question", prompt="Signature confirmed")
 assert not bad, text
+text, bad = call("oms_peer_start", kind="ack", thread="room", participant="helper", message_ids=["worker-question"])
+assert not bad and json.loads(text)["approval"] is False, text
 assert call("oms_peer_start", kind="message", thread="room", participant="sol", prompt="Forged identity")[1]
 assert call("oms_peer_start", kind="consult", prompt="Recursive peer call")[1]
 os.environ["OMS_ROOM_PARTICIPANT"] = "opus"
