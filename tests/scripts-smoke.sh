@@ -28611,7 +28611,8 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     fail "the checked-out oms/ branch must stay a hard ref change, got: ${changed:-<none>}"
 
   # Panel reads keep state in this repo while executing in another checkout.
-  # Only the state side may tolerate evidence-backed foreign branch moves.
+  # Both sides tolerate evidence-backed foreign moves, including shared Git
+  # metadata, while the source checkout's own surfaces remain protected.
   local read_source="$TMP/guard-read-source"
   local other_main="$TMP/guard-read-other-main"
   make_committed_repo "$read_source"
@@ -28647,6 +28648,63 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     out="$(ma_read_guard_assert 2>&1)" || rc=$?
     [ "$rc" = 2 ] || fail "cross-repo read source tracked changes must stay hard: $out"
     contains "$out" 'source repository protected surfaces: tracked' || fail "read source violation was not named: $out"
+
+    # A live managed source must not be mistaken for an exempt sibling.
+    local managed_root="$TMP/guard-read-managed"
+    local linked_source="$managed_root/oh-my-setting-scratch.source/wt"
+    local extra="$TMP/guard-read-extra" action changed
+    make_live_managed_sibling "$project" "${linked_source%/wt}"
+    git -C "$linked_source" checkout -qb oms/read-source
+    OMS_DELEGATE_WORKTREE_ROOT="$managed_root"
+    MA_READ_SOURCE_REPO="$linked_source"
+    for strict in 0 1; do
+      ma_read_guard_begin "$snap/read-linked-$strict" || fail "linked read snapshot failed"
+      ma_read_guard_rebaseline_source || fail "linked read rebaseline failed"
+      next="$(git -C "$other_main" commit-tree -p HEAD -m linked-read-move 'HEAD^{tree}')"
+      git -C "$other_main" reset -q --hard "$next"
+      rc=0
+      out="$(OMS_WORKER_GUARD_STRICT="$strict" ma_read_guard_assert 2>&1)" || rc=$?
+      if [ "$strict" = 0 ]; then
+        [ "$rc" = 0 ] || fail "foreign oms move stopped a linked read: $out"
+        contains "$out" 'state repository changes: foreign-ref' || fail "linked state warning missing: $out"
+        contains "$out" 'source repository changes: foreign-ref' || fail "linked source warning missing: $out"
+      else
+        [ "$rc" = 2 ] || fail "strict linked read tolerated a foreign ref move: $out"
+      fi
+    done
+    for action in add remove; do
+      ma_read_guard_begin "$snap/read-linked-$action" || fail "linked lifecycle snapshot failed"
+      if [ "$action" = add ]; then
+        git -C "$project" worktree add -q --detach "$extra" HEAD
+      else
+        git -C "$project" worktree remove "$extra"
+      fi
+      rc=0
+      out="$(ma_read_guard_assert 2>&1)" || rc=$?
+      [ "$rc" = 0 ] || fail "foreign worktree $action stopped a linked read: $out"
+      contains "$out" 'source repository changes: foreign-worktree' || fail "linked lifecycle warning missing: $out"
+    done
+    ma_read_guard_begin "$snap/read-linked-own-branch" || fail "own source branch snapshot failed"
+    next="$(git -C "$linked_source" commit-tree -p HEAD -m own-source-move 'HEAD^{tree}')"
+    git -C "$linked_source" reset -q --hard "$next"
+    changed="$(oms_worker_surface_diff "$linked_source" "$MA_READ_GUARD_DIR/source" "" "$linked_source")"
+    [ "$changed" = refs ] || fail "source's own branch must remain a hard ref: $changed"
+    rc=0
+    out="$(ma_read_guard_assert 2>&1)" || rc=$?
+    [ "$rc" = 2 ] || fail "linked read tolerated its own source branch move: $out"
+    ma_read_guard_begin "$snap/read-linked-own-head" || fail "own source HEAD snapshot failed"
+    git -C "$linked_source" checkout -q --detach HEAD
+    changed="$(oms_worker_surface_diff "$linked_source" "$MA_READ_GUARD_DIR/source" "" "$linked_source")"
+    [ "$changed" = 'refs, gitmeta' ] || fail "live source HEAD identity must remain hard: $changed"
+    rc=0
+    out="$(ma_read_guard_assert 2>&1)" || rc=$?
+    [ "$rc" = 2 ] || fail "linked read tolerated its own source HEAD change: $out"
+    ma_read_guard_begin "$snap/read-linked-tracked" || fail "linked source content snapshot failed"
+    printf 'linked source mutation\n' >> "$linked_source/file.txt"
+    rc=0
+    out="$(ma_read_guard_assert 2>&1)" || rc=$?
+    [ "$rc" = 2 ] || fail "linked source tracked mutation must stay hard: $out"
+    contains "$out" 'source repository protected surfaces: tracked' || fail "linked source content violation was not named: $out"
   )
 }
 

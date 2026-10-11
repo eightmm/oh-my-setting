@@ -101,7 +101,8 @@ ma_read_guard_snapshot_source() {
   local head_file hooks_dir
   oms_git_assert_safe_execution_config "$MA_READ_SOURCE_REPO" diff-read || return 2
   oms_git_assert_plain_index "$MA_READ_SOURCE_REPO" || return 2
-  oms_worker_surface_snapshot "$MA_READ_SOURCE_REPO" "$MA_READ_GUARD_DIR/source" || return 2
+  # Bind foreign evidence without exempting the source's own managed checkout.
+  oms_worker_surface_snapshot "$MA_READ_SOURCE_REPO" "$MA_READ_GUARD_DIR/source" "$MA_READ_SOURCE_REPO" || return 2
   oms_git_execution_state_snapshot "$MA_READ_SOURCE_REPO" "$MA_READ_GUARD_DIR/source/git-execution-state" || return 2
   MA_READ_SOURCE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/source/git-execution-state")" || return 2
   head_file="$(git -C "$MA_READ_SOURCE_REPO" rev-parse --git-path HEAD | tr -d '\r')" || return 2
@@ -147,7 +148,7 @@ ma_read_guard_assert() {
   local root name digest changed surface hard soft execution
   for name in state source; do
     root="$REPO" digest="$MA_READ_STATE_EXECUTION_SHA" execution="$MA_READ_SOURCE_REPO"
-    [ "$name" != source ] || { root="$MA_READ_SOURCE_REPO"; digest="$MA_READ_SOURCE_EXECUTION_SHA"; execution=""; }
+    [ "$name" != source ] || { root="$MA_READ_SOURCE_REPO"; digest="$MA_READ_SOURCE_EXECUTION_SHA"; }
     oms_git_execution_state_assert_unchanged "$root" "$MA_READ_GUARD_DIR/$name/git-execution-state" "$digest" || return 2
     if [ "$name" = source ]; then
       if [ "$(oms_sha256_file "$MA_READ_SOURCE_HEAD_FILE")" != "$MA_READ_SOURCE_HEAD_SHA" ]; then
@@ -170,7 +171,10 @@ ma_read_guard_assert() {
     changed="$(oms_worker_surface_diff "$root" "$MA_READ_GUARD_DIR/$name" "" "$execution" | tr -d '\r')" || return 2
     hard="" soft=""
     for surface in $(printf '%s' "$changed" | tr ',' ' '); do
-      if [ "$name" = state ] && oms_worker_surface_is_soft "$surface" &&
+      # Source content/control changes stay hard; only attributed foreign Git
+      # activity gets the same relief as on the state side.
+      if { [ "$name" = state ] || [ "$surface" = foreign-ref ] || [ "$surface" = foreign-worktree ]; } &&
+        oms_worker_surface_is_soft "$surface" &&
         [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ]; then
         soft="${soft:+$soft, }$surface"
       else
@@ -178,7 +182,7 @@ ma_read_guard_assert() {
       fi
     done
     if [ -n "$soft" ]; then
-      echo "warning: read pass observed state repository changes: $soft; not attributable to the provider, review before landing" >&2
+      echo "warning: read pass observed $name repository changes: $soft; not attributable to the provider, review before landing" >&2
     fi
     if [ -n "$hard" ]; then
       echo "error: read pass changed $name repository protected surfaces: $hard" >&2
