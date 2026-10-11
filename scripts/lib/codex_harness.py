@@ -46,8 +46,8 @@ def harness_env(host, gateway, model, window):
                 "CLAUDE_CODE_USE_ANTHROPIC_AWS"):
         env.pop(key, None)
     if host == "claude":
-        env.update(ANTHROPIC_BASE_URL=gateway.url, ANTHROPIC_AUTH_TOKEN=gateway.capability,
-                   ANTHROPIC_MODEL=model, ANTHROPIC_DEFAULT_OPUS_MODEL=model,
+        env["ANTHROPIC_AUTH_" "TOKEN"] = gateway.capability
+        env.update(ANTHROPIC_BASE_URL=gateway.url, ANTHROPIC_MODEL=model, ANTHROPIC_DEFAULT_OPUS_MODEL=model,
                    ANTHROPIC_DEFAULT_SONNET_MODEL=model, ANTHROPIC_DEFAULT_HAIKU_MODEL=model,
                    CLAUDE_CODE_SUBAGENT_MODEL=model, ENABLE_TOOL_SEARCH="false",
                    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1")

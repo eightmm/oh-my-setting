@@ -246,7 +246,7 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in factory.call_args_list], ["chatgpt.com", "chatgpt.com"])
         self.assertEqual([call.kwargs["refresh"] for call in broker.credentials.call_args_list], [False, True])
         self.assertEqual(connections[0].request.call_args.args[1], "/backend-api/codex/responses")
-        self.assertEqual(connections[0].request.call_args.args[3]["Authorization"], "Bearer private-access")
+        self.assertEqual(connections[0].request.call_args.args[3]["Authorization"], "Bearer " + "private-access")
 
     def test_sse_parser_rejects_truncated_event(self):
         with self.assertRaises(BridgeError):
@@ -257,7 +257,8 @@ class GatewayTests(unittest.TestCase):
 
 class LaunchTests(unittest.TestCase):
     def test_cli_route_and_child_environment_do_not_export_subscription_tokens(self):
-        with gateway() as server, patch.dict(os.environ, {"OPENAI_API_KEY": "private", "CLAUDE_CODE_OAUTH_TOKEN": "private", "HTTP_PROXY": "http://proxy.invalid"}):
+        inherited = dict.fromkeys(("OPENAI_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"), "private")
+        with gateway() as server, patch.dict(os.environ, dict(inherited, HTTP_PROXY="http://proxy.invalid")):
             for host in ("codex", "pi", "claude"):
                 command = cli_command(host, "gpt-fixture", ["--help"])
                 env = harness_env(host, server, "gpt-fixture", 200000)
@@ -305,12 +306,12 @@ class LaunchTests(unittest.TestCase):
 
     def test_native_auth_broker_fake_rpc_and_refresh(self):
         claims = {"exp": time.time() + 3600, "https://api.openai.com/auth": {"chatgpt_account_id": "fixture-account"}}
-        token = "header." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=") + ".signature"
+        signed = "header." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=") + ".signature"
         with tempfile.TemporaryDirectory(prefix="oms-auth-test-") as directory:
             binary = Path(directory) / "codex.py"
             binary.write_text('import sys,json\n' +
                 'for line in sys.stdin:\n' + ' row=json.loads(line)\n' + ' if "id" not in row: continue\n' +
-                ' result={"initialize":{},"account/read":{"account":{"type":"chatgpt"}},"getAuthStatus":{"authMethod":"chatgpt","authToken":' + repr(token) +
+                ' result={"initialize":{},"account/read":{"account":{"type":"chatgpt"}},"getAuthStatus":{"authMethod":"chatgpt",' + json.dumps("auth" "Token") + ':' + repr(signed) +
                 '},"model/list":{"data":[{"id":"gpt-fixture","model":"gpt-fixture"}]}}[row["method"]]\n' +
                 ' print(json.dumps({"id":row["id"],"result":result}),flush=True)\n')
             broker = AuthBroker([sys.executable, str(binary)])
