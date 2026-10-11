@@ -494,6 +494,49 @@ def safe_label(value):
     return label
 
 
+def _main_window(pane):
+    if not re.fullmatch(r"%[0-9]+", pane):
+        raise ValueError("window ownership is unavailable")
+    result = subprocess.run(tmux_command("display-message", "-p", "-t", pane,
+        "#{window_id}\t#{@oms_panel_main_attempt}\t#{@oms_panel_native_pane}\t#{@oms_panel_repo}\t#{@oms_panel_room_participant}"),
+        capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
+    fields = result.stdout.replace("\r", "").rstrip("\n").split("\t")
+    if result.returncode or len(fields) != 5 or not re.fullmatch(r"@[0-9]+", fields[0]):
+        raise ValueError("window ownership is unavailable")
+    return fields
+
+
+def _main_exit_key():
+    from contextlib import ExitStack
+    from panel_input import TerminalInput
+    import select
+    saved = {}
+
+    def interrupt(number, frame):
+        for signum in saved:
+            signal.signal(signum, signal.SIG_IGN)
+        raise NativeShutdown(number)
+
+    try:
+        for name in ("SIGTERM", "SIGHUP"):
+            number = getattr(signal, name, None)
+            if number is not None:
+                saved[number] = signal.signal(number, interrupt)
+        # Register cleanup before entering: a signal may arrive during raw-mode setup.
+        with ExitStack() as cleanup:
+            terminal = TerminalInput()
+            cleanup.callback(terminal.__exit__)
+            inputs = terminal.__enter__()
+            if inputs.fd is None:
+                key = input()
+                return "\n" if not key else key
+            select.select([inputs.fd], [], [])
+            return os.read(inputs.fd, 1).decode("utf-8", errors="replace")
+    finally:
+        for number, previous in saved.items():
+            signal.signal(number, previous)
+
+
 def run_native(provider, repo, resume=None, model=None, task=None):
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
         raise ValueError("workers cannot open native owner sessions")
@@ -506,10 +549,9 @@ def run_native(provider, repo, resume=None, model=None, task=None):
             # Release the process-lifetime lease while the terminal exit prompt waits.
             with _lock(repo, "panel-main-session", timeout=.1):
                 if attempt:
+                    window = _main_window(pane)
                     if (session_owner(session) != str(Path(repo).resolve())
-                            or pane_option("@oms_panel_main_attempt") != attempt
-                            or pane_option("@oms_panel_native_pane")
-                            or pane_option("@oms_panel_repo") != str(Path(repo).resolve())):
+                            or window[1:4] != [attempt, "", str(Path(repo).resolve())]):
                         raise ValueError("restart ownership is unverified; existing window preserved")
                     if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
                         raise ValueError("another main is live or unverified; finish it before restarting here")
@@ -521,9 +563,16 @@ def run_native(provider, repo, resume=None, model=None, task=None):
                             or previous.get("refs", {}).get("panel_role") != "main"
                             or previous.get("refs", {}).get("panel_room_id") != ident
                             or previous.get("refs", {}).get("panel_room_participant", attempt)
-                               != pane_option("@oms_panel_room_participant")):
+                               != window[4]):
                         raise ValueError("previous main has no confirmed terminal owner; restart refused")
                     resume = previous.get("refs", {}).get("native_session") if provider != "pi" else None
+                    if provider != "pi":
+                        member = room.participant(room.status(repo, ident), window[4])
+                        if (not member["joined"] or member["role"] != "main"
+                                or member["provider"] != main_owner(provider)
+                                or member.get("consumer") and (not resume or member["consumer"] !=
+                                    hashlib.sha256(resume.encode()).hexdigest()[:32])):
+                            raise ValueError("current native session binding is unverified; restart refused")
                 check_legacy_main(repo)
                 original_room = os.environ.get("OMS_ROOM_ID")
                 try:
@@ -550,35 +599,29 @@ def run_native(provider, repo, resume=None, model=None, task=None):
             message = ("another main is live or unverified; main-session lease is busy"
                        if str(error) == "panel operation is busy; retry later" else str(error))
             print("Restart refused: " + clean(message, 200), file=sys.stderr)
-        from panel_input import TerminalInput
-        import select
         while True:
             print("r resume/restart here · Enter close window", flush=True)
-            with TerminalInput() as inputs:
-                if inputs.fd is None:
-                    try:
-                        key = input()
-                    except EOFError:
-                        return status
-                    key = "\n" if not key else key
-                else:
-                    select.select([inputs.fd], [], [])
-                    key = os.read(inputs.fd, 1).decode("utf-8", errors="replace")
+            try:
+                key = _main_exit_key()
+            except EOFError:
+                return status
             if key == "r":
                 break
             if key in ("\r", "\n"):
                 try:
-                    window = subprocess.run(tmux_command("display-message", "-p", "-t", pane,
-                        "#{@oms_panel_main_attempt}\t#{@oms_panel_native_pane}\t#{@oms_panel_repo}"),
-                        capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
-                    fields = window.stdout.replace("\r", "").rstrip("\n").split("\t")
-                    if (window.returncode or fields != [attempt, "", str(Path(repo).resolve())]):
+                    window = _main_window(pane)
+                    if (window[1:4] != [attempt, "", str(Path(repo).resolve())]
+                            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", attempt)):
                         print("Close refused: attempt, native pane or repository ownership changed; window preserved.",
                               file=sys.stderr)
                         return status
-                    subprocess.run(tmux_command("kill-window", "-t", pane), check=True, timeout=5,
+                    # Pin the window and recheck ownership on the server at deletion,
+                    # so moving the pane or replacing the attempt cannot kill a successor.
+                    condition = "#{&&:#{==:#{@oms_panel_main_attempt},%s},#{==:#{@oms_panel_native_pane},}}" % attempt
+                    subprocess.run(tmux_command("if-shell", "-F", "-t", window[0], condition,
+                                                "kill-window -t " + window[0]), check=True, timeout=5,
                                    stdin=subprocess.DEVNULL)
-                except (OSError, subprocess.SubprocessError) as error:
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
                     print("Close unavailable; window preserved: " + clean(str(error), 140), file=sys.stderr)
                 return status
             if not key:
@@ -595,18 +638,28 @@ def run_single_native(provider, repo, resume=None, model=None, task=None, _exit_
             states, incomplete = room.discover(repo)
             if incomplete:
                 raise ValueError("native resume ownership discovery is incomplete; inspect existing sessions")
+            bound_rooms = set()
             for state in states:
                 for enrolled in state["participants"]:
                     if enrolled["provider"] != provider or digest not in (enrolled.get("consumer"), enrolled.get("initial_consumer")):
                         continue
                     history = main_history(repo, state["id"], enrolled["participant"])
-                    claims = [row for row in history if not row.get("refs", {}).get("panel_session_digest")
+                    current = enrolled.get("consumer") == digest
+                    if current and enrolled["joined"]:
+                        bound_rooms.add(state["id"])
+                    claims = [row for row in history if current or not row.get("refs", {}).get("panel_session_digest")
                               or row["refs"]["panel_session_digest"] == digest]
                     if (not claims or any(row.get("provider") != provider or row.get("tool") != "panel-main"
                             or row.get("refs", {}).get("panel_role") != "main" or row.get("terminal") is not True
+                            or row.get("refs", {}).get("panel_room_id", state["id"]) != state["id"]
+                            or row.get("refs", {}).get("panel_room_participant", row.get("attempt_id")) != enrolled["participant"]
                             for row in claims)):
                         raise ValueError("native session has no confirmed terminal owner; inspect its existing session before resuming")
-            ident = ensure_room(repo)
+            if len(bound_rooms) > 1:
+                raise ValueError("native session is bound to multiple rooms; resume refused")
+            ident = ensure_room(repo, os.environ.get("OMS_ROOM_ID") or next(iter(bound_rooms), None))
+            if bound_rooms - {ident}:
+                raise ValueError("native session is bound to another room; resume refused")
             return _run_native(provider, repo, resume, model, task, ident, _exit_info=_exit_info)
     return _run_native(provider, repo, resume, model, task, _exit_info=_exit_info)
 
@@ -641,8 +694,6 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         if prior:
             history = main_history(repo, room_id, prior["participant"])
             if (prior["provider"] != provider or prior["role"] != "main" or not history
-                    or not any(row.get("refs", {}).get("panel_session_digest") == digest
-                               or row.get("attempt_id") == prior["participant"] and prior.get("initial_consumer") == digest for row in history)
                     or any(row.get("tool") != "panel-main" or row.get("provider") != provider
                            or row.get("refs", {}).get("panel_role") != "main" or row.get("terminal") is not True
                            or row.get("refs", {}).get("panel_room_id", room_id) != room_id

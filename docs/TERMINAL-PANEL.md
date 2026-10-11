@@ -95,6 +95,8 @@ confirms the previous main ended. Unknown window/lifecycle state refuses replace
 Fresh Claude mains receive a panel-generated UUID via `--session-id`, retained as
 the attempt's `native_session` reference. Resumed Claude mains keep `--resume`
 and that reference, so restarting keeps the same room participant and unread mail.
+After `/clear`, restart and explicit resume follow the participant's current
+bound session; the original join boundary and mailbox remain intact.
 Codex starts with its existing flags; a recorded native session can be resumed.
 After a native main exits in its panel window, the chat pane shows
 `r resume/restart here · Enter close window`. Press `r` to relaunch in that pane,
@@ -104,6 +106,9 @@ and resume ownership under the main-session lock. Another live main or unverifie
 ownership refuses restart and returns to the prompt. Enter closes the whole
 window, including its board watcher, only while the attempt tag and repository
 still match and the native pane marker is unset; otherwise the window is preserved.
+Close pins the window id and rechecks the attempt and native marker on the tmux
+server at deletion. Failed ownership queries preserve the window. SIGTERM/SIGHUP
+at the prompt restore terminal modes before exiting with 143/129.
 Without a terminal, native launch retains its existing exit behavior.
 
 Pi uses the existing `oms harness pi` bridge and requires both Pi and Codex CLI on PATH.

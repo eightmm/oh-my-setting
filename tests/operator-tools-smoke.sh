@@ -3239,7 +3239,7 @@ if os.name == "posix":
             os.chdir(project)
             os.execvpe(command[0], command, dict(environment, TERM="xterm", OMS_AGENT="codex"))
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 110, 0, 0))
-        initial_tty = termios.tcgetattr(fd) if signal_after is not None else None
+        initial_tty = termios.tcgetattr(fd) if signal_after is not None or expected_exit in (129, 143) else None
         pending = inputs.splitlines(keepends=True)
         prompts = sent_at = 0
         output = b""
@@ -3317,7 +3317,7 @@ if os.name == "posix":
     length_room = room.create(project, "native-label-length", "Native title length")
     for length in (120, 121, 160):
         terminal(["bash", str(panel.ENTRY), "panel", "--host", "inline", "--launch", "codex", "--room", length_room,
-                  "--resume", "exact-session-id", "--task", "x" * length], b"", b"NATIVE_FIXTURE_READY")
+                  "--resume", "label-session-id", "--task", "x" * length], b"", b"NATIVE_FIXTURE_READY")
     assert all(len(p["label"]) <= 120 for p in room.status(project, length_room)["participants"])
     private_task = "Explain " + "/" + "home" + "/fixture-private/input.py"
     terminal(["bash", str(panel.ENTRY), "panel", "--host", "inline", "--launch", "codex", "--resume", "exact-session-id",
@@ -3329,7 +3329,7 @@ if os.name == "posix":
     for row in launched:
         assert row["cwd"] == row["repo"] == str(project.resolve())
         assert row["entry"] == str(panel.ENTRY)
-        assert "exact-session-id" in row["argv"]
+        assert any(session in row["argv"] for session in ("exact-session-id", "label-session-id"))
         assert "peer-delegate" in " ".join(row["argv"])
     native_attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
     assert all(row["state"] == "done" for row in native_attempts
@@ -8034,23 +8034,27 @@ for fields, query_status, closes in ((["exit-attempt", "", str(project.resolve()
             patch.object(panel.sys.stdout, "isatty", return_value=True), \
             patch("panel_input.TerminalInput") as exit_input, patch("builtins.input", return_value=""), \
             patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
-                [], query_status, "\t".join(fields) + "\r\n", "")) as close_query:
+                [], query_status, "\t".join(["@42", *fields, "exit-attempt"]) + "\r\n", "")) as close_query:
         exit_input.return_value.__enter__.return_value.fd = None
         assert panel.run_native("claude", project) == 0
-        kills = [call for call in close_query.call_args_list if "kill-window" in call.args[0]]
+        kills = [call for call in close_query.call_args_list if "if-shell" in call.args[0]]
         assert bool(kills) == closes, (fields, query_status, kills)
+        if kills:
+            args = kills[0].args[0]
+            assert args[-1] == "kill-window -t @42" and args[args.index("-t") + 1] == "@42"
+            assert "@oms_panel_main_attempt},exit-attempt" in args[-2] and "@oms_panel_native_pane},}" in args[-2]
 # Restart refuses an unverified session/window or nonterminal previous attempt;
 # a Pi restart deliberately ignores even a recorded session id and starts fresh.
-for harness, owner, terminal, succeeds in (("claude", None, True, False),
+for harness, owner, previous_terminal, succeeds in (("claude", None, True, False),
                                            ("claude", str(project.resolve()), False, False),
                                            ("pi", str(project.resolve()), True, True)):
-    previous = {"attempt_id": "exit-attempt", "terminal": terminal, "provider": panel.main_owner(harness),
+    previous = {"attempt_id": "exit-attempt", "terminal": previous_terminal, "provider": panel.main_owner(harness),
                 "tool": "panel-main", "refs": {"panel_role": "main", "panel_room_id": shared,
                                                "native_session": "recorded-session"}}
     with patch.dict(os.environ, dict(environment, TMUX="fixture", TMUX_PANE="%42", OMS_PANEL_SESSION="oms-exit"), clear=True), \
             patch.object(panel, "check_legacy_main"), patch.object(panel, "run_single_native", side_effect=exited_native) as restart_main, \
             patch.object(panel, "managed_session", return_value=True), \
-            patch.object(panel, "pane_option", side_effect=exit_options.get), \
+            patch.object(panel, "_main_window", return_value=["@42", "exit-attempt", "", str(project.resolve()), "exit-attempt"]), \
             patch.object(panel, "session_owner", return_value=owner), patch.object(panel, "live_mains", return_value=0), \
             patch.object(panel, "main_history", return_value=[previous]), \
             patch.object(panel.sys.stdin, "isatty", return_value=True), \
@@ -8061,6 +8065,142 @@ for harness, owner, terminal, succeeds in (("claude", None, True, False),
         assert restart_main.call_count == (2 if succeeds else 1)
         if succeeds:
             assert restart_main.call_args.args[2] is None, "Pi restarted using an unverified session binding"
+# A successor takes the window after lookup. Only the server-side condition may
+# delete the pinned window; a separate kill against the moved pane would delete it.
+for change in ("attempt", "native-pane", "moved-pane"):
+    deleted = []
+    def close_race(command, **kwargs):
+        if "display-message" in command:
+            fields = "exit-attempt\t\t" + str(project.resolve())
+            if "#{window_id}" in command[-1]:
+                fields = "@42\t" + fields + "\texit-attempt"
+            return subprocess.CompletedProcess(command, 0, fields + "\n", "")
+        if "kill-window" in command:
+            deleted.append("successor")
+        elif "if-shell" in command:
+            assert command[-1] == "kill-window -t @42" and command[command.index("-t") + 1] == "@42"
+            condition = command[-2]
+            assert "#{==:#{@oms_panel_main_attempt},exit-attempt}" in condition
+            assert "#{==:#{@oms_panel_native_pane},}" in condition
+            if change == "moved-pane":
+                deleted.append("original")
+        return subprocess.CompletedProcess(command, 0, "", "")
+    with patch.dict(os.environ, dict(environment, TMUX="fixture", TMUX_PANE="%42", OMS_PANEL_SESSION="oms-exit"), clear=True), \
+            patch.object(panel, "check_legacy_main"), patch.object(panel, "run_single_native", side_effect=exited_native), \
+            patch.object(panel, "managed_session", return_value=True), \
+            patch.object(panel.sys.stdin, "isatty", return_value=True), patch.object(panel.sys.stdout, "isatty", return_value=True), \
+            patch("panel_input.TerminalInput") as exit_input, patch("builtins.input", return_value=""), \
+            patch.object(panel.subprocess, "run", side_effect=close_race):
+        exit_input.return_value.__enter__.return_value.fd = None
+        assert panel.run_native("claude", project) == 0
+    assert "successor" not in deleted and deleted == (["original"] if change == "moved-pane" else [])
+# A failed native marker query is unavailable evidence, even when pane_option
+# would report an empty (unset) marker. Neither restart nor close may proceed.
+for key in ("r", ""):
+    with patch.dict(os.environ, dict(environment, TMUX="fixture", TMUX_PANE="%42", OMS_PANEL_SESSION="oms-exit"), clear=True), \
+            patch.object(panel, "check_legacy_main"), patch.object(panel, "run_single_native", side_effect=exited_native) as unavailable_start, \
+            patch.object(panel, "managed_session", return_value=True), patch.object(panel, "pane_option", side_effect=exit_options.get), \
+            patch.object(panel, "session_owner", return_value=str(project.resolve())), patch.object(panel, "live_mains", return_value=0), \
+            patch.object(panel, "main_history", return_value=[dict(previous, provider="claude", terminal=True)]), \
+            patch.object(panel.sys.stdin, "isatty", return_value=True), patch.object(panel.sys.stdout, "isatty", return_value=True), \
+            patch("panel_input.TerminalInput") as exit_input, patch("builtins.input", side_effect=[key, EOFError]), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")) as unavailable_query:
+        exit_input.return_value.__enter__.return_value.fd = None
+        assert panel.run_native("claude", project) == 0 and unavailable_start.call_count == 1
+        assert not any("kill-window" in call.args[0] or "if-shell" in call.args[0] for call in unavailable_query.call_args_list)
+# /clear, exit and r retain the actual participant, join boundary and mailbox.
+import hook_state
+from unittest.mock import Mock
+clear_room = room.create(project, "restart-clear-room", "Restart after clear")
+clear_session = "11111111-2222-4333-8444-555555555555"
+clear_launches, clear_exit = [], {}
+real_popen = subprocess.Popen
+def clear_process(command, **kwargs):
+    if command[0] != "claude":
+        return real_popen(command, **kwargs)
+    env = kwargs["env"]
+    clear_launches.append((command, env["OMS_ROOM_PARTICIPANT"], env["OMS_PANEL_MAIN_ATTEMPT"]))
+    if len(clear_launches) == 1:
+        room.join(project, clear_room, "clear-peer", "codex")
+        room.send(project, clear_room, "clear-peer", env["OMS_ROOM_PARTICIPANT"], "Keep this mailbox", message_id="clear-mail")
+        with patch.dict(os.environ, env, clear=True):
+            assert hook_state.rebind_cleared_session({"hook_event_name": "SessionStart", "source": "clear", "session_id": clear_session})
+    else:
+        assert command[command.index("--resume") + 1] == clear_session
+    process = Mock()
+    process.wait.return_value = process.poll.return_value = 0
+    return process
+real_single = panel.run_single_native
+def clear_native(*args, **kwargs):
+    with patch.object(panel, "managed_session", return_value=False):
+        result = real_single(*args, **kwargs)
+    clear_exit.update(kwargs["_exit_info"])
+    return result
+def clear_window(pane):
+    return ["@42", clear_exit["attempt"], "", str(project.resolve()), clear_launches[0][1]]
+def clear_option(name):
+    return dict(zip(("@oms_panel_main_attempt", "@oms_panel_native_pane", "@oms_panel_repo", "@oms_panel_room_participant"),
+                    clear_window("%42")[1:])).get(name, "")
+clear_env = dict(environment, TMUX="fixture", TMUX_PANE="%42", OMS_PANEL_SESSION="oms-clear", OMS_ROOM_ID=clear_room)
+with patch.dict(os.environ, clear_env, clear=True), patch.object(panel, "check_legacy_main"), \
+        patch.object(panel, "run_single_native", side_effect=clear_native), patch.object(panel, "managed_session", return_value=True), \
+        patch.object(panel, "_main_window", side_effect=clear_window, create=True), patch.object(panel, "pane_option", side_effect=clear_option), \
+        patch.object(panel, "session_owner", return_value=str(project.resolve())), \
+        patch.object(panel, "live_mains", return_value=0), patch.object(panel.subprocess, "Popen", side_effect=clear_process), \
+        patch.object(panel.sys.stdin, "isatty", return_value=True), patch.object(panel.sys.stdout, "isatty", return_value=True), \
+        patch("panel_input.TerminalInput") as exit_input, patch("builtins.input", side_effect=["r", EOFError]):
+    exit_input.return_value.__enter__.return_value.fd = None
+    assert panel.run_native("claude", project) == 0
+assert len(clear_launches) == 2 and clear_launches[0][1] == clear_launches[1][1]
+clear_member = clear_launches[0][1]
+assert any(row["room_event"].get("id") == "clear-mail" for row in room.updates(project, clear_room, clear_member)["turns"])
+# Current consumer binding also proves continuity for older stale attempt refs.
+for command, who, attempt_id in clear_launches:
+    panel.events(project, "usage", "--attempt", attempt_id, "--ref", "panel_session_digest=" + "0" * 32)
+with patch.dict(os.environ, dict(environment, OMS_ROOM_ID=clear_room), clear=True), \
+        patch.object(panel, "managed_session", return_value=False), patch.object(panel.subprocess, "Popen", side_effect=clear_process):
+    assert panel.run_single_native("claude", project, resume=clear_session) == 0
+assert len(clear_launches) == 3 and clear_launches[-1][1] == clear_member
+foreign_main = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+                            "--ref", "panel_room_id=" + clear_room, "--ref", "panel_room_participant=" + clear_member,
+                            "--ref", "panel_session_digest=" + "0" * 32, "--then", "starting", "--then", "working", output=True)
+with patch.dict(os.environ, dict(environment, OMS_ROOM_ID=clear_room), clear=True), \
+        patch.object(panel, "native_command", side_effect=AssertionError("live main's session launched")):
+    try:
+        panel.run_single_native("claude", project, resume=clear_session)
+    except ValueError as error:
+        assert "terminal owner" in str(error)
+    else:
+        raise AssertionError("current consumer ignored another live main")
+panel.events(project, "transition", "--attempt", foreign_main, "--state", "cancelled")
+with patch.dict(os.environ, dict(environment, OMS_ROOM_ID=shared), clear=True), \
+        patch.object(panel, "native_command", side_effect=AssertionError("another room's session launched")):
+    try:
+        panel.run_single_native("claude", project, resume=clear_session)
+    except ValueError as error:
+        assert "another room" in str(error)
+    else:
+        raise AssertionError("session moved to another room")
+if os.name != "nt":
+    import signal
+    prompt_script = ("import sys,signal,os\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nimport terminal_panel as p\n"
+        "os.environ['TMUX_PANE']='%42'\n"
+        "p.check_legacy_main=lambda repo: None\np.managed_session=lambda: True\n"
+        "def exited(*args,**kw): kw['_exit_info'].update(attempt='exit-attempt',room='exit-room'); return 0\n"
+        "p.run_single_native=exited\n"
+        "if len(sys.argv)>3:\n"
+        " import panel_input\n"
+        " original=panel_input.TerminalInput.__enter__\n"
+        " def enter(self):\n"
+        "  result=original(self); os.kill(os.getpid(),int(sys.argv[3])); return result\n"
+        " panel_input.TerminalInput.__enter__=enter\n"
+        "try: p.run_native('claude',Path(sys.argv[2]))\n"
+        "except p.NativeShutdown as e: sys.exit(e.exit_code)\n")
+    for number in (signal.SIGTERM, signal.SIGHUP):
+        terminal([sys.executable, "-c", prompt_script, str(root / "scripts/lib"), str(project)], b"", b"\033[?1000l",
+                 trigger=b"\033[?1000h", signal_after=number, expected_exit=128 + number)
+        terminal([sys.executable, "-c", prompt_script, str(root / "scripts/lib"), str(project), str(number)], b"", b"\033[?1000l",
+                 expected_exit=128 + number)
 with patch.object(panel.shutil, "which", return_value="/x"), \
         patch.object(panel, "resolve_session", return_value=("legacy-panel", str(project))), \
         patch.object(panel, "recorded_room", return_value="r1"), patch.object(panel, "live_mains", return_value=1), \
