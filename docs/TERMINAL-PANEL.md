@@ -840,7 +840,9 @@ fits). New instructions follow." A session that is missing, or from a provider
 without resume, falls back to a fresh worker given the previous patch and
 summary, and says so on stderr. A worker that ended by timeout (exit 124) shows
 "timed out · continue with --continue" on its card; there is no `c` key for it, and
-a continued implementation needs `--access write` (the default is read-only); later rounds of one task show "round N".
+a continued implementation needs `--access write` (the default is read-only); later rounds of one task show "round N". Unless the
+environment sets them, write calls get a 40m wall (60m at high effort) and any
+call with `--verify` gets a 20m verify wall, enough for the repository smoke suites.
 
 Give each dispatched subtask a descriptive task ID and short `--label`; reuse
 the exact reviewed plan task ID where one exists. Labels are optional for direct

@@ -2515,6 +2515,7 @@ with open(os.environ["PANEL_TEST_WORKER_LOG"], "a", encoding="utf-8") as f:
                         "room": os.environ.get("OMS_ROOM_ID"),
                         "room_repo": os.environ.get("OMS_ROOM_REPO"),
                         "timeout": os.environ.get("OMS_PEER_TIMEOUT"),
+                        "verify_timeout": os.environ.get("OMS_PEER_VERIFY_TIMEOUT"),
                         "state_repo": os.environ.get("OMS_STATE_REPO"),
                         "participant": os.environ.get("OMS_ROOM_PARTICIPANT")}) + "\\n")
 WORKER
@@ -4827,6 +4828,7 @@ for task_id, explicit_room, writing, continuing in (
     assert observed["git_common"] == str(other_project / ".git"), observed
     assert not Path(observed["cwd"]).exists(), "cross-repository worker cleanup failed"
     assert observed["timeout"] == ("40m" if writing else room_env.get("OMS_PEER_TIMEOUT")), observed
+    assert observed["verify_timeout"] == ("20m" if writing else room_env.get("OMS_PEER_VERIFY_TIMEOUT")), observed
     if writing:
         assert verify_log.read_text().strip() == str(other_project / ".git"), "verification used the state repository"
         assert "applied: no (review patch, then: oms patch-land --repo %s --patch " % other_project in answer, answer
