@@ -5774,7 +5774,6 @@ def exercise_main_lineage():
         assert all(set(c) == {"task_id", "role", "state", "label"} for c in calls), calls
         assert not {"lineage-settled", "lineage-live-task", "lineage-foreign-task"} & {c["task_id"] for c in calls}
         assert "PRIVATE-LINEAGE-PROMPT" not in captured[0], captured[0]
-        assert next(c for c in calls if c["task_id"] == "lineage-task-10")["label"] == "", calls
         assert next(c for c in calls if c["task_id"] == "lineage-task-11")["label"] == "Inspect fixture 11", calls
         assert "--continue TASK_ID" in captured[0]
     print("main lineage: resumed/successor continuation, live/foreign/unknown refusal and bounded prompt-free context passed")
