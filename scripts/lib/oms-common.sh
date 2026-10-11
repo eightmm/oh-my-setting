@@ -1200,6 +1200,14 @@ oms_worker_surface_diff() {
         "$before_dir/gitmeta" "$current_worktree_physical"; then
         continue
       fi
+      if [ "$name" = gitmeta ] && ! oms_worker_gitmeta_admin_changes_are_safe "$repo" \
+        "$before_dir" "$current_worktree_physical"; then
+        changed="${changed:+$changed, }gitmeta"
+        continue
+      fi
+      if [ "$name" = gitmeta ] && [ "$OMS_WG_GITMETA_ADMIN_QUIET" = 1 ]; then
+        continue
+      fi
       if [ "$name" = gitmeta ] && oms_worker_gitmeta_only_kept_siblings "$repo" \
         "$before_dir" "$current_worktree_physical"; then
         changed="${changed:+$changed, }$OMS_WG_GITMETA_SOFT"
@@ -1557,6 +1565,7 @@ oms_worker_gitmeta_settles() {  # REPO BEFORE_FILE CURRENT_WORKTREE
 oms_worker_gitmeta_is_foreign_worktree() {  # REPO METADATA CURRENT_WORKTREE
   local repo="$1" metadata="$2" worker="${3:-}"
   local gitfile physical actual common guarded
+  OMS_WG_FOREIGN_PHYSICAL=""
   [ -n "$worker" ] && [ -d "$metadata" ] && [ ! -L "$metadata" ] || return 1
   [ -f "$metadata/gitdir" ] && [ ! -L "$metadata/gitdir" ] &&
     [ -f "$metadata/HEAD" ] && [ ! -L "$metadata/HEAD" ] || return 1
@@ -1574,6 +1583,83 @@ oms_worker_gitmeta_is_foreign_worktree() {  # REPO METADATA CURRENT_WORKTREE
   actual="$(oms_harness_git_path_physical "$physical" --git-common-dir 2>/dev/null)" || return 1
   common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
   [ "$actual" = "$common" ] || return 1
+  OMS_WG_FOREIGN_PHYSICAL="$physical"
+  return 0
+}
+
+# Lifecycle exemptions cannot hide executable per-worktree config or rewired
+# registrations. Admin bytes of a surviving entry stay fixed; a new entry may
+# not replace any checkout identity captured before the provider ran.
+oms_worker_gitmeta_admin_changes_are_safe() {  # REPO BEFORE_DIR CURRENT_WORKTREE
+  local repo="$1" before="$2" worker="${3:-}"
+  local common entry receipt physical line side
+  OMS_WG_GITMETA_ADMIN_QUIET=0
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
+  oms_worker_surface_capture_one "$repo" gitmeta "$worker" > "$before/gitmeta-admin-now" || return 1
+  python3 - "$before/gitmeta" "$before/gitmeta-admin-now" "$before/gitmeta-admin-lifecycle" <<'PY' > "$before/gitmeta-new-entries" || return 1
+import sys
+def entries(path):
+    result = {}
+    for line in open(path):
+        kind, _, value = line.rstrip('\r\n').partition(' ')
+        if kind == 'worktree-dir':
+            entry, leaf, digest = value, '', ''
+        elif kind in ('worktree', 'worktree-link', 'worktree-entry'):
+            name, digest = value.rsplit(' ', 1)
+            entry, _, leaf = name.rpartition('/')
+        else:
+            continue
+        if entry.startswith('worktrees/'):
+            result.setdefault(entry, {})[leaf] = (kind, digest)
+    return result
+old, new = (entries(path) for path in sys.argv[1:3])
+for entry in old.keys() & new.keys():
+    for leaf in ('gitdir', 'commondir', 'config.worktree'):
+        if old[entry].get(leaf) != new[entry].get(leaf):
+            raise SystemExit(1)
+for entry in new.keys() - old.keys():
+    if 'config.worktree' in new[entry]:
+        raise SystemExit(1)
+    print(entry[len('worktrees/'):])
+# Preserve silent live OMS lifecycle exemptions: only newly visible admin
+# leaves may differ, with no checkout, object-store or existing-entry edits.
+delta = set(open(sys.argv[1]).read().splitlines()) ^ set(open(sys.argv[2]).read().splitlines())
+quiet = bool(delta)
+for line in delta:
+    kind, _, value = line.partition(' ')
+    name = value.rsplit(' ', 1)[0]
+    entry, _, leaf = name.rpartition('/')
+    if kind != 'worktree' or leaf not in ('gitdir', 'commondir', 'config.worktree') or entry in old.keys() & new.keys():
+        quiet = False
+with open(sys.argv[3], 'w') as handle:
+    if quiet:
+        for entry in sorted(old.keys() ^ new.keys()):
+            handle.write(('added ' if entry in new else 'removed ') + entry[len('worktrees/'):] + '\n')
+PY
+  while IFS= read -r entry; do
+    entry="${entry//$'\r'/}"
+    if oms_worker_gitmeta_is_foreign_worktree "$repo" "$common/worktrees/$entry" "$worker"; then
+      physical="$OMS_WG_FOREIGN_PHYSICAL"
+      for receipt in "$before/foreign-worktrees/"*/physical; do
+        [ -f "$receipt" ] || continue
+        [ "$(cat "$receipt")" != "$physical" ] || return 1
+      done
+    fi
+  done < "$before/gitmeta-new-entries"
+  if [ -s "$before/gitmeta-admin-lifecycle" ]; then
+    OMS_WG_GITMETA_ADMIN_QUIET=1
+    while IFS= read -r line; do
+      line="${line//$'\r'/}"
+      side="${line%% *}" entry="${line#* }"
+      if [ "$side" = added ]; then
+        oms_worker_gitmeta_is_live_managed_worktree "$repo" "$common/worktrees/$entry/gitdir" "$worker" ||
+          OMS_WG_GITMETA_ADMIN_QUIET=0
+      elif ! grep -Fxq "worktrees/$entry" "$before/gitmeta-exempt" ||
+        [ -e "$common/worktrees/$entry" ] || [ -L "$common/worktrees/$entry" ]; then
+        OMS_WG_GITMETA_ADMIN_QUIET=0
+      fi
+    done < "$before/gitmeta-admin-lifecycle"
+  fi
   return 0
 }
 
@@ -2106,6 +2192,19 @@ PY
                 printf 'worktree-entry %s non-directory\n' "${wt#"$git_dir"/}"
                 continue
               fi
+              # Liveness exempts checkout churn, never per-worktree execution
+              # configuration or the wiring that makes Git find it.
+              for meta in "$wt/gitdir" "$wt/commondir" "$wt/config.worktree"; do
+                if [ -L "$meta" ]; then
+                  printf 'worktree-link %s %s\n' "${meta#"$git_dir"/}" \
+                    "$(readlink "$meta" 2>/dev/null | oms_sha256_stream || printf 'unreadable')"
+                elif [ -f "$meta" ]; then
+                  printf 'worktree %s %s\n' "${meta#"$git_dir"/}" \
+                    "$(oms_sha256_file "$meta" 2>/dev/null || printf 'unreadable')"
+                elif [ -e "$meta" ]; then
+                  printf 'worktree-entry %s non-regular\n' "${meta#"$git_dir"/}"
+                fi
+              done
               if oms_worker_gitmeta_is_live_managed_worktree "$repo" "$wt/gitdir" \
                 "$current_worktree_physical"; then
                 [ -z "${OMS_WG_GITMETA_EXEMPT_OUT:-}" ] ||
@@ -2120,17 +2219,16 @@ PY
                 printf '%s\n' "${wt#"$git_dir"/}" >> "$OMS_WG_GITMETA_RESIDUE_OUT"
               fi
               printf 'worktree-dir %s\n' "${wt#"$git_dir"/}"
-              for meta in "$wt/gitdir" "$wt/HEAD"; do
-                if [ -L "$meta" ]; then
-                  printf 'worktree-link %s %s\n' "${meta#"$git_dir"/}" \
-                    "$(readlink "$meta" 2>/dev/null | oms_sha256_stream || printf 'unreadable')"
-                elif [ -f "$meta" ]; then
-                  printf 'worktree %s %s\n' "${meta#"$git_dir"/}" \
-                    "$(oms_sha256_file "$meta" 2>/dev/null || printf 'unreadable')"
-                elif [ -e "$meta" ]; then
-                  printf 'worktree-entry %s non-regular\n' "${meta#"$git_dir"/}"
-                fi
-              done
+              meta="$wt/HEAD"
+              if [ -L "$meta" ]; then
+                printf 'worktree-link %s %s\n' "${meta#"$git_dir"/}" \
+                  "$(readlink "$meta" 2>/dev/null | oms_sha256_stream || printf 'unreadable')"
+              elif [ -f "$meta" ]; then
+                printf 'worktree %s %s\n' "${meta#"$git_dir"/}" \
+                  "$(oms_sha256_file "$meta" 2>/dev/null || printf 'unreadable')"
+              elif [ -e "$meta" ]; then
+                printf 'worktree-entry %s non-regular\n' "${meta#"$git_dir"/}"
+              fi
             done
         fi
         if [ -d "$git_dir/modules" ]; then
@@ -2194,6 +2292,7 @@ oms_worker_surface_snapshot() {
     for entry in "$common/worktrees/"*; do
       oms_worker_gitmeta_is_foreign_worktree "$repo" "$entry" "$current_worktree_physical" || continue
       mkdir -p "$dir/foreign-worktrees/${entry##*/}"
+      printf '%s\n' "$OMS_WG_FOREIGN_PHYSICAL" > "$dir/foreign-worktrees/${entry##*/}/physical"
       cp "$entry/HEAD" "$entry/gitdir" "$dir/foreign-worktrees/${entry##*/}/" || return 1
       if [ -f "$entry/logs/HEAD" ] && [ ! -L "$entry/logs/HEAD" ]; then
         cp "$entry/logs/HEAD" "$dir/foreign-worktrees/${entry##*/}/log" || return 1

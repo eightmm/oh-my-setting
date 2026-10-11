@@ -125,7 +125,7 @@ ma_read_guard_begin() {  # PRIVATE_DIR
   MA_READ_GUARD_DIR="$1/read-guard"
   oms_git_assert_safe_execution_config "$REPO" diff-read || return 2
   oms_git_assert_plain_index "$REPO" || return 2
-  oms_worker_surface_snapshot "$REPO" "$MA_READ_GUARD_DIR/state" || return 2
+  oms_worker_surface_snapshot "$REPO" "$MA_READ_GUARD_DIR/state" "$MA_READ_SOURCE_REPO" || return 2
   oms_git_execution_state_snapshot "$REPO" "$MA_READ_GUARD_DIR/state/git-execution-state" || return 2
   MA_READ_STATE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/state/git-execution-state")" || return 2
   ma_read_guard_snapshot_source
@@ -144,10 +144,10 @@ ma_read_guard_rebaseline_source() {
 
 ma_read_guard_assert() {
   [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
-  local root name digest changed surface hard soft
+  local root name digest changed surface hard soft execution
   for name in state source; do
-    root="$REPO" digest="$MA_READ_STATE_EXECUTION_SHA"
-    [ "$name" != source ] || { root="$MA_READ_SOURCE_REPO"; digest="$MA_READ_SOURCE_EXECUTION_SHA"; }
+    root="$REPO" digest="$MA_READ_STATE_EXECUTION_SHA" execution="$MA_READ_SOURCE_REPO"
+    [ "$name" != source ] || { root="$MA_READ_SOURCE_REPO"; digest="$MA_READ_SOURCE_EXECUTION_SHA"; execution=""; }
     oms_git_execution_state_assert_unchanged "$root" "$MA_READ_GUARD_DIR/$name/git-execution-state" "$digest" || return 2
     if [ "$name" = source ]; then
       if [ "$(oms_sha256_file "$MA_READ_SOURCE_HEAD_FILE")" != "$MA_READ_SOURCE_HEAD_SHA" ]; then
@@ -167,7 +167,7 @@ ma_read_guard_assert() {
     fi
     oms_git_assert_safe_execution_config "$root" diff-read || return 2
     oms_git_assert_plain_index "$root" || return 2
-    changed="$(oms_worker_surface_diff "$root" "$MA_READ_GUARD_DIR/$name" | tr -d '\r')" || return 2
+    changed="$(oms_worker_surface_diff "$root" "$MA_READ_GUARD_DIR/$name" "" "$execution" | tr -d '\r')" || return 2
     hard="" soft=""
     for surface in $(printf '%s' "$changed" | tr ',' ' '); do
       if [ "$name" = state ] && oms_worker_surface_is_soft "$surface" &&

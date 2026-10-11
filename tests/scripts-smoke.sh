@@ -27754,6 +27754,50 @@ PY
   [ "${result%%	*}" != 0 ] || fail "a forged scratch marker must not exempt a worker's add: $result"
   contains "$result" 'gitmeta' ||
     fail "a forged scratch registration should be named: $result"
+
+  # Per-worktree config can execute on a sibling's next Git command. Protect
+  # in-place edits and registration swaps, including live managed entries.
+  local admin="$TMP/guard-foreign-admin"
+  local managed_root="$TMP/guard-foreign-admin-root"
+  local sibling_parent="$managed_root/oh-my-setting-scratch.admin"
+  local sibling="$sibling_parent/wt"
+  local entry replacement field target body managed
+  for managed in 0 1; do
+    for field in config.worktree commondir gitdir swap swap-config; do
+      target="$admin-$managed-$field"
+      make_guard_repo "$target"
+      git -C "$target" config extensions.worktreeConfig true
+      if [ "$managed" = 1 ]; then
+        make_live_managed_sibling "$target" "$sibling_parent-$managed-$field"
+        sibling="$sibling_parent-$managed-$field/wt"
+      else
+        sibling="$sibling_parent-$managed-$field/plain foreign"
+        git -C "$target" worktree add -q --detach "$sibling" HEAD
+      fi
+      entry="$(git -C "$sibling" rev-parse --git-dir)"
+      entry="${entry//$'\r'/}"
+      case "$entry" in /*) ;; *) entry="$sibling/$entry" ;; esac
+      case "$field" in
+        config.worktree) body="printf '[core]\\n\\thooksPath = /tmp/guard-no-hooks\\n' > '$entry/config.worktree'" ;;
+        commondir) body="printf '../../.\\n' > '$entry/commondir'" ;;
+        gitdir) body="printf '%s\\n' '$sibling/./.git' > '$entry/gitdir'" ;;
+        swap*)
+          replacement="${entry%/*}/swapped"
+          body="cp -R '$entry' '$replacement'"
+          [ "$field" != swap-config ] || body="$body
+  printf '[core]\\n\\thooksPath = /tmp/guard-no-hooks\\n' > '$replacement/config.worktree'"
+          body="$body
+  printf 'gitdir: %s\\n' '$replacement' > '$sibling/.git'
+  rm -rf '$entry'"
+          ;;
+      esac
+      body='case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac'"
+$body"
+      result="$(run_delegate_beside_sibling "$target" "$managed_root" "$body")"
+      [ "${result%%$'\t'*}" != 0 ] || fail "foreign entry $field mutation must stay hard: $result"
+      contains "$result" 'outside its worktree: gitmeta' || fail "foreign $field mutation was not named: $result"
+    done
+  done
 }
 
 test_shared_memory_context_ranked_recall() {
@@ -28565,6 +28609,45 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     oms_worker_surface_diff "$project" "$snap" )"
   [ "$changed" = "refs" ] ||
     fail "the checked-out oms/ branch must stay a hard ref change, got: ${changed:-<none>}"
+
+  # Panel reads keep state in this repo while executing in another checkout.
+  # Only the state side may tolerate evidence-backed foreign branch moves.
+  local read_source="$TMP/guard-read-source"
+  local other_main="$TMP/guard-read-other-main"
+  make_committed_repo "$read_source"
+  git -C "$project" checkout -q main
+  git -C "$project" worktree add -q "$other_main" oms/other-main
+  (
+    . "$ROOT/scripts/lib/peer-common.sh"
+    REPO="$project" MA_READ_SOURCE_REPO="$read_source"
+    local strict next out rc
+    for strict in 0 1; do
+      ma_read_guard_begin "$snap/read-$strict" || fail "cross-repo read snapshot failed"
+      next="$(git -C "$other_main" commit-tree -p HEAD -m read-move 'HEAD^{tree}')"
+      git -C "$other_main" reset -q --hard "$next"
+      rc=0
+      out="$(OMS_WORKER_GUARD_STRICT="$strict" ma_read_guard_assert 2>&1)" || rc=$?
+      if [ "$strict" = 0 ]; then
+        [ "$rc" = 0 ] || fail "foreign oms branch move stopped a cross-repo read: $out"
+        contains "$out" 'state repository changes: foreign-ref' || fail "read foreign-ref warning missing: $out"
+      else
+        [ "$rc" = 2 ] || fail "strict read tolerated a foreign ref move: $out"
+        contains "$out" 'state repository protected surfaces: refs' || fail "strict read refs not hard: $out"
+      fi
+    done
+    ma_read_guard_begin "$snap/read-unattributed" || fail "read ref attribution snapshot failed"
+    next="$(git -C "$other_main" rev-parse HEAD~1)"
+    git -C "$project" update-ref refs/heads/oms/other-main "$next"
+    rc=0
+    out="$(ma_read_guard_assert 2>&1)" || rc=$?
+    [ "$rc" = 2 ] || fail "read guard softened a branch write without foreign HEAD evidence: $out"
+    ma_read_guard_begin "$snap/read-source" || fail "read source protection snapshot failed"
+    printf 'source mutation\n' >> "$read_source/file.txt"
+    rc=0
+    out="$(ma_read_guard_assert 2>&1)" || rc=$?
+    [ "$rc" = 2 ] || fail "cross-repo read source tracked changes must stay hard: $out"
+    contains "$out" 'source repository protected surfaces: tracked' || fail "read source violation was not named: $out"
+  )
 }
 
 test_worker_guard_accepts_only_artifact_index_compaction() {
