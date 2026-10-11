@@ -320,7 +320,8 @@ def _plan_inputs(repo):
 
     plan = metadata('.oms/plan/tasks.json')
     receipts = []
-    for task in plan.get('tasks', {}).values():
+    tasks = plan.get('tasks', {})
+    for task in tasks.values() if isinstance(tasks, dict) else tasks:
         if task.get('cancellation'):
             relative(task['cancellation']['decision_artifact'])
         if task.get('completion_receipt'):
@@ -559,7 +560,8 @@ def read_plan_list(repo, collect):
                     return value
             try:
                 inputs = _plan_inputs(repo)
-            except (OSError, ValueError, TypeError, KeyError, RecursionError, subprocess.SubprocessError, SystemExit):
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError,
+                    subprocess.SubprocessError, SystemExit):
                 return collect()
             value = collect()
             envelope = {'result': value, 'inputs': inputs}
