@@ -35,7 +35,7 @@ def refusal_hint(attempts):
     candidates = classify(attempts)["releasable"]
     if len(candidates) == 1:
         return "; if that main crashed, release it with oms panel --release-main %s (see k)" % candidates[0]["attempt"]
-    return "; see k for recovery evidence; release requires confirmed termination"
+    return "; see capacity screen k for recovery evidence; candidate is unverifiable; release requires confirmed termination"
 
 
 def events(repo, *args):

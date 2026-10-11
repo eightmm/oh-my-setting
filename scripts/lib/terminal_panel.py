@@ -2409,7 +2409,7 @@ def check_legacy_main(repo):
                     raise ValueError("current main window status unavailable")
                 pending = value
             if live_mains(repo, session, ident, pending) >= MAX_LIVE_MAINS:
-                raise ValueError("this panel already has a live main; finish it before starting another; if that main crashed, release it with oms panel --release-main ATTEMPT (see k)")
+                raise ValueError("this panel already has a live main; finish it before starting another" + __import__("panel_release").refusal_hint(history))
 
 
 def spawn_main(repo, provider, task=None, model=None):
@@ -2435,7 +2435,7 @@ def spawn_single_main(repo, provider, task=None, model=None):
     env["OMS_PANEL_SESSION"] = session
     ident = os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
     if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
-        raise ValueError("this panel already has a live main; finish it before starting another; if that main crashed, release it with oms panel --release-main ATTEMPT (see k)")
+        raise ValueError("this panel already has a live main; finish it before starting another" + __import__("panel_release").refusal_hint(json.loads(events(repo, "list", "--json", output=True))))
     with _lock(repo, "panel-main-session", timeout=.1):
         check_legacy_main(repo)
     pane = add_main_window(repo, session, provider, board_view("auto"), False, env, None, model, task)
@@ -2494,7 +2494,7 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
                 # An explicit --room wins; otherwise new mains default to the panel's open room.
                 os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
                 if live_mains(repo, session, os.environ["OMS_ROOM_ID"]) >= MAX_LIVE_MAINS:
-                    raise ValueError("this panel already has a live main; finish it before starting another; if that main crashed, release it with oms panel --release-main ATTEMPT (see k)")
+                    raise ValueError("this panel already has a live main; finish it before starting another" + __import__("panel_release").refusal_hint(json.loads(events(repo, "list", "--json", output=True))))
                 with _lock(repo, "panel-main-session", timeout=.1):
                     check_legacy_main(repo)
                 created = "window"
@@ -2571,7 +2571,7 @@ def open_native(provider, repo, resume=None, model=None, task=None, view="auto",
         with _lock(repo, "panel-main-start", timeout=3):
             ident = os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
             if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
-                raise ValueError("this panel already has a live main; finish it before starting another; if that main crashed, release it with oms panel --release-main ATTEMPT (see k)")
+                raise ValueError("this panel already has a live main; finish it before starting another" + __import__("panel_release").refusal_hint(json.loads(events(repo, "list", "--json", output=True))))
             with _lock(repo, "panel-main-session", timeout=.1):
                 check_legacy_main(repo)
             window = add_main_window(repo, session, provider, view, attention_only, os.environ.copy(),

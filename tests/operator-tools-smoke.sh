@@ -9003,20 +9003,33 @@ for spawn_env, expected in (({"OMS_HARNESS_CHILD": "1"}, "worker cannot open own
 # The cap is checked after the tool check, so hosts without tmux or a CLI (CI) still reach it.
 with patch.object(panel, "session_owner", return_value=str(project)), patch.object(panel, "panel_room", return_value="r1"), \
         patch.object(panel.shutil, "which", return_value="/usr/bin/true"), \
-        patch.object(panel, "live_mains", return_value=panel.MAX_LIVE_MAINS), patch.object(panel, "add_main_window") as opened_window:
+        patch.object(panel, "live_mains", return_value=panel.MAX_LIVE_MAINS), \
+        patch.object(panel, "events", return_value="[]"), patch.object(panel, "add_main_window") as opened_window:
     try:
         panel.spawn_main(project, "claude")
         raise AssertionError("a second live main was started")
     except ValueError as error:
-        assert "already has a live main" in str(error)
+        assert str(error).startswith("this panel already has a live main")
+        assert "capacity screen k" in str(error) and "unverifiable" in str(error)
+        assert "--release-main" not in str(error)
     assert not opened_window.called
     with patch.object(panel, "tmux_command", return_value=["true"]), patch.object(panel, "bind_main_keys"):
         try:
             panel.split_panel(project, launch="claude")
             raise AssertionError("--launch added a second live main")
         except ValueError as error:
-            assert "already has a live main" in str(error)
+            assert str(error).startswith("this panel already has a live main")
+            assert "capacity screen k" in str(error) and "unverifiable" in str(error)
+            assert "--release-main" not in str(error)
     assert not opened_window.called
+    with patch.object(panel, "recorded_room", return_value="r1"):
+        try:
+            panel.check_legacy_main(project)
+            raise AssertionError("an unverified main window allowed replacement")
+        except ValueError as error:
+            assert str(error).startswith("this panel already has a live main")
+            assert "capacity screen k" in str(error) and "unverifiable" in str(error)
+            assert "--release-main" not in str(error)
 # The cap counts the whole panel, not the selected room; a close needs exactly one proven window and records the leave only after the kill.
 def fake_status(repo, ident):
     return {"participants": [{"participant": "%s-m%s" % (ident, n), "joined": True, "role": "main"} for n in range(4)]}
@@ -9238,12 +9251,27 @@ try:
             assert working_release not in {row["attempt"] for row in panel_release.dead_mains(release_repo)["releasable"]}
         for row, offered in ((next(row for row in rows if row["attempt_id"] == working_release), True),
                              (next(row for row in rows if row["attempt_id"] == legacy_release), False)):
-            with patch.object(panel, "events", return_value=json.dumps([row])):
-                try:
-                    panel.check_legacy_main(release_repo)
-                    raise AssertionError("unreleased main allowed replacement")
-                except ValueError as error:
-                    assert ("oms panel --release-main " + row["attempt_id"] in str(error)) is offered, error
+            with patch.object(panel, "events", return_value=json.dumps([row])), \
+                    patch.object(panel, "session_owner", return_value=str(release_repo)), \
+                    patch.object(panel, "panel_room", return_value="release-room"), \
+                    patch.object(panel, "live_mains", return_value=panel.MAX_LIVE_MAINS), \
+                    patch.object(panel, "main_installed", return_value=True), \
+                    patch.object(panel_host, "herdr_active", return_value=False), \
+                    patch.dict(os.environ, TMUX="fixture", OMS_PANEL_SESSION="oms-fixture"):
+                for refuse in (lambda: panel.check_legacy_main(release_repo),
+                               lambda: panel.spawn_main(release_repo, "claude"),
+                               lambda: panel.construct_panel(release_repo, "oms-fixture", str(release_repo),
+                                                             os.environ.copy(), "auto", False, "claude", None, None, None),
+                               lambda: panel.open_native("claude", release_repo)):
+                    try:
+                        refuse()
+                        raise AssertionError("unreleased main allowed replacement")
+                    except ValueError as error:
+                        assert str(error).startswith("this panel already has a live main"), error
+                        assert ("oms panel --release-main " + row["attempt_id"] in str(error)) is offered, error
+                        assert "--release-main ATTEMPT" not in str(error), error
+                        if not offered:
+                            assert "capacity screen k" in str(error) and "unverifiable" in str(error), error
         if os.name != "nt":
             with patch.object(panel_terminals, "process", return_value={"identity": "f" * 64, "state": "S"}):
                 assert not panel_terminals.matches(live_release_process.pid, live_refs["panel_native_identity"])
