@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 import room
@@ -107,22 +108,30 @@ def close_reader(board):
 def page(render, board):
     """Scroll `render(width)` until q, Esc or the end of input, or until the board pane is gone (a reader never
     outlives its board); focus then returns to the board."""
-    offset, shown, lines, drawn, alive = 0, None, [], None, time.monotonic() + 2
-    refresh = 0
+    offset, shown, lines, drawn, alive = 0, None, ["Reading the recorded result..."], None, time.monotonic() + 2
+    refresh, read = 0, {}
+
+    def fetch(width):
+        # One read at a time off the input thread: a slow result query never blocks q/Esc or scrolling.
+        try:
+            read["lines"] = (width, render(width).splitlines())
+        except Exception as error:  # the pane stays open to say why instead of vanishing
+            read["lines"] = (width, ["Result evidence unavailable: " + clean(str(error), 200)])
+
     try:
         with TerminalInput() as inputs:
             while True:
                 size = tuple(shutil.get_terminal_size())
-                if shown != size or time.monotonic() >= refresh:
-                    try:
-                        updated = render(size[0]).splitlines()
-                    except Exception as error:  # the pane stays open to say why instead of vanishing
-                        updated = ["Result evidence unavailable: " + clean(str(error), 200)]
-                    if updated != lines:
-                        drawn = None
-                    lines = updated
-                    shown = size
-                    refresh = time.monotonic() + 2
+                running = read.get("thread") and read["thread"].is_alive()
+                if not running and (shown != size[0] or time.monotonic() >= refresh):
+                    read["thread"] = threading.Thread(target=fetch, args=(size[0],), daemon=True)
+                    read["thread"].start()
+                    read["thread"].join(.2)
+                    shown, refresh = size[0], time.monotonic() + 2
+                if "lines" in read:
+                    width, updated = read.pop("lines")
+                    if width == size[0] and updated != lines:
+                        lines, drawn = updated, None
                 height = max(1, size[1] - 1)
                 offset = max(0, min(offset, len(lines) - height))
                 if drawn != (offset, size, len(lines)):

@@ -5324,6 +5324,10 @@ with patch.object(panel, "render_results", side_effect=ValueError(failure)) as r
     output, unused = read_page(rendered, iter([[("q",)]]))
 assert "Result evidence unavailable: " + panel.clean(failure, 200) in output, output
 assert "\033]52" not in output and not any(c in output for c in ("\a", "\x9b", "\u200b", "\r")), output
+# A slow result query runs off the input thread: q closes the reader at once, showing the pending notice.
+slow_started = time.time()
+output, unused = read_page(lambda width: (time.sleep(3), "late")[1], iter([[("q",)]]))
+assert time.time() - slow_started < 2 and "Reading the recorded result..." in output, output
 # A room transition closes the reader through the watcher's close path; refreshes of the same room do not.
 class RoomFrameReceived(Exception):
     pass
