@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 import stat
+import subprocess
 import time
 
 from panel_results import DURABLE, _lock
@@ -147,3 +148,45 @@ def read_shared(repo, key, collect, cacheable=None):
         raise
     except (OSError, SystemExit):
         return collect()
+
+
+class TickReads:
+    """Share evidence and failures only for one board collection, without caching actions."""
+
+    def __init__(self, repo):
+        self.repo = repo
+        self.values = {}
+        self.errors = {}
+
+    def _once(self, key, collect):
+        if key in self.errors:
+            raise self.errors[key]
+        if key not in self.values:
+            try:
+                self.values[key] = collect()
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError,
+                    subprocess.SubprocessError) as error:
+                self.errors[key] = error
+                raise
+        return self.values[key]
+
+    def attempts(self):
+        def collect():
+            result = subprocess.run(['bash', str(ROOT / 'scripts/oms'), 'agent-events',
+                                     '--repo', str(self.repo), 'list', '--json'],
+                                    capture_output=True, text=True, check=False, timeout=30,
+                                    stdin=subprocess.DEVNULL)
+            if result.returncode:
+                raise ValueError('attempt evidence unavailable')
+            rows = json.loads(result.stdout)
+            if not isinstance(rows, list):
+                raise ValueError('invalid attempt evidence')
+            return rows
+        return self._once('attempts', lambda: read_shared(
+            self.repo, 'attempts', lambda: self._once('agent-events', collect)))
+
+    def records(self):
+        from panel_results import _records
+        return self._once('result-records', lambda: read_shared(
+            self.repo, 'result-records', lambda: self._once('records-query',
+                lambda: _records(self.repo, _attempts=self.attempts()))))

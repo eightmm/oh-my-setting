@@ -2099,7 +2099,9 @@ def main_activity(repo, members, windows=()):
     return result
 
 
-def snapshot(repo, room_id=None):
+def snapshot(repo, room_id=None, _tick=None):
+    from panel_cache import TickReads
+    _tick = TickReads(repo) if _tick is None else _tick
     try:
         def collect_dashboard():
             state, status = dashboard(repo, as_json=True)
@@ -2138,7 +2140,7 @@ def snapshot(repo, room_id=None):
                     try:
                         from panel_results import completed_tasks
                         state["completed_tasks"] = completed_tasks(repo,
-                            [t.get("id") for t in state["room"].get("repo_tasks", [])], _shared=True)
+                            [t.get("id") for t in state["room"].get("repo_tasks", [])], _shared=True, _tick=_tick)
                     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                         state["completed_tasks"] = {}
             except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
@@ -2166,13 +2168,7 @@ def snapshot(repo, room_id=None):
                     repo, state["room"]["participants"], rows).items() if row.get("room") == ident}
                 try:
                     # Calls outside the 8 + 8 row dashboard projection keep their real state from the full projection.
-                    def collect_attempts():
-                        found = subprocess.run(["bash", str(ENTRY), "agent-events", "--repo", str(repo), "list", "--json"],
-                                               capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
-                        if found.returncode:
-                            raise ValueError("attempt evidence unavailable")
-                        return json.loads(found.stdout)
-                    rows = read_shared(repo, 'attempts', collect_attempts)
+                    rows = _tick.attempts()
                     if isinstance(rows, list):
                         calls = {m["participant"]: m.get("role") for m in state["room"]["participants"]
                                  if m.get("joined") and m.get("role") != "main"}
@@ -2201,11 +2197,11 @@ def snapshot(repo, room_id=None):
                                + list((state.get("room_attempts") or {}).values())
                                if row.get("state") in {"failed", "timed_out", "abandoned", "orphaned", "review", "blocked"}}
                     if waiting:
-                        state["finalized"] = {ident: outcome for ident, outcome in outcomes(repo, waiting, _shared=True).items()
+                        state["finalized"] = {ident: outcome for ident, outcome in outcomes(repo, waiting, _shared=True, _tick=_tick).items()
                                               if outcome in {"completed", "accepted"}}
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
-                state["awaiting_admission"] = awaiting_admission(repo, state)
+                state["awaiting_admission"] = awaiting_admission(repo, state, _tick=_tick)
         return state, status
     except (OSError, ValueError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
         return {"repo": {"name": repo.name}, "collection": {"ok": False}}, 1
@@ -2282,7 +2278,7 @@ def frame_view(repo, provider, state, previous=None, menu=True, main_attempt=Non
     return text, size, capable
 
 
-def awaiting_admission(repo, state):
+def awaiting_admission(repo, state, _tick=None):
     """Finished write workers whose recorded patch has no admission or landing record yet."""
     from room_view import nodes
     found = []
@@ -2291,7 +2287,7 @@ def awaiting_admission(repo, state):
         if member.get("role") != "worker" or member.get("access") != "write" or member["state"] != "done" or not task:
             continue
         try:
-            calls = [call for row in results(repo, task_id=task, _shared=True).get("rows", []) for call in row.get("calls", [])]
+            calls = [call for row in results(repo, task_id=task, _shared=True, _tick=_tick).get("rows", []) for call in row.get("calls", [])]
         except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
             continue
         if any(call.get("patch") for call in calls) and not any(
@@ -2742,6 +2738,8 @@ def other_rooms(repo, current, live):
 
 def read_panel(repo, provider, view, attention_only):
     from panel_metrics import collect
+    from panel_cache import TickReads
+    tick = TickReads(repo)
     main_attempt, room_error = None, False
     density = view or os.environ.get("OMS_PANEL_VIEW") or "auto"
     filtered = attention_only
@@ -2762,12 +2760,12 @@ def read_panel(repo, provider, view, attention_only):
             except ValueError:
                 room_error = True
                 selected_room = ""
-    state, status = snapshot(repo, room_id=selected_room)
+    state, status = snapshot(repo, room_id=selected_room, _tick=tick)
     if room_error:
         state = dict(state, room={"id": "unavailable", "error": "invalid window room selection; select an existing room"})
         status = 1
     if state.get("room", {}).get("participants"):
-        state = dict(state, provider_status=collect(state, main_attempt, repo=repo))
+        state = dict(state, provider_status=collect(state, main_attempt, repo=repo, _tick=tick))
         from panel_view import LIVE_STATES
         attempts = state.get("attempts", {})
         # A resumed main keeps its first participant id while running as a new attempt.

@@ -972,6 +972,109 @@ with patch.object(panel_results, '_records', return_value=([], [])) as queries:
     panel_results.results(project, _shared=True)
     assert queries.call_count == 2
 
+# One board collection shares the full projection with D/E/F/G and the H tmux path,
+# even when another writer invalidates every persistent cache during the tick.
+from copy import deepcopy
+import panel_chats
+import panel_host
+import panel_metrics
+
+task_ids = ['tick-write', 'tick-wait']
+plan.write_text(json.dumps({'plan_id': 'tick-plan', 'tasks': [{'id': t} for t in task_ids]}))
+tick_room = {'id': 'tick-room', 'participants': [
+    {'participant': 'tick-main', 'role': 'main', 'provider': 'codex', 'joined': True},
+    {'participant': 'tick-worker', 'role': 'worker', 'provider': 'codex', 'joined': True, 'parent': 'tick-main'}]}
+main = {'attempt_id': 'tick-main', 'terminal': False, 'state': 'working', 'tool': 'panel-main', 'provider': 'codex',
+        'refs': {'panel_room_id': 'tick-room', 'panel_room_participant': 'tick-main', 'panel_role': 'main',
+                 'panel_host': 'herdr', 'panel_socket_digest': 'fixture',
+                 'panel_pane_id': 'tab:p1', 'panel_terminal_id': 'terminal'}}
+write = {'attempt_id': 'tick-worker', 'task_id': 'tick-write', 'terminal': True, 'state': 'done',
+         'refs': {'panel_room_id': 'tick-room', 'panel_room_participant': 'tick-worker', 'panel_role': 'worker'}}
+listed = [main] + [{'attempt_id': 'old-%s' % i, 'terminal': True} for i in range(300)] + [write]
+artifacts = [{'kind': 'delegate', 'task_id': 'tick-write', 'attempt_id': 'tick-worker', 'patch': 'change.patch'},
+             {'kind': 'panel-result', 'task_id': 'tick-wait'}]
+tick_state = {'repo': {'name': 'fixture'}, 'plan': {'present': True}, 'attempts': {'recent': [
+    dict(write, panel={'room_id': 'tick-room', 'room_participant': 'tick-worker', 'role': 'worker', 'access': 'write'}),
+    {'task_id': 'tick-wait', 'state': 'failed'}]}}
+counts = {'events': 0, 'index': 0}
+failure = [False]
+def tick_run(command, **kwargs):
+    value = {}
+    if 'agent-events' in command:
+        counts['events'] += 1
+        assert command[-2:] == ['list', '--json'], command
+        if failure[0]:
+            raise subprocess.TimeoutExpired(command, 5)
+        value = listed
+        plan.write_text(plan.read_text() + '\n')
+    elif 'artifact-index' in command:
+        counts['index'] += 1
+        value = {'rows': artifacts}
+        plan.write_text(plan.read_text() + '\n')
+    elif 'agent-plan' in command:
+        value = {'tasks': [{'id': t} for t in task_ids]}
+    elif command[:2] == ['tmux', 'list-windows']:
+        return subprocess.CompletedProcess(command, 0, f'@1\ttick-main\ttick-room\t%1\ttick-main\t{project.resolve()}\t$1\n', '')
+    elif command[:2] == ['tmux', 'list-panes']:
+        return subprocess.CompletedProcess(command, 0, '%1\t@1\n', '')
+    return subprocess.CompletedProcess(command, 0, json.dumps(value), '')
+def tick_result(repo, row):
+    return {'outcome': 'accepted', 'revision': 'a' * 24, 'evidence': [],
+            'plan_binding': panel_results._plan_bindings(repo, task_ids)['tick-wait'],
+            'verification': {'status': 'passed', 'exit': 0}}
+with patch.object(panel, 'dashboard', side_effect=lambda *a, **k: (deepcopy(tick_state), 0)), \
+        patch.object(panel.room, 'status', side_effect=lambda *a: deepcopy(tick_room)), \
+        patch.object(panel, 'managed_session', return_value=False), \
+        patch.object(panel, 'other_rooms', return_value=([], False)), \
+        patch.object(panel.subprocess, 'run', side_effect=tick_run), \
+        patch.object(panel_chats.shutil, 'which', return_value='/fixture/tmux'), \
+        patch.object(panel_chats, 'current_models', return_value={}), \
+        patch.object(panel_results, '_load_result', side_effect=tick_result), \
+        patch.object(panel_results, 'completed_tasks', wraps=panel_results.completed_tasks) as completed, \
+        patch.object(panel, 'outcomes', wraps=panel.outcomes) as outcomes, \
+        patch.object(panel, 'results', wraps=panel.results) as results, \
+        patch.object(panel_chats, 'windows', wraps=panel_chats.windows) as windows, \
+        patch.dict(os.environ, {'OMS_ROOM_ID': 'tick-room', 'TMUX': 'fixture'}):
+    for read in (lambda: panel.snapshot(project, 'tick-room')[0],
+                 lambda: panel.read_panel(project, 'codex', None, False)[0]):
+        counts.update(events=0, index=0)
+        report = read()
+        assert counts == {'events': 1, 'index': 1}, counts
+        assert report['completed_tasks'].keys() == {'tick-wait'}, report
+        assert report['finalized'] == {'tick-wait': 'accepted'}, report
+        assert report['awaiting_admission'] == ['tick-worker'], report
+        assert report['room_attempts']['tick-worker']['state'] == 'done', report
+    assert completed.call_count == outcomes.call_count == results.call_count == 2
+    tick = windows.call_args.kwargs['_tick']
+    assert windows(project, 'tick-room', tick_room, _tick=tick) == {
+        'tick-main': [{'window': '@1', 'pane': '%1', 'session': '$1'}]}
+    assert tick.records()[0] == listed[-300:], 'results lost their latest-300 coverage'
+    # The Herdr H reader uses the same full rows, including the old active main.
+    with patch.object(panel_host, 'herdr_active', return_value=True), \
+            patch.object(panel_host, 'socket_digest', return_value='fixture'), \
+            patch.object(panel_host, 'pane', return_value={
+                'pane_id': 'tab:p1', 'terminal_id': 'terminal', 'workspace_id': 'workspace',
+                'tab_id': 'tab', 'cwd': str(project.resolve())}):
+        assert panel_host.targets(project, 'tick-room', tick_room, _tick=tick).get('tick-main')
+    assert counts['events'] == 1
+    # Action-time navigation has no tick: it still probes --active for itself.
+    def action_run(command, **kwargs):
+        if 'agent-events' in command:
+            return subprocess.CompletedProcess(command, 0, json.dumps([main]), '')
+        return tick_run(command, **kwargs)
+    with patch.object(panel_chats.subprocess, 'run', side_effect=action_run) as action:
+        assert panel_chats.windows(project, 'tick-room', tick_room).get('tick-main')
+        assert any('--active' in c.args[0] for c in action.call_args_list)
+    # A failed common read stays unknown for every consumer and is retried next tick.
+    failure[0] = True
+    for i in range(2):
+        plan.write_text(plan.read_text() + '\n')
+        counts.update(events=0, index=0)
+        report = panel.read_panel(project, 'codex', None, False)[0]
+        assert counts['events'] == 1 and counts['index'] == 0, counts
+        assert report['completed_tasks'] == {} and 'room_attempts' not in report, report
+        assert report['awaiting_admission'] == [], report
+
 # An owner decision older than results()' twenty-task window still reaches the board through outcomes().
 many = [{'kind': 'panel-result', 'task_id': 'task-%02d' % n} for n in range(30)]
 with patch.object(panel_results, '_records', return_value=([], many)), \
@@ -6368,7 +6471,7 @@ assert got["room_attempts"] == {"gone-review": {"state": "review", "attempt_id":
 with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \
         patch.object(room_module, "status", return_value={"id": "flow-room", "participants": members}), \
         patch.object(panel, "managed_session", return_value=False), \
-        patch.object(panel, "outcomes", side_effect=lambda repo, ids, _shared=False: {"t-a-new": "accepted"} if "t-a-new" in ids else {}), \
+        patch.object(panel, "outcomes", side_effect=lambda repo, ids, _shared=False, _tick=None: {"t-a-new": "accepted"} if "t-a-new" in ids else {}), \
         patch.object(panel.subprocess, "run", side_effect=fake_run):
     got, _ = panel.snapshot(Path("."), "flow-room")
 assert got.get("finalized") == {"t-a-new": "accepted"}, got.get("finalized")

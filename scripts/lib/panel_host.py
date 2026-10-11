@@ -84,17 +84,20 @@ def refs(repo):
             "panel_terminal_id": current_pane["terminal_id"]}
 
 
-def targets(repo, ident, state):
+def targets(repo, ident, state, _tick=None):
     """Reconcile fresh host facts with an active OMS owner, never a UI label."""
     if not herdr_active():
         return {}
     import room
     import subprocess
     try:
-        evidence = subprocess.run(["bash", str(room.ENTRY), "agent-events", "--repo", str(repo),
-                                   "list", "--active", "--json"], capture_output=True, text=True,
-                                  check=True, timeout=5, stdin=subprocess.DEVNULL)
-        attempts = json.loads(evidence.stdout)
+        if _tick is not None:
+            attempts = [row for row in _tick.attempts() if isinstance(row, dict) and not row.get('terminal')]
+        else:
+            evidence = subprocess.run(["bash", str(room.ENTRY), "agent-events", "--repo", str(repo),
+                                       "list", "--active", "--json"], capture_output=True, text=True,
+                                      check=True, timeout=5, stdin=subprocess.DEVNULL)
+            attempts = json.loads(evidence.stdout)
         if not isinstance(attempts, list):
             return {}
         members = {m["participant"]: m for m in state["participants"] if m["role"] == "main"}
@@ -132,7 +135,7 @@ def targets(repo, ident, state):
                 "terminal": observed["terminal_id"], "socket": digest, "repo": str(Path(repo).resolve()),
                 "room": ident, "participant": who, "attempt": attempt["attempt_id"]})
         return {who: candidates for who, candidates in found.items() if who not in uncertain}
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
         return {}
 
 
