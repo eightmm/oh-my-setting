@@ -602,6 +602,8 @@ if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ]; then
   REPO="${REPO//$'\r'/}"
   REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve physical panel state"
 fi
+[ "$APPLY" = 0 ] || [ "$delegate_worktree_repo" = "$REPO" ] ||
+  fail "--apply cannot land a patch built in $delegate_worktree_repo onto panel state repository $REPO"
 # peer-delegate is a public front door, so the orientation pack is revalidated
 # here rather than trusted from plan-run: a malformed, oversized, traversing or
 # secret-shaped pack must be refused before a worktree or artifact exists. The
@@ -2537,9 +2539,9 @@ else
   # a raw `git apply` would land an unreviewed patch outside patch-land's
   # dirty-tree refusal, lock, and admission checks.
   if [ -n "$PLAN_TASK_ID" ]; then
-    echo "applied: no (review patch, then: oms patch-land --repo $REPO --patch $patch_file --plan-task $PLAN_TASK_ID)"
+    echo "applied: no (review patch, then: oms patch-land --repo $delegate_worktree_repo --patch $patch_file --plan-task $PLAN_TASK_ID)"
   else
-    echo "applied: no (review patch, then: oms patch-land --repo $REPO --patch $patch_file)"
+    echo "applied: no (review patch, then: oms patch-land --repo $delegate_worktree_repo --patch $patch_file)"
   fi
 fi
 if [ "$KEEP_WORKTREE" = 1 ]; then

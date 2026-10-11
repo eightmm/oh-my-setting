@@ -4742,6 +4742,19 @@ subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(project), str(other_
 (other_project / "dispatch-brief.md").write_text("Task: append new to value.txt.\n")
 cross_brief = other_project / "dispatch-brief.md"
 verify_log = temporary / "cross-repo-verify"
+for dry_run in (False, True):
+    before = worker_log.read_bytes()
+    request = ["bash", str(panel.ENTRY), "peer-delegate", "--repo", str(other_project),
+               "--to", "codex", "--brief-file", str(cross_brief), "--no-verify", "--apply"]
+    if dry_run:
+        request += ["--dry-run"]
+    refused = subprocess.run(request, env=dict(room_env, OMS_PANEL_DISPATCH="1"),
+                             capture_output=True, text=True, timeout=30)
+    assert refused.returncode != 0 and (
+        "--apply cannot land a patch built in %s onto panel state repository %s" % (other_project, project)
+    ) in refused.stderr, refused
+    assert worker_log.read_bytes() == before, "cross-repository apply launched a worker"
+    assert (other_project / "value.txt").read_text() == (project / "value.txt").read_text() == "old\n"
 for task_id, explicit_room, writing, continuing in (
         ("cross-repo-explicit", True, False, False),
         ("cross-repo-inherited", False, False, False),
@@ -4771,6 +4784,8 @@ for task_id, explicit_room, writing, continuing in (
     assert observed["timeout"] == ("40m" if writing else room_env.get("OMS_PEER_TIMEOUT")), observed
     if writing:
         assert verify_log.read_text().strip() == str(other_project / ".git"), "verification used the state repository"
+        assert "applied: no (review patch, then: oms patch-land --repo %s --patch " % other_project in answer, answer
+        assert "oms patch-land --repo %s --patch " % project not in answer, answer
     state = room.status(project, shared)
     enrolled = room.participant(state, observed["participant"])
     assert enrolled["parent"] == room_owner and enrolled["role"] == "worker", enrolled
