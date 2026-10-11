@@ -2738,14 +2738,15 @@ for harness in panel.MAIN_HARNESSES:
         except ValueError as error:
             assert str(error) == panel.main_missing(harness)
 with patch.dict(os.environ, environment, clear=True), patch.object(panel.shutil, "which", return_value="/x"), \
-        patch.object(panel, "ensure_room", return_value="pi-room"), patch.object(panel, "events", return_value="pi-attempt") as pi_events, \
+        patch.object(panel, "ensure_room", return_value="pi-room"), patch.object(panel, "events", \
+            side_effect=lambda repo, *args, **kwargs: "pi-attempt" if args[0] == "start" else "[]") as pi_events, \
         patch.object(panel.room, "join") as pi_join, patch.object(panel, "managed_session", return_value=False), \
         patch.object(panel.panel_host, "herdr_active", return_value=False), patch.object(panel, "update_activity"), \
         patch.object(panel.subprocess, "Popen") as pi_process:
     pi_process.return_value.wait.return_value = pi_process.return_value.poll.return_value = 0
     assert panel._run_native("pi", project, task="fixture") == 0
     assert pi_join.call_args.args[3] == "codex" and pi_join.call_args.args[7] is None
-    assert "panel_harness=pi" in pi_events.call_args.args
+    assert "panel_harness=pi" in next(c.args for c in pi_events.call_args_list if c.args[1] == "start")
     pi_env = pi_process.call_args.kwargs["env"]
     assert pi_env["OMS_PANEL_OWNER"] == pi_env["OMS_AGENT"] == "codex" and pi_env["OMS_PANEL_HARNESS"] == "pi"
     assert "OMS_HOOK_AGENT" not in pi_env
@@ -5660,6 +5661,14 @@ def exercise_main_lineage():
                 "terminal": False, "sequence": 1, "prompt": "PRIVATE-LINEAGE-PROMPT",
                 "refs": {"panel_role": "worker", "panel_label": "Inspect fixture %d" % n,
                          "prompt": "PRIVATE-LINEAGE-PROMPT"}} for n in range(12)]
+    workers[0].update(state="done", terminal=True)
+    workers[0]["refs"].update(panel_room_id="lineage-room", panel_room_participant="call-0000000000000000",
+                              native_session="lineage-safe-session")
+    from types import SimpleNamespace
+    panel._record_dispatch_call(project, "lineage-room", "call-0000000000000000", "lineage-stable",
+                                SimpleNamespace(pid=987654321), "lineage-process-identity")
+    panel._record_dispatch_call(project, "lineage-room", "call-0000000000000000", "lineage-stable",
+                                SimpleNamespace(pid=987654321), "lineage-process-identity", 0)
     settled = dict(workers[0], attempt_id="lineage-settled", task_id="lineage-settled", state="done", terminal=True)
     live_worker = dict(workers[0], attempt_id="lineage-live-worker", task_id="lineage-live-task",
                        parent_attempt_id=live_old["attempt_id"])
@@ -5670,7 +5679,8 @@ def exercise_main_lineage():
     def continue_task(task, env):
         out, native, note = panel.continuation(project, "claude", None, task, {"provider": "codex"}, brief, env)
         try:
-            assert "A fresh worker continues earlier work" in out.read_text()
+            assert "New instructions follow." in out.read_text()
+            return native
         finally:
             out.unlink()
     def refuse(task, env):
@@ -5682,10 +5692,35 @@ def exercise_main_lineage():
             raise AssertionError("foreign worker was continued")
     def ledger(repo, *args, output=False):
         return "lineage-next" if args[0] == "start" else json.dumps(rows)
-    with patch.object(panel, "events", side_effect=ledger), patch.object(panel, "results", return_value={"rows": []}):
+    with patch.object(panel, "events", side_effect=ledger), patch.object(panel, "results", return_value={"rows": []}), \
+            patch("panel_terminals.process_gone", return_value=True) as gone, \
+            patch.object(panel, "_dispatch_group_gone", return_value=True) as group_gone:
         assert panel.lineage_ids(project, "claude", "lineage-stable", "lineage-resumed") == {
             "lineage-old", "lineage-resumed"}
         continue_task("lineage-task-0", caller)
+        with patch.object(panel, "session_stored", return_value=True):
+            assert continue_task("lineage-task-0", caller) == "lineage-safe-session"
+            def refuse_exit():
+                try:
+                    continue_task("lineage-task-0", caller)
+                except ValueError as error:
+                    assert "historical worker exit is unconfirmed" in str(error), error
+                else:
+                    raise AssertionError("unconfirmed historical worker resumed")
+            for state, terminal in (("working", False), ("review", False), ("done", None)):
+                workers[0].update(state=state, terminal=terminal)
+                refuse_exit()
+            workers[0].update(state="done", terminal=True)
+            gone.return_value = False
+            refuse_exit()
+            gone.return_value = True
+            group_gone.return_value = False
+            refuse_exit()
+            group_gone.return_value = True
+            with patch.object(panel, "_dispatch_call_record", return_value=None):
+                refuse_exit()
+            with patch("panel_terminals.process_gone", side_effect=PermissionError("identity unavailable")):
+                refuse_exit()
         refuse("lineage-task-0", dict(caller, OMS_PANEL_MAIN_ATTEMPT="lineage-live", OMS_ROOM_PARTICIPANT="lineage-live"))
         refuse("lineage-live-task", caller)
         refuse("lineage-foreign-task", caller)
@@ -5710,13 +5745,28 @@ def exercise_main_lineage():
         captured = []
         def native_context(*args, **kwargs):
             captured.append(args[7].read_text())
-            return ["fixture-native"]
+            return real_native_command(*args, **kwargs)
+        real_native_command = panel.native_command
+        real_popen = panel.subprocess.Popen
         with patch.dict(os.environ, environment, clear=True), patch.object(panel, "main_installed", return_value=True), \
                 patch.object(panel.room, "join"), patch.object(panel, "managed_session", return_value=False), \
                 patch.object(panel, "update_activity"), patch.object(panel, "native_command", side_effect=native_context), \
                 patch.object(panel.subprocess, "Popen") as process:
             process.return_value.wait.return_value = process.return_value.poll.return_value = 0
-            assert panel._run_native("claude", project, room_id="lineage-room") == 0
+            process.side_effect = lambda argv, *a, **kw: (process.return_value
+                if argv[0] in {"codex", "claude"} or argv[:3] == ["bash", str(panel.ENTRY), "harness"]
+                else real_popen(argv, *a, **kw))
+            for harness in panel.MAIN_HARNESSES:
+                owner = panel.main_owner(harness)
+                for row in (old, resumed, successor):
+                    row["provider"] = row["refs"]["panel_owner"] = owner
+                foreign["provider"] = foreign["refs"]["panel_owner"] = "codex" if owner == "claude" else "claude"
+                assert panel._run_native(harness, project, task="Lineage fixture task", room_id="lineage-room") == 0
+                argv = process.call_args.args[0]
+                instructions = (argv[-1] if harness == "codex" else argv[argv.index("--append-system-prompt") + 1])
+                assert "lineage-task-11" in instructions and "Unsettled lineage workers (data): " in instructions, argv
+                assert "PRIVATE-LINEAGE-PROMPT" not in instructions
+                assert sum(arg.count("Lineage fixture task") for arg in argv) == 1, argv
         summary = captured[0].split("Unsettled lineage workers (data): ", 1)[1].splitlines()[0]
         calls = json.loads(summary)
         assert len(calls) == 10 and any(c["task_id"] == "lineage-task-11" for c in calls), calls
@@ -5724,6 +5774,8 @@ def exercise_main_lineage():
         assert all(set(c) == {"task_id", "role", "state", "label"} for c in calls), calls
         assert not {"lineage-settled", "lineage-live-task", "lineage-foreign-task"} & {c["task_id"] for c in calls}
         assert "PRIVATE-LINEAGE-PROMPT" not in captured[0], captured[0]
+        assert next(c for c in calls if c["task_id"] == "lineage-task-10")["label"] == "", calls
+        assert next(c for c in calls if c["task_id"] == "lineage-task-11")["label"] == "Inspect fixture 11", calls
         assert "--continue TASK_ID" in captured[0]
     print("main lineage: resumed/successor continuation, live/foreign/unknown refusal and bounded prompt-free context passed")
 

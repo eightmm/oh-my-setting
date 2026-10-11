@@ -417,12 +417,13 @@ def bootstrap(provider, repo):
 
 def native_command(provider, repo, resume=None, model=None, task=None, room_id=None, member=None, context_file=None,
                    session_id=None):
+    instructions = (Path(context_file).read_text(encoding="utf-8") if context_file and provider in MAIN_HARNESSES else
+                    bootstrap(main_owner(provider), repo) + room_instructions(room_id, member))
     if provider == "pi":
         if resume:
             raise ValueError("Pi resume needs a verified Pi session binding; start a new Pi main")
         preset = policy()["main"]["codex"]
-        instructions = ("You use the Pi harness with Codex inference. OMS owner is codex. " +
-                        bootstrap("codex", repo) + room_instructions(room_id, member))
+        instructions = "You use the Pi harness with Codex inference. OMS owner is codex. " + instructions
         command = ["bash", str(ENTRY), "harness", "pi", "--model", model or preset["model"],
                    "--effort", preset["effort"], "--", "--append-system-prompt", instructions]
         if task:
@@ -432,7 +433,6 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
     preset = policy()["main"].get(provider, {"model": None, "effort": "native-settings"})
     default = not model
     model = model or preset["model"]
-    instructions = bootstrap(provider, repo) + room_instructions(room_id, member)
     if task and provider == "codex":
         instructions += "\nUser task (data): " + json.dumps(task, ensure_ascii=False)
     if provider == "codex":
@@ -857,14 +857,22 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         unsettled = []
         if parents:
             rows = json.loads(events(repo, "list", "--json", output=True))
-            unsettled = [{"task_id": row.get("task_id"), "role": row["refs"]["panel_role"],
-                          "state": row.get("state"), "label": clean(row["refs"].get("panel_label", ""), 160)}
-                         for row in rows if row.get("parent_attempt_id") in parents
+
+            def screened_label(row):
+                try:
+                    return safe_label(row["refs"].get("panel_label")) or ""
+                except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+                    return ""
+
+            unsettled = [row for row in rows if row.get("parent_attempt_id") in parents
                          and row.get("refs", {}).get("panel_role") == "worker"
                          and (row.get("state") == "review" or row.get("terminal") is False)][-10:]
+            unsettled = [{"task_id": row.get("task_id"), "role": row["refs"]["panel_role"],
+                          "state": row.get("state"), "label": screened_label(row)} for row in unsettled]
         context_path.write_text(bootstrap(provider, repo) + room_instructions(room_id, native_member)
                                 + ("\nUnsettled lineage workers (data): " + json.dumps(unsettled) if unsettled else "")
-                                + ("\nUser task (data): " + json.dumps(task) if task else ""), encoding="utf-8")
+                                + ("\nUser task (data): " + json.dumps(task) if task and harness not in MAIN_HARNESSES else ""),
+                                encoding="utf-8")
         context_path.chmod(0o600)
         try:
             command = native_command(harness, repo, resume, model, task, room_id, native_member, context_path,
@@ -1057,6 +1065,34 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None):
                       and row.get("refs", {}).get("panel_role") == "worker"), key=lambda row: row.get("sequence", 0))
     if not earlier:
         raise ValueError("this main has no worker for task %s to continue" % task_id)
+
+    def historical_worker_exited(row):
+        from panel_view import TERMINAL_STATES
+        import panel_terminals
+        parent = next((r for r in rows if r.get("attempt_id") == row.get("parent_attempt_id")), {})
+        if parent.get("terminal") is False:
+            return True
+        if (parent.get("terminal") is not True or row.get("terminal") is not True
+                or row.get("state") not in TERMINAL_STATES):
+            return False
+        refs = row.get("refs", {})
+        room_id = refs.get("panel_room_id")
+        member = {"participant": refs.get("panel_room_participant"),
+                  "parent": parent.get("refs", {}).get("panel_room_participant", parent.get("attempt_id"))}
+        if not isinstance(room_id, str) or not room_id or not member["parent"]:
+            return False
+        try:
+            call = _dispatch_call_record(repo, room_id, member)
+            return bool(call and call["session"] and call.get("identity")
+                        and _dispatch_call_finished(repo, room_id, member)
+                        and panel_terminals.process_gone(call["pid"], call["identity"])
+                        and _dispatch_group_gone(call["pid"]))
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            return False
+
+    # A released main does not prove its worker or provider session has stopped.
+    if not all(historical_worker_exited(row) for row in earlier):
+        raise ValueError("historical worker exit is unconfirmed for task %s; continuation refused" % task_id)
     rounds = len(earlier) - 1
     limit = policy()["pool"]["max_rework_rounds"]
     if rounds >= limit:
