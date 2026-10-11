@@ -625,8 +625,8 @@ def replace_before_launch(argv, **kwargs):
 brief = repo / "lease-brief.md"
 brief.write_text("Inspect file.txt without edits; return evidence.\n")
 with patch.dict(os.environ, env, clear=True), patch.object(panel.subprocess, "call", side_effect=replace_before_launch):
-    assert panel.dispatch(repo, "claude", "worker", "light", "auto", "write", "implement", brief=brief,
-                          verify=":", task_id="lease-bound") != 0
+    assert panel.dispatch(repo, "claude", "worker", None, "write", "implement", brief=brief, verify=":",
+                          task_id="lease-bound", target="codex", model="gpt-6-luna", effort="low") != 0
 assert not started.exists()
 run(entry + ["agent-events", "--repo", str(repo), "transition", "--attempt", attempt,
              "--state", "cancelled", "--reason-code", "fixture-terminal"])
