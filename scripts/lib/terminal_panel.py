@@ -21,6 +21,7 @@ import uuid
 import panel_host
 import panel_debate
 import panel_messages
+import panel_reader
 
 from dashboard_projection import clean
 from panel_view import CLOSE_PREFIX, INBOX_LIMIT, close_requests, menu_rows, render, render_results
@@ -1053,42 +1054,29 @@ def watch_shell(repo, provider=None, session=None):
 def panel_environment():
     return ["env"] + [name + "=" + os.environ[name] for name in
                       ("OMS_PANEL_NO_ANIMATION", "OMS_PANEL_COLOR", "NO_COLOR", "OMS_CODEX_NOTIFY", "OMS_CLAUDE_NOTIFY",
-                       "OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_PANEL_HOST", "OMS_PANEL_VIEW", "OMS_PANEL_POSITION",
+                       "OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_PANEL_HOST", "OMS_PANEL_VIEW",
                        "OMS_PANEL_THEME", "COLORFGBG") if name in os.environ]
 
 
 def board_view(view):
-    return ("summary" if os.environ.get("OMS_PANEL_POSITION") == "side" else "graph") if view == "auto" else view
+    return "graph" if view == "auto" else view
 
 
-SPLITS = {"top": ["-v", "-b", "-l", "50%"], "left": ["-h", "-b", "-l", "40%"], "side": ["-h", "-l", "28%"]}
+def reader_shell(repo, target, board):
+    """The reader pane's command for one recorded call of `board`'s window; every argument is quoted."""
+    return shell_command(panel_environment() + [panel_reader.BOARD + "=" + board, "bash", str(ENTRY), "panel",
+                                                "--repo", str(repo)] + panel_reader.target_args(target))
 
 
-def shape(width, height):
-    """Board placement for a window: cells are about twice as tall as wide, so a visually wide
-    window (width > 2 x height) gets a left board."""
-    return "left" if width > 2 * height else "top"
-
-
-def board_position(size, recorded=None):
-    """An explicit OMS_PANEL_POSITION, else the placement the panel already recorded, else the shape of
-    `size`: the placement is chosen once per panel session and a resize never changes it."""
-    position = os.environ.get("OMS_PANEL_POSITION", "auto")
-    if position != "auto":
-        return position
-    if recorded in ("top", "left"):
-        return recorded
-    return shape(*size) if size else "top"
-
-
+BOARD_SHARE = 40  # percent of the window width a first board takes
 MIN_BOARD = MIN_CHAT = 20
 
 
 def parse_split(text):
-    """The panel-wide board geometry as (placement, number, legacy): "<top|left>:<cells>c" in absolute cells,
-    or the older "<top|left>:<percent>" (legacy, 5-95); None when unset or invalid. The unit letter keeps
-    a recorded cell count from reading as a percentage."""
-    match = re.fullmatch(r"(top|left):(\d{1,4})(c?)", (text or "").strip())
+    """The panel-wide board width as ("left", number, legacy): "left:<cells>c" in absolute cells, or the older
+    "left:<percent>" (legacy, 5-95); None when unset or invalid, including an older session's "top:" record.
+    The unit letter keeps a recorded cell count from reading as a percentage."""
+    match = re.fullmatch(r"(left):(\d{1,4})(c?)", (text or "").strip())
     if not match:
         return None
     number = int(match.group(2))
@@ -1097,8 +1085,8 @@ def parse_split(text):
     return (match.group(1), number, True) if 5 <= number <= 95 else None
 
 
-def split_text(position, cells):
-    return "%s:%dc" % (position, cells)
+def split_text(cells):
+    return "left:%dc" % cells
 
 
 def split_cells(stored, window):
@@ -1128,8 +1116,8 @@ def terminal_window():
 
 
 def board_split(pane, repo, command):
-    """Open this window's board at the panel-wide geometry. The first main window's board chooses the placement
-    and records its size in cells; later boards reuse both. The control window only follows the record."""
+    """Open this window's board as its full-height left pane at the panel-wide width. The first main window's board
+    records its width in cells; later boards reuse it. The control window only follows the record."""
     try:
         read = subprocess.run(tmux_command("display-message", "-p", "-t", pane,
                                            "#{window_width} #{window_height} #{session_attached} #{session_id}"
@@ -1143,18 +1131,16 @@ def board_split(pane, repo, command):
     stored = parse_split(parts[2])
     # A detached session still has tmux's 80x24 window; the terminal that is about to attach is the better size.
     sized = window if attached else terminal_window()
-    position = board_position(sized or window, stored[0] if stored else None)
-    flags = list(SPLITS[position])
+    width = "%d%%" % BOARD_SHARE
     if sized:
-        # The sidebar is a left board that starts narrower.
-        kind = "top" if position == "top" else "left"
-        extent = sized[1 if kind == "top" else 0]
-        cells = split_cells(stored if stored and stored[0] == kind else (kind, int(SPLITS[position][-1].rstrip("%")), True), extent)
-        flags[-1] = str(cells) if attached else "%d%%" % max(1, min(99, (200 * cells + extent) // (2 * extent)))
-        if session and parts[1] != "control" and (stored is None or stored[2] and stored[0] == kind):
-            subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_split", split_text(kind, cells)),
+        cells = split_cells(stored or ("left", BOARD_SHARE, True), sized[0])
+        width = str(cells) if attached else "%d%%" % max(1, min(99, (200 * cells + sized[0]) // (2 * sized[0])))
+        if session and parts[1] != "control" and (stored is None or stored[2]):
+            subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_split", split_text(cells)),
                            check=False, timeout=3, stdin=subprocess.DEVNULL)
-    subprocess.run(tmux_command("split-window", *flags, "-t", pane, "-c", str(repo), command), check=True)
+    # -f keeps a reopened board full height even beside a reader pane that splits the chat column.
+    subprocess.run(tmux_command("split-window", "-f", "-h", "-b", "-l", width, "-t", pane, "-c", str(repo), command),
+                   check=True)
 
 
 def panel_geometry():
@@ -1177,7 +1163,7 @@ def panel_geometry():
 
 
 class SplitSync:
-    """Holds every main window's board at the one panel-wide geometry in the session option @oms_panel_split, active
+    """Holds every main window's board at the one panel-wide width in the session option @oms_panel_split, active
     or not: each watcher resizes its own board to the recorded cells, and a border drag in the active window is
     recorded as the new cells for the others to follow."""
 
@@ -1192,64 +1178,38 @@ class SplitSync:
             return None
         active, zoomed, panes, window, pane, text = geometry
         before, self.last = self.last, None
-        if zoomed or panes != 2:
+        # A reader pane only splits the chat column; an older session's top board is left alone.
+        if zoomed or panes < 2 or pane[1] != window[1] or pane[0] >= window[0]:
             return None
-        position = "top" if pane[0] == window[0] else "left"
-        axis = 1 if position == "top" else 0
-        self.last = (window, pane[axis], active)
+        self.last = (window, pane[0], active)
         stored = parse_split(text)
         session = os.environ.get("OMS_PANEL_SESSION", "")
 
         def record(cells):
-            if split_text(position, cells) != text:
-                subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_split", split_text(position, cells)),
+            if split_text(cells) != text:
+                subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_split", split_text(cells)),
                                check=False, timeout=3, stdin=subprocess.DEVNULL)
 
         if stored is None:
             if not active:
                 return None
-            record(split_cells((position, pane[axis], False), window[axis]))
+            record(split_cells(("left", pane[0], False), window[0]))
             return "record"
-        if stored[0] != position:
-            return None  # an explicit OMS_PANEL_POSITION board keeps its own placement; the record never flips
-        if active and before is not None and before[2] and before[0] == window and before[1] != pane[axis]:
-            record(split_cells((position, pane[axis], False), window[axis]))
+        if active and before is not None and before[2] and before[0] == window and before[1] != pane[0]:
+            record(split_cells(("left", pane[0], False), window[0]))
             return "record"
         done = None
         if stored[2]:
-            stored = (position, split_cells(stored, window[axis]), False)
+            stored = ("left", split_cells(stored, window[0]), False)
             record(stored[1])
             done = "record"
-        cells = split_resize(stored, pane[axis], window[axis])
+        cells = split_resize(stored, pane[0], window[0])
         if cells is None:
             return done
-        subprocess.run(tmux_command("resize-pane", "-t", os.environ.get("TMUX_PANE", ""),
-                                    "-y" if position == "top" else "-x", str(cells)), check=False, timeout=3,
-                       stdin=subprocess.DEVNULL)
+        subprocess.run(tmux_command("resize-pane", "-t", os.environ.get("TMUX_PANE", ""), "-x", str(cells)),
+                       check=False, timeout=3, stdin=subprocess.DEVNULL)
         self.last = None
         return "follow"
-
-
-def relayout_board():
-    """Move this watcher's board to an explicitly requested placement (OMS_PANEL_POSITION=top|left) when it
-    differs; an automatic placement is chosen once and never moves."""
-    wanted = os.environ.get("OMS_PANEL_POSITION", "auto")
-    if wanted not in ("top", "left"):
-        return None
-    me = os.environ.get("TMUX_PANE", "")
-    rows = subprocess.run(tmux_command("list-panes", "-t", me, "-F", "#{pane_id} #{pane_width} #{window_width}"),
-                          capture_output=True, text=True, check=True, timeout=3, stdin=subprocess.DEVNULL).stdout.split("\n")
-    panes = [row.split() for row in rows if row.strip()]
-    mine = next((p for p in panes if p[0] == me), None)
-    others = [p for p in panes if p[0] != me]
-    if mine is None or len(others) != 1:
-        return None
-    if wanted == ("top" if mine[1] == mine[2] else "left"):
-        return None
-    subprocess.run(tmux_command("join-pane", *SPLITS[wanted], "-s", me, "-t", others[0][0]), check=True,
-                   timeout=3, stdin=subprocess.DEVNULL)
-    subprocess.run(tmux_command("select-pane", "-t", others[0][0]), check=False, timeout=3, stdin=subprocess.DEVNULL)
-    return wanted
 
 
 def source_stamps():
@@ -1258,7 +1218,7 @@ def source_stamps():
 
 
 REJECTED_RELOAD = {}
-RELOAD_MODULES = "terminal_panel, room_view, panel_view, panel_tree, panel_input, panel_debate, panel_messages, panel_health, panel_history"
+RELOAD_MODULES = "terminal_panel, room_view, panel_view, panel_tree, panel_input, panel_debate, panel_messages, panel_health, panel_history, panel_reader"
 
 
 def reload_ready(stamps, settle=1.0):
@@ -1297,17 +1257,18 @@ def reload_ready(stamps, settle=1.0):
 def panel_panes(repo):
     """Accept only this checkout's OMS front door and explicit repository binding."""
     result = subprocess.run(tmux_command("list-panes", "-a", "-F",
-        "#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_dead}\t#{pane_start_command}"),
+        "#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_dead}\t#{" + panel_reader.OPTION + "}\t#{pane_start_command}"),
         capture_output=True, text=True, check=True, timeout=3, stdin=subprocess.DEVNULL)
     if len(result.stdout) > 1048576:
         raise ValueError("panel discovery exceeds the local limit")
     found = []
     for line in result.stdout.splitlines():
-        fields = line.split("\t", 4)
-        if len(fields) != 5:
+        fields = line.split("\t", 5)
+        if len(fields) != 6:
             continue
-        session, window, pane, dead, command = fields
-        if (not re.fullmatch(PANEL_SESSION, session) or dead != "0" or
+        session, window, pane, dead, reader, command = fields
+        # A reader pane is neither a board nor an input pane.
+        if (reader or not re.fullmatch(PANEL_SESSION, session) or dead != "0" or
                 not re.fullmatch(r"@[0-9]+", window) or not re.fullmatch(r"%[0-9]+", pane)):
             continue
         try:
@@ -1334,7 +1295,7 @@ def panel_panes(repo):
                 key = flags.pop(0)
                 if key in {"--watch", "--no-animation", "--attention-only"}:
                     switches.add(key)
-                elif key in {"--repo", "--room", "--host", "--layout", "--position", "--view", "--owner",
+                elif key in {"--repo", "--room", "--host", "--layout", "--view", "--owner",
                              "--launch", "--resume", "--model", "--task", "--count"} and flags:
                     values[key] = flags.pop(0)
                 else:
@@ -2786,6 +2747,27 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                check=True, timeout=3, stdin=subprocess.DEVNULL)
         expanded = enabled
 
+    def open_call(target):
+        """Show a recorded call in the reader pane right of the board; False keeps its detail in the board."""
+        if not managed_session() or panel_host.herdr_active():
+            return False
+        board = os.environ.get("TMUX_PANE", "")
+        try:
+            pane = panel_reader.open_reader(board, reader_shell(repo, target, board), repo)
+            if pane and expanded:
+                expand(False)  # splitting a zoomed window unzooms it
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return False
+        if pane:
+            navigation["notice"] = "Opened on the right; Esc closes it"
+        return bool(pane)
+
+    def close_call():
+        try:
+            return managed_session() and panel_reader.close_reader(os.environ.get("TMUX_PANE", ""))
+        except (OSError, subprocess.SubprocessError):
+            return False
+
     def interrupted(number, unused):
         for signum in saved_handlers:
             signal.signal(signum, signal.SIG_IGN)
@@ -2803,12 +2785,6 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             print("\033[?25l", end="", flush=True)
         with TerminalInput(managed_session(), active=capable) as inputs:
             background = BackgroundRead() if inputs.fd is not None else None
-            if inputs.fd is not None and managed_session() and os.environ.get("OMS_PANEL_POSITION", "auto") in ("top", "left"):
-                # A board restarted under a different explicit placement moves to it at once.
-                try:
-                    relayout_board()
-                except (OSError, ValueError, subprocess.SubprocessError):
-                    pass
             previews = BackgroundRead()
             state, status, main_attempt = {"repo": {"name": repo.name}, "collection": {"ok": False, "pending": True}}, 0, None
             density, filtered = view or board_view("auto"), attention_only
@@ -2945,6 +2921,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             navigation["notice"] = "Display refreshed; native sessions and retained history preserved"
                         elif event[0] == "k":
                             navigation["health_view"] = not navigation.get("health_view", False)
+                        elif event[0] == "escape" and close_call():
+                            pass  # Esc first closes only the reader pane; the board keeps its preview.
                         elif event[0] == "escape" and navigation.get("health_view"):
                             navigation["health_view"] = False
                         elif tab_event(event, navigation):
@@ -2954,7 +2932,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             navigation["notice"] = "Opening recorded result..."
                             size = redraw()
                             try:
-                                navigate(repo, ("debate", navigation["debate_view"]["shown"]), state, navigation, size.columns)
+                                if not open_call(("debate", navigation["debate_view"]["shown"])):
+                                    navigate(repo, ("debate", navigation["debate_view"]["shown"]), state, navigation, size.columns)
                             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                                 navigation["notice"] = clean(str(error), 160)
                         elif event[0] == "escape" and navigation.get("group_tree") and not navigation.get("detail"):
@@ -3016,6 +2995,10 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                     check=False, timeout=2, stdin=subprocess.DEVNULL)
                         else:
                             action = choose(("down",) if event[0] == "tab" else event, navigation)
+                            shown = None if action else panel_reader.picked(event, navigation)
+                            if shown:
+                                # A click or Enter previews in the board; the call's full content opens on the right.
+                                close_call() if shown[0] == "chat" else open_call(shown)
                             if action and not navigation.get("detail"):
                                 if action[0] in {"chat", "result", "debate"}:
                                     # Show the selection before tmux or evidence reads can block.
@@ -3037,6 +3020,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                     size = redraw()
                                     continue
                                 try:
+                                    if action[0] == "chat":
+                                        close_call()
                                     if action[0] == "chat" and expanded:
                                         expand(False)
                                         density = board_view("auto")
@@ -3044,7 +3029,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                         if managed_session():
                                             subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
                                                                        "@oms_panel_view", density), check=False, timeout=2, stdin=subprocess.DEVNULL)
-                                    navigate(repo, action, state, navigation, size.columns)
+                                    if action[0] not in {"result", "debate"} or not open_call(action):
+                                        navigate(repo, action, state, navigation, size.columns)
                                 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                                     navigation["notice"] = clean(str(error), 160)
                         size = redraw()
@@ -3125,6 +3111,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                 expand(False)
             except (OSError, ValueError, subprocess.SubprocessError):
                 pass
+        if sys.exc_info()[0] is not ReloadWatcher:
+            close_call()  # a re-executed watcher keeps its pane and finds its reader again
         for number, previous in saved_handlers.items():
             signal.signal(number, previous)
         if capable:
@@ -3493,8 +3481,6 @@ def main(argv=None):
     parser.add_argument("--layout", choices=("auto", "inline", "split"), default="auto")
     parser.add_argument("--host", choices=("auto", "inline", "tmux", "herdr"), default="auto",
                         help="optional terminal host; Herdr requires an existing local POSIX pane")
-    parser.add_argument("--position", choices=("auto", "top", "left", "side"),
-                        help="board by window shape (default), above native chat, left of it or a right sidebar")
     parser.add_argument("--room", help="existing shared work room; never joins a different task implicitly")
     parser.add_argument("--launch", help="open the sole main (claude preferred, pi or codex)")
     parser.add_argument("--spawn-main", metavar="PROVIDER",
@@ -3526,6 +3512,7 @@ def main(argv=None):
     parser.add_argument("--rounds", type=int, default=1, help="council debate rounds, 1 or 2")
     parser.add_argument("--thread", help="council thread ID")
     parser.add_argument("--results", action="store_true", help="read bounded durable task results")
+    parser.add_argument("--participant", help="--results of one room call (with --task-id, one council seat)")
     parser.add_argument("--chats", action="store_true", help="read enrolled native chats and navigation capabilities")
     parser.add_argument("--open-chat", help="navigate to a selected room participant without starting a model turn")
     parser.add_argument("--chat-surface", choices=("auto", "terminal", "app"), default="auto")
@@ -3561,6 +3548,8 @@ def main(argv=None):
         parser.error("chat navigation JSON requires --dry-run")
     if args.chat_surface != "auto" and not args.open_chat:
         parser.error("--chat-surface requires --open-chat")
+    if args.participant and not args.results:
+        parser.error("--participant requires --results")
     if args.task and not (args.launch or args.spawn_main):
         parser.error("--task requires --launch or --spawn-main")
     if args.task and (len(args.task.encode("utf-8")) > MAX_PROMPT or "\0" in args.task):
@@ -3660,10 +3649,6 @@ def main(argv=None):
         parser.error("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
     try:
         repo = repository(args.repo)
-        position = args.position or os.environ.get("OMS_PANEL_POSITION", "auto")
-        if position not in {"auto", "top", "left", "side"}:
-            raise ValueError("panel position must be auto, top, left or side")
-        os.environ["OMS_PANEL_POSITION"] = position
         if args.host != "auto":
             os.environ["OMS_PANEL_HOST"] = args.host
         if args.host == "herdr" and not (args.json or args.dry_run):
@@ -3739,11 +3724,20 @@ def main(argv=None):
             return council(repo, args.owner, args.task_id, args.label, args.prompt,
                            args.thread, args.rounds, args.dry_run)
         if args.results:
-            report = results(repo, args.task_id)
+            participant = args.participant and room.identifier(args.participant, "participant")
+
+            def report():
+                read = results(repo, args.task_id, participant)
+                if participant:
+                    read["rows"] = [row for row in read["rows"] if row.get("calls")]
+                return read
+            board = os.environ.get(panel_reader.BOARD, "")
             if args.json:
-                print(json.dumps(report, ensure_ascii=False, indent=2))
+                print(json.dumps(report(), ensure_ascii=False, indent=2))
+            elif panel_reader.PANE.fullmatch(board) and sys.stdin.isatty() and sys.stdout.isatty():
+                return panel_reader.page(lambda width: render_results(report(), width), board)
             else:
-                print(render_results(report, shutil.get_terminal_size().columns))
+                print(render_results(report(), shutil.get_terminal_size().columns))
             return 0
         if args.finalize:
             report = finalize(repo, args.owner, args.task_id, args.summary_file, args.outcome,
@@ -3812,7 +3806,6 @@ def main(argv=None):
                               "provider": main_owner(args.launch),
                               "harness": args.launch,
                               "max_live_mains": MAX_LIVE_MAINS,
-                              "position": position,
                               "argv": native_command(args.launch, repo, args.resume, args.model, args.task)
                               if args.launch else None,
                               "room": os.environ.get("OMS_ROOM_ID") or "new on launch",
