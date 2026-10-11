@@ -87,6 +87,11 @@ def main_state(member):
         return state
     reading = mapping(member.get("panel_activity"))
     if reading.get("attempt") == member.get("attempt"):
+        if reading.get("state") == "waiting":
+            if reading.get("kind") == "approval":
+                return "waiting_approval"
+            if reading.get("kind") == "input":
+                return "waiting_input"
         if reading.get("state") == "busy":
             return "working"
         if reading.get("state") == "idle":
@@ -100,10 +105,11 @@ def main_words(member, unicode=True):
     state = main_state(member)
     if member.get("role") != "main":
         return said(state)
-    if state in {"idle", "quiet"}:
+    if state in {"idle", "quiet", "working", "waiting_approval", "waiting_input"}:
         since = mapping(member.get("panel_activity")).get("since")
         minutes = int(max(0, time.time() - since) // 60) if type(since) in (int, float) and 0 <= since <= time.time() else 0
-        return state + ((" · " if unicode else " / ") + "%sm" % minutes if minutes else "")
+        word = {"waiting_approval": "needs approval", "waiting_input": "needs input"}.get(state, state)
+        return word + ((" · " if unicode else " / ") + "%sm" % minutes if minutes else "")
     return {"working": "working", "live marker": "live"}.get(state, said(state))
 
 

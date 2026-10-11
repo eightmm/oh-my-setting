@@ -41,7 +41,7 @@ PRINT_EXPECTED=0
 # "the installed harness predates this list" instead of silently comparing
 # against the wrong expectations. tests/doctor-surfaces-smoke.sh hashes the row
 # set and fails until the bump and the recorded hash move together.
-HOOKS_SCHEMA=5
+HOOKS_SCHEMA=6
 HOOK_SURFACES='
 UserPromptSubmit|skill-router.sh||
 Stop|turn-guard.sh||12
@@ -83,6 +83,9 @@ SessionStart|resume-hook.sh||10
 # were retired: their activity carried no metrics worth a process per event.
 SessionStart|telemetry-hook.sh||5
 SessionEnd|telemetry-hook.sh||5
+
+# A waiting main needs the person; retain only the notification kind.
+Notification|telemetry-hook.sh|permission_prompt|elicitation_dialog|5
 '
 
 # --print-expected is a read-only report about this checkout. It answers before

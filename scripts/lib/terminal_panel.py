@@ -2050,11 +2050,14 @@ def main_activity(repo, members, windows=()):
             raw = _read(repo, ".oms/hooks/panel-activity/" + who + ".json", maximum=4096, missing=True)
             row = json.loads(raw) if raw else {}
             if (not isinstance(row, dict) or row.get("schema") != 1 or row.get("participant") != who
-                    or row.get("state") not in ("busy", "idle")
+                    or row.get("state") not in ("busy", "idle", "waiting")
+                    or row.get("state") == "waiting" and row.get("kind") not in ("approval", "input")
                     or not all(type(row.get(k)) in (int, float) and 0 <= row[k] <= now
                                for k in ("since", "updated_at"))):
                 continue
             result[who] = {k: row.get(k) for k in ("state", "since", "updated_at", "attempt", "room")}
+            if row["state"] == "waiting":
+                result[who]["kind"] = row["kind"]
         except (OSError, ValueError, TypeError, RecursionError):
             continue
     session = os.environ.get("OMS_PANEL_SESSION", "")
@@ -2802,12 +2805,15 @@ WINDOW_ATTENTION = {"failed", "timed_out", "waiting_input", "waiting_approval", 
 
 
 def main_needs_attention(state, main_attempt):
-    """Whether any call of this window's main is failed, timed out, blocked or waiting on a person."""
-    from room_view import nodes, handled_results
+    """Whether this main waits on a person or its calls need attention."""
+    from room_view import nodes, handled_results, main_state
     from dashboard_projection import mapping
     members = nodes(state)
     ids = {key for m in members if main_attempt in (m.get("participant"), m.get("attempt")) and m.get("role") == "main"
            for key in (m.get("participant"), m.get("attempt")) if key}
+    if any(m.get("role") == "main" and m.get("participant") in ids
+           and main_state(m) in {"waiting_approval", "waiting_input"} for m in members):
+        return True
     room, finalized = mapping(state.get("room")), mapping(state.get("finalized"))
     read = handled_results(room)
     return any(m.get("role") != "main" and m.get("parent") in ids and m["state"] in WINDOW_ATTENTION

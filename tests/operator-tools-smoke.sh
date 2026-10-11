@@ -7827,6 +7827,12 @@ with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProc
     with patch.object(panel.time, "time", return_value=100 + 7 * 24 * 60 * 60):
         silent = panel.main_activity(activity_repo, [activity_main], activity_windows)
         assert silent["activity-main"]["state"] == "quiet" and silent["activity-main"]["since"] == 1000, silent
+        for kind in ("approval", "input"):
+            activity_path.write_text(json.dumps(dict(activity_row, state="waiting", kind=kind)))
+            before_capture = capture.call_count
+            waiting = panel.main_activity(activity_repo, [activity_main], activity_windows)
+            assert waiting["activity-main"]["state"] == "waiting" and waiting["activity-main"]["kind"] == kind, waiting
+            assert capture.call_count == before_capture, "waiting is explicit hook evidence, not pane silence"
     activity_path.write_text(json.dumps(dict(activity_row, updated_at=1090)))
     with patch.object(panel.time, "time", return_value=1092):
         assert panel.main_activity(activity_repo, [activity_main], activity_windows)["activity-main"]["state"] == "busy", "a fresh heartbeat prevents silence fallback"
@@ -7846,7 +7852,8 @@ with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProc
         restarted = panel.main_activity(activity_repo, [activity_main], activity_windows)
         assert restarted["activity-main"]["state"] == "busy" and restarted["activity-main"]["attempt"] == "fresh"
         assert restarted["activity-main"]["since"] == 1201, restarted
-    for bad_row in (None, "{", dict(activity_row, participant="other")):
+    for bad_row in (None, "{", dict(activity_row, participant="other"),
+                    dict(activity_row, state="waiting"), dict(activity_row, state="waiting", kind="unknown")):
         if bad_row is None:
             activity_path.unlink()
         elif isinstance(bad_row, str):
@@ -7863,15 +7870,20 @@ with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProc
     assert graph_view.main_state(dict(activity_main, state="exited", attempt="fresh",
                                       panel_activity=dict(activity_row, attempt="fresh", state="busy"))) == "exited", \
         "terminal attempt state takes precedence over a matching busy activity row"
-for reading, word in (({}, "live"), ({"activity-main": activity_row}, "working"),
+for reading, word in (({}, "live"), ({"activity-main": dict(activity_row, since=280)}, "working · 12m"),
                       ({"activity-main": dict(activity_row, state="quiet", since=280)}, "quiet · 12m"),
                       ({"activity-main": dict(activity_row, state="idle", since=280)}, "idle · 12m"),
+                      ({"activity-main": dict(activity_row, state="waiting", kind="approval", since=280)}, "needs approval · 12m"),
+                      ({"activity-main": dict(activity_row, state="waiting", kind="input", since=280)}, "needs input · 12m"),
+                      ({"activity-main": dict(activity_row, state="waiting", kind="approval", attempt="old")}, "live"),
                       ({"activity-main": dict(activity_row, state="idle", since=280, attempt="old")}, "live")):
     report = dict(activity_report, main_activity=reading)
     with patch.object(panel.time, "time", return_value=1000):
         projected_main = next(m for m in graph_view.nodes(report) if m["role"] == "main")
         assert projected_main["state"] == "working", "presentation must preserve attempt lifecycle"
-        expected_state = "idle" if word.startswith("idle") else "quiet" if word.startswith("quiet") else "working" if word == "working" else "live marker"
+        expected_state = ("waiting_approval" if word.startswith("needs approval") else "waiting_input" if word.startswith("needs input")
+                          else "idle" if word.startswith("idle") else "quiet" if word.startswith("quiet")
+                          else "working" if word.startswith("working") else "live marker")
         assert graph_view.main_state(projected_main) == expected_state
         assert graph_view.main_words(projected_main) == word
         for ascii_only in (False, True):
@@ -7891,9 +7903,20 @@ for reading, word in (({}, "live"), ({"activity-main": activity_row}, "working")
             assert (word.replace(" · ", " / ") if ascii_only else word) in legacy, legacy
             if ascii_only:
                 legacy.encode("ascii")
-        # Turn-idle cannot change what appears under Needs you.
         from panel_view import inbox_items
-        assert inbox_items(report) == inbox_items(activity_report)
+        waiting = word.startswith("needs")
+        assert panel.main_needs_attention(report, "activity-attempt") == waiting
+        assert panel.main_needs_attention(report, "activity-main") == waiting
+        assert not panel.main_needs_attention(report, "unrelated-main")
+        if waiting:
+            items = inbox_items(report)
+            assert len(items) == 1 and items[0]["what"] == "waiting for " + ("approval" if "approval" in word else "input"), items
+            assert items[0]["action"] == ("chat", "activity-main") and items[0]["style"] == "alert", items
+            ended = dict(report, attempts={"recent": [], "active_recent": [
+                dict(activity_report["attempts"]["active_recent"][0], state="done")]})
+            assert not panel.main_needs_attention(ended, "activity-attempt") and not inbox_items(ended)
+        else:
+            assert inbox_items(report) == inbox_items(activity_report)
 with patch.object(panel.time, "time", return_value=1000):
     activity_path.write_text(json.dumps(dict(activity_row, updated_at=1001)))
     assert not panel.main_activity(activity_repo, [activity_main]), "future timestamps are untrusted"

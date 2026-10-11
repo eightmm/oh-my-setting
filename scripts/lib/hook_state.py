@@ -373,6 +373,9 @@ def first_metric(containers: list[dict[str, Any]], *names: str) -> int | float |
 
 def cmd_telemetry(_: argparse.Namespace) -> int:
     payload, _ = load_payload()
+    if (payload.get("hook_event_name") or payload.get("hookEventName")) == "Notification":
+        record_panel_activity(payload)
+        return 0
     repo = hook_repo(payload)
     # Hooks do not adopt arbitrary repositories merely because an agent opened
     # one. `oms init` is the explicit ownership boundary.
@@ -1426,8 +1429,15 @@ def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> 
     if not is_panel_main() or is_harness_child():
         return
     event = payload.get("hook_event_name") or payload.get("hookEventName")
-    if event not in ("UserPromptSubmit", "PostToolUse", "Stop"):
+    if event not in ("UserPromptSubmit", "PostToolUse", "Stop", "Notification"):
         return
+    kind = None
+    if event == "Notification":
+        notification = payload.get("notification_type")
+        if isinstance(notification, str):
+            kind = {"permission_prompt": "approval", "elicitation_dialog": "input"}.get(notification)
+        if kind is None:
+            return
     participant = os.environ.get("OMS_ROOM_PARTICIPANT", "")
     attempt = os.environ.get("OMS_PANEL_MAIN_ATTEMPT", "")
     room_id = os.environ.get("OMS_ROOM_ID", "")
@@ -1460,12 +1470,15 @@ def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> 
         if (event == "PostToolUse" and same and old.get("state") == "busy"
                 and type(updated) in (int, float) and 0 <= updated <= now and now - updated < 10):
             return
-        state = "idle" if event == "Stop" else "busy"
+        state = "waiting" if kind else "idle" if event == "Stop" else "busy"
         since = old.get("since") if same and old.get("state") == state and event == "PostToolUse" else now
         if type(since) not in (int, float) or not 0 <= since <= now:
             since = now
-        write_json_atomic(path, {"schema": 1, "participant": participant, "attempt": attempt,
-                                 "room": room_id, "state": state, "since": since, "updated_at": now})
+        row = {"schema": 1, "participant": participant, "attempt": attempt,
+               "room": room_id, "state": state, "since": since, "updated_at": now}
+        if kind:
+            row["kind"] = kind
+        write_json_atomic(path, row)
 
 
 def panel_main_hint(payload: dict[str, Any]) -> str:

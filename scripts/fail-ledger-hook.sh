@@ -62,8 +62,16 @@ if not isinstance(command, str) or not command.strip():
     raise SystemExit(0)
 command = command.replace("\n", " ")[:2000]
 
-# Only repos that already carry harness state get rows: an unadopted repo
-# must not seed .oms as a hook side effect.
+# This Bash surface bypasses the other tools' activity hook, even when there
+# is no failure history to resolve after the person approves the command.
+try:
+    from hook_state import record_panel_activity
+    record_panel_activity(row)
+except Exception:
+    pass
+
+# Only repos that already carry harness state get ledger rows: an unadopted
+# repo must not seed .oms as a ledger side effect.
 repo = resolve(row)
 if repo is None or not (repo / ".oms").is_dir():
     raise SystemExit(0)

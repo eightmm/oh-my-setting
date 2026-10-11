@@ -1226,6 +1226,55 @@ path = repo / ".oms/hooks/panel-activity/main.json"
 env = {"OMS_PANEL_MAIN_ATTEMPT": "turn-attempt", "OMS_PANEL_SESSION": "oms-fixture",
        "OMS_ROOM_ID": "activity-room", "OMS_ROOM_PARTICIPANT": "main", "OMS_ROOM_REPO": str(repo),
        "OMS_LIVE_COLLAB": "0"}
+# Exercise the installed hook entrypoints, including Bash's empty-ledger exit.
+import subprocess
+root = Path(sys.argv[1]).parent.parent
+(repo / ".oms").mkdir()
+unadopted = repo / "unadopted"
+(unadopted / ".git").mkdir(parents=True)
+with patch.dict(os.environ, dict(env, OMS_TELEMETRY_DEBUG="1")):
+    for notification, kind in (("permission_prompt", "approval"), ("elicitation_dialog", "input")):
+        notice = dict(payload, hook_event_name="Notification", notification_type=notification,
+                      message="private notification message", title="private notification title")
+        def notify(value, cwd=repo):
+            result = subprocess.run(["bash", str(root / "scripts/telemetry-hook.sh")],
+                                    input=json.dumps(dict(notice, notification_type=value, cwd=str(cwd))),
+                                    text=True, capture_output=True, timeout=5)
+            assert result.returncode == 0 and not result.stdout and not result.stderr, result
+        notify(notification)
+        row = json.loads(path.read_text())
+        assert row["state"] == "waiting" and row["kind"] == kind, row
+        notify(notification, unadopted)
+        assert json.loads(path.read_text())["kind"] == kind and not (unadopted / ".oms").exists(), \
+            "notification activity follows the explicit room repo, not a newly opened repo"
+        before = path.read_bytes()
+        for ignored in ("idle_prompt", "unknown", None, ["permission_prompt"]):
+            notify(ignored)
+            assert path.read_bytes() == before, ignored
+        for stored in (repo / ".oms").rglob("*"):
+            if stored.is_file():
+                assert b"private notification" not in stored.read_bytes(), stored
+        assert not (repo / ".oms/hooks/events.jsonl").exists()
+        result = subprocess.run(["bash", str(root / "scripts/fail-ledger-hook.sh")],
+                                input=json.dumps(dict(payload, cwd=str(repo if kind == "approval" else unadopted),
+                                                      hook_event_name="PostToolUse", tool_name="Bash",
+                                                      tool_input={"command": "true"}, tool_response={"exit_code": 0})),
+                                text=True, capture_output=True, timeout=5)
+        assert result.returncode == 0 and not result.stdout and not result.stderr, result
+        row = json.loads(path.read_text())
+        assert row["state"] == "busy" and "kind" not in row, row
+        assert not (unadopted / ".oms").exists()
+    for event in ("UserPromptSubmit", "PostToolUse", "Stop"):
+        notify("permission_prompt")
+        if event == "Stop":
+            with patch.object(hook_state, "load_payload", return_value=(dict(payload, hook_event_name=event), "")), \
+                 patch.object(hook_state, "hook_repo", return_value=repo), patch.object(hook_state, "relay_turn"):
+                hook_state.cmd_relay(None)
+        else:
+            hook_state.live_thread_hint(dict(payload, hook_event_name=event, tool_name="Read"))
+        row = json.loads(path.read_text())
+        assert row["state"] == ("idle" if event == "Stop" else "busy") and "kind" not in row, row
+path.unlink()
 with patch.dict(os.environ, env), patch.object(hook_state.subprocess, "run", side_effect=AssertionError("activity must not spawn")):
     for event, now in (("UserPromptSubmit", 100), ("PostToolUse", 105), ("PostToolUse", 111), ("Stop", 115)):
         with patch.object(hook_state.time, "time", return_value=now):
