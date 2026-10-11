@@ -244,7 +244,7 @@ if [ "$INCLUDE_SESSION" -eq 1 ]; then
   [ -n "$session_agent" ] ||
     fail "--session cannot identify a supported session source; export OMS_AGENT=claude|codex|antigravity"
   session_digest="$advise_tmpdir/session-digest.md"
-  session_args=(--agent "$session_agent" --cwd "$MA_READ_SOURCE_REPO" --out "$session_digest" --min-user-turns 0)
+  session_args=(--agent "$session_agent" --cwd "$REPO" --out "$session_digest" --min-user-turns 0)
   [ -z "$SESSION_ID" ] || session_args+=(--session "$SESSION_ID")
   [ "$ALLOW_SENSITIVE" -eq 0 ] || session_args+=(--allow-sensitive)
   bash "$SCRIPT_DIR/session-handoff.sh" capture "${session_args[@]}" >/dev/null ||

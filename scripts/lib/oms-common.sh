@@ -1942,6 +1942,13 @@ PY
   esac
 }
 
+oms_worker_surface_is_soft() {
+  case "$1" in
+    files|tracked|remote-refs|work-branches|kept-sibling|sibling-cleanup|branch-tracking) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Capture each surface separately so a later comparison can name what moved.
 oms_worker_surface_snapshot() {
   local repo="$1"

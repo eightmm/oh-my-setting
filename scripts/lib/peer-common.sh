@@ -97,27 +97,37 @@ ma_read_source_repo() {
   fi
 }
 
+ma_read_guard_snapshot_source() {
+  oms_git_assert_safe_execution_config "$MA_READ_SOURCE_REPO" diff-read || return 2
+  oms_git_assert_plain_index "$MA_READ_SOURCE_REPO" || return 2
+  oms_worker_surface_snapshot "$MA_READ_SOURCE_REPO" "$MA_READ_GUARD_DIR/source" || return 2
+  oms_git_execution_state_snapshot "$MA_READ_SOURCE_REPO" "$MA_READ_GUARD_DIR/source/git-execution-state" || return 2
+  MA_READ_SOURCE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/source/git-execution-state")" || return 2
+}
+
 ma_read_guard_begin() {  # PRIVATE_DIR
   MA_READ_GUARD_DIR=""
   [ "$REPO" != "$MA_READ_SOURCE_REPO" ] || return 0
   MA_READ_GUARD_DIR="$1/read-guard"
-  local root name
-  for name in state source; do
-    root="$REPO"
-    [ "$name" != source ] || root="$MA_READ_SOURCE_REPO"
-    oms_git_assert_safe_execution_config "$root" diff-read || return 2
-    oms_git_assert_plain_index "$root" || return 2
-    oms_worker_surface_snapshot "$root" "$MA_READ_GUARD_DIR/$name" || return 2
-    oms_git_execution_state_snapshot "$root" "$MA_READ_GUARD_DIR/$name/git-execution-state" || return 2
-  done
+  oms_git_assert_safe_execution_config "$REPO" diff-read || return 2
+  oms_git_assert_plain_index "$REPO" || return 2
+  oms_worker_surface_snapshot "$REPO" "$MA_READ_GUARD_DIR/state" || return 2
+  oms_git_execution_state_snapshot "$REPO" "$MA_READ_GUARD_DIR/state/git-execution-state" || return 2
   MA_READ_STATE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/state/git-execution-state")" || return 2
-  MA_READ_SOURCE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/source/git-execution-state")" || return 2
-  MA_READ_SOURCE_FINGERPRINT="$(ma_worktree_fingerprint "$MA_READ_SOURCE_REPO" | tr -d '\r')" || return 2
+  ma_read_guard_snapshot_source
+}
+
+ma_read_guard_rebaseline_source() {
+  [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
+  # Verification may create outputs, but cannot change the Git execution boundary.
+  oms_git_execution_state_assert_unchanged "$MA_READ_SOURCE_REPO" \
+    "$MA_READ_GUARD_DIR/source/git-execution-state" "$MA_READ_SOURCE_EXECUTION_SHA" || return 2
+  ma_read_guard_snapshot_source
 }
 
 ma_read_guard_assert() {
   [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
-  local root name digest changed
+  local root name digest changed surface hard soft
   for name in state source; do
     root="$REPO" digest="$MA_READ_STATE_EXECUTION_SHA"
     [ "$name" != source ] || { root="$MA_READ_SOURCE_REPO"; digest="$MA_READ_SOURCE_EXECUTION_SHA"; }
@@ -125,15 +135,23 @@ ma_read_guard_assert() {
     oms_git_assert_safe_execution_config "$root" diff-read || return 2
     oms_git_assert_plain_index "$root" || return 2
     changed="$(oms_worker_surface_diff "$root" "$MA_READ_GUARD_DIR/$name" | tr -d '\r')" || return 2
-    if [ -n "$changed" ]; then
-      echo "error: read pass changed $name repository protected surfaces: $changed" >&2
+    hard="" soft=""
+    for surface in $(printf '%s' "$changed" | tr ',' ' '); do
+      if [ "$name" = state ] && oms_worker_surface_is_soft "$surface" &&
+        [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ]; then
+        soft="${soft:+$soft, }$surface"
+      else
+        hard="${hard:+$hard, }$surface"
+      fi
+    done
+    if [ -n "$soft" ]; then
+      echo "warning: read pass observed state repository changes: $soft; not attributable to the provider, review before landing" >&2
+    fi
+    if [ -n "$hard" ]; then
+      echo "error: read pass changed $name repository protected surfaces: $hard" >&2
       return 2
     fi
   done
-  [ "$(ma_worktree_fingerprint "$MA_READ_SOURCE_REPO" | tr -d '\r')" = "$MA_READ_SOURCE_FINGERPRINT" ] || {
-    echo 'error: read pass changed source repository tree' >&2
-    return 2
-  }
 }
 
 ma_repo_label() {
@@ -3796,11 +3814,10 @@ ma_council_context_owned() {  # DIR
 # Stage the bounded context into a seat's private isolated tree under the
 # prompt's path and the legacy artifacts path older seat tooling reads.
 ma_stage_council_context() {  # ROOT
-  if [ "$(ma_read_source_repo "$REPO")" != "$REPO" ]; then
-    return 0
-  fi
-  local leaf="${MA_COUNCIL_CONTEXT_REL##*/}" rel
-  for rel in "$MA_COUNCIL_CONTEXT_REL" ".oms/artifacts/$leaf"; do
+  local context_rel leaf rel
+  context_rel="$(ma_repo_rel "$MA_COUNCIL_CONTEXT_DIR")"
+  leaf="${context_rel##*/}"
+  for rel in "$context_rel" ".oms/artifacts/$leaf"; do
     python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" --stage-context \
       "$MA_COUNCIL_CONTEXT_DIR" "$1" "$rel" || return 1
   done
@@ -3851,6 +3868,7 @@ ma_prepare_council_context() {
   MA_COUNCIL_CONTEXT_DIR="$(mktemp -d "$REPO/.oms/delegations/council-context.XXXXXX")" || return 2
   MA_COUNCIL_CONTEXT_REL="$(ma_repo_rel "$MA_COUNCIL_CONTEXT_DIR")"
   if [ "$source" != "$REPO" ]; then
+    # ma_export_child_env exports the state pointer to every read seat.
     MA_COUNCIL_CONTEXT_REL="\$OMS_STATE_REPO/$MA_COUNCIL_CONTEXT_REL"
   fi
   MA_COUNCIL_CONTEXT_NONCE="$(ma_fence_id)"

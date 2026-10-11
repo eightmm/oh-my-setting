@@ -643,7 +643,7 @@ fi
 oms_require_peer_owner || exit $?
 REPO="$(cd "$REPO" && pwd)"
 ma_resolve_read_repositories review || fail "cannot resolve review source and state repositories"
-git -C "$MA_READ_SOURCE_REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
+git -C "$MA_READ_SOURCE_REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $MA_READ_SOURCE_REPO"
 if [ -n "$BASE_REF" ]; then
   git -C "$MA_READ_SOURCE_REPO" rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null ||
     fail "invalid --base ref: $BASE_REF"
@@ -745,10 +745,18 @@ ma_read_guard_begin "$read_guard_temp" || fail "cannot freeze review repositorie
 # judges the submitted tree, not peer-review's own bookkeeping.
 gate_verify_exit=0
 gate_verify_ran=0
+review_verifier_outputs=0
 if [ "$GATE" -eq 1 ] && [ -n "$VERIFY_CMD" ]; then
   if [ "$DRY_RUN" = "1" ]; then
     echo "gate verify: skipped (dry run)"
   else
+    if [ -n "${MA_READ_GUARD_DIR:-}" ] && [ "$NO_DIFF" -eq 0 ]; then
+      ma_safe_status "$MA_READ_SOURCE_REPO" > "$status_file"
+      if grep -q '^??' "$status_file"; then
+        fail "blocking gate cannot review untracked file content; add intent-to-add or stage it so the complete diff is visible"
+      fi
+      review_verifier_outputs=1
+    fi
     gate_verify_ran=1
     {
       printf '# gate verify\n\n'
@@ -770,6 +778,9 @@ if [ "$GATE" -eq 1 ] && [ -n "$VERIFY_CMD" ]; then
   fi
 fi
 
+if [ "$gate_verify_ran" -eq 1 ]; then
+  ma_read_guard_rebaseline_source || fail "review verification changed protected Git execution state"
+fi
 ma_read_guard_assert || fail "review verification changed protected repository state"
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
@@ -792,7 +803,7 @@ if [ "$NO_DIFF" -eq 0 ]; then
     git -c core.fsmonitor=false -c diff.external= -C "$MA_READ_SOURCE_REPO" \
     diff --no-ext-diff --no-textconv \
     "$diff_base" -- "${MA_SAFE_PATHS[@]}" > "$raw_diff_file" ||
-    fail "git diff failed for $REPO"
+    fail "git diff failed for $MA_READ_SOURCE_REPO"
   if contains_sensitive_content "$raw_diff_file"; then
     echo "external review skipped: sensitive-looking diff content detected" >&2
     exit 3
@@ -807,11 +818,15 @@ if [ "$NO_DIFF" -eq 0 ]; then
   ma_emit_bounded_prompt_file "$raw_diff_file" "$diff_budget" "git diff" \
     "OMS_PROMPT_DIFF_BYTES" > "$diff_file"
   if grep -q '^??' "$status_file"; then
-    if [ "$GATE" -eq 1 ]; then
+    if [ "$GATE" -eq 1 ] && [ "$review_verifier_outputs" -eq 0 ]; then
       echo "error: blocking gate cannot review untracked file content; add intent-to-add or stage it so the complete diff is visible" >&2
       exit 2
     fi
-    echo "warning: untracked files are listed in status but their content is not in the diff (git add -N <file> to include new files)" >&2
+    if [ "$review_verifier_outputs" -eq 1 ]; then
+      echo "warning: verifier-created untracked outputs are listed in status but their content is not in the diff" >&2
+    else
+      echo "warning: untracked files are listed in status but their content is not in the diff (git add -N <file> to include new files)" >&2
+    fi
   fi
 else
   : > "$diff_file"
