@@ -41,6 +41,7 @@ def die(msg):
     sys.stderr.write("error: %s\n" % msg); sys.exit(2)
 
 _completion_module = None
+_unverified_completions = set()
 
 def completion_module():
     global _completion_module
@@ -50,6 +51,7 @@ def completion_module():
 
 
 def load():
+    _unverified_completions.clear()
     if not os.path.exists(path):
         return {"schema": SCHEMA, "goal": "", "accept": "", "tasks": {}}
     state_root = os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
@@ -91,7 +93,9 @@ def load():
         try:
             completion["strict_plan"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), path)
             for task in d["tasks"].values():
-                completion["validate_done"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), d, task, commit_landing_proof)
+                if completion["validate_done"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), d, task,
+                                               commit_landing_proof, allow_unverified=True) is False:
+                    _unverified_completions.add(task["id"])
         except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
             die(str(exc))
     return d
@@ -315,8 +319,18 @@ def require_id():
     if not ID_RE.fullmatch(i): die("--id must match [A-Za-z0-9._-]+")
     return i
 
+def verified_done(t):
+    return t.get("state") == "done" and t.get("id") not in _unverified_completions
+
+def completion_view(t):
+    view = dict(t)
+    if t.get("id") in _unverified_completions:
+        view.update(state="blocked", stored_state=t["state"], completion_verified=False,
+                    reason="research completion not verified: evicted artifact unavailable or digest changed")
+    return view
+
 def deps_done(d, t):
-    return all(d["tasks"].get(x, {}).get("state") == "done" for x in t.get("depends", []))
+    return all(verified_done(d["tasks"].get(x, {})) for x in t.get("depends", []))
 
 def issue_lease(t):
     t["lease_epoch"] = int(t.get("lease_epoch", 0)) + 1
@@ -629,10 +643,13 @@ def expiry_note(t):
         claim_age(t), claim_ttl_for(t), t.get("provider", "") or "?")
 
 def brief_text(t):
+    t = completion_view(t)
     state = t["state"]
     if claim_expired(t):
         state = "%s [%s; claimable]" % (state, expiry_note(t))
     lines = ["# Task %s: %s" % (t["id"], t["title"]), "state: %s" % state]
+    if t.get("completion_verified") is False:
+        lines.append("completion: not verified (stored state: done)")
     lines.append("depends: %s" % (", ".join(t.get("depends", [])) or "(none)"))
     lines.append("allowed_paths: %s" % (", ".join(t.get("allowed_paths", [])) or "(unrestricted)"))
     if t.get("forbidden_paths"):
@@ -687,6 +704,8 @@ if act == "accept":
                 isinstance(task, dict) and ("completion_kind" in task or "completion_receipt" in task)
                 for task in acceptance_tasks.values()):
             load()
+            if _unverified_completions:
+                die("research completion not verified: " + ", ".join(sorted(_unverified_completions)))
     sys.exit(0)
 
 d = load()
@@ -896,7 +915,7 @@ if act == "apply-proposal":
                 continue
             if dep not in tasks:
                 die("proposal task %s depends on unknown/later task %s" % (task_id, dep))
-            if tasks[dep].get("state") != "done":
+            if not verified_done(tasks[dep]):
                 die("proposal task %s depends on unfinished existing task %s" % (task_id, dep))
         role = raw.get("role") or ""
         if not isinstance(role, str):
@@ -1166,7 +1185,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         if t["state"] != "ready":
             die("task %s is %s; only a ready task can be claimed (reopen blocked first)" % (i, t["state"]))
         if not deps_done(d, t):
-            pending = [x for x in t["depends"] if tasks.get(x, {}).get("state") != "done"]
+            pending = [x for x in t["depends"] if not verified_done(tasks.get(x, {}))]
             die("task %s has unfinished dependencies: %s" % (i, ", ".join(pending)))
         issue_lease(t)
         t.update(state="claimed", provider=prov, ttl=env("OMS_TTL"),
@@ -1445,7 +1464,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
     elif act in ("show", "evidence-snapshot"):
         # Computed on a copy: the stored task keeps exactly the fields its
         # writers put there, and a later save() cannot persist a read's view.
-        view = dict(t)
+        view = completion_view(t)
         if isinstance(d.get("project_contract"), dict):
             # Contract metadata is a read-only view for admission consumers. It
             # is deliberately not copied into each stored task.
@@ -1623,8 +1642,8 @@ if act == "list":
         # graph's plan facts) was starting one agent-plan per task.
         views = []
         for t in ordered:
-            if sf and t["state"] != sf: continue
-            view = dict(t)
+            view = completion_view(t)
+            if sf and view["state"] != sf: continue
             view["task_sha256"] = exact_task_sha256(t)
             view["claim_expired"] = claim_expired(t)
             if t.get("state") in ("claimed", "running", "review"):
@@ -1636,7 +1655,8 @@ if act == "list":
                           "tasks": views}, ensure_ascii=False, indent=2))
         sys.exit(0)
     for t in ordered:
-        if sf and t["state"] != sf: continue
+        view = completion_view(t)
+        if sf and view["state"] != sf: continue
         dep = (" depends=%s" % ",".join(t["depends"])) if t["depends"] else ""
         prov = (" @%s" % t["provider"]) if t.get("provider") else ""
         # The state column keeps saying what is stored; the tag says how that
@@ -1644,13 +1664,16 @@ if act == "list":
         tag = (" EXPIRED(%s)" % expiry_note(t)) if claim_expired(t) else ""
         if review_expired(t):
             tag = " STALE(review %dh old)" % (claim_age(t) // 3600)
-        print("%-10s %-9s %s%s%s%s" % (t["id"], t["state"], t["title"], prov, dep, tag))
+        if view.get("completion_verified") is False:
+            tag = " NOT VERIFIED"
+        print("%-10s %-9s %s%s%s%s" % (t["id"], view["state"], t["title"], prov, dep, tag))
     sys.exit(0)
 
 if act == "status":
     by = {}
     for t in tasks.values():
-        by[t["state"]] = by.get(t["state"], 0) + 1
+        state = completion_view(t)["state"]
+        by[state] = by.get(state, 0) + 1
     claimable = [t["id"] for t in ordered if contract_actionable(d, t)]
     stale = [{"id": t["id"], "provider": t.get("provider", ""),
               "age_seconds": claim_age(t), "ttl_seconds": claim_ttl_for(t)}
@@ -1669,7 +1692,7 @@ if act == "status":
             "schema": 1, "present": os.path.exists(path),
             "plan_sha256": hashlib.sha256(plan_raw).hexdigest() if plan_raw else "",
             "task_count": count, "nonempty": count > 0,
-            "all_done": count > 0 and all(t.get("state") == "done" for t in tasks.values()),
+            "all_done": count > 0 and all(verified_done(t) for t in tasks.values()),
             "all_closed": count > 0 and unfinished_count == 0,
             "has_unfinished": unfinished_count > 0,
             "verified_count": verified_count, "cancelled_count": cancelled_count,
@@ -1723,7 +1746,7 @@ if act == "status":
     for r in stale_review:
         print("stale review %s: %dh without a verdict (oms agent-plan reclaim --include-review)"
               % (r["id"], r["age_seconds"] // 3600))
-    blocked = [t for t in ordered if t["state"] == "blocked"]
+    blocked = [completion_view(t) for t in ordered if completion_view(t)["state"] == "blocked"]
     for t in blocked:
         print("blocked %s: %s" % (t["id"], t.get("reason", "")))
     waiting = [t["id"] for t in ordered

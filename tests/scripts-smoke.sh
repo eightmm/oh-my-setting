@@ -6947,9 +6947,23 @@ for damaged in (b'changed accepted report\n', None):
         artifact.write_bytes(damaged)
     completion_core['reset_streams']()
     assert completion_core['validate_done'](str(repo), plan(), done, allow_unverified=True) is False
-    # Callers that do not handle the per-task verdict remain fail-closed.
-    ap('list', '--json', ok=False)
+    views = {task['id']: task for task in json.loads(ap('list', '--json'))['tasks']}
+    assert views[bundle['task_id']]['state'] == 'blocked'
+    assert views[bundle['task_id']]['stored_state'] == 'done'
+    assert views[bundle['task_id']]['completion_verified'] is False
+    assert views[main_report['task_id']]['state'] == 'done'
+    assert 'not verified' in ap('brief', '--id', bundle['task_id'])
+    baseline_verified = sum(task['state'] == 'done' for task in plan()['tasks'].values())
+    assert json.loads(ap('status', '--json'))['verified_count'] == baseline_verified - 1
+    ap('accept', ok=False)
+    assert json.loads(ap('show', '--id', main_report['task_id']))['state'] == 'done'
     assert plan_path.read_bytes() == stable
+    ap('add', '--id', 'eviction-independent', '--title', 'Independent task')
+    ap('add', '--id', 'eviction-dependent', '--title', 'Dependent task', '--depends', bundle['task_id'])
+    ap('claim', '--id', 'eviction-dependent', '--provider', 'codex', ok=False)
+    ap('claim', '--id', 'eviction-independent', '--provider', 'codex')
+    assert plan()['tasks'][bundle['task_id']] == done, 'unrelated save rewrote the receipt task'
+    plan_path.write_bytes(stable)
     artifact.write_bytes(artifact_raw)
 completion_core['reset_streams']()
 assert completion_core['validate_done'](str(repo), plan(), done, allow_unverified=True) is True
