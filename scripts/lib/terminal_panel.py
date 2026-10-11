@@ -538,7 +538,7 @@ def _main_exit_key():
                 termios = None
             if termios is not None:
                 flush_error = getattr(termios, "error", None)
-                flush_errors = (OSError,) + ((flush_error,) if isinstance(flush_error, type)
+                flush_errors = (OSError, ImportError) + ((flush_error,) if isinstance(flush_error, type)
                                              and issubclass(flush_error, BaseException) else ())
                 try:
                     # Native CLI typeahead must not close or restart its exit window.
