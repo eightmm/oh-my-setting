@@ -57,6 +57,85 @@ ma_scripts_dir() {
   printf '%s\n' "${MA_LIB_DIR%/*}"
 }
 
+# Keep panel records in the owner's repository even when source profiles and
+# provider execution come from a less trusted checkout.
+ma_resolve_read_repositories() {  # ARTIFACT_KIND
+  MA_READ_SOURCE_REPO="$REPO"
+  if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ -n "${OMS_ROOM_REPO:-}" ]; then
+    MA_READ_SOURCE_REPO="$(cd "$REPO" && pwd -P)" || return 2
+    REPO="$(oms_state_root "$OMS_ROOM_REPO")" || return 2
+    REPO="${REPO//$'\r'/}"
+    REPO="$(cd "$REPO" && pwd -P)" || return 2
+    if [ "$REPO" != "$MA_READ_SOURCE_REPO" ]; then
+      export OMS_INDEX_BASE_REPO="$MA_READ_SOURCE_REPO"
+      ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/$1}"
+      local artifact
+      artifact="$(python3 - "$ARTIFACT_DIR" <<'PY'
+import sys
+from pathlib import Path
+print(Path(sys.argv[1]).resolve())
+PY
+)" || return 2
+      artifact="${artifact//$'\r'/}"
+      artifact="$(ma_artifact_index_shell_path "$artifact")" || return 2
+      case "$artifact" in "$MA_READ_SOURCE_REPO"/*)
+        echo 'error: cross-repository read artifacts cannot enter the source repository' >&2
+        return 2 ;;
+      "$REPO"/*) ARTIFACT_DIR="$artifact" ;; *)
+        echo 'error: cross-repository read artifacts must stay in the state repository' >&2
+        return 2 ;;
+      esac
+    fi
+  fi
+}
+
+ma_read_source_repo() {
+  if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ -n "${OMS_ROOM_REPO:-}" ]; then
+    printf '%s\n' "${MA_READ_SOURCE_REPO:-$1}"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+ma_read_guard_begin() {  # PRIVATE_DIR
+  MA_READ_GUARD_DIR=""
+  [ "$REPO" != "$MA_READ_SOURCE_REPO" ] || return 0
+  MA_READ_GUARD_DIR="$1/read-guard"
+  local root name
+  for name in state source; do
+    root="$REPO"
+    [ "$name" != source ] || root="$MA_READ_SOURCE_REPO"
+    oms_git_assert_safe_execution_config "$root" diff-read || return 2
+    oms_git_assert_plain_index "$root" || return 2
+    oms_worker_surface_snapshot "$root" "$MA_READ_GUARD_DIR/$name" || return 2
+    oms_git_execution_state_snapshot "$root" "$MA_READ_GUARD_DIR/$name/git-execution-state" || return 2
+  done
+  MA_READ_STATE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/state/git-execution-state")" || return 2
+  MA_READ_SOURCE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/source/git-execution-state")" || return 2
+  MA_READ_SOURCE_FINGERPRINT="$(ma_worktree_fingerprint "$MA_READ_SOURCE_REPO" | tr -d '\r')" || return 2
+}
+
+ma_read_guard_assert() {
+  [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
+  local root name digest changed
+  for name in state source; do
+    root="$REPO" digest="$MA_READ_STATE_EXECUTION_SHA"
+    [ "$name" != source ] || { root="$MA_READ_SOURCE_REPO"; digest="$MA_READ_SOURCE_EXECUTION_SHA"; }
+    oms_git_execution_state_assert_unchanged "$root" "$MA_READ_GUARD_DIR/$name/git-execution-state" "$digest" || return 2
+    oms_git_assert_safe_execution_config "$root" diff-read || return 2
+    oms_git_assert_plain_index "$root" || return 2
+    changed="$(oms_worker_surface_diff "$root" "$MA_READ_GUARD_DIR/$name" | tr -d '\r')" || return 2
+    if [ -n "$changed" ]; then
+      echo "error: read pass changed $name repository protected surfaces: $changed" >&2
+      return 2
+    fi
+  done
+  [ "$(ma_worktree_fingerprint "$MA_READ_SOURCE_REPO" | tr -d '\r')" = "$MA_READ_SOURCE_FINGERPRINT" ] || {
+    echo 'error: read pass changed source repository tree' >&2
+    return 2
+  }
+}
+
 ma_repo_label() {
   local repo="$1"
   if [ -n "$repo" ]; then
@@ -342,6 +421,13 @@ ma_write_task_context() {
 # tell reference data apart from operator instructions.
 ma_write_harness_context() {
   local repo="$1"
+  repo="$(ma_read_source_repo "$repo")"
+  local memory_repo="$repo"
+  if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ -n "${OMS_ROOM_REPO:-}" ] &&
+    [ -n "${MA_READ_SOURCE_REPO:-}" ]; then
+    # Recall may refresh caches; source reads must not create state in B.
+    memory_repo="$REPO"
+  fi
   local include_memory="$2"
   local include_task="$3"
   local include_ml="$4"
@@ -360,9 +446,9 @@ ma_write_harness_context() {
   {
     if [ "$include_memory" -eq 1 ]; then
       if [ "${MA_KIND:-}" = delegate ]; then
-        OMS_AGENT_MEMORY_MODE="${OMS_AGENT_MEMORY_MODE:-relevant}" ma_write_shared_memory_context "$repo" "$recall_query"
+        OMS_AGENT_MEMORY_MODE="${OMS_AGENT_MEMORY_MODE:-relevant}" ma_write_shared_memory_context "$memory_repo" "$recall_query"
       else
-        ma_write_shared_memory_context "$repo" "$recall_query"
+        ma_write_shared_memory_context "$memory_repo" "$recall_query"
       fi
     fi
     if [ "$include_task" -eq 1 ]; then
@@ -1447,7 +1533,8 @@ ma_call_read_peer() {  # ARTIFACT_OUT PREVIEW AGENT_CALL_ARGS...
   OMS_PEER_ANSWER_QUALITY=blocked
   [ "${OH_MY_SETTING_CALL_DRY_RUN:-0}" != 1 ] || preview=1
   log="$(agent_memory_mktemp)" || return 1
-  bash "$(ma_scripts_dir)/agent-call.sh" "$@" > "$log" 2>&1 || rc=$?
+  MA_READ_SOURCE_REPO="${MA_READ_SOURCE_REPO:-}" \
+    bash "$(ma_scripts_dir)/agent-call.sh" "$@" > "$log" 2>&1 || rc=$?
   cat "$log"
   # Ambiguous or absent receipts never borrow another concurrent call's file.
   artifact="$(awk '/^artifact: / {sub(/^artifact: /, ""); value=$0; count++} END {if (count == 1) print value}' "$log")"
@@ -2708,6 +2795,10 @@ ma_run_routed_provider_inner() {
   local after=""
   local status
   local isolated_dir=""
+  local isolation_repo="$state_repo"
+  if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ -n "${OMS_ROOM_REPO:-}" ]; then
+    isolation_repo="$workdir"
+  fi
 
   OMS_WORKER_AUTHORITY_VIOLATION=0
   export OMS_WORKER_AUTHORITY_VIOLATION
@@ -2719,7 +2810,7 @@ ma_run_routed_provider_inner() {
   attempt_file="$(agent_memory_mktemp)" || return 1
 
   if [ "$access" = read ] && oms_provider_requires_read_isolation "$provider"; then
-    isolated_dir="$(ma_agy_read_dir "$state_repo")" || isolated_dir=""
+    isolated_dir="$(ma_agy_read_dir "$isolation_repo")" || isolated_dir=""
     if [ -z "$isolated_dir" ]; then
       printf 'SKIPPED: could not create provider read-isolation directory\n' >> "$artifact"
       rm -f "$attempt_file"
@@ -2728,7 +2819,7 @@ ma_run_routed_provider_inner() {
     workdir="$isolated_dir"
     if [ -n "${MA_COUNCIL_CONTEXT_DIR:-}" ]; then
       if ! ma_stage_council_context "$workdir"; then
-        ma_agy_read_cleanup "$state_repo" "$isolated_dir"
+        ma_agy_read_cleanup "$isolation_repo" "$isolated_dir"
         rm -f "$attempt_file"
         return 2
       fi
@@ -2872,15 +2963,15 @@ EOF
 
     if [ "$OMS_MODEL_FALLBACK_USED" = 1 ] && [ "$access" = read ] &&
       oms_provider_requires_read_isolation "$provider"; then
-      ma_agy_read_cleanup "$state_repo" "$isolated_dir"
-      isolated_dir="$(ma_agy_read_dir "$state_repo")" || isolated_dir=""
+      ma_agy_read_cleanup "$isolation_repo" "$isolated_dir"
+      isolated_dir="$(ma_agy_read_dir "$isolation_repo")" || isolated_dir=""
       if [ -z "$isolated_dir" ]; then
         OMS_MODEL_FALLBACK_USED=0
         printf '\nmodel-fallback: skipped; could not recreate pristine provider isolation\n' >> "$artifact"
       else
         workdir="$isolated_dir"
         if [ -n "${MA_COUNCIL_CONTEXT_DIR:-}" ] && ! ma_stage_council_context "$workdir"; then
-          ma_agy_read_cleanup "$state_repo" "$isolated_dir"
+          ma_agy_read_cleanup "$isolation_repo" "$isolated_dir"
           rm -f "$attempt_file"
           return 2
         fi
@@ -2925,7 +3016,7 @@ EOF
     fi
     export OMS_MODEL_SELECTED OMS_MODEL_FALLBACK_USED OMS_MODEL_FALLBACK_REASON OMS_REASONING_SELECTED
     [ "$access" != read ] || ! oms_provider_requires_read_isolation "$provider" ||
-      ma_agy_read_cleanup "$state_repo" "$isolated_dir"
+      ma_agy_read_cleanup "$isolation_repo" "$isolated_dir"
     return "$status"
   fi
 
@@ -2935,7 +3026,7 @@ EOF
     "${OMS_MODEL_FALLBACK_REASON:--}" >> "$artifact"
   rm -f "$attempt_file"
   if [ -n "$isolated_dir" ]; then
-    ma_agy_read_cleanup "$state_repo" "$isolated_dir"
+    ma_agy_read_cleanup "$isolation_repo" "$isolated_dir"
   fi
   return "$status"
 }
@@ -2977,12 +3068,23 @@ ma_run_routed_provider() {
   local heartbeat_pid="" owner_pid
   local native_session="" native_session_file=""
   local heartbeat_seconds="${OMS_ROUTED_HEARTBEAT_SECONDS:-60}"
+  local read_guard_tmp=""
   local -a start_args
   local -a usage_args
 
   oms_require_peer_owner || return $?
 
   provider="$(oms_provider_normalize "$provider")" || return $?
+  if [ "$access" = read ] && [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] &&
+    [ -n "${MA_READ_SOURCE_REPO:-}" ] &&
+    [ -n "${OMS_ROOM_REPO:-}" ] && [ "$state_repo" != "$5" ] &&
+    [ -z "${MA_READ_GUARD_DIR:-}" ]; then
+    read_guard_tmp="$(mktemp -d "${OMS_LIB_TMPDIR:-${TMPDIR:-/tmp}}/read-guard.XXXXXX")" || return 2
+    if ! ma_read_guard_begin "$read_guard_tmp"; then
+      rm -rf "$read_guard_tmp"
+      return 2
+    fi
+  fi
   events="$(ma_scripts_dir)/agent-events.sh"
   if [ -n "$state_repo" ] && [ -x "$events" ]; then
     if [ -z "$OMS_ATTEMPT_ID" ]; then
@@ -3051,6 +3153,11 @@ PY
   fi
   native_session_file="$(agent_memory_mktemp 2>/dev/null)" || native_session_file=""
   OMS_NATIVE_SESSION_FILE="$native_session_file" ma_run_routed_provider_inner "$@" || status=$?
+  ma_read_guard_assert || status=2
+  if [ -n "$read_guard_tmp" ]; then
+    rm -rf "$read_guard_tmp"
+    MA_READ_GUARD_DIR=""
+  fi
   if [ -n "$native_session_file" ]; then
     native_session="$(head -c 100 "$native_session_file" 2>/dev/null | tr -d '\r\n')"
     rm -f "$native_session_file"
@@ -3341,7 +3448,7 @@ PY_SEAT
   fi
 
   status=0
-  ma_run_routed_provider "$provider" read "$prompt_file" "$artifact" "${REPO:-$PWD}" \
+  ma_run_routed_provider "$provider" read "$prompt_file" "$artifact" "$(ma_read_source_repo "${REPO:-$PWD}")" \
     "${MA_KIND:-call}" "${REPO:-}" "${OMS_OPERATION_ID:-}" || status=$?
 
   printf '\n\n## Exit\n\n%s\n' "$status" >> "$artifact"
@@ -3689,6 +3796,9 @@ ma_council_context_owned() {  # DIR
 # Stage the bounded context into a seat's private isolated tree under the
 # prompt's path and the legacy artifacts path older seat tooling reads.
 ma_stage_council_context() {  # ROOT
+  if [ "$(ma_read_source_repo "$REPO")" != "$REPO" ]; then
+    return 0
+  fi
   local leaf="${MA_COUNCIL_CONTEXT_REL##*/}" rel
   for rel in "$MA_COUNCIL_CONTEXT_REL" ".oms/artifacts/$leaf"; do
     python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" --stage-context \
@@ -3724,7 +3834,8 @@ ma_debate_answer_reference() {
 }
 
 ma_prepare_council_context() {
-  local base=unavailable diff_base=unavailable
+  local base=unavailable diff_base=unavailable source
+  source="$(ma_read_source_repo "$REPO")"
   if [ -L "$REPO/.oms" ] || [ -L "$REPO/.oms/delegations" ]; then
     echo 'error: refusing symlinked .oms for council context' >&2
     return 2
@@ -3739,6 +3850,9 @@ ma_prepare_council_context() {
   agent_memory_ensure_oms_ignore_for_path "$REPO/.oms/delegations/x" 2>/dev/null || true
   MA_COUNCIL_CONTEXT_DIR="$(mktemp -d "$REPO/.oms/delegations/council-context.XXXXXX")" || return 2
   MA_COUNCIL_CONTEXT_REL="$(ma_repo_rel "$MA_COUNCIL_CONTEXT_DIR")"
+  if [ "$source" != "$REPO" ]; then
+    MA_COUNCIL_CONTEXT_REL="\$OMS_STATE_REPO/$MA_COUNCIL_CONTEXT_REL"
+  fi
   MA_COUNCIL_CONTEXT_NONCE="$(ma_fence_id)"
   {
     printf 'kind=oms-council-context\n'
@@ -3748,16 +3862,16 @@ ma_prepare_council_context() {
   MA_COUNCIL_SOURCE_STATE=""
   if [ "${INCLUDE_DIFF:-0}" = 1 ] || [ "${INCLUDE_STATUS:-0}" = 1 ] ||
       { [ "${MA_KIND:-}" = review ] && [ "${NO_DIFF:-0}" = 0 ]; }; then
-    MA_COUNCIL_SOURCE_STATE="$(oms_git_tracked_state_fingerprint "$REPO")" || MA_COUNCIL_SOURCE_STATE=""
-    base="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" || base=unavailable
+    MA_COUNCIL_SOURCE_STATE="$(oms_git_tracked_state_fingerprint "$source")" || MA_COUNCIL_SOURCE_STATE=""
+    base="$(git -C "$source" rev-parse HEAD 2>/dev/null)" || base=unavailable
     if [ "$base" != unavailable ] && [ -z "$MA_COUNCIL_SOURCE_STATE" ]; then
       echo 'error: cannot establish tracked council source identity' >&2
       return 2
     fi
     if [ "${INCLUDE_DIFF:-0}" = 1 ] ||
         { [ "${MA_KIND:-}" = review ] && [ "${NO_DIFF:-0}" = 0 ]; }; then
-      diff_base="$(ma_git_diff_base "$REPO")"
-      diff_base="$(git -C "$REPO" rev-parse --verify "$diff_base^{tree}" 2>/dev/null)" || diff_base=unavailable
+      diff_base="$(ma_git_diff_base "$source")"
+      diff_base="$(git -C "$source" rev-parse --verify "$diff_base^{tree}" 2>/dev/null)" || diff_base=unavailable
     fi
   fi
   MA_COUNCIL_SOURCE_BASE="$base"
@@ -3853,11 +3967,12 @@ write_debate_prompt() {
 }
 
 ma_refresh_council_answers() {
-  local i current_base
+  local i current_base source
+  source="$(ma_read_source_repo "$REPO")"
   if [ -n "${MA_COUNCIL_CONTEXT_DIR:-}" ]; then
-    current_base="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" || current_base=unavailable
+    current_base="$(git -C "$source" rev-parse HEAD 2>/dev/null)" || current_base=unavailable
     if [ -n "$MA_COUNCIL_SOURCE_STATE" ] && {
-        [ "$(oms_git_tracked_state_fingerprint "$REPO")" != "$MA_COUNCIL_SOURCE_STATE" ] ||
+        [ "$(oms_git_tracked_state_fingerprint "$source")" != "$MA_COUNCIL_SOURCE_STATE" ] ||
         [ "$current_base" != "$MA_COUNCIL_SOURCE_BASE" ]; }; then
       echo 'error: tracked source changed during council; do not mix revisions' >&2
       return 2

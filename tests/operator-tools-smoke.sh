@@ -2435,7 +2435,7 @@ rows = json.loads(call(["bash", str(panel.ENTRY), "artifact-index", "--repo", st
 assert {r["provider"] for r in rows if r["kind"] == "delegate"} == set(panel.PROVIDERS)
 assert {r["provider"] for r in rows if r["kind"] == "review"} == set(panel.PROVIDERS)
 
-# Exercise exact role routes through the real provider runner, with one
+# Same-repository dispatch retains its per-role execution locations, with one
 # recorded main per caller and read/write authority tested independently.
 main_attempts = {}
 for owner in panel.PROVIDERS:
@@ -4277,7 +4277,16 @@ def exercise_observed_worker_leases():
             if child_process.poll() is None:
                 child_process.terminate()
             child_process.communicate(timeout=15)
-    # Non-worker backends retain canonical execution/state; they do not implement the delegate split.
+    # One cross-repository read regression: dirty state A and a different scratch source B.
+    untracked_state = project / "state-only-untracked.txt"
+    untracked_state.write_text("owner state stays here\n")
+    source_value = (source / "value.txt").read_text()
+    (source / "value.txt").write_text(source_value + "pending scratch review\n")
+    state_status = subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"])
+    source_status = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"])
+    source_diff = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD"])
+    read_prompt = temporary / "scratch-read-prompt"
+    read_verify = temporary / "scratch-read-verify"
     main_member, main_attempt = mains["claude"]
     canonical_env = dict(environment, OMS_ROOM_ID=test_room, OMS_ROOM_REPO=str(project),
                          OMS_ROOM_PARTICIPANT=main_member, OMS_PANEL_MAIN_ATTEMPT=main_attempt,
@@ -4289,10 +4298,19 @@ def exercise_observed_worker_leases():
                    "--prompt", "Inspect value.txt; judge only the supplied source evidence.", "--task-id", task_id]
         if role == "reviewer":
             request += ["--verify", "test -f value.txt"]
-        answer = call(request, canonical_env)
+        preview = json.loads(call(request + ["--dry-run"], canonical_env))
+        assert preview["argv"][preview["argv"].index("--repo") + 1] == str(source), preview
+        if role == "reviewer":
+            request[request.index("--verify") + 1] = 'pwd -P > "$PANEL_TEST_VERIFY_LOG"; git rev-parse HEAD >> "$PANEL_TEST_VERIFY_LOG"'
+        answer = call(request, dict(canonical_env, PANEL_TEST_PROMPT=str(read_prompt),
+                                    PANEL_TEST_VERIFY_LOG=str(read_verify)))
         assert ("artifact:" if role == "advisor" else "artifacts:") in answer, answer
         observed = json.loads(worker_log.read_text().splitlines()[-1])
-        assert observed["cwd"] == str(project) and observed["parent"] == main_attempt and observed["room"] == test_room, observed
+        assert observed["cwd"] == str(source) and observed["parent"] == main_attempt and observed["room"] == test_room, observed
+        assert observed["room_repo"] == str(project), observed
+        if role == "reviewer":
+            assert read_verify.read_text().splitlines() == [str(source), source_sha], "verify did not execute in B"
+            assert "+pending scratch review" in read_prompt.read_text(), "review diff came from A"
         enrolled = room.participant(room.project(room.records(project, test_room)), observed["participant"])
         assert enrolled["role"] == role and enrolled["parent"] == main_member, enrolled
         report = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
@@ -4301,7 +4319,31 @@ def exercise_observed_worker_leases():
         indexed = [r for r in json.loads(call(["bash", str(panel.ENTRY), "artifact-index", "--repo", str(project),
                     "list", "1000", "--json"]))["rows"] if r.get("task_id") == task_id]
         assert indexed and any(r.get("artifact") and (project / r["artifact"]).is_file() for r in indexed), indexed
-        assert not (source / ".oms/artifacts/index.jsonl").exists(), "non-worker artifacts split into scratch"
+        assert all(source_sha.startswith(r["base_sha"]) for r in indexed), indexed
+        if role == "reviewer":
+            scope_path = re.search(r"^review-scope: (.+)$", answer, re.M).group(1)
+            scope = json.loads(Path(scope_path).read_text())
+            assert scope["head"] == source_sha and scope["base"] == source_sha and scope["paths"] == ["value.txt"], scope
+            import hashlib
+            assert scope["diff_sha256"] == hashlib.sha256(source_diff).hexdigest(), scope
+        attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
+        attempt = next(a for a in attempts if a.get("task_id") == task_id)
+        assert attempt["parent_attempt_id"] == main_attempt and attempt["refs"]["panel_location"].startswith("worktree:"), attempt
+        assert not (source / ".oms").exists(), "read records split into B"
+        assert subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"]) == state_status
+        assert subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"]) == source_status
+        assert (source / "value.txt").read_text() == source_value + "pending scratch review\n"
+        assert untracked_state.read_text() == "owner state stays here\n"
+        assert (project / "value.txt").read_text() == "old\n", "read pass edited A source"
+        for target in (untracked_state, source / "value.txt"):
+            original = target.read_bytes()
+            refused = subprocess.run(request, env=dict(canonical_env, PANEL_TEST_MODE="primary-write",
+                PANEL_TEST_PRIMARY=str(target)), capture_output=True, text=True, timeout=90)
+            assert refused.returncode != 0 and "protected" in refused.stderr, refused
+            assert target.read_bytes() != original, "read guard mutation fixture did not execute"
+            target.write_bytes(original)
+    untracked_state.unlink()
+    (source / "value.txt").write_text(source_value)
     # Snapshot failure is a frontend refusal, even before an observer binding can be selected.
     task_id = "frontend-owned"
     call(plan_api + ["init", "--goal", "Frontend snapshot refusal"])
