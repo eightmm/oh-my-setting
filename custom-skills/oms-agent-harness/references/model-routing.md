@@ -36,6 +36,19 @@ background advisor or require another model call for routine completion.
 
 ## Existing router contract
 
+Panel dispatch uses each role's capability tier and optional provider preference:
+Codex for implementation/documentation/integration, Claude for judgment, and
+tier order for research. Installed candidates with recorded weekly usage at 90%
+or above are skipped when another is installed; unknown readings remain available,
+a sole installed candidate is retained, and all saturated alternatives fail.
+Reviewer/verifier/security-auditor/critic independence wins over preference when
+both available candidates include the main's preferred provider. `--to codex|claude`
+without `--model` pins that provider's tier candidate and effort; explicit models
+remain exact, and other model-selecting transports still require `--model`.
+`--routes` shows tiers, preferences and chosen candidates; owner detection follows
+`OMS_AGENT`, Claude markers, Codex markers, then Codex. Usage comes from existing
+board readings without invoking a provider CLI.
+
 1. Run `oms models` for cached catalogs and per-model effort scales. Use
    `--refresh` only when a live probe is needed.
 2. No `--model` means provider default — except for a write worker

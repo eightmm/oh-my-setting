@@ -15,11 +15,19 @@
                  {"provider": "codex", "model": "gpt-6-astra", "effort": "high"}]
   },
   "roles": {
-    "researcher": "light",
-    "worker": "routine", "builder": "routine", "refactorer": "routine", "documenter": "routine",
-    "release-engineer": "routine",
-    "reviewer": "deep", "verifier": "deep", "security-auditor": "deep", "architect": "deep", "critic": "deep",
-    "integrator": "deep", "performance-engineer": "deep",
-    "advisor": "frontier"
+    "researcher": {"tier": "light"},
+    "worker": {"tier": "routine", "prefer": "codex"},
+    "builder": {"tier": "routine", "prefer": "codex"},
+    "refactorer": {"tier": "routine", "prefer": "codex"},
+    "documenter": {"tier": "routine", "prefer": "codex"},
+    "release-engineer": {"tier": "routine", "prefer": "codex"},
+    "reviewer": {"tier": "deep", "prefer": "claude"},
+    "verifier": {"tier": "deep", "prefer": "claude"},
+    "security-auditor": {"tier": "deep", "prefer": "claude"},
+    "architect": {"tier": "deep", "prefer": "claude"},
+    "critic": {"tier": "deep", "prefer": "claude"},
+    "integrator": {"tier": "deep", "prefer": "codex"},
+    "performance-engineer": {"tier": "deep", "prefer": "codex"},
+    "advisor": {"tier": "frontier", "prefer": "claude"}
   }
 }

@@ -42,33 +42,48 @@ def newest_route_model(provider, configured, catalog):
 
 
 def valid_route(route):
-    return (isinstance(route, dict) and route.get("provider") in MODEL_IDS
-            and route.get("model") in MODEL_IDS[route["provider"]] and route.get("effort") in {"low", "medium", "high"})
+    return (isinstance(route, dict) and set(route) == {"provider", "model", "effort"}
+            and isinstance(route.get("provider"), str) and route["provider"] in MODEL_IDS
+            and isinstance(route.get("model"), str) and route["model"] in MODEL_IDS[route["provider"]]
+            and isinstance(route.get("effort"), str) and route["effort"] in {"low", "medium", "high"})
 
 
 def policy():
     value = json.loads((ROOT / "config/panel-routing.json").read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("schema") != 2:
+    if not isinstance(value, dict) or set(value) != {"schema", "main", "tiers", "roles"} or value.get("schema") != 2:
         raise ValueError("unsupported panel routing policy")
+    mains = value.get("main")
+    if not isinstance(mains, dict) or set(mains) != set(MODEL_IDS):
+        raise ValueError("invalid panel main routes")
     for key in ("codex", "claude"):
-        if not valid_route((value.get("main") or {}).get(key)):
+        if not valid_route(mains[key]) or mains[key]["provider"] != key:
             raise ValueError("invalid panel route: main/%s" % key)
     tiers = value.get("tiers") if isinstance(value.get("tiers"), dict) else {}
+    if set(tiers) != set(TIERS):
+        raise ValueError("invalid panel tiers")
     for tier in TIERS:
         if not isinstance(tiers.get(tier), list) or not tiers[tier] or not all(map(valid_route, tiers[tier])):
             raise ValueError("invalid panel tier: %s" % tier)
+        if len({c["provider"] for c in tiers[tier]}) != len(tiers[tier]):
+            raise ValueError("duplicate provider in panel tier: %s" % tier)
     roles = value.get("roles")
-    if not isinstance(roles, dict) or set(roles) != set(KINDS) or not set(roles.values()) <= set(TIERS):
-        raise ValueError("panel roles must map every role to a tier")
+    if not isinstance(roles, dict) or set(roles) != set(KINDS):
+        raise ValueError("panel roles must map every role to a tier and optional provider preference")
+    for role, route in roles.items():
+        if (not isinstance(route, dict) or not {"tier"} <= set(route) <= {"tier", "prefer"}
+                or not isinstance(route.get("tier"), str) or route["tier"] not in TIERS
+                or "prefer" in route and (not isinstance(route["prefer"], str) or route["prefer"] not in MODEL_IDS)):
+            raise ValueError("invalid panel role: %s" % role)
     return value
 
 
-def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None):
-    """The first installed candidate of the role's tier; installed=None considers every provider."""
+def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None):
+    """Availability, role preference, then independent judgment; explicit targets narrow installed."""
     if not owner or role not in KINDS:
         raise ValueError("choose a supported main and role")
     routes = policy()
-    tier = tier or routes["roles"][role]
+    preferred = routes["roles"][role].get("prefer")
+    tier = tier or routes["roles"][role]["tier"]
     if tier not in TIERS or access not in ("read", "write"):
         raise ValueError("invalid workload or access")
     if access == "write" and role not in WRITERS:
@@ -90,6 +105,21 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
     if not usable:
         raise ValueError("no installed provider serves the %s tier (%s); install one or use --to" % (
             tier, ", ".join(sorted({c["provider"] for c in candidates})) or "none configured"))
+    if len(usable) > 1:
+        # Use the board's rounded reading; stale, malformed and missing readings remain available.
+        from panel_metrics import percent
+        readings = provider_status if isinstance(provider_status, dict) else {}
+        available = []
+        for candidate in usable:
+            row = readings.get(candidate["provider"])
+            used = percent(row.get("weekly_used")) if isinstance(row, dict) else None
+            if used is None or used < 90:
+                available.append(candidate)
+        if not available:
+            raise ValueError("all installed providers in the %s tier report >=90%% weekly usage" % tier)
+        usable = available
+    if preferred:
+        usable = sorted(usable, key=lambda c: c["provider"] != preferred)
     if role in INDEPENDENT:
         usable = sorted(usable, key=lambda c: c["provider"] == owner)
     route = dict(usable[0], effort="low") if role == "researcher" else dict(usable[0])

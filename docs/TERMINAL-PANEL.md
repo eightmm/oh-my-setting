@@ -592,12 +592,14 @@ or automatic routing. Presence is executable discovery, not an authentication
 or runtime health check. Models come from the existing cache without refresh.
 
 A main can explicitly select a registered CLI for a bounded worker, advisor
-or reviewer. `--to` requires an exact `--model` for transports supporting per-call
-model selection; omit the `--workload` tier. An optional `--reasoning-effort` is forwarded through the existing
-provider capability checks. Omitting effort retains the front door's native
-settings. For profile-controlled transports such as Vibe/DeepSeek Harness,
+or reviewer. `--to codex|claude` without `--model` pins that provider's newest
+candidate family and effort from the role's tier; an explicit `--model` overrides
+it. Other transports supporting per-call model selection require an exact
+`--model`; omit the `--workload` tier. An optional `--reasoning-effort` is forwarded through the existing
+provider capability checks. With an explicit model or custom route, omitting
+effort retains the front door's native settings. For profile-controlled transports such as Vibe/DeepSeek Harness,
 omit `--model`; the native profile selects it and an exact override is refused.
-Preset roles route by capability tier, not provider (see Roles below).
+Preset roles use a capability tier and optional provider preference (see Roles below).
 Codex delegated routes accept the exact Sol, Luna and Astra model IDs in the
 panel policy, including Sol 6.1. Model-family versions are distinct from roles. Preset dispatch chooses the newest
 configured/catalog numeric version within its existing family and pins the exact ID;
@@ -660,37 +662,46 @@ The launcher does not autonomously fan out before the main has a task.
 | Claude main (default) | `claude-opus-5-5` | high |
 | Codex main / Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
 
-Calls are routed by capability tier, not by provider. Each tier lists candidates
-from both providers in order of fit; a dispatch takes the first whose provider is
-installed (cached registry, no CLI call) and pins the newest catalog version of
-that model family. No installed candidate is a clear error; `--to PROVIDER
-[--model ID]` stays the explicit provider route.
+Each role selects a capability tier and optionally prefers a provider; a dispatch
+takes its installed preferred candidate, otherwise the first installed tier
+candidate, and pins the newest catalog version within that model family.
+Recorded `weekly_used` readings from the same HUD/pane collection as the board's
+usage line exclude a provider at 90% or above when another tier candidate is
+installed; unknown readings remain available, and a sole installed candidate is
+retained. If every candidate in a multi-provider tier reports 90% or above, the
+route fails. No provider CLI is invoked to query usage. No installed candidate is
+a clear error; `--to PROVIDER [--model ID]` stays the explicit provider route and
+does not switch providers for usage.
 
-| Tier | Candidates, first preferred |
+| Tier | Candidates in fallback order |
 | --- | --- |
 | light | `claude-haiku-5-5` low, `gpt-6-luna` low |
 | routine | `claude-sonnet-5-5` medium, `gpt-6.1-sol` medium |
 | deep | `claude-opus-5-5` high, `gpt-6.1-sol` high |
 | frontier | `claude-fable-5-1` high, `gpt-6-astra` high |
 
-| Role | Default tier | Access | Front door |
-| --- | --- | --- | --- |
-| `researcher` | light (always) | read | `peer-delegate --role researcher` |
-| `worker`, `builder`, `refactorer`, `documenter` | routine | read or write | `peer-delegate --role` (`analysis-worker` / `implementation-worker` for `worker`) |
-| `release-engineer` | routine | read | `peer-delegate --role release-engineer` |
-| `integrator`, `performance-engineer` | deep | read or write | `peer-delegate --role` |
-| `architect`, `critic`, `verifier`, `security-auditor` | deep | read | `peer-delegate --role --read-only` |
-| `reviewer` | deep | read | `peer-review --gate --verify` |
-| `advisor` | frontier | read | `advise` |
+| Role | Default tier | Preferred provider | Access | Front door |
+| --- | --- | --- | --- | --- |
+| `researcher` | light (always) | tier order | read | `peer-delegate --role researcher` |
+| `worker`, `builder`, `refactorer`, `documenter` | routine | Codex | read or write | `peer-delegate --role` (`analysis-worker` / `implementation-worker` for `worker`) |
+| `release-engineer` | routine | Codex | read | `peer-delegate --role release-engineer` |
+| `integrator`, `performance-engineer` | deep | Codex | read or write | `peer-delegate --role` |
+| `architect`, `critic`, `verifier`, `security-auditor` | deep | Claude | read | `peer-delegate --role --read-only` |
+| `reviewer` | deep | Claude | read | `peer-review --gate --verify` |
+| `advisor` | frontier | Claude | read | `advise` |
 
 `--workload light|routine|deep|frontier` overrides the tier for one dispatch and
-`--reasoning-effort` its effort. Reviewer, verifier, security-auditor and critic
-prefer a same-tier candidate from the provider other than the main's, as a
-tie-break only. Their records keep the board kinds `worker`, `researcher`,
+`--reasoning-effort` its effort. Installation and recorded availability filter
+candidates first, then role preference applies, with reviewer/verifier/security-auditor/critic
+independence overriding preference when both providers remain available and the
+preferred provider is the main's. Their records keep the board kinds `worker`, `researcher`,
 `advisor` (advisor, architect, critic) and `reviewer` (reviewer, verifier,
 security-auditor) in `panel_role`; the strategy itself is the recorded purpose
 (plain workers record explain/investigate/implement). `oms panel --routes`
-prints the policy with these kinds and the write-capable roles.
+prints each role's tier, optional preferred provider and chosen candidate, plus
+these kinds and the write-capable roles. Dispatch and council owner defaults use
+`OMS_AGENT`, then Claude's `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT` markers, then
+Codex's `CODEX_SANDBOX` marker, otherwise Codex; `--owner` overrides detection.
 
 [The panel policy](../config/panel-routing.json) is separate from generic OMS
 provider defaults. An explicit native `--model` override preserves native effort

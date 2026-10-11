@@ -150,6 +150,16 @@ def main_owner(harness):
     return "codex" if harness == "pi" else harness
 
 
+def caller_owner():
+    if os.environ.get("OMS_AGENT"):
+        return os.environ["OMS_AGENT"]
+    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
+        return "claude"
+    if os.environ.get("CODEX_SANDBOX"):
+        return "codex"
+    return "codex"
+
+
 def main_installed(harness):
     return bool(shutil.which(native_binary(harness))) and (harness != "pi" or bool(shutil.which("codex")))
 
@@ -217,7 +227,20 @@ def provider_catalog(selection="all"):
             for row in rows]
 
 
-def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None):
+def routing_status(repo, room_id=None, main=None):
+    """Reuse the board's recorded HUD/pane readings without a provider usage query."""
+    if not (room_id or os.environ.get("OMS_ROOM_ID")):
+        return {}
+    from panel_metrics import collect
+    try:
+        state, _ = snapshot(repository(repo), room_id=room_id)
+        return collect(state, main or os.environ.get("OMS_PANEL_MAIN_ATTEMPT"), repo=repository(repo))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return {}
+
+
+def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None,
+                   repo=None, room_id=None, main=None):
     if owner not in PROVIDERS:
         owner = provider_catalog(owner)[0]["provider"]
     if effort not in (None, "low", "medium", "high") or role == "researcher" and effort not in (None, "low"):
@@ -226,11 +249,13 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         raise ValueError("explicit peer model requires --to")
     if target and workload:
         raise ValueError("--to is an explicit route; omit the --workload tier")
-    if not target or role == "researcher":
+    if not target or role == "researcher" or target in PROVIDERS and not model:
         # Tier routing reads installed providers from the cached registry; a researcher's --to only narrows it.
         rows = provider_catalog(target or ",".join(sorted({c["provider"] for tier in policy()["tiers"].values()
                                                            for c in tier})))
-        route = allocate(owner, role, workload, access, purpose, {row["provider"] for row in rows if row["installed"]})
+        readings = routing_status(repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd(), room_id, main) if not target else {}
+        route = allocate(owner, role, workload, access, purpose,
+                         {row["provider"] for row in rows if row["installed"]}, readings)
         peer = next(row for row in rows if row["provider"] == route["provider"])
         route.update(binary=peer["binary"], model=newest_route_model(
             route["provider"], route["model"], peer.get("catalog_models", peer.get("models", []))))
@@ -823,7 +848,7 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
 def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
              main=None, continue_task=None, scopes=None):
-    route = selected_route(owner, role, workload, access, purpose, target, model, effort)
+    route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main)
     label = safe_label(label)
     resume = None
     temporary = None
@@ -3699,17 +3724,18 @@ def main(argv=None):
         parser.error("--dry-run only plans a launch, role dispatch or council")
     if args.finalize and not (args.task_id and args.summary_file and args.outcome and args.owner):
         parser.error("--finalize requires --owner, --task-id, --summary-file and --outcome")
-    if args.council and not (args.owner and args.task_id and args.label and args.prompt):
-        parser.error("--council requires --owner, --task-id, --label and --prompt")
+    if args.council and not (args.task_id and args.label and args.prompt):
+        parser.error("--council requires --task-id, --label and --prompt")
     if (args.to or args.reasoning_effort) and not args.dispatch:
         parser.error("--to and --reasoning-effort require --dispatch")
     if args.task_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", args.task_id):
         parser.error("invalid task ID")
     if args.dispatch:
         try:
-            owner = args.owner or os.environ.get("OMS_AGENT", "codex")
+            owner = args.owner or caller_owner()
             route = selected_route(owner, args.dispatch, args.workload, args.access, args.purpose,
-                                   args.to, args.model, args.reasoning_effort)
+                                   args.to, args.model, args.reasoning_effort,
+                                   repo=args.repo, room_id=args.room, main=args.main)
             # A prompt-less advisor call asks its single question interactively before routing.
             pending = args.dispatch == "advisor" and not (args.prompt or args.brief_file or args.dry_run)
             if args.brief_file:
@@ -3754,7 +3780,25 @@ def main(argv=None):
                 show_providers(rows)
             return 0
         if args.routes:
-            print(json.dumps(dict(policy(), writers=sorted(WRITERS), kinds=KINDS), indent=2))
+            routes = policy()
+            rows = provider_catalog(",".join(sorted({c["provider"] for tier in routes["tiers"].values() for c in tier})))
+            installed = {row["provider"] for row in rows if row["installed"]}
+            try:
+                readings = routing_status(repository(args.repo))
+            except (OSError, ValueError, subprocess.SubprocessError):
+                readings = {}
+            chosen = {}
+            for role in routes["roles"]:
+                try:
+                    route = allocate(caller_owner(), role, installed=installed, provider_status=readings)
+                    peer = next(row for row in rows if row["provider"] == route["provider"])
+                    route["model"] = newest_route_model(route["provider"], route["model"],
+                        peer.get("catalog_models", peer.get("models", [])))
+                    chosen[role] = {key: route[key] for key in ("provider", "model", "effort")}
+                except ValueError as error:
+                    chosen[role] = {"error": str(error)}
+            print(json.dumps(dict(routes, writers=sorted(WRITERS), kinds=KINDS,
+                                  owner=caller_owner(), chosen=chosen), indent=2))
             return 0
         repo = repository(args.repo)
         requested_worktree = work_repository(args.repo if args.repo is not None else os.getcwd())
@@ -3781,7 +3825,7 @@ def main(argv=None):
                 state["provider_status"] = collect(state, repo=repo)
                 state["private_capacity"] = private_capacity(repo)
             else:
-                state, status, *_ = read_panel(repo, os.environ.get("OMS_AGENT", "codex"), None, False)
+                state, status, *_ = read_panel(repo, caller_owner(), None, False)
             if args.json:
                 print(json.dumps(panel_health.project(state), ensure_ascii=False))
             else:
@@ -3814,7 +3858,7 @@ def main(argv=None):
                 print("Started %s main in window %s of room %s" % (report["provider"].capitalize(), report["window"], report["room"]))
             return 0
         if args.council:
-            return council(repo, args.owner, args.task_id, args.label, args.prompt,
+            return council(repo, args.owner or caller_owner(), args.task_id, args.label, args.prompt,
                            args.thread, args.rounds, args.dry_run)
         if args.results:
             participant = args.participant and room.identifier(args.participant, "participant")
@@ -3849,7 +3893,7 @@ def main(argv=None):
                 brief = brief.resolve(strict=True)
             if args.prompt and (len(args.prompt.encode("utf-8")) > MAX_PROMPT or "\0" in args.prompt):
                 raise ValueError("prompt exceeds the panel input contract")
-            owner = args.owner or os.environ.get("OMS_AGENT", "codex")
+            owner = args.owner or caller_owner()
             asked = args.dispatch == "advisor" and not (args.prompt or brief or args.dry_run)
             if asked:
                 if not sys.stdin.isatty():
@@ -3868,7 +3912,7 @@ def main(argv=None):
                            required=False)
             return status
         if args.watch:
-            provider = args.owner or os.environ.get("OMS_AGENT", "codex")
+            provider = args.owner or caller_owner()
             if provider not in PROVIDERS:
                 provider = provider_catalog(provider)[0]["provider"]
             return watch(repo, provider, args.count or 0, args.no_animation,

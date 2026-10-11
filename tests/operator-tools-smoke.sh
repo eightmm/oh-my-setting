@@ -2085,21 +2085,84 @@ for name in ("grok", "antigravity", "muse"):
 assert registered["muse"]["access"] == ["read"]
 assert registered["codex"]["native_launch"] and registered["claude"]["native_launch"]
 assert shlex.split(panel.shell_command(["bash", str(panel.ENTRY), str(project)]))[1:] == ["bash", str(panel.ENTRY), str(project)]
-# Tier routing is provider-agnostic: the first installed candidate, with independence only as a tie-break.
+# Role preferences split execution and judgment; independence and availability take precedence.
 both = {"claude", "codex"}
-assert allocate("codex", tier="light", installed=both)["model"] == "claude-haiku-5-5"
+assert allocate("codex", tier="light", installed=both)["model"] == "gpt-6-luna"
 assert allocate("claude", tier="light", installed={"codex"})["model"] == "gpt-6-luna"
-assert allocate("codex", installed=both)["model"] == "claude-sonnet-5-5"
-assert allocate("claude", installed={"codex"})["model"] == "gpt-6.1-sol"
+assert allocate("codex", installed={"claude"})["model"] == "claude-sonnet-5-5"
+for role in ("worker", "builder", "refactorer", "documenter", "performance-engineer", "integrator", "release-engineer"):
+    for owner in both:
+        assert allocate(owner, role=role, installed=both)["provider"] == "codex"
 assert allocate("claude", role="advisor", installed=both)["model"] == "claude-fable-5-1"
 assert allocate("claude", role="advisor", installed={"codex"})["model"] == "gpt-6-astra"
-assert allocate("claude", role="reviewer", installed=both)["model"] == "gpt-6.1-sol"
-assert allocate("codex", role="security-auditor", installed=both)["model"] == "claude-opus-5-5"
 assert allocate("claude", role="verifier", installed={"claude"})["model"] == "claude-opus-5-5"
 assert allocate("claude", role="architect", installed=both)["model"] == "claude-opus-5-5"
+for role in ("reviewer", "verifier", "security-auditor", "critic"):
+    assert allocate("claude", role=role, installed=both)["provider"] == "codex"
+    assert allocate("codex", role=role, installed=both)["provider"] == "claude"
+assert allocate("codex", role="researcher", installed=both)["model"] == "claude-haiku-5-5"
+for used, expected in ((89, "codex"), (90, "claude"), (100, "claude"),
+                       (None, "codex"), (True, "codex"), ("90", "codex"), (101, "codex")):
+    readings = {"codex": {"weekly_used": used}}
+    assert allocate("codex", installed=both, provider_status=readings)["provider"] == expected
+assert allocate("claude", role="reviewer", installed=both,
+                provider_status={"codex": {"weekly_used": 90}})["provider"] == "claude"
+assert allocate("codex", installed={"codex"}, provider_status={"codex": {"weekly_used": 100}})["provider"] == "codex"
+try:
+    allocate("codex", installed=both, provider_status={p: {"weekly_used": 90} for p in both})
+    raise AssertionError("all saturated candidates were accepted")
+except ValueError as error:
+    assert ">=90% weekly usage" in str(error), error
 routes = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--routes"]))
 assert set(routes["tiers"]) == set(panel.TIERS) and set(routes["roles"]) == set(routes["kinds"]) == set(panel.KINDS)
 assert routes["writers"] == sorted(panel.WRITERS) and report["routing"]["roles"] == routes["roles"]
+assert set(routes["chosen"]) == set(panel.KINDS)
+for role, rule in routes["roles"].items():
+    expected = allocate(routes["owner"], role, installed=both)
+    assert routes["chosen"][role] == {k: expected[k] for k in ("provider", "model", "effort")}
+    assert rule["tier"] == expected["workload"]
+from panel_routing import policy
+for invalid in ("routine", {"tier": "missing"}, {"tier": "routine", "prefer": "grok"},
+                {"tier": []}, {"tier": "routine", "prefer": None}, {"tier": "routine", "extra": True}):
+    malformed = deepcopy(policy())
+    malformed["roles"]["builder"] = invalid
+    with patch("panel_routing.Path.read_text", return_value=json.dumps(malformed)):
+        try:
+            policy()
+            raise AssertionError("invalid role policy accepted: %r" % invalid)
+        except ValueError:
+            pass
+for markers, expected in (({}, "codex"), ({"CODEX_SANDBOX": "1"}, "codex"),
+                          ({"CLAUDECODE": "1", "CODEX_SANDBOX": "1"}, "claude"),
+                          ({"CLAUDE_CODE_ENTRYPOINT": "cli"}, "claude"),
+                          ({"OMS_AGENT": "codex", "CLAUDECODE": "1"}, "codex"),
+                          ({"OMS_AGENT": "claude", "CODEX_SANDBOX": "1"}, "claude")):
+    with patch.dict(os.environ, markers, clear=True):
+        assert panel.caller_owner() == expected
+    detected_env = {k: v for k, v in environment.items()
+                    if k not in {"OMS_AGENT", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CODEX_SANDBOX"}}
+    detected_env.update(markers)
+    planned = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "reviewer",
+                              "--prompt", "Inspect source.", "--verify", "true", "--dry-run"], detected_env))
+    assert planned["route"]["owner"] == expected
+    assert planned["route"]["provider"] != expected
+    with patch.dict(os.environ, detected_env, clear=True), patch.object(panel, "council", return_value=0) as detected:
+        assert panel.main(["--repo", str(project), "--council", "--task-id", "detected-council",
+                           "--label", "Inspect source", "--prompt", "Inspect source.", "--dry-run"]) == 0
+        assert detected.call_args.args[1] == expected
+for target, model, effort in (("codex", "gpt-6.1-sol", "medium"), ("claude", "claude-sonnet-5-5", "medium")):
+    request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "worker",
+               "--to", target, "--prompt", "Inspect source.", "--dry-run"]
+    planned = json.loads(call(request))
+    assert (planned["route"]["provider"], planned["route"]["model"], planned["route"]["effort"]) == (target, model, effort)
+    assert planned["argv"][planned["argv"].index("--model") + 1] == model
+    overridden = json.loads(call(request + ["--model", model, "--reasoning-effort", "high"]))
+    assert overridden["route"]["model"] == model and overridden["route"]["effort"] == "high"
+for target in ("grok", "muse"):
+    rejected = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "worker",
+                               "--to", target, "--prompt", "Inspect source.", "--dry-run"],
+                              env=environment, capture_output=True, text=True)
+    assert rejected.returncode != 0 and "requires an explicit valid --model" in rejected.stderr
 for role, kind, tier in (("builder", "worker", "routine"), ("integrator", "worker", "deep"),
                          ("release-engineer", "worker", "routine"), ("critic", "advisor", "deep"),
                          ("verifier", "reviewer", "deep"), ("researcher", "researcher", "light")):
@@ -2372,10 +2435,10 @@ for owner in panel.PROVIDERS:
     main_attempts[owner] = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
                                "start", "--provider", owner, "--tool", "panel-main", "--ref", "panel_role=main",
                                "--then", "starting", "--then", "working"]).strip()
-cases = [("codex", "worker", "light", "read", "explain", "claude-haiku-5-5"),
-         ("codex", "worker", None, "read", "explain", "claude-sonnet-5-5"),
-         ("codex", "worker", "deep", "read", "investigate", "claude-opus-5-5"),
-         ("claude", "builder", None, "write", None, "claude-sonnet-5-5"),
+cases = [("codex", "worker", "light", "read", "explain", "gpt-6-luna"),
+         ("codex", "worker", None, "read", "explain", "gpt-6.1-sol"),
+         ("codex", "worker", "deep", "read", "investigate", "gpt-6.1-sol"),
+         ("claude", "builder", None, "write", None, "gpt-6.1-sol"),
          ("claude", "advisor", None, "read", None, "claude-fable-5-1"),
          ("codex", "advisor", "deep", "read", None, "claude-opus-5-5"),
          ("claude", "reviewer", None, "read", None, "gpt-6.1-sol"),
@@ -2448,6 +2511,26 @@ with patch.object(panel, "provider_catalog", return_value=[codex_only]):
     assert panel.selected_route("codex", "worker", "deep", "read", "investigate")["model"] == "gpt-6.2-sol"
     assert panel.selected_route("codex", "worker", "light", "read", "explain")["model"] == "gpt-6-luna"
     assert panel.selected_route("codex", "reviewer", None, "read", None)["provider"] == "codex"
+    explicit = panel.selected_route("claude", "worker", None, "read", None, "codex")
+    assert explicit["provider"] == "codex" and explicit["model"] == "gpt-6.2-sol" and explicit["effort"] == "medium"
+recorded = {"codex": {"weekly_used": 90}, "claude": {"weekly_used": None}}
+claude_candidate = {"provider": "claude", "binary": "claude", "installed": True, "models": []}
+with patch.object(panel, "provider_catalog", return_value=[codex_only, claude_candidate]), \
+        patch.object(panel, "snapshot", return_value=({"room": {"id": "quota-room"}}, 0)), \
+        patch("panel_metrics.collect", return_value=recorded) as metrics:
+    selected = panel.selected_route("codex", "worker", None, "read", None,
+                                    repo=project, room_id="quota-room", main="quota-main")
+    assert selected["provider"] == "claude" and selected["model"] == "claude-sonnet-5-5"
+    metrics.assert_called_once_with({"room": {"id": "quota-room"}}, "quota-main", repo=project)
+with patch.object(panel, "provider_catalog", return_value=[codex_only]), \
+        patch("panel_metrics.collect", side_effect=AssertionError("explicit provider queried usage")):
+    assert panel.selected_route("claude", "worker", None, "read", None, "codex", repo=project,
+                                room_id="quota-room")["provider"] == "codex"
+with patch.object(panel, "provider_catalog", return_value=[codex_only, claude_candidate]), \
+        patch.object(panel, "snapshot", return_value=({}, 1)), \
+        patch("panel_metrics.collect", side_effect=ValueError("unavailable reading")):
+    assert panel.selected_route("codex", "worker", None, "read", None,
+                                repo=project, room_id="quota-room")["provider"] == "codex"
 with patch.object(panel, "provider_catalog", return_value=[dict(codex_only, installed=False)]):
     try:
         panel.selected_route("codex", "worker", None, "read", None)
@@ -2594,7 +2677,7 @@ for options in (["--to", "muse"], ["--to", "muse", "--model", "provider-default"
     assert worker_log.read_bytes() == before
 # A role route keeps its tier's model and takes a per-dispatch effort.
 harder = json.loads(call(external_base + ["--workload", "light", "--reasoning-effort", "high", "--dry-run"]))
-assert harder["route"]["model"] == "claude-haiku-5-5" and harder["route"]["effort"] == "high", harder
+assert harder["route"]["model"] == "gpt-6-luna" and harder["route"]["effort"] == "high", harder
 assert harder["argv"][harder["argv"].index("--reasoning-effort") + 1] == "high", harder["argv"]
 profile_route = json.loads(call(external_base + ["--to", "vibe", "--dry-run"]))
 assert profile_route["route"]["model"] == "provider-default" and "--model" not in profile_route["argv"]
@@ -3705,7 +3788,7 @@ answer = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--roo
 assert "artifact:" in answer, answer
 state = room.status(project, shared)
 child = next(p for p in state["participants"] if p["role"] == "worker")
-assert child["parent"] == room_owner and child["model"] == "claude-haiku-5-5", child
+assert child["parent"] == room_owner and child["model"] == "gpt-6-luna", child
 handoff = next(m for m in state["messages"] if m["sender"] == child["participant"])
 assert handoff["recipient"] == room_owner and "parent acceptance pending" in handoff["text"], handoff
 assert "inspected the bounded repository task" in handoff["text"], handoff
@@ -3925,10 +4008,10 @@ def exercise_observed_worker_leases():
     primary_sha = subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD"], text=True).strip()
     assert source_sha != primary_sha
     print("scratch source HEAD:", source_sha, "canonical HEAD:", primary_sha)
-    scenarios = [("codex", "routine", "claude", "claude-sonnet-5-5", "medium", "write", True),
-                 ("claude", "light", "claude", "claude-haiku-5-5", "low", "write", True),
-                 ("codex", "routine", "claude", "claude-sonnet-5-5", "medium", "write", False),
-                 ("claude", "light", "claude", "claude-haiku-5-5", "low", "read", True),
+    scenarios = [("codex", "routine", "codex", "gpt-6.1-sol", "medium", "write", True),
+                 ("claude", "light", "codex", "gpt-6-luna", "low", "write", True),
+                 ("codex", "routine", "codex", "gpt-6.1-sol", "medium", "write", False),
+                 ("claude", "light", "codex", "gpt-6-luna", "low", "read", True),
                  ("codex", None, "codex", "gpt-6-luna", "low", "read", True, "researcher")]
     for number, scenario in enumerate(scenarios):
         owner, workload, worker, model, effort, access, reviewed = scenario[:7]
