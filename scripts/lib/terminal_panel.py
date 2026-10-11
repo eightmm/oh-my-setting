@@ -1842,6 +1842,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                                             route["effort"] or "native-settings", access) +
           " task_id=" + task_id, flush=True)
     status, process, identity = 1, None, None
+    spawn_failed = False
     term_sent = False
     shutdown = None
     evidence = {}
@@ -1874,7 +1875,11 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             number = getattr(signal, name, None)
             if number is not None:
                 saved_handlers[number] = signal.signal(number, interrupt)
-        process = subprocess.Popen(argv, cwd=str(execution), env=env, start_new_session=os.name == "posix")
+        try:
+            process = subprocess.Popen(argv, cwd=str(execution), env=env, start_new_session=os.name == "posix")
+        except OSError:
+            spawn_failed = True
+            raise
         if os.name == "posix":
             import panel_terminals
             current = panel_terminals.process(process.pid)
@@ -1915,6 +1920,11 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                     print("OMS call attempt settlement unavailable.", file=sys.stderr)
                 finally:
                     deliver_result(repo, room_id, member, caller, task_id, status)
+            elif member and process is None and spawn_failed:
+                try:
+                    room.append(repo, room_id, {"kind": "leave", "participant": member}, "Call spawn failed")
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    print("OMS room assignment rollback unavailable.", file=sys.stderr)
             elif member:
                 if status == 0:
                     status = 1

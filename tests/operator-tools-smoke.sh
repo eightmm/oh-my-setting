@@ -5067,7 +5067,7 @@ def exercise_observed_worker_leases():
     dispatch_argv = captured_dispatch["argv"]
     assert "--observe-plan-binding" in dispatch_argv, dispatch_argv
     assert json.loads(dispatch_argv[dispatch_argv.index("--observe-plan-binding") + 1]) == argv_binding._asdict()
-    # Capacity refusals leave enrollment and plan claims untouched; failed assignment rolls enrollment back.
+    # Capacity refusals leave enrollment and plan claims untouched; assignment/spawn failures roll enrollment back.
     import io
     from contextlib import redirect_stderr
     capacity_route = panel.selected_route("claude", "worker", "light", "read", "investigate")
@@ -5078,8 +5078,8 @@ def exercise_observed_worker_leases():
                      "Capacity fixture", None, None, argv_binding.task_id, False,
                      "Capacity call", capacity_route, None, None, None)
     for scenario in ("normal", "full", "full-write", "calls-full", "closed", "foreign-main",
-                     "lost-caller", "lost-child", "send-error"):
-        writing = scenario == "full-write"
+                     "lost-caller", "lost-child", "send-error", "spawn-error"):
+        writing = scenario in {"full-write", "spawn-error"}
         scopes = ["value.txt"] if writing else None
         this_args = capacity_args if not writing else (
             project, "claude", "worker", "write", None,
@@ -5137,29 +5137,39 @@ def exercise_observed_worker_leases():
                 patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
                 patch("panel_terminals.process", return_value=None), \
                 patch.object(panel, "_dispatch_group_gone", return_value=True), \
-                patch.object(panel.subprocess, "Popen", return_value=Mock(pid=123, wait=lambda: 0, poll=lambda: 0)) \
+                patch.object(panel.subprocess, "Popen", side_effect=OSError("fixture spawn failure")
+                             if scenario == "spawn-error" else None,
+                             return_value=Mock(pid=123, wait=lambda: 0, poll=lambda: 0)) \
                     as provider_call, redirect_stderr(errors):
             if scenario != "normal":
                 try:
                     panel.run_dispatch(*this_args)
-                except ValueError as error:
+                except (OSError, ValueError) as error:
                     expected = {"closed": "room is closed", "foreign-main": "identities disagree",
                                 "full": "room %s is full" % argv_binding.room_id,
                                 "full-write": "room %s is full" % argv_binding.room_id,
                                 "calls-full": "room %s is full" % argv_binding.room_id,
                                 "lost-caller": "participant has not joined this room",
                                 "lost-child": "participant has not joined this room",
-                                "send-error": "unrelated room send failure"}[scenario]
+                                "send-error": "unrelated room send failure",
+                                "spawn-error": "fixture spawn failure"}[scenario]
                     assert expected in str(error), (scenario, error)
                 else:
                     raise AssertionError("invalid capacity dispatch was accepted: " + scenario)
-                provider_call.assert_not_called()
+                if scenario in {"send-error", "spawn-error"}:
+                    assert not next(p for p in state["participants"] if p["participant"] == children[0][1])["joined"], scenario
+                    assert leaves == [{"kind": "leave", "participant": children[0][1]}]
+                if scenario == "spawn-error":
+                    provider_call.assert_called_once()
+                    assert children[0][5] == ["value.txt"]
+                    assert "owner cleanup is required" not in errors.getvalue()
+                    assert "scope retained" not in errors.getvalue()
+                    assert not (project / panel._dispatch_pending_path(children[0][1])).exists()
+                else:
+                    provider_call.assert_not_called()
                 if scenario in {"full", "full-write", "calls-full", "closed"}:
                     assert len(state["participants"]) == participants_before and not children
                     observed_plan.assert_not_called()
-                if scenario == "send-error":
-                    assert leaves == [{"kind": "leave", "participant": children[0][1]}]
-                    assert not next(p for p in state["participants"] if p["participant"] == children[0][1])["joined"]
                 continue
             assert panel.run_dispatch(*this_args) == 0, scenario
             provider_call.assert_called_once()
