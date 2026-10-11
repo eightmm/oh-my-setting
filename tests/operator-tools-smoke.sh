@@ -2192,7 +2192,8 @@ for mode in ("animated", "static", "environment", "interrupt"):
         if mode == "interrupt":
             raise KeyboardInterrupt
         clock[0] += seconds
-    with patch.object(panel, "snapshot", return_value=(live, 0)) as collect, \
+    # Keep real collector subprocesses/threads out of the simulated refresh clock.
+    with patch.object(panel, "read_panel", return_value=(live, 0, "codex", None, "auto", False, "")) as collect, \
             patch.object(panel, "managed_session", return_value=False), \
             patch.object(panel, "terminal_style", return_value=(True, False, True)), \
             patch.object(panel.sys, "stdout", output), \
