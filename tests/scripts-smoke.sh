@@ -28699,6 +28699,8 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     rc=0
     out="$(ma_read_guard_assert 2>&1)" || rc=$?
     [ "$rc" = 2 ] || fail "linked read tolerated its own source HEAD change: $out"
+    contains "$out" 'source repository protected surface: HEAD' ||
+      fail "shared source HEAD mutation lost its specific diagnostic: $out"
     ma_read_guard_begin "$snap/read-linked-tracked" || fail "linked source content snapshot failed"
     printf 'linked source mutation\n' >> "$linked_source/file.txt"
     rc=0

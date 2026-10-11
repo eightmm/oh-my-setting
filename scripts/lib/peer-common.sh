@@ -146,7 +146,9 @@ ma_read_guard_rebaseline_source() {
 ma_read_guard_assert() {
   [ -n "${MA_READ_GUARD_DIR:-}" ] || return 0
   local root name digest changed surface hard soft execution
-  for name in state source; do
+  # A linked source's HEAD also appears in the state's Git metadata. Diagnose
+  # source protection first so that shared surface cannot mask the cause.
+  for name in source state; do
     root="$REPO" digest="$MA_READ_STATE_EXECUTION_SHA" execution="$MA_READ_SOURCE_REPO"
     [ "$name" != source ] || { root="$MA_READ_SOURCE_REPO"; digest="$MA_READ_SOURCE_EXECUTION_SHA"; }
     oms_git_execution_state_assert_unchanged "$root" "$MA_READ_GUARD_DIR/$name/git-execution-state" "$digest" || return 2
