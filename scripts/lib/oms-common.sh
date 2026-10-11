@@ -1205,6 +1205,18 @@ oms_worker_surface_diff() {
         changed="${changed:+$changed, }$OMS_WG_GITMETA_SOFT"
         continue
       fi
+      if [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] &&
+        [ "$name" = gitmeta ] && oms_worker_gitmeta_only_foreign_worktrees "$repo" \
+        "$before_dir" "$current_worktree_physical"; then
+        changed="${changed:+$changed, }foreign-worktree"
+        continue
+      fi
+      if [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] &&
+        [ "$name" = refs ] && oms_worker_refs_only_foreign "$repo" \
+        "$before_dir" "$current_worktree_physical"; then
+        changed="${changed:+$changed, }foreign-ref"
+        continue
+      fi
       # Callers pass the execution-state assert first, which binds this copy.
       if [ "$name" = config ] && [ -f "$before_dir/git-execution-state.config" ] &&
         common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" &&
@@ -1539,6 +1551,135 @@ oms_worker_gitmeta_settles() {  # REPO BEFORE_FILE CURRENT_WORKTREE
   return 1
 }
 
+# A marker/name cannot establish ownership. Bind a foreign entry to a real
+# checkout's reciprocal Git backpointer and common-dir, excluding both guarded
+# and delegated checkouts. Capture this identity before allowing its removal.
+oms_worker_gitmeta_is_foreign_worktree() {  # REPO METADATA CURRENT_WORKTREE
+  local repo="$1" metadata="$2" worker="${3:-}"
+  local gitfile physical actual common guarded
+  [ -n "$worker" ] && [ -d "$metadata" ] && [ ! -L "$metadata" ] || return 1
+  [ -f "$metadata/gitdir" ] && [ ! -L "$metadata/gitdir" ] &&
+    [ -f "$metadata/HEAD" ] && [ ! -L "$metadata/HEAD" ] || return 1
+  gitfile="$(sed -n '1p' "$metadata/gitdir")"
+  gitfile="${gitfile//$'\r'/}"
+  case "$gitfile" in */.git) ;; *) return 1 ;; esac
+  physical="$(oms_harness_physical_dir "${gitfile%/.git}" 2>/dev/null)" || return 1
+  worker="$(oms_harness_physical_dir "$worker" 2>/dev/null)" || return 1
+  guarded="$(oms_harness_physical_dir "$repo" 2>/dev/null)" || return 1
+  [ "$physical" != "$worker" ] && [ "$physical" != "$guarded" ] &&
+    [ -f "$physical/.git" ] && [ ! -L "$physical/.git" ] || return 1
+  metadata="$(oms_harness_physical_dir "$metadata" 2>/dev/null)" || return 1
+  actual="$(oms_harness_git_path_physical "$physical" --git-dir 2>/dev/null)" || return 1
+  [ "$actual" = "$metadata" ] || return 1
+  actual="$(oms_harness_git_path_physical "$physical" --git-common-dir 2>/dev/null)" || return 1
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
+  [ "$actual" = "$common" ] || return 1
+  return 0
+}
+
+oms_worker_gitmeta_only_foreign_worktrees() {  # REPO BEFORE_DIR CURRENT_WORKTREE
+  local repo="$1" before="$2" worker="${3:-}"
+  local common line entry side other
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
+  oms_worker_surface_capture_one "$repo" gitmeta "$worker" |
+    LC_ALL=C sort > "$before/gitmeta-now" || return 1
+  LC_ALL=C sort "$before/gitmeta" > "$before/gitmeta-before" || return 1
+  LC_ALL=C comm -23 "$before/gitmeta-before" "$before/gitmeta-now" > "$before/gitmeta-removed"
+  LC_ALL=C comm -13 "$before/gitmeta-before" "$before/gitmeta-now" > "$before/gitmeta-added"
+  for side in removed added; do
+    other="$before/gitmeta-now"
+    [ "$side" != added ] || other="$before/gitmeta-before"
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree-dir worktrees/"*) entry="${line#worktree-dir worktrees/}" ;;
+        "worktree worktrees/"*/*) entry="${line#worktree worktrees/}"; entry="${entry%%/*}" ;;
+        *) return 1 ;;
+      esac
+      # Only whole-entry additions/removals qualify; edits never do.
+      ! awk -v e="worktrees/$entry" '$2 == e || index($2, e "/") == 1 { f=1 } END { exit !f }' \
+        "$other" || return 1
+      if [ "$side" = removed ]; then
+        [ -f "$before/foreign-worktrees/$entry/HEAD" ] &&
+          [ ! -e "$common/worktrees/$entry" ] && [ ! -L "$common/worktrees/$entry" ] || return 1
+      else
+        ! grep -Fxq "worktrees/$entry" "$before/gitmeta-exempt" || return 1
+        oms_worker_gitmeta_is_foreign_worktree "$repo" "$common/worktrees/$entry" "$worker" || return 1
+      fi
+    done < "$before/gitmeta-$side"
+  done
+  [ -s "$before/gitmeta-removed" ] || [ -s "$before/gitmeta-added" ]
+}
+
+# Ref age/committer identity alone is forgeable. Require an existing branch to
+# stay checked out in the same foreign checkout, with an appended HEAD reflog
+# recording its new tip and the ref log's committer/time. Plain update-ref in
+# the worker/shared checkout leaves no such evidence. This is cooperative
+# attribution, not isolation from a same-UID worker that writes foreign logs.
+oms_worker_refs_only_foreign() {  # REPO BEFORE_DIR CURRENT_WORKTREE
+  local repo="$1" before="$2" worker="${3:-}"
+  local common receipt entry ref head logpath
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
+  oms_worker_surface_capture_one "$repo" refs "$worker" > "$before/refs-now" || return 1
+  python3 - "$before/refs" "$before/refs-now" "$before/refs-protected" <<'PY' > "$before/refs-changed" || return 1
+import sys
+def refs(path):
+    return dict(line.rstrip('\r\n').split(' ', 1)[::-1] for line in open(path) if ' ' in line)
+old, new = refs(sys.argv[1]), refs(sys.argv[2])
+protected = set(open(sys.argv[3]).read().splitlines())
+changed = [ref for ref in old.keys() | new.keys() if old.get(ref) != new.get(ref)]
+if not changed or any(ref not in old or ref not in new or not ref.startswith('refs/heads/')
+                      or ref in protected for ref in changed):
+    raise SystemExit(1)
+for ref in sorted(changed):
+    print(ref)
+# The bare resolved HEAD row is also protected, including detached HEAD.
+def tip(path):
+    return [line.strip() for line in open(path) if ' ' not in line.strip()]
+if tip(sys.argv[1]) != tip(sys.argv[2]):
+    raise SystemExit(1)
+PY
+  while IFS= read -r ref; do
+    ref="${ref//$'\r'/}"
+    receipt=""
+    for entry in "$before/foreign-worktrees/"*; do
+      [ -f "$entry/HEAD" ] || continue
+      head="$(sed -n '1p' "$entry/HEAD")"; head="${head//$'\r'/}"
+      [ "$head" = "ref: $ref" ] || continue
+      oms_worker_gitmeta_is_foreign_worktree "$repo" "$common/worktrees/${entry##*/}" "$worker" || continue
+      cmp -s "$entry/gitdir" "$common/worktrees/${entry##*/}/gitdir" &&
+        cmp -s "$entry/HEAD" "$common/worktrees/${entry##*/}/HEAD" || continue
+      logpath="$common/worktrees/${entry##*/}/logs/HEAD"
+      [ -f "$logpath" ] && [ ! -L "$logpath" ] &&
+        [ -f "$common/logs/$ref" ] && [ ! -L "$common/logs/$ref" ] || continue
+      [ -f "$entry/ref-log" ] || continue
+      if python3 - "$entry/log" "$logpath" "$common/logs/$ref" "$before/refs" "$before/refs-now" "$ref" "$entry/ref-log" <<'PY'
+import sys
+before, now, branch = (open(path, 'rb').read() for path in sys.argv[1:4])
+branch_before = open(sys.argv[7], 'rb').read()
+ref = sys.argv[6]
+def tip(path):
+    return next(line.split()[0].encode() for line in open(path) if line.split()[-1] == ref)
+old, new = tip(sys.argv[4]), tip(sys.argv[5])
+if not now.startswith(before) or not branch.startswith(branch_before):
+    raise SystemExit(1)
+rows = [row.split(b'\t', 1)[0].split(b' ', 2) for row in branch[len(branch_before):].splitlines()]
+head_rows = [row.split(b'\t', 1)[0].split(b' ', 2) for row in now[len(before):].splitlines()]
+if not rows:
+    raise SystemExit(1)
+tip_oid = old
+for fields in rows:
+    if len(fields) != 3 or fields[0] != tip_oid or not any(
+            len(head) == 3 and head[1:] == fields[1:] for head in head_rows):
+        raise SystemExit(1)
+    tip_oid = fields[1]
+raise SystemExit(0 if tip_oid == new else 1)
+PY
+      then receipt=1; break; fi
+    done
+    [ -n "$receipt" ] || return 1
+  done < "$before/refs-changed"
+}
+
 # Capture and later re-check the delegated checkout's identity. A provider owns
 # the files inside this directory, but it must not be able to rename the
 # directory and replace the old pathname with a symlink to the primary checkout:
@@ -1764,26 +1905,18 @@ oms_worker_surface_capture_one() {
     config) git -C "$repo" config --local --list 2>/dev/null | LC_ALL=C sort ;;
     remotes) git -C "$repo" remote -v 2>/dev/null | LC_ALL=C sort ;;
     refs)
-      # Remote-tracking refs and stash may move while a sibling fetches or
-      # lands, and the Codex app records turn diffs under refs/codex/ on every
-      # turn in this repository; every other ref remains a worker-attributable,
-      # hard surface.
+      # Local branch names grant no exemption. Foreign moves are classified
+      # against the snapshot's checkout/log evidence by surface_diff.
       (git -C "$repo" show-ref 2>/dev/null || true) |
-        LC_ALL=C awk -v current="$(git -C "$repo" symbolic-ref -q HEAD 2>/dev/null || true)" \
-          '$2 != "refs/stash" && index($2, "refs/remotes/") != 1 &&
-          index($2, "refs/codex/") != 1 &&
-          (index($2, "refs/heads/oms/") != 1 || $2 == current)' |
+        LC_ALL=C awk '$2 != "refs/stash" && index($2, "refs/remotes/") != 1 &&
+          index($2, "refs/codex/") != 1' |
         LC_ALL=C sort
       git -C "$repo" rev-parse HEAD 2>/dev/null || printf 'unborn\n'
+      printf '%s HEAD-identity\n' "$(git -C "$repo" symbolic-ref -q HEAD 2>/dev/null || printf detached)"
       ;;
     work-branches)
-      # Other mains branch, commit and merge their own oms/* work branches in
-      # sibling worktrees while a worker runs. The branch checked out here and
-      # HEAD stay on the hard refs surface above.
-      (git -C "$repo" show-ref 2>/dev/null || true) |
-        LC_ALL=C awk -v current="$(git -C "$repo" symbolic-ref -q HEAD 2>/dev/null || true)" \
-          'index($2, "refs/heads/oms/") == 1 && $2 != current' |
-        LC_ALL=C sort
+      # Retain the snapshot slot; all local branches now belong to refs.
+      :
       ;;
     remote-refs)
       # Keep the allow-list anchored: refs merely containing "refs/remotes"
@@ -2024,7 +2157,7 @@ PY
 
 oms_worker_surface_is_soft() {
   case "$1" in
-    files|tracked|remote-refs|work-branches|kept-sibling|sibling-cleanup|branch-tracking) return 0 ;;
+    files|tracked|remote-refs|kept-sibling|sibling-cleanup|branch-tracking|foreign-worktree|foreign-ref) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -2034,7 +2167,7 @@ oms_worker_surface_snapshot() {
   local repo="$1"
   local dir="$2"
   local current_worktree_physical="${3:-}"
-  local name
+  local name common entry target ref
 
   mkdir -p "$dir" || return 1
   : > "$dir/gitmeta-exempt"
@@ -2045,6 +2178,37 @@ oms_worker_surface_snapshot() {
       oms_worker_surface_capture_one "$repo" "$name" \
       "$current_worktree_physical" > "$dir/$name" 2>/dev/null || true
   done
+  {
+    printf 'refs/heads/main\nrefs/heads/master\nHEAD-identity\n'
+    git -C "$repo" symbolic-ref -q HEAD 2>/dev/null || true
+    target="$(git -C "$repo" symbolic-ref -q --short HEAD 2>/dev/null || true)"
+    target="${target//$'\r'/}"
+    [ -z "$target" ] || git -C "$repo" config --get "branch.$target.merge" 2>/dev/null || true
+    target="$(git -C "$repo" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)"
+    target="${target//$'\r'/}"
+    case "$target" in refs/remotes/origin/*) printf 'refs/heads/%s\n' "${target#refs/remotes/origin/}" ;; esac
+  } > "$dir/refs-protected"
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null || true)"
+  mkdir -p "$dir/foreign-worktrees"
+  if [ -n "$common" ] && [ -n "$current_worktree_physical" ]; then
+    for entry in "$common/worktrees/"*; do
+      oms_worker_gitmeta_is_foreign_worktree "$repo" "$entry" "$current_worktree_physical" || continue
+      mkdir -p "$dir/foreign-worktrees/${entry##*/}"
+      cp "$entry/HEAD" "$entry/gitdir" "$dir/foreign-worktrees/${entry##*/}/" || return 1
+      if [ -f "$entry/logs/HEAD" ] && [ ! -L "$entry/logs/HEAD" ]; then
+        cp "$entry/logs/HEAD" "$dir/foreign-worktrees/${entry##*/}/log" || return 1
+      else
+        : > "$dir/foreign-worktrees/${entry##*/}/log"
+      fi
+      ref="$(sed -n 's/^ref: //p' "$entry/HEAD")"; ref="${ref//$'\r'/}"
+      case "$ref" in
+        refs/heads/*)
+          if git check-ref-format "$ref" && [ -f "$common/logs/$ref" ] && [ ! -L "$common/logs/$ref" ]; then
+            cp "$common/logs/$ref" "$dir/foreign-worktrees/${entry##*/}/ref-log" || return 1
+          fi ;;
+      esac
+    done
+  fi
   # Rows the index store may legitimately compact away; verified against the
   # recorded prefix digest before use, so a later append here is harmless.
   if [ -f "$repo/.oms/artifacts/index.jsonl" ] && [ ! -L "$repo/.oms/artifacts/index.jsonl" ]; then

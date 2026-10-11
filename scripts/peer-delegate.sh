@@ -2051,6 +2051,10 @@ conversation_boundary_check() {
   for surface in $(printf '%s' "$changed" | tr ',' ' '); do
     if oms_worker_surface_is_soft "$surface"; then
       [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] || return 2
+      case "$surface" in
+        foreign-worktree|foreign-ref)
+          echo "warning: the repository changed outside the worktree during this run: $surface" >&2 ;;
+      esac
     else
       echo "error: conversation changed owner surface: $surface" >&2
       return 2

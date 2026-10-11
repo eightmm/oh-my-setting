@@ -26618,6 +26618,71 @@ test_worker_guard_still_fails_on_a_local_branch_ref_change() {
     fail "a local branch ref change should fail the run: $result"
   contains "$result" 'changed protected state outside its worktree: refs' ||
     fail "the local branch ref violation should remain hard: $result"
+
+  # Reusing an old object, an oms/* spelling, and a foreign checked-out branch
+  # cannot make a plain worker update-ref attributable to that checkout.
+  local sibling="$TMP/guard-hard-local-sibling"
+  local next
+  next="$(git -C "$project" commit-tree -p HEAD -m next 'HEAD^{tree}')"
+  git -C "$project" worktree add -qb foreign "$sibling"
+  result="$(run_guarded_worker "$project" "git update-ref refs/heads/foreign '$next'")"
+  [ "${result%%$'\t'*}" != 0 ] || fail "worker update-ref on foreign branch must fail: $result"
+  contains "$result" 'outside its worktree: refs' || fail "foreign update-ref was not hard: $result"
+  result="$(run_guarded_worker "$project" "git update-ref refs/heads/oms/planted '$head'")"
+  [ "${result%%$'\t'*}" != 0 ] || fail "worker-created oms branch must fail: $result"
+  result="$(run_guarded_worker "$project" "git -C '$project' update-ref HEAD '$next'")"
+  [ "${result%%$'\t'*}" != 0 ] || fail "shared HEAD move must fail: $result"
+  contains "$result" 'outside its worktree: refs' || fail "shared HEAD move was not hard: $result"
+  result="$(run_guarded_worker "$project" "git -C '$project' checkout -q guard-local")"
+  [ "${result%%$'\t'*}" != 0 ] || fail "shared symbolic HEAD change must fail: $result"
+  result="$(run_guarded_worker "$project" "git -C '$project' update-ref refs/heads/main '$head'")"
+  [ "${result%%$'\t'*}" != 0 ] || fail "primary main branch move must fail: $result"
+  result="$(run_guarded_worker "$project" "printf '%s\\n' '$next' > \"\$(git rev-parse --git-dir)/HEAD\"")"
+  [ "${result%%$'\t'*}" != 0 ] || fail "own delegated HEAD identity move must fail: $result"
+  git -C "$project" config branch.guard-local.merge refs/heads/foreign
+  result="$(run_guarded_worker "$project" "git -C '$sibling' reset -q --hard '$head'")"
+  [ "${result%%$'\t'*}" != 0 ] || fail "remote target move must fail even with foreign reflogs: $result"
+  contains "$result" 'outside its worktree: refs' || fail "remote target ref was not hard: $result"
+}
+
+test_worker_guard_reports_foreign_checkout_ref_moves() {
+  local project="$TMP/guard-foreign-ref"
+  local sibling="$TMP/guard-foreign-ref-sibling"
+  local ready="$TMP/guard-foreign-ref-ready" done="$TMP/guard-foreign-ref-done"
+  local next result pid branch strict
+  make_guard_repo "$project"
+  git -C "$project" worktree add -qb feature "$sibling"
+  # A separate session rewrites both ordinary and oms/* branches. The provider
+  # only waits; it performs no Git mutation in this fixture.
+  for branch in feature oms/foreign; do
+    [ "$branch" = feature ] || git -C "$sibling" checkout -qb "$branch"
+    for strict in 0 1; do
+      next="$(git -C "$project" commit-tree -p "$branch" -m rewrite "${branch}^{tree}")"
+      rm -f "$ready" "$done"
+      (
+        local tries=0
+        while [ ! -f "$ready" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+        [ -f "$ready" ] || exit 1
+        git -C "$sibling" reset -q --hard "$next"
+        if [ "$strict" = 0 ]; then
+          git -C "$sibling" commit -q --allow-empty -m foreign-sequence
+          git -C "$sibling" rebase -q --force-rebase --exec 'git commit -q --allow-empty --amend -m rebased' HEAD~1
+        fi
+        touch "$done"
+      ) &
+      pid=$!
+      result="$(OMS_WORKER_GUARD_STRICT="$strict" run_guarded_worker "$project" \
+        "touch '$ready'; tries=0; while [ ! -f '$done' ] && [ \"\$tries\" -lt 100 ]; do sleep 0.1; tries=\$((tries + 1)); done; [ -f '$done' ] || exit 1")"
+      wait "$pid" || fail "foreign ref fixture timed out"
+      if [ "$strict" = 0 ]; then
+        [ "${result%%$'\t'*}" = 0 ] || fail "foreign checkout rewrite stopped worker: $result"
+        contains "$result" 'during this run: foreign-ref' || fail "foreign ref warning missing: $result"
+      else
+        [ "${result%%$'\t'*}" != 0 ] || fail "strict mode tolerated foreign rewrite: $result"
+        contains "$result" 'outside its worktree: refs' || fail "strict foreign refs not hard: $result"
+      fi
+    done
+  done
 }
 
 test_worker_guard_sees_object_store_and_metadata_writes() {
@@ -26814,10 +26879,10 @@ test_worker_guard_exempts_a_live_sibling_mid_creation() {
     fail "a newly registered live sibling with a zero-padded positive pid must remain exempt: $result"
   live_body="mkdir -p $live_zero_parent && git -C $project worktree add --quiet --detach $live_zero_parent/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=00\\nrepo=$project\\nworktree=$live_zero_parent/wt\\ntemporary=1\\n' > $live_zero_parent/.oh-my-setting-tmp"
   result="$(run_delegate_beside_sibling "$project" "$managed_root" "$live_body")"
-  [ "${result%%	*}" != 0 ] ||
-    fail "an all-zero newly registered live marker pid must not exempt a worktree: $result"
-  contains "$result" 'outside its worktree: gitmeta' ||
-    fail "an all-zero newly registered live marker pid should remain a gitmeta violation: $result"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a complete foreign registration needs no OMS owner marker: $result"
+  contains "$result" 'during this run: foreign-worktree' ||
+    fail "an unowned complete registration should be visible as foreign: $result"
   # The marker is written before `git worktree add`, which registers the entry
   # before the checkout exists: the pre-provider snapshot sees a registered
   # worktree with no checkout, the final capture sees the same entry live.
@@ -26855,17 +26920,17 @@ mkdir -p $zero_parent && printf 'kind=oh-my-setting-temp\\npid=0\\nrepo=$project
   local kept_zero_body
   kept_zero_body="mkdir -p $kept_zero_parent && git -C $project worktree add --quiet --detach $kept_zero_parent/wt HEAD && printf 'kind=oh-my-setting-temp\\npid=00\\nrepo=$project\\nworktree=$kept_zero_parent/wt\\ntemporary=1\\n' > $kept_zero_parent/.oh-my-setting-tmp"
   result="$(run_delegate_beside_sibling "$project" "$managed_root" "$kept_zero_body")"
-  [ "${result%%	*}" != 0 ] ||
-    fail "an all-zero kept marker pid must not soften a worktree violation: $result"
-  contains "$result" 'outside its worktree: gitmeta' ||
-    fail "an all-zero kept marker pid should remain a gitmeta violation: $result"
+  [ "${result%%	*}" = 0 ] ||
+    fail "a complete foreign registration needs no kept marker: $result"
+  contains "$result" 'during this run: foreign-worktree' ||
+    fail "an invalid kept marker must not hide the foreign registration: $result"
 }
 
 # The incident: a parent made a scratch worktree with plain `git worktree add`
 # while a write worker ran, and the worker failed on gitmeta. The front door
 # marks its registrations, so a parent add and remove mid-run pass; a worker
-# calling it is refused (the plain-add failure is in
-# test_worker_guard_sees_submodule_and_worktree_metadata).
+# calling it is refused; plain Git registrations are visible foreign changes
+# (strict behavior is in test_worker_guard_sees_submodule_and_worktree_metadata).
 test_worker_guard_exempts_parent_scratch_worktrees() {
   local project="$TMP/guard-scratch"
   local managed_root="$TMP/guard-scratch-root"
@@ -26928,9 +26993,10 @@ $parent_cmd add --repo $project --owner-pid $$ >/dev/null && $parent_cmd remove 
     git -C "$p" remote add origin "$p" && git -C "$p" fetch -q origin ||
       fail "could not create the tracking remote fixture"
     make_live_managed_sibling "$p" "$managed_root/oh-my-setting-scratch.${p##*-}"
+    git -C "$p" branch oms/t
   done
   track='case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
-git -C SIB switch -q -c oms/t --track origin/'"$(git -C "$project-track" symbolic-ref --short HEAD)"
+git -C SIB branch --set-upstream-to=origin/'"$(git -C "$project-track" symbolic-ref --short HEAD)"' oms/t'
   result="$(run_delegate_beside_sibling "$project-track" "$managed_root" \
     "${track/SIB/$managed_root/oh-my-setting-scratch.track/wt}")"
   [ "${result%%	*}" = 0 ] ||
@@ -27042,7 +27108,7 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
 
 # The incident: another main's residue cleanup removed a sibling that was
 # already dead and kept at the worker's snapshot. Removing that whole entry is
-# reported softly; strict mode, a plain worktree and a partial removal stay hard.
+# reported softly; strict mode and a partial removal stay hard.
 # oms land and scratch can run from a linked worktree; their marker then names
 # that checkout, not the primary one. Same Git common dir is the same repository.
 test_worker_guard_exempts_a_sibling_marked_from_a_linked_worktree() {
@@ -27115,10 +27181,10 @@ rm -f $common_dir/worktrees/wt/HEAD")"
   result="$(run_delegate_beside_sibling "$project-plain" "$managed_root" \
     "$probe
 git -C $project-plain worktree remove --force $project-plain-wt")"
-  [ "${result%%	*}" != 0 ] ||
-    fail "removing a plain worktree must stay a hard violation: $result"
-  contains "$result" 'outside its worktree: gitmeta' ||
-    fail "a removed plain worktree should be named as gitmeta: $result"
+  [ "${result%%	*}" = 0 ] ||
+    fail "removing a validated plain foreign worktree must pass: $result"
+  contains "$result" 'during this run: foreign-worktree' ||
+    fail "a removed plain worktree should be named as foreign: $result"
 }
 
 test_worker_guard_reports_a_bounded_scan() {
@@ -27633,7 +27699,30 @@ test_worker_guard_sees_submodule_and_worktree_metadata() {
   # common git dir.
   local wt="$TMP/guard-worktree"
   make_guard_repo "$wt"
-  result="$(OMS_TASK_ID=guard-worktree run_guarded_worker "$wt" \
+  local scratch="$TMP/guard-unmanaged-scratch"
+  local ready="$TMP/guard-unmanaged-ready" done="$TMP/guard-unmanaged-done"
+  local action pid
+  for action in add remove; do
+    rm -f "$ready" "$done"
+    (
+      local tries=0
+      while [ ! -f "$ready" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+      [ -f "$ready" ] || exit 1
+      if [ "$action" = add ]; then
+        git -C "$wt" worktree add -q --detach "$scratch" HEAD
+      else
+        git -C "$wt" worktree remove "$scratch"
+      fi
+      touch "$done"
+    ) &
+    pid=$!
+    result="$(run_guarded_worker "$wt" \
+      "touch '$ready'; tries=0; while [ ! -f '$done' ] && [ \"\$tries\" -lt 100 ]; do sleep 0.1; tries=\$((tries + 1)); done; [ -f '$done' ] || exit 1")"
+    wait "$pid" || fail "foreign worktree $action fixture timed out"
+    [ "${result%%$'\t'*}" = 0 ] || fail "foreign worktree $action stopped the worker: $result"
+    contains "$result" 'during this run: foreign-worktree' || fail "foreign lifecycle warning missing: $result"
+  done
+  result="$(OMS_WORKER_GUARD_STRICT=1 OMS_TASK_ID=guard-worktree run_guarded_worker "$wt" \
     "git -C $wt worktree add --detach $wt/../guard-worktree-extra HEAD")"
   [ "${result%%	*}" != 0 ] || fail "registering a worktree should fail the run: $result"
   contains "$result" 'gitmeta' ||
@@ -27660,7 +27749,7 @@ PY
   local forged_parent="$TMP/guard-worktree-forged-dir/oh-my-setting-scratch.forged"
   make_guard_repo "$forged"
   mkdir -p "$forged_parent"
-  result="$(run_guarded_worker "$forged" \
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$forged" \
     "printf 'kind=oh-my-setting-temp\\npid=$$\\nrepo=$forged\\nworktree=$forged_parent/wt\\ntemporary=1\\n' > $forged_parent/.oh-my-setting-tmp && git -C $forged worktree add --detach $forged_parent/wt HEAD")"
   [ "${result%%	*}" != 0 ] || fail "a forged scratch marker must not exempt a worker's add: $result"
   contains "$result" 'gitmeta' ||
@@ -28454,8 +28543,8 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
   [ "$changed" = "refs, remote-refs" ] ||
     fail "a codex/ branch must stay a hard ref change, got: ${changed:-<none>}"
 
-  # Another main's oms/* work branch moves softly; the branch checked out here
-  # stays hard, so a commit on the shared branch still fails a running worker.
+  # Namespace alone is not evidence of foreign ownership; creating an oms/*
+  # branch remains hard, as does moving the checked-out branch.
   rm -rf "$snap"
   ( . "$ROOT/scripts/lib/oms-common.sh"
     oms_worker_surface_snapshot "$project" "$snap" ) ||
@@ -28463,8 +28552,8 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
   git -C "$project" update-ref refs/heads/oms/other-main "$(git -C "$project" rev-parse HEAD)"
   changed="$( . "$ROOT/scripts/lib/oms-common.sh"
     oms_worker_surface_diff "$project" "$snap" )"
-  [ "$changed" = "work-branches" ] ||
-    fail "another main's oms/ branch should change only work-branches, got: ${changed:-<none>}"
+  [ "$changed" = "refs" ] ||
+    fail "an unproven oms/ branch write must stay hard, got: ${changed:-<none>}"
   git -C "$project" checkout -q oms/other-main
   rm -rf "$snap"
   ( . "$ROOT/scripts/lib/oms-common.sh"
@@ -28533,6 +28622,12 @@ test_worker_guard_keeps_local_branch_refs_hard() {
     oms_worker_surface_diff "$project" "$snap" )"
   [ "$changed" = "refs" ] ||
     fail "a local branch ref should change only refs, got: ${changed:-<none>}"
+  ( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_snapshot "$project" "$snap" ) || fail "delete-ref snapshot failed"
+  git -C "$project" update-ref -d refs/heads/guard-local
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = refs ] || fail "an unproven branch deletion must stay hard: $changed"
 }
 
 test_delegate_says_the_worker_cannot_see_uncommitted_work() {
