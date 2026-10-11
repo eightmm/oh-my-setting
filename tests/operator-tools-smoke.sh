@@ -2614,13 +2614,13 @@ for role, rule in routes["roles"].items():
     assert rule["tier"] == expected["workload"]
 from panel_routing import policy
 configured = policy()
-assert configured["pool"] == {"max_running": 3, "max_rework_rounds": 2}
+assert configured["pool"] == {"max_rework_rounds": 2}
 without_pool = dict(configured)
 del without_pool["pool"]
 with patch("panel_routing.Path.read_text", return_value=json.dumps(without_pool)):
     assert policy()["pool"] == configured["pool"]
-for invalid_pool in (None, [], {"max_running": 0}, {"max_running": True},
-                     {"max_rework_rounds": "2"}, {"unexpected": 1}):
+for invalid_pool in (None, [], {"max_rework_rounds": 0}, {"max_rework_rounds": True},
+                     {"max_rework_rounds": "2"}, {"max_running": 3}, {"unexpected": 1}):
     with patch("panel_routing.Path.read_text", return_value=json.dumps(dict(configured, pool=invalid_pool))):
         try:
             policy()
@@ -4703,26 +4703,11 @@ time.sleep(60)
             assert any(o["participant"] == member for o in panel.scope_overlaps(
                 project, shared, room.status(project, shared), room_owner, ["value.txt"]))
         if scenario == "provider-alive":
-            # No board read settles the pending call. At capacity the next dispatch names it;
-            # once its detached provider exits, that action settles the old attempt before launching.
-            following = Mock(pid=2147483645, wait=lambda: 0, poll=lambda: 0)
+            # No board read settles the pending call; once its detached provider exits, the next dispatch
+            # settles the old attempt before launching. Concurrent calls are not capped.
             with patch.dict(os.environ, room_env, clear=True), \
-                    patch.object(panel, "policy", return_value={"pool": {"max_running": 1}}), \
                     patch.object(panel.shutil, "which", return_value=sys.executable), \
-                    patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
-                    patch.object(panel.subprocess, "Popen", side_effect=lambda argv, *a, **kw:
-                                 following if argv[:3] == [sys.executable, "-c", "pass"] else real_popen(argv, *a, **kw)) as launch, \
-                    patch.object(panel_terminals, "process", return_value=None), \
-                    patch.object(panel_terminals, "process_gone", side_effect=lambda pid, identity: pid == pending.pid), \
-                    patch.object(panel, "_dispatch_group_gone", side_effect=lambda pid: pid != provider["group"]):
-                try:
-                    panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
-                                       "after-pending", False, "Next call", interrupted_route, None, None, None)
-                except ValueError as error:
-                    assert "max_running=1" in str(error) and member in str(error) and "retry dispatch" in str(error)
-                else:
-                    raise AssertionError("live detached provider lost its pool slot")
-                assert all(call.args[0][:3] != [sys.executable, "-c", "pass"] for call in launch.call_args_list)
+                    patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]):
                 with patch.object(panel_terminals, "process_gone", return_value=True), \
                         patch.object(panel, "_dispatch_group_gone", return_value=True):
                     assert panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
@@ -4949,7 +4934,7 @@ def exercise_observed_worker_leases():
     capacity_args = (project, "claude", "worker", "read",
                      "Capacity fixture", None, None, argv_binding.task_id, False,
                      "Capacity call", capacity_route, None, None, None)
-    for scenario in ("normal", "full", "full-write", "calls-full", "pool-full", "closed", "foreign-main",
+    for scenario in ("normal", "full", "full-write", "calls-full", "closed", "foreign-main",
                      "lost-caller", "lost-child", "send-error"):
         writing = scenario == "full-write"
         scopes = ["value.txt"] if writing else None
@@ -4975,8 +4960,8 @@ def exercise_observed_worker_leases():
                 if participant["participant"] == event["participant"]:
                     participant["joined"] = False
         live_rows = [{"parent_attempt_id": argv_binding.owner_attempt, "terminal": False,
-                      "refs": {"panel_role": "worker"}} for _ in range(3)] if scenario == "pool-full" else []
-        # Other mains and terminal calls do not spend this main's running budget.
+                      "refs": {"panel_role": "worker"}} for _ in range(5)] if scenario == "normal" else []
+        # Live calls of this main or of others never block a dispatch: a main has no call cap.
         live_rows += [{"parent_attempt_id": "other-main", "terminal": False, "refs": {"panel_role": "worker"}},
                       {"parent_attempt_id": argv_binding.owner_attempt, "terminal": True,
                        "refs": {"panel_role": "worker"}}]
@@ -5019,7 +5004,6 @@ def exercise_observed_worker_leases():
                                 "full": "room %s is full" % argv_binding.room_id,
                                 "full-write": "room %s is full" % argv_binding.room_id,
                                 "calls-full": "room %s is full" % argv_binding.room_id,
-                                "pool-full": "max_running=3; live/pending calls:",
                                 "lost-caller": "participant has not joined this room",
                                 "lost-child": "participant has not joined this room",
                                 "send-error": "unrelated room send failure"}[scenario]
@@ -5027,7 +5011,7 @@ def exercise_observed_worker_leases():
                 else:
                     raise AssertionError("invalid capacity dispatch was accepted: " + scenario)
                 provider_call.assert_not_called()
-                if scenario in {"full", "full-write", "calls-full", "pool-full", "closed"}:
+                if scenario in {"full", "full-write", "calls-full", "closed"}:
                     assert len(state["participants"]) == participants_before and not children
                     observed_plan.assert_not_called()
                 if scenario == "send-error":

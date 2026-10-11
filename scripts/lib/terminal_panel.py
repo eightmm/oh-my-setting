@@ -364,7 +364,7 @@ def bootstrap(provider, repo):
         "implementer. "
         "Act as the control tower: by default delegate implementation, investigation and test repair to "
         "bounded workers (scoped brief with paths, constraints, success criteria and a --verify command), split "
-        "separable files or steps into non-overlapping workers run in parallel, and keep scope, briefs, "
+        "separable files or steps into as many non-overlapping workers run in parallel as the work allows (there is no call cap), and keep scope, briefs, "
         "architecture, integration, review and patch admission in the sole main. "
         "Work directly only when writing the brief would take longer than the edit, or when the step needs the "
         "main itself, such as integrating into a shared tree another main has frozen. "
@@ -1260,24 +1260,13 @@ def deliver_result(repo, room_id, member, caller, task_id, status):
             return
 
 
-def _dispatch_capacity(repo, room_id, state, parent):
-    if room_id:
-        if (len(state["messages"]) + 2 > room.MAX_MESSAGES
-                or sum(bool(p.get("parent")) for p in state["participants"]) >= room.MAX_CALLS):
-            raise ValueError("room %s is full" % room_id)
-        if state["closed"]:
-            raise ValueError("room is closed")
-    if parent:
-        rows = json.loads(events(repo, "list", "--json", output=True))
-        limit = policy()["pool"]["max_running"]
-        running = [row for row in rows if row.get("parent_attempt_id") == parent and not row.get("terminal")
-                   and row.get("refs", {}).get("panel_role") in {"worker", "researcher", "advisor", "reviewer"}]
-        if len(running) >= limit:
-            pending = [row.get("refs", {}).get("panel_room_participant") or row.get("attempt_id", "unknown-call")
-                       for row in running]
-            raise ValueError("main reached max_running=%d; live/pending calls: %s; retry dispatch after they exit "
-                             "to reconcile them; if still live, stop them and verify provider cleanup before "
-                             "cancelling their attempts" % (limit, ", ".join(pending)))
+def _dispatch_capacity(room_id, state):
+    # A main summons as many calls as its work needs; only the room's own bounds apply.
+    if (len(state["messages"]) + 2 > room.MAX_MESSAGES
+            or sum(bool(p.get("parent")) for p in state["participants"]) >= room.MAX_CALLS):
+        raise ValueError("room %s is full" % room_id)
+    if state["closed"]:
+        raise ValueError("room is closed")
 
 
 def _dispatch_group_gone(pid):
@@ -1603,7 +1592,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         if parent and record.get("refs", {}).get("panel_room_id", room_id) != room_id:
             raise ValueError("panel main and selected room identities disagree")
         if not dry_run and parent:
-            _dispatch_capacity(repo, room_id, state, None)
+            _dispatch_capacity(room_id, state)
             _reconcile_dispatch(repo, room_id, state, caller, parent)
             state = room.project(room.records(repo, room_id))
         if scopes:
@@ -1614,9 +1603,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             if dry_run:
                 print(json.dumps(dict(plan, overlaps=found)))
                 return 0
-        _dispatch_capacity(repo, room_id, state, parent)
-    elif parent:
-        _dispatch_capacity(repo, None, None, parent)
+        _dispatch_capacity(room_id, state)
     if access == "write":
         # Delegate's dry-run validates the same brief and route without starting a worker.
         # Give it no room/plan identity so a refused preview cannot claim or enroll this call.

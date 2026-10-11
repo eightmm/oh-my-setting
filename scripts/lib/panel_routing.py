@@ -17,7 +17,7 @@ WRITERS = {"worker", "builder", "refactorer", "documenter", "integrator", "perfo
 # Judges of another context's work prefer the provider other than the main's when the tier offers it.
 INDEPENDENT = {"reviewer", "verifier", "security-auditor", "critic"}
 RESEARCH_FAMILIES = {"luna", "haiku"}
-POOL_DEFAULTS = {"max_running": 3, "max_rework_rounds": 2}
+POOL_DEFAULTS = {"max_rework_rounds": 2}
 
 
 def route_family(provider, model):

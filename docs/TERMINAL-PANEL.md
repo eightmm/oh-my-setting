@@ -154,9 +154,9 @@ main from the menu or with `--launch` keeps the panel's recorded room while it i
 main start a new room, and an explicit `--room ID` or `o Rooms` choice wins.
 A bare control window shows the panel's recorded room.
 Role dispatch refuses a full room before enrollment, checking headroom for assignment and result
-messages. `pool` in `config/panel-routing.json` defaults to three non-terminal call attempts per
-main attempt and two rework rounds per task after its first worker call. Wait for calls to settle
-before dispatching again; at the rework limit, review the brief, raise `--workload` or ask the person.
+messages. A main has no cap on concurrent calls: split separable work into as many parallel calls as it
+needs. `pool.max_rework_rounds` in `config/panel-routing.json` (default two) bounds rework rounds per task
+after its first worker call; at that limit, review the brief, raise `--workload` or ask the person.
 Interruptions give the child up to 20 seconds to clean up, settle unfinished attempts and send a numeric
 result handoff. Sensitive summaries are withheld with an `oms panel --results --task-id` pointer;
 room races can still prevent delivery, while the indexed evidence remains available.
