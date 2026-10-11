@@ -747,7 +747,8 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         # A native user task may reference private files; never copy that text
         # into shared status when it cannot serve as a safe display title.
         label = "Native task not recorded"
-    host_refs = panel_host.refs(execution) if panel_host.herdr_active() else {}
+    import panel_release
+    host_refs = panel_release.start_refs(execution, managed_session())
     status = 1
     process = None
     launch_inflight = False
@@ -851,6 +852,10 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
             reason = "native_launch_unconfirmed" if launch_inflight else "native_launch_failed"
             raise
         launch_inflight = False
+        native_refs = panel_release.process_refs(process.pid, "launcher" if harness == "pi" else "native")
+        if native_refs:
+            update_activity(repo, "usage", "--attempt", attempt, "--actor", "panel-main",
+                            *[arg for key, value in native_refs.items() for arg in ("--ref", key + "=" + value)])
         while True:
             try:
                 status = process.wait(timeout=60)
@@ -875,6 +880,12 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                     context.cleanup()
             except OSError:
                 print("Native context cleanup unavailable; lifecycle evidence is retained.", file=sys.stderr)
+            native_exit = process.poll() if process is not None else None
+            if not launch_inflight and type(native_exit) is int:
+                exit_kind = "launcher" if harness == "pi" else "native"
+                update_activity(repo, "usage", "--attempt", attempt, "--actor", "panel-main",
+                                "--ref", "panel_" + exit_kind + "_exit=confirmed",
+                                "--ref", "panel_" + exit_kind + "_exit_code=" + str(native_exit))
             if launch_inflight or process and process.poll() is None:
                 update_activity(repo, "transition", "--attempt", attempt, "--state", "blocked",
                                 "--actor", "panel-main", "--reason-code", "native_shutdown_unconfirmed")
@@ -2983,11 +2994,7 @@ def read_panel(repo, provider, view, attention_only):
         state["room"] = dict(state["room"], other_rooms=others, other_rooms_incomplete=incomplete)
     state["private_capacity"] = private_capacity(repo)
     import panel_release
-    try:
-        rows = tick.attempts()
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
-        rows = []  # unreadable evidence lists no dead main; the release action rechecks before acting
-    state["dead_mains"] = panel_release.dead_mains(repo, attempts=rows)
+    state["dead_mains"] = panel_release.dead_mains(repo, _tick=tick)
     import panel_health
     state["capacity_alerts"] = panel_health.alerts(state)
     return state, status, provider, main_attempt, density, filtered, selected_room

@@ -72,6 +72,26 @@ def validate_tail(host, tail):
             raise BridgeError("Use the OMS model selection; native routing overrides are unsupported")
 
 
+def record_panel_child(env, pid):
+    import panel_release
+    attempt, repo = env.get("OMS_PANEL_MAIN_ATTEMPT", ""), env.get("OMS_ROOM_REPO")
+    if not repo or not panel_release.ID.fullmatch(attempt) or env.get("OMS_PANEL_HARNESS") != "pi":
+        return
+    try:
+        row = json.loads(panel_release.events(repo, "show", "--attempt", attempt, "--json"))
+        refs = row.get("refs") or {}
+        if (row.get("tool") != "panel-main" or row.get("provider") != "codex"
+                or refs.get("panel_role") != "main" or refs.get("panel_harness") != "pi"):
+            raise ValueError("Pi panel ownership unavailable")
+        native = panel_release.process_refs(pid, "native")
+        if not native:
+            raise ValueError("Pi child identity unavailable")
+        panel_release.events(repo, "usage", "--attempt", attempt, "--actor", "panel-main",
+                             *[arg for key, value in native.items() for arg in ("--ref", key + "=" + value)])
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        print("OMS: Pi child identity unavailable; this main may need separate recovery.", file=sys.stderr)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Use Codex subscription models in Codex CLI, Pi, or Claude Code.",
@@ -130,6 +150,8 @@ def main(argv=None):
                 signal.signal(sig, (lambda _sig, _frame: None) if sig == signal.SIGINT else stop_signal)
         try:
             child = subprocess.Popen(command, env=env)
+            if args.harness == "pi":
+                record_panel_child(env, child.pid)
             return child.wait()
         finally:
             for sig, handler in previous.items():

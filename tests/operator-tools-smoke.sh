@@ -1040,6 +1040,8 @@ with patch.object(panel, 'dashboard', side_effect=lambda *a, **k: (deepcopy(tick
         counts.update(events=0, index=0)
         report = read()
         assert counts == {'events': 1, 'index': 1}, counts
+        if 'dead_mains' in report:
+            assert [row['attempt'] for row in report['dead_mains']['unverifiable']] == ['tick-main']
         assert report['completed_tasks'].keys() == {'tick-wait'}, report
         assert report['finalized'] == {'tick-wait': 'accepted'}, report
         assert report['awaiting_admission'] == ['tick-worker'], report
@@ -8338,116 +8340,285 @@ with patch.object(panel, "events", return_value=json.dumps([{"tool": "panel-main
     except ValueError as error:
         assert "already has a live main" in str(error)
     assert not inline_start.called
-# Explicit recovery proves terminal absence and leaves rejected lifecycle records unchanged.
+# Explicit recovery requires recorded host ownership and positive native termination evidence.
 import panel_release
 import panel_health
 import panel_host
+import panel_terminals
+import codex_harness
+import io
 release_repo = temporary / "release-main"
 release_repo.mkdir()
 subprocess.run(["git", "init", "-q", str(release_repo)], check=True)
 release_bin = temporary / "release-bin"
 release_bin.mkdir()
+release_socket = str(temporary / "release.sock")
+release_server = panel_release.process_refs(os.getpid(), "tmux_server")
+release_server["panel_socket_digest"] = hashlib.sha256(os.path.realpath(release_socket).encode()).hexdigest()
 (release_bin / "tmux").write_text('#!/bin/sh\nif [ "$OMS_RELEASE_ERROR" = 1 ]; then echo "server error" >&2; exit 1; fi\n'
     'if [ "$OMS_RELEASE_NO_SERVER" = 1 ]; then echo "no server running" >&2; exit 1; fi\n'
-    'if [ "$1" = list-windows ]; then printf "%s\\r\\n" "$OMS_RELEASE_WINDOW"; '
+    'if [ "$1" = display-message ]; then printf "%s\\t%s\\r\\n" "$OMS_RELEASE_SERVER" "$OMS_RELEASE_SOCKET"; '
+    'elif [ "$1" = list-windows ]; then printf "%s\\r\\n" "$OMS_RELEASE_WINDOW"; '
     'else printf "%s\\r\\n" "$OMS_RELEASE_PANE"; fi\n')
 (release_bin / "tmux").chmod(0o700)
+release_now = time.time() + 600
 release_env = dict(environment, PATH=str(release_bin) + os.pathsep + environment["PATH"],
-                   OMS_RELEASE_ERROR="0", OMS_RELEASE_NO_SERVER="0", OMS_RELEASE_WINDOW="", OMS_RELEASE_PANE="")
-release_cli = ["bash", str(panel.ENTRY), "panel", "--repo", str(release_repo), "--release-main"]
-def release_attempt(state="working", tool="panel-main", role="main", host=None):
-    refs = ["--ref", "panel_role=" + role, "--ref", "panel_room_id=release-room",
-            "--ref", "panel_label=Recovered main"] + (["--ref", "panel_host=" + host] if host else [])
-    return panel.events(release_repo, "start", "--provider", "codex", "--tool", tool, *refs,
-                        "--then", "starting", "--then", "working",
-                        *(["--then", state] if state != "working" else []), output=True)
-working_release = release_attempt()
-blocked_release = release_attempt("blocked")
-worker_release = release_attempt(tool="peer-delegate", role="worker")
-wrong_role = release_attempt(role="worker")
-herdr_release = release_attempt(host="herdr")
-waiting_release = release_attempt("waiting_input")
-finished_release = release_attempt("cancelled")
-ledger = release_repo / ".oms/lifecycle/events.jsonl"
-for release_id, extra_env, extra_args, expected in (
-        (working_release, {"OMS_RELEASE_PANE": working_release}, [], "live tagged tmux"),
-        (working_release, {"OMS_RELEASE_WINDOW": working_release}, [], "live tagged tmux"),
-        (working_release, {"OMS_RELEASE_ERROR": "1"}, [], "liveness unproven"),
-        (worker_release, {}, [], "requires a panel-main"),
-        (wrong_role, {}, [], "requires a panel-main"),
-        (waiting_release, {}, [], "requires a panel-main"),
-        (finished_release, {}, [], "requires a panel-main"),
-        (herdr_release, {}, [], "liveness unproven"),
-        ("../invalid", {}, [], "invalid panel main attempt"),
-        (working_release, {}, ["--launch", "claude"], "unrecognized arguments"),
-        (working_release, {"OMS_HARNESS_CHILD": "1"}, [], "worker cannot release")):
-    before_release = ledger.read_bytes()
-    refused = subprocess.run(release_cli + [release_id, "--json"] + extra_args,
-                             env=dict(release_env, **extra_env), capture_output=True, text=True, timeout=20)
-    assert refused.returncode and expected in refused.stderr, (refused.stdout, refused.stderr)
-    assert ledger.read_bytes() == before_release, "refused release changed lifecycle"
-for held_lock in ("panel-main-start", "panel-main-session"):
-    before_release = ledger.read_bytes()
-    with panel_results._lock(release_repo, held_lock):
-        refused = subprocess.run(release_cli + [working_release], env=release_env,
-                                 capture_output=True, text=True, timeout=20)
-        assert refused.returncode and "panel operation is busy" in refused.stderr, refused.stderr
-    assert ledger.read_bytes() == before_release, "release bypassed a live main lease"
-with patch.dict(os.environ, release_env, clear=True):
-    with patch.object(panel_release.subprocess, "run", wraps=panel_release.subprocess.run) as scans:
-        dead = panel_release.dead_mains(release_repo)
-        assert not any(c.args[0][1] == "list-panes" for c in scans.call_args_list)
-        assert sum(c.args[0][1] == "list-windows" for c in scans.call_args_list) == 1
-    assert {row["attempt"] for row in dead} == {working_release, blocked_release}, dead
-    assert all(row["label"] == "Recovered main" and row["age"] for row in dead)
-    capacity = panel_health.render({"dead_mains": dead}, 180, 80)
-    assert "Dead mains" in capacity and "oms panel --release-main " + working_release in capacity, capacity
-    with patch.object(panel_release.subprocess, "run", wraps=panel_release.subprocess.run) as scans:
-        assert {row["attempt"] for row in panel_release.dead_mains(release_repo, windows={working_release})} == {
-            blocked_release}
-        assert not any(c.args[0][1] == "list-panes" for c in scans.call_args_list)
-        assert not any(c.args[0][1] == "list-windows" for c in scans.call_args_list)
-    with patch.object(panel_release.shutil, "which", return_value=None):
-        assert panel_release.tagged_attempts() == set()
-    with patch.object(panel_host, "herdr_active", return_value=True), \
-            patch.object(panel_host, "socket_digest", return_value="host-digest"), \
-            patch.object(panel_host, "pane", return_value={}) as host_lookup:
-        for host_error, expected in ((None, "live Herdr pane"), (ValueError("missing pane"), "liveness unproven")):
-            host_lookup.side_effect = host_error
+                   OMS_RELEASE_ERROR="0", OMS_RELEASE_NO_SERVER="0", OMS_RELEASE_WINDOW="", OMS_RELEASE_PANE="",
+                   OMS_RELEASE_SERVER=str(os.getpid()), OMS_RELEASE_SOCKET=release_socket, OMS_RELEASE_NOW=str(release_now))
+release_cli = [sys.executable, "-c", "import os,sys; sys.path.insert(0,sys.argv[1]); import terminal_panel as p; "
+               "import panel_release as r; r.time.time=lambda:float(os.environ['OMS_RELEASE_NOW']); "
+               "sys.exit(p.main(sys.argv[2:]))", str(root / "scripts/lib"), "--repo", str(release_repo), "--release-main"]
+live_release_process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(90)"])
+dead_release_process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(90)"])
+try:
+    live_refs = panel_release.process_refs(live_release_process.pid, "native")
+    dead_refs = panel_release.process_refs(dead_release_process.pid, "native")
+    assert live_refs and dead_refs
+    dead_wrapper = {key.replace("native", "wrapper"): value for key, value in dead_refs.items()}
+    live_wrapper = {key.replace("native", "wrapper"): value for key, value in live_refs.items()}
+    dead_release_process.terminate()
+    dead_release_process.wait(timeout=10)
+    def release_attempt(state="working", tool="panel-main", role="main", host="tmux", native=None, wrapper=None, reason="", server=None, harness="codex"):
+        refs = dict(panel_role=role, panel_room_id="release-room", panel_label="Recovered main",
+                    panel_heartbeat_interval="60", panel_heartbeat_ttl="300", panel_harness=harness)
+        if host:
+            refs["panel_host"] = host
+        if host == "tmux":
+            refs.update(release_server if server is None else server, panel_pane_id="%12")
+        native_refs = dead_refs if native is None else native
+        refs.update(dead_wrapper if wrapper is None else wrapper)
+        args = [arg for key, value in refs.items() for arg in ("--ref", key + "=" + value)]
+        ident = panel.events(release_repo, "start", "--provider", "codex", "--tool", tool, *args,
+                             "--then", "starting", *([] if state == "starting" else ["--then", "working"]), output=True)
+        if native_refs:
+            panel.events(release_repo, "usage", "--attempt", ident, "--actor", "panel-main",
+                         *[arg for key, value in native_refs.items() for arg in ("--ref", key + "=" + value)])
+        if state not in {"starting", "working"}:
+            panel.events(release_repo, "transition", "--attempt", ident, "--state", state, "--reason-code", reason)
+        return ident
+    working_release = release_attempt()
+    blocked_release = release_attempt("blocked", host="inline")
+    legacy_release = release_attempt(host=None, native={}, wrapper={})
+    empty_refs_release = panel.events(release_repo, "start", "--provider", "codex", "--tool", "panel-main",
+                                      "--then", "starting", "--then", "working", output=True)
+    inline_alive = release_attempt(host="inline", native=live_refs, wrapper=live_wrapper)
+    tmux_alive = release_attempt(native=live_refs)
+    inline_orphan = release_attempt(host="inline", native=live_refs)
+    inline_unknown = release_attempt(host="inline", wrapper={})
+    unconfirmed_release = release_attempt("blocked", host="inline", native={}, reason="native_shutdown_unconfirmed")
+    unconfirmed_gone = release_attempt("blocked", host="inline", reason="native_shutdown_unconfirmed")
+    starting_release = release_attempt("starting")
+    worker_release = release_attempt(tool="peer-delegate", role="worker")
+    wrong_role = release_attempt(role="worker")
+    herdr_release = release_attempt(host="herdr")
+    waiting_release = release_attempt("waiting_input")
+    finished_release = release_attempt("cancelled")
+    confirmed_exit = release_attempt(host="inline", native={"panel_native_exit": "confirmed", "panel_native_exit_code": "0"})
+    pi_launcher = release_attempt(host="inline", harness="pi", native={key.replace("native", "launcher"): value for key, value in dead_refs.items()})
+    gone_server = dict(release_server, **{key.replace("native", "tmux_server"): value for key, value in dead_refs.items()})
+    no_server_release = release_attempt(server=gone_server)
+    restarted_release = release_attempt(server=gone_server)
+    pi_release = release_attempt(host="inline", native={}, harness="pi")
+    pi_env = dict(OMS_PANEL_MAIN_ATTEMPT=pi_release, OMS_ROOM_REPO=str(release_repo), OMS_PANEL_HARNESS="pi")
+    with patch.object(panel_release, "process_refs", return_value=dead_refs):
+        codex_harness.record_panel_child(pi_env, dead_release_process.pid)
+    pi_row = json.loads(panel_release.events(release_repo, "show", "--attempt", pi_release, "--json"))
+    assert all(pi_row["refs"][key] == value for key, value in dead_refs.items())
+    pi_alive = release_attempt(host="inline", native={}, harness="pi")
+    pi_live_env = dict(pi_env, OMS_PANEL_MAIN_ATTEMPT=pi_alive)
+    codex_harness.record_panel_child(pi_live_env, live_release_process.pid)
+    ledger = release_repo / ".oms/lifecycle/events.jsonl"
+    for release_id, extra_env, extra_args, expected in (
+            (working_release, {"OMS_RELEASE_PANE": working_release}, [], "live tagged tmux"),
+            (working_release, {"OMS_RELEASE_WINDOW": working_release}, [], "live tagged tmux"),
+            (working_release, {"OMS_RELEASE_ERROR": "1"}, [], "liveness unproven"),
+            (working_release, {"OMS_RELEASE_NO_SERVER": "1"}, [], "liveness unproven"),
+            (legacy_release, {}, [], "liveness unproven"),
+            (empty_refs_release, {}, [], "liveness unproven"),
+            (inline_alive, {}, [], "liveness unproven"),
+            (tmux_alive, {}, [], "liveness unproven"),
+            (inline_orphan, {}, [], "native termination is unconfirmed"),
+            (inline_unknown, {}, [], "liveness unproven"),
+            (unconfirmed_release, {}, [], "liveness unproven"),
+            (pi_launcher, {}, [], "Pi child termination unconfirmed; separate recovery required"),
+            (pi_alive, {}, [], "Pi child termination unconfirmed; separate recovery required"),
+            (working_release, {"OMS_RELEASE_SOCKET": release_socket + ".other"}, [], "tmux server ownership changed"),
+            (working_release, {"OMS_RELEASE_NOW": str(time.time())}, [], "liveness unproven"),
+            (worker_release, {}, [], "requires a panel-main"),
+            (wrong_role, {}, [], "requires a panel-main"),
+            (starting_release, {}, [], "requires a panel-main"),
+            (waiting_release, {}, [], "requires a panel-main"),
+            (finished_release, {}, [], "requires a panel-main"),
+            (herdr_release, {}, [], "liveness unproven"),
+            ("../invalid", {}, [], "invalid panel main attempt"),
+            (working_release, {}, ["--launch", "claude"], "unrecognized arguments"),
+            (working_release, {"OMS_HARNESS_CHILD": "1"}, [], "worker cannot release")):
+        before_release = ledger.read_bytes()
+        refused = subprocess.run(release_cli + [release_id, "--json"] + extra_args,
+                                 env=dict(release_env, **extra_env), capture_output=True, text=True, timeout=20)
+        assert refused.returncode and expected in refused.stderr, (refused.stdout, refused.stderr)
+        assert ledger.read_bytes() == before_release, "refused release changed lifecycle"
+    for held_lock in ("panel-main-start", "panel-main-session"):
+        before_release = ledger.read_bytes()
+        with panel_results._lock(release_repo, held_lock):
+            refused = subprocess.run(release_cli + [working_release], env=release_env,
+                                     capture_output=True, text=True, timeout=20)
+            assert refused.returncode and "panel operation is busy" in refused.stderr, refused.stderr
+        assert ledger.read_bytes() == before_release, "release bypassed a live main lease"
+    with patch.dict(os.environ, release_env, clear=True), patch.object(panel_release.time, "time", return_value=release_now):
+        with patch.object(panel_release.subprocess, "run", wraps=panel_release.subprocess.run) as scans:
+            dead = panel_release.dead_mains(release_repo)
+            assert sum(c.args[0][1] == "list-panes" for c in scans.call_args_list) == 1
+            assert sum(c.args[0][1] == "list-windows" for c in scans.call_args_list) == 1
+        assert {row["attempt"] for row in dead["releasable"]} == {working_release, blocked_release, confirmed_exit, unconfirmed_gone, no_server_release, restarted_release, pi_release}, dead
+        assert {row["attempt"] for row in dead["unverifiable"]} == {
+            legacy_release, inline_alive, tmux_alive, inline_orphan, inline_unknown, unconfirmed_release, herdr_release, pi_launcher, pi_alive, empty_refs_release}, dead
+        assert all(row["label"] == ("" if row["attempt"] == empty_refs_release else "Recovered main") and row["age"]
+                   for group in dead.values() for row in group)
+        capacity = panel_health.render({"dead_mains": dead}, 220, 100)
+        assert "Dead mains" in capacity and "Unverifiable mains" in capacity, capacity
+        assert "oms panel --release-main " + working_release in capacity
+        assert "oms panel --release-main " + legacy_release not in capacity
+        assert "Pi child termination unconfirmed; separate recovery required" in capacity
+        with patch.object(panel_release.subprocess, "run", wraps=panel_release.subprocess.run) as scans:
+            reused = panel_release.dead_mains(release_repo, windows={working_release})
+            assert {row["attempt"] for row in reused["releasable"]} == {blocked_release, confirmed_exit, unconfirmed_gone, no_server_release, restarted_release, pi_release}
+            assert sum(c.args[0][1] == "list-panes" for c in scans.call_args_list) == 1
+            assert not any(c.args[0][1] == "list-windows" for c in scans.call_args_list)
+        with patch.object(panel_release.shutil, "which", return_value=None):
             try:
-                panel_release.prove_host_absent({"panel_host": "herdr", "panel_socket_digest": "host-digest",
-                                                "panel_pane_id": "w1:p1"})
-                raise AssertionError("Herdr evidence allowed unsafe release")
+                panel_release.tagged_attempts()
+                raise AssertionError("missing tmux proved host absence")
             except ValueError as error:
-                assert expected in str(error), error
-    with patch.dict(os.environ, OMS_RELEASE_ERROR="1"):
-        assert panel_release.dead_mains(release_repo) == [], "unproven main displayed as dead"
-    with patch.object(panel, "events", return_value=json.dumps([json.loads(panel_release.events(
-            release_repo, "show", "--attempt", working_release, "--json"))])):
-        try:
-            panel.check_legacy_main(release_repo)
-            raise AssertionError("unreleased main allowed replacement")
-        except ValueError as error:
-            assert "oms panel --release-main " + working_release in str(error), error
-for release_id, previous, extra_env in ((working_release, "working", {}),
-                                        (blocked_release, "blocked", {"OMS_RELEASE_NO_SERVER": "1"})):
-    released = json.loads(call(release_cli + [release_id, "--json"], env=dict(release_env, **extra_env)))
-    assert released == {"attempt": release_id, "previous_state": previous, "state": "abandoned", "reason": "panel_main_released"}
-    before_release = ledger.read_bytes()
-    repeated = subprocess.run(release_cli + [release_id], env=release_env, capture_output=True, text=True, timeout=20)
-    assert repeated.returncode and ledger.read_bytes() == before_release, "terminal release wrote lifecycle"
-release_rows = [json.loads(line) for line in ledger.read_text().splitlines()]
-assert [(r["from_state"], r["to_state"]) for r in release_rows if r.get("reason_code") == "panel_main_released"] == [
-    ("working", "blocked"), ("blocked", "abandoned"), ("blocked", "abandoned")]
-assert all(r["actor"]["name"] == "panel-main-release" for r in release_rows if r.get("reason_code") == "panel_main_released")
-terminal_release = json.loads(panel_release.events(release_repo, "show", "--attempt", working_release, "--json"))
-with patch.object(panel, "events", return_value=json.dumps([terminal_release])), patch.object(panel.shutil, "which", return_value=None):
-    panel.check_legacy_main(release_repo)
-with patch.object(panel.room, "status", return_value={"participants": [{"participant": working_release, "joined": True, "role": "main"}]}), \
-        patch.object(panel, "main_history", return_value=[terminal_release]), \
-        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
-    assert panel.live_mains(release_repo, "s", "release-room") == 0, "abandoned main still counted"
-assert "Dead mains" not in panel_health.render({}, 180, 80)
+                assert "liveness unproven" in str(error)
+        with patch.dict(os.environ, OMS_RELEASE_ERROR="1"):
+            failed_scan = panel_release.dead_mains(release_repo)
+            assert {row["attempt"] for row in failed_scan["releasable"]} == {blocked_release, confirmed_exit, unconfirmed_gone, no_server_release, restarted_release, pi_release}
+            assert working_release in {row["attempt"] for row in failed_scan["unverifiable"]}
+        with patch.dict(os.environ, OMS_RELEASE_NO_SERVER="1"):
+            absent = panel_release.dead_mains(release_repo)
+            assert {no_server_release, restarted_release} <= {row["attempt"] for row in absent["releasable"]}
+            assert working_release in {row["attempt"] for row in absent["unverifiable"]}
+        with patch.object(panel_release, "tmux_identity", side_effect=ValueError("unavailable")), \
+                patch.object(panel_host, "herdr_active", return_value=False), patch.object(sys, "stderr", new_callable=io.StringIO) as warning:
+            assert panel_release.start_refs(release_repo, True)["panel_host"] == "tmux"
+            assert warning.getvalue().count("tmux ownership binding unavailable") == 1
+        rows = json.loads(panel_release.events(release_repo, "list", "--json"))
+        stale_inline = next(row for row in rows if row["attempt_id"] == blocked_release)
+        with patch.object(panel_release, "identity_gone", return_value=True) as probes:
+            assert panel_release.classify([]) == {"releasable": [], "unverifiable": []}
+            assert not probes.called
+            capped_tick = Mock()
+            capped_tick.attempts.return_value = [dict(stale_inline, attempt_id="cap-%s" % i) for i in range(4)]
+            with patch.object(panel_release, "MAX_TICK_PROBES", 2):
+                limited = panel_release.dead_mains(release_repo, _tick=capped_tick)
+            assert len(limited["releasable"]) == len(limited["unverifiable"]) == 2
+            assert probes.call_count == 6, probes.call_count
+            assert all("verification pending" in row["reason"] for row in limited["unverifiable"])
+            pending_capacity = panel_health.render({"dead_mains": limited}, 220, 40)
+            assert "verification pending" in pending_capacity and "oms panel --release-main cap-2" not in pending_capacity
+        with patch.object(panel_release.time, "time", return_value=release_now - 600):
+            assert panel_release.classify(rows) == {"releasable": [], "unverifiable": []}, "fresh attempt appeared as dead"
+        young = dict(next(row for row in rows if row["attempt_id"] == working_release),
+                     created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(release_now - 30)))
+        assert panel_release.classify([young]) == {"releasable": [], "unverifiable": []}
+        fresh = dict(young, created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(release_now - 600)),
+                     last_heartbeat_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(release_now - 1)))
+        assert panel_release.classify([fresh]) == {"releasable": [], "unverifiable": []}
+        with patch.dict(os.environ, OMS_RELEASE_PANE=working_release):
+            assert working_release not in {row["attempt"] for row in panel_release.dead_mains(release_repo)["releasable"]}
+        for row, offered in ((next(row for row in rows if row["attempt_id"] == working_release), True),
+                             (next(row for row in rows if row["attempt_id"] == legacy_release), False)):
+            with patch.object(panel, "events", return_value=json.dumps([row])):
+                try:
+                    panel.check_legacy_main(release_repo)
+                    raise AssertionError("unreleased main allowed replacement")
+                except ValueError as error:
+                    assert ("oms panel --release-main " + row["attempt_id"] in str(error)) is offered, error
+        if os.name != "nt":
+            with patch.object(panel_terminals, "process", return_value={"identity": "f" * 64, "state": "S"}):
+                assert not panel_terminals.matches(live_release_process.pid, live_refs["panel_native_identity"])
+                assert panel_release.identity_gone(live_refs, "native"), "PID reuse was treated as the recorded live process"
+            with patch.object(panel_terminals, "process", return_value=None), patch.object(panel_terminals.os, "kill", side_effect=PermissionError):
+                assert not panel_release.identity_gone(live_refs, "native"), "unknown process probe proved death"
+        with patch.object(panel_host, "herdr_active", return_value=True), \
+                patch.object(panel_host, "socket_digest", return_value="host-digest"), \
+                patch.object(panel_host, "pane", return_value={}) as host_lookup:
+            for host_error in (None, ValueError("missing pane")):
+                host_lookup.side_effect = host_error
+                try:
+                    panel_release.prove_host_absent({"panel_host": "herdr", "panel_socket_digest": "host-digest",
+                                                    "panel_pane_id": "w1:p1"}, herdr_release)
+                    raise AssertionError("Herdr evidence allowed unsafe release")
+                except ValueError as error:
+                    assert "liveness unproven" in str(error)
+        mock_native = Mock(pid=live_release_process.pid)
+        mock_native.wait.return_value = mock_native.poll.return_value = 0
+        with patch.object(panel, "events", return_value="att_recording") as recorded, \
+                patch.object(panel, "main_installed", return_value=True), patch.object(panel, "ensure_room", return_value="release-room"), \
+                patch.object(panel.room, "join"), patch.object(panel, "managed_session", return_value=False), \
+                patch.object(panel_host, "herdr_active", return_value=False), patch.object(panel, "bootstrap", return_value="fixture"), \
+                patch.object(panel, "native_command", return_value=["fixture-native"]), patch.object(panel.subprocess, "Popen", return_value=mock_native):
+            assert panel._run_native("codex", release_repo) == 0
+            start_args = recorded.call_args_list[0].args
+            assert "panel_host=inline" in start_args and "panel_wrapper_pid=" + str(os.getpid()) in start_args
+            assert any(isinstance(arg, str) and arg.startswith("panel_wrapper_identity=") for arg in start_args)
+            assert any("panel_native_pid=" + str(live_release_process.pid) in call.args for call in recorded.call_args_list)
+            assert any("panel_native_exit=confirmed" in call.args for call in recorded.call_args_list)
+            recorded.reset_mock()
+            assert panel._run_native("pi", release_repo) == 0
+            assert any("panel_launcher_pid=" + str(live_release_process.pid) in call.args for call in recorded.call_args_list)
+            assert any("panel_launcher_exit=confirmed" in call.args for call in recorded.call_args_list)
+            assert not any("panel_native_exit=confirmed" in call.args for call in recorded.call_args_list)
+        broker = Mock()
+        broker.model.return_value = {}
+        with patch.object(codex_harness, "AuthBroker", return_value=broker), \
+                patch.object(codex_harness, "Gateway"), patch.object(codex_harness.threading, "Thread"), \
+                patch.object(codex_harness.shutil, "which", return_value="fixture"), \
+                patch.object(codex_harness, "harness_env", return_value=pi_live_env), \
+                patch.object(codex_harness.subprocess, "Popen", return_value=mock_native), \
+                patch.object(panel_release, "events", side_effect=[json.dumps(pi_row), ""]) as child_activity, \
+                patch.object(codex_harness, "record_panel_child", wraps=codex_harness.record_panel_child) as record_child, \
+                patch.object(sys, "stderr", new_callable=io.StringIO) as child_notice:
+            assert codex_harness.main(["pi", "--model", "fixture-model"]) == 0
+            record_child.assert_called_once_with(pi_live_env, live_release_process.pid)
+            assert "panel_native_pid=" + str(live_release_process.pid) in child_activity.call_args.args
+            assert "Pi child identity unavailable" not in child_notice.getvalue()
+        for release_id, previous, extra_env in ((working_release, "working", {}), (blocked_release, "blocked", {}),
+                (confirmed_exit, "working", {}), (unconfirmed_gone, "blocked", {}),
+                (no_server_release, "working", {"OMS_RELEASE_NO_SERVER": "1"}),
+                (restarted_release, "working", {"OMS_RELEASE_SERVER": str(live_release_process.pid)}),
+                (pi_release, "working", {})):
+            released = json.loads(call(release_cli + [release_id, "--json"], env=dict(release_env, **extra_env)))
+            assert released == {"attempt": release_id, "previous_state": previous, "state": "abandoned", "reason": "panel_main_released"}
+            before_release = ledger.read_bytes()
+            repeated = subprocess.run(release_cli + [release_id], env=release_env, capture_output=True, text=True, timeout=20)
+            assert repeated.returncode and ledger.read_bytes() == before_release
+    front_release = release_attempt(host="inline")
+    panel.events(release_repo, "usage", "--attempt", front_release, "--actor", "panel-main",
+                 "--ref", "panel_heartbeat_interval=1", "--ref", "panel_heartbeat_ttl=1")
+    time.sleep(2)
+    front = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(release_repo),
+                             "--release-main", front_release, "--json"], env=release_env))
+    assert front == {"attempt": front_release, "previous_state": "working", "state": "abandoned", "reason": "panel_main_released"}
+    release_rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert [(r["from_state"], r["to_state"]) for r in release_rows if r.get("reason_code") == "panel_main_released"] == [
+        ("working", "blocked"), ("blocked", "abandoned"), ("blocked", "abandoned"), ("working", "blocked"), ("blocked", "abandoned"), ("blocked", "abandoned")
+    ] + [("working", "blocked"), ("blocked", "abandoned")] * 4
+    assert all(r["actor"]["name"] == "panel-main-release" for r in release_rows if r.get("reason_code") == "panel_main_released")
+    terminal_release = json.loads(panel_release.events(release_repo, "show", "--attempt", working_release, "--json"))
+    with patch.object(panel, "events", return_value=json.dumps([terminal_release])), patch.object(panel.shutil, "which", return_value=None):
+        panel.check_legacy_main(release_repo)
+    with patch.object(panel.room, "status", return_value={"participants": [{"participant": working_release, "joined": True, "role": "main"}]}), \
+            patch.object(panel, "main_history", return_value=[terminal_release]), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+        assert panel.live_mains(release_repo, "s", "release-room") == 0
+    assert "Dead mains" not in panel_health.render({}, 180, 80)
+finally:
+    for child in (live_release_process, dead_release_process):
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=10)
 occupied = {"installed": ["claude", "pi", "codex"], "spawn_managed": True, "main_occupied": True}
 assert graph_view.spawn_bar(100, occupied)[1] == []
 assert "One main" in graph_view.spawn_bar(100, occupied)[0]
