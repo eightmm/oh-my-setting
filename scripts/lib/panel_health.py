@@ -71,13 +71,21 @@ def alerts(report):
 def render(report, width, height):
     from panel_view import clipped
     rows = ["OMS / Capacity and recovery" + (" / stale" if report.get("capacity_stale") is True else "")]
-    dead = report.get("dead_mains") or []
+    mains = mapping(report.get("dead_mains"))
+    dead = mains.get("releasable") or []
     if dead:
         rows.append("Dead mains")
         for main in dead:
             rows.append("  %s / %s / %s / %s / %s" % tuple(clean(main.get(key), 160) for key in
                         ("attempt", "provider", "state", "age", "label")))
             rows.append("  oms panel --release-main " + clean(main.get("attempt"), 160))
+    unknown = mains.get("unverifiable") or []
+    if unknown:
+        rows.append("Unverifiable mains")
+        for main in unknown:
+            rows.append("  %s / %s / %s / %s / %s [unverifiable]" % tuple(clean(main.get(key), 160) for key in
+                        ("attempt", "provider", "state", "age", "label")))
+            rows.append("  " + clean(main.get("reason"), 160))
     data = project(report)
     for item in data["items"]:
         value = "--" if item["used"] is None else "%s/%s" % (item["used"], item["limit"])

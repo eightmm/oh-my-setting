@@ -564,7 +564,8 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         # A native user task may reference private files; never copy that text
         # into shared status when it cannot serve as a safe display title.
         label = "Native task not recorded"
-    host_refs = panel_host.refs(execution) if panel_host.herdr_active() else {}
+    import panel_release
+    host_refs = panel_release.start_refs(execution, managed_session())
     attempt = events(repo, "start", "--provider", provider, "--tool", "panel-main",
                      "--ref", "panel_role=main", "--ref", "panel_owner=" + provider,
                      "--ref", "panel_harness=" + harness,
@@ -653,6 +654,10 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         process = subprocess.Popen(native_command(harness, repo, resume, model, task, room_id, native_member, context_path),
                                    cwd=str(execution), env=env)
         launch_inflight = False
+        native_refs = panel_release.process_refs(process.pid, "launcher" if harness == "pi" else "native")
+        if native_refs:
+            update_activity(repo, "usage", "--attempt", attempt, "--actor", "panel-main",
+                            *[arg for key, value in native_refs.items() for arg in ("--ref", key + "=" + value)])
         while True:
             try:
                 status = process.wait(timeout=60)
@@ -676,6 +681,12 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                 context.cleanup()
             except OSError:
                 print("Native context cleanup unavailable; lifecycle evidence is retained.", file=sys.stderr)
+            native_exit = process.poll() if process is not None else None
+            if not launch_inflight and type(native_exit) is int:
+                exit_kind = "launcher" if harness == "pi" else "native"
+                update_activity(repo, "usage", "--attempt", attempt, "--actor", "panel-main",
+                                "--ref", "panel_" + exit_kind + "_exit=confirmed",
+                                "--ref", "panel_" + exit_kind + "_exit_code=" + str(native_exit))
             if launch_inflight or process and process.poll() is None:
                 update_activity(repo, "transition", "--attempt", attempt, "--state", "blocked",
                                 "--actor", "panel-main", "--reason-code", "native_shutdown_unconfirmed")
