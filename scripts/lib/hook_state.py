@@ -1582,6 +1582,8 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
 
 def panel_status_hint(payload: dict[str, Any], room_id: str) -> str:
     """Ask for a declared status when the main has none or it is older than twenty minutes."""
+    if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
+        return ""
     me = os.environ.get("OMS_ROOM_PARTICIPANT", "")
     repo = Path(os.environ["OMS_ROOM_REPO"]) if os.environ.get("OMS_ROOM_REPO") else hook_repo(payload)
     if not (me and room_id and repo):

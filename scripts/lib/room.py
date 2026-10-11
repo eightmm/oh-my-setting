@@ -283,8 +283,16 @@ def validate_event(rows, event, text):
             identifier(event["task_id"], "task")
         return True
     state = project(rows)
-    if child and participant(state, os.environ.get("OMS_ROOM_PARTICIPANT"))["role"] == "main":
-        raise ValueError("a worker cannot speak as a native main")
+    if child:
+        member = participant(state, os.environ.get("OMS_ROOM_PARTICIPANT"))
+        if member["role"] == "main":
+            raise ValueError("a worker cannot speak as a native main")
+        if kind == "message":
+            if str(event["id"]).startswith("result-"):
+                raise ValueError("result handoffs are written by the panel, not by a worker")
+            parent = member.get("parent")
+            if not parent or event.get("recipient") != parent:
+                raise ValueError("a worker can only message its parent %s" % (parent or "<missing>"))
     if kind == "closed":
         who = identifier(event["participant"], "participant")
         caller = os.environ.get("OMS_ROOM_PARTICIPANT")
@@ -805,7 +813,7 @@ def main(argv=None):
     parser.add_argument("--parent")
     parser.add_argument("--topic", default="Shared work")
     parser.add_argument("--task-id")
-    parser.add_argument("--to", default="all")
+    parser.add_argument("--to")
     parser.add_argument("--text")
     parser.add_argument("--text-file")
     parser.add_argument("--kind", choices=sorted(KINDS), default="note")
@@ -819,6 +827,8 @@ def main(argv=None):
     parser.add_argument("--allow-wakeup", action="store_true", help="Claude publish only: authorize a native inbox post which can spend model usage")
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(raw_argv)
+    if args.to is None and args.action != "send":
+        args.to = "all"
     if args.action == "describe":
         allowed_values = {"--repo", "--id", "--participant", "--label"}
         index = 0
@@ -869,6 +879,11 @@ def main(argv=None):
         elif args.action == "close":
             result = close(repo, args.id, args.participant)
         elif args.action == "send":
+            if args.to is None:
+                args.to = "all"
+                if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
+                    member = participant(project(records(repo, args.id)), os.environ.get("OMS_ROOM_PARTICIPANT"))
+                    args.to = member.get("parent") or "all"
             if bool(args.text) == bool(args.text_file):
                 raise ValueError("send needs exactly one text or text-file")
             text = args.text

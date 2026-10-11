@@ -1843,7 +1843,9 @@ def thread_exchange(arguments: dict, action: str) -> tuple[str, bool]:
             if err or not prompt.strip():
                 return err or "error: room message requires a nonempty prompt", True
             command = ["send", "--text", prompt]
-            for key, flag, default in (("to_participant", "--to", "all"), ("message_kind", "--kind", "note"),
+            recipient_default = "" if (os.environ.get("OMS_HARNESS_CHILD") == "1"
+                or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0") else "all"
+            for key, flag, default in (("to_participant", "--to", recipient_default), ("message_kind", "--kind", "note"),
                                        ("reply_to", "--reply-to", ""), ("message_id", "--message-id", "")):
                 value, err = text_argument(arguments, key, 160)
                 if err:
