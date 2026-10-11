@@ -21165,9 +21165,12 @@ for event in ("SessionStart", "SessionEnd"):
     hook = telemetry[0]["hooks"][0]
     assert hook["timeout"] == 5, (event, hook)
 assert "SubagentStop" not in d["hooks"], d["hooks"]
+notice = d["hooks"]["Notification"]
+assert len(notice) == 1 and notice[0]["matcher"] == "permission_prompt|elicitation_dialog", notice
+assert "telemetry-hook.sh" in notice[0]["hooks"][0]["command"] and notice[0]["hooks"][0]["timeout"] == 5, notice
 assert sum(
     len(entry["hooks"]) for entries in d["hooks"].values() for entry in entries
-) == 10 + 1, d["hooks"]  # the ten OMS registrations plus the user router
+) == 11 + 1, d["hooks"]  # the eleven OMS registrations plus the user router
 assert not any(
     "telemetry-hook.sh" in h.get("command", "")
     for entry in d["hooks"].get("PostToolUse", []) for h in entry.get("hooks", [])
