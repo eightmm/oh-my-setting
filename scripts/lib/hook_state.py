@@ -2291,7 +2291,8 @@ def cmd_relay(_: argparse.Namespace) -> int:
 
 def relay_hint(payload: dict[str, Any]) -> str | None:
     """Show each other-agent turn completion once per reading session."""
-    if os.environ.get("OMS_RELAY", "1") != "1" or is_harness_child():
+    # A panel main hears its team through the room and board; another app's turn card is noise there.
+    if os.environ.get("OMS_RELAY", "1") != "1" or is_harness_child() or is_panel_main():
         return None
     if not (payload.get("session_id") or payload.get("sessionId")):
         return None

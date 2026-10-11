@@ -20786,6 +20786,9 @@ test_turn_relay_crosses_between_claude_and_codex() {
   contains "$out" '[oms relay] codex finished a turn ~0m ago: Codex ran the tests.' ||
     fail "a claude session start must see the codex rollout completion, not a guardian's: $out"
   if contains "$out" 'claude finished'; then fail "an agent never sees its own card: $out"; fi
+  out="$(printf '{"hook_event_name":"SessionStart","session_id":"relay-c3","cwd":"%s"}' "$project" |
+    OMS_PANEL_MAIN_ATTEMPT=att-main OMS_PANEL_SESSION=oms-relay OMS_CODEX_HOME="$d/codex" bash "$ROOT/scripts/resume-hook.sh")"
+  if contains "$out" '[oms relay]'; then fail "a panel main gets no turn relay: $out"; fi
 }
 
 
