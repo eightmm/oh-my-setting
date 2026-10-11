@@ -1408,10 +1408,26 @@ def _dispatch_group_gone(pid):
 def _dispatch_exited(process, identity, reaped=False):
     reaped = reaped or type(process.poll()) is int
     if os.name != "posix":
+        # Windows retains its reaped-child check; session teardown cannot be attested here.
         return reaped
-    import panel_terminals
-    leader_gone = reaped or bool(identity and panel_terminals.process_gone(process.pid, identity))
-    return bool(leader_gone and _dispatch_group_gone(process.pid))
+    leader_gone = reaped or _dispatch_leader_gone(process.pid, identity)
+    return bool(leader_gone and _dispatch_group_gone(process.pid) and _dispatch_session_gone(process.pid))
+
+
+def _dispatch_leader_gone(pid, identity):
+    if type(pid) is not int or pid <= 0:
+        return False
+    if identity:
+        import panel_terminals
+        return panel_terminals.process_gone(pid, identity)
+    # A quick leader may disappear before its start identity can be recorded.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass
+    return False
 
 
 def _dispatch_process_snapshot():
@@ -1442,6 +1458,32 @@ def _dispatch_process_snapshot():
     return rows
 
 
+def _dispatch_session_gone(pid):
+    """A reaped leader's session can outlive both it and its original group."""
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        if sys.platform == "linux":
+            rows = _dispatch_process_snapshot()
+            return bool(rows) and not any(row["session"] == pid for row in rows.values())
+        observed = subprocess.run(["ps", "-e", "-o", "pid="], capture_output=True,
+                                  text=True, timeout=3, check=False)
+        if observed.returncode or not observed.stdout.strip():
+            return False
+        for value in observed.stdout.replace("\r", "").split():
+            child = int(value)
+            if child <= 0:
+                return False
+            try:
+                if os.getsid(child) == pid:
+                    return False
+            except ProcessLookupError:
+                continue
+        return True
+    except (OSError, ValueError, IndexError, KeyError, subprocess.SubprocessError):
+        return False
+
+
 def _dispatch_descendants(pid):
     """Snapshot provider descendants and session members; incomplete observation cannot authorize settlement."""
     if os.name != "posix":
@@ -1457,8 +1499,6 @@ def _dispatch_descendants(pid):
             if observed.returncode:
                 return None
             parents = dict(tuple(map(int, line.split())) for line in observed.stdout.replace("\r", "").splitlines())
-        if pid not in parents:
-            return None
         subtree, remaining = {pid}, set(parents) - {pid}
         # Session members may have been reparented after an intermediate shell exits.
         for child in remaining:
@@ -1493,11 +1533,12 @@ def _observe_dispatch_descendants(process, evidence):
     current = _dispatch_descendants(process.pid)
     if "descendants" not in evidence:
         evidence["descendants"] = current
-    elif current is None or evidence["descendants"] is None:
-        evidence["descendants"] = None
-    else:
-        known = {(row["pid"], row["identity"]): row for row in evidence["descendants"] + current}
-        evidence["descendants"] = list(known.values()) if len(known) <= 256 else None
+    elif current is not None:
+        # Never discard recorded detached children when a later scan fails.
+        if evidence["descendants"] and len(evidence["descendants"]) > 256:
+            return
+        known = {(row["pid"], row["identity"]): row for row in (evidence["descendants"] or []) + current}
+        evidence["descendants"] = list(known.values())
 
 
 def _dispatch_descendants_gone(records):
@@ -1513,6 +1554,14 @@ def _dispatch_descendants_gone(records):
                 or not _dispatch_group_gone(row["group"])):
             return False
     return True
+
+
+def _dispatch_recorded_gone(records):
+    # POSIX session observation supplies missing initial evidence for quick calls.
+    # Windows has no session proof and retains its existing missing-snapshot behavior.
+    if records is None and os.name == "posix":
+        records = []
+    return _dispatch_descendants_gone(records)
 
 
 def _dispatch_call_path(member, exited=False):
@@ -1586,12 +1635,11 @@ def _dispatch_call_finished(repo, room_id, member):
         # A matching receipt binds the outcome to a launch, but cannot attest
         # termination: artifacts may be written directly by another call.
         pending = _dispatch_pending(repo, call)
-        if not _dispatch_descendants_gone(pending["descendants"]):
+        if not _dispatch_recorded_gone(pending["descendants"]):
             return False
-        if call["session"] and call.get("identity"):
-            import panel_terminals
-            return (panel_terminals.process_gone(call["pid"], call["identity"])
-                    and _dispatch_group_gone(call["pid"]))
+        if call["session"]:
+            return (_dispatch_leader_gone(call["pid"], call["identity"])
+                    and _dispatch_group_gone(call["pid"]) and _dispatch_session_gone(call["pid"]))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         pass
     return False
@@ -1638,11 +1686,11 @@ def _stop_dispatch_groups(process, identity, evidence, before_force=None):
     """A reaped session leader can leave foreground and detached provider groups alive."""
     if os.name != "posix":
         return bool(not evidence.get("forced") and _dispatch_exited(process, identity, reaped=True)
-                    and _dispatch_descendants_gone(evidence.get("descendants")))
+                    and _dispatch_recorded_gone(evidence.get("descendants")))
 
     def gone():
         return (_dispatch_exited(process, identity, reaped=True)
-                and _dispatch_descendants_gone(evidence.get("descendants")))
+                and _dispatch_recorded_gone(evidence.get("descendants")))
 
     if gone():
         return True
@@ -1692,7 +1740,7 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
     evidence = evidence if evidence is not None else {}
     if type(process.poll()) is int:
         if (_dispatch_exited(process, identity, reaped=True)
-                and _dispatch_descendants_gone(evidence.get("descendants"))):
+                and _dispatch_recorded_gone(evidence.get("descendants"))):
             return True
         if not term_sent and not interrupted:
             return False
@@ -1709,7 +1757,7 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
         if type(process.poll()) is int:
             return _stop_dispatch_groups(process, identity, evidence, before_force)
         return (_dispatch_exited(process, identity)
-                and _dispatch_descendants_gone(evidence.get("descendants")))
+                and _dispatch_recorded_gone(evidence.get("descendants")))
     except subprocess.TimeoutExpired:
         # The delegate's TERM trap owns worktree cleanup; force only its original session after that grace.
         if os.name == "posix":
@@ -1719,7 +1767,7 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
                     or not panel_terminals.matches(process.pid, identity)):
                 print("OMS call shutdown could not verify the child identity; force-stop skipped.", file=sys.stderr)
                 return (_dispatch_exited(process, identity)
-                        and _dispatch_descendants_gone(evidence.get("descendants")))
+                        and _dispatch_recorded_gone(evidence.get("descendants")))
             try:
                 _observe_dispatch_descendants(process, evidence)
                 evidence["forced"] = True
