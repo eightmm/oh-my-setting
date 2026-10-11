@@ -269,6 +269,12 @@ def show_providers(rows):
 
 
 def repository(value):
+    if value is None:
+        query = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
+        if query.returncode:
+            raise ValueError("oms panel needs a git repository: run it inside one or pass --repo PATH")
+        value = Path(query.stdout.replace("\r", "").rstrip("\n")).resolve(strict=True)
     return state_repository(value)
 
 
@@ -3566,7 +3572,7 @@ def main(argv=None):
         return backend.cli_main(arguments[1:])
 
     parser = argparse.ArgumentParser(description="OMS terminal control panel with registered CLI peers.")
-    parser.add_argument("--repo", default=os.getcwd())
+    parser.add_argument("--repo")
     parser.add_argument("--layout", choices=("auto", "inline", "split"), default="auto")
     parser.add_argument("--host", choices=("auto", "inline", "tmux", "herdr"), default="auto",
                         help="optional terminal host; Herdr requires an existing local POSIX pane")
@@ -3702,9 +3708,9 @@ def main(argv=None):
             if args.brief_file:
                 brief_path = Path(args.brief_file).expanduser()
                 if not brief_path.is_absolute():
-                    brief_path = Path(args.repo).expanduser() / brief_path
+                    brief_path = Path(args.repo if args.repo is not None else os.getcwd()).expanduser() / brief_path
                 _read_dispatch_brief(brief_path)
-            routed_command(ENTRY, args.repo, route, "pending question" if pending else args.prompt,
+            routed_command(ENTRY, args.repo if args.repo is not None else os.getcwd(), route, "pending question" if pending else args.prompt,
                            args.brief_file, args.verify, args.task_id)
         except (ValueError, OSError) as error:
             parser.error(clean(str(error), 160))
@@ -3732,8 +3738,19 @@ def main(argv=None):
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
         parser.error("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
     try:
+        if args.providers:
+            rows = provider_catalog()
+            if args.json:
+                print(json.dumps({"schema": 1, "kind": "oms-panel-providers", "providers": rows,
+                                  "executes": False}, ensure_ascii=False, indent=2))
+            else:
+                show_providers(rows)
+            return 0
+        if args.routes:
+            print(json.dumps(dict(policy(), writers=sorted(WRITERS), kinds=KINDS), indent=2))
+            return 0
         repo = repository(args.repo)
-        requested_worktree = work_repository(args.repo)
+        requested_worktree = work_repository(args.repo if args.repo is not None else os.getcwd())
         if requested_worktree != repo:
             os.environ[EXECUTION_ENV] = str(requested_worktree)
         execution = native_repository(repo)
@@ -3788,17 +3805,6 @@ def main(argv=None):
                 print(json.dumps(report))
             else:
                 print("Started %s main in window %s of room %s" % (report["provider"].capitalize(), report["window"], report["room"]))
-            return 0
-        if args.providers:
-            rows = provider_catalog()
-            if args.json:
-                print(json.dumps({"schema": 1, "kind": "oms-panel-providers", "providers": rows,
-                                  "executes": False}, ensure_ascii=False, indent=2))
-            else:
-                show_providers(rows)
-            return 0
-        if args.routes:
-            print(json.dumps(dict(policy(), writers=sorted(WRITERS), kinds=KINDS), indent=2))
             return 0
         if args.council:
             return council(repo, args.owner, args.task_id, args.label, args.prompt,
@@ -3925,6 +3931,8 @@ def main(argv=None):
         return 130
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print("error: " + clean(str(error), 200), file=sys.stderr)
+        if str(error) == "oms panel needs a git repository: run it inside one or pass --repo PATH":
+            return 2
         return 1
 
 

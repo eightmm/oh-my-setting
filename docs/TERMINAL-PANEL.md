@@ -4,6 +4,7 @@ Run `oms` in a terminal to open the control panel. Native Claude Code or Codex
 keeps the conversation pane; the OMS sidebar shows recorded main, advisor and
 worker activity. `oms --help` and bare `oms` with redirected input/output retain
 command help. The panel uses existing OMS state, authentication and front doors.
+Without `--repo`, the panel resolves the current Git top-level and refuses a non-repository with exit 2; `--providers`, `--routes` and `--help` remain available anywhere, and explicit `--repo PATH` also accepts a non-repository directory.
 Boards of one repository share atomic dashboard and result-query caches in `.oms/hooks/panel-cache`, invalidated by input file stats or five-second expiry, while room selection and terminal reads stay per window. A read that races a state change collects directly instead of failing, and a board or control window whose refresh still fails keeps its last good state with a `State refresh failed; showing data from Ns ago` notice rather than the no-room fallback.
 
 When the first read fails, or a window switches to a room it has not successfully read, the panel says that room state is unavailable and that its work and messages are unknown. It does not show empty-work counts. The control menu remains available for retry and navigation; a later successful read restores the normal board.

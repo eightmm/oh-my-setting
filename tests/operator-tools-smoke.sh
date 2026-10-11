@@ -2198,6 +2198,34 @@ ordinary_root = registry / "ordinary"
 subprocess.run(["git", "-C", str(shared_root), "worktree", "add", "--quiet", "--detach", str(ordinary_root)], check=True)
 plain_directory = temporary / "resolution-non-git"
 plain_directory.mkdir()
+panel_front = ["bash", str(panel.ENTRY), "panel"]
+missing_repo_message = "oms panel needs a git repository: run it inside one or pass --repo PATH"
+for options in ([], ["--watch", "--count", "1"], ["--launch", "codex", "--dry-run"],
+                ["--spawn-main", "codex", "--json"], ["--reopen"]):
+    refused = subprocess.run(panel_front + options, cwd=plain_directory, env=resolver_env,
+                             capture_output=True, text=True, timeout=30)
+    assert refused.returncode == 2 and missing_repo_message in refused.stderr, refused
+assert not list(plain_directory.iterdir())
+for options in (["--providers", "--json"], ["--routes"], ["--help"]):
+    informational = subprocess.run(panel_front + options, cwd=plain_directory, env=selected_env,
+                                   capture_output=True, text=True, timeout=30)
+    assert informational.returncode == 0, informational
+explicit = subprocess.run(panel_front + ["--repo", str(plain_directory), "--dry-run"],
+                          cwd=plain_directory, env=resolver_env, capture_output=True, text=True, timeout=30)
+assert explicit.returncode == 0 and json.loads(explicit.stdout)["repo"] == str(plain_directory), explicit
+ordinary_child = ordinary_root / "nested"
+ordinary_child.mkdir()
+ordinary_alias = temporary / "resolution-ordinary-link"
+ordinary_alias.symlink_to(ordinary_child, target_is_directory=True)
+for directory in (ordinary_child, ordinary_alias):
+    implicit = subprocess.run(panel_front + ["--dry-run"], cwd=directory, env=resolver_env,
+                              capture_output=True, text=True, timeout=30)
+    assert implicit.returncode == 0 and json.loads(implicit.stdout)["repo"] == str(ordinary_root), implicit
+with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
+        [], 0, str(ordinary_alias / "..") + "\r\n", "")), \
+        patch.object(panel, "state_repository", return_value=ordinary_root) as state_resolution:
+    assert panel.repository(None) == ordinary_root
+    assert state_resolution.call_args.args == (ordinary_root,)
 with patch.dict(os.environ, resolver_env, clear=True):
     assert panel.repository(ordinary_root) == ordinary_root
     assert panel.repository(plain_directory) == plain_directory
