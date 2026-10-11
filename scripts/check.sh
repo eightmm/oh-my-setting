@@ -290,7 +290,12 @@ if [ "$PARALLEL" = 1 ]; then
     # shellcheck source=scripts/lib/check-parallel.sh
     . "$ROOT/scripts/lib/check-parallel.sh"
     oms_check_parallel "$ROOT/scripts/check.sh" "$CHECK_RUNTIME/parallel" "$SKIP_LINT"
-    echo "check: ok (parallel complete gate)"
+    # A skipped stage is not the complete gate; oms land installs only on the exact full markers.
+    if [ "$SKIP_LINT" = 1 ]; then
+      echo "check: ok (parallel gate without lint)"
+    else
+      echo "check: ok (parallel complete gate)"
+    fi
     exit 0
   fi
 fi
@@ -948,6 +953,8 @@ case "$MODE" in
   focused) echo "check: ok (focused only)" ;;
   scripts-smoke) echo "check: ok (scripts-smoke only)" ;;
   quick) echo "check: ok (quick local checks; full CI gate required)" ;;
-  affected) echo "check: ok (affected tests; mode=$AFFECTED_MODE)" ;;
-  *) echo "check: ok" ;;
+  affected)
+    if [ "$SKIP_LINT" = 1 ]; then echo "check: ok (affected tests; mode=$AFFECTED_MODE; without lint)"
+    else echo "check: ok (affected tests; mode=$AFFECTED_MODE)"; fi ;;
+  *) if [ "$SKIP_LINT" = 1 ]; then echo "check: ok (without lint)"; else echo "check: ok"; fi ;;
 esac

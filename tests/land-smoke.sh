@@ -698,6 +698,12 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
   "$LAND" --repo "$repo" --gate 'bash scripts/check.sh --quick' --wait --ci-wait 1 > "$TMP/quick-pass.out" 2>&1 ||
   fail "a quick gate failed to land: $(cat "$TMP/quick-pass.out")"
 [ "$(cat "$TMP/events")" = ci ] || fail "a gate without full proof must not install"
+gate 'echo "check: ok (parallel gate without lint)"'
+: > "$TMP/events"
+OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --gate 'bash scripts/check.sh --parallel --no-lint' --wait --ci-wait 1 > "$TMP/no-lint.out" 2>&1 ||
+  fail "a no-lint gate failed to land: $(cat "$TMP/no-lint.out")"
+[ "$(cat "$TMP/events")" = ci ] || fail "a gate that skipped lint must not install"
 
 # Probe the real job function with deterministic wait/push interleavings.
 # Git is stubbed: this cannot publish or mutate the caller's repository.
