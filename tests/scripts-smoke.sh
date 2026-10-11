@@ -28655,6 +28655,8 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
     local extra="$TMP/guard-read-extra" action changed
     make_live_managed_sibling "$project" "${linked_source%/wt}"
     git -C "$linked_source" checkout -qb oms/read-source
+    # Read by the sourced read-guard helpers.
+    # shellcheck disable=SC2034
     OMS_DELEGATE_WORKTREE_ROOT="$managed_root"
     MA_READ_SOURCE_REPO="$linked_source"
     for strict in 0 1; do

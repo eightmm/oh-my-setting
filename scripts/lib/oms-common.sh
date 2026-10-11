@@ -385,7 +385,7 @@ def index_signature(data, oid_size):
         size, = struct.unpack(">I", data[at + 4:at + 8])
         if at + 8 + size > end:
             return None
-        # TREE stays in: a forged cache-tree would become the owner's next commit tree.
+        # TREE stays in: a forged cache-tree would become the next commit tree of the owner.
         if name not in (b"UNTR", b"FSMN", b"EOIE", b"IEOT"):
             digest.update(name + struct.pack(">I", size) + data[at + 8:at + 8 + size])
         at += 8 + size
