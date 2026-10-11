@@ -1169,18 +1169,13 @@ def moved_main(repo, owner, env):
 
 def scope_overlaps(repo, room_id, state, caller, scopes):
     """Other mains' and live write calls' declared scopes that overlap these; coordination, not a lock."""
-    calls = [p for p in state["participants"] if p["joined"] and p.get("parent") and p.get("owns")]
-    history = main_history(repo, room_id) if calls else []
     found = []
     for other in state["participants"]:
         if not other["joined"] or other["participant"] == caller or not other.get("owns"):
             continue
         if other.get("parent"):
-            # A handoff is a declaration; only lifecycle or process exit evidence releases a write scope.
-            rows = [row for row in history if row.get("refs", {}).get("panel_room_participant") == other["participant"]
-                    and row.get("refs", {}).get("panel_role") == other["role"]]
-            if (rows and all(row.get("terminal") is True for row in rows)
-                    or _dispatch_call_finished(repo, room_id, other)):
+            # Terminal attempts describe outcomes, not the lifetime of provider descendants.
+            if _dispatch_call_finished(repo, room_id, other):
                 continue
         elif other["role"] != "main":
             continue
@@ -1610,6 +1605,26 @@ def _dispatch_call_record(repo, room_id, member):
         return None
 
 
+# Repository artifacts cannot authenticate an observation from another controller.
+# Keep only this controller's exact successful writes; restart/recovery stays reserved.
+_DISPATCH_OBSERVATIONS = {}
+
+
+def _record_dispatch_pending(repo, call, status, task_id, evidence):
+    pending = dict(call, exit=status, task_id=task_id, forced=bool(evidence.get("forced")),
+                   descendants=evidence.get("descendants"))
+    _write(repo, _dispatch_pending_path(call["participant"]), pending)
+    key = (str(Path(repo).resolve()), call["participant"])
+    _DISPATCH_OBSERVATIONS[key] = json.dumps(pending, sort_keys=True, allow_nan=False)
+    if len(_DISPATCH_OBSERVATIONS) > 2048:
+        del _DISPATCH_OBSERVATIONS[next(iter(_DISPATCH_OBSERVATIONS))]
+
+
+def _dispatch_pending_observed(repo, pending):
+    key = (str(Path(repo).resolve()), pending["participant"])
+    return _DISPATCH_OBSERVATIONS.get(key) == json.dumps(pending, sort_keys=True, allow_nan=False)
+
+
 def _dispatch_pending(repo, call):
     pending = json.loads(_read(repo, _dispatch_pending_path(call["participant"]), 65536, missing=True))
     if (not isinstance(pending, dict) or set(pending) != set(call) | {"exit", "task_id", "forced", "descendants"}
@@ -1635,7 +1650,8 @@ def _dispatch_call_finished(repo, room_id, member):
         # A matching receipt binds the outcome to a launch, but cannot attest
         # termination: artifacts may be written directly by another call.
         pending = _dispatch_pending(repo, call)
-        if not _dispatch_recorded_gone(pending["descendants"]):
+        if (not _dispatch_pending_observed(repo, pending)
+                or not _dispatch_recorded_gone(pending["descendants"])):
             return False
         if call["session"]:
             return (_dispatch_leader_gone(call["pid"], call["identity"])
@@ -1682,14 +1698,30 @@ def _dispatch_before_force(before_force):
             print("OMS call pending record unavailable; continuing force-stop.", file=sys.stderr)
 
 
-def _stop_dispatch_groups(process, identity, evidence, before_force=None):
+def _observe_dispatch_session(process, identity, evidence):
+    if (os.name != "posix" or type(process.pid) is not int or process.pid <= 0
+            or process.pid in {os.getpid(), os.getpgrp()} or not identity):
+        return
+    import panel_terminals
+    current = panel_terminals.process(process.pid)
+    try:
+        if (current and current["group"] == process.pid
+                and panel_terminals.matches(process.pid, identity) and os.getsid(process.pid) == process.pid):
+            evidence["session_leader"] = (process.pid, identity)
+    except ProcessLookupError:
+        pass
+
+
+def _stop_dispatch_groups(process, identity, evidence, before_force=None, reaped=True):
     """A reaped session leader can leave foreground and detached provider groups alive."""
     if os.name != "posix":
-        return bool(not evidence.get("forced") and _dispatch_exited(process, identity, reaped=True)
+        return bool(not evidence.get("forced") and _dispatch_exited(process, identity, reaped=reaped)
                     and _dispatch_recorded_gone(evidence.get("descendants")))
+    if type(process.pid) is not int or process.pid <= 0 or process.pid == os.getpid():
+        return False
 
     def gone():
-        return (_dispatch_exited(process, identity, reaped=True)
+        return (_dispatch_exited(process, identity, reaped=reaped)
                 and _dispatch_recorded_gone(evidence.get("descendants")))
 
     if gone():
@@ -1697,34 +1729,50 @@ def _stop_dispatch_groups(process, identity, evidence, before_force=None):
     import panel_terminals
 
     def signal_groups(number):
-        groups = set()
-        # start_new_session made this child both session and group leader;
-        # its group remains ours while it exists, even after the child is reaped.
-        if not _dispatch_group_gone(process.pid):
+        groups, pids = set(), []
+        caller_group = os.getpgrp()
+        current = panel_terminals.process(process.pid)
+        owns_session = (bool(identity) and evidence.get("session_leader") == (process.pid, identity)
+                        and (current is None or current.get("identity") == identity))
+        # A dead leader cannot supply fresh session proof. Use the identity
+        # recorded while it was alive, and never target the caller's group.
+        if owns_session and process.pid != caller_group and not _dispatch_group_gone(process.pid):
             groups.add(process.pid)
         records = evidence.get("descendants")
         if isinstance(records, list) and len(records) <= 256:
             for row in records:
                 if (isinstance(row, dict) and set(row) == {"pid", "identity", "group"}
-                        and type(row["pid"]) is int and row["pid"] > 0
+                        and type(row["pid"]) is int and row["pid"] > 0 and row["pid"] != os.getpid()
                         and type(row["group"]) is int and row["group"] > 0
                         and isinstance(row["identity"], str) and row["identity"]
                         and panel_terminals.matches(row["pid"], row["identity"])):
                     try:
                         if os.getpgid(row["pid"]) == row["group"]:
-                            groups.add(row["group"])
+                            session = os.getsid(row["pid"])
+                            if (row["group"] != caller_group
+                                    and (owns_session and session == process.pid
+                                         or row["group"] == row["pid"] == session)):
+                                groups.add(row["group"])
+                            else:
+                                pids.append(row)
                     except ProcessLookupError:
                         pass
+        if (groups or pids) and not evidence.get("forced"):
+            evidence["forced"] = True
+            _dispatch_before_force(before_force)
         for group in groups:
             try:
                 os.killpg(group, number)
             except ProcessLookupError:
                 pass
-        return bool(groups)
+        for row in pids:
+            if row["group"] not in groups and panel_terminals.matches(row["pid"], row["identity"]):
+                try:
+                    os.kill(row["pid"], number)
+                except ProcessLookupError:
+                    pass
+        return bool(groups or pids)
 
-    if not evidence.get("forced"):
-        evidence["forced"] = True
-        _dispatch_before_force(before_force)
     for number, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 1)):
         if not signal_groups(number):
             return gone()
@@ -1738,6 +1786,9 @@ def _stop_dispatch_groups(process, identity, evidence, before_force=None):
 
 def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_force=None, interrupted=False):
     evidence = evidence if evidence is not None else {}
+    if type(process.pid) is not int or process.pid <= 0 or process.pid == os.getpid():
+        return False
+    _observe_dispatch_session(process, identity, evidence)
     if type(process.poll()) is int:
         if (_dispatch_exited(process, identity, reaped=True)
                 and _dispatch_recorded_gone(evidence.get("descendants"))):
@@ -1764,10 +1815,11 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
             import panel_terminals
             current = panel_terminals.process(process.pid)
             if (not identity or not current or current["group"] != process.pid
+                    or evidence.get("session_leader") != (process.pid, identity)
+                    or process.pid == os.getpgrp()
                     or not panel_terminals.matches(process.pid, identity)):
                 print("OMS call shutdown could not verify the child identity; force-stop skipped.", file=sys.stderr)
-                return (_dispatch_exited(process, identity)
-                        and _dispatch_recorded_gone(evidence.get("descendants")))
+                return _stop_dispatch_groups(process, identity, evidence, before_force, reaped=False)
             try:
                 _observe_dispatch_descendants(process, evidence)
                 evidence["forced"] = True
@@ -1960,8 +2012,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             call = _dispatch_call_record(repo, room_id, {"participant": member, "parent": caller})
             if not call:
                 raise ValueError("dispatch process record unavailable")
-            _write(repo, _dispatch_pending_path(member), dict(call, exit=status, task_id=task_id,
-                   forced=bool(evidence.get("forced")), descendants=evidence.get("descendants")))
+            _record_dispatch_pending(repo, call, status, task_id, evidence)
 
     def interrupt(signum, frame):
         nonlocal term_sent
@@ -1991,6 +2042,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             import panel_terminals
             current = panel_terminals.process(process.pid)
             identity = current["identity"] if current else None
+            _observe_dispatch_session(process, identity, evidence)
         if member:
             try:
                 _record_dispatch_call(repo, room_id, member, caller, process, identity)

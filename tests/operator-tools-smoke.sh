@@ -4583,6 +4583,16 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
     if os.name != "posix":
         return
     import panel_terminals
+    # PID zero is a process-group selector, not a child identity (argv-observer
+    # uses that sentinel). Never let an invalid or self PID reach signal APIs.
+    for pid in (0, -1, os.getpid()):
+        invalid = Mock(pid=pid, poll=lambda: 0)
+        with patch.object(panel.os, "killpg") as groups, patch.object(panel.os, "kill") as pids:
+            assert panel._stop_dispatch(invalid, None) is False
+            assert panel._stop_dispatch_groups(invalid, None, {}) is False
+        groups.assert_not_called()
+        pids.assert_not_called()
+        invalid.terminate.assert_not_called()
     # BEGIN receipt-only scope regression (also runnable as an isolated case).
     receipt_member = "call-" + "e" * 16
     room.join(project, shared, receipt_member, "codex", "worker", parent=room_owner)
@@ -4595,8 +4605,8 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
         panel._record_dispatch_call(project, shared, receipt_member, room_owner, receipt_child, receipt_identity)
         launch = panel._dispatch_call_record(project, shared, receipt_row)
         pending_path = project / panel._dispatch_pending_path(receipt_member)
-        pending_path.write_text(json.dumps(dict(launch, exit=0, task_id="receipt-fixture", forced=False,
-                                              descendants=panel._dispatch_descendants(receipt_child.pid))))
+        panel._record_dispatch_pending(project, launch, 0, "receipt-fixture",
+                                       {"descendants": panel._dispatch_descendants(receipt_child.pid)})
         # Even a correctly bound receipt written for the live launch is insufficient.
         panel._record_dispatch_call(project, shared, receipt_member, room_owner, receipt_child, receipt_identity, 0)
         with patch.object(panel, "main_history", return_value=[]):
@@ -4606,6 +4616,11 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
     finally:
         receipt_child.terminate()
         receipt_child.wait(timeout=5)
+    with patch.object(panel, "main_history", return_value=[{
+            "terminal": True, "refs": {"panel_role": "worker", "panel_room_participant": receipt_member}}]), \
+            patch.object(panel, "_dispatch_call_finished", return_value=False):
+        assert any(row["participant"] == receipt_member for row in panel.scope_overlaps(
+            project, shared, receipt_state, room_owner, ["value.txt"])), "terminal attempt released unverified scope"
     receipt_path = project / panel._dispatch_call_path(receipt_member, True)
     receipt_bytes = receipt_path.read_bytes()
     receipt = json.loads(receipt_bytes)
@@ -4623,25 +4638,30 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
     receipt_path.write_bytes(receipt_bytes)
     launch = panel._dispatch_call_record(project, shared, receipt_row)
     pending_path = project / panel._dispatch_pending_path(receipt_member)
-    pending_path.write_text(json.dumps(dict(launch, exit=143, task_id="receipt-fixture", forced=True,
-                                          descendants=[{"pid": 2147483646, "identity": "detached", "group": 2147483646}])))
+    pending_path.unlink()
+    panel._record_dispatch_pending(project, launch, 143, "receipt-fixture",
+        {"forced": True, "descendants": [{"pid": 2147483646, "identity": "detached", "group": 2147483646}]})
     with patch.object(panel_terminals, "process_gone", side_effect=lambda pid, identity: pid == receipt_child.pid), \
             patch.object(panel, "_dispatch_group_gone", return_value=True):
         assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt bypassed a surviving descendant"
     with patch.object(panel_terminals, "process_gone", return_value=True), \
             patch.object(panel, "_dispatch_group_gone", return_value=True):
         assert panel._dispatch_call_finished(project, shared, receipt_row), "gone descendants kept scope"
+    trusted_pending = pending_path.read_bytes()
     for descendants in (None, []):
         pending_path.write_text(json.dumps(dict(launch, exit=143, task_id="receipt-fixture",
                                               forced=False, descendants=descendants)))
-        assert panel._dispatch_call_finished(project, shared, receipt_row), "empty session did not supply observation"
-        with patch.object(panel, "_dispatch_session_gone", return_value=False):
-            assert not panel._dispatch_call_finished(project, shared, receipt_row), "surviving/unreadable session released scope"
-    pending_path.write_text(json.dumps(dict(launch, exit=143, task_id="receipt-fixture",
-                                          forced=True, descendants=None)))
-    assert panel._dispatch_call_finished(project, shared, receipt_row), "forced empty session did not supply observation"
-    with patch.object(panel, "_dispatch_session_gone", return_value=False):
-        assert not panel._dispatch_call_finished(project, shared, receipt_row), "forced unreadable session released scope"
+        assert not panel._dispatch_call_finished(project, shared, receipt_row), "forged empty observation released scope"
+    # A newly created sibling pending artifact has no controller provenance either.
+    pending_path.write_text(json.dumps(dict(launch, exit=143, task_id="receipt-fixture", forced=True, descendants=[])))
+    with patch.object(panel, "_DISPATCH_OBSERVATIONS", {}):
+        assert not panel._dispatch_call_finished(project, shared, receipt_row), "new sibling pending artifact released scope"
+    pending_path.write_bytes(trusted_pending)
+    assert panel._dispatch_call_finished(project, shared, receipt_row), "authentic gone descendants kept scope"
+    with patch.object(panel, "_DISPATCH_OBSERVATIONS", {}):
+        assert not panel._dispatch_call_finished(project, shared, receipt_row), "restart trusted repository evidence"
+        assert any(row["participant"] == receipt_member for row in panel.scope_overlaps(
+            project, shared, receipt_state, room_owner, ["value.txt"])), "restart released unverified scope"
     pending_path.write_text("{}")
     assert not panel._dispatch_call_finished(project, shared, receipt_row), "receipt bypassed invalid pending evidence"
     pending_path.unlink()
@@ -4658,7 +4678,7 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
     launch_path.write_bytes(launch_bytes)
     receipt_path.unlink()
     assert not panel._dispatch_call_finished(project, shared, receipt_row), "missing observation released scope"
-    pending_path.write_text(json.dumps(dict(launch, exit=0, task_id="receipt-fixture", forced=False, descendants=[])))
+    panel._record_dispatch_pending(project, launch, 0, "receipt-fixture", {"descendants": []})
     assert panel._dispatch_call_finished(project, shared, receipt_row), "independent exit evidence required a receipt"
     receipt_path.write_bytes(receipt_bytes)
     room.append(project, shared, {"kind": "leave", "participant": receipt_member}, "Receipt fixture complete")
@@ -4987,36 +5007,52 @@ child = subprocess.Popen([sys.executable, "-c", "import signal,time; signal.sign
 Path(sys.argv[1]).write_text(json.dumps([os.getpid(), child.pid]))
 time.sleep(60)
 ''')
-    advisor = subprocess.Popen(["bash", "-c", "trap ':' EXIT; \"$@\"", "advisor",
-                                sys.executable, str(advisor_child), str(advisor_pids)], start_new_session=True)
-    advisor_records = []
+    parent_group = os.getpgrp()
+    parent_identity = panel_terminals.process(os.getpid())["identity"]
+    real_killpg = os.killpg
+    def owned_killpg(group, number):
+        assert type(group) is int and group > 0 and (number == 0 or group != parent_group), "teardown targeted caller group"
+        return real_killpg(group, number)
+    sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
-        deadline = time.monotonic() + 5
-        while not advisor_pids.exists() and advisor.poll() is None and time.monotonic() < deadline:
-            time.sleep(.02)
-        child_pids = json.loads(advisor_pids.read_text())
-        advisor_identity = panel_terminals.process(advisor.pid)["identity"]
-        advisor_records = panel._dispatch_descendants(advisor.pid)
-        assert advisor_records and {row["pid"] for row in advisor_records} >= set(child_pids), advisor_records
-        evidence = {"descendants": advisor_records}
-        advisor.terminate()
-        advisor.wait(timeout=5)
-        before_force = Mock(side_effect=ValueError("dispatch process record unavailable"))
-        with redirect_stderr(io.StringIO()) as notices:
-            verified = panel._stop_dispatch(advisor, advisor_identity, term_sent=True,
-                                            evidence=evidence, before_force=before_force)
-        before_force.assert_called_once_with()
-        assert "pending record unavailable" in notices.getvalue()
-        assert all(not panel_terminals.matches(row["pid"], row["identity"]) for row in advisor_records), "advisor subtree survived"
-        assert verified == (panel._dispatch_group_gone(advisor.pid)
-                            and panel._dispatch_descendants_gone(advisor_records)), "unverified advisor exit settled"
+        for shares_group in (False, True):
+            advisor_pids = temporary / ("advisor-subtree-%s.json" % shares_group)
+            advisor = subprocess.Popen(["bash", "-c", "trap ':' EXIT; \"$@\"", "advisor",
+                                        sys.executable, str(advisor_child), str(advisor_pids)], start_new_session=not shares_group)
+            advisor_records = []
+            try:
+                deadline = time.monotonic() + 5
+                while not advisor_pids.exists() and advisor.poll() is None and time.monotonic() < deadline:
+                    time.sleep(.02)
+                child_pids = json.loads(advisor_pids.read_text())
+                advisor_identity = panel_terminals.process(advisor.pid)["identity"]
+                advisor_records = panel._dispatch_descendants(advisor.pid)
+                assert advisor_records and {row["pid"] for row in advisor_records} >= set(child_pids), advisor_records
+                evidence = {"descendants": advisor_records}
+                panel._observe_dispatch_session(advisor, advisor_identity, evidence)
+                advisor.terminate()
+                advisor.wait(timeout=5)
+                before_force = Mock(side_effect=ValueError("dispatch process record unavailable"))
+                with patch.object(panel.os, "killpg", side_effect=owned_killpg), redirect_stderr(io.StringIO()) as notices:
+                    verified = panel._stop_dispatch(advisor, advisor_identity, term_sent=True,
+                                                    evidence=evidence, before_force=before_force)
+                before_force.assert_called_once_with()
+                assert "pending record unavailable" in notices.getvalue()
+                assert panel_terminals.matches(os.getpid(), parent_identity) and os.getpgrp() == parent_group, "advisor teardown reached parent"
+                assert sentinel.poll() is None, "advisor teardown killed caller-group sibling"
+                assert all(not panel_terminals.matches(row["pid"], row["identity"]) for row in advisor_records), "advisor subtree survived"
+                assert verified == (panel._dispatch_group_gone(advisor.pid)
+                                    and panel._dispatch_descendants_gone(advisor_records)), "unverified advisor exit settled"
+            finally:
+                for row in advisor_records:
+                    if panel_terminals.matches(row["pid"], row["identity"]):
+                        os.kill(row["pid"], signal.SIGKILL)
+                if advisor.poll() is None:
+                    advisor.kill()
+                advisor.wait(timeout=5)
     finally:
-        for row in advisor_records:
-            if panel_terminals.matches(row["pid"], row["identity"]):
-                os.killpg(row["group"], signal.SIGKILL)
-        if advisor.poll() is None:
-            advisor.kill()
-        advisor.wait(timeout=5)
+        sentinel.terminate()
+        sentinel.wait(timeout=5)
     # Pending-record failures must not leave a TERM-resistant child running.
     for failure in (ValueError, OSError):
         ready = temporary / ("force-ready-" + failure.__name__)
@@ -5076,6 +5112,8 @@ time.sleep(60)
         stopped.wait.side_effect = [subprocess.TimeoutExpired("fixture", 20), 0]
         with patch.object(panel, "_dispatch_descendants", return_value=descendants), \
                 patch.object(panel_terminals, "process", return_value={"group": 123}), \
+                patch.object(panel.os, "getsid", return_value=123), \
+                patch.object(panel.os, "getpgrp", return_value=999), \
                 patch.object(panel_terminals, "matches", return_value=identity_matches), \
                 patch.object(panel_terminals, "process_gone", return_value=False), \
                 patch.object(panel, "_dispatch_group_gone", return_value=True), \
@@ -5100,6 +5138,9 @@ time.sleep(60)
         stopped.wait.return_value = -signal.SIGTERM
         provider = {"pid": 456, "identity": "provider-identity", "group": 456}
         with patch.object(panel, "_dispatch_descendants", return_value=[provider]), \
+                patch.object(panel_terminals, "process", return_value=None), \
+                patch.object(panel.os, "getsid", return_value=456), \
+                patch.object(panel.os, "getpgrp", return_value=999), \
                 patch.object(panel_terminals, "matches", return_value=descendant_matches), \
                 patch.object(panel_terminals, "process_gone", return_value=False), \
                 patch.object(panel, "_dispatch_group_gone", return_value=False), \
@@ -5107,7 +5148,9 @@ time.sleep(60)
                 patch.object(panel.time, "monotonic", side_effect=range(0, 100, 6)), \
                 patch.object(panel, "_dispatch_session_gone", return_value=True), \
                 patch.object(panel.os, "killpg") as force:
-            evidence = {"descendants": [provider]} if already_reaped else {}
+            evidence = {"session_leader": (123, "original-identity")}
+            if already_reaped:
+                evidence["descendants"] = [provider]
             assert panel._stop_dispatch(stopped, "original-identity", evidence=evidence, interrupted=True) is False
         expected = {(123, signal.SIGTERM), (123, signal.SIGKILL)}
         if descendant_matches and current_group == 456:
@@ -5159,6 +5202,8 @@ time.sleep(60)
                 patch.object(panel.time, "monotonic", side_effect=range(0, 100, 6)), \
                 patch.object(panel, "_dispatch_session_gone", return_value=scenario != "normal-unobserved"), \
                 patch.object(panel.os, "getpgid", side_effect=lambda pid: pid), \
+                patch.object(panel.os, "getsid", side_effect=lambda pid: pid), \
+                patch.object(panel.os, "getpgrp", return_value=999), \
                 patch.object(panel.os, "killpg") as force, redirect_stderr(io.StringIO()) as notices:
             try:
                 status = panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
@@ -6641,7 +6686,8 @@ scoped_dispatch = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", s
 assert scoped_dispatch.returncode == 0, scoped_dispatch
 scoped_plan = json.loads(scoped_dispatch.stdout)
 assert sorted((o["participant"], o["scope"]) for o in scoped_plan["overlaps"]) == sorted(
-    [(other_main, "scripts/lib/room.py"), ("scope-live", "scripts")]), scoped_plan
+    [(other_main, "scripts/lib/room.py"), ("scope-live", "scripts"),
+     ("scope-done", "scripts/lib/panel_view.py")]), scoped_plan
 assert scoped_dispatch.stderr.count("Scope overlap") == 1 and other_main in scoped_dispatch.stderr, scoped_dispatch.stderr
 assert room.records(project, shared) == scope_before_preview, "scope preview changed the room"
 unscoped = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared, "--dispatch", "worker",
