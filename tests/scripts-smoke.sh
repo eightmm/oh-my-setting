@@ -8425,19 +8425,75 @@ EOF
     fail "an unsafe session id must be rejected"
   fi
 
-  # A newer copy of the session wins over the original; links never copy.
   local projects="$home_dir/.claude/projects" outside="$TMP/delegate-resume-outside"
   mkdir -p "$projects/-newer-worktree"
-  printf 'round2\n' > "$projects/-newer-worktree/$session.jsonl"
-  touch -t 202001010000 "$projects/-old-worktree/$session.jsonl"
   resume_for_test() {
     : > "$log"
     HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
       FIXTURE_LOG="$log" FIXTURE_SESSION="$session" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
       "$ROOT/scripts/peer-delegate.sh" --to claude --repo "$project" \
       --artifact-dir "$project/artifacts" --no-verify --resume-session "$session" \
-      --prompt p >/dev/null 2>&1
+      --prompt p >"$log.out" 2>"$log.err"
   }
+  next_tied_mtime_ns() {
+    python3 - "$projects" "$session" <<'PY' | tr -d '\r'
+import os, stat, sys
+projects, session = sys.argv[1:3]
+times = []
+for name in os.listdir(projects):
+    path = os.path.join(projects, name, session + ".jsonl")
+    try:
+        st = os.lstat(path)
+    except OSError:
+        continue
+    if stat.S_ISREG(st.st_mode):
+        times.append(st.st_mtime_ns)
+print(max(times) + 1000000000)
+PY
+  }
+  set_resume_copy_mtime() {
+    local name="$1" body="$2" mtime_ns="$3"
+    mkdir -p "$projects/$name"
+    python3 - "$projects/$name/$session.jsonl" "$body" "$mtime_ns" <<'PY'
+import os, sys
+path, body, mtime_ns = sys.argv[1:4]
+with open(path, "wb") as f:
+    f.write(body.encode())
+timestamp = int(mtime_ns)
+os.utime(path, ns=(timestamp, timestamp))
+PY
+  }
+
+  local tie_ns
+  tie_ns="$(next_tied_mtime_ns)"
+  set_resume_copy_mtime -tie-a A "$tie_ns"
+  set_resume_copy_mtime -tie-b B "$tie_ns"
+  set_resume_copy_mtime -tie-c B "$tie_ns"
+  if resume_for_test; then fail "differing newest tied copies must be rejected"; fi
+  grep -q 'error: ambiguous claude session .*newest copies share a timestamp' "$log.err" ||
+    fail "tied-copy rejection did not report the expected ambiguity"
+  [ ! -s "$log" ] || fail "ambiguous tied copies must be rejected before invoking Claude"
+
+  tie_ns="$(next_tied_mtime_ns)"
+  set_resume_copy_mtime -tie-a A "$tie_ns"
+  set_resume_copy_mtime -tie-b A "$tie_ns"
+  set_resume_copy_mtime -tie-c A "$tie_ns"
+  resume_for_test || fail "three identical newest tied copies should resume"
+  assert_file_contains "$log" "session-body: A"
+
+  tie_ns="$(next_tied_mtime_ns)"
+  set_resume_copy_mtime -tie-a C "$tie_ns"
+  set_resume_copy_mtime -tie-b C "$tie_ns"
+  set_resume_copy_mtime -tie-c C "$tie_ns"
+  set_resume_copy_mtime -tie-older distinct "$((tie_ns - 1))"
+  resume_for_test || fail "a differing older copy must not make identical newest copies ambiguous"
+  assert_file_contains "$log" "session-body: C"
+
+  rm -rf "$projects/-tie-a" "$projects/-tie-b" "$projects/-tie-c" "$projects/-tie-older"
+
+  # A newer copy of the session wins over the original; links never copy.
+  printf 'round2\n' > "$projects/-newer-worktree/$session.jsonl"
+  touch -t 202001010000 "$projects/-old-worktree/$session.jsonl"
   resume_for_test || fail "resume with two copies failed"
   assert_file_contains "$log" "session-body: round2"
   rm -f "$projects/-newer-worktree/$session.jsonl"
@@ -14999,9 +15055,39 @@ test_agent_role_and_delegate_injection() {
     fail "agent-role list should include bundled decision-advisor"
   printf '%s\n' "$roles" | grep -Fxq repo-auditor ||
     fail "agent-role list should include bundled repo-auditor"
+  printf '%s' "$roles" | grep -Fxq researcher ||
+    fail "agent-role list should include bundled researcher"
   [ "$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
     "$ROOT/scripts/agent-role.sh" --name decision-advisor resolve)" = "$ROOT/roles/decision-advisor.md" ] ||
     fail "agent-role should fall back to bundled roles"
+  local role
+  for role in builder refactorer reviewer architect advisor critic security-auditor \
+      verifier integrator performance-engineer documenter release-engineer; do
+    printf '%s\n' "$roles" | grep -Fxq "$role" ||
+      fail "agent-role list should include bundled $role"
+    [ "$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
+      "$ROOT/scripts/agent-role.sh" --name "$role" resolve)" = "$ROOT/roles/$role.md" ] ||
+      fail "agent-role should resolve bundled $role"
+    assert_file_contains "$ROOT/roles/$role.md" \
+      'Do not delegate recursively or grant new authority.'
+  done
+  assert_file_contains "$ROOT/roles/reviewer.md" \
+    'Use before acceptance in a separate context from the implementer.'
+  assert_file_contains "$ROOT/roles/reviewer.md" 'Read-only.'
+  assert_file_contains "$ROOT/roles/reviewer.md" 'Do not edit, apply patches or accept your own implementation.'
+
+  # Dry-run checks brief selection for one reusable session; no provider runs.
+  for role in builder refactorer; do
+    ( cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
+      OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+        --to codex --resume-session role-session-123 --role "$role" \
+        --artifact-dir "$empty_project/$role-arts" --prompt "bounded $role task" \
+        >/dev/null 2>&1 ) || fail "reusable session should accept the $role brief"
+    assert_one_artifact_contains "$empty_project/$role-arts" 'codex-*.md' \
+      "$(printf '%s' "$role" | tr '[:lower:]' '[:upper:]')-STRATEGY"
+    assert_one_artifact_contains "$empty_project/$role-arts" 'codex-*.md' \
+      'DRY RUN: worker command skipped.'
+  done
   mkdir -p "$TMP/global-roles" "$empty_project/.oms/roles"
   printf 'GLOBAL-ADVISOR\n' > "$TMP/global-roles/decision-advisor.md"
   [ "$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/global-roles" \

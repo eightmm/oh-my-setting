@@ -6,12 +6,15 @@ worker activity. `oms --help` and bare `oms` with redirected input/output retain
 command help. The panel uses existing OMS state, authentication and front doors.
 Boards of one repository share atomic dashboard and result-query caches in `.oms/hooks/panel-cache`, invalidated by input file stats or five-second expiry, while room selection and terminal reads stay per window. A read that races a state change collects directly instead of failing, and a board or control window whose refresh still fails keeps its last good state with a `State refresh failed; showing data from Ns ago` notice rather than the no-room fallback.
 
+When the first read fails, or a window switches to a room it has not successfully read, the panel says that room state is unavailable and that its work and messages are unknown. It does not show empty-work counts. The control menu remains available for retry and navigation; a later successful read restores the normal board.
+
 ## Quick start
 
 1. Run `oms` in a terminal: window 0 is the control window, an inbox for you.
-2. A new panel opens one main window per installed provider at once and selects the
-   first; `OMS_PANEL_MAINS=claude` (comma list, empty for none) chooses them. Add
-   another main from the control window with `1` (Codex) or `2` (Claude), no Enter.
+2. A new panel opens one main, preferring Claude Code, then Pi, then Codex when installed.
+   `OMS_PANEL_MAINS=pi` selects Pi; a legacy comma list is fallback order and opens at most one,
+   while an empty value opens only controls. In controls, `1` starts Claude, `2` Pi, and `0` Codex.
+   Finish the current main before starting a replacement. Existing sessions are preserved.
 3. Panel-wide keys are F-keys only: `F6`/`F7` step between mains, `F9` swaps focus between a main's chat and its board, `F5` opens the control window, `F12` shows the panel keys (`?` on a board lists the board keys); `Ctrl-b d` detaches.
 4. The control window's **Needs you** lists failed or timed-out calls, calls and mains
    waiting for approval or input, broadcasts from mains and patches awaiting admission.
@@ -46,27 +49,52 @@ oms panel --repo . --room team --open-chat sol-main --chat-surface app --dry-run
 oms panel --repo . --council --owner codex --task-id ID --label 'Decision' --prompt 'Compare options' --dry-run
 ```
 
-## Starting more mains
+## Starting the sole main
 
-The last row of every board (graph and tree) reads `[+ Codex main]  [+ Claude main]`
-for the installed CLIs. A click, or `n` then `1` (Codex) or `2` (Claude), adds a main window
-to this panel and room without leaving the current window; the board answers
-"Started Claude main in window 4". The start runs beside the board, and a second request
-while one is starting is ignored. Boards outside tmux show the row disabled with the reason.
+Panel mains carry the assigned goal through worker recovery, result inspection,
+integration, required checks and owner finalization. A worker's exit or review
+handoff is an intermediate step. The main continues actionable work within the
+user's scope, or records a concrete blocker and the next action. Publication
+still requires the user's authority; a local result can be completed first.
 
-A main starts another one from its shell, without a terminal:
+Use the shared `OMS_ROOM_REPO` for plan and result records when editing elsewhere.
+An owner result saved with `--finalize --outcome completed --verify COMMAND`
+binds to the current plan and task. Plan displays **completed locally** for a
+matching passing result, including one recorded outside a panel session, while
+retaining the plan's review/acceptance state. Changed task generations, replaced
+plans, modified evidence and a later unverified result invalidate that display.
+Historical results without the binding remain available in Results. After an
+authorized landing in another worktree, `agent-plan finish --landed-commit SHA`
+can complete the shared task using its exact landing evidence.
+
+The board offers `[+ Claude main]`, `[+ Pi main]` and `[+ Codex main]` for installed harnesses
+when no main is active. A click, or `n` then `1` (Claude), `2` (Pi) or `0` (Codex), starts the
+sole main without leaving the current window. While a main is active or its lifecycle is
+unverified, the row explains the limit and offers no start targets. Startup is serialized;
+an invocation-scoped lease also prevents concurrent inline/Herdr/native main processes.
+Parallel tasks use workers, advisors and reviewers under this main. Previously opened
+multiple-main panels remain visible and usable; they cannot add a main while one is live.
+
+To start a main in an empty existing panel without a terminal:
 
 ```bash
-oms panel --repo . --spawn-main claude --task 'short task' [--model ID] --json
+oms panel --repo . --spawn-main claude --task 'short task' --json
+oms panel --repo . --launch pi --task 'short task'
 ```
 
-It needs this checkout's panel session to be open, never creates a session, attaches a client or
-moves focus, joins the panel's room by the same rules as `--launch`, and prints
-`{"window": N, "provider": ..., "room": ...}`. It refuses inside workers and when the room
-already has six live mains. The caller's room participant (`OMS_ROOM_PARTICIPANT`) is recorded as
-`panel_started_by` on the new main's attempt and on its window; the board marks that main's tab
-with `↳` (`^` in ASCII mode) and its detail starts with "Started by Opus 5.5·1cb4". The bootstrap
-tells mains to use this only for a separate long line of work, not for ordinary subtasks.
+`--spawn-main` never creates a panel session, attaches a client or moves focus, and returns
+`{"window": N, "provider": ..., "owner": ..., "room": ...}`. It refuses inside workers or
+when any panel room has a live main. It permits a replacement after terminal evidence
+confirms the previous main ended. Unknown window/lifecycle state refuses replacement.
+
+Pi uses the existing `oms harness pi` bridge and requires both Pi and Codex CLI on PATH.
+Its default model and effort come from the Codex main preset; `--model` selects an exact
+Codex catalog model. Pi owns its tools and UI, while OMS records the inference owner as
+`codex` and the harness as `pi`. Pi history is separate: this initial integration refuses
+`--resume` until Pi session ownership can be verified. It has no Codex native hook or
+context/quota reading. The launch uses Pi's documented
+[`--append-system-prompt` argument](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/cli/args.ts)
+to preserve its base instructions and pass the OMS room and sole-main contract.
 
 A main never closes another main, because closing ends a native chat and its running work. It
 may only ask: `oms panel --request-close PARTICIPANT --reason "..." [--json]` (refused inside
@@ -99,9 +127,8 @@ point to the full retained result rather than filling the board with raw output.
 Press `f` in a call preview to open that complete scrollable reader; Enter keeps
 the existing preview selection. The reader revalidates the exact recorded target.
 
-A native main launched from the menu joins the selected work room. Opening a
-second native main from the menu or with `--launch` keeps the panel's recorded
-room while it is open and has headroom; a full or closed room makes the next
+A native main launched from the menu joins the selected work room. Starting a replacement
+main from the menu or with `--launch` keeps the panel's recorded room while it is open and has headroom; a full or closed room makes the next
 main start a new room, and an explicit `--room ID` or `o Rooms` choice wins.
 A bare control window shows the panel's recorded room.
 The `o Rooms` menu selects or creates a task-scoped room. It does not enroll
@@ -219,13 +246,16 @@ minutes on every hook and `overdue` from fifteen; the asker's own hook records o
 `Needs you` list shows the question from twenty minutes. A `--kind answer` without
 `--reply-to` links the one open question from that recipient, or is refused with the ids.
 
-The Messages tab opens with the pair summary, one row per pair of mains that exchanged
-mail, named like the tabs (`#1 Opus 5.5 ⇄ #2 Sol 6.1  →16 ←85 · 7 new`, counts relative to the left
-main). Unread pairs come first, then the most recent; at most four rows plus `+N more pairs`,
-then the message list. Clicking a pair row (or moving onto it with the arrow keys)
-switches the box to DETAIL and shows the pair's last six messages, oldest first, from the room
-snapshot, which keeps only the room's latest 12 messages. The top of the board carries no
-between-mains line. When no main in a lane row has an advisor or reviewer, the per-lane
+The bottom box has five tabs: Detail, Plan, Debate, Messages and Between. The Messages tab is a
+filtered room log; the Between tab shows one vertex per main and a labeled connection for each
+pair with recorded mail. Pair counts show sent mail in each direction and, when nonzero, unread
+mail (`new`); pairs with unread mail come first, then the most recent exchange. With two to six
+mains the tab draws a polygon when it fits, otherwise it lists pairs and may show `+N more pair(s)`;
+without a recorded exchange it says `No mail between mains yet`. Clicking a pair count or row
+opens that pair in Detail with up to its last six messages, oldest first, from the main-message
+snapshot; older messages may be absent from that snapshot. This opens Detail once per selection,
+after which the reader can return to Between. The pair detail does not make Messages a pair
+summary. The top of the board carries no between-mains line. When no main in a lane row has an advisor or reviewer, the per-lane
 `◇ Advisors: none active` rows are dropped (the footer offers `a Ask advisor`). The pinned usage line
 (`Claude week 66% · ctx 73% │ Codex week 2% · ctx 84%`) holds the readings; the model-call totals
 stay in the tree USAGE card. Truncation reads `…` (`...` in ASCII mode).
@@ -238,8 +268,9 @@ of the key hints. Board text is written for
 people: states read `running`, `finished` or `needs approval`, call exits and
 provider status lines are dropped from messages, and the detail says whether its
 main reviewed a result instead of showing internal fields. A main reads `working`
-during a hook-recorded turn, `idle · Nm` after Stop (or a stale busy signal plus
-90 seconds of unchanged native-pane output), and `live` until its first activity signal. Clicking another main's
+during a hook-recorded turn, `idle · Nm` after Stop, `quiet · Nm` after a stale
+busy signal plus 90 seconds of unchanged native-pane output, and `live` until its
+first activity signal. Quiet output does not prove that the model stopped. Clicking another main's
 tab selects it and shows its detail; clicking the tab of the main already shown
 (or its card) opens its proven original conversation. Left/right arrows move
 between mains and move the detail with them. Tabs that do not fit shrink in steps (task text, counts, names, one marker, the
@@ -249,8 +280,8 @@ clicked. Calls with no known main are grouped under `unlinked`. Within advisors 
 first, and lane rows name the state (`! failed REV ...`). Lane heads select
 first, like tabs. `[+]` on a tab, or Space on a selected main, pins it; with two or
 more pins the board shows side-by-side lanes, one per main with its calls on
-single lines. A panel holds at most six live mains across all its rooms (`--launch` into an open
-panel refuses a seventh, like `--spawn-main`). Four to six mains fill two rows of lanes
+single lines. A panel now permits one live main across all its rooms; `--launch` and `--spawn-main`
+refuse another while it is active. For preserved legacy panels, four to six mains fill two rows of lanes
 (2+2, 3+2, 3+3, window order left to right, then the next row) when each lane keeps
 30 columns and the board is tall enough; otherwise lanes stay in one row. `[+ All]` pins every main. Every live watcher board (control and
 native windows) shows every main as lanes until pins are chosen, when they all
@@ -577,7 +608,11 @@ provider capability checks. Omitting effort retains the front door's native
 settings. For profile-controlled transports such as Vibe/DeepSeek Harness,
 omit `--model`; the native profile selects it and an exact override is refused.
 Default role allocation remains Sol 6.1/Opus, Luna/Sonnet and Astra/Fable.
-Codex delegated routes accept only the three GPT-6 models in the panel policy.
+Codex delegated routes accept the exact Sol, Luna and Astra model IDs in the
+panel policy, including Sol 6.1. Model-family versions are distinct from roles. Preset dispatch chooses the newest
+configured/catalog numeric version within its existing family and pins the exact ID;
+a newer Astra never replaces a Luna or Sol worker. Explicit CLI selections retain
+the caller's exact model request. A compact model preview does not limit routing.
 
 ```bash
 oms panel --repo . --dispatch advisor --owner codex --to grok --model MODEL \
@@ -637,6 +672,7 @@ The launcher does not autonomously fan out before the main has a task.
 | Codex main | `gpt-6.1-sol` (shown as Sol 6.1) | high | Native main permissions |
 | Claude main | `claude-opus-5-5` | high | Native main permissions |
 | Light, clear worker | `gpt-6-luna` | low | Bounded read or isolated write |
+| Researcher | Latest configured/catalog Luna or Haiku | low | Read-only source/document lookup with citations |
 | Routine implementation / long straightforward explanation | `claude-sonnet-5-5` | medium | Bounded read or isolated write |
 | Main-level worker | Owning main's Sol / Opus preset | high | Bounded worker; no promotion |
 | Astra advisor / reviewer | `gpt-6-astra` | high | Read-only |
@@ -804,8 +840,8 @@ whose patch has no admission or landing record. Arrow keys or a click select a
 row; the wheel moves by lines and page keys by the visible item count, stopping
 at either end. Enter (or a click) opens that main's chat or shows the call's result,
 and Esc returns. An empty list says `Nothing needs you right now`; a room with no
-main shows `Press 1 (Codex) or 2 (Claude) to start a main`. The menu keeps
-start (`1` Codex, `2` Claude, `3` Resume, `t` Task), `o` rooms, `9` refresh and
+main shows `Press 1 (Claude) or 2 (Pi) to start the sole main`. The menu keeps
+start (`1` Claude, `2` Pi, `0` Codex, `3` Resume, `t` Task), `o` rooms, `9` refresh and
 quit/detach; board keys are not repeated. Enter `?` for all other actions in
 ordinary scrollable help (chats, results, views, advisor, review, council,
 finalize); existing shortcuts still work.
@@ -988,9 +1024,9 @@ records remain unobserved.
 
 | Menu action | Behavior |
 | --- | --- |
-| 1 Codex / 2 Claude | Open a native Sol / Opus main |
-| 3 Resume | Select provider and exact native session ID |
-| 4 Main | Choose the identity for subsequent manual dispatch |
+| 1 Claude / 2 Pi / 0 Codex | Start the sole main: native Opus / Pi with Codex inference / native Sol |
+| 3 Resume | Select Claude or Codex and an exact verified native session ID |
+| 4 Main | Choose the main harness; Pi uses the Codex dispatch owner |
 | t Auto task | Enter a task and open the owning native main |
 | 5 Explain | Read-only worker; choose light / routine / main workload |
 | 6 Implement | Choose workload; scoped brief and verifier required |
@@ -1156,3 +1192,103 @@ events, lost acknowledgements and correlated persisted output.
 The operator suite also verifies multiple-main hierarchy, legacy ownership,
 separate review groups, compact/detail budgets, attention filtering, numbered
 result selection, menu cycling and view inheritance in an existing tmux server.
+
+## Researcher and supporting strategies
+
+Use `oms panel --dispatch researcher --owner codex --prompt 'Find and cite the relevant contract.'`
+(or `--owner claude`) for one bounded document/source question. The control menu's
+expanded `e Researcher` entry uses the same route. Researcher is a separate room
+participant beneath its main; its bounded answer is retained in Results and its
+status appears in tree/graph views. It never becomes a main or a patch approver.
+
+The Codex researcher uses Luna and the Claude researcher uses Haiku. Current
+configured floors are `gpt-6-luna` and `claude-haiku-5-5`. The dispatcher compares
+numeric versions within that family against the cached provider catalog and pins
+the newest exact ID. An omitted minor version means zero; `6.10` is newer than
+`6.2`. Cached discovery does not prove account access or live availability. No
+paid availability probe runs. If the pinned model cannot run, the task fails
+without an implicit older-model or more expensive-family substitution. A provider
+without a model catalog retains the configured exact ID until policy is refreshed.
+
+Researcher requires read access, research purpose and low effort. Write scopes,
+implementation, review gates, worker continuation and high-model/effort overrides
+are refused in routing; lifecycle recording independently rejects research
+metadata on a write call. Source content is data, never task authority. The main
+owns interpretation, architecture and acceptance. Official Haiku model/effort
+spelling is documented in [Claude model configuration](https://code.claude.com/docs/en/model-config).
+
+Additional execution seats are not needed for every specialty. Use the existing
+`test-designer` worker strategy for contract/edge-case tests, `patch-reviewer` for
+independent patch judgment, and `repo-auditor` for bounded source audits.
+Document drafting can stay a scoped implementation-worker task; discovery can
+stay Researcher. A deterministic verifier should run tests directly rather than
+paying another model to repeat a command. Deep correctness or risk decisions
+remain with the main/advisor, with models selected for that task.
+
+## Owned terminals, jobs and history
+
+Expanded `s Terminals and jobs` opens a separate owned tmux workspace. F4 shows
+controls and F5 returns to its origin. These are ordinary shells and explicit argv
+jobs, not AI chats. Listing does not capture screens or logs; reads are explicit
+and bounded. Jobs require Linux pidfds/subreaper ownership; unsupported hosts
+retain the normal OMS lifecycle. Shell/workspace ownership remains POSIX/tmux.
+
+`f` shows completed jobs with their actual completed count. A selected provably
+completed job or gone shell offers `x forget`, with a permanent history/log deletion
+warning and explicit `yes` confirmation. Live, uncertain, foreign or unsafe records
+are refused. Retained history is never automatically deleted.
+
+`c` archives completed/gone items and frees active slots while preserving records,
+job recipes and the latest generation's retained log. `h` opens or leaves the
+history view. Individual items offer `a archive` or `b restore`; restoring a record
+does not launch its command or reopen a shell. Archive and restore revalidate the
+exact identity and job generation under the existing ownership locks. Busy,
+unsafe, live and unknown records stay in place.
+If a transfer is interrupted between its marker update and directory move,
+the same archive/restore operation revalidates ownership and completion before
+finishing it; inconsistent markers never authorize restart or permanent deletion.
+
+When a new shell, job or workspace reaches the per-kind 128 active-record bound,
+the allocator archives a positively completed/gone record automatically before
+allocating the new slot. Each kind retains at most 512 archived records. A full
+archive or an active set with no safe candidate refuses the new allocation with
+an explicit capacity reason; existing processes and history remain intact. The
+reclaim scan has a three-second budget and skips busy record locks rather than
+waiting on each one. Native ownership probes retain their existing timeouts.
+
+CLI equivalents are `oms panel job forget ID --repo . --generation N` and
+`oms panel terminal forget ID --repo .`. Use `oms panel terminal workspaces --repo .`
+to discover workspace records and `oms panel terminal workspace-forget ID --repo .`
+for one provably gone workspace. These explicit commands permanently remove private
+history and any retained job log. Revalidate the ID/generation before requesting them.
+Restart keeps the previous completed generation and log when prelaunch validation
+or an unreleased supervisor constructor fails. Once approval release may have
+occurred, uncertainty stays unknown rather than allowing a duplicate generation.
+
+Use `oms panel job archive --repo .` for completed job history,
+`oms panel job list --repo . --archived` to list it, and
+`oms panel job restore ID --repo . --generation N` to restore one exact generation.
+Archived job logs use the usual `logs ID --generation N` command. Terminal history
+uses `archive`, `list --archived`, and `restore ID`; workspace history uses
+`workspace-archive`, `workspaces --archived`, and `workspace-restore ID`.
+
+## Capacity and display recovery
+
+On the focused board, `k` opens the capacity/recovery screen and `k` or `Esc`
+returns to the board. `u` or `Ctrl+L` requests a fresh read and repaints the panel
+without discarding its selected task, logs, sessions or model context. The control
+menu also offers `k Capacity`; `Ctrl+L` there follows the existing Refresh action.
+
+`oms panel --repo . --health` reports the same limits; add `--json` for the complete
+bounded projection or `--room ID` to inspect a specific room. It reports selected
+main context, reported weekly usage, room mains/calls/messages, and private
+active/history slots separately. Missing, ambiguous or stale context/quota stays
+unknown. Context bands reuse the existing `OMS_CTX_WARN_PCT` (15% left) and
+`OMS_CTX_URGENT_PCT` (8% left) settings and existing hook handoff/compaction flow.
+The health screen makes no model calls and changes no native permissions.
+
+Clearing the panel display does not free model context or subscription quota.
+Use native compaction or an explicit handoff for context, and the native quota
+reset for exhausted usage. Room acknowledgement keeps message evidence; new
+mains already use a fresh bounded room near capacity. Existing sessions and
+their room evidence stay intact.

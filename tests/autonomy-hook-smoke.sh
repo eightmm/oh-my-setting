@@ -701,6 +701,8 @@ tower = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserP
 assert "control-tower main" in tower and "--owner claude --room binding-room" in tower, tower
 assert "#1 Opus 5.5" in tower and "trust boundaries" in tower, tower
 assert "Land your own work" in tower and "oms/<task> branch" in tower, tower
+assert "worker exit or review handoff does not end your turn" in tower, tower
+assert "OMS_ROOM_REPO" in tower and "local completion does not grant publication authority" in tower, tower
 assert not hook_state.panel_main_hint(payload("tower")), "only prompts carry the reminder"
 # The shared plan rides on the same line: no plan, no plan sentence; then progress, the main's own task and the next ready one.
 assert "[oms plan]" not in tower, tower
@@ -781,6 +783,16 @@ held = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPr
 assert "yours: t2 (running)" in held and "next ready: t3" in held and "before starting new work" not in held, held
 room.send(repo, "binding-room", os.environ["OMS_ROOM_PARTICIPANT"], "all", "Wiring the banner", kind="status")
 assert "set your status" not in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
+plan_file([{"id": "old-review", "state": "review", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
+           {"id": "current-work", "state": "running", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
+           {"id": "foreign-work", "state": "running", "claimed_by_participant": "someone-else"}])
+assert "yours: current-work (running)" in hook_state.panel_plan_hint(payload("tower"))
+plan_file([{"id": "older-review", "state": "review", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"],
+            "title": "Recover result"}])
+review_hint = hook_state.panel_plan_hint(payload("tower"))
+assert "record the owner result before stopping" in review_hint, review_hint
+plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
+           {"id": "t3", "state": "ready"}])
 # Context pressure: a panel main is told to compact in place at each band; any other session keeps the fresh-session advice.
 hud = repo.parent / "ctx-hud"
 hud.mkdir(exist_ok=True)

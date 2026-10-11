@@ -232,6 +232,49 @@ def _load_result(repo, row):
     return result
 
 
+def _plan_bindings(repo, task_ids):
+    from dashboard_projection import read_plan
+
+    plan, tasks = read_plan(repo)
+    if not isinstance(plan.get('plan_id'), str) or not ID.fullmatch(plan['plan_id']):
+        return {}
+    return {task['id']: {'plan_id': plan['plan_id'],
+                         'task_sha256': hashlib.sha256(json.dumps(task, sort_keys=True,
+                             allow_nan=False).encode()).hexdigest()}
+            for task in tasks if task['id'] in task_ids}
+
+
+def completed_tasks(repo, task_ids, _shared=False):
+    """Locally verified products of the current plan generation, without granting acceptance."""
+    wanted = {ident for ident in task_ids if isinstance(ident, str) and ID.fullmatch(ident)}
+    bindings = _plan_bindings(repo, wanted)
+    if not bindings:
+        return {}
+    if _shared:
+        from panel_cache import read_shared
+        _, rows = read_shared(repo, 'result-records', lambda: _records(repo))
+    else:
+        _, rows = _records(repo)
+    latest = {row['task_id']: row for row in rows
+              if row.get('kind') == 'panel-result' and row.get('task_id') in bindings}
+    found = {}
+    for ident, row in latest.items():
+        try:
+            result = _load_result(repo, row)
+            verified = result.get('verification') or {}
+            if not isinstance(verified, dict):
+                continue
+            if (result.get('plan_binding') == bindings[ident]
+                    and result.get('outcome') in {'completed', 'accepted'}
+                    and verified.get('status') == 'passed' and type(verified.get('exit')) is int
+                    and verified['exit'] == 0
+                    and all(_relative(repo, ref['path']) == ref for ref in result['evidence'])):
+                found[ident] = result['outcome']
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return found
+
+
 def _last_delivery(repo, rows, task_id, revision):
     for row in reversed(rows):
         prefix = '.oms/artifacts/panel-results/delivery-%s-%s-' % (task_id, revision)
@@ -273,6 +316,7 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
     if len(refs) > 8:
         raise ValueError('use at most eight evidence references')
     with _lock(repo):
+        binding = _plan_bindings(repo, {task_id}).get(task_id)
         attempts, rows = _records(repo, full=True)
         main_id = os.environ.get('OMS_PANEL_MAIN_ATTEMPT')
         if main_id:
@@ -300,6 +344,8 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
                 raise ValueError('accepted verifier failed (exit %s)' % checked.returncode)
             if any(_relative(repo, ref['path']) != ref for ref in refs):
                 raise ValueError('evidence changed during verification')
+        if binding != _plan_bindings(repo, {task_id}).get(task_id):
+            raise ValueError('plan task changed during result verification')
         payload = {'schema': 1, 'kind': 'oms-panel-result', 'task_id': task_id,
                    'owner': owner, 'outcome': outcome, 'summary': summary,
                    'summary_sha256': hashlib.sha256(summary.encode()).hexdigest(),
@@ -307,6 +353,8 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
                    'main_attempt_id': main_id,
                    'admission_event_ids': [a.get('event_id') for a in admissions if a],
                    'attempt_ids': [a['attempt_id'] for a in related[-20:]]}
+        if binding:
+            payload['plan_binding'] = binding
         payload['revision'] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:24]
         relative = '.oms/artifacts/panel-results/result-%s-%s.json' % (task_id, payload['revision'])
         path = _write(repo, relative, payload)
@@ -425,10 +473,12 @@ def results(repo, task_id=None, room_participant=None, _shared=False):
                     trimmed, sections = debate_sections(answer)
                     if any(heading in ('Answer', 'Findings') for heading, _ in sections):
                         answer = trimmed
-                    safe = codex_app_notify._safe_message(answer, repo, maximum=MAX_RESULT + 1).strip()
-                    call['answer_truncated'] = (len(answer) > MAX_RESULT + 1 or
-                                                len(safe.encode('utf-8')) > MAX_RESULT)
-                    call['answer'] = sanitize_multiline(safe, MAX_RESULT, MAX_RESULT).strip()
+                    # Redact the whole bounded artifact before deciding whether the retained answer lost bytes.
+                    maximum = max(MAX_RESULT + 1, 2 * len(answer.encode('utf-8')) + MAX_RESULT)
+                    safe = codex_app_notify._safe_message(answer, repo, maximum=maximum).strip()
+                    complete = sanitize_multiline(safe, maximum, maximum).strip()
+                    call['answer'] = sanitize_multiline(complete, MAX_RESULT, MAX_RESULT).strip()
+                    call['answer_truncated'] = call['answer'] != complete
                 except (OSError, ValueError, TypeError):
                     call['answer'] = 'Answer evidence unavailable'
             if (task_id or room_participant) and row.get('patch') and row.get('patch_sha256'):

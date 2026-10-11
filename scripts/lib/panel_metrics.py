@@ -113,7 +113,7 @@ def collect(report, main_attempt=None, now=None, repo=None):
     from panel_chats import current_models, windows
     from room_view import nodes
     room = mapping(report.get("room"))
-    mains = [m for m in nodes(report) if m.get("role") == "main"]
+    mains = [m for m in nodes(report) if m.get("role") == "main" and m.get("harness") != "pi"]
     panes = windows(repo, room["id"], room) if repo is not None and room.get("id") else {}
     now = time.time() if now is None else now
     current = current_models(repo, mains)

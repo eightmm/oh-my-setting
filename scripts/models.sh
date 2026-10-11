@@ -111,9 +111,10 @@ usable_value = None if usable == "unknown" else usable == "true"
 # The catalog is what exists; the routable set is what a route may pick on its
 # own — the provider's own family at its newest generation. The rest stays
 # visible, named for what it is, and is never chosen unless named.
-models = lines(os.environ["OMS_MODELS_FILE"])
+catalog_models = lines(os.environ["OMS_MODELS_FILE"], limit=None)
+models = catalog_models[:20]
 routable = [m for m in lines(os.environ["OMS_ROUTABLE_FILE"], limit=None) if m in models]
-print(json.dumps({"provider": provider, "binary": binary, "present": present == "true",
+print(json.dumps({"provider": provider, "binary": binary, "present": present == "true", "catalog_models": catalog_models,
  "usable": usable_value, "exact_model_override": model_override == "true",
  "models": models, "routable": routable, "not_routed": [m for m in models if m not in routable],
  "effort_mechanism": mechanism or None,

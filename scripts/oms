@@ -149,6 +149,7 @@ fail-ledger
 gc
 goal-drive
 graph
+harness
 inbox
 init
 install-profile
@@ -198,6 +199,7 @@ autopilot
 consult
 dashboard
 doctor
+harness
 inbox
 journal
 land
@@ -286,8 +288,8 @@ if [ ! -f "$TARGET" ]; then
   echo "error: unknown tool: $TOOL (run: oms list --all)" >&2
   exit 2
 fi
-if [ "$TOOL" = panel ]; then
-  # The interactive panel must own the caller's PID so signals reach its cleanup.
+if [ "$TOOL" = panel ] || [ "$TOOL" = harness ]; then
+  # Interactive entrypoints own the caller PID so signals reach their cleanup.
   exec bash "$TARGET" "$@"
 fi
 RC=0

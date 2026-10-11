@@ -18,12 +18,16 @@ from path_scope import normalize as normalize_scope
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "scripts" / "oms"
-ROLES = {"main", "worker", "advisor", "reviewer"}
+ROLES = {"main", "worker", "advisor", "reviewer", "researcher"}
 KINDS = {"question", "answer", "note", "decision", "handoff", "status"}
 MAX_PARTICIPANTS = 32
 # Dispatched calls join with a parent and never free their slot; the message cap
 # (two messages per call) bounds them as well.
 MAX_CALLS = 480
+MAX_MESSAGES = 1024
+MAIN_RESERVE = 8
+CALL_RESERVE = 64
+MESSAGE_RESERVE = 128
 MAX_ROOMS = 64
 MAX_SCAN_ENTRIES = 1024
 MAX_SCAN_BYTES = 8 * 1024 * 1024
@@ -224,6 +228,8 @@ def overlaps(a, b):
 def declared_scopes(role, scopes):
     if not isinstance(scopes, list) or len(scopes) > 16:
         raise ValueError("at most sixteen declared scopes")
+    if role == "researcher" and scopes:
+        raise ValueError("researchers own no write scope")
     if role in {"advisor", "reviewer"} and scopes:
         raise ValueError("advisors and reviewers own no write scope")
     for scope in scopes:
@@ -389,7 +395,7 @@ def validate_event(rows, event, text):
             # result-<call> ids are reserved for a call's own handoff to its parent, which settles it on the board.
             raise ValueError("result-<participant> ids are reserved for that participant's handoff to its parent")
         old = next((m for m in state["messages"] if m["id"] == event["id"]), None)
-        if not old and len(state["messages"]) >= 1024:
+        if not old and len(state["messages"]) >= MAX_MESSAGES:
             raise ValueError("room message limit reached; start a new bounded room")
         if old:
             if all(old.get(k) == v for k, v in event.items()) and old["text"] == text:

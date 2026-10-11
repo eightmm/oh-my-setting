@@ -1527,7 +1527,9 @@ found.sort()
 best = found[-1]
 if len(found) > 1 and found[-2][0] == best[0]:
     contents = set()
-    for _, _, p in found[-2:]:
+    for mtime_ns, _, p in reversed(found):
+        if mtime_ns != best[0]:
+            break
         with open(p, "rb") as f:
             contents.add(f.read())
     if len(contents) > 1:

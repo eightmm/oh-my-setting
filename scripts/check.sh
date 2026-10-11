@@ -884,6 +884,13 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage fail-ledger-hook-filter bash tests/fail-ledger-hook-filter-smoke.sh
   stage autonomy-failure bash tests/autonomy-failure-smoke.sh
   stage operator-tools bash tests/operator-tools-smoke.sh
+  stage panel-controls bash tests/panel-controls-smoke.sh
+  # panel jobs need Linux subreaper+pidfd and a POSIX pty; other hosts keep the
+  # core lifecycle without them rather than counting a missing native proof.
+  if [ "$(uname -s 2>/dev/null)" = Linux ]; then
+    stage terminal-control bash tests/terminal-control-smoke.sh
+    stage panel-workspaces bash tests/panel-workspaces-smoke.sh
+  fi
   stage tool-lock bash tests/tool-lock-smoke.sh
   stage file-lock-boundary bash tests/file-lock-boundary-smoke.sh
   stage bsd-portability bash tests/bsd-portability-smoke.sh

@@ -64,6 +64,7 @@ def nodes(report):
                            model=model, model_at_launch=meta.get("model") or member.get("model"),
                            task_id=attempt.get("task_id"), location=meta.get("location"),
                            effort=effort, access=meta.get("access"),
+                           harness=mapping(attempt.get("panel")).get("harness"),
                            started_by=mapping(report.get("main_starters")).get(member.get("participant")),
                            title=member.get("label_override") or meta.get("label") or member.get("label")))
     # A continued worker shares its task with the earlier rounds of the same main.
@@ -91,6 +92,8 @@ def main_state(member):
             return "working"
         if reading.get("state") == "idle":
             return "idle"
+        if reading.get("state") == "quiet":
+            return "quiet"
     return "live marker"
 
 
@@ -98,10 +101,10 @@ def main_words(member, unicode=True):
     state = main_state(member)
     if member.get("role") != "main":
         return said(state)
-    if state == "idle":
+    if state in {"idle", "quiet"}:
         since = mapping(member.get("panel_activity")).get("since")
         minutes = int(max(0, time.time() - since) // 60) if type(since) in (int, float) and 0 <= since <= time.time() else 0
-        return "idle" + ((" · " if unicode else " / ") + "%sm" % minutes if minutes else "")
+        return state + ((" · " if unicode else " / ") + "%sm" % minutes if minutes else "")
     return {"working": "working", "live marker": "live"}.get(state, said(state))
 
 
@@ -112,12 +115,14 @@ def spawn_bar(width, navigation):
         return None
     if not navigation.get("spawn_managed"):
         return "Start a main: needs the tmux panel (oms panel)", []
+    if navigation.get("main_occupied"):
+        return "One main active or unverified; finish it before starting another", []
     if navigation.get("spawn_armed"):
-        return "Start a main: 1 Codex  2 Claude  Esc cancel", []
+        return "Start one main: 1 Claude  2 Pi  0 Codex  Esc cancel", []
     if navigation.get("spawn_busy"):
         return "Starting a main...", []
     if not installed:
-        return "No Codex or Claude CLI is installed to start a main", []
+        return "No Claude, Pi or Codex main harness is installed", []
     for suffix in (" main", ""):
         labels = ["[+ %s%s]" % (name.capitalize(), suffix) for name in installed]
         if len("  ".join(labels)) <= width:
@@ -138,7 +143,8 @@ def window_order(report, mains):
 
 
 def model_name(member):
-    return MODEL_NAMES.get(member.get("model"), member.get("model")) or member.get("provider", "unknown")
+    name = MODEL_NAMES.get(member.get("model"), member.get("model")) or member.get("provider", "unknown")
+    return "Pi / " + name if member.get("harness") == "pi" else name
 
 
 def open_count(room, participant):
@@ -400,6 +406,10 @@ def goal_box(report, width, unicode, compact):
     filled = min(10, 10 * done // total) if total else 0
     bar = ("▕" + "█" * filled + "░" * (10 - filled) + "▏") if unicode else "[" + "#" * filled + "." * (10 - filled) + "]"
     counts = "%s/%s verified" % (done, total)
+    locally_done = sum(1 for task in listing(mapping(report.get("room")).get("repo_tasks"))
+                      if task.get("state") != "done" and task.get("id") in mapping(report.get("completed_tasks")))
+    if locally_done:
+        counts += sep + "%s locally completed" % locally_done
     # A claim is not proof of running work, and work waiting for review is progress: review outlives the bar.
     reviewing = sep + "%s review" % review if review else ""
     options = [bar + " " + counts + reviewing + sep + "%s claimed" % claimed, bar + " " + counts + reviewing,
@@ -534,7 +544,7 @@ WORDS = {"working": "running", "live marker": "running", "verifying": "checking"
          "timed_out": "timed out", "orphaned": "lost", "waiting_input": "needs input",
          "waiting_approval": "needs approval", "review": "in review", "presence unknown": "status unknown"}
 WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-ROLES = {"main": "Main", "advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate", "worker": "Worker"}
+ROLES = {"main": "Main", "advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate", "worker": "Worker", "researcher": "Researcher"}
 MACHINE = re.compile(r"^(stop-reason:|model-route:|model-result:|usage detail:|tokens used|served model|cost usd|"
                      r"##\s*(output|exit|verify)\b|---\s*(begin|end) )", re.I)
 
@@ -756,6 +766,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if picked:
         primary = picked if picked.get("role") == "main" else owners.get(picked.get("parent"), primary)
     debates = [row for row in worker_rows(report) if row["source"] == "council"]
+    classify = call_classifier(report)
 
     def team(main, every=False):
         ids = {key for key in (main["participant"], main.get("attempt")) if key}
@@ -764,15 +775,13 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                   "_action": ("debate", (row["task"], main["participant"]))}
                  for row in debates if row["parent"] in ids]
         calls += [m for m in members if m.get("role") != "main" and m.get("parent") in ids]
-        calls = [m for m in calls if m["state"] in ATTENTION_STATES] if attention_only and not every else calls
+        if attention_only:
+            calls = [m for m in calls if classify(m) != "past" and
+                     (m["state"] in ATTENTION_STATES or classify(m) == "review")]
         # Judges precede workers so keyboard order follows the drawing.
-        return sorted(calls, key=lambda m: (m.get("role") == "worker",) + call_order(m))
+        return sorted(calls, key=lambda m: (m.get("role") in {"worker", "researcher"},) + call_order(m))
 
-    classify = call_classifier(report)
     teams = {m["participant"]: team(m, every=True) for m in mains}
-    if attention_only:
-        teams = {key: [c for c in calls if c["state"] in ATTENTION_STATES or classify(c) == "review"]
-                 for key, calls in teams.items()}
     grouped = {key: {kind: [c for c in calls if classify(c) == kind] for kind, _ in CALL_GROUPS}
                for key, calls in teams.items()}
     if navigation.get("group_tree"):
@@ -789,8 +798,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     teams = {key: [c for c in calls if classify(c) == "live"] for key, calls in teams.items()}
     children = teams[primary["participant"]] if primary else []
     judges = [m for m in children if m.get("role") in {"advisor", "reviewer", "council"}]
-    workers = [m for m in children if m.get("role") == "worker"]
+    workers = [m for m in children if m.get("role") in {"worker", "researcher"}]
     unlinked = [m for m in members if m.get("role") != "main" and m.get("parent") not in owners]
+    if attention_only:
+        unlinked = [m for m in unlinked if classify(m) != "past" and
+                    (m["state"] in ATTENTION_STATES or classify(m) == "review")]
     offset = max(0, navigation.get("offset", 0))
     scrolled = mapping(navigation.get("band_offsets"))
     judge_start = min(scrolled.get("judge", offset), max(0, len(judges) - 3))
@@ -982,7 +994,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             asked = open_count(room, m["participant"])
             badge = " ".join("%s%s" % (mark, n) for mark, n in (
                 ("W", sum(c.get("role") == "worker" for c in calls)),
-                ("A", sum(c.get("role") != "worker" for c in calls)), ("!", alerts), ("M", unread),
+                ("R", sum(c.get("role") == "researcher" for c in calls)),
+                ("A", sum(c.get("role") not in {"worker", "researcher"} for c in calls)), ("!", alerts), ("M", unread),
                 ("?", asked)) if n)
             ctx = context_note(report, m)
             if ctx:
@@ -1108,7 +1121,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
     def compact(group, span):
         # The top wire must meet the card midpoint, even with a selection mark.
-        limit = span // 2 - 4 if any(m.get("role") in {"main", "worker"} for m in group) else span - 6
+        limit = span // 2 - 4 if any(m.get("role") in {"main", "worker", "researcher"} for m in group) else span - 6
         return any(display_width(heading(m)) > limit for m in group)
 
     shown_groups = [g for g in (shown_judges, shown_workers) if g] + ([[primary]] if primary else [])
@@ -1236,7 +1249,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             span = cell_width
             title = heading(m)
             if reflow:
-                role = {"advisor": "ADV", "reviewer": "REV", "worker": "WRK", "council": "DEB"}.get(m.get("role"), "MAIN")
+                role = {"advisor": "ADV", "reviewer": "REV", "worker": "WRK", "researcher": "RES", "council": "DEB"}.get(m.get("role"), "MAIN")
                 title = (("▸ " if unicode else "> ") if action(m) == selected else "") + role
             status = "%s %s" % (activity(state_of(m), frame, unicode), main_words(m, unicode))
             if m.get("role") == "main" and open_count(room, m["participant"]):
@@ -1251,7 +1264,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 if m.get("role") == "main":
                     calls = teams.get(m["participant"], [])
                     where = "Team W%s A%s%s" % (
-                        sum(c.get("role") == "worker" for c in calls), sum(c.get("role") != "worker" for c in calls),
+                        sum(c.get("role") in {"worker", "researcher"} for c in calls), sum(c.get("role") not in {"worker", "researcher"} for c in calls),
                         " / !%s attention" % sum(c["state"] in ATTENTION_STATES for c in calls)
                         if any(c["state"] in ATTENTION_STATES for c in calls) else "")
                 task_rows = len(task_lines(m, span - 4, 2))
@@ -1298,7 +1311,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             if flanks:
                 if row == 0:
                     left_width, right_width = left - 2, width - left - cell_width - 2
-                    linked_workers = [m for m in linked_children if m.get("role") == "worker"]
+                    linked_workers = [m for m in linked_children if m.get("role") in {"worker", "researcher"}]
                     status_rows = ["Workers %s / live %s" % (len(linked_workers), sum(m["state"] in LIVE_STATES for m in linked_workers)),
                                    "Advisors %s / reviewers %s" % (sum(m.get("role") == "advisor" for m in linked_children),
                                                                   sum(m.get("role") == "reviewer" for m in linked_children)),
@@ -1361,7 +1374,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         first_band = len(bands_hit)
         tag_of = {"advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate"}
         columns = []
-        judge_sets = {m["participant"]: [c for c in teams[m["participant"]] if c.get("role") != "worker"][:3] for m in group}
+        judge_sets = {m["participant"]: [c for c in teams[m["participant"]] if c.get("role") not in {"worker", "researcher"}][:3] for m in group}
         most = max(len(judges) for judges in judge_sets.values())
         # With room, each main's advisors and reviewers share one box above it; boxes and mains line up across lanes.
         boxed = rows >= 14 and any(judge_sets.values())
@@ -1369,7 +1382,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
         def activity_line(calls, m):
             ident = m["participant"]
-            running = sum(c.get("role") == "worker" and c["state"] in LIVE_STATES for c in calls)
+            running = sum(c.get("role") in {"worker", "researcher"} and c["state"] in LIVE_STATES for c in calls)
             needs = sum(c["state"] in ATTENTION_STATES for c in calls)
             reviews = len(grouped[ident]["review"])
             said_at = next((x.get("ts") for x in reversed(listing(room.get("messages"))) if x.get("sender") == ident), None)
@@ -1408,7 +1421,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             top = len(lines) + 1
             calls = teams[m["participant"]]
             judges_here = judge_sets[m["participant"]]
-            workers_here = sorted((c for c in calls if c.get("role") == "worker"),
+            workers_here = sorted((c for c in calls if c.get("role") in {"worker", "researcher"}),
                                   key=lambda c: 0 if c["state"] in LIVE_STATES else 1 if c["state"] in ATTENTION_STATES else 2)
             cells = []
 
@@ -1484,7 +1497,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             hidden = len(workers_here) - len(shown)
             for n, c in enumerate(shown):
                 last = n == len(shown) - 1 and not hidden
-                box = card("Worker %s %s %s" % (name_of(c), activity(c["state"], frame, unicode),
+                box = card("%s %s %s %s" % ("Researcher" if c.get("role") == "researcher" else "Worker",
+                                                name_of(c), activity(c["state"], frame, unicode),
                                                 call_span(c, "→" if unicode else "->")),
                            [("round %s · " % c["round"] if c.get("round", 1) > 1 else "") + task_of(c)], lane_width - 3, 3, unicode)
                 rails = (("└", " ", " ") if last else ("├", "│", "│")) if unicode else (("`", " ", " ") if last else ("|", "|", "|"))
@@ -1584,7 +1598,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 span = (column, x2) if key == active else span
             column += len(text) + 2
         role = previewed.get("role", "worker").upper() if previewed else ""
-        style = (hue(previewed) if role == "MAIN" else "review" if role != "WORKER" else "worker") if previewed else "dim"
+        style = (hue(previewed) if role == "MAIN" else "review" if role not in {"WORKER", "RESEARCHER"} else "worker") if previewed else "dim"
         lines.append(paint(edge, style) if span is None or not color else
                      paint(edge[:span[0]], style) + chosen(edge[span[0]:span[1]], style) + paint(edge[span[1]:], style))
         # No room for a body: the strip alone keeps every tab one click away.
@@ -1695,12 +1709,16 @@ def plan_rows(report, labels, width, unicode):
     for t in sorted((mapping(t) for t in tasks), key=lambda t: PLAN_ORDER.get(t.get("state"), 5)):
         by = t.get("claimed_by_participant")
         word = clean(t.get("state"), 20) or "unknown"
+        locally_done = t.get("id") in mapping(report.get("completed_tasks")) and t.get("state") != "done"
+        if locally_done:
+            word = "completed locally · plan " + word
         age = t.get("claim_age_s")
-        if t.get("claim_expired") and isinstance(age, (int, float)) and age >= 0:
+        if not locally_done and t.get("claim_expired") and isinstance(age, (int, float)) and age >= 0:
             word += " %d%s stale" % ((age // 86400, "d") if age >= 86400 else (age // 3600, "h") if age >= 3600 else (age // 60, "m"))
         # A finished task has no owner or check left to act on, so those columns would only read as warnings.
-        parts = [glyphs.get(t.get("state"), "?") + " " + clean(t.get("id"), 40), word, clean(t.get("title"), 120) or "untitled"]
-        if t.get("state") != "done":
+        parts = [glyphs.get("done" if locally_done else t.get("state"), "?") + " " + clean(t.get("id"), 40),
+                 word, clean(t.get("title"), 120) or "untitled"]
+        if t.get("state") != "done" and not locally_done:
             parts += [clean(labels.get(by) or by, 40) if by else "unclaimed", clean(t.get("verify"), 80) or "no verify"]
         rows.append((" · ".join(parts), ("task", t.get("id")) if t.get("id") else None))
     return rows or [("No repository plan recorded", None)]

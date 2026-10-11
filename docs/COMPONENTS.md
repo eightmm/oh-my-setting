@@ -7,6 +7,11 @@ Copilot CLI, Factory Droid, Aider, and marker-prefixed custom adapters are
 detected as optional transports. It gives them shared rules, skills, state,
 peer calls, isolated write delegation, and one verification boundary for
 OMS-managed delegated patches.
+
+The bundled experimental [Codex harness launcher](CODEX-HARNESSES.md) separates
+the UI/tool loop from inference: `oms harness codex|pi|claude --model EXACT`
+uses an existing Codex ChatGPT subscription login. Pi/Claude use an
+invocation-scoped local gateway; the selected harness retains tool permissions.
 The default subsystem catalog is `oms list` (also `--frontdoor`); core
 primitives and intent variants remain in `oms list --all`. Use
 `oms <tool> --help` for flags and the

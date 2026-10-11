@@ -103,7 +103,7 @@ def panel_metadata(row):
     if refs.get("panel_role") not in ("main", "worker", "advisor", "reviewer"):
         return {}
     return {"panel": {key: clean(refs.get("panel_" + key), 160) or None for key in (
-        "role", "owner", "purpose", "workload", "model", "effort", "location", "access", "label", "room_id", "room_participant"
+        "role", "owner", "harness", "purpose", "workload", "model", "effort", "location", "access", "label", "room_id", "room_participant"
     )}, "parent_attempt_id": clean(row.get("parent_attempt_id")) or None}
 
 

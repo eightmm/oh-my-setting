@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The subscription bridge is a separate wire path; fake RPC/HTTP peers keep it offline.
+PYTHONDONTWRITEBYTECODE=1 python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test_codex_harness.py"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-provider-registry.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM

@@ -1268,13 +1268,17 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
         return ""
     done = {t["id"] for t in tasks if t.get("state") == "done"}
     me = os.environ.get("OMS_ROOM_PARTICIPANT", "")
-    mine = next((t for t in tasks if me and t.get("claimed_by_participant") == me
-                 and t.get("state") in ("claimed", "running", "review", "landing")), None)
+    owned = [t for t in tasks if me and t.get("claimed_by_participant") == me
+             and t.get("state") in ("claimed", "running", "review", "landing")]
+    phases = {"review": 0, "claimed": 1, "running": 2, "landing": 2}
+    mine = max(owned, key=lambda t: (phases[t["state"]], str(t.get("updated", ""))), default=None)
     ready = next((t for t in sorted(tasks, key=lambda t: str(t.get("created", "")))
                   if t.get("state") == "ready" and all(d in done for d in t.get("depends") or [])), None)
     parts = ["Goal: %s" % goal if goal else "Goal: (none recorded)", "%d of %d verified" % (len(done), len(tasks))]
     if mine:
         parts.append("yours: %s (%s)" % (plain_line(mine["id"], 40), plain_line(mine.get("state"), 12)))
+        if mine.get("state") == "review":
+            parts.append("check retained results first; inspect the artifact, integrate and verify; record the owner result before stopping")
     if ready:
         parts.append("next ready: %s %s → oms agent-plan claim --id %s --provider %s" % (
             plain_line(ready["id"], 40), plain_line(ready.get("title"), 40), plain_line(ready["id"], 40),
@@ -1316,8 +1320,12 @@ def panel_main_base(payload: dict[str, Any], room: str) -> str:
             "coordination with other mains yourself; declare your scope with oms room scope --owns PATH before editing shared files "
             "and pass --scope PATH to write workers. Edit directly only when the brief would take longer than the edit "
             "or the step needs the main itself. Call other mains by window and model, such as #1 Opus 5.5 or #2 Sol 6.1. "
-            "Land your own work: commit on an oms/<task> branch in oms scratch-worktree add, rebase on the remote "
+            "Land your own work only when publication is authorized: commit on an oms/<task> branch in oms scratch-worktree add, rebase on the remote "
             "target, then oms land from that worktree; never commit in the shared checkout another main uses. "
+            "Carry the authorized goal through worker recovery, integration, checks and owner finalization; "
+            "a worker exit or review handoff does not end your turn. Continue remaining actionable work, or report "
+            "the concrete blocker and next action. Record plan progress and --finalize results in OMS_ROOM_REPO "
+            "even when the implementation ran elsewhere; local completion does not grant publication authority. "
             "To know whether a land is running, use oms land status --repo PATH (active: true) - never pgrep."
             % (payload_agent(payload), " --room " + room if room else ""))
 

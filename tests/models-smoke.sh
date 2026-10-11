@@ -121,3 +121,9 @@ grep -Fq 'models: gemini-3.8-flash-high, gemini-3.8-flash-low' "$TMP/normalized.
 if grep -Fq 'Fetching available' "$TMP/normalized.out"; then fail 'progress banner appeared as a model'; fi
 
 echo 'models-smoke: ok'
+
+# A compact UI preview must not cap the routing catalog.
+number=1
+while [ "$number" -le 21 ]; do printf 'gpt-6.%s-luna\n' "$number"; number=$((number + 1)); done > "$gen/codex.models"
+out="$(PATH="$TMP/bin:$PATH" OMS_CAPABILITY_DIR="$gen" "$ROOT/scripts/models.sh" --json --providers codex)"
+printf '%s' "$out" | python3 -c 'import json,sys; r=json.load(sys.stdin)["providers"][0]; assert len(r["models"]) == 20; assert len(r["catalog_models"]) == 21; assert r["catalog_models"][-1] == "gpt-6.21-luna"'

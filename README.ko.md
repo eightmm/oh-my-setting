@@ -93,6 +93,10 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 
 ## 들어 있는 것
 
+실험 기능인 [Codex 하네스 실행기](docs/CODEX-HARNESSES.md)는 기존 Codex 구독
+로그인으로 Codex CLI·pi·Claude Code의 UI와 도구를 유지하며 OpenAI 모델을
+사용한다. 예: `oms harness claude --model gpt-6.1-sol`.
+
 | | |
 |---|---|
 | **공유 규칙** | 세 CLI가 함께 쓰는 전역 규칙 하나와 `general`·`ml`·`slurm` 프로젝트 템플릿 |

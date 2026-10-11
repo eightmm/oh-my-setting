@@ -95,6 +95,10 @@ Update oh-my-setting and re-run its doctor.
 
 ## What's inside
 
+The experimental [Codex harness launcher](docs/CODEX-HARNESSES.md) runs Codex
+subscription models in Codex CLI, Pi, or Claude Code while retaining the chosen
+harness's UI and tools: `oms harness claude --model gpt-6.1-sol`.
+
 | | |
 |---|---|
 | **Shared rules** | One global rule set for all three CLIs, plus `general`, `ml` and `slurm` project templates |
