@@ -30,7 +30,7 @@ from panel_view import INBOX_LIMIT, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
 from panel_routing import (allocate, command as routed_command, policy, KINDS, MODEL_IDS, TIERS, WRITERS,
                            newest_route_model, route_family)
-from panel_results import _read, _lock, finalize, outcomes, results, retry_delivery, verified_patch
+from panel_results import _read, _write, _lock, finalize, outcomes, results, retry_delivery, verified_patch
 from panel_cache import read_shared
 from room_repository import EXECUTION_ENV, native_repository, state_repository, work_repository
 
@@ -836,17 +836,17 @@ def moved_main(repo, owner, env):
 def scope_overlaps(repo, room_id, state, caller, scopes):
     """Other mains' and live write calls' declared scopes that overlap these; coordination, not a lock."""
     calls = [p for p in state["participants"] if p["joined"] and p.get("parent") and p.get("owns")]
-    finished = room.status(repo, room_id)["call_results"] if calls else {}
     history = main_history(repo, room_id) if calls else []
     found = []
     for other in state["participants"]:
         if not other["joined"] or other["participant"] == caller or not other.get("owns"):
             continue
         if other.get("parent"):
-            # Live means no result handoff and no terminal attempt; a call with no attempt row yet counts as live.
+            # A handoff is a declaration; only lifecycle or process exit evidence releases a write scope.
             rows = [row for row in history if row.get("refs", {}).get("panel_room_participant") == other["participant"]
                     and row.get("refs", {}).get("panel_role") == other["role"]]
-            if other["participant"] in finished or rows and all(row.get("terminal") is True for row in rows):
+            if (rows and all(row.get("terminal") is True for row in rows)
+                    or _dispatch_call_finished(repo, room_id, other)):
                 continue
         elif other["role"] != "main":
             continue
@@ -1068,15 +1068,81 @@ def _dispatch_capacity(repo, room_id, state, parent):
                              "before dispatching again" % limit)
 
 
+def _dispatch_group_gone(pid):
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass
+    return False
+
+
+def _dispatch_exited(process, identity, reaped=False):
+    reaped = reaped or type(process.poll()) is int
+    if os.name != "posix":
+        return reaped
+    import panel_terminals
+    leader_gone = reaped or bool(identity and panel_terminals.process_gone(process.pid, identity))
+    return bool(leader_gone and _dispatch_group_gone(process.pid))
+
+
+def _dispatch_call_path(member, exited=False):
+    if not re.fullmatch(r"call-[0-9a-f]{16}", member or ""):
+        raise ValueError("invalid dispatch call identity")
+    return ".oms/artifacts/panel-" + member + ("-exit" if exited else "") + ".json"
+
+
+def _record_dispatch_call(repo, room_id, member, caller, process, identity, status=None):
+    if type(process.pid) is not int or process.pid <= 0:
+        raise ValueError("dispatch child PID unavailable")
+    record = {"schema": 1, "kind": "oms-panel-call", "room": room_id, "participant": member,
+              "parent": caller, "pid": process.pid, "identity": identity, "session": os.name == "posix"}
+    if status is not None:
+        record["exit"] = status
+    # Separate immutable receipts retain the original process identity for a later reconciler.
+    _write(repo, _dispatch_call_path(member, status is not None), record)
+
+
+def _dispatch_call_finished(repo, room_id, member):
+    try:
+        call = json.loads(_read(repo, _dispatch_call_path(member["participant"]), 4096, missing=True))
+        if (not isinstance(call, dict)
+                or set(call) != {"schema", "kind", "room", "participant", "parent", "pid", "identity", "session"}
+                or type(call.get("schema")) is not int or call["schema"] != 1 or call.get("kind") != "oms-panel-call"
+                or call.get("room") != room_id or call.get("participant") != member["participant"]
+                or call.get("parent") != member.get("parent") or type(call.get("pid")) is not int
+                or call["pid"] <= 0 or type(call.get("session")) is not bool
+                or call["session"] != (os.name == "posix")
+                or call.get("identity") is not None and not isinstance(call["identity"], str)):
+            return False
+        try:
+            exited = json.loads(_read(repo, _dispatch_call_path(member["participant"], True), 4096, missing=True))
+        except (OSError, ValueError):
+            exited = None
+        if isinstance(exited, dict) and type(exited.get("exit")) is int and exited == dict(call, exit=exited["exit"]):
+            return True
+        if call["session"] and call.get("identity"):
+            import panel_terminals
+            return (panel_terminals.process_gone(call["pid"], call["identity"])
+                    and _dispatch_group_gone(call["pid"]))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        pass
+    return False
+
+
 def _stop_dispatch(process, identity, term_sent=False):
-    if process.poll() is not None:
-        return
+    if type(process.poll()) is int:
+        return _dispatch_exited(process, identity, reaped=True)
     try:
         if not term_sent:
             process.terminate()
-        process.wait(timeout=20)
+        status = process.wait(timeout=20)
+        return _dispatch_exited(process, identity, reaped=type(status) is int)
     except ProcessLookupError:
-        return
+        return _dispatch_exited(process, identity)
     except subprocess.TimeoutExpired:
         # The delegate's TERM trap owns worktree cleanup; force only its original session after that grace.
         if os.name == "posix":
@@ -1085,14 +1151,15 @@ def _stop_dispatch(process, identity, term_sent=False):
             if (not identity or not current or current["group"] != process.pid
                     or not panel_terminals.matches(process.pid, identity)):
                 print("OMS call shutdown could not verify the child identity; force-stop skipped.", file=sys.stderr)
-                return
+                return _dispatch_exited(process, identity)
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
-                return
+                return _dispatch_exited(process, identity)
         else:
             process.kill()
-        process.wait(timeout=5)
+        status = process.wait(timeout=5)
+        return _dispatch_exited(process, identity, reaped=type(status) is int)
 
 
 def _settle_dispatch(repo, room_id, member, status):
@@ -1274,6 +1341,11 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             import panel_terminals
             current = panel_terminals.process(process.pid)
             identity = current["identity"] if current else None
+        if member:
+            try:
+                _record_dispatch_call(repo, room_id, member, caller, process, identity)
+            except (OSError, ValueError):
+                print("OMS call process record unavailable; unverified scopes remain reserved.", file=sys.stderr)
         status = process.wait()
         if status < 0:
             status = 128 - status
@@ -1286,18 +1358,27 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         for number in saved_handlers:
             signal.signal(number, signal.SIG_IGN)
         try:
+            exit_verified = False
             try:
                 if process:
-                    _stop_dispatch(process, identity, term_sent)
+                    exit_verified = _stop_dispatch(process, identity, term_sent)
             except (OSError, subprocess.SubprocessError):
                 print("OMS call shutdown unavailable.", file=sys.stderr)
-            if member:
+            if member and exit_verified:
+                try:
+                    _record_dispatch_call(repo, room_id, member, caller, process, identity, status)
+                except (OSError, ValueError):
+                    print("OMS call exit record unavailable; non-terminal scopes remain reserved.", file=sys.stderr)
                 try:
                     _settle_dispatch(repo, room_id, member, status)
                 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                     print("OMS call attempt settlement unavailable.", file=sys.stderr)
                 finally:
                     deliver_result(repo, room_id, member, caller, task_id, status)
+            elif member:
+                print("OMS call settlement pending: child exit is unverified; attempt and scope retained.", file=sys.stderr)
+                if status == 0:
+                    status = 1
         finally:
             for number, previous in saved_handlers.items():
                 signal.signal(number, previous)

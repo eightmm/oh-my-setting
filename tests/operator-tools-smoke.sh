@@ -3876,8 +3876,14 @@ conflict = io.StringIO()
 with redirect_stderr(conflict):
     panel.deliver_result(project, shared, "screen-call", room_owner, "screen-task", 1)
 assert "message-id conflict: result-screen-call" in conflict.getvalue()
-if os.name == "posix":
+def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner, room_env):
+    import io
     import signal
+    from contextlib import redirect_stderr
+    from unittest.mock import Mock, patch
+    from panel_routing import allocate
+    if os.name != "posix":
+        return
     import panel_terminals
     # Exercise the real child, handlers and ledger without a provider call: leave an active attempt on TERM.
     interrupted_file = temporary / "interrupted-attempt"
@@ -3906,9 +3912,10 @@ time.sleep(60)
 ''')
     saved = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     with patch.dict(os.environ, room_env, clear=True), \
+            patch.object(panel.shutil, "which", return_value=sys.executable), \
             patch.object(panel, "routed_command", return_value=[sys.executable, str(interrupted_child),
                          str(root / "scripts/lib"), str(interrupted_file), str(cleaned_file), "--repo", str(project)]):
-        interrupted_route = panel.selected_route("claude", "worker", "light", "read", "investigate")
+        interrupted_route = allocate("claude", "worker", "light", "read", "investigate", {"codex"})
         assert panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
                                   "interrupted-task", False, "Interrupted call", interrupted_route,
                                   None, None, None) == 143
@@ -3919,16 +3926,79 @@ time.sleep(60)
     settled = room.status(project, shared)
     assert cleaned_file.read_text() == "cleaned" and settled["call_results"][member]["exit"] == 143
     assert room.participant(settled, member)["joined"] and panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"]) == []
-    # Force-stop follows the 20-second grace and rejects a reused PID or unknown identity.
+    with patch.object(panel, "main_history", return_value=[dict(interrupted, state="review", terminal=False)]):
+        assert panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"]) == [], "verified exit receipt did not release scope"
+    # Force-stop follows the grace; signaling alone is not evidence that a process group exited.
     for identity_matches in (True, False):
         stopped = Mock(pid=123, poll=lambda: None)
         stopped.wait.side_effect = [subprocess.TimeoutExpired("fixture", 20), 0]
         with patch.object(panel_terminals, "process", return_value={"group": 123}), \
                 patch.object(panel_terminals, "matches", return_value=identity_matches), \
+                patch.object(panel_terminals, "process_gone", return_value=False), \
+                patch.object(panel, "_dispatch_group_gone", return_value=True), \
                 patch.object(panel.os, "killpg") as force, redirect_stderr(io.StringIO()):
-            panel._stop_dispatch(stopped, "original-identity")
+            assert panel._stop_dispatch(stopped, "original-identity") is identity_matches
         assert stopped.terminate.call_count == 1 and stopped.wait.call_args_list[0].kwargs == {"timeout": 20}
         assert force.call_count == int(identity_matches)
+    disappeared = Mock(pid=123, poll=lambda: None)
+    disappeared.terminate.side_effect = ProcessLookupError
+    with patch.object(panel_terminals, "process_gone", return_value=True), \
+            patch.object(panel, "_dispatch_group_gone", return_value=True):
+        assert panel._stop_dispatch(disappeared, "original-identity") is True
+    disappeared.wait.assert_not_called()
+    real_popen = subprocess.Popen
+    for scenario in ("unknown-identity", "kill-unconfirmed", "leader-only"):
+        pending = Mock(pid=2147483647, poll=lambda: 0 if scenario == "leader-only" else None)
+        pending.wait.side_effect = ([0] if scenario == "leader-only" else
+                                   [panel.NativeShutdown(signal.SIGTERM), subprocess.TimeoutExpired("fixture", 20)] +
+                                   ([subprocess.TimeoutExpired("fixture", 5)] if scenario == "kill-unconfirmed" else []))
+        pending_attempt = []
+        def pending_child(argv, *args, **kwargs):
+            if argv[:3] != [sys.executable, "-c", "pass"]:
+                return real_popen(argv, *args, **kwargs)
+            env = kwargs["env"]
+            member = env["OMS_ROOM_PARTICIPANT"]
+            with patch.dict(os.environ, env, clear=True):
+                room.scope(project, shared, member, ["value.txt"])
+                pending_attempt.append(panel.events(project, "start", "--provider", "codex", "--tool", "peer-delegate",
+                    "--task-id", scenario, "--parent-attempt-id", room_owner,
+                    "--ref", "panel_role=worker", "--ref", "panel_room_id=" + shared,
+                    "--ref", "panel_room_participant=" + member, "--then", "starting", "--then", "working", output=True))
+            return pending
+        observation = ({"identity": "original-identity", "group": pending.pid, "state": "S"}
+                       if scenario == "kill-unconfirmed" else None)
+        with patch.dict(os.environ, room_env, clear=True), \
+                patch.object(panel.shutil, "which", return_value=sys.executable), \
+                patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
+                patch.object(panel.subprocess, "Popen", side_effect=pending_child), \
+                patch.object(panel_terminals, "process", return_value=observation), \
+                patch.object(panel_terminals, "process_gone", return_value=False), \
+                patch.object(panel_terminals, "matches", return_value=True), \
+                patch.object(panel, "_dispatch_group_gone", return_value=False), \
+                patch.object(panel.os, "killpg") as force, redirect_stderr(io.StringIO()) as notices:
+            status = panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
+                                        scenario, False, "Pending child", interrupted_route, None, None, None)
+            row = json.loads(panel.events(project, "show", "--attempt", pending_attempt[0], "--json", output=True))
+            member = row["refs"]["panel_room_participant"]
+            state = room.status(project, shared)
+            assert row["state"] == "working" and status == (1 if scenario == "leader-only" else 143), (scenario, row)
+            assert member not in state["call_results"] and "settlement pending" in notices.getvalue()
+            assert not panel._read(project, panel._dispatch_call_path(member, True), missing=True)
+            record = json.loads(panel._read(project, panel._dispatch_call_path(member)))
+            assert record["pid"] == pending.pid and record["identity"] == (observation or {}).get("identity")
+            assert any(o["participant"] == member for o in panel.scope_overlaps(project, shared, state, room_owner, ["value.txt"]))
+            assert force.call_count == int(scenario == "kill-unconfirmed")
+            # A stale or premature final handoff cannot release an active child's scope.
+            room.send(project, shared, member, room_owner, "Call exit=143; parent acceptance pending.",
+                      kind="handoff", message_id="result-" + member)
+            assert any(o["participant"] == member for o in panel.scope_overlaps(
+                project, shared, room.status(project, shared), room_owner, ["value.txt"]))
+        # Explicit fixture cleanup keeps unresolved children out of unrelated pool/scope cases.
+        panel.events(project, "transition", "--attempt", pending_attempt[0], "--state", "cancelled",
+                     "--reason-code", "fixture_complete")
+    print("dispatch exit evidence: confirmed TERM, unknown identity, unconfirmed kill and surviving group passed")
+
+exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner, room_env)
 # A room in A keeps its parent, call and results when the worker executes in B,
 # whether the caller selects the room explicitly or inherits it.
 other_project = temporary / "dispatch work repo"
@@ -4194,7 +4264,9 @@ def exercise_observed_worker_leases():
                 patch.object(room, "append", side_effect=rollback), \
                 patch.object(panel, "results", return_value={"rows": []}), \
                 patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
-                patch.object(panel.subprocess, "Popen", return_value=Mock(pid=0, wait=lambda: 0, poll=lambda: 0)) \
+                patch("panel_terminals.process", return_value=None), \
+                patch.object(panel, "_dispatch_group_gone", return_value=True), \
+                patch.object(panel.subprocess, "Popen", return_value=Mock(pid=123, wait=lambda: 0, poll=lambda: 0)) \
                     as provider_call, redirect_stderr(errors):
             if scenario != "normal":
                 try:
@@ -4939,6 +5011,10 @@ room.join(project, shared, "scope-live", "codex", role="worker", parent=room_own
 room.join(project, shared, "scope-done", "codex", role="worker", parent=room_owner, owns=["scripts/lib/panel_view.py"])
 room.send(project, shared, "scope-done", room_owner, "Call exit=0; parent acceptance pending.", kind="handoff",
           message_id="result-scope-done")
+panel.events(project, "start", "--provider", "codex", "--tool", "peer-delegate",
+             "--ref", "panel_role=worker", "--ref", "panel_room_id=" + shared,
+             "--ref", "panel_room_participant=scope-done", "--then", "starting", "--then", "working",
+             "--then", "verifying", "--then", "review", "--then", "done")
 scope_before_preview = room.records(project, shared)
 scoped_dispatch = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
                                   "--dispatch", "worker", "--owner", "claude", "--access", "write", "--purpose", "implement",
