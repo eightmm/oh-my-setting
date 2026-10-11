@@ -165,15 +165,12 @@ def open_native(repo, provider, command, watcher):
     env = {key: os.environ[key] for key in ("OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_PANEL_NO_ANIMATION", "OMS_PANEL_COLOR", "NO_COLOR")
            if key in os.environ}
     env["OMS_PANEL_HOST"] = "herdr"
-    top = os.environ.get("OMS_PANEL_POSITION", "auto") in ("auto", "top", "left")
-    env["OMS_PANEL_VIEW"] = "graph" if top else "summary"
-    env["OMS_PANEL_POSITION"] = "top" if top else "side"
-    # layout.apply creates a new tab; it never types into an existing CLI.
+    env["OMS_PANEL_VIEW"] = "graph"
+    # layout.apply creates a new tab; it never types into an existing CLI. The board is the left pane.
     leaf = lambda label, argv: {"type": "pane", "label": label, "cwd": str(repo), "command": argv, "env": env}
     request("layout.apply", {"workspace_id": current_pane["workspace_id"], "tab_label": "OMS / " + provider,
-        "focus": True, "root": {"type": "split", "direction": "down" if top else "right", "ratio": .5 if top else .74,
-        "first": leaf("OMS team", watcher) if top else leaf(provider, command),
-        "second": leaf(provider, command) if top else leaf("OMS tasks", watcher)}})
+        "focus": True, "root": {"type": "split", "direction": "right", "ratio": .4,
+        "first": leaf("OMS team", watcher), "second": leaf(provider, command)}})
 
 
 def zoom(enabled):

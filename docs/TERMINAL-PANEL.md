@@ -20,7 +20,9 @@ When the first read fails, or a window switches to a room it has not successfull
    waiting for approval or input, broadcasts from mains and patches awaiting admission.
 5. Arrow keys or a click select a row; Enter or a click opens that main's chat
    or the call's result. Without a raw-key terminal the menu takes key + Enter.
-6. On a board, click or Enter on a main or call opens it; Esc backs out, `F9` returns to chat.
+6. The board is the left pane of a main's window and its native chat is on the right. On a board,
+   click or Enter on a main opens its chat; on a call it opens the call in a reader pane above the
+   chat. Esc closes the reader (then backs out), `F9` returns to chat.
 7. Results: `t` on a board opens the tree and a call's retained answer; `r` in the control
    menu browses recorded results. Debates: the Debate tab of the board's bottom box (`Tab`, `←→`, `Enter`, `f`), the
    `COUNCIL` branch of a main in the tree, or `c` to start one.
@@ -29,9 +31,8 @@ When the first read fails, or a window switches to a room it has not successfull
 ```bash
 oms panel --repo . --layout inline         # portable menu, no tmux needed
 oms panel --repo . --layout split          # uses an already-installed tmux
-oms panel --repo . --host tmux --launch codex   # team graph above native chat
+oms panel --repo . --host tmux --launch codex   # team graph left of native chat
 oms panel --repo . --host tmux --launch claude
-oms panel --repo . --host tmux --position side # optional side board
 oms panel --repo . --reopen                # restore only a missing tmux board
 oms panel --repo . --json                  # read-only status and role policy
 oms panel --repo . --routes                # read-only role policy
@@ -124,8 +125,8 @@ team row opens that call's recorded result. Recent messages precede historical
 and status-unavailable calls, whose identities and result links stay separate. Result details put the main's decision
 and verification before the worker's answer. Long excerpts remain scrollable and
 point to the full retained result rather than filling the board with raw output.
-Press `f` in a call preview to open that complete scrollable reader; Enter keeps
-the existing preview selection. The reader revalidates the exact recorded target.
+Press `f` in a call preview (or click or Enter on the call) to open that complete
+scrollable reader. The reader revalidates the exact recorded target.
 
 A native main launched from the menu joins the selected work room. Starting a replacement
 main from the menu or with `--launch` keeps the panel's recorded room while it is open and has headroom; a full or closed room makes the next
@@ -148,11 +149,21 @@ Enter. Clicking a main focuses its proven existing tmux conversation pane;
 if no terminal exists, a proven exact Codex app link can open its original chat.
 An unresolved or departed participant shows a reason. These clicks do not
 start or resume CLI sessions, send a prompt or call a model. In the graph, the
-click (or Enter) on a worker, advisor or reviewer shows its retained answer,
-review state and changed files in the board's detail area, which scrolls; no
-separate screen opens from the graph. A main's detail lists its whole team,
-finished calls included, and clicking a team row shows that call there. The
-tree opens recorded results directly. Repository tasks show the
+click (or Enter) on a worker, advisor, reviewer, researcher or council seat
+keeps a short summary in the board's detail area and opens the call's full
+retained result (answer, review state, changed files) in a reader pane on the
+right: the native chat pane is split, the reader on top (about 62 percent of
+its height) and the chat below, and the board keeps its width. Another call
+reuses that reader. `q` or Esc in the reader, or Esc on the board, closes only
+the reader, and focus returns to the board; selecting a main closes it and
+shows the chat. The reader is started as `oms panel --results --participant ID
+[--task-id ID]` with identifiers revalidated from recorded state, closes itself
+when its board pane goes away, and is never discovered as a board or an input
+pane by `--reopen`. When the reader would get fewer than 8 rows, and outside a
+managed tmux main window (inline layout, Herdr, a standalone `--watch`, the
+control window), the call's content stays in the board's detail area as before.
+A main's detail lists its whole team, finished calls included, and clicking a
+team row opens that call the same way, as does Enter on a call in the tree. Repository tasks show the
 displayed snapshot's title, dependencies and declared paths. Escape closes the
 detail or a results screen. Click a main's left chevron or press Space to fold its calls;
 the wheel and PageUp/PageDown scroll. `t`, `g`, and `b` select tree, graph and
@@ -339,7 +350,8 @@ of a recorded patch (summarized only while its SHA-256 still matches, so it
 survives worktree cleanup), outcome, verification and artifact references (read
 in the background, refreshed with each snapshot); for a main its addressed mail
 and team. Reading mail there never
-acknowledges it. The native CLI pane is never used for detail.
+acknowledges it. The native CLI pane itself is never used for detail; the reader is
+a separate pane split from it.
 A CLI exit never changes a task to accepted. The board is repository-wide, not
 a claim that every displayed task belongs to this room. Declared scopes are
 labels, not file locks or authority; write workers still use isolated patches,
@@ -814,22 +826,19 @@ main ownership and exact pane/terminal/socket identity; reused panes and
 unproven sessions are rejected. Numeric footer readings retain their reported
 scope and unknown values. A socket error does not stop the native sibling.
 
-New native boards default to `--position auto`: a window that is visually wider
-than tall (columns more than twice the rows) gets a left board (40 percent),
-otherwise the graph is above the original CLI, with each taking half the window.
-That placement is chosen once, when the panel's first main window opens its board
-(from the terminal that is attaching), and a window resize never moves it;
-`--position top|left|side` fixes the placement.
-The board size is one setting for the whole panel, recorded in absolute cells in the
-session option `@oms_panel_split` (`<top|left>:<cells>c`; the older percent form is
-converted on first sight). Every main window's board, active or not, resizes itself to
+The board is always the full-height left pane of a main window (40 percent of the
+window the first time, sized from the terminal that is attaching), with the native
+CLI on its right; a call opened from the board shows in a reader pane above the CLI.
+Herdr uses the same left board.
+The board width is one setting for the whole panel, recorded in absolute cells in the
+session option `@oms_panel_split` (`left:<cells>c`; the older percent form is
+converted on first sight, and an older session's `top:` record is replaced). Every main window's board, active or not, resizes itself to
 those cells (keeping at least 20 cells for the board and for the chat), so `F6`/`F7`
 between mains only moves the `▸` cursor. Drag the border in any main window and the
 other main windows (and mains opened later) take the new width; a zoomed board and the
 control window are left alone.
 A watcher whose OMS sources change re-executes itself once they compile, so
-updated boards need no manual restart. `--position side` retains a 28 percent
-tmux sidebar (26 percent in Herdr), defaulting to `summary`. Select `v` in the
+updated boards need no manual restart; an open reader stays. Select `v` in the
 task panel to expand its graph; `Esc` collapses it,
 and closing the watcher restores its own zoom. Native input and permission
 prompts stay in the original CLI. The room's detailed tree and graph remain
@@ -845,7 +854,7 @@ provider readings, recorded messages or repository tasks. Missing router,
 progress, locks or billing data is never invented. Smaller interactive panes
 retain tree navigation; passive output shows the list.
 Clicking a main requests navigation to its original chat; workers show their
-content in the detail area. The lower pane remains the provider's native interactive terminal,
+content in the reader pane (or the detail area). The right pane remains the provider's native interactive terminal,
 including editing, pasted input and permission prompts. `--launch` opens this
 layout in the checkout's panel when tmux is available, while `--host inline
 --launch` runs the CLI alone.
