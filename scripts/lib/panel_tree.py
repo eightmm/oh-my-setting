@@ -4,7 +4,7 @@ from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import usage_line
 from panel_view import (ATTENTION_STATES, PALETTE, activity, box_edge, box_row, clipped,
                         menu_rows, status_alerts, tone, usage_words, worker_rows, wrapped)
-from room_view import (action as member_action, call_order, context_note, open_count, call_span, footer_hints, live_unread,
+from room_view import (action as member_action, call_order, context_note, open_count, footer_hints, live_unread,
                        goal_banner, main_names, model_name, native_advisors, nodes, plan_idle, readable, said,
                        settler, spawn_bar, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
 
@@ -52,9 +52,14 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             items.append(action)
 
     def phrase(call):
-        return call_span(call, "→" if unicode else "->")
+        from room_view import LIVE_STATES, elapsed, end_words
+        if call.get("_native"):
+            return "answered" if call.get("_finished") else "running"
+        words = end_words(call, said(call["state"]))
+        return " ".join(part for part in (words, elapsed(call.get("joined_at")) if call["state"] in LIVE_STATES else "") if part)
 
     def call_groups(attached, owner, root_stem):
+        from room_view import clock_stamp
         groups = [(role, [m for m in attached if m.get("role") == role and classify(m) == "live"])
                   for role in ("council", "advisor", "reviewer", "researcher", "worker")]
         groups += [(kind, [m for m in attached if classify(m) == kind]) for kind, _ in CALL_GROUPS]
@@ -86,9 +91,19 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 if child.get("_native"):
                     child_action = None
                     label += sep + "answer stays in the main transcript"
-                add(indent + branch + "%s %s%s%s" % (activity(child["state"], frame, unicode), model, sep, phrase(child) + (sep + "patch awaits admission"
-                        if child["state"] == "done" and child.get("participant") in listing(report.get("awaiting_admission")) else "")),
-                    tone(child["state"]), child_action)
+                clock = " → ".join(filter(None, (clock_stamp(child.get("joined_at")), clock_stamp(child.get("ended"))))) if unicode else \
+                    " -> ".join(filter(None, (clock_stamp(child.get("joined_at")), clock_stamp(child.get("ended")))))
+                if child.get("_native"):
+                    clock = child.get("_finished") or child["_native"]
+                lead = indent + branch + activity(child["state"], frame, unicode) + " " + phrase(child)
+                text = lead + sep + model
+                if display_width(text + sep + clock) <= content_width and clock:
+                    text += sep + clock
+                if display_width(text) > content_width:
+                    text = lead + sep + clipped(model, max(0, content_width - display_width(lead + sep)))
+                add(text, tone(child["state"]), child_action)
+                if child["state"] == "done" and child.get("participant") in listing(report.get("awaiting_admission")):
+                    add(indent + "   patch awaits admission", "alert", child_action)
                 for line in wrapped(label, max(1, content_width - display_width(indent) - 3), 2):
                     add(indent + "   " + line, None, child_action)
 

@@ -264,22 +264,36 @@ def clock_stamp(ts, today=None):
     return time.strftime("%H:%M" if same else "%m-%d %H:%M", local)
 
 
+def elapsed(ts):
+    """Compact elapsed UTC time, empty when no valid timestamp was recorded."""
+    try:
+        seconds = max(0, time.time() - calendar.timegm(time.strptime(str(ts), "%Y-%m-%dT%H:%M:%SZ")))
+    except ValueError:
+        return ""
+    return "<1m" if seconds < 60 else "%dm" % (seconds // 60) if seconds < 3600 else \
+        "%dh" % (seconds // 3600) if seconds < 86400 else "%dd" % (seconds // 86400)
+
+
+def end_words(call, hint):
+    if call.get("state") == "failed":
+        if call.get("guard"):
+            return "guard stop"
+        if call.get("exit") == 124:
+            return "timed out"
+        if call.get("exit") is not None:
+            return "failed (exit %s)" % call["exit"]
+    return hint
+
+
 def call_span(call, arrow="->"):
-    """"14:02 -> 14:31 finished" / "14:05 -> running"; the times come from the room, the end state from the call."""
+    """Recorded start/end clocks and consistent state words; live calls include elapsed time."""
     state = call["state"]
     if call.get("_native"):
-        # The built-in advisor keeps only local clock times.
         return "answered " + call["_finished"] if call.get("_finished") else "asked %s %s running" % (call["_native"], arrow)
-    words = said(state)
-    if state == "failed" and call.get("guard"):
-        words = "guard stop"
-    elif state == "failed" and call.get("exit") is not None:
-        words = ("timed out" + (" · continue with --continue" if call.get("role") == "worker" else "")) if call["exit"] == 124 \
-            else "failed (exit %s)" % call["exit"]
-    if state in LIVE_STATES or not call.get("ended"):
-        end = ""
-    else:
-        end = clock_stamp(call["ended"])
+    words = end_words(call, said(state))
+    if state in LIVE_STATES:
+        return " ".join(part for part in (words, elapsed(call.get("joined_at"))) if part)
+    end = clock_stamp(call["ended"]) if call.get("ended") else ""
     start = clock_stamp(call.get("joined_at"))
     if state == "presence unknown":
         return (start + " " + arrow + " " if start else "") + words
@@ -401,12 +415,15 @@ def goal_box(report, width, unicode, compact):
 
 
 def claims_by_main(report):
-    """Plan tasks a main holds, by its room participant; the plan is repository-owned data."""
+    """Current claims only, newest first; claiming never proves a live process."""
     held = {}
     for task in listing(mapping(report.get("plan")).get("tasks")):
         task = mapping(task)
-        if task.get("claimed_by") and task.get("state") not in ("done", "ready"):
-            held.setdefault(task["claimed_by"], []).append(task)
+        claimant = task.get("claimed_by") or task.get("claimed_by_participant")
+        if claimant and task.get("state") in {"claimed", "running", "review"}:
+            held.setdefault(claimant, []).append(task)
+    for tasks in held.values():
+        tasks.sort(key=lambda task: str(task.get("claimed_at") or ""), reverse=True)
     return held
 
 
@@ -493,8 +510,12 @@ def padded(text, width):
     return text + " " * max(0, width - display_width(text))
 
 
+FLANK_WIDTH = 140
+
+
 def layout(width, count, centered=False):
-    span = min(58, width - 8) if centered else min(58, (width - count - 1) // count)
+    cap = 58 if width >= FLANK_WIDTH else width - 8
+    span = min(cap, width - 8) if centered else min(cap, (width - count - 1) // count)
     return span, (width - (span * count + count - 1)) // 2
 
 
@@ -543,17 +564,40 @@ def without_now(text):
 
 
 def declared_status(room, participant, width):
-    """A main's own declared task as "Now: text (HH:MM)" lines; the text is peer data."""
-    found = (room.get("statuses") or {}).get(participant) or {}
+    """The main's declared task with its recorded clock and a stale marker after 30 minutes."""
+    found = mapping(mapping(room.get("statuses")).get(participant))
     text = without_now(readable(found.get("text"), " "))
     try:
-        stamp = time.strftime("%H:%M", time.localtime(calendar.timegm(time.strptime(str(found.get("ts")), "%Y-%m-%dT%H:%M:%SZ"))))
+        then = calendar.timegm(time.strptime(str(found.get("ts")), "%Y-%m-%dT%H:%M:%SZ"))
+        stamp = time.strftime("%H:%M", time.localtime(then))
+        stale = " (stale)" if time.time() - then > 1800 else ""
     except ValueError:
-        stamp = ""
-    return wrapped("Now: " + text + (" (" + stamp + ")" if stamp else ""), width, 2) if text else []
+        stamp, stale = "", ""
+    lines = wrapped("Now: " + text + (" (" + stamp + ")" if stamp else "") + stale, width, 2) if text else []
+    if lines and stale and width >= len(stale) and not any(stale in line for line in lines):
+        lines[-1] = clipped(lines[-1], width - len(stale)) + stale
+    return lines
 
 
-def detail(member, preview, width, members=(), room=None, teams=None, everyone=None, labels=None):
+def team_counts(calls, classify=None):
+    counts = dict.fromkeys(("attention", "active", "await admission", "finished", "no record"), 0)
+    for call in calls:
+        state = call.get("state")
+        if state == "done" and classify and classify(call) == "review":
+            bucket = "await admission"
+        elif state in ATTENTION_STATES:
+            bucket = "attention"
+        elif state in LIVE_STATES:
+            bucket = "active"
+        elif state in FINISHED:
+            bucket = "finished"
+        else:
+            bucket = "no record"
+        counts[bucket] += 1
+    return ["%s %s" % (number, bucket) for bucket, number in counts.items() if number]
+
+
+def detail(member, preview, width, members=(), room=None, teams=None, everyone=None, labels=None, claims=None, classify=None):
     """Selected block content in plain words; reading mail here never acknowledges it."""
     room = room or {}
     names = {m["participant"]: who(m, labels) for m in members}
@@ -563,8 +607,14 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
     title = "" if title in ("Native task not recorded", "Task unrecorded") else title
     where = "in the repository" if member.get("location") in (None, "repository") else "in its own worktree"
     targets = {}
+    if classify is None:
+        awaiting = set(listing(room.get("awaiting_admission")))
+        classify = lambda c: "review" if c.get("participant") in awaiting else "live"
     if member.get("role") == "main":
         lines = wrapped("%s · %s main · %s" % (name, (member.get("provider") or "").capitalize(), main_words(member)), width, 2)
+        held = (claims if claims is not None else claims_by_main({"plan": {"tasks": room.get("repo_tasks")}})).get(member["participant"], [])
+        if not title and held:
+            title = clean(held[0].get("title")) or clean(held[0].get("id"))
         lines += wrapped("Task: " + (title or "no task title yet"), width, 2)
         lines += declared_status(room, member["participant"], width)
         if member.get("owns"):
@@ -572,16 +622,18 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         if not member.get("model") and member.get("model_at_launch"):
             lines += wrapped("Current model unavailable · launch setting: " +
                              MODEL_NAMES.get(member["model_at_launch"], member["model_at_launch"]), width, 2)
-        inbox = [m for m in listing(room.get("messages")) if member["participant"] in listing(m.get("targets"))]
-        unread = sum(member["participant"] in listing(m.get("pending_for")) for m in inbox)
+        inbox = [m for m in listing(room.get("messages")) if member["participant"] in listing(m.get("targets"))
+                 and not result_handoff(room, m)]
+        unread = sum(valid_count(mapping(p).get("pending")) or 0 for p in listing(room.get("pairs"))
+                     if mapping(p).get("recipient") == member["participant"])
         calls = sorted((everyone or teams or {}).get(member["participant"], []), key=call_order)
-        attention = [c for c in calls if c["state"] in ATTENTION_STATES]
-        active = [c for c in calls if c["state"] in LIVE_STATES]
-        finished = [c for c in calls if c["state"] in FINISHED]
-        unknown = [c for c in calls if c["state"] not in ATTENTION_STATES | LIVE_STATES | FINISHED]
-        counts = [(len(group), label) for group, label in ((active, "active"), (attention, "need attention"),
-                  (finished, "finished"), (unknown, "no record")) if group]
-        lines.append("Team: " + (" · ".join("%s %s" % pair for pair in counts) or "no calls recorded"))
+        attention = [c for c in calls if c["state"] in ATTENTION_STATES or
+                     c["state"] == "done" and classify(c) == "review"]
+        active = [c for c in calls if c["state"] in LIVE_STATES and c not in attention]
+        finished = sorted((c for c in calls if c["state"] in FINISHED and c not in attention),
+                          key=lambda c: (str(c.get("ended") or c.get("joined_at") or ""), c.get("seq", 0)), reverse=True)
+        unknown = [c for c in calls if c not in attention + active + finished]
+        lines.append("Team: " + (" · ".join(team_counts(calls, classify)) or "no calls yet"))
         native = next((c for c in calls if c.get("_native")), None)
         if native:
             # A summary of the main's advisor state belongs beside the team counts, not below the call log.
@@ -593,25 +645,28 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
                 lines.append("  " + heading)
             for c in group:
                 label = MODEL_NAMES.get(c.get("model"), c.get("model")) or "unknown"
-                # Every wrapped team line keeps its exact result target, including finished calls.
-                for part in wrapped("- %s%s %s · %s · %s" % ("! " if c["state"] in ATTENTION_STATES else "", ROLES.get(c.get("role"), "Worker"),
-                                                           label, call_span(c, "→") if c.get("joined_at") or c.get("ended") else said(c["state"]),
-                                                           clean(c.get("title")) or "no task title"), width - 2, 2):
+                text = "- %s%s %s · %s · %s" % ("! " if c in attention else "", ROLES.get(c.get("role"), "Worker"),
+                        label, call_span(c, "→"), clean(c.get("title")) or "no task title")
+                parts = wrapped(text, max(1, width - 4), max(1, len(text)))
+                for index, part in enumerate(parts):
                     targets[len(lines)] = action(c)
-                    lines.append("  " + part)
+                    lines.append(("  " if index == 0 else "    ") + part)
+        team_rows("Needs attention", attention)
+        team_rows("Active", active)
+        team_rows("No record", unknown)
+        team_rows("Finished", finished[:5])
+        if len(finished) > 5:
+            lines.append("%s earlier finished · see Past work" % (len(finished) - 5))
         lines.append("Messages to %s: %s%s" % (who(member, labels), len(inbox), " (%s unread)" % unread if unread else ""))
         for m in inbox[-3:]:
-            lines += wrapped("  From %s: %s" % (names.get(m.get("sender"), clean(m.get("sender"))),
-                                                readable(m.get("text"), " ") or "(empty)"), width, 1)
+            text = "From %s: %s" % (names.get(m.get("sender"), clean(m.get("sender"))),
+                                    readable(m.get("text"), " ") or "(empty)")
+            for index, part in enumerate(wrapped(text, max(1, width - 4), max(1, len(text)), max_chars=len(text))):
+                lines.append(("  " if index == 0 else "    ") + part)
         if not inbox:
             lines.append("  No messages received")
-        # The team reads like a log: finished calls on top, then what needs attention, live work last.
-        team_rows("Finished", finished)
-        team_rows("Needs attention", attention)
-        team_rows("No record", unknown)
-        team_rows("Active", active)
         lines += ["", "Works %s%s" % (where, " · effort " + member["effort"] if member.get("effort") else "")]
-        return lines + ["Click a team row to see it here · click the main again to open its chat"], targets
+        return lines + ["Click a team row to open it · click the main for its chat"], targets
     if member.get("_native"):
         done = member["state"] == "done"
         return ["%s advisor · %s" % (member.get("model"), "answered" if done else "running"),
@@ -620,12 +675,11 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
                 "Its answer stays inside the main's chat"], targets
     owner = names.get(member.get("parent"), "")
     lines = wrapped("%s%s · %s%s" % (who(member), " for " + owner if owner else "",
-                                     said(state), " · " + title if title else ""), width, 3)
+                                     end_words(member, said(state)), " · " + title if title else ""), width, 3)
     if member.get("round", 1) > 1:
         lines += wrapped("Round %s of this task, continuing %s" % (member["round"], names.get(member.get("continues"), "its earlier worker")), width, 2)
-    if member.get("exit") == 124 and member.get("task_id"):
-        lines += wrapped("Timed out. Continue it from its main: oms panel --dispatch worker --continue %s --access write --purpose implement --brief-file PATH --verify COMMAND"
-                         % clean(member["task_id"]), width, 3)
+    if member.get("exit") == 124:
+        lines += wrapped("Timed out · its main can continue it", width, 3)
     access = {"write": "can edit", "read": "read-only"}.get(member.get("access"), "permissions unrecorded")
     metadata = "%s %s%s" % (access.capitalize(), where, " · effort " + member["effort"] if member.get("effort") else "")
     loaded = preview.get("report")
@@ -662,17 +716,17 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
                     body.append("")
                 continue
             cut = len(paragraph) > 4000
-            for part in wrapped(paragraph, width - 2, limit + 1, max_chars=4000):
+            for index, part in enumerate(wrapped(paragraph, max(1, width - 4), limit + 1, max_chars=4000)):
                 if len(body) == limit:
                     more = True
                     break
-                body.append("  " + part)
+                body.append(("  " if index == 0 else "    ") + part)
             more = more or cut
             if more:
                 break
         lines.extend(["", heading] + body)
         if more:
-            lines.append("  More in the full recorded result · f opens it")
+            lines.append("  More in the full recorded result · Enter opens it")
 
     if summary:
         result_text("Main's summary:", summary, 24)
@@ -830,7 +884,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         held = claims.get(m["participant"], [])
         if not held:
             return ""
-        return "Task: %s · %s" % (held[0].get("id"), held[0].get("state")) + (" +%s" % (len(held) - 1) if len(held) > 1 else "")
+        return "Task: %s · %s" % (held[0].get("id"), held[0].get("state")) + (" · +%s more running" % (len(held) - 1) if len(held) > 1 else "")
 
     def declared_of(m):
         # The card already labels it "Now:"; a status written as "Now: ..." would read twice.
@@ -844,8 +898,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             seconds = time.time() - calendar.timegm(time.strptime(str(stamp), "%Y-%m-%dT%H:%M:%SZ"))
         except ValueError:
             seconds = 0
-        # Past an hour the main's own words no longer describe the live counts beside them.
-        return "Now: " + text + ((" · " if unicode else " / ") + ago(stamp) + (" (stale)" if seconds > 3600 else "")
+        return "Now: " + text + ((" · " if unicode else " / ") + ago(stamp) + " (stale)"
                                  if seconds > 1800 else "") if text else ""
 
     def task_of(m):
@@ -859,12 +912,20 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
     def task_lines(m, span, limit):
         title = task_of(m)
-        now = declared_status(room, m["participant"], span) if m.get("role") == "main" else []
+        now = now_line(m) if m.get("role") == "main" else ""
+
+        def status_fit(text, available):
+            stale = " (stale)" if " (stale)" in text and available > len(" (stale)") else ""
+            return clipped(text.replace(stale, "") if stale else text, max(1, available - len(stale))) + stale
+
         if now and clean(m.get("title")) not in (None, "", "Native task not recorded", "Task unrecorded"):
             if limit == 1:
-                return [clipped(title, max(1, span // 2 - 2)) + " / " + clipped(now[0], max(1, span // 2 - 1))]
-            return wrapped(title, span, 1) + now[:limit - 1]
-        return wrapped(title, span, limit)
+                return [clipped(title, max(1, span // 2 - 2)) + " / " + status_fit(now, max(1, span // 2 - 1))]
+            return wrapped(title, span, 1) + [status_fit(now, span)]
+        parts = wrapped(title, span, limit)
+        if now and "(stale)" in now and not any("(stale)" in line for line in parts):
+            parts[-1] = status_fit(parts[-1] + " (stale)", span)
+        return parts
 
     # Mail to finished calls is never read again; unread mail to mains and running calls is counted.
     unread_total = live_unread(report, members, settled)
@@ -911,9 +972,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     # Empty advisor/worker places stay visible, one row each, so the structure never changes shape.
     base_wires += (not shown_judges) + (not shown_workers) if primary and height >= 20 else 0
 
-    def full_title(m):
+    def full_title(m, reflow=False):
         role = "MAIN" if m.get("role") == "main" else m.get("role", "worker").upper()
-        return role + " / " + name_of(m)
+        return role + (" " if reflow else " / ") + name_of(m)
 
     def heading(m):
         mark = ("▸ " if unicode else "> ") if action(m) == selected else ""
@@ -1010,12 +1071,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     budget = total_rows - dock - warn_reserve
 
     def extras(m):
-        return 1 if m.get("role") == "main" or m.get("location") or m.get("effort") else 0
+        return int(bool(m.get("location")))
 
     def needed(group, centered=False):
         span = layout(width, len(group), centered)[0]
         reflow = int(compact(group, span))
-        return max(3 + extras(m) + reflow + len(task_lines(m, span - 4, 2)) for m in group)
+        return max(3 + (1 if m.get("role") == "main" else extras(m)) + reflow + len(task_lines(m, span - 4, 2)) for m in group)
 
     # Cards never keep blank rows; rows they do not need go to the detail area.
     def drawn_rows(card_height):
@@ -1039,31 +1100,29 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             span = cell_width
             title = heading(m)
             if reflow:
-                role = {"advisor": "ADV", "reviewer": "REV", "worker": "WRK", "researcher": "RES", "council": "DEB"}.get(m.get("role"), "MAIN")
-                title = (("▸ " if unicode else "> ") if action(m) == selected else "") + role
-            status = "%s %s" % (activity(main_state(m), frame, unicode), main_words(m, unicode))
+                title = ""
+            state = main_state(m)
+            words = end_words(m, main_words(m, unicode))
+            if m.get("role") != "main" and state in LIVE_STATES | FINISHED:
+                words = call_span(m, "→" if unicode else "->")
+            status = "%s %s" % (activity(state, frame, unicode), words)
             if m.get("role") == "main" and open_count(room, m["participant"]):
                 status += (" · " if unicode else " / ") + "? %s open" % open_count(room, m["participant"])
             ctx = context_note(report, m)
             if ctx:
                 status += "".join((" · " if unicode else " / ") + part for part in
                                   ["ctx %s%%" % ctx[0]] + ["compact soon"] * (ctx[1] == "alert"))
-            if m.get("role") != "main" and primary:
+            if m.get("role") != "main" and primary and len(mains) > 1:
                 status += " · for " + clean(name_of(primary))
             task = task_of(m)
             content = [status + " / " + task] if rows_h == 3 else [status] + task_lines(m, span - 4, rows_h - 3)
             if rows_h >= 4:
-                where = " / ".join(v for v in ("@ " + location_label(m["location"]) if m.get("location") else "",
-                                                m.get("effort") or "") if v)
+                where = ("@ " + location_label(m["location"]) + (" / " + m["effort"] if m.get("effort") else "")) if m.get("location") else ""
                 if m.get("role") == "main":
-                    calls = teams.get(m["participant"], [])
-                    where = "Team W%s A%s%s" % (
-                        sum(c.get("role") in {"worker", "researcher"} for c in calls), sum(c.get("role") not in {"worker", "researcher"} for c in calls),
-                        " / !%s attention" % sum(c["state"] in ATTENTION_STATES for c in calls)
-                        if any(c["state"] in ATTENTION_STATES for c in calls) else "")
-                task_rows = len(task_lines(m, span - 4, 2))
-                tail = [where] if where and rows_h >= 4 + task_rows + int(reflow) else []
-                content = ([full_title(m)] if reflow else []) + [status] + task_lines(
+                    where = "Team: " + (" · ".join(team_counts(everyone.get(m["participant"], []), classify)) or "no calls yet")
+                tail = [where] if where and rows_h >= 5 + int(reflow) else []
+                first = (("▸ " if unicode else "> ") if action(m) == selected else "") + full_title(m, reflow=True)
+                content = ([first] if reflow else []) + [status] + task_lines(
                     m, span - 4, max(1, min(2, rows_h - 3 - len(tail) - int(reflow)))) + tail
             block = card(title, content, span, rows_h, unicode)
             column = span // 2
@@ -1101,7 +1160,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                              "preview": m.get("role") != "main"})
         for row in range(rows_h):
             value = " " * left
-            flanks = centered and width >= 140 and rows_h >= 5
+            flanks = centered and width >= FLANK_WIDTH and rows_h >= 5
             if flanks:
                 if row == 0:
                     left_width, right_width = left - 2, width - left - cell_width - 2
@@ -1198,7 +1257,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         top = len(lines) + 1
         active = navigation.get("tab") if navigation.get("tab") in dict(TABS) else "detail"
         navigation["main_attempt"] = main_attempt
-        body, targets = detail(previewed, preview, width - 4, members, room, teams, everyone, labels) if previewed else (
+        body, targets = detail(previewed, preview, width - 4, members, room, teams, everyone, labels,
+                               claims=claims, classify=classify) if previewed else (
             ["No call selected · click a main or a call to see it here"], {})
         strip_only = rows_high < 3
         capacity = max(1, rows_high - 2)

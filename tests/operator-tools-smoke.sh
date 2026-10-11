@@ -6319,12 +6319,25 @@ flow = {"collection": {"ok": True}, "room": {"id": "flow-room", "title": "Visual
             for m in flow_members]}, "operations": {"recent": [{"kind": "call", "event_id": model,
                 "served_model": model, "tokens": 10} for model in ("gpt-6-sol", "gpt-6-astra", "gpt-6-luna")]}}
 flow_before = json.dumps(flow, sort_keys=True)
+two_main_cards = render(flow, "codex", 157, 50, view="graph", navigation={"dismissed": True})
+assert " for " in two_main_cards, two_main_cards
+single_flow = deepcopy(flow)
+single_flow["room"]["participants"] = [m for m in single_flow["room"]["participants"] if m["participant"] not in {"flow-other", "foreign-child", "unlinked-child"}]
+for glyphs in (False, True):
+    one_nav = {"dismissed": True}
+    one_cards = render(single_flow, "codex", 80, 40, view="graph", unicode=glyphs, navigation=one_nav)
+    assert " for " not in one_cards and "WORKER / " not in one_cards and "WRK" not in one_cards, one_cards
+    for ident, title in (("researcher", "WORKER Luna 6"), ("builder", "WORKER Sonnet 5.5")):
+        edges = [hit for hit in one_nav["hits"] if hit["action"] == ("result", ident)]
+        edge = min(edges, key=lambda hit: hit["y"])
+        first_row = one_cards.splitlines()[edge["y"]][edge["x1"] - 1:edge["x2"]]
+        assert first_row.strip("│| ") == title, first_row
 # Long headings leave the true midpoint free for a wire in either glyph set.
 geometry_flow = deepcopy(flow)
 for attempt in geometry_flow["attempts"]["active_recent"]:
     if attempt["attempt_id"] == "builder":
         attempt["state"] = "waiting_approval"
-for columns, rows, menu in ((76, 16, False), (76, 16, True), (76, 24, False), (100, 24, False), (157, 66, False)):
+for columns, rows, menu in ((76, 16, False), (76, 16, True), (76, 24, False), (100, 24, False), (127, 50, False), (157, 66, False)):
     for glyphs in (False, True):
         geometry_nav = {"dismissed": True, "selected": ("result", "builder")}
         geometry_picture = render(geometry_flow, "codex", columns, rows, view="graph", unicode=glyphs,
@@ -6373,8 +6386,9 @@ for columns, rows in ((110, 44), (100, 24), (76, 18), (76, 21)):
                 assert nav["surface"] == "graph", (alert, nav)
                 if alert:
                     assert alert in picture, picture
-                assert "MAIN / Sol 6" in picture and "ADVISOR / Astra" in picture and "WORKER / Luna" in picture, picture
-                assert picture.index("ADVISOR / Astra") < picture.index("MAIN / Sol 6") < picture.index("WORKER / Luna"), picture
+                worker_heading = "WORKER / Luna" if "WORKER / Luna" in picture else "WORKER Luna"
+                assert "MAIN / Sol 6" in picture and "ADVISOR / Astra" in picture and worker_heading in picture, picture
+                assert picture.index("ADVISOR / Astra") < picture.index("MAIN / Sol 6") < picture.index(worker_heading), picture
                 assert "ONLY OTHER OWNER" not in picture and "NO PARENT PROOF" not in picture, picture
                 assert len(picture.splitlines()) <= rows - int(menu), picture
                 assert all(display_width(line) <= columns for line in picture.splitlines()), picture
@@ -6427,7 +6441,10 @@ mailed["room"]["messages"] = [{"sender": "advisor", "targets": ["flow-main"], "t
 mail_before = json.dumps(mailed, sort_keys=True)
 detail_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
 picture = render(mailed, "codex", 100, 30, view="graph", main_attempt="flow-attempt", navigation=detail_nav)
-assert "[ Detail ]" in picture and "MAIN / Sol 6 / 1-9 of" in picture and "Team: 5 active" in picture and "MAIL FOR MAIN" in picture, picture
+assert "[ Detail ]" in picture and "MAIN / Sol 6 / 1-9 of" in picture and "Team: 5 active" in picture, picture
+mail_last = render(mailed, "codex", 100, 30, view="graph", main_attempt="flow-attempt",
+                   navigation={"preview": {"target": ("chat", "flow-main"), "report": {}}, "band_offsets": {"detail": 99}})
+assert "MAIL FOR MAIN" in mail_last, mail_last
 assert "ADVISOR / Astra" in picture and len(picture.splitlines()) <= 30, picture
 assert json.dumps(mailed, sort_keys=True) == mail_before, "reading main detail changed room mail"
 detail_band = next(b for b in detail_nav["bands"] if b["name"] == "detail")
@@ -7206,6 +7223,24 @@ for managed in (False, True):
                 nav["tab"] = initial_tab
 # People read the board: call exits become words, machine status lines and markdown marks are dropped.
 import room_view as graph_text
+clocked = deepcopy(single_flow)
+for m in clocked["room"]["participants"]:
+    m["joined_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 12 * 60))
+for attempt in clocked["attempts"]["active_recent"]:
+    attempt["panel"]["effort"] = "high"
+for glyphs in (False, True):
+    for columns, rows in ((80, 40), (127, 50)):
+        clocked_cards = graph_text.render_graph(clocked, columns, rows, unicode=glyphs, navigation={"dismissed": True})
+        assert re.search(r"running 12m", clocked_cards), clocked_cards
+        assert not re.search(r"[│|]\s+high\s+[│|]", clocked_cards), clocked_cards
+        assert "high" not in clocked_cards and " for " not in clocked_cards, clocked_cards
+clocked_tree = render(clocked, "codex", 100, 50, view="tree", navigation={})
+assert re.search(r"running 12m", clocked_tree), clocked_tree
+with patch.object(graph_text.time, "time", return_value=1800000000):
+    for seconds, expected in ((30, "<1m"), (720, "12m"), (7200, "2h"), (172800, "2d")):
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(1800000000 - seconds))
+        assert graph_text.elapsed(ts) == expected
+assert graph_text.elapsed("invalid") == ""
 assert graph_text.readable("Call exit=0; parent acceptance pending.\nstop-reason: provider=codex is_error=0\n**Verification:** `ok`", " ") \
     == "Finished. Verification: ok"
 assert graph_text.readable("Call exit=2; parent acceptance pending.", " ") == "Failed (exit 2)."
@@ -7236,7 +7271,7 @@ for attempt in truth["attempts"]["active_recent"]:
 for glyphs, dot, ending in ((True, "·", "→"), (False, "/", "->")):
     board = render(truth, "codex", 157, 40, view="graph", unicode=glyphs, main_attempt="flow-attempt", navigation={})
     assert "Now: 방 범위 선언 %s 6h ago" % dot in board and "Now: Now:" not in board, board
-    assert "6h ago (stale)" in board and board.count("(stale)") == 1 and "fresh work" not in board, board
+    assert "6h ago (stale)" in board and board.count("(stale)") == 2 and "fresh work" not in board, board
     assert "guard stop" in board and "failed (exit 1)" not in board, board
     assert "Needs review (2)" in board, board
 nonguard = deepcopy(truth)
@@ -7377,17 +7412,17 @@ same_model["room"]["participants"].append({"participant": "sol-worker", "role": 
                                            "joined": True, "parent": "flow-attempt", "label": "Same model worker"})
 same_model["room"]["messages"] = [{"sender": "sol-worker", "targets": ["flow-main"], "text": "Call exit=1; parent acceptance pending."}]
 picture = render(same_model, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
-                 navigation={"preview": {"target": ("chat", "flow-main"), "report": {}}})
+                 navigation={"preview": {"target": ("chat", "flow-main"), "report": {}}, "band_offsets": {"detail": 99}})
 assert "From Sol 6 worker: Failed (exit 1)." in picture and "Messages to Sol 6 main" in picture, picture
 sent_board = render(same_model, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                     navigation={"dismissed": True, "tab": "messages"})
 assert "Sol 6 worker → Sol 6 main  · Failed (exit 1)." in sent_board, sent_board
-# A finished call stays reachable from its main's detail: its team row selects it.
+# A finished call stays reachable after scrolling past the main's active team rows.
 done_flow = deepcopy(flow)
 for attempt in done_flow["attempts"]["active_recent"]:
     if attempt["attempt_id"] == "builder":
         attempt["state"] = "done"
-team_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
+team_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}, "band_offsets": {"detail": 1}}
 render(done_flow, "codex", 110, 40, view="graph", main_attempt="flow-attempt", navigation=team_nav)
 row = next(h for h in team_nav["hits"] if h["action"] == ("result", "builder"))
 assert choose(("click", row["x1"], row["y"]), team_nav) is None and team_nav["preview"] == {"target": ("result", "builder")}
@@ -7400,21 +7435,49 @@ team = [m for m in people if m["participant"] in {"advisor", "researcher", "buil
 team[0]["state"] = "waiting_approval"
 team[1]["state"] = "working"
 team[2]["state"] = "done"
+team[2]["title"] = "한글 " * 40 + "DETAIL END"
+team.append(dict(team[2], participant="unknown-call", state="presence unknown", title="Unknown call"))
 for columns in (28, 76, 110):
-    lines, targets = graph_text.detail(main, {}, columns, people, {}, everyone={"flow-main": team})
-    assert lines.index("  Finished") < lines.index("  Needs attention") < lines.index("  Active"), lines
+    lines, targets = graph_text.detail(main, {}, columns, people,
+        {"messages": [{"sender": "advisor", "targets": ["flow-main"], "text": "message " * 60 + "MESSAGE END"}]},
+        everyone={"flow-main": team})
+    assert lines.index("  Needs attention") < lines.index("  Active") < lines.index("  No record") < lines.index("  Finished"), lines
     assert set(targets.values()) == {("result", m["participant"]) for m in team}, targets
-    assert next(i for i,line in enumerate(lines) if "Messages to" in line) < lines.index("  Finished"), lines
+    assert next(i for i,line in enumerate(lines) if "Messages to" in line) > lines.index("  Finished"), lines
     for row, target in targets.items():
         assert 0 <= row < len(lines) and target[1] in {m["participant"] for m in team}
+        assert display_width(lines[row].lstrip()) <= columns - 4, (columns, lines[row])
+        if row - 1 in targets and targets[row] == targets[row - 1]:
+            assert lines[row].startswith("    "), (columns, lines[row])
+    finished_text = " ".join(lines[row].strip() for row in targets if targets[row] == ("result", team[2]["participant"]))
+    assert finished_text.endswith("DETAIL END"), finished_text
+    assert any(line.rstrip().endswith("MESSAGE END") for line in lines), lines
+    message_row = next(i for i, line in enumerate(lines) if line.startswith("  From "))
+    for row in range(message_row, lines.index("", message_row)):
+        assert display_width(lines[row].lstrip()) <= columns - 4, (columns, lines[row])
+        assert lines[row].startswith("  " if row == message_row else "    "), (columns, lines[row])
     assert any("Team:" in line for line in lines) and any("Messages to" in line for line in lines)
+assert all(line.startswith("    ") for index, line in enumerate(lines) if index in targets and index - 1 in targets and targets[index] == targets[index - 1]), lines
+seven_done = [dict(team[2], participant="done-%s" % n, title="Done %s" % n,
+                   ended="2026-10-10T10:%02d:00Z" % n, seq=7 - n) for n in range(7)]
+seven_lines, seven_targets = graph_text.detail(main, {}, 100, people, {}, everyone={"flow-main": seven_done})
+assert len(seven_targets) == 5 and list(seven_targets.values()) == [("result", "done-%s" % n) for n in range(6, 1, -1)]
+assert "2 earlier finished · see Past work" in seven_lines and seven_lines.index("2 earlier finished · see Past work") not in seven_targets
+mail_room = {"participants": [dict(team[2], parent="flow-main")],
+             "messages": [{"id": "result-builder", "sender": "builder", "recipient": "flow-main",
+                           "targets": ["flow-main"], "message_kind": "handoff", "text": "INTERNAL HANDOFF"},
+                          {"sender": "advisor", "targets": ["flow-main"], "text": "DIRECT MESSAGE"}],
+             "pairs": [{"recipient": "flow-main", "pending": 4}]}
+mail_detail = graph_text.detail(main, {}, 100, people, mail_room, everyone={"flow-main": team})[0]
+assert "INTERNAL HANDOFF" not in "\n".join(mail_detail) and "DIRECT MESSAGE" in "\n".join(mail_detail), mail_detail
+assert "Messages to Sol 6 main: 1 (4 unread)" in mail_detail, mail_detail
 assert not any(line.startswith("Scope:") for line in lines)
 scoped_main = graph_text.detail(dict(main, owns=["scripts/lib", "docs"]), {}, 76, people, {}, everyone={"flow-main": team})[0]
 assert "Scope: scripts/lib, docs" in scoped_main, scoped_main
 unknown_call = dict(team[2], state="presence unknown")
 lines, targets = graph_text.detail(main, {}, 76, people, {}, everyone={"flow-main": [unknown_call]})
 assert "Team: 1 no record" in lines and "  Active" not in lines and "  Finished" not in lines
-assert any("Messages to" in line for line in lines[:8]) and ("result", "builder") in targets.values()
+assert any("Messages to" in line for line in lines) and ("result", "builder") in targets.values()
 worker = next(m for m in people if m["participant"] == "builder")
 recorded = {"rows": [{"outcome": "accepted", "verification": {"status": "passed"},
     "summary": "OWNER DECISION", "calls": [{"answer": "RAW WORKER ANSWER"}]}]}
@@ -7550,10 +7613,25 @@ declared_board = deepcopy(counted)
 declared_board["room"]["statuses"] = {"flow-main": {"text": "Fixing the parser", "ts": "2026-10-07T09:05:00Z", "seq": 3}}
 declared_picture = render(declared_board, "codex", 157, 34, view="graph", main_attempt="flow-attempt",
                  navigation={"dismissed": True})
-assert "Now: Fixing the parser" in declared_picture and "Latest sent:" not in declared_picture, declared_picture
+assert "Now: Fixing the parser" in declared_picture and "(stale)" in declared_picture and "Latest sent:" not in declared_picture, declared_picture
+long_status = deepcopy(declared_board["room"])
+long_status["statuses"]["flow-main"]["text"] = "Checking the parser and cached dashboard projection for a very long declared status"
+status_rows = graph_text.declared_status(long_status, "flow-main", 28)
+assert len(status_rows) == 2 and "(stale)" in status_rows[-1] and all(display_width(row) <= 28 for row in status_rows), status_rows
+declared_board["plan"] = {"tasks": [
+    {"id": "old", "title": "Old claim", "state": "claimed", "claimed_by": "flow-main", "claimed_at": "2026-10-10T09:00:00Z"},
+    {"id": "current", "title": "Current claim", "state": "running", "claimed_by": "flow-main", "claimed_at": "2026-10-10T10:00:00Z"},
+    {"id": "cancelled", "state": "cancelled", "claimed_by": "flow-main", "claimed_at": "2026-10-10T11:00:00Z"}]}
+held = graph_text.claims_by_main(declared_board)
+assert [t["id"] for t in held["flow-main"]] == ["current", "old"], held
+claimed_card = graph_text.render_graph(declared_board, 127, 50, navigation={"dismissed": True})
+assert "Task: current · running · +1 more running" in claimed_card and "+2 more" not in claimed_card, claimed_card
+claim_detail = graph_text.detail(dict(main, title="Native task not recorded"), {}, 100, people, {}, claims=held)[0]
+assert "Task: Current claim" in claim_detail, claim_detail
+declared_board["plan"] = deepcopy(counted.get("plan", {}))
 declared_picture = render(declared_board, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                  navigation={"preview": {"target": ("chat", "flow-main"), "report": {}}})
-assert re.search(r"Now: Fixing the parser \(\d\d:\d\d\)", declared_picture), declared_picture
+assert re.search(r"Now: Fixing the parser \(\d\d:\d\d\) \(stale\)", declared_picture), declared_picture
 # A board too small for the box keeps the one-row tab strip: its names switch tabs, and no hint names a closed box.
 for glyphs in (True, False):
     strips = 0
@@ -7608,12 +7686,22 @@ for columns in (139, 140, 141, 200):
     drawn = render(wide_flow, "codex", columns, 44, view="graph", main_attempt="flow-attempt", navigation=nav)
     assert all(display_width(line) <= columns for line in drawn.splitlines()) and len(drawn.splitlines()) <= 44
     # The selected main's mail is read in the bottom Detail tab; another main's mail never shows.
-    assert "CHECK FIXTURE FIRST" in drawn and "PRIVATE OTHER MAIL" not in drawn, drawn
+    mail_drawn = render(wide_flow, "codex", columns, 44, view="graph", main_attempt="flow-attempt",
+                        navigation={"band_offsets": {"detail": 99}})
+    assert "CHECK FIXTURE FIRST" in mail_drawn and "PRIVATE OTHER MAIL" not in mail_drawn, mail_drawn
     assert "no task title yet" in drawn and "Native task not recorded" not in drawn
     for hit in nav["hits"]:
         # Card hits stay inside the card; the full-width detail area is a separate target.
         if hit["action"] == ("chat", "flow-main") and hit["y"] > 6 and not hit.get("preview"):
             assert hit["x1"] > 1 and hit["x2"] < columns, hit
+expanded_main = deepcopy(wide_flow)
+expanded_main["room"]["participants"][0]["label"] = "Fix caching and the panel integration while keeping every recorded result reachable"
+for glyphs in (False, True):
+    expanded_nav = {"dismissed": True}
+    expanded_picture = render(expanded_main, "codex", 127, 40, view="graph", unicode=glyphs, navigation=expanded_nav)
+    main_border = next(line for line in expanded_picture.splitlines() if "MAIN / " in line)
+    assert len(main_border) - len(main_border.lstrip()) <= 4, expanded_picture
+    assert "caching and the panel integration" in expanded_picture, expanded_picture
 from panel_view import PALETTE
 colored = render(wide_flow, "codex", 200, 44, view="graph", color=True)
 # Each provider keeps its own hue, and a selection is a coloured block, never a bare white inversion.
@@ -7712,7 +7800,11 @@ assert "Old job 03" in ended_text and ended_text.count("finished") == 12, ended_
 timed = deepcopy(ended)
 timed["room"]["call_results"]["old-00"]["exit"] = 124
 timed_text = render(timed, "codex", 120, 120, view="tree", navigation={})
-assert "timed out · continue with --continue" in timed_text and "c continue" not in timed_text, timed_text
+assert "timed out" in timed_text and "--continue" not in timed_text, timed_text
+timed_worker = next(m for m in graph_text.nodes(timed) if m["participant"] == "old-00")
+timed_detail = "\n".join(graph_text.detail(timed_worker, {}, 100, graph_text.nodes(timed))[0])
+assert "timed out" in timed_detail.splitlines()[0] and "failed" not in timed_detail.splitlines()[0], timed_detail
+assert "timed out" in timed_detail and "Timed out · its main can continue it" in timed_detail and "oms panel" not in timed_detail
 from room_view import nodes as room_nodes
 rounded = deepcopy(ended)
 rounded["attempts"] = {"active_recent": [], "recent": [
@@ -7839,12 +7931,14 @@ projected = plan_tasks(str(long_plan_repo))
 assert projected[0] == {"id": "long-00", "title": "Plan task 0", "state": "done", "claimed_by": None}, projected[0]
 completion_tasks = [dict(row) for row in long_tasks]
 completion_tasks[0]["completion_kind"] = "research-accepted"
+completion_tasks[0]["claimed_at"] = "2026-10-10T10:00:00Z"
 completion_tasks[1]["completion_kind"] = "satisfied-by"
 completion_tasks[2]["completion_kind"] = {"kind": "research-accepted"}
 (long_plan_repo / ".oms/plan/tasks.json").write_text(json.dumps({"tasks": completion_tasks}), encoding="utf-8")
 projected = plan_tasks(str(long_plan_repo))
 assert projected[0]["completion_kind"] == "research-accepted" and projected[1]["completion_kind"] == "satisfied-by", projected[:2]
 assert "completion_kind" not in projected[2] and "completion_kind" not in projected[3], projected[2:4]
+assert projected[0]["claimed_at"] == "2026-10-10T10:00:00Z" and "claimed_at" not in projected[1], projected[:2]
 (long_plan_repo / ".oms/plan/tasks.json").write_text(json.dumps({"tasks": long_tasks}), encoding="utf-8")
 def long_plan_run(command, **kwargs):
     data = {"tasks": long_tasks} if "agent-plan" in command else []
@@ -7872,7 +7966,44 @@ team_lines, _ = graph_text.detail(next(m for m in graph_text.nodes(ended) if m["
     graph_text.nodes(ended), ended["room"], everyone={"flow-main": [m for m in graph_text.nodes(ended)
                                                                   if m.get("parent") == "flow-attempt"]})
 team_rows = [line for line in team_lines if "Old job" in line or "한글 작업 제목 / builder" in line]
-assert "finished" in team_rows[0] and "running" in team_rows[-1] and "failed (exit 1)" in team_rows[-3], team_rows
+assert "failed (exit 1)" in team_rows[0] and "finished" in team_rows[-1], team_rows
+assert team_lines.index("  Needs attention") < team_lines.index("  Active") < team_lines.index("  Finished"), team_lines
+assert sum("Old job" in line and "finished" in line for line in team_lines) == 5, team_lines
+assert "7 earlier finished · see Past work" in team_lines, team_lines
+empty_team = deepcopy(flow)
+empty_team["room"]["participants"] = [m for m in flow_members if m.get("role") == "main"]
+admission_team = deepcopy(flow)
+next(a for a in admission_team["attempts"]["active_recent"] if a["attempt_id"] == "builder")["state"] = "done"
+admission_team["awaiting_admission"] = ["builder"]
+next(m for m in admission_team["room"]["participants"] if m["participant"] == "flow-main")["label"] = "Native task not recorded"
+admission_team["plan"] = {"tasks": [{"id": "claim-detail", "title": "Current claim", "state": "running",
+                                      "claimed_by": "flow-main", "claimed_at": "2026-10-11T12:00:00Z"}]}
+for team_report, expected_team in ((flow, "5 active"),
+                                   (ended, "1 attention · 5 active · 12 finished · 1 no record"),
+                                   (admission_team, "4 active · 1 await admission"),
+                                   (empty_team, "no calls yet")):
+    detail_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
+    detail_team = graph_text.render_graph(team_report, 127, 120, navigation=detail_nav).splitlines()
+    team_card = graph_text.render_graph(team_report, 127, 50, navigation={"dismissed": True})
+    card_team = next(line.split("Team: ", 1)[1].split("│", 1)[0].strip()
+                     for line in team_card.splitlines() if "Team: " in line)
+    detail_teams = [line.split("Team: ", 1)[1].split("│", 1)[0].strip()
+                    for line in detail_team if "Team: " in line]
+    assert len(detail_teams) == 2 and all(card_team == team for team in detail_teams), (team_card, detail_team)
+    assert card_team == expected_team, (card_team, expected_team)
+    assert "Team W" not in team_card and all("Team W" not in line for line in detail_team)
+    if team_report is admission_team:
+        attention_row = next(i for i, line in enumerate(detail_team) if "Needs attention" in line)
+        active_row = next(i for i, line in enumerate(detail_team) if "  Active" in line)
+        worker_row = next(h["y"] - 1 for h in detail_nav["hits"] if h["action"] == ("result", "builder")
+                          and attention_row < h["y"] - 1 < active_row)
+        assert "builder" in detail_team[worker_row] and not any("  Finished" in line for line in detail_team), detail_team
+        assert any("Task: Current claim" in line for line in detail_team) and "claim-detail" in team_card, (team_card, detail_team)
+assert graph_text.team_counts([{"state": state} for state in
+    ("presence unknown", "done", "working", "failed", "cancelled", "done")],
+    lambda call: "review" if call["state"] == "done" else "live") == [
+        "1 attention", "1 active", "2 await admission", "1 finished", "1 no record"]
+assert graph_text.team_counts([{"state": "done"}, {"state": "cancelled"}]) == ["2 finished"]
 assert any("status unknown" in line for line in team_lines) and "failed (exit 1)" in "\n".join(team_lines), team_lines
 # Attempt evidence beats the result message, and the header clock carries date and weekday.
 beaten = deepcopy(ended)
@@ -10366,6 +10497,13 @@ for mode in ("tree", "graph"):
     assert kept["expanded_groups"] == nav["expanded_groups"]
     reset = panel.refreshed_navigation(dict(nav), {"room": {"id": "different-room"}})
     assert not reset.get("expanded_groups")
+    for columns in (40, 56):
+        for glyphs in (True, False):
+            narrow = render(grouped_board, "codex", columns, 80, view=mode, unicode=glyphs, navigation=nav)
+            assert "patch awaits admission" in narrow and "finished" in narrow, narrow
+            alert_row = next(i for i, line in enumerate(narrow.splitlines()) if "patch awaits admission" in line)
+            label_row = next(i for i, line in enumerate(narrow.splitlines()) if "pending-patch" in line)
+            assert alert_row < label_row, narrow
     for columns, rows in ((120, 80), (76, 16), (28, 12), (2, 8)):
         for glyphs in (True, False):
             small = render(grouped_board, "codex", columns, rows, view=mode, unicode=glyphs, navigation=nav)

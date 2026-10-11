@@ -260,7 +260,9 @@ def plan_tasks(repo_path):
              "state": clean(row.get("state"), 20),
              **({"completion_kind": clean(row["completion_kind"], 40)}
                 if isinstance(row.get("completion_kind"), str) else {}),
-             "claimed_by": clean(row.get("claimed_by_participant"), 80) or None}
+             "claimed_by": clean(row.get("claimed_by_participant"), 80) or None,
+             **({"claimed_at": clean(row["claimed_at"], 40)}
+                if isinstance(row.get("claimed_at"), str) else {})}
             for row in rows]
 
 
