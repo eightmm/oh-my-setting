@@ -8067,14 +8067,30 @@ for harness, owner, previous_terminal, succeeds in (("claude", None, True, False
         assert restart_main.call_count == (2 if succeeds else 1)
         if succeeds:
             assert restart_main.call_args.args[2] is None, "Pi restarted using an unverified session binding"
-# Context writing fails after the replacement window tag, before native launch.
-# Its terminal owner must receive the prompt for both retry and guarded close;
+# Context or launch setup fails before a child exists, before or after replacement
+# tagging. Retry and guarded close retain the terminal window owner;
 # incomplete or changed ownership must never receive it.
 from unittest.mock import Mock
-for recovery in ("retry", "close", "nonterminal", "participant", "room", "repository", "native-pane", "session", "unavailable"):
-    failure_room = room.create(project, "restart-failure-" + recovery, "Failed restart")
+for failure_step, recovery in ([("write", key) for key in
+        ("retry", "close", "nonterminal", "participant", "room", "repository", "native-pane", "session", "unavailable")]
+        + [(step, key) for step in ("directory", "command", "popen") for key in ("retry", "close")]):
+    failure_room = room.create(project, "restart-failure-" + failure_step + "-" + recovery, "Failed restart")
     failure_tags, failure_attempts, failure_launches, failure_closes = {}, [], [], []
+    failure_created = []
     real_run, real_popen, real_write, real_history = subprocess.run, subprocess.Popen, Path.write_text, panel.main_history
+    real_events, real_directory = panel.events, panel.tempfile.TemporaryDirectory
+    def failure_events(repo, operation, *args, **kwargs):
+        result = real_events(repo, operation, *args, **kwargs)
+        if operation == "start":
+            failure_created.append(result)
+        return result
+    def failure_directory(*args, **kwargs):
+        if failure_step == "directory" and len(failure_created) == 2:
+            assert failure_tags["@oms_panel_main_attempt"] == failure_created[0]
+            assert "@oms_panel_native_pane" not in failure_tags
+            assert len(failure_launches) == 1, "replacement launched before directory creation"
+            raise OSError("injected replacement context directory failure")
+        return real_directory(*args, **kwargs)
     def failure_tmux(command, **kwargs):
         if command[0] != "fixture-tmux":
             return real_run(command, **kwargs)
@@ -8102,12 +8118,21 @@ for recovery in ("retry", "close", "nonterminal", "participant", "room", "reposi
     def failure_process(command, **kwargs):
         if command[0] != "fixture-native":
             return real_popen(command, **kwargs)
+        if (failure_step == "popen" and len(failure_created) == 2
+                and kwargs["env"]["OMS_PANEL_MAIN_ATTEMPT"] == failure_created[-1]):
+            assert len(failure_launches) == 1, "replacement child already exists"
+            raise FileNotFoundError("injected replacement executable missing")
         failure_launches.append(kwargs["env"]["OMS_PANEL_MAIN_ATTEMPT"])
         process = Mock()
         process.wait.return_value = process.poll.return_value = 0
         return process
+    def failure_command(*args, **kwargs):
+        if failure_step == "command" and len(failure_created) == 2:
+            assert len(failure_launches) == 1, "replacement launched before argv construction"
+            raise ValueError("injected replacement native command failure")
+        return ["fixture-native"]
     def failure_write(path, *args, **kwargs):
-        if path.name == "context.txt" and len(failure_attempts) == 2:
+        if failure_step == "write" and path.name == "context.txt" and len(failure_attempts) == 2:
             assert failure_tags["@oms_panel_native_pane"] == "%42"
             assert failure_tags["@oms_panel_repo"] == str(project.resolve())
             assert len(failure_launches) == 1, "replacement launched before the injected startup failure"
@@ -8129,37 +8154,54 @@ for recovery in ("retry", "close", "nonterminal", "participant", "room", "reposi
     failure_keys = iter(["r", "r", "\n"] if recovery == "retry" else ["r", "\n"])
     def failure_key():
         key = next(failure_keys)
-        if len(failure_attempts) == 2:
-            replacement = next(row for row in real_history(project, failure_room)
-                               if row["attempt_id"] == failure_attempts[-1])
+        if len(failure_created) == 2:
+            history = real_history(project, failure_room)
+            replacement = next(row for row in history if row["attempt_id"] == failure_created[-1])
             assert replacement["terminal"] is True and replacement["state"] == "failed"
+            if failure_step in ("command", "popen"):
+                assert replacement["reason_code"] == ("native_command_failed" if failure_step == "command" else "native_launch_failed")
+                assert "@oms_panel_native_pane" not in failure_tags
+            assert all(row["terminal"] is True for row in history if row["tool"] == "panel-main")
         return key
     with patch.dict(os.environ, dict(environment, TMUX="fixture", TMUX_PANE="%42", OMS_PANEL_SESSION="oms-failure",
                                     OMS_ROOM_ID=failure_room), clear=True), \
-            patch.object(panel, "check_legacy_main"), patch.object(panel, "main_installed", return_value=True), \
+            patch.object(panel, "resolve_session", return_value=("", "")), \
+            patch.object(panel, "main_installed", return_value=True), patch.object(panel, "events", side_effect=failure_events), \
+            patch.object(panel.tempfile, "TemporaryDirectory", side_effect=failure_directory), \
             patch.object(panel, "managed_session", return_value=True), \
             patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
             patch.object(panel, "pane_option", side_effect=lambda name: failure_tags.get(name, "")), \
             patch.object(panel, "session_owner", side_effect=lambda session: "/foreign/repository"
                          if recovery == "session" and len(failure_attempts) == 2 else str(project.resolve())), \
             patch.object(panel, "live_mains", return_value=0), patch.object(panel, "main_history", side_effect=failure_history), \
-            patch.object(panel, "native_command", return_value=["fixture-native"]), patch.object(panel, "bootstrap", return_value="fixture"), \
+            patch.object(panel, "native_command", side_effect=failure_command), patch.object(panel, "bootstrap", return_value="fixture"), \
             patch.object(panel.subprocess, "run", side_effect=failure_tmux), \
             patch.object(panel.subprocess, "Popen", side_effect=failure_process), patch.object(Path, "write_text", new=failure_write), \
             patch.object(panel.sys.stdin, "isatty", return_value=True), patch.object(panel.sys.stdout, "isatty", return_value=True), \
             patch.object(panel, "_main_exit_key", side_effect=failure_key):
         failure_status = panel.run_native("claude", project)
     succeeds = recovery in ("retry", "close")
-    assert len(failure_attempts) == (3 if recovery == "retry" else 2), "failed restart stranded the retry prompt"
+    assert len(failure_created) == (3 if recovery == "retry" else 2), "failed restart stranded the retry prompt"
+    assert len(failure_attempts) == len(failure_created) - int(failure_step == "directory")
     assert len(failure_launches) == (2 if recovery == "retry" else 1)
     assert bool(failure_closes) == succeeds, "failed restart stranded close or adopted an unverified owner"
     if succeeds:
-        assert failure_status == (0 if recovery == "retry" else 1)
+        assert failure_status == (0 if recovery == "retry" or failure_step == "directory" else 1)
         close = failure_closes[0]
         assert close[-1] == "kill-window -t @42" and close[close.index("-t") + 1] == "@42"
         assert "#{==:#{@oms_panel_main_attempt}," + failure_attempts[-1] + "}" in close[-2]
         assert "#{==:#{@oms_panel_repo}," + str(project.resolve()) + "}" in close[-2]
         assert "#{==:#{@oms_panel_native_pane},}" in close[-2]
+    if failure_step in ("directory", "command", "popen"):
+        # A failed startup must not block a later fresh launch through the real
+        # legacy lifecycle guard, after either retry or guarded close.
+        with patch.dict(os.environ, dict(environment, OMS_ROOM_ID=failure_room), clear=True), \
+                patch.object(panel, "resolve_session", return_value=("", "")), \
+                patch.object(panel, "main_installed", return_value=True), patch.object(panel, "managed_session", return_value=False), \
+                patch.object(panel, "native_command", return_value=["fixture-native"]), \
+                patch.object(panel, "bootstrap", return_value="fixture"), patch.object(panel.subprocess, "Popen", side_effect=failure_process):
+            assert panel.run_native("claude", project) == 0
+        assert all(row["terminal"] is True for row in real_history(project, failure_room) if row["tool"] == "panel-main")
 # A successor takes the window after lookup. Only the server-side condition may
 # delete the pinned window; a separate kill against the moved pane would delete it.
 for change in ("attempt", "native-pane", "moved-pane"):

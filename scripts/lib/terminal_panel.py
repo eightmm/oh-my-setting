@@ -742,46 +742,11 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         # into shared status when it cannot serve as a safe display title.
         label = "Native task not recorded"
     host_refs = panel_host.refs(execution) if panel_host.herdr_active() else {}
-    attempt = events(repo, "start", "--provider", provider, "--tool", "panel-main",
-                     "--ref", "panel_role=main", "--ref", "panel_owner=" + provider,
-                     "--ref", "panel_harness=" + harness,
-                     "--ref", "panel_model=" + (model or preset["model"]),
-                     "--ref", "panel_effort=" + (preset["effort"] if not model or harness == "pi" else "native-settings"),
-                     "--ref", "panel_label=" + label,
-                     "--ref", "panel_location=repository", "--ref", "panel_room_id=" + room_id,
-                     *(["--ref", "native_session=" + native_session,
-                        "--ref", "panel_session_digest=" + hashlib.sha256(native_session.encode()).hexdigest()[:32]]
-                       if native_session else []),
-                     *(["--ref", "panel_room_participant=" + member] if member else []),
-                     *[arg for key, value in host_refs.items() for arg in ("--ref", key + "=" + value)],
-                     "--then", "starting", "--then", "working", output=True)
-    native_member = member or attempt
-    if _exit_info is not None:
-        _exit_info.update(attempt=attempt, room=room_id)
-    try:
-        if not member:
-            room.join(repo, room_id, native_member, provider, "main", model or preset["model"], label, native_session)
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-        update_activity(repo, "transition", "--attempt", attempt, "--state", "failed", "--actor", "panel-main",
-                        "--reason-code", "room_join_failed")
-        raise
-    env = child_environment(provider, repo)
-    env.update(OMS_PANEL_OWNER=provider, OMS_PANEL_HARNESS=harness)
-    env.update(OMS_ROOM_ID=room_id, OMS_ROOM_PARTICIPANT=native_member, OMS_ROOM_REPO=str(repo))
-    if provider in PROVIDERS and harness != "pi":
-        env["OMS_HOOK_AGENT"] = provider
-    else:
-        env.pop("OMS_HOOK_AGENT", None)
-    env["OMS_PANEL_MAIN_ATTEMPT"] = attempt
-    env["OMS_PANEL_RESULTS"] = "1"
-    # A resumed owner is independent of any worker attempt inherited by the shell.
-    env.pop("OMS_ATTEMPT_ID", None)
-    for key in ("OMS_PANEL_DISPATCH", "OMS_PANEL_ROLE", "OMS_PANEL_PURPOSE", "OMS_PANEL_WORKLOAD", "OMS_PANEL_LABEL", "OMS_ROOM_ADMITTED_PARTICIPANT"):
-        env.pop(key, None)
     status = 1
     process = None
     launch_inflight = False
-    context = tempfile.TemporaryDirectory(prefix="oms-native-context-")
+    context = None
+    reason = "native_exit"
 
     def stop_native():
         if process and process.poll() is None:
@@ -804,7 +769,43 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         # resets on exec; SIG_IGN would instead disable the child's handler.
         pass
 
+    attempt = events(repo, "start", "--provider", provider, "--tool", "panel-main",
+                     "--ref", "panel_role=main", "--ref", "panel_owner=" + provider,
+                     "--ref", "panel_harness=" + harness,
+                     "--ref", "panel_model=" + (model or preset["model"]),
+                     "--ref", "panel_effort=" + (preset["effort"] if not model or harness == "pi" else "native-settings"),
+                     "--ref", "panel_label=" + label,
+                     "--ref", "panel_location=repository", "--ref", "panel_room_id=" + room_id,
+                     *(["--ref", "native_session=" + native_session,
+                        "--ref", "panel_session_digest=" + hashlib.sha256(native_session.encode()).hexdigest()[:32]]
+                       if native_session else []),
+                     *(["--ref", "panel_room_participant=" + member] if member else []),
+                     *[arg for key, value in host_refs.items() for arg in ("--ref", key + "=" + value)],
+                     "--then", "starting", "--then", "working", output=True)
     try:
+        native_member = member or attempt
+        if _exit_info is not None:
+            _exit_info.update(attempt=attempt, room=room_id)
+        try:
+            if not member:
+                room.join(repo, room_id, native_member, provider, "main", model or preset["model"], label, native_session)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            reason = "room_join_failed"
+            raise
+        env = child_environment(provider, repo)
+        env.update(OMS_PANEL_OWNER=provider, OMS_PANEL_HARNESS=harness)
+        env.update(OMS_ROOM_ID=room_id, OMS_ROOM_PARTICIPANT=native_member, OMS_ROOM_REPO=str(repo))
+        if provider in PROVIDERS and harness != "pi":
+            env["OMS_HOOK_AGENT"] = provider
+        else:
+            env.pop("OMS_HOOK_AGENT", None)
+        env["OMS_PANEL_MAIN_ATTEMPT"] = attempt
+        env["OMS_PANEL_RESULTS"] = "1"
+        # A resumed owner is independent of any worker attempt inherited by the shell.
+        env.pop("OMS_ATTEMPT_ID", None)
+        for key in ("OMS_PANEL_DISPATCH", "OMS_PANEL_ROLE", "OMS_PANEL_PURPOSE", "OMS_PANEL_WORKLOAD", "OMS_PANEL_LABEL", "OMS_ROOM_ADMITTED_PARTICIPANT"):
+            env.pop(key, None)
+        context = tempfile.TemporaryDirectory(prefix="oms-native-context-")
         previous = signal.signal(signal.SIGINT, native_turn_interrupt)
         saved_handlers[signal.SIGINT] = previous
         for name in ("SIGTERM", "SIGHUP"):
@@ -830,10 +831,20 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         context_path.write_text(bootstrap(provider, repo) + room_instructions(room_id, native_member)
                                 + ("\nUser task (data): " + json.dumps(task) if task else ""), encoding="utf-8")
         context_path.chmod(0o600)
+        try:
+            command = native_command(harness, repo, resume, model, task, room_id, native_member, context_path,
+                                     session_id=native_session)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            reason = "native_command_failed"
+            raise
         launch_inflight = True
-        process = subprocess.Popen(native_command(harness, repo, resume, model, task, room_id, native_member, context_path,
-                                                  session_id=native_session),
-                                   cwd=str(execution), env=env)
+        try:
+            process = subprocess.Popen(command, cwd=str(execution), env=env)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            # Popen rejected the launch; an interrupt during launch remains unconfirmed.
+            launch_inflight = False
+            reason = "native_launch_failed"
+            raise
         launch_inflight = False
         while True:
             try:
@@ -855,7 +866,8 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
     finally:
         try:
             try:
-                context.cleanup()
+                if context is not None:
+                    context.cleanup()
             except OSError:
                 print("Native context cleanup unavailable; lifecycle evidence is retained.", file=sys.stderr)
             if launch_inflight or process and process.poll() is None:
@@ -863,10 +875,10 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                                 "--actor", "panel-main", "--reason-code", "native_shutdown_unconfirmed")
             elif status == 0:
                 update_activity(repo, "transition", "--attempt", attempt, "--state", "verifying", "--then", "review",
-                       "--then", "done", "--actor", "panel-main", "--reason-code", "native_exit")
+                       "--then", "done", "--actor", "panel-main", "--reason-code", reason)
             else:
                 update_activity(repo, "transition", "--attempt", attempt, "--state", "cancelled" if status in (129, 130, 143) else "failed",
-                       "--actor", "panel-main", "--reason-code", "native_exit")
+                       "--actor", "panel-main", "--reason-code", reason)
             if managed_session() and not launch_inflight and (process is None or process.poll() is not None):
                 if pane_option("@oms_panel_main_attempt") == attempt:
                     try:
