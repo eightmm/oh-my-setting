@@ -6271,6 +6271,16 @@ with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}, "pla
         patch.object(panel.subprocess, "run", side_effect=long_plan_run):
     long_report, _ = panel.snapshot(long_plan_repo, "long-plan")
 assert long_report["room"]["repo_tasks"] == long_tasks
+def slow_plan_run(command, **kwargs):
+    if "agent-plan" in command:
+        raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+    return subprocess.CompletedProcess(command, 0, "[]", "")
+with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}, "plan": {"present": True}}, 0)), \
+        patch.object(room_module, "status", return_value={"id": "long-plan", "participants": [{"participant": "m1"}]}), \
+        patch.object(panel.subprocess, "run", side_effect=slow_plan_run):
+    slow_report, _ = panel.snapshot(long_plan_repo, "long-plan")
+assert slow_report["room"].get("participants") and slow_report["room"].get("repo_tasks_unavailable"), slow_report["room"]
+assert "error" not in slow_report["room"], "a slow plan list must not hide the room and its main"
 ended_nav = {"expanded_groups": {("past", "flow-main")}}
 render(ended, "codex", 120, 120, view="tree", navigation=ended_nav)
 shown = list(dict.fromkeys(h["action"][1] for h in sorted(ended_nav["hits"], key=lambda h: h["y"]) if h["action"][0] == "result"))
