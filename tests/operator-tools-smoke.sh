@@ -2381,6 +2381,51 @@ with patch.object(panel, "snapshot", return_value=(live, 0)), \
         patch.object(panel, "frame_view", wraps=panel.frame_view) as displayed:
     assert panel.watch(Path("."), "codex", count=1, no_animation=True) == 1
 assert "invalid window room selection" in displayed.call_args.args[2]["room"]["error"]
+# Non-TTY exceptions from a background collector follow the synchronous error path,
+# including a second read after a successful frame; they cannot become held success.
+class CompletedRead(panel.BackgroundRead):
+    def start(self, reader):
+        super().start(reader)
+        result = self.ready.get(timeout=2)
+        self.ready.put(result)
+for successful_reads in (0, 1):
+    clock = [0.0]
+    with patch.object(panel, "BackgroundRead", CompletedRead), \
+            patch.object(panel, "read_panel", side_effect=[(live, 0, "codex", None, "auto", False, "")] * successful_reads +
+                         [ValueError("fixture collection unavailable")]), \
+            patch.object(panel, "repository", return_value=Path(".")), \
+            patch.object(panel, "work_repository", return_value=Path(".")), \
+            patch.object(panel, "native_repository", return_value=Path(".")), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "terminal_style", return_value=(False, False, True)), \
+            patch.object(panel.sys, "stdout", io.StringIO()), \
+            patch.object(panel.sys, "stderr", io.StringIO()) as errors, \
+            patch.object(panel, "frame_view", wraps=panel.frame_view) as displayed, \
+            patch.object(panel.time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(panel.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0]+seconds)), \
+            patch.dict(os.environ, {}, clear=True):
+        assert panel.main(["--repo", ".", "--watch", "--count", "2", "--no-animation"]) == 1
+        assert errors.getvalue() == "error: fixture collection unavailable\n"
+        assert displayed.call_count == successful_reads, "collector exception displayed stale success"
+# Interactive collection errors remain failed frames, then recover on the next read.
+clock = [0.0]
+output = io.StringIO()
+with patch.object(panel, "BackgroundRead", CompletedRead), \
+        patch.object(panel, "read_panel", side_effect=[ValueError("fixture collection unavailable"),
+                     (live, 0, "codex", None, "auto", False, "")]) as collect, \
+        patch.object(panel, "managed_session", return_value=False), \
+        patch.object(panel, "terminal_style", return_value=(True, False, True)), \
+        patch.object(panel.sys, "stdout", output), patch.object(output, "isatty", return_value=True), \
+        patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((100, 40))), \
+        patch.object(panel, "frame_view", wraps=panel.frame_view) as displayed, \
+        patch.object(panel.time, "monotonic", side_effect=lambda: clock[0]), \
+        patch.object(ResponsiveInput, "wait", side_effect=lambda seconds: clock.__setitem__(0, clock[0]+seconds) or []), \
+        patch("panel_input.TerminalInput", ResponsiveInput), patch.dict(os.environ, {}, clear=True):
+    assert panel.watch(Path("."), "codex", count=2, no_animation=True) == 0
+    assert collect.call_count == displayed.call_count == 2
+    assert displayed.call_args_list[0].args[2]["collection"]["ok"] is False
+    assert displayed.call_args_list[1].args[2] == live
+    assert "Room state unavailable" in output.getvalue(), output.getvalue()
 clock = [0.0]
 with patch.object(panel, "dashboard", side_effect=[(deepcopy(live), 0), (deepcopy(live), 0)]), \
         patch.object(room, "status", side_effect=lambda repo, ident: {"id": ident}), \
@@ -10666,12 +10711,21 @@ if os.name != "nt":
         assert status["terminal"] and status["state"] == "cancelled", status
         assert not Path(signalled["context"]).exists()
 if os.name != "nt":
-    import time, signal
+    import time, signal, select
+    # restore_signals does not reset an inherited SIG_IGN for SIGINT. Set the child's
+    # disposition before exec so background suite launches exercise the same interrupt path.
+    def default_sigint():
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+    def ignored_sigint():
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     stop_log = temporary / "panel-stop-watch.log"
     with stop_log.open("w") as output:
         watcher = subprocess.Popen(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                                     "--room", shared, "--watch", "--no-animation"],
-                                   env=recovery_env, stdout=output, stderr=subprocess.STDOUT)
+                                   env=recovery_env, stdout=output, stderr=subprocess.STDOUT,
+                                   preexec_fn=default_sigint)
         try:
             deadline = time.monotonic() + 10
             while "Messages:" not in stop_log.read_text() and time.monotonic() < deadline:
@@ -10680,6 +10734,145 @@ if os.name != "nt":
             assert "Messages:" in stop_log.read_text(), "watcher did not become ready"
             watcher.send_signal(signal.SIGINT)
             assert watcher.wait(timeout=10) == 130, "public panel did not receive SIGINT"
+        finally:
+            if watcher.poll() is None:
+                watcher.kill()
+                watcher.wait(timeout=5)
+    # Block each caller-thread phase on a pipe handshake, then interrupt it once.
+    # Count=1 enters restore/finally naturally, so their blocks precede the signal.
+    phase_script = r'''
+import os, signal, sys, threading
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import terminal_panel as panel
+import panel_input
+phase = sys.argv[3]
+ignored = os.environ.get('OMS_TEST_WATCH_SIGINT') == 'ignored'
+expected = signal.SIG_IGN if ignored else signal.default_int_handler
+assert signal.getsignal(signal.SIGINT) == expected
+render = panel.frame_view
+def blocked(*args, **kwargs):
+    os.write(2, b'PHASE_BLOCKED\n')
+    if ignored:
+        assert os.read(0, 1) == b'x'
+    else:
+        threading.Event().wait(60)
+    if phase == 'render':
+        return render(*args, **kwargs)
+panel.read_panel = lambda *args: ({'repo': {'name': 'fixture'}, 'collection': {'ok': True}},
+                                 0, 'codex', None, 'auto', False, '')
+panel.managed_session = lambda: False
+panel.terminal_style = lambda: (False, False, True)
+if phase == 'startup':
+    panel.source_stamps = blocked
+elif phase == 'render':
+    panel.frame_view = blocked
+elif phase == 'restore':
+    panel_input.TerminalInput.__exit__ = blocked
+elif phase in ('cleanup', 'cleanup-process'):
+    panel.managed_session = lambda: True
+    panel.pane_option = lambda name: ''
+    panel.session_option = lambda name: ''
+    if phase == 'cleanup':
+        panel.panel_reader.close_reader = blocked
+    else:
+        def cleanup(*args):
+            child = panel.subprocess.Popen([sys.executable, '-c',
+                "import os,threading;os.write(2,b'PHASE_BLOCKED\\n');threading.Event().wait(60)"])
+            try:
+                child.wait(timeout=60)
+            finally:
+                child.kill()
+                child.wait(timeout=2)
+        panel.panel_reader.close_reader = cleanup
+status = panel.main(['--repo', sys.argv[2], '--watch', '--count', '1', '--no-animation'])
+assert signal.getsignal(signal.SIGINT) == expected
+sys.exit(status)
+'''
+    # Use a python3 shim solely to inject probes while still exercising both public wrappers.
+    shim_dir = temporary / "watch-phase-bin"
+    shim_dir.mkdir(exist_ok=True)
+    phase_file = temporary / "watch-phase.py"
+    phase_file.write_text(phase_script)
+    shim = shim_dir / "python3"
+    shim.write_text("#!/usr/bin/env bash\nexec %s %s %s %s \"$OMS_TEST_WATCH_PHASE\"\n" % (
+        shlex.quote(sys.executable), shlex.quote(str(phase_file)),
+        shlex.quote(str(root / "scripts/lib")), shlex.quote(str(project))))
+    shim.chmod(0o755)
+    for phase in ("startup", "render", "restore", "cleanup", "cleanup-process"):
+        watcher = subprocess.Popen(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                    "--watch", "--no-animation"],
+            env=dict(recovery_env, PATH=str(shim_dir) + os.pathsep + recovery_env["PATH"], OMS_TEST_WATCH_PHASE=phase),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            start_new_session=True, preexec_fn=default_sigint)
+        try:
+            assert select.select([watcher.stderr], [], [], 5)[0], (phase, "phase never reached")
+            assert watcher.stderr.readline() == b"PHASE_BLOCKED\n", phase
+            watcher.send_signal(signal.SIGINT)
+            assert watcher.wait(timeout=2) == 130, (phase, "default SIGINT delayed")
+        finally:
+            if watcher.poll() is None:
+                os.killpg(watcher.pid, signal.SIGKILL)
+                watcher.wait(timeout=5)
+    # Inherited SIG_IGN stays ignored through the public wrappers and count=1 cleanup.
+    # Release the blocked render only after sending SIGINT; a handler override exits 130.
+    watcher = subprocess.Popen(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                "--watch", "--count", "1", "--no-animation"],
+        env=dict(recovery_env, PATH=str(shim_dir) + os.pathsep + recovery_env["PATH"],
+                 OMS_TEST_WATCH_PHASE="render", OMS_TEST_WATCH_SIGINT="ignored"),
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        start_new_session=True, preexec_fn=ignored_sigint)
+    try:
+        assert select.select([watcher.stderr], [], [], 5)[0], "ignored watcher did not become ready"
+        assert watcher.stderr.readline() == b"PHASE_BLOCKED\n"
+        watcher.send_signal(signal.SIGINT)
+        _, errors = watcher.communicate(input=b"x", timeout=2)
+        assert watcher.returncode == 0, ("inherited SIG_IGN was overridden", errors)
+        assert not errors, errors
+    finally:
+        if watcher.poll() is None:
+            os.killpg(watcher.pid, signal.SIGKILL)
+            watcher.wait(timeout=5)
+    # SQLite lock waits defer Python's signal handler until the lock is released.
+    # Keep that lock held through exit; readiness comes from SQLite's trace callback, not a delay.
+    import select, sqlite3
+    blocked_db = temporary / "panel-blocked-watch.sqlite"
+    read_finished = temporary / "panel-blocked-watch-finished"
+    blocked_script = """
+import sqlite3, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import terminal_panel as panel
+from panel_input import TerminalInput
+with TerminalInput() as inputs:
+    assert inputs.fd is None
+def blocked_read(*args):
+    with sqlite3.connect(sys.argv[3], timeout=60, isolation_level=None) as database:
+        database.set_trace_callback(lambda sql: print('READ_BLOCKED', file=sys.stderr, flush=True))
+        try:
+            database.execute('INSERT INTO held VALUES (1)')
+        finally:
+            Path(sys.argv[4]).touch()
+    raise AssertionError('status read was released before watcher exit')
+panel.read_panel = blocked_read
+sys.exit(panel.main(['--repo', sys.argv[2], '--watch', '--no-animation']))
+"""
+    with sqlite3.connect(blocked_db) as database:
+        database.execute("CREATE TABLE held (value)")
+        database.execute("BEGIN IMMEDIATE")
+        watcher = subprocess.Popen([sys.executable, "-c", blocked_script, str(root / "scripts/lib"),
+                                    str(project), str(blocked_db), str(read_finished)],
+                                   env=recovery_env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                   preexec_fn=default_sigint)
+        try:
+            assert select.select([watcher.stderr], [], [], 5)[0], "blocked watcher did not become ready"
+            assert watcher.stderr.readline().strip() == "READ_BLOCKED", "status read did not reach its held lock"
+            watcher.send_signal(signal.SIGINT)
+            assert watcher.wait(timeout=2) == 130, "blocked status read delayed SIGINT"
+            assert not read_finished.exists(), "watcher waited for its blocked status read"
+            output, errors = watcher.communicate(timeout=2)
+            assert not output and not errors, (output, errors)
         finally:
             if watcher.poll() is None:
                 watcher.kill()

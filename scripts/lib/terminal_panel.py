@@ -3432,8 +3432,8 @@ class BackgroundRead:
         def run():
             try:
                 result = reader()
-            except Exception:
-                result = None
+            except Exception as error:
+                result = error
             self.ready.put(result)
 
         threading.Thread(target=run, daemon=True).start()
@@ -3697,7 +3697,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
         if capable:
             print("\033[?25l", end="", flush=True)
         with TerminalInput(managed_session(), active=capable) as inputs:
-            background = BackgroundRead() if inputs.fd is not None else None
+            # Native reads can defer Python's SIGINT handler; redirected watches need the input loop too.
+            background = BackgroundRead() if inputs.fd is not None or not capable and not sys.stdout.isatty() else None
             previews = BackgroundRead()
             state, status, main_attempt = {"repo": {"name": repo.name}, "collection": {"ok": False, "pending": True}}, 0, None
             density, filtered = view or board_view("auto"), attention_only
@@ -3711,6 +3712,10 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         submitted_revision = revision
                         background.start(lambda: read_panel(repo, provider, view, attention_only))
                     collected, result = background.take()
+                    if collected and isinstance(result, Exception):
+                        if inputs.fd is None:
+                            raise result
+                        result = None
                 else:
                     result = read_panel(repo, provider, view, attention_only)
                     collected = True
@@ -3748,6 +3753,10 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         raise ReloadWatcher()
                     if REJECTED_RELOAD.pop("notice", False):
                         navigation["notice"] = "New panel code does not start yet; keeping this board"
+
+                if background and inputs.fd is None and not collected:
+                    inputs.wait(.05)
+                    continue
 
                 def redraw():
                     nonlocal last
@@ -3942,6 +3951,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         next_read, size = 0, redraw()
                         break
                     loaded, report = previews.take()
+                    if isinstance(report, Exception):
+                        report = None
                     preview = navigation.get("preview")
                     opening = navigation.get("opening")
                     if loaded and opening and report is None:
