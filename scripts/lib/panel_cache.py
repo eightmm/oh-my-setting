@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import runpy
 import subprocess
 from pathlib import Path
@@ -173,11 +174,28 @@ def _plan_input_stamp(path, directory=False):
     return identity + [info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
 
 
+def _plan_record_current(path, directory, stamp):
+    if isinstance(stamp, dict):
+        resolved = os.path.realpath(path)
+        return (resolved == stamp['resolved']
+                and _plan_input_stamp(resolved, directory) == stamp['stamp'])
+    return _plan_input_stamp(path, directory) == stamp
+
+
+def _plan_claim_ttl(task):
+    # Match agent-plan.sh's ASCII environment guard, then the engine's
+    # per-task string parser (which also accepts Unicode decimal digits).
+    raw = os.environ.get('OMS_PLAN_CLAIM_TTL') or '3600'
+    default = int(raw) if re.fullmatch(r'[0-9]+', raw) else 3600
+    value = task.get('ttl', '')
+    return int(value) if isinstance(value, str) and value.isdigit() else default
+
+
 def _plan_inputs_current(envelope):
     try:
         inputs = envelope['inputs']
         return (isinstance(inputs, list) and len(inputs) <= PLAN_INPUT_LIMIT
-                and all(_plan_input_stamp(path, directory) == stamp
+                and all(_plan_record_current(path, directory, stamp)
                         for path, directory, stamp in inputs))
     except (OSError, ValueError, TypeError, KeyError):
         return False
@@ -202,7 +220,18 @@ def _plan_inputs(repo):
             return
         if len(inputs) >= PLAN_INPUT_LIMIT:
             raise ValueError('plan cache input limit exceeded')
-        inputs[key] = (directory, _plan_input_stamp(path, directory))
+        try:
+            inside = os.path.commonpath((str(repo), key)) == str(repo)
+        except ValueError:  # Different Windows drives are external inputs.
+            inside = False
+        if inside:
+            stamp = _plan_input_stamp(path, directory)
+        else:
+            # Preserve the spelling too: retargeted external symlinks must
+            # invalidate, while /etc and HOME aliases remain cacheable.
+            resolved = os.path.realpath(path)
+            stamp = {'resolved': resolved, 'stamp': _plan_input_stamp(resolved, directory)}
+        inputs[key] = (directory, stamp)
         if path.parent != path:
             add(path.parent, directory=True)
 
@@ -272,7 +301,8 @@ def _plan_inputs(repo):
                 owner = Path(item['directory']) / 'owner.json'
                 add(owner)
                 owner_stamp = inputs[str(owner)][1]
-                total += owner_stamp[-3] if owner_stamp else 0
+                owner_info = owner_stamp['stamp'] if isinstance(owner_stamp, dict) else owner_stamp
+                total += owner_info[-3] if owner_info else 0
                 if total > PLAN_METADATA_LIMIT:
                     raise ValueError('plan cache metadata limit exceeded')
                 certificate = capture['certificate'](item)
@@ -297,8 +327,10 @@ def _plan_inputs(repo):
         git_dirs = {Path(os.path.abspath(repo / name)) for name in paths}
         for folder in git_dirs:
             add(folder, directory=True)
-            for name in ('commondir', 'config', 'HEAD', 'index', 'packed-refs', 'shallow', 'info/grafts'):
+            for name in ('commondir', 'config', 'HEAD', 'packed-refs', 'shallow', 'info/grafts'):
                 add(folder / name)
+            if os.name == 'nt':
+                add(folder / 'index')
         # Git may read global or included config outside the worktree. Record
         # active origins and missing include targets so creation also invalidates.
         for path in (Path.home() / '.gitconfig',
@@ -323,22 +355,68 @@ def _plan_inputs(repo):
                     raise ValueError('unresolved plan cache Git include')
                 add(config_path.parent / Path(value).expanduser())
         git_proof = False
+        legacy_refs = False
+        commits = set()
         for receipt in receipts:
             bundle = receipt['bundle']
             if receipt['completion_kind'] == 'satisfied-by':
                 git_proof = True
                 if bundle['successor']['product_kind'] == 'commit':
-                    core = runpy.run_path(str(ROOT / 'scripts/lib/plan-completion.py'))
-                    tree(core['canonical_land_directory'](str(repo)))
+                    commits.add(bundle['successor']['commit_sha'])
                 else:
                     relative('.oms/landings.jsonl')
             elif bundle.get('legacy_adoption') and receipt['snapshot'].get('evidence', {}).get('index', {}).get('base_sha'):
                 git_proof = True
+                legacy_refs = True
+        if commits:
+            core = runpy.run_path(str(ROOT / 'scripts/lib/plan-completion.py'))
+            directory = Path(core['canonical_land_directory'](str(repo)))
+            add(directory)
+            names = list(directory.iterdir()) if directory.is_dir() else []
+            if len(names) > 4096:
+                raise ValueError('too many canonical commit receipts')
+            for path in names:
+                if not any(path.name.startswith(commit + '-') for commit in commits) or path.suffix != '.json':
+                    continue
+                add(path)
+                raw = DURABLE['read_no_follow'](path.anchor, str(path.relative_to(path.anchor)),
+                                               'plan cache land receipt', max_bytes=1024 * 1024)
+                total += len(raw)
+                if total > PLAN_METADATA_LIMIT:
+                    raise ValueError('plan cache metadata limit exceeded')
+                landed = json.loads(raw)
+                ref = 'refs/remotes/%s/%s' % (landed.get('remote', ''), landed.get('target', ''))
+                checked = subprocess.run(['git', 'check-ref-format', ref], env=env,
+                                         capture_output=True, timeout=5, check=False)
+                if checked.returncode:
+                    continue
+                # Packed refs are already guarded. Follow loose symbolic refs
+                # once on a miss and stamp every spelling in that chain.
+                for folder in git_dirs:
+                    current = ref
+                    for depth in range(16):
+                        target = folder / current
+                        add(target)
+                        if not target.is_file():
+                            break
+                        raw_ref = DURABLE['read_no_follow'](str(folder), current,
+                                                           'plan cache ref', max_bytes=4096).decode().strip()
+                        if not raw_ref.startswith('ref: '):
+                            break
+                        current = raw_ref[5:]
+                        if not current.startswith('refs/') or any(part in ('', '.', '..') for part in current.split('/')):
+                            raise ValueError('unsafe symbolic Git ref')
+                    else:
+                        raise ValueError('too many symbolic Git refs')
         if git_proof:
             # Directory stamps catch additions/removals; file stamps also catch
             # in-place corruption of content-addressed objects and packed refs.
             for folder in git_dirs:
-                tree(folder / 'refs')
+                if legacy_refs:
+                    # Abbreviated legacy identities can resolve through refs.
+                    tree(folder / 'refs')
+                else:
+                    tree(folder / 'refs/replace')
                 tree(folder / 'objects')
                 alternate = folder / 'objects/info/alternates'
                 if alternate.exists():
@@ -366,7 +444,7 @@ def read_plan_list(repo, collect):
         return collect()
 
     def stamp():
-        entries = []
+        entries = [('plan-input-schema', 2)]
         for path in (repo / '.oms', repo / '.oms/plan', repo / '.oms/plan/tasks.json',
                      repo / '.oms/plan/completions', repo / 'PROJECT.md',
                      ROOT / 'scripts/agent-plan.sh', ROOT / 'scripts/lib/agent_plan_core.py',
@@ -398,8 +476,6 @@ def read_plan_list(repo, collect):
     def refreshed(value):
         value = copy.deepcopy(value)
         now = int(time.time())
-        default = os.environ.get('OMS_PLAN_CLAIM_TTL', '3600')
-        default = int(default) if default.isascii() and default.isdigit() else 3600
         for task in value['tasks']:
             state = task.get('state')
             if state not in ('claimed', 'running', 'review'):
@@ -416,8 +492,7 @@ def read_plan_list(repo, collect):
             if anchor is None:
                 continue
             age = now - anchor
-            ttl = task.get('ttl', '')
-            ttl = int(ttl) if isinstance(ttl, str) and ttl.isdigit() else default
+            ttl = _plan_claim_ttl(task)
             if state == 'claimed' and age >= ttl:
                 return None
             task['claim_age_s'] = age

@@ -1166,33 +1166,112 @@ def save_closed():
     closed_plan.write_text(json.dumps({'schema': 3, 'plan_id': plan_id, 'tasks': closed_tasks}), encoding='utf-8')
     (closed / '.oms/artifacts/index.jsonl').write_bytes(b''.join(encoded(row) for row in index_rows))
 save_closed()
-readers = [('round2', cache.read_plan_list)]
+readers = [('round3', cache.read_plan_list)]
 if len(sys.argv) > 3:
     # Comparative timing is an explicit fixture benchmark, not a repeated CI
     # baseline. Ordinary regression runs require no historical Git objects.
-    round1 = {'__file__': str(Path(sys.argv[1]) / 'panel_cache.py')}
-    exec(Path(sys.argv[3]).read_bytes(), round1)
-    readers = [('base-343464a', lambda repo, collect: collect()),
-               ('round1', round1['read_plan_list']), ('round2', cache.read_plan_list)]
+    previous = {'__file__': str(Path(sys.argv[1]) / 'panel_cache.py')}
+    exec(Path(sys.argv[3]).read_bytes(), previous)
+    readers = [('round2', previous['read_plan_list']), ('round3', cache.read_plan_list)]
 for label, reader in readers:
     (closed / cache.DIRECTORY / 'plan-list.json').unlink(missing_ok=True)
     result = measure(reader, closed, 'closed-000', detailed=True)
-    assert result['tick_calls'] == ([1, 0, 0] if label == 'round2' else [1, 1, 1]), result
+    assert result['tick_calls'] == ([1, 0, 0] if label in ('round2', 'round3') else [1, 1, 1]), result
     print('closed-plan unchanged %s: %s' % (label, json.dumps(result)))
 add_completion(250)
 save_closed()
 for label, reader in readers:
     result = measure(reader, closed, 'closed-000', detailed=True)
-    assert result['tick_calls'] == ([1, 0, 0] if label == 'round2' else [1, 1, 1]), result
+    assert result['tick_calls'] == ([1, 0, 0] if label in ('round2', 'round3') else [1, 1, 1]), result
     print('closed-plan added %s: %s' % (label, json.dumps(result)))
 os.utime(first_receipt, ns=(first_receipt.stat().st_atime_ns, first_receipt.stat().st_mtime_ns + 1_000_000))
 for label, reader in readers:
     result = measure(reader, closed, 'closed-000', detailed=True)
-    assert result['tick_calls'] == ([1, 0, 0] if label == 'round2' else [1, 1, 1]), result
+    assert result['tick_calls'] == ([1, 0, 0] if label in ('round2', 'round3') else [1, 1, 1]), result
     print('closed-plan receipt-touched %s: %s' % (label, json.dumps(result)))
 with patch.object(cache, '_plan_inputs', side_effect=AssertionError('dependencies reread on a cache hit')), \
         patch.object(Path, 'iterdir', side_effect=AssertionError('namespace walked on a cache hit')):
     assert len(cache.read_plan_list(closed, lambda: None)['tasks']) == 251
+# External HOME/config aliases are normal on macOS and Fedora Atomic. Keep
+# their resolved targets and detect retargeting without accepting repo symlinks.
+outside = Path(sys.argv[2]) / 'external-home'
+outside.mkdir()
+(outside / '.gitconfig').write_text('', encoding='utf-8')
+alias = Path(sys.argv[2]) / 'home-alias'
+alias.symlink_to(outside, target_is_directory=True)
+with patch.dict(os.environ, HOME=str(alias), GIT_CONFIG_GLOBAL=str(alias / '.gitconfig')):
+    result = measure(cache.read_plan_list, closed, 'closed-000', detailed=True)
+    assert result['tick_calls'] == [1, 0, 0], result
+    envelope = {'inputs': cache._plan_inputs(closed)}
+    os.utime(outside / '.gitconfig', None)
+    assert not cache._plan_inputs_current(envelope), 'external config touch was missed'
+    result = measure(cache.read_plan_list, closed, 'closed-000', detailed=True)
+    assert result['tick_calls'] == [1, 0, 0], result
+    envelope = {'inputs': cache._plan_inputs(closed)}
+    replacement_home = Path(sys.argv[2]) / 'replacement-home'
+    replacement_home.mkdir()
+    (replacement_home / '.gitconfig').write_text('', encoding='utf-8')
+    alias.unlink()
+    alias.symlink_to(replacement_home, target_is_directory=True)
+    assert not cache._plan_inputs_current(envelope), 'external alias retarget was missed'
+repo_alias = closed / 'unsafe-alias'
+repo_alias.symlink_to(outside, target_is_directory=True)
+try:
+    cache._plan_input_stamp(repo_alias)
+except ValueError:
+    pass
+else:
+    raise AssertionError('repository symlink became cacheable')
+repo_alias.unlink()
+# Check parser parity with the engine definition without running its CLI body.
+import ast
+engine = ast.parse((root / 'scripts/lib/agent_plan_core.py').read_text())
+parser = next(node for node in engine.body if isinstance(node, ast.FunctionDef) and node.name == 'claim_ttl_for')
+for raw_default in ('', '0', '0010', '3600', '+10', ' 10', '١٠'):
+    default = int(raw_default) if raw_default and all('0' <= digit <= '9' for digit in raw_default) else 3600
+    namespace = {'CLAIM_TTL': default}
+    exec(compile(ast.Module(body=[parser], type_ignores=[]), '<engine TTL>', 'exec'), namespace)
+    with patch.dict(os.environ, OMS_PLAN_CLAIM_TTL=raw_default):
+        for value in ('', '0', '0010', '١٠', '+10', ' 10', 10, None):
+            task = {'ttl': value}
+            assert cache._plan_claim_ttl(task) == namespace['claim_ttl_for'](task), (raw_default, value)
+# Discovery pays the commit namespace resolver once and guards only the pushed
+# ref chain (plus replacement refs), not unrelated refs or the POSIX index.
+receipt_paths = [first_receipt, next(path for path in (closed / '.oms/plan/completions').iterdir() if path != first_receipt)]
+original_receipts = [path.read_bytes() for path in receipt_paths]
+land_directory = Path(sys.argv[2]) / 'land-receipts'
+land_directory.mkdir()
+commit = '5' * 40
+(land_directory / (commit + '-fixture.json')).write_text(json.dumps({'remote': 'origin', 'target': 'main'}))
+remote_ref = closed / '.git/refs/remotes/origin/main'
+remote_ref.parent.mkdir(parents=True)
+resolved_ref = remote_ref.with_name('accepted')
+remote_ref.write_text('ref: refs/remotes/origin/accepted\n')
+resolved_ref.write_text(commit + '\n')
+try:
+    for path, raw in zip(receipt_paths, original_receipts):
+        receipt = json.loads(raw)
+        receipt['completion_kind'] = 'satisfied-by'
+        receipt['bundle']['successor'] = {'product_kind': 'commit', 'commit_sha': commit}
+        path.write_bytes(encoded(receipt))
+    from unittest.mock import Mock
+    resolver = Mock(return_value=str(land_directory))
+    with patch.object(cache.runpy, 'run_path', return_value={'canonical_land_directory': resolver}) as loader:
+        dependencies = cache._plan_inputs(closed)
+    assert loader.call_count == resolver.call_count == 1, 'commit namespace resolved per receipt'
+    paths = {item[0] for item in dependencies}
+    assert {str(remote_ref), str(resolved_ref), str(closed / '.git/packed-refs')}.issubset(paths)
+    envelope = {'inputs': dependencies}
+    os.utime(resolved_ref, ns=(resolved_ref.stat().st_atime_ns, resolved_ref.stat().st_mtime_ns + 1_000_000))
+    assert not cache._plan_inputs_current(envelope), 'resolved Git ref touch was missed'
+    assert str(closed / '.git/refs/heads') not in paths, 'unrelated refs were stamped'
+    assert (str(closed / '.git/index') in paths) == (os.name == 'nt')
+finally:
+    for path, raw in zip(receipt_paths, original_receipts):
+        path.write_bytes(raw)
+    remote_ref.unlink()
+    resolved_ref.unlink()
+
 for changed in (closed / 'decision.md', closed / '.oms/artifacts/closed-000.md',
                 closed / provenance['capture']['path'], closed / provenance['room']['path'],
                 closed / 'verify.sh'):
