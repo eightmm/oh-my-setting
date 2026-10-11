@@ -7,6 +7,8 @@ import hashlib
 import json
 import math
 import os
+import runpy
+import subprocess
 from pathlib import Path
 import stat
 import time
@@ -152,12 +154,203 @@ def read_shared(repo, key, collect, cacheable=None):
         return collect()
 
 
+PLAN_INPUT_LIMIT = 16384
+PLAN_METADATA_LIMIT = 64 * 1024 * 1024
+
+
+def _plan_input_stamp(path, directory=False):
+    try:
+        info = Path(path).lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+        raise ValueError('unsafe plan cache input')
+    identity = [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid]
+    if directory and stat.S_ISDIR(info.st_mode):
+        # Ancestors are identity guards, not enumerated namespaces. Cache and
+        # lock publication must not invalidate these guards themselves.
+        return identity
+    return identity + [info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+
+def _plan_inputs_current(envelope):
+    try:
+        inputs = envelope['inputs']
+        return (isinstance(inputs, list) and len(inputs) <= PLAN_INPUT_LIMIT
+                and all(_plan_input_stamp(path, directory) == stamp
+                        for path, directory, stamp in inputs))
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+
+
+def _plan_inputs(repo):
+    """Discover validation reads once, without traversing the .oms tree.
+
+    Receipt objects already contain the complete frozen proof references,
+    including captured streams and approval snapshots. The artifact index and
+    patch-land log are the only live streams used by validate_done. Git-backed
+    proofs additionally guard the bounded local Git namespace and object store.
+    """
+    inputs = {}
+    landing_paths = set()
+    total = 0
+
+    def add(path, directory=False):
+        path = Path(os.path.abspath(path))
+        key = str(path)
+        if key in inputs and (directory or not inputs[key][0]):
+            return
+        if len(inputs) >= PLAN_INPUT_LIMIT:
+            raise ValueError('plan cache input limit exceeded')
+        inputs[key] = (directory, _plan_input_stamp(path, directory))
+        if path.parent != path:
+            add(path.parent, directory=True)
+
+    def relative(value):
+        if not isinstance(value, str) or not value:
+            raise ValueError('invalid plan cache reference')
+        if os.path.isabs(value):
+            # Legacy successor intents retain absolute repo-local patch paths.
+            value = str(Path(value).relative_to(repo)).replace(os.sep, '/')
+        if '\\' in value or ':' in value or any(part in ('', '.', '..') for part in value.split('/')):
+            raise ValueError('invalid plan cache reference')
+        add(repo / value)
+        if value.startswith('.oms/landing-patches/') and value.count('/') == 2:
+            landing_paths.add(value)
+        return value
+
+    def metadata(value):
+        nonlocal total
+        rel = relative(value)
+        raw = DURABLE['read_no_follow'](str(repo), rel, 'plan cache dependency',
+                                        max_bytes=4 * 1024 * 1024)
+        total += len(raw)
+        if total > PLAN_METADATA_LIMIT:
+            raise ValueError('plan cache metadata limit exceeded')
+        return json.loads(raw)
+
+    def references(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in ('path', 'artifact', 'patch', 'decision_artifact') and isinstance(item, str) and item:
+                    relative(item)
+                else:
+                    references(item)
+        elif isinstance(value, list):
+            for item in value:
+                references(item)
+
+    def tree(path):
+        # Only Git/proof namespaces are enumerated; never the whole .oms tree.
+        add(path)
+        if Path(path).is_dir():
+            for child in Path(path).iterdir():
+                tree(child)
+
+    plan = metadata('.oms/plan/tasks.json')
+    receipts = []
+    for task in plan.get('tasks', {}).values():
+        if task.get('cancellation'):
+            relative(task['cancellation']['decision_artifact'])
+        if task.get('completion_receipt'):
+            receipt = metadata(task['completion_receipt']['path'])
+            references(receipt)
+            receipts.append(receipt)
+    if landing_paths:
+        # The designated patch reader also proves private generation ownership
+        # through the journal, owner certificate and publication hardlink.
+        relative('.oms/landings.jsonl')
+        journal_stamp = inputs[str(repo / '.oms/landings.jsonl')][1]
+        total += journal_stamp[-3] if journal_stamp else 0
+        if total > PLAN_METADATA_LIMIT:
+            raise ValueError('plan cache metadata limit exceeded')
+        capture = runpy.run_path(str(ROOT / 'scripts/lib/landing-capture.py'))
+        reservations = capture['reservations'](str(repo))
+        names = {Path(path).name for path in landing_paths}
+        for item in reservations.values():
+            if item['landing_id'] + '.patch' in names:
+                owner = Path(item['directory']) / 'owner.json'
+                add(owner)
+                owner_stamp = inputs[str(owner)][1]
+                total += owner_stamp[-3] if owner_stamp else 0
+                if total > PLAN_METADATA_LIMIT:
+                    raise ValueError('plan cache metadata limit exceeded')
+                certificate = capture['certificate'](item)
+                publication = certificate['objects'].get('publication')
+                if publication:
+                    add(publication['anchor'])
+                    add(publication['path'])
+    if receipts:
+        relative('.oms/artifacts/index.jsonl')
+        # Resolve gitfiles/commondir once; subsequent ticks use only lstat.
+        env = dict(os.environ, GIT_NO_LAZY_FETCH='1', GIT_ALLOW_PROTOCOL='', GIT_OPTIONAL_LOCKS='0')
+        for name in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR',
+                     'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE'):
+            env.pop(name, None)
+        query = subprocess.run(['git', '-C', str(repo), 'rev-parse', '--git-dir', '--git-common-dir'],
+                               capture_output=True, text=True, timeout=5, check=False, env=env,
+                               stdin=subprocess.DEVNULL)
+        paths = query.stdout.replace('\r', '').splitlines()
+        if query.returncode or len(paths) != 2:
+            raise ValueError('plan cache Git namespace unavailable')
+        add(repo / '.git')
+        git_dirs = {Path(os.path.abspath(repo / name)) for name in paths}
+        for folder in git_dirs:
+            add(folder, directory=True)
+            for name in ('commondir', 'config', 'HEAD', 'index', 'packed-refs', 'shallow', 'info/grafts'):
+                add(folder / name)
+        # Git may read global or included config outside the worktree. Record
+        # active origins and missing include targets so creation also invalidates.
+        for path in (Path.home() / '.gitconfig',
+                     Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'git/config',
+                     Path(os.environ.get('GIT_CONFIG_SYSTEM') or '/etc/gitconfig'),
+                     Path(os.environ.get('GIT_CONFIG_GLOBAL') or Path.home() / '.gitconfig')):
+            add(path)
+        config = subprocess.run(['git', '-C', str(repo), 'config', '--null', '--show-origin', '--includes', '--list'],
+                                capture_output=True, timeout=5, check=False, env=env, stdin=subprocess.DEVNULL)
+        if config.returncode or len(config.stdout) > 4 * 1024 * 1024:
+            raise ValueError('plan cache Git config unavailable')
+        parts = config.stdout.decode('utf-8').rstrip('\0').split('\0') if config.stdout else []
+        if len(parts) % 2:
+            raise ValueError('invalid plan cache Git config origins')
+        for origin, entry in zip(parts[::2], parts[1::2]):
+            if origin.startswith('file:'):
+                config_path = Path(os.path.abspath(repo / origin[5:]))
+                add(config_path)
+            key, _, value = entry.partition('\n')
+            if key == 'include.path' or key.startswith('includeif.') and key.endswith('.path'):
+                if not origin.startswith('file:') or value.startswith('%'):
+                    raise ValueError('unresolved plan cache Git include')
+                add(config_path.parent / Path(value).expanduser())
+        git_proof = False
+        for receipt in receipts:
+            bundle = receipt['bundle']
+            if receipt['completion_kind'] == 'satisfied-by':
+                git_proof = True
+                if bundle['successor']['product_kind'] == 'commit':
+                    core = runpy.run_path(str(ROOT / 'scripts/lib/plan-completion.py'))
+                    tree(core['canonical_land_directory'](str(repo)))
+                else:
+                    relative('.oms/landings.jsonl')
+            elif bundle.get('legacy_adoption') and receipt['snapshot'].get('evidence', {}).get('index', {}).get('base_sha'):
+                git_proof = True
+        if git_proof:
+            # Directory stamps catch additions/removals; file stamps also catch
+            # in-place corruption of content-addressed objects and packed refs.
+            for folder in git_dirs:
+                tree(folder / 'refs')
+                tree(folder / 'objects')
+                alternate = folder / 'objects/info/alternates'
+                if alternate.exists():
+                    raise ValueError('alternate Git object stores are not cacheable')
+    return [[path, directory, stamp] for path, (directory, stamp) in sorted(inputs.items())]
+
+
 def read_plan_list(repo, collect):
     """Share stat-bound list reads, refreshing ages and fencing TTL expiry.
 
-    Expired claims require fresh worker/PID evidence. Typed completions and
-    cancellations validate external receipts/artifacts, so retain their full
-    read path rather than walking those namespaces on every board tick.
+    Expired claims require fresh worker/PID evidence. Completion dependencies
+    are discovered only on a miss, then checked by stat before reuse.
     """
     repo = Path(repo).resolve()
     if not (repo / '.oms/hooks').is_dir():
@@ -167,6 +360,10 @@ def read_plan_list(repo, collect):
     # snapshot normally already receives that canonical state repository.
     if repo.name == 'wt' and repo.parent.name.startswith('oh-my-setting-scratch.'):
         return collect()
+    if any(os.environ.get(name) for name in (
+            'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY',
+            'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE')):
+        return collect()
 
     def stamp():
         entries = []
@@ -175,7 +372,13 @@ def read_plan_list(repo, collect):
                      ROOT / 'scripts/agent-plan.sh', ROOT / 'scripts/lib/agent_plan_core.py',
                      ROOT / 'scripts/lib/agent-plan-engine.py',
                      ROOT / 'scripts/lib/task-assignment.py', ROOT / 'scripts/lib/project-state.py',
-                     Path(__file__)):
+                     *(ROOT / 'scripts/lib' / name for name in (
+                         'plan-completion.py', 'plan-receipt.py', 'durable-jsonl.py',
+                         'path_scope.py', 'landing-capture.py', 'main_reviewer.py',
+                         'process_liveness.py', 'verify-floor-lint.py', 'plan-retire.py',
+                         'agent-memory-common.sh', 'oms-common.sh', 'provider-registry.sh',
+                         'harness-residue.sh', 'file-lock.sh', 'project-state.sh')),
+                     ROOT / 'scripts/oms', Path(__file__)):
             try:
                 info = path.lstat()
             except FileNotFoundError:
@@ -186,7 +389,10 @@ def read_plan_list(repo, collect):
                 return None
             entries.append((str(path), info.st_dev, info.st_ino, info.st_mode,
                             info.st_size, info.st_mtime_ns, info.st_ctime_ns))
-        entries.append(('ttl', os.environ.get('OMS_PLAN_CLAIM_TTL')))
+        entries.append(('settings', {name: value for name, value in os.environ.items()
+                                    if name.startswith('GIT_') or name in (
+                                        'OMS_PLAN_CLAIM_TTL', 'HOME', 'XDG_CONFIG_HOME',
+                                        'XDG_STATE_HOME', 'PATH')}))
         return hashlib.sha256(_body(entries)).hexdigest()
 
     def refreshed(value):
@@ -195,8 +401,6 @@ def read_plan_list(repo, collect):
         default = os.environ.get('OMS_PLAN_CLAIM_TTL', '3600')
         default = int(default) if default.isascii() and default.isdigit() else 3600
         for task in value['tasks']:
-            if any(field in task for field in ('completion_kind', 'completion_receipt', 'cancellation')):
-                return None
             state = task.get('state')
             if state not in ('claimed', 'running', 'review'):
                 continue
@@ -226,21 +430,27 @@ def read_plan_list(repo, collect):
         if generation is None:
             return collect()
         cached = _load(repo, relative, identity, generation)
-        if cached:
-            value = refreshed(cached['value'])
-            if value is not None and stamp() == generation:
+        if cached and _plan_inputs_current(cached['value']):
+            value = refreshed(cached['value']['result'])
+            if value is not None and stamp() == generation and _plan_inputs_current(cached['value']):
                 return value
         with _lock(repo, 'panel-cache-plan-list', timeout=0):
             cached = _load(repo, relative, identity, generation)
-            if cached:
-                value = refreshed(cached['value'])
-                if value is not None and stamp() == generation:
+            if cached and _plan_inputs_current(cached['value']):
+                value = refreshed(cached['value']['result'])
+                if value is not None and stamp() == generation and _plan_inputs_current(cached['value']):
                     return value
+            try:
+                inputs = _plan_inputs(repo)
+            except (OSError, ValueError, TypeError, KeyError, RecursionError, subprocess.SubprocessError, SystemExit):
+                return collect()
             value = collect()
-            if stamp() == generation and refreshed(value) is not None:
+            envelope = {'result': value, 'inputs': inputs}
+            if (stamp() == generation and refreshed(value) is not None
+                    and _plan_inputs_current(envelope)):
                 data = {'schema': 1, 'repo': identity, 'fingerprint': generation,
-                        'created': time.time(), 'value': value,
-                        'sha256': hashlib.sha256(_body(value)).hexdigest()}
+                        'created': time.time(), 'value': envelope,
+                        'sha256': hashlib.sha256(_body(envelope)).hexdigest()}
                 try:
                     path = DURABLE['canonical_repo_path'](str(repo), relative, 'panel cache', True)
                     DURABLE['atomic_mutate'](path, lambda old: _body(data), str(repo),
