@@ -17,6 +17,7 @@ WRITERS = {"worker", "builder", "refactorer", "documenter", "integrator", "perfo
 # Judges of another context's work prefer the provider other than the main's when the tier offers it.
 INDEPENDENT = {"reviewer", "verifier", "security-auditor", "critic"}
 RESEARCH_FAMILIES = {"luna", "haiku"}
+POOL_DEFAULTS = {"max_running": 3, "max_rework_rounds": 2}
 
 
 def route_family(provider, model):
@@ -50,8 +51,14 @@ def valid_route(route):
 
 def policy():
     value = json.loads((ROOT / "config/panel-routing.json").read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or set(value) != {"schema", "main", "tiers", "roles"} or value.get("schema") != 2:
+    if (not isinstance(value, dict) or not {"schema", "main", "tiers", "roles"} <= set(value)
+            <= {"schema", "main", "tiers", "roles", "pool"} or value.get("schema") != 2):
         raise ValueError("unsupported panel routing policy")
+    pool = value.get("pool", {})
+    if (not isinstance(pool, dict) or not set(pool) <= set(POOL_DEFAULTS)
+            or any(type(number) is not int or number <= 0 for number in pool.values())):
+        raise ValueError("panel pool limits must be positive integers")
+    value["pool"] = dict(POOL_DEFAULTS, **pool)
     mains = value.get("main")
     if not isinstance(mains, dict) or set(mains) != set(MODEL_IDS):
         raise ValueError("invalid panel main routes")

@@ -153,12 +153,13 @@ A native main launched from the menu joins the selected work room. Starting a re
 main from the menu or with `--launch` keeps the panel's recorded room while it is open and has headroom; a full or closed room makes the next
 main start a new room, and an explicit `--room ID` or `o Rooms` choice wins.
 A bare control window shows the panel's recorded room.
-Role dispatch keeps its validated main, room, model and plan binding when the
-room's message limit prevents the informational assignment notice. It reports
-that delivery is unavailable and still runs the call; ordinary room sends keep
-their limit. Result delivery can also be unavailable, with evidence retained in
-the indexed call result. Closed rooms, invalid membership and unrelated send
-failures still refuse dispatch.
+Role dispatch refuses a full room before enrollment, checking headroom for assignment and result
+messages. `pool` in `config/panel-routing.json` defaults to three non-terminal call attempts per
+main attempt and two rework rounds per task after its first worker call. Wait for calls to settle
+before dispatching again; at the rework limit, review the brief, raise `--workload` or ask the person.
+Interruptions give the child up to 20 seconds to clean up, settle unfinished attempts and send a numeric
+result handoff. Sensitive summaries are withheld with an `oms panel --results --task-id` pointer;
+room races can still prevent delivery, while the indexed evidence remains available.
 The `o Rooms` menu selects or creates a task-scoped room. It does not enroll
 other sessions merely because they share a repository. Auto uses a connected
 vertical tree for a selected room at 28 columns and 12 rows or larger. Every
@@ -445,6 +446,13 @@ participant in lifecycle refs, supplies the room interface in the scoped
 context, and returns a bounded artifact-backed handoff to its caller. A handoff
 reports the call exit and pending parent acceptance. It does not merge native
 histories or write source files in the main's worktree.
+
+If an exit cannot be verified, the attempt and write scope remain held with no
+final handoff. The next dispatch reconciles pending calls whose recorded process
+identities and, after a forced stop, provider groups are proven gone. Pool-limit
+refusals name unresolved calls; stop any remaining providers and verify cleanup
+before cancelling their attempts. TERM/HUP ends the panel after dispatch cleanup.
+
 Native instructions include explicit room and participant arguments for tools
 that do not inherit the CLI environment. Role dispatch uses `--room ID` to
 resolve the verified active main; missing or ambiguous ownership is refused.
