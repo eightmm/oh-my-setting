@@ -267,11 +267,11 @@ def current_models(repo, members):
         return {}
 
 
-def windows(repo, ident, state=None):
+def windows(repo, ident, state=None, _tick=None):
     found = {}
     import panel_host
     if panel_host.herdr_active():
-        return panel_host.targets(repo, ident, state if state is not None else room.status(repo, ident))
+        return panel_host.targets(repo, ident, state if state is not None else room.status(repo, ident), _tick=_tick)
     if not os.environ.get("TMUX") or not shutil.which("tmux"):
         return found
     try:
@@ -303,12 +303,15 @@ def windows(repo, ident, state=None):
                 candidates.append((member, fields))
         if not candidates:
             return found
-        evidence = subprocess.run(["bash", str(room.ENTRY), "agent-events", "--repo", str(repo),
-                                   "list", "--active", "--json"], capture_output=True, text=True,
-                                  check=False, timeout=5, stdin=subprocess.DEVNULL)
-        if evidence.returncode:
-            return found
-        attempts = json.loads(evidence.stdout)
+        if _tick is not None:
+            attempts = [row for row in _tick.attempts() if isinstance(row, dict) and not row.get('terminal')]
+        else:
+            evidence = subprocess.run(["bash", str(room.ENTRY), "agent-events", "--repo", str(repo),
+                                       "list", "--active", "--json"], capture_output=True, text=True,
+                                      check=False, timeout=5, stdin=subprocess.DEVNULL)
+            if evidence.returncode:
+                return found
+            attempts = json.loads(evidence.stdout)
         if not isinstance(attempts, list):
             return found
         attempts = {a.get("attempt_id"): a for a in attempts
@@ -323,7 +326,7 @@ def windows(repo, ident, state=None):
                     or refs.get("panel_room_participant", fields[1]) != member):
                 continue
             found.setdefault(member, []).append({"window": fields[0], "pane": fields[3], "session": fields[6]})
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
         pass
     return found
 

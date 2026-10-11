@@ -41,8 +41,9 @@ def _query(repo, verb, *args):
     return json.loads(result.stdout)
 
 
-def _records(repo, full=False):
-    attempts = _query(repo, 'agent-events', 'list', *([] if full else ['--limit', '300']))
+def _records(repo, full=False, _attempts=None):
+    attempts = (_query(repo, 'agent-events', 'list', *([] if full else ['--limit', '300']))
+                if _attempts is None else (_attempts if full else _attempts[-300:]))
     index = _query(repo, 'artifact-index', 'list', '1000').get('rows', [])
     if not isinstance(attempts, list) or not isinstance(index, list):
         raise ValueError('invalid result evidence')
@@ -245,13 +246,15 @@ def _plan_bindings(repo, task_ids):
             for task in tasks if task['id'] in task_ids}
 
 
-def completed_tasks(repo, task_ids, _shared=False):
+def completed_tasks(repo, task_ids, _shared=False, _tick=None):
     """Locally verified products of the current plan generation, without granting acceptance."""
     wanted = {ident for ident in task_ids if isinstance(ident, str) and ID.fullmatch(ident)}
     bindings = _plan_bindings(repo, wanted)
     if not bindings:
         return {}
-    if _shared:
+    if _tick is not None:
+        _, rows = _tick.records()
+    elif _shared:
         from panel_cache import read_shared
         _, rows = read_shared(repo, 'result-records', lambda: _records(repo))
     else:
@@ -393,12 +396,14 @@ def retry_delivery(repo, task_id, revision=None):
     raise ValueError('saved result not found in retained evidence')
 
 
-def outcomes(repo, task_ids, _shared=False):
+def outcomes(repo, task_ids, _shared=False, _tick=None):
     """The owner's recorded outcome for each of these tasks, beyond the twenty-task window results() pages."""
     wanted = {i for i in task_ids if isinstance(i, str) and ID.fullmatch(i)}
     if not wanted:
         return {}
-    if _shared:
+    if _tick is not None:
+        _, rows = _tick.records()
+    elif _shared:
         from panel_cache import read_shared
         _, rows = read_shared(repo, 'result-records', lambda: _records(repo))
     else:
@@ -414,10 +419,12 @@ def outcomes(repo, task_ids, _shared=False):
     return found
 
 
-def results(repo, task_id=None, room_participant=None, _shared=False):
+def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None):
     if task_id and not ID.fullmatch(task_id):
         raise ValueError('invalid task ID')
-    if _shared:
+    if _tick is not None:
+        attempts, rows = _tick.records()
+    elif _shared:
         from panel_cache import read_shared
         attempts, rows = read_shared(repo, 'result-records', lambda: _records(repo))
     else:
