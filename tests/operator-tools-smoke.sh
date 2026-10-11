@@ -2998,6 +2998,89 @@ call(["bash", str(panel.ENTRY), "patch-land", "--repo", str(project), "--patch",
 write_finalize[write_finalize.index("--verify") + 1] = "test \"$(tail -1 value.txt)\" = new"
 whole_finalize[whole_finalize.index("--verify") + 1] = "test \"$(tail -1 value.txt)\" = new"
 assert json.loads(call(write_finalize))["outcome"] == "accepted"
+# BEGIN patch-scope finalize regression (also runnable as an isolated case).
+scope_patch = project / ".oms/artifacts/scope-result.patch"
+scope_worker = {"attempt_id": "att_scope_write", "task_id": "scope-result", "parent_attempt_id": "scope-main",
+                "refs": {"panel_role": "worker", "panel_access": "write", "panel_room_id": "scope-room",
+                         "panel_room_participant": "scope-worker"}}
+
+def scope_evidence(body):
+    scope_patch.write_bytes(body)
+    digest = hashlib.sha256(body).hexdigest()
+    return [{"kind": "delegate", "task_id": "scope-result", "attempt_id": "att_scope_write",
+             "patch": ".oms/artifacts/scope-result.patch", "patch_sha256": digest, "exit": 0},
+            {"kind": "patch-land", "task_id": "scope-result", "patch_sha256": digest, "exit": 0}]
+
+extra_patch = (b"diff --git a/value.txt b/value.txt\n--- a/value.txt\n+++ b/value.txt\n@@ -1 +1 @@\n-old\n+new\n"
+               b"diff --git a/other.txt b/other.txt\n--- /dev/null\n+++ b/other.txt\n@@ -0,0 +1 @@\n+extra\n")
+scope_member = {"participants": [{"participant": "scope-worker", "owns": ["value.txt"]}]}
+with patch.dict(os.environ, environment, clear=True), \
+        patch.object(saved, "_plan_bindings", return_value={}), \
+        patch.object(saved, "_register"), patch.object(saved, "_plan_hint"), \
+        patch.object(saved.room, "status", return_value=scope_member):
+    with patch.object(saved, "_records", return_value=([scope_worker], scope_evidence(extra_patch))):
+        changes = saved.results(project, "scope-result")["rows"][0]["calls"][0]["changes"]
+        assert changes["out_of_scope"] == {"count": 1, "paths": ["other.txt"]}, changes
+        for task, main in (("scope-result", None), ("whole-scope-main", "scope-main")):
+            attempts = [scope_worker] + ([{"attempt_id": main, "tool": "panel-main", "provider": "codex"}] if main else [])
+            with patch.object(saved, "_records", return_value=(attempts, scope_evidence(extra_patch))), \
+                    patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": main} if main else {}):
+                try:
+                    saved.finalize(project, "codex", task, str(summary), "accepted", "true", ["value.txt"])
+                    raise AssertionError("out-of-scope write patch accepted")
+                except ValueError as error:
+                    assert "1 path(s) outside its declared scope" in str(error) and "other.txt" in str(error), error
+                assert saved.finalize(project, "codex", task, str(summary), "completed")["outcome"] == "completed"
+        for owns in ([], None):
+            scope_member["participants"][0]["owns"] = owns
+            assert saved.results(project, "scope-result")["rows"][0]["calls"][0]["changes"]["out_of_scope"]["count"] == 0
+            assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])["outcome"] == "accepted"
+    scope_member["participants"][0]["owns"] = ["docs/*.md"]
+    glob_patch = b"diff --git a/docs/readme.md b/docs/readme.md\n--- /dev/null\n+++ b/docs/readme.md\n@@ -0,0 +1 @@\n+doc\n"
+    with patch.object(saved, "_records", return_value=([scope_worker], scope_evidence(glob_patch))):
+        assert saved.results(project, "scope-result")["rows"][0]["calls"][0]["changes"]["out_of_scope"]["count"] == 0
+        assert saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])["outcome"] == "accepted"
+    rename_patch = b"diff --git a/docs/readme.md b/outside.md\nsimilarity index 100%\nrename from docs/readme.md\nrename to outside.md\n"
+    for owns, outside in ((["docs/*.md"], "outside.md"), (["outside.md"], "docs/readme.md")):
+        scope_member["participants"][0]["owns"] = owns
+        with patch.object(saved, "_records", return_value=([scope_worker], scope_evidence(rename_patch))):
+            assert saved.results(project, "scope-result")["rows"][0]["calls"][0]["changes"]["out_of_scope"] == {"count": 1, "paths": [outside]}
+            try:
+                saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+                raise AssertionError("out-of-scope rename accepted")
+            except ValueError as error:
+                assert "outside its declared scope" in str(error) and outside in str(error), error
+    many_patch = b"".join(("diff --git a/file%d b/file%d\nGIT binary patch\nliteral 0\n\n" % (n, n)).encode() for n in range(25))
+    assert saved._patch_paths(many_patch) == ["file%d" % n for n in range(25)]
+    scope_patch.write_bytes(many_patch)
+    assert saved._patch_paths(scope_patch) == saved._patch_paths(many_patch)
+    assert saved._scope_drift(saved._patch_paths(many_patch), ["file0"])[-1] == "file24"
+    long_name = "docs/" + "x" * 180 + ".md"
+    assert saved._patch_paths(("diff --git a/%s b/%s\n" % (long_name, long_name)).encode()) == [long_name]
+    quoted_patch = b'diff --git "a/docs/caf\\303\\251.md" "b/docs/caf\\303\\251.md"\nGIT binary patch\n'
+    assert saved._patch_paths(quoted_patch) == ["docs/café.md"]
+    spaced = "docs/a b/read me.md"
+    assert saved._patch_paths(("diff --git a/%s b/%s\nGIT binary patch\n" % (spaced, spaced)).encode()) == [spaced]
+    plain = b"--- a/first.txt\n+++ b/first.txt\n@@ -1 +1 @@\n--- content\n+++ content\n--- a/second.txt\n+++ b/second.txt\n@@ -0,0 +1 @@\n+new\n"
+    assert saved._patch_paths(plain) == ["first.txt", "second.txt"]
+    with patch.object(saved, "verified_patch", return_value=plain):
+        stats = saved._diffstat(project, {})
+        assert stats == {"files": [["first.txt", 1, 1], ["second.txt", 1, 0]], "count": 2, "added": 2, "removed": 1}, stats
+    with patch.object(saved, "verified_patch", return_value=many_patch):
+        stats = saved._diffstat(project, {})
+        assert stats["count"] == 25 and len(stats["files"]) == 20, stats
+    scope_member["participants"][0]["owns"] = ["file0"]
+    with patch.object(saved, "_records", return_value=([scope_worker], scope_evidence(many_patch))):
+        drift = saved.results(project)["rows"][0]["calls"][0]["changes"]["out_of_scope"]
+        assert drift == {"count": 24, "paths": ["file%d" % n for n in range(1, 9)]}, drift
+        try:
+            saved.finalize(project, "codex", "scope-result", str(summary), "accepted", "true", ["value.txt"])
+            raise AssertionError("drift after display file cap accepted")
+        except ValueError as error:
+            assert "24 path(s) outside its declared scope" in str(error) and "file8" in str(error) and "file9" not in str(error), error
+    assert saved._patch_paths(b"--- a/deleted.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n") == ["deleted.txt"]
+# END patch-scope finalize regression.
+
 whole = json.loads(call(whole_finalize, owner_env))
 assert whole["main_attempt_id"] == main_attempts["claude"] and whole["admission_event_ids"]
 joined = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",

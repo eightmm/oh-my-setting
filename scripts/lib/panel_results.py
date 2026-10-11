@@ -17,6 +17,8 @@ import codex_app_notify
 from dashboard_projection import clean
 from peer_artifacts import artifact_sections_stream, debate_sections
 from work_journal import sanitize_multiline
+from path_scope import classify
+import room
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / 'scripts/oms'
@@ -103,27 +105,105 @@ def verified_patch(repo, row, maximum=4 * 1024 * 1024):
     return data
 
 
+def _patch_name(value, prefix=True):
+    if value.startswith('"'):
+        # Git quotes UTF-8 bytes with C escapes, including octal escapes.
+        escapes = {ord('a'): 7, ord('b'): 8, ord('t'): 9, ord('n'): 10,
+                   ord('v'): 11, ord('f'): 12, ord('r'): 13,
+                   ord('"'): 34, ord('\\'): 92}
+        raw = value[1:-1].encode('utf-8', 'surrogateescape')
+        def unescape(match):
+            code = match.group(1)
+            return bytes([int(code, 8) if code[:1] in b'01234567' else escapes[code[0]]])
+        value = re.sub(rb'\\([0-7]{1,3}|[abtnvfr"\\])', unescape, raw).decode('utf-8', 'surrogateescape')
+    if value == '/dev/null':
+        return None
+    return value[2:] if prefix and value[:2] in ('a/', 'b/') else value
+
+
+def _patch_paths(patch_bytes_or_path):
+    """All touched paths, including both rename sides, without display clipping."""
+    data = (patch_bytes_or_path if isinstance(patch_bytes_or_path, bytes)
+            else Path(patch_bytes_or_path).read_bytes())
+    paths, fallback, names = {}, [], []
+    remaining = 0
+    for line in data.decode('utf-8', 'surrogateescape').splitlines():
+        if line.startswith('diff --git '):
+            paths.update(dict.fromkeys(names or fallback))
+            names, remaining = [], 0
+            rest = line[11:]
+            match = re.fullmatch(r'("(?:[^"\\]|\\.)*"|a/.*?) ("(?:[^"\\]|\\.)*"|b/.*)', rest)
+            if not match:
+                raise ValueError('patch paths unavailable: invalid git header')
+            fallback = [_patch_name(value) for value in match.groups()]
+            # Unquoted names may contain spaces and even the delimiter " b/".
+            if rest.startswith('a/') and len(rest) % 2 == 1:
+                middle = len(rest) // 2
+                if rest[middle:middle + 3] == ' b/' and rest[2:middle] == rest[middle + 3:]:
+                    fallback = [rest[2:middle]]
+        elif line.startswith('@@ '):
+            match = re.match(r'@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@', line)
+            if not match:
+                raise ValueError('patch paths unavailable: invalid hunk header')
+            remaining = sum(int(value) if value is not None else 1 for value in match.groups())
+        elif remaining:
+            remaining -= 2 if line.startswith(' ') else 1 if line.startswith(('+', '-')) else 0
+        elif line.startswith(('--- ', '+++ ')):
+            name = _patch_name(line[4:].split('\t', 1)[0])
+            if name is not None:
+                names.append(name)
+        elif line.startswith(('rename from ', 'rename to ', 'copy from ', 'copy to ')):
+            names.append(_patch_name(line.split(' ', 2)[2], prefix=False))
+    paths.update(dict.fromkeys(names or fallback))
+    return list(paths)
+
+
+def _scope_drift(paths, owns):
+    return [path for path in paths if classify(path, owns, []) == 'outside'] if owns else []
+
+
+def _worker_owns(repo, worker):
+    refs = worker.get('refs', {})
+    ident, who = refs.get('panel_room_id'), refs.get('panel_room_participant')
+    if not ident or not who:
+        return []
+    state = room.status(repo, ident)
+    member = next((p for p in state['participants'] if p['participant'] == who), None)
+    if member is None:
+        raise ValueError('write worker declared scope evidence unavailable')
+    return member.get('owns') or []
+
+
 def _diffstat(repo, row):
     """Changed files of a recorded patch, read only while its digest still matches."""
     data = verified_patch(repo, row)
-    files, header = [], False
-    for line in data.decode('utf-8', 'replace').splitlines():
+    paths = _patch_paths(data)
+    files = {path: [clean(path, 160), 0, 0] for path in paths}
+    current, header, remaining = None, True, 0
+    for line in data.decode('utf-8', 'surrogateescape').splitlines():
         if line.startswith('diff --git '):
-            # Fallback name; the header's +++/--- lines name the file without ' b/' ambiguity.
-            files.append([clean(line.split(' b/', 1)[-1], 160), 0, 0])
+            current = _patch_paths(line.encode('utf-8', 'surrogateescape'))[-1]
             header = True
-        elif files and header and line.startswith(('+++ ', '--- ')):
-            name = line[4:].strip().strip('"')
-            if name != '/dev/null' and (line.startswith('+++ ') or files[-1][0] == ''):
-                files[-1][0] = clean(name[2:] if name[:2] in ('a/', 'b/') else name, 160)
-        elif files and line.startswith('@@'):
+        elif header and line.startswith('+++ '):
+            name = _patch_name(line[4:].split('\t', 1)[0])
+            if name is not None:
+                current = name
+        elif header and line.startswith('--- '):
+            current = _patch_name(line[4:].split('\t', 1)[0])
+        elif line.startswith('@@'):
             header = False
-        elif files and not header and line.startswith('+'):
-            files[-1][1] += 1
-        elif files and not header and line.startswith('-'):
-            files[-1][2] += 1
-    return {'files': files[:20], 'count': len(files), 'added': sum(f[1] for f in files),
-            'removed': sum(f[2] for f in files)}
+            match = re.match(r'@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@', line)
+            remaining = sum(int(value) if value is not None else 1 for value in match.groups())
+        elif not header:
+            if current in files and line.startswith('+'):
+                files[current][1] += 1
+            elif current in files and line.startswith('-'):
+                files[current][2] += 1
+            remaining -= 2 if line.startswith(' ') else 1 if line.startswith(('+', '-')) else 0
+            header = remaining == 0
+    return {'files': list(files.values())[:20], 'count': len(files),
+            'added': sum(f[1] for f in files.values()),
+            'removed': sum(f[2] for f in files.values())}
 
 
 def _admission(repo, rows, task_id, worker):
@@ -344,6 +424,18 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
         workers = sorted([a for a in related if a.get('refs', {}).get('panel_access') == 'write'
                           and a.get('refs', {}).get('panel_role') == 'worker'], key=lambda a: a.get('created_at', ''))
         admissions = [_admission(repo, rows, a.get('task_id'), a) for a in workers]
+        if outcome == 'accepted':
+            for worker in workers:
+                owns = _worker_owns(repo, worker)
+                if not owns:
+                    continue
+                patches = [r for r in rows if r.get('kind') == 'delegate'
+                           and r.get('attempt_id') == worker.get('attempt_id') and r.get('patch_sha256')]
+                for row in patches:
+                    drift = _scope_drift(_patch_paths(verified_patch(repo, row)), owns)
+                    if drift:
+                        raise ValueError('write worker patch has %s path(s) outside its declared scope: %s'
+                                         % (len(drift), ', '.join(drift[:8])))
         if outcome == 'accepted' and any(not item for item in admissions):
             raise ValueError('write worker needs matching landed patch evidence')
         if outcome == 'accepted' and (not verify or not refs):
@@ -506,9 +598,13 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                     call['answer_truncated'] = call['answer'] != complete
                 except (OSError, ValueError, TypeError):
                     call['answer'] = 'Answer evidence unavailable'
-            if (task_id or room_participant) and row.get('patch') and row.get('patch_sha256'):
+            if row.get('patch') and row.get('patch_sha256'):
                 try:
                     call['changes'] = _diffstat(repo, row)
+                    worker = next((a for a in matching if a.get('attempt_id') == row.get('attempt_id')), {})
+                    if worker.get('refs', {}).get('panel_access') == 'write':
+                        drift = _scope_drift(_patch_paths(verified_patch(repo, row)), _worker_owns(repo, worker))
+                        call['changes']['out_of_scope'] = {'count': len(drift), 'paths': drift[:8]}
                 except (OSError, ValueError, TypeError):
                     call['changes'] = {'issue': 'patch evidence unavailable'}
             calls.append(call)
