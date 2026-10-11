@@ -37,10 +37,14 @@ def harness_env(host, gateway, model, window):
             env.pop(key, None)
         env["NO_PROXY"] = "127.0.0.1,localhost"
         env["no_proxy"] = "127.0.0.1,localhost"
+        # Nested CLIs started by this host must not inherit its gateway route (see peer-common.sh).
+        env["OMS_HARNESS_BRIDGE"] = "1"
+    # Subscription only: no host keeps a metered or inherited Anthropic route.
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+                "CLAUDE_CODE_USE_ANTHROPIC_AWS"):
+        env.pop(key, None)
     if host == "claude":
-        for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
-                    "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_ANTHROPIC_AWS"):
-            env.pop(key, None)
         env.update(ANTHROPIC_BASE_URL=gateway.url, ANTHROPIC_AUTH_TOKEN=gateway.capability,
                    ANTHROPIC_MODEL=model, ANTHROPIC_DEFAULT_OPUS_MODEL=model,
                    ANTHROPIC_DEFAULT_SONNET_MODEL=model, ANTHROPIC_DEFAULT_HAIKU_MODEL=model,

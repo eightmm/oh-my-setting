@@ -269,6 +269,12 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], server.capability)
             self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
             self.assertEqual(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "gpt-fixture")
+            routes = ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK")
+            with patch.dict(os.environ, dict.fromkeys(routes, "sentinel")):
+                for host in ("codex", "pi"):
+                    scrubbed = harness_env(host, server, "gpt-fixture", 200000)
+                    self.assertEqual([key for key in routes if key in scrubbed], [])
+                    self.assertEqual(scrubbed.get("OMS_HARNESS_BRIDGE"), None if host == "codex" else "1")
             with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": "pi-main", "OMS_PANEL_OWNER": "codex",
                                          "OMS_PANEL_HARNESS": "pi", "OMS_HOOK_AGENT": "codex"}):
                 pi_env = harness_env("pi", server, "gpt-fixture", 200000)
