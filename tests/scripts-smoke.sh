@@ -27115,6 +27115,7 @@ test_worker_guard_rejects_any_worker_authority_state_change() {
     "artifacts/.index.jsonl.tmp.123"
     "artifacts/quarantine/.artifact-index-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.raw.tmp.123.0123456789abcdef0123456789abcdef"
     "hooks/panel-cache/.dashboard.json.tmp.123.0123456789abcdef0123456789abcdef"
+    "hooks/panel-cache/.plan-list.json.tmp.123.0123456789abcdef0123456789abcdef"
     "artifacts/panel-results/.result-task-0123456789abcdef01234567.json.tmp.123.0123456789abcdef0123456789abcdef"
     "artifacts/panel-results/.delivery-task-0123456789abcdef01234567-0123456789abcdef-pending.json.tmp.123.0123456789abcdef0123456789abcdef"
   )

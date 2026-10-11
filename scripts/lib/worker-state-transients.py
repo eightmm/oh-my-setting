@@ -61,7 +61,7 @@ def is_internal_atomic_temp(root, rel):
         ):
             matched = True
         elif re.fullmatch(
-            r"hooks/panel-cache/(?:dashboard|attempts|result-records)\.json", target
+            r"hooks/panel-cache/(?:dashboard|attempts|result-records|plan-list)\.json", target
         ):
             matched = True
         else:
