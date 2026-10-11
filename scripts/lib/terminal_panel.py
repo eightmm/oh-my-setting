@@ -2113,10 +2113,15 @@ def snapshot(repo, room_id=None):
             try:
                 state["room"] = room.status(repo, ident)
                 if state.get("plan", {}).get("present"):
-                    run = subprocess.run(["bash", str(ENTRY), "agent-plan", "--repo", str(repo), "list", "--json"],
-                                         capture_output=True, text=True, timeout=5, check=False)
-                    if run.returncode == 0:
-                        state["room"]["repo_tasks"] = json.loads(run.stdout).get("tasks", [])
+                    # The task list is board context: a slow or failed read leaves the room and its mains drawn.
+                    try:
+                        run = subprocess.run(["bash", str(ENTRY), "agent-plan", "--repo", str(repo), "list", "--json"],
+                                             capture_output=True, text=True, timeout=15, check=False,
+                                             stdin=subprocess.DEVNULL)
+                        if run.returncode == 0:
+                            state["room"]["repo_tasks"] = json.loads(run.stdout).get("tasks", [])
+                    except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
+                        state["room"]["repo_tasks_unavailable"] = True
                     try:
                         from panel_results import completed_tasks
                         state["completed_tasks"] = completed_tasks(repo,
