@@ -2665,10 +2665,12 @@ def publish_bottom(navigation, before):
                        check=False, timeout=2, stdin=subprocess.DEVNULL)
 
 
-def refreshed_navigation(navigation, state, bottom=None):
+def refreshed_navigation(navigation, state, bottom=None, close_call=None):
     """Apply a new snapshot: another room resets the view; an open preview re-reads its evidence."""
     ident = state.get("room", {}).get("id")
     if navigation.get("room_id") and ident and navigation["room_id"] != ident:
+        if close_call:
+            close_call()
         navigation = {"collapsed": set(), "offset": 0}
     elif navigation.get("preview"):
         # Evidence is re-read only when the room's messages or a call's state moved, not on every refresh.
@@ -2992,7 +2994,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         read_filtered = navigation["attention"]
                     if not background or revision == submitted_revision:
                         density, filtered = read_density, read_filtered
-                    navigation = refreshed_navigation(navigation, state, managed_session() and session_option(BOTTOM_OPTION))
+                    navigation = refreshed_navigation(navigation, state, managed_session() and session_option(BOTTOM_OPTION),
+                                                     close_call=close_call)
                     stale_notice(navigation, notice)
                     if managed_session() and state.get("collection", {}).get("ok") is True and main_attempt:
                         alert = (main_needs_attention(state, main_attempt), main_has_open_questions(state, main_attempt))

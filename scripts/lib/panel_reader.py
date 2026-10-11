@@ -7,6 +7,7 @@ import sys
 import time
 
 import room
+from dashboard_projection import clean
 from panel_input import TerminalInput, hit_at
 from panel_results import ID
 
@@ -83,10 +84,16 @@ def open_reader(board, command, cwd):
     pane = made.stdout.strip()
     if made.returncode or not PANE.fullmatch(pane):
         return None
-    if tmux("set-option", "-p", "-t", pane, OPTION, board).returncode:
-        tmux("kill-pane", "-t", pane)
-        return None
-    return pane
+    marked = False
+    try:
+        marked = tmux("set-option", "-p", "-t", pane, OPTION, board).returncode == 0
+    finally:
+        if not marked:
+            try:
+                tmux("kill-pane", "-t", pane)
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return pane if marked else None
 
 
 def close_reader(board):
@@ -101,16 +108,21 @@ def page(render, board):
     """Scroll `render(width)` until q, Esc or the end of input, or until the board pane is gone (a reader never
     outlives its board); focus then returns to the board."""
     offset, shown, lines, drawn, alive = 0, None, [], None, time.monotonic() + 2
+    refresh = 0
     try:
         with TerminalInput() as inputs:
             while True:
                 size = tuple(shutil.get_terminal_size())
-                if shown != size:
+                if shown != size or time.monotonic() >= refresh:
                     try:
-                        lines = render(size[0]).splitlines()
+                        updated = render(size[0]).splitlines()
                     except Exception as error:  # the pane stays open to say why instead of vanishing
-                        lines = ["Result evidence unavailable: " + str(error)[:200]]
+                        updated = ["Result evidence unavailable: " + clean(str(error), 200)]
+                    if updated != lines:
+                        drawn = None
+                    lines = updated
                     shown = size
+                    refresh = time.monotonic() + 2
                 height = max(1, size[1] - 1)
                 offset = max(0, min(offset, len(lines) - height))
                 if drawn != (offset, size, len(lines)):

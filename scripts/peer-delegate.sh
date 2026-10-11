@@ -823,6 +823,7 @@ export OMS_REASONING_EFFORT_REQUEST="$REASONING_EFFORT"
 export OMS_REASONING_FALLBACK_EXPLICIT=""
 export OMS_MODEL_ROLE="$ROLE" OMS_MODEL_OPERATION=delegate
 oms_model_prepare "$TO" || exit $?
+ma_default_read_effort "$TO" "$WORKER_ACCESS"
 if [ -n "$OBSERVED_BINDING" ]; then
   [ -n "$MODEL" ] && [ "$OMS_MODEL_PRIMARY" = "$MODEL" ] && [ -z "$OMS_MODEL_FALLBACK" ] ||
     fail "plan observation requires the selected exact model without fallback"
@@ -1057,7 +1058,8 @@ if [ "$APPLY" = 1 ] && [ "$DRY_RUN" = 0 ] \
   fail "refusing --apply: main tree has uncommitted changes"
 fi
 
-slug_src="$PROMPT"
+slug_src="${TASK_ID:-${OMS_TASK_ID:-}}"
+[ -n "$slug_src" ] || slug_src="$PROMPT"
 [ -n "$slug_src" ] || slug_src="$(head -c 200 "$BRIEF_FILE")"
 slug="$(slugify "$slug_src")"
 [ -n "$slug" ] || slug="delegate"
@@ -1065,7 +1067,8 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 export OMS_OPERATION_ID="${OMS_OPERATION_ID:-delegate-$timestamp}"
 export OMS_DELEGATION_ID="${OMS_DELEGATION_ID:-$timestamp}"
 artifact="$ARTIFACT_DIR/$TO-$slug-$timestamp.md"
-patch_file="$ARTIFACT_DIR/$TO-$slug-$timestamp.patch"
+patch_file=""
+[ "$WORKER_ACCESS" = read ] || patch_file="$ARTIFACT_DIR/$TO-$slug-$timestamp.patch"
 
 if ! OMS_SCAN_BRIEF_RANGE="$brief_first:$brief_last" ma_validate_outbound_prompt "$prompt_file"; then
   {
@@ -1076,11 +1079,11 @@ if ! OMS_SCAN_BRIEF_RANGE="$brief_first:$brief_last" ma_validate_outbound_prompt
     printf 'No prompt content was written to this artifact and no worktree was created.\n'
     printf '\n\n## Exit\n\n3\n'
   } > "$artifact"
-  : > "$patch_file"
+  [ -z "$patch_file" ] || : > "$patch_file"
   OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
   echo "blocked: $TO sensitive outbound context -> $artifact"
   echo "artifact: $artifact"
-  echo "patch: $patch_file"
+  echo "patch: ${patch_file:-none (read-only)}"
   plan_failure_transition
   exit 3
 fi
@@ -1158,7 +1161,7 @@ context_compile_block() {
     printf 'No worker command ran and no context provenance was recorded.\n'
     printf '\n\n## Exit\n\n3\n'
   } > "$artifact"
-  : > "$patch_file"
+  [ -z "$patch_file" ] || : > "$patch_file"
   OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
   echo "blocked: $TO context manifest compilation failed -> $artifact" >&2
   plan_failure_transition
@@ -1292,7 +1295,7 @@ print("%s\t%s\t%s\t%s\t%s" % (
       printf 'No prompt content was written to this artifact and no worker command ran.\n'
       printf '\n\n## Exit\n\n3\n'
     } > "$artifact"
-    : > "$patch_file"
+    [ -z "$patch_file" ] || : > "$patch_file"
     OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 3 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" || true
     echo "blocked: $TO sensitive compiled context -> $artifact" >&2
     plan_failure_transition
@@ -1738,6 +1741,7 @@ EOF
 # (caches, build output) do not leak into the patch.
 capture_patch() {
   worker_worktree_require_identity "patch capture" || return 1
+  [ "$WORKER_ACCESS" = write ] || return 0
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
     GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
     -c core.fsmonitor=false -C "$worktree" add -A
@@ -1811,8 +1815,8 @@ run_verify() {
 # same worker continuing in the same worktree.
 write_repair_prompt() {
   local output="$1"
-  local patch_bytes
-  patch_bytes="$(LC_ALL=C wc -c < "$patch_file" | tr -d ' ')"
+  local patch_bytes=0
+  [ -z "$patch_file" ] || patch_bytes="$(LC_ALL=C wc -c < "$patch_file" | tr -d ' ')"
 
   {
     printf 'You are %s, a delegated worker agent, continuing your own previous attempt.\n' "$TO"
@@ -1839,7 +1843,9 @@ write_repair_prompt() {
       printf '\n## Previous Worker Exit\n\n- exit %s (interrupted or timed out; finish the remaining work)\n' "$worker_status"
     fi
     printf '\n## Your Previous Patch (captured, not accepted yet)\n\n'
-    if [ "$patch_bytes" -le 4096 ]; then
+    if [ -z "$patch_file" ]; then
+      printf 'None (read-only report).\n'
+    elif [ "$patch_bytes" -le 4096 ]; then
       quote_head "$patch_file" 4096 "previous patch"
     else
       printf 'The %s-byte patch is already staged in this worktree; its body is not repeated here.\n' "$patch_bytes"
@@ -2057,11 +2063,11 @@ if [ "$worker_boundary_failed" = 1 ]; then
   worker_status=125
   route_retry_terminal=1
   KEEP_WORKTREE=1
-  : > "$patch_file"
+  [ -z "$patch_file" ] || : > "$patch_file"
 elif ! capture_patch; then
   worker_status=125
   route_retry_terminal=1
-  : > "$patch_file"
+  [ -z "$patch_file" ] || : > "$patch_file"
 fi
 
 # A worker can exit 0 having produced only its own reason for doing nothing —
@@ -2247,14 +2253,14 @@ if [ "$DRY_RUN" != "1" ]; then
       verify_status=125
       route_retry_terminal=1
       KEEP_WORKTREE=1
-      : > "$patch_file"
+      [ -z "$patch_file" ] || : > "$patch_file"
       break
     fi
     if ! capture_patch; then
       worker_status=125
       verify_status=125
       route_retry_terminal=1
-      : > "$patch_file"
+      [ -z "$patch_file" ] || : > "$patch_file"
       break
     fi
     if [ -n "$VERIFY_CMD" ]; then
@@ -2483,6 +2489,7 @@ if [ -n "$THREAD_ID" ]; then
 fi
 
 echo "worker: $TO exit $worker_status"
+echo "route: $TO / ${OMS_MODEL_SELECTED:-provider-default} / effort=${OMS_REASONING_SELECTED:-native-settings} / $WORKER_ACCESS"
 if [ -n "$VERIFY_CMD" ]; then
   echo "verify: exit $verify_status"
 fi
@@ -2490,8 +2497,10 @@ if [ "$REPAIR" -gt 0 ]; then
   echo "repair: $repair_used/$REPAIR round(s) used"
 fi
 echo "artifact: $artifact"
-echo "patch: $patch_file"
-if [ "$applied" = 1 ]; then
+echo "patch: ${patch_file:-none (read-only)}"
+if [ "$WORKER_ACCESS" = read ]; then
+  :
+elif [ "$applied" = 1 ]; then
   echo "applied: yes (review with: git -C $REPO diff)"
 else
   # The printed next step is the admission front door, never a gate bypass:

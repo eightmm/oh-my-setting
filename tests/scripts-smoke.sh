@@ -4798,6 +4798,7 @@ PY
 
 test_delegate_read_only_rejects_apply() {
   local project="$TMP/delegate-read-only"
+  local out artifact
 
   make_committed_repo "$project"
   # Authority comes from the caller, and the two flags contradict: a
@@ -4808,6 +4809,64 @@ test_delegate_read_only_rejects_apply() {
     fail "--read-only with --apply must be rejected"
   fi
   assert_file_contains "$project/err" "--read-only produces no patch"
+
+  out="$(OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --prompt "Audit the tree" --read-only)"
+  contains "$out" 'patch: none (read-only)' || fail "read-only patch status missing: $out"
+  contains "$out" 'effort=medium / read' || fail "resolved default read effort missing: $out"
+  if contains "$out" 'patch-land' || contains "$out" 'applied:'; then
+    fail "read-only run must not suggest patch landing: $out"
+  fi
+  [ -z "$(find "$project/.oms/artifacts/delegate" -name '*.patch')" ] ||
+    fail "read-only run created a patch"
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY_READ' || fail "read-only index lost report lineage"
+import json, pathlib, sys
+row = json.loads(pathlib.Path(sys.argv[1]).read_text().splitlines()[-1])
+assert row['kind'] == 'delegate' and row['artifact_sha256'], row
+assert not any(k.startswith('patch') for k in row), row
+assert row['reasoning_effort'] == 'medium', row
+PY_READ
+
+  out="$(OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --prompt "Explicit effort audit" --read-only \
+    --reasoning-effort high)"
+  contains "$out" 'effort=high / read' || fail "explicit read effort missing: $out"
+
+  local bin_dir="$project/bin" home_dir="$project/home"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+prompt="$(cat)"
+[ -n "$prompt" ] || exit 0
+if [ ! -f "$HOME/first-attempt" ]; then
+  touch "$HOME/first-attempt"
+  echo 'temporary fixture failure'
+  exit 1
+fi
+echo 'repaired read-only report'
+EOF
+  chmod +x "$bin_dir/codex"
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --prompt 'Read-only repair' --read-only --repair 1)"
+  contains "$out" 'repair: 1/1 round(s) used' || fail "read-only repair failed: $out"
+  contains "$out" 'effort=medium / read' || fail "actual read effort missing: $out"
+  artifact="$(printf '%s\n' "$out" | sed -n 's/^artifact: //p')"
+  assert_file_contains "$artifact" 'model-route:'
+  assert_file_contains "$artifact" 'effort=medium'
+  assert_file_contains "$artifact" 'None (read-only report).'
+  assert_file_contains "$artifact" 'repaired read-only report'
+  [ -z "$(find "$project/.oms/artifacts/delegate" -name '*.patch')" ] ||
+    fail "read-only repair created a patch"
+
+  if OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+    --to codex --repo "$project" --read-only --prompt 'api_t'"oken=fixture-secret" \
+    >"$project/blocked.out" 2>&1; then
+    fail "sensitive read-only prompt must be blocked"
+  fi
+  assert_file_contains "$project/blocked.out" 'patch: none (read-only)'
+  [ -z "$(find "$project/.oms/artifacts/delegate" -name '*.patch')" ] ||
+    fail "blocked read-only run created a patch"
 }
 
 test_delegate_embeds_review_findings() {
@@ -8735,6 +8794,17 @@ test_delegate_task_id_lineage() {
   idx="$d/.oms/artifacts/index.jsonl"
   assert_file_contains "$idx" '"task_id": "P1"'
   assert_file_contains "$idx" '"base_sha"'
+  assert_one_artifact_contains "$d/.oms/artifacts/delegate" 'codex-p1-*.md' 'DRY RUN:'
+  [ -n "$(find "$d/.oms/artifacts/delegate" -name 'codex-p1-*.patch')" ] ||
+    fail "task-id write patch name must follow the task ID"
+  OMS_TASK_ID=env-task OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+    --repo "$d" --to codex --prompt "different prompt" --no-verify >/dev/null
+  assert_one_artifact_contains "$d/.oms/artifacts/delegate" 'codex-env-task-*.md' 'DRY RUN:'
+  assert_file_contains "$idx" '"task_id": "env-task"'
+  OMS_TASK_ID=env-task OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+    --repo "$d" --to codex --task-id explicit-task --prompt "different prompt" --no-verify >/dev/null
+  assert_one_artifact_contains "$d/.oms/artifacts/delegate" 'codex-explicit-task-*.md' 'DRY RUN:'
+  assert_file_contains "$idx" '"task_id": "explicit-task"'
 
   # An unsafe task id is rejected before anything runs.
   if OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
@@ -11101,6 +11171,20 @@ test_delegate_records_task_outcome() {
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "delegate"'
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"patch": "artifacts/codex-implement-helper-'
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"task_goal": "Record delegated artifact"'
+
+  HOME="$home_dir" "$ROOT/scripts/peer-delegate.sh" --dry-run \
+    --repo "$project" --artifact-dir "$artifact_dir" --to codex \
+    --read-only --prompt "Inspect helper" >/dev/null
+  assert_file_contains "$project/.oms/task/current.md" 'artifact=artifacts/codex-inspect-helper-'
+  if grep 'artifact=artifacts/codex-inspect-helper-' "$project/.oms/task/current.md" | grep -Fq 'patch='; then
+    fail "read-only task outcome must omit patch guidance"
+  fi
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY_READ' || fail "read-only task outcome index missing"
+import json, pathlib, sys
+row = json.loads(pathlib.Path(sys.argv[1]).read_text().splitlines()[-1])
+assert row['task_goal'] == 'Record delegated artifact', row
+assert 'patch' not in row and 'patch_sha256' not in row, row
+PY_READ
 }
 
 test_consult_memory_is_opt_in() {

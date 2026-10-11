@@ -5262,6 +5262,24 @@ for listing, native in (("%1\t20\t\n%2\t12\t\n", "%2"), ("%1\t40\t\n%2\t40\t\n",
     assert opened is None and not any(c[0] == "split-window" for c in calls), (listing, native, calls)
 opened, calls = reader_calls("%1\t40\t\n%2\t40\t\n", fail=("set-option",))
 assert opened is None and calls[-1] == ["kill-pane", "-t", "%9"], "an unmarked reader was left behind"
+for failure in (subprocess.TimeoutExpired("tmux", 3), OSError("tmux unavailable")):
+    for cleanup_failure in (None, subprocess.TimeoutExpired("tmux", 3), OSError("tmux gone")):
+        def interrupted_reader(command, **kwargs):
+            assert kwargs["timeout"] == 3 and kwargs["stdin"] == subprocess.DEVNULL
+            if command[1] == "set-option":
+                raise failure
+            if command[1] == "kill-pane" and cleanup_failure:
+                raise cleanup_failure
+            out = {"list-panes": "%1\t40\t\n%2\t40\t\n", "show-option": "%2\n", "split-window": "%9\n"}.get(command[1], "")
+            return subprocess.CompletedProcess(command, 0, out, "")
+        with patch.object(panel_reader.subprocess, "run", side_effect=interrupted_reader) as tmux_run:
+            try:
+                panel_reader.open_reader("%1", "CMD", Path("/repo"))
+            except (OSError, subprocess.TimeoutExpired) as error:
+                assert error is failure, "cleanup replaced the original failure"
+            else:
+                raise AssertionError("reader marking failure was swallowed")
+        assert tmux_run.call_args.args[0] == ["tmux", "kill-pane", "-t", "%9"], "an unmarked reader was left behind"
 assert reader_calls("%1\t40\t\n%9\t24\t%1\n%2\t15\t\n", fail=("respawn-pane",))[0] is None
 assert panel_reader.split_rows(13) is None and panel_reader.split_rows(14) == 8 and panel_reader.split_rows(40) == 24
 def close_calls(listing, board="%1"):
@@ -5272,6 +5290,63 @@ def close_calls(listing, board="%1"):
 assert close_calls("%1\t40\t\n%9\t24\t%1\n%2\t15\t\n") == (True, [
     ["list-panes", "-t", "%1", "-F", "#{pane_id}\t#{pane_height}\t#{@oms_panel_reader}"], ["kill-pane", "-t", "%9"]])
 assert close_calls("%1\t40\t\n%2\t40\t\n")[0] is False and close_calls("x", board="1; kill")[1] == []
+# Completion at the same terminal size and line count is repainted without losing the person's scroll.
+def read_page(render, batches):
+    clock, waits = [0.0], []
+    class PageInput:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def wait(self, seconds):
+            assert 0 < seconds <= 1
+            waits.append(seconds)
+            clock[0] += seconds
+            return next(batches)
+    with patch.object(panel_reader, "TerminalInput", return_value=PageInput()), \
+            patch.object(panel_reader.time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(panel_reader.shutil, "get_terminal_size", return_value=os.terminal_size((80, 4))), \
+            patch.object(panel_reader, "tmux", return_value=subprocess.CompletedProcess([], 0, "%1\n", "")) as tmux_run, \
+            patch.object(panel_reader.sys, "stdout", io.StringIO()) as output:
+        assert panel_reader.page(render, "%1") == 0
+    assert tmux_run.call_args.args == ("select-pane", "-t", "%1")
+    return output.getvalue(), waits
+with patch.object(panel, "render_results", side_effect=["\n".join("running %d" % i for i in range(8)),
+                                                       "\n".join("done %d" % i for i in range(8))]) as rendered:
+    output, waits = read_page(rendered, iter([[("pagedown",)], [], [("q",)]]))
+assert rendered.call_count == 2 and waits == [1, 1, 1], "reader evidence polling was unbounded or stale"
+assert "done 3\ndone 4\ndone 5" in output and output.count("4-6/8") == 2, output
+with patch.object(panel, "render_results", side_effect=["\n".join(str(i) for i in range(8)), "short"]) as rendered:
+    output, unused = read_page(rendered, iter([[("end",)], [], [("escape",)]]))
+assert "short\n\n\nq/Esc" in output and "1-1/1" in output, "shrinking evidence left the reader out of range"
+failure = "bad\033]52;c;payload\a\x9b31m\u200b\r\n" + "x" * 250
+with patch.object(panel, "render_results", side_effect=ValueError(failure)) as rendered:
+    output, unused = read_page(rendered, iter([[("q",)]]))
+assert "Result evidence unavailable: " + panel.clean(failure, 200) in output, output
+assert "\033]52" not in output and not any(c in output for c in ("\a", "\x9b", "\u200b", "\r")), output
+# A room transition closes the reader through the watcher's close path; refreshes of the same room do not.
+class RoomFrameReceived(Exception):
+    pass
+for current_room in ("old-room", "new-room"):
+    def room_frame(*args, **kwargs):
+        assert closed.call_count == int(current_room != "old-room"), "room refresh left the reader open or closed it unnecessarily"
+        if current_room != "old-room":
+            closed.assert_called_once_with("%1")
+            assert "preview" not in kwargs["navigation"]
+        raise RoomFrameReceived()
+    with patch.dict(os.environ, {"TMUX": "", "TMUX_PANE": "%1", "OMS_PANEL_RESUME": json.dumps(
+            {"room_id": "old-room", "preview": ["result", "w1"]})}), \
+            patch.object(panel, "managed_session", return_value=True), \
+            patch.object(panel, "session_option", return_value=""), \
+            patch.object(panel, "terminal_style", return_value=(False, False, True)), \
+            patch.object(panel, "read_panel", return_value=({"room": {"id": current_room}}, 0, "codex", None,
+                                                           "graph", False, current_room)), \
+            patch.object(panel, "frame_view", side_effect=room_frame), \
+            patch.object(panel_reader, "close_reader", return_value=True) as closed:
+        try:
+            panel.watch(Path("."), "codex", count=1)
+        except RoomFrameReceived:
+            pass
 # A click or Enter that previews a call (or selects a main) on the board is what opens (or closes) the reader;
 # arrow keys and clicks elsewhere leave it alone.
 chosen_nav = {"preview": {"target": ("result", "w1")}, "selected": ("result", "w1"),
