@@ -808,6 +808,16 @@ The `t Auto task` menu follows the same rule. Participant labels are bounded to
 arguments, starts no process and writes no state. Its arguments can contain the
 supplied task, so keep the launch plan private when that task is private.
 
+### Without the panel
+
+The same role and tier routing works from any Claude Code, Codex or Pi session
+without a panel: `oms panel --repo . --dispatch ROLE --prompt TEXT` (or
+`--access write --brief-file PATH --verify COMMAND` for a write role). The caller
+is detected from `OMS_AGENT`, else Claude Code's or Codex's own environment, so
+reviewer independence still prefers the other provider. Without a room the call
+is recorded as a standalone result: read it with `oms panel --results --task-id
+ID`. `--dry-run` prints the chosen route and argv without running a model.
+
 ## Context limits for mains
 
 A main's context left is read from the statusline cache (Claude) or the
