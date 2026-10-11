@@ -102,6 +102,7 @@ Codex starts with its existing flags; a recorded native session can be resumed.
 After a native main exits in its panel window, the chat pane shows
 `r resume/restart here · Enter close window`. Press `r` to relaunch in that pane,
 resuming its recorded session or starting fresh when no session is recorded.
+Restart does not resend the original `--task`, even when starting a fresh session.
 Fresh Codex restarts start a new session even after the previous session's first
 hook bound its room consumer; that binding is checked only when resuming a stored session.
 The previous attempt must be terminal, and startup rechecks the sole-main limit

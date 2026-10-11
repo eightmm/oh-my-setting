@@ -9360,6 +9360,8 @@ for fields, query_status, closes in ((["exit-attempt", "", str(project.resolve()
 # a Pi restart deliberately ignores even a recorded session id and starts fresh.
 for harness, owner, previous_terminal, succeeds in (("claude", None, True, False),
                                            ("claude", str(project.resolve()), False, False),
+                                           ("claude", str(project.resolve()), True, True),
+                                           ("codex", str(project.resolve()), True, True),
                                            ("pi", str(project.resolve()), True, True)):
     previous = {"attempt_id": "exit-attempt", "terminal": previous_terminal, "provider": panel.main_owner(harness),
                 "tool": "panel-main", "refs": {"panel_role": "main", "panel_room_id": shared,
@@ -9370,14 +9372,19 @@ for harness, owner, previous_terminal, succeeds in (("claude", None, True, False
             patch.object(panel, "_main_window", return_value=["@42", "exit-attempt", "", str(project.resolve()), "exit-attempt"]), \
             patch.object(panel, "session_owner", return_value=owner), patch.object(panel, "live_mains", return_value=0), \
             patch.object(panel, "main_history", return_value=[previous]), \
+            patch.object(panel.room, "status", return_value={"participants": [{"participant": "exit-attempt",
+                "joined": True, "role": "main", "provider": panel.main_owner(harness),
+                "consumer": hashlib.sha256(b"recorded-session").hexdigest()[:32]}]}), \
             patch.object(panel.sys.stdin, "isatty", return_value=True), \
             patch.object(panel.sys.stdout, "isatty", return_value=True), \
             patch("panel_input.TerminalInput") as exit_input, patch("builtins.input", side_effect=["r", EOFError]):
         exit_input.return_value.__enter__.return_value.fd = None
-        assert panel.run_native(harness, project) == 0
+        assert panel.run_native(harness, project, task="push the release tag") == 0
         assert restart_main.call_count == (2 if succeeds else 1)
+        assert restart_main.call_args_list[0].args[4] == "push the release tag"
         if succeeds:
-            assert restart_main.call_args.args[2] is None, "Pi restarted using an unverified session binding"
+            assert restart_main.call_args.args[2] == (None if harness == "pi" else "recorded-session")
+            assert restart_main.call_args.args[4] is None, "restart resent the original task"
 # Context or launch setup fails before a child exists, before or after replacement
 # tagging. Retry and guarded close retain the terminal window owner;
 # incomplete or changed ownership must never receive it.

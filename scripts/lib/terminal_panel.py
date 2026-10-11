@@ -596,7 +596,8 @@ def run_native(provider, repo, resume=None, model=None, task=None):
                 try:
                     if attempt:
                         os.environ["OMS_ROOM_ID"] = ident
-                    status = run_single_native(provider, repo, resume, model, task, _exit_info=exit_info)
+                    status = run_single_native(provider, repo, resume, model, None if attempt else task,
+                                               _exit_info=exit_info)
                 finally:
                     if original_room is None:
                         os.environ.pop("OMS_ROOM_ID", None)
