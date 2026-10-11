@@ -307,7 +307,7 @@ def age_label(stamp, now=None):
 
 def inbox_items(report, unicode=True):
     """What the person must act on, newest first: failures, waits, broadcasts from mains, patches to admit."""
-    from room_view import failure_handled, handled_results, main_names, nodes, readable
+    from room_view import failure_handled, handled_results, main_names, main_state, nodes, readable
     members = nodes(report)
     titles = main_names(members)
     name = lambda m: MODEL_NAMES.get(m.get("model"), m.get("model")) or m.get("provider") or "unknown"
@@ -327,7 +327,7 @@ def inbox_items(report, unicode=True):
             " for " + titles.get(parent["participant"], name(parent)) if parent else "")
     items = []
     for member in members:
-        state = member["state"]
+        state = main_state(member) if member.get("role") == "main" else member["state"]
         if state in FAILED_WORDS and not failure_handled(report, member, read_results):
             what, shown, style = FAILED_WORDS[state], state, "bad"
         elif state in WAITING_WORDS:
