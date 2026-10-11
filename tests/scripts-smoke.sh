@@ -2267,6 +2267,7 @@ test_delegate_auto_verify_uses_check_contract() {
   local artifact_dir="$project/artifacts"
   local bin_dir="$project/bin"
   local home_dir="$project/home"
+  local out
 
   make_committed_repo "$project"
   mkdir -p "$project/scripts" "$bin_dir" "$home_dir"
@@ -2305,20 +2306,88 @@ EOF
     fail "--no-verify should skip verification section"
   fi
 
-  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
-    --artifact-dir "$artifact_dir" --read-only --prompt 'Read only report' >/dev/null
+    --artifact-dir "$artifact_dir" --read-only --prompt 'Read only report' 2>"$project/read-only-clean.err")"
+  contains "$out" 'worker: codex exit 0' || fail "unchanged read-only worker did not succeed: $out"
+  if grep -Fq 'read-only worker changed files:' "$project/read-only-clean.err"; then
+    fail "unchanged read-only worker emitted a write violation"
+  fi
   artifact="$(find "$artifact_dir" -type f -name 'codex-read-only-report-*.md' | head -n 1)"
   [ -n "$artifact" ] || fail "missing read-only report"
   if grep -Fq '## Verify' "$artifact"; then
     fail "read-only report must not automatically run project tests"
   fi
 
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init \
+    --goal 'Detect read-only worker writes' --next 'Inspect worker report' >/dev/null
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) echo 'codex 1.0'; exit 0 ;; esac
+cat >/dev/null
+if [ "${READ_ONLY_REPAIR_PROBE:-0}" = 1 ] && [ ! -f "$HOME/read-only-first-round" ]; then
+  touch "$HOME/read-only-first-round"
+  echo 'temporary fixture failure'
+  exit 1
+fi
+printf 'unauthorized change\n' > unauthorized.txt
+if [ "${READ_ONLY_MANY_PATHS:-0}" = 1 ]; then
+  for n in {1..21}; do
+    printf -v name 'changed-%02d.txt' "$n"
+    printf 'unauthorized change\n' > "$name"
+  done
+fi
+echo 'worker done'
+EOF
+  chmod +x "$bin_dir/codex"
+  local probe rc patch warning
+  for probe in initial repair bounded; do
+    rc=0
+    out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      READ_ONLY_REPAIR_PROBE="$([ "$probe" != repair ] || printf 1)" \
+      READ_ONLY_MANY_PATHS="$([ "$probe" != bounded ] || printf 1)" \
+      "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+      --artifact-dir "$artifact_dir" --read-only --repair 1 \
+      --prompt "Read only violation $probe" 2>"$project/read-only.err")" || rc=$?
+    [ "$rc" = 1 ] || fail "read-only writes must fail ($probe): $out"
+    contains "$out" 'worker: codex exit 125' || fail "read-only writes lost authority failure status: $out"
+    if contains "$out" 'patch-land'; then fail "read-only violation suggested landing: $out"; fi
+    artifact="$(printf '%s\n' "$out" | sed -n 's/^artifact: //p')"
+    patch="$(printf '%s\n' "$out" | sed -n 's/^patch: //p')"
+    [ "$patch" = 'none (read-only)' ] || fail "read-only violation exposed a patch: $patch"
+    if find "$artifact_dir" -type f -name '*.patch' | grep -Fq "read-only-violation-$probe-"; then
+      fail "read-only violation created a patch artifact"
+    fi
+    [ "$(grep -c '^read-only worker changed files: ' "$project/read-only.err")" = 1 ] ||
+      fail "read-only violation must emit exactly one warning"
+    warning="$(sed -n '/^read-only worker changed files: /p' "$project/read-only.err")"
+    if [ "$probe" = bounded ]; then
+      contains "$warning" 'changed-20.txt ... (+2 more)' || fail "changed path list is not bounded: $warning"
+      if contains "$warning" 'changed-21.txt'; then fail "changed path list exceeded its cap: $warning"; fi
+    else
+      [ "$warning" = 'read-only worker changed files: unauthorized.txt' ] ||
+        fail "read-only warning did not name the changed path: $warning"
+    fi
+    assert_file_contains "$artifact" "$warning"
+    if [ "$probe" = repair ]; then
+      contains "$out" 'repair: 1/1 round(s) used' || fail "repair write was not inspected: $out"
+    else
+      contains "$out" 'repair: 0/1 round(s) used' || fail "authority violation was retried: $out"
+    fi
+    assert_file_contains "$project/.oms/task/current.md" 'peer-delegate codex exit=1'
+    assert_file_contains "$project/.oms/task/current.md" 'worker=codex exit 125'
+    python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "read-only failure receipt missing"
+import json, pathlib, sys
+row = json.loads(pathlib.Path(sys.argv[1]).read_text().splitlines()[-1])
+assert row['kind'] == 'delegate' and row['exit'] == 1, row
+assert not row.get('patch'), row
+PY
+  done
+
   printf '#!/usr/bin/env bash\necho unbounded-check\n' > "$project/scripts/check.sh"
   git -C "$project" add scripts/check.sh
   git -C "$project" -c user.email=t@e.c -c user.name=T commit -qm unbounded-check
   printf '#!/usr/bin/env bash\necho worker-started >&2\nexit 91\n' > "$bin_dir/codex"
-  local out
   if out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
     --artifact-dir "$artifact_dir" --prompt 'Unknown check mode' 2>&1)"; then
@@ -4781,6 +4850,25 @@ test_delegate_dry_run() {
   [ -n "$patch" ] || fail "missing delegate patch artifact"
   [ ! -s "$patch" ] || fail "dry-run patch should be empty"
   [ -z "$(git -C "$project" status --porcelain file.txt)" ] || fail "delegate dry-run touched main tree"
+
+  "$ROOT/scripts/agent-task.sh" --repo "$project" init \
+    --goal 'Dry run verification' --next 'Inspect dry run report' >/dev/null
+  local out
+  out="$("$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --dry-run --verify 'exit 91' --repair 2 \
+    --prompt 'Dry run verify')"
+  contains "$out" 'verify: NOT RUN (dry run)' || fail "dry-run verification status missing: $out"
+  if contains "$out" 'verify: exit 0'; then
+    fail "dry-run verification reported a pass: $out"
+  fi
+  assert_one_artifact_contains "$artifact_dir" 'codex-dry-run-verify-*.md' 'DRY RUN: verify skipped.'
+  assert_file_contains "$project/.oms/task/current.md" 'verify=NOT RUN (dry run)'
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY_DRY' || fail "dry-run verify receipt reported a pass"
+import json, pathlib, sys
+row = json.loads(pathlib.Path(sys.argv[1]).read_text().splitlines()[-1])
+assert 'verify_exit' not in row, row
+assert 'repair_replay' not in row, row
+PY_DRY
 
   mkdir -p "$project/cap"
   printf 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\n' > "$project/cap/codex.models"
