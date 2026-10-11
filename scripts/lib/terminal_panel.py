@@ -1414,20 +1414,62 @@ def _dispatch_exited(process, identity, reaped=False):
     return bool(leader_gone and _dispatch_group_gone(process.pid))
 
 
+def _dispatch_process_snapshot():
+    """Read Linux topology and start identity together before short-lived shell helpers disappear."""
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8", errors="replace").strip()
+    if not boot:
+        raise ValueError("process boot identity unavailable")
+    rows, deadline = {}, time.monotonic() + 3
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        if time.monotonic() >= deadline:
+            raise ValueError("process observation timed out")
+        child = int(entry.name)
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+        except FileNotFoundError:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                continue
+            raise ValueError("process observation unavailable")
+        if not fields[19].isdigit():
+            raise ValueError("process start identity unavailable")
+        rows[child] = {"pid": child, "parent": int(fields[1]), "group": int(fields[2]),
+                       "session": int(fields[3]),
+                       "identity": hashlib.sha256((boot + ":" + fields[19]).encode("utf-8")).hexdigest()}
+    return rows
+
+
 def _dispatch_descendants(pid):
-    """Snapshot detached provider groups too; incomplete observation cannot authorize forced settlement."""
+    """Snapshot provider descendants and session members; incomplete observation cannot authorize settlement."""
     if os.name != "posix":
         return None
     import panel_terminals
     try:
-        observed = subprocess.run(["ps", "-e", "-o", "pid=,ppid="], capture_output=True,
-                                  text=True, timeout=3, check=False)
-        if observed.returncode:
-            return None
-        parents = dict(tuple(map(int, line.split())) for line in observed.stdout.replace("\r", "").splitlines())
+        snapshot = _dispatch_process_snapshot() if sys.platform == "linux" else None
+        if snapshot is not None:
+            parents = {child: row["parent"] for child, row in snapshot.items()}
+        else:
+            observed = subprocess.run(["ps", "-e", "-o", "pid=,ppid="], capture_output=True,
+                                      text=True, timeout=3, check=False)
+            if observed.returncode:
+                return None
+            parents = dict(tuple(map(int, line.split())) for line in observed.stdout.replace("\r", "").splitlines())
         if pid not in parents:
             return None
         subtree, remaining = {pid}, set(parents) - {pid}
+        # Session members may have been reparented after an intermediate shell exits.
+        for child in remaining:
+            try:
+                if (snapshot[child]["session"] if snapshot is not None else os.getsid(child)) == pid:
+                    subtree.add(child)
+            except ProcessLookupError:
+                continue
+        remaining.difference_update(subtree)
+        if len(subtree) > 256:
+            return None
         while True:
             children = {child for child in remaining if parents[child] in subtree}
             if not children:
@@ -1438,12 +1480,12 @@ def _dispatch_descendants(pid):
                 return None
         records = []
         for child in sorted(subtree - {pid}):
-            current = panel_terminals.process(child)
+            current = snapshot[child] if snapshot is not None else panel_terminals.process(child)
             if not current or current["parent"] != parents[child]:
                 return None
             records.append({key: current[key] for key in ("pid", "identity", "group")})
         return records
-    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+    except (OSError, ValueError, IndexError, KeyError, subprocess.SubprocessError):
         return None
 
 
@@ -1543,10 +1585,9 @@ def _dispatch_call_finished(repo, room_id, member):
                 return False
         # A matching receipt binds the outcome to a launch, but cannot attest
         # termination: artifacts may be written directly by another call.
-        if _read(repo, _dispatch_pending_path(member["participant"]), 65536, missing=True):
-            pending = _dispatch_pending(repo, call)
-            if not _dispatch_descendants_gone(pending["descendants"]):
-                return False
+        pending = _dispatch_pending(repo, call)
+        if not _dispatch_descendants_gone(pending["descendants"]):
+            return False
         if call["session"] and call.get("identity"):
             import panel_terminals
             return (panel_terminals.process_gone(call["pid"], call["identity"])
@@ -1585,10 +1626,19 @@ def _reconcile_dispatch(repo, room_id, state, caller, parent):
             continue
 
 
+def _dispatch_before_force(before_force):
+    if before_force:
+        try:
+            before_force()
+        except (OSError, ValueError):
+            print("OMS call pending record unavailable; continuing force-stop.", file=sys.stderr)
+
+
 def _stop_dispatch_groups(process, identity, evidence, before_force=None):
     """A reaped session leader can leave foreground and detached provider groups alive."""
     if os.name != "posix":
-        return bool(not evidence.get("forced") and _dispatch_exited(process, identity, reaped=True))
+        return bool(not evidence.get("forced") and _dispatch_exited(process, identity, reaped=True)
+                    and _dispatch_descendants_gone(evidence.get("descendants")))
 
     def gone():
         return (_dispatch_exited(process, identity, reaped=True)
@@ -1626,8 +1676,7 @@ def _stop_dispatch_groups(process, identity, evidence, before_force=None):
 
     if not evidence.get("forced"):
         evidence["forced"] = True
-        if before_force:
-            before_force()
+        _dispatch_before_force(before_force)
     for number, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 1)):
         if not signal_groups(number):
             return gone()
@@ -1639,12 +1688,14 @@ def _stop_dispatch_groups(process, identity, evidence, before_force=None):
     return gone()
 
 
-def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_force=None):
+def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_force=None, interrupted=False):
     evidence = evidence if evidence is not None else {}
     if type(process.poll()) is int:
         if (_dispatch_exited(process, identity, reaped=True)
-                and _dispatch_descendants_gone(evidence.get("descendants", []))):
+                and _dispatch_descendants_gone(evidence.get("descendants"))):
             return True
+        if not term_sent and not interrupted:
+            return False
         return _stop_dispatch_groups(process, identity, evidence, before_force)
     try:
         if not term_sent:
@@ -1672,8 +1723,7 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
             try:
                 _observe_dispatch_descendants(process, evidence)
                 evidence["forced"] = True
-                if before_force:
-                    before_force()
+                _dispatch_before_force(before_force)
                 if not panel_terminals.matches(process.pid, identity):
                     return False
                 os.killpg(process.pid, signal.SIGKILL)
@@ -1681,8 +1731,7 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
                 pass
         else:
             evidence["forced"] = True
-            if before_force:
-                before_force()
+            _dispatch_before_force(before_force)
             process.kill()
         status = process.wait(timeout=5)
         if type(status) is not int:
@@ -1899,7 +1948,13 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 _record_dispatch_call(repo, room_id, member, caller, process, identity)
             except (OSError, ValueError):
                 print("OMS call process record unavailable; unverified scopes remain reserved.", file=sys.stderr)
-        status = process.wait()
+        while True:
+            _observe_dispatch_descendants(process, evidence)
+            try:
+                status = process.wait(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                pass
         if status < 0:
             status = 128 - status
     except NativeShutdown as error:
@@ -1916,14 +1971,18 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             exit_verified = False
             try:
                 if process:
-                    exit_verified = _stop_dispatch(process, identity, term_sent, evidence, record_pending)
+                    exit_verified = _stop_dispatch(process, identity, term_sent, evidence, record_pending,
+                                                   interrupted=status in {129, 130, 143})
             except (OSError, ValueError, subprocess.SubprocessError):
                 print("OMS call shutdown unavailable.", file=sys.stderr)
             if member and exit_verified:
                 try:
+                    record_pending()
                     _record_dispatch_call(repo, room_id, member, caller, process, identity, status)
                 except (OSError, ValueError):
+                    exit_verified = False
                     print("OMS call exit record unavailable; non-terminal scopes remain reserved.", file=sys.stderr)
+            if member and exit_verified:
                 try:
                     _settle_dispatch(repo, room_id, member, status)
                 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):

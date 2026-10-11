@@ -4593,6 +4593,10 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
     try:
         receipt_identity = panel_terminals.process(receipt_child.pid)["identity"]
         panel._record_dispatch_call(project, shared, receipt_member, room_owner, receipt_child, receipt_identity)
+        launch = panel._dispatch_call_record(project, shared, receipt_row)
+        pending_path = project / panel._dispatch_pending_path(receipt_member)
+        pending_path.write_text(json.dumps(dict(launch, exit=0, task_id="receipt-fixture", forced=False,
+                                              descendants=panel._dispatch_descendants(receipt_child.pid))))
         # Even a correctly bound receipt written for the live launch is insufficient.
         panel._record_dispatch_call(project, shared, receipt_member, room_owner, receipt_child, receipt_identity, 0)
         with patch.object(panel, "main_history", return_value=[]):
@@ -4647,6 +4651,8 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
         raise AssertionError("exit writer accepted a substituted launch")
     launch_path.write_bytes(launch_bytes)
     receipt_path.unlink()
+    assert not panel._dispatch_call_finished(project, shared, receipt_row), "missing observation released scope"
+    pending_path.write_text(json.dumps(dict(launch, exit=0, task_id="receipt-fixture", forced=False, descendants=[])))
     assert panel._dispatch_call_finished(project, shared, receipt_row), "independent exit evidence required a receipt"
     receipt_path.write_bytes(receipt_bytes)
     room.append(project, shared, {"kind": "leave", "participant": receipt_member}, "Receipt fixture complete")
@@ -4718,6 +4724,7 @@ time.sleep(60)
                 patch.object(panel, "plan_link", return_value=None), \
                 patch.object(panel.subprocess, "Popen", return_value=finished), \
                 patch.object(panel_terminals, "process", return_value=None), \
+                patch.object(panel, "_dispatch_descendants", return_value=[]), \
                 patch.object(panel, "_dispatch_group_gone", return_value=True):
             try:
                 code = panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
@@ -4726,6 +4733,82 @@ time.sleep(60)
                 assert interruption is error and error.exit_code == 129
             else:
                 assert code == 130
+    # The normal wait loop records a detached child while alive, then verifies its reaped exit.
+    normal_child = temporary / "normal-observed-child.py"
+    normal_child.write_text('''import os, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import terminal_panel as panel
+import room
+repo, ident, member = Path(os.environ["OMS_ROOM_REPO"]), os.environ["OMS_ROOM_ID"], os.environ["OMS_ROOM_PARTICIPANT"]
+room.scope(repo, ident, member, ["value.txt"])
+attempt = panel.events(repo, "start", "--provider", "codex", "--tool", "peer-delegate", "--task-id", sys.argv[4],
+                       "--parent-attempt-id", os.environ["OMS_PANEL_MAIN_ATTEMPT"],
+                       "--ref", "panel_role=worker", "--ref", "panel_room_id=" + ident,
+                       "--ref", "panel_room_participant=" + member, "--then", "starting", "--then", "working", output=True)
+Path(sys.argv[2]).write_text(attempt)
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2.2)"], start_new_session=True)
+Path(sys.argv[3]).write_text("ready")
+child.wait(timeout=10)
+''')
+    real_popen, real_snapshot, real_record = subprocess.Popen, panel._dispatch_descendants, panel._record_dispatch_call
+    for failure in ("complete", "incomplete", "record-unavailable"):
+        incomplete = failure == "incomplete"
+        task = "normal-observed-" + failure
+        attempt_file, ready_file = temporary / (task + ".attempt"), temporary / (task + ".ready")
+        snapshots = []
+        def launch_observed(argv, *args, **kwargs):
+            process = real_popen(argv, *args, **kwargs)
+            if str(normal_child) in argv:
+                deadline = time.monotonic() + 5
+                while not ready_file.exists() and process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(.02)
+                assert ready_file.exists(), "normal child did not become ready"
+            return process
+        def observe_snapshot(pid):
+            snapshot = real_snapshot(pid)
+            snapshots.append(snapshot)
+            return None if incomplete and len(snapshots) == 2 else snapshot
+        with patch.dict(os.environ, room_env, clear=True), \
+                patch.object(panel.shutil, "which", return_value=sys.executable), \
+                patch.object(panel, "routed_command", return_value=[sys.executable, str(normal_child),
+                             str(root / "scripts/lib"), str(attempt_file), str(ready_file), task, "--repo", str(project)]), \
+                patch.object(panel.subprocess, "Popen", side_effect=launch_observed), \
+                patch.object(panel, "_dispatch_descendants", side_effect=observe_snapshot), \
+                patch.object(panel, "_record_dispatch_call", side_effect=ValueError("fixture record unavailable")
+                             if failure == "record-unavailable" else real_record), \
+                redirect_stderr(io.StringIO()) as notices:
+            assert panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
+                                      task, False, "Observed normal call", interrupted_route,
+                                      None, None, None) == int(failure != "complete")
+        assert len(snapshots) >= 2 and all(snapshots), snapshots
+        row = json.loads(panel.events(project, "show", "--attempt", attempt_file.read_text(), "--json", output=True))
+        member = row["refs"]["panel_room_participant"]
+        state = room.status(project, shared)
+        call = panel._dispatch_call_record(project, shared, room.participant(state, member))
+        overlaps = panel.scope_overlaps(project, shared, state, room_owner, ["value.txt"])
+        if failure == "record-unavailable":
+            assert call is None and not row["terminal"] and member not in state["call_results"]
+            assert not panel._read(project, panel._dispatch_pending_path(member), missing=True)
+            assert any(item["participant"] == member for item in overlaps)
+            assert "owner cleanup is required" in notices.getvalue()
+            panel.events(project, "transition", "--attempt", row["attempt_id"], "--state", "cancelled",
+                         "--reason-code", "fixture_complete")
+            continue
+        pending = panel._dispatch_pending(project, call)
+        if incomplete:
+            assert pending["descendants"] is None and not row["terminal"]
+            assert member not in state["call_results"] and "settlement pending" in notices.getvalue()
+            assert any(item["participant"] == member for item in overlaps)
+            with patch.dict(os.environ, room_env, clear=True):
+                panel._reconcile_dispatch(project, shared, state, room_owner, room_owner)
+            assert member not in room.status(project, shared)["call_results"], "unknown observation reconciled"
+            panel.events(project, "transition", "--attempt", row["attempt_id"], "--state", "cancelled",
+                         "--reason-code", "fixture_complete")
+        else:
+            assert pending["descendants"] and panel._dispatch_descendants_gone(pending["descendants"])
+            assert row["terminal"] and state["call_results"][member]["exit"] == 0
+            assert not any(item["participant"] == member for item in overlaps)
     # Observe a real provider in a new session, with its parent reaping it during fixture cleanup.
     subtree_file = temporary / "provider-subtree.pid"
     subtree_child = temporary / "provider-subtree.py"
@@ -4748,11 +4831,26 @@ time.sleep(60)
         detached = int(subtree_file.read_text())
         snapshot = panel._dispatch_descendants(subtree.pid)
         assert snapshot and any(row["pid"] == row["group"] == detached for row in snapshot), snapshot
+        assert all(panel_terminals.matches(row["pid"], row["identity"]) for row in snapshot)
         assert not panel._dispatch_descendants_gone(snapshot)
+        if sys.platform == "linux":
+            with patch.object(panel_terminals, "process", return_value=None):
+                assert panel._dispatch_descendants(subtree.pid) == snapshot, "snapshot required a later identity read"
     finally:
         subtree.terminate()
         subtree.wait(timeout=5)
     assert panel._dispatch_descendants_gone(snapshot)
+    if sys.platform == "linux":
+        with patch.object(panel, "_dispatch_process_snapshot", side_effect=PermissionError):
+            assert panel._dispatch_descendants(os.getpid()) is None, "unreadable process observation accepted"
+    with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
+            [], 0, "123 1\n456 1\n", "")), \
+            patch.object(panel.sys, "platform", "darwin"), \
+            patch.object(panel.os, "getsid", return_value=123), \
+            patch.object(panel_terminals, "process", return_value={
+                "pid": 456, "parent": 1, "identity": "session-member", "group": 456}):
+        assert panel._dispatch_descendants(123) == [
+            {"pid": 456, "identity": "session-member", "group": 456}], "reparented session member was missed"
     # An advisor-shaped shell exits on TERM while its foreground child and a
     # provider in another process group survive. Reaping that shell is not teardown.
     advisor_pids = temporary / "advisor-subtree.json"
@@ -4779,7 +4877,12 @@ time.sleep(60)
         evidence = {"descendants": advisor_records}
         advisor.terminate()
         advisor.wait(timeout=5)
-        verified = panel._stop_dispatch(advisor, advisor_identity, term_sent=True, evidence=evidence)
+        before_force = Mock(side_effect=ValueError("dispatch process record unavailable"))
+        with redirect_stderr(io.StringIO()) as notices:
+            verified = panel._stop_dispatch(advisor, advisor_identity, term_sent=True,
+                                            evidence=evidence, before_force=before_force)
+        before_force.assert_called_once_with()
+        assert "pending record unavailable" in notices.getvalue()
         assert all(not panel_terminals.matches(row["pid"], row["identity"]) for row in advisor_records), "advisor subtree survived"
         assert verified == (panel._dispatch_group_gone(advisor.pid)
                             and panel._dispatch_descendants_gone(advisor_records)), "unverified advisor exit settled"
@@ -4790,6 +4893,59 @@ time.sleep(60)
         if advisor.poll() is None:
             advisor.kill()
         advisor.wait(timeout=5)
+    # Pending-record failures must not leave a TERM-resistant child running.
+    for failure in (ValueError, OSError):
+        ready = temporary / ("force-ready-" + failure.__name__)
+        resistant = subprocess.Popen([sys.executable, "-c",
+            "import signal,sys,time; from pathlib import Path; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "Path(sys.argv[1]).write_text('ready'); time.sleep(60)", str(ready)],
+            start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and resistant.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert ready.exists(), "TERM-resistant child did not become ready"
+            identity = panel_terminals.process(resistant.pid)["identity"]
+            wait = resistant.wait
+            def bounded_wait(timeout):
+                return wait(timeout=.1 if timeout == 20 else timeout)
+            before_force = Mock(side_effect=failure("dispatch process record unavailable"))
+            with patch.object(resistant, "wait", side_effect=bounded_wait), \
+                    redirect_stderr(io.StringIO()) as notices:
+                assert panel._stop_dispatch(resistant, identity, before_force=before_force)
+            before_force.assert_called_once_with()
+            assert resistant.poll() == -signal.SIGKILL
+            assert panel_terminals.process_gone(resistant.pid, identity)
+            assert "pending record unavailable" in notices.getvalue()
+        finally:
+            if resistant.poll() is None:
+                resistant.kill()
+            resistant.wait(timeout=5)
+        portable = Mock(pid=123, poll=lambda: None)
+        portable.wait.side_effect = [subprocess.TimeoutExpired("fixture", 20), 0]
+        before_force = Mock(side_effect=failure("dispatch process record unavailable"))
+        with patch.object(panel.os, "name", "nt"), \
+                patch.object(panel, "_dispatch_exited", return_value=True), \
+                patch.object(panel, "_dispatch_descendants_gone", return_value=True), \
+                patch.object(panel, "_observe_dispatch_descendants"), \
+                redirect_stderr(io.StringIO()) as notices:
+            assert not panel._stop_dispatch(portable, None, before_force=before_force)
+        before_force.assert_called_once_with()
+        portable.kill.assert_called_once_with()
+        assert "pending record unavailable" in notices.getvalue()
+    # Normal and graceful exits need the same complete recorded tree evidence as forced exits.
+    provider = {"pid": 2147483646, "identity": "provider-identity", "group": 2147483646}
+    for already_reaped in (True, False):
+        for descendants, gone in (([provider], False), ([provider], True), (None, True)):
+            stopped = Mock(pid=2147483647, poll=lambda: 0 if already_reaped else None)
+            stopped.wait.return_value = 0
+            with patch.object(panel_terminals, "process_gone", return_value=gone), \
+                    patch.object(panel_terminals, "matches", return_value=False), \
+                    patch.object(panel, "_dispatch_group_gone", return_value=True):
+                assert panel._stop_dispatch(stopped, "original-identity", term_sent=True,
+                                            evidence={"descendants": descendants}) is (descendants is not None and gone)
+            assert stopped.wait.call_count == int(not already_reaped)
     # Force-stop follows the grace; signaling alone is not evidence that a process group exited.
     for identity_matches, descendants in ((True, []), (False, []), (True, None)):
         stopped = Mock(pid=123, poll=lambda: None)
@@ -4812,8 +4968,10 @@ time.sleep(60)
     disappeared.wait.assert_not_called()
     # A dead leader bypasses the wait timeout. Still escalate its surviving group,
     # and signal a detached group only while the recorded process identity matches.
-    for descendant_matches, current_group in ((True, 456), (False, 456), (True, 789)):
-        stopped = Mock(pid=123, poll=lambda: None)
+    for already_reaped, descendant_matches, current_group in (
+            (False, True, 456), (False, False, 456), (False, True, 789),
+            (True, True, 456), (True, False, 456), (True, True, 789)):
+        stopped = Mock(pid=123, poll=lambda: 0 if already_reaped else None)
         stopped.wait.return_value = -signal.SIGTERM
         provider = {"pid": 456, "identity": "provider-identity", "group": 456}
         with patch.object(panel, "_dispatch_descendants", return_value=[provider]), \
@@ -4823,20 +4981,27 @@ time.sleep(60)
                 patch.object(panel.os, "getpgid", return_value=current_group), \
                 patch.object(panel.time, "monotonic", side_effect=range(0, 100, 6)), \
                 patch.object(panel.os, "killpg") as force:
-            evidence = {}
-            assert panel._stop_dispatch(stopped, "original-identity", evidence=evidence) is False
+            evidence = {"descendants": [provider]} if already_reaped else {}
+            assert panel._stop_dispatch(stopped, "original-identity", evidence=evidence, interrupted=True) is False
         expected = {(123, signal.SIGTERM), (123, signal.SIGKILL)}
         if descendant_matches and current_group == 456:
             expected.update({(456, signal.SIGTERM), (456, signal.SIGKILL)})
         assert {tuple(call.args) for call in force.call_args_list} == expected, force.call_args_list
         assert evidence["forced"] and evidence["descendants"] == [provider]
     real_popen = subprocess.Popen
-    for scenario in ("unknown-identity", "kill-unconfirmed", "provider-alive", "leader-only"):
-        pending = Mock(pid=2147483647, poll=lambda: 0 if scenario == "leader-only" else None)
-        pending.wait.side_effect = ([0] if scenario == "leader-only" else
+    normal_scenarios = {"leader-only", "normal-provider-alive", "normal-unobserved"}
+    provider_scenarios = {"provider-alive", "normal-provider-alive", "graceful-provider-alive"}
+    for scenario in ("unknown-identity", "kill-unconfirmed", "provider-alive", "leader-only",
+                     "normal-provider-alive", "normal-unobserved", "graceful-provider-alive"):
+        pending = Mock(pid=2147483647, poll=lambda: 0 if scenario in normal_scenarios else None)
+        pending.wait.side_effect = ([0] if scenario in normal_scenarios else
                                    [panel.NativeShutdown(signal.SIGTERM), subprocess.TimeoutExpired("fixture", 20)] +
                                    ([subprocess.TimeoutExpired("fixture", 5)] if scenario == "kill-unconfirmed" else
                                     [-signal.SIGKILL] if scenario == "provider-alive" else []))
+        if scenario == "graceful-provider-alive":
+            pending.wait.side_effect = [panel.NativeShutdown(signal.SIGTERM), 0]
+        if scenario in {"normal-provider-alive", "normal-unobserved"}:
+            pending.wait.side_effect = [subprocess.TimeoutExpired("fixture", 1), 0]
         pending_attempt = []
         def pending_child(argv, *args, **kwargs):
             if argv[:3] != [sys.executable, "-c", "pass"]:
@@ -4858,42 +5023,55 @@ time.sleep(60)
                 patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
                 patch.object(panel.subprocess, "Popen", side_effect=pending_child), \
                 patch.object(panel_terminals, "process", return_value=observation), \
-                patch.object(panel_terminals, "process_gone", side_effect=lambda pid, identity: scenario == "provider-alive" and pid == pending.pid), \
+                patch.object(panel_terminals, "process_gone", side_effect=lambda pid, identity: scenario in provider_scenarios and pid == pending.pid), \
                 patch.object(panel_terminals, "matches", return_value=True), \
-                patch.object(panel, "_dispatch_descendants", return_value=[provider] if scenario == "provider-alive" else []), \
-                patch.object(panel, "_dispatch_group_gone", side_effect=lambda pid: scenario == "provider-alive" and pid == pending.pid), \
+                patch.object(panel, "_dispatch_descendants",
+                             side_effect=([[], None] if scenario == "normal-unobserved" else
+                                          [[provider], []] if scenario == "normal-provider-alive" else None),
+                             return_value=[provider] if scenario in provider_scenarios else []), \
+                patch.object(panel, "_dispatch_group_gone", side_effect=lambda pid: (scenario in provider_scenarios or scenario == "normal-unobserved") and pid == pending.pid), \
+                patch.object(panel.time, "monotonic", side_effect=range(0, 100, 6)), \
                 patch.object(panel.os, "getpgid", side_effect=lambda pid: pid), \
                 patch.object(panel.os, "killpg") as force, redirect_stderr(io.StringIO()) as notices:
             try:
                 status = panel.run_dispatch(project, "claude", "worker", "read", "Inspect source", None, None,
                                             scenario, False, "Pending child", interrupted_route, None, None, None)
             except panel.NativeShutdown as error:
-                assert scenario != "leader-only" and error.exit_code == 143
+                assert scenario not in normal_scenarios and error.exit_code == 143
                 status = error.exit_code
             else:
-                assert scenario == "leader-only", "dispatch swallowed shutdown"
+                assert scenario in normal_scenarios, "dispatch swallowed shutdown"
             row = json.loads(panel.events(project, "show", "--attempt", pending_attempt[0], "--json", output=True))
             member = row["refs"]["panel_room_participant"]
             state = room.status(project, shared)
-            assert row["state"] == "working" and status == (1 if scenario == "leader-only" else 143), (scenario, row)
+            assert row["state"] == "working" and not row["terminal"]
+            assert status == (1 if scenario in normal_scenarios else 143), (scenario, row)
             assert member not in state["call_results"] and "settlement pending" in notices.getvalue()
             assert not panel._read(project, panel._dispatch_call_path(member, True), missing=True)
             record = json.loads(panel._read(project, panel._dispatch_call_path(member)))
             assert record["pid"] == pending.pid and record["identity"] == (observation or {}).get("identity")
             assert any(o["participant"] == member for o in panel.scope_overlaps(project, shared, state, room_owner, ["value.txt"]))
             assert force.call_count == {"unknown-identity": 0, "kill-unconfirmed": 1,
-                                        "provider-alive": 3, "leader-only": 2}[scenario]
+                                        "provider-alive": 3, "leader-only": 0,
+                                        "normal-provider-alive": 0, "normal-unobserved": 0,
+                                        "graceful-provider-alive": 2}[scenario]
             deferred = panel._dispatch_pending(project, record)
-            assert deferred["forced"] == (scenario in {"kill-unconfirmed", "provider-alive", "leader-only"})
-            if scenario == "provider-alive":
+            assert deferred["forced"] == (scenario in {"kill-unconfirmed", "provider-alive", "graceful-provider-alive"})
+            assert not panel._dispatch_call_finished(project, shared, room.participant(state, member))
+            if scenario == "normal-unobserved":
+                assert deferred["descendants"] is None
+            if scenario in {"normal-provider-alive", "normal-unobserved"}:
+                assert pending.wait.call_args_list[0].kwargs == {"timeout": 1}
+                assert pending.wait.call_count == 2
+            if scenario in provider_scenarios:
                 assert deferred["descendants"] == [provider]
             # A stale or premature final handoff cannot release an active child's scope.
-            if scenario != "provider-alive":
+            if scenario not in provider_scenarios:
                 room.send(project, shared, member, room_owner, "Call exit=143; parent acceptance pending.",
                           kind="handoff", message_id="result-" + member)
             assert any(o["participant"] == member for o in panel.scope_overlaps(
                 project, shared, room.status(project, shared), room_owner, ["value.txt"]))
-        if scenario == "provider-alive":
+        if scenario in provider_scenarios:
             # No board read settles the pending call; once its detached provider exits, the next dispatch
             # settles the old attempt before launching. Concurrent calls are not capped.
             with patch.dict(os.environ, room_env, clear=True), \
@@ -4905,8 +5083,10 @@ time.sleep(60)
                                               "after-pending", False, "Next call", interrupted_route, None, None, None) == 0
                 reconciled = json.loads(panel.events(project, "show", "--attempt", pending_attempt[0], "--json", output=True))
                 after = room.status(project, shared)
-                assert reconciled["state"] == "cancelled" and reconciled["reason_code"] == "panel_call_interrupted"
-                assert after["call_results"][member]["exit"] == 143
+                expected_status = 1 if scenario in normal_scenarios else 143
+                assert reconciled["state"] == ("failed" if expected_status == 1 else "cancelled")
+                assert reconciled["reason_code"] == "panel_call_interrupted"
+                assert after["call_results"][member]["exit"] == expected_status
                 assert not any(o["participant"] == member for o in panel.scope_overlaps(project, shared, after, room_owner, ["value.txt"]))
         else:
             # Explicit fixture cleanup keeps unresolved children out of unrelated pool/scope cases.
@@ -5130,9 +5310,10 @@ def exercise_observed_worker_leases():
             patch.object(panel, "child_environment", return_value={}), \
             patch.object(panel, "native_repository", return_value=project), \
             patch.object(panel, "plan_link", return_value=argv_binding), \
+            patch.object(panel, "_dispatch_descendants", return_value=[]), \
             patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as preflight, \
             patch.object(panel.subprocess, "Popen", side_effect=lambda argv, **kwargs:
-                         captured_dispatch.update(argv=argv) or Mock(pid=0, wait=lambda: 0, poll=lambda: 0)):
+                         captured_dispatch.update(argv=argv) or Mock(pid=0, wait=lambda **kwargs: 0, poll=lambda: 0)):
         assert panel.run_dispatch(*dispatch_args) == 0
     preview_argv = preflight.call_args.args[0]
     assert preview_argv[-1] == "--dry-run" and "--observe-plan-binding" not in preview_argv
@@ -5210,10 +5391,11 @@ def exercise_observed_worker_leases():
                 patch.object(panel, "results", return_value={"rows": []}), \
                 patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
                 patch("panel_terminals.process", return_value=None), \
-                patch.object(panel, "_dispatch_group_gone", return_value=True), \
+                patch.multiple(panel, _dispatch_group_gone=Mock(return_value=True), \
+                               _dispatch_descendants=Mock(return_value=[])), \
                 patch.object(panel.subprocess, "Popen", side_effect=OSError("fixture spawn failure")
                              if scenario == "spawn-error" else None,
-                             return_value=Mock(pid=123, wait=lambda: 0, poll=lambda: 0)) \
+                             return_value=Mock(pid=123, wait=lambda **kwargs: 0, poll=lambda: 0)) \
                     as provider_call, redirect_stderr(errors):
             if scenario != "normal":
                 try:
