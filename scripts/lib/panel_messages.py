@@ -6,6 +6,7 @@ reading never acknowledges (no room writes).
 
 import calendar
 import time
+import unicodedata
 
 from dashboard_projection import clean, display_width, listing, mapping
 from panel_view import clipped, wrapped
@@ -74,8 +75,10 @@ def _rows(messages, name_of, now=None, members=(), readers=(), width=100, unicod
         else:
             route = name_of(sender) + (" → " if unicode else " -> ") + name_of(recipient)
         first = next((line for line in text.splitlines() if line.strip()), "")
-        prefix = "%s %s %s " % (stamp(m.get("ts"), now)[-5:], "●" if unicode else "*", kind)
-        tail = " · unread" if pending else ""
+        # The mark is the read state: filled for unread, hollow once read.
+        mark = ("●" if pending else "○") if unicode else ("*" if pending else "-")
+        prefix = "%s %s %s " % (stamp(m.get("ts"), now)[-5:], mark, kind)
+        tail = ""
         # Narrow rows spend their space on the note before showing its route.
         sep = " · " if unicode else " / "
         tail = tail.replace(" · ", sep)
@@ -151,7 +154,24 @@ def call_rows(rows, members, name_of, room, width, unicode=True):
 
 def readable_text(text):
     from room_view import readable
-    return readable(str(text or "")[:MAX_TEXT], "\n", True)
+    from panel_view import _result_blocks
+    output, prose = [], []
+
+    def flush():
+        if prose:
+            output.append(readable("\n".join(prose), "\n", True))
+            prose[:] = []
+
+    for line, kind in _result_blocks(str(text or "")[:MAX_TEXT]):
+        if kind == "prose":
+            prose.append(line)
+        else:
+            flush()
+            # Keep layout and fence metadata while making terminal controls inert.
+            output.append("".join("?" if char != "\t" and unicodedata.category(char)[0] == "C" else char
+                                  for char in line))
+    flush()
+    return "\n".join(output).strip("\n")
 
 
 def tab_body(report, width, cap, navigation, unicode=True):

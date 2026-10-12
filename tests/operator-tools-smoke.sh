@@ -1895,8 +1895,22 @@ ascii_debate = board("debate", nav=nav, unicode=False)[1]
 assert not any(ch in ascii_debate for ch in BOX_CHARS), ascii_debate
 assert "(changed in round 2: (c) -> (a))" in " ".join(ascii_debate.replace("|", " ").split()), ascii_debate
 # Messages: names, local times, unread marks, filters, in-place full text; reading never writes; the dot clears once the Debate tab was seen.
+from panel_messages import _rows, readable_text
+fenced_message = "before\n```bash\necho `kept`\n```\nafter"
+assert readable_text(fenced_message) == fenced_message, readable_text(fenced_message)
+unread_message = [{"id": "tail-check", "sender": "peer", "recipient": "main",
+                   "pending_for": ["main"], "text": "Unread body", "ts": "2026-10-12T00:00:00Z"}]
+# The row mark carries the read state (filled/hollow, ASCII */-) instead of a trailing word.
+read_message = [dict(unread_message[0], id="tail-read", pending_for=[])]
+for glyphs, unread_mark, read_mark in ((True, "●", "○"), (False, "*", "-")):
+    line = _rows(unread_message, lambda ident: ident, now=1791763200,
+                 readers=("main",), unicode=glyphs)[0]["line"]
+    seen = _rows(read_message, lambda ident: ident, now=1791763200,
+                 readers=("main",), unicode=glyphs)[0]["line"]
+    assert " %s note " % unread_mark in line and "unread" not in line, line
+    assert " %s note " % read_mark in seen and unread_mark not in seen, seen
 nav, shown = board("messages", 110, 24)
-assert "Filter: needs you" in shown and "line 29" in shown and "Opus 5.5 main → Sol 6.1 main" in shown and "· unread" in shown and "\x1b" not in shown, shown
+assert "Filter: needs you" in shown and "line 29" in shown and "Opus 5.5 main → Sol 6.1 main" in shown and "●" in shown and "· unread" not in shown and "\x1b" not in shown, shown
 assert "loading earlier" not in shown, shown
 nav["messages_view"]["reading"] = True
 assert "loading earlier messages" in board("messages", 110, 24, nav=nav)[1]
