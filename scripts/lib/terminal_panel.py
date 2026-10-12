@@ -5169,6 +5169,14 @@ def main(argv=None):
     parser.add_argument("--label", help="short task title for the role board")
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
     args = parser.parse_args(arguments)
+    if args.repo is not None:
+        try:
+            panel_repository(args.repo)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            if " is not a git repository; open it in a git repository or pass --repo PATH" in str(error):
+                print("oms panel: " + clean(str(error), 200), file=sys.stderr)
+                return 2
+            raise
     if args.release_main is not None:
         import panel_release
         return panel_release.cli_main(arguments)

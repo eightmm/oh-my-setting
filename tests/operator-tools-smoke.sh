@@ -3316,16 +3316,23 @@ for options in (["--providers", "--json"], ["--routes"], ["--help"]):
     informational = subprocess.run(panel_front + options, cwd=plain_directory, env=selected_env,
                                    capture_output=True, text=True, timeout=30)
     assert informational.returncode == 0, informational
+    wrapped = subprocess.run(["bash", str(root / "scripts/panel.sh")] + options, cwd=plain_directory,
+                             env=selected_env, capture_output=True, text=True, timeout=30)
+    assert wrapped.returncode == 0, wrapped
 explicit = subprocess.run(panel_front + ["--repo", str(plain_directory), "--dry-run"],
                           cwd=plain_directory, env=resolver_env, capture_output=True, text=True, timeout=30)
 assert explicit.returncode == 2 and missing_repo_message in explicit.stderr, explicit
 wrapper = subprocess.run(["bash", str(root / "scripts/panel.sh")], cwd=plain_directory,
                          env=resolver_env, capture_output=True, text=True, timeout=30)
 assert wrapper.returncode == 2 and missing_repo_message in wrapper.stderr, wrapper
-wrapper_explicit = subprocess.run(["bash", str(root / "scripts/panel.sh"), "--repo", str(plain_directory)],
-                                  cwd=ordinary_root, env=resolver_env, capture_output=True,
-                                  text=True, timeout=30)
-assert wrapper_explicit.returncode == 2 and missing_repo_message in wrapper_explicit.stderr, wrapper_explicit
+equals_explicit = subprocess.run(panel_front + ["--repo=" + str(plain_directory), "--dry-run"],
+                                 cwd=ordinary_root, env=resolver_env, capture_output=True,
+                                 text=True, timeout=30)
+assert equals_explicit.returncode == 2 and missing_repo_message in equals_explicit.stderr, equals_explicit
+repeated_repo = subprocess.run(panel_front + ["--repo", str(plain_directory), "--repo", str(ordinary_root), "--dry-run"],
+                               cwd=ordinary_root, env=resolver_env, capture_output=True,
+                               text=True, timeout=30)
+assert repeated_repo.returncode == 0 and json.loads(repeated_repo.stdout)["repo"] == str(ordinary_root), repeated_repo
 assert not list(plain_directory.iterdir()), list(plain_directory.iterdir())
 ordinary_child = ordinary_root / "nested"
 ordinary_child.mkdir()
