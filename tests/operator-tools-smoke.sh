@@ -4119,6 +4119,11 @@ with patch.object(panel, "provider_catalog", return_value=[dict(codex_only, inst
 with patch.object(panel, "provider_catalog", return_value=[dict(codex_only, models=["gpt-6-luna"],
         catalog_models=["gpt-6-luna"] * 20 + ["gpt-6.2-luna"])]):
     assert panel.selected_route("codex", "researcher", None, "read", None)["model"] == "gpt-6.2-luna"
+def fixture_selected_route(*args, **kwargs):
+    target = kwargs.get("target", args[5] if len(args) > 5 else None)
+    catalog = [row for row in (codex_only, claude_candidate) if target in (None, row["provider"])]
+    with patch.object(panel, "provider_catalog", return_value=catalog):
+        return panel.selected_route(*args, **kwargs)
 try:
     panel.room.declared_scopes("researcher", ["src"])
     raise AssertionError("researcher write scope was accepted")
@@ -7060,13 +7065,22 @@ assert hinted.returncode == 0 and "agent-plan finish --id plan-link --landed-com
 def exercise_observed_worker_leases():
     # Every success marker comes from the real peer dispatcher while the fake CLI waits.
     import time
+    codex_candidate = {"provider": "codex", "binary": "codex", "installed": True,
+                       "models": ["gpt-6-sol"], "catalog_models": ["gpt-6-sol", "gpt-6.2-sol"]}
+    claude_candidate = {"provider": "claude", "binary": "claude", "installed": True, "models": []}
+    def fixture_selected_route(*args, **kwargs):
+        target = kwargs.get("target", args[5] if len(args) > 5 else None)
+        catalog = [row for row in (codex_candidate, claude_candidate)
+                   if target in (None, row["provider"])]
+        with patch.object(panel, "provider_catalog", return_value=catalog):
+            return panel.selected_route(*args, **kwargs)
     plan_api = ["bash", str(panel.ENTRY), "agent-plan", "--repo", str(project)]
     # The observer tuple belongs on the peer dispatcher argv; the native CLI
     # receives ordinary model flags and cannot expose this frontend argument.
     argv_binding = panel.PlanBinding("plan_" + "1" * 32, "argv-observer", "lease_" + "2" * 32,
                                      "codex", "claude", "argv-main", "att_" + "3" * 32, "argv-room")
     captured_dispatch = {}
-    route = panel.selected_route("claude", "worker", "light", "write", "implement")
+    route = fixture_selected_route("claude", "worker", "light", "write", "implement")
     dispatch_args = (project, "claude", "worker", "write",
                      None, brief, "--task-id", "argv-observer", False, None, route, None, None, None)
     # The fake provider CLIs live in the fixture PATH, but this in-process
@@ -7102,7 +7116,7 @@ def exercise_observed_worker_leases():
     # Capacity refusals leave enrollment and plan claims untouched; assignment/spawn failures roll enrollment back.
     import io
     from contextlib import redirect_stderr
-    capacity_route = panel.selected_route("claude", "worker", "light", "read", "investigate")
+    capacity_route = fixture_selected_route("claude", "worker", "light", "read", "investigate")
     capacity_env = {"OMS_ROOM_ID": argv_binding.room_id,
                     "OMS_ROOM_PARTICIPANT": argv_binding.owner_participant,
                     "OMS_PANEL_MAIN_ATTEMPT": argv_binding.owner_attempt}
@@ -7116,7 +7130,7 @@ def exercise_observed_worker_leases():
         this_args = capacity_args if not writing else (
             project, "claude", "worker", "write", None,
             brief, "git diff --check", argv_binding.task_id, False, "Capacity call",
-            panel.selected_route("claude", "worker", "light", "write", "implement"), None, None, scopes)
+            fixture_selected_route("claude", "worker", "light", "write", "implement"), None, None, scopes)
         state = {"messages": [{}] * (room.MAX_MESSAGES - 1 if scenario in {"full", "full-write"} else 1),
                  "closed": scenario == "closed", "participants": [{
                      "participant": argv_binding.owner_participant, "role": "main",
@@ -10684,6 +10698,91 @@ with patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmu
         patch.object(panel.subprocess, "run", side_effect=reloaded_key_run):
     panel.bind_main_keys()
 assert bindings == replacement_keys, bindings
+
+# Context headers cover main variants, reader composition, escaping, and border restoration.
+header_state = {"room": {"id": "fixture", "participants": [
+    {"participant": "header-main", "role": "main", "provider": "claude", "harness": "claude",
+     "joined": True, "model": "Opus 5.5"},
+    {"participant": "header-call", "role": "worker", "provider": "codex", "joined": True,
+     "model": "test-model", "label": "Build result"}]},
+    "attempts": {"active_recent": [], "recent": []}, "repo": {"name": "repo", "branch": "feature#one"}}
+for harness, shown in (("claude", "Claude Code"), ("codex", "Codex"), ("pi", "Pi")):
+    header_state["room"]["participants"][0]["harness"] = harness
+    header_state["room"]["participants"][0]["provider"] = harness
+    label = panel.context_header_text(header_state, "header-main", Path("repo"))
+    assert shown in label and "TASK —" in label and "feature##one" in label, label
+assert "unknown" in panel.context_header_text({"repo": {}}, "absent", Path("repo"))
+
+def header_window_fixture(local_values, reader=False, fail_capture=False,
+                          reader_target=("result", "header-call")):
+    options = {"@oms_panel_native_pane": "%8"}
+    options.update(local_values)
+    calls = []
+    def fake_tmux(argv, **kwargs):
+        args = argv[1:]
+        calls.append(args)
+        if args[0] == "show-options":
+            option = args[-1]
+            if fail_capture and "-v" in args and option == "pane-border-format":
+                return subprocess.CompletedProcess(argv, 1, "", "capture failed")
+            value = local_values.get(option)
+            if value is None:
+                output = ""
+            elif "-v" in args:
+                output = value + "\n"
+            else:
+                quoted = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+                output = option + " " + quoted + "\n"
+            return subprocess.CompletedProcess(argv, 0, output, "")
+        if args[0] == "show-option":
+            value = options.get(args[-1])
+            return subprocess.CompletedProcess(argv, 0 if value is not None else 1, (value or "") + "\n", "")
+        if args[0] == "display-message":
+            return subprocess.CompletedProcess(argv, 0, "80\n", "")
+        if args[0] == "set-option":
+            if "-u" in args:
+                options.pop(args[-1], None)
+            else:
+                options[args[-2]] = args[-1]
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    os.environ.update(TMUX="fixture", TMUX_PANE="%7", OMS_PANEL_SESSION="oms-panel-0123456789ab")
+    with patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
+            patch.object(panel.subprocess, "run", side_effect=fake_tmux), \
+            patch.object(panel.panel_reader, "find", return_value="%9" if reader else None):
+        navigation = {"preview": {"target": ("result", "header-main")},
+                      "reader_target": reader_target}
+        panel.update_context_header(header_state, "header-main", Path("repo"), navigation)
+        panel.update_context_header(header_state, "header-main", Path("repo"), navigation)
+        panel.toggle_context_headers()
+        for option in ("pane-border-status", "pane-border-format"):
+            assert options.get(option) == local_values.get(option), (option, options, local_values)
+            assert (option in options) == (option in local_values), (option, options, local_values)
+        if reader:
+            reader_headers = [args[-1] for args in calls if args[0] == "set-option" and
+                              args[-2] == panel.HEADER_OPTION and args[-3] == "%9"]
+            assert any(value.startswith("RESULT · Build result") for value in reader_headers), calls
+        if not local_values:
+            unset = {args[-1] for args in calls if args[0] == "set-option" and "-u" in args}
+            assert {"pane-border-status", "pane-border-format"} <= unset, calls
+        if fail_capture:
+            changed_borders = [args for args in calls if args[0] == "set-option" and
+                               args[-2] in ("pane-border-status", "pane-border-format")]
+            assert not changed_borders, changed_borders
+            assert panel.HEADER_ENABLED not in options, options
+    return calls, options
+
+header_window_fixture({}, reader=True)
+header_window_fixture({}, reader=True, reader_target=("debate", ("fixture-task", "header-call")))
+quoted_format = "format with spaces, #, 'single' and \"double\" quotes"
+header_window_fixture({"pane-border-status": "bottom", "pane-border-format": quoted_format})
+header_window_fixture({"pane-border-status": "bottom", "pane-border-format": quoted_format},
+                      fail_capture=True)
+assert panel._tmux_output_value("value\n\n") == "value\n"
+for code in (1, -9):
+    with patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
+            patch.object(panel.subprocess, "run",
+                         return_value=subprocess.CompletedProcess([], code, "", "")):
+        assert panel._window_option_local("%7", "pane-border-format") == (None, ""), code
 
 # An attention-marked window name keeps the geometry fields and the split text apart.
 with patch.object(panel, "tmux_command", side_effect=lambda *a: ["x"]), patch.object(panel.subprocess, "run",

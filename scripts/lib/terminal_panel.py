@@ -2914,7 +2914,7 @@ def keys_help(installed=None):
     installed = set(name for name in ("claude", "pi", "codex") if main_installed(name)) if installed is None else set(installed)
     starts = [label for name, label in (("claude", "1 Claude"), ("pi", "2 Pi"), ("codex", "0 Codex"))
               if name in installed]
-    return (" ".join(starts + ["? More F5 Back"]), "F9 Chat/Board F5 Control ? Keys k Capacity")
+    return (" ".join(starts + ["? More F5 Back"]), "F9 Chat/Board F5 Control ? Keys k Capacity i Headers")
 
 
 KEYS_HELP = keys_help()
@@ -3970,6 +3970,141 @@ def tab_event(event, navigation):
 BOTTOM_OPTION = "@oms_panel_bottom"
 BOTTOM_LIMIT = 512
 BOTTOM_KINDS = {"chat", "result", "debate", "mail"}
+HEADER_OPTION = "@oms_panel_header"
+HEADER_ENABLED = "@oms_panel_headers"
+
+
+def _header_safe(value):
+    return (clean(value, 120) or "").replace("#", "##").replace(",", " ").replace("{", "(").replace("}", ")")
+
+
+def context_header_text(state, main_attempt, repo):
+    from room_view import nodes, main_words, model_name, context_note
+    member = next((m for m in nodes(state) if m.get("role") == "main" and
+                   main_attempt in (m.get("participant"), m.get("attempt"))), None)
+    task = "TASK " + _header_safe(member.get("task_id")) if member and member.get("task_id") else "TASK —"
+    model = _header_safe(model_name(member)) if member else "unknown"
+    provider = _header_safe({"claude": "Claude Code", "codex": "Codex", "pi": "Pi"}.get(
+        member.get("harness") or member.get("provider"), member.get("provider"))) if member else "unknown"
+    status = _header_safe(main_words(member)) if member else "idle"
+    context = ""
+    if member:
+        note = context_note(state, member)
+        if note:
+            context = " · ctx %s%% left" % note[0]
+    branch = _header_safe((state.get("repo") or {}).get("branch"))
+    location = _header_safe((state.get("repo") or {}).get("name") or repo.name)
+    if branch:
+        location += "/" + branch
+    return "MAIN · %s · %s · %s · %s · %s%s" % (provider, model, task, location, status, context)
+
+
+def _tmux_output_value(value):
+    return value[:-1] if value.endswith("\n") else value
+
+
+def _window_option_local(pane, option):
+    present = subprocess.run(tmux_command("show-options", "-w", "-q", "-t", pane, option),
+                             capture_output=True, text=True, check=False, timeout=2,
+                             stdin=subprocess.DEVNULL)
+    if present.returncode:
+        return None, ""
+    exists = bool(present.stdout.rstrip("\r\n"))
+    if not exists:
+        return False, ""
+    raw = subprocess.run(tmux_command("show-options", "-w", "-v", "-q", "-t", pane, option),
+                         capture_output=True, text=True, check=False, timeout=2,
+                         stdin=subprocess.DEVNULL)
+    if raw.returncode:
+        return None, ""
+    return True, _tmux_output_value(raw.stdout)
+
+
+def update_context_header(state, main_attempt, repo, navigation=None):
+    pane = os.environ.get("TMUX_PANE", "")
+    if not managed_session() or not re.fullmatch(r"%[0-9]+", pane):
+        return
+    quiet = dict(capture_output=True, text=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
+    def run(*args):
+        return subprocess.run(tmux_command(*args), **quiet)
+    try:
+        enabled = run("show-option", "-w", "-v", "-t", pane, HEADER_ENABLED)
+        if enabled.returncode:
+            originals = []
+            for option, saved in (("pane-border-status", "@oms_panel_headers_previous_status"),
+                                  ("pane-border-format", "@oms_panel_headers_previous_format")):
+                local, value = _window_option_local(pane, option)
+                if local is None:
+                    return
+                originals.append((option, saved, local, value))
+            for option, saved, local, value in originals:
+                run("set-option", "-w", "-t", pane, saved + "_local", "1" if local else "0")
+                run("set-option", "-w", "-t", pane, saved, value)
+            run("set-option", "-w", "-t", pane, HEADER_ENABLED, "1")
+            run("set-option", "-w", "-t", pane, "pane-border-status", "top")
+            run("set-option", "-w", "-t", pane, "pane-border-format", "#{?@oms_panel_headers,#{@oms_panel_header},}")
+        label = context_header_text(state, main_attempt, repo)
+        native = run("show-option", "-w", "-v", "-t", pane, "@oms_panel_native_pane")
+        target = native.stdout.strip() if native.returncode == 0 else ""
+        if re.fullmatch(r"%[0-9]+", target):
+            width = run("display-message", "-p", "-t", target, "#{pane_width}")
+            if width.returncode == 0 and width.stdout.strip().isdigit():
+                from dashboard_projection import fit
+                label = fit(label, int(width.stdout.strip()))
+            current = run("show-option", "-p", "-v", "-t", target, HEADER_OPTION)
+            if current.returncode or _tmux_output_value(current.stdout) != label:
+                run("set-option", "-p", "-t", target, HEADER_OPTION, label)
+        reader = panel_reader.find(pane)
+        if reader:
+            from room_view import nodes, model_name
+            target = (navigation or {}).get("reader_target")
+            ident = target[-1][-1] if target and target[0] == "debate" else target[-1] if target else None
+            call = next((m for m in nodes(state) if ident and m.get("participant") == ident), None)
+            label = "RESULT · %s · %s · %s" % (
+                _header_safe(call.get("title") or call.get("participant")) if call else "call unavailable",
+                _header_safe(call.get("role") or "call") if call else "call",
+                _header_safe(model_name(call)) if call else "unknown")
+            width = run("display-message", "-p", "-t", reader, "#{pane_width}")
+            if width.returncode == 0 and width.stdout.strip().isdigit():
+                from dashboard_projection import fit
+                label = fit(label, int(width.stdout.strip()))
+            current = run("show-option", "-p", "-v", "-t", reader, HEADER_OPTION)
+            if current.returncode or _tmux_output_value(current.stdout) != label:
+                run("set-option", "-p", "-t", reader, HEADER_OPTION, label)
+    except Exception:
+        return
+
+
+def toggle_context_headers():
+    pane = os.environ.get("TMUX_PANE", "")
+    if not managed_session() or not re.fullmatch(r"%[0-9]+", pane):
+        return
+    def run(*args):
+        return subprocess.run(tmux_command(*args), capture_output=True, text=True, check=False,
+                              timeout=2, stdin=subprocess.DEVNULL)
+    try:
+        enabled = run("show-option", "-w", "-v", "-t", pane, HEADER_ENABLED)
+        if enabled.returncode:
+            return
+        if enabled.returncode == 0 and enabled.stdout.strip() == "0":
+            run("set-option", "-w", "-t", pane, HEADER_ENABLED, "1")
+            run("set-option", "-w", "-t", pane, "pane-border-status", "top")
+            run("set-option", "-w", "-t", pane, "pane-border-format", "#{?@oms_panel_headers,#{@oms_panel_header},}")
+        else:
+            run("set-option", "-w", "-t", pane, HEADER_ENABLED, "0")
+            for option, saved in (("pane-border-status", "@oms_panel_headers_previous_status"),
+                                  ("pane-border-format", "@oms_panel_headers_previous_format")):
+                local = run("show-option", "-w", "-v", "-t", pane, saved + "_local")
+                if local.returncode:
+                    continue
+                if local.stdout.strip() == "1":
+                    value = run("show-option", "-w", "-v", "-t", pane, saved)
+                    if value.returncode == 0:
+                        run("set-option", "-w", "-t", pane, option, _tmux_output_value(value.stdout))
+                elif local.stdout.strip() == "0":
+                    run("set-option", "-w", "-u", "-t", pane, option)
+    except Exception:
+        return
 
 
 def bottom_state(navigation):
@@ -4333,6 +4468,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             return False
         if pane:
             navigation["reader_open"] = True
+            navigation["reader_target"] = target
             navigation["notice"] = "Opened on the right; Esc closes it"
         return bool(pane)
 
@@ -4340,6 +4476,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
         try:
             closed = managed_session() and panel_reader.close_reader(os.environ.get("TMUX_PANE", ""))
             navigation.pop("reader_open", None)
+            navigation.pop("reader_target", None)
             return closed
         except (OSError, subprocess.SubprocessError):
             return False
@@ -4404,6 +4541,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         if alert != flagged:
                             mark_window(*alert)
                             flagged = alert
+                    if managed_session():
+                        update_context_header(state, main_attempt, repo, navigation)
                     if n and not sys.stdout.isatty():
                         print("----")
                     n += 1
@@ -4503,6 +4642,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             navigation["notice"] = "Display refreshed; native sessions and retained history preserved"
                         elif event[0] == "k":
                             navigation["health_view"] = not navigation.get("health_view", False)
+                        elif event[0] == "i" and managed_session():
+                            toggle_context_headers()
                         elif event[0] == "escape" and close_call():
                             pass  # Esc first closes only the reader pane; the board keeps its preview.
                         elif event[0] == "escape" and navigation.get("health_view"):
