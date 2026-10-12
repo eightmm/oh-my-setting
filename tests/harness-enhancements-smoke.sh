@@ -882,11 +882,16 @@ EOF
     fail "ci-parity gate rejected a routing change"
   grep -Fxq operator-tools <<< "$out" || fail "a routing change skipped provider-less operator-tools: $out"
   # A selected test sees PATH as a CI host does: no provider CLI, every other tool.
-  mkdir -p "$TMP/parity-bin"
-  for provider_cli in codex cursor-agent oms-agent-adapter-parity; do
+  # codex and the helper share a directory reached through a relative PATH
+  # entry, so its shadow links must still resolve from the shadow directory.
+  mkdir -p "$TMP/parity-bin" "$TMP/parity-rel"
+  for provider_cli in cursor-agent oms-agent-adapter-parity; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-bin/$provider_cli"
   done
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-bin/parity-helper"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-rel/codex"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-rel/parity-helper"
+  chmod +x "$TMP/parity-rel/"*
+  parity_rel="$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$TMP/parity-rel" "$gate")"
   printf '#!/usr/bin/env bash\nprintf "docker:%%s\\n" "$*" >> "$OMS_TEST_AFFECTED_LOG"\n' > "$TMP/parity-bin/fake-docker"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-bin/fake-shellcheck"
   chmod +x "$TMP/parity-bin/"*
@@ -902,7 +907,7 @@ EOF
   base="$head"
   head="$(git -C "$gate" rev-parse HEAD)"
   : > "$log"
-  out="$(cd "$gate" && PATH="$TMP/parity-bin:$PATH" OMS_TEST_AFFECTED_LOG="$log" \
+  out="$(cd "$gate" && PATH="$parity_rel:$TMP/parity-bin:$PATH" OMS_TEST_AFFECTED_LOG="$log" \
     OMS_SHELLCHECK_BIN="$TMP/parity-bin/fake-shellcheck" OMS_DOCKER_BIN="$TMP/parity-bin/fake-docker" \
     bash scripts/check.sh --affected --ci-parity --changed-from "$base" --changed-to "$head" 2>&1)" ||
     fail "ci-parity gate failed: $out"

@@ -496,6 +496,7 @@ hide_provider_clis() {
       count=$((count + 1))
       shadow="$CHECK_RUNTIME/provider-less/$count"
       mkdir -p "$shadow"
+      dir="$(cd "$dir" && pwd -P)"
       for entry in "$dir"/*; do
         [ -e "$entry" ] || continue
         base="${entry##*/}"
@@ -541,6 +542,12 @@ parse_with_bash32() {  # parse_with_bash32 FILE...
     echo "skip: bash32-parse (docker image bash:3.2 is absent or docker is not running; docker pull bash:3.2 enables it)"
     return 0
   fi
+  case "$ROOT" in
+    *:*|*,*)
+      echo "skip: bash32-parse (docker cannot mount a checkout path containing ':' or ',')"
+      return 0
+      ;;
+  esac
   # shellcheck disable=SC2016 # $f and $@ expand inside the container.
   stage bash32-parse "$docker" run --rm --network none -v "$ROOT:/r:ro" bash:3.2 \
     bash -c 'for f in "$@"; do bash -n "/r/$f" || exit 1; done' bash32-parse "$@"
@@ -830,7 +837,7 @@ fi
 
 if [ "$RUN_QUICK" = 1 ]; then
   changed_file="$CHECK_RUNTIME/changed-files"
-  git diff --name-only --no-renames "$QUICK_FROM" "$QUICK_TO" -- > "$changed_file"
+  git -c core.quotePath=false diff -z --name-only --no-renames "$QUICK_FROM" "$QUICK_TO" -- > "$changed_file"
   quick_harness=0
   quick_models=0
   quick_seats=0
@@ -840,7 +847,7 @@ if [ "$RUN_QUICK" = 1 ]; then
   quick_docs=1
   quick_shell_files=()
   quick_python_files=()
-  while IFS= read -r path; do
+  while IFS= read -r -d '' path; do
     [ -n "$path" ] || continue
     case "$path" in
       README.md|README.ko.md|docs/*.md|custom-skills/*.md|templates/*.md) ;;
