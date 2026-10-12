@@ -8069,16 +8069,21 @@ with patch.dict(os.environ, {}):
         # native rebind, a call's result and an answer) all reach the successor; a crash after the seal is
         # finished by the next write, even from a writer already enrolled there.
         raced = fresh("m1", "m2", "m3", calls=[("call-x", "m1")])
-        consumer = member(raced, "m1")["consumer"]
+        consumer, freed = member(raced, "m1")["consumer"], member(raced, "m3")["consumer"]
         question = room.send(where, raced, "m1", "m2", "Which file?", "question")["id"]
         broadcast = room.send(where, raced, "m1", "all", "Before the call joined", "note")["id"]
         room.join(where, raced, "call-y", "codex", "worker", parent="m1")
+        room.join(where, raced, "pi1", "pi", "main", native_session="pi-one")
         steps = []
         def racing(repo, state, target, bounded=True):
             steps.append(target)
             if len(steps) == 1:
                 moved = real_carry(repo, state, target, bounded)
                 room.append(where, raced, {"kind": "leave", "participant": "m3"}, "Participant left")
+                # A session freed by a member that left is taken by a new one; a Pi main rejoins on a new session.
+                room.join(where, raced, "m4", "claude", "main", native_session="sess-%s-m3" % raced)
+                room.append(where, raced, {"kind": "leave", "participant": "pi1"}, "Participant left")
+                room.join(where, raced, "pi1", "pi", "main", native_session="pi-two")
                 with bound(raced, "m2"):
                     room.scope(where, raced, "m2", ["src"])
                     room.send(where, raced, "m2", "m1", "src.py", "answer", reply_to=question)
@@ -8113,6 +8118,8 @@ with patch.dict(os.environ, {}):
         assert healed["carried"] and healed["call_results"]["call-x"]["exit"] == 0, healed["call_results"]
         people = {p["participant"]: p for p in healed["participants"]}
         assert not people["m3"]["joined"] and people["m2"]["owns"] == ["src"], people
+        assert people["m4"]["joined"] and people["m4"]["consumer"] == freed, people["m4"]
+        assert people["pi1"]["consumer"] == hashlib.sha256(b"pi-two").hexdigest()[:32], people["pi1"]
         assert people["m1"]["label_override"] == "Second work" and people["m1"]["consumer"] != consumer
         assert people["m1"]["initial_consumer"] == consumer, people["m1"]
         assert room.selected(where, people["m1"]["consumer"]) == (after, "m1")
@@ -8163,6 +8170,7 @@ with patch.dict(os.environ, {}):
             except subprocess.TimeoutExpired:
                 pass
         room.append(where, noted, {"kind": "leave", "participant": "m2"}, "Participant left")
+        room.join(where, noted, "m4", "claude", "main", native_session="sess-%s-m2" % noted)
         assert room.successor_id(noted) not in {s["id"] for s in room.discover(where)[0]}
         with bound(noted, "m1"), patch.object(room, "MESSAGE_RESERVE", 1):
             moved = room.rollover(where, noted, "m1")
@@ -8177,22 +8185,64 @@ with patch.dict(os.environ, {}):
                     assert "another participant" in str(error), error
                 else:
                     raise AssertionError("an unknown message id was acknowledged")
+            # Unknown ids read each sealed log once, not once per id, both before the write and under its lock.
+            reads, real_records = [], room.records
+            bogus = ["bogus-%d" % n for n in range(50)]
+            with patch.object(room, "records", side_effect=lambda repo, ident: reads.append(ident)
+                              or real_records(repo, ident)):
+                for check in (lambda: room.acknowledge(where, noted, "m1", bogus),
+                              lambda: room.validate_event(room.records(where, moved), {
+                                  "kind": "received", "participant": "m1", "messages": bogus}, "", repo=where)):
+                    try:
+                        check()
+                    except ValueError as error:
+                        assert "another participant" in str(error), error
+                    else:
+                        raise AssertionError("an unknown message id was acknowledged")
+            assert reads.count(noted) <= 2, reads.count(noted)
+        freed = hashlib.sha256(("sess-%s-m2" % noted).encode()).hexdigest()[:32]
+        assert member(moved, "m4")["consumer"] == freed and not member(moved, "m2")["joined"]
         sealed = room.status(where, noted, exact=True)
         assert [m["id"] for m in sealed["messages"] if m["pending_for"]] == unread[1:], sealed["messages"]
         # A close racing a rollover waits for its seal and closes the successor; no open half-carried room remains.
+        # It runs in its own process, which has not seen the carry complete, and keeps its stale resolve.
         closing = fresh("m1", calls=[("call-c", "m1")])
         racer = {}
+        closer = ("import sys, time; sys.path.insert(0, sys.argv[1]); import room; room.RESOLVE_TTL = 600; "
+                  "start = time.monotonic(); room.close(sys.argv[2], sys.argv[3], 'm1'); print(time.monotonic() - start)")
         def closing_carry(repo, state, target, bounded=True):
             if not racer:
-                racer["thread"] = threading.Thread(target=lambda: room.close(where, closing, "m1"))
-                racer["thread"].start()
-                time.sleep(0.5)
+                racer["process"] = subprocess.Popen(
+                    [sys.executable, "-c", closer, str(Path(room.__file__).parent), str(where), closing],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                time.sleep(2)
             return real_carry(repo, state, target, bounded)
         with bound(closing, "m1"), patch.object(room, "carry", side_effect=closing_carry):
             moved = room.rollover(where, closing, "m1")
-            racer["thread"].join(timeout=60)
+            out, err = racer["process"].communicate(timeout=90)
+        assert racer["process"].returncode == 0 and float(out.split()[-1]) < 20, (out, err)
         assert room.status(where, moved)["closed"] and room.selected(where, member(closing, "m1")["consumer"]) in (
             None, (None, None))
+        # A finished call that answers a broadcast question between the first carry and the seal is carried with
+        # its answer, as the sealed log's audience admits it; the question stays answered and the room writable.
+        asked_all = fresh("m1", "m2", calls=[("call-f", "m1")])
+        room.send(where, asked_all, "call-f", "m1", "Call exit=0; done", "handoff", message_id="result-call-f")
+        with bound(asked_all, "m1"):
+            room.acknowledge(where, asked_all, "m1", ["result-call-f"])
+            question = room.send(where, asked_all, "m1", "all", "Anyone?", "question")["id"]
+        answers = []
+        def answering(repo, state, target, bounded=True):
+            moved = real_carry(repo, state, target, bounded)
+            if not answers:
+                with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1", "OMS_ROOM_ID": asked_all,
+                                             "OMS_ROOM_PARTICIPANT": "call-f", "OMS_ROOM_REPO": str(where)}):
+                    answers.append(room.send(where, asked_all, "call-f", "m1", "Me", "answer", reply_to=question))
+            return moved
+        with bound(asked_all, "m1"), patch.object(room, "carry", side_effect=answering):
+            moved = room.rollover(where, asked_all, "m1")
+        assert room.status(where, moved)["carried"] and not room.status(where, moved)["open_questions"]
+        with bound(asked_all, "m1"):
+            room.send(where, asked_all, "m1", "m2", "Still writable", "note")
         # A worker's flood of open questions to its parent does not block the rollover.
         flooded = fresh("m1", calls=[("call-w", "m1")])
         worker_env = {"OMS_HARNESS_CHILD": "1", "OMS_ROOM_ID": flooded, "OMS_ROOM_PARTICIPANT": "call-w",
@@ -8214,6 +8264,7 @@ with patch.dict(os.environ, {}):
                         OMS_ROOM_REPO=str(where))
         for verb in (["new", "--id", room.successor_id(squatted), "--topic", "x"],
                      ["new", "--id", room.successor_id(squatted), "--live"],
+                     ["new", "--id", room.successor_id(squatted).upper(), "--live"],
                      ["append", "--id", squatted, "--role", "note", "--text", "plain"],
                      ["close", "--id", squatted]):
             refused = subprocess.run(["bash", str(panel.ENTRY), "thread", "--repo", str(where)] + verb, env=squatter,
@@ -8222,8 +8273,36 @@ with patch.dict(os.environ, {}):
                                            or "admitted room participant" in refused.stderr), (verb, refused)
         assert not (where / ".oms/threads" / (room.successor_id(squatted) + ".jsonl")).exists()
         assert not room.status(where, squatted)["closed"]
-        with bound(squatted, "m1"):
+        # Nor a plain row while the rollover creates the successor: neither in its empty file nor after its topic.
+        successor = where / ".oms/threads" / (room.successor_id(squatted) + ".jsonl")
+        successor.write_bytes(b"")
+        bare = {k: v for k, v in squatter.items() if not k.startswith("OMS_ROOM_")}
+        squat = ["bash", str(panel.ENTRY), "thread", "--repo", str(where), "append", "--id",
+                 room.successor_id(squatted), "--role", "note", "--text", "squat"]
+        squats, real_command = [subprocess.run(squat, env=bare, capture_output=True, text=True, timeout=60)], room.command
+        def squatting(repo, *args, env=None):
+            out = real_command(repo, *args, env=env)
+            if args[:3] == ("new", "--id", room.successor_id(squatted)):
+                squats.append(subprocess.run(squat, env=squatter, capture_output=True, text=True, timeout=60))
+            return out
+        with bound(squatted, "m1"), patch.object(room, "command", side_effect=squatting):
             moved = room.rollover(where, squatted, "m1")
+        assert len(squats) == 2 and all(s.returncode and "admitted room participant" in s.stderr for s in squats), squats
+        # A worker's message through another spelling of its room id, one log on a case-insensitive filesystem, is
+        # refused, so every row keeps the log's own id and the room stays readable.
+        real_path = room.thread_live.thread_path
+        with patch.object(room.thread_live, "thread_path", side_effect=lambda repo, ident: real_path(repo, ident.lower())), \
+                patch.dict(os.environ, dict(squatter, OMS_TH_FILE=str(where / ".oms/threads" / (moved + ".jsonl")),
+                                            OMS_TH_ID=moved.upper(), OMS_TH_ROLE="note", OMS_TH_ROOM_EVENT=json.dumps({
+                                                "kind": "message", "id": "cv1", "sender": "call-s", "recipient": "m1",
+                                                "message_kind": "note"}))):
+            try:
+                room.thread_live.append_from_env()
+            except ValueError as error:
+                assert "does not match its log" in str(error), error
+            else:
+                raise AssertionError("a row was written under another spelling of its room id")
+        assert "cv1" not in {m["id"] for m in room.messages(where, moved)}
         refused = subprocess.run(["bash", str(panel.ENTRY), "thread", "--repo", str(where), "close", "--id", moved],
                                  env=squatter, capture_output=True, text=True, timeout=60)
         assert refused.returncode and not room.status(where, moved)["closed"], refused
@@ -8237,6 +8316,9 @@ with patch.dict(os.environ, {}):
         released = member(created, "m3")["consumer"]
         room.append(where, created, {"kind": "leave", "participant": "m3"}, "Participant left")
         room.join(where, created, "m3", "codex", "main")
+        room.join(where, created, "pi9", "pi", "main", native_session="pi-a")
+        room.append(where, created, {"kind": "leave", "participant": "pi9"}, "Participant left")
+        room.join(where, created, "pi9", "pi", "main", native_session="pi-b")
         with bound(created, "m1"):
             room.bind(where, created, "m1", "sess-rebound", replaces=first)
         with bound(created, "m2"):
@@ -8251,6 +8333,7 @@ with patch.dict(os.environ, {}):
                 raise AssertionError("the main that rolled a room over kept a creator's close right")
         rebound = member(moved, "m1")
         assert rebound["initial_consumer"] == first and rebound["consumer"] != first, rebound
+        assert member(moved, "pi9")["consumer"] == hashlib.sha256(b"pi-b").hexdigest()[:32]
         assert not member(moved, "m3").get("consumer") and room.selected(where, released) in (None, (None, None))
         assert room.selected(where, first) == (None, None) and any(
             p.get("initial_consumer") == first for s in room.discover(where)[0] if s["id"] == moved

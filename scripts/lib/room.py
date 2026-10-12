@@ -618,6 +618,11 @@ def validate_event(rows, event, text, repo=None):
             raise ValueError("message id conflicts with its existing content")
         if event.get("reply_to"):
             original = next((m for m in state["messages"] if m["id"] == event["reply_to"]), None)
+            if (carry and original and event["sender"] not in original["targets"] and repo is not None
+                    and state["predecessor"]):
+                # A broadcast carried before its finished call answered it holds the audience carried then; the
+                # sealed log holds the one it was sent to.
+                original = _lineage_messages(repo, state, [event["reply_to"]]).get(event["reply_to"])
             if (not original or event["sender"] not in original["targets"]
                     or event["recipient"] != original["sender"]):
                 raise ValueError("reply must return to the sender of a message addressed to this participant")
@@ -627,13 +632,13 @@ def validate_event(rows, event, text, repo=None):
         if not isinstance(mids, list) or not 1 <= len(mids) <= 200 or any(not isinstance(m, str) for m in mids):
             raise ValueError("ack requires bounded message ids")
         indexed = {m["id"]: m for m in state["messages"]}
-        for mid in set(mids) - set(indexed):
-            # Unread mail a rollover left in a sealed log is acknowledged here; the sealed log takes no rows.
-            found = _lineage_message(repo, state, mid) if repo is not None and state["predecessor"] else None
-            if found:
-                indexed[mid] = dict(found, received_by=[
-                    row["room_event"]["participant"] for row in rows
-                    if row.get("room_event", {}).get("kind") == "received" and mid in row["room_event"]["messages"]])
+        # Unread mail a rollover left in a sealed log is acknowledged here; the sealed log takes no rows.
+        lineage = (_lineage_messages(repo, state, set(mids) - set(indexed))
+                   if repo is not None and state["predecessor"] else {})
+        for mid, found in lineage.items():
+            indexed[mid] = dict(found, received_by=[
+                row["room_event"]["participant"] for row in rows
+                if row.get("room_event", {}).get("kind") == "received" and mid in row["room_event"]["messages"]])
         for mid in mids:
             original = indexed.get(mid)
             if not original or event["participant"] not in original["targets"]:
@@ -808,11 +813,20 @@ def carry_plan(state, current=None, bounded=True):
         order.append(members[who])
     for who in sorted(keep, key=lambda w: members[w]["seq"]):
         place(who)
-    held = {members[w].get("consumer") for w in keep} | {p.get("consumer") for p in there.values() if p["joined"]}
-    writes = []
+    # Members that left the sealed log leave its successor first, freeing a native session another member now
+    # holds; nothing carried names them, as every carried member and message is joined in the sealed log.
+    gone = sorted(present - set(joined), key=lambda w: there[w]["seq"])
+    writes = [({"kind": "leave", "participant": who}, "Participant left", None) for who in gone]
+    held = {members[w].get("consumer") for w in keep} | {
+        p.get("consumer") for w, p in there.items() if p["joined"] and w not in gone}
     for p in order:
         who = p["participant"]
+        # Only a Codex/Claude main takes a native bind; any other member rejoins with its current session.
+        bindable = p["role"] == "main" and p["provider"] in {"codex", "claude"}
         now = there.get(who) if who in present else None
+        if now is not None and not bindable and p.get("consumer") and now.get("consumer") != p["consumer"]:
+            writes.append(({"kind": "leave", "participant": who}, "Participant left", None))
+            now = None
         if now is None:
             event = {"kind": "join", "participant": who, "provider": p["provider"], "role": p["role"],
                      "model": p.get("model"), "label": p["label"], "owns": list(p.get("owns", []))}
@@ -821,7 +835,7 @@ def carry_plan(state, current=None, bounded=True):
             # A rebound main joins with the session it first joined with and is rebound below, so resume ownership
             # still recognizes that session; unless another carried member now holds it.
             first = p.get("initial_consumer")
-            consumer = (first if p.get("consumer") and first and first not in held - {p["consumer"]}
+            consumer = (first if bindable and p.get("consumer") and first and first not in held - {p["consumer"]}
                         else p.get("consumer"))
             if consumer:
                 event["consumer"] = consumer
@@ -864,9 +878,6 @@ def carry_plan(state, current=None, bounded=True):
         for start in range(0, len(mids), 200):
             writes.append(({"kind": "received", "participant": who, "messages": mids[start:start + 200]},
                            "Messages consumed before rollover", None))
-    # Last, once nothing carried still needs them: members that left the sealed log leave its successor too.
-    for who in sorted(present - set(joined), key=lambda w: there[w]["seq"]):
-        writes.append(({"kind": "leave", "participant": who}, "Participant left", None))
     return writes, [m for m in dropped if m["id"] not in known]
 
 
@@ -996,10 +1007,17 @@ def join(repo, room, who, provider, role="main", model=None, label=None, native_
 
 def close(repo, room, who):
     event = {"kind": "closed", "participant": identifier(who, "participant")}
-    # Behind the rollover lock a close lands before a seal or in the successor, never between carry and seal.
-    with _rollover_lock(repo, resolve(repo, identifier(room, "room"), fresh=True)):
-        append(repo, room, event, "Room closed")
-    return {"status": "closed"}
+    literal = identifier(room, "room")
+    # Behind the rollover lock a close lands before a seal or in the successor, never between carry and seal. A
+    # rollover that sealed the room while this waited moves the close to its successor's lock: the sealed room's
+    # lock is held here and cannot be taken again to finish its carry.
+    for _ in range(MAX_HOPS):
+        target = resolve(repo, literal, fresh=True)
+        with _rollover_lock(repo, target):
+            if resolve(repo, literal, fresh=True) == target:
+                append(repo, target, event, "Room closed")
+                return {"status": "closed"}
+    raise ValueError("room forwarding chain too long")
 
 
 def describe(repo, room, who, label):
@@ -1238,8 +1256,8 @@ def acknowledge(repo, room, who, mids):
         # Mail already consumed before a rollover was not carried; acknowledging it again is a no-op. Unread mail
         # the rollover left in the sealed log is acknowledged here; any other id is refused as usual.
         known = {m["id"] for m in state["messages"]}
-        settled = [mid for mid in mids if mid not in known
-                   and who in (_lineage_message(repo, state, mid) or {}).get("received_by", [])]
+        lineage = _lineage_messages(repo, state, set(mids) - known)
+        settled = [mid for mid in mids if who in lineage.get(mid, {}).get("received_by", [])]
         if settled:
             print("room: already consumed before rollover: " + ", ".join(settled[:8]), file=sys.stderr)
         mids = [mid for mid in mids if mid not in settled]
@@ -1248,13 +1266,18 @@ def acknowledge(repo, room, who, mids):
     append(repo, room, {"kind": "received", "participant": who, "messages": mids}, "Messages consumed")
 
 
-def _lineage_message(repo, state, mid):
-    """A message a rollover left in one of this room's sealed predecessors, as that log projects it."""
+def _lineage_messages(repo, state, mids):
+    """{id: message} for ids a rollover left in this room's sealed predecessors, nearest first as each log projects
+    them; each log is read once however many ids are asked, since a worker's acknowledgment names up to 200."""
+    wanted, found = set(mids), {}
     for earlier in _lineage(repo, state["id"]):
-        found = next((m for m in project(records(repo, earlier))["messages"] if m["id"] == mid), None)
-        if found:
-            return found
-    return None
+        if not wanted:
+            break
+        for m in project(records(repo, earlier))["messages"]:
+            if m["id"] in wanted:
+                found[m["id"]] = m
+                wanted.discard(m["id"])
+    return found
 
 
 def selected(repo, consumer=None, preferred=None, who=None):
