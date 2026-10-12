@@ -9245,7 +9245,7 @@ for line in structured_detail[structured_start:]:
 assert len(structured_preview) == 2 and "| size | issue |" in structured_preview[1] and structured_preview[1].endswith("..."), structured_preview
 # Main mail readers retain table/fence layout, read state and room isolation; empty cards offer no f action.
 mail_flow = deepcopy(done_flow)
-mail_body = "Summary\n\n| size | issue |\n|------|-------|\n| large | joined |\n\n```bash\n  oms panel | size\n\tprintf '\\n'\n```\nLAST MAIL LINE"
+mail_body = "\n  **Summary** snake__case `literal`  \nmodel-result: actual peer finding\n\n| size | issue |\n|------|-------|\n| large | joined |\n\n```bash\n  oms panel | size\n\tprintf '\\n'\n```\nLAST MAIL LINE\n\n"
 mail_flow["room"].update(closed=False, messages=[
     {"sender": "advisor", "targets": ["flow-main"], "ts": "2026-10-10T09:00:00Z", "text": "EARLIER MAIL"},
     {"sender": "advisor", "targets": ["flow-other"], "text": "PRIVATE OTHER MAIL"},
@@ -9253,12 +9253,18 @@ mail_flow["room"].update(closed=False, messages=[
      "ts": "2026-10-10T10:00:00Z", "text": mail_body}])
 mail_frozen = json.dumps(mail_flow, sort_keys=True)
 for surface in ("graph", "tree"):
-    for automatic in (False, True):
+    for automatic, managed in ((False, False), (False, True), (True, False), (True, True)):
         mail_nav = {"tab": "detail"} if automatic else {
             "tab": "detail", "preview": {"target": ("chat", "flow-main"), "report": {}}}
         mail_screen = render(mail_flow, "codex", 120, 44, view=surface, main_attempt="flow-attempt",
-                             navigation=mail_nav, managed=True, unicode=False)
-        assert mail_nav["full_mail"] == ("mail", "flow-main") and "f Open right" in mail_screen, mail_nav
+                             navigation=mail_nav, managed=managed, unicode=False)
+        assert mail_nav["full_mail"] == ("mail", "flow-main"), mail_nav
+        assert ("f Open right" if managed else "f Full text") in mail_screen, mail_screen
+        assert managed or "f Open right" not in mail_screen, mail_screen
+        assert mail_screen.splitlines()[-1].isascii(), mail_screen
+        help_nav = dict(mail_nav, keys_help=True, help_rows=8)
+        help_text = "\n".join(graph_text.footer_hints(help_nav, 120, managed, False, main, True))
+        assert ("f Open right" if managed else "f Full text") in help_text, help_text
         assert "LAST MAIL LINE" not in mail_screen and choose(("f",), mail_nav) == ("mail", "flow-main")
         assert choose(("f",), dict(mail_nav, tab_body_visible=False)) is None
         mail_nav["tab"] = "plan"
@@ -9271,8 +9277,10 @@ for surface in ("graph", "tree"):
     empty_screen = render(empty_mail, "codex", 120, 44, view=surface, navigation=mail_nav, managed=True, unicode=False)
     assert not mail_nav.get("full_mail") and "f Open right" not in empty_screen and choose(("f",), mail_nav) is None
 mail_page = panel.panel_messages.mail_page(mail_flow["room"], "flow-main", 120)
-readable_mail = panel.panel_messages.readable_text(mail_body)
+readable_mail = mail_body
 assert readable_mail in mail_page and "PRIVATE OTHER MAIL" not in mail_page, mail_page
+assert "snakecase" in panel.panel_messages.readable_text(mail_body)
+assert "model-result: actual peer finding" not in panel.panel_messages.readable_text(mail_body)
 assert "| size | issue |\n|------|-------|\n| large | joined |" in mail_page
 assert "```bash\n  oms panel | size\n\tprintf '\\n'\n```" in mail_page
 assert mail_page.index("EARLIER MAIL") < mail_page.index(readable_mail) and mail_page.count("From ") == 2
@@ -9283,13 +9291,15 @@ narrow_mail = panel.panel_messages.mail_page(long_mail["room"], "flow-main", 24)
 assert "RETAINED END" in narrow_mail and "↪" not in narrow_mail
 assert all(display_width(line) <= 24 for line in narrow_mail.splitlines()), narrow_mail
 hostile_mail = deepcopy(mail_flow)
-hostile_mail["room"]["messages"][-1]["text"] = "```bash\n  printf '\x1b[2J'\x00\n```\n\x1b[31mEND"
+hostile_mail["room"]["messages"][-1]["text"] = "```bash\n  printf '\x1b[2J'\x00\n```\n\x1b[31mEND\u202e\u200b\r\x07"
 inert_page = panel.panel_messages.mail_page(hostile_mail["room"], "flow-main", 120)
 assert "\x1b" not in inert_page and "\x00" not in inert_page and "```bash\n  printf '?[2J'?\n```" in inert_page, inert_page
+assert "?[31mEND????" in inert_page and not any(c in inert_page for c in "\u202e\u200b\r\x07"), inert_page
 with patch.object(panel, "repository", return_value=project), \
         patch.object(panel, "work_repository", return_value=project), \
         patch.object(panel, "native_repository", return_value=project), \
         patch.object(panel.room, "status", return_value=mail_flow["room"]), \
+        patch.object(panel.room, "messages", return_value=mail_flow["room"]["messages"]) as full_log, \
         patch.object(panel.room, "acknowledge", side_effect=AssertionError("reader acknowledged mail")), \
         patch.object(panel.room, "send", side_effect=AssertionError("reader wrote mail")), \
         patch.object(panel.shutil, "get_terminal_size", return_value=os.terminal_size((120, 44))), \
@@ -9301,7 +9311,51 @@ with patch.object(panel, "repository", return_value=project), \
     with patch.object(panel.sys.stdout, "isatty", return_value=True):
         assert panel.main(["--repo", str(project), "--room", "flow-room", "--mail", "flow-main"]) == 0
     paged.assert_called_once()
+    full_log.assert_called_once_with(project, "flow-room")
 assert json.dumps(mail_flow, sort_keys=True) == mail_frozen, "mail reader changed room state"
+# A note older than the status window remains available and both readers fetch its complete body.
+mail_records = [{"thread": "flow-room", "seq": 0, "room_event": {"kind": "created"}}]
+mail_records += [{"seq": i + 1, "room_event": dict(kind="join", participant=m["participant"],
+    provider=m.get("provider", "codex"), role=m["role"], label=m["label"], model=m.get("model", ""))}
+    for i, m in enumerate(mail_flow["room"]["participants"])]
+mail_start = len(mail_records)
+mail_records += [{"seq": mail_start, "text": "OLDER NOTE\n" + mail_body, "room_event": {
+    "kind": "message", "id": "old-mail", "sender": "advisor", "recipient": "flow-main", "message_kind": "note"}}]
+mail_records += [{"seq": mail_start + i + 1, "text": "New status", "room_event": {
+    "kind": "message", "id": "mail-status-%s" % i, "sender": "advisor", "recipient": "flow-other",
+    "message_kind": "status"}} for i in range(12)]
+with patch.object(panel.room, "records", return_value=mail_records), \
+        patch.object(panel.room, "acknowledge", side_effect=AssertionError("reader acknowledged old mail")), \
+        patch.object(panel.room, "send", side_effect=AssertionError("reader wrote old mail")):
+    old_flow = dict(mail_flow, room=panel.room.status(project, "flow-room"))
+    assert len(old_flow["room"]["messages"]) == 12
+    assert not panel.panel_messages.main_mail(old_flow["room"], "flow-main")
+    old_frozen = json.dumps(old_flow, sort_keys=True)
+    for projection in (old_flow, dict(old_flow, room=dict(old_flow["room"], pairs=[])),
+                       dict(old_flow, room=dict(old_flow["room"], pending_messages=[],
+                            pairs=[dict(p, pending=0) for p in old_flow["room"]["pairs"]]))):
+        old_nav = {"tab": "detail", "selected": ("chat", "flow-main")}
+        old_screen = render(projection, "codex", 157, 44, view="graph", main_attempt="flow-attempt",
+                            navigation=old_nav, unicode=False)
+        assert old_nav["full_mail"] == ("mail", "flow-main") and choose(("f",), old_nav) == ("mail", "flow-main")
+        assert "Tab Next tab" in old_screen.splitlines()[-1] and "q Quit" in old_screen.splitlines()[-1]
+    with patch.object(panel, "managed_session", return_value=False):
+        panel.navigate(project, ("mail", "flow-main"), old_flow, old_nav, 120)
+    assert "OLDER NOTE\n" + mail_body in old_nav["detail"]["text"], old_nav["detail"]
+    with patch.object(panel, "repository", return_value=project), \
+            patch.object(panel, "work_repository", return_value=project), \
+            patch.object(panel, "native_repository", return_value=project), \
+            patch.object(panel.shutil, "get_terminal_size", return_value=os.terminal_size((120, 44))), \
+            patch.dict(os.environ, {}, clear=True), patch.object(panel.sys, "stdout", io.StringIO()) as mail_stdout:
+        assert panel.main(["--repo", str(project), "--room", "flow-room", "--mail", "flow-main"]) == 0
+        assert "OLDER NOTE\n" + mail_body in mail_stdout.getvalue(), mail_stdout.getvalue()
+    assert json.dumps(old_flow, sort_keys=True) == old_frozen
+    bounded_log = panel.room.messages(project, "flow-room") + [
+        dict(old_flow["room"]["messages"][-1], text="Bounded status") for _ in range(panel.panel_messages.MAX_MESSAGES)]
+    with patch.object(panel.room, "messages", return_value=bounded_log):
+        assert panel.panel_messages.read(project, "flow-room") == bounded_log[-panel.panel_messages.MAX_MESSAGES:]
+        panel.navigate(project, ("mail", "flow-main"), old_flow, old_nav, 120)
+        assert "OLDER NOTE" not in old_nav["detail"]["text"]
 with patch.object(panel, "BackgroundRead", ImmediateRead), \
         patch.object(panel, "read_panel", return_value=(mail_flow, 0, "codex", "flow-attempt", "graph", False, "flow-room")), \
         patch.object(panel, "managed_session", return_value=True), \
@@ -10588,6 +10642,20 @@ for columns, rows in ((50, 18), (80, 40), (127, 40)):
     assert not fallback_nav["main_occupied"] and "[2] Pi" in fallback, fallback
     assert not any(key in fallback for key in ("[1]", "[0]", "1 Codex", "2 Claude")), fallback
 from room_view import footer_hints
+for columns in (36, 50, 80, 127, 157):
+    for managed in (False, True):
+        for glyphs in (False, True):
+            hint_nav = {"tab_strip_visible": True, "tab_body_visible": True, "tab": "detail",
+                        "selected": ("chat", "flow-main")}
+            base_footer = footer_hints(hint_nav, columns, managed, glyphs, None, True)[0]
+            hint_nav["full_mail"] = ("mail", "flow-main")
+            mail_footer = footer_hints(hint_nav, columns, managed, glyphs, None, True)[0]
+            assert display_width(mail_footer) <= columns and (glyphs or mail_footer.isascii()), mail_footer
+            assert "Tab Next tab" not in base_footer or "Tab Next tab" in mail_footer, (base_footer, mail_footer)
+            assert managed or "f Open right" not in mail_footer, mail_footer
+            if columns >= 127:
+                assert "Tab Next tab" in mail_footer and ("f Open right" if managed else "f Full text") in mail_footer
+                assert mail_footer.index("Tab Next tab") < mail_footer.index("f "), mail_footer
 for columns in (36, 50, 80, 127):
     help_rows = footer_hints({"keys_help": True, "main_occupied": True}, columns, True, True, None, False)
     assert "? Hide" in "\n".join(help_rows) and "n New main" not in "\n".join(help_rows), help_rows

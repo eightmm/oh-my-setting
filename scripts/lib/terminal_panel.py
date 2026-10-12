@@ -3602,6 +3602,7 @@ def navigate(repo, action, state, navigation, width):
         navigation["notice"] = "Chat navigation requested " + {"existing-terminal": "in its window", "app-uri": "in the app",
                                                                   "windows-uri": "in the app"}.get(opened["method"], "")
     elif kind == "mail":
+        current = dict(current, messages=panel_messages.read(repo, room_id))
         navigation["detail"] = {"title": "MESSAGES", "text": panel_messages.mail_page(current, ident, width)}
         navigation["offset"] = 0
     elif kind in {"result", "debate"}:
@@ -5272,6 +5273,7 @@ def main(argv=None):
                 if not any(m["participant"] == participant and m["role"] == "main" and m["joined"]
                            for m in state["participants"]):
                     raise ValueError("main left or its role changed; refresh before reading messages")
+                state = dict(state, messages=panel_messages.read(repo, args.room))
                 return panel_messages.mail_page(state, participant, width)
 
             board = os.environ.get(panel_reader.BOARD, "")

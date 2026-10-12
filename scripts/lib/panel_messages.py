@@ -1,7 +1,7 @@
 """Messages reader for the panel board: the room's message log, read-only.
 
-Message text is untrusted peer data: it passes through readable()/clean()/wrapped(), never raw, and
-reading never acknowledges (no room writes).
+Message text is untrusted peer data: terminal controls are made inert before display,
+and reading never acknowledges (no room writes).
 """
 
 import calendar
@@ -193,7 +193,7 @@ def main_mail(state, participant):
 
 
 def mail_page(state, participant, width):
-    """The selected main's addressed log, oldest first; keep sanitized block layout intact."""
+    """The selected main's addressed log, oldest first; only terminal controls and wrapping alter bodies."""
     from room_view import main_names, who
     from panel_view import _result_structured
     width = max(8, width)
@@ -204,7 +204,7 @@ def mail_page(state, participant, width):
     for message in main_mail(state, participant):
         sender = clean(names.get(message.get("sender"), message.get("sender")), 100) or "unknown"
         lines += ["", clipped("From %s / %s" % (sender, stamp(message.get("ts"))), width)]
-        for line in (readable_text(message.get("text")) or "(empty)").split("\n"):
+        for line in str(message.get("text") or "(empty)").split("\n"):
             lines.extend(_result_structured(line, width))
     return "\n".join(lines)
 

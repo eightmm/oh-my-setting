@@ -1586,7 +1586,12 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
         active = "detail"
     if active == "detail" and rows_high >= 3 and previewed and previewed.get("role") == "main":
         from panel_messages import main_mail
-        if main_mail(room, previewed["participant"]):
+        participant = previewed["participant"]
+        if (main_mail(room, participant)
+                or any(mapping(p).get("recipient") == participant
+                       and (mapping(p).get("sent") or mapping(p).get("pending")) for p in listing(room.get("pairs")))
+                or any(participant in listing(mapping(m).get("pending_for")) and not result_handoff(room, m)
+                       for m in listing(room.get("pending_messages")))):
             navigation["full_mail"] = ("mail", previewed["participant"])
     navigation["main_attempt"] = main_attempt
     claims = claims_by_main(report) if claims is None else claims
@@ -1836,13 +1841,14 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
     worktree = bool(member and kind == "result" and str(member.get("location") or "").startswith("worktree:"))
     mail = bool(navigation.get("full_mail") and navigation.get("tab", "detail") == "detail"
                 and navigation.get("tab_body_visible") and not navigation.get("detail"))
+    mail_hint = ("f Open right" if managed else "f Full text") if mail else ""
     message_call = tabs and navigation.get("tab") == "messages" and navigation.get("message_has_call")
     if navigation.get("keys_help"):
         keys = ["? Hide", "Esc Back", "F5 Control" if managed else "", "k Capacity", "u Refresh",
                 ("Enter Collapse" if navigation.get("messages_view", {}).get("open") is not None and navigation.get("messages_view", {}).get("open") == navigation.get("messages_view", {}).get("selected") else "Enter Expand") if tabs and navigation.get("tab") == "messages" else
                 "Enter Open right" if managed and kind in {"result", "debate"} else "Enter Open",
                 move + " Move", "Space Fold", "a Ask advisor",
-                "w Worktree" if worktree else "", "f Open right" if mail or message_call or managed and navigation.get("full_result") else
+                "w Worktree" if worktree else "", mail_hint if mail else "f Open right" if message_call or managed and navigation.get("full_result") else
                 "f Full result" if navigation.get("full_result") else "",
                 "Tab Next tab" if tabs else "", "g Graph", "t Tree",
                 "n New main" if managed and not navigation.get("main_occupied") else "",
@@ -1869,7 +1875,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                   else ["wheel Scroll", "Tab Next tab"] if tab == "plan" else None)
     contextual = contextual or (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + [
                   "Enter Open right" if right else "",
-                  "f Open right" if mail or managed and navigation.get("full_result") else "f Full result" if navigation.get("full_result") else "",
+                  "f Open right" if managed and navigation.get("full_result") else "f Full result" if navigation.get("full_result") else "",
                   "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
                   "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "" if right else "Enter Show",
                   "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
@@ -1885,6 +1891,8 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
         for hint in [h for h in contextual if h]:
             if len(packed) < 3 and display_width("  ".join(packed + [hint] + reserved)) <= width:
                 packed.append(hint)
+        if mail_hint and display_width("  ".join(packed + [mail_hint] + reserved)) <= width:
+            packed.append(mail_hint)
         return packed
 
     reserved = [toggle, "F12 Keys"] if managed and width >= 64 else ["F9", "F12 Keys"] if managed else ["q Quit", "? Keys"]
