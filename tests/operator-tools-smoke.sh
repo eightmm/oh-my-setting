@@ -9530,7 +9530,7 @@ with tempfile.TemporaryDirectory() as slug_root:
             [c.args[0] for c in adopted.call_args_list]
 # Context used rides on the shown main's card in three bands; only the proven main carries it.
 claude_main = next(m for m in flow["room"]["participants"] if m.get("role") == "main" and m.get("provider") == "claude")["participant"]
-for left, words in ((50, "ctx 50% used"), (78, "ctx 22% used"), (10, "ctx 90% used · compact soon")):
+for left, words in ((42, "ctx 58% used"), (22, "ctx 78% used"), (12, "ctx 88% used · compact soon")):
     metered = dict(flow, provider_status={"claude": {"participant": claude_main, "context_left": left}})
     picture = render(metered, "codex", 110, 30, view="graph", navigation={"selected": ("chat", claude_main)})
     # The usage row already says "ctx N% used"; the card is the second place.
