@@ -152,27 +152,6 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     if unlinked:
         add("Calls with no known main", "alert")
         call_groups(unlinked, "unlinked", "")
-    if len(mains) == 1:
-        grouped_rows = [(i, row) for i, row in enumerate(rows) if row.get("action") and
-                        row["action"][0] == "group" and row["action"][1][1] == mains[0]["participant"]]
-        if len(grouped_rows) == 2:
-            span = max(1, (content_width - 3) // 2)
-            labels, targets, column = [], [], 1
-            for unused, row in grouped_rows:
-                kind, owner = row["action"][1]
-                mark = ("▾" if (kind, owner) in expanded else "▸") if unicode else ("v" if (kind, owner) in expanded else ">")
-                children = [c for c in calls if classify(c) == kind and
-                            c.get("parent") in {owner, mains[0].get("attempt")}]
-                unknown = sum(c["state"] == "presence unknown" for c in children)
-                label = clipped("%s %s (%s)%s" % (mark, dict(CALL_GROUPS)[kind], len(children),
-                    " / %s earlier unknown" % unknown if unknown else ""), span)
-                labels.append(label)
-                targets.append((column, column + display_width(label) - 1, row["action"]))
-                column += display_width(label) + 3
-            first, row = grouped_rows[0]
-            rows[first] = dict(row, text=sep.join(labels), targets=targets,
-                              action=selected if selected in [target[2] for target in targets] else row["action"])
-            del rows[grouped_rows[1][0]]
     if not mains and not calls:
         add("No main connected" if room.get("id") else "Select a work room", "dim")
         if menu and not navigation["main_occupied"]:
@@ -271,7 +250,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         activity_floor = min(activity_floor, 3 + int(bool(tasks)))
     activity_floor += 2 if boxed else 0
     dock_rows = (14 if budget - len(head) >= 14 + activity_floor else int(budget > len(head))) if width >= 20 else 0
-    if dock_rows == 1 and navigation.get("preview") and budget - len(head) - activity_floor >= 3:
+    if dock_rows == 1 and (navigation.get("preview") or navigation.get("tab") == "past") and budget - len(head) - activity_floor >= 3:
         dock_rows = min(14, budget - len(head) - activity_floor)
     navigation.update(tab_strip_visible=bool(dock_rows), tab_body_visible=dock_rows >= 3)
     activity_head = boxed and budget - len(head) - dock_rows >= 2
@@ -324,20 +303,11 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         body = body[:-1]
     else:
         task_tail = []
-    past_group = ("group", ("past", "unlinked"))
-    if task_tail and len(task_tail) < room_budget:
-        group_row = next((row for row in body if row.get("action") == past_group or any(
-            target == past_group for unused, unused_end, target in row.get("targets", []))), None)
-        if group_row is not None:
-            body.remove(group_row)
-            task_tail.insert(0, group_row)
     body_budget = max(0, room_budget - len(task_tail))
     positions = {}
     for index, row in enumerate(body):
         if row.get("action"):
             positions.setdefault(row["action"], index)
-        for unused, unused_end, target in row.get("targets", []):
-            positions.setdefault(target, index)
     for index, row in enumerate(task_tail):
         if row.get("action"):
             positions.setdefault(row["action"], len(body) + index)
@@ -349,11 +319,6 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     elif scroll_row:
         body_budget -= 1
     offset = min(max(0, navigation.get("offset", 0)), max(0, len(body) - body_budget))
-    if selected is None and not current and not navigation.get("offset") and body_budget:
-        past_position = positions.get(("group", ("past", "unlinked")))
-        if (past_position is not None and past_position < len(body)
-                and past_position >= body_budget):
-            offset = past_position - body_budget + 1
     geometry = (width, height, menu, summary)
     if body_budget and selected in positions and positions[selected] < len(body) and (
             navigation.get("tree_selected") != selected or navigation.get("geometry") != geometry or
@@ -384,11 +349,6 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     if boxed:
         shown.append({"text": box_edge("", width, unicode, "bottom"), "style": "main"})
     output, hits = [], []
-    if task_tail and past_group in unique:
-        unique.remove(past_group)
-        task_action = next((row.get("action") for row in task_tail if row.get("action") and
-                            row["action"][0] == "task"), None)
-        unique.insert(unique.index(task_action), past_group) if task_action in unique else unique.append(past_group)
     previous_action = None
     for y, row in enumerate(shown):
         value = row["text"]
@@ -405,11 +365,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         elif color and style:
             value = PALETTE[style] + value + "\033[0m"
         output.append(value)
-        if row.get("targets"):
-            inset = 2 if inner else 0
-            hits += [{"y": y + 1, "x1": x1 + inset, "x2": x2 + inset, "action": target}
-                     for x1, x2, target in row["targets"]]
-        elif row.get("action"):
+        if row.get("action"):
             hits.append({"y": y + 1, "x1": 1, "x2": width, "action": row["action"], "fold": row.get("fold", False)})
     output += [""] * max(0, budget - dock_rows - len(output))
     dock_top = len(output)

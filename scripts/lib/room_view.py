@@ -73,6 +73,14 @@ def nodes(report):
             earlier = rounds.setdefault((member["parent"], member["task_id"]), [])
             member.update(round=len(earlier) + 1, continues=earlier[-1] if earlier else None)
             earlier.append(member["participant"])
+    # A later call of the same role on the same task supersedes an earlier failure; it is no longer attention.
+    latest = {}
+    for member in sorted(output, key=lambda m: m.get("seq", 0)):
+        if member.get("role") != "main" and member.get("task_id"):
+            key = (member.get("role"), member["task_id"])
+            if key in latest:
+                latest[key]["superseded"] = True
+            latest[key] = member
     rank = lambda member: (0 if member["state"] in LIVE_STATES else 2 if member["state"] in {"done", "cancelled"} else 1, -member.get("seq", 0))
     return sorted(output, key=rank)
 
@@ -196,12 +204,21 @@ def handled_results(room):
                    if mapping(r).get("read") is True}
 
 
-def failure_handled(report, call, read_results=None):
-    """Only consumed result handoffs or an owner's accepted/completed task decision settle failures."""
+def closed_tasks(report):
+    """Task ids the plan records done or cancelled, or whose owner completed or accepted them."""
+    plan = {t.get("id") for t in map(mapping, listing(mapping(report.get("plan")).get("tasks")))
+            if t.get("state") in {"done", "cancelled"}}
+    return {ident for ident in plan if ident} | {ident for ident, outcome in mapping(report.get("finalized")).items()
+                                                  if outcome in {"completed", "accepted"}}
+
+
+def failure_handled(report, call, read_results=None, closed=None):
+    """A consumed result handoff, a later round of its task, or the task's close settles a failure."""
     read_results = handled_results(mapping(report.get("room"))) if read_results is None else read_results
+    closed = closed_tasks(report) if closed is None else closed
     return (call["state"] in ATTENTION_STATES - {"waiting_input", "waiting_approval", "review", "blocked"}
-            and ("result-" + str(call.get("participant")) in read_results
-                 or mapping(report.get("finalized")).get(call.get("task_id")) in {"completed", "accepted"}))
+            and ("result-" + str(call.get("participant")) in read_results or call.get("superseded") is True
+                 or bool(call.get("task_id")) and call.get("task_id") in closed))
 
 
 def settler(report):
@@ -209,6 +226,7 @@ def settler(report):
     room = mapping(report.get("room"))
     read_results = handled_results(room)
     finalized = mapping(report.get("finalized"))
+    closed = closed_tasks(report)
     attempts_seen = mapping(report.get("attempts"))
     # Only complete active evidence permits hiding an old unknown; it does not prove completion.
     complete = attempts_seen.get("available") is True and valid_count(attempts_seen.get("active")) is not None and (
@@ -221,9 +239,9 @@ def settler(report):
     def settled(call):
         # Finished or aged-out calls, and failed ones whose result its main has read or finalized, leave the board.
         # A review or a block ends only with the owner's recorded decision on the task, never by reading a result.
-        closed = finalized.get(call.get("task_id")) in {"completed", "accepted"}
+        decided = finalized.get(call.get("task_id")) in {"completed", "accepted"}
         return (call["state"] in FINISHED or call["state"] == "presence unknown" and aged(call)
-                or failure_handled(report, call, read_results) or call["state"] in {"review", "blocked"} and closed)
+                or failure_handled(report, call, read_results, closed) or call["state"] in {"review", "blocked"} and decided)
     return settled, aged
 
 
@@ -241,7 +259,8 @@ def call_classifier(report):
     return classify
 
 
-CALL_GROUPS = (("review", "Needs review"), ("past", "Past work"))
+# Settled ("past") calls leave the board for the dock's Past tab; only review stays a board group.
+CALL_GROUPS = (("review", "Needs review"),)
 
 
 def call_order(call):
@@ -304,7 +323,7 @@ JUDGE_LINGER = 1800  # panel_chats.ADVISOR_MAX_AGE: the built-in advisor's answe
 
 
 def lingering(call):
-    """An answered advisor, reviewer or debate stays above its main for half an hour before Past work."""
+    """An answered advisor, reviewer or debate stays above its main for half an hour before the Past tab."""
     if call.get("role") not in {"advisor", "reviewer", "council"} or call["state"] != "done":
         return False
     if str(call.get("participant", "")).startswith("native-advisor-"):
@@ -348,8 +367,33 @@ def plan_idle(report):
     return valid_count(mapping(report.get("plan")).get("idle_days"))
 
 
+def held_split(report, members=None):
+    """(awaiting, ended) ids of running plan tasks whose recorded calls all stopped.
+
+    Every call terminal: ended. Otherwise each open call waits in review, blocked or admission: awaiting.
+    A task with no call evidence, a live or an unknown call stays claimed; a claim never proves a process."""
+    admission = set(listing(report.get("awaiting_admission")))
+    calls = {}
+    for m in nodes(report) if members is None else members:
+        if m.get("role") != "main" and m.get("task_id"):
+            state = "review" if m.get("state") == "done" and m.get("participant") in admission else m.get("state")
+            calls.setdefault(m["task_id"], []).append(state)
+    awaiting, ended = set(), set()
+    for task in map(mapping, listing(mapping(report.get("plan")).get("tasks"))):
+        states = calls.get(task.get("id"))
+        if task.get("state") != "running" or not states:
+            continue
+        if all(state in TERMINAL_STATES for state in states):
+            ended.add(task["id"])
+        elif all(state in TERMINAL_STATES | {"review", "blocked"} for state in states):
+            awaiting.add(task["id"])
+    return awaiting, ended
+
+
 def plan_summary(report):
-    """(goal, verified, total, review, claimed) of the active plan; None when there is no goal or it idled a week."""
+    """(goal, verified, total, review, claimed, stale) of the active plan; None when there is no goal or it idled a week.
+
+    Cancelled tasks are closed, never verified, so they leave the total; stale holds have no live call."""
     plan = mapping(report.get("plan"))
     goal = clean(plan.get("goal"), 200)
     if not plan.get("present") or not goal or (plan_idle(report) or 0) >= 7:
@@ -357,8 +401,13 @@ def plan_summary(report):
     by_state = mapping(plan.get("by_state"))
     number = lambda *names: sum(valid_count(by_state.get(name)) or 0 for name in names)
     total = valid_count(plan.get("task_count"))
-    return (goal, number("done"), total if total is not None else sum(valid_count(v) or 0 for v in by_state.values()),
-            number("review", "landing"), number("claimed", "running"))
+    total = total if total is not None else sum(valid_count(v) or 0 for v in by_state.values())
+    awaiting, ended = held_split(report)
+    stale_claims, stale_reviews = (valid_count(plan.get(key)) or 0 for key in ("stale_claims", "stale_reviews"))
+    return (goal, number("done"), max(0, total - number("cancelled")),
+            max(0, number("review", "landing") - stale_reviews) + len(awaiting),
+            max(0, number("claimed", "running") - stale_claims - len(awaiting) - len(ended)),
+            stale_claims + stale_reviews + len(ended))
 
 
 def goal_banner(report, width, unicode, compact=False):
@@ -386,7 +435,7 @@ def goal_box(report, width, unicode, compact):
     sep = " · " if unicode else " / "
     if summary is None:
         return [(one_row("GOAL" + sep + "none" + sep + "oms agent-plan init --goal TEXT", width), "dim")]
-    goal, done, total, review, claimed = summary
+    goal, done, total, review, claimed, stale = summary
     filled = min(10, 10 * done // total) if total else 0
     bar = ("▕" + "█" * filled + "░" * (10 - filled) + "▏") if unicode else "[" + "#" * filled + "." * (10 - filled) + "]"
     counts = "%s/%s verified" % (done, total)
@@ -395,9 +444,10 @@ def goal_box(report, width, unicode, compact):
     if locally_done:
         counts += sep + "%s locally completed" % locally_done
     # A claim is not proof of running work, and work waiting for review is progress: review outlives the bar.
-    reviewing = sep + "%s review" % review if review else ""
-    options = [bar + " " + counts + reviewing + sep + "%s claimed" % claimed, bar + " " + counts + reviewing,
-               counts + reviewing, "%s/%s%s" % (done, total, reviewing), "%s/%s" % (done, total)]
+    reviewing, claiming, staling = (sep + "%s %s" % (n, word) if n else "" for n, word in
+                                    ((review, "review"), (claimed, "claimed"), (stale, "stale")))
+    options = [bar + " " + counts + reviewing + claiming + staling, bar + " " + counts + reviewing + claiming,
+               bar + " " + counts + reviewing, counts + reviewing, "%s/%s%s" % (done, total, reviewing), "%s/%s" % (done, total)]
     inner = max(1, width - 4)
     if compact:
         prefix = "GOAL  "
@@ -409,8 +459,14 @@ def goal_box(report, width, unicode, compact):
     right = next((o for o in options if width - len(left) - display_width(o) - 6 >= 2), None)
     if right:
         top = left + bar_char * (width - len(left) - display_width(right) - 2 - len(closing)) + " " + right + " " + closing
+    note, command = "%s stale, not counted: no live worker" % stale, "oms agent-plan release --id ID"
+    # Narrow boxes wrap the note and the release command apart, so the command is never clipped.
+    note = [] if not stale else [note + sep + "release with " + command] \
+        if display_width(note + sep + "release with " + command) <= inner else \
+        wrapped(note, inner, 2) + wrapped(next((text for text in ("release: " + command, command)
+                                               if display_width(text) <= inner), command), inner, 2)
     return [(top, "head")] + [(box_row(line, width, unicode), "head") for line in wrapped(goal, inner, 2)] \
-        + [(box_edge("", width, unicode, "bottom"), "head")]
+        + [(box_row(line, width, unicode), "dim") for line in note] + [(box_edge("", width, unicode, "bottom"), "head")]
 
 
 def claims_by_main(report):
@@ -607,6 +663,8 @@ def team_counts(calls, classify=None):
         state = call.get("state")
         if state == "done" and classify and classify(call) == "review":
             bucket = "await admission"
+        elif state in ATTENTION_STATES and classify and classify(call) == "past":
+            bucket = "finished"  # handled, superseded by a later round, or its task closed
         elif state in ATTENTION_STATES:
             bucket = "attention"
         elif state in LIVE_STATES:
@@ -649,10 +707,11 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         unread = sum(valid_count(mapping(p).get("pending")) or 0 for p in listing(room.get("pairs"))
                      if mapping(p).get("recipient") == member["participant"])
         calls = sorted((everyone or teams or {}).get(member["participant"], []), key=call_order)
-        attention = [c for c in calls if c["state"] in ATTENTION_STATES or
+        attention = [c for c in calls if c["state"] in ATTENTION_STATES and classify(c) != "past" or
                      c["state"] == "done" and classify(c) == "review"]
         active = [c for c in calls if c["state"] in LIVE_STATES and c not in attention]
-        finished = sorted((c for c in calls if c["state"] in FINISHED and c not in attention),
+        finished = sorted((c for c in calls if c not in attention and (
+                              c["state"] in FINISHED or c["state"] in ATTENTION_STATES and classify(c) == "past")),
                           key=lambda c: (str(c.get("ended") or c.get("joined_at") or ""), c.get("seq", 0)), reverse=True)
         unknown = [c for c in calls if c not in attention + active + finished]
         lines.append("Team: " + (" · ".join(team_counts(calls, classify)) or "no calls yet"))
@@ -678,7 +737,7 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         team_rows("No record", unknown)
         team_rows("Finished", finished[:5])
         if len(finished) > 5:
-            lines.append("%s earlier finished · see Past work" % (len(finished) - 5))
+            lines.append("%s earlier finished · see the Past tab" % (len(finished) - 5))
         lines.append("Messages to %s: %s%s" % (who(member, labels), len(inbox), " (%s unread)" % unread if unread else ""))
         for m in inbox[-3:]:
             text = "From %s: %s" % (names.get(m.get("sender"), clean(m.get("sender"))),
@@ -853,7 +912,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                     worker_start = index // 3 * 3
     shown_judges, shown_workers = judges[judge_start:judge_start + 3], workers[worker_start:worker_start + 3]
     preview = mapping(navigation.get("preview"))
-    previewed = next((m for m in mains + [c for calls in everyone.values() for c in calls]
+    previewed = next((m for m in mains + [c for calls in everyone.values() for c in calls] + unlinked
                       if action(m) == preview.get("target")), None)
     navigation.pop("full_result", None)
     if previewed and previewed.get("role") != "main" and not previewed.get("_native"):
@@ -907,12 +966,21 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         return labels.get(m["participant"]) or model_name(m)
 
     claims = claims_by_main(report)
+    awaiting_tasks, ended_tasks = held_split(report, members)
 
     def claim_line(m):
         held = claims.get(m["participant"], [])
         if not held:
             return ""
-        return "Task: %s · %s" % (held[0].get("id"), held[0].get("state")) + (" · +%s more running" % (len(held) - 1) if len(held) > 1 else "")
+        # A task whose calls all ended is not running work; one whose calls wait in review is counted apart.
+        current = [t for t in held if t.get("id") not in awaiting_tasks | ended_tasks]
+        lead = (current or held)[0]
+        word = "awaiting review" if lead.get("id") in awaiting_tasks else "worker ended" \
+            if lead.get("id") in ended_tasks else lead.get("state")
+        waiting = sum(t.get("id") in awaiting_tasks and t is not lead for t in held)
+        return "Task: %s · %s" % (lead.get("id"), word) + (
+            " · +%s more running" % (len(current) - 1) if len(current) > 1 else "") + (
+            " · %s awaiting review" % waiting if waiting else "")
 
     def declared_of(m):
         # The card already labels it "Now:"; a status written as "Now: ..." would read twice.
@@ -1291,11 +1359,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if omitted or unlinked:
         parts = ["%s more calls (scroll)" % omitted] if omitted else []
         open_unlinked = [m for m in unlinked if classify(m) != "past"]
-        if unlinked:
+        if open_unlinked:
+            # Settled ones are listed in the Past tab; only open calls need the tree.
             parts.append("%s call%s with no known main%s · t shows them" % (
                 len(open_unlinked), "" if len(open_unlinked) == 1 else "s",
                 " (+%s past)" % (len(unlinked) - len(open_unlinked)) if len(open_unlinked) < len(unlinked) else ""))
-        if len(lines) < total_rows - dock:
+        if parts and len(lines) < total_rows - dock:
             # The warning sits on the row just above the box, so it holds still as the upper region changes.
             lines.extend([""] * max(0, total_rows - dock - 1 - len(lines)) * bool(dock))
             add(" / ".join(parts), "alert" if open_unlinked else "dim")
@@ -1433,6 +1502,7 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     navigation["main_attempt"] = main_attempt
     claims = claims_by_main(report) if claims is None else claims
     classify = call_classifier(report) if classify is None else classify
+    past = past_calls(members, everyone, classify)
     body, targets = detail(previewed, preview, width - 4, members, room, teams, everyone, labels,
                            claims=claims, classify=classify) if previewed else (
         ["No call selected · click a main or a call to see it here"], {})
@@ -1444,15 +1514,15 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     if active == "debate":
         seen[shown_main] = digest
     marks = {"debate": (" •" if unicode else " *") if digest and seen.get(shown_main) != digest else "",
-             "messages": " %s unread" % unread_total if unread_total else ""}
-    tabs = [entry for entry in TABS if entry[0] != "needs" or attention]
+             "messages": " %s unread" % unread_total if unread_total else "", "past": " %s" % len(past)}
+    tabs = [entry for entry in TABS if (entry[0] != "needs" or attention) and (entry[0] != "past" or past)]
     if active not in dict(tabs):
         active = "detail"
     navigation["visible_tabs"] = [key for key, unused in tabs]
-    abbreviations = {"detail": "Dtl", "plan": "Plan", "debate": "Dbt", "messages": "Msg", "needs": "Needs"}
+    abbreviations = {"detail": "Dtl", "plan": "Plan", "debate": "Dbt", "messages": "Msg", "past": "Past", "needs": "Needs"}
     for short in (0, 1, 2):
         gap = " " if short == 2 else "  "
-        tiny = {"detail": "D", "plan": "P", "debate": "B", "messages": "M", "needs": "N"}
+        tiny = {"detail": "D", "plan": "P", "debate": "B", "messages": "M", "past": "H", "needs": "N"}
         texts = [(("[%s]" if short == 2 else "[ %s ]") if key == active else "%s") % (
             (name if short == 0 else abbreviations[key] if short == 1 else tiny[key]) +
             (marks.get(key, "") if short == 0 else " %s" % unread_total if key == "messages" and unread_total else ""))
@@ -1508,6 +1578,8 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                     rows[0] = ("%s rows hidden / wheel | %s" % (len(plan) - page_size, rows[0][0]), None, False)
         elif active == "debate":
             rows = debate_body(report, shown_main, width - 4, capacity, navigation, labels, unicode)
+        elif active == "past":
+            rows = past_body(past, width - 4, capacity, navigation, labels, unicode)
         elif active == "needs":
             from panel_view import needs_strip
             needed_rows = needs_strip(report, width - 4, unicode, limit=len(attention))
@@ -1528,7 +1600,8 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
             if target:
                 # Body text without its own link is passive, so a click that selects text changes nothing.
                 hits.append({"y": top + 1 + n, "x1": 1, "x2": width, "action": target,
-                             **({"preview": True, "passive": n in plain} if active == "detail" else {})})
+                             **({"preview": True, "passive": n in plain} if active == "detail" else
+                                {"past": True} if active == "past" else {})})
         lines.extend([box_row("", width, unicode)] * (rows_high - 2 - capacity))
         lines.append(paint(box_edge("", width, unicode, "bottom"), style))
         navigation["box"] = {"y1": top, "y2": top + rows_high - 1, "pages": bool(previewed) or active == "plan"}
@@ -1538,7 +1611,82 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     return lines, hits
 
 
-TABS = (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"), ("needs", "Needs you"))
+TABS = (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"), ("past", "Past"),
+        ("needs", "Needs you"))
+
+
+def past_calls(members, everyone, classify):
+    """Settled calls of every main and of calls with no known main, newest first; the board shows none of them."""
+    owners = {key for m in members if m.get("role") == "main" for key in (m["participant"], m.get("attempt")) if key}
+    pool = [c for calls in everyone.values() for c in calls]
+    pool += [m for m in members if m.get("role") != "main" and m.get("parent") not in owners]
+    unique = {action(c): c for c in pool if classify(c) == "past"}
+    return sorted(unique.values(), key=lambda c: (str(c.get("ended") or c.get("joined_at") or ""), c.get("seq", 0)),
+                  reverse=True)
+
+
+def past_body(past, width, capacity, navigation, labels, unicode):
+    """One row per past call: who, its task, how it ended and when; selecting one shows it in Detail."""
+    sep = " · " if unicode else " / "
+    ids = [action(c) for c in past]
+    navigation["past_ids"] = ids
+    view = navigation.setdefault("past_view", {})
+    header = capacity >= 3
+    page = max(1, capacity - int(header))
+    first = min(max(0, view.get("scroll", 0)), max(0, len(ids) - page))
+    selected = navigation.get("selected")
+    if view.pop("reveal", False) and selected in ids:
+        at = ids.index(selected)
+        first = at if at < first else max(first, at - page + 1)
+    view.update(scroll=first, page=page)
+    rows = [("%s past call%s, newest first%sEnter shows one in Detail" % (len(ids), "" if len(ids) == 1 else "s", sep),
+             None, False)] if header else []
+    for call in past[first:first + page]:
+        who = labels.get(call.get("participant")) or "%s %s" % (ROLES.get(call.get("role"), "Worker"), model_name(call))
+        end = clock_stamp(call["ended"]) if call.get("ended") else call.get("_finished") or ""
+        tail = sep.join(part for part in (end_words(call, said(call["state"])), end) if part)
+        space = width - display_width(who + sep + sep + tail)
+        title = clean(call.get("title")) or "no task title"
+        text = sep.join([who] + ([fit(title, space)] if space >= 6 else []) + [tail])
+        rows.append((clipped(text, width), action(call), action(call) == selected))
+    return rows
+
+
+def past_event(event, navigation):
+    """Past-tab keys: arrows pick a call, Enter or a click shows it in Detail, f opens it on the right."""
+    ids, kind, selected = navigation.get("past_ids", []), event[0], navigation.get("selected")
+    view = navigation.setdefault("past_view", {})
+    if kind in {"up", "down", "home", "end"}:
+        if ids:
+            at = ids.index(selected) if selected in ids else (-1 if kind == "down" else len(ids))
+            at = 0 if kind == "home" else len(ids) - 1 if kind == "end" else \
+                min(len(ids) - 1, max(0, at + (1 if kind == "down" else -1)))
+            navigation["selected"] = ids[at]
+            view["reveal"] = True
+        return True
+    if kind in {"scroll", "pageup", "pagedown"}:
+        step = max(1, view.get("page", 1))
+        view["scroll"] = max(0, view.get("scroll", 0) + (event[1] if kind == "scroll" else
+                                                          -step if kind == "pageup" else step))
+        return True
+    if kind == "click":
+        hit = next((h for h in navigation.get("hits", []) if h.get("past") and h["y"] == event[2]
+                    and h["x1"] <= event[1] <= h["x2"]), None)
+        if hit is None:
+            return False
+        target = hit["action"]
+    elif kind in {"enter", "f"} and selected in ids:
+        target = selected
+    else:
+        return False
+    # The call reads exactly as a board card does: Detail shows it and f opens its full result on the right.
+    navigation.update(selected=target, preview={"target": target}, tab="detail")
+    navigation.pop("dismissed", None)
+    if kind == "f":
+        navigation["open_call"] = target
+    return True
+
+
 PLAN_ORDER = {"done": 0, "cancelled": 1, "review": 2, "landing": 2, "running": 3, "claimed": 3, "ready": 4, "blocked": 5}
 
 
@@ -1548,9 +1696,12 @@ def plan_rows(report, labels, width, unicode):
     glyphs = (dict(done="✓", cancelled="×", review="◐", landing="◐", running="●", claimed="●", ready="○", blocked="✗") if unicode else
               dict(done="+", cancelled="x", review="~", landing="~", running="*", claimed="*", ready="o", blocked="x"))
     rows = []
+    awaiting, ended = held_split(report)
     for t in sorted((mapping(t) for t in tasks), key=lambda t: PLAN_ORDER.get(t.get("state"), 5)):
         by = t.get("claimed_by_participant")
         word = clean(t.get("state"), 20) or "unknown"
+        if t.get("state") == "running" and t.get("id") in ended | awaiting:
+            word += " (worker ended)" if t["id"] in ended else " (awaiting review)"
         if word == "done":
             kind = t.get("completion_kind")
             if kind == "research-accepted":
@@ -1616,6 +1767,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                   else [move + " Message", "Enter Expand", arrows + " Filter"] if tab == "messages"
                   else [move + " Seat", "Enter Open right" if managed else "Enter Open", arrows + " Target"] if tab == "debate" and not navigation.get("debate_empty")
                   else ["Tab Next tab"] if tab == "debate"
+                  else [move + " Call", "Enter Detail", "f Open right" if managed else "f Full result"] if tab == "past"
                   else ["wheel Scroll", "Tab Next tab"] if tab == "plan" else None)
     contextual = contextual or (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + [
                   "Enter Open right" if right else "",

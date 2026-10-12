@@ -376,7 +376,7 @@ def age_label(stamp, now=None):
 
 def inbox_items(report, unicode=True):
     """What the person must act on, newest first: failures, waits, broadcasts from mains, patches to admit."""
-    from room_view import failure_handled, handled_results, main_names, main_state, nodes, readable
+    from room_view import closed_tasks, failure_handled, handled_results, main_names, main_state, nodes, readable
     members = nodes(report)
     titles = main_names(members)
     name = lambda m: MODEL_NAMES.get(m.get("model"), m.get("model")) or m.get("provider") or "unknown"
@@ -386,7 +386,7 @@ def inbox_items(report, unicode=True):
     stamps = {row.get("attempt_id"): row.get("updated_at") for key in ("recent", "active_recent")
               for row in listing(attempts.get(key))}
     finalized, awaiting = mapping(report.get("finalized")), set(listing(report.get("awaiting_admission")))
-    read_results = handled_results(mapping(report.get("room")))
+    read_results, closed = handled_results(mapping(report.get("room"))), closed_tasks(report)
 
     def who(member):
         if member.get("role") == "main":
@@ -397,7 +397,7 @@ def inbox_items(report, unicode=True):
     items = []
     for member in members:
         state = main_state(member) if member.get("role") == "main" else member["state"]
-        if state in FAILED_WORDS and not failure_handled(report, member, read_results):
+        if state in FAILED_WORDS and not failure_handled(report, member, read_results, closed):
             what, shown, style = FAILED_WORDS[state], state, "bad"
         elif state in WAITING_WORDS:
             what, shown, style = WAITING_WORDS[state], state, "alert"

@@ -899,9 +899,10 @@ def plan_file(tasks):
     (plan_dir / "tasks.json").write_text(json.dumps({"goal": "Ship the shared plan board " * 5, "tasks": {
         t["id"]: dict(t, title=t.get("title", t["id"]), created=stamp, updated=stamp) for t in tasks}}))
 plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "ready", "depends": ["t1"], "title": "Wire banner"},
-           {"id": "t3", "state": "ready", "depends": ["t9"]}])
+           {"id": "t3", "state": "ready", "depends": ["t9"]}, {"id": "t4", "state": "cancelled"}])
 free = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
-assert "[oms plan] Goal: Ship the shared plan board" in free and "1 of 3 verified" in free, free
+# Cancelled work is closed, never verified: it leaves the total as on the panel goal banner.
+assert "[oms plan] Goal: Ship the shared plan board" in free and "1 of 3 verified · 1 cancelled" in free, free
 assert "yours:" not in free and "next ready: t2 Wire banner → oms agent-plan claim --id t2 --provider claude" in free, free
 assert "claim the next ready task before starting new work" in free and "t3" not in free.split("next ready:")[1], free
 assert len(free.split("[oms plan]")[1].split("set your status")[0]) < 420 and "\n" not in free, free

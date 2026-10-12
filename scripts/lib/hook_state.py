@@ -1533,7 +1533,8 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
     ready = next((t for t in sorted(tasks, key=lambda t: str(t.get("created", "")))
                   if t.get("state") == "ready" and all(d in done for d in t.get("depends") or [])), None)
     cancelled = sum(1 for task in tasks if task.get("state") == "cancelled")
-    progress = "%d of %d verified" % (len(done), len(tasks))
+    # Cancelled tasks are closed, never verified: the panel goal banner leaves them out of the total too.
+    progress = "%d of %d verified" % (len(done), len(tasks) - cancelled)
     if cancelled:
         progress += " · %d cancelled" % cancelled
     parts = ["Goal: %s" % goal if goal else "Goal: (none recorded)", progress]
