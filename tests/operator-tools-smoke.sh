@@ -886,6 +886,7 @@ grep -Fq 'persisted trace context' "$TMP/bad-trace.out" ||
 # Reuse this operator suite for the new front end. Providers are protocol
 # fixtures; the real consult/delegate/review and artifact writers run below.
 PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/scripts/lib" "$TMP" <<'PY' || fail "shared panel cache regression"
+import inspect
 import io
 import json
 import os
