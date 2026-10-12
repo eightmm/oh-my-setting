@@ -494,7 +494,7 @@ EOF
 
   local signal_suite="$TMP/signal-smoke.sh"
   local signal_tmp="$TMP/signal-tmp"
-  local leader child fast status=0
+  local leader child fast linger linger_state="" status=0
   mkdir -p "$signal_tmp"
   cat > "$signal_suite" <<'EOF'
 test_slow_one() {
@@ -514,10 +514,15 @@ test_slow_two() {
 test_fast() {
   echo "$PPID" > "$OMS_TEST_FAST_FILE"
 }
+test_lingering() {
+  sleep 30 &
+  echo "$!" > "$OMS_TEST_LINGER_FILE"
+}
 # SMOKE_TEST_CALLS_BEGIN
 test_slow_one
 test_slow_two
 test_fast
+test_lingering
 # SMOKE_TEST_CALLS_END
 echo done
 EOF
@@ -526,11 +531,11 @@ EOF
   printf '%s\n' 'kill() { printf "%s %s\n" "$$" "$*" >> "$OMS_TEST_KILL_LOG"; builtin kill "$@"; }' \
     > "$signal_tmp/kill-log.bash"
   TMPDIR="$signal_tmp" OMS_TEST_PID_FILE="$signal_tmp/pids" OMS_TEST_FAST_FILE="$signal_tmp/fast" \
-    OMS_TEST_KILL_LOG="$signal_tmp/kills" BASH_ENV="$signal_tmp/kill-log.bash" OMS_SMOKE_SUITE="$signal_suite" \
-    "$ROOT/tests/run-smoke-shard.sh" --jobs 3 >/dev/null 2>&1 &
+    OMS_TEST_LINGER_FILE="$signal_tmp/linger" OMS_TEST_KILL_LOG="$signal_tmp/kills" BASH_ENV="$signal_tmp/kill-log.bash" OMS_SMOKE_SUITE="$signal_suite" \
+    "$ROOT/tests/run-smoke-shard.sh" --jobs 4 >/dev/null 2>&1 &
   leader=$!
   for _ in $(seq 1 100); do
-    [ -f "$signal_tmp/pids" ] && [ "$(wc -l < "$signal_tmp/pids")" -ge 4 ] && [ -s "$signal_tmp/fast" ] && break
+    [ -f "$signal_tmp/pids" ] && [ "$(wc -l < "$signal_tmp/pids")" -ge 4 ] && [ -s "$signal_tmp/fast" ] && [ -s "$signal_tmp/linger" ] && break
     sleep 0.05
   done
   [ -s "$signal_tmp/fast" ] || fail "the fast smoke shard did not run"
@@ -567,9 +572,23 @@ EOF
   fi
   [ -z "$(find "$signal_tmp" -maxdepth 1 -type d -name 'oms-smoke-shards.*' -print -quit)" ] ||
     fail "parallel smoke log directory survived parent TERM"
-  ! grep -Eq "^$leader .*(^| )-?$fast( |\$)" "$signal_tmp/kills" ||
+  # Existence probes (kill -0) are allowed; only a delivered signal is a fault.
+  ! grep -Eq "^$leader -(TERM|KILL) .*(^| )-?$fast( |\$)" "$signal_tmp/kills" ||
     fail "parallel smoke cleanup signalled the finished shard $fast: $(grep "^$leader " "$signal_tmp/kills" | tr '\n' ';')"
   grep -q "^$leader " "$signal_tmp/kills" || fail "parallel smoke cleanup sent no signal to running shards"
+  # A finished shard's leftover process still names the shard's group, so the
+  # group is reserved and its member must not outlive the cancelled run.
+  linger="$(cat "$signal_tmp/linger")"
+  for _ in $(seq 1 100); do
+    linger_state="$(ps -o stat= -p "$linger" 2>/dev/null | tr -d '[:space:]' || true)"
+    case "$linger_state" in ''|Z*) break ;; esac
+    sleep 0.05
+  done
+  case "$linger_state" in
+    ''|Z*) ;;
+    *) kill -KILL "$linger" 2>/dev/null || true
+       fail "a finished smoke shard's background process survived parent TERM: $linger" ;;
+  esac
   [ -z "$(find "$signal_tmp" -maxdepth 1 -name 'oms-smoke-run.*' -print -quit)" ] ||
     fail "a terminated smoke shard left its run log behind"
 }

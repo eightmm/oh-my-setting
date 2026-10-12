@@ -186,17 +186,22 @@ if [ -n "$JOBS" ]; then
 
   LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/oms-smoke-shards.XXXXXX")"
   PIDS=""
-  # Only shards this shell still runs are signalled, and only as the process
-  # groups set -m made them lead: a reaped shard's PID may already belong to
-  # another session's gate or land job.
+  # Shards are signalled only as the process groups set -m made them lead.
+  # A running shard's group is ours. A finished shard's group is ours only
+  # while it still has members and no process holds the leader's PID: POSIX
+  # never reuses a PID that still names a process group, so leftovers of a
+  # finished shard are reached and a reused PID (another gate or land job)
+  # is not.
   cleanup_workers() {
     local pid running signalled=""
     trap - EXIT HUP INT TERM
     running=" $(jobs -pr | tr '\n' ' ') "
     for pid in $PIDS; do
       case "$running" in
-        *" $pid "*) kill -TERM -- "-$pid" >/dev/null 2>&1 && signalled="$signalled $pid" ;;
+        *" $pid "*) ;;
+        *) ! kill -0 "$pid" >/dev/null 2>&1 && kill -0 -- "-$pid" >/dev/null 2>&1 || continue ;;
       esac
+      kill -TERM -- "-$pid" >/dev/null 2>&1 && signalled="$signalled $pid"
     done
     sleep 1
     # A group with a live member keeps its ID reserved, so a shard signalled a
