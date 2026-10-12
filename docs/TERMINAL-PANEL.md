@@ -239,7 +239,7 @@ unrecorded`; OMS does not infer a task from the native chat. `WORK STATUS` is
 a summary, not another agent. The main is the central card and shows its
 coordination role. Advisors/reviewers sit above it and join its top edge;
 workers branch from its bottom edge. Each child connects to the main itself,
-so workers do not appear to report to an advisor. `Needs review (N)` groups contain lifecycle `review` calls and
+so workers do not appear to report to an advisor. `Awaiting decision (N)` groups contain lifecycle `review` calls and
 completed write calls awaiting patch admission. Past calls are not a board
 group: `done`/`cancelled` calls, failures already handled (result read, a later
 round of the same task, or the task done, cancelled or finalized) and old unknown
@@ -250,7 +250,7 @@ the scrollable tree; Esc Back or `g` Graph returns directly to the graph and
 resets local group expansion. Collapsing all inspected groups also returns. Expansion
 survives refresh and resize, but resets on a room change. The tree keeps each
 group under its explicit main, with participant-scoped result actions.
-Unknown calls retain `status unknown` and an `earlier unknown` count; neither
+Unknown calls retain `status unknown` and an `N unrecorded` count; neither
 age nor process exit establishes acceptance. The unknown cutoff requires a
 complete active list and ten minutes of age. Unproven unknowns, unhandled
 failures, blocked and waiting calls remain visible. Review counts remain in
@@ -259,7 +259,8 @@ actions only change local display state; result activation retains existing
 fresh participant/result validation. No records, acknowledgments or lifecycle
 states change. Wires attach at the card
 edges, and a particle on a live edge moves toward its consumer. Child status
-names its main. Cards stay bounded in width instead of stretching a lone worker
+names its main (`for Opus 5.5`) only when another main could be meant: more than one live main, or a shown
+main that exited while another lives. Under the sole live main it would only crowd out state and elapsed time. Cards stay bounded in width instead of stretching a lone worker
 across the terminal.
 
 Three rows are pinned at the top of every board (graph and tree of the sole main window, and the control
@@ -268,10 +269,10 @@ Groups, the cards, the bottom tab box and the footer follow; status alerts sit u
 The usage line always covers both providers (`Claude week 66% · ctx 73% │ Codex --`); a provider without a
 reading reads `Codex --`, whichever main the window belongs to. The goal box is a card titled `GOAL` with the
 plan goal on at most two rows and the progress right-aligned on the title row
-(`╭─ GOAL ──── ▕██████░░░░▏ 6/9 verified · 1 review · 2 claimed ─╮`; ASCII `+- GOAL` and `[######....]`).
+(`╭─ GOAL ──── ▕██████░░░░▏ 6/9 verified · 1 in review · 2 claimed ─╮`; ASCII `+- GOAL` and `[######....]`).
 Cancelled tasks are closed, never verified, so they leave the total (the `[oms plan]` sentence uses the
 same total). A running task whose recorded calls all ended counts as `stale` instead of `claimed`, one whose
-calls wait in review or admission counts as `review`; expired claims and abandoned review leases are stale too.
+calls wait in review or admission counts as `in review`; expired claims and abandoned review leases are stale too.
 Only the current holder's calls count: the claimant call itself, or calls of the claiming main that joined at or
 after the claim, so calls an earlier holder left never mark a fresh claim stale (an `oms agent-plan touch`
 heartbeat restarts that clock, so a touched hold reads claimed until a new call joins).
@@ -283,10 +284,31 @@ board under 20 rows (or when the pinned rows would starve the body) the box shri
 it is a one-row dim box, `[ GOAL · none · oms agent-plan init --goal TEXT ]`. While `oms land status --json` reports `active: true` (a probe of the land lock, never the receipt), one more row reads `LANDING <sha7> · <step> · <N>m`. `oms agent-plan claim` run by a panel main
 also records its room participant (`claimed_by_participant`); the main's card then adds
 `Task: <id> · <state>` beside its title (`+N more running` counts only held tasks with a live or unknown
-call, `N awaiting review` those waiting in review; tasks whose calls all ended are left out), or, without a recorded title, `Now: <declared status>`
+call, `N awaiting decision` those whose calls wait for the main's decision; tasks whose calls all ended are left out), or, without a recorded title, `Now: <declared status>`
 (with its age past 30 minutes and `(stale)` past an hour) or a dim `no status yet`. Every prompt of a panel main
 carries a `[oms plan]` sentence (goal, progress, the main's task, the next ready task and its claim
 command) and, when its declared status is missing or older than 20 minutes, a reminder to set it.
+
+What the numbers mean. Each word names one stage, and the same set carries the same word on the
+board group, the goal box, the main card's `Team:` line, Detail, `Needs you` and the Plan tab:
+
+- `running`/`active`: a call's process is live.
+- `finished`: a call's process exited; that alone admits or verifies nothing.
+- `awaiting decision`: a finished call whose patch awaits admission, or a call in lifecycle `review`, until
+  its main records a decision on the task (`Awaiting decision (N)` on the board, `N awaiting decision` in `Team:`;
+  `Needs you` names the patch case `patch awaits admission`);
+  a decided review call reads `decided` in the Past tab.
+- `unrecorded`: no live process, heartbeat or exit was seen (`status unknown`); it is not a failure and stays
+  until its main decides. Detail says so in one line.
+- `in review`: plan tasks in the plan's `review` state (`N in review` in the goal box, `in review` in the Plan tab).
+- `verified`: plan tasks `done` (`N/M verified`); finished or admitted calls never count.
+- `landed`: `oms land` pushed the change and `agent-plan finish --landed-commit SHA` recorded it; while a land
+  runs the goal box adds `LANDING`.
+
+When the graph leaves rows blank between the cards and the bottom box, a dim summary fills them:
+`Attention N` with the first two `Needs you` items, `In progress N calls · oldest Nm`, and `Recent` with the
+last three finished calls and their end words. It is display-only, never takes rows from the cards or the
+box, and is hidden when fewer than four rows are spare.
 
 A main is named by its model; an earlier main of the room on the same model adds its
 participant id tail (`Opus 5.5 #9f3c`). A question to a main with no linked answer

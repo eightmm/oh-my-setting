@@ -83,7 +83,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 mark = ("▾" if group_key in expanded else "▸") if unicode else ("v" if group_key in expanded else ">")
                 unknown = sum(c["state"] == "presence unknown" for c in children)
                 add(root_stem + (end if last_group else prefix) + "%s %s (%s)%s" % (
-                    mark, heading, len(children), " / %s earlier unknown" % unknown if unknown else ""),
+                    mark, heading, len(children), " / %s unrecorded" % unknown if unknown else ""),
                     "review" if role == "review" else "dim", ("group", group_key))
                 if group_key not in expanded:
                     continue
@@ -177,7 +177,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         add("Repository tasks", "worker", divider=True)
         for task in tasks:
             action = ("task", task.get("id"))
-            add("%s%s%s" % (said(task.get("state")), sep, task.get("title") or task.get("id")),
+            add("%s%s%s" % ("in review" if task.get("state") == "review" else said(task.get("state")), sep,
+                             task.get("title") or task.get("id")),
                 tone(task.get("state")), action)
     footer = menu_rows(width, 1, unicode, navigation.get("menu_help", False), managed,
                        occupied=navigation["main_occupied"], installed=navigation.get("installed")) if menu else []

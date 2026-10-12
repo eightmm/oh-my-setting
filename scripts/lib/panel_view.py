@@ -410,7 +410,7 @@ def inbox_items(report, unicode=True):
         elif state == "done" and member["participant"] in awaiting:
             what, shown, style = "patch awaits admission", "review", "review"
         elif state == "review" and finalized.get(member.get("task_id")) not in {"completed", "accepted"}:
-            what, shown, style = "needs review", "review", "review"
+            what, shown, style = "awaiting decision", "review", "review"
         else:
             continue
         title = clean(member.get("title"), 80)

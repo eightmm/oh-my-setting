@@ -1813,7 +1813,7 @@ plan_rows = [line for line in plan.split("\n") if "Goal:" in line or " t-" in li
 assert not any("Goal:" in line for line, _ in render_plan_rows(msg_report, {}, 80, True)), plan
 assert [row.split(" · ")[0].split()[-1] for row in plan_rows] == ["t-ver", "t-rev", "t-run", "t-rdy", "t-blk"], plan_rows
 assert "t-ver · done · Verified one" in plan and "Verified one · unclaimed" not in plan and "make d" not in plan and "t-run · running 9h stale · Running one" in plan and "Opus 5.5 · make c" in plan, plan
-assert "t-rev · review · Review one" in plan and "unclaimed · make e" in plan and "codex ·" not in plan and "claude ·" not in plan, plan
+assert "t-rev · in review · Review one" in plan and "unclaimed · make e" in plan and "codex ·" not in plan and "claude ·" not in plan, plan
 task_hits = [h["action"] for h in nav["hits"] if h["action"][0] == "task"]
 assert task_hits == [("task", t) for t in ("t-ver", "t-rev", "t-run", "t-rdy", "t-blk")], task_hits
 # Recorded completion metadata is visible only for terminal rows; unknown/malformed kinds stay plain done.
@@ -7991,6 +7991,15 @@ for glyphs in (False, True):
         edge = min(edges, key=lambda hit: hit["y"])
         first_row = one_cards.splitlines()[edge["y"]][edge["x1"] - 1:edge["x2"]]
         assert first_row.strip("│| ") == title, first_row
+# An exited predecessor leaves one live main: its calls drop "for <main>"; the predecessor's calls keep it.
+successor_flow = deepcopy(flow)
+next(a for a in successor_flow["attempts"]["active_recent"] if a["attempt_id"] == "flow-other")["state"] = "done"
+for glyphs in (False, True):
+    successor_cards = render(successor_flow, "codex", 127, 40, view="graph", unicode=glyphs, navigation={"dismissed": True})
+    assert " for " not in successor_cards and "running" in successor_cards, successor_cards
+    predecessor_cards = render(successor_flow, "codex", 127, 40, view="graph", unicode=glyphs,
+                               navigation={"dismissed": True, "selected": ("result", "foreign-child")})
+    assert "running %s for Opus 5.5" % ("·" if glyphs else "/") in predecessor_cards, predecessor_cards
 # Long headings leave the true midpoint free for a wire in either glyph set.
 geometry_flow = deepcopy(flow)
 for attempt in geometry_flow["attempts"]["active_recent"]:
@@ -9030,7 +9039,7 @@ for glyphs, dot, ending in ((True, "·", "→"), (False, "/", "->")):
     assert "Now: 방 범위 선언 %s 6h ago" % dot in board and "Now: Now:" not in board, board
     assert "6h ago (stale)" in board and board.count("(stale)") == 2 and "fresh work" not in board, board
     assert "guard stop" in board and "failed (exit 1)" not in board, board
-    assert "Needs review (2)" in board, board
+    assert "Awaiting decision (2)" in board, board
 nonguard = deepcopy(truth)
 nonguard["room"]["messages"][0]["text"] = "Call exit=1; parent acceptance pending."
 assert "failed (exit 1)" in render(nonguard, "codex", 157, 40, view="graph", main_attempt="flow-attempt", navigation={})
@@ -9205,7 +9214,7 @@ for columns in (28, 76, 110):
     lines, targets = graph_text.detail(main, {}, columns, people,
         {"messages": [{"sender": "advisor", "targets": ["flow-main"], "text": "message " * 60 + "MESSAGE END"}]},
         everyone={"flow-main": team})
-    assert lines.index("  Needs attention") < lines.index("  Active") < lines.index("  No record") < lines.index("  Finished"), lines
+    assert lines.index("  Needs attention") < lines.index("  Active") < lines.index("  Unrecorded") < lines.index("  Finished"), lines
     assert set(targets.values()) == {("result", m["participant"]) for m in team}, targets
     assert next(i for i,line in enumerate(lines) if "Messages to" in line) > lines.index("  Finished"), lines
     for row, target in targets.items():
@@ -9395,7 +9404,12 @@ scoped_main = graph_text.detail(dict(main, owns=["scripts/lib", "docs"]), {}, 76
 assert "Scope: scripts/lib, docs" in scoped_main, scoped_main
 unknown_call = dict(team[2], state="presence unknown")
 lines, targets = graph_text.detail(main, {}, 76, people, {}, everyone={"flow-main": [unknown_call]})
-assert "Team: 1 no record" in lines and "  Active" not in lines and "  Finished" not in lines
+unknown_detail = " ".join(graph_text.detail(unknown_call, {"report": {"rows": []}}, 76, people, {})[0])
+assert "status unknown" in unknown_detail and "Status unknown: no live process, heartbeat or exit seen" in unknown_detail \
+    and "f opens it" in unknown_detail, unknown_detail
+assert "Team: 1 unrecorded" in lines and "  Active" not in lines and "  Finished" not in lines
+assert any(line.startswith("    no live process, heartbeat or exit seen; not a failure")
+           for line in lines[lines.index("  Unrecorded"):lines.index("Messages to Sol 6 main: 0")]), lines
 assert any("Messages to" in line for line in lines) and ("result", "builder") in targets.values()
 worker = next(m for m in people if m["participant"] == "builder")
 recorded = {"rows": [{"outcome": "accepted", "verification": {"status": "passed"},
@@ -10045,10 +10059,10 @@ for settled_report in (retried, closed_failure):
                                                            if m["participant"] == "old-00")) == "past"
 assert ("result", "old-00") in {item["action"] for item in inbox_items(ended)}
 for team_report, expected_team in ((flow, "5 active"),
-                                   (ended, "1 attention · 5 active · 12 finished · 1 no record"),
-                                   (retried, "6 active · 13 finished · 1 no record"),
-                                   (closed_failure, "5 active · 13 finished · 1 no record"),
-                                   (admission_team, "4 active · 1 await admission"),
+                                   (ended, "1 attention · 5 active · 12 finished · 1 unrecorded"),
+                                   (retried, "6 active · 13 finished · 1 unrecorded"),
+                                   (closed_failure, "5 active · 13 finished · 1 unrecorded"),
+                                   (admission_team, "4 active · 1 awaiting decision"),
                                    (empty_team, "no calls yet")):
     detail_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
     detail_team = graph_text.render_graph(team_report, 127, 120, navigation=detail_nav).splitlines()
@@ -10061,7 +10075,7 @@ for team_report, expected_team in ((flow, "5 active"),
     assert card_team == expected_team, (card_team, expected_team)
     assert "Team W" not in team_card and all("Team W" not in line for line in detail_team)
     if team_report is admission_team:
-        attention_row = next(i for i, line in enumerate(detail_team) if "Needs attention" in line)
+        attention_row = next(i for i, line in enumerate(detail_team) if "  Awaiting decision" in line)
         active_row = next(i for i, line in enumerate(detail_team) if "  Active" in line)
         worker_row = next(h["y"] - 1 for h in detail_nav["hits"] if h["action"] == ("result", "builder")
                           and attention_row < h["y"] - 1 < active_row)
@@ -10070,9 +10084,38 @@ for team_report, expected_team in ((flow, "5 active"),
 assert graph_text.team_counts([{"state": state} for state in
     ("presence unknown", "done", "working", "failed", "cancelled", "done")],
     lambda call: "review" if call["state"] == "done" else "live") == [
-        "1 attention", "1 active", "2 await admission", "1 finished", "1 no record"]
+        "1 attention", "1 active", "2 awaiting decision", "1 finished", "1 unrecorded"]
 assert graph_text.team_counts([{"state": "done"}, {"state": "cancelled"}]) == ["2 finished"]
 assert any("status unknown" in line for line in team_lines) and "failed (exit 1)" in "\n".join(team_lines), team_lines
+# Spare rows between the cards and the box carry a display-only summary; the cards and the box keep every row.
+summary_room = deepcopy(admission_team)
+next(a for a in summary_room["attempts"]["active_recent"] if a["attempt_id"] == "flow-other")["state"] = "done"
+summary_room["room"]["call_results"] = {"builder": {"exit": 0, "ts": minutes_ago(5), "seq": 9}}
+# Without judges their empty band is one row, so a tall board leaves rows blank above the box.
+summary_room["room"]["participants"] = [m for m in summary_room["room"]["participants"]
+                                        if m["participant"] not in {"advisor", "reviewer"}]
+next(a for a in summary_room["attempts"]["active_recent"] if a["attempt_id"] == "builder")["state"] = "done"
+real_summary = graph_text.board_summary
+for columns, rows, shown in ((127, 60, True), (127, 40, True), (110, 24, False), (80, 24, False), (42, 24, False)):
+    for glyphs in (True, False):
+        summary_nav, plain_nav = {}, {}
+        summary_board = graph_text.render_graph(summary_room, columns, rows, unicode=glyphs, navigation=summary_nav).splitlines()
+        graph_text.board_summary = lambda *unused, **unused_too: []
+        try:
+            plain_board = graph_text.render_graph(summary_room, columns, rows, unicode=glyphs, navigation=plain_nav).splitlines()
+        finally:
+            graph_text.board_summary = real_summary
+        assert summary_nav["box"] == plain_nav["box"] and summary_nav["hits"] == plain_nav["hits"] \
+            and len(summary_board) == len(plain_board) == rows, (summary_board, plain_board)
+        assert all(display_width(line) <= columns for line in summary_board), summary_board
+        changed = [i for i, (a, b) in enumerate(zip(summary_board, plain_board)) if a != b]
+        assert all(plain_board[i] == "" for i in changed) and all(i < summary_nav["box"]["y1"] - 1 for i in changed), changed
+        assert bool(changed) == shown, (columns, rows, summary_board)
+        if shown:
+            block = "\n".join(summary_board[i] for i in changed)
+            assert block.startswith("Attention    1 ") and "In progress  4 calls" in block, block
+            assert "Recent       Sonnet 5.5 worker %s finished " % ("·" if glyphs else "/") in block, block
+            assert block.splitlines()[-1].endswith("awaiting decision %s 한글 작업 제목 / builder" % ("·" if glyphs else "/")), block
 # Attempt evidence beats the result message, and the header clock carries date and weekday.
 beaten = deepcopy(ended)
 beaten["attempts"]["active_recent"].append({"attempt_id": "old-00", "state": "working",
@@ -10093,7 +10136,7 @@ active_rows = active.splitlines()
 top_at = next(i for i, l in enumerate(active_rows) if l.startswith("[ GOAL"))
 top = active_rows[top_at]
 assert "OMS · " in active_rows[0] and top_at == 2 and "week" in active_rows[1], active
-assert "6/9 verified · 1 review · 2 claimed" in top and display_width(top) == 120 and "cancelled" not in top, top
+assert "6/9 verified · 1 in review · 2 claimed" in top and display_width(top) == 120 and "cancelled" not in top, top
 assert "Plan:" not in active and "Task: t7 · running" in active, active
 assert {"y": top_at + 1, "x1": 1, "x2": 120, "action": ("tab", "plan")} in banner_nav["hits"]
 plan_board = graph_text.render_graph(words, 120, 40, navigation={"tab": "plan"})
@@ -10125,25 +10168,25 @@ short_words["council"] = {}
 for short in (12, 14, 18):
     short_rows = graph_text.render_graph(short_words, 100, short).splitlines()
     assert short_rows[0].startswith("OMS · ") and "week" in short_rows[1] and short_rows[2].startswith("[ GOAL  Ship") \
-        and short_rows[2].endswith(" 6/9 verified · 1 review · 2 claimed ]"), short_rows[:4]
+        and short_rows[2].endswith(" 6/9 verified · 1 in review · 2 claimed ]"), short_rows[:4]
 long_goal = deepcopy(words)
 long_goal["plan"]["goal"] = "Ship the shared plan board with every main claiming work from it " * 2
 wrapped_top = graph_text.render_graph(long_goal, 80, 40).splitlines()
 wrap_at = next(i for i, l in enumerate(wrapped_top) if l.startswith("[ GOAL"))
 assert wrap_at == 2 and "Ship the shared" in wrapped_top[wrap_at] and \
-    wrapped_top[wrap_at].endswith("6/9 verified · 1 review · 2 claimed ]"), wrapped_top[:4]
+    wrapped_top[wrap_at].endswith("6/9 verified · 1 in review · 2 claimed ]"), wrapped_top[:4]
 # The board's compact banner links to the original full, wrapped goal in Plan.
 plan_goal = graph_text.render_graph(long_goal, 80, 40, navigation={"tab": "plan"}).splitlines()
-assert any("6/9 verified · 1 review · 2 claimed" in line for line in plan_goal), plan_goal
+assert any("6/9 verified · 1 in review · 2 claimed" in line for line in plan_goal), plan_goal
 plan_at = next(i for i, line in enumerate(plan_goal) if "╭─ GOAL" in line)
 assert "│ Ship the shared" in plan_goal[plan_at + 1] and plan_goal[plan_at + 2].startswith("│ │ ") \
     and "╰" in plan_goal[plan_at + 3], plan_goal
 goal_rows = [text for text, unused in graph_text.goal_box(long_goal, 80, True, False)]
-assert goal_rows[0].endswith("6/9 verified · 1 review · 2 claimed ─╮") \
+assert goal_rows[0].endswith("6/9 verified · 1 in review · 2 claimed ─╮") \
     and goal_rows[1].startswith("│ Ship the shared") and goal_rows[2].startswith("│ ") \
     and goal_rows[3].startswith("╰"), goal_rows
 narrow_top = next(l for l in graph_text.render_graph(words, 60, 40).splitlines() if l.startswith("[ GOAL"))
-assert display_width(narrow_top) == 60 and narrow_top.endswith("6/9 verified · 1 review ]") \
+assert display_width(narrow_top) == 60 and narrow_top.endswith("6/9 verified · 1 in review ]") \
     and "claimed" not in narrow_top and "cancelled" not in narrow_top, narrow_top
 plain_board = graph_text.render_graph(words, 100, 40, unicode=False)
 plain_goal = next(l for l in plain_board.splitlines() if l.startswith("[ GOAL"))
@@ -10175,7 +10218,7 @@ held_flow["room"]["repo_tasks"] = held_tasks
 assert graph_text.held_split(held_flow) == ({"t-review"}, {"t-ended"})
 assert graph_text.plan_summary(held_flow)[1:] == (4, 7, 1, 1, 1), graph_text.plan_summary(held_flow)
 held_wide = graph_text.goal_banner(held_flow, 127, True)[0][0]
-assert held_wide.endswith(" 4/7 verified · 1 review · 1 claimed · 1 stale ]") and display_width(held_wide) == 127, held_wide
+assert held_wide.endswith(" 4/7 verified · 1 in review · 1 claimed · 1 stale ]") and display_width(held_wide) == 127, held_wide
 for columns in (28, 42, 57, 80):
     for glyphs in (True, False):
         held_narrow = graph_text.goal_banner(held_flow, columns, glyphs)[0][0]
@@ -10185,15 +10228,15 @@ for columns in (28, 42, 57, 80):
         held_note = " ".join(text[2:-2].strip() for text in held_box[2:-1])
         assert "1 stale, not counted: no live worker" in held_note and "oms agent-plan release --id ID" in held_note, held_box
 held_box = [text for text, unused in graph_text.goal_box(held_flow, 127, True, False)]
-assert "4/7 verified · 1 review · 1 claimed · 1 stale ─╮" in held_box[0] and \
+assert "4/7 verified · 1 in review · 1 claimed · 1 stale ─╮" in held_box[0] and \
     "│ 1 stale, not counted: no live worker · release with oms agent-plan release --id ID " in held_box[2], held_box
 assert "--include-running" not in "\n".join(held_box)
 held_rows = [text for text, unused in graph_text.plan_rows(held_flow, {}, 120, True)]
 assert any("t-ended · running (worker ended) · Held t-ended" in text for text in held_rows), held_rows
-assert any("t-review · running (awaiting review) · Held t-review" in text for text in held_rows), held_rows
+assert any("t-review · running (awaiting decision) · Held t-review" in text for text in held_rows), held_rows
 assert any("t-live · running · Held t-live" in text for text in held_rows), held_rows
 held_card = graph_text.render_graph(held_flow, 127, 50, navigation={"dismissed": True})
-assert "Task: t-live · running · 1 awaiting review" in held_card and "more running" not in held_card, held_card
+assert "Task: t-live · running · 1 awaiting decision" in held_card and "more running" not in held_card, held_card
 everything_ended = deepcopy(held_flow)
 for attempt in everything_ended["attempts"]["active_recent"]:
     if attempt["attempt_id"] in held_calls:
@@ -13455,7 +13498,7 @@ for mode in ("tree", "graph"):
         picture = render(orphans, "codex", 120, 80, view=mode, unicode=glyphs, navigation=nav)
         if mode == "tree":
             assert ("result", "live-call") in nav["items"] and ("result", "past-call") not in nav["items"], nav
-            assert "Past work" not in picture and "Needs review (2)" in picture, picture
+            assert "Past work" not in picture and "Awaiting decision (2)" in picture, picture
             target = ("group", ("review", "unlinked"))
             hit = next(h for h in nav["hits"] if h["action"] == target)
             assert choose(("click", hit["x1"], hit["y"]), nav) == target
@@ -13471,7 +13514,7 @@ for mode in ("tree", "graph"):
 for mode in ("tree", "graph"):
     nav = {"dismissed": True}
     picture = render(grouped_board, "codex", 120, 80, view=mode, navigation=nav)
-    assert "Needs review (2)" in picture and "Past work" not in picture and "Past 2" in picture, picture
+    assert "Awaiting decision (2)" in picture and "Past work" not in picture and "Past 2" in picture, picture
     # Collapsed children stay out of the body; pinned Needs-you links remain reachable.
     pinned = {row["action"] for row in needs_strip(grouped_board, 120, True)}
     body_top = (next(i + 1 for i, line in enumerate(picture.splitlines()) if line.startswith("╭─ Activity"))
@@ -13486,7 +13529,7 @@ for mode in ("tree", "graph"):
         assert ("result", ident) in nav["items"], (mode, ident, nav)
     mixed_nav = {"dismissed": True}
     mixed_picture = render(mixed, "codex", 120, 80, view=mode, navigation=mixed_nav)
-    assert "Needs review (2)" in mixed_picture and "Past 2" in mixed_picture
+    assert "Awaiting decision (2)" in mixed_picture and "Past 2" in mixed_picture
     assert mixed_nav["items"] == nav["items"], (mode, mixed_nav)
     group_hits = [h for h in nav["hits"] if h["action"][0] == "group"]
     assert len(group_hits) == 1, group_hits
@@ -13593,7 +13636,7 @@ native_inspection = render(dict(grouped_board, native_advisors=open_call), "clau
 assert "Fable 5.1" in native_inspection and "answer stays in the main transcript" in native_inspection
 attention_nav = {}
 attention = render(grouped_board, "codex", 120, 80, view="tree", attention_only=True, navigation=attention_nav)
-assert "Needs review (2)" in attention and "Past work" not in attention
+assert "Awaiting decision (2)" in attention and "Past work" not in attention
 from panel_view import inbox_items
 assert {item["action"] for item in inbox_items(grouped_board)} >= {("result", "review-call"), ("result", "pending-patch")}
 # Reading a call's own handoff handles its failure, but cannot settle a block or admit a patch.
@@ -13614,7 +13657,7 @@ for sender, recipient, pending, visible in (("adv-worker", "adv-main", [], False
         assert (("result", "adv-worker") in attention_nav["items"]) == visible, (mode, sender, recipient, pending, attention_nav)
         assert ("Broken patch" in attention_picture) == visible, (mode, sender, recipient, pending, attention_picture)
         assert ("result", "blocked-call") in attention_nav["items"] and "blocked-call" in attention_picture, (mode, attention_nav)
-        assert "Needs review (2)" in attention_picture, (mode, attention_picture)
+        assert "Awaiting decision (2)" in attention_picture, (mode, attention_picture)
     assert json.dumps(handed_off, sort_keys=True) == frozen_handoff
 for mark in ("completed", "accepted"):
     handled = dict(grouped_board, finalized={"adv-task": mark})

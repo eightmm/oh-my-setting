@@ -259,8 +259,9 @@ def call_classifier(report):
     return classify
 
 
-# Settled ("past") calls leave the board for the dock's Past tab; only review stays a board group.
-CALL_GROUPS = (("review", "Needs review"),)
+# Settled ("past") calls leave the board for the dock's Past tab; only calls awaiting their main's decision
+# (lifecycle review, or finished and awaiting admission) stay a board group. Plan tasks keep the word "review".
+CALL_GROUPS = (("review", "Awaiting decision"),)
 
 
 def call_order(call):
@@ -493,7 +494,7 @@ def goal_box(report, width, unicode, compact):
         counts += sep + "%s locally completed" % locally_done
     # A claim is not proof of running work, and work waiting for review is progress: review outlives the bar.
     reviewing, claiming, staling = (sep + "%s %s" % (n, word) if n else "" for n, word in
-                                    ((review, "review"), (claimed, "claimed"), (stale, "stale")))
+                                    ((review, "in review"), (claimed, "claimed"), (stale, "stale")))
     options = [bar + " " + counts + reviewing + claiming + staling, bar + " " + counts + reviewing + claiming,
                bar + " " + counts + reviewing, counts + reviewing, "%s/%s%s" % (done, total, reviewing), "%s/%s" % (done, total)]
     inner = max(1, width - 4)
@@ -624,7 +625,7 @@ def layout(width, count, centered=False):
 
 WORDS = {"working": "running", "live marker": "running", "verifying": "checking", "done": "finished",
          "timed_out": "timed out", "orphaned": "lost", "waiting_input": "needs input",
-         "waiting_approval": "needs approval", "review": "in review", "presence unknown": "status unknown"}
+         "waiting_approval": "needs approval", "review": "awaiting decision", "presence unknown": "status unknown"}
 WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 ROLES = {"main": "Main", "advisor": "Advisor", "reviewer": "Reviewer", "council": "Debate", "worker": "Worker", "researcher": "Researcher"}
 MACHINE = re.compile(r"^(stop-reason:|model-route:|model-result:|usage detail:|tokens used|served model|cost usd|"
@@ -706,11 +707,11 @@ def declared_status(room, participant, width):
 
 
 def team_counts(calls, classify=None):
-    counts = dict.fromkeys(("attention", "active", "await admission", "finished", "no record"), 0)
+    counts = dict.fromkeys(("attention", "active", "awaiting decision", "finished", "unrecorded"), 0)
     for call in calls:
         state = call.get("state")
-        if state == "done" and classify and classify(call) == "review":
-            bucket = "await admission"
+        if classify and classify(call) == "review":
+            bucket = "awaiting decision"  # the board's group of the same name counts the same calls
         elif state in ATTENTION_STATES and classify and classify(call) == "past":
             bucket = "finished"  # handled, superseded by a later round, or its task closed
         elif state in ATTENTION_STATES:
@@ -720,9 +721,12 @@ def team_counts(calls, classify=None):
         elif state in FINISHED:
             bucket = "finished"
         else:
-            bucket = "no record"
+            bucket = "unrecorded"
         counts[bucket] += 1
     return ["%s %s" % (number, bucket) for bucket, number in counts.items() if number]
+
+
+UNRECORDED = "no live process, heartbeat or exit seen; not a failure, kept until its main decides"
 
 
 def detail(member, preview, width, members=(), room=None, teams=None, everyone=None, labels=None, claims=None, classify=None):
@@ -755,13 +759,13 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         unread = sum(valid_count(mapping(p).get("pending")) or 0 for p in listing(room.get("pairs"))
                      if mapping(p).get("recipient") == member["participant"])
         calls = sorted((everyone or teams or {}).get(member["participant"], []), key=call_order)
-        attention = [c for c in calls if c["state"] in ATTENTION_STATES and classify(c) != "past" or
-                     c["state"] == "done" and classify(c) == "review"]
-        active = [c for c in calls if c["state"] in LIVE_STATES and c not in attention]
-        finished = sorted((c for c in calls if c not in attention and (
+        deciding = [c for c in calls if classify(c) == "review"]
+        attention = [c for c in calls if c["state"] in ATTENTION_STATES and classify(c) not in {"past", "review"}]
+        active = [c for c in calls if c["state"] in LIVE_STATES and c not in attention + deciding]
+        finished = sorted((c for c in calls if c not in attention + deciding and (
                               c["state"] in FINISHED or c["state"] in ATTENTION_STATES and classify(c) == "past")),
                           key=lambda c: (str(c.get("ended") or c.get("joined_at") or ""), c.get("seq", 0)), reverse=True)
-        unknown = [c for c in calls if c not in attention + active + finished]
+        unknown = [c for c in calls if c not in attention + deciding + active + finished]
         lines.append("Team: " + (" · ".join(team_counts(calls, classify)) or "no calls yet"))
         native = next((c for c in calls if c.get("_native")), None)
         if native:
@@ -774,15 +778,19 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
                 lines.append("  " + heading)
             for c in group:
                 label = MODEL_NAMES.get(c.get("model"), c.get("model")) or "unknown"
-                text = "- %s%s %s · %s · %s" % ("! " if c in attention else "", ROLES.get(c.get("role"), "Worker"),
-                        label, call_span(c, "→"), clean(c.get("title")) or "no task title")
+                span = call_span(c, "→") + (", awaiting decision" if c in deciding and c["state"] == "done" else "")
+                text = "- %s%s %s · %s · %s" % ("! " if c in attention + deciding else "", ROLES.get(c.get("role"), "Worker"),
+                        label, span, clean(c.get("title")) or "no task title")
                 parts = wrapped(text, max(1, width - 4), max(1, len(text)))
                 for index, part in enumerate(parts):
                     targets[len(lines)] = action(c)
                     lines.append(("  " if index == 0 else "    ") + part)
         team_rows("Needs attention", attention)
+        team_rows("Awaiting decision", deciding)
         team_rows("Active", active)
-        team_rows("No record", unknown)
+        team_rows("Unrecorded", unknown)
+        if unknown:
+            lines.extend("    " + part for part in wrapped(UNRECORDED, max(1, width - 4), 3))
         team_rows("Finished", finished[:5])
         if len(finished) > 5:
             lines.append("%s earlier finished · see the Past tab" % (len(finished) - 5))
@@ -827,6 +835,8 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         lines += wrapped("Round %s of this task, continuing %s" % (member["round"], names.get(member.get("continues"), "its earlier worker")), width, 2)
     if member.get("exit") == 124:
         lines += wrapped("Timed out · its main can continue it", width, 3)
+    if state == "presence unknown":
+        lines += wrapped("Status unknown: " + UNRECORDED + ". Any recorded result is below; f opens it", width, 4)
     access = {"write": "can edit", "read": "read-only"}.get(member.get("access"), "permissions unrecorded")
     metadata = "%s %s%s" % (access.capitalize(), where, " · effort " + member["effort"] if member.get("effort") else "")
     loaded = preview.get("report")
@@ -890,6 +900,38 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
 FINISHED = {"done", "cancelled"}
 
 
+def board_summary(report, calls, classify, width, rows, unicode=True):
+    """Attention, In progress and Recent in at most `rows` rows; the board's own counts, in the same words."""
+    from panel_view import inbox_items
+    sep = " · " if unicode else " / "
+    calls = list({action(c): c for c in calls if not c.get("_native")}.values())
+    seen, attention = set(), []
+    for item in inbox_items(report, unicode):
+        if item["row_id"] not in seen:
+            seen.add(item["row_id"])
+            attention.append(item["glyph"] + " " + item["who"] + sep + item["what"])
+    running = [c for c in calls if c["state"] in LIVE_STATES]
+    oldest = min((str(c["joined_at"]) for c in running if c.get("joined_at")), default="")
+    recent = sorted((c for c in calls if c["state"] in TERMINAL_STATES and c.get("ended")),
+                    key=lambda c: str(c["ended"]), reverse=True)
+    recent = [sep.join(p for p in ("%s %s" % (model_name(c), ROLES.get(c.get("role"), "Worker").lower()),
+                                   end_words(c, said(c["state"])) + " " + clock_stamp(c["ended"]) +
+                                   (", awaiting decision" if c["state"] == "done" and classify(c) == "review" else ""),
+                                   clean(c.get("title"))) if p) for c in recent]
+    sections = [["Attention    %s" % len(attention) + (sep + attention[0] if attention else sep + "nothing waiting")]
+                + attention[1:2],
+                ["In progress  %s call%s" % (len(running), "" if len(running) == 1 else "s") +
+                 (sep + "oldest " + elapsed(oldest) if oldest else "")],
+                ["Recent       " + (recent[0] if recent else "no finished calls yet")] + recent[1:3]]
+    # Each section keeps its first row; spare rows go to attention, then recent.
+    keep = [1, 1, 1]
+    for index in (0, 2, 2):
+        if sum(keep) < rows and keep[index] < len(sections[index]):
+            keep[index] += 1
+    return [clipped((" " * 13 if n else "") + text, width)
+            for section, count in zip(sections, keep) for n, text in enumerate(section[:count])][:rows]
+
+
 def latest_answer(report):
     for row in listing(mapping(report).get("rows")):
         for call in reversed(listing(row.get("calls"))):
@@ -929,6 +971,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         primary = picked if picked.get("role") == "main" else owners.get(picked.get("parent"), primary)
     debates = [row for row in worker_rows(report) if row["source"] == "council"]
     classify = call_classifier(report)
+    # A sole main, or the one live main, needs no "for <main>" on its calls; an exited predecessor's calls keep it.
+    sole_live = bool(primary) and (len(mains) == 1 or [m for m in mains if m["state"] not in TERMINAL_STATES] == [primary])
 
     def team(main, every=False):
         ids = {key for key in (main["participant"], main.get("attempt")) if key}
@@ -1044,12 +1088,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         # A task whose calls all ended is not running work; one whose calls wait in review is counted apart.
         current = [t for t in held if t.get("id") not in awaiting_tasks | ended_tasks]
         lead = (current or held)[0]
-        word = "awaiting review" if lead.get("id") in awaiting_tasks else "worker ended" \
+        word = "awaiting decision" if lead.get("id") in awaiting_tasks else "worker ended" \
             if lead.get("id") in ended_tasks else lead.get("state")
         waiting = sum(t.get("id") in awaiting_tasks and t is not lead for t in held)
         return "Task: %s · %s" % (lead.get("id"), word) + (
             " · +%s more running" % (len(current) - 1) if len(current) > 1 else "") + (
-            " · %s awaiting review" % waiting if waiting else "")
+            " · %s awaiting decision" % waiting if waiting else "")
 
     def declared_of(m):
         # The card already labels it "Now:"; a status written as "Now: ..." would read twice.
@@ -1124,13 +1168,13 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             target = ("group", (kind, primary["participant"]))
             group_actions.append(target)
             label = "%s %s (%s)" % ("▸" if unicode else ">", title, len(calls))
-            if len(mains) != 1:
+            if not sole_live:
                 label += " / " + name_of(primary)
             unknown = sum(c["state"] == "presence unknown" for c in calls)
             if unknown:
-                label += " / %s earlier unknown" % unknown
+                label += " / %s unrecorded" % unknown
             group_labels.append((label, target, "review" if kind == "review" else "dim"))
-        if len(mains) == 1 and group_labels:
+        if sole_live and group_labels:
             group_width = max(1, (width - 3 * (len(group_labels) - 1)) // len(group_labels))
             group_labels = [(clipped(label, group_width), target, style) for label, target, style in group_labels]
             column = 1
@@ -1300,7 +1344,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             if ctx:
                 status += "".join((" · " if unicode else " / ") + part for part in
                                   ["ctx %s%%" % ctx[0]] + ["compact soon"] * (ctx[1] == "alert"))
-            if m.get("role") != "main" and primary and len(mains) > 1:
+            if m.get("role") != "main" and primary and not sole_live:
                 status += " · for " + clean(name_of(primary))
             task = task_of(m)
             content = [status + " / " + task] if rows_h == 3 else [status] + task_lines(m, span - 4, rows_h - 3)
@@ -1426,14 +1470,22 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                                                "no workers"), "dim")
     body_drawn = False
     omitted = len(children) - len(shown_judges) - len(shown_workers)
+    parts, open_unlinked = ["%s more calls (scroll)" % omitted] if omitted else [], []
     if omitted or unlinked:
-        parts = ["%s more calls (scroll)" % omitted] if omitted else []
         open_unlinked = [m for m in unlinked if classify(m) != "past"]
         if open_unlinked:
             # Settled ones are listed in the Past tab; only open calls need the tree.
             parts.append("%s call%s with no known main%s · t shows them" % (
                 len(open_unlinked), "" if len(open_unlinked) == 1 else "s",
                 " (+%s past)" % (len(unlinked) - len(open_unlinked)) if len(open_unlinked) < len(unlinked) else ""))
+    # Rows the cards and the box leave blank carry a display-only summary; it never takes their rows.
+    spare = total_rows - dock - len(lines) - bool(parts) - 1
+    if dock and spare >= 3:
+        lines.append("")
+        for text in board_summary(report, [c for calls in everyone.values() for c in calls] + unlinked,
+                                  classify, width, spare, unicode):
+            add(text, "dim")
+    if omitted or unlinked:
         if parts and len(lines) < total_rows - dock:
             # The warning sits on the row just above the box, so it holds still as the upper region changes.
             lines.extend([""] * max(0, total_rows - dock - 1 - len(lines)) * bool(dock))
@@ -1736,7 +1788,8 @@ def past_body(past, width, capacity, navigation, labels, unicode):
     for call in past[first:first + page]:
         who = labels.get(call.get("participant")) or "%s %s" % (ROLES.get(call.get("role"), "Worker"), model_name(call))
         end = clock_stamp(call["ended"]) if call.get("ended") else call.get("_finished") or ""
-        words = end_words(call, said(call["state"]))
+        # A review call reaches Past only once its main recorded the decision.
+        words = "decided" if call["state"] == "review" else end_words(call, said(call["state"]))
         title = clean(call.get("title")) or "no task title"
         # Narrow rows give up the role word, then the time, then the model before the task title: rows differ by task.
         model = model_name(call)
@@ -1797,9 +1850,9 @@ def plan_rows(report, labels, width, unicode):
     awaiting, ended = held_split(report)
     for t in sorted((mapping(t) for t in tasks), key=lambda t: PLAN_ORDER.get(t.get("state"), 5)):
         by = t.get("claimed_by_participant")
-        word = clean(t.get("state"), 20) or "unknown"
+        word = "in review" if t.get("state") == "review" else clean(t.get("state"), 20) or "unknown"
         if t.get("state") == "running" and t.get("id") in ended | awaiting:
-            word += " (worker ended)" if t["id"] in ended else " (awaiting review)"
+            word += " (worker ended)" if t["id"] in ended else " (awaiting decision)"
         if word == "done":
             kind = t.get("completion_kind")
             if kind == "research-accepted":
