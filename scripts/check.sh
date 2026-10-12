@@ -178,9 +178,11 @@ manifest) then the test suites. With no arguments it runs both.
                         Run affected checks here; defer full checks to CI lanes.
   --ci-parity           With --affected, the oms land default: a full fallback
                         runs lint and the quick lane instead (CI runs the full
-                        selection), test stages run with provider CLIs hidden
-                        from PATH as on CI hosts, and changed shell files are
-                        parsed by a real Bash 3.2 (docker image bash:3.2 on
+                        selection), plus operator-tools when tier-routing
+                        inputs change; test stages run with every registry
+                        provider CLI hidden from PATH as on CI hosts, and
+                        changed shell files are parsed by a real Bash 3.2
+                        (docker image bash:3.2 on
                         Linux, /bin/bash on macOS; skipped with a reason when
                         neither is available).
   --changed-from REF    Base tree for --quick or --affected.
@@ -457,25 +459,39 @@ stage() {  # stage NAME COMMAND...
 
 # CI hosts have no provider CLI, so a suite that quietly depends on one passes
 # here and fails there (f698ac9: panel routing found no installed provider).
-# Each PATH directory holding one is replaced by a shadow of symlinks to its
-# other entries; dropping the directory would also drop oms, python3 and the
-# rest. Git Bash copies instead of linking, so Windows hosts skip with a reason.
-CHECK_PROVIDER_CLIS="claude codex pi agy gemini"
+# The names come from the provider registry (every built-in transport, both
+# OpenCode spellings) plus custom oms-agent-adapter-* executables, so a
+# provider the registry would discover stays hidden. Each PATH directory
+# holding one is replaced by a shadow of symlinks to its other entries;
+# dropping the directory would also drop oms, python3 and the rest. Git Bash
+# copies instead of linking, so Windows hosts skip with a reason.
+is_provider_cli() {  # is_provider_cli BASENAME
+  case " $CHECK_PROVIDER_CLIS " in *" $1 "*) return 0 ;; esac
+  case "$1" in oms-agent-adapter-?*) return 0 ;; esac
+  return 1
+}
 hide_provider_clis() {
-  local rest="$PATH:" dir name entry base hit shadow count=0 filtered=""
+  local rest="$PATH:" dir entry base hit shadow count=0 filtered=""
   case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*)
       echo "skip: provider-less PATH (no native symlinks on this host)"
       return 0
       ;;
   esac
+  CHECK_PROVIDER_CLIS="opencode opencode2 $(
+    # shellcheck source=scripts/lib/provider-registry.sh
+    . "$ROOT/scripts/lib/provider-registry.sh"
+    for name in $(oms_provider_supported_names); do oms_provider_binary "$name"; done | tr '\n' ' '
+  )" || { echo "FATAL: the provider registry did not list its CLIs" >&2; exit 1; }
   while [ -n "$rest" ]; do
     dir="${rest%%:*}"
     rest="${rest#*:}"
     hit=0
-    for name in $CHECK_PROVIDER_CLIS; do
-      [ -z "$dir" ] || [ ! -e "$dir/$name" ] || hit=1
-    done
+    if [ -n "$dir" ] && [ -d "$dir" ]; then
+      for entry in "$dir"/*; do
+        if is_provider_cli "${entry##*/}" && [ -e "$entry" ]; then hit=1; break; fi
+      done
+    fi
     if [ "$hit" = 1 ]; then
       count=$((count + 1))
       shadow="$CHECK_RUNTIME/provider-less/$count"
@@ -483,8 +499,7 @@ hide_provider_clis() {
       for entry in "$dir"/*; do
         [ -e "$entry" ] || continue
         base="${entry##*/}"
-        case " $CHECK_PROVIDER_CLIS " in *" $base "*) continue ;; esac
-        ln -s "$entry" "$shadow/$base"
+        is_provider_cli "$base" || ln -s "$entry" "$shadow/$base"
       done
       dir="$shadow"
     fi
@@ -493,7 +508,7 @@ hide_provider_clis() {
   PATH="$filtered"
   export PATH
   hash -r
-  echo "ci-parity: provider CLIs hidden from PATH ($CHECK_PROVIDER_CLIS; shadowed PATH entries: $count)"
+  echo "ci-parity: provider CLIs hidden from PATH ($CHECK_PROVIDER_CLIS oms-agent-adapter-*; shadowed PATH entries: $count)"
 }
 
 # The host bash -n accepts what Bash 3.2 cannot parse (f698ac9 shipped such a
@@ -819,6 +834,7 @@ if [ "$RUN_QUICK" = 1 ]; then
   quick_harness=0
   quick_models=0
   quick_seats=0
+  quick_routing=0
   quick_skills=0
   quick_python=0
   quick_docs=1
@@ -858,6 +874,13 @@ if [ "$RUN_QUICK" = 1 ]; then
         quick_seats=1
         ;;
     esac
+    # Tier routing picks among installed providers, so these are the inputs
+    # that let a fixture pass only where a provider CLI exists (f698ac9).
+    case "$path" in
+      config/panel-routing.json|config/models.json|scripts/lib/provider-registry.sh|scripts/lib/panel_routing.py|scripts/lib/panel_view.py|scripts/lib/terminal_panel.py|tests/operator-tools-smoke.sh)
+        quick_routing=1
+        ;;
+    esac
     case "$path" in
       custom-skills/*|templates/*.md|plugins/*|skills.manifest.json|scripts/install-skills.sh|scripts/validate-skills.py)
         quick_skills=1
@@ -895,6 +918,9 @@ if [ "$RUN_QUICK" = 1 ]; then
   [ "$quick_models" = 0 ] || stage provider-registry bash tests/provider-registry-smoke.sh
   [ "$quick_models" = 0 ] || stage models-surface bash tests/models-smoke.sh
   [ "$quick_seats" = 0 ] || stage seat-reliability bash tests/seat-reliability-smoke.sh
+  # Only a CI-parity gate hides provider CLIs; a capped full selection has no
+  # graph selection to reach this suite otherwise.
+  [ "$CI_PARITY" = 0 ] || [ "$quick_routing" = 0 ] || stage operator-tools bash tests/operator-tools-smoke.sh
 fi
 
 affected_test_was_run_by_quick() {  # affected_test_was_run_by_quick PATH
@@ -906,6 +932,7 @@ affected_test_was_run_by_quick() {  # affected_test_was_run_by_quick PATH
       [ "$quick_models" = 1 ]; return
       ;;
     tests/seat-reliability-smoke.sh) [ "$quick_seats" = 1 ]; return ;;
+    tests/operator-tools-smoke.sh) [ "$CI_PARITY" = 1 ] && [ "$quick_routing" = 1 ]; return ;;
   esac
   return 1
 }

@@ -701,7 +701,7 @@ test_affected_gate_runs_positive_evidence_and_fails_open() {
   cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
   cp "$ROOT/scripts/lib/oms-state-inventory.py" "$gate/scripts/lib/oms-state-inventory.py"
   cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
-    "$ROOT/scripts/lib/poll.sh" "$gate/scripts/lib/"
+    "$ROOT/scripts/lib/poll.sh" "$ROOT/scripts/lib/provider-registry.sh" "$gate/scripts/lib/"
   cp "$ROOT/tests/run-smoke-shard.sh" "$gate/tests/run-smoke-shard.sh"
   for script in check-python.sh check-bash32.sh; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/$script"
@@ -847,12 +847,25 @@ EOF
   for stage_name in shellcheck source-distribution bash32-parse; do
     grep -Fxq "$stage_name" <<< "$out" || fail "capped fallback omitted $stage_name: $out"
   done
-  if grep -Eqx 'autonomy-hook|shellcheck-changed' <<< "$out"; then
-    fail "capped fallback ran full lanes or repeated lint: $out"
+  if grep -Eqx 'autonomy-hook|shellcheck-changed|operator-tools' <<< "$out"; then
+    fail "capped fallback ran full lanes, repeated lint or an untouched routing suite: $out"
   fi
+  # A tier-routing input adds the suite that routes among installed providers
+  # (f698ac9 shipped a fixture that passed only where a provider CLI existed).
+  boundary_base="$head"
+  printf '# routing changed\n' >> "$gate/scripts/lib/panel_routing.py"
+  git -C "$gate" add scripts/lib/panel_routing.py
+  git -C "$gate" commit -qm routing
+  head="$(git -C "$gate" rev-parse HEAD)"
+  out="$(cd "$gate" && bash scripts/check.sh --affected --ci-parity \
+    --changed-from "$boundary_base" --changed-to "$head" --list-stages 2>/dev/null)" ||
+    fail "ci-parity gate rejected a routing change"
+  grep -Fxq operator-tools <<< "$out" || fail "a routing change skipped provider-less operator-tools: $out"
   # A selected test sees PATH as a CI host does: no provider CLI, every other tool.
   mkdir -p "$TMP/parity-bin"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-bin/codex"
+  for provider_cli in codex cursor-agent oms-agent-adapter-parity; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-bin/$provider_cli"
+  done
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-bin/parity-helper"
   printf '#!/usr/bin/env bash\nprintf "docker:%%s\\n" "$*" >> "$OMS_TEST_AFFECTED_LOG"\n' > "$TMP/parity-bin/fake-docker"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-bin/fake-shellcheck"
@@ -860,7 +873,8 @@ EOF
   cat > "$gate/tests/leaf-smoke.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'shell-file\n' >> "$OMS_TEST_AFFECTED_LOG"
-printf 'codex:%s helper:%s\n' "$(command -v codex || echo absent)" \
+printf 'codex:%s cursor:%s adapter:%s helper:%s\n' "$(command -v codex || echo absent)" \
+  "$(command -v cursor-agent || echo absent)" "$(command -v oms-agent-adapter-parity || echo absent)" \
   "$(command -v parity-helper >/dev/null && echo present)" >> "$OMS_TEST_AFFECTED_LOG"
 EOF
   git -C "$gate" add tests/leaf-smoke.sh
@@ -878,7 +892,7 @@ EOF
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
       grep -Fq 'skip: provider-less PATH' <<< "$out" || fail "Windows provider-less skip was silent: $out" ;;
-    *) grep -Fxq 'codex:absent helper:present' "$log" ||
+    *) grep -Fxq 'codex:absent cursor:absent adapter:absent helper:present' "$log" ||
          fail "ci-parity PATH kept a provider CLI or lost a tool: $(cat "$log")" ;;
   esac
   if [ "$(uname -s)" = Linux ]; then

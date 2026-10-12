@@ -354,22 +354,30 @@ mkdir -p "$TMP/bin"
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 if [ "$2" = view ]; then
-  # A run's jobs: the full selection, an affected-only run, or neither.
+  # A run's jobs: the full selection, an affected-only run, or neither. The
+  # full job set also arrives for another SHA, a failed run, with a duplicate
+  # job or beside a failed job; none of those proves this commit.
   echo jobs >> "$OMS_TEST_LAND_EVENTS"
   [ "${OMS_TEST_CI_SCOPE:-affected}" != error ] || exit 4
   sha="$(git -C "$OMS_TEST_LAND_REPO" rev-parse HEAD)"
+  full='"lint","affected_plan","gate","native (ubuntu-latest, copy)","focused (1/4)","focused (2/4)","focused (3/4)","focused (4/4)","scripts-smoke (1/4)","scripts-smoke (2/4)","scripts-smoke (3/4)","scripts-smoke (4/4)"'
   case "${OMS_TEST_CI_SCOPE:-affected}" in
-    full)
-      jobs='"lint","affected_plan","gate","native (ubuntu-latest, copy)","focused (1/4)","focused (2/4)","focused (3/4)","focused (4/4)","scripts-smoke (1/4)","scripts-smoke (2/4)","scripts-smoke (3/4)","scripts-smoke (4/4)"' ;;
+    full|wrong-sha|failed-run|duplicate|extra-failure) jobs="$full" ;;
     ambiguous) jobs='"lint","affected_plan","gate","focused (1/4)"' ;;
     *) jobs='"affected_plan","gate"' ;;
   esac
   python3 -c 'import json, sys
-names = json.loads("[" + sys.argv[2] + "]")
+sha, names, scope = sys.argv[1], json.loads("[" + sys.argv[2] + "]"), sys.argv[3]
 rows = [{"name": name, "conclusion": "success"} for name in names]
 if "lint" not in names:
     rows.append({"name": "lint", "conclusion": "skipped"})
-print(json.dumps({"headSha": sys.argv[1], "status": "completed", "conclusion": "success", "jobs": rows}))' "$sha" "$jobs"
+if scope == "duplicate":
+    rows.append({"name": "gate", "conclusion": "success"})
+if scope == "extra-failure":
+    rows.append({"name": "native (ubuntu-latest, auto)", "conclusion": "failure"})
+print(json.dumps({"headSha": "0" * 40 if scope == "wrong-sha" else sha, "status": "completed",
+                  "conclusion": "failure" if scope == "failed-run" else "success", "jobs": rows}))' \
+    "$sha" "$jobs" "${OMS_TEST_CI_SCOPE:-affected}"
   exit 0
 fi
 echo ci >> "$OMS_TEST_LAND_EVENTS"
@@ -714,9 +722,10 @@ for key in sys.argv[1].split("."): r = r.get(key, {}) if isinstance(r, dict) els
 print(r if r != {} else "")' "$1"; }
 [ "$(land_field gate.scope)" = partial ] && [ "$(land_field ci.scope)" = affected ] ||
   fail "capped gate or affected CI was recorded as full proof"
-# Unreadable or ambiguous CI scope blocks the install; the retry resumes and a
-# full-selection run for the exact SHA installs it without re-running the gate.
-for scope in error ambiguous; do
+# Unreadable, ambiguous or misattributed CI scope blocks the install; the retry
+# resumes and a full-selection run for the exact SHA installs it without
+# re-running the gate.
+for scope in error ambiguous wrong-sha failed-run duplicate extra-failure; do
   : > "$TMP/events"
   if OMS_TEST_CI_SCOPE="$scope" OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
       "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/scope-$scope.out" 2>&1; then

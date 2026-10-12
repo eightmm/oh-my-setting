@@ -35,8 +35,9 @@
 - Deploy/install changed OMS code with `oms land`: it checks the committed HEAD
   and pushes only while HEAD and the tracked tree remain unchanged, without a
   duplicate hook gate. Its default gate is `check.sh --affected --ci-parity`:
-  a full selection runs lint and the quick lane, never CI's full lanes, with
-  provider CLIs hidden from PATH and a Bash 3.2 parse of changed shell files.
+  a full selection runs lint and the quick lane, never CI's full lanes, plus
+  operator-tools when tier-routing inputs change, with every registry provider
+  CLI hidden from PATH and a Bash 3.2 parse of changed shell files.
   Installation needs successful CI for that same SHA plus full proof: a full
   local gate (`--gate 'bash scripts/check.sh --parallel'`) or a CI run whose
   jobs executed the full selection. Affected-only gates and runs push but

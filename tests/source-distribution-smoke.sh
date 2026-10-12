@@ -462,11 +462,15 @@ expected = {
     "runtime-core-integration": "runtime-core-integration-smoke.sh",
     "install-profile": "install-profile-smoke.sh",
 }
+# CI parity's quick lane may also run operator-tools; --ci-parity never sets
+# RUN_FOCUSED, so one run still invokes it once.
+parity = '[ "$CI_PARITY" = 0 ] || [ "$quick_routing" = 0 ] || stage operator-tools bash tests/operator-tools-smoke.sh'
 for stage, suite in expected.items():
     invocation = "stage %s bash tests/%s" % (stage, suite)
     if focused.count(invocation) != 1:
         raise SystemExit("focused gate must contain exactly once: %s" % invocation)
-    if text.count("bash tests/%s" % suite) != 1:
+    allowed = 1 + (suite == "operator-tools-smoke.sh" and text.count(parity) == 1 and parity not in focused)
+    if text.count("bash tests/%s" % suite) != allowed:
         raise SystemExit("gate duplicates suite invocation: %s" % suite)
 if "tests/*.sh" not in text:
     raise SystemExit("shellcheck lint no longer covers tests/*.sh")
