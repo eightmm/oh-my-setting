@@ -103,8 +103,20 @@ import os, signal
 assert signal.getsignal(signal.SIGINT) != signal.SIG_IGN
 assert int(signal.getsignal(signal.SIGQUIT) == signal.SIG_IGN) == int(os.environ["OMS_PARALLEL_QUIT"])
 PY
-key="${1#--}${3:+-${3%/*}}"
+if [ "$1" = --shard ]; then key="operator-${2%/*}"
+else key="${1#--}${3:+-${3%/*}}"; fi
 touch "$OMS_PARALLEL_PROBE/$key.ran"
+if [ "${OMS_PARALLEL_CANCEL:-0}" = 1 ]; then
+  printf '%s\n' "$$" > "$OMS_PARALLEL_PROBE/$key.pid"
+  case "$key" in operator-2|focused-only-1)
+    touch "$OMS_PARALLEL_PROBE/$key.ready"; exit 0 ;; esac
+  trap 'wait "$child" 2>/dev/null || :; exit 143' TERM
+  sleep 60 &
+  child=$!
+  printf '%s\n' "$child" > "$OMS_PARALLEL_PROBE/$key.child"
+  touch "$OMS_PARALLEL_PROBE/$key.ready"
+  wait "$child"
+fi
 if [ "${OMS_PARALLEL_FAIL:-0}" = 1 ] && [ "$key" = focused-only-2 ]; then exit 11; fi
 EOF
   # shellcheck source=scripts/lib/check-parallel.sh
@@ -115,6 +127,88 @@ EOF
   if OMS_PARALLEL_FAIL=1 oms_check_parallel "$probe/check.sh" "$probe/fail-logs" 0 > "$probe/fail.log" 2>&1; then
     fail "parallel gate swallowed a failing lane"
   fi
+  cat > "$probe/cancel.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+trap 'exit 143' TERM
+. "$1/scripts/lib/check-parallel.sh"
+kill() {
+  printf '%s\n' "$*" >> "$OMS_PARALLEL_PROBE/signals"
+  # Record the regression without forwarding a stale negative PID.
+  [ "$*" != "-TERM -- -$(cat "$OMS_PARALLEL_PROBE/$OMS_PARALLEL_FAST.pid")" ] || return 0
+  builtin kill "$@"
+}
+if [ "$2" = operator ]; then
+  oms_operator_parallel "$OMS_PARALLEL_PROBE/check.sh" 3
+else
+  oms_check_parallel "$OMS_PARALLEL_PROBE/check.sh" "$OMS_PARALLEL_PROBE/logs" 0
+fi
+EOF
+  python3 - "$ROOT" "$probe" <<'PY' || fail "parallel cancellation reached a finished group or missed live descendants"
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+root, probe = map(Path, sys.argv[1:])
+if os.name != 'posix':
+    print('SKIP: cancellation probe requires POSIX process groups')
+    sys.exit(0)
+def alive(pid):
+    # Linux zombies have terminated but may await their adopting reaper.
+    stat = Path('/proc') / str(pid) / 'stat'
+    try:
+        if stat.read_text().split(') ', 1)[1].startswith('Z '):
+            return False
+    except FileNotFoundError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+for mode, fast, count in (('operator', 'operator-2', 3), ('check', 'focused-only-1', 10)):
+    fixture = probe / mode
+    fixture.mkdir()
+    for name in ('check.sh', 'cancel.sh'):
+        (fixture / name).write_bytes((probe / name).read_bytes())
+    env = dict(os.environ, OMS_PARALLEL_PROBE=str(fixture), OMS_PARALLEL_CANCEL='1', OMS_PARALLEL_FAST=fast)
+    with (fixture / 'cancel.log').open('w') as output:
+        process = subprocess.Popen(['bash', str(fixture / 'cancel.sh'), str(root), mode],
+                                   env=env, stdout=output, stderr=output, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 10
+            while True:
+                pids = list(fixture.glob('*.pid'))
+                children = list(fixture.glob('*.child'))
+                fast_path = fixture / (fast + '.pid')
+                if (len(list(fixture.glob('*.ready'))) == count and len(pids) == count
+                        and len(children) == count - 1 and fast_path.exists()
+                        and not alive(int(fast_path.read_text()))):
+                    break
+                assert process.poll() is None and time.monotonic() < deadline, (mode, output.name)
+                time.sleep(.02)
+            exited = int(fast_path.read_text())
+            descendants = [int(path.read_text()) for path in children]
+            assert all(alive(pid) for pid in descendants), mode
+            os.killpg(process.pid, signal.SIGTERM)
+            assert process.wait(timeout=5) == 143, (mode, (fixture / 'cancel.log').read_text())
+            signals = (fixture / 'signals').read_text().splitlines()
+            assert '-TERM -- -%s' % exited not in signals, (mode, exited, signals)
+            expected = {'-TERM -- -' + path.read_text().strip() for path in pids if path != fast_path}
+            assert set(signals) == expected, (mode, signals, expected)
+            deadline = time.monotonic() + 5
+            while any(alive(pid) for pid in descendants) and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert not any(alive(pid) for pid in descendants), (mode, descendants)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5)
+PY
 ) || exit 1
 # Copy mode is the Windows ownership contract. Proving it only on the Windows
 # runner means the slowest leg in the matrix is the first to report a broken

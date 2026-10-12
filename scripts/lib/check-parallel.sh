@@ -5,6 +5,20 @@
 # once, so it splits the focused stages eight ways and scripts-smoke six: with
 # four of each, the longest lane, not the longest stage, set the gate's wall
 # time.
+oms_parallel_terminate_running() {
+  local pid running
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    # Reaped jobs retain array slots while an earlier wait is blocked. Check
+    # this shell's job table per signal; Bash cannot make check+kill atomic.
+    for running in $(jobs -pr); do
+      [ "$pid" = "$running" ] || continue
+      kill -TERM -- "-$pid" 2>/dev/null || true
+      break
+    done
+  done
+}
+
 oms_check_parallel() (
   set -euo pipefail
   local check="$1" logs="$2" skip_lint="${3:-0}"
@@ -13,9 +27,7 @@ oms_check_parallel() (
   mkdir -p "$logs"
   cleanup_parallel() {
     local pid
-    for pid in "${pids[@]}"; do
-      [ -z "$pid" ] || kill -TERM -- "-$pid" 2>/dev/null || true
-    done
+    oms_parallel_terminate_running ${pids[@]+"${pids[@]}"}
     for pid in "${pids[@]}"; do
       [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
     done
@@ -56,9 +68,7 @@ oms_operator_parallel() (
   cleanup_operator() {
     local pid
     trap - EXIT HUP INT TERM
-    for pid in ${pids[@]+"${pids[@]}"}; do
-      [ -z "$pid" ] || kill -TERM -- "-$pid" 2>/dev/null || true
-    done
+    oms_parallel_terminate_running ${pids[@]+"${pids[@]}"}
     for pid in ${pids[@]+"${pids[@]}"}; do
       [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
     done
