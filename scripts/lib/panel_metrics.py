@@ -1,6 +1,7 @@
 """Local numeric readings for an explicitly selected room main."""
 
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -8,6 +9,8 @@ import stat
 import subprocess
 import tempfile
 import time
+from decimal import Decimal, InvalidOperation
+from datetime import datetime, timezone
 
 from dashboard_projection import mapping, number
 from panel_view import TERMINAL_STATES
@@ -150,6 +153,376 @@ def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
                 row["context_left"] = None
         output[provider] = row
     return output
+
+
+def _stamp(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (ValueError, OverflowError):
+        return None
+
+
+def _duration(value):
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(s|m|h|d|w)", value or "")
+    if not match:
+        raise ValueError("--since must be a positive finite duration such as 30m, 2h or 7d")
+    try:
+        seconds = float(Decimal(match.group(1)) * Decimal(
+            {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[match.group(2)]))
+    except (InvalidOperation, OverflowError, ValueError):
+        seconds = float("inf")
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("--since must be a positive finite duration such as 30m, 2h or 7d")
+    return seconds
+
+
+METRIC_TAIL_BYTES = 16 * 1024 * 1024
+METRIC_TAIL_ROWS = 20000
+METRIC_ATTEMPTS = 300
+PLAN_TASK_STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "done", "cancelled"}
+
+
+def _attempt_history(repo):
+    """Project at most the newest 300 created attempts from a bounded ledger tail."""
+    from panel_results import DURABLE
+
+    relative = ".oms/lifecycle/events.jsonl"
+    target = DURABLE["canonical_repo_path"](str(repo), relative, "panel metrics lifecycle", False)
+    parent = os.path.dirname(target)
+    try:
+        parent_info = os.lstat(parent)
+    except FileNotFoundError:
+        return [], False
+    if not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode):
+        raise ValueError("panel metrics lifecycle parent is unsafe")
+    ancestry = DURABLE["component_snapshot"](str(repo), target, "panel metrics lifecycle")
+    directory = None
+    descriptor = None
+    try:
+        if os.name != "nt":
+            directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                                | getattr(os, "O_NOFOLLOW", 0))
+            if not DURABLE["same_file"](parent_info, os.fstat(directory)):
+                raise ValueError("panel metrics lifecycle parent changed")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(os.path.basename(target) if directory is not None else target,
+                             flags, **({} if directory is None else {"dir_fd": directory}))
+        opened = os.fstat(descriptor)
+        if not DURABLE["safe_regular"](opened):
+            raise ValueError("panel metrics lifecycle must be a regular single-link file")
+        named = (os.stat(os.path.basename(target), dir_fd=directory, follow_symlinks=False)
+                 if directory is not None else os.lstat(target))
+        if not DURABLE["safe_regular"](named) or not DURABLE["same_file"](opened, named):
+            raise ValueError("panel metrics lifecycle changed before read")
+        start = max(0, opened.st_size - METRIC_TAIL_BYTES)
+        os.lseek(descriptor, start, os.SEEK_SET)
+        chunks, remaining = [], min(METRIC_TAIL_BYTES, opened.st_size - start)
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        body = b"".join(chunks)
+        after = os.fstat(descriptor)
+        named_after = (os.stat(os.path.basename(target), dir_fd=directory, follow_symlinks=False)
+                       if directory is not None else os.lstat(target))
+        if (not DURABLE["safe_regular"](named_after) or not DURABLE["same_file"](after, named_after)
+                or not DURABLE["_snapshot_matches"](opened, after)):
+            raise ValueError("panel metrics lifecycle changed during read")
+        DURABLE["components_unchanged"](ancestry, "panel metrics lifecycle")
+    except FileNotFoundError:
+        return [], False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory is not None:
+            os.close(directory)
+
+    truncated = start > 0 or len(body) < max(0, opened.st_size - start)
+    if start and b"\n" in body:
+        body = body.split(b"\n", 1)[1]
+    elif start:
+        body = b""
+    lines = body.splitlines()
+    if len(lines) > METRIC_TAIL_ROWS:
+        lines = lines[-METRIC_TAIL_ROWS:]
+        truncated = True
+    if body and not body.endswith(b"\n"):
+        lines = lines[:-1]
+        truncated = True
+    rows, malformed = [], False
+    for line in lines:
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except (ValueError, UnicodeError, RecursionError):
+            malformed = True
+            continue
+        if not isinstance(row, dict):
+            malformed = True
+            continue
+        rows.append(row)
+    created_ids = []
+    for row in reversed(rows):
+        if row.get("event_type") == "attempt.created" and row.get("attempt_id") not in created_ids:
+            created_ids.append(row.get("attempt_id"))
+            if len(created_ids) >= METRIC_ATTEMPTS:
+                break
+    selected = set(created_ids)
+    attempts, incomplete = {}, truncated or malformed
+    terminal = {"done", "failed", "cancelled", "timed_out", "abandoned"}
+    for event_order, row in enumerate(rows):
+        attempt_id = row.get("attempt_id")
+        if attempt_id not in selected:
+            continue
+        kind, stamp = row.get("event_type"), row.get("ts")
+        if kind == "attempt.created":
+            attempts[attempt_id] = {"attempt_id": attempt_id, "task_id": row.get("task_id", ""),
+                "parent_attempt_id": row.get("parent_attempt_id", ""), "provider": row.get("provider", ""),
+                "tool": row.get("tool", ""), "refs": row.get("refs", {}), "state": row.get("to_state"),
+                "created_at": stamp, "created_order": event_order,
+                "updated_at": stamp, "terminal": False, "transitions": []}
+        elif attempt_id in attempts:
+            current = attempts[attempt_id]
+            if kind == "attempt.state_changed":
+                current["state"] = row.get("to_state")
+                current["terminal"] = row.get("to_state") in terminal
+                current["reason_code"] = row.get("reason_code", "")
+                current["transitions"].append({"state": row.get("to_state"), "reason_code": row.get("reason_code", ""),
+                                               "ts": stamp, "order": event_order})
+            elif row.get("refs"):
+                current["refs"].update(row["refs"])
+            current["updated_at"] = stamp
+    if truncated and len(created_ids) < METRIC_ATTEMPTS:
+        incomplete = True
+    return list(attempts.values()), incomplete
+
+
+def aggregate(repo, since=None, now=None):
+    """Aggregate bounded recorded evidence read only.
+
+    Follow-up task IDs are not linked by any producer record; rework therefore
+    counts only additional write rounds for the same task ID.
+    """
+    from panel_results import _query, _read, _indexed
+
+    repo = Path(repo)
+    now = time.time() if now is None else now
+    seconds = _duration(since) if since is not None else None
+    cutoff = now - seconds if seconds is not None else None
+    if cutoff is not None and not math.isfinite(cutoff):
+        raise ValueError("--since duration is outside the supported time range")
+    plan_path = repo / ".oms/plan/tasks.json"
+    incomplete_reasons = []
+    try:
+        plan_bytes = _read(repo, ".oms/plan/tasks.json", 4 * 1024 * 1024, missing=True)
+    except (OSError, ValueError, UnicodeError):
+        plan_bytes = None
+        incomplete_reasons.append("plan evidence unavailable or unsafe")
+    if plan_bytes is None:
+        plan = {}
+    elif not plan_bytes and not os.path.lexists(str(plan_path)):
+        plan = {}
+    else:
+        try:
+            plan = json.loads(plan_bytes.decode("utf-8"))
+            if (not isinstance(plan, dict) or "tasks" not in plan
+                    or not isinstance(plan.get("tasks"), (dict, list))):
+                raise ValueError("invalid plan shape")
+            plan_rows = list(plan["tasks"].values()) if isinstance(plan["tasks"], dict) else plan["tasks"]
+            if any(not isinstance(task, dict) or not isinstance(task.get("id"), str) for task in plan_rows):
+                raise ValueError("invalid plan task row")
+        except (ValueError, UnicodeError):
+            plan = {}
+            incomplete_reasons.append("plan evidence malformed")
+    tasks = plan.get("tasks", {}) if isinstance(plan, dict) else {}
+    tasks = list(tasks.values()) if isinstance(tasks, dict) else tasks if isinstance(tasks, list) else []
+    valid_tasks = []
+    for task in tasks:
+        state = task.get("state", "ready")
+        if type(state) is not str or state not in PLAN_TASK_STATES:
+            incomplete_reasons.append("plan task state malformed")
+            continue
+        valid_tasks.append(task)
+    tasks = valid_tasks
+    plan_task_ids = {task.get("id") for task in tasks if isinstance(task.get("id"), str)}
+    attempts, incomplete_attempts = _attempt_history(repo)
+    artifacts = _query(repo, "artifact-index", "list", "1000").get("rows", [])
+    artifacts = [row for row in artifacts if isinstance(row, dict)]
+    incomplete = incomplete_attempts or bool(incomplete_reasons)
+    if incomplete_attempts:
+        incomplete_reasons.append("lifecycle evidence is partial")
+
+    def in_window(stamp):
+        timestamp = stamp if isinstance(stamp, (int, float)) and math.isfinite(stamp) else _stamp(stamp)
+        return cutoff is None or (timestamp is not None and timestamp >= cutoff)
+
+    started_states = {"claimed", "running", "review", "landing", "done"}
+    implementation_calls = [row for row in attempts if row.get("refs", {}).get("panel_role") == "worker"
+                            and row.get("refs", {}).get("panel_access") == "write"]
+    attempts_by_task = {}
+    for attempt in implementation_calls:
+        ident = attempt.get("task_id")
+        if ident:
+            attempts_by_task.setdefault(ident, []).append(attempt)
+    started = []
+    first_start = {}
+    for task in tasks:
+        history = task.get("history") if isinstance(task.get("history"), list) else []
+        claim_times = [_stamp(item.get("ts")) for item in history if isinstance(item, dict)
+                       and item.get("kind") in {"claim", "start", "started"}]
+        call_times = [_stamp(row.get("created_at")) for row in attempts_by_task.get(task.get("id"), [])]
+        first = min((stamp for stamp in claim_times + call_times if stamp is not None), default=None)
+        cancellation = task.get("cancellation") if isinstance(task.get("cancellation"), dict) else {}
+        lease_epoch = task.get("lease_epoch", 0)
+        retained_claim = (type(lease_epoch) is int and lease_epoch > 0) or bool(
+            task.get("lease_id") or task.get("claimed_by_participant"))
+        cancelled_after_start = task.get("state") == "cancelled" and cancellation.get("state") not in {"ready", "blocked"}
+        ever_started = (task.get("state") in started_states or cancelled_after_start
+                        or retained_claim
+                        or bool(attempts_by_task.get(task.get("id")))
+                        or any(isinstance(item, dict) and item.get("kind") in {"claim", "start", "started"}
+                               for item in history))
+        if ever_started and in_window(first):
+            started.append(task)
+            first_start[task.get("id")] = first
+        elif ever_started and cutoff is not None and first is None:
+            incomplete = True
+    finished = sum(task.get("state") in {"done", "landed"} or bool(task.get("landing")) for task in started)
+    calls = attempts
+    write_calls = [row for row in calls if row.get("refs", {}).get("panel_role") == "worker"
+                   and row.get("refs", {}).get("panel_access") == "write"
+                   and not any(item.get("reason_code") == "manual_clear" for item in row.get("transitions", []))]
+    write_groups = {}
+    for call in write_calls:
+        if call.get("task_id"):
+            write_groups.setdefault(call.get("task_id"), []).append(call)
+    reworked = set()
+    for task_id, rows in write_groups.items():
+        ordered = sorted(rows, key=lambda row: (_stamp(row.get("created_at")) is None,
+                                                _stamp(row.get("created_at")) or 0))
+        if (task_id in plan_task_ids and len(ordered) > 1
+                and any(in_window(row.get("created_at")) for row in ordered[1:])):
+            reworked.add(task_id)
+
+    def has_write_successor(call, transition):
+        if call.get("refs", {}).get("panel_role") != "worker" or call.get("refs", {}).get("panel_access") != "write":
+            return False
+        settled_at = _stamp(transition.get("ts"))
+        settled_order = transition.get("order", -1)
+        for candidate in write_groups.get(call.get("task_id"), []):
+            created = _stamp(candidate.get("created_at"))
+            created_order = candidate.get("created_order", -1)
+            if (candidate.get("attempt_id") != call.get("attempt_id") and created is not None
+                    and (created, created_order) > (settled_at, settled_order)):
+                return True
+        return False
+
+    abandoned = 0
+    clears, cancels = 0, 0
+    for call in calls:
+        for transition in call.get("transitions", []):
+            stamp = _stamp(transition.get("ts"))
+            if stamp is None or not in_window(transition.get("ts")):
+                continue
+            state, reason = transition.get("state"), transition.get("reason_code")
+            if reason == "manual_clear":
+                clears += 1
+            elif state == "cancelled":
+                cancels += 1
+            if (state in {"abandoned", "timed_out", "guard-stopped"} or
+                    state in {"failed", "blocked"} and str(reason).startswith("guard")):
+                if not has_write_successor(call, transition):
+                    abandoned += 1
+    plan_cancels = [task.get("cancellation", {}).get("ts") for task in tasks
+                    if isinstance(task.get("cancellation"), dict)]
+    cancels += sum(in_window(stamp) for stamp in plan_cancels)
+    owner_failures = 0
+    for row in artifacts:
+        if row.get("kind") != "panel-result" or not in_window(row.get("ts")):
+            continue
+        try:
+            result = json.loads(_indexed(repo, row, 1024 * 1024))
+            owner_failures += int(isinstance(result, dict) and result.get("kind") == "oms-panel-result"
+                                  and result.get("outcome") == "failed")
+        except (OSError, ValueError, TypeError):
+            continue
+
+    by_id = {attempt.get("attempt_id"): attempt for attempt in attempts}
+    verdicts = [row for row in artifacts if row.get("kind") == "review-outcome"
+                and row.get("attempt_id") in by_id]
+    waits = []
+    for verdict in verdicts:
+        reviewer = by_id[verdict["attempt_id"]]
+        reviewer_start = _stamp(reviewer.get("created_at"))
+        decided = _stamp(verdict.get("ts"))
+        if reviewer.get("task_id") != verdict.get("task_id") or reviewer_start is None or decided is None:
+            continue
+        candidates = []
+        for call in write_calls:
+            if call.get("task_id") != verdict.get("task_id"):
+                continue
+            settled = max((_stamp(item.get("ts")) for item in call.get("transitions", [])
+                           if item.get("state") in {"done", "failed", "cancelled", "timed_out", "abandoned"}
+                           and _stamp(item.get("ts")) is not None and _stamp(item.get("ts")) <= reviewer_start),
+                          default=None)
+            if settled is not None:
+                candidates.append((settled, call))
+        if candidates:
+            settled, _call = max(candidates, key=lambda item: item[0])
+            if decided >= reviewer_start and in_window(settled):
+                waits.append(decided - settled)
+    waits.sort()
+
+    def percentile(values, fraction):
+        if not values:
+            return None
+        position = (len(values) - 1) * fraction
+        lower = int(position)
+        upper = min(lower + 1, len(values) - 1)
+        return round(values[lower] + (values[upper] - values[lower]) * (position - lower), 2)
+
+    return {"schema": 1, "kind": "oms-panel-metrics", "since": since,
+            "completion": {"finished": finished, "started": len(started),
+                           "rate": round(finished / len(started), 4) if started else None},
+            "review_wait_seconds": {"count": len(waits), "median": percentile(waits, .5),
+                                    "p90": percentile(waits, .9)},
+            "rework": {"tasks": len(reworked), "started": len(started),
+                       "rate": round(len(reworked) / len(started), 4) if started else None},
+            "abandoned_calls": abandoned,
+            "interventions": {"manual_clears": clears, "cancels": cancels,
+                              "owner_finalized_failures": owner_failures,
+                              "total": clears + cancels + owner_failures},
+            "coverage": "plan tasks, latest 300 lifecycle attempts and 1000 artifact events, retained room logs",
+            "incomplete": bool(incomplete),
+            "incomplete_reason": "; ".join(incomplete_reasons) if incomplete_reasons else None}
+
+
+def metrics_text(report):
+    completion, waits = report["completion"], report["review_wait_seconds"]
+    rework = report["rework"]
+    def rate(value):
+        return "none" if value is None else "%.1f%%" % (value * 100)
+    def seconds(value):
+        return "none" if value is None else "%ss" % value
+    return "\n".join((
+        "Panel metrics%s" % (" (since %s)" % report["since"] if report.get("since") else ""),
+        "completion: %d/%d (%s)" % (completion["finished"], completion["started"], rate(completion["rate"])),
+        "review wait: n=%d median=%s p90=%s" % (waits["count"], seconds(waits["median"]), seconds(waits["p90"])),
+        "rework: %d/%d (%s)" % (rework["tasks"], rework["started"], rate(rework["rate"])),
+        "abandoned calls: %d" % report["abandoned_calls"],
+        "main interventions: %d (manual clears=%d, cancels=%d, owner failures=%d)" % (
+            report["interventions"]["total"], report["interventions"]["manual_clears"],
+            report["interventions"]["cancels"], report["interventions"]["owner_finalized_failures"]),
+        "incomplete: %s" % report.get("incomplete_reason") if report.get("incomplete")
+        else "incomplete: no"))
 
 
 def usage_line(report, width=100, unicode=True):

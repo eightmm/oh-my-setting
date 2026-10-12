@@ -5198,6 +5198,9 @@ def main(argv=None):
     parser.add_argument("--providers", action="store_true", help="read registered CLI capabilities without running providers")
     parser.add_argument("--release-main", metavar="ATTEMPT", help="release a crashed main after proving its terminal owner absent")
     parser.add_argument("--health", action="store_true", help="read context, reported quota, room bounds and private slot/history capacity")
+    parser.add_argument("--metrics", action="store_true",
+                        help="read-only recorded metrics; follow-up task IDs have no producer linkage")
+    parser.add_argument("--since", metavar="DURATION", help="limit --metrics to records within a duration (for example 7d)")
     parser.add_argument("--json", action="store_true", help="read-only availability and shared OMS state")
     parser.add_argument("--watch", action="store_true", help="read-only activity tree, refreshed every five seconds")
     parser.add_argument("--owner", help="main identity for --watch or --dispatch")
@@ -5253,9 +5256,11 @@ def main(argv=None):
         return panel_release.cli_main(arguments)
     if args.health and (args.dry_run or args.view or args.attention_only):
         parser.error("--health is a read-only report; use --repo, --room and optional --json")
+    if args.since is not None and not args.metrics:
+        parser.error("--since requires --metrics")
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.finalize, args.retry_delivery, args.providers,
-                                     args.chats, args.open_chat, args.health, args.mail)) > 1:
+                                     args.chats, args.open_chat, args.health, args.mail, args.metrics)) > 1:
         parser.error("choose one panel operation")
     if args.json and (args.watch or args.launch or args.dispatch or args.routes or args.council or args.finalize):
         parser.error("--json is only available for panel state or results")
@@ -5284,7 +5289,7 @@ def main(argv=None):
         parser.error("--spawn-main starts a main; it has no dry-run")
     if (args.view or args.attention_only) and (args.launch or args.spawn_main or args.reopen or args.json or args.dry_run or args.routes
             or args.dispatch or args.council or args.results or args.finalize or args.retry_delivery or args.providers
-            or args.chats or args.open_chat or args.mail):
+            or args.chats or args.open_chat or args.mail or args.metrics):
         parser.error("--view and --attention-only apply to the interactive menu or --watch")
     if (args.brief_file or args.purpose or args.workload or args.access != "read") and not args.dispatch:
         parser.error("role task options require --dispatch")
@@ -5361,7 +5366,7 @@ def main(argv=None):
         parser.error("invalid model ID")
     if (args.dispatch or args.council or args.finalize or args.retry_delivery or args.chats or args.open_chat
             or args.spawn_main or not (
-            args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health or args.mail)) and (
+            args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health or args.mail or args.metrics)) and (
             os.environ.get("OMS_HARNESS_CHILD") == "1"
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
         parser.error("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
@@ -5425,6 +5430,11 @@ def main(argv=None):
             else:
                 print(panel_health.render(state, 120, 100))
             return status
+        if args.metrics:
+            from panel_metrics import aggregate, metrics_text
+            report = aggregate(repo, args.since)
+            print(json.dumps(report, ensure_ascii=False, indent=2) if args.json else metrics_text(report))
+            return 0
         if args.reopen:
             print(json.dumps(reopen_panel(repo)))
             return 0

@@ -110,6 +110,13 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(root / 'scripts/lib'))
 import terminal_panel as panel, room
 from panel_routing import allocate
+def fixture_provider_catalog(providers=None):
+    rows = [{"provider": name, "binary": name, "installed": True, "models": []}
+            for name in ("claude", "codex", "pi")]
+    if providers:
+        requested = set(providers.split(",")) if isinstance(providers, str) else set(providers)
+        rows = [row for row in rows if row["provider"] in requested]
+    return rows
 """
     pty = extract(source, "pty", fixture=True).replace(' and operator_selected_py("native-pty")', '')
     (LIB / "operator_pty_helper.py").write_text(pty, encoding="utf-8")
@@ -124,7 +131,7 @@ from panel_routing import allocate
         elif name == "dispatch-exit":
             body += "\nexercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner, room_env)\n"
         elif name == "worker-leases":
-            body += "\nexercise_observed_worker_leases()\n"
+            body += "\nwith patch.object(panel, \"provider_catalog\", side_effect=fixture_provider_catalog):\n    exercise_observed_worker_leases()\n"
         (LIB / filename).write_text(body, encoding="utf-8")
 
 
@@ -1641,6 +1648,220 @@ from copy import deepcopy
 import panel_chats
 import panel_host
 import panel_metrics
+
+# Persist producer-shaped plan, lifecycle and artifact-index records. This also
+# exercises the public text and JSON CLI surfaces without mocking readers.
+import io
+import hashlib
+import runpy
+import os
+from contextlib import redirect_stdout
+from contextlib import redirect_stderr
+from datetime import datetime, timezone
+import room as room_module
+metric_repo = project / 'panel-metrics-fixture'
+metric_repo.mkdir()
+subprocess.run(['git', 'init', '-q', str(metric_repo)], check=True)
+(metric_repo / '.oms/plan').mkdir(parents=True)
+(metric_repo / '.oms/threads').mkdir()
+now_metric = time.time()
+def stamp_metric(offset):
+    return datetime.fromtimestamp(now_metric + offset, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+old_lock_dir = os.environ.get('OMS_LOCK_DIR')
+os.environ['OMS_LOCK_DIR'] = str(metric_repo / '.oms/fixture-locks')
+room_module.create(metric_repo, room='metric-room', title='Metrics fixture', creator='metric-main')
+room_module.join(metric_repo, 'metric-room', 'metric-main', 'codex', role='main')
+room_module.join(metric_repo, 'metric-room', 'metric-worker', 'codex', role='worker', parent='metric-main')
+room_module.send(metric_repo, 'metric-room', 'metric-worker', 'metric-main',
+                 'Follow-up task: followup', kind='handoff')
+if old_lock_dir is None:
+    os.environ.pop('OMS_LOCK_DIR', None)
+else:
+    os.environ['OMS_LOCK_DIR'] = old_lock_dir
+
+# A ready task cancelled before claim is not started, even though claimed_at
+# can be refreshed later by touch.
+(metric_repo / '.oms/plan/tasks.json').write_text(json.dumps({'tasks': {
+    'continued': {'id': 'continued', 'state': 'done', 'claimed_at': stamp_metric(-1), 'lease_epoch': 1},
+    'recent': {'id': 'recent', 'state': 'done', 'claimed_at': stamp_metric(-1)},
+    'abandoned': {'id': 'abandoned', 'state': 'running', 'claimed_at': stamp_metric(-1)},
+    'followup': {'id': 'followup', 'state': 'running', 'claimed_at': stamp_metric(-1)},
+    'claim-blocked': {'id': 'claim-blocked', 'state': 'blocked', 'provider': 'codex',
+                      'claimed_at': stamp_metric(-1), 'lease_epoch': 1},
+    'ready-cancel': {'id': 'ready-cancel', 'state': 'cancelled', 'claimed_at': stamp_metric(-1),
+                     'lease_epoch': 0, 'cancellation': {'state': 'ready', 'ts': stamp_metric(-90)}}}}), encoding='utf-8')
+
+events_module = runpy.run_path(str(Path(sys.argv[1]) / 'agent-events.py'))
+new_event = events_module['new_event']
+event_rows = []
+def add_attempt(attempt_id, task_id, role, access, start, end, final, reason='', parent='main-metric'):
+    refs = {'panel_role': role, 'panel_access': access,
+            'panel_room_id': 'metric-room', 'panel_room_participant': attempt_id}
+    created = new_event(attempt_id, 1, 'attempt.created', run_id='run-metric', task_id=task_id,
+                        parent_attempt_id=parent, provider='codex', tool='panel-dispatch',
+                        refs=refs, to_state='queued')
+    created['ts'] = stamp_metric(start)
+    event_rows.append(created)
+    states = [('starting', start + 1), ('working', start + 2), (final, end)]
+    previous = 'queued'
+    seq = 2
+    for state, offset in states:
+        row = new_event(attempt_id, seq, 'attempt.state_changed', from_state=previous,
+                        to_state=state, reason_code=reason if state == final else '', actor='main-metric')
+        row['ts'] = stamp_metric(offset)
+        event_rows.append(row)
+        previous, seq = state, seq + 1
+
+# More than the public 300 attempt window: bounded tail projection retains the
+# newest attempts and excludes old history without projecting the whole ledger.
+for number in range(305):
+    add_attempt('old-%03d' % number, 'old-task-%03d' % number, 'worker', 'write', -1000-number*4,
+                -999-number*4, 'done')
+# Same-task continuation may have a different owning main attempt. Its recent
+# timeout and successor belong to --since even though the task started earlier.
+add_attempt('write-one', 'continued', 'worker', 'write', -600, -50, 'timed_out')
+add_attempt('write-two', 'continued', 'worker', 'write', -45, -40, 'done', parent='main-later')
+add_attempt('review-two', 'continued', 'reviewer', 'read', -35, -30, 'done', parent='main-later')
+add_attempt('write-recent', 'recent', 'worker', 'write', -55, -40, 'done')
+add_attempt('review-recent', 'recent', 'reviewer', 'read', -35, -30, 'done')
+add_attempt('write-abandoned', 'abandoned', 'worker', 'write', -25, -15, 'timed_out')
+add_attempt('clear-call', 'recent', 'worker', 'write', -35, -30, 'cancelled', 'manual_clear')
+add_attempt('write-followup', 'followup', 'worker', 'write', -45, -40, 'done')
+lifecycle = metric_repo / '.oms/lifecycle/events.jsonl'
+lifecycle.parent.mkdir(parents=True)
+lifecycle.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in event_rows), encoding='utf-8')
+
+metric_result_path = metric_repo / '.oms/artifacts/panel-results/failure.json'
+metric_result_path.parent.mkdir(parents=True)
+metric_result_path.write_text(json.dumps({'schema': 1, 'kind': 'oms-panel-result', 'outcome': 'failed'}), encoding='utf-8')
+artifact_rows = []
+for event_id, task_id, attempt_id, offset in (
+        ('evt_review_two', 'continued', 'review-two', -20),
+        ('evt_review_recent', 'recent', 'review-recent', -20)):
+    artifact_rows.append({'schema': 1, 'event_id': event_id, 'operation_id': 'op_' + event_id,
+                          'ts': stamp_metric(offset), 'kind': 'review-outcome', 'provider': 'local',
+                          'exit': 0, 'task_id': task_id, 'attempt_id': attempt_id})
+artifact_rows.append({'schema': 1, 'event_id': 'evt_panel_failure', 'operation_id': 'op_panel_failure',
+                      'ts': stamp_metric(-10), 'kind': 'panel-result', 'provider': 'local', 'exit': 1,
+                      'task_id': 'abandoned', 'artifact': '.oms/artifacts/panel-results/failure.json',
+                      'artifact_sha256': hashlib.sha256(metric_result_path.read_bytes()).hexdigest()})
+index_path = metric_repo / '.oms/artifacts/index.jsonl'
+index_path.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in artifact_rows), encoding='utf-8')
+expected_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
+assert expected_metrics['completion'] == {'finished': 2, 'started': 5, 'rate': 0.4}, expected_metrics
+assert expected_metrics['review_wait_seconds'] == {'count': 2, 'median': 20.0, 'p90': 20.0}, expected_metrics
+assert expected_metrics['rework'] == {'tasks': 1, 'started': 5, 'rate': 0.2}, expected_metrics
+assert expected_metrics['abandoned_calls'] == 1, expected_metrics
+assert expected_metrics['interventions'] == {'manual_clears': 1, 'cancels': 1,
+                                              'owner_finalized_failures': 1, 'total': 3}, expected_metrics
+metric_text = io.StringIO()
+with redirect_stdout(metric_text):
+    assert panel.main(['--repo', str(metric_repo), '--metrics']) == 0
+assert 'completion: 2/5 (40.0%)' in metric_text.getvalue(), metric_text.getvalue()
+metric_json = io.StringIO()
+with redirect_stdout(metric_json):
+    assert panel.main(['--repo', str(metric_repo), '--metrics', '--json']) == 0
+assert json.loads(metric_json.getvalue())['completion'] == expected_metrics['completion']
+metric_help = io.StringIO()
+try:
+    with redirect_stdout(metric_help):
+        panel.main(['--help'])
+except SystemExit as error:
+    assert error.code == 0
+assert 'follow-up task IDs have no producer linkage' in ' '.join(metric_help.getvalue().split()), metric_help.getvalue()
+recent_metrics = panel_metrics.aggregate(metric_repo, since='1m', now=now_metric)
+assert recent_metrics['completion'] == {'finished': 1, 'started': 3, 'rate': 0.3333}, recent_metrics
+assert recent_metrics['review_wait_seconds'] == {'count': 2, 'median': 20.0, 'p90': 20.0}, recent_metrics
+assert recent_metrics['rework'] == {'tasks': 1, 'started': 3, 'rate': 0.3333}, recent_metrics
+assert recent_metrics['abandoned_calls'] == 1, recent_metrics
+assert recent_metrics['interventions'] == {'manual_clears': 1, 'cancels': 0,
+                                            'owner_finalized_failures': 1, 'total': 2}, recent_metrics
+for invalid_since in ('', '0s', '-1h', '9' * 400 + 'd', 'garbage'):
+    error_text = io.StringIO()
+    if invalid_since == '':
+        try:
+            panel_metrics.aggregate(metric_repo, since=invalid_since, now=now_metric)
+        except ValueError as error:
+            error_text.write(str(error))
+        else:
+            raise AssertionError('invalid --since value was accepted: %r' % invalid_since)
+    else:
+        with redirect_stderr(error_text):
+            assert panel.main(['--repo', str(metric_repo), '--metrics', '--since=' + invalid_since]) == 1
+    assert '--since must be a positive finite duration' in error_text.getvalue(), error_text.getvalue()
+
+# Ledger order breaks timestamp ties: the timeout is followed by a successful
+# write continuation in the same recorded second.
+plan_path = metric_repo / '.oms/plan/tasks.json'
+metric_plan = json.loads(plan_path.read_text(encoding='utf-8'))
+metric_plan['tasks']['same-second'] = {'id': 'same-second', 'state': 'running', 'lease_epoch': 1}
+plan_path.write_text(json.dumps(metric_plan), encoding='utf-8')
+add_attempt('same-second-timeout', 'same-second', 'worker', 'write', -10, -5, 'timed_out')
+add_attempt('same-second-success', 'same-second', 'worker', 'write', -5, -3, 'done')
+lifecycle.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in event_rows), encoding='utf-8')
+same_second_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
+assert same_second_metrics['abandoned_calls'] == 1, same_second_metrics
+assert same_second_metrics['rework']['tasks'] == 2, same_second_metrics
+
+# Existing but corrupt plan evidence is incomplete and exposes a concise reason
+# through both output formats.
+plan_path.write_text('{broken json', encoding='utf-8')
+corrupt_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
+assert corrupt_metrics['incomplete'] is True, corrupt_metrics
+assert corrupt_metrics['incomplete_reason'] == 'plan evidence malformed', corrupt_metrics
+corrupt_text = io.StringIO()
+with redirect_stdout(corrupt_text):
+    assert panel.main(['--repo', str(metric_repo), '--metrics']) == 0
+assert 'incomplete: plan evidence malformed' in corrupt_text.getvalue(), corrupt_text.getvalue()
+corrupt_json = io.StringIO()
+with redirect_stdout(corrupt_json):
+    assert panel.main(['--repo', str(metric_repo), '--metrics', '--json']) == 0
+corrupt_payload = json.loads(corrupt_json.getvalue())
+assert corrupt_payload['incomplete'] is True
+assert corrupt_payload['incomplete_reason'] == 'plan evidence malformed'
+
+# Invalid task state values are excluded from counts and reported as partial
+# evidence in both output formats instead of being interpreted as ready.
+for invalid_state in (None, 7, False, 'unknown'):
+    plan_path.write_text(json.dumps({'tasks': {
+        'valid': {'id': 'valid', 'state': 'running', 'lease_epoch': 1},
+        'invalid': {'id': 'invalid', 'state': invalid_state, 'lease_epoch': 1}}}), encoding='utf-8')
+    bad_state_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
+    assert bad_state_metrics['incomplete'] is True, bad_state_metrics
+    assert bad_state_metrics['incomplete_reason'] == 'plan task state malformed', bad_state_metrics
+    assert bad_state_metrics['completion']['started'] == 1, bad_state_metrics
+bad_state_text = io.StringIO()
+with redirect_stdout(bad_state_text):
+    assert panel.main(['--repo', str(metric_repo), '--metrics']) == 0
+assert 'incomplete: plan task state malformed' in bad_state_text.getvalue(), bad_state_text.getvalue()
+bad_state_json = io.StringIO()
+with redirect_stdout(bad_state_json):
+    assert panel.main(['--repo', str(metric_repo), '--metrics', '--json']) == 0
+bad_state_payload = json.loads(bad_state_json.getvalue())
+assert bad_state_payload['incomplete'] is True
+assert bad_state_payload['incomplete_reason'] == 'plan task state malformed'
+
+empty_metrics_repo = project / 'panel-metrics-empty-fixture'
+empty_metrics_repo.mkdir()
+subprocess.run(['git', 'init', '-q', str(empty_metrics_repo)], check=True)
+(empty_metrics_repo / '.oms/plan').mkdir(parents=True)
+(empty_metrics_repo / '.oms/threads').mkdir()
+empty_metrics = panel_metrics.aggregate(empty_metrics_repo)
+assert empty_metrics['incomplete'] is False and empty_metrics['incomplete_reason'] is None, empty_metrics
+assert empty_metrics['completion'] == {'finished': 0, 'started': 0, 'rate': None}
+assert empty_metrics['review_wait_seconds'] == {'count': 0, 'median': None, 'p90': None}
+assert empty_metrics['rework']['rate'] is None and empty_metrics['abandoned_calls'] == 0
+assert empty_metrics['interventions']['total'] == 0
+empty_text = io.StringIO()
+with redirect_stdout(empty_text):
+    assert panel.main(['--repo', str(empty_metrics_repo), '--metrics']) == 0
+assert 'completion: 0/0 (none)' in empty_text.getvalue(), empty_text.getvalue()
+empty_json = io.StringIO()
+with redirect_stdout(empty_json):
+    assert panel.main(['--repo', str(empty_metrics_repo), '--metrics', '--json']) == 0
+assert json.loads(empty_json.getvalue())['review_wait_seconds']['p90'] is None
+shutil.rmtree(metric_repo)
+shutil.rmtree(empty_metrics_repo)
 
 task_ids = ['tick-write', 'tick-wait']
 plan.write_text(json.dumps({'plan_id': 'tick-plan', 'tasks': [{'id': t} for t in task_ids]}))
@@ -3903,40 +4124,48 @@ try:
     raise AssertionError("researcher write scope was accepted")
 except ValueError:
     pass
-for target in ("codex", "claude"):
-    preset = panel.selected_route("claude", "researcher", None, "read", None, target)
-    command = panel.routed_command(panel.ENTRY, project, preset, prompt="Find cited evidence.")
-    assert "--read-only" in command and command[command.index("--role") + 1] == "researcher"
-    assert preset["provider"] == target and preset["effort"] == "low" and preset["workload"] == "light"
-    for options in ((None, "read", "implement", None, None, None),
-                    (None, "write", None, None, None, None),
-                    ("deep", "read", None, None, None, None),
-                    (None, "read", None, None, None, "high"),
-                    (None, "read", None, "codex", "gpt-6-astra", None),
-                    (None, "read", None, "claude", "provider-default", None),
-                    (None, "read", None, "grok", None, None),
-                    ("light", "read", None, "codex", None, None)):
-        workload, access, purpose, to, model, effort = options
+def fixture_provider_catalog(providers=None):
+    rows = [codex_only, claude_candidate]
+    if providers:
+        requested = set(providers.split(",")) if isinstance(providers, str) else set(providers)
+        rows = [row for row in rows if row["provider"] in requested]
+    return rows
+
+with patch.object(panel, "provider_catalog", side_effect=fixture_provider_catalog):
+    for target in ("codex", "claude"):
+        preset = panel.selected_route("claude", "researcher", None, "read", None, target)
+        command = panel.routed_command(panel.ENTRY, project, preset, prompt="Find cited evidence.")
+        assert "--read-only" in command and command[command.index("--role") + 1] == "researcher"
+        assert preset["provider"] == target and preset["effort"] == "low" and preset["workload"] == "light"
+        for options in ((None, "read", "implement", None, None, None),
+                        (None, "write", None, None, None, None),
+                        ("deep", "read", None, None, None, None),
+                        (None, "read", None, None, None, "high"),
+                        (None, "read", None, "codex", "gpt-6-astra", None),
+                        (None, "read", None, "claude", "provider-default", None),
+                        (None, "read", None, "grok", None, None),
+                        ("light", "read", None, "codex", None, None)):
+            workload, access, purpose, to, model, effort = options
+            try:
+                panel.selected_route("claude", "researcher", workload, access, purpose, to, model, effort)
+                raise AssertionError("researcher authority/model override was accepted")
+            except ValueError:
+                pass
+        for forbidden in ({"verify": "true"}, {"resume": "fixture-session"}):
+            try:
+                panel.routed_command(panel.ENTRY, project, preset, prompt="Lookup only.", **forbidden)
+                raise AssertionError("researcher gate/continuation was accepted")
+            except ValueError:
+                pass
+    # Only write-capable roles continue a session; judges keep a context apart from the implementer.
+    for role in ("reviewer", "verifier", "security-auditor", "critic", "advisor", "release-engineer"):
+        judge = panel.selected_route("claude", role, None, "read", None)
         try:
-            panel.selected_route("claude", "researcher", workload, access, purpose, to, model, effort)
-            raise AssertionError("researcher authority/model override was accepted")
-        except ValueError:
-            pass
-    for forbidden in ({"verify": "true"}, {"resume": "fixture-session"}):
-        try:
-            panel.routed_command(panel.ENTRY, project, preset, prompt="Lookup only.", **forbidden)
-            raise AssertionError("researcher gate/continuation was accepted")
-        except ValueError:
-            pass
-# Only write-capable roles continue a session; judges keep a context apart from the implementer.
-for role in ("reviewer", "verifier", "security-auditor", "critic", "advisor", "release-engineer"):
-    judge = panel.selected_route("claude", role, None, "read", None)
-    try:
-        panel.routed_command(panel.ENTRY, project, judge, brief=str(brief), verify="true", resume="fixture-session")
-        raise AssertionError("%s resumed a session" % role)
-    except ValueError as error:
-        assert "only write-capable roles continue" in str(error), error
-refactor = panel.selected_route("claude", "refactorer", None, "write", None)
+            panel.routed_command(panel.ENTRY, project, judge, brief=str(brief), verify="true", resume="fixture-session")
+            raise AssertionError("%s resumed a session" % role)
+        except ValueError as error:
+            assert "only write-capable roles continue" in str(error), error
+    refactor = panel.selected_route("claude", "refactorer", None, "write", None)
 assert "--resume-session" in panel.routed_command(panel.ENTRY, project, refactor, brief=str(brief), verify="true",
                                                   resume="fixture-session")
 
