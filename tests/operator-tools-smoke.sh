@@ -15364,14 +15364,14 @@ interrupted_row = dict(activity_row, since=300, updated_at=300, origin="user", t
 activity_path.write_text(json.dumps(interrupted_row))
 assert "[Request interrupted by user]" not in activity_path.read_text(), "transcript text stays out of activity records"
 with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude_home)}):
-    terminal_panel.MAIN_INTERRUPT_CACHE.clear()
+    panel.MAIN_INTERRUPT_CACHE.clear()
     real_open = os.open
     transcript_opens = []
     def count_transcript_open(path, *args, **kwargs):
         if str(path) == str(transcript):
             transcript_opens.append(path)
         return real_open(path, *args, **kwargs)
-    with patch.object(terminal_panel.os, "open", side_effect=count_transcript_open):
+    with patch.object(panel.os, "open", side_effect=count_transcript_open):
         interrupted_activity = panel.main_activity(activity_repo, [activity_main])
         cached_interrupted = panel.main_activity(activity_repo, [activity_main])
     assert len(transcript_opens) == 1, transcript_opens
