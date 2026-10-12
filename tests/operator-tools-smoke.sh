@@ -2833,6 +2833,7 @@ for successful_reads in (0, 1):
             patch.object(panel, "read_panel", side_effect=[(live, 0, "codex", None, "auto", False, "")] * successful_reads +
                          [ValueError("fixture collection unavailable")]), \
             patch.object(panel, "repository", return_value=Path(".")), \
+            patch.object(panel, "git_toplevel", return_value=Path(".")), \
             patch.object(panel, "work_repository", return_value=Path(".")), \
             patch.object(panel, "native_repository", return_value=Path(".")), \
             patch.object(panel, "managed_session", return_value=False), \

@@ -360,15 +360,18 @@ def repository(value):
     return state_repository(value)
 
 
-def panel_repository(value):
+def git_toplevel(value):
     requested = Path(value if value is not None else os.getcwd()).resolve(strict=True)
     query = subprocess.run(["git", "-C", str(requested), "rev-parse", "--show-toplevel"],
                            stdin=subprocess.DEVNULL, capture_output=True, text=True,
                            check=False, timeout=5)
     if query.returncode:
         raise ValueError("%s is not a git repository; open it in a git repository or pass --repo PATH" % requested)
-    root = Path(query.stdout.replace("\r", "").rstrip("\n")).resolve(strict=True)
-    return repository(root)
+    return Path(query.stdout.replace("\r", "").rstrip("\n")).resolve(strict=True)
+
+
+def panel_repository(value):
+    return repository(git_toplevel(value))
 
 
 def child_environment(provider, repo):
@@ -5171,7 +5174,7 @@ def main(argv=None):
     args = parser.parse_args(arguments)
     if args.repo is not None:
         try:
-            panel_repository(args.repo)
+            git_toplevel(args.repo)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             if " is not a git repository; open it in a git repository or pass --repo PATH" in str(error):
                 print("oms panel: " + clean(str(error), 200), file=sys.stderr)
