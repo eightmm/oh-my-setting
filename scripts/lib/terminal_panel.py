@@ -3417,8 +3417,7 @@ def awaiting_admission(repo, state, _tick=None):
     return [member["participant"] for member in members if member["task_id"] in pending][:INBOX_LIMIT]
 
 
-def show(repo, provider, previous=None, menu=True, clear=True, main_attempt=None,
-         view="auto", attention_only=False, navigation=None, cache=None):
+def _show_state(repo, main_attempt=None, navigation=None, cache=None):
     # A cache lets key presses redraw the last snapshot instead of collecting a new one.
     if cache is not None and "state" in cache:
         state, status = cache["state"], cache["status"]
@@ -3433,6 +3432,12 @@ def show(repo, provider, previous=None, menu=True, clear=True, main_attempt=None
             state = dict(state, provider_status=collect(state, main_attempt, repo=repo))
         if cache is not None:
             cache.update(state=state, status=status)
+    return state, status
+
+
+def show(repo, provider, previous=None, menu=True, clear=True, main_attempt=None,
+         view="auto", attention_only=False, navigation=None, cache=None):
+    state, status = _show_state(repo, main_attempt, navigation, cache)
     text, size, capable = frame_view(repo, provider, state, previous, menu, main_attempt,
                                     view=view, attention_only=attention_only, navigation=navigation)
     # Finish collection/rendering before clearing, so errors never blank the pane.
@@ -4511,14 +4516,14 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
     from panel_input import choose, passive_click
 
     def repaint():
+        state, unused = _show_state(repo, navigation=navigation, cache=cache)
         reader = navigation.get("debate_view") or {}
         if navigation.get("tab") == "debate" and reader.get("shown") and (
                 "report" not in reader or reader.pop("refresh", False)):
             try:
                 reader.update(report=panel_debate.read(repo, ("debate", reader["shown"]), call_results), error=None)
             except Exception as error:
-                reader.update(report={}, error=clean(str(error), 120) or "Debate evidence unavailable")
-        state = cache.get("state", {})
+                reader.update(report=None, error=clean(str(error), 120) or "Debate evidence unavailable")
         log = navigation.setdefault("messages_view", {"selected": None, "open": None, "filter": 0, "scroll": 0})
         if navigation.get("tab") == "messages" and state and log.get("rev") != panel_messages.signature(state):
             signature = panel_messages.signature(state)
@@ -4529,7 +4534,7 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                 except Exception as error:
                     log.update(error=clean(str(error), 120), rev=signature, reading=False)
                 else:
-                    log.update(log=messages or log.get("log"), rev=signature, reading=False)
+                    log.update(log=messages or log.get("log"), rev=signature, reading=False, error=None)
         show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
 
     # Raw mode starts before the first frame, so keys typed while it loads are kept.

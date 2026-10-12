@@ -10371,43 +10371,93 @@ assert painted.call_count == 3 and graph_nav["preview"].get("report") == {} and 
 # The control pane routes tree and graph dock events before returning a control choice.
 class DockInput(ReaderInput):
     def __init__(self, batches): self.batches = batches
+dock_state = {"collection": {"ok": True},
+              "room": {"id": "room-1", "message_count": 3, "pending_count": 1, "received_count": 2,
+                       "participants": [{"participant": "main-1", "role": "main", "joined": True,
+                                         "provider": "codex", "attempt": "main-attempt"}]},
+              "attempts": {"recent": [{"attempt_id": "debate-attempt", "tool": "panel-council",
+                                       "task_id": "task-1", "state": "done", "parent_attempt_id": "main-attempt",
+                                       "panel": {"room_id": "room-1", "room_participant": "main-1"}}]}}
+def dock_read(navigation, state=dock_state, batches=None):
+    # Use the real show/frame_view path, including an empty cache on each automatic refresh.
+    clock = [0]
+    class RefreshInput(DockInput):
+        def wait(self, seconds):
+            clock[0] += seconds
+            return []
+    inputs = RefreshInput([]) if batches is None else DockInput(batches)
+    width = 120 if navigation["surface"] == "graph" else 70  # the graph view's tree fallback
+    with patch.object(panel, "menu_input", return_value=inputs), \
+            patch.object(panel, "snapshot", return_value=(state, 0)) as collected, \
+            patch("panel_metrics.collect", return_value={}) as metrics, \
+            patch.object(panel.time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(panel, "terminal_style", return_value=(False, False, True)), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "provider_availability", return_value={}), \
+            patch.object(panel.shutil, "get_terminal_size", return_value=os.terminal_size((width, 40))), \
+            patch.object(panel.sys, "stdout", io.StringIO()) as output:
+        choice = panel.read_choice(Path("."), "codex", "ready", "graph", False,
+                                   navigation, {})
+    collected.assert_called_once_with(Path("."))
+    metrics.assert_called_once_with(state, None, repo=Path("."))
+    return choice, output.getvalue()
+
 for surface in ("graph", "tree"):
     dock_nav = {"surface": surface, "tab": "detail", "hits": [], "tab_strip_visible": True}
-    with patch.object(panel, "menu_input", return_value=DockInput([[('tab',)], [('q',)]])), \
-            patch.object(panel, "show"):
-        assert panel.read_choice(Path("."), "codex", "ready", "auto", False, dock_nav, {}) == "q"
+    choice, text = dock_read(dock_nav, batches=[[('tab',)], [('q',)]])
+    assert choice == "q" and "No repository plan recorded" in text, text
     assert dock_nav["tab"] == "plan", dock_nav
 # Debate evidence is loaded synchronously on entering the tab and retained across repaint.
 for surface in ("graph", "tree"):
     debate_nav = {"surface": surface, "tab": "detail", "tab_strip_visible": True,
                   "debate_view": {"shown": ("task-1", "main-1")},
                   "box": {"y1": 1, "y2": 10}}
-    debate_input = DockInput([[('tab',)], [('tab',)], [('wheel',)], [('q',)]])
-    answer = {"rows": [{"calls": [{"kind": "seat", "answer": "seat answer"}]}]}
-    with patch.object(panel, "menu_input", return_value=debate_input), patch.object(panel, "show"), \
-            patch.object(panel.panel_debate, "read", return_value=answer) as debate_read:
-        assert panel.read_choice(Path("."), "codex", "ready", "auto", False, debate_nav, {}) == "q"
+    answer = {"rows": [{"calls": [{"kind": "ask", "selected_model": "gpt-6.1-sol", "answer": "seat answer"}]}]}
+    with patch.object(panel.panel_debate, "read", return_value=answer) as debate_read:
+        choice, text = dock_read(debate_nav, batches=[[('tab',)], [('tab',)], [('scroll', 1)], [('q',)]])
+        assert choice == "q" and "seat answer" in text, text
     debate_read.assert_called_once_with(Path("."), ("debate", ("task-1", "main-1")), panel.call_results)
     assert debate_nav["debate_view"]["report"] is answer and debate_nav["tab"] == "debate", debate_nav
-# A debate read failure is retained for the dock to render.
-debate_nav = {"surface": "graph", "tab": "debate", "tab_strip_visible": True,
-              "debate_view": {"shown": ("task-1", "main-1")}}
-with patch.object(panel, "menu_input", return_value=DockInput([[('wheel',)], [('q',)]])), \
-        patch.object(panel, "show"), patch.object(panel.panel_debate, "read", side_effect=OSError("missing")):
-    assert panel.read_choice(Path("."), "codex", "ready", "auto", False, debate_nav, {}) == "q"
-assert debate_nav["debate_view"]["report"] == {} and debate_nav["debate_view"]["error"] == "missing", debate_nav
-# Messages evidence follows the state signature and is read once across repaint.
-messages_state = {"room": {"id": "room-1", "message_count": 3, "pending_count": 1, "received_count": 2}}
-messages_nav = {"surface": "graph", "tab": "messages", "tab_strip_visible": True,
-                "box": {"y1": 1, "y2": 10},
-                "messages_view": {"selected": None, "open": None, "filter": 0, "scroll": 0}}
-with patch.object(panel, "menu_input", return_value=DockInput([[('wheel',)], [('wheel',)], [('q',)]])), \
-        patch.object(panel, "show"), patch.object(panel.panel_messages, "read", return_value=[{"id": "m1"}]) as messages_read:
-    assert panel.read_choice(Path("."), "codex", "ready", "auto", False, messages_nav,
-                             {"state": messages_state}) == "q"
-messages_read.assert_called_once_with(Path("."), "room-1")
-assert messages_nav["messages_view"]["log"] == [{"id": "m1"}] and messages_nav["messages_view"]["rev"] == \
-    panel.panel_messages.signature(messages_state), messages_nav
+# Reader failures render, survive repaint without repeated reads, and clear on successful retry.
+for surface in ("graph", "tree"):
+    debate_nav = {"surface": surface, "tab": "debate", "tab_strip_visible": True,
+                  "debate_view": {"shown": ("task-1", "main-1")}}
+    with patch.object(panel.panel_debate, "read", side_effect=OSError("debate missing")) as debate_read:
+        choice, text = dock_read(debate_nav, batches=[[('scroll', 1)], [('q',)]])
+    assert choice == "q" and "! debate missing" in text and "No seat answers recorded yet" not in text, text
+    debate_read.assert_called_once()
+    assert debate_nav["debate_view"]["report"] is None, debate_nav
+    debate_nav["debate_view"]["refresh"] = True
+    with patch.object(panel.panel_debate, "read", return_value=answer) as debate_read:
+        choice, text = dock_read(debate_nav)
+    assert choice == "9" and "seat answer" in text and "debate missing" not in text, text
+    debate_read.assert_called_once()
+    assert debate_nav["debate_view"]["error"] is None, debate_nav
+
+    messages_nav = {"surface": surface, "tab": "messages", "tab_strip_visible": True}
+    messages = [{"id": "m1", "text": "first message"}]
+    new_message = {"id": "m2", "text": "new message"}
+    newer_state = dict(dock_state, room=dict(dock_state["room"], message_count=4))
+    with patch.object(panel.panel_messages, "read", side_effect=[messages, messages + [new_message]]) as messages_read:
+        choice, text = dock_read(messages_nav)
+        assert choice == "9" and "first message" in text and "new message" not in text, text
+        choice, text = dock_read(messages_nav, newer_state)
+        assert choice == "9" and "new message" in text, text
+    assert messages_read.call_count == 2, messages_read.call_args_list
+    assert messages_nav["messages_view"]["rev"] == panel.panel_messages.signature(newer_state), messages_nav
+
+    messages_nav = {"surface": surface, "tab": "messages", "tab_strip_visible": True}
+    with patch.object(panel.panel_messages, "read", side_effect=OSError("messages missing")) as messages_read:
+        choice, text = dock_read(messages_nav, batches=[[('scroll', 1)], [('scroll', 1)], [('q',)]])
+        assert choice == "q" and "! messages missing" in text, text
+        choice, text = dock_read(messages_nav)
+        assert choice == "9" and "! messages missing" in text, text
+    messages_read.assert_called_once_with(Path("."), "room-1")
+    with patch.object(panel.panel_messages, "read", return_value=messages + [new_message]) as messages_read:
+        choice, text = dock_read(messages_nav, newer_state)
+    assert choice == "9" and "new message" in text and "messages missing" not in text, text
+    messages_read.assert_called_once_with(Path("."), "room-1")
+    assert messages_nav["messages_view"]["error"] is None, messages_nav
 # A Messages-tab f request opens the recorded target before returning the queued control key.
 message_nav = {"surface": "graph", "tab": "messages", "box": {"y1": 1, "y2": 10},
                "message_ids": ["m1"], "message_calls": {"m1": ("result", "w1")},

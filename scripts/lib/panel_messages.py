@@ -191,7 +191,8 @@ def tab_body(report, width, cap, navigation, unicode=True):
     if state.get("open") not in ids:
         state["open"] = None
     navigation["message_has_call"] = bool(navigation["message_calls"].get(state.get("selected")))
-    budget = max(1, cap - 1)
+    error = clean(state.get("error"), 120)
+    budget = max(1, cap - 1 - bool(error))
     state["viewport"] = budget
     body, starts = [], {}
     for r in rows:
@@ -216,6 +217,8 @@ def tab_body(report, width, cap, navigation, unicode=True):
                                     "  · %d-%d of %d" % (scroll + 1, min(len(body), scroll + budget), len(body))
                                     if len(body) > budget else "")
     out = [(head, None, False)]
+    if error:
+        out.append(("! " + error, None, False))
     if not rows:
         out.append(("Reading messages..." if loading else "No messages need you" if label == "needs you" else "No messages in this view", None, False))
     out += [(text, ("message", ident) if header and ident is not None else None,
