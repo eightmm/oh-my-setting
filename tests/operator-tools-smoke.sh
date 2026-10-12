@@ -14918,9 +14918,11 @@ for activity_state, kind in (("idle", None), ("quiet", None), ("waiting", "input
     live_review = next(m for m in graph_view.nodes(handoff) if m["participant"] == "stale-patch")
     assert graph_view.call_classifier(handoff)(live_review) == "review", (activity_state, kind)
     assert ("result", "stale-patch") in {item["action"] for item in inbox_items(handoff)}, (activity_state, kind)
-    assert graph_view.plan_summary(handoff)[3] == 1, (activity_state, kind)
+    # The goal banner counts only plan review; the held task waits on its call instead.
+    assert graph_view.plan_summary(handoff)[3] == 0 and "held-review" in graph_view.held_split(handoff)[0], \
+        (activity_state, kind, graph_view.plan_summary(handoff), graph_view.held_split(handoff))
     handoff_banner = graph_view.goal_banner(handoff, 127, True)[0][0]
-    assert "1 review" in handoff_banner, (activity_state, kind, handoff_banner)
+    assert "1 claimed" in handoff_banner and "review" not in handoff_banner, (activity_state, kind, handoff_banner)
 handoff["attempts"]["recent"][-1]["state"] = "done"
 handoff.pop("main_activity")
 owner_successor_done = next(m for m in graph_view.nodes(handoff) if m["participant"] == "stale-patch")
