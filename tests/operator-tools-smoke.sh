@@ -2231,7 +2231,7 @@ assert panel_debate._sentence('He said "stop! now" ok. More') == 'He said "stop!
 assert [panel_debate.choice(t) for t in ("저는 (a)를 고릅니다.", "B: safest", "A good idea", "Yes, ship", "revise", "none")] == \
     ["(a)", "(b)", None, "yes", "revise", None]
 assert TerminalInput().decode(b"0\t") == [("0",), ("tab",)]
-assert TerminalInput().decode(b"dm") == [("unbound",), ("unbound",)]
+assert TerminalInput().decode(b"dm") == [("unbound",), ("m",)]
 assert TerminalInput().decode(b"y") == [("unbound",)]
 assert TerminalInput().decode(b"cy") == [("c",), ("unbound",)]
 assert TerminalInput().decode(b"\033[200~cy\033[201~") == [("paste",)]
@@ -2250,6 +2250,7 @@ assert stale_prefix.escape_since == 10.0, stale_prefix.escape_since
 with patch("panel_input.time.monotonic", return_value=10.05), \
         patch("panel_input.select.select", return_value=([], [], [])):
     assert stale_prefix.wait(0) == [] and stale_prefix.pending == b"\033[200"
+assert TerminalInput().decode(b"m") == [("m",)]
 msg_members = [{"participant": "m1", "role": "main", "joined": True, "model": "claude-opus-5-5", "seq": 1, "provider": "claude", "attempt": "a1"},
                {"participant": "m2", "role": "main", "joined": True, "model": "gpt-6.1-sol", "seq": 2, "provider": "codex", "attempt": "a2"},
                {"participant": "m3", "role": "main", "joined": True, "model": "gpt-6-luna", "seq": 3, "provider": "codex", "attempt": "a3"}]
@@ -2291,6 +2292,42 @@ def board(tab, width=80, height=60, **kwargs):
     nav = kwargs.pop("nav", None) or {"selected": ("chat", "m2"), "tab": tab}
     nav["tab"] = tab
     return nav, render(msg_report, "codex", width, height, view="graph", navigation=nav, main_attempt="a2", **kwargs)
+
+
+# Portrait and short-wide boards spend available rows on the activity viewport and tab body.
+for width, height in ((40, 90), (60, 80), (120, 20), (127, 50)):
+    nav, text = board("messages", width, height)
+    lines = text.splitlines()
+    assert len(lines) == height and nav["tab_strip_visible"] and nav["tab_body_visible"], (width, height, nav)
+    assert nav["box"]["y2"] <= height and nav["box"]["y1"] >= 1, (width, height, nav["box"])
+    assert all(1 <= hit["y"] <= height and 1 <= hit["x1"] <= hit["x2"] <= width for hit in nav["hits"]), (width, height)
+    assert any(hit["action"] == ("tab", "messages") for hit in nav["hits"]), (width, height)
+    assert nav["box"]["y2"] - nav["box"]["y1"] >= (3 if height <= 20 else 14), (width, height, nav["box"])
+    blank_run = longest_blank = 0
+    for line in lines:
+        blank_run = blank_run + 1 if not line.strip() else 0
+        longest_blank = max(longest_blank, blank_run)
+    if height > width or height <= 20:
+        assert longest_blank <= 2, (width, height, longest_blank, [(i + 1, line) for i, line in enumerate(lines) if not line.strip()])
+
+# A parentless live worker adds the short-board warning before the dock; it must not restore the blank band.
+unlinked = deepcopy(msg_report)
+unlinked["room"]["participants"].append({"participant": "unlinked-call", "role": "worker", "joined": True,
+                                          "model": "gpt-6-luna", "seq": 4, "provider": "codex"})
+unlinked["attempts"]["active_recent"].append({
+    "attempt_id": "att_unlinked", "state": "working", "provider": "codex", "tool": "peer-delegate",
+    "task_id": "unlinked", "panel": {"role": "worker", "model": "gpt-6-luna", "label": "Unlinked worker",
+                                          "room_id": "r", "room_participant": "unlinked-call"}})
+unlinked_nav = {"selected": ("chat", "m2"), "tab": "messages"}
+unlinked_text = render(unlinked, "codex", 120, 20, view="graph", navigation=unlinked_nav, main_attempt="a2")
+unlinked_lines = unlinked_text.splitlines()
+assert unlinked_nav["tab_body_visible"] and unlinked_nav["box"]["y2"] - unlinked_nav["box"]["y1"] >= 3, unlinked_nav
+assert "no known main" in unlinked_text, unlinked_text
+blank_run = longest_blank = 0
+for line in unlinked_lines:
+    blank_run = blank_run + 1 if not line.strip() else 0
+    longest_blank = max(longest_blank, blank_run)
+assert longest_blank <= 2, (120, 20, longest_blank, unlinked_lines)
 
 
 # The strip: selected tab bracketed, unread count and new-debate dot, hits equal drawing at 80 and 157 columns and in ASCII.
@@ -5595,8 +5632,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             tmux_wait(["display-message", "-p", "-t", session, "#{window_name}"], "control")
             os.write(fd, b"\033[15~")
             tmux_wait(["display-message", "-p", "-t", session, "#{window_name}"], "claude")
-            # One panel-wide board geometry in cells: both mains end with the same board size, a drag in the active
-            # window is recorded and the other main follows; a zoomed board is left alone.
+            # Board geometry is recorded per window: a drag affects its own main, and a zoomed sibling stays put.
             shared = {}
             for owner in ("codex", "claude"):
                 rows = subprocess.check_output(tmux + ["list-panes", "-t", session + ":" + owner, "-F",
@@ -5608,23 +5644,22 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 "#{window_width} #{window_height} #{pane_width}"], env=env, text=True).split()
             window, extent = int(geometry[0]), "#{pane_width}"
             assert int(geometry[2]) < window, geometry
-            tmux_wait(["display-message", "-p", "-t", shared["claude"], extent],
-                      subprocess.check_output(tmux + ["display-message", "-p", "-t", shared["codex"], extent],
-                                              env=env, text=True).strip(), timeout=20)
+            claude_initial = subprocess.check_output(tmux + ["display-message", "-p", "-t", shared["claude"], extent],
+                                                     env=env, text=True).strip()
             dragged = panel.split_cells(("left", window * 3 // 10, False), window)
             subprocess.run(tmux + ["resize-pane", "-t", shared["codex"], "-x", str(dragged)], env=env, check=True)
-            tmux_wait(["show-options", "-v", "-t", session, "@oms_panel_split"], panel.split_text(dragged))
-            tmux_wait(["display-message", "-p", "-t", shared["claude"], extent], str(dragged), timeout=20)
+            tmux_wait(["show-options", "-w", "-v", "-t", shared["codex"], "@oms_panel_split"], panel.split_text(dragged))
+            tmux_wait(["display-message", "-p", "-t", shared["claude"], extent], claude_initial, timeout=20)
             tmux_wait(["display-message", "-p", "-t", shared["codex"], extent], str(dragged), timeout=20)
             subprocess.run(tmux + ["resize-pane", "-t", shared["claude"], "-Z"], env=env, check=True)
             wider = panel.split_cells(("left", window * 7 // 10, False), window)
-            subprocess.run(tmux + ["set-option", "-t", session, "@oms_panel_split", panel.split_text(wider)],
+            subprocess.run(tmux + ["set-option", "-w", "-t", shared["claude"], "@oms_panel_split", panel.split_text(wider)],
                            env=env, check=True)
             time.sleep(3)
             assert subprocess.check_output(tmux + ["display-message", "-p", "-t", shared["claude"],
                 "#{window_zoomed_flag}"], env=env, text=True).strip() == "1", "a zoomed board was resized"
             subprocess.run(tmux + ["resize-pane", "-t", shared["claude"], "-Z"], env=env, check=True)
-            tmux_wait(["display-message", "-p", "-t", shared["claude"], extent], str(wider), timeout=20)
+            tmux_wait(["display-message", "-p", "-t", shared["claude"], extent], str(panel.work_split_cells(("left", wider, False), window)), timeout=20)
             control_sidebar = next(row.split("\t")[0] for row in panes if "--watch" in row)
             tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_owner"], "claude")
             tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "Claude --")
@@ -5707,7 +5742,11 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             chat_pane, graph_pane = chat_row[0], graph_row[0]
             assert int(graph_row[1]) < int(chat_row[1]) and graph_row[2] == chat_row[2], pane_rows
             tmux_wait(["capture-pane", "-p", "-t", chat_pane], "NATIVE_FIXTURE_READY")
-            tmux_wait(["capture-pane", "-p", "-t", graph_pane], "Sol 6.1 ─")
+            board_width = int(subprocess.check_output(tmux + ["display-message", "-p", "-t", graph_pane,
+                                                              "#{pane_width}"], env=env, text=True))
+            assert board_width < 76, board_width
+            board_picture = tmux_wait(["capture-pane", "-p", "-t", graph_pane], "this window · Sol 6.1")
+            assert "Activity" in board_picture, board_picture
             native_pid = subprocess.check_output(tmux + ["display-message", "-p", "-t", chat_pane, "#{pane_pid}"], env=env, text=True)
             assert subprocess.check_output(tmux + ["display-message", "-p", "-t", top_window, "#{pane_id}"], env=env, text=True).strip() == chat_pane
             subprocess.run(tmux + ["send-keys", "-t", graph_pane, "-l", "v"], env=env, check=True)
@@ -5746,7 +5785,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             assert subprocess.check_output(tmux + ["display-message", "-p", "-t", chat_pane, "#{pane_pid}"], env=env, text=True) == native_pid
             restored = tmux_wait(["list-panes", "-t", top_window, "-F", "#{pane_id}\t#{pane_start_command}"], "--watch")
             graph_pane = next(row.split("\t", 1)[0] for row in restored.splitlines() if "--watch" in row)
-            tmux_wait(["capture-pane", "-p", "-t", graph_pane], "Sol 6.1 ─")
+            tmux_wait(["capture-pane", "-p", "-t", graph_pane], "this window · Sol 6.1")
             tmux_wait(["show-option", "-p", "-v", "-t", graph_pane, "@oms_panel_main_watch"], "1")
             restored_attempt = subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", graph_pane,
                                                 "@oms_panel_main_attempt"], env=env, text=True).strip()
@@ -5760,6 +5799,10 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                                              OMS_ROOM_PARTICIPANT=restored_owner), clear=True):
                 assert panel._cancel_watch_authority(project, restored_attempt, restored_owner), \
                     "reopened main board did not restore cancellation authority"
+            assert int(subprocess.check_output(tmux + ["display-message", "-p", "-t", graph_pane,
+                                                      "#{pane_width}"], env=env, text=True)) == board_width
+            restored_picture = tmux_wait(["capture-pane", "-p", "-t", graph_pane], "this window · Sol 6.1")
+            assert "Activity" in restored_picture, restored_picture
             with patch.dict(os.environ, reopen_env, clear=True), patch.object(panel.sys.stdin, "isatty", return_value=True), \
                     patch.object(panel.sys.stdout, "isatty", return_value=True), \
                     patch.object(panel, "reopen_panel", wraps=panel.reopen_panel) as reopen_again:
@@ -10135,6 +10178,12 @@ flow = {"collection": {"ok": True}, "room": {"id": "flow-room", "title": "Visual
 flow_before = json.dumps(flow, sort_keys=True)
 two_main_cards = render(flow, "codex", 157, 50, view="graph", navigation={"dismissed": True})
 assert " for " in two_main_cards, two_main_cards
+overview_nav = {"dismissed": True}
+overview_graph = render(flow, "codex", 124, 40, view="graph", navigation=overview_nav)
+assert overview_nav["surface"] == "graph", overview_nav
+capped_nav = {"dismissed": True}
+capped_tree = render(flow, "codex", 60, 40, view="graph", navigation=capped_nav)
+assert capped_nav["surface"] == "tree" and ("chat", "flow-main") in capped_nav["items"], capped_nav
 single_flow = deepcopy(flow)
 single_flow["room"]["participants"] = [m for m in single_flow["room"]["participants"] if m["participant"] not in {"flow-other", "foreign-child", "unlinked-child"}]
 for glyphs in (False, True):
@@ -10376,20 +10425,64 @@ changed_nav = {"preview": {"target": ("result", "builder"), "report": {"rows": [
     {"answer": "Patched the parser.", "changes": stat}]}]}}}
 picture = render(flow, "codex", 100, 34, view="graph", main_attempt="flow-attempt", navigation=changed_nav)
 assert "Changed files: 1 (+2 -1)" in picture and "value.txt +2 -1" in picture, picture
-# The board is the full-height left pane. One panel-wide width in absolute cells (the older percent form is read once
-# and re-recorded as cells; an older session's top record is replaced): every main window's board, active or not,
-# resizes itself to it; a border drag in the active window is recorded and the others follow by at least two cells;
-# our own resize, a window resize, a zoomed board or an older top board never overwrite it; the board and the chat
-# each keep 20 cells.
+# The board is on the left in landscape and above chat in portrait. Each window keeps its own record; legacy left
+# percentages are converted on that window's axis, and orientation flips retain the board pane.
 assert panel.parse_split("left:15c") == ("left", 15, False) and panel.parse_split("left:40") == ("left", 40, True)
 assert panel.parse_split("left:3") is None and panel.parse_split("x") is None and panel.parse_split("left:0c") is None
-assert panel.parse_split("top:25c") is None and panel.split_text(30) == "left:30c"
+assert panel.parse_split("top:25r") == ("top", 25, False) and panel.parse_split("top:25c") is None
+assert panel.split_text(30) == "left:30c" and panel.top_text(30) == "top:30r"
+assert panel.work_split_cells(("left", 248, False), 400) == 152
+assert panel.work_split_cells(("left", 190, False), 200) == 76
+assert panel.work_split_cells(("left", 190, False), 160) == 39
+assert 160 - panel.work_split_cells(("left", 190, False), 160) - 1 >= 120
+assert panel.work_split_cells(("left", 190, False), 120) == 99, "narrow windows keep the existing chat minimum"
 assert panel.split_cells(("left", 40, True), 220) == 88 and panel.split_cells(("left", 25, False), 50) == 25
 assert panel.split_cells(("left", 5, False), 100) == 20 and panel.split_cells(("left", 95, False), 100) == 79
 assert panel.split_cells(("left", 30, False), 30) == 15
 assert panel.split_resize(("left", 25, False), 25, 50) is None and panel.split_resize(("left", 25, False), 24, 50) is None
 assert panel.split_resize(("left", 25, False), 22, 50) == 25 and panel.split_resize(("left", 20, False), 25, 50) == 20
 assert panel.split_resize(("left", 40, True), 25, 50) == 20
+def board_calls(display, terminal=None, percent="", failed=False, main_watch=False):
+    def answer(command, **kwargs):
+        is_geometry = "display-message" in command
+        return subprocess.CompletedProcess(command, int(failed and is_geometry), display if is_geometry else "%2" if "-P" in command else "", "")
+    with patch.dict(os.environ, {"OMS_PANEL_BOARD_PERCENT": percent}), \
+            patch.object(panel, "terminal_window", return_value=terminal), \
+            patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
+            patch.object(panel.subprocess, "run", side_effect=answer) as tmux_run:
+        panel.board_split("%1", Path("/repo"), "board", main_watch=main_watch)
+    return [call.args[0][1:] for call in tmux_run.call_args_list if "display-message" not in call.args[0]]
+def left_split(width):
+    return ["split-window", "-f", "-h", "-b", "-l", width, "-t", "%1", "-c", "/repo", "board"]
+record_left = ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:56c"]
+legacy_left = ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:76c"]
+assert board_calls("200 50 1 $1\tcodex\t") == [record_left, left_split("56")]
+assert board_calls("400 50 1 $1\tcodex\tleft:248c\t") == [left_split("152")]
+assert board_calls("200 50 1 $1\tcodex\tleft:190c\t") == [left_split("76")]
+assert board_calls("120 50 1 $1\tcodex\tleft:95c\t") == [left_split("95")]
+assert board_calls("400 50 1 $1\tcodex\tleft:180c\twork\tleft:180c@400") == [left_split("180")]
+assert board_calls("200 50 1 $1\tcodex\tleft:190c\toverview") == [left_split("124")]
+assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
+assert board_calls("200 50 1 $1\tcodex\tleft:40") == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:76c"], left_split("76")]
+assert board_calls("200 50 1 $1\tcodex\ttop:12c") == [record_left, left_split("56")], "an older top record was kept"
+assert board_calls("80 90 1 $1\tcodex\t") == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:41r"],
+    ["split-window", "-f", "-v", "-b", "-l", "41", "-t", "%1", "-c", "/repo", "board"]]
+assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
+assert board_calls("200 50 1 $1\tcontrol\t") == [left_split("56")]
+assert board_calls("") == [left_split("28%")]
+assert board_calls("broken geometry", failed=True) == [left_split("28%")]
+# A detached session still reports tmux's 80x24: the attaching terminal sizes the board and the record.
+assert board_calls("80 24 0 $1\tcodex\t", terminal=(240, 59)) == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:67c"], left_split("28%")]
+assert board_calls("80 24 0 $1\tcodex\t") == [left_split("28%")]
+for configured, cells in (("25", 50), ("35", 70), ("1", 50), ("99", 70), ("-1", 50),
+                          ("garbage", 56), ("28.5", 56), ("2_8", 56)):
+    assert board_calls("200 50 1 $1\tcodex\t", percent=configured) == [
+        ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:%dc" % cells], left_split(str(cells))]
+    assert board_calls("200 50 1 $1\tclaude\tleft:90c", percent=configured) == [left_split("76")]
+assert board_calls("50 24 1 $1\tcodex\t", percent="25") == []
 # New boards require 20 tree cells and 40 native CLI cells, including the border in the budget.
 split_widths = ((42, None), (60, None), (63, 20), (64, 20), (80, 22), (127, 36))
 for window, cells in split_widths:
@@ -10403,28 +10496,18 @@ assert panel.board_split_cells(("left", 70, False), 80) == 39
 # A dragged width is kept once the window can hold both minimums.
 assert panel.board_split_cells(("left", 70, False), 110, explicit=True) == 70
 assert panel.board_split_cells(("left", 70, False), 60, explicit=True) is None
-def board_calls(display, terminal=None, percent="", main_watch=False):
-    def answer(command, **kwargs):
-        output = display if "display-message" in command else "%2" if "-P" in command else ""
-        return subprocess.CompletedProcess(command, 0, output, "")
-    with patch.dict(os.environ, {"OMS_PANEL_BOARD_PERCENT": percent}), \
-            patch.object(panel, "terminal_window", return_value=terminal), \
-            patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
-            patch.object(panel.subprocess, "run", side_effect=answer) as tmux_run:
-        panel.board_split("%1", Path("/repo"), "board", main_watch=main_watch)
-    return [call.args[0][1:] for call in tmux_run.call_args_list if "display-message" not in call.args[0]]
-def left_split(width):
-    return ["split-window", "-f", "-h", "-b", "-l", width, "-t", "%1", "-c", "/repo", "board"]
-record_left = ["set-option", "-t", "$1", "@oms_panel_split", "left:56c"]
-legacy_left = ["set-option", "-t", "$1", "@oms_panel_split", "left:80c"]
 assert board_calls("200 50 1 $1\tcodex\t") == [record_left, left_split("56")]
 assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
-assert board_calls("200 50 1 $1\tcodex\tleft:40") == [legacy_left, left_split("80")]
+assert board_calls("200 50 1 $1\tcodex\tleft:40") == [legacy_left, left_split("76")]
 assert board_calls("200 50 1 $1\tcodex\ttop:12c") == [record_left, left_split("56")], "an older top record was kept"
 assert board_calls("200 50 1 $1\tcontrol\t") == [left_split("56")]
 assert board_calls("200 50 1 $1\tclaude\t", main_watch=True) == [
     record_left,
     ["split-window", "-P", "-F", "#{pane_id}", "-f", "-h", "-b", "-l", "56", "-t", "%1", "-c", "/repo", "board"],
+    ["set-option", "-p", "-t", "%2", "@oms_panel_main_watch", "1"]]
+assert board_calls("80 90 1 $1\tclaude\t", main_watch=True) == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:41r"],
+    ["split-window", "-P", "-F", "#{pane_id}", "-f", "-v", "-b", "-l", "41", "-t", "%1", "-c", "/repo", "board"],
     ["set-option", "-p", "-t", "%2", "@oms_panel_main_watch", "1"]]
 control_input = {"pane": "%10", "window": "@1", "session": "oms-fixture", "watch": False}
 for identity, expected_watch in (({}, False),
@@ -10439,13 +10522,21 @@ for identity, expected_watch in (({}, False),
     assert split.call_args.kwargs["main_watch"] is expected_watch, (identity, split.call_args)
 # A detached session still reports tmux's 80x24: the attaching terminal sizes the board and the record.
 assert board_calls("80 24 0 $1\tcodex\t", terminal=(240, 59)) == [
-    ["set-option", "-t", "$1", "@oms_panel_split", "left:67c"], left_split("28%")]
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:67c"], left_split("28%")]
 assert board_calls("80 24 0 $1\tcodex\t") == [left_split("28%")]
 for window, cells in split_widths:
     for height in (24, 40):
-        record = [] if cells is None else [["set-option", "-t", "$1", "@oms_panel_split", panel.split_text(cells)]]
-        attached_split = [] if cells is None else [left_split(str(cells))]
-        detached_split = [] if cells is None else [left_split("%d%%" % ((200 * cells + window) // (2 * window)))]
+        # Portrait creation uses rows; the same minimum-pane budget still decides whether to split.
+        portrait = height * 2 > window
+        extent = panel.board_split_cells(("top", panel.BOARD_HEIGHT_SHARE, True), height) if portrait else cells
+        axis = height if portrait else window
+        value = (panel.top_text(extent) if portrait else panel.split_text(extent)) if extent is not None else ""
+        record = [] if extent is None else [["set-option", "-w", "-t", "%1", "@oms_panel_split", value]]
+        def expected_split(size):
+            return ["split-window", "-f", "-v" if portrait else "-h", "-b", "-l", size,
+                    "-t", "%1", "-c", "/repo", "board"]
+        attached_split = [] if extent is None else [expected_split(str(extent))]
+        detached_split = [] if extent is None else [expected_split("%d%%" % ((200 * extent + axis) // (2 * axis)))]
         for name in ("control", "claude"):
             recorded = record if name == "claude" else []
             assert board_calls("%d %d 1 $1\t%s\t" % (window, height, name)) == recorded + attached_split
@@ -10456,11 +10547,11 @@ assert board_calls("80 24 1 $1\tclaude\tleft:70c") == [left_split("59")]
 for configured, cells in (("25", 50), ("35", 70), ("1", 50), ("99", 70), ("-1", 50),
                           ("garbage", 56), ("28.5", 56), ("2_8", 56)):
     assert board_calls("200 50 1 $1\tcodex\t", percent=configured) == [
-        ["set-option", "-t", "$1", "@oms_panel_split", "left:%dc" % cells], left_split(str(cells))]
-    assert board_calls("200 50 1 $1\tclaude\tleft:90c", percent=configured) == [left_split("90")]
+        ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:%dc" % cells], left_split(str(cells))]
+    assert board_calls("200 50 1 $1\tclaude\tleft:90c", percent=configured) == [left_split("76")]
 assert board_calls("50 24 1 $1\tcodex\t", percent="25") == []
 assert board_calls("61 24 1 $1\tcodex\t", percent="35") == [
-    ["set-option", "-t", "$1", "@oms_panel_split", "left:20c"], left_split("20")]
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:20c"], left_split("20")]
 # Unknown terminal size: the share is taken from the clamped cells, so the CLI keeps its 40 cells.
 assert board_calls("61 24 0 $1\tcodex\t", percent="35") == [left_split("33%")]
 def sync_run(sync, *reads):
@@ -10468,35 +10559,284 @@ def sync_run(sync, *reads):
             patch.object(panel.subprocess, "run") as tmux_run:
         done = [sync.tick(read) for read in reads]
     return done, [call.args[0][1:] for call in tmux_run.call_args_list]
-def reading(active, window, pane, text="", zoomed=False, panes=2):
-    return (active, zoomed, panes, window, pane, text)
+def sync_run_panes(sync, reads, listing):
+    def answer(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, listing if command[1] == "list-panes" else "", "")
+    with patch.dict(os.environ, {"OMS_PANEL_SESSION": "s", "TMUX_PANE": "%1"}), \
+            patch.object(panel.subprocess, "run", side_effect=answer) as tmux_run:
+        done = [sync.tick(read) for read in reads]
+    return done, [call.args[0][1:] for call in tmux_run.call_args_list]
+def reading(active, window, pane, text="", zoomed=False, panes=2, mode="work", native="%2", drag=""):
+    return (active, zoomed, panes, window, pane, text, mode, native, drag)
 # A border drag in the active window is recorded as cells (clamped) and an inactive window resizes to the record.
 done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (25, 50), "left:25c"), reading(True, (100, 50), (22, 50), "left:25c"))
-assert done == [None, "record"] and calls == [["set-option", "-t", "s", "@oms_panel_split", "left:22c"]], (done, calls)
+assert done == [None, "record"] and calls == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:22c"],
+    ["set-option", "-w", "-t", "%1", "@oms_panel_work_drag", "left:22@100"]], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(True, (400, 50), (152, 50), "left:152c"),
+                       reading(True, (400, 50), (180, 50), "left:152c"),
+                       reading(True, (400, 50), (180, 50), "left:180c", drag="left:180@400"))
+assert done == [None, "record", None] and calls == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:180c"],
+    ["set-option", "-w", "-t", "%1", "@oms_panel_work_drag", "left:180@400"]], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (400, 50), (180, 50), "left:180c",
+                                                 drag="left:180@400"))
+assert done == [None] and calls == [], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (317, 50), (196, 50), "left:196c"))
+assert done == ["follow"] and calls == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:120c"],
+    ["resize-pane", "-t", "%1", "-x", "120"]], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (317, 50), (196, 50), "left:196c",
+                                                 drag="left:196@317"))
+assert done == [None] and calls == [], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (400, 50), (180, 50), "left:180c",
+                                                 drag="left:180@400"),
+                       reading(False, (200, 50), (90, 50), "left:180c", drag="left:180@400"))
+assert done == [None, None] and calls == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:90c"],
+    ["set-option", "-w", "-t", "%1", "@oms_panel_work_drag", "left:90@200"]], (done, calls)
+for mode in ("overview", "focus"):
+    done, calls = sync_run(panel.SplitSync(), reading(True, (317, 50), (196, 50), "left:196c",
+                                                    mode=mode, drag="left:196@317"))
+    assert done == [None] and calls == [], (mode, done, calls)
 done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (25, 50), "left:25c"), reading(True, (100, 50), (5, 50), "left:25c"))
-assert done == [None, "record"] and calls[-1][-1] == "left:20c", (done, calls)
+assert done == [None, "record"] and calls == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:20c"],
+    ["set-option", "-w", "-t", "%1", "@oms_panel_work_drag", "left:20@100"]], (done, calls)
 done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (25, 50), "left:22c"), reading(False, (100, 50), (22, 50), "left:22c"))
 assert done == ["follow", None] and calls == [["resize-pane", "-t", "%1", "-x", "22"]], (done, calls)
 # A reader pane splitting the chat column (three panes) leaves the board synced.
 done, calls = sync_run(panel.SplitSync(), reading(False, (200, 50), (130, 50), "left:80c", panes=3))
-assert done == ["follow"] and calls == [["resize-pane", "-t", "%1", "-x", "80"]], (done, calls)
+assert done == ["follow"] and calls == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:76c"],
+    ["resize-pane", "-t", "%1", "-x", "76"]], (done, calls)
+# Work caps a stored share, Overview uses a temporary graph width, and Focus only zooms the native CLI pane.
+done, calls = sync_run(panel.SplitSync(), reading(False, (400, 50), (250, 50), "left:250c"))
+assert done == ["follow"] and calls == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:152c"],
+    ["resize-pane", "-t", "%1", "-x", "152"]], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (200, 50), (56, 50), "left:56c", mode="overview"))
+assert done == [None] and calls == [], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (200, 50), (56, 50), "left:56c", mode="focus"))
+assert done == [None] and calls == [], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (200, 50), (56, 50), "left:56c", zoomed=True,
+                                                 mode="overview"))
+assert done == [None] and calls == [], (done, calls)
+# Cycling updates only the window mode. It leaves the per-window Work geometry untouched.
+mode = [""]
+def cycle_answer(command, **kwargs):
+    if command[1] == "display-message":
+        return subprocess.CompletedProcess(command, 0, mode[0], "")
+    if command[1] == "set-option":
+        mode[0] = command[-1]
+    return subprocess.CompletedProcess(command, 0, "", "")
+with patch.object(panel.subprocess, "run", side_effect=cycle_answer) as mode_run:
+    cycled = [panel.cycle_panel_mode("%1") for _ in range(3)]
+assert cycled == ["overview", "focus", "work"] and mode[0] == "work", cycled
+assert [call.args[0][1:] for call in mode_run.call_args_list if call.args[0][1] == "set-option"] == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_mode", name] for name in cycled]
+assert "F8" in dict((key, command) for key, command in panel.MAIN_KEYS)
+assert all(hint in panel.keys_help(())[1] for hint in ("F8 Modes", "i Headers"))
+root_calls = []
+def root_key_run(argv, **kwargs):
+    if argv[1] == "list-keys" and argv[-1] == "F8":
+        return subprocess.CompletedProcess(argv, 0, "bind-key -n F8 display-message user\n", "")
+    root_calls.append(argv[1:])
+    return subprocess.CompletedProcess(argv, 1 if argv[1] == "list-keys" else 0, "", "")
+with patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
+        patch.object(panel.subprocess, "run", side_effect=root_key_run):
+    panel.bind_main_keys()
+assert not any(call[0] == "bind-key" and call[2] == "F8" for call in root_calls), root_calls
+sequence = [reading(False, (200, 50), (56, 50), "left:56c"),
+            reading(False, (200, 50), (56, 50), "left:56c", mode="overview"),
+            reading(False, (200, 50), (124, 50), "left:56c", mode="focus"),
+            reading(False, (200, 50), (124, 50), "left:56c", zoomed=True, mode="focus"),
+            reading(False, (200, 50), (124, 50), "left:56c", zoomed=True),
+            reading(False, (200, 50), (124, 50), "left:56c")]
+def mode_sequence_run(reads):
+    with patch.dict(os.environ, {"OMS_PANEL_SESSION": "s", "TMUX_PANE": "%1"}), \
+            patch.object(panel.subprocess, "run") as tmux_run:
+        modes, splits = panel.PanelModeSync(), panel.SplitSync()
+        done = []
+        for read in reads:
+            split = splits.tick(read)
+            done.append((modes.tick(read), split))
+    return done, [call.args[0][1:] for call in tmux_run.call_args_list]
+done, calls = mode_sequence_run(sequence)
+assert [split for unused, split in done] == [None, None, None, None, None, "follow"], (done, calls)
+assert calls == [["resize-pane", "-t", "%1", "-x", "124"],
+                 ["resize-pane", "-Z", "-t", "%2"],
+                 ["resize-pane", "-Z", "-t", "%2"],
+                 ["resize-pane", "-t", "%1", "-x", "56"]], calls
+assert not any(call[0] == "set-option" for call in calls), calls
+# Overview and Focus resizes do not replace the last Work proportion.
+done, calls = mode_sequence_run([
+    reading(False, (400, 50), (112, 50), "left:112c"),
+    reading(False, (400, 50), (56, 50), "left:112c", mode="overview"),
+    reading(False, (200, 50), (56, 50), "left:112c", mode="overview"),
+    reading(False, (200, 50), (56, 50), "left:112c", zoomed=True, mode="focus"),
+    reading(False, (200, 50), (76, 50), "left:112c", zoomed=True),
+    reading(False, (200, 50), (76, 50), "left:112c")])
+assert [split for unused, split in done] == [None, None, None, None, None, "follow"], (done, calls)
+assert calls[-2:] == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:56c"],
+    ["resize-pane", "-t", "%1", "-x", "56"]], calls
+# A marked Work drag keeps its proportion when the window shrinks in Overview.
+done, calls = mode_sequence_run([
+    reading(False, (400, 50), (180, 50), "left:180c", drag="left:180@400"),
+    reading(False, (400, 50), (248, 50), "left:180c", mode="overview", drag="left:180@400"),
+    reading(False, (200, 50), (124, 50), "left:180c", mode="overview", drag="left:180@400"),
+    reading(False, (200, 50), (124, 50), "left:180c", drag="left:180@400")])
+assert done[-1][1] == "follow" and calls[-1] == ["resize-pane", "-t", "%1", "-x", "90"], (done, calls)
+assert [call for call in calls if call[0] == "set-option"] == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:90c"],
+    ["set-option", "-w", "-t", "%1", "@oms_panel_work_drag", "left:90@200"]], calls
+# A portrait board flips during Overview; Overview sizing waits until the board is beside the chat pane.
+def mode_flip_run(reads, listing):
+    def answer(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, listing if command[1] == "list-panes" else "", "")
+    with patch.dict(os.environ, {"OMS_PANEL_SESSION": "s", "TMUX_PANE": "%1"}), \
+            patch.object(panel.subprocess, "run", side_effect=answer) as tmux_run:
+        modes, splits = panel.PanelModeSync(), panel.SplitSync()
+        done = []
+        for read in reads:
+            split = splits.tick(read)
+            done.append((modes.tick(read), split))
+    return done, [call.args[0][1:] for call in tmux_run.call_args_list]
+done, calls = mode_flip_run([
+    reading(False, (80, 90), (80, 40), "top:40r"),
+    reading(False, (200, 50), (200, 25), "top:40r", mode="overview"),
+    reading(False, (200, 50), (89, 50), "top:40r", mode="overview")],
+    "%1 200 25\n%2 80 25\n")
+assert [split for unused, split in done] == [None, "follow", None], (done, calls)
+assert calls == [["list-panes", "-t", "%1", "-F", "#{pane_id} #{pane_width} #{pane_height}"],
+                 ["join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-h", "-l", "89"],
+                 ["resize-pane", "-t", "%1", "-x", "124"]], calls
+assert not any(call[0] == "set-option" for call in calls), calls
+# Returning after Overview changed the edge restores the Work fraction on the new axis.
+done, calls = mode_flip_run([
+    reading(False, (80, 90), (80, 40), "top:40r"),
+    reading(False, (200, 50), (200, 25), "top:40r", mode="overview"),
+    reading(False, (200, 50), (124, 50), "top:40r", mode="overview"),
+    reading(False, (200, 50), (124, 50), "top:40r")],
+    "%1 200 25\n%2 80 25\n")
+assert done[-1][1] == "follow" and calls[-2:] == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:76c"],
+    ["resize-pane", "-t", "%1", "-x", "76"]], (done, calls)
+# Entering Focus during an edge flip moves the board before zooming the CLI.
+done, calls = mode_flip_run([
+    reading(False, (200, 50), (56, 50), "left:56c"),
+    reading(False, (80, 90), (30, 90), "left:56c", mode="focus")],
+    "%1 30 90\n%2 49 90\n")
+assert done[-1] == ("focus", "follow") and calls[-2:] == [
+    ["join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-v", "-l", "25"],
+    ["resize-pane", "-Z", "-t", "%2"]], (done, calls)
+# Overview and Focus also flip landscape boards back to portrait without changing Work geometry.
+for mode in ("overview", "focus"):
+    done, calls = mode_flip_run([
+        reading(False, (200, 50), (124, 50), "left:124c", mode=mode),
+        reading(False, (80, 90), (40, 90), "left:124c", mode=mode)],
+        "%1 40 90\n%2 40 45\n")
+    assert [split for unused, split in done] == [None, "follow"], (mode, done, calls)
+    assert [call for call in calls if call[0] == "join-pane"] == [
+        ["join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-v", "-l", "56"]], (mode, calls)
+    assert not any(call[0] == "set-option" for call in calls), (mode, calls)
 # The active window enforces the record too, and its own resize is not read back as a drag.
 done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (30, 50), "left:22c"), reading(True, (100, 50), (21, 50), "left:22c"))
 assert done == ["follow", None] and calls == [["resize-pane", "-t", "%1", "-x", "22"]], (done, calls)
-# A window resize moves the board back to the recorded cells and never records the new size.
+# A same-orientation window resize scales the recorded board share proportionally.
 done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (25, 50), "left:25c"), reading(True, (120, 50), (30, 50), "left:25c"))
-assert done == [None, "follow"] and calls == [["resize-pane", "-t", "%1", "-x", "25"]], (done, calls)
-# Nothing recorded yet: the active window records its size, an inactive one waits; the older percent form is converted.
+assert done == [None, "record"] and calls == [["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:30c"]], (done, calls)
+# Cap after scaling the original record, so repeated window shrinks preserve its fraction.
+done, calls = sync_run(panel.SplitSync(), reading(True, (400, 50), (112, 50), "left:112c"),
+                       reading(True, (200, 50), (56, 50), "left:112c"),
+                       reading(True, (100, 50), (28, 50), "left:56c"))
+assert done == [None, "record", "record"] and calls == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:56c"],
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:28c"]], (done, calls)
+# A one-cell gap may still violate the chat reserve, so it must trigger a resize.
+done, calls = sync_run(panel.SplitSync(), reading(False, (200, 50), (76, 50), "left:76c"),
+                       reading(False, (160, 50), (40, 50), "left:76c"))
+assert done == [None, "follow"] and calls == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:39c"],
+    ["resize-pane", "-t", "%1", "-x", "39"]], (done, calls)
+# Separate watchers write only their own window option, even though both windows share a tmux session.
+with patch.dict(os.environ, {"OMS_PANEL_SESSION": "s"}), patch.object(panel.subprocess, "run") as tmux_run:
+    for pane_id in ("%1", "%9"):
+        sync = panel.SplitSync()
+        with patch.dict(os.environ, {"TMUX_PANE": pane_id}):
+            sync.tick(reading(True, (100, 50), (25, 50), "left:25c"))
+            assert sync.tick(reading(True, (100, 50), (22, 50), "left:25c")) == "record"
+window_records = [call.args[0][1:] for call in tmux_run.call_args_list if call.args[0][1] == "set-option"]
+assert window_records == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:22c"],
+    ["set-option", "-w", "-t", "%1", "@oms_panel_work_drag", "left:22@100"],
+    ["set-option", "-w", "-t", "%9", "@oms_panel_split", "left:22c"],
+    ["set-option", "-w", "-t", "%9", "@oms_panel_work_drag", "left:22@100"]], window_records
+# Windows without a record are left alone; the older percent form is converted only where recorded.
 done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (25, 50)), reading(False, (100, 50), (25, 50)))
-assert done == ["record", None] and calls == [["set-option", "-t", "s", "@oms_panel_split", "left:25c"]], (done, calls)
-done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (25, 50), "left:30"))
-assert done == ["follow"] and calls == [["set-option", "-t", "s", "@oms_panel_split", "left:30c"],
-                                        ["resize-pane", "-t", "%1", "-x", "30"]], (done, calls)
-# A zoomed board and an older session's full-width top board are left alone.
-done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (100, 50), "left:30c", zoomed=True),
-                       reading(False, (200, 50), (200, 25), "left:15c"))
 assert done == [None, None] and calls == [], (done, calls)
-# A full-width pane needs neither split synchronization nor key forwarding on F9.
+done, calls = sync_run(panel.SplitSync(), reading(False, (200, 50), (60, 50), "left:30"))
+assert done == ["record"] and calls == [["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:60c"]], (done, calls)
+done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (25, 50), "left:30"))
+assert done == ["follow"] and calls == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:30c"],
+    ["resize-pane", "-t", "%1", "-x", "30"]], (done, calls)
+# Zoom remains untouched, while the non-zoomed top board in a landscape window flips to a left split.
+def zoom_and_flip(first, second):
+    def answer(command, **kwargs):
+        out = "%1 200 25\n%2 100 50\n" if command[1] == "list-panes" else ""
+        return subprocess.CompletedProcess(command, 0, out, "")
+    with patch.dict(os.environ, {"OMS_PANEL_SESSION": "s", "TMUX_PANE": "%1"}), \
+            patch.object(panel.subprocess, "run", side_effect=answer) as tmux_run:
+        sync = panel.SplitSync()
+        done = [sync.tick(first), sync.tick(second)]
+    return done, [call.args[0][1:] for call in tmux_run.call_args_list]
+done, calls = zoom_and_flip(reading(False, (100, 50), (100, 50), "left:30c", zoomed=True),
+                            reading(False, (200, 50), (200, 25), "left:15c"))
+assert done == [None, "follow"] and calls[-1] == [
+    "join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-h", "-l", "20"], (done, calls)
+# Orientation changes move the existing board pane to the new edge and keep other pane ids in place.
+def flip_run(first, second, listing):
+    def answer(command, **kwargs):
+        if command[1] == "list-panes":
+            return subprocess.CompletedProcess(command, 0, listing, "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+    with patch.dict(os.environ, {"OMS_PANEL_SESSION": "s", "TMUX_PANE": "%1"}), \
+            patch.object(panel.subprocess, "run", side_effect=answer) as tmux_run:
+        sync = panel.SplitSync()
+        sync.tick(first)
+        done = [sync.tick(second)]
+    return done, [call.args[0][1:] for call in tmux_run.call_args_list]
+done, calls = flip_run(reading(False, (120, 50), (30, 50), "left:30c"),
+                       reading(False, (80, 90), (30, 90), "left:30c"),
+                       "%1 80 30\n%2 40 45\n%3 40 44\n")
+assert done[-1] == "follow" and [call for call in calls if call[0] == "join-pane"] == [
+    ["join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-v", "-l", "23"]], (done, calls)
+done, calls = flip_run(reading(False, (200, 50), (60, 50), "left:30"),
+                       reading(False, (80, 90), (24, 90), "left:30"),
+                       "%1 80 30\n%2 40 45\n")
+assert done[-1] == "follow" and [call for call in calls if call[0] == "join-pane"] == [
+    ["join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-v", "-l", "27"]], (done, calls)
+done, calls = flip_run(reading(False, (80, 90), (80, 40), "top:40r"),
+                       reading(False, (120, 50), (120, 40), "top:40r"),
+                       "%1 120 40\n%2 60 50\n")
+assert done[-1] == "follow" and [call for call in calls if call[0] == "join-pane"] == [
+    ["join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-h", "-l", "53"]], (done, calls)
+assert all(call[call.index("-t") + 1] in ("%1", "%2") for call in calls
+           if call[0] in ("list-panes", "join-pane")), calls
+# Four-cell hysteresis keeps the current orientation at 100x50 and throughout the boundary band.
+done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (25, 50), "left:25c"),
+                       reading(False, (100, 51), (25, 51), "left:25c"),
+                       reading(False, (100, 52), (25, 52), "left:25c"))
+assert done == [None, None, None] and calls == [], (done, calls)
+done, calls = sync_run_panes(panel.SplitSync(), [reading(False, (100, 50), (100, 25), "top:25r"),
+                                                  reading(False, (100, 49), (100, 25), "top:25r"),
+                                                  reading(False, (100, 47), (100, 25), "top:25r")],
+                             "%1 100 25\n%2 80 25\n")
+assert done == [None, None, "follow"] and calls[-1] == [
+    "join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-h", "-l", "51"], (done, calls)
+# The new unsplit narrow-window path keeps the original single-pane/F9 regressions.
 done, calls = sync_run(panel.SplitSync(), reading(True, (42, 24), (42, 24), "left:22c", panes=1))
 assert done == [None] and calls == [], (done, calls)
 assert dict(panel.MAIN_KEYS)["F9"] == "select-pane -t :.+"
@@ -11547,7 +11887,15 @@ for code in (1, -9):
 # An attention-marked window name keeps the geometry fields and the split text apart.
 with patch.object(panel, "tmux_command", side_effect=lambda *a: ["x"]), patch.object(panel.subprocess, "run",
         return_value=subprocess.CompletedProcess([], 0, "1 0 2 100 50 100 25\t! codex\ttop:30\n", "")):
-    assert panel.panel_geometry() == (True, False, 2, (100, 50), (100, 25), "top:30")
+    assert panel.panel_geometry() == (True, False, 2, (100, 50), (100, 25), "top:30", "work", "", "")
+for headers in ("off", "top", "bottom"):
+    pane_height = 49 if headers != "off" else 50
+    with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0,
+            "1 0 2 100 50 25 %s %s\t! codex\tleft:25c\twork\t%%2\t\n" % (pane_height, headers), "")):
+        geometry = panel.panel_geometry()
+    assert geometry == (True, False, 2, (100, 50), (25, 50), "left:25c", "work", "%2", ""), geometry
+    done, calls = sync_run(panel.SplitSync(), geometry)
+    assert done == [None] and calls == [], (headers, done, calls)
 renames = []
 class TmuxStub:
     def __init__(self, name):

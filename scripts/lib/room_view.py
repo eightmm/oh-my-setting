@@ -1569,10 +1569,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if omitted or unlinked:
         if parts and len(lines) < total_rows - dock:
             # The warning sits on the row just above the box, so it holds still as the upper region changes.
-            lines.extend([""] * max(0, total_rows - dock - 1 - len(lines)) * bool(dock))
+            if height > 20 and height <= width:
+                lines.extend([""] * max(0, total_rows - dock - 1 - len(lines)) * bool(dock))
             add(" / ".join(parts), "alert" if open_unlinked else "dim")
     # The box keeps the rows it was given whatever the upper region drew; only an overflowing region shrinks it.
-    rows_high = min(dock, max(0, total_rows - len(lines)))
+    rows_high = (max(0, total_rows - len(lines)) if height <= 20 or height > width else
+                 min(dock, max(0, total_rows - len(lines)))) if dock else 0
     rows_high = 1 if 0 < rows_high < 3 else rows_high
     navigation.update(tab_strip_visible=bool(rows_high), tab_body_visible=rows_high >= 3)
     if rows_high:
@@ -2046,7 +2048,8 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                 "Tab Next tab" if tabs else "", "g Graph", "t Tree",
                 "n New main" if managed and not navigation.get("main_occupied") else "",
                 "v " + ("Collapse" if navigation.get("expanded") else "Expand"), "b Attention",
-                "Shift-drag Copy" if managed else "", toggle if managed else "q Quit", "F12 Keys" if managed else ""]
+                "Shift-drag Copy" if managed else "", "m Modes" if managed else "",
+                toggle if managed else "q Quit", "F12 Keys" if managed else ""]
         lines = [""]
         for key in [k for k in keys if k]:
             key = clipped(key, width)
@@ -2094,10 +2097,20 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
             packed.append(mail_hint)
         return packed
 
-    reserved = [toggle, "F12 Keys"] if managed and width >= 64 else ["F9", "F12 Keys"] if managed else ["q Quit", "? Keys"]
+    if managed:
+        base_reserved = [toggle, "F12 Keys"] if width >= 64 else ["F9", "F12 Keys"]
+        swap_reserved = ["F9 Swap", "F12 Keys"]
+        mode_reserved = ([toggle, "m Modes", "F12 Keys"] if width >= 64 else
+                         ["F9 Swap", "m Modes", "F12 Keys"])
+        reserved = base_reserved
+        if width < 64 and pack(swap_reserved) == pack(base_reserved):
+            reserved = swap_reserved
+        primary = lambda hints: [hint for hint in hints if hint.startswith(("Enter ", "Esc ", "f "))]
+        if (primary(pack(mode_reserved)) == primary(pack(base_reserved))
+                and display_width("  ".join(mode_reserved)) <= width):
+            reserved = mode_reserved
+    else:
+        reserved = ["q Quit", "? Keys"]
     packed = pack(reserved)
-    if managed and width < 64 and pack(["F9 Swap", "F12 Keys"]) == packed:
-        # The short F9 label is shown only when no contextual hint loses its place to it.
-        reserved = ["F9 Swap", "F12 Keys"]
     tail = "  ".join(reserved)
     return ["  ".join(packed + reserved)] if display_width(tail) <= width else [clipped(tail, width)]

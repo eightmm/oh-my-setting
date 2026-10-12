@@ -375,7 +375,15 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         output.append(value)
         if row.get("action"):
             hits.append({"y": y + 1, "x1": 1, "x2": width, "action": row["action"], "fold": row.get("fold", False)})
-    output += [""] * max(0, budget - dock_rows - len(output))
+    while output and not output[-1].strip():
+        output.pop()
+    spare = max(0, budget - dock_rows - len(output))
+    if dock_rows and height > width:
+        # Put unused activity rows into the dock; the dock's body can use them
+        # for reading instead of separating it from the activity tree with a blank band.
+        dock_rows += spare
+    else:
+        output += [""] * spare
     dock_top = len(output)
     everyone = {m["participant"]: [c for c in calls if c.get("parent") in
                 {m["participant"], m.get("attempt")}] for m in mains}

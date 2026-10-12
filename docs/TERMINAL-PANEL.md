@@ -942,18 +942,33 @@ main ownership and exact pane/terminal/socket identity; reused panes and
 unproven sessions are rejected. Numeric footer readings retain their reported
 scope and unknown values. A socket error does not stop the native sibling.
 
-The board is always the full-height left pane of the main window (28 percent of the
-window the first time, sized from the terminal that is attaching; optional integer
-`OMS_PANEL_BOARD_PERCENT` overrides this default, clamped to 25–35 percent, with invalid values ignored), with the native
-CLI to its right; opening a call places its reader to the right of the board, splitting the chat column.
+The board is on the left in landscape windows and above the CLI in portrait windows
+(28 percent of the width or 45 percent of the height the first time, sized from the
+terminal that is attaching; optional integer `OMS_PANEL_BOARD_PERCENT` overrides the
+landscape default, clamped to 25–35 percent, with invalid values ignored). In Work
+mode, a landscape default or scaled record is capped at the smaller of 38 percent
+of the window and the width that leaves 120 columns for the CLI; the existing minimum
+split rules apply on narrower windows. A new landscape board stays unsplit when
+20 board columns, the divider and 40 CLI columns cannot fit; a portrait split needs
+20 rows on each side of the divider. A deliberate border drag remains in effect
+for that Work window and is recorded there. A call opened from the board shows in a
+reader pane above the CLI.
 Herdr uses the same left board, starting at the same 28 percent share and honoring
 `OMS_PANEL_BOARD_PERCENT`. Later Herdr resizing is not recorded or shared;
-`SplitSync` synchronizes widths only in tmux.
-In tmux, the board width is recorded in absolute cells in the session option `@oms_panel_split`
-(`left:<cells>c`; the older percent form is converted on first sight, and an older
-session's `top:` record is replaced), keeping at least 20 cells for the board and for
-the chat. Drag the border and the board keeps the new width; a zoomed board and the
-control window are left alone.
+`SplitSync` synchronizes the board width or portrait height only in tmux.
+In tmux, each window records its board edge and size in its window option
+`@oms_panel_split` (`left:<cells>c` or `top:<rows>r`; the older percent form is
+converted on first sight). Resizing recomputes the portrait/landscape edge with a
+small hysteresis band and scales the recorded size with the window, clamped to keep
+at least 20 cells for the board and chat. A flip moves the
+existing board pane without moving focus, preserving pane ids; dragging the border sets the size followed
+by later resizes. Press `m` on the board or `F8` in tmux to cycle Work, Overview and
+Focus. Overview gives the graph about 62 percent of the landscape width without
+changing the Work record. Focus zooms the CLI pane; leaving it unzooms and returning
+to Work restores its recorded width. SplitSync stays idle while Focus is zoomed and
+does not apply the Work record in Overview. Graph rendering falls back to the tree
+when the board is too narrow for the graph. The control window and other zoomed
+windows are left alone.
 A watcher whose OMS sources change re-executes itself once they compile, so
 updated boards need no manual restart; an open reader stays. Select `v` in the
 task panel to expand its graph; `Esc` or watcher shutdown collapses it. Native input and permission
@@ -1048,7 +1063,9 @@ existing room rules apply. Rooms stay bounded and task-scoped; the panel
 outlives them. Separate tmux servers are separate scopes. Each native conversation gets
 its own sidebar with state refreshed every five seconds. Existing windows and tmux settings
 are preserved, with one addition: `F9` selects the other pane
-of the window, `F5` opens the control window and `F12` shows the key list, all without the prefix (F8 is Codex's voice key and F10/F11 belong to terminal menus). tmux key bindings are server-wide, so the binding acts only in sessions that carry the panel's `@oms_panel_repo` marker,
+of the window, `F8` cycles layout modes, `F5` opens the control window and `F12` shows
+the key list, all without the prefix (F10/F11 belong to terminal menus). tmux key
+bindings are server-wide, so the binding acts only in sessions that carry the panel's `@oms_panel_repo` marker,
 passes the key through unchanged in every other session, and is not installed when the key is
 already bound by the user (a binding OMS installed earlier under the old session-name test is replaced). With default bindings, `Ctrl-b w` picks a window and `Ctrl-b d`
 detaches while work continues. Quit in the control pane also detaches. Failed

@@ -2993,25 +2993,38 @@ def reader_shell(repo, target, board, room_id=None):
                                                 "--repo", str(repo)] + arguments)
 
 
-BOARD_SHARE = 28  # percent of the window width a first board takes
+BOARD_SHARE = 28  # percent of the window width a first landscape board takes
+BOARD_HEIGHT_SHARE = 45
+OVERVIEW_SHARE = 62
 MIN_BOARD = MIN_CHAT = 20
+WORK_CHAT_RESERVE = 120
+PANEL_MODES = ("work", "overview", "focus")
 
 
 def parse_split(text):
-    """The panel-wide board width as ("left", number, legacy): "left:<cells>c" in absolute cells, or the older
-    "left:<percent>" (legacy, 5-95); None when unset or invalid, including an older session's "top:" record.
-    The unit letter keeps a recorded cell count from reading as a percentage."""
-    match = re.fullmatch(r"(left):(\d{1,4})(c?)", (text or "").strip())
+    """A window board axis as (orientation, cells, legacy-percent flag)."""
+    match = re.fullmatch(r"(left):(\d{1,4})(c?)|(top):(\d{1,4})r", (text or "").strip())
     if not match:
         return None
+    if match.group(4):
+        number = int(match.group(5))
+        return ("top", number, False) if number else None
     number = int(match.group(2))
-    if match.group(3):
-        return (match.group(1), number, False) if number else None
-    return (match.group(1), number, True) if 5 <= number <= 95 else None
+    return ("left", number, False) if match.group(3) and number else \
+        ("left", number, True) if not match.group(3) and 5 <= number <= 95 else None
+
+
+def parse_work_drag(text):
+    match = re.fullmatch(r"(left|top):(\d{1,4})c?@(\d{1,4})", (text or "").strip())
+    return (match.group(1), int(match.group(2)), int(match.group(3))) if match else None
 
 
 def split_text(cells):
     return "left:%dc" % cells
+
+
+def top_text(rows):
+    return "top:%dr" % rows
 
 
 def split_cells(stored, window):
@@ -3026,13 +3039,41 @@ NATIVE_MIN = 40  # a native CLI prompt below this wraps every word (42-cell dogf
 
 
 def board_split_cells(stored, window, explicit=False):
-    """Board cells, or None when the window cannot hold a 20-cell tree beside a NATIVE_MIN-cell CLI; such a window
-    stays whole and the control pane's g key draws the same tree. A recorded (dragged) width is the person's choice
-    and is kept; the default share never squeezes the CLI below NATIVE_MIN."""
-    if window < MIN_BOARD + 1 + NATIVE_MIN:
+    """Board cells, or None when both panes cannot fit: landscape needs NATIVE_MIN CLI columns,
+    portrait needs MIN_CHAT CLI rows. Explicit sizes keep the existing chat floor; defaults reserve the CLI minimum."""
+    minimum = MIN_CHAT if stored[0] == "top" else NATIVE_MIN
+    if window < MIN_BOARD + 1 + minimum:
         return None
     cells = split_cells(stored, window)
-    return cells if explicit else min(cells, window - 1 - NATIVE_MIN)
+    return cells if explicit else min(cells, window - 1 - minimum)
+
+
+def work_split_cells(stored, window):
+    """Apply the Work-mode board cap while preserving the narrow-window split contract."""
+    cells = split_cells(stored, window)
+    if stored[0] == "top" or window < MIN_BOARD + WORK_CHAT_RESERVE + 1:
+        return cells
+    # tmux keeps a one-cell divider between the board and the CLI pane.
+    cap = min((38 * window + 50) // 100, window - WORK_CHAT_RESERVE - 1)
+    return max(MIN_BOARD, min(cells, cap))
+
+
+def next_panel_mode(mode):
+    return PANEL_MODES[(PANEL_MODES.index(mode) + 1) % len(PANEL_MODES)] if mode in PANEL_MODES else "overview"
+
+
+def cycle_panel_mode(pane):
+    """Cycle this window's layout without changing its Work split record."""
+    try:
+        found = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{@oms_panel_mode}"),
+                               capture_output=True, text=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
+        current = found.stdout.replace("\r", "").strip() if found.returncode == 0 else "work"
+        mode = next_panel_mode(current)
+        subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_mode", mode),
+                       check=False, timeout=2, stdin=subprocess.DEVNULL)
+        return mode
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def split_resize(stored, pane, window):
@@ -3054,20 +3095,23 @@ def terminal_window():
 
 
 def board_split(pane, repo, command, main_watch=False):
-    """Open this window's board as its full-height left pane at the panel-wide width. The first main window's board
-    records its width in cells; later boards reuse it. The control window only follows the record.
+    """Open this window's board on the portrait or landscape edge at its own recorded size.
     Leave narrow windows unsplit so both the board and native CLI remain usable."""
     try:
-        read = subprocess.run(tmux_command("display-message", "-p", "-t", pane,
+        result = subprocess.run(tmux_command("display-message", "-p", "-t", pane,
                                            "#{window_width} #{window_height} #{session_attached} #{session_id}"
-                                           "\t#{window_name}\t#{@oms_panel_split}"),
-                              capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL).stdout
-        parts = (read.replace("\r", "").rstrip("\n").split("\t") + ["", ""])[:3]
+                                           "\t#{window_name}\t#{@oms_panel_split}\t#{@oms_panel_mode}"
+                                           "\t#{@oms_panel_work_drag}"),
+                              capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+        if result.returncode:
+            raise ValueError("window geometry unavailable")
+        parts = (result.stdout.replace("\r", "").rstrip("\n").split("\t") + ["", "", "", "", ""])[:5]
         fields = parts[0].split()
         window, attached, session = (int(fields[0]), int(fields[1])), int(fields[2]) > 0, fields[3]
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-        window, attached, session, parts = None, True, "", ["", "", ""]
+        window, attached, session, parts = None, True, "", ["", "", "", "", ""]
     stored = parse_split(parts[2])
+    mode = parts[3] if parts[3] in PANEL_MODES else "work"
     # A detached session still has tmux's 80x24 window; the terminal that is about to attach is the better size.
     sized = window if attached else terminal_window()
     share = BOARD_SHARE
@@ -3077,21 +3121,35 @@ def board_split(pane, repo, command, main_watch=False):
             share = max(25, min(35, int(configured)))
         except ValueError:
             pass
+    available = sized or window
+    portrait = bool(available and available[1] * 2 > available[0])
+    orientation = stored[0] if stored else ("top" if portrait else "left")
+    if mode == "overview" and orientation == "left":
+        share = OVERVIEW_SHARE
     width = "%d%%" % share
-    if sized or window:
-        cells = board_split_cells(stored or ("left", share, True), (sized or window)[0], explicit=stored is not None)
-        if cells is None:
+    if available:
+        axis = available[1] if orientation == "top" else available[0]
+        default = BOARD_HEIGHT_SHARE if orientation == "top" else (BOARD_SHARE if mode == "overview" else share)
+        geometry = stored or (orientation, default, True)
+        drag = parse_work_drag(parts[4])
+        deliberate = bool(drag and stored and drag[0] == stored[0] and drag[1] == stored[1]
+                          and drag[2] == axis)
+        base_cells = board_split_cells(geometry, axis, explicit=stored is not None)
+        if base_cells is None:
             return
-    if not sized and window:
-        # Unknown terminal: keep a share so the board scales on attach, but the share of the clamped cells.
-        width = "%d%%" % max(1, min(99, (200 * cells + window[0]) // (2 * window[0])))
-    if sized:
-        width = str(cells) if attached else "%d%%" % max(1, min(99, (200 * cells + sized[0]) // (2 * sized[0])))
-        if session and parts[1] != "control" and (stored is None or stored[2]):
-            subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_split", split_text(cells)),
+        cells = (board_split_cells((orientation, (OVERVIEW_SHARE * axis + 50) // 100, False), axis)
+                 if mode == "overview" and orientation == "left" else
+                 base_cells if mode == "overview" or deliberate else work_split_cells((orientation, base_cells, False), axis))
+        record_cells = work_split_cells((orientation, base_cells, False), axis)
+        percent = max(1, min(99, (200 * cells + axis) // (2 * axis)))
+        width = str(cells) if sized and attached else "%d%%" % percent
+        if sized and session and parts[1] != "control" and (stored is None or stored[2]):
+            value = top_text(record_cells) if orientation == "top" else split_text(record_cells)
+            subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_split", value),
                            check=False, timeout=3, stdin=subprocess.DEVNULL)
-    # -f keeps a reopened board full height even beside a reader pane that splits the chat column.
-    split = tmux_command("split-window", "-f", "-h", "-b", "-l", width, "-t", pane, "-c", str(repo), command)
+    # -f keeps the board spanning the full window axis beside a reader pane.
+    direction = "-v" if orientation == "top" else "-h"
+    split = tmux_command("split-window", "-f", direction, "-b", "-l", width, "-t", pane, "-c", str(repo), command)
     if main_watch:
         split[2:2] = ["-P", "-F", "#{pane_id}"]
     result = subprocess.run(split, check=True, capture_output=main_watch, text=main_watch)
@@ -3111,64 +3169,230 @@ def panel_geometry():
     try:
         result = subprocess.run(tmux_command("display-message", "-p", "-t", os.environ.get("TMUX_PANE", ""),
                                              "#{window_active} #{window_zoomed_flag} #{window_panes} #{window_width} "
-                                             "#{window_height} #{pane_width} #{pane_height}\t#{window_name}\t#{@oms_panel_split}"),
+                                             "#{window_height} #{pane_width} #{pane_height} #{pane-border-status}\t#{window_name}\t#{@oms_panel_split}"
+                                             "\t#{@oms_panel_mode}\t#{@oms_panel_native_pane}"
+                                             "\t#{@oms_panel_work_drag}"),
                                 capture_output=True, text=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
         # Tabs keep a window name with spaces (an attention mark "! ") from shifting the split text.
         parts = result.stdout.replace("\r", "").rstrip("\n").split("\t") if result.returncode == 0 else []
         fields = parts[0].split() if len(parts) >= 2 else []
         if len(fields) < 7 or parts[1] == "control" or fields[0] not in ("0", "1") or fields[1] not in ("0", "1"):
             return None
+        mode = parts[3].strip() if len(parts) > 3 and parts[3].strip() in PANEL_MODES else "work"
+        native = parts[4].strip() if len(parts) > 4 else ""
+        drag = parts[5].strip() if len(parts) > 5 else ""
+        # tmux excludes the header row from pane_height but includes it in the layout's window_height.
+        header_rows = int(len(fields) > 7 and fields[7] in ("top", "bottom"))
         return (fields[0] == "1", fields[1] == "1", int(fields[2]), (int(fields[3]), int(fields[4])),
-                (int(fields[5]), int(fields[6])), parts[2].strip() if len(parts) > 2 else "")
+                (int(fields[5]), int(fields[6]) + header_rows), parts[2].strip() if len(parts) > 2 else "", mode, native, drag)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
 
-class SplitSync:
-    """Holds every main window's board at the one panel-wide width in the session option @oms_panel_split, active
-    or not: each watcher resizes its own board to the recorded cells, and a border drag in the active window is
-    recorded as the new cells for the others to follow."""
+class PanelModeSync:
+    """Apply window mode effects independently from Work split synchronization."""
 
     def __init__(self):
-        # (window, board cells, active) of the previous tick; None after this watcher's own resize, so its
+        self.mode = None
+
+    def tick(self, geometry):
+        if geometry is None:
+            return None
+        active, zoomed, panes, window, pane, text = geometry[:6]
+        mode, native = (geometry[6:8] + ("work", ""))[:2] if len(geometry) > 6 else ("work", "")
+        previous, self.mode = self.mode, mode
+        board = os.environ.get("TMUX_PANE", "")
+        if zoomed:
+            if native and ((mode == "focus" and previous != "focus") or
+                           (mode != "focus" and previous == "focus")):
+                subprocess.run(tmux_command("resize-pane", "-Z", "-t", native), check=False, timeout=3,
+                               stdin=subprocess.DEVNULL)
+                return "unzoom"
+            return None
+        if mode == "focus" and native:
+            subprocess.run(tmux_command("resize-pane", "-Z", "-t", native), check=False, timeout=3,
+                           stdin=subprocess.DEVNULL)
+            return "focus"
+        landscape_board = panes >= 2 and pane[1] == window[1] and pane[0] < window[0]
+        if mode == "overview" and landscape_board and window[1] * 2 <= window[0] + 4:
+            target = split_cells(("left", (OVERVIEW_SHARE * window[0] + 50) // 100, False), window[0])
+            if abs(target - pane[0]) >= 2:
+                subprocess.run(tmux_command("resize-pane", "-t", board, "-x", str(target)), check=False,
+                               timeout=3, stdin=subprocess.DEVNULL)
+                return "overview"
+        return None
+
+
+class SplitSync:
+    """Keep this recorded main window's board on the portrait or landscape edge and size."""
+
+    def __init__(self):
+        # (window, board cells, active, orientation) of the previous tick; None after this watcher's own resize, so its
         # result is never read back as a drag.
         self.last = None
+        self.mode = None
+        self.manual = None
+        self.work_geometry = None
 
     def tick(self, geometry):
         """Apply one geometry read; return the name of what was done ("record", "follow") or None."""
         if geometry is None:
             return None
-        active, zoomed, panes, window, pane, text = geometry
-        before, self.last = self.last, None
-        # A reader pane only splits the chat column; an older session's top board is left alone.
-        if zoomed or panes < 2 or pane[1] != window[1] or pane[0] >= window[0]:
+        active, zoomed, panes, window, pane, text = geometry[:6]
+        mode = geometry[6] if len(geometry) > 6 and geometry[6] in PANEL_MODES else "work"
+        # Focus can zoom the CLI pane; leave the pending Work transition for
+        # the first unzoomed geometry so its recorded proportion is restored.
+        if zoomed:
             return None
-        self.last = (window, pane[0], active)
+        drag = parse_work_drag(geometry[8] if len(geometry) > 8 else "")
+        returning_to_work = self.mode is not None and self.mode != "work" and mode == "work"
+        before, self.last = self.last, None
+        if self.mode != mode:
+            if mode == "work" or self.mode is None:
+                before = None
+            self.mode = mode
+        board = os.environ.get("TMUX_PANE", "")
         stored = parse_split(text)
-        session = os.environ.get("OMS_PANEL_SESSION", "")
+        if panes < 2:
+            return None
+        # The board fills the perpendicular dimension; this also identifies its current orientation
+        # when the stored preference has just become stale after a client resize.
+        current = "top" if pane[0] == window[0] and pane[1] < window[1] else \
+            "left" if pane[1] == window[1] and pane[0] < window[0] else None
+        if current is None:
+            return None
+        doubled_height = window[1] * 2
+        margin = 4
+        if current == "left":
+            orientation = "top" if doubled_height > window[0] + margin else "left"
+        else:
+            orientation = "left" if doubled_height < window[0] - margin else "top"
+        if self.manual is not None and (self.manual[0] != window or self.manual[1] != orientation):
+            self.manual = None
+        old_axis = window[1] if current == "top" else window[0]
+        axis = window[1] if orientation == "top" else window[0]
+        current_extent = pane[1] if current == "top" else pane[0]
+        self.last = (window, current_extent, active, current)
 
         def record(cells):
-            if split_text(cells) != text:
-                subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_split", split_text(cells)),
-                               check=False, timeout=3, stdin=subprocess.DEVNULL)
+            if mode != "work":
+                return False
+            value = top_text(cells) if orientation == "top" else split_text(cells)
+            self.work_geometry = (window, orientation, (orientation, cells, False))
+            if value == text:
+                return False
+            subprocess.run(tmux_command("set-option", "-w", "-t", board, "@oms_panel_split", value),
+                           check=False, timeout=3, stdin=subprocess.DEVNULL)
+            return True
+
+        marked_drag = bool(mode == "work" and drag and stored and drag[:2] == stored[:2] and drag[0] == orientation)
+        if marked_drag and drag[2] != axis and drag[2] > 0:
+            scaled = (drag[1] * axis + drag[2] // 2) // drag[2]
+            record(scaled)
+            drag_value = "%s:%d@%d" % (orientation, scaled, axis)
+            subprocess.run(tmux_command("set-option", "-w", "-t", board, "@oms_panel_work_drag", drag_value),
+                           check=False, timeout=3, stdin=subprocess.DEVNULL)
+            stored = (orientation, scaled, False)
+            drag = (orientation, scaled, axis)
+            marked_drag = True
+        if marked_drag:
+            self.manual = (window, orientation, axis)
+        elif mode == "work" and drag:
+            subprocess.run(tmux_command("set-option", "-wu", "-t", board, "@oms_panel_work_drag"),
+                           check=False, timeout=3, stdin=subprocess.DEVNULL)
 
         if stored is None:
-            if not active:
-                return None
-            record(split_cells(("left", pane[0], False), window[0]))
+            return None
+        legacy = stored[2]
+        if legacy:
+            # Resolve legacy percentages before orientation or size normalization.
+            stored = (orientation, split_cells(stored, axis), False)
+        returned_record = False
+        if returning_to_work and self.work_geometry is not None:
+            work_window, work_orientation, work_stored = self.work_geometry
+            work_axis = work_window[1] if work_orientation == "top" else work_window[0]
+            if work_axis > 0 and (work_axis != axis or work_orientation != orientation):
+                cells = (work_stored[1] * axis + work_axis // 2) // work_axis
+                cells = split_cells((orientation, cells, False), axis) if marked_drag else \
+                    work_split_cells((orientation, cells, False), axis)
+                stored = (orientation, cells, False)
+                returned_record = record(cells)
+        if current != orientation:
+            # Carry the user's selected fraction across the axis change.
+            if stored[0] == current:
+                source_axis = (before[0][1] if current == "top" else before[0][0]) \
+                    if before is not None and before[3] == current else old_axis
+                cells = split_cells((orientation, (stored[1] * axis + source_axis // 2) // source_axis, False), axis)
+            else:
+                cells = split_cells((orientation, stored[1], False), axis)
+            if mode == "work":
+                cells = work_split_cells((orientation, cells, False), axis)
+                record(cells)
+            panes_result = subprocess.run(tmux_command("list-panes", "-t", board,
+                                                       "-F", "#{pane_id} #{pane_width} #{pane_height}"),
+                                         capture_output=True, text=True, check=False, timeout=3,
+                                         stdin=subprocess.DEVNULL)
+            candidates = []
+            for line in panes_result.stdout.replace("\r", "").splitlines():
+                fields = line.split()
+                if len(fields) == 3 and fields[0] != os.environ.get("TMUX_PANE", ""):
+                    try:
+                        candidates.append((int(fields[1]) * int(fields[2]), fields[0]))
+                    except ValueError:
+                        pass
+            if candidates:
+                destination = max(candidates)[1]
+                direction = "-v" if orientation == "top" else "-h"
+                subprocess.run(tmux_command("join-pane", "-d", "-f", "-s", board, "-t", destination,
+                                            "-b", direction, "-l", str(cells)), check=False, timeout=3,
+                               stdin=subprocess.DEVNULL)
+                self.last = None
+                return "follow"
             return "record"
-        if active and before is not None and before[2] and before[0] == window and before[1] != pane[0]:
-            record(split_cells(("left", pane[0], False), window[0]))
-            return "record"
+        if mode != "work":
+            return None
         done = None
-        if stored[2]:
-            stored = ("left", split_cells(stored, window[0]), False)
-            record(stored[1])
+        if mode == "work" and active and before is not None and before[2] and before[0] == window and before[3] == orientation \
+                and before[1] != current_extent:
+            current_cells = split_cells((orientation, current_extent, False), axis)
+            record(current_cells)
+            drag_value = "%s:%d@%d" % (orientation, current_cells, axis)
+            subprocess.run(tmux_command("set-option", "-w", "-t", board, "@oms_panel_work_drag", drag_value),
+                           check=False, timeout=3, stdin=subprocess.DEVNULL)
+            self.manual = (window, orientation, axis)
+            return "record"
+        previous_axis = (before[0][1] if orientation == "top" else before[0][0]) if before is not None else axis
+        if before is not None and previous_axis != axis and before[3] == orientation and mode == "work" \
+                and not marked_drag and not legacy:
+            cells = split_cells((orientation, (stored[1] * axis + previous_axis // 2) // previous_axis, False), axis)
+            cells = work_split_cells((orientation, cells, False), axis)
+            stored = (orientation, cells, False)
+            if record(cells):
+                done = "record"
+            self.manual = None
+            if drag:
+                subprocess.run(tmux_command("set-option", "-wu", "-t", board, "@oms_panel_work_drag"),
+                               check=False, timeout=3, stdin=subprocess.DEVNULL)
+        elif mode == "work":
+            normalized = work_split_cells(stored, axis)
+            if legacy or (not marked_drag and normalized != stored[1]):
+                stored = (orientation, normalized, False)
+                done = "record" if record(normalized) else None
+        if mode == "work":
+            self.work_geometry = (window, orientation, stored)
+        if returned_record:
             done = "record"
-        cells = split_resize(stored, pane[0], window[0])
+        manual = self.manual is not None and self.manual[0] == window and self.manual[1] == orientation
+        target = split_cells(stored, axis) if manual else work_split_cells(stored, axis)
+        wide_reserve_restore = orientation == "left" and not manual \
+            and axis >= MIN_BOARD + WORK_CHAT_RESERVE + 1 \
+            and axis - current_extent - 1 < WORK_CHAT_RESERVE \
+            and target != current_extent
+        cells = target if abs(target - current_extent) >= 2 or wide_reserve_restore else None
         if cells is None:
             return done
-        subprocess.run(tmux_command("resize-pane", "-t", os.environ.get("TMUX_PANE", ""), "-x", str(cells)),
+        dimension = "-y" if orientation == "top" else "-x"
+        subprocess.run(tmux_command("resize-pane", "-t", os.environ.get("TMUX_PANE", ""), dimension, str(cells)),
                        check=False, timeout=3, stdin=subprocess.DEVNULL)
         self.last = None
         return "follow"
@@ -3415,18 +3639,21 @@ def bind_window(pane, launch, view, attention_only):
         subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_" + key, value), check=True)
 
 
-# F9 selects the other pane of the window: the native chat from its board and back.
+# F9 switches panes; F8 cycles layout modes from any pane in a panel window.
 def keys_help(installed=None):
     installed = set(name for name in ("claude", "pi", "codex") if main_installed(name)) if installed is None else set(installed)
     starts = [label for name, label in (("claude", "1 Claude"), ("pi", "2 Pi"), ("codex", "0 Codex"))
               if name in installed]
-    return (" ".join(starts + ["? More F5 Back"]), "F9 Chat/Board F5 Control ? Keys k Capacity i Headers")
+    return (" ".join(starts + ["? More F5 Back"]), "F9 Chat/Board F8 Modes F5 Control ? Keys k Capacity i Headers")
 
 
 KEYS_HELP = keys_help()
 # Text inside tmux's conditional cannot contain commas or closing braces.
 MAIN_KEYS = (("F9", "select-pane -t :.+"),
              ("F5", 'if-shell -F "#{==:#{window_name},control}" "select-window -l" "select-window -t :=control"'),
+             ("F8", 'if-shell -F "#{==:#{@oms_panel_mode},overview}" "set-option -w @oms_panel_mode focus" '
+                    '"if-shell -F \\"#{==:#{@oms_panel_mode},focus}\\" \\"set-option -w @oms_panel_mode work\\" '
+                    '\\"set-option -w @oms_panel_mode overview\\""'),
              ("F12", 'display-message -d 8000 "#{?#{==:#{window_name},control},%s,%s}"' % KEYS_HELP))
 
 
@@ -5102,9 +5329,10 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             previews = BackgroundRead()
             state, status, main_attempt = {"repo": {"name": repo.name}, "collection": {"ok": False, "pending": True}}, 0, None
             density, filtered = view or board_view("auto"), attention_only
+            layout_mode = "work"
             next_read, next_frame, revision = 0, 0, 0
             held = {}
-            next_focus, splits = 0, SplitSync()
+            next_focus, splits, modes = 0, SplitSync(), PanelModeSync()
             while True:
                 collected = False
                 if background:
@@ -5209,7 +5437,19 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         resized = False
                     if managed_session() and inputs.fd is not None and time.monotonic() >= next_focus:
                         next_focus = time.monotonic() + 1
-                        splits.tick(panel_geometry())
+                        geometry = panel_geometry()
+                        # Finish any edge change before Focus zooms the native pane.
+                        splits.tick(geometry)
+                        modes.tick(geometry)
+                        current_mode = geometry[6] if geometry and len(geometry) > 6 else "work"
+                        if current_mode != layout_mode:
+                            layout_mode = current_mode
+                            density = "graph" if layout_mode == "overview" else board_view("auto")
+                            navigation["layout_mode"] = layout_mode
+                            navigation["view"] = density
+                            subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
+                                                        "@oms_panel_view", density), check=False, timeout=2,
+                                           stdin=subprocess.DEVNULL)
                     if resized:
                         size = redraw()
                     batch_hits = navigation.get("hits")
@@ -5273,6 +5513,18 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             navigation["health_view"] = not navigation.get("health_view", False)
                         elif event[0] == "i" and managed_session():
                             toggle_context_headers()
+                        elif event[0] == "m" and managed_session():
+                            mode = cycle_panel_mode(os.environ.get("TMUX_PANE", ""))
+                            if mode:
+                                layout_mode = mode
+                                density = "graph" if mode == "overview" else board_view("auto")
+                                navigation["layout_mode"] = mode
+                                navigation["view"] = density
+                                subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
+                                                            "@oms_panel_view", density), check=False, timeout=2,
+                                               stdin=subprocess.DEVNULL)
+                            else:
+                                navigation["notice"] = "Layout mode unavailable; native session preserved"
                         elif event[0] == "escape" and close_call():
                             pass  # Esc first closes only the reader pane; the board keeps its preview.
                         elif event[0] == "escape" and navigation.get("health_view"):

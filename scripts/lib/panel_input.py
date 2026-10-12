@@ -125,7 +125,7 @@ class TerminalInput:
                 output.append(("tab",))
             elif value == b"\x0c":
                 output.append(("repaint",))
-            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"f", b"?", b"n", b"0", b"1", b"2", b"k", b"u", b"c") or value.decode("ascii", "ignore") in self.extra_keys:
+            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"f", b"?", b"n", b"0", b"1", b"2", b"k", b"u", b"c", b"m") or value.decode("ascii", "ignore") in self.extra_keys:
                 output.append((value.decode(),))
             else:
                 output.append(("unbound",))
