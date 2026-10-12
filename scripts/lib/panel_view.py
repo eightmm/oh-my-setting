@@ -404,20 +404,20 @@ def inbox_items(report, unicode=True):
     for member in members:
         state = main_state(member) if member.get("role") == "main" else member["state"]
         if state in FAILED_WORDS and not failure_handled(report, member, read_results, closed):
-            what, shown, style = FAILED_WORDS[state], state, "bad"
+            what, shown, style, kind = FAILED_WORDS[state], state, "bad", "failed"
         elif state in WAITING_WORDS:
-            what, shown, style = WAITING_WORDS[state], state, "alert"
+            what, shown, style, kind = WAITING_WORDS[state], state, "alert", "needs"
         elif state == "done" and member["participant"] in awaiting:
-            what, shown, style = "patch awaits admission", "review", "review"
+            what, shown, style, kind = "patch awaits admission", "review", "review", "decide"
         elif state == "review" and finalized.get(member.get("task_id")) not in {"completed", "accepted"}:
-            what, shown, style = "awaiting decision", "review", "review"
+            what, shown, style, kind = "awaiting decision", "review", "review", "decide"
         else:
             continue
         title = clean(member.get("title"), 80)
         items.append({"stamp": stamps.get(member.get("attempt")) or "", "glyph": activity(shown, None, unicode),
                       "who": who(member), "what": what + (": " + title if title and title != "Native task not recorded" else ""),
                       "style": style, "action": ("chat" if member.get("role") == "main" else "result", member["participant"]),
-                      "row_id": ("call", member["participant"])})
+                      "row_id": ("call", member["participant"]), "cls": kind, "task": member.get("task_id")})
     from panel_messages import exited_mail
     open_ids = {mapping(q).get("id") for q in listing(mapping(report.get("room")).get("open_questions"))}
     for index, message in enumerate(listing(mapping(report.get("room")).get("messages"))):
@@ -428,7 +428,8 @@ def inbox_items(report, unicode=True):
             items.append({"stamp": message.get("ts") or "", "glyph": ">" if not unicode else "»",
                           "who": who(sender), "what": "to all: " + clean(text, 80),
                           "style": "alert", "action": ("chat", sender["participant"]),
-                          "row_id": ("message", str(message.get("id")) if message.get("id") else ("position", index))})
+                          "row_id": ("message", str(message.get("id")) if message.get("id") else ("position", index)),
+                          "cls": "needs" if message.get("message_kind") == "question" else "mail"})
     room = mapping(report.get("room"))
     pending = room.get("pending_messages") if "pending_messages" in room else room.get("messages")
     for index, message in enumerate(listing(pending)):
@@ -440,7 +441,8 @@ def inbox_items(report, unicode=True):
                                  " from " + (label(asker) if asker else clean(message.get("sender"))),
                           "what": "to " + address(message["recipient"]) + ": " + clean(readable(message.get("text"), " "), 80),
                           "style": "alert", "action": ("chat", target),
-                          "row_id": ("message", str(message.get("id")) if message.get("id") else ("position", index))})
+                          "row_id": ("message", str(message.get("id")) if message.get("id") else ("position", index)),
+                          "cls": "needs" if message.get("message_kind") == "question" else "mail"})
     import room as room_module
     for index, question in enumerate(listing(mapping(report.get("room")).get("open_questions"))):
         question, minutes = mapping(question), room_module.age(mapping(question).get("ts")) // 60
@@ -451,7 +453,8 @@ def inbox_items(report, unicode=True):
             items.append({"stamp": question.get("ts") or "", "glyph": "?", "who": "Question from " + label(asker),
                           "what": "to " + address(target["participant"]), "style": "alert",
                           "action": ("chat", recipient),
-                          "row_id": ("question", str(question.get("id")) if question.get("id") else ("position", index))})
+                          "row_id": ("question", str(question.get("id")) if question.get("id") else ("position", index)),
+                          "cls": "needs"})
     failure_statuses = {"failed", "timeout", "timed_out", "error", "rejected", "unavailable", "failed_command",
                         "rpc_error", "persistence_failure", "absent", "archived", "busy", "invalid_timeout", "uncertain",
                         "unsupported_platform", "unbound", "ambiguous", "unsafe_endpoint", "empty_message", "oversized"}
@@ -461,8 +464,68 @@ def inbox_items(report, unicode=True):
         items.append({"stamp": max(receipt.get("ts") or "" for receipt in failed), "glyph": "!",
                       "who": "Main wake-up delivery failed",
                       "what": "(unconfirmed)" if any(receipt.get("delivery_unknown") for receipt in failed) else "",
-                      "style": "bad", "action": None, "row_id": ("delivery", "wake-up")})
+                      "style": "bad", "action": None, "row_id": ("delivery", "wake-up"), "cls": "info"})
     return sorted(items, key=lambda item: item["stamp"], reverse=True)
+
+
+# Attention classes in rank order: (key, header and row tag, narrow header word, tab heading).
+ATTENTION_CLASSES = (("needs", "needs you", "you", "Needs you"), ("failed", "failed", "fail", "Failed"),
+                     ("decide", "decide", "dec", "Awaiting decision"), ("stale", "stale", "stale", "Stale holds"),
+                     ("mail", "mail", "mail", "Mail"), ("info", "info", "info", "Other"))
+
+
+def attention_items(report, unicode=True):
+    """The Attention queue: the inbox plus held tasks whose workers all ended, deduplicated and ranked by class.
+
+    Within a class the newest comes first, except decisions, which wait longest first. Display-only."""
+    from room_view import held_split
+    items = inbox_items(report, unicode)
+    failing = {item["task"] for item in items if item["cls"] == "failed" and item.get("task")}
+    tasks = {t.get("id"): t for t in map(mapping, listing(mapping(report.get("plan")).get("tasks")))}
+    for ident in sorted(held_split(report)[1] - failing):
+        title = clean(tasks.get(ident, {}).get("title"), 80)
+        # An unresolved failure already names the task; the stale row would only repeat it.
+        items.append({"stamp": str(tasks.get(ident, {}).get("claimed_at") or ""), "glyph": "○" if unicode else "o",
+                      "who": "Task " + clean(ident, 40), "what": "workers ended, still held" + (": " + title if title else ""),
+                      "style": "alert", "action": ("tab", "plan"), "row_id": ("task", ident), "cls": "stale"})
+    seen, ranked = set(), []
+    for kind, unused, unused_short, unused_heading in ATTENTION_CLASSES:
+        group = sorted((item for item in items if item["cls"] == kind), key=lambda item: item["stamp"],
+                       reverse=kind != "decide")
+        for item in group:
+            if item["row_id"] not in seen:
+                seen.add(item["row_id"])
+                ranked.append(dict(item, age=age_label(item["stamp"]) if kind == "decide" and item["stamp"] else ""))
+    return ranked
+
+
+def attention_header(ranked, width, unicode):
+    """`Attention N · 1 needs you · 2 failed`, zero classes dropped; narrower widths shorten the class words."""
+    sep = " · " if unicode else " / "
+    counts = [(sum(item["cls"] == kind for item in ranked), tag, short) for kind, tag, short, unused in ATTENTION_CLASSES]
+    for form in ("tag", "short", None):
+        text = "Attention %s" % len(ranked) + "".join(
+            sep + "%s %s" % (n, tag if form == "tag" else short) for n, tag, short in counts if n and form)
+        if display_width(text) <= width:
+            return text
+    return clipped("Attn %s" % len(ranked), width)
+
+
+def attention_row(item, width, unicode, tag=True):
+    """One queue item: class tag with a decision's age, glyph, who and what; narrow rows keep tag, who and state."""
+    sep = " · " if unicode else " / "
+    word = dict((kind, word) for kind, word, unused, unused_heading in ATTENTION_CLASSES)[item["cls"]] if tag else ""
+    lead = " ".join(part for part in (word, item.get("age")) if part)
+    text = (lead + sep if lead else "") + item["glyph"] + " " + item["who"] + sep + item["what"]
+    if display_width(text) > width:
+        state = item["what"].split(":", 1)[0].replace("waiting for approval", "needs approval").replace(
+            "waiting for input", "needs input")
+        who = item["who"].split(" for ", 1)[0]
+        if item["row_id"][0] == "call":
+            who = who.rsplit(" ", 1)[0]
+        # The tag already says "failed"; the state repeats only when it adds a word.
+        text = sep.join(part for part in (lead, who, "" if state == word else state) if part)
+    return clipped(text, width)
 
 
 def render_inbox(report, width, height, color, unicode, managed, previous, navigation):
@@ -690,33 +753,14 @@ def render_unavailable(report, width, height, color, unicode, previous, menu, ma
     return "\n".join(lines[:budget])
 
 
-def needs_strip(report, width, unicode, limit=3):
-    """Pinned attention derived from the same inbox as the control window."""
-    items, seen = [], set()
-    for item in inbox_items(report, unicode):
-        if item["row_id"] not in seen:
-            items.append(item)
-            seen.add(item["row_id"])
-    if not items:
+def needs_strip(report, width, unicode, limit=3, ranked=None):
+    """Pinned attention: the queue's class counts, which open the Attention tab, then its top items by rank."""
+    ranked = attention_items(report, unicode) if ranked is None else ranked
+    if not ranked:
         return []
-    sep = " · " if unicode else " / "
-    rows = []
-    for index, item in enumerate(items[:max(0, limit)]):
-        prefix = "Needs you" + sep if index == 0 else "  "
-        text = prefix + item["glyph"] + " " + item["who"] + sep + item["what"]
-        if display_width(text) > width:
-            state = item["what"].split(":", 1)[0].replace("waiting for approval", "needs approval").replace(
-                "waiting for input", "needs input")
-            who = item["who"].split(" for ", 1)[0]
-            if item["row_id"][0] == "call":
-                who = who.rsplit(" ", 1)[0]
-            text = prefix + who + sep + state
-        rows.append({"text": clipped(text, width),
-                     "style": item["style"], "action": item["action"]})
-    if len(items) > max(0, limit):
-        rows.append({"text": clipped("+%s more" % (len(items) - max(0, limit)), width),
-                     "style": "alert", "action": ("tab", "needs")})
-    return rows
+    rows = [{"text": attention_header(ranked, width, unicode), "style": ranked[0]["style"], "action": ("tab", "needs")}]
+    return rows + [{"text": attention_row(item, width, unicode), "style": item["style"], "action": item["action"]}
+                   for item in ranked[:max(0, limit)]]
 
 
 def render(report, provider, width=100, height=28, color=False, unicode=True,

@@ -291,13 +291,13 @@ carries a `[oms plan]` sentence (goal, progress, the main's task, the next ready
 command) and, when its declared status is missing or older than 20 minutes, a reminder to set it.
 
 What the numbers mean. Each word names one stage, and the same set carries the same word on the
-board group, the goal box, the main card's `Team:` line, Detail, `Needs you` and the Plan tab:
+board group, the goal box, the main card's `Team:` line, Detail, the Attention queue and the Plan tab:
 
 - `running`/`active`: a call's process is live.
 - `finished`: a call's process exited; that alone admits or verifies nothing.
 - `awaiting decision`: a finished call whose patch awaits admission, or a call in lifecycle `review`, until
   its main records a decision on the task (`Awaiting decision (N)` on the board, `N awaiting decision` in `Team:`;
-  `Needs you` names the patch case `patch awaits admission`);
+  the Attention queue names the patch case `patch awaits admission`);
   once its main completes or accepts the task, the call reads `decided` wherever it is shown.
 - `unrecorded`: no live process, heartbeat or exit was seen (`status unknown`); it is not a failure and stays
   until its main decides. Detail says so in one line.
@@ -307,8 +307,22 @@ board group, the goal box, the main card's `Team:` line, Detail, `Needs you` and
 - `landed`: `oms land` pushed the change and `agent-plan finish --landed-commit SHA` recorded it; while a land
   runs the goal box adds `LANDING`.
 
+The Attention queue ranks what needs the person by urgency, not recency, and every board surface reads the
+same ranked list, computed once per frame. Its classes, in rank order and named by a short tag on each row:
+`needs you` (a call or main waiting for approval or input, a question escalated to the person or asked of
+`all` by a main), `failed` (a failed, timed-out, abandoned or lost call whose result handoff is unread, that no
+later round superseded and whose task is still open), `decide` (a finished call awaiting its main's decision
+or admission, oldest first, with its age), `stale` (a running plan task whose holder's calls all ended; its row
+opens the Plan tab), `mail` (other unanswered room mail from or to mains) and `info` (a failed main wake-up
+delivery). Within a class the newest comes first. Above the board a header such as
+`Attention 7 · 1 needs you · 2 failed · 3 decide · 1 stale` (zero classes dropped; narrower widths shorten
+the words to `1 you · 2 fail · 3 dec`, then `Attention 7`) opens the Attention tab and is followed by the top
+three items. The `Attention N` tab groups every item under a class heading; arrows pick one, Enter or a click
+shows it in Detail, and `f` opens a call's full result on the right. The queue is display-only: it changes no
+lifecycle state or authority.
+
 When the graph leaves rows blank between the cards and the bottom box, a dim summary fills them:
-`Attention N` with the first two `Needs you` items, `In progress N calls · oldest Nm`, and `Recent` with the
+`Attention N` with the first two queue items, `In progress N calls · oldest Nm`, and `Recent` with the
 last three finished calls and their end words. It is display-only, never takes rows from the cards or the
 box, and is hidden when fewer than four rows are spare.
 
@@ -322,7 +336,7 @@ minutes on every hook and `overdue` from fifteen; the asker's own hook records o
 `--reply-to` links the one open question from that recipient, or is refused with the ids.
 
 The bottom box has four tabs, Detail, Plan, Debate and Messages, plus Past while any call is settled
-and Needs you while anything needs the person; the Messages tab is a
+and Attention while anything needs the person; the Messages tab is a
 filtered room log. A main without an advisor or reviewer shows one dim
 `◇ Advisors: none active · a asks one` row above its card. The pinned usage line
 (`Claude week 66% · ctx 73% │ Codex week 2% · ctx 84%`) holds the readings; the model-call totals

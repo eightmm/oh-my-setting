@@ -907,16 +907,13 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
 FINISHED = {"done", "cancelled"}
 
 
-def board_summary(report, calls, classify, width, rows, unicode=True):
+def board_summary(report, calls, classify, width, rows, unicode=True, ranked=None):
     """Attention, In progress and Recent in at most `rows` rows; the board's own counts, in the same words."""
-    from panel_view import inbox_items
+    from panel_view import attention_items, attention_row
     sep = " · " if unicode else " / "
     calls = list({action(c): c for c in calls if not c.get("_native")}.values())
-    seen, attention = set(), []
-    for item in inbox_items(report, unicode):
-        if item["row_id"] not in seen:
-            seen.add(item["row_id"])
-            attention.append(item["glyph"] + " " + item["who"] + sep + item["what"])
+    ranked = attention_items(report, unicode) if ranked is None else ranked
+    attention = [attention_row(item, 400, unicode) for item in ranked]
     running = [c for c in calls if c["state"] in LIVE_STATES]
     oldest = min((str(c["joined_at"]) for c in running if c.get("joined_at")), default="")
     recent = sorted((c for c in calls if c["state"] in TERMINAL_STATES and c.get("ended")),
@@ -1161,8 +1158,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         add(text, style)
     for alert in status_alerts(report):
         add(alert, "bad")
-    from panel_view import needs_strip
-    attention_rows = needs_strip(report, width, unicode)
+    from panel_view import attention_items, needs_strip
+    # One ranked queue per frame feeds the strip, the spare-row summary and the Attention tab.
+    ranked = attention_items(report, unicode)
+    attention_rows = needs_strip(report, width, unicode, ranked=ranked)
     for row in attention_rows:
         if row["action"]:
             hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": row["action"]})
@@ -1489,7 +1488,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if dock and spare >= 3:
         lines.append("")
         for text in board_summary(report, [c for calls in everyone.values() for c in calls] + unlinked,
-                                  classify, width, spare, unicode):
+                                  classify, width, spare, unicode, ranked):
             add(text, "dim")
     if omitted or unlinked:
         if parts and len(lines) < total_rows - dock:
@@ -1505,7 +1504,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         dock_lines, dock_hits = tab_box(report, width, rows_high, navigation, color, unicode,
             members=members, primary=primary, previewed=previewed, preview=preview, teams=teams,
             everyone=everyone, labels=labels, main_attempt=main_attempt, automatic=automatic,
-            claims=claims, classify=classify,
+            claims=claims, classify=classify, attention=ranked,
             past=past_calls([c for calls in everyone.values() for c in calls] + unlinked, classify))
         top = len(lines)
         lines += dock_lines
@@ -1583,7 +1582,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
 def tab_box(report, width, rows, navigation, color=False, unicode=True, *, members=None,
             primary=None, previewed=None, preview=None, teams=None, everyone=None, labels=None,
-            main_attempt=None, automatic=False, claims=None, classify=None, past=None):
+            main_attempt=None, automatic=False, claims=None, classify=None, past=None, attention=None):
     """The shared reading dock; hit rows are relative to the returned lines."""
     rows_high = rows if rows >= 3 else int(rows > 0)
     navigation["full_mail"] = None
@@ -1639,8 +1638,8 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     from panel_debate import signature, tab_body as debate_body
     from panel_messages import tab_body as messages_body
     top = 1
-    from panel_view import inbox_items
-    attention = inbox_items(report, unicode)
+    from panel_view import attention_items
+    attention = attention_items(report, unicode) if attention is None else attention
     active = navigation.get("tab") if navigation.get("tab") in dict(TABS) else "detail"
     if active == "needs" and not attention:
         active = "detail"
@@ -1665,18 +1664,20 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     if active == "debate":
         seen[shown_main] = digest
     marks = {"debate": (" •" if unicode else " *") if digest and seen.get(shown_main) != digest else "",
-             "messages": " %s unread" % unread_total if unread_total else "", "past": " %s" % len(past)}
+             "messages": " %s unread" % unread_total if unread_total else "", "past": " %s" % len(past),
+             "needs": " %s" % len(attention)}
     tabs = [entry for entry in TABS if (entry[0] != "needs" or attention) and (entry[0] != "past" or past)]
     if active not in dict(tabs):
         active = "detail"
     navigation["visible_tabs"] = [key for key, unused in tabs]
-    abbreviations = {"detail": "Dtl", "plan": "Plan", "debate": "Dbt", "messages": "Msg", "past": "Past", "needs": "Needs"}
+    abbreviations = {"detail": "Dtl", "plan": "Plan", "debate": "Dbt", "messages": "Msg", "past": "Past", "needs": "Attn"}
     for short in (0, 1, 2):
         gap = " " if short == 2 else "  "
-        tiny = {"detail": "D", "plan": "P", "debate": "B", "messages": "M", "past": "H", "needs": "N"}
+        tiny = {"detail": "D", "plan": "P", "debate": "B", "messages": "M", "past": "H", "needs": "A"}
         texts = [(("[%s]" if short == 2 else "[ %s ]") if key == active else "%s") % (
             (name if short == 0 else abbreviations[key] if short == 1 else tiny[key]) +
-            (marks.get(key, "") if short == 0 else " %s" % unread_total if key == "messages" and unread_total else ""))
+            (marks.get(key, "") if short == 0 else " %s" % unread_total if key == "messages" and unread_total else
+             " %s" % len(attention) if key == "needs" else ""))
             for key, name in tabs]
         if display_width(gap.join(texts)) <= width - 6:
             break
@@ -1732,11 +1733,7 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
         elif active == "past":
             rows = past_body(past, width - 4, capacity, navigation, labels, unicode)
         elif active == "needs":
-            from panel_view import needs_strip
-            needed_rows = needs_strip(report, width - 4, unicode, limit=len(attention))
-            first = min(scrolled.get("detail", 0), max(0, len(needed_rows) - capacity))
-            scrolled_now["detail"] = first
-            rows = [(r["text"], r["action"], False) for r in needed_rows[first:first + capacity]]
+            rows = attention_body(attention, width - 4, capacity, navigation, unicode)
         else:
             summary = [("Messages: %s unread for live participants" % unread_total, None, False)] if capacity >= 3 else []
             rows = summary + messages_body(report, width - 4, capacity - len(summary), navigation, unicode)
@@ -1752,7 +1749,7 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                 # Body text without its own link is passive, so a click that selects text changes nothing.
                 hits.append({"y": top + 1 + n, "x1": 1, "x2": width, "action": target,
                              **({"preview": True, "passive": n in plain} if active == "detail" else
-                                {"past": True} if active == "past" else {})})
+                                {active: True} if active in {"past", "needs"} else {})})
         lines.extend([box_row("", width, unicode)] * (rows_high - 2 - capacity))
         lines.append(paint(box_edge("", width, unicode, "bottom"), style))
         navigation["box"] = {"y1": top, "y2": top + rows_high - 1, "pages": bool(previewed) or active == "plan"}
@@ -1763,7 +1760,7 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
 
 
 TABS = (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"), ("past", "Past"),
-        ("needs", "Needs you"))
+        ("needs", "Attention"))
 
 
 def past_calls(pool, classify):
@@ -1808,10 +1805,38 @@ def past_body(past, width, capacity, navigation, labels, unicode):
     return rows
 
 
-def past_event(event, navigation):
-    """Past-tab keys: arrows pick a call, Enter or a click shows it in Detail, f opens it on the right."""
-    ids, kind, selected = navigation.get("past_ids", []), event[0], navigation.get("selected")
-    view = navigation.setdefault("past_view", {})
+def attention_body(ranked, width, capacity, navigation, unicode):
+    """The Attention tab: the ranked queue under one heading per class; selecting an item works as in Past."""
+    from panel_view import ATTENTION_CLASSES, attention_header, attention_row
+    sep = " · " if unicode else " / "
+    lines = []
+    for kind, unused, unused_short, heading in ATTENTION_CLASSES:
+        group = [item for item in ranked if item["cls"] == kind]
+        if group:
+            lines.append((clipped("%s (%s)" % (heading, len(group)) + (sep + "oldest first" if kind == "decide" else ""),
+                                  width), None))
+            lines += [("  " + attention_row(item, width - 2, unicode, tag=False), item["action"]) for item in group]
+    ids = list(dict.fromkeys(target for unused, target in lines if target))
+    navigation["needs_ids"] = ids
+    view = navigation.setdefault("needs_view", {})
+    header = capacity >= 3
+    page = max(1, capacity - int(header))
+    first = min(max(0, view.get("scroll", 0)), max(0, len(lines) - page))
+    selected = navigation.get("selected")
+    if view.pop("reveal", False) and selected in ids:
+        at = next(n for n, (unused, target) in enumerate(lines) if target == selected)
+        first = at if at < first else max(first, at - page + 1)
+    view.update(scroll=first, page=page)
+    title = attention_header(ranked, width, unicode)
+    hint = title + sep + "Enter shows one in Detail"
+    rows = [(hint if display_width(hint) <= width else title, None, False)] if header else []
+    return rows + [(text, target, target is not None and target == selected) for text, target in lines[first:first + page]]
+
+
+def past_event(event, navigation, tab="past"):
+    """Past- and Attention-tab keys: arrows pick a row, Enter or a click shows it in Detail, f opens it on the right."""
+    ids, kind, selected = navigation.get(tab + "_ids", []), event[0], navigation.get("selected")
+    view = navigation.setdefault(tab + "_view", {})
     if kind in {"up", "down", "home", "end"}:
         if ids:
             at = ids.index(selected) if selected in ids else (-1 if kind == "down" else len(ids))
@@ -1826,7 +1851,7 @@ def past_event(event, navigation):
                                                           -step if kind == "pageup" else step))
         return True
     if kind == "click":
-        hit = next((h for h in navigation.get("hits", []) if h.get("past") and h["y"] == event[2]
+        hit = next((h for h in navigation.get("hits", []) if h.get(tab) and h["y"] == event[2]
                     and h["x1"] <= event[1] <= h["x2"]), None)
         if hit is None:
             return False
@@ -1835,10 +1860,14 @@ def past_event(event, navigation):
         target = selected
     else:
         return False
+    if target[0] == "tab":
+        # A stale hold has no call left; its row opens the Plan tab that lists the task.
+        navigation["tab"] = target[1]
+        return True
     # The call reads exactly as a board card does: Detail shows it and f opens its full result on the right.
     navigation.update(selected=target, preview={"target": target}, tab="detail")
     navigation.pop("dismissed", None)
-    if kind == "f":
+    if kind == "f" and target[0] in {"result", "debate"}:
         navigation["open_call"] = target
     return True
 

@@ -209,7 +209,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         footer.insert(len(footer) - hint_rows, bar[0])
     budget = max(0, height - int(menu) - len(footer))
     import os
-    from panel_view import needs_strip
+    from panel_view import attention_items, needs_strip
+    # One ranked queue per frame feeds the strip and the Attention tab, also across the auto-fold re-render.
+    ranked = navigation.pop("_attention", None)
+    ranked = attention_items(report, unicode) if ranked is None else ranked
     repo = mapping(report.get("repo"))
     heading = "OMS" + sep + (os.path.basename(clean(repo.get("name")) or str(repo.get("path") or "").rstrip("/\\")) or "repository")
     alerts = status_alerts(report)
@@ -218,7 +221,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             {"text": clipped(usage_line(report, width, unicode), width), "style": "dim"}]
     head += [{"text": clipped(text, width), "style": style, "action": ("tab", "plan")} for text, style in banner]
     head += [{"text": clipped(alert, width), "style": "bad"} for alert in alerts]
-    head += needs_strip(report, width, unicode)
+    head += needs_strip(report, width, unicode, ranked=ranked)
     others = listing(room.get("other_rooms"))
     if height >= 20 and (others or room.get("other_rooms_incomplete")):
         head.append({"text": clipped("OTHER ROOMS / " + " | ".join("%s %s live mains" % (
@@ -285,7 +288,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 if c.get("parent") in {m["participant"], m.get("attempt")}))}
         keep = keep if keep - {None} else {m["participant"] for m in mains[:1]}
         extra = {m["participant"] for m in mains} - keep
-        inner = dict(navigation, collapsed=collapsed | extra, _auto_fold=True)
+        inner = dict(navigation, collapsed=collapsed | extra, _auto_fold=True, _attention=ranked)
         text = render_tree(report, width, height, color, unicode, frame, menu, attention_only,
                            main_attempt, inner, summary, managed, previous=previous)
         reachable = any(i[0] == "result" for i in inner["items"]) or not any(i[0] == "result" for i in items)
@@ -374,7 +377,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     everyone = {m["participant"]: [c for c in calls if c.get("parent") in
                 {m["participant"], m.get("attempt")}] for m in mains}
     dock_lines, dock_hits = tab_box(report, width, dock_rows, navigation, color, unicode,
-                                    main_attempt=main_attempt, everyone=everyone, past=past)
+                                    main_attempt=main_attempt, everyone=everyone, past=past, attention=ranked)
     if dock_rows == 1:
         dock_lines = [line.replace("╭", "[").replace("╮", "]") for line in dock_lines]
     output += dock_lines
@@ -405,9 +408,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     navigation.update(hits=hits, items=unique, offset=offset, body_rows=len(body), viewport=body_budget,
                       room_id=room.get("id"), positions=positions, geometry=geometry, surface="tree", bands=bands,
                       tree_selected=selected)
-    # A Past-list choice scrolled off its page stays chosen; only the board's own rows are reaped.
-    kept = (navigation.get("tab") == "past" and "past" in navigation.get("visible_tabs", [])
-            and selected in navigation.get("past_ids", []))
+    # A Past- or Attention-list choice scrolled off its page stays chosen; only the board's own rows are reaped.
+    tab = navigation.get("tab")
+    kept = (tab in {"past", "needs"} and tab in navigation.get("visible_tabs", [])
+            and selected in navigation.get(tab + "_ids", []))
     if selected not in unique and not kept:
         navigation["selected"] = None
         navigation.pop("selected_row", None)

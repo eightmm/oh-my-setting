@@ -3795,9 +3795,9 @@ def tab_event(event, navigation):
         return panel_messages.handle(event, navigation)
     if tab == "debate" and kind != "q" and (hit is not None or kind != "click") and inside:
         return panel_debate.handle(event, navigation)
-    if tab == "past" and kind != "q" and inside:
+    if tab in {"past", "needs"} and kind != "q" and inside:
         from room_view import past_event
-        return past_event(event, navigation)
+        return past_event(event, navigation, tab)
     return False
 
 

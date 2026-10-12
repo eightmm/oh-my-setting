@@ -2341,7 +2341,7 @@ for columns, rows_high in ((42, 24), (50, 50)):
     last_nav = {}
     last_picture = render_tree(last_attention, columns, rows_high, menu=True,
                                previous=last_error, navigation=last_nav)
-    assert "Needs you" in "\n".join(last_picture.splitlines()[:10]), last_picture
+    assert "Attention 1" in "\n".join(last_picture.splitlines()[:10]), last_picture
     assert any(hit["action"] == ("task", "t-rev") for hit in last_nav["hits"]), last_picture
     assert last_nav["tab_strip_visible"] and len(last_picture.splitlines()) <= rows_high - 1, last_picture
     if rows_high == 50:
@@ -10308,7 +10308,7 @@ for columns, rows_high, surface in ((36, 50, "tree"), (50, 50, "tree"), (80, 50,
     shown = render(geometry_flow, "codex", columns, rows_high, view="graph", navigation=nav, main_attempt="flow-attempt")
     assert nav["surface"] == surface and nav["tab_strip_visible"], (columns, rows_high, nav)
     assert any(h["action"] == ("tab", "messages") for h in nav["hits"]), nav
-    assert "Needs you" in "\n".join(shown.splitlines()[:10]), shown
+    assert "Attention" in "\n".join(shown.splitlines()[:10]), shown
     assert "needs" in nav["visible_tabs"], nav
     if (columns, rows_high) == (127, 90):
         upper_end = max(b["y2"] for b in nav["bands"] if b["name"] != "detail")
@@ -10318,15 +10318,16 @@ for attempt in many_needs["attempts"]["active_recent"]:
     if attempt["panel"]["role"] != "main":
         attempt["state"] = "waiting_approval"
 attention_rows = needs_strip(many_needs, 36, True)
-assert len(attention_rows) == 4 and attention_rows[-1]["action"] == ("tab", "needs")
-assert attention_rows[-1]["text"].startswith("+") and "more" in attention_rows[-1]["text"]
+# The counts header opens the Attention tab and replaces the "+N more" row, so the strip still holds four rows.
+assert len(attention_rows) == 4 and attention_rows[0]["action"] == ("tab", "needs")
+assert attention_rows[0]["text"].startswith("Attention %s" % len(inbox_items(many_needs))), attention_rows
 # Pinned attention follows header/navigation order in both the keyboard list and the hit map.
 many_needs["room"]["repo_tasks"] = [{"id": "last-task", "title": "Last task", "state": "ready"}]
 needs_nav = {}
 needs_picture = render(many_needs, "codex", 50, 50, view="tree", navigation=needs_nav)
 pinned_actions = [item["action"] for item in attention_rows]
 hit_actions = [hit["action"] for hit in sorted(needs_nav["hits"], key=lambda hit: hit["y"])]
-assert hit_actions.index(pinned_actions[0]) < hit_actions.index(("task", "last-task")), needs_picture
+assert hit_actions.index(pinned_actions[0]) < hit_actions.index(pinned_actions[1]) < hit_actions.index(("task", "last-task")), needs_picture
 choose(("end",), needs_nav)
 assert needs_nav["selected"] == ("task", "last-task"), needs_nav
 repeated_needs = deepcopy(many_needs)
@@ -10337,8 +10338,118 @@ plain_needs = deepcopy(many_needs)
 for member in plain_needs["room"]["participants"]:
     member["label"] = "plain label"
 same_labels = needs_strip(plain_needs, 200, True, limit=100)
-assert {row["action"] for row in same_labels} == {item["action"] for item in inbox_items(plain_needs)}, \
+assert {row["action"] for row in same_labels[1:]} == {item["action"] for item in inbox_items(plain_needs)}, \
     "distinct calls with identical labels must remain reachable"
+# The Attention queue ranks by urgency, not recency: needs you, failed, decide (oldest first), stale, mail, info;
+# within any other class the newest comes first. A superseded failure or one whose task closed leaves the queue, and
+# a held task whose failed call is listed is not repeated as stale.
+from panel_view import attention_items, attention_header, attention_row
+from unittest.mock import patch
+import panel_view
+queue = deepcopy(held_flow)
+for attempt in queue["attempts"]["active_recent"]:
+    state, age = {"builder": ("waiting_approval", 1), "advisor": ("waiting_input", 9), "explorer": ("review", 5),
+                  "reviewer": ("done", 30), "researcher": ("done", 40)}.get(attempt["attempt_id"], (attempt["state"], 0))
+    attempt.update(state=state, updated_at=minutes_ago(age))
+queue["awaiting_admission"] = ["reviewer"]
+queue["plan"]["tasks"].append({"id": "t-crash", "title": "Held t-crash", "state": "running", "claimed_by": "flow-main",
+                               "claimed_by_participant": "flow-main", "claimed_at": "2026-10-11T12:09:00Z"})
+for seq, (ident, state, age, task) in enumerate((("crash-new", "failed", 2, "t-open"), ("crash-held", "failed", 6, "t-crash"),
+        ("crash-old", "timed_out", 20, "t-open2"), ("crash-redo", "failed", 3, "t-redo"), ("retry-redo", "working", 1, "t-redo"),
+        ("crash-closed", "failed", 4, "t-d0"))):
+    queue["room"]["participants"].append(dict(next(m for m in queue["room"]["participants"] if m["participant"] == "researcher"),
+                                              participant=ident, seq=60 + seq, label="Crash " + ident))
+    queue["attempts"]["active_recent"].append({"attempt_id": ident, "state": state, "updated_at": minutes_ago(age), "task_id": task,
+        "panel": {"room_id": "flow-room", "room_participant": ident, "role": "worker"}})
+queue["room"]["messages"] = [
+    {"id": "note-all", "sender": "flow-main", "recipient": "all", "message_kind": "note", "text": "Status for all",
+     "ts": minutes_ago(7), "pending_for": ["advisor"]},
+    {"id": "ask-all", "sender": "flow-main", "recipient": "all", "message_kind": "question", "text": "Which way?",
+     "ts": minutes_ago(50), "pending_for": ["advisor"]}]
+queue["room"]["publications"] = {"wake": {"status": "failed", "ts": minutes_ago(8)}}
+assert graph_text.held_split(queue)[1] == {"t-ended", "t-crash"}, graph_text.held_split(queue)
+ranked = attention_items(queue)
+assert [item["row_id"][1] for item in ranked] == ["builder", "advisor", "ask-all", "crash-new", "crash-held", "crash-old",
+                                                  "reviewer", "explorer", "t-ended", "note-all", "wake-up"], ranked
+assert [item["cls"] for item in ranked] == ["needs"] * 3 + ["failed"] * 3 + ["decide"] * 2 + ["stale", "mail", "info"]
+assert [item["age"] for item in ranked[6:8]] == ["30m", "5m"] and not any(item["age"] for item in ranked[:6] + ranked[8:])
+assert ranked[8]["action"] == ("tab", "plan") and "Held t-ended" in ranked[8]["what"], ranked[8]
+# Counts drop zero classes; narrower widths shorten the class words, then keep only the total.
+full_header = "Attention 11 · 3 needs you · 3 failed · 2 decide · 1 stale · 1 mail · 1 info"
+short_header = "Attention 11 · 3 you · 3 fail · 2 dec · 1 stale · 1 mail · 1 info"
+assert attention_header(ranked, 127, True) == full_header
+assert attention_header(ranked, len(full_header) - 1, True) == short_header
+assert attention_header(ranked, len(short_header) - 1, True) == "Attention 11"
+assert attention_header(ranked, 11, True) == "Attn 11" and attention_header(ranked, 3, True) == "At…"
+assert attention_header(ranked, 127, False) == full_header.replace(" · ", " / ")
+assert attention_header(attention_items(held_flow), 80, True) == "Attention 2 · 1 decide · 1 stale"
+strip = needs_strip(queue, 127, True)
+assert [row["action"] for row in strip] == [("tab", "needs"), ("result", "builder"), ("result", "advisor"),
+                                           ("chat", "flow-main")], strip
+assert strip[0]["text"] == full_header and strip[1]["text"].startswith("needs you · ⚑ Sonnet 5.5 worker"), strip
+assert needs_strip(queue, 127, True, ranked=ranked) == strip
+# The narrow fallback keeps tag, who and state, and does not repeat a tag the state already says.
+assert attention_row(ranked[3], 24, True) == "failed · Luna 6", attention_row(ranked[3], 24, True)
+assert attention_row(ranked[5], 30, False) == "failed / Luna 6 / timed out"
+assert attention_row(ranked[6], 40, True) == "decide 30m · Fable 5.1 · patch awaits a…" and \
+    attention_row(ranked[6], 200, True).startswith("decide 30m · ◇ Fable 5.1 reviewer for Sol 6 · patch")
+# The spare-row summary lists the same first two items in the same order.
+summary = graph_text.board_summary(queue, [], lambda call: "live", 127, 5, True)
+assert summary[0] == clipped("Attention    11 · " + attention_row(ranked[0], 400, True), 127), summary
+assert summary[1].strip() == attention_row(ranked[1], 400, True)[:127 - 13].strip(), summary
+# The Attention tab groups the queue under one heading per class, in rank order, rows as in the strip.
+group_nav = {}
+group_rows = graph_text.attention_body(ranked, 123, 30, group_nav, True)
+assert group_rows[0][0] == full_header + " · Enter shows one in Detail", group_rows[0]
+assert [text for text, unused, unused_pick in group_rows[1:] if not text.startswith("  ")] == [
+    "Needs you (3)", "Failed (3)", "Awaiting decision (2) · oldest first", "Stale holds (1)", "Mail (1)", "Other (1)"]
+assert [target for unused, target, unused_pick in group_rows if target] == [item["action"] for item in ranked if item["action"]]
+assert group_nav["needs_ids"] == list(dict.fromkeys(item["action"] for item in ranked if item["action"]))
+for columns, rows_high in ((127, 40), (57, 40)):
+    tab_nav = {"tab": "needs", "dismissed": True}
+    tab_picture = render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
+    assert tab_nav["tab_body_visible"] and ("Attention 11" if columns == 127 else "Attn 11") in tab_picture, tab_picture
+    assert "Needs you (3)" in tab_picture and "Enter shows one in Detail" in tab_picture, tab_picture
+    # Arrows pick a row, Enter shows it in Detail; End reaches the stale hold, whose Enter opens the Plan tab.
+    assert panel.tab_event(("home",), tab_nav) and tab_nav["selected"] == ("result", "builder"), tab_nav
+    assert panel.tab_event(("enter",), tab_nav) and tab_nav["tab"] == "detail" and \
+        tab_nav["preview"] == {"target": ("result", "builder")}, tab_nav
+    shown = render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
+    assert "WORKER / Sonnet 5.5" in "\n".join(shown.splitlines()[tab_nav["box"]["y1"] - 1:]), shown
+    tab_nav["tab"] = "needs"
+    render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
+    assert panel.tab_event(("end",), tab_nav) and tab_nav["selected"] == ("tab", "plan"), tab_nav
+    render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
+    assert tab_nav["needs_view"]["scroll"] > 0 or columns == 127, tab_nav["needs_view"]
+    assert panel.tab_event(("enter",), tab_nav) and tab_nav["tab"] == "plan", tab_nav
+    # A click on a queue row shows that call in Detail, and f opens its full result.
+    tab_nav["tab"] = "needs"
+    tab_nav["needs_view"]["scroll"] = 0
+    render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
+    hit = next(h for h in tab_nav["hits"] if h.get("needs") and h["action"] == ("result", "advisor"))
+    assert panel.tab_event(("click", hit["x1"], hit["y"]), tab_nav) and tab_nav["tab"] == "detail" and \
+        tab_nav["preview"] == {"target": ("result", "advisor")}, tab_nav
+# One ranked list per frame: the strip, the spare-row summary and the tab share a single inbox computation.
+real_inbox = panel_view.inbox_items
+for fixture, columns, rows_high, mode in ((summary_room, 127, 40, "graph"), (queue, 127, 40, "graph"),
+                                          (queue, 42, 40, "tree")):
+    calls_made = []
+    counted = lambda *args, **kwargs: calls_made.append(1) or real_inbox(*args, **kwargs)
+    with patch.object(panel_view, "inbox_items", counted):
+        frame_nav = {"tab": "needs"}
+        frame = render(fixture, "codex", columns, rows_high, view=mode, navigation=frame_nav)
+    assert len(calls_made) == 1 and frame_nav["tab_body_visible"], (fixture is queue, mode, len(calls_made))
+    if fixture is summary_room:
+        assert "Attention    1 · " in frame and "In progress" in frame, frame
+# Every size fits its width exactly as measured, in both glyph sets, on the board and in the Attention tab.
+for columns, rows_high in ((28, 16), (42, 24), (57, 24), (80, 24), (110, 24), (127, 40)):
+    for glyphs in (True, False):
+        for tab in ("detail", "needs"):
+            fit_nav = {"tab": tab}
+            fitted = render(queue, "codex", columns, rows_high, unicode=glyphs, navigation=fit_nav).splitlines()
+            assert len(fitted) <= rows_high and all(display_width(line) <= columns for line in fitted), (columns, fitted)
+            assert glyphs or not set("·…⚑◇○»│╭╮╰╯─").intersection("".join(fitted)), fitted
+            assert any(line.startswith(("Attention 11", "Attn 11")) for line in fitted), (columns, rows_high, fitted)
 decoder = TerminalInput()
 assert decoder.decode(b"\033[<0;8;") == []
 assert decoder.decode(b"7M\033[<0;8;7m\033[<65;8;7M\033[A\r") == [
