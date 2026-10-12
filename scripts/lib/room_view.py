@@ -362,17 +362,16 @@ def plan_summary(report):
 
 
 def goal_banner(report, width, unicode, compact=False):
-    """The pinned goal box as [(text, style)], every row a link to the Plan tab; compact is one row.
-
-    A plan draws a card titled GOAL (goal text on at most two rows, progress on the title row); without one a dim one-row box.
-    """
-    rows = goal_box(report, width, unicode, compact)
+    """The one-row board goal, linked by its caller to the full Plan tab."""
+    rows = goal_box(report, width, unicode, True)
     land = mapping(report.get("land"))
     if land.get("active") is True:
         sep = " · " if unicode else " / "
         minutes = valid_count(land.get("minutes"))
         text = "LANDING " + clean(str(land.get("sha") or ""))[:7] + sep + clean(str(land.get("step") or "land"))[:12]
-        rows.append((clipped(text + (sep + "%sm" % minutes if minutes is not None else ""), width), "head"))
+        landing = text + (sep + "%sm" % minutes if minutes is not None else "")
+        goal = rows[0][0][2:-2].rstrip()
+        rows = [(one_row(clipped(goal, max(1, width - display_width(landing) - 7)) + sep + landing, width), "head")]
     return rows
 
 
@@ -390,15 +389,11 @@ def goal_box(report, width, unicode, compact):
     goal, done, total, review, claimed = summary
     filled = min(10, 10 * done // total) if total else 0
     bar = ("▕" + "█" * filled + "░" * (10 - filled) + "▏") if unicode else "[" + "#" * filled + "." * (10 - filled) + "]"
-    by_state = mapping(mapping(report.get("plan")).get("by_state"))
-    cancelled = valid_count(by_state.get("cancelled")) or 0
     counts = "%s/%s verified" % (done, total)
     locally_done = sum(1 for task in listing(mapping(report.get("room")).get("repo_tasks"))
                       if task.get("state") != "done" and task.get("id") in mapping(report.get("completed_tasks")))
     if locally_done:
         counts += sep + "%s locally completed" % locally_done
-    if cancelled:
-        counts += sep + "%s cancelled" % cancelled
     # A claim is not proof of running work, and work waiting for review is progress: review outlives the bar.
     reviewing = sep + "%s review" % review if review else ""
     options = [bar + " " + counts + reviewing + sep + "%s claimed" % claimed, bar + " " + counts + reviewing,
@@ -787,7 +782,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     interactive = navigation is not None
     navigation = navigation if interactive else {}
     navigation.pop("box", None)
-    navigation["tab_strip_visible"] = True
+    navigation.update(tab_strip_visible=True, tab_body_visible=True, help_rows=max(4, height // 3))
     room = mapping(report.get("room"))
     members = nodes(report)
     navigation["main_occupied"] = bool(
@@ -880,12 +875,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             fixed = "  ".join(footer_hints({}, width, managed, unicode, None, True)[-1].split("  ")[-2:])
             footer = [clipped(clean(navigation["notice"], 180), max(1, width - display_width(fixed) - 2)) + "  " + fixed]
             hint_rows = 1
-    publications = mapping(room.get("publications"))
-    if publications:
-        footer.append("APP DELIVERY / " + " | ".join("%s: %s%s" % (
-            target, mapping(receipt).get("status", "unknown"),
-            " (unconfirmed)" if mapping(receipt).get("delivery_unknown") else "")
-            for target, receipt in list(publications.items())[-3:]))
     bar = None if menu else spawn_bar(width, navigation)
     if bar:
         footer.append(bar[0])
@@ -962,8 +951,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
     # Mail to finished calls is never read again; unread mail to mains and running calls is counted.
     unread_total = live_unread(report, members, settled)
-    heading_text = "OMS · " + (clean(room.get("title") or room.get("id")) or "Work room") + " · " + (
-        "%s unread for live participants" % unread_total if unread_total else "no unread messages")
+    import os
+    repo = mapping(report.get("repo"))
+    heading_text = "OMS · " + (os.path.basename(clean(repo.get("name")) or str(repo.get("path") or "").rstrip("/\\")) or "repository")
     clock = time.strftime("%m-%d ") + WEEKDAYS[time.localtime().tm_wday] + time.strftime(" %H:%M")
     if display_width(heading_text) + len(clock) + 2 <= width:
         heading_text += " " * (width - display_width(heading_text) - len(clock)) + clock
@@ -975,20 +965,41 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         add(text, style)
     for alert in status_alerts(report):
         add(alert, "bad")
+    from panel_view import needs_strip
+    attention_rows = needs_strip(report, width, unicode)
+    for row in attention_rows:
+        if row["action"]:
+            hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": row["action"]})
+        add(row["text"], row["style"])
     group_actions = []
     if primary:
+        group_labels = []
         for kind, title in CALL_GROUPS:
             calls = grouped[primary["participant"]][kind]
             if not calls:
                 continue
             target = ("group", (kind, primary["participant"]))
             group_actions.append(target)
+            label = "%s %s (%s)" % ("▸" if unicode else ">", title, len(calls))
+            if len(mains) != 1:
+                label += " / " + name_of(primary)
             unknown = sum(c["state"] == "presence unknown" for c in calls)
-            label = "%s %s (%s) / %s" % ("▸" if unicode else ">", title, len(calls), name_of(primary))
             if unknown:
                 label += " / %s earlier unknown" % unknown
-            hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": target})
-            add(label, "review" if kind == "review" else "dim")
+            group_labels.append((label, target, "review" if kind == "review" else "dim"))
+        if len(mains) == 1 and group_labels:
+            group_width = max(1, (width - 3 * (len(group_labels) - 1)) // len(group_labels))
+            group_labels = [(clipped(label, group_width), target, style) for label, target, style in group_labels]
+            column = 1
+            for label, target, unused in group_labels:
+                hits.append({"y": len(lines) + 1, "x1": column,
+                             "x2": min(width, column + display_width(label) - 1), "action": target})
+                column += display_width(label) + 3
+            add(" · ".join(label for label, unused, style in group_labels), "dim")
+        else:
+            for label, target, style in group_labels:
+                hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": target})
+                add(label, style)
     others = listing(room.get("other_rooms"))
     if room.get("other_rooms_incomplete") and height >= 20 and not others:
         add("OTHER ROOMS / scan incomplete; mains in other rooms may be missing", "alert")
@@ -1003,7 +1014,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     wire_rows = 2 if height >= 32 else 1
     base_wires = wire_rows * (bool(shown_judges) + bool(shown_workers))
     # Empty advisor/worker places stay visible, one row each, so the structure never changes shape.
-    base_wires += (not shown_judges) + (not shown_workers) if primary and height >= 20 else 0
+    base_wires += (not shown_judges) + (not shown_workers) if primary and height >= 24 else 0
 
     def full_title(m, reflow=False):
         role = "MAIN" if m.get("role") == "main" else m.get("role", "worker").upper()
@@ -1051,28 +1062,32 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             wires -= wire_rows * len(embedded)
         return embedded, wires
 
-    # The bottom reading box is reserved before anything above it is sized. Its rows come from the terminal
-    # size and the ordinary full upper shape (three advisors, the main, three workers, one warning row), never
-    # from how many calls are live, so call counts cannot move it; rows the upper region leaves unused sit above
-    # it. Target: two fifths of the rows, keeping 17 for the upper region. Stable means eleven rows or more: a
-    # page of eight lines is the least that holds a main's first-page summary, so a screen that cannot keep that
-    # beside the ordinary shape takes the rows the current calls leave (three or more, up to the target), then the
-    # one-row tab strip, then none. Compact screens trade stability for a readable box.
-    target = 0 if not interactive else min(height * 2 // 5, height - 17)
+    # Reserve the ordinary band shape even for its empty placeholders, so
+    # call counts and finished groups cannot move the reading dock.
+    placeholders = bool(primary) and height >= 24
+    ordinary = (3 if primary else 0) + sum(wire_rows + 6 for group in
+                (shown_judges, shown_workers) if group or placeholders)
+    worker_floor = 5 if layout(width, 3)[0] // 2 - 4 < 21 else 3
+    compact_shape = 3 + 2 * wire_rows + 3 + worker_floor if primary else 0
+    fixed_header = 3 + len(status_alerts(report)) + len(attention_rows)
+    fixed_header += int(bool(others or room.get("other_rooms_incomplete")) and height >= 20)
+    target = max(0, total_rows - fixed_header - ordinary - 1) if interactive else 0
+    compact_target = min(height * 2 // 5, max(0, total_rows - fixed_header - compact_shape - 1)) if interactive else 0
+    target = max(target, compact_target)
+    if height <= 20:
+        target = min(height * 2 // 5, height - 17) if interactive else 0
     target = target if target >= 3 else int(interactive)
     warn_possible = int(bool(unlinked) or len(children) > len(shown_judges) + len(shown_workers))
-    # A compact card (heading, status, two wrapped task rows, two borders) is six rows, so the reservation
-    # takes six for the main and for a narrow three-card band whatever is selected or recorded.
-    band_floor = 6 if layout(width, 3)[0] // 2 - 4 < 21 else 3
-    ordinary = (2 * wire_rows + 6 + 2 * band_floor) if primary else 0
 
     def upper_fit(rows_left, stable):
         """(embedded branches, wire rows) when the upper region fits rows_left, else None."""
         embedded, wires = plan_upper(rows_left)
-        return (embedded, wires) if rows_left >= max(wires + minimum_total, ordinary * stable) else None
+        # Group headings use space vacated by finished calls without moving the dock.
+        return (embedded, wires) if rows_left >= max(wires + minimum_total,
+                                                    (ordinary + fixed_header - used) * stable) else None
 
     plan = None
-    tiers = ((True, 11, target), (False, 3, target), (False, 1, min(target, 1)), (False, 0, 0)) if interactive else ((False, 0, 0),)
+    tiers = ((True, max(11, compact_target), target), (False, 3, target), (False, 1, min(target, 1)), (False, 0, 0)) if interactive else ((False, 0, 0),)
     # A visible warning outranks a bigger box, but not the tab strip; the strip outranks the warning.
     for warn in (1, 0) if warn_possible else (0,):
         for stable, low, high in tiers:
@@ -1095,10 +1110,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         text = render(report, primary.get("provider", "codex") if primary else "codex", width, height,
                       color, unicode, menu=menu, managed=managed, main_attempt=main_attempt, frame=frame,
                       view="tree" if interactive else "compact", attention_only=attention_only, navigation=navigation)
-        if publications and "APP DELIVERY" not in text:
-            rows = text.splitlines()
-            rows[-1] = clipped(footer[-1], width)
-            text = "\n".join(rows)
         return text
     dock, (embedded, wires), warn_reserve = plan
     budget = total_rows - dock - warn_reserve
@@ -1251,20 +1262,23 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     root_top = root_bottom
     if shown_judges:
         band(shown_judges, "review", "judge", True)
-    elif primary and height >= 20:
-        add(padded(" " * max(0, root_top - 10) + "◇ Advisors: none active · a asks one" if unicode else
-                   " " * max(0, root_top - 10) + "Advisors: none active / a asks one", width), "dim")
+    elif primary and height >= 24:
+        add(padded(" " * max(0, root_top - 10) + "◇ no advisors · a ask" if unicode else
+                   " " * max(0, root_top - 10) + "no advisors / a ask", width), "dim")
     if primary:
         cards([primary], hue(primary), centered=True,
               top=bool(shown_judges), bottom=bool(shown_workers))
     else:
-        for line in card("MAIN", ["No main connected / start Codex or Claude"], width, card_height, unicode):
+        prompt = "No main connected · " if navigation["main_occupied"] else "No main · n, then "
+        prompt += menu_rows(width, 1, unicode, managed=managed, occupied=navigation["main_occupied"],
+                            installed=navigation.get("installed"))[0]
+        for line in card("MAIN", [prompt], width, card_height, unicode):
             add(line, "main")
     if shown_workers:
         band(shown_workers, "worker", "worker", False)
-    elif primary and height >= 20:
-        add(" " * max(0, root_bottom - 10) + ("▢ Workers: none running · they appear here when spawned" if unicode else
-                                               "Workers: none running / they appear here when spawned"), "dim")
+    elif primary and height >= 24:
+        add(" " * max(0, root_bottom - 10) + ("▢ no workers" if unicode else
+                                               "no workers"), "dim")
     body_drawn = False
     omitted = len(children) - len(shown_judges) - len(shown_workers)
     if omitted or unlinked:
@@ -1281,97 +1295,24 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     # The box keeps the rows it was given whatever the upper region drew; only an overflowing region shrinks it.
     rows_high = min(dock, max(0, total_rows - len(lines)))
     rows_high = 1 if 0 < rows_high < 3 else rows_high
-    navigation["tab_strip_visible"] = bool(rows_high)
+    navigation.update(tab_strip_visible=bool(rows_high), tab_body_visible=rows_high >= 3)
     if rows_high:
         lines.extend([""] * (total_rows - rows_high - len(lines)))
-        # One box with tabs: the selected call's detail, the plan, this main's debates, the room's messages.
-        from panel_debate import signature, tab_body as debate_body
-        from panel_messages import tab_body as messages_body
-        top = len(lines) + 1
-        active = navigation.get("tab") if navigation.get("tab") in dict(TABS) else "detail"
-        navigation["main_attempt"] = main_attempt
-        body, targets = detail(previewed, preview, width - 4, members, room, teams, everyone, labels,
-                               claims=claims, classify=classify) if previewed else (
-            ["No call selected · click a main or a call to see it here"], {})
-        strip_only = rows_high < 3
-        capacity = max(1, rows_high - 2)
-        seen = navigation.setdefault("debate_seen", {})
-        shown_main = primary["participant"] if primary else None
-        digest = signature(report, shown_main)
-        if active == "debate":
-            seen[shown_main] = digest
-        marks = {"debate": (" •" if unicode else " *") if digest and seen.get(shown_main) != digest else "",
-                 "messages": " %s unread" % unread_total if unread_total else ""}
-        texts = [("[ %s ]" if key == active else "%s") % (name + marks.get(key, "")) for key, name in TABS]
-        edge = box_edge("  ".join(texts), width, unicode)
-        column, span = 3, None
-        for key, text in zip(dict(TABS), texts):
-            x1, x2 = column + 1, min(column + len(text), width - 3)
-            if x1 <= x2:
-                hits.append({"y": top, "x1": x1, "x2": x2, "action": ("tab", key)})
-                span = (column, x2) if key == active else span
-            column += len(text) + 2
-        role = previewed.get("role", "worker").upper() if previewed else ""
-        style = (hue(previewed) if role == "MAIN" else "review" if role not in {"WORKER", "RESEARCHER"} else "worker") if previewed else "dim"
-        lines.append(paint(edge, style) if span is None or not color else
-                     paint(edge[:span[0]], style) + chosen(edge[span[0]:span[1]], style) + paint(edge[span[1]:], style))
-        # No room for a body: the strip alone keeps every tab one click away.
-        if strip_only:
-            navigation.pop("box", None)
-        else:
-            body_drawn = True
-            first, plain = 0, set()
-            if active == "detail" and capacity == 1 and body:
-                # One row holds the content line itself; a title there would leave nothing to scroll.
-                first = min(scrolled.get("detail", 0), len(body) - 1)
-                scrolled_now["detail"] = first
-                rows = [(body[first], targets.get(first, action(previewed)) if previewed else None, False)]
-                plain = {0} if first not in targets else set()
-            elif active == "detail":
-                first = min(scrolled.get("detail", 0), max(0, len(body) - (capacity - 1)))
-                scrolled_now["detail"] = first
-                head = "%s / %s%s" % (role, name_of(previewed), " / auto" if automatic else "") if previewed else "DETAIL"
-                if len(body) > capacity - 1:
-                    head += " / %s-%s of %s / wheel" % (first + 1, min(len(body), first + capacity - 1), len(body))
-                rows = [(head, action(previewed) if previewed else None, False)] + [
-                    (text, targets.get(first + i, action(previewed)) if previewed else None, False)
-                    for i, text in enumerate(body[first:first + capacity - 1])]
-                plain = {i + 1 for i in range(capacity - 1) if first + i not in targets}
-            elif active == "plan":
-                plan = plan_rows(report, labels, width - 4, unicode)
-                if capacity == 1 and len(plan) > 1:
-                    plan.append(("Full plan: oms agent-plan list", None))
-                page_size = max(1, capacity - int(len(plan) > capacity))
-                first = min(scrolled.get("detail", 0), max(0, len(plan) - page_size))
-                scrolled_now["detail"] = first
-                rows = [(text, target, False) for text, target in plan[first:first + page_size]]
-                if len(plan) > capacity:
-                    notice = "%s rows hidden / wheel; full: oms agent-plan list" % (len(plan) - page_size)
-                    if capacity > 1:
-                        rows.insert(0, (notice, None, False))
-                    else:
-                        rows[0] = ("%s rows hidden / wheel | %s" % (len(plan) - page_size, rows[0][0]), None, False)
-            elif active == "debate":
-                rows = debate_body(report, shown_main, width - 4, capacity, navigation, labels, unicode)
-                if navigation["debate_view"].get("shown") is None and not menu and not navigation.get("keys_help") \
-                        and footer[-hint_rows:] == hints:
-                    # Nothing to pick or open: the seat and target keys would do nothing.
-                    footer[-hint_rows:] = hints = footer_hints(dict(navigation, debate_empty=True), width, managed,
-                                                               unicode, chosen_member, True)
-            else:
-                rows = messages_body(report, width - 4, capacity, navigation, unicode)
-            for n in range(capacity):
-                text, target, picked = rows[n] if n < len(rows) else ("", None, False)
-                line = box_row(text, width, unicode)
-                lines.append("\033[7m" + line + "\033[0m" if color and picked else line)
-                if target:
-                    # Body text without its own link is passive, so a click that selects text changes nothing.
-                    hits.append({"y": top + 1 + n, "x1": 1, "x2": width, "action": target,
-                                 **({"preview": True, "passive": n in plain} if active == "detail" else {})})
-            lines.extend([box_row("", width, unicode)] * (rows_high - 2 - capacity))
-            lines.append(paint(box_edge("", width, unicode, "bottom"), style))
-            bands_hit.append({"name": "detail", "y1": top, "y2": top + rows_high - 1, "x1": 1, "x2": width, "step": 3})
-            navigation["box"] = {"y1": top, "y2": top + rows_high - 1, "pages": bool(previewed) or active == "plan"}
+        dock_lines, dock_hits = tab_box(report, width, rows_high, navigation, color, unicode,
+            members=members, primary=primary, previewed=previewed, preview=preview, teams=teams,
+            everyone=everyone, labels=labels, main_attempt=main_attempt, automatic=automatic,
+            claims=claims, classify=classify)
+        top = len(lines)
+        lines += dock_lines
+        hits += [dict(hit, y=hit["y"] + top) for hit in dock_hits]
+        body_drawn = navigation["tab_body_visible"]
+        scrolled_now["detail"] = navigation.get("band_offsets", {}).get("detail", 0)
+        if navigation.get("box"):
+            navigation["box"] = {**navigation["box"], "y1": navigation["box"]["y1"] + top,
+                                 "y2": navigation["box"]["y2"] + top}
+            bands_hit.append(dict(navigation["box"], name="detail", x1=1, x2=width, step=3))
+    if body_drawn and navigation.get("tab") == "debate" and not navigation.get("debate_view", {}).get("shown") and not menu:
+        footer[-hint_rows:] = footer_hints(dict(navigation, debate_empty=True), width, managed, unicode, chosen_member, True)
     if not body_drawn:
         navigation.pop("full_result", None)
     if not body_drawn and not menu and footer[-hint_rows:] == hints:
@@ -1397,12 +1338,200 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                       room_id=room.get("id"), graph_selected=selected, surface="graph",
                       primary=("chat", primary["participant"]) if primary else None,
                       bands=bands_hit, band_offsets=scrolled_now)
+    if not color and selected:
+        previous = None
+        for hit in hits:
+            if hit["action"] != selected or navigation.get("box") and hit["y"] >= navigation["box"]["y1"]:
+                continue
+            if previous != hit["y"] - 1:
+                # Card runs share an action; mark their first row, preserving other columns.
+                line = padded(lines[hit["y"] - 1], width)
+                columns = [0]
+                for char in line:
+                    columns.append(columns[-1] + display_width(char))
+                first = next(i for i, column in enumerate(columns) if column >= hit["x1"] - 1)
+                last = next(i for i, column in enumerate(columns) if column >= hit["x2"])
+                left, cell, right = line[:first], line[first:last], line[last:]
+                if not cell.rstrip().endswith("<"):
+                    span = hit["x2"] - hit["x1"] + 1
+                    border = cell[-1:] if cell.endswith(("╮", "+")) else ""
+                    space = max(0, span - 2 - len(border))
+                    if border:
+                        end = max(i for i, column in enumerate(columns) if column <= hit["x1"] - 1 + space)
+                        text = line[first:end]
+                    else:
+                        text = clipped(cell.rstrip(), space)
+                    lines[hit["y"] - 1] = left + padded(text, space) + " <" + border + right
+            previous = hit["y"]
     text = "\n".join(lines)
     # Plain-word separators keep one-cell ASCII stand-ins, so hit columns do not move.
     return text if unicode else text.translate({ord("·"): "/", ord("→"): ">", ord("×"): "x", ord("│"): "|"})
 
 
-TABS = (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"))
+def tab_box(report, width, rows, navigation, color=False, unicode=True, *, members=None,
+            primary=None, previewed=None, preview=None, teams=None, everyone=None, labels=None,
+            main_attempt=None, automatic=False, claims=None, classify=None):
+    """The shared reading dock; hit rows are relative to the returned lines."""
+    rows_high = rows if rows >= 3 else int(rows > 0)
+    navigation.update(tab_strip_visible=bool(rows_high), tab_body_visible=rows_high >= 3)
+    navigation.pop("box", None)
+    if not rows_high:
+        navigation.pop("full_result", None)
+        return [], []
+    room = mapping(report.get("room"))
+    members = nodes(report) + native_advisors(report, nodes(report)) if members is None else members
+    labels = main_names(members) if labels is None else labels
+    mains = [m for m in members if m.get("role") == "main"]
+    if primary is None:
+        primary = next((m for m in mains if main_attempt in (m["participant"], m.get("attempt"))), next(iter(mains), None))
+    if everyone is None:
+        everyone = {m["participant"]: [c for c in members if c.get("role") != "main" and
+                    c.get("parent") in (m["participant"], m.get("attempt"))] for m in mains}
+    teams = everyone if teams is None else teams
+    preview = mapping(navigation.get("preview")) if preview is None else preview
+    if previewed is None:
+        previewed = next((m for m in members if action(m) == preview.get("target")), None)
+        if previewed is None and primary and rows_high >= 5 and not navigation.get("dismissed"):
+            previewed, preview, automatic = primary, {"target": action(primary), "report": {}}, True
+    if previewed and previewed.get("role") != "main" and not previewed.get("_native") and rows_high >= 3:
+        navigation["full_result"] = action(previewed)
+    else:
+        navigation.pop("full_result", None)
+    settled, unused = settler(report)
+    unread_total = live_unread(report, members, settled)
+    scrolled = mapping(navigation.get("band_offsets"))
+    scrolled_now = dict(scrolled)
+    lines, hits = [], []
+
+    def paint(text, style):
+        return PALETTE[style] + text + "\033[0m" if color and style else text
+
+    def chosen(text, style):
+        return PALETTE[style] + "\033[7m" + text + "\033[0m" if color else text
+
+    def hue(member):
+        return "codex" if member.get("provider") == "codex" else "main"
+
+    def name_of(member):
+        return labels.get(member["participant"]) or model_name(member)
+
+    from panel_debate import signature, tab_body as debate_body
+    from panel_messages import tab_body as messages_body
+    top = 1
+    from panel_view import inbox_items
+    attention = inbox_items(report, unicode)
+    active = navigation.get("tab") if navigation.get("tab") in dict(TABS) else "detail"
+    if active == "needs" and not attention:
+        active = "detail"
+    navigation["main_attempt"] = main_attempt
+    claims = claims_by_main(report) if claims is None else claims
+    classify = call_classifier(report) if classify is None else classify
+    body, targets = detail(previewed, preview, width - 4, members, room, teams, everyone, labels,
+                           claims=claims, classify=classify) if previewed else (
+        ["No call selected · click a main or a call to see it here"], {})
+    strip_only = rows_high < 3
+    capacity = max(1, rows_high - 2)
+    seen = navigation.setdefault("debate_seen", {})
+    shown_main = primary["participant"] if primary else None
+    digest = signature(report, shown_main)
+    if active == "debate":
+        seen[shown_main] = digest
+    marks = {"debate": (" •" if unicode else " *") if digest and seen.get(shown_main) != digest else "",
+             "messages": " %s unread" % unread_total if unread_total else ""}
+    tabs = [entry for entry in TABS if entry[0] != "needs" or attention]
+    if active not in dict(tabs):
+        active = "detail"
+    navigation["visible_tabs"] = [key for key, unused in tabs]
+    abbreviations = {"detail": "Dtl", "plan": "Plan", "debate": "Dbt", "messages": "Msg", "needs": "Needs"}
+    for short in (0, 1, 2):
+        gap = " " if short == 2 else "  "
+        tiny = {"detail": "D", "plan": "P", "debate": "B", "messages": "M", "needs": "N"}
+        texts = [(("[%s]" if short == 2 else "[ %s ]") if key == active else "%s") % (
+            (name if short == 0 else abbreviations[key] if short == 1 else tiny[key]) +
+            (marks.get(key, "") if short == 0 else " %s" % unread_total if key == "messages" and unread_total else ""))
+            for key, name in tabs]
+        if display_width(gap.join(texts)) <= width - 6:
+            break
+    edge = box_edge(gap.join(texts), width, unicode)
+    column, span = 3, None
+    for (key, unused), text in zip(tabs, texts):
+        x1, x2 = column + 1, min(column + display_width(text), width - 3)
+        if x1 <= x2:
+            hits.append({"y": top, "x1": x1, "x2": x2, "action": ("tab", key)})
+            span = (column, x2) if key == active else span
+        column += display_width(text) + len(gap)
+    role = previewed.get("role", "worker").upper() if previewed else ""
+    style = (hue(previewed) if role == "MAIN" else "review" if role not in {"WORKER", "RESEARCHER"} else "worker") if previewed else "dim"
+    lines.append(paint(edge, style) if span is None or not color else
+                 paint(edge[:span[0]], style) + chosen(edge[span[0]:span[1]], style) + paint(edge[span[1]:], style))
+    # No room for a body: the strip alone keeps every tab one click away.
+    if strip_only:
+        navigation.pop("box", None)
+    else:
+        first, plain = 0, set()
+        if active == "detail" and capacity == 1 and body:
+            # One row holds the content line itself; a title there would leave nothing to scroll.
+            first = min(scrolled.get("detail", 0), len(body) - 1)
+            scrolled_now["detail"] = first
+            rows = [(body[first], targets.get(first, action(previewed)) if previewed else None, False)]
+            plain = {0} if first not in targets else set()
+        elif active == "detail":
+            first = min(scrolled.get("detail", 0), max(0, len(body) - (capacity - 1)))
+            scrolled_now["detail"] = first
+            head = "%s / %s%s" % (role, name_of(previewed), " / auto" if automatic else "") if previewed else "DETAIL"
+            if len(body) > capacity - 1:
+                head += " / %s-%s of %s / wheel" % (first + 1, min(len(body), first + capacity - 1), len(body))
+            rows = [(head, action(previewed) if previewed else None, False)] + [
+                (text, targets.get(first + i, action(previewed)) if previewed else None, False)
+                for i, text in enumerate(body[first:first + capacity - 1])]
+            plain = {i + 1 for i in range(capacity - 1) if first + i not in targets}
+        elif active == "plan":
+            plan = [(text, None) for text, unused in goal_box(report, width - 4, unicode, False)] + plan_rows(report, labels, width - 4, unicode)
+            if capacity == 1 and len(plan) > 1:
+                plan.append(("Full plan: oms agent-plan list", None))
+            page_size = max(1, capacity - int(len(plan) > capacity))
+            first = min(scrolled.get("detail", 0), max(0, len(plan) - page_size))
+            scrolled_now["detail"] = first
+            rows = [(text, target, False) for text, target in plan[first:first + page_size]]
+            if len(plan) > capacity:
+                notice = "%s rows hidden / wheel; full: oms agent-plan list" % (len(plan) - page_size)
+                if capacity > 1:
+                    rows.insert(0, (notice, None, False))
+                else:
+                    rows[0] = ("%s rows hidden / wheel | %s" % (len(plan) - page_size, rows[0][0]), None, False)
+        elif active == "debate":
+            rows = debate_body(report, shown_main, width - 4, capacity, navigation, labels, unicode)
+        elif active == "needs":
+            from panel_view import needs_strip
+            needed_rows = needs_strip(report, width - 4, unicode, limit=len(attention))
+            first = min(scrolled.get("detail", 0), max(0, len(needed_rows) - capacity))
+            scrolled_now["detail"] = first
+            rows = [(r["text"], r["action"], False) for r in needed_rows[first:first + capacity]]
+        else:
+            summary = [("Messages: %s unread for live participants" % unread_total, None, False)] if capacity >= 3 else []
+            rows = summary + messages_body(report, width - 4, capacity - len(summary), navigation, unicode)
+        previous_target = None
+        for n in range(capacity):
+            text, target, picked = rows[n] if n < len(rows) else ("", None, False)
+            if not color and target and target == navigation.get("selected") and target != previous_target:
+                text = clipped(text, max(0, width - 6)) + " <"
+            previous_target = target
+            line = box_row(text, width, unicode)
+            lines.append("\033[7m" + line + "\033[0m" if color and picked else line)
+            if target:
+                # Body text without its own link is passive, so a click that selects text changes nothing.
+                hits.append({"y": top + 1 + n, "x1": 1, "x2": width, "action": target,
+                             **({"preview": True, "passive": n in plain} if active == "detail" else {})})
+        lines.extend([box_row("", width, unicode)] * (rows_high - 2 - capacity))
+        lines.append(paint(box_edge("", width, unicode, "bottom"), style))
+        navigation["box"] = {"y1": top, "y2": top + rows_high - 1, "pages": bool(previewed) or active == "plan"}
+    navigation["band_offsets"] = scrolled_now
+    if not unicode:
+        lines = [line.translate({ord("·"): "/", ord("→"): ">", ord("×"): "x", ord("│"): "|"}) for line in lines]
+    return lines, hits
+
+
+TABS = (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages", "Messages"), ("needs", "Needs you"))
 PLAN_ORDER = {"done": 0, "cancelled": 1, "review": 2, "landing": 2, "running": 3, "claimed": 3, "ready": 4, "blocked": 5}
 
 

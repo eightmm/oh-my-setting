@@ -635,11 +635,42 @@ def render_unavailable(report, width, height, color, unicode, previous, menu, ma
     return "\n".join(lines[:budget])
 
 
+def needs_strip(report, width, unicode, limit=3):
+    """Pinned attention derived from the same inbox as the control window."""
+    items, seen = [], set()
+    for item in inbox_items(report, unicode):
+        if item["row_id"] not in seen:
+            items.append(item)
+            seen.add(item["row_id"])
+    if not items:
+        return []
+    sep = " · " if unicode else " / "
+    rows = []
+    for index, item in enumerate(items[:max(0, limit)]):
+        prefix = "Needs you" + sep if index == 0 else "  "
+        text = prefix + item["glyph"] + " " + item["who"] + sep + item["what"]
+        if display_width(text) > width:
+            state = item["what"].split(":", 1)[0].replace("waiting for approval", "needs approval").replace(
+                "waiting for input", "needs input")
+            who = item["who"].split(" for ", 1)[0]
+            if item["row_id"][0] == "call":
+                who = who.rsplit(" ", 1)[0]
+            text = prefix + who + sep + state
+        rows.append({"text": clipped(text, width),
+                     "style": item["style"], "action": item["action"]})
+    if len(items) > max(0, limit):
+        rows.append({"text": clipped("+%s more" % (len(items) - max(0, limit)), width),
+                     "style": "alert", "action": ("tab", "needs")})
+    return rows
+
+
 def render(report, provider, width=100, height=28, color=False, unicode=True,
            previous=None, availability=None, menu=False, managed=False, main_attempt=None, frame=None,
            view="auto", attention_only=False, navigation=None):
     width, height = max(1, min(200, width)), max(1, height)
     use_unicode(unicode)
+    if navigation is not None:
+        navigation.update(tab_strip_visible=False, tab_body_visible=False, help_rows=max(4, height // 3))
     if room_unreadable(report):
         return render_unavailable(report, width, height, color, unicode, previous, menu, managed,
                                   navigation if navigation is not None else {})
@@ -650,7 +681,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     if menu and view != "graph":
         return render_inbox(report, width, height, color, unicode, managed, previous, navigation)
     if view in ("tree", "summary") or (view == "auto" and mapping(report.get("room")).get("participants")
-                          and width >= 28 and height >= 12):
+                          and width >= 20 and height >= 12):
         from panel_tree import render_tree
         return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
                            main_attempt, navigation, summary=view == "summary", managed=managed)
@@ -658,7 +689,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         from room_view import render_graph
         return render_graph(report, width, height, color, unicode, frame, menu, attention_only, main_attempt, navigation, managed)
     if (view == "graph" and navigation is not None and mapping(report.get("room")).get("participants")
-            and width >= 28 and height >= 8):
+            and width >= 20 and height >= 8):
         from panel_tree import render_tree
         return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
                            main_attempt, navigation, managed=managed)
@@ -693,8 +724,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     footer = footer[-footer_space:] if footer_space else []
     budget = max(0, height - len(footer) - int(menu))
     repo = mapping(report.get("repo"))
-    add(("✳ " if unicode else "* ") + "OMS " + ("control panel" if menu else "dashboard") +
-        " / " + (repo.get("name") or "repository"), "head")
+    add("OMS" + sep + (os.path.basename(clean(repo.get("name")) or str(repo.get("path") or "").rstrip("/\\")) or "repository"), "head")
     from panel_metrics import usage_line
     from room_view import goal_banner
     add(usage_line(report, width, unicode), "dim")
@@ -780,11 +810,6 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
             add("Graph needs 76x16 / showing list", "dim")
         add(sep.join(["Messages: %s unread" % room.get("pending_count", "?"), "%s read" % room.get("received_count", "?"),
                       "%s answered" % room.get("answered_count", "?")]), "dim")
-        publications = mapping(room.get("publications"))
-        if publications:
-            add("APP DELIVERY / " + " | ".join("%s: %s%s" %
-                (target, receipt.get("status", "unknown"), "?" if receipt.get("delivery_unknown") else "")
-                for target, receipt in list(publications.items())[-3:]), "dim")
     if not main_attempt:
         preset = policy()["main"].get(provider, {})
         if not any(root.get("id") for root in roots):
@@ -886,12 +911,12 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         parts = ["+%s more" % (len(rows) - shown)] if len(rows) > shown else []
         parts += ["%s filtered" % hidden] if hidden else []
         parts += ["%s outside" % other] if other else []
-        overflow = " / ".join(parts) + " / 8 Details"
+        overflow = " / ".join(parts) + " / v Expand"
         if display_width(overflow) > width:
             parts = ["+%s" % (len(rows) - shown)] if len(rows) > shown else []
             parts += ["f%s" % hidden] if hidden else []
             parts += ["out%s" % other] if other else []
-            overflow = " / ".join(parts) + " / 8 Details"
+            overflow = " / ".join(parts) + " / v Expand"
         add(overflow, "dim")
 
     recent = [row for row in listing(attempts.get("recent")) if row.get("state") in TERMINAL_STATES

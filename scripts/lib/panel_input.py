@@ -250,7 +250,7 @@ def choose(event, navigation):
         return selected if selected in items else None
     elif kind == "f":
         target = navigation.get("full_result")
-        if (navigation.get("surface") == "graph" and target in items
+        if (navigation.get("surface") in {"graph", "tree"} and target in items
                 and target[0] in ("result", "debate")
                 and (navigation.get("preview") or {}).get("target") == target):
             return target

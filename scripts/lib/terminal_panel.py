@@ -3664,10 +3664,10 @@ def open_worktree(repo, state, navigation):
 def tab_event(event, navigation):
     """The bottom box's own keys and clicks; True when the event was consumed. Tabs never switch by themselves."""
     from room_view import TABS
-    names = [key for key, unused in TABS]
+    names = navigation.get("visible_tabs", [key for key, unused in TABS if key != "needs"])
     tab = navigation.get("tab") if navigation.get("tab") in names else "detail"
     kind = event[0]
-    if navigation.get("surface") != "graph" or navigation.get("detail"):
+    if navigation.get("surface") not in {"graph", "tree"} or navigation.get("detail"):
         return False
     if kind == "tab":
         if not navigation.get("tab_strip_visible", True):
@@ -4303,7 +4303,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                     os.environ.get("TMUX_PANE", ""), name, value),
                                     check=False, timeout=2, stdin=subprocess.DEVNULL)
                         else:
-                            action = choose(("down",) if event[0] == "tab" else event, navigation)
+                            action = choose(("down",) if event[0] == "tab" and not navigation.get("tab_strip_visible", False) else event, navigation)
                             shown = None if action else panel_reader.picked(event, navigation)
                             if shown:
                                 # A click or Enter previews in the board; the call's full content opens on the right.

@@ -11,7 +11,11 @@ from room_view import (action as member_action, call_order, context_note, open_c
 
 def render_tree(report, width, height, color=False, unicode=True, frame=None, menu=False,
                 attention_only=False, main_attempt=None, navigation=None, summary=False, managed=False):
-    navigation = navigation if navigation is not None else {}
+    from panel_view import use_unicode
+    use_unicode(unicode)
+    interactive = navigation is not None
+    navigation = navigation if interactive else {}
+    navigation.update(tab_strip_visible=False, tab_body_visible=False, help_rows=max(4, height // 3))
     sep = " · " if unicode else " / "
     selected = navigation.get("selected")
     collapsed = navigation.get("collapsed", set())
@@ -131,17 +135,13 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         context = context_note(report, main)
         if context:
             status += sep + "c%s%%" % context[0]
-        if folded:
-            reviews = sum(classify(m) == "review" for m in attached)
-            if reviews:
-                status += sep + "Needs review (%s)" % reviews
         add(label if width < 60 else label + sep + status, "dim" if state == "idle" else "codex" if main.get("provider") == "codex" else "main",
             action, bool(attached))
         if width < 60:
             add("  " + status, "dim" if state == "idle" else tone(state), action)
         title = main.get("title")
         if title and title != "Native task not recorded":
-            for line in wrapped(title, max(1, content_width - 7), 2):
+            for line in wrapped(title, max(1, content_width - 7), 3 if height >= 40 else 2):
                 add(root_stem + "  " + line, None, action)
         for line in declared_status(room, main["participant"], max(1, content_width - 4)):
             add(root_stem + "  " + line, None, action)
@@ -151,17 +151,32 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     if unlinked:
         add("Calls with no known main", "alert")
         call_groups(unlinked, "unlinked", "")
+    if len(mains) == 1:
+        grouped_rows = [(i, row) for i, row in enumerate(rows) if row.get("action") and
+                        row["action"][0] == "group" and row["action"][1][1] == mains[0]["participant"]]
+        if len(grouped_rows) == 2:
+            span = max(1, (content_width - 3) // 2)
+            labels, targets, column = [], [], 1
+            for unused, row in grouped_rows:
+                kind, owner = row["action"][1]
+                mark = ("▾" if (kind, owner) in expanded else "▸") if unicode else ("v" if (kind, owner) in expanded else ">")
+                children = [c for c in calls if classify(c) == kind and
+                            c.get("parent") in {owner, mains[0].get("attempt")}]
+                unknown = sum(c["state"] == "presence unknown" for c in children)
+                label = clipped("%s %s (%s)%s" % (mark, dict(CALL_GROUPS)[kind], len(children),
+                    " / %s earlier unknown" % unknown if unknown else ""), span)
+                labels.append(label)
+                targets.append((column, column + display_width(label) - 1, row["action"]))
+                column += display_width(label) + 3
+            first, row = grouped_rows[0]
+            rows[first] = dict(row, text=sep.join(labels), targets=targets,
+                              action=selected if selected in [target[2] for target in targets] else row["action"])
+            del rows[grouped_rows[1][0]]
     if not mains and not calls:
         add("No main connected" if room.get("id") else "Select a work room", "dim")
         if menu and not navigation["main_occupied"]:
-            add("Start one main", "main")
-    tasks = listing(room.get("repo_tasks"))
-    if tasks:
-        add("Repository tasks", "worker", divider=True)
-        for task in tasks:
-            action = ("task", task.get("id"))
-            add("%s%s%s" % (said(task.get("state")), sep, task.get("title") or task.get("id")),
-                tone(task.get("state")), action)
+            add(menu_rows(width, 1, unicode, managed=managed,
+                          occupied=navigation["main_occupied"], installed=navigation.get("installed"))[0], "main")
     acceptance = mapping(report.get("acceptance"))
     if acceptance.get("available"):
         verified = "%s of %s tasks verified" % (mapping(acceptance.get("counts")).get("verified", 0),
@@ -169,32 +184,35 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         idle = plan_idle(report) or 0
         if idle >= 7:
             add(sep.join(["Old plan", "idle %s days" % idle, verified]), "dim")
-    for message in listing(room.get("messages"))[-2:]:
-        add("Room log" + sep + (readable(message.get("text"), " ") or ""), "dim")
-    if any(main.get("owns") for main in mains):
-        add("Scopes" + sep + "declared, not locks", "dim", divider=True)
-    for main in mains:
-        if main.get("owns"):
-            add("  " + (main.get("provider") or "main") + ": " + ", ".join(main["owns"]), "dim")
-    footer = menu_rows(width, height, unicode, navigation.get("menu_help", False), managed,
+    from room_view import clock_stamp, result_handoff
+    messages = [m for m in listing(room.get("messages")) if not result_handoff(room, m)]
+    for message in messages[-2:]:
+        sender = names.get(message.get("sender")) or next((model_name(m) for m in members
+                 if m["participant"] == message.get("sender")), clean(message.get("sender")) or "unknown")
+        add(clock_stamp(message.get("ts"))[-5:] + " " + sender + sep + (readable(message.get("text"), " ") or ""), "dim")
+    tasks = listing(room.get("repo_tasks"))
+    task_start = len(rows)
+    if tasks:
+        add("Repository tasks", "worker", divider=True)
+        for task in tasks:
+            action = ("task", task.get("id"))
+            add("%s%s%s" % (said(task.get("state")), sep, task.get("title") or task.get("id")),
+                tone(task.get("state")), action)
+    footer = menu_rows(width, 1, unicode, navigation.get("menu_help", False), managed,
                        occupied=navigation["main_occupied"], installed=navigation.get("installed")) if menu else []
     if navigation.get("notice"):
         footer.append(clean(navigation["notice"], 200))
-    publications = mapping(room.get("publications"))
-    if publications:
-        footer.append("APP DELIVERY / " + " | ".join("%s: %s%s" % (
-            target, mapping(receipt).get("status", "unknown"),
-            " (unconfirmed)" if mapping(receipt).get("delivery_unknown") else "")
-            for target, receipt in list(publications.items())[-3:]))
     def hints(help_open):
         chosen = next((m for m in members if member_action(m) == selected), None)
         return footer_hints(dict(navigation, keys_help=help_open), width, managed, unicode, chosen, False)
 
     hint_rows = 0
     if not menu:
-        shown_hints = hints(navigation.get("keys_help", False))
-        footer += shown_hints
-        hint_rows = len(shown_hints)
+        chosen = next((m for m in members if member_action(m) == selected), None)
+        shown_hints = footer_hints(dict(navigation, tab_strip_visible=True, tab_body_visible=True),
+                                   width, managed, unicode, chosen, True)
+        hint_rows = max(4, len(shown_hints)) if navigation.get("keys_help") else len(shown_hints)
+        footer += shown_hints + [""] * (hint_rows - len(shown_hints))
     if len(footer) > height - int(menu) - 4:
         footer = menu_rows(width, 1, unicode, managed=managed, occupied=navigation["main_occupied"],
                            installed=navigation.get("installed")) if menu else hints(False)
@@ -204,15 +222,22 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         # The start bar sits just above the key hints, which stay the last rows.
         footer.insert(len(footer) - hint_rows, bar[0])
     budget = max(0, height - int(menu) - len(footer))
-    heading = "OMS / " + (clean(room.get("title") or room.get("id")) or "Work room")
+    import os
+    from panel_view import needs_strip
+    repo = mapping(report.get("repo"))
+    heading = "OMS" + sep + (os.path.basename(clean(repo.get("name")) or str(repo.get("path") or "").rstrip("/\\")) or "repository")
     alerts = status_alerts(report)
-    # Header, usage and goal box are pinned; the goal box shrinks to one row before any of them is dropped.
-    full = goal_banner(report, width, unicode)
-    banner = full if budget - 2 - len(alerts) - len(full) >= 3 and height >= 20 else goal_banner(report, width, unicode, True)
+    banner = goal_banner(report, width, unicode, True)
     head = [{"text": clipped(heading, width), "style": "main"},
             {"text": clipped(usage_line(report, width, unicode), width), "style": "dim"}]
     head += [{"text": clipped(text, width), "style": style, "action": ("tab", "plan")} for text, style in banner]
     head += [{"text": clipped(alert, width), "style": "bad"} for alert in alerts]
+    head += needs_strip(report, width, unicode)
+    others = listing(room.get("other_rooms"))
+    if height >= 20 and (others or room.get("other_rooms_incomplete")):
+        head.append({"text": clipped("OTHER ROOMS / " + " | ".join("%s %s live mains" % (
+            clean(r.get("id"), 24), r.get("mains")) for r in others[:3]) +
+            (" / scan incomplete" if room.get("other_rooms_incomplete") else ""), width), "style": "alert"})
     pinned = len(head)
     labels = usage_words(report, unicode)
     if boxed and height >= 20 and labels and budget - len(head) >= 5:
@@ -225,18 +250,45 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         head.append({"text": box_edge("USAGE", width, unicode), "style": "dim"})
         head += [{"text": box_row(line, width, unicode), "style": style} for line, style in content]
         head.append({"text": box_edge("", width, unicode, "bottom"), "style": "dim"})
-    if budget - len(head) >= 5:
-        unread = live_unread(report, members, settled)
-        mailbox = "Messages: %s unread for live participants" % unread
-        if not summary:
-            mailbox += sep + "%s read" % room.get("received_count", 0) + sep + "%s answered" % room.get("answered_count", 0)
-        head.append({"text": clipped(mailbox, width), "style": "alert" if unread else "dim"})
     # The viewport owns its borders, so scrolling never leaves an open card.
     if boxed and budget - len(head) < 3:
         head = head[:pinned]
     head = head[:budget]
-    room_budget = max(0, budget - len(head) - (2 if boxed else 0))
+    from room_view import tab_box
+    main_rows = {}
+    for i, row in enumerate(rows):
+        if row.get("action") and row["action"][0] == "chat":
+            main_rows.setdefault(row["action"], i)
+    activity_floor = (max(main_rows.values()) + 1 if main_rows else 1) + int(bool(tasks))
+    if navigation.get("preview") or interactive and height >= 32:
+        activity_floor = min(activity_floor, 3 + int(bool(tasks)))
+    activity_floor += 2 if boxed else 0
+    dock_rows = (14 if budget - len(head) >= 14 + activity_floor else int(budget > len(head))) if width >= 20 else 0
+    if dock_rows == 1 and navigation.get("preview") and budget - len(head) - activity_floor >= 3:
+        dock_rows = min(14, budget - len(head) - activity_floor)
+    navigation.update(tab_strip_visible=bool(dock_rows), tab_body_visible=dock_rows >= 3)
+    activity_head = boxed and budget - len(head) - dock_rows >= 2
+    boxed = boxed and budget - len(head) - dock_rows >= 5
+    room_budget = max(0, budget - len(head) - dock_rows - (2 if boxed else int(activity_head)))
     body = rows
+    # Spend spare tree rows on a third title row while the nested group renderer stays shared.
+    if height >= 40 and room_budget > len(body):
+        for child in calls:
+            if child.get("_native"):
+                continue
+            target = child.get("_action") or ("result", child["participant"])
+            first = next((i for i, row in enumerate(body) if row.get("action") == target), None)
+            if first is None or first + 1 >= len(body) or body[first + 1].get("action") != target:
+                continue
+            prefix_text = body[first + 1]["text"][:len(body[first + 1]["text"]) - len(body[first + 1]["text"].lstrip())]
+            title_rows = wrapped(child.get("title") or child["participant"], max(1, content_width - len(prefix_text)), 3)
+            old_count = 0
+            while first + 1 + old_count < len(body) and body[first + 1 + old_count].get("action") == target:
+                old_count += 1
+            if len(title_rows) > old_count and len(title_rows) - old_count <= room_budget - len(body):
+                body[first + 1:first + 1 + old_count] = [{"text": prefix_text + text, "style": None,
+                    "action": target} for text in title_rows]
+    unique = list(dict.fromkeys([row["action"] for row in head if row.get("action") and row["action"][0] != "tab"] + items))
     if len(body) > room_budget > 0 and not navigation.get("_auto_fold"):
         # Too short for everything: earlier mains other than the selected one drop to their status line, kept only if that puts every main on screen and leaves a call to select.
         keep = {current} | {m["participant"] for m in mains if selected and (
@@ -251,42 +303,94 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         reachable = any(i[0] == "result" for i in inner["items"]) or not any(i[0] == "result" for i in items)
         if reachable and all(inner["positions"].get(("chat", m["participant"]), 0) < inner["viewport"] for m in mains):
             navigation.update({k: v for k, v in inner.items() if k not in ("collapsed", "_auto_fold")})
+            navigation["items"] = list(dict.fromkeys(unique + navigation["items"]))
             return text
+    # Keep the repository task tail reachable while the longer room tree scrolls.
+    task_rows = body[task_start:]
+    first_call = next((i + 1 for i, row in enumerate(body) if row.get("action") and
+                       row["action"][0] in {"result", "debate"}), 0)
+    body_floor = max(max(main_rows.values(), default=-1) + 1, first_call)
+    task_tail = task_rows if tasks and len(task_rows) + body_floor <= room_budget else task_rows[-1:] if tasks and room_budget else []
+    if task_tail and len(task_tail) == len(task_rows):
+        body = body[:task_start]
+    elif task_tail:
+        body = body[:-1]
+    else:
+        task_tail = []
+    past_group = ("group", ("past", "unlinked"))
+    if task_tail and len(task_tail) < room_budget:
+        group_row = next((row for row in body if row.get("action") == past_group or any(
+            target == past_group for unused, unused_end, target in row.get("targets", []))), None)
+        if group_row is not None:
+            body.remove(group_row)
+            task_tail.insert(0, group_row)
+    body_budget = max(0, room_budget - len(task_tail))
     positions = {}
     for index, row in enumerate(body):
         if row.get("action"):
             positions.setdefault(row["action"], index)
-    offset = min(max(0, navigation.get("offset", 0)), max(0, len(body) - room_budget))
-    if len(body) > room_budget and room_budget:
-        room_budget -= 1
-        offset = min(offset, max(0, len(body) - room_budget))
+        for unused, unused_end, target in row.get("targets", []):
+            positions.setdefault(target, index)
+    for index, row in enumerate(task_tail):
+        if row.get("action"):
+            positions.setdefault(row["action"], len(body) + index)
+    scroll_row = len(body) > body_budget and body_budget > 0
+    if scroll_row and task_tail:
+        # The task tail already marks the bottom of this viewport; keep the
+        # last room row instead of spending another row on a scroll counter.
+        scroll_row = False
+    elif scroll_row:
+        body_budget -= 1
+    offset = min(max(0, navigation.get("offset", 0)), max(0, len(body) - body_budget))
+    if selected is None and not current and not navigation.get("offset") and body_budget:
+        past_position = positions.get(("group", ("past", "unlinked")))
+        if (past_position is not None and past_position < len(body)
+                and past_position >= body_budget):
+            offset = past_position - body_budget + 1
     geometry = (width, height, menu, summary)
-    if room_budget and selected in positions and (navigation.get("geometry") != geometry or
-                                                 navigation.get("viewport") != room_budget):
+    if body_budget and selected in positions and positions[selected] < len(body) and (
+            navigation.get("tree_selected") != selected or navigation.get("geometry") != geometry or
+            navigation.get("viewport") != body_budget):
         position = positions[selected]
-        if position < offset:
+        if (selected[0] == "group" and selected[1] in expanded and body_budget > 1
+                and position + 1 < len(body) and body[position + 1].get("action")
+                and body[position + 1]["action"][0] in {"result", "debate"}
+                and position + 1 >= offset + body_budget):
             offset = position
-        elif position >= offset + room_budget:
-            offset = position - room_budget + 1
+        elif position < offset:
+            offset = position
+        elif position >= offset + body_budget:
+            offset = position - body_budget + 1
     shown = list(head)
-    if boxed:
-        shown.append({"text": box_edge("Activity%s%s mains%s%s calls%s" % (
-            sep, len(mains), sep, len(calls), sep + "attention" if attention_only else ""), width, unicode), "style": "main"})
-    shown += body[offset:offset + room_budget]
-    if len(body) > room_budget and budget > len(head):
-        shown.append({"text": clipped("%s-%s / %s rows / %s" % (offset + 1, min(len(body), offset + room_budget), len(body),
+    if activity_head:
+        heading = "Activity%s%s main%s%s%s call%s%s" % (
+            sep, len(mains), "" if len(mains) == 1 else "s", sep, len(calls),
+            "" if len(calls) == 1 else "s", sep + "attention" if attention_only else "")
+        shown.append({"text": box_edge(heading, width, unicode) if boxed else clipped(heading, width),
+                      "style": "main"})
+    shown += body[offset:offset + body_budget]
+    if scroll_row:
+        shown.append({"text": clipped("%s-%s / %s rows / %s" % (offset + 1, min(len(body), offset + body_budget), len(body),
                       "j/k to scroll" if menu else "scroll for more"), content_width),
                       "style": "dim", "action": None})
+    shown += task_tail
     if boxed:
         shown.append({"text": box_edge("", width, unicode, "bottom"), "style": "main"})
     output, hits = [], []
-    unique = list(dict.fromkeys(items))
+    if task_tail and past_group in unique:
+        unique.remove(past_group)
+        task_action = next((row.get("action") for row in task_tail if row.get("action") and
+                            row["action"][0] == "task"), None)
+        unique.insert(unique.index(task_action), past_group) if task_action in unique else unique.append(past_group)
+    previous_action = None
     for y, row in enumerate(shown):
         value = row["text"]
         style = row.get("style")
         inner = boxed and len(head) < y < len(shown) - 1
-        if not color and row.get("action") and row["action"] == selected:
-            value = clipped(value, max(0, content_width - 2)) + " <" if content_width >= 2 else "<"
+        if not color and row.get("action") and row["action"] == selected and row["action"] != previous_action:
+            span = content_width if inner else width
+            value = clipped(value, max(0, span - 2)) + " <" if span >= 2 else "<"
+        previous_action = row.get("action")
         if inner:
             value = box_edge(value, width, unicode, "divider") if row.get("divider") else box_row(value, width, unicode)
         if color and row.get("action") and row["action"] == selected:
@@ -294,9 +398,32 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         elif color and style:
             value = PALETTE[style] + value + "\033[0m"
         output.append(value)
-        if row.get("action"):
+        if row.get("targets"):
+            inset = 2 if inner else 0
+            hits += [{"y": y + 1, "x1": x1 + inset, "x2": x2 + inset, "action": target}
+                     for x1, x2, target in row["targets"]]
+        elif row.get("action"):
             hits.append({"y": y + 1, "x1": 1, "x2": width, "action": row["action"], "fold": row.get("fold", False)})
+    output += [""] * max(0, budget - dock_rows - len(output))
+    dock_top = len(output)
+    everyone = {m["participant"]: [c for c in calls if c.get("parent") in
+                {m["participant"], m.get("attempt")}] for m in mains}
+    dock_lines, dock_hits = tab_box(report, width, dock_rows, navigation, color, unicode,
+                                    main_attempt=main_attempt, everyone=everyone)
+    if dock_rows == 1:
+        dock_lines = [line.replace("╭", "[").replace("╮", "]") for line in dock_lines]
+    output += dock_lines
+    hits += [dict(hit, y=hit["y"] + dock_top) for hit in dock_hits]
+    bands = []
+    if navigation.get("box"):
+        navigation["box"] = {**navigation["box"], "y1": navigation["box"]["y1"] + dock_top,
+                             "y2": navigation["box"]["y2"] + dock_top}
+        bands.append(dict(navigation["box"], name="detail", x1=1, x2=width, step=3))
+    # Refit hints after the dock has supplied its actual visibility and preview state.
     if not menu:
+        chosen = next((m for m in members if member_action(m) == selected), None)
+        fitted = footer_hints(navigation, width, managed, unicode, chosen, True)
+        footer[-hint_rows:] = fitted[:hint_rows] + [""] * max(0, hint_rows - len(fitted))
         output += [""] * max(0, height - len(output) - len(footer))
     output += [PALETTE["dim"] + clipped(line, width) + "\033[0m" if color and
                line.startswith(("╭", "╰", "+", "OMS records")) else clipped(line, width)
@@ -305,8 +432,14 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         row = len(output) - hint_rows - 1
         output[row] = PALETTE["main" if bar[1] else "dim"] + output[row] + "\033[0m" if color else output[row]
         hits += [{"y": row + 1, "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
-    navigation.update(hits=hits, items=unique, offset=offset, body_rows=len(body), viewport=room_budget,
-                      room_id=room.get("id"), positions=positions, geometry=geometry, surface="tree", bands=[])
+    for hit in dock_hits:
+        target = hit["action"]
+        if target[0] in {"result", "debate"} and target not in unique:
+            before_task = next((i for i, action in enumerate(unique) if action[0] == "task"), len(unique))
+            unique.insert(before_task, target)
+    navigation.update(hits=hits, items=unique, offset=offset, body_rows=len(body), viewport=body_budget,
+                      room_id=room.get("id"), positions=positions, geometry=geometry, surface="tree", bands=bands,
+                      tree_selected=selected)
     if selected not in unique:
         navigation["selected"] = None
         navigation.pop("selected_row", None)
