@@ -493,8 +493,10 @@ next dispatch rolls it over to a linked successor (`oms room rollover --id ROOM`
 does the same by hand); ids that name the old room keep working, the old log is
 sealed and retained (`oms room show --id OLD --exact`), and nothing is
 discarded. The successor carries joined mains, running calls, calls whose
-results are unread, mail still owed to them, open questions and each main's
-latest status; the Past tab also lists the previous room's settled calls.
+results are unread, mail still owed to calls, open questions and each main's
+latest status, plus the newest other unread mail up to 128 messages; older
+unread mail stays in the sealed log and a note in the successor says so. The
+Past tab also lists the previous room's settled calls.
 A running main keeps its environment and native session: its writes, reads and
 dispatches follow the old id to the successor.
 

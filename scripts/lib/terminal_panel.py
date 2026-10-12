@@ -1445,7 +1445,10 @@ def _rollover_if_needed(repo, room_id, state, caller):
         moved = room.rollover(repo, room_id, caller)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print("Room %s could not roll over: %s" % (room_id, clean(str(error), 200)), file=sys.stderr)
-        return None
+        # Past its seal the room has moved on; the first writer the cut-short carry misses finishes it.
+        moved = room.resolve(repo, room_id, fresh=True)
+        if moved == room_id:
+            return None
     print("Room %s continues as %s; ids naming %s keep working." % (room_id, moved, room_id), file=sys.stderr)
     _adopt_successor(repo)
     return moved
@@ -2140,6 +2143,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         room.join(repo, room_id, member, route["provider"], route["kind"], route["model"], label or route["purpose"],
                   owns=scopes, parent=caller)
         try:
+            # A rollover that sealed the room meanwhile carried the join; enroll the call where it now lives.
+            room_id = room.settle(repo, room_id)
             delivery_state = room.project(room.records(repo, room_id))
             if delivery_state["closed"]:
                 raise ValueError("room is closed")
