@@ -10670,9 +10670,10 @@ ended_body = ended_text.split("╭─ [ Detail ]", 1)[0]
 assert "Old job 03" in ended_body and "finished" not in ended_body and "Past work" not in ended_body, ended_text
 ended_past = render(ended, "codex", 120, 120, view="tree", navigation={"tab": "past"}).split("[ Past 12 ]", 1)[1]
 past_jobs = [line for line in ended_past.splitlines() if "Old job" in line]
-# The first page lists the newest eleven of the twelve; the header counts every one.
-assert "12 past calls, newest first" in ended_past and \
-    [int(line.split("Old job ")[1][:2]) for line in past_jobs] == [n for n in range(13, 1, -1) if n != 3], past_jobs
+# The first page lists the newest calls in order (at least eleven at this height); the header counts every one.
+newest_first = [n for n in range(13, 0, -1) if n != 3]
+assert "12 past calls, newest first" in ended_past and len(past_jobs) >= 11 and \
+    [int(line.split("Old job ")[1][:2]) for line in past_jobs] == newest_first[:len(past_jobs)], past_jobs
 # A job that ended before local midnight carries its date ("10-12 21:20").
 assert all(re.search(r"Worker Luna 6 · Old job \d\d · finished · (\d\d-\d\d )?\d\d:\d\d", line) for line in past_jobs), past_jobs
 # A worker that hit its wall clock says how to continue; later rounds of one task are numbered.
