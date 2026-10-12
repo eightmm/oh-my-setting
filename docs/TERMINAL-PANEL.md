@@ -273,7 +273,8 @@ Cancelled tasks are closed, never verified, so they leave the total (the `[oms p
 same total). A running task whose recorded calls all ended counts as `stale` instead of `claimed`, one whose
 calls wait in review or admission counts as `review`; expired claims and abandoned review leases are stale too.
 Only the current holder's calls count: the claimant call itself, or calls of the claiming main that joined at or
-after the claim, so calls an earlier holder left never mark a fresh claim stale.
+after the claim, so calls an earlier holder left never mark a fresh claim stale (an `oms agent-plan touch`
+heartbeat restarts that clock, so a touched hold reads claimed until a new call joins).
 Zero counts are omitted and `stale` is dropped first on narrow boards; the full box adds
 `N stale, not counted: no live worker · release with oms agent-plan release --id ID`. On a
 board under 20 rows (or when the pinned rows would starve the body) the box shrinks to one row,
