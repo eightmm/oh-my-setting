@@ -10377,6 +10377,37 @@ for surface in ("graph", "tree"):
             patch.object(panel, "show"):
         assert panel.read_choice(Path("."), "codex", "ready", "auto", False, dock_nav, {}) == "q"
     assert dock_nav["tab"] == "plan", dock_nav
+# Debate evidence is loaded synchronously on entering the tab and retained across repaint.
+for surface in ("graph", "tree"):
+    debate_nav = {"surface": surface, "tab": "detail", "tab_strip_visible": True,
+                  "debate_view": {"shown": ("task-1", "main-1")},
+                  "box": {"y1": 1, "y2": 10}}
+    debate_input = DockInput([[('tab',)], [('tab',)], [('wheel',)], [('q',)]])
+    answer = {"rows": [{"calls": [{"kind": "seat", "answer": "seat answer"}]}]}
+    with patch.object(panel, "menu_input", return_value=debate_input), patch.object(panel, "show"), \
+            patch.object(panel.panel_debate, "read", return_value=answer) as debate_read:
+        assert panel.read_choice(Path("."), "codex", "ready", "auto", False, debate_nav, {}) == "q"
+    debate_read.assert_called_once_with(Path("."), ("debate", ("task-1", "main-1")), panel.call_results)
+    assert debate_nav["debate_view"]["report"] is answer and debate_nav["tab"] == "debate", debate_nav
+# A debate read failure is retained for the dock to render.
+debate_nav = {"surface": "graph", "tab": "debate", "tab_strip_visible": True,
+              "debate_view": {"shown": ("task-1", "main-1")}}
+with patch.object(panel, "menu_input", return_value=DockInput([[('wheel',)], [('q',)]])), \
+        patch.object(panel, "show"), patch.object(panel.panel_debate, "read", side_effect=OSError("missing")):
+    assert panel.read_choice(Path("."), "codex", "ready", "auto", False, debate_nav, {}) == "q"
+assert debate_nav["debate_view"]["report"] == {} and debate_nav["debate_view"]["error"] == "missing", debate_nav
+# Messages evidence follows the state signature and is read once across repaint.
+messages_state = {"room": {"id": "room-1", "message_count": 3, "pending_count": 1, "received_count": 2}}
+messages_nav = {"surface": "graph", "tab": "messages", "tab_strip_visible": True,
+                "box": {"y1": 1, "y2": 10},
+                "messages_view": {"selected": None, "open": None, "filter": 0, "scroll": 0}}
+with patch.object(panel, "menu_input", return_value=DockInput([[('wheel',)], [('wheel',)], [('q',)]])), \
+        patch.object(panel, "show"), patch.object(panel.panel_messages, "read", return_value=[{"id": "m1"}]) as messages_read:
+    assert panel.read_choice(Path("."), "codex", "ready", "auto", False, messages_nav,
+                             {"state": messages_state}) == "q"
+messages_read.assert_called_once_with(Path("."), "room-1")
+assert messages_nav["messages_view"]["log"] == [{"id": "m1"}] and messages_nav["messages_view"]["rev"] == \
+    panel.panel_messages.signature(messages_state), messages_nav
 # A Messages-tab f request opens the recorded target before returning the queued control key.
 message_nav = {"surface": "graph", "tab": "messages", "box": {"y1": 1, "y2": 10},
                "message_ids": ["m1"], "message_calls": {"m1": ("result", "w1")},

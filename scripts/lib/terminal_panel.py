@@ -4509,9 +4509,32 @@ def menu_input():
 def read_choice(repo, provider, previous, view, attention_only, navigation, cache):
     """One control key without Enter; arrows, clicks and Enter act on the Needs-you list. A line elsewhere."""
     from panel_input import choose, passive_click
+
+    def repaint():
+        reader = navigation.get("debate_view") or {}
+        if navigation.get("tab") == "debate" and reader.get("shown") and (
+                "report" not in reader or reader.pop("refresh", False)):
+            try:
+                reader.update(report=panel_debate.read(repo, ("debate", reader["shown"]), call_results), error=None)
+            except Exception as error:
+                reader.update(report={}, error=clean(str(error), 120) or "Debate evidence unavailable")
+        state = cache.get("state", {})
+        log = navigation.setdefault("messages_view", {"selected": None, "open": None, "filter": 0, "scroll": 0})
+        if navigation.get("tab") == "messages" and state and log.get("rev") != panel_messages.signature(state):
+            signature = panel_messages.signature(state)
+            room_id = signature[0]
+            if room_id:
+                try:
+                    messages = panel_messages.read(repo, room_id)
+                except Exception as error:
+                    log.update(error=clean(str(error), 120), rev=signature, reading=False)
+                else:
+                    log.update(log=messages or log.get("log"), rev=signature, reading=False)
+        show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
+
     # Raw mode starts before the first frame, so keys typed while it loads are kept.
     with menu_input() as inputs:
-        show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
+        repaint()
         if inputs.fd is None:
             choice = read_field("oms> ")
             if navigation.get("detail"):
@@ -4539,7 +4562,7 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                         navigate(repo, target, cache.get("state", {}), navigation, width)
                         if navigation.get("opening"):
                             finish_opening(navigation, read_evidence(repo, navigation["opening"]))
-                    show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
+                    repaint()
                     continue
                 if len(event) == 1 and len(event[0]) == 1 and event[0] != " ":
                     # Keys typed ahead run on the next read, not lost with this one.
@@ -4556,7 +4579,7 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                     if navigation.pop("detail", None) is None:
                         continue
                     navigation["offset"] = 0
-                    show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
+                    repaint()
                     continue
                 navigation.pop("notice", None)
                 if (navigation.get("detail") and event[0] in ("enter", "click")) or passive_click(event, navigation):
@@ -4568,7 +4591,7 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                     if navigation.get("opening"):
                         # No watch loop reads in the background here; read now so the row opens.
                         finish_opening(navigation, read_evidence(repo, navigation["opening"]))
-                show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
+                repaint()
             navigation.pop("queued", None)
             if time.monotonic() >= deadline:
                 return "9"
