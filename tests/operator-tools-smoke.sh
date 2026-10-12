@@ -10895,8 +10895,8 @@ with tempfile.TemporaryDirectory() as reader_repo_name:
     reader_repo = Path(reader_repo_name)
     lifecycle = reader_repo / ".oms/lifecycle"
     lifecycle.mkdir(parents=True)
-    ledger = lifecycle / "events.jsonl"
-    ledger.write_text("".join(json.dumps({"attempt_id": "old", "event_type": "attempt.created", "ts": "old"}) + "\n"
+    reader_ledger = lifecycle / "events.jsonl"
+    reader_ledger.write_text("".join(json.dumps({"attempt_id": "old", "event_type": "attempt.created", "ts": "old"}) + "\n"
                              for unused in range(20)) +
                       json.dumps({"attempt_id": "reader-attempt", "event_type": "attempt.created", "ts": "now"}) + "\n" +
                       json.dumps({"attempt_id": "reader-attempt", "event_type": "attempt.heartbeat", "ts": "later"}) + "\n",
