@@ -2405,10 +2405,13 @@ def board_view(view):
     return "graph" if view == "auto" else view
 
 
-def reader_shell(repo, target, board):
-    """The reader pane's command for one recorded call of `board`'s window; every argument is quoted."""
+def reader_shell(repo, target, board, room_id=None):
+    """The reader pane's read-only command for `board`'s window; every argument is quoted."""
+    arguments = panel_reader.target_args(target)
+    if target[0] == "mail":
+        arguments += ["--room", room.identifier(room_id, "room")]
     return shell_command(panel_environment() + [panel_reader.BOARD + "=" + board, "bash", str(ENTRY), "panel",
-                                                "--repo", str(repo)] + panel_reader.target_args(target))
+                                                "--repo", str(repo)] + arguments)
 
 
 BOARD_SHARE = 28  # percent of the window width a first board takes
@@ -3578,10 +3581,10 @@ def navigate(repo, action, state, navigation, width):
     if not room_id or managed_session() and pane_option("@oms_panel_room") != room_id:
         raise ValueError("room selection changed; refresh before navigating")
     current = room.status(repo, room_id)
-    if kind in {"chat", "result", "debate"}:
+    if kind in {"chat", "result", "debate", "mail"}:
         who = ident[1] if kind == "debate" else ident
         member = next((m for m in current["participants"] if m["participant"] == who and m["joined"]), None)
-        if member is None or (kind in {"chat", "debate"}) != (member["role"] == "main"):
+        if member is None or (kind in {"chat", "debate", "mail"}) != (member["role"] == "main"):
             raise ValueError("participant left or its role changed; refresh before navigating")
     if kind == "chat":
         import panel_chats
@@ -3589,6 +3592,9 @@ def navigate(repo, action, state, navigation, width):
             allowed_methods={"existing-terminal", "app-uri", "windows-uri"})
         navigation["notice"] = "Chat navigation requested " + {"existing-terminal": "in its window", "app-uri": "in the app",
                                                                   "windows-uri": "in the app"}.get(opened["method"], "")
+    elif kind == "mail":
+        navigation["detail"] = {"title": "MESSAGES", "text": panel_messages.mail_page(current, ident, width)}
+        navigation["offset"] = 0
     elif kind in {"result", "debate"}:
         # The watch loop reads the evidence in the background and opens the detail when it arrives.
         navigation["opening"] = action
@@ -3778,7 +3784,7 @@ def tab_event(event, navigation):
 
 BOTTOM_OPTION = "@oms_panel_bottom"
 BOTTOM_LIMIT = 512
-BOTTOM_KINDS = {"chat", "result", "debate"}
+BOTTOM_KINDS = {"chat", "result", "debate", "mail"}
 
 
 def bottom_state(navigation):
@@ -4135,7 +4141,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             return False
         board = os.environ.get("TMUX_PANE", "")
         try:
-            pane = panel_reader.open_reader(board, reader_shell(repo, target, board), repo)
+            pane = panel_reader.open_reader(board, reader_shell(repo, target, board, navigation.get("room_id")), repo)
             if pane and expanded:
                 expand(False)  # splitting a zoomed window unzooms it
         except (OSError, ValueError, subprocess.SubprocessError):
@@ -4397,7 +4403,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                 # A click or Enter previews in the board; the call's full content opens on the right.
                                 close_call() if shown[0] == "chat" else open_call(shown)
                             if action and not navigation.get("detail"):
-                                if action[0] in {"chat", "result", "debate"}:
+                                if action[0] in {"chat", "result", "debate", "mail"}:
                                     # Show the selection before tmux or evidence reads can block.
                                     navigation["notice"] = ("Opening chat..." if action[0] == "chat" else
                                                             "Opening recorded result...")
@@ -4412,7 +4418,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                         if managed_session():
                                             subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
                                                                        "@oms_panel_view", density), check=False, timeout=2, stdin=subprocess.DEVNULL)
-                                    if action[0] not in {"result", "debate"} or not open_call(action):
+                                    if action[0] not in {"result", "debate", "mail"} or not open_call(action):
                                         navigate(repo, action, state, navigation, size.columns)
                                 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                                     navigation["notice"] = clean(str(error), 160)
@@ -4646,6 +4652,25 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                             finish_opening(navigation, read_evidence(repo, navigation["opening"]))
                     repaint()
                     continue
+                if (event[0] == "f" and navigation.get("surface") in {"graph", "tree"}
+                        and navigation.get("tab", "detail") == "detail" and not navigation.get("detail")
+                        and (navigation.get("full_mail") or not navigation.get("full_result"))):
+                    target = choose(event, navigation)
+                    if target:
+                        try:
+                            board = os.environ.get("TMUX_PANE", "")
+                            pane = (managed_session() and not panel_host.herdr_active() and panel_reader.open_reader(
+                                board, reader_shell(repo, target, board, navigation.get("room_id")), repo))
+                            if pane:
+                                navigation["reader_open"] = True
+                                navigation["notice"] = "Opened on the right; Esc closes it"
+                            else:
+                                navigate(repo, target, cache.get("state", {}), navigation,
+                                         max(1, shutil.get_terminal_size().columns))
+                        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                            navigation["notice"] = clean(str(error), 160)
+                        repaint()
+                    continue
                 if len(event) == 1 and len(event[0]) == 1 and event[0] != " ":
                     # Keys typed ahead run on the next read, not lost with this one.
                     navigation["queued"] = events[position + 1:]
@@ -4658,6 +4683,14 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                         navigation["offset"] = 0
                     return "9" if event[0] == "u" else event[0]
                 if event[0] == "escape":
+                    if navigation.get("reader_open") and managed_session():
+                        try:
+                            panel_reader.close_reader(os.environ.get("TMUX_PANE", ""))
+                        except (OSError, subprocess.SubprocessError) as error:
+                            navigation["notice"] = clean(str(error), 160)
+                        navigation.pop("reader_open", None)
+                        repaint()
+                        continue
                     if navigation.pop("detail", None) is None:
                         continue
                     navigation["offset"] = 0
@@ -4993,6 +5026,7 @@ def main(argv=None):
     parser.add_argument("--rounds", type=int, default=1, help="council debate rounds, 1 or 2")
     parser.add_argument("--thread", help="council thread ID")
     parser.add_argument("--results", action="store_true", help="read bounded durable task results")
+    parser.add_argument("--mail", metavar="PARTICIPANT", help="read messages addressed to one main in --room")
     parser.add_argument("--participant", help="--results of one room call (with --task-id, one council seat)")
     parser.add_argument("--chats", action="store_true", help="read enrolled native chats and navigation capabilities")
     parser.add_argument("--open-chat", help="navigate to a selected room participant without starting a model turn")
@@ -5023,7 +5057,7 @@ def main(argv=None):
         parser.error("--health is a read-only report; use --repo, --room and optional --json")
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.finalize, args.retry_delivery, args.providers,
-                                     args.chats, args.open_chat, args.health)) > 1:
+                                     args.chats, args.open_chat, args.health, args.mail)) > 1:
         parser.error("choose one panel operation")
     if args.json and (args.watch or args.launch or args.dispatch or args.routes or args.council or args.finalize):
         parser.error("--json is only available for panel state or results")
@@ -5033,6 +5067,8 @@ def main(argv=None):
         parser.error("--chat-surface requires --open-chat")
     if args.participant and not args.results:
         parser.error("--participant requires --results")
+    if args.mail and (not args.room or args.json or args.dry_run):
+        parser.error("--mail requires --room and plain read-only output")
     if args.task and not (args.launch or args.spawn_main):
         parser.error("--task requires --launch or --spawn-main")
     if args.task and (len(args.task.encode("utf-8")) > MAX_PROMPT or "\0" in args.task):
@@ -5049,7 +5085,7 @@ def main(argv=None):
         parser.error("--spawn-main starts a main; it has no dry-run")
     if (args.view or args.attention_only) and (args.launch or args.spawn_main or args.reopen or args.json or args.dry_run or args.routes
             or args.dispatch or args.council or args.results or args.finalize or args.retry_delivery or args.providers
-            or args.chats or args.open_chat):
+            or args.chats or args.open_chat or args.mail):
         parser.error("--view and --attention-only apply to the interactive menu or --watch")
     if (args.brief_file or args.purpose or args.workload or args.access != "read") and not args.dispatch:
         parser.error("role task options require --dispatch")
@@ -5126,7 +5162,7 @@ def main(argv=None):
         parser.error("invalid model ID")
     if (args.dispatch or args.council or args.finalize or args.retry_delivery or args.chats or args.open_chat
             or args.spawn_main or not (
-            args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health)) and (
+            args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health or args.mail)) and (
             os.environ.get("OMS_HARNESS_CHILD") == "1"
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
         parser.error("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
@@ -5219,6 +5255,21 @@ def main(argv=None):
         if args.council:
             return council(repo, args.owner or caller_owner(), args.task_id, args.label, args.prompt,
                            args.thread, args.rounds, args.dry_run)
+        if args.mail:
+            participant = room.identifier(args.mail, "participant")
+
+            def reader(width):
+                state = room.status(repo, args.room)
+                if not any(m["participant"] == participant and m["role"] == "main" and m["joined"]
+                           for m in state["participants"]):
+                    raise ValueError("main left or its role changed; refresh before reading messages")
+                return panel_messages.mail_page(state, participant, width)
+
+            board = os.environ.get(panel_reader.BOARD, "")
+            if panel_reader.PANE.fullmatch(board) and sys.stdin.isatty() and sys.stdout.isatty():
+                return panel_reader.page(reader, board)
+            print(reader(shutil.get_terminal_size().columns))
+            return 0
         if args.results:
             participant = args.participant and room.identifier(args.participant, "participant")
 

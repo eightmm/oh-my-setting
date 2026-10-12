@@ -186,6 +186,29 @@ def readable_text(text):
     return "\n".join(output).strip("\n")
 
 
+def main_mail(state, participant):
+    from room_view import result_handoff
+    return [m for m in listing(state.get("messages")) if participant in listing(mapping(m).get("targets"))
+            and not result_handoff(state, m)]
+
+
+def mail_page(state, participant, width):
+    """The selected main's addressed log, oldest first; keep sanitized block layout intact."""
+    from room_view import main_names, who
+    from panel_view import _result_structured
+    width = max(8, width)
+    members = listing(state.get("participants"))
+    labels = main_names(members)
+    names = {m["participant"]: who(m, labels) for m in members}
+    lines = [clipped("Messages to " + clean(names.get(participant, participant)), width)]
+    for message in main_mail(state, participant):
+        sender = clean(names.get(message.get("sender"), message.get("sender")), 100) or "unknown"
+        lines += ["", clipped("From %s / %s" % (sender, stamp(message.get("ts"))), width)]
+        for line in (readable_text(message.get("text")) or "(empty)").split("\n"):
+            lines.extend(_result_structured(line, width))
+    return "\n".join(lines)
+
+
 def tab_body(report, width, cap, navigation, unicode=True):
     """Rows (text, action, selected) for the Messages tab: the filter line, then the log window."""
     state = navigation.setdefault("messages_view", {"selected": None, "open": None, "filter": 0, "scroll": 0})

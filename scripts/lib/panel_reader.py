@@ -24,14 +24,16 @@ def tmux(*args):
 
 
 def target_args(target):
-    """`oms panel` arguments that read one recorded call; identifiers from recorded state are revalidated here."""
+    """Read-only `oms panel` arguments; identifiers from recorded state are revalidated here."""
     kind, ident = target
-    if kind not in ("result", "debate"):
-        raise ValueError("only a recorded call opens in the reader")
+    if kind not in ("result", "debate", "mail"):
+        raise ValueError("only recorded results or main messages open in the reader")
     task, who = ident if kind == "debate" else (None, ident)
     room.identifier(who, "participant")
     if task is not None and (not isinstance(task, str) or not ID.fullmatch(task)):
         raise ValueError("invalid task ID")
+    if kind == "mail":
+        return ["--mail", who]
     return ["--results", "--participant", who] + (["--task-id", task] if task else [])
 
 

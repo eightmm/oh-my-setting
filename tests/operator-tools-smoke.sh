@@ -8289,8 +8289,10 @@ import panel_reader
 assert panel_reader.target_args(("result", "worker-1")) == ["--results", "--participant", "worker-1"]
 assert panel_reader.target_args(("debate", ("task.1", "seat-a"))) == [
     "--results", "--participant", "seat-a", "--task-id", "task.1"]
+assert panel_reader.target_args(("mail", "main-1")) == ["--mail", "main-1"]
 for bad in (("result", "-x"), ("result", "a b"), ("result", "$(touch x)"), ("result", None),
-            ("debate", ("-t", "seat")), ("debate", ("t;x", "seat")), ("chat", "main-1")):
+            ("debate", ("-t", "seat")), ("debate", ("t;x", "seat")), ("chat", "main-1"),
+            ("mail", "-x"), ("mail", "a b"), ("mail", "$(touch x)"), ("mail", None)):
     try:
         panel_reader.target_args(bad)
     except ValueError:
@@ -8300,6 +8302,10 @@ for bad in (("result", "-x"), ("result", "a b"), ("result", "$(touch x)"), ("res
 words = shlex.split(panel.reader_shell(Path("/repo x"), ("result", "worker-1"), "%1"))
 assert words[:2] == ["exec", "env"] and "OMS_PANEL_READER_BOARD=%1" in words, words
 assert words[-5:] == ["--repo", "/repo x", "--results", "--participant", "worker-1"], words
+mail_words = shlex.split(panel.reader_shell(Path("/repo x"), ("mail", "main-1"), "%1", "room-1"))
+assert mail_words[-6:] == ["--repo", "/repo x", "--mail", "main-1", "--room", "room-1"], mail_words
+assert panel.read_bottom(panel.bottom_text({"tab": "detail", "target": ("mail", "main-1"),
+                                          "offset": 0, "dismissed": False}))["target"] == ("mail", "main-1")
 def reader_calls(listing, native="%2", fail=()):
     def answer(command, **kwargs):
         out = {"list-panes": listing, "show-option": native + "\n", "split-window": "%9\n"}.get(command[1], "")
@@ -9214,6 +9220,85 @@ for line in structured_detail[structured_start:]:
         break
     structured_preview.append(line)
 assert len(structured_preview) == 2 and "| size | issue |" in structured_preview[1] and structured_preview[1].endswith("..."), structured_preview
+# Main mail readers retain table/fence layout, read state and room isolation; empty cards offer no f action.
+mail_flow = deepcopy(done_flow)
+mail_body = "Summary\n\n| size | issue |\n|------|-------|\n| large | joined |\n\n```bash\n  oms panel | size\n\tprintf '\\n'\n```\nLAST MAIL LINE"
+mail_flow["room"].update(closed=False, messages=[
+    {"sender": "advisor", "targets": ["flow-main"], "ts": "2026-10-10T09:00:00Z", "text": "EARLIER MAIL"},
+    {"sender": "advisor", "targets": ["flow-other"], "text": "PRIVATE OTHER MAIL"},
+    {"sender": "advisor", "targets": ["flow-main"], "pending_for": ["flow-main"],
+     "ts": "2026-10-10T10:00:00Z", "text": mail_body}])
+mail_frozen = json.dumps(mail_flow, sort_keys=True)
+for surface in ("graph", "tree"):
+    for automatic in (False, True):
+        mail_nav = {"tab": "detail"} if automatic else {
+            "tab": "detail", "preview": {"target": ("chat", "flow-main"), "report": {}}}
+        mail_screen = render(mail_flow, "codex", 120, 44, view=surface, main_attempt="flow-attempt",
+                             navigation=mail_nav, managed=True, unicode=False)
+        assert mail_nav["full_mail"] == ("mail", "flow-main") and "f Open right" in mail_screen, mail_nav
+        assert "LAST MAIL LINE" not in mail_screen and choose(("f",), mail_nav) == ("mail", "flow-main")
+        assert choose(("f",), dict(mail_nav, tab_body_visible=False)) is None
+        mail_nav["tab"] = "plan"
+        render(mail_flow, "codex", 120, 44, view=surface, navigation=mail_nav, unicode=False)
+        assert not mail_nav.get("full_mail") and choose(("f",), mail_nav) is None
+    empty_mail = deepcopy(mail_flow)
+    empty_mail["room"]["messages"] = [mail_flow["room"]["messages"][1]]
+    mail_nav = {"tab": "detail", "full_mail": ("mail", "flow-main"),
+                "preview": {"target": ("chat", "flow-main"), "report": {}}}
+    empty_screen = render(empty_mail, "codex", 120, 44, view=surface, navigation=mail_nav, managed=True, unicode=False)
+    assert not mail_nav.get("full_mail") and "f Open right" not in empty_screen and choose(("f",), mail_nav) is None
+mail_page = panel.panel_messages.mail_page(mail_flow["room"], "flow-main", 120)
+readable_mail = panel.panel_messages.readable_text(mail_body)
+assert readable_mail in mail_page and "PRIVATE OTHER MAIL" not in mail_page, mail_page
+assert "| size | issue |\n|------|-------|\n| large | joined |" in mail_page
+assert "```bash\n  oms panel | size\n\tprintf '\\n'\n```" in mail_page
+assert mail_page.index("EARLIER MAIL") < mail_page.index(readable_mail) and mail_page.count("From ") == 2
+assert panel.panel_messages.stamp("2026-10-10T10:00:00Z") in mail_page
+long_mail = deepcopy(mail_flow)
+long_mail["room"]["messages"][-1]["text"] = "```\n" + "x" * 200 + "\n```\nRETAINED END"
+narrow_mail = panel.panel_messages.mail_page(long_mail["room"], "flow-main", 24)
+assert "RETAINED END" in narrow_mail and "↪" not in narrow_mail
+assert all(display_width(line) <= 24 for line in narrow_mail.splitlines()), narrow_mail
+hostile_mail = deepcopy(mail_flow)
+hostile_mail["room"]["messages"][-1]["text"] = "```bash\n  printf '\x1b[2J'\x00\n```\n\x1b[31mEND"
+inert_page = panel.panel_messages.mail_page(hostile_mail["room"], "flow-main", 120)
+assert "\x1b" not in inert_page and "\x00" not in inert_page and "```bash\n  printf '?[2J'?\n```" in inert_page, inert_page
+with patch.object(panel, "repository", return_value=project), \
+        patch.object(panel, "work_repository", return_value=project), \
+        patch.object(panel, "native_repository", return_value=project), \
+        patch.object(panel.room, "status", return_value=mail_flow["room"]), \
+        patch.object(panel.room, "acknowledge", side_effect=AssertionError("reader acknowledged mail")), \
+        patch.object(panel.room, "send", side_effect=AssertionError("reader wrote mail")), \
+        patch.object(panel.shutil, "get_terminal_size", return_value=os.terminal_size((120, 44))), \
+        patch.dict(os.environ, {panel_reader.BOARD: "%1"}, clear=True), \
+        patch.object(panel.sys, "stdin") as reader_stdin, patch.object(panel.sys, "stdout", io.StringIO()), \
+        patch.object(panel.panel_reader, "page", side_effect=lambda render_page, board: (
+            0 if board == "%1" and readable_mail in render_page(120) else 1)) as paged:
+    reader_stdin.isatty.return_value = True
+    with patch.object(panel.sys.stdout, "isatty", return_value=True):
+        assert panel.main(["--repo", str(project), "--room", "flow-room", "--mail", "flow-main"]) == 0
+    paged.assert_called_once()
+assert json.dumps(mail_flow, sort_keys=True) == mail_frozen, "mail reader changed room state"
+with patch.object(panel, "BackgroundRead", ImmediateRead), \
+        patch.object(panel, "read_panel", return_value=(mail_flow, 0, "codex", "flow-attempt", "graph", False, "flow-room")), \
+        patch.object(panel, "managed_session", return_value=True), \
+        patch.object(panel, "terminal_style", return_value=(True, False, False)), \
+        patch.object(panel, "provider_availability", return_value={}), \
+        patch.object(panel, "main_installed", return_value=False), patch.object(panel, "mark_window"), \
+        patch.object(panel, "reload_ready", return_value=False), patch.object(panel, "session_option", return_value=None), \
+        patch.object(panel, "panel_geometry", return_value=None), \
+        patch.object(panel.panel_host, "herdr_active", return_value=False), \
+        patch.object(panel.panel_reader, "open_reader", return_value="%9") as opened, \
+        patch.object(panel.panel_reader, "close_reader", return_value=False), \
+        patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((120, 44))), \
+        patch.object(panel.sys, "stdout", io.StringIO()), \
+        patch.dict(os.environ, {"TMUX_PANE": "%1"}, clear=True), \
+        patch("panel_input.TerminalInput", return_value=BatchInput([[("f",)], [("eof",)]])):
+    assert panel.watch(project, "codex", view="graph", no_animation=True) == 0
+opened.assert_called_once()
+assert opened.call_args.args[0] == "%1" and shlex.split(opened.call_args.args[1])[-4:] == [
+    "--mail", "flow-main", "--room", "flow-room"], opened.call_args
+# End main mail reader assertions.
 assert not any(line.startswith("Scope:") for line in lines)
 scoped_main = graph_text.detail(dict(main, owns=["scripts/lib", "docs"]), {}, 76, people, {}, everyone={"flow-main": team})[0]
 assert "Scope: scripts/lib, docs" in scoped_main, scoped_main
@@ -9245,6 +9330,10 @@ preview_screen = render(done_flow, "codex", 110, 40, view="graph", navigation=fu
 assert "FINAL RETAINED LINE" not in preview_screen and "Enter Open right" in preview_screen, preview_screen
 full_action = choose(("f",), full_nav)
 assert full_action == ("result", "builder"), full_nav
+for surface in ("graph", "tree"):
+    debate_target = ("debate", ("task.1", "flow-main"))
+    assert choose(("f",), {"surface": surface, "items": [debate_target], "full_result": debate_target,
+                           "preview": {"target": debate_target}}) == debate_target
 tree_full_nav = {"selected": ("result", "builder"),
                  "preview": {"target": ("result", "builder"), "report": full_recorded}}
 tree_preview = render(done_flow, "codex", 110, 40, view="tree", navigation=tree_full_nav)
@@ -10822,6 +10911,36 @@ for surface in ("graph", "tree"):
     choice, text = dock_read(dock_nav, batches=[[('tab',)], [('q',)]])
     assert choice == "q" and "No repository plan recorded" in text, text
     assert dock_nav["tab"] == "plan", dock_nav
+# Main mail control input consumes f and uses the same target as the board, with a local reader fallback.
+dock_mail = deepcopy(dock_state)
+dock_mail["room"].update(closed=False, messages=[{"sender": "advisor", "targets": ["main-1"],
+                                                "text": mail_body, "pending_for": ["main-1"]}])
+for surface in ("graph", "tree"):
+    mail_control_nav = {"surface": surface, "tab": "detail", "preview": {"target": ("chat", "main-1")}}
+    with patch.object(panel.room, "status", return_value=dock_mail["room"]), \
+            patch.object(panel.room, "acknowledge", side_effect=AssertionError("control acknowledged mail")):
+        choice, text = dock_read(mail_control_nav, state=dock_mail, batches=[[('f',)], [('q',)]])
+    assert choice == "9" and "LAST MAIL LINE" in text and "```bash" in text and "|------|-------|" in text, text
+    assert mail_control_nav.get("offset") == 0 and "detail" not in mail_control_nav
+    empty_control_nav = {"surface": surface, "tab": "detail", "preview": {"target": ("chat", "main-1")}}
+    with patch.object(panel.room, "status", side_effect=AssertionError("empty mail was opened")):
+        choice, text = dock_read(empty_control_nav, batches=[[('f',)], [('q',)]])
+    assert choice == "q" and "f Open right" not in text and not empty_control_nav.get("detail"), text
+mail_control_nav = {"surface": "graph", "tab": "detail", "preview": {"target": ("chat", "main-1")}}
+with patch.object(panel, "menu_input", return_value=DockInput([[('f',)], [('escape',)], [('q',)]])), \
+        patch.object(panel, "_show_state", return_value=(dock_mail, 0)), \
+        patch.object(panel, "show", side_effect=lambda *a, **k: render(dock_mail, "codex", 120, 44, view="graph",
+                     managed=True, unicode=False, navigation=mail_control_nav)), \
+        patch.object(panel, "managed_session", return_value=True), \
+        patch.object(panel.panel_host, "herdr_active", return_value=False), \
+        patch.dict(os.environ, {"TMUX_PANE": "%1"}, clear=True), \
+        patch.object(panel.panel_reader, "open_reader", return_value="%9") as opened, \
+        patch.object(panel.panel_reader, "close_reader", return_value=True) as closed:
+    assert panel.read_choice(project, "codex", "ready", "graph", False, mail_control_nav, {}) == "q"
+closed.assert_called_once_with("%1")
+assert not mail_control_nav.get("reader_open") and shlex.split(opened.call_args.args[1])[-4:] == [
+    "--mail", "main-1", "--room", "room-1"], opened.call_args
+# End main mail control assertions.
 # Debate evidence is loaded synchronously on entering the tab and retained across repaint.
 for surface in ("graph", "tree"):
     debate_nav = {"surface": surface, "tab": "detail", "tab_strip_visible": True,

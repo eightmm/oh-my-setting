@@ -249,6 +249,11 @@ def choose(event, navigation):
             return None
         return selected if selected in items else None
     elif kind == "f":
+        mail = navigation.get("full_mail")
+        if (navigation.get("surface") in {"graph", "tree"} and not navigation.get("detail")
+                and navigation.get("tab", "detail") == "detail" and navigation.get("tab_body_visible") and mail
+                and ("chat", mail[1]) in items):
+            return mail
         target = navigation.get("full_result")
         if (navigation.get("surface") in {"graph", "tree"} and target in items
                 and target[0] in ("result", "debate")

@@ -750,8 +750,8 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         if not member.get("model") and member.get("model_at_launch"):
             lines += wrapped("Current model unavailable · launch setting: " +
                              MODEL_NAMES.get(member["model_at_launch"], member["model_at_launch"]), width, 2)
-        inbox = [m for m in listing(room.get("messages")) if member["participant"] in listing(m.get("targets"))
-                 and not result_handoff(room, m)]
+        from panel_messages import main_mail
+        inbox = main_mail(room, member["participant"])
         unread = sum(valid_count(mapping(p).get("pending")) or 0 for p in listing(room.get("pairs"))
                      if mapping(p).get("recipient") == member["participant"])
         calls = sorted((everyone or teams or {}).get(member["participant"], []), key=call_order)
@@ -980,6 +980,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     preview = mapping(navigation.get("preview"))
     previewed = next((m for m in mains + [c for calls in everyone.values() for c in calls] + unlinked
                       if action(m) == preview.get("target")), None)
+    navigation["full_mail"] = None
     navigation.pop("full_result", None)
     if previewed and previewed.get("role") != "main" and not previewed.get("_native"):
         navigation["full_result"] = action(previewed)
@@ -1462,6 +1463,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         footer[-hint_rows:] = fitted_hints[:hint_rows] + [""] * max(0, hint_rows - len(fitted_hints))
     if body_drawn and navigation.get("tab") == "debate" and not navigation.get("debate_view", {}).get("shown") and not menu:
         footer[-hint_rows:] = footer_hints(dict(navigation, debate_empty=True), width, managed, unicode, chosen_member, True)
+    if navigation.get("full_mail") and not menu:
+        fitted = footer_hints(navigation, width, managed, unicode, chosen_member, True)
+        footer[:hint_rows] = fitted[:hint_rows] + [""] * max(0, hint_rows - len(fitted))
     if not body_drawn:
         navigation.pop("full_result", None)
     if not body_drawn and not menu and footer[-hint_rows:] == hints:
@@ -1522,6 +1526,7 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
             main_attempt=None, automatic=False, claims=None, classify=None, past=None):
     """The shared reading dock; hit rows are relative to the returned lines."""
     rows_high = rows if rows >= 3 else int(rows > 0)
+    navigation["full_mail"] = None
     navigation.update(tab_strip_visible=bool(rows_high), tab_body_visible=rows_high >= 3)
     navigation.pop("box", None)
     if not rows_high:
@@ -1579,6 +1584,10 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     active = navigation.get("tab") if navigation.get("tab") in dict(TABS) else "detail"
     if active == "needs" and not attention:
         active = "detail"
+    if active == "detail" and rows_high >= 3 and previewed and previewed.get("role") == "main":
+        from panel_messages import main_mail
+        if main_mail(room, previewed["participant"]):
+            navigation["full_mail"] = ("mail", previewed["participant"])
     navigation["main_attempt"] = main_attempt
     claims = claims_by_main(report) if claims is None else claims
     body, targets = detail(previewed, preview, width - 4, members, room, teams, everyone, labels,
@@ -1825,12 +1834,14 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
     arrows, move = ("←→", "↑↓") if unicode else ("<>", "^v")
     toggle = "F9 Chat⇄Board" if unicode else "F9 Chat<>Board"
     worktree = bool(member and kind == "result" and str(member.get("location") or "").startswith("worktree:"))
+    mail = bool(navigation.get("full_mail") and navigation.get("tab", "detail") == "detail"
+                and navigation.get("tab_body_visible") and not navigation.get("detail"))
     if navigation.get("keys_help"):
         keys = ["? Hide", "Esc Back", "F5 Control" if managed else "", "k Capacity", "u Refresh",
                 ("Enter Collapse" if navigation.get("messages_view", {}).get("open") is not None and navigation.get("messages_view", {}).get("open") == navigation.get("messages_view", {}).get("selected") else "Enter Expand") if tabs and navigation.get("tab") == "messages" else
                 "Enter Open right" if managed and kind in {"result", "debate"} else "Enter Open",
                 move + " Move", "Space Fold", "a Ask advisor",
-                "w Worktree" if worktree else "", "f Open right" if managed and navigation.get("full_result") else
+                "w Worktree" if worktree else "", "f Open right" if mail or managed and navigation.get("full_result") else
                 "f Full result" if navigation.get("full_result") else "",
                 "Tab Next tab" if tabs else "", "g Graph", "t Tree",
                 "n New main" if managed and not navigation.get("main_occupied") else "",
@@ -1857,7 +1868,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                   else ["wheel Scroll", "Tab Next tab"] if tab == "plan" else None)
     contextual = contextual or (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + [
                   "Enter Open right" if right else "",
-                  "f Open right" if managed and navigation.get("full_result") else "f Full result" if navigation.get("full_result") else "",
+                  "f Open right" if mail or managed and navigation.get("full_result") else "f Full result" if navigation.get("full_result") else "",
                   "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
                   "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "" if right else "Enter Show",
                   "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
