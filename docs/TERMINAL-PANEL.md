@@ -271,8 +271,9 @@ reading reads `Codex --`, whichever main the window belongs to. The goal box is 
 plan goal on at most two rows and the progress right-aligned on the title row
 (`╭─ GOAL ──── ▕██████░░░░▏ 6/9 verified · 1 in review · 2 claimed ─╮`; ASCII `+- GOAL` and `[######....]`).
 Cancelled tasks are closed, never verified, so they leave the total (the `[oms plan]` sentence uses the
-same total). A running task whose recorded calls all ended counts as `stale` instead of `claimed`, one whose
-calls wait in review or admission counts as `in review`; expired claims and abandoned review leases are stale too.
+same total). A running task whose recorded calls all ended counts as `stale` instead of `claimed`; one whose
+calls wait for its main's decision stays `claimed` (the main card and Plan tab mark it `awaiting decision`);
+expired claims and abandoned review leases are stale too.
 Only the current holder's calls count: the claimant call itself, or calls of the claiming main that joined at or
 after the claim, so calls an earlier holder left never mark a fresh claim stale (an `oms agent-plan touch`
 heartbeat restarts that clock, so a touched hold reads claimed until a new call joins).
@@ -297,10 +298,11 @@ board group, the goal box, the main card's `Team:` line, Detail, `Needs you` and
 - `awaiting decision`: a finished call whose patch awaits admission, or a call in lifecycle `review`, until
   its main records a decision on the task (`Awaiting decision (N)` on the board, `N awaiting decision` in `Team:`;
   `Needs you` names the patch case `patch awaits admission`);
-  a decided review call reads `decided` in the Past tab.
+  once its main completes or accepts the task, the call reads `decided` wherever it is shown.
 - `unrecorded`: no live process, heartbeat or exit was seen (`status unknown`); it is not a failure and stays
   until its main decides. Detail says so in one line.
-- `in review`: plan tasks in the plan's `review` state (`N in review` in the goal box, `in review` in the Plan tab).
+- `in review`: plan tasks in the plan's `review` state only (`N in review` in the goal box, `in review` in the
+  Plan tab, the tree and the main card's `Task:`).
 - `verified`: plan tasks `done` (`N/M verified`); finished or admitted calls never count.
 - `landed`: `oms land` pushed the change and `agent-plan finish --landed-commit SHA` recorded it; while a land
   runs the goal box adds `LANDING`.

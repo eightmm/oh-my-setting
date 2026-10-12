@@ -81,9 +81,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             heading = group_title or ("COUNCIL" if role == "council" else role.upper() + "S")
             if group_title:
                 mark = ("▾" if group_key in expanded else "▸") if unicode else ("v" if group_key in expanded else ">")
-                unknown = sum(c["state"] == "presence unknown" for c in children)
-                add(root_stem + (end if last_group else prefix) + "%s %s (%s)%s" % (
-                    mark, heading, len(children), " / %s unrecorded" % unknown if unknown else ""),
+                add(root_stem + (end if last_group else prefix) + "%s %s (%s)" % (mark, heading, len(children)),
                     "review" if role == "review" else "dim", ("group", group_key))
                 if group_key not in expanded:
                     continue

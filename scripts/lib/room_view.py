@@ -27,6 +27,7 @@ def nodes(report):
         if ident:
             linked.setdefault(ident, []).append(row)
     output = []
+    finalized = mapping(report.get("finalized"))
     guarded = {m.get("sender") for m in map(mapping, listing(room.get("messages")))
                if result_handoff(room, m) and "worker guard stopped this run" in str(m.get("text")).lower()}
     for member in listing(room.get("participants")):
@@ -57,7 +58,10 @@ def nodes(report):
         code = result.get("exit")
         derived = "presence unknown" if member.get("role") == "main" or type(code) is not int else \
             "done" if code == 0 else "failed"
-        output.append(dict(member, attempt=attempt.get("attempt_id"), state=attempt.get("state") or derived,
+        state = attempt.get("state") or derived
+        # Display only: a review whose task its main completed or accepted reads "decided"; the state stays.
+        decided = state == "review" and finalized.get(attempt.get("task_id")) in {"completed", "accepted"}
+        output.append(dict(member, attempt=attempt.get("attempt_id"), state=state, _decided=decided,
                            panel_activity=mapping(mapping(report.get("main_activity")).get(member.get("participant"))),
                            ended=result.get("ts"), exit=code if type(code) is int else None,
                            guard=member.get("participant") in guarded,
@@ -293,6 +297,8 @@ def elapsed(ts):
 
 
 def end_words(call, hint):
+    if call.get("_decided"):
+        return "decided"
     if call.get("state") == "failed":
         if call.get("guard"):
             return "guard stop"
@@ -454,8 +460,8 @@ def plan_summary(report):
     awaiting, ended = held_split(report)
     stale_claims, stale_reviews = (valid_count(plan.get(key)) or 0 for key in ("stale_claims", "stale_reviews"))
     return (goal, number("done"), max(0, total - number("cancelled")),
-            max(0, number("review", "landing") - stale_reviews) + len(awaiting),
-            max(0, number("claimed", "running") - stale_claims - len(awaiting) - len(ended)),
+            max(0, number("review", "landing") - stale_reviews),
+            max(0, number("claimed", "running") - stale_claims - len(ended)),
             stale_claims + stale_reviews + len(ended))
 
 
@@ -790,7 +796,7 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         team_rows("Active", active)
         team_rows("Unrecorded", unknown)
         if unknown:
-            lines.extend("    " + part for part in wrapped(UNRECORDED, max(1, width - 4), 3))
+            lines.extend("    " + part for part in wrapped(UNRECORDED, max(1, width - 4), len(UNRECORDED)))
         team_rows("Finished", finished[:5])
         if len(finished) > 5:
             lines.append("%s earlier finished · see the Past tab" % (len(finished) - 5))
@@ -836,7 +842,8 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
     if member.get("exit") == 124:
         lines += wrapped("Timed out · its main can continue it", width, 3)
     if state == "presence unknown":
-        lines += wrapped("Status unknown: " + UNRECORDED + ". Any recorded result is below; f opens it", width, 4)
+        note = "Status unknown: " + UNRECORDED + ". Any recorded result is below; f opens it"
+        lines += wrapped(note, width, len(note))
     access = {"write": "can edit", "read": "read-only"}.get(member.get("access"), "permissions unrecorded")
     metadata = "%s %s%s" % (access.capitalize(), where, " · effort " + member["effort"] if member.get("effort") else "")
     loaded = preview.get("report")
@@ -845,7 +852,7 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
     if loaded is None:
         return lines + ["", "Loading its recorded result...", "", metadata], targets
     if not listing(loaded.get("rows")):
-        return lines + ["", "No result recorded yet (%s)" % said(state), "", metadata], targets
+        return lines + ["", "No result recorded yet (%s)" % end_words(member, said(state)), "", metadata], targets
     # A whole-main result is adopted by every child of that main; only the call's own task speaks for it.
     rows = listing(loaded.get("rows"))
     row = next((r for r in rows if member.get("task_id") and r.get("task_id") == member["task_id"]), rows[0])
@@ -972,7 +979,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     debates = [row for row in worker_rows(report) if row["source"] == "council"]
     classify = call_classifier(report)
     # A sole main, or the one live main, needs no "for <main>" on its calls; an exited predecessor's calls keep it.
-    sole_live = bool(primary) and (len(mains) == 1 or [m for m in mains if m["state"] not in TERMINAL_STATES] == [primary])
+    # A main with no attempt evidence ("presence unknown") is not shown to be live, so it never needs disambiguation.
+    sole_live = bool(primary) and (len(mains) == 1 or [m for m in mains if m["state"] not in
+                                                       TERMINAL_STATES | {"presence unknown"}] == [primary])
 
     def team(main, every=False):
         ids = {key for key in (main["participant"], main.get("attempt")) if key}
@@ -1089,7 +1098,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         current = [t for t in held if t.get("id") not in awaiting_tasks | ended_tasks]
         lead = (current or held)[0]
         word = "awaiting decision" if lead.get("id") in awaiting_tasks else "worker ended" \
-            if lead.get("id") in ended_tasks else lead.get("state")
+            if lead.get("id") in ended_tasks else "in review" if lead.get("state") == "review" else lead.get("state")
         waiting = sum(t.get("id") in awaiting_tasks and t is not lead for t in held)
         return "Task: %s · %s" % (lead.get("id"), word) + (
             " · +%s more running" % (len(current) - 1) if len(current) > 1 else "") + (
@@ -1170,9 +1179,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             label = "%s %s (%s)" % ("▸" if unicode else ">", title, len(calls))
             if not sole_live:
                 label += " / " + name_of(primary)
-            unknown = sum(c["state"] == "presence unknown" for c in calls)
-            if unknown:
-                label += " / %s unrecorded" % unknown
             group_labels.append((label, target, "review" if kind == "review" else "dim"))
         if sole_live and group_labels:
             group_width = max(1, (width - 3 * (len(group_labels) - 1)) // len(group_labels))
@@ -1788,8 +1794,7 @@ def past_body(past, width, capacity, navigation, labels, unicode):
     for call in past[first:first + page]:
         who = labels.get(call.get("participant")) or "%s %s" % (ROLES.get(call.get("role"), "Worker"), model_name(call))
         end = clock_stamp(call["ended"]) if call.get("ended") else call.get("_finished") or ""
-        # A review call reaches Past only once its main recorded the decision.
-        words = "decided" if call["state"] == "review" else end_words(call, said(call["state"]))
+        words = end_words(call, said(call["state"]))
         title = clean(call.get("title")) or "no task title"
         # Narrow rows give up the role word, then the time, then the model before the task title: rows differ by task.
         model = model_name(call)

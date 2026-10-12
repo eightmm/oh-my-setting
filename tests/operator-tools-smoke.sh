@@ -1814,6 +1814,7 @@ assert not any("Goal:" in line for line, _ in render_plan_rows(msg_report, {}, 8
 assert [row.split(" · ")[0].split()[-1] for row in plan_rows] == ["t-ver", "t-rev", "t-run", "t-rdy", "t-blk"], plan_rows
 assert "t-ver · done · Verified one" in plan and "Verified one · unclaimed" not in plan and "make d" not in plan and "t-run · running 9h stale · Running one" in plan and "Opus 5.5 · make c" in plan, plan
 assert "t-rev · in review · Review one" in plan and "unclaimed · make e" in plan and "codex ·" not in plan and "claude ·" not in plan, plan
+assert "in review · Review one" in render(msg_report, "codex", 120, 80, view="tree", navigation={"dismissed": True})
 task_hits = [h["action"] for h in nav["hits"] if h["action"][0] == "task"]
 assert task_hits == [("task", t) for t in ("t-ver", "t-rev", "t-run", "t-rdy", "t-blk")], task_hits
 # Recorded completion metadata is visible only for terminal rows; unknown/malformed kinds stay plain done.
@@ -8000,6 +8001,14 @@ for glyphs in (False, True):
     predecessor_cards = render(successor_flow, "codex", 127, 40, view="graph", unicode=glyphs,
                                navigation={"dismissed": True, "selected": ("result", "foreign-child")})
     assert "running %s for Opus 5.5" % ("·" if glyphs else "/") in predecessor_cards, predecessor_cards
+# A predecessor with no attempt evidence is not shown live either, so the live main's calls still drop "for <main>".
+unproven_flow = deepcopy(flow)
+unproven_flow["attempts"]["active_recent"] = [a for a in flow["attempts"]["active_recent"] if a["attempt_id"] != "flow-other"]
+from room_view import nodes as room_nodes
+assert next(m for m in room_nodes(unproven_flow) if m["participant"] == "flow-other")["state"] == "presence unknown"
+for glyphs in (False, True):
+    unproven_cards = render(unproven_flow, "codex", 127, 40, view="graph", unicode=glyphs, navigation={"dismissed": True})
+    assert " for " not in unproven_cards and "running" in unproven_cards, unproven_cards
 # Long headings leave the true midpoint free for a wire in either glyph set.
 geometry_flow = deepcopy(flow)
 for attempt in geometry_flow["attempts"]["active_recent"]:
@@ -9407,6 +9416,12 @@ lines, targets = graph_text.detail(main, {}, 76, people, {}, everyone={"flow-mai
 unknown_detail = " ".join(graph_text.detail(unknown_call, {"report": {"rows": []}}, 76, people, {})[0])
 assert "status unknown" in unknown_detail and "Status unknown: no live process, heartbeat or exit seen" in unknown_detail \
     and "f opens it" in unknown_detail, unknown_detail
+# The Detail scrolls, so narrow panels wrap the whole explanation, including what to do.
+for columns in (24, 38):
+    narrow_unknown = graph_text.detail(unknown_call, {"report": {"rows": []}}, columns, people, {})[0]
+    assert "kept until its main decides. Any recorded result is below; f opens it" in " ".join(narrow_unknown), narrow_unknown
+    narrow_main = graph_text.detail(main, {}, columns, people, {}, everyone={"flow-main": [unknown_call]})[0]
+    assert "not a failure, kept until its main decides" in " ".join(line.strip() for line in narrow_main), narrow_main
 assert "Team: 1 unrecorded" in lines and "  Active" not in lines and "  Finished" not in lines
 assert any(line.startswith("    no live process, heartbeat or exit seen; not a failure")
            for line in lines[lines.index("  Unrecorded"):lines.index("Messages to Sol 6 main: 0")]), lines
@@ -10081,10 +10096,11 @@ for team_report, expected_team in ((flow, "5 active"),
                           and attention_row < h["y"] - 1 < active_row)
         assert "builder" in detail_team[worker_row] and not any("  Finished" in line for line in detail_team), detail_team
         assert any("Task: Current claim" in line for line in detail_team) and "claim-detail" in team_card, (team_card, detail_team)
+# A lifecycle review call and a finished call awaiting admission share the board's "Awaiting decision" count.
 assert graph_text.team_counts([{"state": state} for state in
-    ("presence unknown", "done", "working", "failed", "cancelled", "done")],
-    lambda call: "review" if call["state"] == "done" else "live") == [
-        "1 attention", "1 active", "2 awaiting decision", "1 finished", "1 unrecorded"]
+    ("presence unknown", "done", "working", "failed", "cancelled", "done", "review")],
+    lambda call: "review" if call["state"] in {"done", "review"} else "live") == [
+        "1 attention", "1 active", "3 awaiting decision", "1 finished", "1 unrecorded"]
 assert graph_text.team_counts([{"state": "done"}, {"state": "cancelled"}]) == ["2 finished"]
 assert any("status unknown" in line for line in team_lines) and "failed (exit 1)" in "\n".join(team_lines), team_lines
 # Spare rows between the cards and the box carry a display-only summary; the cards and the box keep every row.
@@ -10111,6 +10127,9 @@ for columns, rows, shown in ((127, 60, True), (127, 40, True), (110, 24, False),
         changed = [i for i, (a, b) in enumerate(zip(summary_board, plain_board)) if a != b]
         assert all(plain_board[i] == "" for i in changed) and all(i < summary_nav["box"]["y1"] - 1 for i in changed), changed
         assert bool(changed) == shown, (columns, rows, summary_board)
+        if columns == 127:
+            group_row = next(line for line in summary_board if "Awaiting decision (1)" in line)
+            assert group_row.strip().endswith("Awaiting decision (1)"), group_row
         if shown:
             block = "\n".join(summary_board[i] for i in changed)
             assert block.startswith("Attention    1 ") and "In progress  4 calls" in block, block
@@ -10201,7 +10220,8 @@ cancelled_goal["plan"]["by_state"]["cancelled"] = 2
 assert "cancelled" not in graph_text.goal_banner(cancelled_goal, 120, True)[0][0]
 assert "6/7 verified" in graph_text.goal_banner(cancelled_goal, 120, True)[0][0]
 # Cancelled tasks are closed, never verified: they leave the total. A running task whose calls all ended is stale,
-# one whose call waits in review counts as review, and the main's card counts neither as running.
+# one whose call awaits its main's decision stays claimed ("in review" is the plan's review state only), and the
+# main's card counts neither as running.
 held_flow = deepcopy(single_flow)
 held_calls = {"researcher": ("done", "t-ended"), "explorer": ("review", "t-review"), "builder": ("working", "t-live")}
 for attempt in held_flow["attempts"]["active_recent"]:
@@ -10216,19 +10236,20 @@ held_flow["plan"] = {"present": True, "goal": "Count held work honestly", "task_
                      "by_state": {"done": 4, "cancelled": 3, "running": 3}, "tasks": held_tasks}
 held_flow["room"]["repo_tasks"] = held_tasks
 assert graph_text.held_split(held_flow) == ({"t-review"}, {"t-ended"})
-assert graph_text.plan_summary(held_flow)[1:] == (4, 7, 1, 1, 1), graph_text.plan_summary(held_flow)
+assert graph_text.plan_summary(held_flow)[1:] == (4, 7, 0, 2, 1), graph_text.plan_summary(held_flow)
 held_wide = graph_text.goal_banner(held_flow, 127, True)[0][0]
-assert held_wide.endswith(" 4/7 verified · 1 in review · 1 claimed · 1 stale ]") and display_width(held_wide) == 127, held_wide
+assert held_wide.endswith(" 4/7 verified · 2 claimed · 1 stale ]") and display_width(held_wide) == 127, held_wide
 for columns in (28, 42, 57, 80):
     for glyphs in (True, False):
         held_narrow = graph_text.goal_banner(held_flow, columns, glyphs)[0][0]
-        assert display_width(held_narrow) == columns and "stale" not in held_narrow, held_narrow
+        # The shortest count drops first; at 80 columns every count fits.
+        assert display_width(held_narrow) == columns and ("stale" in held_narrow) == (columns == 80), held_narrow
         held_box = [text for text, unused in graph_text.goal_box(held_flow, columns, glyphs, False)]
         assert all(display_width(text) == columns for text in held_box), held_box
         held_note = " ".join(text[2:-2].strip() for text in held_box[2:-1])
         assert "1 stale, not counted: no live worker" in held_note and "oms agent-plan release --id ID" in held_note, held_box
 held_box = [text for text, unused in graph_text.goal_box(held_flow, 127, True, False)]
-assert "4/7 verified · 1 in review · 1 claimed · 1 stale ─╮" in held_box[0] and \
+assert "4/7 verified · 2 claimed · 1 stale ─╮" in held_box[0] and \
     "│ 1 stale, not counted: no live worker · release with oms agent-plan release --id ID " in held_box[2], held_box
 assert "--include-running" not in "\n".join(held_box)
 held_rows = [text for text, unused in graph_text.plan_rows(held_flow, {}, 120, True)]
@@ -10237,6 +10258,12 @@ assert any("t-review · running (awaiting decision) · Held t-review" in text fo
 assert any("t-live · running · Held t-live" in text for text in held_rows), held_rows
 held_card = graph_text.render_graph(held_flow, 127, 50, navigation={"dismissed": True})
 assert "Task: t-live · running · 1 awaiting decision" in held_card and "more running" not in held_card, held_card
+# A held task in the plan's review state reads "in review" on the card, as in the goal box and the Plan tab.
+review_hold = deepcopy(held_flow)
+next(t for t in review_hold["plan"]["tasks"] if t["id"] == "t-live")["state"] = "review"
+review_hold["plan"]["by_state"] = {"done": 4, "cancelled": 3, "running": 2, "review": 1}
+review_card = graph_text.render_graph(review_hold, 127, 50, navigation={"dismissed": True})
+assert "Task: t-live · in review · 1 awaiting decision" in review_card and "4/7 verified · 1 in review" in review_card, review_card
 everything_ended = deepcopy(held_flow)
 for attempt in everything_ended["attempts"]["active_recent"]:
     if attempt["attempt_id"] in held_calls:
@@ -10254,7 +10281,7 @@ assert next(m for m in graph_text.nodes(pending_holds) if m["participant"] == "b
 assert graph_text.held_split(pending_holds) == ({"t-ended", "t-review"}, set())
 pending_holds["plan"].update(task_count=13, stale_claims=1, stale_reviews=1,
                              by_state={"done": 4, "cancelled": 3, "running": 3, "claimed": 1, "review": 2})
-assert graph_text.plan_summary(pending_holds)[1:] == (4, 10, 3, 1, 2), graph_text.plan_summary(pending_holds)
+assert graph_text.plan_summary(pending_holds)[1:] == (4, 10, 1, 3, 2), graph_text.plan_summary(pending_holds)
 # Only the current holder's calls speak for a hold: a call another main left, or one the claiming main started
 # before this claim, is not evidence; a call that holds the claim itself always is.
 holder = deepcopy(everything_ended)
@@ -13639,6 +13666,9 @@ attention = render(grouped_board, "codex", 120, 80, view="tree", attention_only=
 assert "Awaiting decision (2)" in attention and "Past work" not in attention
 from panel_view import inbox_items
 assert {item["action"] for item in inbox_items(grouped_board)} >= {("result", "review-call"), ("result", "pending-patch")}
+needs_words = {item["action"]: item["what"] for item in inbox_items(grouped_board)}
+assert needs_words[("result", "review-call")].startswith("awaiting decision") \
+    and needs_words[("result", "pending-patch")].startswith("patch awaits admission"), needs_words
 # Reading a call's own handoff handles its failure, but cannot settle a block or admit a patch.
 for sender, recipient, pending, visible in (("adv-worker", "adv-main", [], False),
                                            ("adv-worker", "adv-main", ["adv-main"], True),
@@ -13661,6 +13691,20 @@ for sender, recipient, pending, visible in (("adv-worker", "adv-main", [], False
     assert json.dumps(handed_off, sort_keys=True) == frozen_handoff
 for mark in ("completed", "accepted"):
     handled = dict(grouped_board, finalized={"adv-task": mark})
+    # A review call whose task its main decided reads "decided" in its Detail, the main's Detail and Past alike.
+    decided_board = deepcopy(handled)
+    next(a for a in decided_board["attempts"]["recent"] if a["attempt_id"] == "review-call")["task_id"] = "adv-task"
+    decided_people = graph_view.nodes(decided_board)
+    decided_call = next(m for m in decided_people if m["participant"] == "review-call")
+    assert decided_call["state"] == "review" and graph_view.call_classifier(decided_board)(decided_call) == "past"
+    decided_head = graph_view.detail(decided_call, {"report": {"rows": []}}, 100, decided_people, {})[0][0]
+    assert "· decided" in decided_head and "awaiting decision" not in decided_head, decided_head
+    decided_nav = {"preview": {"target": ("chat", "adv-main"), "report": {}}, "dismissed": True}
+    decided_main = graph_view.render_graph(decided_board, 127, 80, navigation=decided_nav)
+    decided_row = next(line for line in decided_main.splitlines() if "review-call" in line and "- Worker" in line)
+    assert "decided" in decided_row and "awaiting decision" not in decided_row, decided_main
+    decided_past = render(decided_board, "codex", 120, 80, view="graph", navigation={"dismissed": True, "tab": "past"})
+    assert any("review-call" in line and "decided" in line for line in decided_past.splitlines()), decided_past
     failed = next(m for m in graph_view.nodes(handled) if m["participant"] == "adv-worker")
     assert graph_view.call_classifier(handled)(failed) == "past"
     for mode in ("tree", "graph"):
