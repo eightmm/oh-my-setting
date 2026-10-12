@@ -808,6 +808,7 @@ def carry_plan(state, current=None, bounded=True):
         order.append(members[who])
     for who in sorted(keep, key=lambda w: members[w]["seq"]):
         place(who)
+    held = {members[w].get("consumer") for w in keep} | {p.get("consumer") for p in there.values() if p["joined"]}
     writes = []
     for p in order:
         who = p["participant"]
@@ -815,9 +816,15 @@ def carry_plan(state, current=None, bounded=True):
         if now is None:
             event = {"kind": "join", "participant": who, "provider": p["provider"], "role": p["role"],
                      "model": p.get("model"), "label": p["label"], "owns": list(p.get("owns", []))}
-            for key in ("consumer", "parent"):
-                if p.get(key):
-                    event[key] = p[key]
+            if p.get("parent"):
+                event["parent"] = p["parent"]
+            # A rebound main joins with the session it first joined with and is rebound below, so resume ownership
+            # still recognizes that session; unless another carried member now holds it.
+            first = p.get("initial_consumer")
+            consumer = (first if p.get("consumer") and first and first not in held - {p["consumer"]}
+                        else p.get("consumer"))
+            if consumer:
+                event["consumer"] = consumer
             writes.append((event, "Joined: " + p["label"], None))
             now = dict(event)
         if p.get("label_override") and now.get("label_override") != p["label_override"]:
@@ -914,7 +921,7 @@ def settle(repo, room):
     """The room an id names, once the rollover that sealed it into that room has finished its carry.
 
     A rollover cut short after its seal leaves the successor refusing every write but its carry; the first
-    writer to meet that refusal finishes the carry here and retries."""
+    writer other than a worker to meet that refusal finishes the carry here and retries."""
     target = resolve(repo, room, fresh=True)
     _finish_carry(repo, target)
     return target
@@ -949,12 +956,13 @@ def rollover(repo, old, actor=None):
         path = Path(repo) / ".oms/threads" / (new + ".jsonl")
         if path.exists() and not path.stat().st_size:
             path.unlink()  # a successor create cut short before its header row
+        # The successor keeps the sealed room's creator, whose close right does not pass to the rollover's main.
         if not path.exists():
-            create(repo, new, state["title"], state["task_id"], chosen["participant"], predecessor=old)
+            create(repo, new, state["title"], state["task_id"], state["creator"], predecessor=old)
         else:
             rows = records(repo, new)
             if len(rows) == 1 and rows[0].get("live") is True and not rows[0].get("room_event"):
-                _write(repo, new, _created_event(state["task_id"], chosen["participant"], old), state["title"])
+                _write(repo, new, _created_event(state["task_id"], state["creator"], old), state["title"])
             elif _predecessor(repo, new) != old:
                 raise ValueError("successor room id collision")
         if not _carried(repo, new):

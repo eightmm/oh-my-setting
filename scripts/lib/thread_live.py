@@ -104,9 +104,16 @@ def open_thread(repo, thread):
     return handle
 
 
+def _harness_child(env):
+    return env.get("OMS_HARNESS_CHILD") == "1" or env.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"
+
+
 def create_thread(repo, thread):
     if not ID.fullmatch(thread):
         raise ValueError("invalid thread id")
+    if _harness_child(os.environ) and re.fullmatch(r"room-[0-9a-f]{12}", thread):
+        # Successor room ids derive from public room ids; a worker holding one would block its room's rollover.
+        raise ValueError("a worker cannot create a room")
     path = safe_path(repo, Path(".oms") / "threads" / (thread + ".jsonl"), True)
     try:
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -220,6 +227,10 @@ def append_from_env():
         raise ValueError("invalid thread row")
     if any(row.get("role") == "closed" for row in rows):
         raise ValueError("thread is closed")
+    if (not env.get("OMS_TH_ROOM_EVENT") and _harness_child(env) and len(rows) > 1
+            and isinstance(rows[1].get("room_event"), dict) and rows[1]["room_event"].get("kind") == "created"):
+        # Plain rows (topic, close, cursor ack) skip the room's own gates; oms room refuses a worker's close.
+        raise ValueError("a worker can only message or acknowledge as its admitted room participant")
     last = rows[-1].get("room_event") if rows else None
     if isinstance(last, dict) and last.get("kind") == "successor" and not env.get("OMS_TH_ROOM_EVENT"):
         # A sealed room log ends with its successor row; room events meet the same seal in validate_event.

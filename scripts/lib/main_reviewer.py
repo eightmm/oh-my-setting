@@ -513,6 +513,9 @@ def _room_approver(repo, room_id, participant):
         sys.path.insert(0, library)
     import room
     state = room.project(room.records(repo, room_id))
+    if state.get("successor"):
+        # A sealed log no longer sees leaves, closes or rebinds; approval names the room it continues as.
+        raise ValueError("room %s continues as %s; name that room for approval" % (room_id, state["successor"]))
     member = room.participant(state, participant)
     consumer = member.get("consumer")
     if (state["id"] != room_id or state["closed"] or not member.get("joined")

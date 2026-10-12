@@ -447,10 +447,23 @@ def membership_epoch(repo, room, who, provider, read_window=None):
         # Independent streams have only second-resolution timestamps. A
         # departure/closure in that same second cannot establish an epoch;
         # reject ambiguity instead of attributing an old read to a rejoin.
-        boundaries = leaves + [r for r in records if r.get('role') == 'closed']
+        def closing(r):
+            return r.get('role') == 'closed' or r.get('room_event', {}).get('kind') == 'closed'
+        boundaries = leaves + [r for r in records if closing(r)]
+        rejoins = joins[1:]
+        # After a rollover the parent's leave, close or rejoin lands in the successor. Rows up to its carried
+        # mark only replay the sealed log, whose own rows were checked above.
+        for later_records, _ in successor_rooms(repo, state):
+            mark = next((i for i, r in enumerate(later_records) if r.get('room_event', {}).get('kind') == 'carried'),
+                        len(later_records))
+            own = later_records[mark + 1:]
+            boundaries += [r for r in own if closing(r) or r.get('room_event', {}).get('participant') == who
+                           and r['room_event'].get('kind') == 'leave']
+            rejoins += [r for r in own if r.get('room_event', {}).get('participant') == who
+                        and r['room_event'].get('kind') == 'join']
         if any(r['ts'] <= ended for r in boundaries):
             fail('historical room membership boundary is unproven or ambiguous')
-        if any(r['ts'] <= ended for r in joins[1:]):
+        if any(r['ts'] <= ended for r in rejoins):
             fail('historical READ crosses recycled room membership')
         return
     member = next((m for m in state['participants'] if m['participant'] == who), {})
@@ -474,7 +487,9 @@ def successor_rooms(repo, state):
     for _ in range(64):
         nxt = state.get('successor')
         rel = '.oms/threads/%s.jsonl' % nxt
+        # Revalidation reads only captured streams; the live walk ran when the receipt was accepted.
         if (not isinstance(nxt, str) or not re.fullmatch(r'room-[0-9a-f]{12}', nxt) or nxt in seen
+                or _HISTORICAL and (repo, rel) not in _HISTORICAL
                 or not read(repo, rel, MAX_STREAM, missing=True)):
             break
         records, content_sha = rows(repo, rel)
@@ -645,6 +660,9 @@ def completion_owner(repo, bundle, task, action, bundle_sha):
         fail('unsupported main reviewer authority')
     records, content_sha = rows(repo, '.oms/threads/' + relative(descriptor['room_id']) + '.jsonl')
     state = room_records(records, descriptor['room_id'], content_sha)
+    if state.get('successor'):
+        # A sealed room log no longer records leaves, closes or rebinds; the bundle must name its successor.
+        fail('declared main review room continues as %s; name that room' % state['successor'])
     member = next((m for m in state['participants'] if m['participant'] == declared), {})
     if (state['closed'] or not member.get('joined') or member.get('role') != 'main' or
             member.get('parent') or member.get('provider') != 'codex' or

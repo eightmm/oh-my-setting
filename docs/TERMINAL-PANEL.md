@@ -499,9 +499,11 @@ the newest other unread mail up to 128 messages; older unread mail stays in the
 sealed log, a note in the successor says so, and acknowledging it through
 either id records the receipt. Carried mail keeps its send time and a
 broadcast its original audience; a call whose parent left stays behind. Until
-its carry completes the successor refuses other writes, and the first one
-finishes a carry a crash cut short. The Past tab also lists the previous room's
-settled calls.
+its carry completes the successor refuses other writes; the next write by a
+main or the panel finishes a carry a crash cut short, and a worker's write is
+refused until then, since workers cannot carry. The successor keeps the sealed
+room's creator, and a rebound main keeps its first native session. The Past
+tab also lists the previous room's settled calls.
 A running main keeps its environment and native session: its writes, reads and
 dispatches follow the old id to the successor.
 

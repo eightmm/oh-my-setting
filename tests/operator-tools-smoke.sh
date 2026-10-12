@@ -7836,7 +7836,7 @@ with patch.dict(os.environ, {}):
     ids = [e["id"] for e in events_new if e["kind"] == "message"]
     joined = [e["participant"] for e in events_new if e["kind"] == "join"]
     assert len(ids) == len(set(ids)) and len(joined) == len(set(joined)), (ids, joined)
-    assert events_new[0] == {"kind": "created", "participant": lead, "predecessor": old}
+    assert events_new[0] == {"kind": "created", "predecessor": old}, events_new[0]
     sealed = room.records(roll, old)
     assert sealed[-1]["room_event"]["kind"] == "successor" and sealed[-1]["text"] == "Room continues as " + new
     # Carried: joined main (consumer, scope, label), running and unread-result calls, mail still owed, open question
@@ -8098,6 +8098,15 @@ with patch.dict(os.environ, {}):
                 pass
         after = room.successor_id(raced)
         assert room.resolve(where, raced, fresh=True) == after and not room.status(where, after)["carried"]
+        # Workers cannot carry, so a worker's write waits for a main's to finish the carry.
+        with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1", "OMS_ROOM_ID": raced, "OMS_ROOM_PARTICIPANT": "call-y",
+                                     "OMS_ROOM_REPO": str(where)}):
+            try:
+                room.send(where, raced, "call-y", "m1", "Before the carry", "question")
+            except ValueError as error:
+                assert "room carry is unfinished" in str(error), error
+            else:
+                raise AssertionError("a worker wrote into a half-carried successor")
         with bound(raced, "m1"):
             room.send(where, after, "m1", "m2", "Enrolled writer", "note")
         healed = room.status(where, after)
@@ -8105,6 +8114,7 @@ with patch.dict(os.environ, {}):
         people = {p["participant"]: p for p in healed["participants"]}
         assert not people["m3"]["joined"] and people["m2"]["owns"] == ["src"], people
         assert people["m1"]["label_override"] == "Second work" and people["m1"]["consumer"] != consumer
+        assert people["m1"]["initial_consumer"] == consumer, people["m1"]
         assert room.selected(where, people["m1"]["consumer"]) == (after, "m1")
         # The answered question stays answered, and the broadcast reaches only who it reached when sent.
         assert not [q for q in healed["open_questions"] if q["id"] == question], healed["open_questions"]
@@ -8197,6 +8207,56 @@ with patch.dict(os.environ, {}):
         with bound(flooded, "m1"), patch.object(room, "CARRY_MESSAGES", 1):
             moved = room.rollover(where, flooded, "m1")
         assert len(room.status(where, moved)["open_questions"]) == 3
+        # A worker cannot take its room's derivable successor id ahead of the rollover, nor write plain rows
+        # (a raw close among them) into a room log; oms room close refuses it the same way.
+        squatted = fresh("m1", calls=[("call-s", "m1")])
+        squatter = dict(os.environ, OMS_HARNESS_CHILD="1", OMS_ROOM_ID=squatted, OMS_ROOM_PARTICIPANT="call-s",
+                        OMS_ROOM_REPO=str(where))
+        for verb in (["new", "--id", room.successor_id(squatted), "--topic", "x"],
+                     ["new", "--id", room.successor_id(squatted), "--live"],
+                     ["append", "--id", squatted, "--role", "note", "--text", "plain"],
+                     ["close", "--id", squatted]):
+            refused = subprocess.run(["bash", str(panel.ENTRY), "thread", "--repo", str(where)] + verb, env=squatter,
+                                     capture_output=True, text=True, timeout=60)
+            assert refused.returncode and ("worker cannot create a room" in refused.stderr
+                                           or "admitted room participant" in refused.stderr), (verb, refused)
+        assert not (where / ".oms/threads" / (room.successor_id(squatted) + ".jsonl")).exists()
+        assert not room.status(where, squatted)["closed"]
+        with bound(squatted, "m1"):
+            moved = room.rollover(where, squatted, "m1")
+        refused = subprocess.run(["bash", str(panel.ENTRY), "thread", "--repo", str(where), "close", "--id", moved],
+                                 env=squatter, capture_output=True, text=True, timeout=60)
+        assert refused.returncode and not room.status(where, moved)["closed"], refused
+        # The successor keeps the sealed room's creator: the main that rolled it over gains no close right, and
+        # a rebound main keeps the session it first joined with, so resume ownership still knows that session.
+        created = room.create(where, title="Creator room", creator="c0")
+        for who in ("m1", "m2", "m3"):
+            room.join(where, created, who, "codex", "main", native_session="sess-%s-%s" % (created, who))
+        first = member(created, "m1")["consumer"]
+        # A main that rejoined without a native session stays unbound; its released session is not revived.
+        released = member(created, "m3")["consumer"]
+        room.append(where, created, {"kind": "leave", "participant": "m3"}, "Participant left")
+        room.join(where, created, "m3", "codex", "main")
+        with bound(created, "m1"):
+            room.bind(where, created, "m1", "sess-rebound", replaces=first)
+        with bound(created, "m2"):
+            moved = room.rollover(where, created, "m2")
+            assert room.status(where, moved)["creator"] == "c0"
+            room.append(where, created, {"kind": "leave", "participant": "m2"}, "Participant left")
+            try:
+                room.close(where, created, "m2")
+            except ValueError as error:
+                assert "has not joined" in str(error), error
+            else:
+                raise AssertionError("the main that rolled a room over kept a creator's close right")
+        rebound = member(moved, "m1")
+        assert rebound["initial_consumer"] == first and rebound["consumer"] != first, rebound
+        assert not member(moved, "m3").get("consumer") and room.selected(where, released) in (None, (None, None))
+        assert room.selected(where, first) == (None, None) and any(
+            p.get("initial_consumer") == first for s in room.discover(where)[0] if s["id"] == moved
+            for p in s["participants"])
+        room.close(where, created, "c0")
+        assert room.status(where, moved)["closed"]
     for mode, panel_env in (("stripped", False), ("panel", True)):
         rollover_regressions(temporary / ("rollover regressions " + mode), panel_env)
 recorded = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--limit", "300", "--json"]))

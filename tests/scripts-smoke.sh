@@ -6959,9 +6959,9 @@ life_raw = (repo / proof['lifecycle']['path']).read_bytes()
 life_lines = life_raw.splitlines(keepends=True)
 assert len(life_lines) >= 3
 room_raw = (repo / proof['room']['path']).read_bytes()
-def variant(raw, count=None):
+def variant(raw, count=None, kind='lifecycle'):
     changed = copy.deepcopy(proof)
-    item = changed['lifecycle']
+    item = changed[kind]
     digest = h(raw)
     item.update(path='.oms/plan/completion-prefixes/' + digest + '.jsonl',
                 sha256=digest, bytes=len(raw), rows=raw.count(b'\n') if count is None else count)
@@ -7070,26 +7070,47 @@ successor_path = repo / '.oms/threads' / (successor_room + '.jsonl')
 carried_join = {'schema': 1, 'ts': seal['ts'], 'thread': successor_room, 'seq': 3, 'role': 'note', 'agent': 'agent',
                 'text': 'Joined', 'room_event': {'kind': 'join', 'participant': participant, 'provider': 'codex',
                                                  'role': 'main', 'label': participant}}
+carried_mark = dict(carried_join, seq=4, text='Carried from ' + room, room_event={'kind': 'carried'})
+window = (seal['ts'], seal['ts'])
 try:
-    sealed_path.write_bytes(unsealed + (json.dumps(seal) + '\n').encode())
+    sealed_raw = unsealed + (json.dumps(seal) + '\n').encode()
+    sealed_path.write_bytes(sealed_raw)
+    sealed_proof = variant(sealed_raw, kind='room')
     scope['reset_streams']()
     scope['membership_epoch'](str(repo), room, participant, 'codex')
+    # A Desktop reviewer names the room it is in now: a sealed log no longer sees its leave, close or rebind.
+    desktop_bundle = {'owner': {'participant': participant, 'parent_provider': 'codex'},
+                      'reviewer': {'kind': 'codex-desktop-main', 'room_id': room, 'approval': {}}}
+    try:
+        scope['completion_owner'](str(repo), desktop_bundle, {'claimed_by_participant': participant},
+                                  'accept-main-research', '0' * 64)
+    except ValueError as error:
+        assert 'continues as ' + successor_room in str(error), error
+    else:
+        assert False, 'a Desktop reviewer approved through a sealed room'
     # The main keeps the old id after the rollover; a close or leave through it lands in the successor and
     # still ends the membership.
     for ending in ('closed', 'leave'):
-        successor_path.write_text(''.join(json.dumps(r) + '\n' for r in successor_rows + [carried_join]))
+        successor_path.write_text(''.join(json.dumps(r) + '\n' for r in successor_rows + [carried_join, carried_mark]))
         scope['reset_streams']()
         scope['membership_epoch'](str(repo), room, participant, 'codex')
+        # A READ spanning the rollover is not a recycled membership: the carried join replays the sealed log.
+        scope['membership_epoch'](str(repo), room, participant, 'codex', window)
         with successor_path.open('a') as handle:
-            handle.write(json.dumps(dict(carried_join, seq=4, text=ending, room_event={
+            handle.write(json.dumps(dict(carried_join, seq=5, text=ending, room_event={
                 'kind': ending, 'participant': participant})) + '\n')
         scope['reset_streams']()
-        try:
+        for read_window, refusal in ((None, 'unproven or recycled'), (window, 'boundary is unproven')):
+            try:
+                scope['membership_epoch'](str(repo), room, participant, 'codex', read_window)
+            except ValueError as error:
+                assert refusal in str(error), error
+            else:
+                assert False, 'a %s in the successor kept the old room membership' % ending
+        # A receipt accepted after the seal revalidates against its captured logs, not the successor written later.
+        scope['reset_streams']()
+        with scope['historical_prefixes'](str(repo), sealed_proof):
             scope['membership_epoch'](str(repo), room, participant, 'codex')
-        except ValueError as error:
-            assert 'unproven or recycled' in str(error), error
-        else:
-            assert False, 'a %s in the successor kept the old room membership' % ending
 finally:
     sealed_path.write_bytes(unsealed)
     if successor_path.exists():
@@ -30950,6 +30971,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 from unittest import mock
@@ -31247,6 +31269,23 @@ with tempfile.TemporaryDirectory() as home:
     duplicate.unlink()
     with mock.patch.object(m, "MAX_STORE_ENTRIES", 2):
         rejects(m._find_rollout, str(store / "sessions"), consumer, os.getuid(), home, 0)
+# A rolled-over room's sealed log no longer sees the main's rebind, leave or close: approval names its successor.
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts/lib"))
+import room as room_lib
+unbound = {k: v for k, v in os.environ.items() if not k.startswith(("OMS_ROOM_", "OMS_PANEL_"))
+           and k not in ("OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH")}
+with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, unbound, clear=True):
+    where = os.path.realpath(home)
+    subprocess.run(["git", "init", "-q", where], check=True)
+    ident = room_lib.create(where, title="Approver room")
+    for who in ("dm", "m2"):
+        room_lib.join(where, ident, who, "codex", "main", native_session="sess-" + who)
+    assert m._room_approver(where, ident, "dm")[0] == m._sha(b"sess-dm")[:32]
+    moved = room_lib.rollover(where, ident, "m2")
+    rejects(m._room_approver, where, ident, "dm")
+    assert m._room_approver(where, moved, "dm")[0] == m._sha(b"sess-dm")[:32]
+    room_lib.append(where, ident, {"kind": "leave", "participant": "dm"}, "Participant left")
+    rejects(m._room_approver, where, moved, "dm")
 with mock.patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}, clear=True):
     rejects(m.capture_completed_main_reviewer, repo, task, bundle_sha, "room", "main", ref, request)
 PY
