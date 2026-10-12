@@ -5094,8 +5094,9 @@ def main(argv=None):
         parser.error("task exceeds the panel input contract")
     if args.watch and (args.launch or args.json or args.dry_run):
         parser.error("--watch is a read-only view; cannot combine with launch, JSON or dry-run")
-    if args.owner is not None and not (args.watch or args.dispatch or args.council or args.finalize):
-        parser.error("--owner requires --watch, --dispatch, --council or --finalize")
+    # A main names itself on every panel call; reading results accepts that identity without filtering by it.
+    if args.owner is not None and not (args.watch or args.dispatch or args.council or args.finalize or args.results):
+        parser.error("--owner requires --watch, --dispatch, --council, --finalize or --results")
     if args.count is not None and not args.watch:
         parser.error("--count requires --watch")
     if args.no_animation and not args.watch:

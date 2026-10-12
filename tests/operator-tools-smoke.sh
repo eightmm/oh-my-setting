@@ -3860,6 +3860,9 @@ else:
     plan_path.write_bytes(before_plan)
 reopened = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results",
                             "--task-id", "panel-council-test", "--json"]))
+# A main that names itself (as Pi mains do) reads the same results.
+assert json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results", "--owner", "codex",
+                        "--task-id", "panel-council-test", "--json"])) == reopened
 row = reopened["rows"][0]
 assert row["acceptance"] and row["summary"].startswith("결과 화면") and row["delivery"] == "not_requested"
 assert any(c.get("answer", "").startswith("Answer:") for c in row["calls"]), row
