@@ -353,11 +353,11 @@ def live_readers(report, members, settled):
                                                and m.get("state") in reading and not settled(m)}
 
 
-def message_successors(repo, members):
+def message_successors(rows, members):
     """Display-only succession uses the continuation validator, never room consumption."""
-    from terminal_panel import lineage_ids
+    from terminal_panel import lineage_ids_from_rows
     mains = [m for m in members if m.get("role") == "main"]
-    histories = [(m, lineage_ids(repo, m.get("provider"), m["participant"], m.get("attempt")))
+    histories = [(m, lineage_ids_from_rows(rows, m.get("provider"), m["participant"], m.get("attempt")))
                  for m in mains if m.get("attempt") and m.get("state") not in TERMINAL_STATES]
     output = {}
     for old in mains:
@@ -1836,12 +1836,13 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
     worktree = bool(member and kind == "result" and str(member.get("location") or "").startswith("worktree:"))
     mail = bool(navigation.get("full_mail") and navigation.get("tab", "detail") == "detail"
                 and navigation.get("tab_body_visible") and not navigation.get("detail"))
+    message_call = tabs and navigation.get("tab") == "messages" and navigation.get("message_has_call")
     if navigation.get("keys_help"):
         keys = ["? Hide", "Esc Back", "F5 Control" if managed else "", "k Capacity", "u Refresh",
                 ("Enter Collapse" if navigation.get("messages_view", {}).get("open") is not None and navigation.get("messages_view", {}).get("open") == navigation.get("messages_view", {}).get("selected") else "Enter Expand") if tabs and navigation.get("tab") == "messages" else
                 "Enter Open right" if managed and kind in {"result", "debate"} else "Enter Open",
                 move + " Move", "Space Fold", "a Ask advisor",
-                "w Worktree" if worktree else "", "f Open right" if mail or managed and navigation.get("full_result") else
+                "w Worktree" if worktree else "", "f Open right" if mail or message_call or managed and navigation.get("full_result") else
                 "f Full result" if navigation.get("full_result") else "",
                 "Tab Next tab" if tabs else "", "g Graph", "t Tree",
                 "n New main" if managed and not navigation.get("main_occupied") else "",

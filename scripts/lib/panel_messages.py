@@ -310,14 +310,14 @@ def handle(event, navigation):
         state["open"] = None
         state["reveal"] = True
         return True
-    elif kind == "f" or kind == "enter" and state.get("selected") in ids and state.get("open") == state["selected"]:
+    elif kind == "f":
         target = navigation.get("message_calls", {}).get(state.get("selected"))
         if target:
             navigation["open_call"] = target
         else:
             navigation["notice"] = "This message has no call to open"
     elif kind == "enter" and state.get("selected") in ids:
-        state["open"] = state["selected"]
+        state["open"] = None if state.get("open") == state["selected"] else state["selected"]
         state["reveal"] = True
     elif kind == "click":
         ident = clicked(event, navigation)

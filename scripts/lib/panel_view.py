@@ -429,7 +429,10 @@ def inbox_items(report, unicode=True):
                           "who": who(sender), "what": "to all: " + clean(text, 80),
                           "style": "alert", "action": ("chat", sender["participant"]),
                           "row_id": ("message", str(message.get("id")) if message.get("id") else ("position", index))})
-        elif exited_mail(message, byid) and message.get("id") not in open_ids:
+    room = mapping(report.get("room"))
+    pending = room.get("pending_messages") if "pending_messages" in room else room.get("messages")
+    for index, message in enumerate(listing(pending)):
+        if exited_mail(message, byid) and message.get("id") not in open_ids:
             target = successors.get(message["recipient"], message["recipient"])
             asker = byid.get(message.get("sender"), {})
             items.append({"stamp": message.get("ts") or "", "glyph": "?" if message.get("message_kind") == "question" else ">",

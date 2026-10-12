@@ -1021,10 +1021,18 @@ def session_stored(provider, session):
 
 def lineage_ids(repo, owner, participant, current_attempt):
     """Own participant history plus released earlier mains of this provider; unknown ownership fails closed."""
+    try:
+        rows = json.loads(events(repo, "list", "--json", output=True))
+        return lineage_ids_from_rows(rows, owner, participant, current_attempt)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return set()
+
+
+def lineage_ids_from_rows(rows, owner, participant, current_attempt):
+    """Apply the continuation ownership checks to already collected attempt evidence."""
     from datetime import datetime
     from panel_view import TERMINAL_STATES
     try:
-        rows = json.loads(events(repo, "list", "--json", output=True))
         if (not isinstance(rows, list) or any(not isinstance(row, dict)
                 or not isinstance(row.get("refs", {}), dict) for row in rows)):
             return set()
@@ -3334,6 +3342,7 @@ def snapshot(repo, room_id=None, _tick=None):
                 state.pop("native_advisors", None)
                 state.pop("finalized", None)
                 state.pop("room_attempts", None)
+                attempt_rows = []
                 rows = []
                 if managed_session():
                     # The main's window names its chat pane, read for busy/idle activity.
@@ -3350,12 +3359,12 @@ def snapshot(repo, room_id=None, _tick=None):
                     repo, state["room"]["participants"], rows).items() if row.get("room") == ident}
                 try:
                     # Members outside the 8 + 8 row dashboard projection keep their real state from the full projection.
-                    rows = _tick.attempts()
-                    if isinstance(rows, list):
+                    attempt_rows = _tick.attempts()
+                    if isinstance(attempt_rows, list):
                         calls = {m["participant"]: m.get("role") for m in state["room"]["participants"]
                                  if m.get("joined")}
                         linked = {}
-                        for row in rows:
+                        for row in attempt_rows:
                             # The ledger keeps panel identity in refs; the dashboard projection lifts it into "panel".
                             refs = row.get("refs") or {}
                             who = refs.get("panel_room_participant")
@@ -3368,9 +3377,9 @@ def snapshot(repo, room_id=None, _tick=None):
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
                 try:
-                    # Succession is display-only; a lineage read failure leaves mail with its original main.
+                    # Succession reuses this tick's evidence; a failed read leaves mail with its original main.
                     from room_view import message_successors, nodes
-                    state["message_successors"] = message_successors(repo, nodes(state))
+                    state["message_successors"] = message_successors(attempt_rows, nodes(state))
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     state.pop("message_successors", None)
                 try:

@@ -749,8 +749,10 @@ def status(repo, room):
             pair["sent"] += 1
             pair["pending"] += int(target in message["pending_for"])
     state["pairs"] = list(pairs.values())
-    # Live readers are known only to the panel; retain pending recipients beyond the text window.
-    pending = [{"id": message["id"], "pending_for": message["pending_for"]}
+    # Live readers are known only to the panel; retain pending mail beyond the recent text window.
+    # Inbox previews need routing and a bounded snippet, not the full pending message bodies.
+    pending = [dict({k: message[k] for k in ("id", "pending_for", "sender", "recipient", "message_kind", "answered", "ts")},
+                    text=message["text"][:300])
                for message in state["messages"] if message["pending_for"]]
     state["pending_messages"] = pending[-500:]
     state["pending_messages_truncated"] = len(pending) > 500

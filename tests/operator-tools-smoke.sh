@@ -1975,7 +1975,7 @@ board("messages", 110, 40, nav=nav)
 assert tab_event(("up",), nav) and tab_event(("enter",), nav)
 opened_message = board("messages", 80, 60, nav=nav)[1]
 assert "END" in opened_message and "paragraph two" in opened_message and opened_message.count("word") > 70, opened_message
-assert tab_event(("enter",), nav) and nav["messages_view"]["open"] is not None
+assert tab_event(("f",), nav) and nav["messages_view"]["open"] is not None
 assert "no call" in nav["notice"] and "open_call" not in nav
 assert tab_event(("escape",), nav)
 # Esc closes an open message and nothing else; with none open it is left to the board.
@@ -2041,7 +2041,8 @@ many_pending["room"], many_log = pending_projection(32, consumed=2)
 assert len(many_pending["room"]["messages"]) == 12 and many_pending["room"]["message_count"] == 32
 assert many_pending["room"]["pending_count"] == 60
 assert many_pending["room"]["pending_messages"] == [
-    {"id": m["id"], "pending_for": m["pending_for"]} for m in many_log if m["pending_for"]]
+    dict({k: m[k] for k in ("id", "pending_for", "sender", "recipient", "message_kind", "answered", "ts")},
+         text=m["text"][:300]) for m in many_log if m["pending_for"]]
 assert not many_pending["room"]["pending_messages_truncated"]
 readers = room_view.live_readers(many_pending, nodes(many_pending), settler(many_pending)[0])
 all_rows = panel_messages._rows(many_log, str, readers=readers, width=123)
@@ -2053,7 +2054,7 @@ for loaded in (True, False):
     if loaded:
         many_nav["messages_view"]["log"] = many_log
     many_body = panel_messages.tab_body(many_pending, 123, 40, many_nav)
-    tagged = sum(bool(action) and "unread" in line for line, action, _ in many_body)
+    tagged = sum(bool(action) and " ● " in line for line, action, _ in many_body)
     assert tagged == (expected if loaded else 12), many_body
     assert live_unread(many_pending, nodes(many_pending), settler(many_pending)[0]) == expected
     many_board = render(many_pending, "codex", 127, 60, view="graph", navigation=many_nav)
@@ -2113,7 +2114,12 @@ for width in (50, 80, 127):
     assert single_nav["message_has_call"] and panel_messages.handle(("f",), single_nav)
     assert single_nav.pop("open_call") == ("result", "w")
     assert panel_messages.handle(("enter",), single_nav)
-    assert panel_messages.handle(("enter",), single_nav) and single_nav.pop("open_call") == ("result", "w")
+    assert single_nav["messages_view"]["open"] == "question" and "open_call" not in single_nav
+    assert len(panel_messages.tab_body(default_single, width, 30, single_nav)) > len(body)
+    assert panel_messages.handle(("f",), single_nav) and single_nav.pop("open_call") == ("result", "w")
+    assert panel_messages.handle(("enter",), single_nav)
+    assert single_nav["messages_view"]["open"] is None and "open_call" not in single_nav
+    assert panel_messages.tab_body(default_single, width, 30, single_nav) == body
     assert panel_messages.handle(("right",), single_nav)
     body = panel_messages.tab_body(single, width, 30, single_nav)
     assert "Filter: by call" in body[0][0] and set(single_nav["message_ids"]) == {"question", "brief"}, body
@@ -2142,12 +2148,27 @@ for width in (50, 80, 127):
     panel_messages.tab_body(single, width, 30, single_nav)
     assert not single_nav["message_has_call"]
     assert panel_messages.handle(("f",), single_nav) and "open_call" not in single_nav and "no call" in single_nav["notice"]
+    single_nav.pop("notice")
+    for opened in ("brief", None):
+        assert panel_messages.handle(("enter",), single_nav)
+        assert single_nav["messages_view"]["open"] == opened
+        assert "open_call" not in single_nav and "notice" not in single_nav
+        panel_messages.tab_body(single, width, 30, single_nav)
     assert panel_messages.handle(("right",), single_nav)
     assert "Filter: this call" in panel_messages.tab_body(single, width, 30, single_nav)[0][0]
     assert panel_messages.handle(("right",), single_nav)
     assert "Filter: needs you" in panel_messages.tab_body(single, width, 30, single_nav)[0][0]
     full_board = render(single, "codex", width, 60, view="graph", navigation={"tab": "messages"})
     assert ("Messages 1 unread" if width >= 76 else "Messages: 1 unread") in full_board, full_board
+for glyphs in (True, False):
+    for help_open in (True, False):
+        hint_nav = {"tab": "messages", "tab_strip_visible": True, "message_has_call": True,
+                    "keys_help": help_open, "help_rows": 8,
+                    "messages_view": {"selected": "question", "open": "question"}}
+        hints = " ".join(room_view.footer_hints(hint_nav, 200, True, glyphs, None, True))
+        assert "Enter Collapse" in hints and "f Open right" in hints, hints
+        hint_nav["messages_view"]["open"] = None
+        assert "Enter Expand" in " ".join(room_view.footer_hints(hint_nav, 200, True, glyphs, None, True))
 assert who(members[0]) == who(members[0], task=False)
 worker = next(m for m in members if m["participant"] == "w")
 assert "Fix message reader" in who(worker, task=True) and "Fix message reader" not in who(worker)
@@ -10324,8 +10345,8 @@ def exercise_exited_main_mail():
     def project():
         report["attempts"]["recent"] = [dict(r, panel={"role": "main", "room_id": "mail",
             "room_participant": r["attempt_id"]}) for r in ledger]
-        with patch.object(panel, "events", return_value=json.dumps(ledger)):
-            report["message_successors"] = room_view.message_successors("unused", room_view.nodes(report))
+        with patch.object(panel, "events", side_effect=AssertionError("succession reread ledger")):
+            report["message_successors"] = room_view.message_successors(ledger, room_view.nodes(report))
 
     for ident, kind, target in (("mail-q", "question", "mail-old1"),
                                 ("mail-note", "note", "mail-old1"),
@@ -10336,8 +10357,7 @@ def exercise_exited_main_mail():
             "text": "Call exit=0; verify\x1b[2J\u202e", "ts": "2026-10-10T00:00:00Z"})
     report["room"]["open_questions"] = [{k: m[k] for k in ("id", "sender", "recipient", "ts")}
                                          for m in report["room"]["messages"] if m["message_kind"] == "question"]
-    report["room"]["pending_messages"] = [{"id": m["id"], "pending_for": m["pending_for"]}
-                                            for m in report["room"]["messages"]]
+    report["room"]["pending_messages"] = deepcopy(report["room"]["messages"])
     report["room"]["message_count"] = 4
 
     def surfaces(inherited=False):
@@ -10371,10 +10391,57 @@ def exercise_exited_main_mail():
 
     project()
     surfaces()
+    def history_window():
+        rows = [{"thread": "mail", "seq": 0, "room_event": {"kind": "created"}}]
+        rows += [{"seq": i + 1, "room_event": dict(kind="join", label=m["participant"], **{k: m[k] for k in
+                    ("participant", "provider", "role")})}
+                 for i, m in enumerate(report["room"]["participants"])]
+        start = len(rows)
+        rows += [{"seq": start, "ts": "2026-10-10T00:00:00Z", "text": "Old pending note\x1b[2J\u202e" + "x" * 1000,
+                  "room_event": {"kind": "message", "id": "old-note", "sender": "mail-reviewer",
+                                 "recipient": "mail-old1", "message_kind": "note"}}]
+        rows += [{"seq": start + i + 1, "text": "New status", "room_event": {
+                  "kind": "message", "id": "status-%d" % i, "sender": "mail-reviewer",
+                  "recipient": "all", "message_kind": "status"}} for i in range(12)]
+        def projected():
+            with patch.object(room, "records", return_value=rows):
+                return dict(report, room=room.status("unused", "mail"))
+        window = projected()
+        assert len(window["room"]["messages"]) == 12 and all(m["id"] != "old-note" for m in window["room"]["messages"])
+        assert len(window["room"]["pending_messages"][0]["text"]) == 300
+        before = deepcopy(window)
+        items = inbox_items(window, False)
+        target = report["message_successors"].get("mail-old1", "mail-old1")
+        assert len(items) == 1 and items[0]["action"] == ("chat", target), items
+        assert "Old pending note" in items[0]["what"] and "\x1b" not in str(items) and "\u202e" not in str(items)
+        assert ("(main exited)" if target == "mail-old1" else "(was #old1)") in items[0]["what"]
+        assert room_view.live_unread(window, room_view.nodes(window), room_view.settler(window)[0]) == 1
+        screen = render(window, "codex", 127, 40, unicode=False, menu=True)
+        assert screen.isascii() and "Needs you / 1" in screen, screen
+        assert window == before, "pending projection display changed room evidence"
+        # Recent history and pending projection overlap without duplicate rows; the projection is authoritative.
+        window["room"]["messages"].append(window["room"]["pending_messages"][0])
+        assert len(inbox_items(window, False)) == 1
+        window["room"]["pending_messages"] = []
+        assert not inbox_items(window, False), "empty projection used stale recent mail"
+        rows.append({"seq": start + 13, "room_event": {
+            "kind": "received", "participant": "mail-old1", "messages": ["old-note"]}})
+        assert not inbox_items(projected(), False), "received note still needs attention"
+        rows.pop()
+        # Preserve the existing bounded lower-bound count after the 500-message projection cap.
+        rows += [{"seq": start + 13 + i, "text": "Pending note", "room_event": {
+                  "kind": "message", "id": "extra-%d" % i, "sender": "mail-reviewer",
+                  "recipient": "mail-old1", "message_kind": "note"}} for i in range(500)]
+        capped = projected()
+        assert len(capped["room"]["pending_messages"]) == len(inbox_items(capped, False)) == 500
+        assert room_view.live_unread(capped, room_view.nodes(capped), room_view.settler(capped)[0]) == "500+"
+
+    history_window()
     ledger.append(successor)
     report["room"]["participants"].append(dict(report["room"]["participants"][0], participant="mail-new1", seq=4))
     project()
     surfaces(True)
+    history_window()
     successor_nav = {"main_attempt": "mail-new1", "messages_view": {
         "filter": 3, "selected": None, "open": None, "scroll": 0}}
     body = panel_messages.tab_body(report, 200, 20, successor_nav, False)
@@ -10385,16 +10452,28 @@ def exercise_exited_main_mail():
     with patch.object(room, "age", return_value=0):
         assert len(inbox_items(report)) == 4, "an exited main's fresh question vanished"
     # Snapshot reads full main lifecycle evidence outside the dashboard's capped rows.
-    with patch.object(panel, "dashboard", return_value=(dict(report, attempts={"recent": [], "active_recent": []}), 0)), \
+    with patch.object(panel, "dashboard", side_effect=lambda *args, **kwargs:
+                      (dict(deepcopy(report), attempts={"recent": [], "active_recent": []}), 0)), \
             patch.object(room, "status", return_value=deepcopy(report["room"])), \
             patch.object(panel, "managed_session", return_value=False), \
             patch.object(panel, "main_activity", return_value={}), \
-            patch.object(panel, "events", return_value=json.dumps(ledger)), \
+            patch.object(panel, "events", side_effect=AssertionError("snapshot reread ledger")), \
+            patch.object(panel, "read_shared", side_effect=lambda repo, key, collect, **kw: collect()), \
             patch.object(panel, "awaiting_admission", return_value=[]), \
             patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "{}", "")):
-        collected, status = panel.snapshot(Path("."), "mail", _tick=SimpleNamespace(attempts=lambda: ledger))
+        from unittest.mock import Mock
+        attempts = Mock(return_value=ledger)
+        collected, status = panel.snapshot(Path("."), "mail", _tick=SimpleNamespace(attempts=attempts))
+        attempts.assert_called_once_with()
+        failed_attempts = Mock(side_effect=ValueError("attempt evidence unavailable"))
+        fallback, fallback_status = panel.snapshot(Path("."), "mail", _tick=SimpleNamespace(attempts=failed_attempts))
+        failed_attempts.assert_called_once_with()
+        assert fallback_status == 0 and not fallback.get("message_successors"), fallback
     assert status == 0 and collected["message_successors"] == report["message_successors"], collected
     assert len(inbox_items(collected)) == 4
+    with patch.object(panel, "events", return_value=json.dumps(ledger)):
+        assert panel.lineage_ids("unused", "claude", "mail-new1", "mail-new1") == \
+               panel.lineage_ids_from_rows(ledger, "claude", "mail-new1", "mail-new1")
     # Unproven, foreign, later and ambiguous predecessors never change recipient ownership.
     for changed in (dict(old, terminal=None), dict(old, provider="codex"),
                     dict(old, created_at="2026-10-12T00:00:00Z"), dict(old, state="working", terminal=False)):
