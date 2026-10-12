@@ -2124,7 +2124,7 @@ for width in (50, 80, 127):
     assert panel_messages.handle(("right",), single_nav)
     body = panel_messages.tab_body(single, width, 30, single_nav)
     assert "Filter: all" in body[0][0]
-    tagged = [line for line, action, _ in body if action and "unread" in line]
+    tagged = [line for line, action, _ in body if action and (" ● " in line or " * " in line)]
     members = nodes(single)
     settled, _ = settler(single)
     assert live_readers(single, members, settled) == {"m2", "w"}
@@ -2210,7 +2210,7 @@ for width in (24, 42, 50, 80, 127):
                 body = panel_messages.tab_body(narrow, width, 30, narrow_nav, glyphs)
                 assert all(display_width(line) <= width for line, _, _ in body), (width, glyphs, body)
                 if filter_index == 2:
-                    tagged = [line for line, action, _ in body if action and "unread" in line]
+                    tagged = [line for line, action, _ in body if action and (" ● " in line or " * " in line)]
                     assert live_unread(narrow, nodes(narrow), settler(narrow)[0]) == len(tagged) == 1, body
                 if filter_index == 0:
                     assert panel_messages.handle(("enter",), narrow_nav)
@@ -10356,7 +10356,7 @@ def exercise_exited_main_mail():
             nav = {}
             body = panel_messages.tab_body(report, 200, 20, nav, glyphs)
             assert body[0][0] == "Filter: needs you (4)" and len(nav["message_ids"]) == 4, body
-            tagged = [line for line, action, _ in body if action and "unread" in line]
+            tagged = [line for line, action, _ in body if action and (" ● " in line or " * " in line)]
             assert len(tagged) == room_view.live_unread(report, members, room_view.settler(report)[0]) == 4
             assert all(("(was #old" if inherited else "(main exited)") in line for line in tagged), tagged
             for columns, height in ((50, 18), (127, 40), (200, 60)):
