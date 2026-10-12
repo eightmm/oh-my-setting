@@ -1587,9 +1587,8 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     if active == "detail" and rows_high >= 3 and previewed and previewed.get("role") == "main":
         from panel_messages import main_mail
         participant = previewed["participant"]
+        # Pair totals also count result handoffs, so only mail-specific evidence enables the reader.
         if (main_mail(room, participant)
-                or any(mapping(p).get("recipient") == participant
-                       and (mapping(p).get("sent") or mapping(p).get("pending")) for p in listing(room.get("pairs")))
                 or any(participant in listing(mapping(m).get("pending_for")) and not result_handoff(room, m)
                        for m in listing(room.get("pending_messages")))):
             navigation["full_mail"] = ("mail", previewed["participant"])

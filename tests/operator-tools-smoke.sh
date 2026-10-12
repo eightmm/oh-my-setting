@@ -8225,8 +8225,11 @@ for window, cells in split_widths:
         assert cells == panel.split_cells(("left", panel.BOARD_SHARE, True), window)
         assert cells >= 20 and window - cells - 1 >= 40
 assert panel.board_split_cells(("left", 28, True), 61) == 20
-assert panel.board_split_cells(("left", 35, True), 61) is None
-assert panel.board_split_cells(("left", 70, False), 80) is None
+assert panel.board_split_cells(("left", 35, True), 61) == 20  # the default share yields to the CLI minimum
+assert panel.board_split_cells(("left", 70, False), 80) == 39
+# A dragged width is kept once the window can hold both minimums.
+assert panel.board_split_cells(("left", 70, False), 110, explicit=True) == 70
+assert panel.board_split_cells(("left", 70, False), 60, explicit=True) is None
 def board_calls(display, terminal=None, percent=""):
     def answer(command, **kwargs):
         return subprocess.CompletedProcess(command, 0, display if "display-message" in command else "", "")
@@ -9331,14 +9334,20 @@ with patch.object(panel.room, "records", return_value=mail_records), \
     assert len(old_flow["room"]["messages"]) == 12
     assert not panel.panel_messages.main_mail(old_flow["room"], "flow-main")
     old_frozen = json.dumps(old_flow, sort_keys=True)
-    for projection in (old_flow, dict(old_flow, room=dict(old_flow["room"], pairs=[])),
-                       dict(old_flow, room=dict(old_flow["room"], pending_messages=[],
-                            pairs=[dict(p, pending=0) for p in old_flow["room"]["pairs"]]))):
+    for projection in (old_flow, dict(old_flow, room=dict(old_flow["room"], pairs=[]))):
         old_nav = {"tab": "detail", "selected": ("chat", "flow-main")}
         old_screen = render(projection, "codex", 157, 44, view="graph", main_attempt="flow-attempt",
                             navigation=old_nav, unicode=False)
         assert old_nav["full_mail"] == ("mail", "flow-main") and choose(("f",), old_nav) == ("mail", "flow-main")
         assert "Tab Next tab" in old_screen.splitlines()[-1] and "q Quit" in old_screen.splitlines()[-1]
+    # Pair totals include result handoffs, so neither read mail beyond the window nor a handoff alone enables f;
+    # the Messages tab still lists read mail.
+    for projection in (dict(old_flow, room=dict(old_flow["room"], pending_messages=[])),
+                       dict(old_flow, room=dict(old_flow["room"], messages=[], pending_messages=[],
+                            pairs=[{"recipient": "flow-main", "sent": 1, "pending": 1}]))):
+        none_nav = {"tab": "detail", "selected": ("chat", "flow-main")}
+        render(projection, "codex", 157, 44, view="graph", main_attempt="flow-attempt", navigation=none_nav, unicode=False)
+        assert not none_nav.get("full_mail") and choose(("f",), none_nav) is None, none_nav
     with patch.object(panel, "managed_session", return_value=False):
         panel.navigate(project, ("mail", "flow-main"), old_flow, old_nav, 120)
     assert "OLDER NOTE\n" + mail_body in old_nav["detail"]["text"], old_nav["detail"]

@@ -2451,11 +2451,17 @@ def split_cells(stored, window):
     return max(low, min(high, cells)) if high >= low else max(1, window // 2)
 
 
-def board_split_cells(stored, window):
-    # The tree needs 20 cells; native CLI prompts need 40 (42-cell dogfood wrapped every word).
-    # Keep the window full width otherwise; the control pane's g key still opens the tree.
+NATIVE_MIN = 40  # a native CLI prompt below this wraps every word (42-cell dogfood: Claude Code got 21)
+
+
+def board_split_cells(stored, window, explicit=False):
+    """Board cells, or None when the window cannot hold a 20-cell tree beside a NATIVE_MIN-cell CLI; such a window
+    stays whole and the control pane's g key draws the same tree. A recorded (dragged) width is the person's choice
+    and is kept; the default share never squeezes the CLI below NATIVE_MIN."""
+    if window < MIN_BOARD + 1 + NATIVE_MIN:
+        return None
     cells = split_cells(stored, window)
-    return cells if cells >= MIN_BOARD and window - cells - 1 >= 40 else None
+    return cells if explicit else min(cells, window - 1 - NATIVE_MIN)
 
 
 def split_resize(stored, pane, window):
@@ -2502,7 +2508,7 @@ def board_split(pane, repo, command):
             pass
     width = "%d%%" % share
     if sized or window:
-        cells = board_split_cells(stored or ("left", share, True), (sized or window)[0])
+        cells = board_split_cells(stored or ("left", share, True), (sized or window)[0], explicit=stored is not None)
         if cells is None:
             return
     if sized:
