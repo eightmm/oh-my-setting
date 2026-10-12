@@ -4167,7 +4167,7 @@ for index, (owner, role, workload, access, purpose, expected) in enumerate(cases
 from panel_routing import newest_route_model
 assert newest_route_model("codex", "gpt-6-luna", ["gpt-6.2-luna", "gpt-6.10-luna", "gpt-7-astra"]) == "gpt-6.10-luna"
 assert newest_route_model("claude", "claude-haiku-5-5", ["claude-haiku-5-6", "claude-opus-9-9"]) == "claude-haiku-5-6"
-codex_only = {"provider": "codex", "binary": "codex", "installed": True, "models": ["gpt-6-sol"],
+codex_only = {"provider": "codex", "binary": "codex", "installed": True, "exact_model_override": True, "access": ["read", "write"], "models": ["gpt-6-sol"],
               "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-7-astra"]}
 with patch.object(panel, "provider_catalog", return_value=[codex_only]):
     assert panel.selected_route("codex", "worker", "deep", "read", "investigate")["model"] == "gpt-6.2-sol"
@@ -4176,7 +4176,7 @@ with patch.object(panel, "provider_catalog", return_value=[codex_only]):
     explicit = panel.selected_route("claude", "worker", None, "read", None, "codex")
     assert explicit["provider"] == "codex" and explicit["model"] == "gpt-6-luna" and explicit["effort"] == "medium"
 recorded = {"codex": {"weekly_used": 90}, "claude": {"weekly_used": None}}
-claude_candidate = {"provider": "claude", "binary": "claude", "installed": True, "models": []}
+claude_candidate = {"provider": "claude", "binary": "claude", "installed": True, "models": [], "exact_model_override": True, "access": ["read", "write"]}
 def fixture_selected_route(*args, **kwargs):
     target = args[5] if len(args) > 5 else kwargs.get("target")
     catalog = [row for row in (codex_only, claude_candidate) if target is None or row["provider"] == target]
