@@ -7,6 +7,8 @@ fi
 
 ROOT="${OMS_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 TMP="$(mktemp -d /tmp/oms-tests.XXXXXX)"
+# shellcheck source=tests/lib/smoke-env.sh
+. "$ROOT/tests/lib/smoke-env.sh"
 # Stop fixtures must never reach a live Codex app on the developer machine.
 export OMS_CODEX_NOTIFY=0
 # Worker-guard cases pin strictness per call. A caller that exports
@@ -79,6 +81,7 @@ export GIT_AUTHOR_NAME="oms-test" GIT_AUTHOR_EMAIL="test@example.com"
 export GIT_COMMITTER_NAME="oms-test" GIT_COMMITTER_EMAIL="test@example.com"
 export LC_ALL=C LANG=C TZ=UTC
 export HOME="$TEST_HOME" XDG_CONFIG_HOME="$TMP/config" XDG_CACHE_HOME="$TEST_HOME/.cache" NVM_DIR="$TEST_HOME/.nvm"
+oms_smoke_use_fixture_root
 # Harness residue (worktrees, lock dirs, delegate temp dirs) lives under
 # TMPDIR, and doctor/cleanup count what they find there. With the host's
 # shared /tmp, a stray oh-my-setting-* dir from a real run makes those tests
@@ -11466,13 +11469,20 @@ test_consult_memory_is_opt_in() {
 
 test_panel_write_workers_get_private_test_state() {
   local fixture="$TMP/panel-private-test-state"
-  local env_path
+  local root lifecycle repo out retained_root map_output
+  local caller_fixture="${OMS_FIXTURE_ROOT-}"
+  local original_lock="${OMS_LOCK_DIR-}" original_state="${XDG_STATE_HOME-}" original_cache="${XDG_CACHE_HOME-}"
+  local fixture_lock="${OMS_LOCK_DIR:-$fixture/original-locks}"
+  local fixture_state="${XDG_STATE_HOME:-$fixture/original-state}"
+  local fixture_cache="${XDG_CACHE_HOME:-$fixture/original-cache}"
+  local original_tmux="$fixture/original-tmux"
   mkdir -p "$fixture/bin" "$fixture/parent/worktree"
   cat > "$fixture/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
 printf '%s\n' "$@" > "$PANEL_ARGV"
-printf '%s\n' "${OMS_LOCK_DIR:-}" "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" "${TMUX_TMPDIR:-}" > "$PANEL_ENV"
+printf '%s\n' "${OMS_FIXTURE_ROOT:-}" "${TMUX_TMPDIR:-}" "${OMS_LOCK_DIR:-}" \
+  "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" > "$PANEL_ENV"
 [ "${PANEL_FAIL:-0}" != 1 ] || exit 7
 printf '{}\n'
 EOF
@@ -11480,27 +11490,41 @@ EOF
 #!/usr/bin/env bash
 case "${1:-}" in --version|--help) exit 0 ;; esac
 printf '%s\n' "$@" > "$PANEL_ARGV"
-printf '%s\n' "${OMS_LOCK_DIR:-}" "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" "${TMUX_TMPDIR:-}" > "$PANEL_ENV"
+printf '%s\n' "${OMS_FIXTURE_ROOT:-}" "${TMUX_TMPDIR:-}" "${OMS_LOCK_DIR:-}" \
+  "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" > "$PANEL_ENV"
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"ok"}'
 EOF
   chmod +x "$fixture/bin/codex" "$fixture/bin/claude"
   printf 'fixture prompt\n' > "$fixture/prompt"
 
+  map_output="$(OMS_FIXTURE_ROOT="$fixture/mapped-suite" bash -c \
+    '. "$1/tests/lib/smoke-env.sh"; oms_smoke_use_fixture_root; printf "%s\\n%s\\n%s\\n" "$OMS_LOCK_DIR" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"' \
+    _ "$ROOT")"
+  [ "$map_output" = "$fixture/mapped-suite/locks
+$fixture/mapped-suite/state
+$fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $map_output"
+  [ "${OMS_LOCK_DIR-}" = "$original_lock" ] || fail 'suite fixture mapping changed the caller lock path'
+  [ "${XDG_STATE_HOME-}" = "$original_state" ] || fail 'suite fixture mapping changed the caller XDG state path'
+  [ "${XDG_CACHE_HOME-}" = "$original_cache" ] || fail 'suite fixture mapping changed the caller XDG cache path'
+
   for provider in codex claude; do
-    local root="$fixture/$provider"
+    root="$fixture/$provider"
     mkdir -p "$root/parent/worktree"
     PANEL_ARGV="$root/argv" PANEL_ENV="$root/env" PATH="$fixture/bin:$PATH" \
       OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker MA_KIND=delegate REPO="$root/parent/worktree" \
+      OMS_LOCK_DIR="$fixture_lock" XDG_STATE_HOME="$fixture_state" \
+      XDG_CACHE_HOME="$fixture_cache" TMUX_TMPDIR="$original_tmux" \
       bash -c '. "$1/scripts/lib/peer-common.sh"; MA_KIND=delegate; REPO="$4"; ma_provider_attempt "$2" write "$3/prompt" "$3/output" "$4" provider-default "" delegate "" ""' \
       _ "$ROOT" "$provider" "$fixture" "$root/parent/worktree" || fail "$provider panel write fixture failed"
     local writable_root
     writable_root="$(awk 'prev == "--add-dir" { print; exit } { prev = $0 }' "$root/argv")"
     [ -n "$writable_root" ] || fail "$provider write argv omitted the private writable root"
-    [ ! -e "$writable_root" ] || fail "$provider successful call left private state behind: $writable_root"
-    [ "$(wc -l < "$root/env" | tr -d ' ')" = 4 ] || fail "$provider write call omitted fixture environment"
-    while IFS= read -r env_path; do
-      case "$env_path" in "$writable_root"/*) ;; *) fail "$provider write environment escaped private root: $env_path" ;; esac
-    done < "$root/env"
+    [ -d "$writable_root" ] || fail "$provider successful provider return removed state before worktree cleanup"
+    [ "$(sed -n '1p' "$root/env")" = "$writable_root" ] || fail "$provider fixture root env differed from --add-dir"
+    [ "$(sed -n '2p' "$root/env")" = "$writable_root/tmux" ] || fail "$provider tmux root escaped fixture root"
+    [ "$(sed -n '3p' "$root/env")" = "$fixture_lock" ] || fail "$provider worker OMS_LOCK_DIR changed"
+    [ "$(sed -n '4p' "$root/env")" = "$fixture_state" ] || fail "$provider worker XDG_STATE_HOME changed"
+    [ "$(sed -n '5p' "$root/env")" = "$fixture_cache" ] || fail "$provider worker XDG_CACHE_HOME changed"
     [ "$provider" != codex ] || grep -Fxq -- 'workspace-write' "$root/argv" || fail 'Codex workspace-write sandbox changed'
   done
 
@@ -11508,24 +11532,40 @@ EOF
   mkdir -p "$read_root/parent/worktree"
   PANEL_ARGV="$read_root/argv" PANEL_ENV="$read_root/env" PATH="$fixture/bin:$PATH" \
     OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker MA_KIND=delegate REPO="$read_root/parent/worktree" \
+    OMS_LOCK_DIR="$fixture_lock" XDG_STATE_HOME="$fixture_state" \
+    XDG_CACHE_HOME="$fixture_cache" TMUX_TMPDIR="$original_tmux" \
     bash -c '. "$1/scripts/lib/peer-common.sh"; MA_KIND=delegate; REPO="$3"; ma_provider_attempt codex read "$2/prompt" "$2/output" "$3" provider-default "" delegate "" ""' \
     _ "$ROOT" "$fixture" "$read_root/parent/worktree" || fail 'read panel fixture failed'
-  if grep -Fq -- '--add-dir' "$read_root/argv" || grep -Fq '.oms-panel-worker.' "$read_root/env"; then
+  if grep -Fq -- '--add-dir' "$read_root/argv" ||
+    [ "$(sed -n '1p' "$read_root/env")" != "$caller_fixture" ] ||
+    [ "$(sed -n '2p' "$read_root/env")" != "$original_tmux" ] ||
+    [ "$(sed -n '3p' "$read_root/env")" != "$fixture_lock" ]; then
     fail "read worker inherited private write state or writable root: $(cat "$read_root/argv"; cat "$read_root/env")"
   fi
 
-  local failed_root="$fixture/failure"
-  mkdir -p "$failed_root/parent/worktree"
-  if PANEL_ARGV="$failed_root/argv" PANEL_ENV="$failed_root/env" PANEL_FAIL=1 PATH="$fixture/bin:$PATH" \
-    OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=builder MA_KIND=delegate REPO="$failed_root/parent/worktree" \
-    bash -c '. "$1/scripts/lib/peer-common.sh"; MA_KIND=delegate; REPO="$3"; ma_provider_attempt codex write "$2/prompt" "$3/output" "$3" provider-default "" delegate "" ""' \
-    _ "$ROOT" "$fixture" "$failed_root/parent/worktree"; then
-    fail 'failed provider fixture unexpectedly succeeded'
-  fi
-  local retained_root
-  retained_root="$(sed -n 's/^panel worker private test state retained after failure: //p' "$failed_root/parent/worktree/output")"
-  [ -n "$retained_root" ] && [ -d "$retained_root" ] || fail 'failed call did not retain private state for inspection'
-  rm -rf "$retained_root"
+  lifecycle="$fixture/lifecycle"
+  repo="$lifecycle/repo"
+  mkdir -p "$lifecycle/home"
+  make_committed_repo "$repo"
+  out="$(HOME="$lifecycle/home" PATH="$fixture/bin:$PATH" \
+    OMS_DELEGATE_WORKTREE_ROOT="$lifecycle/worktrees" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
+    OMS_LOCK_DIR="$fixture_lock" XDG_STATE_HOME="$fixture_state" XDG_CACHE_HOME="$fixture_cache" \
+    PANEL_ARGV="$lifecycle/argv" PANEL_ENV="$lifecycle/env" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$repo" --to codex --prompt 'fixture task' --no-verify 2>&1)" ||
+    fail "panel delegate success fixture failed: $out"
+  retained_root="$(sed -n '1p' "$lifecycle/env")"
+  [ -n "$retained_root" ] && [ ! -e "$retained_root" ] &&
+    [ ! -e "$(dirname "$retained_root")" ] || fail 'successful delegate did not remove fixture root with its managed worktree'
+
+  out="$(HOME="$lifecycle/home" PATH="$fixture/bin:$PATH" \
+    OMS_DELEGATE_WORKTREE_ROOT="$lifecycle/worktrees" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
+    OMS_LOCK_DIR="$fixture_lock" XDG_STATE_HOME="$fixture_state" XDG_CACHE_HOME="$fixture_cache" \
+    PANEL_ARGV="$lifecycle/argv" PANEL_ENV="$lifecycle/env" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$repo" --to codex --prompt 'fixture task' --no-verify --keep-worktree 2>&1)" ||
+    fail "panel delegate keep-worktree fixture failed: $out"
+  retained_root="$(sed -n '1p' "$lifecycle/env")"
+  [ -n "$retained_root" ] && [ -d "$retained_root" ] && [ -d "$(dirname "$retained_root")" ] ||
+    fail 'kept delegate worktree did not retain its fixture root'
 }
 
 test_claude_envelope_carries_stop_reason() {

@@ -2270,7 +2270,6 @@ ma_provider_attempt() {
   local provider_scratch=""
   local panel_worker_root=""
   local panel_worker_parent=""
-  local panel_worker_root_real=""
   local seat_plans="" seat_plans_real="" workdir_real=""
   local -a cmd
 
@@ -2300,14 +2299,14 @@ ma_provider_attempt() {
     return 126
   fi
   case "${OMS_PANEL_ROLE:-}" in
-    worker|builder|refactorer|documenter|integrator|performance-engineer)
+    worker)
       if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "$access" = write ] &&
         { [ "$provider" = codex ] || [ "$provider" = claude ]; }; then
         panel_worker_parent="$(cd "$workdir/.." 2>/dev/null && pwd -P)" || {
           echo 'error: could not resolve the panel worktree parent for private test state' > "$output_file"
           return 2
         }
-        panel_worker_root="$(mktemp -d "$panel_worker_parent/.oms-panel-worker.XXXXXX")" || {
+        panel_worker_root="$(mktemp -d "$panel_worker_parent/.oms-panel-fixtures.XXXXXX")" || {
           echo 'error: could not allocate private panel worker test state' > "$output_file"
           return 2
         }
@@ -2316,14 +2315,12 @@ ma_provider_attempt() {
           echo 'error: could not protect private panel worker test state' > "$output_file"
           return 2
         }
-        mkdir -p "$panel_worker_root/locks" "$panel_worker_root/state" \
-          "$panel_worker_root/cache" "$panel_worker_root/tmux" || {
+        mkdir -p "$panel_worker_root/tmux" || {
           rm -rf "$panel_worker_root"
           echo 'error: could not prepare private panel worker test state' > "$output_file"
           return 2
         }
-        chmod 700 "$panel_worker_root/locks" "$panel_worker_root/state" \
-          "$panel_worker_root/cache" "$panel_worker_root/tmux" || {
+        chmod 700 "$panel_worker_root/tmux" || {
           rm -rf "$panel_worker_root"
           echo 'error: could not protect private panel worker test state' > "$output_file"
           return 2
@@ -2668,7 +2665,6 @@ ma_provider_attempt() {
     [ "${OMS_WORKER_AUTHORITY_EXCLUSIVE:-0}" = 1 ]; then
     authority_backup="$(mktemp -d "${TMPDIR:-/tmp}/oms-authority.XXXXXX")" || {
       [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
-      [ -z "$panel_worker_root" ] || rm -rf "$panel_worker_root"
       printf 'BLOCKED: could not allocate owner authority recovery state\n' > "$output_file"
       OMS_WORKER_AUTHORITY_VIOLATION=1
       export OMS_WORKER_AUTHORITY_VIOLATION
@@ -2677,7 +2673,6 @@ ma_provider_attempt() {
     chmod 0700 "$authority_backup" || {
       rm -rf "$authority_backup"
       [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
-      [ -z "$panel_worker_root" ] || rm -rf "$panel_worker_root"
       printf 'BLOCKED: could not protect owner authority recovery state\n' > "$output_file"
       OMS_WORKER_AUTHORITY_VIOLATION=1
       export OMS_WORKER_AUTHORITY_VIOLATION
@@ -2687,7 +2682,6 @@ ma_provider_attempt() {
     authority_after="$(agent_memory_mktemp)" || {
       rm -rf "$authority_backup"
       [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
-      [ -z "$panel_worker_root" ] || rm -rf "$panel_worker_root"
       printf 'BLOCKED: could not allocate owner authority comparison state\n' > "$output_file"
       OMS_WORKER_AUTHORITY_VIOLATION=1
       export OMS_WORKER_AUTHORITY_VIOLATION
@@ -2700,7 +2694,6 @@ ma_provider_attempt() {
       rm -rf "$authority_backup"
       rm -f "$authority_after"
       [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
-      [ -z "$panel_worker_root" ] || rm -rf "$panel_worker_root"
       OMS_WORKER_AUTHORITY_VIOLATION=1
       export OMS_WORKER_AUTHORITY_VIOLATION
       return 125
@@ -2715,9 +2708,7 @@ ma_provider_attempt() {
     (
       ma_export_child_env "$provider" "$origin" "$state_repo" "$call_id" "$access"
       if [ -n "$panel_worker_root" ]; then
-        export OMS_LOCK_DIR="$panel_worker_root/locks"
-        export XDG_STATE_HOME="$panel_worker_root/state"
-        export XDG_CACHE_HOME="$panel_worker_root/cache"
+        export OMS_FIXTURE_ROOT="$panel_worker_root"
         export TMUX_TMPDIR="$panel_worker_root/tmux"
       fi
       cd "$workdir" || exit 1
@@ -2726,20 +2717,6 @@ ma_provider_attempt() {
     local pid="$!"
 
     if wait "$pid"; then status=0; else status=$?; fi
-  fi
-  if [ -n "$panel_worker_root" ]; then
-    if [ "$status" -eq 0 ]; then
-      if [ -d "$panel_worker_root" ] && [ ! -L "$panel_worker_root" ]; then
-        panel_worker_root_real="$(cd "$panel_worker_root" 2>/dev/null && pwd -P)" || panel_worker_root_real=""
-        if [ -n "$panel_worker_root_real" ] &&
-          [ "$panel_worker_root_real" = "$panel_worker_parent/${panel_worker_root##*/}" ]; then
-          rm -rf -- "$panel_worker_root_real"
-        fi
-      fi
-    else
-      printf '\npanel worker private test state retained after failure: %s\n' \
-        "$panel_worker_root" >> "$output_file"
-    fi
   fi
   [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
   # Remove only a real directory at its physical spot inside this workdir: a

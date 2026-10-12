@@ -42,9 +42,7 @@ ma_conversation_run() {
       unset OMS_PEER_INTERACTIVE OMS_CONVERSATION_MAX_TURNS OMS_CONVERSATION_IDLE_SECONDS
       ma_export_child_env "$provider" "$origin" "$state_repo" "$call_id" "$access"
       if [ -n "${panel_worker_root:-}" ]; then
-        export OMS_LOCK_DIR="$panel_worker_root/locks"
-        export XDG_STATE_HOME="$panel_worker_root/state"
-        export XDG_CACHE_HOME="$panel_worker_root/cache"
+        export OMS_FIXTURE_ROOT="$panel_worker_root"
         export TMUX_TMPDIR="$panel_worker_root/tmux"
       fi
       cd "$workdir" || exit 1

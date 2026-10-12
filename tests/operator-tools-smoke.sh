@@ -20,6 +20,7 @@ for provider in claude codex; do
   chmod +x "$TMP/provider-standins/$provider"
 done
 PATH="$PATH:$TMP/provider-standins"
+oms_smoke_use_fixture_root
 
 fail() {
   echo "FAIL: $*" >&2
