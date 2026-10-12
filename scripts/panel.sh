@@ -8,6 +8,28 @@ command -v python3 >/dev/null 2>&1 || {
   exit 2
 }
 export PYTHONDONTWRITEBYTECODE=1
+# Refuse invalid roots before entering the board restart loop or importing panel state.
+python3 - "$@" <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+args = sys.argv[1:]
+requested = None
+for index, arg in enumerate(args):
+    if arg == "--repo" and index + 1 < len(args):
+        requested = args[index + 1]
+        break
+directory = Path(requested if requested is not None else os.getcwd()).resolve(strict=True)
+check = subprocess.run(["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
+                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL, check=False)
+if check.returncode:
+    print("oms panel: %s is not a git repository; open it in a git repository or pass --repo PATH" % directory,
+          file=sys.stderr)
+    sys.exit(2)
+PY
 board=0
 for arg in "$@"; do
   [ "$arg" != "--watch" ] || board=1

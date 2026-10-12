@@ -3305,7 +3305,7 @@ subprocess.run(["git", "-C", str(shared_root), "worktree", "add", "--quiet", "--
 plain_directory = temporary / "resolution-non-git"
 plain_directory.mkdir()
 panel_front = ["bash", str(panel.ENTRY), "panel"]
-missing_repo_message = "oms panel needs a git repository: run it inside one or pass --repo PATH"
+missing_repo_message = "oms panel: %s is not a git repository; open it in a git repository or pass --repo PATH" % plain_directory
 for options in ([], ["--watch", "--count", "1"], ["--launch", "codex", "--dry-run"],
                 ["--spawn-main", "codex", "--json"], ["--reopen"]):
     refused = subprocess.run(panel_front + options, cwd=plain_directory, env=resolver_env,
@@ -3318,7 +3318,15 @@ for options in (["--providers", "--json"], ["--routes"], ["--help"]):
     assert informational.returncode == 0, informational
 explicit = subprocess.run(panel_front + ["--repo", str(plain_directory), "--dry-run"],
                           cwd=plain_directory, env=resolver_env, capture_output=True, text=True, timeout=30)
-assert explicit.returncode == 0 and json.loads(explicit.stdout)["repo"] == str(plain_directory), explicit
+assert explicit.returncode == 2 and missing_repo_message in explicit.stderr, explicit
+wrapper = subprocess.run(["bash", str(root / "scripts/panel.sh")], cwd=plain_directory,
+                         env=resolver_env, capture_output=True, text=True, timeout=30)
+assert wrapper.returncode == 2 and missing_repo_message in wrapper.stderr, wrapper
+wrapper_explicit = subprocess.run(["bash", str(root / "scripts/panel.sh"), "--repo", str(plain_directory)],
+                                  cwd=ordinary_root, env=resolver_env, capture_output=True,
+                                  text=True, timeout=30)
+assert wrapper_explicit.returncode == 2 and missing_repo_message in wrapper_explicit.stderr, wrapper_explicit
+assert not list(plain_directory.iterdir()), list(plain_directory.iterdir())
 ordinary_child = ordinary_root / "nested"
 ordinary_child.mkdir()
 ordinary_alias = temporary / "resolution-ordinary-link"
@@ -3334,7 +3342,12 @@ with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProc
     assert state_resolution.call_args.args == (ordinary_root,)
 with patch.dict(os.environ, resolver_env, clear=True):
     assert panel.repository(ordinary_root) == ordinary_root
-    assert panel.repository(plain_directory) == plain_directory
+    try:
+        panel.panel_repository(plain_directory)
+    except ValueError as error:
+        assert str(error) == "%s is not a git repository; open it in a git repository or pass --repo PATH" % plain_directory
+    else:
+        raise AssertionError("panel accepted a non-repository explicit path")
     non_git_scratch = registry / "oh-my-setting-scratch.non-git" / "wt"
     non_git_scratch.mkdir(parents=True)
     (non_git_scratch.parent / ".oh-my-setting-tmp").write_bytes(proof_bytes)

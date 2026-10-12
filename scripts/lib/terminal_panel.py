@@ -360,6 +360,17 @@ def repository(value):
     return state_repository(value)
 
 
+def panel_repository(value):
+    requested = Path(value if value is not None else os.getcwd()).resolve(strict=True)
+    query = subprocess.run(["git", "-C", str(requested), "rev-parse", "--show-toplevel"],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           check=False, timeout=5)
+    if query.returncode:
+        raise ValueError("%s is not a git repository; open it in a git repository or pass --repo PATH" % requested)
+    root = Path(query.stdout.replace("\r", "").rstrip("\n")).resolve(strict=True)
+    return repository(root)
+
+
 def child_environment(provider, repo):
     env = {name: value for name, value in os.environ.items()
            if name not in {"OMS_PANEL_EXECUTION_ROOT", "OMS_INDEX_BASE_REPO", "DELEGATE_SOURCE_REPO"} and not name.startswith(("OMS_DL_", "OMS_OBSERVE_PLAN_", "OMS_OBSERVER_"))}
@@ -5305,7 +5316,7 @@ def main(argv=None):
             print(json.dumps(dict(routes, writers=sorted(WRITERS), kinds=KINDS,
                                   owner=caller_owner(), chosen=chosen), indent=2))
             return 0
-        repo = repository(os.environ.get("OMS_ROOM_REPO") or args.repo) if args.dispatch else repository(args.repo)
+        repo = panel_repository(os.environ.get("OMS_ROOM_REPO") or args.repo) if args.dispatch else panel_repository(args.repo)
         requested_worktree = work_repository(args.repo if args.repo is not None else os.getcwd())
         if not args.dispatch and requested_worktree != repo:
             os.environ[EXECUTION_ENV] = str(requested_worktree)
@@ -5505,9 +5516,10 @@ def main(argv=None):
     except KeyboardInterrupt:
         return 130
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        print("error: " + clean(str(error), 200), file=sys.stderr)
-        if str(error) == "oms panel needs a git repository: run it inside one or pass --repo PATH":
+        if " is not a git repository; open it in a git repository or pass --repo PATH" in str(error):
+            print("oms panel: " + clean(str(error), 200), file=sys.stderr)
             return 2
+        print("error: " + clean(str(error), 200), file=sys.stderr)
         return 1
 
 
