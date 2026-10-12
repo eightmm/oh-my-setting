@@ -6752,9 +6752,9 @@ def exercise_observed_worker_leases():
                 room_log = project / ".oms/threads" / (test_room + ".jsonl")
                 room_before = room_log.read_bytes()
                 for bad_state in ({"joined": False}, {"joined": True, "role": "worker", "parent": main_member,
-                                   "provider": route["provider"], "model": route["model"]},
+                                   "provider": validation_route["provider"], "model": validation_route["model"]},
                                   {"joined": True, "role": "researcher", "parent": main_member,
-                                   "provider": route["provider"], "model": "wrong-model"}):
+                                   "provider": validation_route["provider"], "model": "wrong-model"}):
                     with patch.object(panel.room, "participant", return_value=dict(enrolled, **bad_state)):
                         try:
                             binding.validate(project, child_env, validation_route)
