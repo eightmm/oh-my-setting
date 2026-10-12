@@ -26721,52 +26721,141 @@ test_worker_guard_reports_foreign_checkout_ref_moves() {
     done
   done
 
-  result="$(run_guarded_worker "$project" \
-    "git -C '$sibling' checkout -q -b oms/existing-worktree")"
+  local managed_root="$TMP/guard-branch-managed"
+  local existing="$managed_root/foreign-existing/wt"
+  mkdir -p "${existing%/wt}"
+  git -C "$project" worktree add -q --detach "$existing" HEAD
+  rm -f "$ready" "$done"
+  (
+    local tries=0
+    while [ ! -f "$ready" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+    [ -f "$ready" ] || exit 1
+    git -C "$existing" checkout -q --no-track -b oms/existing-worktree
+    touch "$done"
+  ) &
+  pid=$!
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
+    "touch '$ready'; tries=0; while [ ! -f '$done' ] && [ \"\$tries\" -lt 100 ]; do sleep 0.1; tries=\$((tries + 1)); done; [ -f '$done' ] || exit 1")"
+  wait "$pid" || fail "managed foreign checkout fixture timed out"
   [ "${result%%$'\t'*}" = 0 ] ||
-    fail "checking out a new oms/* branch in an existing foreign worktree should be soft: $result"
+    fail "a separate managed checkout creating oms/* should be soft: $result"
   contains "$result" 'during this run: foreign-ref' ||
-    fail "an existing foreign checkout should report foreign-ref: $result"
+    fail "managed foreign checkout warning missing: $result"
 
-  # A second session creates a detached worktree, checks out a fresh oms/*
-  # branch there, and leaves it registered while the worker finishes.
-  local created="$TMP/guard-foreign-ref-created"
-  rm -rf "$ready" "$done"
-  result="$(run_guarded_worker "$project" \
-    "git worktree add -q --detach '$created' HEAD && git -C '$created' checkout -q --no-track -b oms/created && git -C '$created' -c user.name=test -c user.email=test@example.invalid commit -q --allow-empty -m follow-up")"
+  # A separate actor creates and checks out the branch while the provider only
+  # waits. The managed root is outside the delegated worker's writable tree.
+  local created="$managed_root/foreign-created/wt"
+  mkdir -p "${created%/wt}"
+  rm -f "$ready" "$done"
+  (
+    local tries=0
+    while [ ! -f "$ready" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+    [ -f "$ready" ] || exit 1
+    git -C "$project" worktree add -q --detach "$created" HEAD || exit 1
+    git -C "$created" checkout -q --no-track -b oms/created || exit 1
+    git -C "$created" -c user.name=test -c user.email=test@example.invalid commit -q --allow-empty -m follow-up || exit 1
+    touch "$done"
+  ) &
+  pid=$!
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
+    "touch '$ready'; tries=0; while [ ! -f '$done' ] && [ \"\$tries\" -lt 100 ]; do sleep 0.1; tries=\$((tries + 1)); done; [ -f '$done' ] || exit 1")"
+  wait "$pid" || fail "managed detached checkout fixture timed out"
   [ "${result%%$'\t'*}" = 0 ] ||
-    fail "a foreign detached checkout of a new oms/* branch should be soft: $result"
+    fail "separate managed branch creation should be soft: $result"
   contains "$result" 'during this run: foreign-ref' ||
-    fail "a new foreign oms/* checkout should be warned as foreign-ref: $result"
+    fail "managed branch creation warning missing: $result"
 
-  # Namespace alone or checkout from the delegated worktree is no evidence of
-  # foreign ownership.
-  result="$(run_guarded_worker "$project" \
-    "git branch oms/unattached HEAD")"
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" "git branch oms/unattached HEAD")"
   [ "${result%%$'\t'*}" != 0 ] ||
     fail "an oms/* branch without a foreign checkout should stay hard: $result"
-  result="$(run_guarded_worker "$project" \
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
     "git -C \"\$PWD\" checkout -q -b oms/worker-own")"
   [ "${result%%$'\t'*}" != 0 ] ||
     fail "a new branch checked out in the worker worktree should stay hard: $result"
 
-  # Strict mode does not grant the foreign-checkout exemption.
-  local strict_created="$TMP/guard-foreign-ref-strict-created"
-  result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$project" \
-    "git worktree add -q --detach '$strict_created' HEAD && git -C '$strict_created' checkout -q --no-track -b oms/strict-created")"
+  local strict_created="$managed_root/foreign-strict/wt"
+  mkdir -p "${strict_created%/wt}"
+  git -C "$project" worktree add -q --detach "$strict_created" HEAD
+  rm -f "$ready" "$done"
+  (
+    local tries=0
+    while [ ! -f "$ready" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+    [ -f "$ready" ] || exit 1
+    git -C "$strict_created" checkout -q --no-track -b oms/strict-created
+    touch "$done"
+  ) &
+  pid=$!
+  result="$(OMS_WORKER_GUARD_STRICT=1 OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
+    "touch '$ready'; tries=0; while [ ! -f '$done' ] && [ \"\$tries\" -lt 100 ]; do sleep 0.1; tries=\$((tries + 1)); done; [ -f '$done' ] || exit 1")"
+  wait "$pid" || fail "strict managed checkout fixture timed out"
   [ "${result%%$'\t'*}" != 0 ] ||
     fail "strict mode tolerated a newly checked-out foreign oms/* branch: $result"
+  git -C "$project" worktree remove -f "$strict_created" >/dev/null 2>&1 || true
+  git -C "$project" branch -D oms/strict-created >/dev/null 2>&1 || true
 
-  result="$(run_guarded_worker "$project" \
-    "git worktree remove -f '$created' && git branch -D oms/created")"
+  local deleted="$managed_root/foreign-deleted/wt"
+  mkdir -p "${deleted%/wt}"
+  git -C "$project" worktree add -q --detach "$deleted" HEAD
+  git -C "$deleted" checkout -q --no-track -b oms/deleted
+  rm -f "$ready" "$done"
+  (
+    local tries=0
+    while [ ! -f "$ready" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+    [ -f "$ready" ] || exit 1
+    git -C "$project" worktree remove -f "$deleted" || exit 1
+    git -C "$project" branch -D oms/deleted >/dev/null || exit 1
+    touch "$done"
+  ) &
+  pid=$!
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
+    "touch '$ready'; tries=0; while [ ! -f '$done' ] && [ \"\$tries\" -lt 100 ]; do sleep 0.1; tries=\$((tries + 1)); done; [ -f '$done' ] || exit 1")"
+  wait "$pid" || fail "managed foreign deletion fixture timed out"
   [ "${result%%$'\t'*}" = 0 ] ||
-    fail "removing a foreign checkout together with its oms/* branch should be soft: $result"
+    fail "removing a managed foreign checkout with its branch should be soft: $result"
   contains "$result" 'during this run: foreign-ref' ||
-    fail "a foreign checkout branch deletion should be warned as foreign-ref: $result"
+    fail "managed foreign deletion warning missing: $result"
 
-  result="$(run_guarded_worker "$project" "git branch -D oms/unattached")"
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" "git branch -D oms/unattached")"
   [ "${result%%$'\t'*}" != 0 ] ||
     fail "deleting an oms/* branch without foreign checkout evidence should stay hard: $result"
+  git -C "$project" branch unrelated HEAD
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" "git branch -D unrelated")"
+  [ "${result%%$'\t'*}" != 0 ] ||
+    fail "deleting a non-oms branch should stay hard: $result"
+
+  # A worker cannot manufacture the managed-root evidence from writable paths.
+  local outside="$TMP/guard-worker-outside/wt"
+  mkdir -p "${outside%/wt}"
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
+    "git worktree add -q --detach '$outside' HEAD && git -C '$outside' checkout -q --no-track -b oms/outside")"
+  [ "${result%%$'\t'*}" != 0 ] || fail "worker-created /tmp checkout was accepted: $result"
+  git -C "$project" worktree remove -f "$outside" >/dev/null 2>&1 || true
+  git -C "$project" branch -D oms/outside >/dev/null 2>&1 || true
+
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
+    "git worktree add -q --detach \"\$PWD/inside\" HEAD && git -C \"\$PWD/inside\" checkout -q --no-track -b oms/inside")"
+  [ "${result%%$'\t'*}" != 0 ] || fail "worker-created nested checkout was accepted: $result"
+
+  local common fake_entry
+  common="$(git -C "$project" rev-parse --git-common-dir)"
+  case "$common" in /*) ;; *) common="$project/$common" ;; esac
+  fake_entry="$common/worktrees/fake-managed"
+  mkdir -p "$managed_root/fake-parent" "$common/worktrees"
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
+    "git branch oms/fake HEAD && mkdir -p '$fake_entry'; printf '%s/.git\\n' '$managed_root/fake-parent/wt' > '$fake_entry/gitdir'; printf 'ref: refs/heads/oms/fake\\n' > '$fake_entry/HEAD'")"
+  [ "${result%%$'\t'*}" != 0 ] || fail "fake managed registration was accepted: $result"
+  rm -rf "$fake_entry"
+
+  local target="$managed_root/symlink-target/wt" alias="$TMP/guard-symlink-into-managed"
+  mkdir -p "${target%/wt}"
+  git -C "$project" worktree add -q --detach "$target" HEAD
+  ln -s "$target" "$alias"
+  fake_entry="$common/worktrees/fake-symlink"
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
+    "git branch oms/symlink HEAD && mkdir -p '$fake_entry'; printf '%s/.git\\n' '$alias' > '$fake_entry/gitdir'; printf 'ref: refs/heads/oms/symlink\\n' > '$fake_entry/HEAD'")"
+  [ "${result%%$'\t'*}" != 0 ] || fail "symlinked managed checkout was accepted: $result"
+  rm -rf "$fake_entry" "$alias"
+  git -C "$project" worktree remove -f "$target" >/dev/null 2>&1 || true
 }
 
 test_worker_guard_sees_object_store_and_metadata_writes() {
@@ -28753,7 +28842,10 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
         contains "$out" 'state repository protected surfaces: refs' || fail "strict read refs not hard: $out"
       fi
     done
-    local created_read="$TMP/guard-read-created"
+    local read_managed_root="$TMP/guard-read-created-root"
+    local created_read="$read_managed_root/foreign/wt"
+    mkdir -p "${created_read%/wt}"
+    OMS_DELEGATE_WORKTREE_ROOT="$read_managed_root"
     for strict in 0 1; do
       ma_read_guard_begin "$snap/read-created-$strict" || fail "read branch-create snapshot failed"
       git -C "$project" worktree add -q --detach "$created_read" HEAD

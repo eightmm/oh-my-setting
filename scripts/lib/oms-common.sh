@@ -1596,6 +1596,7 @@ oms_worker_gitmeta_is_foreign_worktree() {  # REPO METADATA CURRENT_WORKTREE
   local repo="$1" metadata="$2" worker="${3:-}"
   local gitfile physical actual common guarded
   OMS_WG_FOREIGN_PHYSICAL=""
+  OMS_WG_FOREIGN_PATH=""
   [ -n "$worker" ] && [ -d "$metadata" ] && [ ! -L "$metadata" ] || return 1
   [ -f "$metadata/gitdir" ] && [ ! -L "$metadata/gitdir" ] &&
     [ -f "$metadata/HEAD" ] && [ ! -L "$metadata/HEAD" ] || return 1
@@ -1614,6 +1615,36 @@ oms_worker_gitmeta_is_foreign_worktree() {  # REPO METADATA CURRENT_WORKTREE
   common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
   [ "$actual" = "$common" ] || return 1
   OMS_WG_FOREIGN_PHYSICAL="$physical"
+  OMS_WG_FOREIGN_PATH="${gitfile%/.git}"
+  return 0
+}
+
+# A valid Git backpointer proves registration, not that the worker could not
+# have created it. New/deleted branch attribution therefore also requires the
+# checkout to live below the parent-only worktree root.
+oms_worker_path_is_managed_foreign_worktree() {  # PATH CURRENT_WORKTREE
+  local path="$1" worker="${2:-}" allow_missing="${3:-0}"
+  local root root_physical physical worker_physical
+  root="$(oms_harness_delegate_worktree_root)" || return 1
+  case "$root" in /*) ;; *) return 1 ;; esac
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  root_physical="$(oms_harness_physical_dir "$root" 2>/dev/null)" || return 1
+  while [ "$root" != / ] && [ "${root%/}" != "$root" ]; do root="${root%/}"; done
+  [ "$root" = "$root_physical" ] || return 1
+  while [ "$path" != / ] && [ "${path%/}" != "$path" ]; do path="${path%/}"; done
+  if [ -d "$path" ]; then
+    physical="$(oms_harness_physical_dir "$path" 2>/dev/null)" || return 1
+    [ "$path" = "$physical" ] || return 1
+  else
+    # A deleted checkout cannot be resolved again; its snapshot receipt holds
+    # the canonical path captured while the registered directory still existed.
+    [ "$allow_missing" = 1 ] || return 1
+    case "$path" in *//*|*/./*|*/../*|*/.|*/..) return 1 ;; esac
+    physical="$path"
+  fi
+  case "$physical" in "$root_physical"/*) ;; *) return 1 ;; esac
+  worker_physical="$(oms_harness_physical_dir "$worker" 2>/dev/null)" || return 1
+  case "$physical" in "$worker_physical"|"$worker_physical"/*) return 1 ;; esac
   return 0
 }
 
@@ -1742,6 +1773,7 @@ def refs(path):
     return dict(line.rstrip('\r\n').split(' ', 1)[::-1] for line in open(path) if ' ' in line)
 old, new = refs(sys.argv[1]), refs(sys.argv[2])
 protected = set(open(sys.argv[3]).read().splitlines())
+# Accepted pre-existing contract: evidence-backed moves of non-oms branches stay soft.
 changed = [ref for ref in old.keys() | new.keys() if old.get(ref) != new.get(ref)]
 if not changed or any(not ref.startswith('refs/heads/') or ref in protected or
                       (ref not in old and not ref.startswith('refs/heads/oms/')) or
@@ -1818,6 +1850,7 @@ oms_worker_refs_foreign_branch_created() {  # REPO BEFORE_DIR CURRENT_WORKTREE R
     head="$(sed -n '1p' "$entry/HEAD")"; head="${head//$'\r'/}"
     [ "$head" = "ref: $ref" ] || continue
     oms_worker_gitmeta_is_foreign_worktree "$repo" "$entry" "$worker" || continue
+    oms_worker_path_is_managed_foreign_worktree "$OMS_WG_FOREIGN_PATH" "$worker" || continue
     branchlog="$common/logs/$ref"; logpath="$entry/logs/HEAD"
     [ -f "$branchlog" ] && [ ! -L "$branchlog" ] &&
       [ -f "$logpath" ] && [ ! -L "$logpath" ] || continue
@@ -1877,7 +1910,7 @@ PY
 
 oms_worker_refs_foreign_branch_deleted() {  # REPO BEFORE_DIR CURRENT_WORKTREE REF
   local repo="$1" before="$2" worker="${3:-}" ref="$4"
-  local common entry receipt head count=0 current
+  local common entry receipt head count=0 current physical path
   case "$ref" in refs/heads/oms/*) ;; *) return 1 ;; esac
   common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
   for receipt in "$before/foreign-worktrees/"*; do
@@ -1885,9 +1918,18 @@ oms_worker_refs_foreign_branch_deleted() {  # REPO BEFORE_DIR CURRENT_WORKTREE R
     head="$(sed -n '1p' "$receipt/HEAD")"; head="${head//$'\r'/}"
     [ "$head" = "ref: $ref" ] || continue
     count=$((count + 1))
+    [ -f "$receipt/physical" ] || return 1
+    physical="$(sed -n '1p' "$receipt/physical")"; physical="${physical//$'\r'/}"
+    [ -f "$receipt/path" ] || return 1
+    path="$(sed -n '1p' "$receipt/path")"; path="${path//$'\r'/}"
+    [ "$path" = "$physical" ] || return 1
+    oms_worker_path_is_managed_foreign_worktree "$physical" "$worker" 1 || return 1
     entry="$common/worktrees/${receipt##*/}"
     if [ -e "$entry" ] || [ -L "$entry" ]; then
       oms_worker_gitmeta_is_foreign_worktree "$repo" "$entry" "$worker" || return 1
+      [ "$OMS_WG_FOREIGN_PHYSICAL" = "$physical" ] || return 1
+      [ "$OMS_WG_FOREIGN_PATH" = "$physical" ] || return 1
+      oms_worker_path_is_managed_foreign_worktree "$OMS_WG_FOREIGN_PATH" "$worker" || return 1
       current="$(sed -n '1p' "$entry/HEAD")"; current="${current//$'\r'/}"
       [ "$current" != "ref: $ref" ] || return 1
     fi
@@ -2498,6 +2540,7 @@ oms_worker_surface_snapshot() {
       oms_worker_gitmeta_is_foreign_worktree "$repo" "$entry" "$current_worktree_physical" || continue
       mkdir -p "$dir/foreign-worktrees/${entry##*/}"
       printf '%s\n' "$OMS_WG_FOREIGN_PHYSICAL" > "$dir/foreign-worktrees/${entry##*/}/physical"
+      printf '%s\n' "$OMS_WG_FOREIGN_PATH" > "$dir/foreign-worktrees/${entry##*/}/path"
       cp "$entry/HEAD" "$entry/gitdir" "$dir/foreign-worktrees/${entry##*/}/" || return 1
       if [ -f "$entry/logs/HEAD" ] && [ ! -L "$entry/logs/HEAD" ]; then
         cp "$entry/logs/HEAD" "$dir/foreign-worktrees/${entry##*/}/log" || return 1
