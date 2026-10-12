@@ -8912,8 +8912,11 @@ assert room.status(project, declared)["pending_count"] == 0
 control_env = dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project))
 control_launch = {}
 control_codex = {"provider": "codex", "binary": "codex", "installed": True, "models": ["gpt-6-sol"],
-                 "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6-astra"]}
-control_claude = {"provider": "claude", "binary": "claude", "installed": True, "models": ["claude-haiku-5-5"]}
+                 "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6-astra"],
+                 "access": ["read", "write"], "exact_model_override": True}
+control_claude = {"provider": "claude", "binary": "claude", "installed": True,
+                  "models": ["claude-haiku-5-5"], "access": ["read", "write"],
+                  "exact_model_override": True}
 real_popen = panel.subprocess.Popen
 def observe_control_launch(argv, *args, **kwargs):
     if (argv[:3] == [sys.executable, "-c", "pass"]
@@ -8922,6 +8925,7 @@ def observe_control_launch(argv, *args, **kwargs):
     return real_popen(argv, *args, **kwargs)
 with patch.dict(os.environ, control_env, clear=True), \
         patch.object(panel, "provider_catalog", return_value=[control_codex, control_claude]), \
+        patch.object(panel.shutil, "which", return_value="/fixture/provider"), \
         patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
         patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch):
     assert panel.dispatch(project, "claude", "worker", "light", "read", "investigate",
@@ -8939,19 +8943,22 @@ with patch.dict(os.environ, control_env, clear=True), \
     warning_output = io.StringIO()
     with patch.dict(os.environ, control_env, clear=True), \
             patch.object(panel, "provider_catalog", return_value=[control_codex, control_claude]), \
+            patch.object(panel.shutil, "which", return_value="/fixture/provider"), \
             patch.object(panel, "routed_command", return_value=control_write_command), \
             patch.object(panel, "snapshot", return_value=(warning_report, 0)), \
             patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch), \
             redirect_stderr(warning_output):
-        assert panel.dispatch(project, "claude", "worker", "light", "write", "implement",
-                              brief="Change nothing.", verify="true", task_id="backlog-warning",
-                              label="Backlog warning") == 0
+        warning_status = panel.dispatch(project, "claude", "worker", "light", "write", "implement",
+                                        brief="Change nothing.", verify="true", task_id="backlog-warning",
+                                        label="Backlog warning")
+    assert warning_status == 0, (warning_status, warning_output.getvalue(), control_launch)
     assert warning_output.getvalue().splitlines() == [
         "plan backlog-warning has no recorded task; panel left it unchanged; plan protection is absent",
         "9 results await review/admission; review first"], warning_output.getvalue()
     warning_output = io.StringIO()
     with patch.dict(os.environ, control_env, clear=True), \
             patch.object(panel, "provider_catalog", return_value=[control_codex, control_claude]), \
+            patch.object(panel.shutil, "which", return_value="/fixture/provider"), \
             patch.object(panel, "routed_command", return_value=control_write_command), \
             patch.object(panel, "snapshot", return_value=(dict(warning_report, review_backlog={
                 "threshold": 9, "counts": {room_owner: 9}}), 0)), \
@@ -10883,7 +10890,7 @@ assert "patch capped" in panel_reader.render_view("Diff", {}, write_call, patch=
 assert panel_reader.VIEWS == ("Result", "Events", "Diff")
 assert "Result" in panel_reader.render_view("Result", {"rows": []}, write_call)
 assert panel_reader.TerminalInput(extra_keys=("r", "e", "d")).decode(b"\tred") == [("tab",), ("r",), ("e",), ("d",)]
-assert panel_reader.TerminalInput().decode(b"red") == []
+assert panel_reader.TerminalInput().decode(b"red") == [("unbound",)] * 3
 with tempfile.TemporaryDirectory() as reader_repo_name:
     reader_repo = Path(reader_repo_name)
     lifecycle = reader_repo / ".oms/lifecycle"
