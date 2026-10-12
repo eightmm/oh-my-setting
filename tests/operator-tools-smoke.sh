@@ -12,6 +12,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 exec < /dev/null
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-operator-tools.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+# Tier routing only routes to providers on PATH. CI hosts have no provider CLIs, so inert
+# stand-ins sit last on PATH; a developer's real CLIs still win and no fixture executes them.
+mkdir -p "$TMP/provider-standins"
+for provider in claude codex; do
+  printf '#!/bin/sh\necho "%s stand-in: not a real CLI" >&2\nexit 1\n' "$provider" > "$TMP/provider-standins/$provider"
+  chmod +x "$TMP/provider-standins/$provider"
+done
+PATH="$PATH:$TMP/provider-standins"
 
 fail() {
   echo "FAIL: $*" >&2

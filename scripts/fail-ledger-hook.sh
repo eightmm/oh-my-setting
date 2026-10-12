@@ -62,7 +62,7 @@ if not isinstance(command, str) or not command.strip():
     raise SystemExit(0)
 command = command.replace("\n", " ")[:2000]
 
-# This Bash surface bypasses the other tools' activity hook, even when there
+# This Bash surface bypasses the activity hook of the other tools, even when there
 # is no failure history to resolve after the person approves the command.
 try:
     from hook_state import record_panel_activity
