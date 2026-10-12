@@ -475,8 +475,8 @@ def held_split(report, members=None):
     the claim, so an earlier holder's calls never speak for a fresh claim. Every counted call terminal: ended.
     Otherwise each open call waits in review, blocked or admission: awaiting.
     A recorded lease must match the current task lease; otherwise old calls cannot hold a refreshed claim.
-    Legacy rows without leases retain the claim-time fallback. Without lease lineage, no matching call, a live
-    call or an unknown call stays claimed; a claim never proves a process."""
+    Legacy rows without leases retain the claim-time fallback. No matching call, a live call or an unknown
+    call stays claimed; a claim never proves a process."""
     admission = set(listing(report.get("awaiting_admission")))
     members = nodes(report) if members is None else members
     classify = call_classifier(report)
@@ -493,7 +493,6 @@ def held_split(report, members=None):
         claimant = task.get("claimed_by") or task.get("claimed_by_participant")
         since = str(task.get("claimed_at") or "")
         lease = task.get("lease_id")
-        lease_recorded = bool(lease or any(m.get("lease_id") for m in calls.get(task.get("id"), [])))
         states = ["review" if (m.get("state") == "done" and m.get("participant") in admission
                                 or m.get("state") == "review") and classify(m) == "review"
                   else "done" if m.get("state") in {"review", "done"} else m.get("state")
@@ -506,8 +505,7 @@ def held_split(report, members=None):
                        (not claimant or owners.get(m.get("parent"), m.get("parent")) == owners.get(claimant, claimant))
                        and not (since and m.get("joined_at") and str(m["joined_at"]) < since))]
         if not states:
-            if lease_recorded:
-                ended.add(task["id"])
+            # No call carrying the current lease is not evidence the work stopped: the claim stays claimed.
             continue
         if all(state in TERMINAL_STATES for state in states):
             ended.add(task["id"])

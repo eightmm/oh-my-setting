@@ -415,18 +415,19 @@ def bootstrap(provider, repo):
         "--access write --brief-file PATH --verify COMMAND for worker (--purpose explain|investigate|implement), "
         "builder, refactorer, documenter, integrator or performance-engineer; researcher, advisor, architect, "
         "critic, reviewer (needs --verify), verifier, security-auditor and release-engineer are read-only. "
-        "Each role takes its default capability tier and its preferred installed provider; reviewer, verifier, "
-        "security-auditor and critic take the provider other than yours when available. Do not pass --to or "
+        "Each role takes the first installed model of its capability tier, ordered by more weekly quota left; "
+        "reviewer, verifier, security-auditor and critic then take the provider other than yours when available. Do not pass --to or "
         "--model for ordinary role calls, so tier routing applies; use them only when a specific provider is "
         "required. Override one dispatch with --workload light|routine|deep|frontier, or "
         "--reasoning-effort high for trust-boundary or unclear-failure work and low for mechanical edits. "
         "Researcher answers document/source lookups with citations on the newest Haiku or Luna at low effort. "
-        "Use security-auditor for risky changes (permissions, secrets, destructive operations, scripts, hooks, "
-        "install), verifier before declaring completion (original request against final result), integrator "
-        "when merging or resolving conflicts, performance-engineer when performance needs measurement, "
-        "documenter at completion and release-engineer when deploying. Advisor (which direction?), architect "
-        "(how to structure?) and critic (when does it fail?) are separate judgments; call one when needed, "
-        "not all by default. A role is a mandate, not an instance: --continue may carry a builder session into "
+        "Use security-auditor for risky changes (authentication, permissions, secrets, signals, install, "
+        "deletion, destructive operations, scripts, hooks), verifier before declaring completion (original "
+        "request against final result), architect for structural decisions, integrator when merging or "
+        "resolving conflicts, performance-engineer when performance needs measurement, documenter at "
+        "completion and release-engineer when deploying. These judges run one at a time when their trigger "
+        "applies, never all concurrently by default. Advisor (which direction?), architect (how to structure?) "
+        "and critic (when does it fail?) are separate judgments; call one when needed, not all by default. A role is a mandate, not an instance: --continue may carry a builder session into "
         "refactorer, while reviewer, verifier, security-auditor and critic always get a context apart from the "
         "implementer. "
         "Act as the control tower: by default delegate implementation, investigation and test repair to "
@@ -5176,10 +5177,11 @@ def main(argv=None):
         try:
             git_toplevel(args.repo)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            if " is not a git repository; open it in a git repository or pass --repo PATH" in str(error):
-                print("oms panel: " + clean(str(error), 200), file=sys.stderr)
-                return 3
-            raise
+            # A missing directory, an unreadable path or a git timeout is as permanent as a non-repository.
+            reason = str(error) if " is not a git repository" in str(error) else \
+                "%s is not a usable git repository (%s); pass --repo PATH" % (args.repo, type(error).__name__)
+            print("oms panel: " + clean(reason, 200), file=sys.stderr)
+            return 3
     if args.release_main is not None:
         import panel_release
         return panel_release.cli_main(arguments)

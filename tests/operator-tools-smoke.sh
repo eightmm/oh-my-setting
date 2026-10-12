@@ -3489,6 +3489,11 @@ for owner in panel.PROVIDERS:
         "performance-engineer when performance needs measurement", "documenter at completion",
         "release-engineer when deploying", "not all by default", "a context apart"))
     assert "--seat" not in panel.bootstrap(owner, project) and "Astra" not in panel.bootstrap(owner, project)
+    assert "preferred installed provider" not in panel.bootstrap(owner, project) and \
+        "ordered by more weekly quota left" in panel.bootstrap(owner, project)
+    assert all(trigger in panel.bootstrap(owner, project) for trigger in (
+        "authentication, permissions, secrets, signals, install", "architect for structural decisions",
+        "release-engineer when deploying", "never all concurrently by default"))
     assert "control tower: by default delegate" in panel.bootstrap(owner, project)
     assert "exactly one live main" in panel.bootstrap(owner, project) and "trust-boundary" in panel.bootstrap(owner, project)
     assert "The sole main lands its work" in panel.bootstrap(owner, project)
@@ -3597,6 +3602,16 @@ for options in (["--providers", "--json"], ["--routes"], ["--help"]):
     wrapped = subprocess.run(["bash", str(root / "scripts/panel.sh")] + options, cwd=plain_directory,
                              env=selected_env, capture_output=True, text=True, timeout=30)
     assert wrapped.returncode == 0, wrapped
+gone_repo = temporary / "resolution-missing-directory"
+for options in (["--dry-run"], ["--watch", "--count", "1"]):
+    vanished = subprocess.run(panel_front + ["--repo", str(gone_repo)] + options, cwd=plain_directory,
+                              env=resolver_env, capture_output=True, text=True, timeout=30)
+    assert vanished.returncode == 3 and "Traceback" not in vanished.stderr and \
+        "is not a usable git repository" in vanished.stderr, vanished
+with patch.object(panel.subprocess, "run", side_effect=subprocess.TimeoutExpired(["git"], 5)), \
+        patch.object(panel.sys, "stderr", io.StringIO()) as timed_err:
+    assert panel.main(["--repo", str(plain_directory), "--dry-run"]) == 3
+assert "TimeoutExpired" in timed_err.getvalue() and "Traceback" not in timed_err.getvalue(), timed_err.getvalue()
 explicit = subprocess.run(panel_front + ["--repo", str(plain_directory), "--dry-run"],
                           cwd=plain_directory, env=resolver_env, capture_output=True, text=True, timeout=30)
 assert explicit.returncode == 3 and missing_repo_message in explicit.stderr, explicit
@@ -11445,7 +11460,12 @@ lease_tasks["t-live"]["lease_id"] = "lease-current-live"
 lease_attempts["builder"].setdefault("panel", {})["lease_id"] = "lease-current-live"
 lease_tasks["t-review"].update(lease_id="lease-reclaimed", claimed_at="2026-10-12T00:00:00Z")
 lease_attempts["explorer"].setdefault("panel", {})["lease_id"] = "lease-previous"
-assert graph_text.held_split(lease_flow) == (set(), {"t-ended", "t-review"}), graph_text.held_split(lease_flow)
+# A re-claimed lease with no call carrying it has no evidence the work stopped: it stays claimed.
+assert graph_text.held_split(lease_flow) == (set(), {"t-ended"}), graph_text.held_split(lease_flow)
+no_call_flow = deepcopy(lease_flow)
+no_call_flow["attempts"]["active_recent"] = [row for row in no_call_flow["attempts"]["active_recent"]
+                                             if row.get("task_id") != "t-ended"]
+assert "t-ended" not in graph_text.held_split(no_call_flow)[1], graph_text.held_split(no_call_flow)
 assert graph_text.plan_summary(held_flow)[1:] == (4, 7, 0, 2, 1), graph_text.plan_summary(held_flow)
 held_wide = graph_text.goal_banner(held_flow, 127, True)[0][0]
 assert held_wide.endswith(" 4/7 verified · 2 claimed · 1 stale ]") and display_width(held_wide) == 127, held_wide

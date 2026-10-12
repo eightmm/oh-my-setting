@@ -707,7 +707,7 @@ it. Other transports supporting per-call model selection require an exact
 provider capability checks. With an explicit model or custom route, omitting
 effort retains the front door's native settings. For profile-controlled transports such as Vibe/DeepSeek Harness,
 omit `--model`; the native profile selects it and an exact override is refused.
-Preset roles use a capability tier and optional provider preference (see Roles below).
+Preset roles use a capability tier ordered by weekly quota left, with no provider preference (see Roles below).
 Codex delegated routes accept the exact Sol, Luna and Astra model IDs in the
 panel policy, including Sol 6.1. Model-family versions are distinct from roles. Preset dispatch chooses the newest
 configured/catalog numeric version within its existing family and pins the exact ID;
@@ -770,7 +770,7 @@ The launcher does not autonomously fan out before the main has a task.
 | Claude main (default) | `claude-opus-5-5` | high |
 | Codex main / Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
 
-Routing filters a tier to installed providers. Only when multiple providers are installed does it remove providers reporting at least 90% weekly usage; missing, stale or malformed readings stay eligible, and routing fails if every installed candidate reports at least 90%. A sole installed provider remains eligible regardless of usage. It then applies the role's configured provider preference, followed by independence ordering that moves reviewer, verifier, security-auditor and critic away from the owner's provider when another candidate remains. Researcher is pinned to the light tier at low effort. Role defaults are shown below.
+Routing filters a tier to installed providers. Only when multiple providers are installed does it remove providers reporting at least 90% weekly usage; missing, stale or malformed readings stay eligible, and routing fails if every installed candidate reports at least 90%. A sole installed provider remains eligible regardless of usage. Inside the tier, providers with more weekly quota left come first (configured tier order breaks ties or missing readings); independence ordering then moves reviewer, verifier, security-auditor and critic away from the owner's provider when another candidate remains. No role prefers a provider. Researcher is pinned to the light tier at low effort. Role defaults are shown below.
 
 | Tier | Configured model candidates (effort) |
 | --- | --- |
@@ -779,13 +779,13 @@ Routing filters a tier to installed providers. Only when multiple providers are 
 | deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high) |
 | frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high) |
 
-| Role | Default tier | Preferred provider | Access | Front door |
+| Role | Default tier | Provider order | Access | Front door |
 | --- | --- | --- | --- | --- |
-| `researcher` | light, low effort | none | read | `peer-delegate --role researcher` |
-| `worker`, `builder`, `refactorer`, `documenter` | routine | Codex | read or write | `peer-delegate --role` |
-| `integrator`, `performance-engineer` | deep | Codex | read or write | `peer-delegate --role` |
-| `release-engineer` | routine | Codex | read | `peer-delegate --role release-engineer` |
-| `reviewer`, `advisor`, `architect`, `critic`, `verifier`, `security-auditor` | frontier | Claude | read | `peer-review`, `advise` or `peer-delegate --role --read-only` |
+| `researcher` | light, low effort | quota left | read | `peer-delegate --role researcher` |
+| `worker`, `builder`, `refactorer`, `documenter` | routine | quota left | read or write | `peer-delegate --role` |
+| `integrator`, `performance-engineer` | deep | quota left | read or write | `peer-delegate --role` |
+| `release-engineer` | routine | quota left | read | `peer-delegate --role release-engineer` |
+| `reviewer`, `advisor`, `architect`, `critic`, `verifier`, `security-auditor` | frontier | quota left, then away from the owner for reviewer, verifier, security-auditor and critic | read | `peer-review`, `advise` or `peer-delegate --role --read-only` |
 
 For the plain `worker` role, the read front door is `analysis-worker` and the write front door is `implementation-worker`; other roles keep their role names.
 
