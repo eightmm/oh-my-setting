@@ -1625,6 +1625,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                       body_rows=len(children), positions={item: i for i, item in enumerate(items)},
                       room_id=room.get("id"), graph_selected=selected, surface="graph",
                       primary=("chat", primary["participant"]) if primary else None,
+                      cancel_owner={"participant": owners[main_attempt]["participant"], "attempt": main_attempt}
+                      if main_attempt in owners else None,
                       bands=bands_hit, band_offsets=scrolled_now)
     if not color and selected:
         previous = None
@@ -2024,6 +2026,11 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
     arrows, move = ("←→", "↑↓") if unicode else ("<>", "^v")
     toggle = "F9 Chat⇄Board" if unicode else "F9 Chat<>Board"
     worktree = bool(member and kind == "result" and str(member.get("location") or "").startswith("worktree:"))
+    cancel_owner = navigation.get("cancel_owner") or {}
+    cancelable = bool(navigation.get("cancel_allowed", True) and member and kind == "result"
+                      and member.get("state") in {"starting", "working", "verifying"}
+                      and cancel_owner.get("participant") and cancel_owner.get("attempt")
+                      and member.get("parent") == cancel_owner.get("participant"))
     mail = bool(navigation.get("full_mail") and navigation.get("tab", "detail") == "detail"
                 and navigation.get("tab_body_visible") and not navigation.get("detail"))
     mail_hint = ("f Open right" if managed else "f Full text") if mail else ""
@@ -2033,7 +2040,8 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                 ("Enter Collapse" if navigation.get("messages_view", {}).get("open") is not None and navigation.get("messages_view", {}).get("open") == navigation.get("messages_view", {}).get("selected") else "Enter Expand") if tabs and navigation.get("tab") == "messages" else
                 "Enter Open right" if managed and kind in {"result", "debate"} else "Enter Open",
                 move + " Move", "Space Fold", "a Ask advisor",
-                "w Worktree" if worktree else "", mail_hint if mail else "f Open right" if message_call or managed and navigation.get("full_result") else
+                "w Worktree" if worktree else "", "c Cancel call" if cancelable else "",
+                mail_hint if mail else "f Open right" if message_call or managed and navigation.get("full_result") else
                 "f Full result" if navigation.get("full_result") else "",
                 "Tab Next tab" if tabs else "", "g Graph", "t Tree",
                 "n New main" if managed and not navigation.get("main_occupied") else "",
@@ -2068,6 +2076,10 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                   "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
                   "Tab Next tab" if tabs and not navigation.get("detail") else "",
                   "Space Fold" if kind == "group" or kind == "chat" and not graph else ""]
+    if navigation.get("cancel_pending"):
+        contextual.insert(0, "Confirm in tmux prompt")
+    elif cancelable:
+        contextual.insert(0, "c Cancel call")
     if navigation.get("reader_open"):
         contextual.insert(0, "Esc Close right")
     if not tabs:

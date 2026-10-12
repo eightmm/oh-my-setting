@@ -19,6 +19,7 @@ class TerminalInput:
         self.fd = None
         self.saved = None
         self.pending = b""
+        self.pasting = False
         self.escape_since = None
         self.deferred = []
 
@@ -44,7 +45,7 @@ class TerminalInput:
                                        capture_output=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
                     except (OSError, subprocess.SubprocessError):
                         pass
-            sys.stdout.write("\033[?1000h\033[?1006h")
+            sys.stdout.write("\033[?1000h\033[?1006h\033[?2004h")
             sys.stdout.flush()
         except (ImportError, OSError, ValueError, subprocess.SubprocessError):
             self.__exit__(None, None, None)
@@ -53,7 +54,7 @@ class TerminalInput:
     def __exit__(self, *args):
         if self.saved is not None:
             try:
-                sys.stdout.write("\033[?1000l\033[?1006l")
+                sys.stdout.write("\033[?1000l\033[?1006l\033[?2004l")
                 sys.stdout.flush()
             finally:
                 import termios
@@ -64,7 +65,7 @@ class TerminalInput:
                     self.fd = None
 
     def decode(self, data):
-        self.pending = (self.pending + data)[-1024:]
+        self.pending += data
         output = []
         keys = {b"\033[A": "up", b"\033[B": "down", b"\033[C": "right", b"\033[D": "left",
                 b"\033OA": "up", b"\033OB": "down", b"\033OC": "right", b"\033OD": "left",
@@ -72,6 +73,23 @@ class TerminalInput:
                 b"\033[1~": "home", b"\033[4~": "end", b"\033[7~": "home", b"\033[8~": "end",
                 b"\033[5~": "pageup", b"\033[6~": "pagedown"}
         while self.pending:
+            paste_start, paste_end = b"\033[200~", b"\033[201~"
+            if self.pasting:
+                end = self.pending.find(paste_end)
+                if end < 0:
+                    self.pending = self.pending[-(len(paste_end) - 1):]
+                    break
+                self.pending = self.pending[end + len(paste_end):]
+                self.pasting = False
+                continue
+            if self.pending.startswith(paste_start):
+                self.pending = self.pending[len(paste_start):]
+                self.pasting = True
+                output.append(("paste",))
+                continue
+            if paste_start.startswith(self.pending) and len(self.pending) > 2:
+                self.escape_since = time.monotonic()
+                break
             mouse = re.match(rb"\x1b\[<(\d{1,4});(\d{1,4});(\d{1,4})([Mm])", self.pending)
             if mouse:
                 code, x, y = [int(v) for v in mouse.groups()[:3]]
@@ -88,13 +106,14 @@ class TerminalInput:
                 self.pending = self.pending[len(key):]
                 continue
             if self.pending.startswith(b"\033"):
-                # A complete sequence nobody binds (Delete, F-keys, Shift-Tab, Ctrl-arrows) is dropped, never Esc.
+                # A complete unbound sequence remains distinct from Esc.
                 unknown = re.match(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|O[@-~])", self.pending)
                 if unknown:
+                    output.append(("unbound",))
                     self.pending = self.pending[unknown.end():]
                     continue
                 if self.pending == b"\033" or self.pending.startswith((b"\033[", b"\033O")) and len(self.pending) < 32:
-                    self.escape_since = self.escape_since or time.monotonic()
+                    self.escape_since = time.monotonic()
                     break
                 self.pending = self.pending[1:]
                 continue
@@ -106,12 +125,13 @@ class TerminalInput:
                 output.append(("tab",))
             elif value == b"\x0c":
                 output.append(("repaint",))
-            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"f", b"?", b"n", b"0", b"1", b"2", b"k", b"u") or value.decode("ascii", "ignore") in self.extra_keys:
+            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"f", b"?", b"n", b"0", b"1", b"2", b"k", b"u", b"c") or value.decode("ascii", "ignore") in self.extra_keys:
                 output.append((value.decode(),))
+            else:
+                output.append(("unbound",))
         if not self.pending:
             self.escape_since = None
         return output
-
     def wait(self, seconds):
         if self.deferred:
             events, self.deferred = self.deferred, []
@@ -144,7 +164,6 @@ class TerminalInput:
         if self.pending.startswith(b"\033[<"):
             self.pending = b""
             self.escape_since = None
-
 
 def preview_target(navigation, target):
     """A loaded preview of the same target keeps its report; only a new target starts one."""

@@ -410,7 +410,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             unique.insert(before_task, target)
     navigation.update(hits=hits, items=unique, offset=offset, body_rows=len(body), viewport=body_budget,
                       room_id=room.get("id"), positions=positions, geometry=geometry, surface="tree", bands=bands,
-                      tree_selected=selected)
+                      tree_selected=selected,
+                      primary=("chat", current) if current else None,
+                      cancel_owner={"participant": current, "attempt": main_attempt}
+                      if current and main_attempt else None)
     # A Past- or Attention-list choice scrolled off its page stays chosen; only the board's own rows are reaped.
     tab = navigation.get("tab")
     kept = (tab in {"past", "needs"} and tab in navigation.get("visible_tabs", [])

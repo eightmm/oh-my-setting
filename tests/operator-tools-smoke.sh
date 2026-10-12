@@ -2224,12 +2224,32 @@ import panel_messages
 import panel_chats
 import room_view
 from panel_input import TerminalInput, choose
+from unittest.mock import patch
 from terminal_panel import tab_event
 assert panel_debate._sentence("I'm keeping (a), the `!` marker is cheaper. More.") == "I'm keeping (a), the `!` marker is cheaper."
 assert panel_debate._sentence('He said "stop! now" ok. More') == 'He said "stop! now" ok.'
 assert [panel_debate.choice(t) for t in ("저는 (a)를 고릅니다.", "B: safest", "A good idea", "Yes, ship", "revise", "none")] == \
     ["(a)", "(b)", None, "yes", "revise", None]
-assert TerminalInput().decode(b"0\t") == [("0",), ("tab",)] and TerminalInput().decode(b"dm") == []
+assert TerminalInput().decode(b"0\t") == [("0",), ("tab",)]
+assert TerminalInput().decode(b"dm") == [("unbound",), ("unbound",)]
+assert TerminalInput().decode(b"y") == [("unbound",)]
+assert TerminalInput().decode(b"cy") == [("c",), ("unbound",)]
+assert TerminalInput().decode(b"\033[200~cy\033[201~") == [("paste",)]
+
+paste_start = b"\033[200~"
+for split in range(1, len(paste_start)):
+    decoder = TerminalInput()
+    assert decoder.decode(paste_start[:split]) == [], split
+    assert decoder.decode(paste_start[split:] + b"cy\033[201~") == [("paste",)], split
+
+stale_prefix = TerminalInput()
+stale_prefix.escape_since = 1.0
+with patch("panel_input.time.monotonic", return_value=10.0):
+    assert stale_prefix.decode(b"\033[200") == []
+assert stale_prefix.escape_since == 10.0, stale_prefix.escape_since
+with patch("panel_input.time.monotonic", return_value=10.05), \
+        patch("panel_input.select.select", return_value=([], [], [])):
+    assert stale_prefix.wait(0) == [] and stale_prefix.pending == b"\033[200"
 msg_members = [{"participant": "m1", "role": "main", "joined": True, "model": "claude-opus-5-5", "seq": 1, "provider": "claude", "attempt": "a1"},
                {"participant": "m2", "role": "main", "joined": True, "model": "gpt-6.1-sol", "seq": 2, "provider": "codex", "attempt": "a2"},
                {"participant": "m3", "role": "main", "joined": True, "model": "gpt-6-luna", "seq": 3, "provider": "codex", "attempt": "a3"}]
@@ -2747,8 +2767,10 @@ nav, text = board("detail", 110, 40, managed=True)
 assert "Tab Next tab" in text.split("\n")[-1]
 from panel_tree import render_tree
 tree_nav = {"selected": ("chat", "m2")}
-tree_text = render_tree(msg_report, 110, 40, navigation=tree_nav)
+tree_text = render_tree(msg_report, 110, 40, main_attempt="a2", navigation=tree_nav)
 assert tree_nav["tab_strip_visible"] and tab_event(("tab",), tree_nav), tree_text
+assert tree_nav["primary"] == ("chat", "m2") and tree_nav["cancel_owner"] == {
+    "participant": "m2", "attempt": "a2"}, tree_nav
 narrow_tree_nav = {}
 narrow_tree_text = render(msg_report, "codex", 22, 40, view="graph", navigation=narrow_tree_nav)
 assert narrow_tree_nav["surface"] == "tree" and narrow_tree_nav["hits"], narrow_tree_text
@@ -5705,6 +5727,19 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             restored = tmux_wait(["list-panes", "-t", top_window, "-F", "#{pane_id}\t#{pane_start_command}"], "--watch")
             graph_pane = next(row.split("\t", 1)[0] for row in restored.splitlines() if "--watch" in row)
             tmux_wait(["capture-pane", "-p", "-t", graph_pane], "Sol 6.1 ─")
+            tmux_wait(["show-option", "-p", "-v", "-t", graph_pane, "@oms_panel_main_watch"], "1")
+            restored_attempt = subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", graph_pane,
+                                                "@oms_panel_main_attempt"], env=env, text=True).strip()
+            restored_owner = subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", graph_pane,
+                                              "@oms_panel_room_participant"], env=env, text=True).strip()
+            chat_watch = subprocess.run(tmux + ["show-option", "-p", "-v", "-t", chat_pane,
+                                                "@oms_panel_main_watch"], env=env, capture_output=True, text=True)
+            assert chat_watch.returncode != 0 or chat_watch.stdout.strip() != "1", \
+                "reopen marked the native chat pane as the main board"
+            with patch.dict(os.environ, dict(reopen_env, TMUX_PANE=graph_pane,
+                                             OMS_ROOM_PARTICIPANT=restored_owner), clear=True):
+                assert panel._cancel_watch_authority(project, restored_attempt, restored_owner), \
+                    "reopened main board did not restore cancellation authority"
             with patch.dict(os.environ, reopen_env, clear=True), patch.object(panel.sys.stdin, "isatty", return_value=True), \
                     patch.object(panel.sys.stdout, "isatty", return_value=True), \
                     patch.object(panel, "reopen_panel", wraps=panel.reopen_panel) as reopen_again:
@@ -6079,6 +6114,9 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
                       "'--ref','panel_room_participant='+member,'--then','starting','--then','working',output=True)\n"
                       "Path(" + repr(str(attempt_path)) + ").write_text(attempt)\n"
                       "release=" + repr(str(release)) + "; ready=" + repr(str(ready)) + "\n")
+            if body is None and task == "cancel-selected-call":
+                body = ("child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'])\n"
+                        "Path(" + repr(str(ready)) + ").write_text(str(child.pid)); time.sleep(60)\n")
             body = body or ("Path(ready).write_text(str(os.getpid()))\n"
                             "while not Path(release).exists(): time.sleep(.02)\n")
             env = dict(room_env, OMS_ROOM_PARTICIPANT=name, OMS_ROOM_ADMITTED_PARTICIPANT=name)
@@ -6086,7 +6124,11 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
                                         str(project), name, digest, sys.executable, "-c", header + body],
                                        env=env, start_new_session=True)
             try:
-                panel.dispatch_store.write(project, name + "-process.json", {"pid": process.pid}, exclusive=True)
+                supervisor = panel_terminals.process(process.pid)
+                assert supervisor and supervisor["group"] == process.pid, "supervisor process identity unavailable"
+                panel.dispatch_store.write(project, name + "-process.json",
+                                           {"pid": process.pid, "identity": supervisor["identity"],
+                                            "group": supervisor["group"]}, exclusive=True)
                 deadline = time.monotonic() + 10
                 while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
                     time.sleep(.02)
@@ -6095,7 +6137,7 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
                 panel._record_dispatch_pending(project, call, 1, task, {"descendants": panel._dispatch_descendants(process.pid)})
                 row = json.loads(panel.events(project, "show", "--attempt", attempt_path.read_text(), "--json", output=True))
                 yield dict(name=name, member=member, call=call, process=process, release=release,
-                           ready=ready, row=row, digest=digest)
+                           ready=ready, row=row, digest=digest, supervisor=supervisor)
             finally:
                 release.touch()
                 try:
@@ -6112,6 +6154,210 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
                                  "--reason-code", "fixture_complete")
 
         # Public artifacts never replace positive controller proof, even with terminal ledger rows.
+        with recorded_fixture("cancel-selected-call") as fixture:
+            import room_view
+            name, member, call, process = (fixture[key] for key in ("name", "member", "call", "process"))
+            selected_state = {"room": room.status(project, shared),
+                              "room_attempts": {name: {"attempt_id": fixture["row"]["attempt_id"],
+                                                       "state": "working"}}}
+            main_attempt = room_env["OMS_PANEL_MAIN_ATTEMPT"]
+            tree_report, unused_status = panel.snapshot(project, room_id=shared)
+            selected_nav = {"selected": ("result", name)}
+            room_view.render_graph(tree_report, 120, 40, main_attempt=main_attempt, navigation=selected_nav)
+            assert selected_nav.get("selected") == ("result", name), selected_nav
+            assert selected_nav.get("primary") == ("chat", room_owner), selected_nav
+            assert selected_nav.get("cancel_owner") == {"participant": room_owner, "attempt": main_attempt}, selected_nav
+            from unittest.mock import Mock
+            nonce_factory = Mock(return_value=Mock(hex="0123456789abcdef0123456789abcdef"))
+            with patch.object(panel, "_cancel_window_id", return_value="@42"), \
+                    patch.object(panel.uuid, "uuid4", nonce_factory), \
+                    patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as confirm:
+                pending = panel._begin_cancel_confirmation(
+                    {"participant": name, "role": "worker", "model": "gpt-6-sol",
+                     "label": "#(touch /tmp/pwn) #{window_name};"},
+                    {"attempt_id": fixture["row"]["attempt_id"]}, "/dev/pts/7")
+            confirm_command = confirm.call_args.args[0]
+            assert confirm_command[:6] == ["tmux", "confirm-before", "-b", "-t", "/dev/pts/7", "-p"], confirm_command
+            assert confirm_command[6] == \
+                "Cancel worker gpt-6-sol ##(touch /tmp/pwn) ##{window_name};? (y/n)", confirm_command
+            assert confirm_command[7] == "set-option -w -t @42 @oms_cancel_confirm " + pending["nonce"], confirm_command
+            assert pending["window_id"] == "@42" and pending["call_id"] == name
+
+            for clients in ("", "/dev/pts/7 @43\n/dev/pts/8 @44\n",
+                            "/dev/pts/7 @42\n/dev/pts/8 @42\n"):
+                with patch.dict(os.environ, {"OMS_PANEL_SESSION": "oms-fixture"}), \
+                        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
+                            [], 0, clients, "")):
+                    assert panel._cancel_client_name("@42") is None, clients
+            with patch.dict(os.environ, {"OMS_PANEL_SESSION": "oms-fixture"}), \
+                    patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        [], 0, "/dev/pts/7 @42\n/dev/pts/8 @43\n", "")):
+                assert panel._cancel_client_name("@42") == "/dev/pts/7"
+
+            with patch.object(panel, "managed_session", return_value=True), \
+                    patch.object(panel, "cancel_selected_call", return_value="ready"), \
+                    patch.object(panel, "_cancel_window_id", return_value="@42"), \
+                    patch.object(panel, "_cancel_client_name", return_value=None), \
+                    patch.object(panel.subprocess, "run") as no_client_prompt:
+                no_client_message, no_client_pending = panel._request_cancel_confirmation(
+                    project, selected_state, selected_nav, main_attempt)
+            assert no_client_message == "Cancel needs a single attached client" and no_client_pending is None
+            no_client_prompt.assert_not_called()
+
+            with patch.object(panel, "managed_session", return_value=False), \
+                    patch.object(panel, "cancel_selected_call") as inline_cancel, \
+                    patch.object(panel, "_begin_cancel_confirmation") as inline_prompt:
+                inline_message, inline_pending = panel._request_cancel_confirmation(
+                    project, selected_state, selected_nav, main_attempt)
+            assert inline_message == "Cancel needs the managed tmux panel" and inline_pending is None
+            inline_cancel.assert_not_called()
+            inline_prompt.assert_not_called()
+
+            tick_state = {"room_attempts": {name: {"attempt_id": pending["attempt_id"]}}}
+            tick_nav = {"selected": ("result", name), "cancel_pending": pending}
+            with patch.object(panel, "_cancel_option_value", return_value=pending["nonce"]), \
+                    patch.object(panel, "_clear_cancel_option") as clear_option, \
+                    patch.object(panel, "cancel_selected_call", return_value="Cancellation requested") as cancel_once:
+                assert panel._poll_cancel_confirmation(project, tick_state, tick_nav, main_attempt,
+                                                       now=pending["expires"] - 1) == "Cancellation requested"
+            cancel_once.assert_called_once_with(project, tick_state, tick_nav, main_attempt, send=True)
+            clear_option.assert_called_once_with("@42")
+
+            for wrong_value, selected, now in (("wrong-nonce", ("result", name), pending["expires"] - 1),
+                                               (pending["nonce"], ("result", "other-call"), pending["expires"] - 1),
+                                               (pending["nonce"], ("result", name), pending["expires"] + 1)):
+                stale = dict(pending)
+                nav = {"selected": selected, "cancel_pending": stale}
+                with patch.object(panel, "_cancel_option_value", return_value=wrong_value), \
+                        patch.object(panel, "_clear_cancel_option"), \
+                        patch.object(panel, "cancel_selected_call") as never_cancel:
+                    assert panel._poll_cancel_confirmation(project, tick_state, nav, main_attempt, now=now) != "Cancellation requested"
+                never_cancel.assert_not_called()
+                assert "cancel_pending" not in nav
+
+            from panel_input import TerminalInput
+            pasted = TerminalInput().decode(b"\033[200~cy\033[201~")
+            assert pasted == [("paste",)] and not any(event == ("y",) for event in pasted), pasted
+            unbracketed_paste = TerminalInput().decode(b"cy")
+            assert unbracketed_paste == [("c",), ("unbound",)], unbracketed_paste
+            with patch.object(panel, "_cancel_option_value", return_value=None), \
+                    patch.object(panel, "_clear_cancel_option") as no_paste_clear, \
+                    patch.object(panel, "cancel_selected_call") as no_paste_cancel:
+                waiting_nav = {"selected": ("result", name), "cancel_pending": dict(pending)}
+                assert panel._poll_cancel_confirmation(project, tick_state, waiting_nav, main_attempt,
+                                                       now=pending["expires"] - 1) is None
+            no_paste_cancel.assert_not_called()
+            no_paste_clear.assert_not_called()
+
+            watch_options = {"@oms_panel_main_attempt": main_attempt,
+                             "@oms_panel_room_participant": room_owner,
+                             "@oms_panel_repo": str(project.resolve()),
+                             "@oms_panel_main_watch": "1",
+                             "@oms_panel_native_pane": "%71"}
+            def cancel_as_main(*args, **kwargs):
+                with patch.dict(os.environ, {"TMUX": "fixture", "TMUX_PANE": "%72",
+                                              "OMS_PANEL_SESSION": "oms-fixture"}):
+                    with patch.object(panel, "pane_option", side_effect=lambda key: watch_options.get(key, "")), \
+                            patch.object(panel, "pane_local_option",
+                                         side_effect=lambda key: watch_options.get(key, "")):
+                        return panel.cancel_selected_call(*args, **kwargs)
+            cancel_preflight = cancel_as_main(project, selected_state, selected_nav, main_attempt)
+            main_fixture_row = json.loads(panel.events(project, "show", "--attempt", main_attempt,
+                                                       "--json", output=True))
+            assert cancel_preflight == "ready", (cancel_preflight, main_fixture_row)
+            assert process.poll() is None and panel._dispatch_supervisor_receipt(project, call)["exit"] is None, \
+                "cancellation preflight signalled before confirmation"
+            tree = panel._dispatch_descendants(process.pid)
+            assert tree and not panel._dispatch_group_gone(process.pid), "long-running provider tree was not observed"
+            foreign_nav = dict(selected_nav, cancel_owner={"participant": "foreign-main", "attempt": main_attempt})
+            assert cancel_as_main(project, selected_state, foreign_nav, main_attempt) != "ready", \
+                "foreign call cancellation was allowed"
+            resumed_owner = "resumed-main"
+            resumed_nav = dict(selected_nav, cancel_owner={"participant": resumed_owner, "attempt": main_attempt})
+            resumed_state = room.status(project, shared)
+            resumed_state["participants"] = [dict(row, participant=resumed_owner)
+                if row["participant"] == room_owner else dict(row, parent=resumed_owner)
+                if row["participant"] == name else row for row in resumed_state["participants"]]
+            original_events = panel.events
+            def resumed_events(repo, *args, **kwargs):
+                if "--attempt" in args and args[args.index("--attempt") + 1] == main_attempt:
+                    return json.dumps({"tool": "panel-main", "terminal": False,
+                                       "refs": {"panel_room_id": shared,
+                                                "panel_room_participant": resumed_owner}})
+                return original_events(repo, *args, **kwargs)
+            watch_options["@oms_panel_room_participant"] = resumed_owner
+            with patch.object(panel.room, "status", return_value=resumed_state), \
+                    patch.object(panel, "events", side_effect=resumed_events), \
+                    patch.object(panel, "_dispatch_call_record", return_value=dict(call, parent=resumed_owner)), \
+                    patch.object(panel, "_dispatch_supervisor_snapshot", return_value=(
+                        panel._dispatch_supervisor_receipt(project, call),
+                        panel.dispatch_store.read(project, name + "-process.json"))):
+                assert cancel_as_main(project, selected_state, resumed_nav, main_attempt) == "ready", \
+                    "resumed main participant was confused with its current attempt"
+            watch_options["@oms_panel_room_participant"] = room_owner
+            with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}):
+                assert cancel_as_main(project, selected_state, selected_nav, main_attempt) != "ready", \
+                    "child caller was allowed to cancel"
+            with patch.dict(os.environ, {"OMS_HARNESS_DELEGATE_DEPTH": "1"}):
+                assert cancel_as_main(project, selected_state, selected_nav, main_attempt) != "ready", \
+                    "delegate caller was allowed to cancel"
+            with patch.dict(os.environ, {"OMS_PANEL_DISPATCH": "1", "OMS_PANEL_ROLE": "worker"}):
+                assert cancel_as_main(project, selected_state, selected_nav, main_attempt) != "ready", \
+                    "worker caller was allowed to cancel"
+            watch_options["@oms_panel_main_attempt"] = "observer-attempt"
+            assert cancel_as_main(project, selected_state, selected_nav, main_attempt) != "ready", \
+                "observational watch was allowed to cancel"
+            watch_options["@oms_panel_main_attempt"] = main_attempt
+            watch_options["@oms_panel_main_watch"] = ""
+            assert cancel_as_main(project, selected_state, selected_nav, main_attempt) != "ready", \
+                "unmarked observer pane was allowed to cancel"
+            watch_options["@oms_panel_main_watch"] = "1"
+            binding = panel.dispatch_store.read(project, name + "-process.json")
+            panel.dispatch_store.write(project, name + "-process.json",
+                                       dict(binding, identity="different-process-generation"))
+            assert cancel_as_main(project, selected_state, selected_nav, main_attempt, send=True).startswith(
+                "Supervisor identity changed"), "reused supervisor PID was signalled"
+            assert process.poll() is None, "identity mismatch still signalled the supervisor"
+            panel.dispatch_store.write(project, name + "-process.json", dict(binding, pid=process.pid + 1))
+            assert cancel_as_main(project, selected_state, selected_nav, main_attempt) != "ready", \
+                "receipt/binding PID mismatch was accepted"
+            panel.dispatch_store.write(project, name + "-process.json", binding)
+            panel.dispatch_store.write(project, name + "-process.json", {"pid": binding["pid"]})
+            assert cancel_as_main(project, selected_state, selected_nav, main_attempt).startswith(
+                "Legacy supervisor binding cannot be safely cancelled"), \
+                "legacy PID-only binding was allowed to cancel"
+            assert process.poll() is None, "legacy PID-only binding still signalled the supervisor"
+            panel.dispatch_store.write(project, name + "-process.json", binding)
+            if hasattr(panel.os, "pidfd_open") and hasattr(panel.signal, "pidfd_send_signal"):
+                cancel_result = cancel_as_main(project, selected_state, selected_nav, main_attempt, send=True)
+            else:
+                cancel_result = cancel_as_main(project, selected_state, selected_nav, main_attempt, send=True)
+                assert cancel_result.startswith("Safe supervisor signalling is unavailable") and process.poll() is None, \
+                    "platform without pidfd did not fail closed"
+                cancel_result = "platform-no-pidfd"
+            if cancel_result != "platform-no-pidfd":
+                assert cancel_result.startswith("Cancellation requested"), "selected call was not signalled"
+                assert process.wait(timeout=8) == 143, "supervisor did not receive cancellation"
+                receipt = panel._dispatch_supervisor_receipt(project, call)
+                assert receipt and receipt["all_reaped"] and receipt["exit"] == 143, "provider tree was not reaped"
+                assert all(panel_terminals.process_gone(row["pid"], row["identity"]) for row in tree), \
+                    "provider descendant survived supervisor cancellation"
+                assert panel._dispatch_group_gone(process.pid), "supervisor process group survived cancellation"
+                panel._record_dispatch_pending(project, call, 143, "cancel-selected-call",
+                                               {"descendants": panel._dispatch_descendants(process.pid) or []})
+                panel._record_dispatch_call(project, shared, name, room_owner, process,
+                                            fixture["supervisor"]["identity"], 143)
+                panel._settle_dispatch(project, shared, name, 143)
+                panel.deliver_result(project, shared, name, room_owner, "cancel-selected-call", 143)
+                settled = json.loads(panel.events(project, "show", "--attempt", fixture["row"]["attempt_id"],
+                                                  "--json", output=True))
+                assert settled["terminal"] and settled["state"] == "cancelled", settled
+                assert panel._dispatch_released(project, call), "settled room call record was not released"
+                assert any(message["id"] == "result-" + name for message in room.status(project, shared)["messages"]), \
+                    "settled call result was not recorded in the room"
+                assert cancel_as_main(project, selected_state, selected_nav, main_attempt) == \
+                    "Selected call is no longer running", "terminal ledger call was not reported as a no-op"
+
         with recorded_fixture("receipt-ports") as fixture:
             name, member, call, process = (fixture[k] for k in ("name", "member", "call", "process"))
             state = room.status(project, shared)
@@ -6166,6 +6412,11 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
                     project, shared, state, room_owner, ["value.txt"])), "invalid proof suppressed scope overlap"
             panel.dispatch_store.write(project, receipt_name, receipt)
             assert panel._dispatch_call_finished(project, shared, member), "authentic gone descendants kept scope"
+            panel.dispatch_store.write(project, name + "-process.json", {"pid": process.pid})
+            assert panel._dispatch_supervisor_receipt(project, call)["pid"] == process.pid, \
+                "legacy PID-only binding rejected a valid supervisor receipt"
+            assert panel._dispatch_call_finished(project, shared, member), \
+                "legacy PID-only binding prevented settlement of a valid completed call"
             pending_name = name + "-pending.json"
             pending = panel.dispatch_store.read(project, pending_name)
             for invalid in ({}, dict(pending, task_id="../foreign"), dict(pending, launch_sha256="0" * 64)):
@@ -6214,6 +6465,19 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
             assert refused_exit, "exit writer accepted a substituted launch"
             launch_path.write_bytes(original_launch)
             assert not panel._dispatch_call_finished(project, shared, member), "identical bytes repaired a changed launch"
+
+        with recorded_fixture("legacy-binding-settlement") as fixture:
+            name, call, process = (fixture[key] for key in ("name", "call", "process"))
+            fixture["release"].touch()
+            assert process.wait(timeout=5) == 0, "legacy-binding supervisor did not finish"
+            panel._record_dispatch_pending(project, call, 0, "legacy-binding-settlement", {"descendants": []})
+            panel.dispatch_store.write(project, name + "-process.json", {"pid": process.pid})
+            with patch.dict(os.environ, room_env, clear=True):
+                panel._reconcile_dispatch(project, shared, room.status(project, shared), room_owner, room_owner)
+            settled = json.loads(panel.events(project, "show", "--attempt", fixture["row"]["attempt_id"],
+                                              "--json", output=True))
+            assert settled["terminal"] and settled["state"] == "failed", settled
+            assert panel._dispatch_released(project, call), "legacy PID-only binding did not release its room record"
 
         # Session/group membership and snapshots cannot hide an adopted survivor or authorize release.
         for topology in ("group", "session", "shared"):
@@ -9711,14 +9975,15 @@ assert panel.board_split_cells(("left", 70, False), 80) == 39
 # A dragged width is kept once the window can hold both minimums.
 assert panel.board_split_cells(("left", 70, False), 110, explicit=True) == 70
 assert panel.board_split_cells(("left", 70, False), 60, explicit=True) is None
-def board_calls(display, terminal=None, percent=""):
+def board_calls(display, terminal=None, percent="", main_watch=False):
     def answer(command, **kwargs):
-        return subprocess.CompletedProcess(command, 0, display if "display-message" in command else "", "")
+        output = display if "display-message" in command else "%2" if "-P" in command else ""
+        return subprocess.CompletedProcess(command, 0, output, "")
     with patch.dict(os.environ, {"OMS_PANEL_BOARD_PERCENT": percent}), \
             patch.object(panel, "terminal_window", return_value=terminal), \
             patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
             patch.object(panel.subprocess, "run", side_effect=answer) as tmux_run:
-        panel.board_split("%1", Path("/repo"), "board")
+        panel.board_split("%1", Path("/repo"), "board", main_watch=main_watch)
     return [call.args[0][1:] for call in tmux_run.call_args_list if "display-message" not in call.args[0]]
 def left_split(width):
     return ["split-window", "-f", "-h", "-b", "-l", width, "-t", "%1", "-c", "/repo", "board"]
@@ -9729,6 +9994,21 @@ assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
 assert board_calls("200 50 1 $1\tcodex\tleft:40") == [legacy_left, left_split("80")]
 assert board_calls("200 50 1 $1\tcodex\ttop:12c") == [record_left, left_split("56")], "an older top record was kept"
 assert board_calls("200 50 1 $1\tcontrol\t") == [left_split("56")]
+assert board_calls("200 50 1 $1\tclaude\t", main_watch=True) == [
+    record_left,
+    ["split-window", "-P", "-F", "#{pane_id}", "-f", "-h", "-b", "-l", "56", "-t", "%1", "-c", "/repo", "board"],
+    ["set-option", "-p", "-t", "%2", "@oms_panel_main_watch", "1"]]
+control_input = {"pane": "%10", "window": "@1", "session": "oms-fixture", "watch": False}
+for identity, expected_watch in (({}, False),
+                                 ({"@oms_panel_main_attempt": "main-attempt",
+                                   "@oms_panel_room_participant": "main-member",
+                                   "@oms_panel_repo": "/repo"}, True)):
+    with patch.object(panel, "panel_panes", side_effect=[[control_input], [control_input]]), \
+            patch.object(panel, "pane_option", side_effect=lambda key: identity.get(key, "")), \
+            patch.object(panel, "board_split") as split, \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "graph", "")):
+        panel.reopen_panel(Path("/repo"))
+    assert split.call_args.kwargs["main_watch"] is expected_watch, (identity, split.call_args)
 # A detached session still reports tmux's 80x24: the attaching terminal sizes the board and the record.
 assert board_calls("80 24 0 $1\tcodex\t", terminal=(240, 59)) == [
     ["set-option", "-t", "$1", "@oms_panel_split", "left:67c"], left_split("28%")]
@@ -12692,6 +12972,15 @@ for columns in (36, 50, 80, 127):
                     if columns >= 80 and not tabs:
                         assert "v Expand" in foot, (columns, hint_nav, hints)
 assert "F9 Swap" in footer_hints({"selected": ("chat", "m1")}, 46, True, True, None, False)[0]
+cancel_hint = footer_hints({"selected": ("result", "c1"),
+                            "cancel_owner": {"participant": "m1", "attempt": "a1"}}, 100, True, True,
+                           {"state": "working", "parent": "m1"}, True)
+assert "c Cancel call" in " ".join(cancel_hint), cancel_hint
+confirm_hint = footer_hints({"selected": ("result", "c1"),
+                             "cancel_owner": {"participant": "m1", "attempt": "a1"},
+                             "cancel_pending": {"call_id": "c1"}}, 100, True, True,
+                            {"state": "working", "parent": "m1"}, True)
+assert "Confirm in tmux prompt" in " ".join(confirm_hint), confirm_hint
 expanded_message_nav = {"tab_strip_visible": True, "tab": "messages",
                         "messages_view": {"selected": "message-1", "open": "message-1"}}
 assert "Enter Collapse" in " ".join(footer_hints(expanded_message_nav, 80, True, True, None, True))
@@ -13227,14 +13516,20 @@ with patch.object(panel, "menu_input", return_value=EmptyGraphInput()), \
     assert panel.read_choice(Path("."), "codex", "ready", "auto", False, empty_graph_nav, {}) == "q"
 assert painted.call_count == 1 and moved.call_count == 0, (painted.call_count, moved.call_count)
 assert TerminalInput().decode(b"v\033[A") == [("v",), ("up",)]
-# Keys the board does not bind are ignored, never read as Esc; Home/End work in every encoding tmux sends.
+# Keys the board does not bind stay distinct from Esc; Home/End work in every encoding tmux sends.
 for sequence, expected in ((b"\033[1~", "home"), (b"\033[4~", "end"), (b"\033[7~", "home"), (b"\033[8~", "end"),
                            (b"\033OH", "home"), (b"\033OF", "end")):
     assert TerminalInput().decode(sequence) == [(expected,)], sequence
 for sequence in (b"\033[Z", b"\033[3~", b"\033[15~", b"\033[1;5C", b"\033OP"):
     ignored = TerminalInput()
-    assert ignored.decode(sequence) == [] and ignored.pending == b"", sequence
-assert TerminalInput().decode(b"\033[3~q") == [("q",)]
+    assert ignored.decode(sequence) == [("unbound",)] and ignored.pending == b"", sequence
+assert TerminalInput().decode(b"\033[3~q") == [("unbound",), ("q",)]
+split_paste = TerminalInput()
+split_paste_events = split_paste.decode(b"\033[200")
+split_paste_events += split_paste.decode(b"~" + b"x" * 1022 + b"c")
+split_paste_events += split_paste.decode(b"y")
+assert split_paste.pasting and split_paste_events == [("paste",)], \
+    (split_paste_events, split_paste.pasting)
 for partial, expected in ((b"\033", [("escape",)]), (b"\033[1;5", []), (b"\033O", [])):
     timed = TerminalInput()
     timed.fd = 0

@@ -1775,19 +1775,266 @@ def _dispatch_pending(repo, call):
     return pending
 
 
-def _dispatch_supervisor_receipt(repo, call):
+def _dispatch_supervisor_snapshot(repo, call):
     if call["schema"] == 2 and call["backend"] != "subreaper":
         return None
     receipt = dispatch_store.read(repo, call["participant"] + "-supervisor.json")
     binding = dispatch_store.read(repo, call["participant"] + "-process.json")
     digest = _dispatch_exit_record(call, 0)["launch_sha256"]
-    if (set(receipt) != {"launch_sha256", "pid", "all_reaped", "exit"}
+    if (not isinstance(receipt, dict) or not isinstance(binding, dict)
+            or set(receipt) != {"launch_sha256", "pid", "all_reaped", "exit"}
+            or set(binding) not in ({"pid"}, {"pid", "identity", "group"})
+            or type(binding["pid"]) is not int or binding["pid"] <= 0
+            or set(binding) == {"pid", "identity", "group"}
+            and (not isinstance(binding["identity"], str) or not binding["identity"]
+                 or type(binding["group"]) is not int or binding["group"] != binding["pid"])
+            or type(receipt["pid"]) is not int or receipt["pid"] <= 0
             or receipt["launch_sha256"] != digest or receipt["pid"] != binding["pid"]
             or call["schema"] == 1 and binding["pid"] != call["pid"]
             or type(receipt["all_reaped"]) is not bool
             or receipt["exit"] is not None and type(receipt["exit"]) is not int):
         return None
-    return receipt
+    return receipt, binding
+
+
+def _dispatch_supervisor_receipt(repo, call):
+    snapshot = _dispatch_supervisor_snapshot(repo, call)
+    return snapshot[0] if snapshot else None
+
+
+def _cancel_watch_authority(repo, main_attempt, owner):
+    """Require this window's own live main watch, never an observational/child caller."""
+    env = os.environ
+    if (env.get("OMS_HARNESS_CHILD") == "1" or env.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"
+            or env.get("OMS_PANEL_DISPATCH") or env.get("OMS_PANEL_ROLE")
+            or env.get("OMS_ATTEMPT_ID") or env.get("OMS_TASK_ID")
+            or env.get("OMS_ROOM_ADMITTED_PARTICIPANT")
+            or env.get("OMS_ROOM_PARTICIPANT") not in (None, owner)):
+        return False
+    pane = env.get("TMUX_PANE", "")
+    if not managed_session() or not re.fullmatch(r"%[0-9]+", pane):
+        return False
+    try:
+        repo_path = str(Path(repo).resolve())
+        options = {name: pane_option(name) for name in
+                   ("@oms_panel_main_attempt", "@oms_panel_room_participant", "@oms_panel_repo",
+                    "@oms_panel_native_pane")}
+        return (options["@oms_panel_main_attempt"] == main_attempt
+                and options["@oms_panel_room_participant"] == owner
+                and options["@oms_panel_repo"] == repo_path
+                and pane_local_option("@oms_panel_main_watch") == "1"
+                and re.fullmatch(r"%[0-9]+", options["@oms_panel_native_pane"]) is not None
+                and options["@oms_panel_native_pane"] != pane)
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return False
+
+
+def _cancel_window_id():
+    pane = os.environ.get("TMUX_PANE", "")
+    if not managed_session() or not re.fullmatch(r"%[0-9]+", pane):
+        return None
+    try:
+        result = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{window_id}"),
+                                capture_output=True, text=True, check=False, timeout=2,
+                                stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    window_id = result.stdout.replace("\r", "").strip()
+    return window_id if result.returncode == 0 and re.fullmatch(r"@[0-9]+", window_id) else None
+
+
+def _cancel_client_name(window_id):
+    session = os.environ.get("OMS_PANEL_SESSION", "")
+    if not re.fullmatch(r"@[0-9]+", window_id or "") or not session:
+        return None
+    try:
+        result = subprocess.run(tmux_command("list-clients", "-t", "=" + session,
+                                             "-F", "#{client_name} #{window_id}"),
+                                capture_output=True, text=True, check=False, timeout=2,
+                                stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    matches = []
+    for row in result.stdout.replace("\r", "").splitlines():
+        fields = row.split()
+        if len(fields) == 2 and fields[1] == window_id:
+            matches.append(fields[0])
+    return matches[0] if len(matches) == 1 else None
+
+
+def _clear_cancel_option(window_id):
+    if not re.fullmatch(r"@[0-9]+", window_id or ""):
+        return
+    try:
+        subprocess.run(tmux_command("set-option", "-w", "-u", "-t", window_id,
+                                    "@oms_cancel_confirm"), check=False, timeout=2,
+                       stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _begin_cancel_confirmation(member, attempt, client_name=None, window_id=None):
+    window_id = window_id or _cancel_window_id()
+    if not window_id or not client_name:
+        return None
+    nonce = uuid.uuid4().hex
+    role = clean(member.get("role") or "call", 32)
+    model = clean(member.get("model") or "unknown model", 48)
+    task = clean(attempt.get("task_id") or member.get("label") or member.get("participant"), 64)
+    prompt = ("Cancel %s %s %s? (y/n)" % (role, model, task)).replace("#", "##")
+    command = "set-option -w -t %s @oms_cancel_confirm %s" % (window_id, nonce)
+    try:
+        result = subprocess.run(tmux_command("confirm-before", "-b", "-t", client_name,
+                                             "-p", prompt, command),
+                                capture_output=True, text=True, check=False, timeout=2,
+                                stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return {"call_id": member["participant"], "attempt_id": attempt["attempt_id"],
+            "nonce": nonce, "expires": time.monotonic() + 15, "window_id": window_id}
+
+
+def _cancel_option_value(window_id):
+    try:
+        result = subprocess.run(tmux_command("show-option", "-w", "-v", "-t", window_id,
+                                             "@oms_cancel_confirm"), capture_output=True,
+                                text=True, check=False, timeout=1, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.replace("\r", "").strip()
+
+
+def _poll_cancel_confirmation(repo, state, navigation, main_attempt, now=None):
+    pending = navigation.get("cancel_pending")
+    if not isinstance(pending, dict):
+        return None
+    now = time.monotonic() if now is None else now
+    selected = navigation.get("selected")
+    attempt = ((state.get("room_attempts") or {}).get(pending.get("call_id")) or {})
+    if (selected != ("result", pending.get("call_id"))
+            or attempt.get("attempt_id") != pending.get("attempt_id")):
+        _clear_cancel_option(pending.get("window_id"))
+        navigation.pop("cancel_pending", None)
+        return None
+    if now >= pending.get("expires", 0):
+        _clear_cancel_option(pending.get("window_id"))
+        navigation.pop("cancel_pending", None)
+        navigation["notice"] = "Call cancellation confirmation expired"
+        return navigation["notice"]
+    value = _cancel_option_value(pending.get("window_id"))
+    if value is None:
+        return None
+    _clear_cancel_option(pending.get("window_id"))
+    navigation.pop("cancel_pending", None)
+    # The nonce is visible in tmux command arguments and a window option. A same-UID
+    # process with tmux-server access can observe or forge it; this guards accidental
+    # keys and pasted input, not hostile same-UID code.
+    if value != pending.get("nonce"):
+        navigation["notice"] = "Call cancellation not confirmed"
+        return navigation["notice"]
+    navigation["notice"] = cancel_selected_call(repo, state, navigation, main_attempt, send=True)
+    return navigation["notice"]
+
+
+def _request_cancel_confirmation(repo, state, navigation, main_attempt):
+    if not managed_session():
+        return "Cancel needs the managed tmux panel", None
+    result = cancel_selected_call(repo, state, navigation, main_attempt)
+    if result != "ready":
+        return result, None
+    call_id = navigation["selected"][1]
+    attempt = (state.get("room_attempts") or {}).get(call_id) or {}
+    member = next((row for row in (state.get("room", {}).get("participants") or [])
+                   if row.get("participant") == call_id), {})
+    window_id = _cancel_window_id()
+    client_name = _cancel_client_name(window_id)
+    if not client_name:
+        return "Cancel needs a single attached client", None
+    pending = _begin_cancel_confirmation(member, attempt, client_name, window_id)
+    if not pending:
+        return "Call cancellation confirmation unavailable", None
+    return "Confirm cancellation in the tmux prompt", pending
+
+
+def cancel_selected_call(repo, state, navigation, main_attempt, send=False):
+    """Signal one still-live child supervisor after checking panel, ledger and PID identity."""
+    selected = navigation.get("selected") or ()
+    owner_binding = navigation.get("cancel_owner") or {}
+    room_id = state.get("room", {}).get("id")
+    if (len(selected) != 2 or selected[0] != "result"
+            or not isinstance(owner_binding, dict)):
+        return "Select a running call owned by this main"
+    owner = owner_binding.get("participant")
+    watched_attempt = owner_binding.get("attempt")
+    if not isinstance(owner, str) or not owner or watched_attempt != main_attempt:
+        return "Selected main does not match this panel"
+    if not isinstance(main_attempt, str) or not main_attempt:
+        return "Panel main identity is unavailable"
+    if not _cancel_watch_authority(repo, main_attempt, owner):
+        return "Only this panel's own main watch can cancel calls"
+    try:
+        room_state = room.status(repo, room_id) if room_id else None
+        members = (room_state or {}).get("participants") or []
+        main = next((row for row in members if row.get("participant") == owner), None)
+        member = next((row for row in members if row.get("participant") == selected[1]), None)
+        if (not main or not main.get("joined") or main.get("role") != "main"
+                or not member or not member.get("joined") or member.get("role") == "main"):
+            return "Selected call is no longer available"
+        if member.get("parent") != owner:
+            return "Cannot cancel a call owned by another main"
+        main_row = json.loads(events(repo, "show", "--attempt", main_attempt, "--json", output=True))
+        main_refs = main_row.get("refs") or {}
+        if (main_row.get("tool") != "panel-main" or main_row.get("terminal")
+                or main_refs.get("panel_room_id", room_id) != room_id
+                or main_refs.get("panel_room_participant", main_attempt) != owner):
+            return "Panel main is no longer live"
+        attempt = (state.get("room_attempts") or {}).get(member["participant"])
+        if not isinstance(attempt, dict) or attempt.get("state") not in {"starting", "working", "verifying"}:
+            return "Selected call is no longer running"
+        current = json.loads(events(repo, "show", "--attempt", attempt.get("attempt_id"), "--json", output=True))
+        refs = current.get("refs") or {}
+        if (current.get("attempt_id") != attempt.get("attempt_id") or current.get("terminal")
+                or current.get("state") not in {"starting", "working", "verifying"}
+                or current.get("parent_attempt_id") != main_attempt
+                or refs.get("panel_room_id") != room_id
+                or refs.get("panel_room_participant") != member["participant"]):
+            return "Selected call is no longer running"
+        call = _dispatch_call_record(repo, room_id, member)
+        if not call or call.get("parent") != owner or call.get("backend") != "subreaper":
+            return "Selected call has no live supervisor record"
+        snapshot = _dispatch_supervisor_snapshot(repo, call)
+        if not snapshot:
+            return "Supervisor identity is unavailable; call was not signalled"
+        receipt, binding = snapshot
+        if receipt["all_reaped"] or receipt["exit"] is not None:
+            return "Selected call has already settled"
+        if set(binding) != {"pid", "identity", "group"}:
+            return "Legacy supervisor binding cannot be safely cancelled; call was not signalled"
+        if not send:
+            return "ready"
+        import panel_terminals
+        if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+            return "Safe supervisor signalling is unavailable; call was not signalled"
+        pidfd = os.pidfd_open(binding["pid"])
+        try:
+            current_process = panel_terminals.process(binding["pid"])
+            if (not current_process or current_process["identity"] != binding["identity"]
+                    or current_process["group"] != binding["group"]
+                    or os.getpgid(binding["pid"]) != binding["group"]):
+                return "Supervisor identity changed; call was not signalled"
+            # A pidfd pins the verified process across the signal and prevents PID reuse.
+            signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+        finally:
+            os.close(pidfd)
+        return "Cancellation requested; waiting for supervisor cleanup"
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+        return "Call cancellation could not be verified; call was not signalled"
 
 
 def _dispatch_call_finished(repo, room_id, member):
@@ -2222,7 +2469,13 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                            str(repo), control_member, digest] + argv
             process = subprocess.Popen(command, cwd=str(execution), env=env, start_new_session=os.name == "posix")
             if launch:
-                dispatch_store.write(repo, control_member + "-process.json", {"pid": process.pid}, exclusive=True)
+                binding = {"pid": process.pid}
+                if os.name == "posix":
+                    import panel_terminals
+                    supervisor = panel_terminals.process(process.pid)
+                    if supervisor and supervisor["group"] == process.pid:
+                        binding.update(identity=supervisor["identity"], group=supervisor["group"])
+                dispatch_store.write(repo, control_member + "-process.json", binding, exclusive=True)
             if access == "write" and caller:
                 try:
                     from review_backlog import warning_for
@@ -2570,7 +2823,7 @@ def terminal_window():
     return None
 
 
-def board_split(pane, repo, command):
+def board_split(pane, repo, command, main_watch=False):
     """Open this window's board as its full-height left pane at the panel-wide width. The first main window's board
     records its width in cells; later boards reuse it. The control window only follows the record.
     Leave narrow windows unsplit so both the board and native CLI remain usable."""
@@ -2608,8 +2861,18 @@ def board_split(pane, repo, command):
             subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_split", split_text(cells)),
                            check=False, timeout=3, stdin=subprocess.DEVNULL)
     # -f keeps a reopened board full height even beside a reader pane that splits the chat column.
-    subprocess.run(tmux_command("split-window", "-f", "-h", "-b", "-l", width, "-t", pane, "-c", str(repo), command),
-                   check=True)
+    split = tmux_command("split-window", "-f", "-h", "-b", "-l", width, "-t", pane, "-c", str(repo), command)
+    if main_watch:
+        split[2:2] = ["-P", "-F", "#{pane_id}"]
+    result = subprocess.run(split, check=True, capture_output=main_watch, text=main_watch)
+    watch_pane = result.stdout.replace("\r", "").strip() if main_watch else ""
+    if main_watch and re.fullmatch(r"%[0-9]+", watch_pane):
+        try:
+            subprocess.run(tmux_command("set-option", "-p", "-t", watch_pane,
+                                        "@oms_panel_main_watch", "1"), check=True, timeout=3,
+                           stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            pass  # Cancellation fails closed if the watcher pane cannot be marked.
 
 
 def panel_geometry():
@@ -2796,7 +3059,10 @@ def reopen_panel(repo):
         if selected.returncode or selected.stdout.strip() == "auto":
             subprocess.run(tmux_command("set-option", "-w", "-t", base["pane"], "@oms_panel_view", board_view("auto")),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
-        board_split(base["pane"], repo, watch_shell(repo, session=base["session"]))
+        owns_main = (bool(pane_option("@oms_panel_main_attempt"))
+                     and bool(pane_option("@oms_panel_room_participant"))
+                     and pane_option("@oms_panel_repo") == str(Path(repo).resolve()))
+        board_split(base["pane"], repo, watch_shell(repo, session=base["session"]), main_watch=owns_main)
     subprocess.run(tmux_command("select-pane", "-t", base["pane"]), check=True, timeout=3, stdin=subprocess.DEVNULL)
     return {"status": "already_open" if boards else "reopened", "session": base["session"],
             "window": base["window"], "input_pane": base["pane"], "native_restarted": False}
@@ -3001,7 +3267,7 @@ def add_main_window(repo, session, launch, view, attention_only, env, resume=Non
                                    launch_command(repo, session, launch, resume, model, task)),
                                    env=env, text=True).strip()
     bind_window(pane, launch, view, attention_only)
-    board_split(pane, repo, watch_shell(repo, launch))
+    board_split(pane, repo, watch_shell(repo, launch), main_watch=True)
     return pane
 
 
@@ -3223,7 +3489,7 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
             subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_repo", str(repo)), check=True)
             if launch:
                 bind_window(pane, launch, view, attention_only)
-            board_split(pane, repo, watch_shell(repo, launch))
+            board_split(pane, repo, watch_shell(repo, launch), main_watch=bool(launch))
             subprocess.run(tmux_command("select-pane", "-t", pane), check=True)
             opened = []
             for provider in mains:
@@ -3756,6 +4022,16 @@ def session_option(name):
 def pane_option(name):
     try:
         result = subprocess.run(tmux_command("show-option", "-w", "-v", "-t",
+                                os.environ.get("TMUX_PANE", ""), name),
+                                capture_output=True, text=True, check=False, timeout=5)
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def pane_local_option(name):
+    try:
+        result = subprocess.run(tmux_command("show-option", "-p", "-v", "-t",
                                 os.environ.get("TMUX_PANE", ""), name),
                                 capture_output=True, text=True, check=False, timeout=5)
         return result.stdout.strip() if result.returncode == 0 else ""
@@ -4627,8 +4903,13 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         read_filtered = navigation["attention"]
                     if not background or revision == submitted_revision:
                         density, filtered = read_density, read_filtered
+                    pending_cancel = navigation.get("cancel_pending")
                     navigation = refreshed_navigation(navigation, state, managed_session() and session_option(BOTTOM_OPTION),
                                                      close_call=close_call)
+                    if pending_cancel and not navigation.get("cancel_pending"):
+                        _clear_cancel_option(pending_cancel.get("window_id"))
+                    if navigation.get("cancel_pending"):
+                        _poll_cancel_confirmation(repo, state, navigation, main_attempt)
                     stale_notice(navigation, notice)
                     if managed_session() and state.get("collection", {}).get("ok") is True and main_attempt:
                         alert = (main_needs_attention(state, main_attempt), main_has_open_questions(state, main_attempt))
@@ -4656,6 +4937,11 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
 
                 def redraw():
                     nonlocal last
+                    owner = next((member for member in __import__("room_view").nodes(state)
+                                  if member.get("role") == "main"
+                                  and main_attempt in (member.get("participant"), member.get("attempt"))), None)
+                    navigation["cancel_allowed"] = bool(owner and _cancel_watch_authority(
+                        repo, main_attempt, owner["participant"]))
                     navigation.update(hits=[], items=[], expanded=expanded, installed=installed,
                                       spawn_busy=any(proc.poll() is None for proc, unused, unused2 in spawns),
                                       spawn_managed=managed_session(),
@@ -4677,6 +4963,11 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     return status
                 deadline = time.monotonic() + .05 if background and background.pending else next_read
                 while True:
+                    pending_cancel = navigation.get("cancel_pending")
+                    if (pending_cancel and navigation.get("selected") !=
+                            ("result", pending_cancel.get("call_id"))):
+                        _clear_cancel_option(pending_cancel.get("window_id"))
+                        navigation.pop("cancel_pending", None)
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
@@ -4693,7 +4984,21 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         size = redraw()
                     batch_hits = navigation.get("hits")
                     changed_from = None
+                    discard_batch = False
                     for event in events:
+                        pending_cancel = navigation.get("cancel_pending")
+                        if (pending_cancel and navigation.get("selected") !=
+                                ("result", pending_cancel.get("call_id"))):
+                            _clear_cancel_option(pending_cancel.get("window_id"))
+                            navigation.pop("cancel_pending", None)
+                        if pending_cancel and event[0] == "c":
+                            _clear_cancel_option(pending_cancel.get("window_id"))
+                            navigation.pop("cancel_pending", None)
+                            navigation["notice"] = "Call cancellation not confirmed"
+                            size = redraw()
+                            continue
+                        if discard_batch:
+                            continue
                         publish_bottom(navigation, changed_from)
                         changed_from = bottom_state(navigation)
                         if event[0] == "click" and navigation.get("hits") != batch_hits:
@@ -4793,6 +5098,13 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                 navigation["notice"] = ask_advisor(repo, state, navigation)
                             except (OSError, ValueError, subprocess.SubprocessError) as error:
                                 navigation["notice"] = clean(str(error), 160)
+                        elif event[0] == "c" and not navigation.get("detail"):
+                            message, pending = _request_cancel_confirmation(repo, state, navigation, main_attempt)
+                            navigation["notice"] = message
+                            if pending:
+                                navigation["cancel_pending"] = pending
+                                size = redraw()
+                                discard_batch = True
                         elif event[0] in {"g", "t", "b", "v"}:
                             if event[0] in {"g", "t"}:
                                 reset_group_view(navigation)

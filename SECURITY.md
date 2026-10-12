@@ -128,6 +128,10 @@ and the soft report of other mains' `oms/*` work-branch moves. An adversarial
 same-UID process can imitate a sibling's marker and PID, forge Git metadata, or
 move a work branch; `OMS_WORKER_GUARD_STRICT=1` keeps kept siblings, sibling
 cleanup and work branches hard. Use an OS sandbox for that threat model.
+Cancellation confirmation has the same same-UID limit: its nonce is visible in
+tmux command arguments and a window option, so same-UID code with tmux-server
+access can observe or forge it. The nonce only guards accidental keys and
+pasted input.
 
 The delegated checkout is also bound to its physical directory identity, Git
 directory/common-directory, and both regular Git backpointers. Those receipts
