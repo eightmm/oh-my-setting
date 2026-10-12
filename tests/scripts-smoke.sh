@@ -11464,6 +11464,70 @@ test_consult_memory_is_opt_in() {
     fail "consult --memory should attach shared memory"
 }
 
+test_panel_write_workers_get_private_test_state() {
+  local fixture="$TMP/panel-private-test-state"
+  local env_path
+  mkdir -p "$fixture/bin" "$fixture/parent/worktree"
+  cat > "$fixture/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
+printf '%s\n' "$@" > "$PANEL_ARGV"
+printf '%s\n' "${OMS_LOCK_DIR:-}" "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" "${TMUX_TMPDIR:-}" > "$PANEL_ENV"
+[ "${PANEL_FAIL:-0}" != 1 ] || exit 7
+printf '{}\n'
+EOF
+  cat > "$fixture/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in --version|--help) exit 0 ;; esac
+printf '%s\n' "$@" > "$PANEL_ARGV"
+printf '%s\n' "${OMS_LOCK_DIR:-}" "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" "${TMUX_TMPDIR:-}" > "$PANEL_ENV"
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"ok"}'
+EOF
+  chmod +x "$fixture/bin/codex" "$fixture/bin/claude"
+  printf 'fixture prompt\n' > "$fixture/prompt"
+
+  for provider in codex claude; do
+    local root="$fixture/$provider"
+    mkdir -p "$root/parent/worktree"
+    PANEL_ARGV="$root/argv" PANEL_ENV="$root/env" PATH="$fixture/bin:$PATH" \
+      OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker MA_KIND=delegate REPO="$root/parent/worktree" \
+      bash -c '. "$1/scripts/lib/peer-common.sh"; MA_KIND=delegate; REPO="$4"; ma_provider_attempt "$2" write "$3/prompt" "$3/output" "$4" provider-default "" delegate "" ""' \
+      _ "$ROOT" "$provider" "$fixture" "$root/parent/worktree" || fail "$provider panel write fixture failed"
+    local writable_root
+    writable_root="$(awk 'prev == "--add-dir" { print; exit } { prev = $0 }' "$root/argv")"
+    [ -n "$writable_root" ] || fail "$provider write argv omitted the private writable root"
+    [ ! -e "$writable_root" ] || fail "$provider successful call left private state behind: $writable_root"
+    [ "$(wc -l < "$root/env" | tr -d ' ')" = 4 ] || fail "$provider write call omitted fixture environment"
+    while IFS= read -r env_path; do
+      case "$env_path" in "$writable_root"/*) ;; *) fail "$provider write environment escaped private root: $env_path" ;; esac
+    done < "$root/env"
+    [ "$provider" != codex ] || grep -Fxq -- 'workspace-write' "$root/argv" || fail 'Codex workspace-write sandbox changed'
+  done
+
+  local read_root="$fixture/read"
+  mkdir -p "$read_root/parent/worktree"
+  PANEL_ARGV="$read_root/argv" PANEL_ENV="$read_root/env" PATH="$fixture/bin:$PATH" \
+    OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker MA_KIND=delegate REPO="$read_root/parent/worktree" \
+    bash -c '. "$1/scripts/lib/peer-common.sh"; MA_KIND=delegate; REPO="$3"; ma_provider_attempt codex read "$2/prompt" "$2/output" "$3" provider-default "" delegate "" ""' \
+    _ "$ROOT" "$fixture" "$read_root/parent/worktree" || fail 'read panel fixture failed'
+  if grep -Fq -- '--add-dir' "$read_root/argv" || grep -Fq '.oms-panel-worker.' "$read_root/env"; then
+    fail "read worker inherited private write state or writable root: $(cat "$read_root/argv"; cat "$read_root/env")"
+  fi
+
+  local failed_root="$fixture/failure"
+  mkdir -p "$failed_root/parent/worktree"
+  if PANEL_ARGV="$failed_root/argv" PANEL_ENV="$failed_root/env" PANEL_FAIL=1 PATH="$fixture/bin:$PATH" \
+    OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=builder MA_KIND=delegate REPO="$failed_root/parent/worktree" \
+    bash -c '. "$1/scripts/lib/peer-common.sh"; MA_KIND=delegate; REPO="$3"; ma_provider_attempt codex write "$2/prompt" "$3/output" "$3" provider-default "" delegate "" ""' \
+    _ "$ROOT" "$fixture" "$failed_root/parent/worktree"; then
+    fail 'failed provider fixture unexpectedly succeeded'
+  fi
+  local retained_root
+  retained_root="$(sed -n 's/^panel worker private test state retained after failure: //p' "$failed_root/parent/worktree/output")"
+  [ -n "$retained_root" ] && [ -d "$retained_root" ] || fail 'failed call did not retain private state for inspection'
+  rm -rf "$retained_root"
+}
+
 test_claude_envelope_carries_stop_reason() {
   local project="$TMP/claude-envelope"
   local bin_dir="$project/bin"
