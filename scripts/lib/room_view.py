@@ -1623,7 +1623,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
     if not tabs:
         contextual.append("v Expand")
     contextual.sort(key=lambda hint: 0 if hint.startswith("Enter ") or hint.startswith("f ") or hint.startswith("Esc ") else 1)
-    reserved = (["F9", "F12 Keys"] if width < 64 else [toggle, "F12 Keys"]) if managed else ["q Quit", "? Keys"]
+    reserved = (["F9 Swap", "F12 Keys"] if width < 64 else [toggle, "F12 Keys"]) if managed else ["q Quit", "? Keys"]
     packed = []
     tail = "  ".join(reserved)
     for hint in [h for h in contextual if h]:

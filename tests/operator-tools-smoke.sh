@@ -7726,6 +7726,24 @@ fallback_nav = {}
 fallback = render(room_view, "claude", 35, 23, view="graph", navigation=fallback_nav)
 assert fallback_nav["surface"] == "tree" and fallback_nav["hits"], fallback
 assert "Graph needs" not in fallback and "OMS dashboard" not in fallback, fallback
+main_states = deepcopy(room_view)
+main_states["room"]["participants"] = [
+    {"participant": "main-live", "provider": "codex", "model": "gpt-6-sol", "role": "main",
+     "label": "Live main", "joined": True, "seq": 1},
+    {"participant": "main-exited", "provider": "claude", "model": "opus", "role": "main",
+     "label": "Exited main", "joined": True, "seq": 2}]
+main_states["attempts"]["active_recent"] = [{"attempt_id": "live-attempt", "state": "working",
+    "panel": {"role": "main", "room_id": main_states["room"]["id"], "room_participant": "main-live"}}]
+main_states["attempts"]["recent"] = [{"attempt_id": "exited-attempt", "state": "failed",
+    "panel": {"role": "main", "room_id": main_states["room"]["id"], "room_participant": "main-exited"}}]
+# The narrow board dashboard (under 28 columns) counts live mains only.
+mixed_mains = render(main_states, "claude", 27, 30, view="graph")
+assert "Joined mains 1 /" in mixed_mains and "Mains: none live" not in mixed_mains, mixed_mains
+main_states["attempts"]["active_recent"] = []
+main_states["attempts"]["recent"].append({"attempt_id": "live-exited-attempt", "state": "cancelled",
+    "panel": {"role": "main", "room_id": main_states["room"]["id"], "room_participant": "main-live"}})
+exited_mains = render(main_states, "claude", 27, 30, view="graph")
+assert "Joined mains" not in exited_mains and "Mains: none live (2 exited)" in exited_mains, exited_mains
 for source_view, dimensions in ((room_view, ((80, 11), (80, 12), (60, 14), (100, 16))),
                                 (degraded, ((100, 30),))):
     for columns, rows in dimensions:
@@ -9933,6 +9951,7 @@ for columns in (36, 50, 80, 127):
                         assert "f Open right" in foot, (columns, hint_nav, hints)
                     if columns >= 80 and not tabs:
                         assert "v Expand" in foot, (columns, hint_nav, hints)
+assert "F9 Swap" in footer_hints({"selected": ("chat", "m1")}, 46, True, True, None, False)[0]
 assert "Sol 6.1 worker for Opus 5.5 · failed: Fix parser" in inbox, inbox
 assert "waiting for approval: Run migration" in inbox and "patch awaits admission: Write patch" in inbox, inbox
 assert "Opus 5.5 main · to all: Which branch?" in inbox and "\033" not in inbox, inbox

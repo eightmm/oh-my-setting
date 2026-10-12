@@ -837,10 +837,14 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         members = nodes(report)
         mains = [member for member in members if member.get("role") == "main"]
         if mains:
-            labels = main_names(members)
-            names = [labels[member["participant"]] for member in mains[:2]]
-            add("Joined mains %s / %s%s" % (len(mains), ", ".join(names),
-                " +%s" % (len(mains) - 2) if len(mains) > 2 else ""), "dim")
+            live_mains = [member for member in mains if member.get("state") not in TERMINAL_STATES]
+            if live_mains:
+                labels = main_names(members)
+                names = [labels[member["participant"]] for member in live_mains[:2]]
+                add("Joined mains %s / %s%s" % (len(live_mains), ", ".join(names),
+                    " +%s" % (len(live_mains) - 2) if len(live_mains) > 2 else ""), "dim")
+            else:
+                add("Mains: none live (%s exited)" % len(mains), "dim")
         if view == "graph":
             add("Graph needs 76x16 / showing list", "dim")
         add(sep.join(["Messages: %s unread" % room.get("pending_count", "?"), "%s read" % room.get("received_count", "?"),
