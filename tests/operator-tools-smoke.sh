@@ -10727,7 +10727,7 @@ live_row = event("a-live", "working", "2026-01-03T00:00:00Z", who="gone-live")
 live_row["refs"]["panel_lease_id"] = "lease-live"
 listed.append(live_row)
 members = [{"participant": "gone-review", "role": "worker", "joined": True},
-           {"participant": "gone-live", "role": "worker", "joined": True},
+           {"participant": "gone-live", "role": "worker", "joined": True, "parent": "flow-attempt"},
            {"participant": "flow-main", "role": "main", "joined": True}]
 def fake_run(command, **kwargs):
     if command[2:3] == ["land"]:
