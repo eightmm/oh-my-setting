@@ -12550,8 +12550,13 @@ past_jobs = [line for line in ended_past.splitlines() if "Old job" in line]
 newest_first = [n for n in range(13, 0, -1) if n != 3]
 assert "12 past calls, newest first" in ended_past and len(past_jobs) >= 11 and \
     [int(line.split("Old job ")[1][:2]) for line in past_jobs] == newest_first[:len(past_jobs)], past_jobs
-# A job that ended before local midnight carries its date ("10-12 21:20").
-assert all(re.search(r"Worker Luna 6 · Old job \d\d · finished · (\d\d-\d\d )?\d\d:\d\d", line) for line in past_jobs), past_jobs
+# An end time from an earlier local day carries its date, so the expectation holds across midnight.
+def ended_stamp(n):
+    import calendar
+    local = time.localtime(calendar.timegm(time.strptime(ended["room"]["call_results"]["old-%02d" % n]["ts"], "%Y-%m-%dT%H:%M:%SZ")))
+    return time.strftime("%H:%M" if local[:3] == time.localtime()[:3] else "%m-%d %H:%M", local)
+assert all(re.search(r"Worker Luna 6 · Old job %02d · finished · %s " % (n, ended_stamp(n)), line + " ")
+           for line, n in zip(past_jobs, newest_first)), past_jobs
 # A worker that hit its wall clock says how to continue; later rounds of one task are numbered.
 timed = deepcopy(ended)
 timed["room"]["call_results"]["old-00"]["exit"] = 124
