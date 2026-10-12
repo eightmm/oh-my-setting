@@ -1238,6 +1238,12 @@ oms_worker_surface_diff() {
         continue
       fi
       if [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] &&
+        [ "$name" = gitmeta ] && oms_worker_gitmeta_only_foreign_checkout_heads "$repo" \
+        "$before_dir" "$current_worktree_physical"; then
+        changed="${changed:+$changed, }foreign-ref"
+        continue
+      fi
+      if [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] &&
         [ "$name" = gitmeta ] && oms_worker_gitmeta_only_foreign_worktrees "$repo" \
         "$before_dir" "$current_worktree_physical"; then
         changed="${changed:+$changed, }foreign-worktree"
@@ -1737,8 +1743,10 @@ def refs(path):
 old, new = refs(sys.argv[1]), refs(sys.argv[2])
 protected = set(open(sys.argv[3]).read().splitlines())
 changed = [ref for ref in old.keys() | new.keys() if old.get(ref) != new.get(ref)]
-if not changed or any(ref not in old or ref not in new or not ref.startswith('refs/heads/')
-                      or ref in protected for ref in changed):
+if not changed or any(not ref.startswith('refs/heads/') or ref in protected or
+                      (ref not in old and not ref.startswith('refs/heads/oms/')) or
+                      (ref not in new and not ref.startswith('refs/heads/oms/'))
+                      for ref in changed):
     raise SystemExit(1)
 for ref in sorted(changed):
     print(ref)
@@ -1751,6 +1759,13 @@ PY
   while IFS= read -r ref; do
     ref="${ref//$'\r'/}"
     receipt=""
+    if ! awk -v r="$ref" '$2 == r { found=1 } END { exit !found }' "$before/refs"; then
+      oms_worker_refs_foreign_branch_created "$repo" "$before" "$worker" "$ref" || return 1
+      continue
+    elif ! awk -v r="$ref" '$2 == r { found=1 } END { exit !found }' "$before/refs-now"; then
+      oms_worker_refs_foreign_branch_deleted "$repo" "$before" "$worker" "$ref" || return 1
+      continue
+    fi
     for entry in "$before/foreign-worktrees/"*; do
       [ -f "$entry/HEAD" ] || continue
       head="$(sed -n '1p' "$entry/HEAD")"; head="${head//$'\r'/}"
@@ -1788,6 +1803,163 @@ PY
     done
     [ -n "$receipt" ] || return 1
   done < "$before/refs-changed"
+}
+
+# A newly born oms/* ref has no before-snapshot ref-log receipt. Accept it only
+# when a live, independently registered checkout now names it and Git recorded
+# the same checkout event in both its branch and per-worktree HEAD reflogs.
+oms_worker_refs_foreign_branch_created() {  # REPO BEFORE_DIR CURRENT_WORKTREE REF
+  local repo="$1" before="$2" worker="${3:-}" ref="$4"
+  local common entry head logpath branchlog receipt branch_before head_before
+  case "$ref" in refs/heads/oms/*) ;; *) return 1 ;; esac
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
+  for entry in "$common"/worktrees/*; do
+    [ -f "$entry/HEAD" ] && [ ! -L "$entry/HEAD" ] || continue
+    head="$(sed -n '1p' "$entry/HEAD")"; head="${head//$'\r'/}"
+    [ "$head" = "ref: $ref" ] || continue
+    oms_worker_gitmeta_is_foreign_worktree "$repo" "$entry" "$worker" || continue
+    branchlog="$common/logs/$ref"; logpath="$entry/logs/HEAD"
+    [ -f "$branchlog" ] && [ ! -L "$branchlog" ] &&
+      [ -f "$logpath" ] && [ ! -L "$logpath" ] || continue
+    receipt="$before/foreign-worktrees/${entry##*/}"
+    branch_before="$before/branch-logs/${ref#refs/heads/}"
+    head_before=""
+    if [ -d "$receipt" ]; then
+      cmp -s "$receipt/gitdir" "$entry/gitdir" || continue
+      head_before="$receipt/log"
+    fi
+    if python3 - "$branchlog" "$logpath" "$before/refs-now" "$ref" \
+      "$branch_before" "$head_before" <<'PY'
+import os, sys
+branch_log, head_log, refs_now, ref, branch_before, head_before = sys.argv[1:]
+def read_rows(data):
+    result = []
+    for line in data.splitlines():
+        fields = line.rstrip(b"\r\n").split(b"\t", 1)
+        if len(fields) == 2:
+            result.append((fields[0].split(b" ", 2), fields[1]))
+    return result
+branch_now = open(branch_log, "rb").read()
+head_now = open(head_log, "rb").read()
+branch_base = open(branch_before, "rb").read() if os.path.isfile(branch_before) else b""
+head_base = open(head_before, "rb").read() if head_before else b""
+if not branch_now.startswith(branch_base) or not head_now.startswith(head_base):
+    raise SystemExit(1)
+try:
+    tip = next(line.split(" ", 1)[0].encode() for line in open(refs_now)
+               if line.rstrip().endswith(" " + ref))
+except StopIteration:
+    raise SystemExit(1)
+branch_rows = read_rows(branch_now[len(branch_base):])
+head_rows = read_rows(head_now[len(head_base):])
+if not branch_rows or not head_rows:
+    raise SystemExit(1)
+suffix = (" to " + ref[len("refs/heads/"):]).encode()
+tip_oid = b"0" * len(tip)
+checkout_seen = False
+for fields, _ in branch_rows:
+    if len(fields) != 3 or fields[0] != tip_oid:
+        raise SystemExit(1)
+    matching = [(head, message) for head, message in head_rows
+                if len(head) == 3 and head[1:] == fields[1:]]
+    if not matching:
+        raise SystemExit(1)
+    if any(message.startswith(b"checkout: moving from ") and message.endswith(suffix)
+           for _, message in matching):
+        checkout_seen = True
+    tip_oid = fields[1]
+raise SystemExit(0 if checkout_seen and tip_oid == tip else 1)
+PY
+    then return 0; fi
+  done
+  return 1
+}
+
+oms_worker_refs_foreign_branch_deleted() {  # REPO BEFORE_DIR CURRENT_WORKTREE REF
+  local repo="$1" before="$2" worker="${3:-}" ref="$4"
+  local common entry receipt head count=0 current
+  case "$ref" in refs/heads/oms/*) ;; *) return 1 ;; esac
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
+  for receipt in "$before/foreign-worktrees/"*; do
+    [ -f "$receipt/HEAD" ] || continue
+    head="$(sed -n '1p' "$receipt/HEAD")"; head="${head//$'\r'/}"
+    [ "$head" = "ref: $ref" ] || continue
+    count=$((count + 1))
+    entry="$common/worktrees/${receipt##*/}"
+    if [ -e "$entry" ] || [ -L "$entry" ]; then
+      oms_worker_gitmeta_is_foreign_worktree "$repo" "$entry" "$worker" || return 1
+      current="$(sed -n '1p' "$entry/HEAD")"; current="${current//$'\r'/}"
+      [ "$current" != "ref: $ref" ] || return 1
+    fi
+    [ -f "$receipt/ref-log" ] || return 1
+    if python3 - "$receipt/ref-log" "$before/refs" "$ref" <<'PY'
+import sys
+old_log, refs_before, ref = sys.argv[1:]
+try:
+    tip = next(line.split(" ", 1)[0].encode() for line in open(refs_before)
+               if line.rstrip().endswith(" " + ref))
+except StopIteration:
+    raise SystemExit(1)
+rows = [line.split(b"\t", 1)[0].split(b" ", 2)
+        for line in open(old_log, "rb").read().splitlines()]
+raise SystemExit(0 if rows and len(rows[-1]) == 3 and rows[-1][1] == tip else 1)
+PY
+    then :; else return 1; fi
+  done
+  [ "$count" -eq 1 ] || return 1
+  for entry in "$common"/worktrees/*; do
+    [ -f "$entry/HEAD" ] && [ ! -L "$entry/HEAD" ] || continue
+    current="$(sed -n '1p' "$entry/HEAD")"; current="${current//$'\r'/}"
+    [ "$current" != "ref: $ref" ] || return 1
+  done
+  return 0
+}
+
+oms_worker_gitmeta_only_foreign_checkout_heads() {  # REPO BEFORE_DIR CURRENT_WORKTREE
+  local repo="$1" before="$2" worker="${3:-}"
+  local common entry old_head new_head ref
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null)" || return 1
+  oms_worker_refs_only_foreign "$repo" "$before" "$worker" || return 1
+  OMS_WG_GITMETA_EXEMPT_OUT=/dev/null OMS_WG_GITMETA_RESIDUE_OUT=/dev/null \
+    oms_worker_surface_capture_one "$repo" gitmeta "$worker" > "$before/gitmeta-checkout-now" || return 1
+  python3 - "$before/gitmeta" "$before/gitmeta-checkout-now" \
+    "$before/gitmeta-checkout-entries" <<'PY' || return 1
+import sys
+def surfaces(path):
+    heads, other = {}, []
+    for line in open(path):
+        row = line.rstrip("\r\n")
+        kind, _, value = row.partition(" ")
+        name, _, digest = value.rpartition(" ")
+        if kind == "worktree" and name.endswith("/HEAD"):
+            heads[name] = digest
+        else:
+            other.append(row)
+    return heads, sorted(other)
+old, old_other = surfaces(sys.argv[1])
+new, new_other = surfaces(sys.argv[2])
+if old_other != new_other or old.keys() != new.keys():
+    raise SystemExit(1)
+changed = [name for name in old if old[name] != new[name]]
+if not changed:
+    raise SystemExit(1)
+with open(sys.argv[3], "w") as handle:
+    for name in changed:
+        handle.write(name + "\n")
+PY
+  while IFS= read -r entry; do
+    entry="${entry#worktrees/}"
+    entry="${entry%/HEAD}"
+    [ -f "$before/foreign-worktrees/$entry/HEAD" ] || return 1
+    oms_worker_gitmeta_is_foreign_worktree "$repo" "$common/worktrees/$entry" "$worker" || return 1
+    cmp -s "$before/foreign-worktrees/$entry/gitdir" "$common/worktrees/$entry/gitdir" || return 1
+    old_head="$(sed -n '1p' "$before/foreign-worktrees/$entry/HEAD")"; old_head="${old_head//$'\r'/}"
+    new_head="$(sed -n '1p' "$common/worktrees/$entry/HEAD")"; new_head="${new_head//$'\r'/}"
+    case "$new_head" in 'ref: refs/heads/'*) ;; *) return 1 ;; esac
+    ref="${new_head#ref: }"
+    [ "$old_head" != "$new_head" ] && grep -Fxq "$ref" "$before/refs-changed" || return 1
+  done < "$before/gitmeta-checkout-entries"
+  return 0
 }
 
 # Capture and later re-check the delegated checkout's identity. A provider owns
@@ -2313,6 +2485,11 @@ oms_worker_surface_snapshot() {
     target="$(git -C "$repo" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)"
     target="${target//$'\r'/}"
     case "$target" in refs/remotes/origin/*) printf 'refs/heads/%s\n' "${target#refs/remotes/origin/}" ;; esac
+    if [ -n "$current_worktree_physical" ]; then
+      target="$(git -C "$current_worktree_physical" symbolic-ref -q HEAD 2>/dev/null || true)"
+      target="${target//$'\r'/}"
+      [ -z "$target" ] || printf '%s\n' "$target"
+    fi
   } > "$dir/refs-protected"
   common="$(oms_harness_git_path_physical "$repo" --git-common-dir 2>/dev/null || true)"
   mkdir -p "$dir/foreign-worktrees"
@@ -2335,6 +2512,24 @@ oms_worker_surface_snapshot() {
           fi ;;
       esac
     done
+  fi
+  mkdir -p "$dir/branch-logs"
+  if [ -n "$common" ] && [ -d "$common/logs/refs/heads/oms" ] &&
+    [ ! -L "$common/logs/refs/heads/oms" ]; then
+    python3 - "$common/logs/refs/heads/oms" "$dir/branch-logs/oms" <<'PY' || return 1
+import os, shutil, sys
+root, out = sys.argv[1:]
+for current, directories, files in os.walk(root, followlinks=False):
+    directories[:] = [name for name in directories
+                      if not os.path.islink(os.path.join(current, name))]
+    for name in files:
+        source = os.path.join(current, name)
+        if os.path.islink(source) or not os.path.isfile(source):
+            continue
+        target = os.path.join(out, os.path.relpath(source, root))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copyfile(source, target)
+PY
   fi
   # Rows the index store may legitimately compact away; verified against the
   # recorded prefix digest before use, so a later append here is harmless.

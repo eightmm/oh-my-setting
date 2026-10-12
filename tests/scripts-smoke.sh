@@ -26720,6 +26720,53 @@ test_worker_guard_reports_foreign_checkout_ref_moves() {
       fi
     done
   done
+
+  result="$(run_guarded_worker "$project" \
+    "git -C '$sibling' checkout -q -b oms/existing-worktree")"
+  [ "${result%%$'\t'*}" = 0 ] ||
+    fail "checking out a new oms/* branch in an existing foreign worktree should be soft: $result"
+  contains "$result" 'during this run: foreign-ref' ||
+    fail "an existing foreign checkout should report foreign-ref: $result"
+
+  # A second session creates a detached worktree, checks out a fresh oms/*
+  # branch there, and leaves it registered while the worker finishes.
+  local created="$TMP/guard-foreign-ref-created"
+  rm -rf "$ready" "$done"
+  result="$(run_guarded_worker "$project" \
+    "git worktree add -q --detach '$created' HEAD && git -C '$created' checkout -q --no-track -b oms/created && git -C '$created' -c user.name=test -c user.email=test@example.invalid commit -q --allow-empty -m follow-up")"
+  [ "${result%%$'\t'*}" = 0 ] ||
+    fail "a foreign detached checkout of a new oms/* branch should be soft: $result"
+  contains "$result" 'during this run: foreign-ref' ||
+    fail "a new foreign oms/* checkout should be warned as foreign-ref: $result"
+
+  # Namespace alone or checkout from the delegated worktree is no evidence of
+  # foreign ownership.
+  result="$(run_guarded_worker "$project" \
+    "git branch oms/unattached HEAD")"
+  [ "${result%%$'\t'*}" != 0 ] ||
+    fail "an oms/* branch without a foreign checkout should stay hard: $result"
+  result="$(run_guarded_worker "$project" \
+    "git -C \"\$PWD\" checkout -q -b oms/worker-own")"
+  [ "${result%%$'\t'*}" != 0 ] ||
+    fail "a new branch checked out in the worker worktree should stay hard: $result"
+
+  # Strict mode does not grant the foreign-checkout exemption.
+  local strict_created="$TMP/guard-foreign-ref-strict-created"
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$project" \
+    "git worktree add -q --detach '$strict_created' HEAD && git -C '$strict_created' checkout -q --no-track -b oms/strict-created")"
+  [ "${result%%$'\t'*}" != 0 ] ||
+    fail "strict mode tolerated a newly checked-out foreign oms/* branch: $result"
+
+  result="$(run_guarded_worker "$project" \
+    "git worktree remove -f '$created' && git branch -D oms/created")"
+  [ "${result%%$'\t'*}" = 0 ] ||
+    fail "removing a foreign checkout together with its oms/* branch should be soft: $result"
+  contains "$result" 'during this run: foreign-ref' ||
+    fail "a foreign checkout branch deletion should be warned as foreign-ref: $result"
+
+  result="$(run_guarded_worker "$project" "git branch -D oms/unattached")"
+  [ "${result%%$'\t'*}" != 0 ] ||
+    fail "deleting an oms/* branch without foreign checkout evidence should stay hard: $result"
 }
 
 test_worker_guard_sees_object_store_and_metadata_writes() {
@@ -28705,6 +28752,23 @@ test_worker_guard_splits_remote_tracking_and_stash_refs() {
         [ "$rc" = 2 ] || fail "strict read tolerated a foreign ref move: $out"
         contains "$out" 'state repository protected surfaces: refs' || fail "strict read refs not hard: $out"
       fi
+    done
+    local created_read="$TMP/guard-read-created"
+    for strict in 0 1; do
+      ma_read_guard_begin "$snap/read-created-$strict" || fail "read branch-create snapshot failed"
+      git -C "$project" worktree add -q --detach "$created_read" HEAD
+      git -C "$created_read" checkout -q --no-track -b oms/read-created
+      rc=0
+      out="$(OMS_WORKER_GUARD_STRICT="$strict" ma_read_guard_assert 2>&1)" || rc=$?
+      if [ "$strict" = 0 ]; then
+        [ "$rc" = 0 ] || fail "foreign oms branch creation stopped a read: $out"
+        contains "$out" 'state repository changes: foreign-ref' || fail "read branch-create warning missing: $out"
+      else
+        [ "$rc" = 2 ] || fail "strict read tolerated foreign oms branch creation: $out"
+        contains "$out" 'state repository protected surfaces: refs' || fail "strict read branch-create refs not hard: $out"
+      fi
+      git -C "$project" worktree remove -f "$created_read"
+      git -C "$project" branch -D oms/read-created >/dev/null
     done
     ma_read_guard_begin "$snap/read-unattributed" || fail "read ref attribution snapshot failed"
     next="$(git -C "$other_main" rev-parse HEAD~1)"
