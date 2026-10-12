@@ -293,7 +293,7 @@ def windows(repo, ident, state=None, _tick=None):
         candidates = []
         for line in result.stdout.splitlines():
             fields = line.replace("\r", "").split("\t")
-            if (len(fields) == 7 and fields[2] == ident and re.fullmatch(r"@[0-9]+", fields[0])
+            if (len(fields) == 7 and room.same_room(repo, fields[2], ident) and re.fullmatch(r"@[0-9]+", fields[0])
                     and re.fullmatch(r"\$[0-9]+", fields[6])
                     and re.fullmatch(r"%[0-9]+", fields[3]) and fields[3] + "\t" + fields[0] in native_panes):
                 member = fields[4] or fields[1]
@@ -322,7 +322,7 @@ def windows(repo, ident, state=None, _tick=None):
             if (not isinstance(refs, dict) or attempt.get("terminal") is not False
                     or attempt.get("tool") != "panel-main" or refs.get("panel_role") != "main"
                     or attempt.get("provider") != members[member]["provider"]
-                    or refs.get("panel_room_id") != ident
+                    or not room.same_room(repo, refs.get("panel_room_id"), ident)
                     or refs.get("panel_room_participant", fields[1]) != member):
                 continue
             found.setdefault(member, []).append({"window": fields[0], "pane": fields[3], "session": fields[6]})

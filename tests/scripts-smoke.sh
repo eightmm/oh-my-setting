@@ -7049,6 +7049,30 @@ finally:
     scope['stream_rows'] = original_stream_rows
     scope['MAX_PREFIX_CACHE'] = original_cache_limit
     scope['reset_streams']()
+sealed_rows = [json.loads(line) for line in room_raw.splitlines()]
+# A room sealed by a rollover stays a valid native room history: the running main is still enrolled there,
+# and the successor's predecessor header is a valid creation event.
+successor_room = 'room-' + h(('successor:' + room).encode())[:12]
+seal = {'schema': 1, 'ts': sealed_rows[-1]['ts'], 'thread': room, 'seq': len(sealed_rows) + 1, 'role': 'note',
+        'agent': 'agent', 'text': 'Room continues as ' + successor_room,
+        'room_event': {'kind': 'successor', 'participant': participant, 'target': successor_room}}
+sealed_state = scope['room_records'](sealed_rows + [seal], room)
+assert sealed_state['successor'] == successor_room and not sealed_state['closed']
+successor_rows = [{'schema': 1, 'ts': seal['ts'], 'thread': successor_room, 'seq': 1, 'role': 'note',
+                   'agent': 'agent', 'text': 'Private completion fixture', 'live': True},
+                  {'schema': 1, 'ts': seal['ts'], 'thread': successor_room, 'seq': 2, 'role': 'note',
+                   'agent': 'agent', 'text': 'Private completion fixture',
+                   'room_event': {'kind': 'created', 'participant': participant, 'predecessor': room}}]
+assert scope['room_records'](successor_rows, successor_room)['predecessor'] == room
+sealed_path = repo / '.oms/threads' / (room + '.jsonl')
+unsealed = sealed_path.read_bytes()
+try:
+    sealed_path.write_bytes(unsealed + (json.dumps(seal) + '\n').encode())
+    scope['reset_streams']()
+    scope['membership_epoch'](str(repo), room, participant, 'codex')
+finally:
+    sealed_path.write_bytes(unsealed)
+    scope['reset_streams']()
 # Rehashing a shortened blob/ref cannot replace the separate trusted capture.
 def forged_receipt(mutator):
     forged = copy.deepcopy(receipt)

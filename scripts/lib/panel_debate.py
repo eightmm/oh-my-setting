@@ -26,7 +26,7 @@ def debates(report, room=None):
         meta = mapping(row.get("panel"))
         if row.get("tool") != "panel-council" or row.get("attempt_id") in seen:
             continue
-        if meta.get("room_id") and meta["room_id"] != room.get("id"):
+        if meta.get("room_id") and meta["room_id"] not in {room.get("id"), room.get("predecessor")} - {None}:
             continue
         seen.add(row.get("attempt_id"))
         main = mains.get(row.get("parent_attempt_id")) or meta.get("room_participant")

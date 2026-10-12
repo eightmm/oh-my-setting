@@ -220,6 +220,10 @@ def append_from_env():
         raise ValueError("invalid thread row")
     if any(row.get("role") == "closed" for row in rows):
         raise ValueError("thread is closed")
+    last = rows[-1].get("room_event") if rows else None
+    if isinstance(last, dict) and last.get("kind") == "successor" and not env.get("OMS_TH_ROOM_EVENT"):
+        # A sealed room log ends with its successor row; room events meet the same seal in validate_event.
+        raise ValueError("room continues as %s" % last.get("target"))
     if fields and any(all(row.get(key) == val for key, val in fields.items()) for row in rows):
         return  # Replayed acknowledgment is idempotent under the existing lock.
     text_file = env.get("OMS_TH_TEXT_FILE")
@@ -233,7 +237,7 @@ def append_from_env():
     if env.get("OMS_TH_ROOM_EVENT"):
         from room import validate_event
         event = json.loads(env["OMS_TH_ROOM_EVENT"])
-        if not validate_event(rows, event, text):
+        if not validate_event(rows, event, text, repo=repo):
             return
         fields["room_event"] = event
     row = {"schema": 1, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

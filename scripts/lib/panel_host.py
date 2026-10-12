@@ -114,7 +114,7 @@ def targets(repo, ident, state, _tick=None):
             if (who not in members or attempt.get("terminal") is not False
                     or attempt.get("tool") != "panel-main" or ref.get("panel_role") != "main"
                     or attempt.get("provider") != members[who]["provider"]
-                    or ref.get("panel_room_id") != ident or ref.get("panel_host") != "herdr"
+                    or not room.same_room(repo, ref.get("panel_room_id"), ident) or ref.get("panel_host") != "herdr"
                     or ref.get("panel_socket_digest") != digest):
                 continue
             try:

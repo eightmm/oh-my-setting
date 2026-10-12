@@ -40,11 +40,13 @@ def project(report):
         for called, label, limit, reserve in ((False, "Room mains", room.MAX_PARTICIPANTS, room.MAIN_RESERVE),
                                               (True, "Room calls", room.MAX_CALLS, room.CALL_RESERVE)):
             add("room", label, sum(bool(mapping(member).get("parent")) == called for member in members), limit,
-                "New mains use a fresh bounded room near capacity; existing sessions and room evidence stay intact.",
+                "The next dispatch continues this room as a linked successor; ids and retained history keep working."
+                if called else "New mains use a fresh bounded room near capacity; existing sessions and room evidence stay intact.",
                 warning_at=limit - reserve + 1)
         messages = shared.get("message_count")
         add("room", "Room messages", messages if type(messages) is int else None, room.MAX_MESSAGES,
-            "Select a fresh room for new work; acknowledgement does not delete retained messages.", type(messages) is not int,
+            "The next dispatch continues this room as a linked successor; the sealed log stays readable.",
+            type(messages) is not int,
             warning_at=room.MAX_MESSAGES - room.MESSAGE_RESERVE + 1)
     for kind, row in mapping(report.get("private_capacity")).items():
         row = mapping(row)

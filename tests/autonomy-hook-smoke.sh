@@ -599,6 +599,25 @@ with patch.dict(os.environ, coord_env), patch.object(hook_state.subprocess, "run
     host_identity["room"] = "coord-target"
     room.append(repo, "coord-target", {"kind": "leave", "participant": "coord-reader"}, "Reader left coordination")
     assert hook_state.coordination_room(payload("coord-native")) is None, "departed coordination receiver remained bound"
+    # The bound room rolls over: the inherited old id resolves to the successor, whose tmux id is not a second
+    # coordination room; the cursor restarts there and the first delivery says once why the id changed.
+    host_identity["room"] = "coord-target"
+    room.send(repo, "coord-source", "coord-writer", "coord-reader", "BEFORE ROLLOVER", message_id="before-rollover")
+    assert "BEFORE ROLLOVER" in hook_state.live_thread_hint(payload("coord-native"))
+    room.acknowledge(repo, "coord-source", "coord-reader", ["before-rollover"])
+    rolled = room.rollover(repo, "coord-source", "coord-reader")
+    assert room._selected(repo, hook_state.session_hash(payload("coord-native")), "coord-source", "coord-reader")[0] == (
+        rolled, "coord-reader")
+    room.send(repo, "coord-source", "coord-writer", "coord-reader", "AFTER ROLLOVER", message_id="after-rollover")
+    host_identity["room"] = rolled
+    assert hook_state.coordination_room(payload("coord-native")) is None, "a rolled-over room was coordinated twice"
+    moved = hook_state.live_thread_hint(payload("coord-native"))
+    assert moved.startswith("[oms room] room coord-source continues as %s;" % rolled), moved
+    assert "AFTER ROLLOVER" in moved and "BEFORE ROLLOVER" not in moved and "--id " + rolled in moved, moved
+    room.send(repo, "coord-source", "coord-writer", "coord-reader", "LATER", message_id="after-rollover-2")
+    later = hook_state.live_thread_hint(payload("coord-native"))
+    assert "LATER" in later and "continues as" not in later and "AFTER ROLLOVER" not in later, later
+    host_identity["room"] = "coord-target"
 # The hook skips mail its participant already consumed, yet moves its cursor past it.
 room.create(repo, "acked", "Consumed mail")
 room.join(repo, "acked", "writer", "codex", model="gpt-6-sol", native_session="ack-writer")

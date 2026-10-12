@@ -14,10 +14,12 @@ def nodes(report):
     attempts = mapping(report.get("attempts"))
     linked = {}
     rows = listing(attempts.get("active_recent")) + listing(attempts.get("recent"))
-    rows = sorted(rows, key=lambda row: mapping(row.get("panel")).get("room_id") != room.get("id"))
+    # Attempts started before a rollover name the predecessor room; they still belong to this board.
+    here = {room.get("id"), room.get("predecessor")} - {None}
+    rows = sorted(rows, key=lambda row: mapping(row.get("panel")).get("room_id") not in here)
     for row in rows:
         meta = mapping(row.get("panel"))
-        if meta.get("room_id") and meta["room_id"] != room.get("id"):
+        if meta.get("room_id") and meta["room_id"] not in here:
             continue
         ident = meta.get("room_participant")
         if ident and not meta.get("room_id") and ident != row.get("attempt_id"):
@@ -1606,6 +1608,9 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
         owners = {key for m in mains for key in (m["participant"], m.get("attempt")) if key}
         past = past_calls([c for calls in everyone.values() for c in calls] +
                           [m for m in members if m.get("role") != "main" and m.get("parent") not in owners], classify)
+    # Calls settled before a rollover follow the newer ones; older rooms stay readable with room show --exact.
+    shown = {action(c) for c in past}
+    past = list(past) + [c for c in listing(room.get("predecessor_calls")) if action(c) not in shown]
     preview = mapping(navigation.get("preview")) if preview is None else preview
     if previewed is None:
         # Team rows include synthetic debate calls, which members never list.

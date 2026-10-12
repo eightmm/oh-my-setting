@@ -1910,7 +1910,7 @@ def coordination_room(payload: dict[str, Any], repo: Path | None = None):
         if actual_session != session or not owner or Path(owner).resolve() != selected_repo:
             return None
         ident = room.identifier(ident, "room")
-        if not ident or ident == os.environ["OMS_ROOM_ID"]:
+        if not ident or room.same_room(selected_repo, os.environ["OMS_ROOM_ID"], ident):
             return None
         who, consumer = os.environ["OMS_ROOM_PARTICIPANT"], session_hash(payload)
         original, original_state = room._selected(selected_repo, consumer, os.environ["OMS_ROOM_ID"], who)
@@ -2064,6 +2064,13 @@ def _live_thread_hint(payload: dict[str, Any], repo: Path | None = None, *, coor
                 except (ValueError, OSError):
                     reminders = ""  # reminders are advisory; the delivered turns still go out
                 message = "\n".join(part for part in (message, reminders) if part)
+            bound = os.environ.get("OMS_ROOM_ID")
+            if (room_member and coordination is None and bound and bound != tid and state.get("thread") != tid
+                    and delta["cursor"] != after):
+                # The first read after a rollover says once why the room id changed.
+                message = "\n".join(part for part in (
+                    "[oms room] room %s continues as %s; commands naming %s keep working." % (bound, tid, bound),
+                    message) if part)
             if delta["cursor"] != after:
                 if coordination is not None and time.monotonic() >= deadline:
                     return ""

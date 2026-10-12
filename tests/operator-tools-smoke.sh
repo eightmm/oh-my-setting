@@ -6551,6 +6551,15 @@ def exercise_observed_worker_leases():
                                            "role": role, "joined": True})
             if scenario in {"lost-caller", "lost-child"}:
                 state["participants"].pop(0 if scenario == "lost-caller" else -1)
+        rolled = room.successor_id(argv_binding.room_id)
+        def roll(repo, room_id, actor):
+            # A room past its marks continues as its successor; a refused carry leaves the capacity refusal.
+            assert (room_id, actor) == (argv_binding.room_id, argv_binding.owner_participant)
+            if scenario == "full-write":
+                raise ValueError("rollover carry exceeds reserve")
+            state["messages"] = [{}]
+            state["participants"] = [p for p in state["participants"] if not p.get("parent")]
+            return rolled
         def notice(repo, room_id, sender, recipient, text, kind, **kwargs):
             if scenario == "send-error" and text.startswith("Assigned:"):
                 raise ValueError("unrelated room send failure")
@@ -6558,6 +6567,7 @@ def exercise_observed_worker_leases():
                 raise ValueError("room message limit reached; start a new bounded room")
             notices.append((sender, recipient, text))
         errors = io.StringIO()
+        rolling = Mock(side_effect=roll)
         with patch.object(panel.shutil, "which", return_value="fixture-codex"), \
                 patch.object(panel, "moved_main", return_value=None), \
                 patch.object(panel, "child_environment", side_effect=lambda *args: dict(capacity_env)), \
@@ -6565,11 +6575,9 @@ def exercise_observed_worker_leases():
                 patch.object(panel, "events", side_effect=lambda repo, operation, *args, **kwargs:
                              json.dumps(main_record if operation == "show" else live_rows)), \
                 patch.object(panel, "plan_link", return_value=argv_binding) as observed_plan, \
-                patch.object(room, "records", return_value=[]), \
-                patch.object(room, "project", return_value=state), \
-                patch.object(room, "join", side_effect=enroll), \
-                patch.object(room, "send", side_effect=notice), \
-                patch.object(room, "append", side_effect=rollback), \
+                patch.multiple(room, records=Mock(return_value=[]), project=Mock(return_value=state),
+                               join=Mock(side_effect=enroll), rollover=rolling, send=Mock(side_effect=notice),
+                               append=Mock(side_effect=rollback)), \
                 patch.object(panel, "results", return_value={"rows": []}), \
                 patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
                 patch("panel_terminals.process", return_value=None), \
@@ -6580,14 +6588,12 @@ def exercise_observed_worker_leases():
                              if scenario == "spawn-error" else None,
                              return_value=Mock(pid=123, wait=lambda **kwargs: 0, poll=lambda: 0)) \
                     as provider_call, redirect_stderr(errors):
-            if scenario != "normal":
+            if scenario not in {"normal", "full", "calls-full"}:
                 try:
                     panel.run_dispatch(*this_args)
                 except (OSError, ValueError) as error:
                     expected = {"closed": "room is closed", "foreign-main": "identities disagree",
-                                "full": "room %s is full" % argv_binding.room_id,
                                 "full-write": "room %s is full" % argv_binding.room_id,
-                                "calls-full": "room %s is full" % argv_binding.room_id,
                                 "lost-caller": "participant has not joined this room",
                                 "lost-child": "participant has not joined this room",
                                 "send-error": "unrelated room send failure",
@@ -6606,9 +6612,11 @@ def exercise_observed_worker_leases():
                     assert not (project / panel._dispatch_pending_path(children[0][1])).exists()
                 else:
                     provider_call.assert_not_called()
-                if scenario in {"full", "full-write", "calls-full", "closed"}:
+                if scenario in {"full-write", "closed"}:
                     assert len(state["participants"]) == participants_before and not children
                     observed_plan.assert_not_called()
+                if scenario == "full-write":
+                    assert "could not roll over: rollover carry exceeds reserve" in errors.getvalue()
                 continue
             assert panel.run_dispatch(*this_args) == 0, scenario
             provider_call.assert_called_once()
@@ -6616,13 +6624,18 @@ def exercise_observed_worker_leases():
             invoked, child_env = provider_call.call_args.args[0], provider_call.call_args.kwargs["env"]
             assert json.loads(invoked[invoked.index("--observe-plan-binding") + 1]) == argv_binding._asdict()
             assert capacity_route["model"] in " ".join(invoked), invoked
-            assert child_env["OMS_ROOM_ID"] == argv_binding.room_id
+            # After a rollover the call enrolls in, and its worker is told, the successor room.
+            current = rolled if scenario != "normal" else argv_binding.room_id
+            assert rolling.called == (scenario != "normal"), scenario
+            assert child_env["OMS_ROOM_ID"] == current
             assert child_env["OMS_PANEL_MAIN_ATTEMPT"] == argv_binding.owner_attempt
             assert child_env["OMS_ROOM_PARTICIPANT"] == children[0][1]
-            assert children[0][0] == argv_binding.room_id and children[0][-1] == argv_binding.owner_participant
+            assert children[0][0] == current and children[0][-1] == argv_binding.owner_participant
             assert children[0][2:6] == (capacity_route["provider"], "worker", capacity_route["model"], scopes)
             assert child_env["OMS_PANEL_PURPOSE"] == ("implement" if writing else "investigate")
-            assert notices[0][2] == "Assigned: Capacity call" and not errors.getvalue()
+            assert notices[0][2] == "Assigned: Capacity call"
+            assert errors.getvalue() == ("" if scenario == "normal" else "Room %s continues as %s; ids naming %s keep working.\n"
+                                         % (argv_binding.room_id, rolled, argv_binding.room_id)), errors.getvalue()
     test_room = room.create(project, "observed-worker-room", "Worker lease producer")
     mains = {}
     for provider in panel.PROVIDERS:
@@ -7718,6 +7731,221 @@ with patch.dict(os.environ, control_env, clear=True), \
             raise AssertionError("room call cap was not enforced")
     panel.events(project, "transition", "--attempt", second_owner, "--state", "cancelled")
     room.append(project, shared, {"kind": "leave", "participant": second_owner}, "Fixture owner stopped")
+# A room past its rollover marks continues as a derived successor: running ids keep working, history stays.
+import threading
+roll = temporary / "rollover repo"
+roll.mkdir()
+subprocess.run(["git", "init", "-q", str(roll)], check=True)
+with patch.dict(os.environ, {}):
+    for name in [n for n in os.environ if n.startswith(("OMS_ROOM_", "OMS_PANEL_")) or n in (
+            "OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH", "TMUX", "TMUX_PANE")]:
+        del os.environ[name]
+    old = room.create(roll, title="All-day room")
+    lead = "main-roll"
+    room.join(roll, old, lead, "claude", "main", native_session="roll-session", owns=["docs"])
+    room.describe(roll, old, lead, "Rolling main")
+    for call_name in ("call-run", "call-pend", "call-done"):
+        room.join(roll, old, call_name, "codex", "worker", parent=lead)
+    assigned = {c: room.send(roll, old, lead, c, "Assigned: " + c, "handoff")["id"]
+                for c in ("call-run", "call-pend", "call-done")}
+    question = room.send(roll, old, lead, "call-run", "Which file?", "question")["id"]
+    room.send(roll, old, "call-pend", lead, "Call exit=0; pending read", "handoff", message_id="result-call-pend")
+    room.send(roll, old, "call-done", lead, "Call exit=1; read", "handoff", message_id="result-call-done")
+    room.acknowledge(roll, old, lead, ["result-call-done"])
+    room.send(roll, old, lead, "all", "first status", "status")
+    latest_status = room.send(roll, old, lead, "all", "latest status", "status")["id"]
+    old_cursor = room.updates(roll, old, lead)["cursor"]
+    # Bulk settled mail to the finished call, written as valid rows instead of 900 subprocess appends.
+    log = roll / ".oms/threads" / (old + ".jsonl")
+    rows = room.records(roll, old)
+    stamp = rows[-1]["ts"]
+    with log.open("a", encoding="utf-8") as handle:
+        for n in range(room.ROLLOVER_MESSAGES + 1 - len(room.project(rows)["messages"])):
+            handle.write(json.dumps({"schema": 1, "ts": stamp, "thread": old, "seq": len(rows) + n + 1, "role": "note",
+                                     "agent": "agent", "text": "bulk %d" % n,
+                                     "room_event": {"kind": "message", "id": "bulk-%d" % n, "sender": lead,
+                                                    "recipient": "call-done", "message_kind": "note"}}) + "\n")
+    full = room.project(room.records(roll, old))
+    assert len(full["messages"]) == room.ROLLOVER_MESSAGES + 1
+    old_bytes = log.read_bytes()
+    new = room.successor_id(old)
+    assert re.fullmatch(r"room-[0-9a-f]{12}", new) and room.resolve(roll, old) == old
+    # A carry beyond the reserve is refused before any write: the old log and the successor id stay untouched.
+    with patch.object(room, "MESSAGE_RESERVE", 1):
+        try:
+            room.rollover(roll, old)
+        except ValueError as error:
+            assert "carry exceeds reserve" in str(error), error
+        else:
+            raise AssertionError("an oversized carry rolled the room over")
+    assert log.read_bytes() == old_bytes and not (roll / ".oms/threads" / (new + ".jsonl")).exists()
+    # Crash after the first carry, then after the seal; reruns converge on one successor without duplicates.
+    real_carry, calls, late = room.carry, [], {}
+    def crashing(stage):
+        def carry(repo, state, target, bounded=True):
+            calls.append(stage)
+            real_carry(repo, state, target, bounded)
+            if stage == "pre" and len(calls) == 1:
+                raise OSError("fixture crash after carry")
+            if stage == "post" and calls.count("post") == 2:
+                raise OSError("fixture crash after seal")
+        return carry
+    with patch.object(room, "carry", side_effect=crashing("pre")):
+        try:
+            room.rollover(roll, old, lead)
+        except OSError:
+            pass
+    assert room.resolve(roll, old) == old and room.records(roll, new)[1]["room_event"]["predecessor"] == old
+    def concurrent(repo, state, target, bounded=True):
+        calls.append("post")
+        if calls.count("post") == 1:
+            # A dispatch joins and assigns between the first read and the seal: the delta carry keeps it.
+            room.join(roll, old, "call-late", "codex", "worker", parent=lead)
+            late["assigned"] = room.send(roll, old, lead, "call-late", "Assigned: late", "handoff")["id"]
+        elif calls.count("post") == 2:
+            # A writer that raced the seal waits for the delta carry and lands in the successor.
+            late["writer"] = threading.Thread(target=lambda: late.update(note=room.send(
+                roll, old, "call-late", lead, "late note", "note")["id"]))
+            late["writer"].start()
+        real_carry(repo, state, target, bounded)
+        if calls.count("post") == 2:
+            raise OSError("fixture crash after seal")
+    with patch.object(room, "carry", side_effect=concurrent):
+        try:
+            room.rollover(roll, old, lead)
+        except OSError:
+            pass
+    assert room.records(roll, old)[-1]["room_event"] == {"kind": "successor", "participant": lead, "target": new}
+    assert room.rollover(roll, old, lead) == new
+    late["writer"].join(timeout=60)
+    after = room.records(roll, new)
+    assert room.rollover(roll, old, lead) == new and room.records(roll, new) == after, "third rollover was not a no-op"
+    events_new = [r["room_event"] for r in after if r.get("room_event")]
+    ids = [e["id"] for e in events_new if e["kind"] == "message"]
+    joined = [e["participant"] for e in events_new if e["kind"] == "join"]
+    assert len(ids) == len(set(ids)) and len(joined) == len(set(joined)), (ids, joined)
+    assert events_new[0] == {"kind": "created", "participant": lead, "predecessor": old}
+    sealed = room.records(roll, old)
+    assert sealed[-1]["room_event"]["kind"] == "successor" and sealed[-1]["text"] == "Room continues as " + new
+    # Carried: joined main (consumer, scope, label), running and unread-result calls, mail still owed, open question
+    # and the newest status. Not carried: settled mail, the finished call, and Assigned to a call that already answered.
+    state = room.status(roll, new)
+    members = {p["participant"]: p for p in state["participants"]}
+    before = {p["participant"]: p for p in full["participants"]}
+    assert members[lead]["consumer"] == before[lead]["consumer"] and members[lead]["owns"] == ["docs"]
+    assert members[lead]["label"] == "Rolling main" and "call-done" not in members
+    assert {"call-run", "call-pend", "call-late"} <= set(members), members
+    carried = set(ids)
+    assert {assigned["call-run"], question, "result-call-pend", latest_status, late["assigned"], late["note"]} <= carried, carried
+    assert not carried & {assigned["call-pend"], assigned["call-done"], "result-call-done", "bulk-0"}, carried
+    assert state["statuses"][lead]["text"] == "latest status"
+    assert [q["id"] for q in state["open_questions"]] == [question]
+    assert state["predecessor"] == old and len(state["messages"]) < room.MESSAGE_RESERVE
+    # The old log stays a readable, unclosed room: the running main is still enrolled there.
+    history = room.status(roll, old, exact=True)
+    assert history["successor"] == new and not history["closed"] and history["message_count"] == len(full["messages"]) + 1
+    assert room.participant(history, lead)["joined"]
+    shown = subprocess.run(["bash", str(panel.ENTRY), "room", "show", "--repo", str(roll), "--id", old, "--exact"],
+                           capture_output=True, text=True, timeout=60)
+    assert shown.returncode == 0 and json.loads(shown.stdout)["id"] == old, shown.stderr
+    shown = subprocess.run(["bash", str(panel.ENTRY), "room", "show", "--repo", str(roll), "--id", old],
+                           capture_output=True, text=True, timeout=60)
+    assert shown.returncode == 0 and json.loads(shown.stdout)["id"] == new, shown.stderr
+    # Ids naming the old room forward; a raw write to the sealed log is refused.
+    sent = room.send(roll, old, lead, "call-run", "After rollover", "note")
+    assert room.messages(roll, new)[-1]["id"] == sent["id"]
+    raw = subprocess.run(["bash", str(panel.ENTRY), "thread", "append", "--repo", str(roll), "--id", old,
+                          "--role", "note", "--text", "bypass"], capture_output=True, text=True, timeout=60)
+    assert raw.returncode and "room continues as " + new in raw.stderr, raw
+    stale = room.updates(roll, old, lead, old_cursor)
+    assert stale["thread"] == new and "result-call-pend" in [t["room_event"]["id"] for t in stale["turns"]], stale
+    # A worker launched before the rollover keeps OMS_ROOM_ID=OLD: its ack and message land in the successor.
+    worker = {"OMS_HARNESS_CHILD": "1", "OMS_ROOM_ID": old, "OMS_ROOM_PARTICIPANT": "call-run", "OMS_ROOM_REPO": str(roll)}
+    with patch.dict(os.environ, worker):
+        room.acknowledge(roll, old, "call-run", [assigned["call-run"]])
+        room.send(roll, old, "call-run", lead, "Worker note", "note")
+        assert "call-run" in next(m for m in room.messages(roll, new) if m["id"] == assigned["call-run"])["received_by"]
+        assert room.messages(roll, new)[-1]["text"] == "Worker note"
+        try:
+            room.rollover(roll, new)
+        except ValueError as error:
+            assert "worker cannot roll" in str(error)
+        else:
+            raise AssertionError("a worker rolled a room over")
+    # The panel's result handoff named the old room at launch and still reaches the main.
+    with patch.object(panel, "results", return_value={"rows": []}):
+        panel.deliver_result(roll, old, "call-run", lead, "roll-task", 0)
+    assert room.messages(roll, new)[-1]["id"] == "result-call-run"
+    other = room.create(roll, title="Elsewhere")
+    room.join(roll, other, "main-other", "codex", "main")
+    room.join(roll, other, "call-other", "codex", "worker", parent="main-other")
+    with patch.dict(os.environ, dict(worker, OMS_ROOM_ID=other, OMS_ROOM_PARTICIPANT="call-other")):
+        try:
+            room.send(roll, old, "call-other", lead, "Cross-room note", "note")
+        except ValueError as error:
+            assert "admitted room participant" in str(error), error
+        else:
+            raise AssertionError("another room's worker wrote through a forwarded id")
+    # The old env main acks mail that was settled before the rollover: a quiet no-op, not an error.
+    count = len(room.records(roll, new))
+    with patch.dict(os.environ, {"OMS_ROOM_ID": old, "OMS_ROOM_PARTICIPANT": lead, "OMS_ROOM_REPO": str(roll)}):
+        room.acknowledge(roll, old, lead, ["result-call-done"])
+        assert len(room.records(roll, new)) == count
+        room.describe(roll, old, lead, "Rolling main, day two")
+    assert room.participant(room.status(roll, old), lead)["label"] == "Rolling main, day two"
+    # A successor row whose target does not name the room back is not followed; writes meet the seal.
+    forged = room.create(roll, title="Forged")
+    room.join(roll, forged, "main-forged", "codex", "main")
+    rows = room.records(roll, forged)
+    with (roll / ".oms/threads" / (forged + ".jsonl")).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"schema": 1, "ts": stamp, "thread": forged, "seq": len(rows) + 1, "role": "note",
+                                 "agent": "agent", "text": "Room continues as " + new,
+                                 "room_event": {"kind": "successor", "participant": "main-forged", "target": new}}) + "\n")
+    assert room.resolve(roll, forged) == forged
+    try:
+        room.send(roll, forged, "main-forged", "all", "Into the forged room", "status")
+    except ValueError as error:
+        assert "room continues as" in str(error), error
+    else:
+        raise AssertionError("a write passed a forged seal")
+    try:
+        room._write(roll, other, {"kind": "successor", "participant": "main-other", "target": new}, "forged")
+    except ValueError as error:
+        assert "does not derive" in str(error), error
+    else:
+        raise AssertionError("a successor row named a room that does not derive from it")
+    # Discovery reads a sealed log's header and tail only; it neither fills the room bound nor the byte budget.
+    states, incomplete = room.discover(roll)
+    stub = next(s for s in states if s["id"] == old)
+    assert stub["sealed"] and stub["successor"] == new and not stub["participants"] and not incomplete
+    live_rooms = sum(not s.get("sealed") for s in states)
+    with patch.object(room, "MAX_ROOMS", live_rooms), \
+            patch.object(room, "MAX_SCAN_BYTES", sum(len(p.read_bytes()) for p in (roll / ".oms/threads").glob("*.jsonl")
+                                                    if p.stem != old) + 4096):
+        states, incomplete = room.discover(roll)
+        assert not incomplete and {s["id"] for s in states} >= {old, new, other}
+    assert room.selected(roll, members[lead]["consumer"]) == (new, lead)
+    # The board's Past tab lists the previous room's settled calls; the next dispatch is admitted again.
+    assert [c["participant"] for c in room.predecessor_calls(roll, room.status(roll, new))] == ["call-done"]
+    import room_view
+    past_navigation = {"tab": "past"}
+    successor_view = room.status(roll, new)
+    room_view.tab_box({"room": dict(successor_view, predecessor_calls=room.predecessor_calls(roll, successor_view))},
+                      100, 12, past_navigation)
+    assert ("result", "call-done") in past_navigation["past_ids"], past_navigation
+    filled = room.project(room.records(roll, new))
+    panel._dispatch_capacity(new, filled)
+    assert panel._rollover_if_needed(roll, new, filled, lead) is None
+    with patch.object(room, "ROLLOVER_MESSAGES", 1):
+        third = panel._rollover_if_needed(roll, new, filled, lead)
+    assert third == room.successor_id(new) and room.resolve(roll, old) == third
+    panel._dispatch_capacity(third, room.project(room.records(roll, third)))
+    # The CLI rolls a room by hand; naming an already rolled id returns the room it continues as.
+    for named, expected in ((other, room.successor_id(other)), (old, third)):
+        by_hand = subprocess.run(["bash", str(panel.ENTRY), "room", "rollover", "--repo", str(roll), "--id", named],
+                                 capture_output=True, text=True, timeout=120)
+        assert by_hand.returncode == 0 and json.loads(by_hand.stdout) == {"id": expected, "rolled": named}, by_hand
+    assert room.resolve(roll, other, fresh=True) == room.successor_id(other)
 recorded = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--limit", "300", "--json"]))
 room_attempt = next(a for a in recorded if a.get("refs", {}).get("panel_room_participant") == child["participant"])
 assert room_attempt["refs"]["panel_room_id"] == shared
@@ -8822,6 +9050,12 @@ with patch.dict(os.environ, {"OMS_ROOM_ID": "room-full"}), patch.object(panel, "
         patch.object(panel.room, "create", return_value="room-fresh") as fresh, \
         patch.object(panel, "managed_session", return_value=False):
     assert panel.panel_room(Path("/tmp/project-a")) == "room-fresh" and fresh.called
+# A selected room that rolled over names its successor: the new main and the session record get the successor.
+with patch.dict(os.environ, {"OMS_ROOM_ID": old, "OMS_PANEL_SESSION": "roll-session"}), \
+        patch.object(panel, "managed_session", return_value=True), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as recorded_room:
+    assert panel.panel_room(roll) == third
+    assert recorded_room.call_args.args[0][-3:] == ["=roll-session", "OMS_ROOM_ID", third], recorded_room.call_args
 # --main without a room cannot fall through to an unowned call.
 with patch.dict(os.environ, {"OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": "", "OMS_PANEL_MAIN_ATTEMPT": ""}), \
         patch.object(panel, "child_environment", return_value={"PATH": os.environ.get("PATH", "")}), \

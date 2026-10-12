@@ -170,7 +170,8 @@ def _worker_owns(repo, worker):
     ident, who = refs.get('panel_room_id'), refs.get('panel_room_participant')
     if not ident or not who:
         return []
-    state = room.status(repo, ident)
+    # The room the worker joined holds its declaration, even after that room rolled over.
+    state = room.status(repo, ident, exact=True)
     member = next((p for p in state['participants'] if p['participant'] == who), None)
     if member is None:
         raise ValueError('write worker declared scope evidence unavailable')

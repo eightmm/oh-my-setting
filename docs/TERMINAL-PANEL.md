@@ -486,7 +486,19 @@ other participants' direct mail, advance a checked cursor and do not acknowledge
 Delivery/consumption/answer/acceptance are separate states. Rooms are bounded
 to 32 members (mains and other unparented participants), 480 dispatched calls
 (participants with a parent, which keep their slot after finishing) and 1024
-messages; start a new room when those limits are reached. History is retained, not silently discarded.
+messages, so each tick's room read stays bounded.
+
+Bounds apply per room log. When a room passes 896 messages or 416 calls, the
+next dispatch rolls it over to a linked successor (`oms room rollover --id ROOM`
+does the same by hand); ids that name the old room keep working, the old log is
+sealed and retained (`oms room show --id OLD --exact`), and nothing is
+discarded. The successor carries joined mains, running calls, calls whose
+results are unread, mail still owed to them, open questions and each main's
+latest status; the Past tab also lists the previous room's settled calls.
+A running main keeps its environment and native session: its writes, reads and
+dispatches follow the old id to the successor.
+
+New event kinds need a current reader: install the same SHA and restart panel processes.
 
 Installed prompt/edit hooks deliver at the next safe point. Idle sessions must
 poll or reach a safe point; there is no vendor-independent push/wakeup promise.

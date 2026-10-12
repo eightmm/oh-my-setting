@@ -900,7 +900,8 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     room = mapping(report.get("room"))
     if room and height >= 20:
         narrow = width < 28
-        add(("Room: " if narrow else "ROOM / ") + (clean(room.get("title") or room.get("id"), 160) or "unavailable"), "main")
+        add(("Room: " if narrow else "ROOM / ") + (clean(room.get("title") or room.get("id"), 160) or "unavailable")
+            + (" (continues %s)" % clean(room["predecessor"], 160) if room.get("predecessor") else ""), "main")
         from room_view import main_names, nodes
         members = nodes(report)
         mains = [member for member in members if member.get("role") == "main"]
