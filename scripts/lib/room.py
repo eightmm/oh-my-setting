@@ -56,6 +56,12 @@ def identifier(value, label="identifier"):
     return value
 
 
+def _safe_room_path(value):
+    return (isinstance(value, str) and value and not value.startswith(("/", "\\"))
+            and "\\" not in value and ":" not in value
+            and all(part not in {"", ".", ".."} for part in value.split("/")))
+
+
 def records(repo, room):
     with thread_live.open_thread(repo, room) as handle:
         data = handle.read(thread_live.MAX_FILE + 1)
@@ -261,7 +267,10 @@ def event_shape(event):
                 "scope": ("participant",), "describe": ("participant", "label"),
                 "leave": ("participant",), "closed": ("participant",), "message": ("id", "sender", "recipient", "message_kind"),
                 "received": ("participant",), "publication": ("id", "digest", "status"),
-                "successor": ("participant", "target"), "carried": ()}
+                "successor": ("participant", "target"), "carried": (),
+                "call-result": ("event_id", "task_id", "call_id", "attempt_id", "role", "access", "verify_status"),
+                "review-dispatch": ("event_id", "task_id", "call_id", "patch_sha256", "review_call_id"),
+                "review-dispatch-failed": ("event_id", "task_id", "call_id", "patch_sha256", "review_call_id")}
     if not event:
         return
     if kind not in required or any(not isinstance(event.get(key), str) for key in required[kind]):
@@ -279,8 +288,25 @@ def event_shape(event):
         raise ValueError("missing room receipt ids")
     if kind == "publication" and type(event.get("delivery_unknown")) is not bool:
         raise ValueError("invalid room delivery receipt")
+    if kind == "message" and "quiet" in event and type(event["quiet"]) is not bool:
+        raise ValueError("invalid quiet message marker")
     if kind == "publication" and "target" in event and not isinstance(event["target"], str):
         raise ValueError("invalid room delivery target")
+    if kind == "call-result":
+        if (not {"exit", "needs_review"} <= set(event)
+                or event.get("role") not in ROLES or event.get("access") not in {"read", "write"}
+                or type(event.get("exit")) is not int or type(event.get("needs_review")) is not bool
+                or event.get("verify_status") not in {"passed", "failed", "not_run"}
+                or event.get("verify_exit") is not None and type(event.get("verify_exit")) is not int
+                or not isinstance(event.get("changed_files", []), list)
+                or any(not isinstance(path, str) for path in event.get("changed_files", []))):
+            raise ValueError("invalid structured call result")
+    if kind in {"review-dispatch", "review-dispatch-failed"} and not re.fullmatch(
+            r"[0-9a-f]{64}", str(event.get("patch_sha256", ""))):
+        raise ValueError("invalid review patch digest")
+    if kind in {"review-dispatch", "review-dispatch-failed"} and (
+            type(event.get("attempt")) is not int or event["attempt"] < 1):
+        raise ValueError("invalid automatic review attempt")
     if kind == "describe":
         if set(event) - {"kind", "participant", "label"}:
             raise ValueError("describe changes only the participant label")
@@ -331,9 +357,10 @@ def project(rows):
             members[event["participant"]]["owns"] = list(event["owns"])
         elif kind == "message":
             # A carried broadcast keeps the audience it had when it was sent.
-            targets = (list(event["audience"]) if "audience" in event
+            targets = ([] if event.get("quiet") else
+                       (list(event["audience"]) if "audience" in event
                        else [p for p, member in members.items() if member["joined"] and p != event["sender"]]
-                       if event["recipient"] == "all" else [event["recipient"]])
+                       if event["recipient"] == "all" else [event["recipient"]]))
             if event["message_kind"] == "status":
                 targets = []
             messages.append(dict(event, targets=targets, text=row.get("text", ""), seq=row["seq"], ts=row.get("ts")))
@@ -396,7 +423,7 @@ def declared_scopes(role, scopes):
 
 def validate_event(rows, event, text, repo=None):
     """Validate while thread.sh holds its existing file lock; no membership grants authority."""
-    if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "bind", "scope", "describe", "leave", "closed", "message", "received", "publication", "successor", "carried"}:
+    if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "bind", "scope", "describe", "leave", "closed", "message", "received", "publication", "successor", "carried", "call-result", "review-dispatch", "review-dispatch-failed"}:
         raise ValueError("invalid room event")
     event_shape(event)
     kind = event["kind"]
@@ -408,10 +435,13 @@ def validate_event(rows, event, text, repo=None):
             "describe": {"kind", "participant", "label"},
             "leave": {"kind", "participant"},
             "closed": {"kind", "participant"},
-            "message": {"kind", "id", "sender", "recipient", "message_kind", "reply_to"} | ({"audience"} if carry else set()),
+            "message": {"kind", "id", "sender", "recipient", "message_kind", "reply_to", "quiet"} | ({"audience"} if carry else set()),
             "received": {"kind", "participant", "messages"},
             "publication": {"kind", "id", "digest", "status", "delivery_unknown", "turn_id", "retry", "target"},
-            "successor": {"kind", "participant", "target"}, "carried": {"kind"}}[kind]
+            "successor": {"kind", "participant", "target"}, "carried": {"kind"},
+            "call-result": {"kind", "event_id", "task_id", "call_id", "attempt_id", "role", "access", "exit", "verify_status", "verify_exit", "artifact", "patch", "patch_sha256", "changed_files", "needs_review"},
+            "review-dispatch": {"kind", "event_id", "task_id", "call_id", "patch_sha256", "review_call_id", "attempt"},
+            "review-dispatch-failed": {"kind", "event_id", "task_id", "call_id", "patch_sha256", "review_call_id", "attempt"}}[kind]
     if set(event) - keys:
         raise ValueError("unknown room event fields")
     metadata = json.dumps(event, ensure_ascii=False)
@@ -481,6 +511,17 @@ def validate_event(rows, event, text, repo=None):
         return not state["closed"]
     if state["closed"] and kind != "received":
         raise ValueError("room is closed")
+    if kind in {"call-result", "review-dispatch", "review-dispatch-failed"}:
+        key = "event_id"
+        structured = structured_events(repo, state["id"], rows=rows)
+        old = next((previous for previous in structured
+                    if previous.get("kind") == kind and previous.get(key) == event[key]), None)
+        if old:
+            if kind == "review-dispatch":
+                raise ValueError("review patch digest already claimed")
+            if old == event:
+                return False
+            raise ValueError("structured room event id conflicts with existing content")
     if kind == "successor":
         member = participant(state, event["participant"])
         if member["role"] != "main" or member.get("parent"):
@@ -589,6 +630,53 @@ def validate_event(rows, event, text, repo=None):
                                  else "room participant limit reached")
     elif kind == "leave":
         participant(state, event.get("participant"))
+    elif kind == "call-result":
+        identifier(event.get("event_id"), "event")
+        identifier(event.get("task_id"), "task")
+        identifier(event.get("call_id"), "call")
+        identifier(event.get("attempt_id"), "attempt")
+        _result_participant(repo, state, event["call_id"])
+        for name in ("artifact", "patch"):
+            value = event.get(name)
+            if value is not None and (not isinstance(value, str) or value.startswith(("/", "\\"))
+                                      or "\\" in value or ":" in value
+                                      or any(part in {"", ".", ".."} for part in value.split("/"))):
+                raise ValueError("call result paths must be repository-relative")
+        digest = event.get("patch_sha256")
+        if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise ValueError("invalid call result patch digest")
+        if any(not _safe_room_path(path) for path in event.get("changed_files", [])):
+            raise ValueError("call result files must be repository-relative")
+    elif kind == "review-dispatch":
+        identifier(event.get("event_id"), "event")
+        identifier(event.get("task_id"), "task")
+        identifier(event.get("call_id"), "call")
+        identifier(event.get("review_call_id"), "call")
+        _result_participant(repo, state, event["call_id"])
+        claims = [previous for previous in structured
+                  if previous.get("kind") == "review-dispatch"
+                  and previous.get("patch_sha256") == event["patch_sha256"]]
+        failures = {previous.get("attempt") for previous in structured
+                    if previous.get("kind") == "review-dispatch-failed"
+                    and previous.get("patch_sha256") == event["patch_sha256"]}
+        expected_attempt = len(claims) + 1
+        if (event["attempt"] != expected_attempt or expected_attempt > 2
+                or claims and claims[-1].get("attempt") not in failures):
+            raise ValueError("review patch digest already claimed")
+    elif kind == "review-dispatch-failed":
+        identifier(event.get("event_id"), "event")
+        identifier(event.get("task_id"), "task")
+        identifier(event.get("call_id"), "call")
+        identifier(event.get("review_call_id"), "call")
+        _result_participant(repo, state, event["call_id"])
+        claim = next((previous for previous in reversed(structured)
+                      if previous.get("kind") == "review-dispatch"
+                      and previous.get("patch_sha256") == event["patch_sha256"]
+                      and previous.get("attempt") == event["attempt"]), None)
+        if not claim or event["attempt"] in {previous.get("attempt") for previous in structured
+                if previous.get("kind") == "review-dispatch-failed"
+                and previous.get("patch_sha256") == event["patch_sha256"]}:
+            raise ValueError("automatic review failure does not match an active claim")
     elif kind == "message":
         identifier(event.get("id"), "message")
         participant(state, event.get("sender"))
@@ -703,6 +791,22 @@ def append(repo, room, event, text):
         if target == literal and not unfinished:
             raise
     return _write(repo, target, event, text)
+
+
+def claim_review(repo, ident, event):
+    """Atomically claim one automatic review digest in the append-only room log."""
+    try:
+        append(repo, ident, event, "Automatic review claimed")
+        return True
+    except ValueError as error:
+        if "review patch digest already claimed" in str(error):
+            return False
+        raise
+
+
+def fail_review(repo, ident, event):
+    """Release a failed launch while keeping one bounded retry in the room log."""
+    append(repo, ident, event, "Automatic review launch failed")
 
 
 def create(repo, room=None, title="Shared work", task_id=None, creator=None, predecessor=None):
@@ -881,6 +985,8 @@ def carry_plan(state, current=None, bounded=True):
             continue
         event = {"kind": "message", "id": m["id"], "sender": m["sender"], "recipient": m["recipient"],
                  "message_kind": m["message_kind"]}
+        if m.get("quiet"):
+            event["quiet"] = True
         if m.get("reply_to") and (m["reply_to"] in chosen or m["reply_to"] in known):
             event["reply_to"] = m["reply_to"]
         if m["recipient"] == "all" and m["message_kind"] != "status":
@@ -1120,7 +1226,7 @@ def _settled_reply(repo, room, who, recipient, reply_to):
     return reply_to
 
 
-def send(repo, room, who, recipient, text, kind="note", reply_to=None, message_id=None, linked=True):
+def send(repo, room, who, recipient, text, kind="note", reply_to=None, message_id=None, linked=True, quiet=False):
     if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 4000:
         raise ValueError("message needs 1..4000 UTF-8 bytes")
     if kind == "answer" and not reply_to and linked:
@@ -1137,6 +1243,8 @@ def send(repo, room, who, recipient, text, kind="note", reply_to=None, message_i
         reply_to = _settled_reply(repo, room, who, recipient, reply_to)
     event = {"kind": "message", "id": message_id or "msg-" + uuid.uuid4().hex,
              "sender": who, "recipient": recipient, "message_kind": kind}
+    if quiet:
+        event["quiet"] = True
     if reply_to:
         event["reply_to"] = reply_to
     try:
@@ -1176,7 +1284,7 @@ def scope(repo, ident, who, owns):
 def visible(row, who, joined_seq=0):
     # A carried broadcast follows every carried join, so its audience, not the join order, says who it reached.
     event = row.get("room_event", {})
-    return (event.get("kind") == "message" and event.get("message_kind") != "status"
+    return (event.get("kind") == "message" and not event.get("quiet") and event.get("message_kind") != "status"
             and row.get("seq", 0) > joined_seq and event.get("sender") != who
             and event.get("recipient") in ("all", who) and who in event.get("audience", [who]))
 
@@ -1273,6 +1381,60 @@ def _lineage(repo, room):
     return found
 
 
+def _sealed_predecessors(repo, ident):
+    """Only mutually linked, sealed predecessors can supply structured evidence."""
+    current, seen = ident, {ident}
+    for _ in range(MAX_HOPS):
+        old = _predecessor(repo, current)
+        if not old:
+            return
+        sealed = _tail_successor(repo, old)
+        if sealed is None:
+            return  # A prospective successor cannot expose its predecessor before the seal.
+        if old in seen or successor_id(old) != current or sealed != current:
+            raise ValueError("structured result lineage is not sealed")
+        yield old
+        seen.add(old)
+        current = old
+    if _predecessor(repo, current):
+        raise ValueError("structured result lineage is too long")
+
+
+def _structured_rows(repo, ident, rows=None):
+    """Structured call and review evidence, oldest first, including sealed predecessors.
+
+    Validation supplies its locked rows; readers follow the room id. History stays in sealed logs so a
+    rollover never fills its bounded carry reserve with finished calls or resets review attempts.
+    """
+    if rows is None:
+        ident = resolve(repo, ident, fresh=True)
+        rows = records(repo, ident)
+    histories = [records(repo, old) for old in _sealed_predecessors(repo, ident)] if repo is not None else []
+    events = []
+    for history in list(reversed(histories)) + [rows]:
+        for row in history:
+            event = row.get("room_event", {})
+            if event.get("kind") in {"call-result", "review-dispatch", "review-dispatch-failed"}:
+                event_shape(event)
+                events.append(row)
+    return events
+
+
+def structured_events(repo, ident, rows=None):
+    return [row["room_event"] for row in _structured_rows(repo, ident, rows)]
+
+
+def _result_participant(repo, state, who):
+    # Finished calls are deliberately omitted from the successor carry, but their review can settle there.
+    if any(p["participant"] == who for p in state["participants"]) or repo is None:
+        return participant(state, who)
+    for old in _sealed_predecessors(repo, state["id"]):
+        earlier = project(records(repo, old))
+        if any(p["participant"] == who for p in earlier["participants"]):
+            return participant(earlier, who)
+    return participant(state, who)
+
+
 def acknowledge(repo, room, who, mids):
     room = resolve(repo, room)
     state = project(records(repo, room))
@@ -1341,7 +1503,8 @@ def messages(repo, room):
 
 
 def status(repo, room, exact=False):
-    state = project(records(repo, room if exact else resolve(repo, room)))
+    rows = records(repo, room if exact else resolve(repo, room))
+    state = project(rows)
     if state["successor"]:
         _later_receipts(repo, state)
     state["message_count"] = len(state["messages"])
@@ -1362,6 +1525,13 @@ def status(repo, room, exact=False):
             state["call_results"][found.group(1)] = {"exit": int(exited.group(1)) if exited else None,
                                                      "ts": m["ts"], "seq": m["seq"],
                                                      "read": not m["pending_for"]}
+    for row in _structured_rows(repo, state["id"], rows=rows):
+        event = row["room_event"]
+        if event["kind"] == "call-result":
+            result = state["call_results"].get(event["call_id"], {})
+            state["call_results"][event["call_id"]] = dict(event, ts=result.get("ts", row.get("ts")),
+                                                         seq=result.get("seq", row["seq"]),
+                                                         read=result.get("read", True))
     state["received_count"] = sum(len(m["received_by"]) for m in state["messages"])
     state["answered_count"] = sum(m["answered"] for m in state["messages"])
     pairs = {}

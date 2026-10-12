@@ -2,9 +2,10 @@
 """Terminal front end; existing OMS tools retain state and mutation authority."""
 
 import argparse
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stdout
 import datetime
 import hashlib
+import io
 import json
 import math
 import os
@@ -1260,7 +1261,7 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
 
 def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
-             main=None, continue_task=None, scopes=None, work_repo=None):
+             main=None, continue_task=None, scopes=None, work_repo=None, member_id=None):
     route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main)
     label = safe_label(label)
     resume = None
@@ -1274,7 +1275,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         print(note, file=sys.stderr)
     try:
         return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
-                            dry_run, label, route, main, resume, scopes, work_repo)
+                            dry_run, label, route, main, resume, scopes, work_repo, member_id)
     finally:
         if temporary:
             temporary.unlink()
@@ -1424,8 +1425,120 @@ def _validate_dry_run_inputs(prompt, brief):
                 raise ValueError("outbound dispatch input could not be validated")
 
 
+def _safe_patch_path(value):
+    return (isinstance(value, str) and value and not value.startswith(("/", "\\")) and
+            "\\" not in value and ":" not in value and
+            all(part not in {"", ".", ".."} for part in value.split("/")))
+
+
+def _call_result_event(repo, room_id, member, task_id, status):
+    import panel_results
+    attempts, artifacts = panel_results._records(repo, full=True)
+    attempt = next((row for row in reversed(attempts)
+                    if room.same_room(repo, row.get("refs", {}).get("panel_room_id"), room_id)
+                    and row.get("refs", {}).get("panel_room_participant") == member), {})
+    attempt_id = attempt.get("attempt_id") or member
+    refs = attempt.get("refs", {})
+    review_context = _review_dispatch_context(repo, room_id, member)
+    if review_context and isinstance(review_context.get("task_id"), str):
+        task_id = review_context["task_id"]
+    matched = [row for row in artifacts if row.get("attempt_id") == attempt_id
+               and row.get("task_id") == task_id]
+    record = next((row for row in reversed(matched) if row.get("artifact")), matched[-1] if matched else {})
+    artifact = record.get("artifact")
+    patch_path, patch_sha = record.get("patch"), record.get("patch_sha256")
+    changed = []
+    valid_patch = False
+    if patch_path and patch_sha:
+        data = panel_results.verified_patch(repo, record)
+        paths = panel_results._patch_paths(data)
+        if all(_safe_patch_path(path) for path in paths):
+            changed = paths
+            valid_patch = True
+        else:
+            patch_path, patch_sha = None, None
+    if artifact and not _safe_patch_path(artifact):
+        artifact = None
+    verify_exit = record.get("verify_exit")
+    verify_status = "not_run" if verify_exit is None else "passed" if verify_exit == 0 else "failed"
+    event_digest = hashlib.sha256((member + "\0" + attempt_id).encode()).hexdigest()
+    payload = {"kind": "call-result", "event_id": "call-result-" + event_digest,
+               "task_id": task_id, "call_id": member, "attempt_id": attempt_id,
+               "role": (refs.get("panel_role") if refs.get("panel_role") in room.ROLES else
+                        "reviewer" if review_context else "worker"),
+               "access": refs.get("panel_access") if refs.get("panel_access") in {"read", "write"} else "read",
+               "exit": status, "verify_status": verify_status, "verify_exit": verify_exit,
+               "artifact": artifact, "patch": patch_path, "patch_sha256": patch_sha,
+               "changed_files": changed, "needs_review": bool(valid_patch and patch_path
+                                                            and refs.get("panel_access") == "write")}
+    room.append(repo, room_id, payload, "Structured call result")
+    return payload, record
+
+
+def _judgment_mail(repo, room_id, member, caller, task_id, message):
+    try:
+        room.send(repo, room_id, member, caller, message, "note",
+                  message_id="judgment-" + member, quiet=False)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        print("OMS judgment notification unavailable for task " + task_id, file=sys.stderr)
+
+
+def _review_verdict(answer):
+    matches = re.findall(r"(?im)^\s*GATE\s*:\s*(pass|fail)\s*$", str(answer or ""))
+    return matches[-1].lower() if matches else None
+
+
+def _review_dispatch_context(repo, room_id, member):
+    try:
+        events = room.structured_events(repo, room_id)
+        return next((event for event in reversed(events)
+                     if event.get("kind") in {"review-dispatch", "review-dispatch-failed"}
+                     and event.get("review_call_id") == member), {})
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return {}
+
+
+def _dispatch_execution_repository(repo, room_id, member, caller):
+    call = _dispatch_call_record(repo, room_id, {"participant": member, "parent": caller})
+    if not call or call.get("schema") != 2:
+        return None
+    anchor = dispatch_store.read(repo, member + "-launch.json")
+    value = anchor.get("execution_repo") if isinstance(anchor, dict) else None
+    if not isinstance(value, str) or not os.path.isabs(value):
+        return None
+    try:
+        return work_repository(value)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _review_verifier(repo, room_id, member, caller, task_id):
+    """Use controller-recorded dispatch input, then the linked plan contract."""
+    import panel_results
+    try:
+        verify = _dispatch_verifier(repo, room_id, member, caller)
+        if isinstance(verify, str) and verify.strip():
+            return verify.strip()
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        pass
+    try:
+        raw = panel_results._read(repo, ".oms/plan/tasks.json", 4 * 1024 * 1024, missing=True)
+        plan = json.loads(raw) if raw else {}
+        tasks = plan.get("tasks") if isinstance(plan, dict) else None
+        if not isinstance(tasks, dict):
+            return None
+        task = tasks.get(task_id, {})
+        verify = task.get("verify") if isinstance(task, dict) else None
+        return verify.strip() if isinstance(verify, str) and verify.strip() else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def deliver_result(repo, room_id, member, caller, task_id, status):
     """Keep the numeric outcome deliverable when a worker summary cannot be shared."""
+    review_context = _review_dispatch_context(repo, room_id, member)
+    if review_context and isinstance(review_context.get("task_id"), str):
+        task_id = review_context["task_id"]
     summary = "Result evidence unavailable"
     try:
         report = results(repo, task_id, member)
@@ -1433,12 +1546,110 @@ def deliver_result(repo, room_id, member, caller, task_id, status):
         summary = next((c.get("answer") for c in reversed(calls) if c.get("answer")), summary)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         pass
+    try:
+        auto_review = policy().get("auto_review", True)
+    except (OSError, ValueError, KeyError, TypeError):
+        auto_review = False
+    result_event, result_record = None, {}
+    try:
+        result_event, result_record = _call_result_event(repo, room_id, member, task_id, status)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+        print("OMS structured call result unavailable for task " + task_id, file=sys.stderr)
+    role = (result_event or {}).get("role")
+    verify_failed = (result_event or {}).get("verify_status") == "failed"
+    guard_stop = "worker guard stopped this run" in str(summary).lower()
+    review_delivered = False
+    if role == "reviewer":
+        verdict = _review_verdict(summary)
+        if status != 0 or verify_failed or guard_stop or not verdict:
+            reason = ("verification failed" if verify_failed else
+                      "guard stopped the review" if guard_stop else
+                      "review exited with status %s" % status if status != 0 else
+                      "review ended without a final GATE verdict")
+            _judgment_mail(repo, room_id, member, caller, task_id,
+                           "Task %s review failed or is inconclusive: %s." % (task_id, reason))
+        else:
+            if verdict == "pass":
+                notice = "Review passed for task %s; patch %s is awaiting admission by the main." % (
+                    task_id, (result_event or {}).get("patch_sha256") or "digest unavailable")
+            else:
+                notice = "Review verdict FAIL for task %s; patch %s." % (
+                    task_id, (result_event or {}).get("patch_sha256") or "digest unavailable")
+            _judgment_mail(repo, room_id, member, caller, task_id, notice)
+    elif status != 0 or verify_failed or guard_stop:
+        reason = ("verification failed" if verify_failed else
+                  "worker guard stopped the call" if guard_stop else
+                  "worker exited with status %s" % status)
+        _judgment_mail(repo, room_id, member, caller, task_id,
+                       "Task %s needs judgment: %s (exit %s)." % (task_id, reason, status))
+    if (result_event and result_event.get("needs_review") and status == 0 and not guard_stop
+            and result_event.get("verify_status") != "failed" and auto_review):
+        digest = result_event["patch_sha256"]
+        artifact, patch_path = result_event.get("artifact"), result_event.get("patch")
+        evidence_paths = (("artifact " + artifact + " and ") if artifact else "") + "patch " + str(patch_path)
+        prompt = ("Review the completed write result for task " + task_id + ".\n"
+                  "Read the repo-relative " + evidence_paths + ".\n"
+                  "Assess correctness and safety. Do not apply or execute the patch.\n"
+                  "End with exactly one final line: GATE: pass or GATE: fail, then concise findings before it.")
+        verifier = _review_verifier(repo, room_id, member, caller, task_id)
+        try:
+            if not verifier:
+                _judgment_mail(repo, room_id, member, caller, task_id,
+                               "Task %s has a write patch but no recorded verifier; manual review is needed."
+                               % task_id)
+                raise LookupError("no verifier is available for automatic review")
+            work_repo = _dispatch_execution_repository(repo, room_id, member, caller)
+            if work_repo is None:
+                _judgment_mail(repo, room_id, member, caller, task_id,
+                               "Task %s execution repository is unknown or no longer available; manual review is needed."
+                               % task_id)
+                raise LookupError("execution repository is unknown or unavailable")
+            _validate_dry_run_inputs(prompt, None)
+            owner = os.environ.get("OMS_AGENT", caller_owner())
+            events = room.structured_events(repo, room_id)
+            claims = [event for event in events if event.get("kind") == "review-dispatch"
+                      and event.get("patch_sha256") == digest]
+            attempt = len(claims) + 1
+            review_member = "call-" + hashlib.sha256((digest + "/" + str(attempt)).encode()).hexdigest()[:16]
+            review_event = {"kind": "review-dispatch",
+                            "event_id": "review-dispatch-" + digest + "-" + str(attempt),
+                            "task_id": task_id, "call_id": member, "patch_sha256": digest,
+                            "review_call_id": review_member, "attempt": attempt}
+            if room.claim_review(repo, room_id, review_event):
+                try:
+                    with redirect_stdout(io.StringIO()):
+                        dispatch(repo, owner, "reviewer", None, "read", None, prompt=prompt, verify=verifier,
+                                 task_id=task_id, dry_run=True, label="Automatic patch review")
+                    dispatch(repo, owner, "reviewer", None, "read", None, prompt=prompt, verify=verifier,
+                             task_id=task_id, label="Automatic patch review", member_id=review_member,
+                             work_repo=work_repo)
+                    review_delivered = True
+                except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                    room.fail_review(repo, room_id, {
+                        "kind": "review-dispatch-failed",
+                        "event_id": "review-dispatch-failed-" + digest + "-" + str(attempt),
+                        "task_id": task_id, "call_id": member, "patch_sha256": digest,
+                        "review_call_id": review_member, "attempt": attempt})
+                    raise
+            else:
+                previous = [event for event in events if event.get("kind") in {
+                    "review-dispatch", "review-dispatch-failed"} and event.get("patch_sha256") == digest]
+                review_delivered = bool(previous and previous[-1].get("kind") == "review-dispatch")
+        except LookupError:
+            pass
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            _judgment_mail(repo, room_id, member, caller, task_id,
+                           "Task %s has a write patch that could not launch automatic review; manual review is needed."
+                           % task_id)
+            print("OMS automatic review unavailable for task %s: %s" % (task_id, clean(str(error), 180)),
+                  file=sys.stderr)
     prefix = "Call exit=%d; parent acceptance pending.\n" % status
     message = (prefix + str(summary)).encode("utf-8")[:3800].decode("utf-8", "ignore")
     message_id = "result-" + member
     for retry in (False, True):
         try:
-            room.send(repo, room_id, member, caller, message, "handoff", message_id=message_id)
+            room.send(repo, room_id, member, caller, message, "handoff", message_id=message_id,
+                      quiet=review_delivered)
             return
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             if not retry and isinstance(error, ValueError) and "sensitive" in str(error).lower():
@@ -1690,7 +1901,16 @@ def _dispatch_exit_record(call, status):
     return dict(call, exit=status, launch_sha256=hashlib.sha256(launch).hexdigest())
 
 
-def _prepare_dispatch_call(repo, room_id, member, caller):
+def _dispatch_verifier(repo, room_id, member, caller):
+    call = _dispatch_call_record(repo, room_id, {"participant": member, "parent": caller})
+    if not call or call.get("schema") != 2:
+        return None
+    anchor = dispatch_store.read(repo, member + "-launch.json")
+    verify = anchor.get("verify") if isinstance(anchor, dict) else None
+    return verify if isinstance(verify, str) and verify.strip() else None
+
+
+def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution_repo=None):
     call = {"schema": 2, "kind": "oms-panel-call", "room": room_id, "participant": member,
             "parent": caller, "nonce": uuid.uuid4().hex,
             "backend": "subreaper" if sys.platform == "linux" else "unsupported"}
@@ -1703,8 +1923,12 @@ def _prepare_dispatch_call(repo, room_id, member, caller):
                                  label="dispatch launch")
     except SystemExit as error:
         raise ValueError("dispatch launch record refused") from error
-    dispatch_store.write(repo, member + "-launch.json",
-                         {"call": call, "generation": dispatch_store.generation(path)}, exclusive=True)
+    anchor = {"call": call, "generation": dispatch_store.generation(path)}
+    if verify:
+        anchor["verify"] = verify
+    if execution_repo:
+        anchor["execution_repo"] = str(execution_repo)
+    dispatch_store.write(repo, member + "-launch.json", anchor, exclusive=True)
     return call
 
 
@@ -1733,7 +1957,11 @@ def _dispatch_call_record(repo, room_id, member):
         if call["schema"] == 2:
             if (set(call) != fields | {"nonce", "backend"} or data != dispatch_store.encoded(call)
                     or not isinstance(call["nonce"], str) or not re.fullmatch(r"[0-9a-f]{32}", call["nonce"])
-                    or call["backend"] not in {"subreaper", "unsupported"}):
+                    or call["backend"] not in {"subreaper", "unsupported"}
+                    or set(anchor) - {"call", "generation", "verify", "execution_repo"}
+                    or "verify" in anchor and (not isinstance(anchor["verify"], str) or not anchor["verify"].strip())
+                    or "execution_repo" in anchor and (not isinstance(anchor["execution_repo"], str)
+                                                         or not os.path.isabs(anchor["execution_repo"]))):
                 return None
         else:
             # Old repository records alone cannot establish controller provenance.
@@ -2269,7 +2497,7 @@ def _settle_dispatch(repo, room_id, member, status):
 
 
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
-                 dry_run, label, route, main, resume, scopes, work_repo=None):
+                 dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None):
     source_repo = repo
     if os.environ.get("OMS_ROOM_REPO"):
         repo = repository(os.environ["OMS_ROOM_REPO"])
@@ -2329,6 +2557,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         raise ValueError("--main needs a room; select it with --room")
     if not room_id and not parent:
         print("Standalone dispatch: room and main relationship are unrecorded; plan protection is absent.", file=sys.stderr)
+    if member_id is not None and not re.fullmatch(r"call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}", member_id):
+        raise ValueError("invalid panel call identifier")
     member = None
     caller = env.get("OMS_ROOM_PARTICIPANT")
     if room_id:
@@ -2403,7 +2633,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     if binding and route["kind"] in {"worker", "researcher"}:
         argv += ["--observe-plan-binding", json.dumps(binding._asdict(), separators=(",", ":"))]
     if room_id:
-        member = "call-" + uuid.uuid4().hex[:16]
+        member = member_id or "call-" + uuid.uuid4().hex[:16]
         room.join(repo, room_id, member, route["provider"], route["kind"], route["model"], label or route["purpose"],
                   owns=scopes, parent=caller)
         try:
@@ -2461,7 +2691,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             if number is not None:
                 saved_handlers[number] = signal.signal(number, interrupt)
         try:
-            launch = _prepare_dispatch_call(repo, room_id, control_member, caller)
+            launch = _prepare_dispatch_call(repo, room_id, control_member, caller, verify, execution)
             command = argv
             if launch and launch["backend"] == "subreaper":
                 digest = _dispatch_exit_record(launch, 0)["launch_sha256"]

@@ -3541,6 +3541,20 @@ def call(command, env=None):
     assert result.returncode == 0, (command, result.returncode, result.stdout[-6000:], result.stderr[-6000:])
     return result.stdout
 
+# Routing checks stay on fixture catalogs even when provider CLIs are absent.
+def fixture_selected_route(*args, **kwargs):
+    target = args[5] if len(args) > 5 else kwargs.get("target")
+    codex = {"provider": "codex", "binary": "codex", "installed": True,
+             "models": ["gpt-6-sol", "gpt-6-luna"],
+             "catalog_models": ["gpt-6-sol", "gpt-6-luna"], "access": ["read", "write"],
+             "exact_model_override": True}
+    claude = {"provider": "claude", "binary": "claude", "installed": True,
+              "models": [], "catalog_models": [], "access": ["read", "write"],
+              "exact_model_override": True}
+    catalog = [row for row in (codex, claude) if target is None or row["provider"] == target]
+    with patch.object(panel, "provider_catalog", return_value=catalog):
+        return panel.selected_route(*args, **kwargs)
+
 # OPERATOR_FIXTURE_END provider
 baseline = subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"])
 report = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--json"]))
@@ -3647,6 +3661,7 @@ from panel_routing import policy
 configured = policy()
 assert configured["pool"] == {"max_rework_rounds": 2}
 assert configured["review_backlog_warn"] == 8
+assert configured["auto_review"] is True
 without_pool = dict(configured)
 del without_pool["pool"]
 with patch("panel_routing.Path.read_text", return_value=json.dumps(without_pool)):
@@ -4125,6 +4140,11 @@ with patch.object(panel, "provider_catalog", return_value=[codex_only]):
     assert explicit["provider"] == "codex" and explicit["model"] == "gpt-6-luna" and explicit["effort"] == "medium"
 recorded = {"codex": {"weekly_used": 90}, "claude": {"weekly_used": None}}
 claude_candidate = {"provider": "claude", "binary": "claude", "installed": True, "models": []}
+def fixture_selected_route(*args, **kwargs):
+    target = args[5] if len(args) > 5 else kwargs.get("target")
+    catalog = [row for row in (codex_only, claude_candidate) if target is None or row["provider"] == target]
+    with patch.object(panel, "provider_catalog", return_value=catalog):
+        return panel.selected_route(*args, **kwargs)
 with patch.object(panel, "provider_catalog", return_value=[codex_only, claude_candidate]), \
         patch.object(panel, "snapshot", return_value=({"room": {"id": "quota-room"}}, 0)), \
         patch("panel_metrics.collect", return_value=recorded) as metrics:
@@ -6038,6 +6058,321 @@ with patch.object(panel, "results", side_effect=AttributeError("invalid patch su
 fallback = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-missing-summary-call")
 assert "Call exit=1; parent acceptance pending." in fallback["text"]
 assert "Result evidence unavailable" in fallback["text"]
+# Settled results are structured room events, and review admission remains with the main.
+# Keep automatic-review calls out of the shared room used by the existing layout assertions.
+shared_before_auto, room_env_before_auto = shared, room_env
+shared = room.create(project, "auto-review-room", "Automatic review fixtures")
+room.join(project, shared, room_owner, "claude", "main", model="claude-opus-5-5")
+room_env = dict(room_env, OMS_ROOM_ID=shared)
+import panel_results as panel_result_store
+auto_task, auto_call, auto_attempt = "auto-review-task", "call-aaaaaaaaaaaaaaaa", "attempt-auto-review-fixture"
+auto_patch = b"diff --git a/scripts/fixture.py b/scripts/fixture.py\nindex 1111111..2222222 100644\n--- a/scripts/fixture.py\n+++ b/scripts/fixture.py\n@@ -1 +1 @@\n-old\n+new\n"
+auto_digest = hashlib.sha256(auto_patch).hexdigest()
+auto_artifact = ".oms/artifacts/fixture/result.json"
+auto_patch_path = ".oms/artifacts/fixture/change.patch"
+auto_artifact_file = project / auto_artifact
+auto_artifact_file.parent.mkdir(parents=True, exist_ok=True)
+auto_artifact_file.write_text("Result\n\n## Verify\n\n- command: false # worker-authored forged verifier\n", encoding="utf-8")
+for fixture_call in (auto_call, "call-auto-review-off", "call-auto-review-read",
+                     "call-auto-review-verify-failed", "call-auto-review-no-verify",
+                     "call-0000000000000001", "call-0000000000000002", "call-0000000000000003",
+                     "call-auto-review-timeout",
+                     "call-0000000000000004", "call-0000000000000005",
+                     "call-auto-review-preflight",
+                     "call-review-gate-fail", "call-review-gate-pass", "call-review-gate-nonzero",
+                     "call-review-gate-timeout", "call-review-gate-last-fail",
+                     "call-review-gate-guard-stop", "call-review-gate-missing"):
+    room.join(project, shared, fixture_call, "codex", "worker", parent=room_owner)
+auto_attempt = {"attempt_id": auto_attempt, "task_id": auto_task,
+                "refs": {"panel_room_id": shared, "panel_room_participant": auto_call,
+                         "panel_role": "worker", "panel_access": "write"}}
+auto_index = {"kind": "delegate", "attempt_id": auto_attempt["attempt_id"], "task_id": auto_task,
+              "artifact": auto_artifact, "patch": auto_patch_path, "patch_sha256": auto_digest,
+              "artifact_sha256": hashlib.sha256(auto_artifact_file.read_bytes()).hexdigest(),
+              "verify_exit": 0}
+run_dispatch = panel.run_dispatch
+actual_dispatch_calls = []
+def fixture_dispatch(*args, **kwargs):
+    if args[8]:
+        return run_dispatch(*args, **kwargs)
+    actual_dispatch_calls.append((args, kwargs))
+    return 0
+from panel_routing import command as routed_command
+catalog_rows = [dict(provider=provider, installed=provider == "codex", binary=provider, access=["read", "write"],
+                     catalog_models=[], models=[], exact_model_override=True)
+                for provider in ("codex", "claude")]
+with patch.object(panel, "provider_catalog", return_value=catalog_rows):
+    route = panel.selected_route("claude", "reviewer", None, "read", None, repo=project)
+review_prompt = "Review task auto-review-task. Read repo-relative patch .oms/artifacts/fixture/change.patch.\nDo not apply it."
+worker_execution_repo = project.parent / "worker-execution-repo"
+worker_execution_repo.mkdir(exist_ok=True)
+command = routed_command(panel.ENTRY, project, route, prompt=review_prompt,
+                         verify="test -f scripts/fixture.py", task_id=auto_task)
+assert command[command.index("--verify") + 1] == "test -f scripts/fixture.py"
+recorded_call = panel._prepare_dispatch_call(project, shared, "call-0000000000000000", room_owner,
+                                             "test -f scripts/fixture.py", project)
+assert panel._dispatch_call_record(project, shared, recorded_call) == recorded_call
+assert panel._dispatch_verifier(project, shared, recorded_call["participant"], room_owner) == \
+    "test -f scripts/fixture.py"
+with patch.object(panel_result_store, "_records", return_value=([auto_attempt], [auto_index])), \
+        patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+        patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
+        patch.object(panel, "work_repository", return_value=worker_execution_repo), \
+        patch.object(panel, "provider_catalog", return_value=catalog_rows), \
+        patch.dict(os.environ, room_env, clear=True):
+    panel._prepare_dispatch_call(project, shared, auto_call, room_owner,
+                                 "test -f scripts/fixture.py", worker_execution_repo)
+    first_event, _ = panel._call_result_event(project, shared, auto_call, auto_task, 0)
+    second_event, _ = panel._call_result_event(project, shared, auto_call, auto_task, 0)
+    assert first_event == second_event and first_event["needs_review"]
+    assert first_event["changed_files"] == ["scripts/fixture.py"]
+    assert first_event["patch_sha256"] == auto_digest and first_event["verify_status"] == "passed"
+    assert (first_event["task_id"], first_event["call_id"], first_event["role"], first_event["access"],
+            first_event["exit"], first_event["artifact"], first_event["patch"], first_event["verify_exit"]) == (
+                auto_task, auto_call, "worker", "write", 0, auto_artifact, auto_patch_path, 0)
+    panel.deliver_result(project, shared, auto_call, room_owner, auto_task, 0)
+    panel.deliver_result(project, shared, auto_call, room_owner, auto_task, 0)
+    assert len(actual_dispatch_calls) == 1, actual_dispatch_calls
+    dispatch_args, dispatch_kwargs = actual_dispatch_calls[0]
+    assert dispatch_args[6] == "test -f scripts/fixture.py"
+    prompt = dispatch_args[4]
+    assert auto_artifact in prompt and auto_patch_path in prompt and str(project) not in prompt
+    assert dispatch_args[2:4] == ("reviewer", "read")
+    assert dispatch_args[10]["provider"] != "claude", dispatch_args[10]
+    assert dispatch_kwargs == {}
+    assert dispatch_args[15] == "call-" + hashlib.sha256((auto_digest + "/1").encode()).hexdigest()[:16]
+    assert dispatch_args[14] == worker_execution_repo and dispatch_args[14] != project, dispatch_args
+    result_events = [row["room_event"] for row in room.records(project, shared)
+                     if row.get("room_event", {}).get("kind") == "call-result"
+                     and row["room_event"].get("call_id") == auto_call]
+    assert len(result_events) == 1 and result_events[0]["attempt_id"] == auto_attempt["attempt_id"]
+    result_handoff = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-" + auto_call)
+    assert not result_handoff["pending_for"] and result_handoff.get("quiet") is True
+    assert "call-result-" + hashlib.sha256((auto_call + "\0" + auto_attempt["attempt_id"]).encode()).hexdigest() in {
+        row.get("room_event", {}).get("event_id") for row in room.records(project, shared)}
+    preflight_call = "call-0000000000000001"
+    preflight_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-preflight",
+        refs=dict(auto_attempt["refs"], panel_room_participant=preflight_call))
+    preflight_patch = auto_patch + b"# reviewer preflight failure\n"
+    preflight_digest = hashlib.sha256(preflight_patch).hexdigest()
+    preflight_index = dict(auto_index, attempt_id=preflight_attempt["attempt_id"], patch_sha256=preflight_digest)
+    panel._prepare_dispatch_call(project, shared, preflight_call, room_owner,
+                                 "test -f scripts/fixture.py", worker_execution_repo)
+    with patch.object(panel_result_store, "_records", return_value=([preflight_attempt], [preflight_index])), \
+            patch.object(panel_result_store, "verified_patch", return_value=preflight_patch), \
+            patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+            patch.object(panel, "dispatch", side_effect=ValueError("review preflight refused")), \
+            patch.object(panel, "work_repository", return_value=worker_execution_repo), \
+            patch.dict(os.environ, room_env, clear=True):
+        panel.deliver_result(project, shared, preflight_call, room_owner, auto_task, 0)
+    preflight_review = next(row["room_event"] for row in room.records(project, shared)
+                            if row.get("room_event", {}).get("kind") == "review-dispatch"
+                            and row["room_event"].get("patch_sha256") == preflight_digest)
+    preflight_member = preflight_review["review_call_id"]
+    room.join(project, shared, preflight_member, "codex", "reviewer", parent=room_owner)
+    preflight_result, _ = panel._call_result_event(project, shared, preflight_member, "wrong-task", 1)
+    assert preflight_result["role"] == "reviewer" and preflight_result["task_id"] == auto_task, preflight_result
+    panel.deliver_result(project, shared, preflight_member, room_owner, "wrong-task", 1)
+    reviewer_mail = next(m for m in room.status(project, shared)["messages"]
+                         if m["id"] == "judgment-" + preflight_member)
+    assert "review failed or is inconclusive" in reviewer_mail["text"] and room_owner in reviewer_mail["targets"]
+    reviewer_result = next(row["room_event"] for row in room.records(project, shared)
+                           if row.get("room_event", {}).get("kind") == "call-result"
+                           and row["room_event"].get("call_id") == preflight_member)
+    assert reviewer_result["role"] == "reviewer" and reviewer_result["task_id"] == auto_task
+    preflight_mail = next(m for m in room.status(project, shared)["messages"]
+                          if m["id"] == "judgment-" + preflight_call)
+    assert "could not launch automatic review" in preflight_mail["text"] and room_owner in preflight_mail["targets"]
+    assert any(row.get("room_event", {}).get("kind") == "review-dispatch-failed"
+               and row["room_event"].get("review_call_id") == preflight_member for row in room.records(project, shared))
+    auto_off_call = "call-auto-review-off"
+    with patch.object(panel_result_store, "_records", return_value=([dict(auto_attempt,
+            attempt_id="attempt-auto-review-off", refs=dict(auto_attempt["refs"], panel_room_participant=auto_off_call))],
+            [dict(auto_index, attempt_id="attempt-auto-review-off")])), \
+            patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+            patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+            patch.object(panel, "policy", return_value={"auto_review": False}), \
+            patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
+            patch.dict(os.environ, room_env, clear=True):
+        panel.deliver_result(project, shared, auto_off_call, room_owner, auto_task, 0)
+        assert len(actual_dispatch_calls) == 1
+        legacy = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-" + auto_off_call)
+        assert legacy["text"] == "Call exit=0; parent acceptance pending.\nWorker finished."
+        assert not legacy.get("quiet", False)
+read_call = "call-auto-review-read"
+with patch.object(panel_result_store, "_records", return_value=([dict(auto_attempt,
+        attempt_id="attempt-auto-review-read", refs=dict(auto_attempt["refs"], panel_room_participant=read_call,
+                                                         panel_access="read"))],
+        [dict(auto_index, attempt_id="attempt-auto-review-read")])), \
+        patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+        patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
+        patch.dict(os.environ, room_env, clear=True):
+    panel.deliver_result(project, shared, read_call, room_owner, auto_task, 0)
+    assert len(actual_dispatch_calls) == 1
+verify_call = "call-auto-review-verify-failed"
+verify_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-verify-failed",
+    refs=dict(auto_attempt["refs"], panel_room_participant=verify_call))
+with patch.object(panel_result_store, "_records", return_value=([verify_attempt],
+        [dict(auto_index, attempt_id=verify_attempt["attempt_id"], verify_exit=2)])), \
+        patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+        patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
+        patch.dict(os.environ, room_env, clear=True):
+    panel.deliver_result(project, shared, verify_call, room_owner, auto_task, 1)
+    assert len(actual_dispatch_calls) == 1
+    verify_mail = next(m for m in room.status(project, shared)["messages"] if m["id"] == "judgment-" + verify_call)
+    assert "verification failed" in verify_mail["text"] and room_owner in verify_mail["targets"]
+no_verify_call = "call-auto-review-no-verify"
+no_verify_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-no-verify",
+    refs=dict(auto_attempt["refs"], panel_room_participant=no_verify_call))
+no_verify_index = dict(auto_index, attempt_id=no_verify_attempt["attempt_id"], artifact=".oms/artifacts/fixture/no-verify.json")
+(project / no_verify_index["artifact"]).write_text("Result without verifier\n", encoding="utf-8")
+no_verify_index["artifact_sha256"] = hashlib.sha256((project / no_verify_index["artifact"]).read_bytes()).hexdigest()
+with patch.object(panel_result_store, "_records", return_value=([no_verify_attempt], [no_verify_index])), \
+        patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value=None), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+        patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
+        patch.dict(os.environ, room_env, clear=True):
+    panel.deliver_result(project, shared, no_verify_call, room_owner, auto_task, 0)
+    assert len(actual_dispatch_calls) == 1
+    no_verify_mail = next(m for m in room.status(project, shared)["messages"]
+                          if m["id"] == "judgment-" + no_verify_call)
+    assert "no recorded verifier" in no_verify_mail["text"] and room_owner in no_verify_mail["targets"]
+for malformed_tasks in ([], None):
+    with patch.object(panel, "_dispatch_verifier", return_value=None), \
+            patch.object(panel_result_store, "_read", return_value=json.dumps({"tasks": malformed_tasks})):
+        assert panel._review_verifier(project, shared, auto_call, room_owner, auto_task) is None
+for missing_repo_call, execution_repo in (
+        ("call-0000000000000002", None),
+        ("call-0000000000000003", project.parent / "missing-worker-execution-repo")):
+    missing_repo_attempt = dict(auto_attempt, attempt_id="attempt-" + missing_repo_call,
+        refs=dict(auto_attempt["refs"], panel_room_participant=missing_repo_call))
+    missing_repo_index = dict(auto_index, attempt_id=missing_repo_attempt["attempt_id"])
+    panel._prepare_dispatch_call(project, shared, missing_repo_call, room_owner,
+                                 "test -f scripts/fixture.py", execution_repo)
+    with patch.object(panel_result_store, "_records", return_value=([missing_repo_attempt], [missing_repo_index])), \
+            patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+            patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+            patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
+            patch.dict(os.environ, room_env, clear=True):
+        before_calls = len(actual_dispatch_calls)
+        panel.deliver_result(project, shared, missing_repo_call, room_owner, auto_task, 0)
+        assert len(actual_dispatch_calls) == before_calls
+    missing_repo_mail = next(m for m in room.status(project, shared)["messages"]
+                             if m["id"] == "judgment-" + missing_repo_call)
+    assert "execution repository is unknown or no longer available" in missing_repo_mail["text"]
+    assert room_owner in missing_repo_mail["targets"]
+    missing_repo_handoff = next(m for m in room.status(project, shared)["messages"]
+                                if m["id"] == "result-" + missing_repo_call)
+    assert missing_repo_handoff.get("quiet") is not True
+    assert not any(row.get("room_event", {}).get("kind") == "review-dispatch"
+                   and row["room_event"].get("call_id") == missing_repo_call
+                   for row in room.records(project, shared))
+timeout_call = "call-auto-review-timeout"
+timeout_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-timeout",
+    refs=dict(auto_attempt["refs"], panel_room_participant=timeout_call))
+timeout_index = dict(auto_index, attempt_id=timeout_attempt["attempt_id"], verify_exit=None)
+with patch.object(panel_result_store, "_records", return_value=([timeout_attempt], [timeout_index])), \
+        patch.object(panel_result_store, "verified_patch", return_value=auto_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker timed out."}]}]}), \
+        patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
+        patch.dict(os.environ, room_env, clear=True):
+    before_calls = len(actual_dispatch_calls)
+    panel.deliver_result(project, shared, timeout_call, room_owner, auto_task, 124)
+    assert len(actual_dispatch_calls) == before_calls
+timeout_messages = room.status(project, shared)["messages"]
+timeout_mail = next(m for m in timeout_messages if m["id"] == "judgment-" + timeout_call)
+timeout_handoff = next(m for m in timeout_messages if m["id"] == "result-" + timeout_call)
+assert "worker exited with status 124" in timeout_mail["text"] and room_owner in timeout_mail["targets"]
+assert not timeout_handoff.get("quiet") and timeout_mail["seq"] < timeout_handoff["seq"]
+plan_verify_call = "call-0000000000000004"
+plan_verify_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-plan-verify",
+    refs=dict(auto_attempt["refs"], panel_room_participant=plan_verify_call))
+plan_artifact = ".oms/artifacts/fixture/plan-verifier.json"
+(project / plan_artifact).write_text("Result without call verifier\n", encoding="utf-8")
+plan_patch = auto_patch + b"# plan verifier digest\n"
+plan_verify_index = dict(auto_index, attempt_id=plan_verify_attempt["attempt_id"], artifact=plan_artifact,
+                         patch_sha256=hashlib.sha256(plan_patch).hexdigest())
+plan_verify_index["artifact_sha256"] = hashlib.sha256((project / plan_artifact).read_bytes()).hexdigest()
+plan_path = project / ".oms/plan/tasks.json"
+plan_path.write_text(json.dumps({"tasks": {auto_task: {"verify": "test -f scripts/fixture.py"}}}), encoding="utf-8")
+panel._prepare_dispatch_call(project, shared, plan_verify_call, room_owner,
+                             "test -f scripts/fixture.py", worker_execution_repo)
+with patch.object(panel_result_store, "_records", return_value=([plan_verify_attempt], [plan_verify_index])), \
+        patch.object(panel_result_store, "verified_patch", return_value=plan_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value=None), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+        patch.object(panel, "run_dispatch", side_effect=fixture_dispatch), \
+        patch.object(panel, "work_repository", return_value=worker_execution_repo), \
+        patch.object(panel, "provider_catalog", return_value=catalog_rows), \
+        patch.dict(os.environ, room_env, clear=True):
+    panel.deliver_result(project, shared, plan_verify_call, room_owner, auto_task, 0)
+assert len(actual_dispatch_calls) == 2 and actual_dispatch_calls[-1][0][6] == "test -f scripts/fixture.py", actual_dispatch_calls
+plan_path.unlink()
+retry_call = "call-0000000000000005"
+retry_attempt = dict(auto_attempt, attempt_id="attempt-auto-review-retry",
+    refs=dict(auto_attempt["refs"], panel_room_participant=retry_call))
+retry_patch = auto_patch + b"# retry digest\n"
+retry_digest = hashlib.sha256(retry_patch).hexdigest()
+retry_index = dict(auto_index, attempt_id=retry_attempt["attempt_id"], patch_sha256=retry_digest)
+retry_outputs = []
+panel._prepare_dispatch_call(project, shared, retry_call, room_owner,
+                             "test -f scripts/fixture.py", worker_execution_repo)
+def fail_once(*args, **kwargs):
+    if args[8]:
+        return run_dispatch(*args, **kwargs)
+    retry_outputs.append((args, kwargs))
+    if len(retry_outputs) == 1:
+        raise OSError("fixture launch failure")
+    return 0
+with patch.object(panel_result_store, "_records", return_value=([retry_attempt], [retry_index])), \
+        patch.object(panel_result_store, "verified_patch", return_value=retry_patch), \
+        patch.object(panel, "_dispatch_verifier", return_value="test -f scripts/fixture.py"), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "Worker finished."}]}]}), \
+        patch.object(panel, "run_dispatch", side_effect=fail_once), \
+        patch.object(panel, "work_repository", return_value=worker_execution_repo), \
+        patch.object(panel, "provider_catalog", return_value=catalog_rows), \
+        patch.dict(os.environ, room_env, clear=True):
+    panel.deliver_result(project, shared, retry_call, room_owner, auto_task, 0)
+    panel.deliver_result(project, shared, retry_call, room_owner, auto_task, 0)
+    panel.deliver_result(project, shared, retry_call, room_owner, auto_task, 0)
+    assert len(retry_outputs) == 2
+retry_events = [row["room_event"] for row in room.records(project, shared)
+                if row.get("room_event", {}).get("kind") in {"review-dispatch", "review-dispatch-failed"}
+                and row["room_event"].get("patch_sha256") == retry_digest]
+assert [event["kind"] for event in retry_events] == ["review-dispatch", "review-dispatch-failed", "review-dispatch"]
+for reviewer_call, answer, exit_status, expected in (
+        ("call-review-gate-fail", "Findings: checked.\nGATE: fail", 0, "Review verdict FAIL"),
+        ("call-review-gate-pass", "Findings: checked.\nGATE: pass", 0, "awaiting admission"),
+        ("call-review-gate-nonzero", "Findings: checked.\nGATE: pass", 1, "failed or is inconclusive"),
+        ("call-review-gate-timeout", "Findings: checked.\nGATE: pass", 124, "failed or is inconclusive"),
+        ("call-review-gate-last-fail", "GATE: pass\nFindings: blocking issue.\nGATE: fail", 0,
+         "Review verdict FAIL"),
+        ("call-review-gate-guard-stop", "The worker guard stopped this run.\nGATE: pass", 0,
+         "failed or is inconclusive"),
+        ("call-review-gate-missing", "Findings: review ended early.", 0, "failed or is inconclusive")):
+    reviewer_attempt = dict(auto_attempt, attempt_id="attempt-" + reviewer_call,
+        refs=dict(auto_attempt["refs"], panel_room_participant=reviewer_call,
+                  panel_role="reviewer", panel_access="read"))
+    with patch.object(panel_result_store, "_records", return_value=([reviewer_attempt], [])), \
+            patch.object(panel, "_dispatch_verifier", return_value=None), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": answer}]}]}), \
+            patch.dict(os.environ, room_env, clear=True):
+        panel.deliver_result(project, shared, reviewer_call, room_owner, auto_task, exit_status)
+    verdict_mail = next(m for m in room.status(project, shared)["messages"]
+                        if m["id"] == "judgment-" + reviewer_call)
+    assert expected in verdict_mail["text"] and room_owner in verdict_mail["targets"]
+shared, room_env = shared_before_auto, room_env_before_auto
 import io
 from contextlib import redirect_stderr
 conflict = io.StringIO()
@@ -7339,8 +7674,10 @@ def exercise_observed_worker_leases():
     # Every success marker comes from the real peer dispatcher while the fake CLI waits.
     import time
     codex_candidate = {"provider": "codex", "binary": "codex", "installed": True,
-                       "models": ["gpt-6-sol"], "catalog_models": ["gpt-6-sol", "gpt-6.2-sol"]}
-    claude_candidate = {"provider": "claude", "binary": "claude", "installed": True, "models": []}
+                       "models": ["gpt-6-sol"], "catalog_models": ["gpt-6-sol", "gpt-6.2-sol"],
+                       "access": ["read", "write"], "exact_model_override": True}
+    claude_candidate = {"provider": "claude", "binary": "claude", "installed": True, "models": [],
+                        "access": ["read", "write"], "exact_model_override": True}
     def fixture_selected_route(*args, **kwargs):
         target = kwargs.get("target", args[5] if len(args) > 5 else None)
         catalog = [row for row in (codex_candidate, claude_candidate)
@@ -7348,7 +7685,8 @@ def exercise_observed_worker_leases():
         with patch.object(panel, "provider_catalog", return_value=catalog):
             return panel.selected_route(*args, **kwargs)
     codex_only = {"provider": "codex", "binary": "codex", "installed": True, "models": ["gpt-6-sol"],
-                  "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-7-astra"]}
+                  "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-7-astra"],
+                  "access": ["read", "write"], "exact_model_override": True}
     plan_api = ["bash", str(panel.ENTRY), "agent-plan", "--repo", str(project)]
     # The observer tuple belongs on the peer dispatcher argv; the native CLI
     # receives ordinary model flags and cannot expose this frontend argument.
@@ -7422,9 +7760,8 @@ def exercise_observed_worker_leases():
         notices, children, leaves = [], [], []
         def rollback(repo, room_id, event, text):
             leaves.append(event)
-            for participant in state["participants"]:
-                if participant["participant"] == event["participant"]:
-                    participant["joined"] = False
+            next((participant for participant in state["participants"]
+                  if participant["participant"] == event.get("participant")), {}).update(joined=False)
         live_rows = [{"parent_attempt_id": argv_binding.owner_attempt, "terminal": False,
                       "refs": {"panel_role": "worker"}} for _ in range(5)] if scenario == "normal" else []
         # Live calls of this main or of others never block a dispatch: a main has no call cap.
@@ -7465,7 +7802,14 @@ def exercise_observed_worker_leases():
                                join=Mock(side_effect=enroll), rollover=rolling, send=Mock(side_effect=notice),
                                append=Mock(side_effect=rollback)), \
                 patch.object(panel, "results", return_value={"rows": []}), \
-                patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+                patch.object(panel.subprocess, "run", side_effect=lambda argv, **kwargs:
+                             subprocess.CompletedProcess(argv, 0,
+                                 json.dumps([{"attempt_id": "fixture-capacity-result", "refs": {
+                                     "panel_room_id": argv_binding.room_id,
+                                     "panel_room_participant": next(p["participant"] for p in state["participants"]
+                                                                     if p.get("role") == "worker"),
+                                     "panel_role": "worker", "panel_access": "write" if writing else "read"}}]) if "agent-events" in argv
+                                 else '{"rows":[]}' if "artifact-index" in argv else "", "")), \
                 patch("panel_terminals.process", return_value=None), \
                 patch.multiple(panel, _dispatch_group_gone=Mock(return_value=True), \
                                _dispatch_descendants=Mock(return_value=[]), \
@@ -7610,8 +7954,10 @@ def exercise_observed_worker_leases():
             enrolled = room.participant(room.project(room.records(project, test_room)), observed["participant"])
             assert enrolled["parent"] == main_member and observed["parent"] == main_attempt, enrolled
             assert enrolled["role"] == role and enrolled["owns"] == [], enrolled
-            validation_route = dict(provider=worker, model=model,
-                                    reasoning_effort=effort, fallback_model="")
+            route = fixture_selected_route(owner, role, None, access, purpose if role == "worker" else None,
+                                           worker, model, effort)
+            validation_route = dict(provider=route["provider"], model=route["model"],
+                                    reasoning_effort=route["effort"], fallback_model="")
             binding = panel.PlanBinding(row["plan_id"], task_id, row["lease_id"], row["provider"], owner,
                                         main_member, main_attempt, test_room)
             assert binding._asdict() == observed_binding, binding
@@ -8116,7 +8462,7 @@ def exercise_main_lineage():
                 "refs": {"panel_role": "worker", "panel_label": "Inspect fixture %d" % n,
                          "prompt": "PRIVATE-LINEAGE-PROMPT"}} for n in range(12)]
     workers[0].update(state="done", terminal=True)
-    workers[0]["refs"].update(panel_room_id="lineage-room", panel_room_participant="call-0000000000000000",
+    workers[0]["refs"].update(panel_room_id="lineage-room", panel_room_participant="call-bbbbbbbbbbbbbbbb",
                               native_session="lineage-safe-session")
     from types import SimpleNamespace
     process = SimpleNamespace(pid=987654321)
@@ -8211,7 +8557,7 @@ def exercise_main_lineage():
             assert panel._dispatch_call_record(project, "other-room", member) is None
             assert panel._dispatch_call_record(project, "lineage-room", dict(member, parent="other-main")) is None
             # Legacy records retain all liveness refusals, and need private proof too.
-            legacy_name = "call-0000000000000001"
+            legacy_name = "call-cccccccccccccccc"
             legacy = {"schema": 1, "kind": "oms-panel-call", "room": "lineage-room", "participant": legacy_name,
                       "parent": "lineage-stable", "pid": process.pid, "identity": "lineage-process-identity",
                       "session": True}
@@ -8555,7 +8901,7 @@ with patch.dict(os.environ, control_env, clear=True), \
             patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch), \
             redirect_stderr(warning_output):
         assert panel.dispatch(project, "claude", "worker", "light", "write", "implement",
-                              brief="Change nothing.", verify=True, task_id="backlog-warning",
+                              brief="Change nothing.", verify="true", task_id="backlog-warning",
                               label="Backlog warning") == 0
     assert warning_output.getvalue().splitlines() == [
         "plan backlog-warning has no recorded task; panel left it unchanged; plan protection is absent",
@@ -8569,7 +8915,7 @@ with patch.dict(os.environ, control_env, clear=True), \
             patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch), \
             redirect_stderr(warning_output):
         assert panel.dispatch(project, "claude", "worker", "light", "write", "implement",
-                              brief="Change nothing.", verify=True, task_id="backlog-at-threshold",
+                              brief="Change nothing.", verify="true", task_id="backlog-at-threshold",
                               label="Backlog at threshold") == 0
     assert warning_output.getvalue().splitlines() == [
         "plan backlog-at-threshold has no recorded task; panel left it unchanged; plan protection is absent"], \
@@ -8968,6 +9314,88 @@ with patch.dict(os.environ, {}):
 
         def member(ident, who):
             return next(p for p in room.status(where, ident)["participants"] if p["participant"] == who)
+
+        # Structured evidence stays in sealed history; quiet carried results never wake the main.
+        reviewed = fresh("m1", calls=(("call-reviewed", "m1"),))
+        result_event = {"kind": "call-result", "event_id": "call-result-rollover", "task_id": "rollover-review",
+                        "call_id": "call-reviewed", "attempt_id": "attempt-reviewed", "role": "worker",
+                        "access": "write", "exit": 0, "verify_status": "passed", "verify_exit": 0,
+                        "patch_sha256": "a" * 64, "changed_files": ["scripts/fixture.py"], "needs_review": True}
+        claim = {"kind": "review-dispatch", "event_id": "review-dispatch-rollover-1",
+                 "task_id": "rollover-review", "call_id": "call-reviewed", "patch_sha256": "a" * 64,
+                 "review_call_id": "call-review-1", "attempt": 1}
+        failure = dict(claim, kind="review-dispatch-failed", event_id="review-dispatch-failed-rollover-1")
+        with bound(reviewed, "m1"):
+            room.append(where, reviewed, result_event, "Structured call result")
+            assert room.claim_review(where, reviewed, claim)
+            # Unread direct mail keeps this finished call in the carry, including its quiet result.
+            kept = room.send(where, reviewed, "call-reviewed", "m1", "Review observation")["id"]
+            room.send(where, reviewed, "call-reviewed", "m1", "Call exit=0; parent acceptance pending.",
+                      "handoff", message_id="result-call-reviewed", quiet=True)
+            moved = room.rollover(where, reviewed, "m1")
+            carried_result = next(m for m in room.messages(where, moved) if m["id"] == "result-call-reviewed")
+            assert carried_result.get("quiet") is True and carried_result["pending_for"] == []
+            assert not room.visible(next(row for row in room.records(where, moved)
+                                         if row.get("room_event", {}).get("id") == "result-call-reviewed"), "m1")
+            assert not any(row.get("room_event", {}).get("id") == "result-call-reviewed"
+                           for row in room.updates(where, moved, "m1")["turns"])
+            assert result_event in room.structured_events(where, moved)
+            before_result = room.records(where, moved)
+            room.append(where, reviewed, result_event, "Structured call result")
+            assert room.records(where, moved) == before_result, "rollover duplicated a structured result"
+            assert room.status(where, moved)["call_results"]["call-reviewed"]["patch_sha256"] == "a" * 64
+            assert panel._review_dispatch_context(where, moved, "call-review-1") == claim
+            assert not room.claim_review(where, moved, claim)
+            retry_claim = dict(claim, event_id="review-dispatch-rollover-2", attempt=2, review_call_id="call-review-2")
+            assert not room.claim_review(where, moved, retry_claim), "rollover reset an active review digest"
+            room.fail_review(where, reviewed, failure)
+            room.acknowledge(where, moved, "m1", [kept])
+            next_room = room.rollover(where, moved, "m1")
+            assert "call-reviewed" not in {p["participant"] for p in room.status(where, next_room)["participants"]}
+            assert room.claim_review(where, next_room, retry_claim), "failed review lost its bounded retry"
+            room.fail_review(where, reviewed, dict(retry_claim, kind="review-dispatch-failed",
+                                                 event_id="review-dispatch-failed-rollover-2"))
+            last_room = room.rollover(where, next_room, "m1")
+            assert not room.claim_review(where, last_room, dict(claim, event_id="review-dispatch-rollover-3",
+                                                              attempt=3, review_call_id="call-review-3"))
+            assert room.structured_events(where, reviewed).count(result_event) == 1
+            with patch.object(room, "MAX_HOPS", 2):
+                try:
+                    room.structured_events(where, last_room)
+                except ValueError as error:
+                    assert "lineage is too long" in str(error), error
+                else:
+                    raise AssertionError("truncated lineage reset structured review history")
+            assert room.status(where, last_room)["call_results"]["call-reviewed"]["attempt_id"] == "attempt-reviewed"
+            past = room.predecessor_calls(where, room.status(where, last_room))
+            assert [call["participant"] for call in past] == ["call-reviewed"] and past[0]["exit"] == 0, past
+            # The original attempt binding still resolves when a late result is built in the successor.
+            attempt = {"attempt_id": "attempt-reviewed", "task_id": "rollover-review",
+                       "refs": {"panel_room_id": reviewed, "panel_room_participant": "call-reviewed",
+                                "panel_role": "worker", "panel_access": "write"}}
+            with patch.object(panel_result_store, "_records", return_value=([attempt], [])):
+                late_result, _ = panel._call_result_event(where, last_room, "call-reviewed", "rollover-review", 0)
+                assert late_result["attempt_id"] == "attempt-reviewed" and late_result["access"] == "write"
+        for guard in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_HARNESS_DELEGATE_DEPTH": "1"}):
+            with patch.dict(os.environ, dict(guard, OMS_ROOM_ID=reviewed, OMS_ROOM_REPO=str(where),
+                                            OMS_ROOM_PARTICIPANT="call-reviewed")):
+                for target in (reviewed, moved, next_room, last_room):
+                    before = room.records(where, last_room)
+                    for event in (result_event, claim, failure):
+                        try:
+                            room.append(where, target, event, "Worker structured forgery")
+                        except ValueError as error:
+                            assert "worker can only message or acknowledge" in str(error), error
+                        else:
+                            raise AssertionError("worker wrote structured lineage evidence")
+                    assert room.records(where, last_room) == before
+                with patch.dict(os.environ, {"OMS_ROOM_CARRY": "1"}):
+                    try:
+                        room.validate_event(room.records(where, last_room), result_event, "Forged carry", repo=where)
+                    except ValueError as error:
+                        assert "worker cannot carry a room" in str(error), error
+                    else:
+                        raise AssertionError("worker carried structured evidence")
 
         real_carry = room.carry
         # Both described mains carry their labels, by hand, through a dispatch and through a full room's send.
