@@ -14569,14 +14569,24 @@ assert graph_view.call_classifier(handoff)(owner_successor_done) == "past"
 assert "held-review" not in graph_view.held_split(handoff)[0]
 assert graph_view.plan_summary(handoff)[3] == 0 and not inbox_items(handoff)
 handoff_banner = graph_view.goal_banner(handoff, 127, True)[0][0]
-assert "0 review" in handoff_banner, handoff_banner
-handoff["attempts"]["recent"][-1]["state"] = "working"
-owner_live_successor = next(m for m in graph_view.nodes(handoff) if m["participant"] == "stale-patch")
-assert graph_view.call_classifier(handoff)(owner_live_successor) == "review"
-assert graph_view.held_split(handoff) == ({"held-review"}, set())
-assert graph_view.plan_summary(handoff)[3] == 1 and len(inbox_items(handoff)) == 1
-handoff_banner = graph_view.goal_banner(handoff, 127, True)[0][0]
-assert "1 review" in handoff_banner, handoff_banner
+assert "review" not in handoff_banner, handoff_banner
+for activity_state, kind in (("idle", None), ("quiet", None), ("waiting", "input"), ("waiting", "approval")):
+    handoff["attempts"]["recent"][-1]["state"] = "working"
+    reading = {"attempt": "successor-main", "state": activity_state}
+    if kind:
+        reading["kind"] = kind
+    handoff["main_activity"] = {"successor": reading}
+    live_review = next(m for m in graph_view.nodes(handoff) if m["participant"] == "stale-patch")
+    assert graph_view.call_classifier(handoff)(live_review) == "review", (activity_state, kind)
+    assert ("result", "stale-patch") in {item["action"] for item in inbox_items(handoff)}, (activity_state, kind)
+    assert graph_view.plan_summary(handoff)[3] == 1, (activity_state, kind)
+    handoff_banner = graph_view.goal_banner(handoff, 127, True)[0][0]
+    assert "1 review" in handoff_banner, (activity_state, kind, handoff_banner)
+handoff["attempts"]["recent"][-1]["state"] = "done"
+handoff.pop("main_activity")
+owner_successor_done = next(m for m in graph_view.nodes(handoff) if m["participant"] == "stale-patch")
+assert graph_view.call_classifier(handoff)(owner_successor_done) == "past"
+assert graph_view.plan_summary(handoff)[3] == 0
 # The owner's recorded decision on a task closes its review and its block; a failed decision does not.
 for outcome, expected in (("completed", "past"), ("accepted", "past"), ("failed", None)):
     decided = graph_view.call_classifier(dict(grouped_board, finalized={"decided-task": outcome}))

@@ -293,7 +293,8 @@ def settler(report):
         owner_exited = owner is not None and main_state(owner) == "exited"
         claimant = task.get("claimed_by") or task.get("claimed_by_participant") if task else None
         successor = mains.get(claimant)
-        adopted = successor is not None and successor is not owner and main_state(successor) in LIVE_STATES
+        adopted = (successor is not None and successor is not owner and successor.get("attempt")
+                   and successor.get("state") not in TERMINAL_STATES)
         unowned_old = review and task is None and (joined_seconds(call) or 0) > 12 * 60 * 60
         handed_off = review and owner_exited and not adopted
         finished = call["state"] in FINISHED and not (
