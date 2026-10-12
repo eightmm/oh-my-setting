@@ -3076,13 +3076,13 @@ assert allocate("claude", role="reviewer", installed=both,
 assert allocate("codex", role="reviewer", installed=both,
                 provider_status={"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}})["provider"] == "claude"
 assert allocate("codex", installed={"codex"}, provider_status={"codex": {"weekly_used": 100}})["provider"] == "codex"
-# Routing spread by workload: measured usage changes the selected provider inside each tier;
-# owner identity only changes the independent-judgment roles when usage is unknown.
+# Routing spread follows quota readings except that independent judgments always avoid the owner.
 routing_roles = {
     "researcher": "light",
     "worker": "routine", "builder": "routine", "documenter": "routine",
     "integrator": "deep", "performance-engineer": "deep",
     "reviewer": "frontier", "verifier": "frontier", "security-auditor": "frontier",
+    "critic": "frontier",
     "advisor": "frontier", "architect": "frontier",
 }
 usage_scenarios = {
@@ -3096,7 +3096,7 @@ for role, tier in routing_roles.items():
             selected = allocate(owner, role=role, installed=both, provider_status=readings)
             expected = {"none": "claude", "claude-70-codex-20": "codex",
                         "codex-70-claude-20": "claude"}[scenario]
-            if scenario == "none" and role in ("reviewer", "verifier", "security-auditor"):
+            if role in ("reviewer", "verifier", "security-auditor", "critic"):
                 expected = "codex" if owner == "claude" else "claude"
             assert selected["provider"] == expected, (role, scenario, owner, selected)
             assert selected["workload"] == tier
