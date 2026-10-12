@@ -14550,6 +14550,33 @@ assert graph_view.call_classifier(review_fixture)(stale_node) == "review"
 assert ("result", "stale-patch") in {item["action"] for item in inbox_items(review_fixture)}
 assert len(needs_strip(review_fixture, 120, True)) == len(inbox_items(review_fixture)), \
     "Needs-you strip count must match actionable inbox items"
+# An exited owner with an exited successor did not adopt the patch; a live successor did.
+handoff = deepcopy(review_fixture)
+handoff["room"]["participants"].append({"participant": "successor", "provider": "codex", "role": "main",
+    "joined": True, "parent": None, "seq": 3, "label": "Successor"})
+handoff["attempts"]["recent"] += [
+    {"attempt_id": "owner-main", "state": "done", "panel": {"room_id": "adv-room", "room_participant": "adv-main", "role": "main"}},
+    {"attempt_id": "successor-main", "state": "done", "panel": {"room_id": "adv-room", "room_participant": "successor", "role": "main"}}]
+stale_attempt = next(a for a in handoff["attempts"]["recent"] if a["attempt_id"] == "stale-patch")
+stale_attempt["task_id"] = "held-review"
+handoff["room"]["participants"][1]["parent"] = "adv-main"
+handoff["room"]["participants"][1]["joined_at"] = minutes_ago(10)
+handoff["plan"] = {"present": True, "goal": "Adopt patch", "idle_days": 0, "task_count": 1,
+                   "by_state": {"running": 1}, "tasks": [{"id": "held-review", "state": "running",
+                   "claimed_by": "successor"}]}
+owner_successor_done = next(m for m in graph_view.nodes(handoff) if m["participant"] == "stale-patch")
+assert graph_view.call_classifier(handoff)(owner_successor_done) == "past"
+assert "held-review" not in graph_view.held_split(handoff)[0]
+assert graph_view.plan_summary(handoff)[3] == 0 and not inbox_items(handoff)
+handoff_banner = graph_view.goal_banner(handoff, 127, True)[0][0]
+assert "0 review" in handoff_banner, handoff_banner
+handoff["attempts"]["recent"][-1]["state"] = "working"
+owner_live_successor = next(m for m in graph_view.nodes(handoff) if m["participant"] == "stale-patch")
+assert graph_view.call_classifier(handoff)(owner_live_successor) == "review"
+assert graph_view.held_split(handoff) == ({"held-review"}, set())
+assert graph_view.plan_summary(handoff)[3] == 1 and len(inbox_items(handoff)) == 1
+handoff_banner = graph_view.goal_banner(handoff, 127, True)[0][0]
+assert "1 review" in handoff_banner, handoff_banner
 # The owner's recorded decision on a task closes its review and its block; a failed decision does not.
 for outcome, expected in (("completed", "past"), ("accepted", "past"), ("failed", None)):
     decided = graph_view.call_classifier(dict(grouped_board, finalized={"decided-task": outcome}))
