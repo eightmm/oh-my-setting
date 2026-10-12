@@ -3465,6 +3465,7 @@ def snapshot(repo, room_id=None, _tick=None):
                                     and str(row.get("updated_at") or "") >= str(linked.get(who, {}).get("updated_at") or "")):
                                 linked[who] = {"state": row["state"], "attempt_id": row["attempt_id"],
                                                "updated_at": row.get("updated_at"), "task_id": row.get("task_id"),
+                                               "lease_id": refs.get("panel_lease_id"),
                                                **({"access": "write"} if refs.get("panel_access") == "write" else {})}
                         state["room_attempts"] = linked
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):

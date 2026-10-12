@@ -10697,15 +10697,21 @@ order = [2 if "running" in r else 1 for r in rows]
 assert 1 in order and 2 in order, rows
 # A call outside the projection takes its real state from room_attempts, ahead of any exit code.
 gone = deepcopy(ended)
-for ident in ("gone-review", "gone-blocked"):
+for ident in ("gone-review", "gone-blocked", "gone-live"):
     gone["room"]["participants"].append({"participant": ident, "role": "worker", "model": "gpt-6-luna", "joined": True,
         "provider": "codex", "parent": "flow-attempt", "label": "Gone " + ident, "seq": 40})
 gone["room"]["call_results"]["gone-review"] = {"exit": 0, "ts": minutes_ago(5), "seq": 200}
 gone["room_attempts"] = {"gone-review": {"state": "review", "attempt_id": "att-r", "updated_at": minutes_ago(4), "task_id": "task-r"},
-                         "gone-blocked": {"state": "blocked", "attempt_id": "att-b", "updated_at": minutes_ago(4), "task_id": "task-b"}}
+                         "gone-blocked": {"state": "blocked", "attempt_id": "att-b", "updated_at": minutes_ago(4), "task_id": "task-b"},
+                         "gone-live": {"state": "working", "attempt_id": "att-live", "updated_at": minutes_ago(4),
+                                       "task_id": "task-live", "lease_id": "lease-live"}}
 seen = {m["participant"]: m for m in graph_text.nodes(gone)}
 assert (seen["gone-review"]["state"], seen["gone-review"]["attempt"], seen["gone-review"]["task_id"]) == ("review", "att-r", "task-r"), seen["gone-review"]
 assert seen["gone-blocked"]["state"] == "blocked" and seen["old-01"]["state"] == "done", seen
+assert seen["gone-live"]["state"] == "working" and seen["gone-live"]["lease_id"] == "lease-live", seen["gone-live"]
+gone["plan"] = {"tasks": [{"id": "task-live", "state": "running", "claimed_by": "flow-attempt",
+                            "lease_id": "lease-live", "claimed_at": minutes_ago(1)}]}
+assert graph_text.held_split(gone) == (set(), set()), graph_text.held_split(gone)
 # snapshot() links full-projection rows only on the room, participant and role identity, newest row winning.
 from unittest.mock import patch
 import room as room_module
@@ -10717,7 +10723,11 @@ listed = [event("a-old", "working", "2026-01-01T00:00:00Z"), event("a-new", "rev
           event("a-room", "failed", "2026-01-03T00:00:00Z", room_id="other-room"),
           event("a-who", "failed", "2026-01-03T00:00:00Z", who="someone-else"),
           event("a-role", "failed", "2026-01-03T00:00:00Z", role="advisor")]
+live_row = event("a-live", "working", "2026-01-03T00:00:00Z", who="gone-live")
+live_row["refs"]["panel_lease_id"] = "lease-live"
+listed.append(live_row)
 members = [{"participant": "gone-review", "role": "worker", "joined": True},
+           {"participant": "gone-live", "role": "worker", "joined": True},
            {"participant": "flow-main", "role": "main", "joined": True}]
 def fake_run(command, **kwargs):
     if command[2:3] == ["land"]:
@@ -10733,7 +10743,14 @@ with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0))
     got, _ = panel.snapshot(Path("."), "flow-room")
 assert got["land"] == {"active": True, "sha": "abc1234", "step": "gate", "minutes": 2}, got.get("land")
 assert got["room_attempts"] == {"gone-review": {"state": "review", "attempt_id": "a-new",
-    "updated_at": "2026-01-02T00:00:00Z", "task_id": "t-a-new"}}, got.get("room_attempts")
+    "updated_at": "2026-01-02T00:00:00Z", "task_id": "t-a-new", "lease_id": None},
+    "gone-live": {"state": "working", "attempt_id": "a-live", "updated_at": "2026-01-03T00:00:00Z",
+                  "task_id": "t-a-live", "lease_id": "lease-live"}}, got.get("room_attempts")
+snapshot_nodes = {m["participant"]: m for m in graph_text.nodes(got)}
+assert snapshot_nodes["gone-live"]["lease_id"] == "lease-live", snapshot_nodes["gone-live"]
+got["plan"] = {"tasks": [{"id": "t-a-live", "state": "running", "claimed_by": "flow-attempt",
+                            "lease_id": "lease-live", "claimed_at": "2026-01-03T00:00:01Z"}]}
+assert graph_text.held_split(got) == (set(), set()), graph_text.held_split(got)
 # An older review call found only in room_attempts still gets the owner's recorded decision.
 with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \
         patch.object(room_module, "status", return_value={"id": "flow-room", "participants": members}), \

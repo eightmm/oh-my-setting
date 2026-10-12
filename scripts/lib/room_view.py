@@ -62,10 +62,10 @@ def nodes(report):
         # only a same-role attempt is the member itself.
         attempt = next((row for row in linked.get(member.get("participant"), [])
                         if mapping(row.get("panel")).get("role") == member.get("role")), {})
-        meta = mapping(attempt.get("panel"))
         if not attempt:
             # Outside the projection window: the full-projection row for this call, when the snapshot found one.
             attempt = mapping(mapping(report.get("room_attempts")).get(member.get("participant")))
+        meta = mapping(attempt.get("panel"))
         status = mapping(mapping(report.get("provider_status")).get("codex"))
         native = mapping(status.get("native_models"))
         reading = mapping(native.get(member.get("participant")))
@@ -93,7 +93,7 @@ def nodes(report):
                            guard=member.get("participant") in guarded,
                            model=model, model_at_launch=meta.get("model") or member.get("model"),
                            task_id=attempt.get("task_id"), location=meta.get("location"),
-                           lease_id=meta.get("lease_id"),
+                           lease_id=meta.get("lease_id") or attempt.get("lease_id"),
                            effort=effort, access=meta.get("access") or attempt.get("access"),
                            harness=mapping(attempt.get("panel")).get("harness"),
                            title=member.get("label_override") or meta.get("label") or member.get("label")))
