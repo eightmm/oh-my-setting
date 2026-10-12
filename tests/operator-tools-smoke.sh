@@ -3076,6 +3076,36 @@ assert allocate("claude", role="reviewer", installed=both,
 assert allocate("codex", role="reviewer", installed=both,
                 provider_status={"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}})["provider"] == "claude"
 assert allocate("codex", installed={"codex"}, provider_status={"codex": {"weekly_used": 100}})["provider"] == "codex"
+# Routing spread by workload: measured usage changes the selected provider inside each tier;
+# owner identity only changes the independent-judgment roles when usage is unknown.
+routing_roles = {
+    "researcher": "light",
+    "worker": "routine", "builder": "routine", "documenter": "routine",
+    "integrator": "deep", "performance-engineer": "deep",
+    "reviewer": "frontier", "verifier": "frontier", "security-auditor": "frontier",
+    "advisor": "frontier", "architect": "frontier",
+}
+usage_scenarios = {
+    "none": {},
+    "claude-70-codex-20": {"claude": {"weekly_used": 70}, "codex": {"weekly_used": 20}},
+    "codex-70-claude-20": {"claude": {"weekly_used": 20}, "codex": {"weekly_used": 70}},
+}
+for role, tier in routing_roles.items():
+    for scenario, readings in usage_scenarios.items():
+        for owner in both:
+            selected = allocate(owner, role=role, installed=both, provider_status=readings)
+            expected = {"none": "claude", "claude-70-codex-20": "codex",
+                        "codex-70-claude-20": "claude"}[scenario]
+            if scenario == "none" and role in ("reviewer", "verifier", "security-auditor"):
+                expected = "codex" if owner == "claude" else "claude"
+            assert selected["provider"] == expected, (role, scenario, owner, selected)
+            assert selected["workload"] == tier
+            assert selected["model"] == {
+                ("light", "claude"): "claude-haiku-5-5", ("light", "codex"): "gpt-6-luna",
+                ("routine", "claude"): "claude-sonnet-5-5", ("routine", "codex"): "gpt-6-luna",
+                ("deep", "claude"): "claude-opus-5-5", ("deep", "codex"): "gpt-6.1-sol",
+                ("frontier", "claude"): "claude-fable-5-1", ("frontier", "codex"): "gpt-6-astra",
+            }[(tier, expected)]
 try:
     allocate("codex", installed=both, provider_status={p: {"weekly_used": 90} for p in both})
     raise AssertionError("all saturated candidates were accepted")
