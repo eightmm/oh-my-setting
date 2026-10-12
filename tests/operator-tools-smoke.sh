@@ -8123,11 +8123,22 @@ assert panel.split_cells(("left", 30, False), 30) == 15
 assert panel.split_resize(("left", 25, False), 25, 50) is None and panel.split_resize(("left", 25, False), 24, 50) is None
 assert panel.split_resize(("left", 25, False), 22, 50) == 25 and panel.split_resize(("left", 20, False), 25, 50) == 20
 assert panel.split_resize(("left", 40, True), 25, 50) == 20
+# New boards require 20 tree cells and 40 native CLI cells, including the border in the budget.
+split_widths = ((42, None), (60, None), (63, 20), (64, 20), (80, 22), (127, 36))
+for window, cells in split_widths:
+    assert panel.board_split_cells(("left", panel.BOARD_SHARE, True), window) == cells
+    if cells is not None:
+        assert cells == panel.split_cells(("left", panel.BOARD_SHARE, True), window)
+        assert cells >= 20 and window - cells - 1 >= 40
+assert panel.board_split_cells(("left", 28, True), 61) == 20
+assert panel.board_split_cells(("left", 35, True), 61) is None
+assert panel.board_split_cells(("left", 70, False), 80) is None
 def board_calls(display, terminal=None, percent=""):
     def answer(command, **kwargs):
         return subprocess.CompletedProcess(command, 0, display if "display-message" in command else "", "")
     with patch.dict(os.environ, {"OMS_PANEL_BOARD_PERCENT": percent}), \
             patch.object(panel, "terminal_window", return_value=terminal), \
+            patch.object(panel, "tmux_command", side_effect=lambda *args: ["fixture-tmux", *args]), \
             patch.object(panel.subprocess, "run", side_effect=answer) as tmux_run:
         panel.board_split("%1", Path("/repo"), "board")
     return [call.args[0][1:] for call in tmux_run.call_args_list if "display-message" not in call.args[0]]
@@ -8144,13 +8155,24 @@ assert board_calls("200 50 1 $1\tcontrol\t") == [left_split("56")]
 assert board_calls("80 24 0 $1\tcodex\t", terminal=(240, 59)) == [
     ["set-option", "-t", "$1", "@oms_panel_split", "left:67c"], left_split("28%")]
 assert board_calls("80 24 0 $1\tcodex\t") == [left_split("28%")]
+for window, cells in split_widths:
+    for height in (24, 40):
+        record = [] if cells is None else [["set-option", "-t", "$1", "@oms_panel_split", panel.split_text(cells)]]
+        attached_split = [] if cells is None else [left_split(str(cells))]
+        detached_split = [] if cells is None else [left_split("%d%%" % ((200 * cells + window) // (2 * window)))]
+        for name in ("control", "claude"):
+            recorded = record if name == "claude" else []
+            assert board_calls("%d %d 1 $1\t%s\t" % (window, height, name)) == recorded + attached_split
+            assert board_calls("80 24 0 $1\t%s\t" % name, terminal=(window, height)) == recorded + detached_split
+assert board_calls("60 24 0 $1\tclaude\t") == [], "unknown terminal size ignored a narrow tmux window"
+assert board_calls("80 24 1 $1\tclaude\tleft:70c") == [], "stored width left the CLI unusable"
 for configured, cells in (("25", 50), ("35", 70), ("1", 50), ("99", 70), ("-1", 50),
                           ("garbage", 56), ("28.5", 56), ("2_8", 56)):
     assert board_calls("200 50 1 $1\tcodex\t", percent=configured) == [
         ["set-option", "-t", "$1", "@oms_panel_split", "left:%dc" % cells], left_split(str(cells))]
     assert board_calls("200 50 1 $1\tclaude\tleft:90c", percent=configured) == [left_split("90")]
-assert board_calls("50 24 1 $1\tcodex\t", percent="25") == [
-    ["set-option", "-t", "$1", "@oms_panel_split", "left:20c"], left_split("20")]
+assert board_calls("50 24 1 $1\tcodex\t", percent="25") == []
+assert board_calls("61 24 1 $1\tcodex\t", percent="35") == []
 def sync_run(sync, *reads):
     with patch.dict(os.environ, {"OMS_PANEL_SESSION": "s", "TMUX_PANE": "%1"}), \
             patch.object(panel.subprocess, "run") as tmux_run:
@@ -8184,6 +8206,10 @@ assert done == ["follow"] and calls == [["set-option", "-t", "s", "@oms_panel_sp
 done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (100, 50), "left:30c", zoomed=True),
                        reading(False, (200, 50), (200, 25), "left:15c"))
 assert done == [None, None] and calls == [], (done, calls)
+# A full-width pane needs neither split synchronization nor key forwarding on F9.
+done, calls = sync_run(panel.SplitSync(), reading(True, (42, 24), (42, 24), "left:22c", panes=1))
+assert done == [None] and calls == [], (done, calls)
+assert dict(panel.MAIN_KEYS)["F9"] == "select-pane -t :.+"
 # A call opens in a reader pane right of the board: the window's recorded native chat pane is split with the reader
 # on top and the reader is marked with its board; a second call respawns that reader, close kills only it, and a
 # short chat or a missing/foreign chat record keeps the detail in the board. Recorded identifiers are revalidated

@@ -2398,6 +2398,13 @@ def split_cells(stored, window):
     return max(low, min(high, cells)) if high >= low else max(1, window // 2)
 
 
+def board_split_cells(stored, window):
+    # The tree needs 20 cells; native CLI prompts need 40 (42-cell dogfood wrapped every word).
+    # Keep the window full width otherwise; the control pane's g key still opens the tree.
+    cells = split_cells(stored, window)
+    return cells if cells >= MIN_BOARD and window - cells - 1 >= 40 else None
+
+
 def split_resize(stored, pane, window):
     """Cells a board of `pane` cells in a `window`-cell axis should take to match the stored geometry, or None
     when it is already within one cell (a 2-cell gap is the threshold that keeps windows from ping-ponging)."""
@@ -2418,7 +2425,8 @@ def terminal_window():
 
 def board_split(pane, repo, command):
     """Open this window's board as its full-height left pane at the panel-wide width. The first main window's board
-    records its width in cells; later boards reuse it. The control window only follows the record."""
+    records its width in cells; later boards reuse it. The control window only follows the record.
+    Leave narrow windows unsplit so both the board and native CLI remain usable."""
     try:
         read = subprocess.run(tmux_command("display-message", "-p", "-t", pane,
                                            "#{window_width} #{window_height} #{session_attached} #{session_id}"
@@ -2440,8 +2448,11 @@ def board_split(pane, repo, command):
         except ValueError:
             pass
     width = "%d%%" % share
+    if sized or window:
+        cells = board_split_cells(stored or ("left", share, True), (sized or window)[0])
+        if cells is None:
+            return
     if sized:
-        cells = split_cells(stored or ("left", share, True), sized[0])
         width = str(cells) if attached else "%d%%" % max(1, min(99, (200 * cells + sized[0]) // (2 * sized[0])))
         if session and parts[1] != "control" and (stored is None or stored[2]):
             subprocess.run(tmux_command("set-option", "-t", session, "@oms_panel_split", split_text(cells)),
