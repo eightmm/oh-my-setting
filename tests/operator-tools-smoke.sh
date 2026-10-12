@@ -10850,6 +10850,26 @@ assert panel.expire_notice(aging, 110.0) is True and "notice" not in aging
 aging["notice"] = "again"
 assert panel.expire_notice(aging, 111.0) is False and aging["notice"] == "again"
 from panel_tree import render_detail
+snapshot_task = {"id": "snap", "title": "Snapshot task", "state": "running", "depends": ["base"],
+    "provider": "codex", "claimed_at": "2026-10-11T00:00:00Z",
+    "verify": "python3 verify.py " + "x" * 300, "allowed_paths": ["scripts/lib/panel.py"]}
+snapshot_state = {"room": {"repo_tasks": [snapshot_task]}}
+snapshot_nav = {"room_id": "snapshot-room"}
+with patch.object(panel, "managed_session", return_value=False), \
+        patch.object(panel.room, "status", return_value={"participants": []}):
+    panel.navigate(project, ("task", "snap"), snapshot_state, snapshot_nav, 100)
+snapshot_text = snapshot_nav["detail"]["text"]
+assert "Depends: base" in snapshot_text and "Claimed by: codex / " in snapshot_text and " ago" in snapshot_text
+assert "Verify: python3 verify.py" in snapshot_text and "lease_" not in snapshot_text
+assert "Scope: scripts/lib/panel.py" in snapshot_text and len(snapshot_text) < 1000
+snapshot_nav = {"room_id": "snapshot-room"}
+with patch.object(panel, "managed_session", return_value=False), \
+        patch.object(panel.room, "status", return_value={"participants": []}):
+    panel.navigate(project, ("task", "snap"), {"room": {"repo_tasks": [
+        {"id": "snap", "title": "No optional fields", "state": "ready"}]}}, snapshot_nav, 100)
+assert "Depends:" not in snapshot_nav["detail"]["text"]
+assert "Claimed by:" not in snapshot_nav["detail"]["text"]
+assert "Verify:" not in snapshot_nav["detail"]["text"]
 long_answer = "\n".join("Answer line %s" % n for n in range(40)) + "\n" + "x" * 900 + " END_OF_ANSWER"
 long_result = {"rows": [{"task_id": "long-result", "summary": "Owner summary",
     "calls": [{"kind": "call", "exit": 0, "answer": long_answer,
@@ -11636,6 +11656,20 @@ opener_fixture.chmod(0o755)
 listed = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
                         "--chats", "--json"], chat_cli_env))
 assert listed["kind"] == "oms-panel-chats" and any(r["uri"] for r in listed["rows"])
+chat_rows = listed["rows"]
+assert all("not bound or outside bounded local scan" not in (row.get("reason") or "") for row in chat_rows)
+chat_members = [
+    {"participant": "unbound", "label": "Native task not recorded", "provider": "claude", "role": "main", "joined": True},
+    {"participant": "outside", "label": "", "provider": "codex", "role": "main", "joined": True,
+     "consumer": "a" * 32},
+]
+with patch.object(panel_chats.room, "status", return_value={"participants": chat_members}), \
+        patch.object(panel_chats, "windows", return_value={}), \
+        patch.object(panel_chats, "native_index", return_value={"codex": {}, "claude": {}}):
+    chat_rows = panel_chats.catalog(project, "chat-copy")["rows"]
+    assert chat_rows[0]["reason"] == "no native session recorded for this main", chat_rows
+    assert chat_rows[1]["reason"] == "session not found in the recent local history (older sessions are not scanned)", chat_rows
+    assert chat_rows[0]["title"] == "claude main (no task title)" and chat_rows[1]["title"] == "codex main (no task title)"
 planned = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
                          "--open-chat", "chat-sol", "--chat-surface", "app", "--dry-run", "--json"], chat_cli_env))
 assert planned["uri"] == "codex://threads/" + chat_codex and not planned["ui_observed"]

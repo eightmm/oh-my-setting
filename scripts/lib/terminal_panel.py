@@ -3591,8 +3591,19 @@ def navigate(repo, action, state, navigation, width):
         if task is None:
             raise ValueError("task is outside the displayed snapshot")
         lines = ["Task snapshot: " + clean(task.get("id")), clean(task.get("title")),
-                 "State: " + clean(task.get("state")),
-                 "Depends: " + ", ".join(task.get("depends") or [])]
+                 "State: " + clean(task.get("state"))]
+        depends = task.get("depends") or []
+        if depends:
+            lines.append("Depends: " + ", ".join(clean(item) for item in depends))
+        # Plan records name the claiming provider; the lease itself stays out of the panel.
+        claimant = task.get("provider") if task.get("claimed_at") or task.get("state") in ("claimed", "running") else None
+        if claimant:
+            from panel_view import age_label
+            age = age_label(task.get("claimed_at")) if task.get("claimed_at") else ""
+            lines.append("Claimed by: " + clean(claimant) + (" / " + age + " ago" if age else ""))
+        verify = task.get("verify")
+        if verify:
+            lines.append("Verify: " + clean(verify, 240))
         if task.get("id") in state.get("completed_tasks", {}):
             lines += ["Work: completed locally; passing owner verification recorded.",
                       "Plan acceptance: " + clean(task.get("state"))]

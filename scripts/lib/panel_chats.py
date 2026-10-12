@@ -345,13 +345,19 @@ def catalog(repo, ident, who=None, terminal_first=False):
         native = index.get(provider, {}).get(member.get("consumer"), set()) if member["role"] == "main" else set()
         sid = next(iter(native)) if len(native) == 1 else None
         locations = panes.get(who, []) if member["role"] == "main" else []
+        title = clean(member.get("label"), 80)
+        if title in {None, "", "Native task not recorded"}:
+            title = "%s %s (no task title)" % (provider, member["role"])
         rows.append({"participant": who, "label": member["label"], "provider": provider,
             "role": member["role"], "joined": member["joined"], "session_id": sid,
             "uri": "codex://threads/" + quote(sid, safe="") if sid and provider == "codex" else None,
             "terminal": locations[0] if len(locations) == 1 else None,
             "status": "native" if sid or len(locations) == 1 else "artifacts" if member["role"] != "main" else "unresolved",
             "reason": "ambiguous native identity" if len(native) > 1 or len(locations) > 1 else
-                      "not bound or outside bounded local scan" if not sid and not locations else None})
+                      "no native session recorded for this main" if not sid and not locations and not member.get("consumer") else
+                      "session not found in the recent local history (older sessions are not scanned)"
+                      if not sid and not locations else None,
+            "title": title})
     return {"schema": 1, "kind": "oms-panel-chats", "room": ident, "rows": rows,
             "authority": "navigation only; no prompt submission or transcript forwarding"}
 
@@ -466,7 +472,7 @@ def open_chat(repo, ident, who, surface="auto", dry_run=False, allowed_methods=N
 def text(report):
     lines = ["ROOM CHATS / " + report["room"]]
     for number, row in enumerate(report["rows"], 1):
-        lines.append("%s. %s / %s / %s / %s%s" % (number, clean(row["label"], 80), row["provider"], row["role"], row["status"],
+        lines.append("%s. %s / %s / %s / %s%s" % (number, row["title"], row["provider"], row["role"], row["status"],
                                                "" if row["joined"] else " / left"))
         if row["reason"]:
             lines.append("   " + row["reason"])
