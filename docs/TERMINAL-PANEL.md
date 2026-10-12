@@ -905,7 +905,7 @@ ID`. `--dry-run` prints the chosen route and argv without running a model.
 
 ## Context limits for mains
 
-A main's context left is read from the statusline cache (Claude) or the
+A main's context usage comes from the statusline cache (Claude) or the
 transcript (Codex). At 30% left a handoff digest is saved silently
 (`OMS_CTX_CAPTURE_PCT`), at 15% a warning is shown once (`OMS_CTX_WARN_PCT`)
 and at 8% once more (`OMS_CTX_URGENT_PCT`); the latch re-arms above 30%
@@ -978,7 +978,7 @@ layout in the checkout's panel when tmux is available, while `--host inline
 The room's default tree uses closed usage, activity and action cards. Wide
 usage cards list the retained model-call totals (the quota/context readings are
 the pinned usage line); call totals appear once and are not account quotas. A narrow
-usage line uses `W` for weekly used percentage and `C` for main context left. Activity keeps
+usage line uses `W` for weekly quota left and `C` for main context used. Activity keeps
 main/role branches, wraps task titles, separates repository tasks, and closes
 the viewport border even while scrolling. Empty declared scopes are omitted.
 The control menu is an inbox. **Needs you** lists up to 12 items, newest first,
@@ -1076,7 +1076,7 @@ wrapped lines, so long titles need not compete with location and purpose.
 No absolute home paths or transcripts are added to panel metadata.
 
 Activity is organized under the window's sole live MAIN: ADVISORS / REVIEWERS /
-WORKERS, followed by each call and its task title. Main rows can show `? N open` questions and `cN%` context left. When space is short, earlier mains fold to their status rows automatically; the selected main and the main owning the selected call stay expanded. The control window renders the Needs you attention inbox; the main board carries the MAIN card and its team counts. Legacy calls without explicit panel ownership
+WORKERS, followed by each call and its task title. Main rows can show `? N open` questions and `cN%` context used. When space is short, earlier mains fold to their status rows automatically; the selected main and the main owning the selected call stay expanded. The control window renders the Needs you attention inbox; the main board carries the MAIN card and its team counts. Legacy calls without explicit panel ownership
 remain unlinked; a generic attempt parent is never promoted into a native-main
 relationship. A linked owner whose metadata is unavailable is labelled so.
 
