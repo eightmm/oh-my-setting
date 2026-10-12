@@ -263,7 +263,7 @@ with patch("subprocess.run", side_effect=AssertionError("health projection execu
         check(len(text.splitlines()) <= height and all(display_width(line) <= width for line in text.splitlines()),
               "capacity view exceeded its viewport")
         if (width, height) == (40, 30):
-            claude = next(line for line in text.splitlines() if "Claude context" in line)
+            claude = next(line for line in text.splitlines() if "Claude main" in line)
             check("97% used" in claude and "[" in claude and "Codex" not in text and "Main: 1 live" in text,
                   "capacity values/providers/main count were not readable")
             check("5% left [warning] Claude weekly" in text, "weekly quota was not rendered as left")
