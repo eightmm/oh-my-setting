@@ -2759,8 +2759,14 @@ def bind_window(pane, launch, view, attention_only):
 
 
 # F9 selects the other pane of the window: the native chat from its board and back.
-KEYS_HELP = ("1 Claude 2 Pi 0 Codex ? More F5 Back",
-             "F9 Chat/Board F5 Control ? Keys k Capacity")
+def keys_help(installed=None):
+    installed = set(name for name in ("claude", "pi", "codex") if main_installed(name)) if installed is None else set(installed)
+    starts = [label for name, label in (("claude", "1 Claude"), ("pi", "2 Pi"), ("codex", "0 Codex"))
+              if name in installed]
+    return (" ".join(starts + ["? More F5 Back"]), "F9 Chat/Board F5 Control ? Keys k Capacity")
+
+
+KEYS_HELP = keys_help()
 # Text inside tmux's conditional cannot contain commas or closing braces.
 MAIN_KEYS = (("F9", "select-pane -t :.+"),
              ("F5", 'if-shell -F "#{==:#{window_name},control}" "select-window -l" "select-window -t :=control"'),
@@ -2794,6 +2800,9 @@ def bind_main_keys():
     # on the current binding within the server; another inspection is not a guard.
     try:
         for key, command in MAIN_KEYS:
+            if key == "F12":
+                help_lines = keys_help()
+                command = 'display-message -d 8000 "#{?#{==:#{window_name},control},%s,%s}"' % help_lines
             found = subprocess.run(tmux_command("list-keys", "-T", "root", key), **quiet)
             # An earlier OMS binding matched the session name; replace it with the marker test.
             if found.returncode == 0 and "oms-panel-*" not in found.stdout and "@oms_panel_repo" not in found.stdout:
@@ -4591,6 +4600,7 @@ def interactive(repo, view="auto", attention_only=False):
             subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
                                         "@oms_panel_attention", "1" if attention_only else "0"), check=True)
         cache = {"held": held}
+        navigation["installed"] = [name for name in MAIN_HARNESSES if main_installed(name)]
         navigation["line_input"] = not raw_keys()
         try:
             choice = read_choice(repo, provider, previous, view, attention_only, navigation, cache)

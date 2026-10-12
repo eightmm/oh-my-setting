@@ -312,6 +312,22 @@ def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=T
     harnesses = [("claude", "[1] Claude"), ("pi", "[2] Pi"), ("codex", "[0] Codex")]
     start_keys = [label for name, label in harnesses if installed is None or name in installed]
     starts = "  ".join(start_keys + (["[3] Resume", "[t] Task"] if start_keys else []))
+
+    def wrap_groups(text, row_width, limit):
+        groups = [group.strip() for group in re.findall(r"\[[^]]+\](?: [^[]+)?", text)]
+        if not groups:
+            return wrapped(text, row_width, limit)
+        rows, current = [], ""
+        for group in groups:
+            candidate = group if not current else current + " " + group
+            if current and display_width(candidate) > row_width:
+                rows.append(current)
+                current = group
+            else:
+                current = candidate
+        if current:
+            rows.append(current)
+        return [clipped(line, row_width) for line in rows[:limit]]
     if height < 20 or width < 28:
         options = (["[o] Rooms [k] Capacity [9] Refresh [?] [q] " + quit_label,
                     "[o] [k] [9] [?] [q]"] if occupied else
@@ -331,11 +347,11 @@ def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=T
     if width < 60 and not expanded:
         compact = ([] if occupied else ["  ".join(start_keys), "[3] Resume  [t] Task"] if start_keys else []) + [other]
         for line in compact:
-            lines += [box_row(part, width, unicode) for part in wrapped(line, width - 4, 3)]
+            lines += [box_row(part, width, unicode) for part in wrap_groups(line, width - 4, 3)]
         return lines + [box_edge("", width, unicode, "bottom")]
     indent = 9 if expanded else 7
     for label, keys_text in groups:
-        for index, line in enumerate(wrapped(keys_text, max(1, width - indent - 5), 5)):
+        for index, line in enumerate(wrap_groups(keys_text, max(1, width - indent - 5), 5 if not expanded else len(keys_text))):
             lines.append(box_row((label.ljust(indent) if index == 0 else " " * indent) + line, width, unicode))
     return lines + [box_edge("", width, unicode, "bottom")]
 
@@ -343,7 +359,7 @@ def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=T
 INBOX_LIMIT = 12
 FAILED_WORDS = {"failed": "failed", "timed_out": "timed out", "abandoned": "abandoned", "orphaned": "lost its process"}
 WAITING_WORDS = {"waiting_approval": "waiting for approval", "waiting_input": "waiting for input"}
-ONBOARDING = "Press 1 (Claude) or 2 (Pi) to start the sole main; 0 opens Codex"
+ONBOARDING = "Press {starts} to start the sole main{codex}"
 
 
 def age_label(stamp, now=None):
@@ -473,7 +489,26 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
         head.extend(last)
         styles.extend(["dim"] * len(last))
     if not occupied:
-        for line in wrapped(ONBOARDING, width, 3):
+        installed = navigation.get("installed")
+        names = [(name, label) for name, label in (("claude", "1 (Claude)"), ("pi", "2 (Pi)"))
+                 if installed is None or name in installed]
+        starts = " or ".join(label for _, label in names)
+        codex = "; 0 opens Codex" if installed is None or "codex" in installed else ""
+        onboarding = ONBOARDING.format(starts=starts, codex=codex) if starts else ""
+        protected = onboarding.replace("1 (Claude)", "1\u00a0(Claude)").replace("2 (Pi)", "2\u00a0(Pi)")
+        tokens = re.findall(r"1\u00a0\(Claude\)|2\u00a0\(Pi\)|\S+", protected)
+        onboarding_rows, current = [], ""
+        for token in tokens:
+            candidate = token if not current else current + " " + token
+            if current and display_width(candidate) > width:
+                onboarding_rows.append(current)
+                current = token
+            else:
+                current = candidate
+        if current:
+            onboarding_rows.append(current)
+        for line in onboarding_rows[:3] if onboarding else []:
+            line = clipped(line.replace("\u00a0", " "), width)
             head.append(line)
             styles.append("main")
     keep = max(pinned, budget - 3)

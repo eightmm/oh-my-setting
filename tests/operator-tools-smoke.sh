@@ -4657,7 +4657,10 @@ if os.name == "posix":
             assert "START" not in unselected and "Press 1" not in unselected, unselected
             control_room = panel.room.create(project, title="Control fixture")
             subprocess.run(tmux + ["set-environment", "-t", session, "OMS_ROOM_ID", control_room], env=env, check=True)
-            tmux_wait(["capture-pane", "-p", "-t", control], "Press 1 (Claude) or 2 (Pi)")
+            onboarded = tmux_wait(["capture-pane", "-p", "-t", control], "Press 1 (Claude)")
+            # The start keys name only harnesses installed in this fixture.
+            pi_ready = all(panel.shutil.which(name, path=env["PATH"]) for name in ("pi", "codex"))
+            assert ("2 (Pi)" in onboarded) == pi_ready, onboarded
             control_options = {name: subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", control, name],
                                                              env=env, text=True).strip()
                                for name in ("@oms_panel_view", "@oms_panel_attention")}
@@ -9837,6 +9840,33 @@ for columns, rows in ((50, 18), (80, 40), (127, 40)):
         assert "START" not in screen and "Press 1" not in screen and "[1]" not in screen, screen
         assert stale_nav["main_occupied"], stale_nav
 # Default controls and direct graph/tree renders share occupancy and installed harnesses.
+import terminal_panel as panel
+from panel_view import menu_rows
+partial_installed = {"claude", "codex"}
+for expanded in (False, True):
+    for columns in (57, 40):
+        rows = menu_rows(columns, 28, expanded=expanded, installed=partial_installed)
+        joined = "\n".join(rows)
+        assert "Pi" not in joined, rows
+        for key, label in (("[1]", "Claude"), ("[0]", "Codex"), ("[o]", "Rooms"),
+                           ("[k]", "Capacity"), ("[9]", "Refresh"), ("[?]", "More"),
+                           ("[q]", "Quit"), ("[t]", "Task")):
+            for row in rows:
+                if key in row:
+                    assert label in row[row.index(key):], (columns, expanded, key, rows)
+assert "Pi" not in " ".join(panel.keys_help(partial_installed))
+# Expanded help keeps every shortcut group however narrow the pane is.
+for columns in range(28, 41):
+    expanded_rows = "\n".join(menu_rows(columns, 40, expanded=True))
+    assert all(key in expanded_rows for key in ("[c]", "[7]", "[n]", "[8]")), (columns, expanded_rows)
+partial_screen = render(empty_room, "claude", 57, 28, menu=True, navigation={"installed": partial_installed})
+assert "Pi" not in partial_screen and "Press 1 (Claude)" in partial_screen and "0 opens Codex" in partial_screen
+assert "2 (Pi)" not in partial_screen
+for onboarding_width in (22, 57, 40):
+    onboarding_screen = render(empty_room, "claude", onboarding_width, 28, menu=True,
+                               navigation={"installed": {"claude", "pi"}})
+    assert all(("1 (Claude)" in row or "Press" not in row) for row in onboarding_screen.splitlines()), onboarding_screen
+    assert all(("2 (Pi)" in row or "or 2" not in row) for row in onboarding_screen.splitlines()), onboarding_screen
 from room_view import render_graph
 terminal_room = deepcopy(inbox_room)
 terminal_room["attempts"]["active_recent"][0]["state"] = "done"
