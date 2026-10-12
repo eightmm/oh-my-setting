@@ -466,6 +466,14 @@ def inbox_items(report, unicode=True):
                       "who": "Main wake-up delivery failed",
                       "what": "(unconfirmed)" if any(receipt.get("delivery_unknown") for receipt in failed) else "",
                       "style": "bad", "action": None, "row_id": ("delivery", "wake-up"), "cls": "info"})
+    backlog = mapping(report.get("review_backlog"))
+    from review_backlog import warning
+    for participant, total in mapping(backlog.get("counts")).items():
+        if total > backlog.get("threshold", 8) and participant in byid:
+            # Undated, so it leads the decide class, which waits longest first.
+            items.append({"stamp": "", "glyph": "!", "who": who(byid[participant]),
+                          "what": warning(total), "style": "review", "action": ("chat", participant),
+                          "row_id": ("review-backlog", participant), "cls": "decide"})
     return sorted(items, key=lambda item: item["stamp"], reverse=True)
 
 

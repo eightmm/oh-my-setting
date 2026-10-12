@@ -2223,6 +2223,15 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             process = subprocess.Popen(command, cwd=str(execution), env=env, start_new_session=os.name == "posix")
             if launch:
                 dispatch_store.write(repo, control_member + "-process.json", {"pid": process.pid}, exclusive=True)
+            if access == "write" and caller:
+                try:
+                    from review_backlog import warning_for
+                    backlog_report, _ = snapshot(repo, room_id)
+                    notice = warning_for(backlog_report, caller)
+                    if notice:
+                        print(notice, file=sys.stderr)
+                except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+                    pass
         except (OSError, ValueError):
             spawn_failed = process is None
             if process is not None and process.poll() is None:
@@ -3589,9 +3598,14 @@ def snapshot(repo, room_id=None, _tick=None):
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
                 state["awaiting_admission"] = awaiting_admission(repo, state, _tick=_tick)
+        from review_backlog import project
+        state["review_backlog"] = project(state)
         return state, status
     except (OSError, ValueError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
-        return {"repo": {"name": repo.name}, "collection": {"ok": False}}, 1
+        state = {"repo": {"name": repo.name}, "collection": {"ok": False}}
+        from review_backlog import project
+        state["review_backlog"] = project(state)
+        return state, 1
 
 
 def refresh_failed(state):

@@ -135,6 +135,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         context = context_note(report, main)
         if context:
             status += sep + "ctx %s%% used" % context[0]
+        from review_backlog import needs_review_hint
+        if needs_review_hint(report, main["participant"]):
+            status += sep + "review first"
         add(label if width < 60 else label + sep + status, "dim" if state == "idle" else "codex" if main.get("provider") == "codex" else "main",
             action, bool(attached))
         if width < 60:

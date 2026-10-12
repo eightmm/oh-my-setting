@@ -1421,6 +1421,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             if ctx:
                 status += "".join((" · " if unicode else " / ") + part for part in
                                   ["ctx %s%% used" % ctx[0]] + ["compact soon"] * (ctx[1] == "alert"))
+            if m.get("role") == "main":
+                from review_backlog import needs_review_hint
+                if needs_review_hint(report, m["participant"]):
+                    status += (" · " if unicode else " / ") + "review first"
             if m.get("role") != "main" and primary and not sole_live:
                 status += " · for " + clean(name_of(primary))
             task = task_of(m)

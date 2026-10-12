@@ -52,8 +52,11 @@ def valid_route(route):
 def policy():
     value = json.loads((ROOT / "config/panel-routing.json").read_text(encoding="utf-8"))
     if (not isinstance(value, dict) or not {"schema", "main", "tiers", "roles"} <= set(value)
-            <= {"schema", "main", "tiers", "roles", "pool"} or value.get("schema") != 2):
+            <= {"schema", "main", "tiers", "roles", "pool", "review_backlog_warn"} or value.get("schema") != 2):
         raise ValueError("unsupported panel routing policy")
+    if "review_backlog_warn" in value and (type(value["review_backlog_warn"]) is not int
+                                             or value["review_backlog_warn"] < 0):
+        raise ValueError("review backlog warning threshold must be a non-negative integer")
     pool = value.get("pool", {})
     if (not isinstance(pool, dict) or not set(pool) <= set(POOL_DEFAULTS)
             or any(type(number) is not int or number <= 0 for number in pool.values())):

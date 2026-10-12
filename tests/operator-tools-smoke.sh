@@ -3624,6 +3624,7 @@ for role, rule in routes["roles"].items():
 from panel_routing import policy
 configured = policy()
 assert configured["pool"] == {"max_rework_rounds": 2}
+assert configured["review_backlog_warn"] == 8
 without_pool = dict(configured)
 del without_pool["pool"]
 with patch("panel_routing.Path.read_text", return_value=json.dumps(without_pool)):
@@ -3637,6 +3638,14 @@ for invalid_pool in (None, [], {"max_rework_rounds": 0}, {"max_rework_rounds": T
             assert "positive integers" in str(error)
         else:
             raise AssertionError("invalid pool policy accepted")
+for invalid_threshold in (True, -1, "8"):
+    with patch("panel_routing.Path.read_text", return_value=json.dumps(dict(configured, review_backlog_warn=invalid_threshold))):
+        try:
+            policy()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid review backlog threshold accepted")
 for invalid in ("routine", {"tier": "missing"}, {"tier": "routine", "prefer": "grok"},
                 {"tier": []}, {"tier": "routine", "prefer": None}, {"tier": "routine", "extra": True}):
     malformed = deepcopy(policy())
@@ -7074,6 +7083,8 @@ def exercise_observed_worker_leases():
                    if target in (None, row["provider"])]
         with patch.object(panel, "provider_catalog", return_value=catalog):
             return panel.selected_route(*args, **kwargs)
+    codex_only = {"provider": "codex", "binary": "codex", "installed": True, "models": ["gpt-6-sol"],
+                  "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-7-astra"]}
     plan_api = ["bash", str(panel.ENTRY), "agent-plan", "--repo", str(project)]
     # The observer tuple belongs on the peer dispatcher argv; the native CLI
     # receives ordinary model flags and cannot expose this frontend argument.
@@ -7123,6 +7134,8 @@ def exercise_observed_worker_leases():
     capacity_args = (project, "claude", "worker", "read",
                      "Capacity fixture", None, None, argv_binding.task_id, False,
                      "Capacity call", capacity_route, None, None, None)
+    with patch.object(panel, "provider_catalog", return_value=[codex_only, claude_candidate]):
+        capacity_write_route = panel.selected_route("claude", "worker", "light", "write", "implement")
     for scenario in ("normal", "full", "full-write", "calls-full", "calls-stuck", "closed", "foreign-main",
                      "lost-caller", "lost-child", "send-error", "spawn-error"):
         writing = scenario in {"full-write", "spawn-error"}
@@ -8245,6 +8258,9 @@ assert room.status(project, declared)["pending_count"] == 0
 # than the first main ever joined, and refuses zero or ambiguous ownership.
 control_env = dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project))
 control_launch = {}
+control_codex = {"provider": "codex", "binary": "codex", "installed": True, "models": ["gpt-6-sol"],
+                 "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6-astra"]}
+control_claude = {"provider": "claude", "binary": "claude", "installed": True, "models": ["claude-haiku-5-5"]}
 real_popen = panel.subprocess.Popen
 def observe_control_launch(argv, *args, **kwargs):
     if (argv[:3] == [sys.executable, "-c", "pass"]
@@ -8252,12 +8268,48 @@ def observe_control_launch(argv, *args, **kwargs):
         control_launch.update(env=kwargs["env"])
     return real_popen(argv, *args, **kwargs)
 with patch.dict(os.environ, control_env, clear=True), \
+        patch.object(panel, "provider_catalog", return_value=[control_codex, control_claude]), \
         patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
         patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch):
     assert panel.dispatch(project, "claude", "worker", "light", "read", "investigate",
                           prompt="Inspect the bounded source", task_id="control-owner", label="Control dispatch") == 0
     newest = room.status(project, shared)["participants"][-1]
     assert newest["parent"] == room_owner
+    warning_report = {"room": {"id": shared, "participants": [dict(room.participant(
+        room.status(project, shared), room_owner))]}, "attempts": {"recent": [], "active_recent": []},
+        "plan": {"tasks": [{"id": "review-%s" % n, "state": "review",
+                             "claimed_by_participant": room_owner} for n in range(9)]},
+        "review_backlog": {"threshold": 8, "counts": {room_owner: 9}}}
+    control_write_command = [sys.executable, "-c", "pass", "--repo", str(project),
+                             "--verify", "true", "--task-id", "backlog-warning"]
+    from contextlib import redirect_stderr
+    warning_output = io.StringIO()
+    with patch.dict(os.environ, control_env, clear=True), \
+            patch.object(panel, "provider_catalog", return_value=[control_codex, control_claude]), \
+            patch.object(panel, "routed_command", return_value=control_write_command), \
+            patch.object(panel, "snapshot", return_value=(warning_report, 0)), \
+            patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch), \
+            redirect_stderr(warning_output):
+        assert panel.dispatch(project, "claude", "worker", "light", "write", "implement",
+                              brief="Change nothing.", verify=True, task_id="backlog-warning",
+                              label="Backlog warning") == 0
+    assert warning_output.getvalue().splitlines() == [
+        "plan backlog-warning has no recorded task; panel left it unchanged; plan protection is absent",
+        "9 results await review/admission; review first"], warning_output.getvalue()
+    warning_output = io.StringIO()
+    with patch.dict(os.environ, control_env, clear=True), \
+            patch.object(panel, "provider_catalog", return_value=[control_codex, control_claude]), \
+            patch.object(panel, "routed_command", return_value=control_write_command), \
+            patch.object(panel, "snapshot", return_value=(dict(warning_report, review_backlog={
+                "threshold": 9, "counts": {room_owner: 9}}), 0)), \
+            patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch), \
+            redirect_stderr(warning_output):
+        assert panel.dispatch(project, "claude", "worker", "light", "write", "implement",
+                              brief="Change nothing.", verify=True, task_id="backlog-at-threshold",
+                              label="Backlog at threshold") == 0
+    assert warning_output.getvalue().splitlines() == [
+        "plan backlog-at-threshold has no recorded task; panel left it unchanged; plan protection is absent"], \
+        warning_output.getvalue()
     for owner in ("codex",):
         try:
             panel.dispatch(project, owner, "worker", "light", "read", "investigate", prompt="Inspect source")
@@ -12268,17 +12320,17 @@ inbox_room = {"repo": {"name": "r"}, "collection": {"ok": True}, "finalized": {}
         {"participant": "m1", "role": "main", "joined": True, "provider": "claude", "model": "claude-opus-5-5", "seq": 1},
         {"participant": "w1", "role": "worker", "joined": True, "provider": "codex", "model": "gpt-6.1-sol", "seq": 2, "parent": "m1"},
         {"participant": "w2", "role": "worker", "joined": True, "provider": "codex", "model": "gpt-6.1-sol", "seq": 3, "parent": "m1"},
-        {"participant": "w3", "role": "worker", "joined": True, "provider": "codex", "model": "gpt-6.1-sol", "seq": 4, "parent": "m1"}],
+        {"participant": "w3", "role": "worker", "joined": True, "provider": "codex", "model": "gpt-6.1-sol", "seq": 4, "parent": "m1-attempt"}],
         "messages": [{"id": "n1", "sender": "m1", "recipient": "all", "message_kind": "question", "text": "Which branch?\x1b[2J",
                       "pending_for": ["w1"], "answered": False, "ts": "2026-10-07T00:00:00Z"}]},
     "attempts": {"available": True, "recent": [], "active_recent": [
-        {"attempt_id": "a1", "state": "working", "panel": {"role": "main", "room_participant": "m1", "room_id": "inbox-room"}},
+        {"attempt_id": "m1-attempt", "state": "working", "panel": {"role": "main", "room_participant": "m1", "room_id": "inbox-room"}},
         {"attempt_id": "a2", "state": "failed", "updated_at": "2026-10-07T00:01:00Z",
          "panel": {"role": "worker", "room_participant": "w1", "room_id": "inbox-room", "label": "Fix parser"}},
         {"attempt_id": "a3", "state": "waiting_approval", "updated_at": "2026-10-07T00:02:00Z",
          "panel": {"role": "worker", "room_participant": "w2", "room_id": "inbox-room", "label": "Run migration"}},
         {"attempt_id": "a4", "state": "done", "updated_at": "2026-10-07T00:00:30Z",
-         "panel": {"role": "worker", "room_participant": "w3", "room_id": "inbox-room", "label": "Write patch"}}]}}
+         "panel": {"role": "worker", "access": "write", "room_participant": "w3", "room_id": "inbox-room", "label": "Write patch"}}]}}
 def exercise_exited_main_mail():
     from copy import deepcopy
     import json
@@ -12472,6 +12524,52 @@ exercise_exited_main_mail()
 nav = {}
 inbox = render(inbox_room, "codex", 100, 28, menu=True, navigation=nav)
 assert "Needs you" in inbox and "Nothing needs you" not in inbox and "Press 1" not in inbox and "START" not in inbox, inbox
+from review_backlog import counts as backlog_counts, project as backlog_project, warning as backlog_warning
+inbox_room["plan"] = {"tasks": [{"id": "review-%s" % n, "state": "review",
+                                  "claimed_by_participant": "m1"} for n in range(8)]}
+assert backlog_counts(inbox_room) == {"m1": 9}, backlog_counts(inbox_room)
+inbox_room["review_backlog"] = backlog_project(inbox_room)
+backlog_items = [item for item in inbox_items(inbox_room) if item["row_id"] == ("review-backlog", "m1")]
+assert len(backlog_items) == 1 and backlog_items[0]["what"] == backlog_warning(9), backlog_items
+# In the Attention queue the backlog warning is a decision and leads that class.
+from panel_view import attention_items
+backlog_decisions = [item["row_id"] for item in attention_items(inbox_room) if item["cls"] == "decide"]
+assert backlog_decisions[:1] == [("review-backlog", "m1")], backlog_decisions
+with patch("review_backlog.policy", return_value={"review_backlog_warn": 9}):
+    inbox_room["review_backlog"] = backlog_project(inbox_room)
+    assert not [item for item in inbox_items(inbox_room) if item["row_id"] == ("review-backlog", "m1")]
+with patch("review_backlog.policy", side_effect=OSError("policy unavailable")), \
+        patch("review_backlog.counts", return_value={"m1": 9}):
+    fallback_backlog = backlog_project(inbox_room)
+assert fallback_backlog == {"threshold": 8, "counts": {"m1": 9}}, fallback_backlog
+assert any(item["row_id"] == ("review-backlog", "m1") for item in
+           inbox_items(dict(inbox_room, review_backlog=fallback_backlog)))
+many_patches = deepcopy(inbox_room)
+many_patches["plan"] = {"tasks": []}
+many_patches["room"] = dict(many_patches["room"], participants=list(many_patches["room"]["participants"]))
+many_patches["attempts"] = dict(many_patches["attempts"], active_recent=list(many_patches["attempts"]["active_recent"]))
+awaiting_admission = ["w3"]
+for number in range(8):
+    participant = "pending-%s" % number
+    awaiting_admission.append(participant)
+    many_patches["room"]["participants"].append({"participant": participant, "role": "worker", "joined": True,
+        "provider": "codex", "model": "gpt-6.1-sol", "seq": 10 + number, "parent": "m1-attempt"})
+    many_patches["attempts"]["active_recent"].append({"attempt_id": "attempt-%s" % number, "state": "done",
+        "panel": {"role": "worker", "access": "write", "room_participant": participant,
+                  "room_id": "inbox-room", "label": "Write patch %s" % number}})
+many_patches["awaiting_admission"] = awaiting_admission
+assert backlog_counts(many_patches) == {"m1": 9}, backlog_counts(many_patches)
+assert sum(item["what"].startswith("patch awaits admission") for item in inbox_items(many_patches)) == 9
+from review_backlog import policy as backlog_policy
+with patch("review_backlog.policy", wraps=backlog_policy) as policy_reads, \
+        patch("review_backlog.counts", wraps=backlog_counts) as backlog_count_reads:
+    many_patches["review_backlog"] = backlog_project(many_patches)
+    for board_view in ("graph", "tree"):
+        strip = needs_strip(many_patches, 160, True)
+        assert "review first" in strip[0]["text"] and strip[0]["action"] == ("chat", "m1"), strip
+        drawing = render(many_patches, "claude", 160, 50, view=board_view)
+        assert "review first" in drawing, (board_view, drawing)
+    assert policy_reads.call_count == backlog_count_reads.call_count == 1, (policy_reads.call_count, backlog_count_reads.call_count)
 for columns, rows in ((50, 18), (80, 40), (127, 40)):
     for menu_report in (inbox_room, dict(inbox_room, room={"id": "broken", "error": "room unreadable: ValueError: bad room"})):
         screen = render(menu_report, "claude", columns, rows, menu=True, managed=True)
