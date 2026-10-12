@@ -17,7 +17,7 @@ HEADING = re.compile(r"^\s{0,3}(?:#{1,6}\s+(.+?)(?:\s+#+)?|\*\*(.+?)\*\*:?)\s*$"
 
 def debates(report, room=None):
     """This room's council debates, newest first; a debate with no known main is not listed."""
-    from room_view import nodes
+    from room_view import nodes, room_ids
     room = mapping(room or report.get("room"))
     attempts = mapping(report.get("attempts"))
     mains = {m.get("attempt"): m["participant"] for m in nodes(report) if m.get("role") == "main" and m.get("attempt")}
@@ -26,7 +26,7 @@ def debates(report, room=None):
         meta = mapping(row.get("panel"))
         if row.get("tool") != "panel-council" or row.get("attempt_id") in seen:
             continue
-        if meta.get("room_id") and meta["room_id"] not in {room.get("id"), room.get("predecessor")} - {None}:
+        if meta.get("room_id") and meta["room_id"] not in room_ids(room):
             continue
         seen.add(row.get("attempt_id"))
         main = mains.get(row.get("parent_attempt_id")) or meta.get("room_participant")

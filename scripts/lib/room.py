@@ -1404,34 +1404,59 @@ def _later_receipts(repo, state):
         cur = nxt
 
 
-_PREDECESSOR_CALLS = {}
+_SEALED_VIEWS = {}
 
 
-def predecessor_calls(repo, state):
-    """Settled calls of the room this one continues, shaped like board call nodes; sealed logs are read once."""
-    old = state.get("predecessor")
-    if not old:
-        return []
-    try:
-        info = thread_live.thread_path(repo, old).stat()
-        stamp = (info.st_dev, info.st_ino, info.st_size)
-        cached = _PREDECESSOR_CALLS.get((str(repo), old))
-        if not cached or cached[0] != stamp:
-            before = status(repo, old, exact=True)
-            calls = []
-            for member in before["participants"]:
-                result = before["call_results"].get(member["participant"])
-                if not member.get("parent") or not result:
-                    continue
-                code = result["exit"]
-                calls.append(dict(member, state="done" if code == 0 else "failed", ended=result["ts"],
-                                  exit=code, attempt=None, title=member.get("label"), _predecessor=old))
-            cached = _PREDECESSOR_CALLS[(str(repo), old)] = (stamp, calls)
-    except (OSError, ValueError, KeyError, TypeError):
-        return []
+def _sealed(repo, ident):
+    """(predecessor, successor, settled calls, publications) of a sealed log, read once per change of the log."""
+    info = thread_live.thread_path(repo, ident).stat()
+    stamp = (info.st_dev, info.st_ino, info.st_size)
+    cached = _SEALED_VIEWS.get((str(repo), ident))
+    if not cached or cached[0] != stamp:
+        before = status(repo, ident, exact=True)
+        calls = []
+        for member in before["participants"]:
+            result = before["call_results"].get(member["participant"])
+            if not member.get("parent") or not result:
+                continue
+            code = result["exit"]
+            calls.append(dict(member, state="done" if code == 0 else "failed", ended=result["ts"], exit=code,
+                              read=result["read"], attempt=None, title=member.get("label"), _predecessor=ident))
+        cached = _SEALED_VIEWS[(str(repo), ident)] = (stamp, (before.get("predecessor"), before.get("successor"),
+                                                               calls, before.get("publications") or {}))
+    return cached[1]
+
+
+def lineage(repo, state):
+    """The sealed rooms this one continues, nearest first, as (id, settled calls, publications).
+
+    A room is followed back only while it names the later one as its successor, at most MAX_HOPS rooms."""
+    found, later, old = [], state.get("id"), state.get("predecessor")
+    seen = {later}
+    for _ in range(MAX_HOPS):
+        if not old or old in seen:
+            break
+        try:
+            before, successor, calls, published = _sealed(repo, old)
+        except (OSError, ValueError, KeyError, TypeError):
+            break
+        if successor != later:
+            break
+        found.append((old, calls, published))
+        seen.add(old)
+        later, old = old, before
+    return found
+
+
+def predecessor_calls(repo, state, chain=None):
+    """Settled calls of the rooms this one continues, shaped like board call nodes; a call's nearest room wins."""
     here = {p["participant"] for p in state.get("participants", [])}
-    return sorted((c for c in cached[1] if c["participant"] not in here),
-                  key=lambda c: (str(c.get("ended") or ""), c.get("seq", 0)), reverse=True)
+    calls = {}
+    for _, settled, _ in lineage(repo, state) if chain is None else chain:
+        for call in settled:
+            if call["participant"] not in here:
+                calls.setdefault(call["participant"], call)
+    return sorted(calls.values(), key=lambda c: (str(c.get("ended") or ""), c.get("seq", 0)), reverse=True)
 
 
 def publish(repo, ident, retry=False, app="codex", recipient=None, allow_wakeup=False):

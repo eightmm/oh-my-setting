@@ -9,13 +9,31 @@ from panel_view import (ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STA
                         clipped, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped)
 
 
+def room_ids(room):
+    """This room and the sealed rooms it continues: attempts started before a rollover name one of them."""
+    return ({room.get("id"), room.get("predecessor")} | set(listing(room.get("lineage")))) - {None}
+
+
+def owed(report, call):
+    """Whether a call settled in an earlier room still waits on the person: a decision, an admission or a held task."""
+    task = call.get("task_id")
+    if not task or mapping(report.get("finalized")).get(task) in {"completed", "accepted"}:
+        return False
+    running = {t.get("id") for t in map(mapping, listing(mapping(report.get("plan")).get("tasks")))
+               if t.get("state") == "running"}
+    # Until the snapshot knows the pending patches every finished write call is a candidate.
+    pending = report.get("awaiting_admission")
+    admitting = pending is None or call["participant"] in listing(pending)
+    return (call["state"] in {"review", "blocked"} or task in running
+            or call["state"] == "done" and call.get("access") == "write" and admitting)
+
+
 def nodes(report):
     room = mapping(report.get("room"))
     attempts = mapping(report.get("attempts"))
     linked = {}
     rows = listing(attempts.get("active_recent")) + listing(attempts.get("recent"))
-    # Attempts started before a rollover name the predecessor room; they still belong to this board.
-    here = {room.get("id"), room.get("predecessor")} - {None}
+    here = room_ids(room)
     rows = sorted(rows, key=lambda row: mapping(row.get("panel")).get("room_id") not in here)
     for row in rows:
         meta = mapping(row.get("panel"))
@@ -32,7 +50,12 @@ def nodes(report):
     finalized = mapping(report.get("finalized"))
     guarded = {m.get("sender") for m in map(mapping, listing(room.get("messages")))
                if result_handoff(room, m) and "worker guard stopped this run" in str(m.get("text")).lower()}
-    for member in listing(room.get("participants")):
+    present = {mapping(m).get("participant") for m in listing(room.get("participants"))}
+    # Calls settled in a room this one continues are not carried, yet some still wait on the person; only one with
+    # attempt evidence has a task to wait on, which bounds the work however long the chain grows.
+    known = (set(linked) | set(mapping(report.get("room_attempts")))) - present
+    earlier = [c for c in map(mapping, listing(room.get("predecessor_calls"))) if c.get("participant") in known]
+    for member in listing(room.get("participants")) + earlier:
         if not member.get("joined"):
             continue
         # Dispatched children inherit their main's participant as provenance;
@@ -56,7 +79,8 @@ def nodes(report):
         if live_native and status.get("native_model_checked"):
             model, effort = (reading.get("model"), reading.get("effort")) if current else (None, None)
         # Attempt evidence wins; a call's result message is the fallback once its attempt left the projection.
-        result = mapping(mapping(room.get("call_results")).get(member.get("participant")))
+        result = ({"exit": member.get("exit"), "ts": member.get("ended")} if member.get("_predecessor") else
+                  mapping(mapping(room.get("call_results")).get(member.get("participant"))))
         code = result.get("exit")
         derived = "presence unknown" if member.get("role") == "main" or type(code) is not int else \
             "done" if code == 0 else "failed"
@@ -69,19 +93,24 @@ def nodes(report):
                            guard=member.get("participant") in guarded,
                            model=model, model_at_launch=meta.get("model") or member.get("model"),
                            task_id=attempt.get("task_id"), location=meta.get("location"),
-                           effort=effort, access=meta.get("access"),
+                           effort=effort, access=meta.get("access") or attempt.get("access"),
                            harness=mapping(attempt.get("panel")).get("harness"),
                            title=member.get("label_override") or meta.get("label") or member.get("label")))
+        if member.get("_predecessor") and not owed(report, output[-1]):
+            output.pop()
+    # Seq numbers restart in every room: calls from the rooms this one continues come first, the oldest room first.
+    depth = {old: -n for n, old in enumerate(listing(room.get("lineage")), 1)}
+    order = lambda m: (depth.get(m["_predecessor"], -1) if m.get("_predecessor") else 0, m.get("seq", 0))
     # A continued worker shares its task with the earlier rounds of the same main.
     rounds = {}
-    for member in sorted(output, key=lambda m: m.get("seq", 0)):
+    for member in sorted(output, key=order):
         if member.get("role") == "worker" and member.get("task_id") and member.get("parent"):
             earlier = rounds.setdefault((member["parent"], member["task_id"]), [])
             member.update(round=len(earlier) + 1, continues=earlier[-1] if earlier else None)
             earlier.append(member["participant"])
     # A later call of the same role on the same task supersedes an earlier failure; it is no longer attention.
     latest = {}
-    for member in sorted(output, key=lambda m: m.get("seq", 0)):
+    for member in sorted(output, key=order):
         if member.get("role") != "main" and member.get("task_id"):
             key = (member.get("role"), member["task_id"])
             if key in latest:
@@ -207,7 +236,9 @@ def handled_results(room):
     read = {mapping(m).get("id") for m in listing(room.get("messages")) if result_handoff(room, m)
             and not listing(mapping(m).get("pending_for"))}
     return read | {"result-" + str(who) for who, r in mapping(room.get("call_results")).items()
-                   if mapping(r).get("read") is True}
+                   if mapping(r).get("read") is True} | {
+        "result-" + str(c.get("participant")) for c in map(mapping, listing(room.get("predecessor_calls")))
+        if c.get("read") is True}
 
 
 def closed_tasks(report):
@@ -1609,7 +1640,8 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
         past = past_calls([c for calls in everyone.values() for c in calls] +
                           [m for m in members if m.get("role") != "main" and m.get("parent") not in owners], classify)
     # Calls settled before a rollover follow the newer ones; older rooms stay readable with room show --exact.
-    shown = {action(c) for c in past}
+    # A call the board still draws, carried or owed from an earlier room, is not past.
+    shown = {action(c) for c in past} | {action(m) for m in members if m.get("role") != "main" and classify(m) != "past"}
     past = list(past) + [c for c in listing(room.get("predecessor_calls")) if action(c) not in shown]
     preview = mapping(navigation.get("preview")) if preview is None else preview
     if previewed is None:

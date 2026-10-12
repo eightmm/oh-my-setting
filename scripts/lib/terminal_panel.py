@@ -3367,6 +3367,7 @@ def snapshot(repo, room_id=None, _tick=None):
         state.pop("land", None)
         state.pop("completed_tasks", None)
         state.pop("message_successors", None)
+        state.pop("awaiting_admission", None)
         try:
             # A receipt that says running proves nothing; only the probed lock (active) does.
             run = subprocess.run(["bash", str(ENTRY), "land", "status", "--repo", str(repo), "--json"],
@@ -3379,9 +3380,18 @@ def snapshot(repo, room_id=None, _tick=None):
         if ident:
             try:
                 state["room"] = room.status(repo, ident)
-                earlier = room.predecessor_calls(repo, state["room"])
-                if earlier:
-                    state["room"]["predecessor_calls"] = earlier
+                chain = room.lineage(repo, state["room"])
+                if chain:
+                    state["room"]["lineage"] = [old for old, _, _ in chain]
+                    state["room"]["predecessor_calls"] = room.predecessor_calls(repo, state["room"], chain)
+                    # A sealed room's delivery receipt stands until a later room records one for the same target.
+                    published = {}
+                    for _, _, receipts in chain:
+                        for target, receipt in receipts.items():
+                            published.setdefault(target, receipt)
+                    state["room"]["predecessor_publications"] = {
+                        target: receipt for target, receipt in published.items()
+                        if target not in state["room"].get("publications", {})}
                 if state.get("plan", {}).get("present"):
                     # The task list is board context: a slow or failed read leaves the room and its mains drawn.
                     try:
@@ -3437,8 +3447,9 @@ def snapshot(repo, room_id=None, _tick=None):
                     # Members outside the 8 + 8 row dashboard projection keep their real state from the full projection.
                     attempt_rows = _tick.attempts()
                     if isinstance(attempt_rows, list):
-                        calls = {m["participant"]: m.get("role") for m in state["room"]["participants"]
-                                 if m.get("joined")}
+                        calls = {m["participant"]: m.get("role") for m in state["room"].get("predecessor_calls", [])}
+                        calls.update((m["participant"], m.get("role")) for m in state["room"]["participants"]
+                                     if m.get("joined"))
                         linked = {}
                         for row in attempt_rows:
                             # The ledger keeps panel identity in refs; the dashboard projection lifts it into "panel".
@@ -3449,7 +3460,8 @@ def snapshot(repo, room_id=None, _tick=None):
                                     and row.get("attempt_id") and row.get("state")
                                     and str(row.get("updated_at") or "") >= str(linked.get(who, {}).get("updated_at") or "")):
                                 linked[who] = {"state": row["state"], "attempt_id": row["attempt_id"],
-                                               "updated_at": row.get("updated_at"), "task_id": row.get("task_id")}
+                                               "updated_at": row.get("updated_at"), "task_id": row.get("task_id"),
+                                               **({"access": "write"} if refs.get("panel_access") == "write" else {})}
                         state["room_attempts"] = linked
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
@@ -3556,7 +3568,7 @@ def awaiting_admission(repo, state, _tick=None):
     """Finished write workers whose recorded patch has no admission or landing record yet."""
     from room_view import nodes
     from panel_results import pending_admissions
-    members = [member for member in nodes(state)
+    members = [member for member in nodes(dict(state, awaiting_admission=None))
                if member.get("role") == "worker" and member.get("access") == "write"
                and member["state"] == "done" and member.get("task_id")]
     try:

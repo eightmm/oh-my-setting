@@ -458,8 +458,8 @@ def inbox_items(report, unicode=True):
     failure_statuses = {"failed", "timeout", "timed_out", "error", "rejected", "unavailable", "failed_command",
                         "rpc_error", "persistence_failure", "absent", "archived", "busy", "invalid_timeout", "uncertain",
                         "unsupported_platform", "unbound", "ambiguous", "unsafe_endpoint", "empty_message", "oversized"}
-    failed = [mapping(receipt) for receipt in mapping(mapping(report.get("room")).get("publications")).values()
-              if mapping(receipt).get("status") in failure_statuses]
+    receipts = [*mapping(room.get("publications")).values(), *mapping(room.get("predecessor_publications")).values()]
+    failed = [mapping(receipt) for receipt in receipts if mapping(receipt).get("status") in failure_statuses]
     if failed:
         items.append({"stamp": max(receipt.get("ts") or "" for receipt in failed), "glyph": "!",
                       "who": "Main wake-up delivery failed",
