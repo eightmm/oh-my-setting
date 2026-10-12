@@ -240,7 +240,13 @@ def append_from_env():
         if not validate_event(rows, event, text, repo=repo):
             return
         fields["room_event"] = event
-    row = {"schema": 1, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if fields.get("room_event") and env.get("OMS_ROOM_CARRY") == "1" and env.get("OMS_ROOM_CARRY_TS"):
+        # A rollover's carried message keeps the time it was sent, so reminders and escalation keep counting.
+        if not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", env["OMS_ROOM_CARRY_TS"]) or env["OMS_ROOM_CARRY_TS"] > stamp:
+            raise ValueError("invalid carried room time")
+        stamp = env["OMS_ROOM_CARRY_TS"]
+    row = {"schema": 1, "ts": stamp,
            "thread": thread, "seq": max((r.get("seq", 0) for r in rows), default=0) + 1,
            "role": env["OMS_TH_ROLE"], "agent": env.get("OMS_TH_AGENT") or "agent", "text": text}
     for key in ("provider", "model", "artifact", "quality"):

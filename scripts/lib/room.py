@@ -120,7 +120,11 @@ def discover(repo):
                         scanned += len(suffix)
                         if scanned > MAX_SCAN_BYTES:
                             raise ValueError("room discovery byte limit")
-                        found.append(project(decode_records(b"".join(prefix) + suffix, Path(entry.name).stem)))
+                        state = project(decode_records(b"".join(prefix) + suffix, Path(entry.name).stem))
+                        if (state["predecessor"] and not state["carried"]
+                                and _tail_successor(repo, state["predecessor"]) != state["id"]):
+                            continue  # still being carried before its seal, or left by a rollover that never sealed
+                        found.append(state)
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
                     incomplete = True
                     if scanned >= MAX_SCAN_BYTES:
@@ -244,6 +248,11 @@ def _child():
     return os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"
 
 
+def _carrying():
+    """Whether this write replays a sealed room's state into its successor rather than speaking for a session."""
+    return os.environ.get("OMS_ROOM_CARRY") == "1"
+
+
 def event_shape(event):
     if not isinstance(event, dict):
         raise ValueError("invalid persisted room event")
@@ -252,7 +261,7 @@ def event_shape(event):
                 "scope": ("participant",), "describe": ("participant", "label"),
                 "leave": ("participant",), "closed": ("participant",), "message": ("id", "sender", "recipient", "message_kind"),
                 "received": ("participant",), "publication": ("id", "digest", "status"),
-                "successor": ("participant", "target")}
+                "successor": ("participant", "target"), "carried": ()}
     if not event:
         return
     if kind not in required or any(not isinstance(event.get(key), str) for key in required[kind]):
@@ -261,7 +270,7 @@ def event_shape(event):
                 "predecessor"):
         if event.get(key) is not None and not isinstance(event[key], str):
             raise ValueError("invalid room event field")
-    for key in ("owns", "messages"):
+    for key in ("owns", "messages", "audience"):
         if key in event and (not isinstance(event[key], list) or any(not isinstance(value, str) for value in event[key])):
             raise ValueError("invalid room event list")
     if kind == "scope" and "owns" not in event:
@@ -288,6 +297,7 @@ def project(rows):
     if created is None:
         raise ValueError("this thread is not a work room")
     members, messages, receipts, owner, publication, publications, successor = {}, [], {}, None, None, {}, None
+    carried = False
     for row in rows:
         event = row.get("room_event", {})
         kind = event.get("kind")
@@ -320,7 +330,9 @@ def project(rows):
                 raise ValueError("declared scope has no participant")
             members[event["participant"]]["owns"] = list(event["owns"])
         elif kind == "message":
-            targets = ([p for p, member in members.items() if member["joined"] and p != event["sender"]]
+            # A carried broadcast keeps the audience it had when it was sent.
+            targets = (list(event["audience"]) if "audience" in event
+                       else [p for p, member in members.items() if member["joined"] and p != event["sender"]]
                        if event["recipient"] == "all" else [event["recipient"]])
             if event["message_kind"] == "status":
                 targets = []
@@ -334,6 +346,8 @@ def project(rows):
         elif kind == "successor":
             # Sealing is not closing: members stay joined, so proofs read against this log still hold.
             successor = event["target"]
+        elif kind == "carried":
+            carried = True
     answered = {m.get("reply_to") for m in messages if m["message_kind"] == "answer"}
     for message in messages:
         targets = message["targets"]
@@ -347,7 +361,7 @@ def project(rows):
             "closed": any(row.get("role") == "closed" or row.get("room_event", {}).get("kind") == "closed" for row in rows),
             "participants": list(members.values()), "messages": messages, "publication": publication,
             "publications": publications, "successor": successor,
-            "predecessor": created["room_event"].get("predecessor"),
+            "predecessor": created["room_event"].get("predecessor"), "carried": carried,
             "delivery": "next safe point or explicit poll; acknowledgment is not approval"}
 
 
@@ -382,10 +396,11 @@ def declared_scopes(role, scopes):
 
 def validate_event(rows, event, text, repo=None):
     """Validate while thread.sh holds its existing file lock; no membership grants authority."""
-    if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "bind", "scope", "describe", "leave", "closed", "message", "received", "publication", "successor"}:
+    if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "bind", "scope", "describe", "leave", "closed", "message", "received", "publication", "successor", "carried"}:
         raise ValueError("invalid room event")
     event_shape(event)
     kind = event["kind"]
+    carry = _carrying()
     keys = {"created": {"kind", "task_id", "participant", "predecessor"},
             "join": {"kind", "participant", "provider", "model", "role", "label", "consumer", "owns", "parent"},
             "bind": {"kind", "participant", "consumer", "previous"},
@@ -393,10 +408,10 @@ def validate_event(rows, event, text, repo=None):
             "describe": {"kind", "participant", "label"},
             "leave": {"kind", "participant"},
             "closed": {"kind", "participant"},
-            "message": {"kind", "id", "sender", "recipient", "message_kind", "reply_to"},
+            "message": {"kind", "id", "sender", "recipient", "message_kind", "reply_to"} | ({"audience"} if carry else set()),
             "received": {"kind", "participant", "messages"},
             "publication": {"kind", "id", "digest", "status", "delivery_unknown", "turn_id", "retry", "target"},
-            "successor": {"kind", "participant", "target"}}[kind]
+            "successor": {"kind", "participant", "target"}, "carried": {"kind"}}[kind]
     if set(event) - keys:
         raise ValueError("unknown room event fields")
     metadata = json.dumps(event, ensure_ascii=False)
@@ -409,6 +424,8 @@ def validate_event(rows, event, text, repo=None):
     if check.returncode != 1:
         raise ValueError("room metadata contains sensitive-looking content or could not be checked")
     child = _child()
+    if child and carry:
+        raise ValueError("a worker cannot carry a room")
     if child and (not rows or not _bound_room(rows, repo)
                   or kind not in {"message", "received"} or
                   event.get("sender", event.get("participant")) != os.environ.get("OMS_ROOM_PARTICIPANT")):
@@ -429,6 +446,21 @@ def validate_event(rows, event, text, repo=None):
         if kind == "successor" and event["target"] == state["successor"]:
             return False
         raise ValueError("room continues as %s" % state["successor"])
+    if state["predecessor"]:
+        # Until its carry completes a successor holds only carried state, so a rerun can compare it with the
+        # sealed log; anything else waits for the carry, which the writer's retry finishes.
+        if carry and state["carried"]:
+            if kind == "carried":
+                return False
+            raise ValueError("room carry is complete")
+        if not carry and not state["carried"]:
+            raise ValueError("room carry is unfinished")
+    elif carry or kind == "carried":
+        raise ValueError("only a successor room takes carried state")
+    if kind == "carried":
+        if repo is not None and _tail_successor(repo, state["predecessor"]) != rows[0]["thread"]:
+            raise ValueError("a carry completes only after its predecessor is sealed")
+        return True
     if child:
         member = participant(state, os.environ.get("OMS_ROOM_PARTICIPANT"))
         if member["role"] == "main":
@@ -565,6 +597,11 @@ def validate_event(rows, event, text, repo=None):
             participant(state, recipient)
         if recipient == event["sender"]:
             raise ValueError("a message needs another participant or all")
+        if "audience" in event:
+            if recipient != "all" or event.get("message_kind") == "status" or event["sender"] in event["audience"]:
+                raise ValueError("a carried audience belongs to a broadcast")
+            for who in event["audience"]:
+                participant(state, who)
         if event.get("message_kind") not in KINDS:
             raise ValueError("invalid message kind")
         if str(event["id"]).startswith("result-") and (
@@ -590,6 +627,13 @@ def validate_event(rows, event, text, repo=None):
         if not isinstance(mids, list) or not 1 <= len(mids) <= 200 or any(not isinstance(m, str) for m in mids):
             raise ValueError("ack requires bounded message ids")
         indexed = {m["id"]: m for m in state["messages"]}
+        for mid in set(mids) - set(indexed):
+            # Unread mail a rollover left in a sealed log is acknowledged here; the sealed log takes no rows.
+            found = _lineage_message(repo, state, mid) if repo is not None and state["predecessor"] else None
+            if found:
+                indexed[mid] = dict(found, received_by=[
+                    row["room_event"]["participant"] for row in rows
+                    if row.get("room_event", {}).get("kind") == "received" and mid in row["room_event"]["messages"]])
         for mid in mids:
             original = indexed.get(mid)
             if not original or event["participant"] not in original["targets"]:
@@ -599,17 +643,31 @@ def validate_event(rows, event, text, repo=None):
     return True
 
 
-def command(repo, *args):
-    run = subprocess.run(["bash", str(ENTRY), "thread", "--repo", str(repo)] + list(args),
+_CARRY_ENV = ("OMS_ROOM_CARRY", "OMS_ROOM_CARRY_TS")
+_SESSION_ENV = ("OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT", "OMS_ROOM_REPO")
+
+
+def command(repo, *args, env=None):
+    run = subprocess.run(["bash", str(ENTRY), "thread", "--repo", str(repo)] + list(args), env=env,
                          capture_output=True, text=True, check=False, timeout=15, stdin=subprocess.DEVNULL)
     if run.returncode:
         raise ValueError(clean(run.stderr or run.stdout, 300))
     return run.stdout.strip()
 
 
-def _write(repo, room, event, text):
+def _write(repo, room, event, text, carried=None):
+    """carried: None for the session's own write; True, or the original row time, for a rollover's carry.
+
+    A carry replays evidence from a sealed log, so it claims no session binding; it runs only where a rollover
+    may (never in a worker), under the sealed room's rollover lock."""
+    env = {k: v for k, v in os.environ.items() if k not in _CARRY_ENV}
+    if carried is not None:
+        env = {k: v for k, v in env.items() if k not in _SESSION_ENV}
+        env["OMS_ROOM_CARRY"] = "1"
+        if isinstance(carried, str):
+            env["OMS_ROOM_CARRY_TS"] = carried
     return command(repo, "append", "--id", identifier(room, "room"), "--role", "note", "--text", text,
-                   "--room-event", json.dumps(event, ensure_ascii=False))
+                   "--room-event", json.dumps(event, ensure_ascii=False), env=env)
 
 
 def _rollover_lock(repo, old, timeout=30):
@@ -626,10 +684,11 @@ def append(repo, room, event, text):
     try:
         return _write(repo, resolve(repo, literal), event, text)
     except ValueError as error:
-        if "room continues as" not in str(error) and "has not joined this room" not in str(error):
+        unfinished = "room carry is unfinished" in str(error)
+        if "room continues as" not in str(error) and not unfinished:
             raise
         target = settle(repo, literal)
-        if target == literal:
+        if target == literal and not unfinished:
             raise
     return _write(repo, target, event, text)
 
@@ -656,19 +715,35 @@ def _created_event(task_id, creator, predecessor):
 
 
 def carry_plan(state, current=None, bounded=True):
-    """(joins, messages, receipts, dropped) that keep a sealed room's live state working in its successor.
+    """(writes, dropped): the (event, text, time) writes that keep a sealed room's live state working in current.
 
     Essential state always travels: joined mains, calls still running or holding unread results with their
-    results and direct mail, open questions and each main's latest status. Other unread mail fills the message
-    reserve newest first; the rest stays readable in the sealed log. Everything already in current is skipped."""
-    members = {p["participant"]: p for p in state["participants"] if p["joined"]}
+    results and direct mail, open questions (a call's oldest one) and each main's latest status. Other unread
+    mail fills the message reserve newest first; the rest stays readable in the sealed log. What current already
+    holds is skipped, and its members are brought up to date with the sealed log."""
+    joined = {p["participant"]: p for p in state["participants"] if p["joined"]}
+
+    def rooted(who):
+        parent, seen = joined[who].get("parent"), {who}
+        while parent:
+            if parent not in joined or parent in seen:
+                return False
+            seen.add(parent)
+            parent = joined[parent].get("parent")
+        return True
+    # A call whose parent left has nobody to hand its result to; its mail stays in the sealed log.
+    members = {who: p for who, p in joined.items() if rooted(who)}
     results = {m["id"]: m for m in state["messages"] if str(m["id"]).startswith("result-")}
-    present = {p["participant"]: p for p in (current or {}).get("participants", []) if p["joined"]}
+    there = {p["participant"]: p for p in (current or {}).get("participants", [])}
+    present = {who for who, p in there.items() if p["joined"]}
     keep = {who for who, p in members.items() if not p.get("parent")
             or "result-" + who not in results or results["result-" + who]["pending_for"]}
-    keep |= set(present) & set(members)
+    keep |= present & set(members)
     # A call that already handed back its result reads no more mail; its Assigned handoff stays behind.
     finished = {who for who in members if "result-" + who in results}
+    questions = [q["id"] for q in open_questions(state)]
+    indexed = {m["id"]: m for m in state["messages"]}
+    known = {m["id"]: m for m in (current or {}).get("messages", [])}
     while True:
         chosen, essential = {}, set()
         for m in state["messages"]:
@@ -678,8 +753,14 @@ def carry_plan(state, current=None, bounded=True):
                     essential.add(m["id"])
         # A carried call keeps its result, so the successor never shows it running again.
         essential.update("result-" + who for who in keep if "result-" + who in results)
-        essential.update(q["id"] for q in open_questions(state)
-                         if set(next(m for m in state["messages"] if m["id"] == q["id"])["targets"]) & keep)
+        asked = set()
+        for qid in questions:
+            sender = indexed[qid]["sender"]
+            if not set(indexed[qid]["targets"]) & keep or members.get(sender, {}).get("parent") and sender in asked:
+                continue
+            # A call's later open questions are ordinary mail, so a flood of them cannot block the rollover.
+            asked.add(sender)
+            essential.add(qid)
         latest = {}
         for m in state["messages"]:
             if m["message_kind"] == "status" and m["sender"] in keep and members[m["sender"]]["role"] == "main":
@@ -693,12 +774,20 @@ def carry_plan(state, current=None, bounded=True):
         dropped = optional[max(0, MESSAGE_RESERVE - len(essential)):]
         for m in dropped:
             del chosen[m["id"]]
+        # A carried question that was answered travels with its first answer, so it does not open again.
+        answered = {m.get("reply_to") for m in list(chosen.values()) + list(known.values())
+                    if m["message_kind"] == "answer"}
+        for m in state["messages"]:
+            if (m["message_kind"] == "answer" and m.get("reply_to") not in answered and m["sender"] in members
+                    and m["recipient"] in members and (m.get("reply_to") in chosen or m.get("reply_to") in known)):
+                chosen[m["id"]] = m
+                answered.add(m["reply_to"])
         grown = set(keep)
         grown.update(m["sender"] for m in chosen.values())
         grown.update(m["recipient"] for m in chosen.values() if m["recipient"] != "all")
         for who in list(grown):
             parent = members[who].get("parent")
-            while parent and parent in members and parent not in grown:
+            while parent and parent not in grown:
                 grown.add(parent)
                 parent = members[parent].get("parent")
         if grown == keep:
@@ -713,36 +802,47 @@ def carry_plan(state, current=None, bounded=True):
         parent = members[who].get("parent")
         if who in placed:
             return
-        if parent and parent in members:
+        if parent:
             place(parent)
         placed.add(who)
         order.append(members[who])
     for who in sorted(keep, key=lambda w: members[w]["seq"]):
         place(who)
-    joins = []
+    writes = []
     for p in order:
         who = p["participant"]
-        if who not in present:
+        now = there.get(who) if who in present else None
+        if now is None:
             event = {"kind": "join", "participant": who, "provider": p["provider"], "role": p["role"],
                      "model": p.get("model"), "label": p["label"], "owns": list(p.get("owns", []))}
             for key in ("consumer", "parent"):
                 if p.get(key):
                     event[key] = p[key]
-            joins.append((event, "Joined: " + p["label"]))
-        if p.get("label_override") and not present.get(who, {}).get("label_override"):
+            writes.append((event, "Joined: " + p["label"], None))
+            now = dict(event)
+        if p.get("label_override") and now.get("label_override") != p["label_override"]:
             # The board titles a main by its described work, which a plain join label does not carry.
-            joins.append(({"kind": "describe", "participant": who, "label": p["label_override"]},
-                          "Work description updated"))
-    known = {m["id"]: m for m in (current or {}).get("messages", [])}
-    messages = []
+            writes.append(({"kind": "describe", "participant": who, "label": p["label_override"]},
+                           "Work description updated", None))
+        if list(now.get("owns", [])) != list(p.get("owns", [])):
+            writes.append(({"kind": "scope", "participant": who, "owns": list(p.get("owns", []))},
+                           "Scope: " + (", ".join(p.get("owns", [])) or "cleared"), None))
+        if p.get("consumer") and now.get("consumer") != p["consumer"]:
+            event = {"kind": "bind", "participant": who, "consumer": p["consumer"]}
+            if now.get("consumer"):
+                event["previous"] = now["consumer"]
+            writes.append((event, "Native session rebound", None))
     for m in sorted(chosen.values(), key=lambda m: m["seq"]):
         if m["id"] in known:
             continue
         event = {"kind": "message", "id": m["id"], "sender": m["sender"], "recipient": m["recipient"],
                  "message_kind": m["message_kind"]}
-        if m.get("reply_to") and m["reply_to"] in chosen:
+        if m.get("reply_to") and (m["reply_to"] in chosen or m["reply_to"] in known):
             event["reply_to"] = m["reply_to"]
-        messages.append((event, m["text"]))
+        if m["recipient"] == "all" and m["message_kind"] != "status":
+            # A broadcast reaches only who it reached when sent, not everyone carried after it.
+            event["audience"] = [who for who in m["targets"] if who in keep]
+        writes.append((event, m["text"], m.get("ts")))
     receipts = {}
     for m in state["messages"]:
         if m["id"] not in chosen and m["id"] not in known:
@@ -753,52 +853,89 @@ def carry_plan(state, current=None, bounded=True):
         for who in m["received_by"]:
             if who in keep and who not in done and who in targets:
                 receipts.setdefault(who, []).append(m["id"])
-    return joins, messages, receipts, [m for m in dropped if m["id"] not in known]
+    for who, mids in sorted(receipts.items()):
+        for start in range(0, len(mids), 200):
+            writes.append(({"kind": "received", "participant": who, "messages": mids[start:start + 200]},
+                           "Messages consumed before rollover", None))
+    # Last, once nothing carried still needs them: members that left the sealed log leave its successor too.
+    for who in sorted(present - set(joined), key=lambda w: there[w]["seq"]):
+        writes.append(({"kind": "leave", "participant": who}, "Participant left", None))
+    return writes, [m for m in dropped if m["id"] not in known]
 
 
 def carry(repo, state, new, bounded=True):
-    """Write the carry plan into new; returns how many unread messages stay only in the sealed log."""
-    current = project(records(repo, new))
-    joins, messages, receipts, dropped = carry_plan(state, current, bounded)
-    for event, text in joins:
-        _write(repo, new, event, text)
-    for event, text in messages:
-        _write(repo, new, event, text)
-    for who, mids in sorted(receipts.items()):
-        for start in range(0, len(mids), 200):
-            _write(repo, new, {"kind": "received", "participant": who, "messages": mids[start:start + 200]},
-                   "Messages consumed before rollover")
-    return len(dropped)
+    """Write the carry plan into new; returns the unread messages that stay only in the sealed log."""
+    writes, dropped = carry_plan(state, project(records(repo, new)), bounded)
+    for event, text, stamp in writes:
+        _write(repo, new, event, text, carried=stamp or True)
+    return dropped
+
+
+_CARRIED = set()
+
+
+def _carried(repo, room):
+    key = (str(repo), room)
+    if key not in _CARRIED and project(records(repo, room))["carried"]:
+        _CARRIED.add(key)  # a completed carry never reopens
+    return key in _CARRIED
+
+
+def _complete(repo, old, new):
+    """Finish the carry from sealed old into new and mark it complete; the caller holds old's rollover lock."""
+    if _carried(repo, new):
+        return
+    rows = records(repo, old)
+    seal = rows[-1].get("room_event", {})
+    if seal.get("kind") != "successor" or seal.get("target") != new:
+        raise ValueError("room %s is not sealed into %s" % (old, new))
+    dropped = carry(repo, project(rows), new, bounded=False)
+    note = "rollover-unread-" + hashlib.sha256(old.encode("utf-8")).hexdigest()[:12]
+    if dropped and note not in {m["id"] for m in project(records(repo, new))["messages"]}:
+        # One note per sealed room, from the main its seal names, so a rerun by another main writes the same one.
+        _write(repo, new, {"kind": "message", "id": note, "sender": seal["participant"], "recipient": "all",
+                           "message_kind": "note"},
+               "Older unread mail stays in %s; read it with oms room show --id %s --exact" % (old, old), carried=True)
+    _write(repo, new, {"kind": "carried"}, "Carried from " + old, carried=True)
+    _CARRIED.add((str(repo), new))
+
+
+def _finish_carry(repo, room):
+    """Complete the carry into room once its predecessor is sealed into it; a worker only waits for one running."""
+    old = _predecessor(repo, room)
+    if not old or (str(repo), room) in _CARRIED or _tail_successor(repo, old) != room:
+        return
+    with _rollover_lock(repo, old):
+        if not _child():
+            _complete(repo, old, room)
 
 
 def settle(repo, room):
-    """The room an id names once the rollover that sealed it has carried its late writers.
+    """The room an id names, once the rollover that sealed it into that room has finished its carry.
 
-    A rollover cut short after its seal never ran the delta carry; the first writer that misses it finishes
-    it here. A worker cannot enroll others, so it only waits for a rollover in progress."""
+    A rollover cut short after its seal leaves the successor refusing every write but its carry; the first
+    writer to meet that refusal finishes the carry here and retries."""
     target = resolve(repo, room, fresh=True)
-    old = _predecessor(repo, target) if target != room else None
-    if old:
-        with _rollover_lock(repo, old):
-            if not _child():
-                carry(repo, project(records(repo, old)), target, bounded=False)
+    _finish_carry(repo, target)
     return target
 
 
 def rollover(repo, old, actor=None):
     """Seal a filling room and continue it as its derived successor; idempotent and crash-safe.
 
-    The successor row on the old log is the commit point; carries before it are skipped on a rerun,
-    and the carry after it picks up writers that landed between the first read and the seal."""
+    The bulk of the carry lands before the seal, while writers still use the old log; the successor row on the
+    old log is the commit point, and the carry after it brings the successor up to the sealed log and marks it
+    complete. Until then the successor refuses every other write, so a rerun only ever compares carried state."""
     if _child():
         raise ValueError("a worker cannot roll a room over")
     old = identifier(old, "room")
+    _finish_carry(repo, old)  # a room is sealed only once its own carry is complete
     with _rollover_lock(repo, old):
         current = resolve(repo, old, fresh=True)
         new = successor_id(old)
         if current != old:
-            if _predecessor(repo, current) == old:
-                carry(repo, project(records(repo, old)), current, bounded=False)
+            if _tail_successor(repo, old) == new and _predecessor(repo, new) == old:
+                _complete(repo, old, new)
             return current
         state = project(records(repo, old))
         if state["closed"]:
@@ -810,6 +947,8 @@ def rollover(repo, old, actor=None):
             raise ValueError("rollover needs an enrolled main")
         carry_plan(state)
         path = Path(repo) / ".oms/threads" / (new + ".jsonl")
+        if path.exists() and not path.stat().st_size:
+            path.unlink()  # a successor create cut short before its header row
         if not path.exists():
             create(repo, new, state["title"], state["task_id"], chosen["participant"], predecessor=old)
         else:
@@ -818,16 +957,12 @@ def rollover(repo, old, actor=None):
                 _write(repo, new, _created_event(state["task_id"], chosen["participant"], old), state["title"])
             elif _predecessor(repo, new) != old:
                 raise ValueError("successor room id collision")
-        if carry(repo, state, new):
-            # One note per sealed room: a later rollover may carry this one while it leaves its own.
-            note = "rollover-unread-" + hashlib.sha256(old.encode("utf-8")).hexdigest()[:12]
-            _write(repo, new, {"kind": "message", "id": note, "sender": chosen["participant"],
-                               "recipient": "all", "message_kind": "note"},
-                   "Older unread mail stays in %s; read it with oms room show --id %s --exact" % (old, old))
+        if not _carried(repo, new):
+            carry(repo, state, new)
         _write(repo, old, {"kind": "successor", "participant": chosen["participant"], "target": new},
                "Room continues as " + new)
         _RECENT.clear()  # this process follows the seal at once; others within RESOLVE_TTL
-        carry(repo, project(records(repo, old)), new, bounded=False)
+        _complete(repo, old, new)
         return new
 
 
@@ -853,7 +988,9 @@ def join(repo, room, who, provider, role="main", model=None, label=None, native_
 
 def close(repo, room, who):
     event = {"kind": "closed", "participant": identifier(who, "participant")}
-    append(repo, room, event, "Room closed")
+    # Behind the rollover lock a close lands before a seal or in the successor, never between carry and seal.
+    with _rollover_lock(repo, resolve(repo, identifier(room, "room"), fresh=True)):
+        append(repo, room, event, "Room closed")
     return {"status": "closed"}
 
 
@@ -1088,15 +1225,28 @@ def _lineage(repo, room):
 
 def acknowledge(repo, room, who, mids):
     room = resolve(repo, room)
-    if _predecessor(repo, room):
-        # Mail settled before a rollover was not carried; acknowledging it again is a no-op.
-        known = {m["id"] for m in project(records(repo, room))["messages"]}
-        kept = [mid for mid in mids if mid in known]
-        if not kept:
-            print("room: messages already settled before rollover", file=sys.stderr)
+    state = project(records(repo, room))
+    if state["predecessor"]:
+        # Mail already consumed before a rollover was not carried; acknowledging it again is a no-op. Unread mail
+        # the rollover left in the sealed log is acknowledged here; any other id is refused as usual.
+        known = {m["id"] for m in state["messages"]}
+        settled = [mid for mid in mids if mid not in known
+                   and who in (_lineage_message(repo, state, mid) or {}).get("received_by", [])]
+        if settled:
+            print("room: already consumed before rollover: " + ", ".join(settled[:8]), file=sys.stderr)
+        mids = [mid for mid in mids if mid not in settled]
+        if not mids:
             return
-        mids = kept
     append(repo, room, {"kind": "received", "participant": who, "messages": mids}, "Messages consumed")
+
+
+def _lineage_message(repo, state, mid):
+    """A message a rollover left in one of this room's sealed predecessors, as that log projects it."""
+    for earlier in _lineage(repo, state["id"]):
+        found = next((m for m in project(records(repo, earlier))["messages"] if m["id"] == mid), None)
+        if found:
+            return found
+    return None
 
 
 def selected(repo, consumer=None, preferred=None, who=None):
@@ -1127,9 +1277,6 @@ def _selected(repo, consumer=None, preferred=None, who=None):
         for member in state["participants"]:
             if member.get("consumer") == consumer and member["joined"]:
                 candidates.append((member["joined_at"], member["seq"], state["id"], member["participant"], state))
-    # Until its seal lands, a room being rolled over stays the binding; its successor already holds the carry.
-    rolling = {c[2] for c in candidates}
-    candidates = [c for c in candidates if c[4].get("predecessor") not in rolling]
     return (candidates[0][2:4], candidates[0][4]) if len(candidates) == 1 else ((None, None) if enrolled else None, None)
 
 
@@ -1140,6 +1287,8 @@ def messages(repo, room):
 
 def status(repo, room, exact=False):
     state = project(records(repo, room if exact else resolve(repo, room)))
+    if state["successor"]:
+        _later_receipts(repo, state)
     state["message_count"] = len(state["messages"])
     live = {p["participant"] for p in state["participants"] if p["joined"]}
     state["pending_count"] = sum(len(live.intersection(m["pending_for"])) for m in state["messages"])
@@ -1177,6 +1326,27 @@ def status(repo, room, exact=False):
     state["pending_messages_truncated"] = len(pending) > 500
     state["messages"] = state["messages"][-12:]
     return state
+
+
+def _later_receipts(repo, state):
+    """Apply to a sealed log the receipts its successors took for the unread mail it kept."""
+    pending = {m["id"]: m for m in state["messages"] if m["pending_for"]}
+    cur, seen = state["id"], {state["id"]}
+    for _ in range(MAX_HOPS):
+        nxt = _tail_successor(repo, cur) if cur != state["id"] else state["successor"]
+        if not pending or not nxt or nxt in seen or _predecessor(repo, nxt) != cur:
+            return
+        for row in records(repo, nxt):
+            event = row.get("room_event", {})
+            if event.get("kind") != "received":
+                continue
+            for mid in event["messages"]:
+                if mid in pending and event["participant"] in pending[mid]["targets"]:
+                    message = pending[mid]
+                    message["received_by"] = sorted(set(message["received_by"]) | {event["participant"]})
+                    message["pending_for"] = [p for p in message["pending_for"] if p != event["participant"]]
+        seen.add(nxt)
+        cur = nxt
 
 
 _PREDECESSOR_CALLS = {}

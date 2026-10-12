@@ -1445,7 +1445,7 @@ def _rollover_if_needed(repo, room_id, state, caller):
         moved = room.rollover(repo, room_id, caller)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print("Room %s could not roll over: %s" % (room_id, clean(str(error), 200)), file=sys.stderr)
-        # Past its seal the room has moved on; the first writer the cut-short carry misses finishes it.
+        # Past its seal the room has moved on; its successor refuses writes until the next one finishes the carry.
         moved = room.resolve(repo, room_id, fresh=True)
         if moved == room_id:
             return None

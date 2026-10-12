@@ -7775,8 +7775,9 @@ with patch.dict(os.environ, {}):
     assert re.fullmatch(r"room-[0-9a-f]{12}", new) and room.resolve(roll, old) == old
     # Unread mail beyond the message reserve stays in the sealed log, newest first; essential state always travels.
     with patch.object(room, "MESSAGE_RESERVE", 0):
-        joins, carried, receipts, dropped = room.carry_plan(full)
-    assert [m["id"] for m in dropped] == [fyi] and {"result-call-pend", question} <= {e["id"] for e, _ in carried}
+        writes, dropped = room.carry_plan(full)
+    assert [m["id"] for m in dropped] == [fyi] and {"result-call-pend", question} <= {
+        e["id"] for e, _, _ in writes if e["kind"] == "message"}
     # Essential carry beyond its bound is refused before any write: the old log and the successor id stay untouched.
     with patch.object(room, "CARRY_MESSAGES", 1):
         try:
@@ -8012,6 +8013,192 @@ with patch.dict(os.environ, {}):
     landed = [m["id"] for m in room.messages(roll, room.successor_id(full_room))]
     assert landed[-1] == "result-call-full" and unread not in landed, landed
     assert [m for m in landed if m.startswith("rollover-unread-")], landed
+    # The rollover holds in the environment a panel main really runs in (terminal_panel exports its room,
+    # participant, repo and attempt), not only in a stripped one: each main below acts under its own binding.
+    def rollover_regressions(where, panel_env):
+        subprocess.run(["git", "init", "-q", str(where)], check=True)
+
+        def bound(ident, who):
+            return patch.dict(os.environ, {"OMS_ROOM_ID": ident, "OMS_ROOM_PARTICIPANT": who,
+                                           "OMS_ROOM_REPO": str(where), "OMS_PANEL_MAIN_ATTEMPT": "att-" + who}
+                              if panel_env else {})
+
+        def fresh(*mains, calls=()):
+            ident = room.create(where, title="Regression room")
+            for who in mains:
+                room.join(where, ident, who, "claude" if who.endswith("1") else "codex", "main",
+                          native_session="sess-" + ident + "-" + who)
+            for who, parent in calls:
+                room.join(where, ident, who, "codex", "worker", parent=parent)
+            return ident
+
+        def fill(ident, sender, count):
+            rows = room.records(where, ident)
+            with (where / ".oms/threads" / (ident + ".jsonl")).open("a", encoding="utf-8") as handle:
+                for n in range(count):
+                    handle.write(json.dumps({"schema": 1, "ts": rows[-1]["ts"], "thread": ident, "seq": len(rows) + n + 1,
+                                             "role": "note", "agent": "agent", "text": "status %d" % n,
+                                             "room_event": {"kind": "message", "id": "fill-%s-%d" % (ident, n),
+                                                            "sender": sender, "recipient": "all",
+                                                            "message_kind": "status"}}) + "\n")
+
+        def member(ident, who):
+            return next(p for p in room.status(where, ident)["participants"] if p["participant"] == who)
+
+        real_carry = room.carry
+        # Both described mains carry their labels, by hand, through a dispatch and through a full room's send.
+        described = fresh("m1", "m2")
+        for who in ("m1", "m2"):
+            with bound(described, who):
+                room.describe(where, described, who, "Work of " + who)
+        with bound(described, "m1"):
+            rolled = room.rollover(where, described, "m1")
+            assert room.rollover(where, described, "m1") == rolled
+            assert {p["participant"]: p.get("label_override") for p in room.status(where, rolled)["participants"]} == {
+                "m1": "Work of m1", "m2": "Work of m2"}
+            fill(rolled, "m1", room.ROLLOVER_MESSAGES + 1)
+            errors = io.StringIO()
+            with redirect_stderr(errors):
+                dispatched = panel._rollover_if_needed(where, rolled, room.project(room.records(where, rolled)), "m1")
+            assert dispatched == room.successor_id(rolled) and "could not" not in errors.getvalue(), errors.getvalue()
+            fill(dispatched, "m1", room.MAX_MESSAGES)
+            room.send(where, dispatched, "m1", "m2", "Past the limit", "handoff")
+            assert room.messages(where, room.successor_id(dispatched))[-1]["text"] == "Past the limit"
+            assert member(described, "m2")["label_override"] == "Work of m2"
+        # Writes that land between the first carry and the seal (a leave, a rescope, a second description, a
+        # native rebind, a call's result and an answer) all reach the successor; a crash after the seal is
+        # finished by the next write, even from a writer already enrolled there.
+        raced = fresh("m1", "m2", "m3", calls=[("call-x", "m1")])
+        consumer = member(raced, "m1")["consumer"]
+        question = room.send(where, raced, "m1", "m2", "Which file?", "question")["id"]
+        broadcast = room.send(where, raced, "m1", "all", "Before the call joined", "note")["id"]
+        room.join(where, raced, "call-y", "codex", "worker", parent="m1")
+        steps = []
+        def racing(repo, state, target, bounded=True):
+            steps.append(target)
+            if len(steps) == 1:
+                moved = real_carry(repo, state, target, bounded)
+                room.append(where, raced, {"kind": "leave", "participant": "m3"}, "Participant left")
+                with bound(raced, "m2"):
+                    room.scope(where, raced, "m2", ["src"])
+                    room.send(where, raced, "m2", "m1", "src.py", "answer", reply_to=question)
+                    room.acknowledge(where, raced, "m2", [question])
+                with bound(raced, "m1"):
+                    room.describe(where, raced, "m1", "Second work")
+                    room.bind(where, raced, "m1", "sess-two", replaces=consumer)
+                    room.acknowledge(where, raced, "m1", [m["id"] for m in room.messages(where, raced)
+                                                          if m["sender"] == "m2"])
+                room.send(where, raced, "call-x", "m1", "Call exit=0; done", "handoff", message_id="result-call-x")
+                return moved
+            raise subprocess.TimeoutExpired("thread append", 15)
+        with bound(raced, "m1"), patch.object(room, "carry", side_effect=racing):
+            try:
+                room.rollover(where, raced, "m1")
+            except subprocess.TimeoutExpired:
+                pass
+        after = room.successor_id(raced)
+        assert room.resolve(where, raced, fresh=True) == after and not room.status(where, after)["carried"]
+        with bound(raced, "m1"):
+            room.send(where, after, "m1", "m2", "Enrolled writer", "note")
+        healed = room.status(where, after)
+        assert healed["carried"] and healed["call_results"]["call-x"]["exit"] == 0, healed["call_results"]
+        people = {p["participant"]: p for p in healed["participants"]}
+        assert not people["m3"]["joined"] and people["m2"]["owns"] == ["src"], people
+        assert people["m1"]["label_override"] == "Second work" and people["m1"]["consumer"] != consumer
+        assert room.selected(where, people["m1"]["consumer"]) == (after, "m1")
+        # The answered question stays answered, and the broadcast reaches only who it reached when sent.
+        assert not [q for q in healed["open_questions"] if q["id"] == question], healed["open_questions"]
+        assert next(m for m in room.messages(where, after) if m["id"] == broadcast)["targets"] == ["m2", "m3", "call-x"]
+        # A participant that left the successor stays gone when a later writer or a rerun meets the rollover.
+        room.append(where, after, {"kind": "leave", "participant": "m2"}, "Participant left")
+        try:
+            room.send(where, raced, "m1", "m-typo", "Misaddressed", "note")
+        except ValueError as error:
+            assert "has not joined" in str(error), error
+        else:
+            raise AssertionError("a misaddressed note was delivered")
+        with bound(raced, "m1"):
+            room.rollover(where, raced, "m1")
+        assert not member(after, "m2")["joined"]
+        # Carried mail keeps its send time, so reminder and escalation clocks keep counting.
+        aged = fresh("m1", "m2")
+        asked = room.send(where, aged, "m1", "m2", "Still open?", "question")["id"]
+        log = where / ".oms/threads" / (aged + ".jsonl")
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        old_stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 1500))
+        log.write_text("".join(json.dumps(dict(r, ts=old_stamp)) + "\n" for r in rows))
+        with bound(aged, "m1"):
+            moved = room.rollover(where, aged, "m1")
+        assert next(q for q in room.open_questions(room.status(where, moved)) if q["id"] == asked)["age"] >= 1500
+        # A call whose parent left is not carried; an empty successor file left by a cut-short create is replaced.
+        orphaned = fresh("m1", "m2", calls=[("call-o", "m2")])
+        room.append(where, orphaned, {"kind": "leave", "participant": "m2"}, "Participant left")
+        (where / ".oms/threads" / (room.successor_id(orphaned) + ".jsonl")).write_bytes(b"")
+        with bound(orphaned, "m1"):
+            moved = room.rollover(where, orphaned, "m1")
+        assert "call-o" not in {p["participant"] for p in room.status(where, moved)["participants"]}
+        # A rollover cut short before its seal and rerun by another main writes its unread-mail note once; a
+        # dropped message is acknowledged in the successor, and the sealed log shows it read.
+        noted = fresh("m1", "m2", "m3")
+        unread = [room.send(where, noted, "m3", "m1", "Unread %d" % n, "note")["id"] for n in range(3)]
+        real_write = room._write
+        def unsealed(repo, ident, event, text, carried=None):
+            if event["kind"] == "successor":
+                raise subprocess.TimeoutExpired("thread append", 15)
+            return real_write(repo, ident, event, text, carried)
+        with bound(noted, "m2"), patch.object(room, "_write", side_effect=unsealed), \
+                patch.object(room, "MESSAGE_RESERVE", 1):
+            try:
+                room.rollover(where, noted, "m2")
+            except subprocess.TimeoutExpired:
+                pass
+        room.append(where, noted, {"kind": "leave", "participant": "m2"}, "Participant left")
+        assert room.successor_id(noted) not in {s["id"] for s in room.discover(where)[0]}
+        with bound(noted, "m1"), patch.object(room, "MESSAGE_RESERVE", 1):
+            moved = room.rollover(where, noted, "m1")
+            assert room.rollover(where, noted, "m1") == moved
+            landed = [m for m in room.messages(where, moved) if m["id"].startswith("rollover-unread-")]
+            assert len(landed) == 1 and landed[0]["sender"] == "m1", landed
+            room.acknowledge(where, noted, "m1", [unread[0]])
+            for wrong in (["msg-typo"], [unread[1], "msg-typo"]):
+                try:
+                    room.acknowledge(where, noted, "m1", wrong)
+                except ValueError as error:
+                    assert "another participant" in str(error), error
+                else:
+                    raise AssertionError("an unknown message id was acknowledged")
+        sealed = room.status(where, noted, exact=True)
+        assert [m["id"] for m in sealed["messages"] if m["pending_for"]] == unread[1:], sealed["messages"]
+        # A close racing a rollover waits for its seal and closes the successor; no open half-carried room remains.
+        closing = fresh("m1", calls=[("call-c", "m1")])
+        racer = {}
+        def closing_carry(repo, state, target, bounded=True):
+            if not racer:
+                racer["thread"] = threading.Thread(target=lambda: room.close(where, closing, "m1"))
+                racer["thread"].start()
+                time.sleep(0.5)
+            return real_carry(repo, state, target, bounded)
+        with bound(closing, "m1"), patch.object(room, "carry", side_effect=closing_carry):
+            moved = room.rollover(where, closing, "m1")
+            racer["thread"].join(timeout=60)
+        assert room.status(where, moved)["closed"] and room.selected(where, member(closing, "m1")["consumer"]) in (
+            None, (None, None))
+        # A worker's flood of open questions to its parent does not block the rollover.
+        flooded = fresh("m1", calls=[("call-w", "m1")])
+        worker_env = {"OMS_HARNESS_CHILD": "1", "OMS_ROOM_ID": flooded, "OMS_ROOM_PARTICIPANT": "call-w",
+                      "OMS_ROOM_REPO": str(where)}
+        with patch.dict(os.environ, worker_env):
+            for n in range(3):
+                room.send(where, flooded, "call-w", "m1", "Question %d" % n, "question")
+            try:
+                room.rollover(where, flooded)
+            except ValueError as error:
+                assert "worker cannot roll" in str(error), error
+        with bound(flooded, "m1"), patch.object(room, "CARRY_MESSAGES", 1):
+            moved = room.rollover(where, flooded, "m1")
+        assert len(room.status(where, moved)["open_questions"]) == 3
+    for mode, panel_env in (("stripped", False), ("panel", True)):
+        rollover_regressions(temporary / ("rollover regressions " + mode), panel_env)
 recorded = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--limit", "300", "--json"]))
 room_attempt = next(a for a in recorded if a.get("refs", {}).get("panel_room_participant") == child["participant"])
 assert room_attempt["refs"]["panel_room_id"] == shared

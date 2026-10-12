@@ -457,6 +457,34 @@ def membership_epoch(repo, room, who, provider, read_window=None):
     if (state['id'] != room or state['closed'] or len(joins) != 1 or leaves or
             not member.get('joined') or member.get('role') != 'main' or member.get('provider') != provider):
         fail('actual parent room context is unproven or recycled')
+    # A main keeps the id of the room it joined after that room rolls over; a close or leave lands in the room
+    # it continues as, so the membership must still hold there.
+    for later_records, later in successor_rooms(repo, state):
+        member = next((m for m in later['participants'] if m['participant'] == who), {})
+        if (later['closed'] or not member.get('joined') or member.get('role') != 'main'
+                or member.get('provider') != provider
+                or any(r.get('room_event', {}).get('participant') == who and r['room_event'].get('kind') == 'leave'
+                       for r in later_records)):
+            fail('actual parent room context is unproven or recycled')
+
+
+def successor_rooms(repo, state):
+    """(records, state) of each room a sealed room continues as, oldest first, each naming the one before it."""
+    found, seen = [], {state['id']}
+    for _ in range(64):
+        nxt = state.get('successor')
+        rel = '.oms/threads/%s.jsonl' % nxt
+        if (not isinstance(nxt, str) or not re.fullmatch(r'room-[0-9a-f]{12}', nxt) or nxt in seen
+                or not read(repo, rel, MAX_STREAM, missing=True)):
+            break
+        records, content_sha = rows(repo, rel)
+        later = room_records(records, nxt, content_sha)
+        if later.get('predecessor') != state['id']:
+            break
+        found.append((records, later))
+        seen.add(nxt)
+        state = later
+    return found
 
 
 def caller_owner(repo, bundle, task):

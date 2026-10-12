@@ -7066,12 +7066,34 @@ successor_rows = [{'schema': 1, 'ts': seal['ts'], 'thread': successor_room, 'seq
 assert scope['room_records'](successor_rows, successor_room)['predecessor'] == room
 sealed_path = repo / '.oms/threads' / (room + '.jsonl')
 unsealed = sealed_path.read_bytes()
+successor_path = repo / '.oms/threads' / (successor_room + '.jsonl')
+carried_join = {'schema': 1, 'ts': seal['ts'], 'thread': successor_room, 'seq': 3, 'role': 'note', 'agent': 'agent',
+                'text': 'Joined', 'room_event': {'kind': 'join', 'participant': participant, 'provider': 'codex',
+                                                 'role': 'main', 'label': participant}}
 try:
     sealed_path.write_bytes(unsealed + (json.dumps(seal) + '\n').encode())
     scope['reset_streams']()
     scope['membership_epoch'](str(repo), room, participant, 'codex')
+    # The main keeps the old id after the rollover; a close or leave through it lands in the successor and
+    # still ends the membership.
+    for ending in ('closed', 'leave'):
+        successor_path.write_text(''.join(json.dumps(r) + '\n' for r in successor_rows + [carried_join]))
+        scope['reset_streams']()
+        scope['membership_epoch'](str(repo), room, participant, 'codex')
+        with successor_path.open('a') as handle:
+            handle.write(json.dumps(dict(carried_join, seq=4, text=ending, room_event={
+                'kind': ending, 'participant': participant})) + '\n')
+        scope['reset_streams']()
+        try:
+            scope['membership_epoch'](str(repo), room, participant, 'codex')
+        except ValueError as error:
+            assert 'unproven or recycled' in str(error), error
+        else:
+            assert False, 'a %s in the successor kept the old room membership' % ending
 finally:
     sealed_path.write_bytes(unsealed)
+    if successor_path.exists():
+        successor_path.unlink()
     scope['reset_streams']()
 # Rehashing a shortened blob/ref cannot replace the separate trusted capture.
 def forged_receipt(mutator):
