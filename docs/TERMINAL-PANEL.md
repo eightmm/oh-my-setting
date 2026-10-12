@@ -272,6 +272,8 @@ plan goal on at most two rows and the progress right-aligned on the title row
 Cancelled tasks are closed, never verified, so they leave the total (the `[oms plan]` sentence uses the
 same total). A running task whose recorded calls all ended counts as `stale` instead of `claimed`, one whose
 calls wait in review or admission counts as `review`; expired claims and abandoned review leases are stale too.
+Only the current holder's calls count: the claimant call itself, or calls of the claiming main that joined at or
+after the claim, so calls an earlier holder left never mark a fresh claim stale.
 Zero counts are omitted and `stale` is dropped first on narrow boards; the full box adds
 `N stale, not counted: no live worker · release with oms agent-plan release --id ID`. On a
 board under 20 rows (or when the pinned rows would starve the body) the box shrinks to one row,
@@ -1059,7 +1061,7 @@ with `8 Details`. Small panes use borderless summaries. Press `b` to
 toggle attention-only: waiting input, waiting approval, blocked, review and
 orphaned calls, plus retained failed terminal outcomes. Filtered calls are
 counted rather than changing their states. Settled calls stay in the Past tab
-and are hidden from the board. Both controls affect presentation, not the main identity or
+and are hidden from the board; attention-only empties the Past tab as well. Both controls affect presentation, not the main identity or
 dispatch authority. A native window inherits these
 settings when opened, and the control sidebar follows subsequent menu changes.
 CLI `--view` overrides a watch's window density; `--attention-only` keeps its

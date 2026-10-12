@@ -9647,7 +9647,66 @@ shown = list(dict.fromkeys(h["action"][1] for h in sorted(ended_nav["hits"], key
 assert shown == [i[1] for i in ended_nav["items"] if i[0] == "result"] and shown.index("old-13") > shown.index("builder"), shown
 assert any(h["action"] == ("result", "old-00") and h["y"] < activity_top for h in ended_nav["hits"]), ended_nav
 assert all(h.get("past") for h in ended_nav["hits"] if h["action"] == ("result", "old-13")), ended_nav
-team_lines, _ = graph_text.detail(next(m for m in graph_text.nodes(ended) if m["participant"] == "flow-main"), {}, 120,
+# With a second main the open Past list still gets a body on short trees, so its keys reach the list.
+for columns, rows_high in ((42, 24), (80, 24), (110, 24), (110, 28)):
+    two_nav = {"tab": "past"}
+    two_past = render(ended, "codex", columns, rows_high, view="tree", navigation=two_nav, main_attempt="flow-attempt")
+    assert two_nav["tab_body_visible"] and two_nav["box"] and "Old job 13" in two_past, (columns, rows_high, two_past)
+    assert all(display_width(line) <= columns for line in two_past.splitlines()), two_past
+# Past-list keys: arrows, Home and End pick a call and keep it on the page; a wheel scroll keeps the choice.
+one_ended = deepcopy(ended)
+one_ended["room"]["participants"] = [m for m in one_ended["room"]["participants"]
+                                     if m["participant"] not in {"flow-other", "foreign-child", "unlinked-child"}]
+keys_nav = {"tab": "past"}
+render(one_ended, "codex", 57, 30, view="tree", navigation=keys_nav)
+picked = []
+for key in ("down", "down", "end", "up", "home"):
+    assert panel.tab_event((key,), keys_nav), key
+    render(one_ended, "codex", 57, 30, view="tree", navigation=keys_nav)
+    picked.append((keys_nav["selected"][1], keys_nav["past_view"]["scroll"]))
+assert picked == [("old-13", 0), ("old-12", 0), ("old-01", 1), ("old-02", 1), ("old-13", 0)], picked
+assert panel.tab_event(("scroll", 3, 5, keys_nav["box"]["y1"] + 2), keys_nav)
+render(one_ended, "codex", 57, 30, view="tree", navigation=keys_nav)
+assert keys_nav["selected"] == ("result", "old-13") and keys_nav["past_view"]["scroll"] == 1, keys_nav
+assert panel.tab_event(("enter",), keys_nav) and keys_nav["tab"] == "detail" and \
+    keys_nav["preview"] == {"target": ("result", "old-13")}, keys_nav
+f_nav = {"tab": "past"}
+render(one_ended, "codex", 57, 30, view="tree", navigation=f_nav)
+assert panel.tab_event(("down",), f_nav) and panel.tab_event(("f",), f_nav)
+assert f_nav["open_call"] == ("result", "old-13") and f_nav["tab"] == "detail", f_nav
+# Narrow rows drop the role word and time before the task title, so rows still differ by task.
+for columns in (28, 42):
+    for glyphs in (True, False):
+        narrow_past = render(one_ended, "codex", columns, 24, view="tree", unicode=glyphs, navigation={"tab": "past"})
+        narrow_rows = [line for line in narrow_past.splitlines() if "finished" in line]
+        assert narrow_rows and all("Old job" in line for line in narrow_rows), narrow_rows
+# Attention-only empties the whole Past list, owned and unowned calls alike.
+orphan_done = deepcopy(ended)
+next(a for a in orphan_done["attempts"]["active_recent"] if a["attempt_id"] == "unlinked-child")["state"] = "done"
+for mode in ("tree", "graph"):
+    for only in (False, True):
+        only_nav = {"tab": "past"}
+        render(orphan_done, "codex", 127, 60, view=mode, attention_only=only, navigation=only_nav)
+        assert ("past" in only_nav["visible_tabs"]) is not only, (mode, only, only_nav["visible_tabs"])
+        assert only or len(only_nav["past_ids"]) == 13, only_nav["past_ids"]
+# A Past tab with nothing past shows Detail, and the hints are Detail's.
+for mode in ("tree", "graph"):
+    for columns, rows_high in ((57, 24), (127, 40)):
+        hinted = [render(single_flow, "codex", columns, rows_high, view=mode, navigation={"tab": tab},
+                         main_attempt="flow-attempt").splitlines()[-1] for tab in ("past", "detail")]
+        assert hinted[0] == hinted[1] and "Call" not in hinted[0], (mode, columns, hinted)
+# A past debate opens in Detail from the tree's Past tab as it does from the graph.
+past_debate = deepcopy(single_flow)
+past_debate["attempts"]["active_recent"].append({"attempt_id": "council-1", "state": "done", "tool": "panel-council",
+    "task_id": "deb-1", "parent_attempt_id": "flow-attempt", "panel": {"label": "Pick a design"}})
+for mode in ("tree", "graph"):
+    debate_nav = {"tab": "past"}
+    render(past_debate, "codex", 127, 50, view=mode, navigation=debate_nav)
+    assert debate_nav["past_ids"] == [("debate", ("deb-1", "flow-main"))], debate_nav
+    debate_nav["surface"] = mode
+    assert panel.tab_event(("down",), debate_nav) and panel.tab_event(("enter",), debate_nav)
+    assert "COUNCIL / " in render(past_debate, "codex", 127, 50, view=mode, navigation=debate_nav), mode
+team_lines, _ =graph_text.detail(next(m for m in graph_text.nodes(ended) if m["participant"] == "flow-main"), {}, 120,
     graph_text.nodes(ended), ended["room"], everyone={"flow-main": [m for m in graph_text.nodes(ended)
                                                                   if m.get("parent") == "flow-attempt"]})
 team_rows = [line for line in team_lines if "Old job" in line or "한글 작업 제목 / builder" in line]
@@ -9834,6 +9893,35 @@ for attempt in everything_ended["attempts"]["active_recent"]:
         attempt["state"] = "done"
 assert "Task: t-live · worker ended" in graph_text.render_graph(everything_ended, 127, 50, navigation={"dismissed": True})
 assert graph_text.plan_summary(everything_ended)[1:] == (4, 7, 0, 0, 3)
+# A finished call awaiting admission or a blocked call awaits; an unknown call keeps its task claimed; the plan's
+# own stale claims and reviews join the stale count once, apart from the ended and awaiting tasks.
+pending_holds = deepcopy(held_flow)
+pending_holds["awaiting_admission"] = ["researcher"]
+pending_holds["attempts"]["active_recent"] = [a for a in pending_holds["attempts"]["active_recent"] if a["attempt_id"] != "builder"]
+pending_holds["room_attempts"] = {"builder": {"attempt_id": "builder", "task_id": "t-live"}}
+next(a for a in pending_holds["attempts"]["active_recent"] if a["attempt_id"] == "explorer")["state"] = "blocked"
+assert next(m for m in graph_text.nodes(pending_holds) if m["participant"] == "builder")["state"] == "presence unknown"
+assert graph_text.held_split(pending_holds) == ({"t-ended", "t-review"}, set())
+pending_holds["plan"].update(task_count=13, stale_claims=1, stale_reviews=1,
+                             by_state={"done": 4, "cancelled": 3, "running": 3, "claimed": 1, "review": 2})
+assert graph_text.plan_summary(pending_holds)[1:] == (4, 10, 3, 1, 2), graph_text.plan_summary(pending_holds)
+# Only the current holder's calls speak for a hold: a call another main left, or one the claiming main started
+# before this claim, is not evidence; a call that holds the claim itself always is.
+holder = deepcopy(everything_ended)
+holder["room"]["participants"].append(next(m for m in flow_members if m["participant"] == "flow-other"))
+holder["attempts"]["active_recent"].append(next(a for a in flow["attempts"]["active_recent"] if a["attempt_id"] == "flow-other"))
+holder_tasks = {t["id"]: t for t in holder["plan"]["tasks"]}
+holder_tasks["t-review"].update(claimed_by="flow-other", claimed_by_participant="flow-other")
+holder_tasks["t-live"].update(claimed_by="builder", claimed_by_participant="builder")
+for ident in ("researcher", "builder"):
+    next(m for m in holder["room"]["participants"] if m["participant"] == ident)["joined_at"] = "2026-10-11T11:00:00Z"
+assert graph_text.held_split(holder) == (set(), {"t-live"}), graph_text.held_split(holder)
+assert graph_text.plan_summary(holder)[1:] == (4, 7, 0, 2, 1), graph_text.plan_summary(holder)
+holder_rows = [text for text, unused in graph_text.plan_rows(holder, {}, 120, True)]
+assert any("t-review · running · Held t-review" in text for text in holder_rows), holder_rows
+assert any("t-ended · running · Held t-ended" in text for text in holder_rows), holder_rows
+holder_card = graph_text.render_graph(holder, 157, 60, navigation={"dismissed": True})
+assert "Task: t-ended · running" in holder_card and "worker ended" not in holder_card, holder_card
 for columns, rows_high, surface in ((36, 50, "tree"), (50, 50, "tree"), (80, 50, "graph"), (127, 40, "graph"), (127, 90, "graph")):
     nav = {}
     shown = render(geometry_flow, "codex", columns, rows_high, view="graph", navigation=nav, main_attempt="flow-attempt")

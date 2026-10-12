@@ -4,7 +4,7 @@ from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import usage_line
 from panel_view import (ATTENTION_STATES, PALETTE, activity, box_edge, box_row, clipped,
                         main_occupied, menu_rows, status_alerts, TERMINAL_STATES, tone, usage_words, worker_rows, wrapped)
-from room_view import (action as member_action, call_order, context_note, open_count, footer_hints, live_unread,
+from room_view import (action as member_action, call_order, past_calls, context_note, open_count, footer_hints, live_unread,
                        goal_banner, main_names, model_name, native_advisors, nodes, plan_idle, readable, said,
                        settler, spawn_bar, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
 
@@ -42,13 +42,14 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     for row in worker_rows(report):
         if row["source"] == "council" and row["parent"] in owners:
             owner = owners[row["parent"]]
-            calls.append({"role": "council", "parent": row["parent"], "state": row["state"],
-                          "title": row["work"], "model": row["name"],
+            calls.append({"participant": row["task"], "role": "council", "parent": row["parent"],
+                          "state": row["state"], "title": row["work"], "model": row["name"],
                           "_action": ("debate", (row["task"], owner["participant"]))})
     calls.sort(key=call_order)
     if attention_only:
         calls = [m for m in calls if classify(m) != "past" and
                  (m["state"] in ATTENTION_STATES or classify(m) == "review")]
+    past = past_calls(calls, classify)
     prefix, end, stem = ("├─ ", "└─ ", "│  ") if unicode else ("|- ", "`- ", "|  ")
     rows, items = [], []
     boxed = width >= 28 and height >= 16
@@ -246,11 +247,13 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         if row.get("action") and row["action"][0] == "chat":
             main_rows.setdefault(row["action"], i)
     activity_floor = (max(main_rows.values()) + 1 if main_rows else 1) + int(bool(tasks))
-    if navigation.get("preview") or interactive and height >= 32:
+    # A chosen preview or an open Past list is what the person asked to read, so the dock may push later mains down.
+    reading = navigation.get("preview") or navigation.get("tab") == "past" and past
+    if reading or interactive and height >= 32:
         activity_floor = min(activity_floor, 3 + int(bool(tasks)))
     activity_floor += 2 if boxed else 0
     dock_rows = (14 if budget - len(head) >= 14 + activity_floor else int(budget > len(head))) if width >= 20 else 0
-    if dock_rows == 1 and (navigation.get("preview") or navigation.get("tab") == "past") and budget - len(head) - activity_floor >= 3:
+    if dock_rows == 1 and reading and budget - len(head) - activity_floor >= 3:
         dock_rows = min(14, budget - len(head) - activity_floor)
     navigation.update(tab_strip_visible=bool(dock_rows), tab_body_visible=dock_rows >= 3)
     activity_head = boxed and budget - len(head) - dock_rows >= 2
@@ -372,7 +375,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     everyone = {m["participant"]: [c for c in calls if c.get("parent") in
                 {m["participant"], m.get("attempt")}] for m in mains}
     dock_lines, dock_hits = tab_box(report, width, dock_rows, navigation, color, unicode,
-                                    main_attempt=main_attempt, everyone=everyone)
+                                    main_attempt=main_attempt, everyone=everyone, past=past)
     if dock_rows == 1:
         dock_lines = [line.replace("╭", "[").replace("╮", "]") for line in dock_lines]
     output += dock_lines
@@ -403,7 +406,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     navigation.update(hits=hits, items=unique, offset=offset, body_rows=len(body), viewport=body_budget,
                       room_id=room.get("id"), positions=positions, geometry=geometry, surface="tree", bands=bands,
                       tree_selected=selected)
-    if selected not in unique:
+    # A Past-list choice scrolled off its page stays chosen; only the board's own rows are reaped.
+    kept = (navigation.get("tab") == "past" and "past" in navigation.get("visible_tabs", [])
+            and selected in navigation.get("past_ids", []))
+    if selected not in unique and not kept:
         navigation["selected"] = None
         navigation.pop("selected_row", None)
         navigation.pop("row_ids", None)

@@ -368,20 +368,32 @@ def plan_idle(report):
 
 
 def held_split(report, members=None):
-    """(awaiting, ended) ids of running plan tasks whose recorded calls all stopped.
+    """(awaiting, ended) ids of running plan tasks whose current holder's calls all stopped.
 
-    Every call terminal: ended. Otherwise each open call waits in review, blocked or admission: awaiting.
-    A task with no call evidence, a live or an unknown call stays claimed; a claim never proves a process."""
+    Only the holder's own calls count: the claimant itself, or calls of the claiming main that joined at or after
+    the claim, so an earlier holder's calls never speak for a fresh claim. Every counted call terminal: ended.
+    Otherwise each open call waits in review, blocked or admission: awaiting.
+    A task with no such call, a live or an unknown call stays claimed; a claim never proves a process."""
     admission = set(listing(report.get("awaiting_admission")))
+    members = nodes(report) if members is None else members
+    owners = {key: m["participant"] for m in members if m.get("role") == "main"
+              for key in (m["participant"], m.get("attempt")) if key}
     calls = {}
-    for m in nodes(report) if members is None else members:
+    for m in members:
         if m.get("role") != "main" and m.get("task_id"):
-            state = "review" if m.get("state") == "done" and m.get("participant") in admission else m.get("state")
-            calls.setdefault(m["task_id"], []).append(state)
+            calls.setdefault(m["task_id"], []).append(m)
     awaiting, ended = set(), set()
     for task in map(mapping, listing(mapping(report.get("plan")).get("tasks"))):
-        states = calls.get(task.get("id"))
-        if task.get("state") != "running" or not states:
+        if task.get("state") != "running":
+            continue
+        claimant = task.get("claimed_by") or task.get("claimed_by_participant")
+        since = str(task.get("claimed_at") or "")
+        states = ["review" if m.get("state") == "done" and m.get("participant") in admission else m.get("state")
+                  for m in calls.get(task.get("id"), [])
+                  if claimant and m.get("participant") == claimant or
+                  (not claimant or owners.get(m.get("parent"), m.get("parent")) == owners.get(claimant, claimant))
+                  and not (since and m.get("joined_at") and str(m["joined_at"]) < since)]
+        if not states:
             continue
         if all(state in TERMINAL_STATES for state in states):
             ended.add(task["id"])
@@ -1377,7 +1389,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         dock_lines, dock_hits = tab_box(report, width, rows_high, navigation, color, unicode,
             members=members, primary=primary, previewed=previewed, preview=preview, teams=teams,
             everyone=everyone, labels=labels, main_attempt=main_attempt, automatic=automatic,
-            claims=claims, classify=classify)
+            claims=claims, classify=classify,
+            past=past_calls([c for calls in everyone.values() for c in calls] + unlinked, classify))
         top = len(lines)
         lines += dock_lines
         hits += [dict(hit, y=hit["y"] + top) for hit in dock_hits]
@@ -1387,6 +1400,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             navigation["box"] = {**navigation["box"], "y1": navigation["box"]["y1"] + top,
                                  "y2": navigation["box"]["y2"] + top}
             bands_hit.append(dict(navigation["box"], name="detail", x1=1, x2=width, step=3))
+    if body_drawn and not menu and navigation.get("tab") not in navigation.get("visible_tabs", []) + [None, "detail"] \
+            and footer[-hint_rows:] == hints:
+        # The hints were fitted before the dock fell back to Detail for a tab it does not show.
+        fitted_hints = footer_hints(navigation, width, managed, unicode, chosen_member, True)
+        footer[-hint_rows:] = fitted_hints[:hint_rows] + [""] * max(0, hint_rows - len(fitted_hints))
     if body_drawn and navigation.get("tab") == "debate" and not navigation.get("debate_view", {}).get("shown") and not menu:
         footer[-hint_rows:] = footer_hints(dict(navigation, debate_empty=True), width, managed, unicode, chosen_member, True)
     if not body_drawn:
@@ -1446,7 +1464,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
 
 def tab_box(report, width, rows, navigation, color=False, unicode=True, *, members=None,
             primary=None, previewed=None, preview=None, teams=None, everyone=None, labels=None,
-            main_attempt=None, automatic=False, claims=None, classify=None):
+            main_attempt=None, automatic=False, claims=None, classify=None, past=None):
     """The shared reading dock; hit rows are relative to the returned lines."""
     rows_high = rows if rows >= 3 else int(rows > 0)
     navigation.update(tab_strip_visible=bool(rows_high), tab_body_visible=rows_high >= 3)
@@ -1464,9 +1482,16 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
         everyone = {m["participant"]: [c for c in members if c.get("role") != "main" and
                     c.get("parent") in (m["participant"], m.get("attempt"))] for m in mains}
     teams = everyone if teams is None else teams
+    classify = call_classifier(report) if classify is None else classify
+    if past is None:
+        owners = {key for m in mains for key in (m["participant"], m.get("attempt")) if key}
+        past = past_calls([c for calls in everyone.values() for c in calls] +
+                          [m for m in members if m.get("role") != "main" and m.get("parent") not in owners], classify)
     preview = mapping(navigation.get("preview")) if preview is None else preview
     if previewed is None:
-        previewed = next((m for m in members if action(m) == preview.get("target")), None)
+        # Team rows include synthetic debate calls, which members never list.
+        previewed = next((m for m in members + [c for calls in everyone.values() for c in calls] + past
+                          if action(m) == preview.get("target")), None)
         if previewed is None and primary and rows_high >= 5 and not navigation.get("dismissed"):
             previewed, preview, automatic = primary, {"target": action(primary), "report": {}}, True
     if previewed and previewed.get("role") != "main" and not previewed.get("_native") and rows_high >= 3:
@@ -1501,8 +1526,6 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
         active = "detail"
     navigation["main_attempt"] = main_attempt
     claims = claims_by_main(report) if claims is None else claims
-    classify = call_classifier(report) if classify is None else classify
-    past = past_calls(members, everyone, classify)
     body, targets = detail(previewed, preview, width - 4, members, room, teams, everyone, labels,
                            claims=claims, classify=classify) if previewed else (
         ["No call selected · click a main or a call to see it here"], {})
@@ -1615,12 +1638,11 @@ TABS = (("detail", "Detail"), ("plan", "Plan"), ("debate", "Debate"), ("messages
         ("needs", "Needs you"))
 
 
-def past_calls(members, everyone, classify):
-    """Settled calls of every main and of calls with no known main, newest first; the board shows none of them."""
-    owners = {key for m in members if m.get("role") == "main" for key in (m["participant"], m.get("attempt")) if key}
-    pool = [c for calls in everyone.values() for c in calls]
-    pool += [m for m in members if m.get("role") != "main" and m.get("parent") not in owners]
-    unique = {action(c): c for c in pool if classify(c) == "past"}
+def past_calls(pool, classify):
+    """Settled calls of the shown pool, newest first; the board shows none of them.
+
+    Callers pass the calls their board draws from, so an attention-only board empties the list as a whole."""
+    unique = {action(c): c for c in pool if c.get("role") != "main" and classify(c) == "past"}
     return sorted(unique.values(), key=lambda c: (str(c.get("ended") or c.get("joined_at") or ""), c.get("seq", 0)),
                   reverse=True)
 
@@ -1644,10 +1666,16 @@ def past_body(past, width, capacity, navigation, labels, unicode):
     for call in past[first:first + page]:
         who = labels.get(call.get("participant")) or "%s %s" % (ROLES.get(call.get("role"), "Worker"), model_name(call))
         end = clock_stamp(call["ended"]) if call.get("ended") else call.get("_finished") or ""
-        tail = sep.join(part for part in (end_words(call, said(call["state"])), end) if part)
-        space = width - display_width(who + sep + sep + tail)
+        words = end_words(call, said(call["state"]))
         title = clean(call.get("title")) or "no task title"
-        text = sep.join([who] + ([fit(title, space)] if space >= 6 else []) + [tail])
+        # Narrow rows give up the role word, then the time, then the model before the task title: rows differ by task.
+        model = model_name(call)
+        for head, tail in ((who, (words, end)), (model, (words, end)), (model, (words,)), ("", (words,))):
+            tail = sep.join(p for p in tail if p)
+            space = width - display_width(head) - display_width(tail) - display_width(sep) * (bool(head) + bool(tail))
+            if space >= 10:
+                break
+        text = sep.join(p for p in (head, fit(title, space) if space >= 1 else "", tail) if p)
         rows.append((clipped(text, width), action(call), action(call) == selected))
     return rows
 
@@ -1760,7 +1788,9 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                 lines.append("")
             lines[-1] += ("  " if lines[-1] else "") + key
         return lines[:max(0, navigation.get("help_rows", 4))]
-    tab = navigation.get("tab") if tabs and navigation.get("tab_body_visible", True) and not navigation.get("detail") else None
+    # The dock falls back to Detail for a tab it does not show (an empty Past list, say); the hints follow the dock.
+    tab = navigation.get("tab") if tabs and navigation.get("tab_body_visible", True) and not navigation.get("detail") and \
+        navigation.get("tab") in navigation.get("visible_tabs", [navigation.get("tab")]) else None
     right = managed and (kind in {"result", "debate"} or navigation.get("preview") and
                         navigation["preview"].get("target", (None,))[0] in {"result", "debate"})
     contextual = (["Enter Expand", "f Open right", move + " Message", arrows + " Filter"] if tab == "messages" and navigation.get("message_has_call")
