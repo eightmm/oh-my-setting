@@ -376,7 +376,8 @@ def age_label(stamp, now=None):
 
 def inbox_items(report, unicode=True):
     """What the person must act on, newest first: failures, waits, broadcasts from mains, patches to admit."""
-    from room_view import closed_tasks, failure_handled, handled_results, main_names, main_state, nodes, readable
+    from room_view import (closed_tasks, failure_handled, handled_results, main_names, main_state, message_address,
+                           nodes, readable)
     members = nodes(report)
     titles = main_names(members)
     name = lambda m: MODEL_NAMES.get(m.get("model"), m.get("model")) or m.get("provider") or "unknown"
@@ -387,6 +388,11 @@ def inbox_items(report, unicode=True):
               for row in listing(attempts.get(key))}
     finalized, awaiting = mapping(report.get("finalized")), set(listing(report.get("awaiting_admission")))
     read_results, closed = handled_results(mapping(report.get("room"))), closed_tasks(report)
+    successors = mapping(report.get("message_successors"))
+    byid = {m["participant"]: m for m in members}
+    label = lambda m: clean(titles.get(m["participant"]) or name(m))
+    address = lambda ident: message_address(ident, members, successors,
+                                           lambda target: label(byid[target]) if target in byid else clean(target))
 
     def who(member):
         if member.get("role") == "main":
@@ -412,6 +418,8 @@ def inbox_items(report, unicode=True):
                       "who": who(member), "what": what + (": " + title if title and title != "Native task not recorded" else ""),
                       "style": style, "action": ("chat" if member.get("role") == "main" else "result", member["participant"]),
                       "row_id": ("call", member["participant"])})
+    from panel_messages import exited_mail
+    open_ids = {mapping(q).get("id") for q in listing(mapping(report.get("room")).get("open_questions"))}
     for index, message in enumerate(listing(mapping(report.get("room")).get("messages"))):
         sender = mains.get(message.get("sender"))
         if (sender and message.get("recipient") == "all" and message.get("message_kind") != "answer"
@@ -421,16 +429,25 @@ def inbox_items(report, unicode=True):
                           "who": who(sender), "what": "to all: " + clean(text, 80),
                           "style": "alert", "action": ("chat", sender["participant"]),
                           "row_id": ("message", str(message.get("id")) if message.get("id") else ("position", index))})
+        elif exited_mail(message, byid) and message.get("id") not in open_ids:
+            target = successors.get(message["recipient"], message["recipient"])
+            asker = byid.get(message.get("sender"), {})
+            items.append({"stamp": message.get("ts") or "", "glyph": "?" if message.get("message_kind") == "question" else ">",
+                          "who": ("Question" if message.get("message_kind") == "question" else "Message") +
+                                 " from " + (label(asker) if asker else clean(message.get("sender"))),
+                          "what": "to " + address(message["recipient"]) + ": " + clean(readable(message.get("text"), " "), 80),
+                          "style": "alert", "action": ("chat", target),
+                          "row_id": ("message", str(message.get("id")) if message.get("id") else ("position", index))})
     import room as room_module
-    byid = {m["participant"]: m for m in members}
     for index, question in enumerate(listing(mapping(report.get("room")).get("open_questions"))):
         question, minutes = mapping(question), room_module.age(mapping(question).get("ts")) // 60
         asker, target = byid.get(question.get("sender")), byid.get(question.get("recipient"))
-        if minutes * 60 >= room_module.PERSON_AFTER and asker and target and target.get("role") == "main":
-            label = lambda m: titles.get(m["participant"]) or name(m)
+        if (asker and target and target.get("role") == "main"
+                and (minutes * 60 >= room_module.PERSON_AFTER or target.get("state") in TERMINAL_STATES)):
+            recipient = successors.get(target["participant"], target["participant"])
             items.append({"stamp": question.get("ts") or "", "glyph": "?", "who": "Question from " + label(asker),
-                          "what": "to " + label(target), "style": "alert",
-                          "action": ("chat", target["participant"]),
+                          "what": "to " + address(target["participant"]), "style": "alert",
+                          "action": ("chat", recipient),
                           "row_id": ("question", str(question.get("id")) if question.get("id") else ("position", index))})
     failure_statuses = {"failed", "timeout", "timed_out", "error", "rejected", "unavailable", "failed_command",
                         "rpc_error", "persistence_failure", "absent", "archived", "busy", "invalid_timeout", "uncertain",

@@ -10198,6 +10198,138 @@ inbox_room = {"repo": {"name": "r"}, "collection": {"ok": True}, "finalized": {}
          "panel": {"role": "worker", "room_participant": "w2", "room_id": "inbox-room", "label": "Run migration"}},
         {"attempt_id": "a4", "state": "done", "updated_at": "2026-10-07T00:00:30Z",
          "panel": {"role": "worker", "room_participant": "w3", "room_id": "inbox-room", "label": "Write patch"}}]}}
+def exercise_exited_main_mail():
+    from copy import deepcopy
+    import json
+    from pathlib import Path
+    import subprocess
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import panel_messages
+    import room
+    import room_view
+    import terminal_panel as panel
+    from dashboard_projection import display_width
+    from panel_view import inbox_items, render
+
+    def main(ident, state="done", provider="claude", created="2026-10-10T00:00:00Z"):
+        return {"attempt_id": ident, "tool": "panel-main", "provider": provider, "state": state,
+                "terminal": state == "done", "created_at": created, "updated_at": created,
+                "refs": {"panel_role": "main", "panel_owner": provider,
+                         "panel_room_id": "mail", "panel_room_participant": ident}}
+
+    old, earlier = main("mail-old1"), main("mail-old2")
+    successor = main("mail-new1", "working", created="2026-10-11T00:00:00Z")
+    ledger = [old, earlier]
+    report = {"repo": {"name": "mail"}, "collection": {"ok": True},
+              "attempts": {"active_recent": [], "recent": []}, "room": {"id": "mail",
+              "participants": [{"participant": r["attempt_id"], "role": "main", "provider": "claude",
+                                "model": "claude-opus-5-5", "joined": True, "seq": i}
+                               for i, r in enumerate(ledger)] + [
+                  {"participant": "mail-reviewer", "role": "reviewer", "provider": "codex", "joined": True,
+                   "parent": old["attempt_id"], "model": "gpt-6.1-sol", "seq": 3}],
+              "call_results": {"mail-reviewer": {"exit": 0}}, "messages": [], "open_questions": []}}
+
+    def project():
+        report["attempts"]["recent"] = [dict(r, panel={"role": "main", "room_id": "mail",
+            "room_participant": r["attempt_id"]}) for r in ledger]
+        with patch.object(panel, "events", return_value=json.dumps(ledger)):
+            report["message_successors"] = room_view.message_successors("unused", room_view.nodes(report))
+
+    for ident, kind, target in (("mail-q", "question", "mail-old1"),
+                                ("mail-note", "note", "mail-old1"),
+                                ("result-mail-reviewer", "handoff", "mail-old1"),
+                                ("mail-other", "question", "mail-old2")):
+        report["room"]["messages"].append({"id": ident, "sender": "mail-reviewer", "recipient": target,
+            "targets": [target], "message_kind": kind, "pending_for": [target], "answered": False,
+            "text": "Call exit=0; verify\x1b[2J\u202e", "ts": "2026-10-10T00:00:00Z"})
+    report["room"]["open_questions"] = [{k: m[k] for k in ("id", "sender", "recipient", "ts")}
+                                         for m in report["room"]["messages"] if m["message_kind"] == "question"]
+    report["room"]["pending_messages"] = [{"id": m["id"], "pending_for": m["pending_for"]}
+                                            for m in report["room"]["messages"]]
+    report["room"]["message_count"] = 4
+
+    def surfaces(inherited=False):
+        before = deepcopy(report)
+        members = room_view.nodes(report)
+        items = inbox_items(report, False)
+        assert len(items) == 4, items
+        if inherited:
+            assert report["message_successors"] == {"mail-old1": "mail-new1", "mail-old2": "mail-new1"}
+            assert all(item["action"] == ("chat", "mail-new1") for item in items), items
+            assert all("#new1 (was #old" in item["what"] and "main exited" not in item["what"] for item in items)
+            assert room_view.message_pending(report["room"]["messages"][0], report["message_successors"]) == {"mail-new1"}
+        else:
+            assert not report["message_successors"]
+            assert all("(main exited)" in item["what"] for item in items), items
+        for glyphs in (True, False):
+            nav = {}
+            body = panel_messages.tab_body(report, 200, 20, nav, glyphs)
+            assert body[0][0] == "Filter: needs you (4)" and len(nav["message_ids"]) == 4, body
+            tagged = [line for line, action, _ in body if action and "unread" in line]
+            assert len(tagged) == room_view.live_unread(report, members, room_view.settler(report)[0]) == 4
+            assert all(("(was #old" if inherited else "(main exited)") in line for line in tagged), tagged
+            for columns, height in ((50, 18), (127, 40), (200, 60)):
+                screen = render(report, "codex", columns, height, unicode=glyphs, menu=True)
+                assert len(screen.splitlines()) <= height and all(display_width(line) <= columns for line in screen.splitlines())
+                board = render(report, "codex", columns, height, unicode=glyphs, view="tree", navigation={"tab": "messages"})
+                assert len(board.splitlines()) <= height and all(display_width(line) <= columns for line in board.splitlines())
+                assert ("Messages 4 unread" if columns >= 76 else "[ Msg 4 ]") in board, board
+                assert "\x1b" not in screen + board and (glyphs or (screen + board).isascii())
+        assert report == before, "display changed room evidence"
+
+    project()
+    surfaces()
+    ledger.append(successor)
+    report["room"]["participants"].append(dict(report["room"]["participants"][0], participant="mail-new1", seq=4))
+    project()
+    surfaces(True)
+    successor_nav = {"main_attempt": "mail-new1", "messages_view": {
+        "filter": 3, "selected": None, "open": None, "scroll": 0}}
+    body = panel_messages.tab_body(report, 200, 20, successor_nav, False)
+    assert body[0][0] == "Filter: to/from me (4)", body
+    old_nav = {"main_attempt": "mail-old1", "messages_view": {
+        "filter": 3, "selected": None, "open": None, "scroll": 0}}
+    assert panel_messages.tab_body(report, 200, 20, old_nav, False)[0][0] == "Filter: to/from me (0)"
+    with patch.object(room, "age", return_value=0):
+        assert len(inbox_items(report)) == 4, "an exited main's fresh question vanished"
+    # Snapshot reads full main lifecycle evidence outside the dashboard's capped rows.
+    with patch.object(panel, "dashboard", return_value=(dict(report, attempts={"recent": [], "active_recent": []}), 0)), \
+            patch.object(room, "status", return_value=deepcopy(report["room"])), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "main_activity", return_value={}), \
+            patch.object(panel, "events", return_value=json.dumps(ledger)), \
+            patch.object(panel, "awaiting_admission", return_value=[]), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "{}", "")):
+        collected, status = panel.snapshot(Path("."), "mail", _tick=SimpleNamespace(attempts=lambda: ledger))
+    assert status == 0 and collected["message_successors"] == report["message_successors"], collected
+    assert len(inbox_items(collected)) == 4
+    # Unproven, foreign, later and ambiguous predecessors never change recipient ownership.
+    for changed in (dict(old, terminal=None), dict(old, provider="codex"),
+                    dict(old, created_at="2026-10-12T00:00:00Z"), dict(old, state="working", terminal=False)):
+        ledger[0] = changed
+        project()
+        assert "mail-old1" not in report["message_successors"], (changed, report)
+    ledger[0] = old
+    ledger.append(dict(successor))
+    project()
+    assert not report["message_successors"], "duplicate attempt evidence reassigned mail"
+    ledger.pop()
+    # A resumed participant is already the recipient; normal live-main rows retain their existing presentation.
+    ledger[:] = [dict(old, state="working", terminal=False)]
+    report["room"]["participants"] = report["room"]["participants"][:1] + [report["room"]["participants"][2]]
+    report["room"]["messages"] = report["room"]["messages"][:3]
+    report["room"]["open_questions"] = report["room"]["open_questions"][:1]
+    project()
+    items = inbox_items(report, False)
+    assert len(items) == 1 and items[0]["what"] == "to Opus 5.5" and items[0]["action"] == ("chat", "mail-old1"), items
+    nav = {}
+    body = panel_messages.tab_body(report, 200, 20, nav, False)
+    assert body[0][0] == "Filter: needs you (1)" and nav["message_ids"] == ["mail-q"], body
+    assert "main exited" not in str(items) + str(body) and "(was #" not in str(items) + str(body)
+    print("exited-main mail: markers, succession, unread/filter agreement, bounded safe rendering and live-main invariants passed")
+
+exercise_exited_main_mail()
 nav = {}
 inbox = render(inbox_room, "codex", 100, 28, menu=True, navigation=nav)
 assert "Needs you" in inbox and "Nothing needs you" not in inbox and "Press 1" not in inbox and "START" not in inbox, inbox

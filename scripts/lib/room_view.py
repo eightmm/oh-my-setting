@@ -353,12 +353,48 @@ def live_readers(report, members, settled):
                                                and m.get("state") in reading and not settled(m)}
 
 
+def message_successors(repo, members):
+    """Display-only succession uses the continuation validator, never room consumption."""
+    from terminal_panel import lineage_ids
+    mains = [m for m in members if m.get("role") == "main"]
+    histories = [(m, lineage_ids(repo, m.get("provider"), m["participant"], m.get("attempt")))
+                 for m in mains if m.get("attempt") and m.get("state") not in TERMINAL_STATES]
+    output = {}
+    for old in mains:
+        if old.get("state") not in TERMINAL_STATES or not old.get("attempt"):
+            continue
+        successors = [m["participant"] for m, parents in histories if old["attempt"] in parents]
+        if len(successors) == 1:
+            output[old["participant"]] = successors[0]
+    return output
+
+
+def message_pending(message, successors):
+    return {successors.get(ident, ident) for ident in listing(mapping(message).get("pending_for"))}
+
+
+def message_address(recipient, members, successors, name_of):
+    """Keep the original main visible when mail moves, or when it has nobody to read it."""
+    target = successors.get(recipient, recipient)
+    label = name_of(target)
+    if target != recipient:
+        tail = "#" + str(target)[-4:]
+        if tail not in label:
+            label += " " + tail
+        label += " (was #" + str(recipient)[-4:] + ")"
+    elif any(m.get("participant") == recipient and m.get("role") == "main"
+             and m.get("state") in TERMINAL_STATES for m in members):
+        label += " (main exited)"
+    return clean(label, 200)
+
+
 def live_unread(report, members, settled):
     """Unread messages for live readers; a capped projection renders its lower bound as N+."""
     ids = live_readers(report, members, settled)
     room = mapping(report.get("room"))
+    successors = mapping(report.get("message_successors"))
     projected = "pending_messages" in room
-    count = sum(bool(ids.intersection(listing(mapping(message).get("pending_for"))))
+    count = sum(bool(ids.intersection(message_pending(message, successors)))
                 for message in listing(room.get("pending_messages" if projected else "messages")))
     return "%s+" % count if projected and room.get("pending_messages_truncated") else count
 

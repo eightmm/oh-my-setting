@@ -3282,6 +3282,7 @@ def snapshot(repo, room_id=None, _tick=None):
         state.pop("room", None)
         state.pop("land", None)
         state.pop("completed_tasks", None)
+        state.pop("message_successors", None)
         try:
             # A receipt that says running proves nothing; only the probed lock (active) does.
             run = subprocess.run(["bash", str(ENTRY), "land", "status", "--repo", str(repo), "--json"],
@@ -3345,11 +3346,11 @@ def snapshot(repo, room_id=None, _tick=None):
                 state["main_activity"] = {who: row for who, row in main_activity(
                     repo, state["room"]["participants"], rows).items() if row.get("room") == ident}
                 try:
-                    # Calls outside the 8 + 8 row dashboard projection keep their real state from the full projection.
+                    # Members outside the 8 + 8 row dashboard projection keep their real state from the full projection.
                     rows = _tick.attempts()
                     if isinstance(rows, list):
                         calls = {m["participant"]: m.get("role") for m in state["room"]["participants"]
-                                 if m.get("joined") and m.get("role") != "main"}
+                                 if m.get("joined")}
                         linked = {}
                         for row in rows:
                             # The ledger keeps panel identity in refs; the dashboard projection lifts it into "panel".
@@ -3363,6 +3364,12 @@ def snapshot(repo, room_id=None, _tick=None):
                         state["room_attempts"] = linked
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
+                try:
+                    # Succession is display-only; a lineage read failure leaves mail with its original main.
+                    from room_view import message_successors, nodes
+                    state["message_successors"] = message_successors(repo, nodes(state))
+                except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
+                    state.pop("message_successors", None)
                 try:
                     import panel_chats
                     state["native_advisors"] = panel_chats.native_advisors(state["room"]["participants"])

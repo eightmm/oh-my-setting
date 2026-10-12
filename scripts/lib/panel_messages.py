@@ -57,23 +57,26 @@ def _people(report, navigation):
     return name_of, mains, me, members
 
 
-def _rows(messages, name_of, now=None, members=(), readers=(), width=100, unicode=True, mains=()):
+def _rows(messages, name_of, now=None, members=(), readers=(), width=100, unicode=True, mains=(), successors=None):
+    from room_view import message_address, message_pending
+    successors = mapping(successors)
     index = {m["participant"]: m for m in members}
     rows = []
     for raw in messages:
         m = mapping(raw)
         text = readable_text(m.get("text"))
         kind = clean(m.get("message_kind"), 20) or "note"
-        pending = bool(set(listing(m.get("pending_for"))) & set(readers))
+        pending = bool(message_pending(m, successors) & set(readers))
         targets = listing(m.get("targets"))
         sender = m.get("sender")
         recipient = m.get("recipient") or (targets[0] if len(targets) == 1 else "all")
+        addressed = message_address(recipient, members, successors, name_of)
         if len(mains) == 1 and sender in mains:
-            route = name_of(recipient)
-        elif len(mains) == 1 and recipient in mains:
+            route = addressed
+        elif len(mains) == 1 and recipient in mains and addressed == name_of(recipient):
             route = name_of(sender)
         else:
-            route = name_of(sender) + (" → " if unicode else " -> ") + name_of(recipient)
+            route = name_of(sender) + (" → " if unicode else " -> ") + addressed
         first = next((line for line in text.splitlines() if line.strip()), "")
         # The mark is the read state: filled for unread, hollow once read.
         mark = ("●" if pending else "○") if unicode else ("*" if pending else "-")
@@ -97,7 +100,8 @@ def _rows(messages, name_of, now=None, members=(), readers=(), width=100, unicod
         rows.append({"id": str(m.get("id")), "line": line, "text": text, "message": m,
                      "unread": pending, "sender": sender, "first": clean(first, 300),
                      "call": ("result", sender) if member and member.get("role") != "main" else None,
-                     "people": {sender, m.get("recipient"), *targets}})
+                     "people": {sender, successors.get(recipient, recipient),
+                                *(successors.get(t, t) for t in targets)}})
     return rows
 
 
@@ -115,6 +119,14 @@ def routine(message, room, index, own_notes=True):
             or own_notes and sender.get("role") != "main" and sender.get("parent")
             and message.get("message_kind") == "note"
             and (message.get("recipient") == sender["parent"] or targets == [sender["parent"]]))
+
+
+def exited_mail(message, index):
+    from panel_view import TERMINAL_STATES
+    target = index.get(message.get("recipient"), {})
+    return (target.get("role") == "main" and target.get("state") in TERMINAL_STATES
+            and message.get("message_kind") not in {"answer", "status"} and not message.get("answered")
+            and target.get("participant") in listing(message.get("pending_for")))
 
 
 def call_rows(rows, members, name_of, room, width, unicode=True):
@@ -195,9 +207,10 @@ def tab_body(report, width, cap, navigation, unicode=True):
         filters.append(("to/from me", me))
     state["filter"] = state.get("filter", 0) % len(filters)
     label, person = filters[state["filter"]]
-    rows = _rows(messages, name_of, members=members, readers=readers, width=width, unicode=unicode, mains=mains)
+    rows = _rows(messages, name_of, members=members, readers=readers, width=width, unicode=unicode, mains=mains,
+                 successors=mapping(report.get("message_successors")))
     if label == "needs you":
-        rows = [r for r in rows if not routine(r["message"], room, index)]
+        rows = [r for r in rows if exited_mail(r["message"], index) or not routine(r["message"], room, index)]
     elif label == "by call":
         rows = call_rows(rows, members, name_of, room, width, unicode)
     elif person:
