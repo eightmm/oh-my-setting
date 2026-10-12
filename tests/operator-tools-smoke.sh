@@ -50,6 +50,8 @@ OMS_FIXTURE_REPO="$repo" OMS_FIXTURE_BASE="$base_sha" OMS_FIXTURE_PID="$$" \
 python3 - <<'PY'
 import hashlib
 import json
+import io
+import inspect
 import os
 from pathlib import Path
 
@@ -897,6 +899,43 @@ sys.path.insert(0, sys.argv[1])
 import panel_cache as cache
 import panel_results
 import terminal_panel as panel
+
+# Compact line views stay readable without adding room scans.
+room_rows = [{"id": "room-current", "title": "Shared work", "closed": False,
+              "participants": [{"participant": "main-live", "joined": True, "role": "main"},
+                               {"participant": "main-idle", "joined": True, "role": "main"}],
+              "messages": [{"pending_for": ["a", "b"], "ts": "2026-10-12T00:00:00+00:00"}]}]
+room_text = "\n".join(panel.room_listing(room_rows, "room-current", 200, now=1791763320,
+                                          live_participants={"main-live"}))
+assert "* 1 room-current" in room_text and "1 live mains" in room_text and "2 unread" in room_text, room_text
+assert "last 2m ago / open" in room_text, room_text
+
+with patch.object(panel.shutil, "get_terminal_size", return_value=os.terminal_size((57, 24))), \
+        patch("sys.stdout", new=io.StringIO()) as provider_text:
+    panel.show_providers([{"provider": "fixture", "installed": True, "access": ["read"],
+                           "native_launch": False, "exact_model_override": True, "models": []}])
+provider_lines = provider_text.getvalue().splitlines()
+assert all(len(line) <= 57 for line in provider_lines), provider_lines
+assert not any(line.endswith("supp") or line == "    lied" for line in provider_lines), provider_lines
+
+with patch.object(panel, "terminal_style", return_value=(True, False, False)), \
+        patch("sys.stdout", new=io.StringIO()) as clear_text:
+    panel.clear_control_view()
+assert clear_text.getvalue() == "\033[H\033[2J"
+with patch.object(panel, "terminal_style", return_value=(False, False, False)), \
+        patch("sys.stdout", new=io.StringIO()) as plain_text:
+    panel.clear_control_view()
+assert plain_text.getvalue() == ""
+
+empty_prompts = []
+with patch.object(panel, "results", return_value={"rows": []}), \
+        patch.object(panel, "clear_control_view"), patch.object(panel, "render_results", return_value="empty"), \
+        patch.object(panel, "read_field", side_effect=lambda label, required=False: empty_prompts.append(label) or ""):
+    panel.browse_results(Path("."))
+assert empty_prompts == ["Enter to return: "], empty_prompts
+capacity_source = inspect.getsource(panel.interactive)
+assert "Enter returns to controls; 9 refreshes" not in capacity_source
+assert 'read_field("Enter to return / 9 Refresh: "' in capacity_source
 
 project = Path(sys.argv[2]) / 'shared-panel'
 (project / '.oms/hooks').mkdir(parents=True)

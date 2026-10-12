@@ -3,6 +3,7 @@
 
 import argparse
 from contextlib import nullcontext
+import datetime
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ import sys
 import time
 import threading
 import tempfile
+import textwrap
 from typing import NamedTuple
 import room
 import uuid
@@ -292,14 +294,54 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
 
 
 def show_providers(rows):
-    print("Registered CLI calls (room delivery: polling / installed hook safe points):")
+    clear_control_view()
+    width = max(1, shutil.get_terminal_size().columns)
+    heading = "Registered CLI calls (room delivery: polling / installed hook safe points):"
+    print(textwrap.fill(heading, width=width, break_long_words=False, break_on_hyphens=False))
     for row in rows:
         status = "installed" if row["installed"] else "absent"
         native = " / native launch" if row["native_launch"] else ""
         models = (", ".join(row["models"][:4]) or "exact model must be supplied"
                   if row["exact_model_override"] else "native profile controls the model")
-        print("  %s: %s / %s%s / %s" % (row["provider"], status, "/".join(row["access"]), native,
-                                             clean(models, 180)))
+        line = "  %s: %s / %s%s / %s" % (row["provider"], status, "/".join(row["access"]), native,
+                                         clean(models, 180))
+        print(textwrap.fill(line, width=width, subsequent_indent="    ",
+                            break_long_words=False, break_on_hyphens=False))
+
+
+def clear_control_view():
+    """Put a line-oriented control view above the board only on an interactive terminal."""
+    if terminal_style()[0]:
+        print("\033[H\033[2J", end="", flush=True)
+
+
+def room_listing(rooms, current, width, now=None, live_participants=None):
+    """Format bounded discovery snapshots without reading rooms again."""
+    from panel_view import clipped
+    now = time.time() if now is None else now
+    lines = []
+    for index, shared in enumerate(rooms, 1):
+        participants = shared.get("participants", [])
+        mains = sum(bool(p.get("joined")) and p.get("role") == "main" and
+                    p.get("participant") in (live_participants or set()) for p in participants)
+        unread = sum(len(message.get("pending_for", [])) for message in shared.get("messages", []))
+        messages = shared.get("messages", [])
+        age = "no messages"
+        if messages and messages[-1].get("ts"):
+            try:
+                stamp = datetime.datetime.fromisoformat(messages[-1]["ts"].replace("Z", "+00:00")).timestamp()
+                seconds = max(0, int(now - stamp))
+                age = ("%dm ago" % (seconds // 60) if seconds < 3600 else
+                       "%dh ago" % (seconds // 3600) if seconds < 86400 else "%dd ago" % (seconds // 86400))
+            except (ValueError, TypeError, OverflowError):
+                age = "age unknown"
+        marker = "*" if shared.get("id") == current else " "
+        state = "closed" if shared.get("closed") else "open"
+        title = clean(shared.get("title") or "Untitled", 120)
+        line = "%s %s %s / %s / %d live mains / %d unread / last %s / %s" % (
+            marker, index, clean(shared.get("id", ""), 128), title, mains, unread, age, state)
+        lines.append(clipped(line, width))
+    return lines
 
 
 def repository(value):
@@ -4448,15 +4490,17 @@ def browse_results(repo):
     while True:
         report = results(repo)
         width = shutil.get_terminal_size().columns
+        clear_control_view()
         print(render_results(report, width, compact=True))
         rows = report.get("rows", [])
-        choice = read_field("Result number (Enter to return): ", required=False)
+        choice = read_field("Result number (Enter to return): " if rows else "Enter to return: ", required=False)
         if not choice:
             return
         if len(choice) > 3 or not choice.isascii() or not choice.isdigit() or not 1 <= int(choice) <= len(rows):
             print("Choose a listed result number.")
             continue
         task_id = rows[int(choice) - 1]["task_id"]
+        clear_control_view()
         print(render_results(results(repo, task_id), width))
         read_field("Press Enter to return to the result list: ", required=False)
 
@@ -4468,6 +4512,7 @@ def browse_chats(repo):
         raise ValueError("select an existing room first")
     while True:
         report = panel_chats.catalog(repo, ident)
+        clear_control_view()
         print(panel_chats.text(report))
         choice = read_field("Chat number (a<number> for Codex app, Enter to return): ", required=False)
         if not choice:
@@ -4677,6 +4722,7 @@ def interactive(repo, view="auto", attention_only=False):
                 continue
             if choice == "?":
                 width = max(1, shutil.get_terminal_size().columns)
+                clear_control_view()
                 print("\n".join(menu_rows(width, 40, terminal_style()[2], expanded=True, managed=managed_session(), occupied=navigation.get("main_occupied", True), installed=navigation.get("installed"))))
                 read_field("Press Enter to return to the panel: ", required=False)
                 continue
@@ -4692,7 +4738,8 @@ def interactive(repo, view="auto", attention_only=False):
                     report["private_capacity"] = private_capacity(repo)
                     report["dead_mains"] = panel_release.dead_mains(repo, _tick=TickReads(repo))
                     size = shutil.get_terminal_size((100, 28))
-                    print(panel_health.render(report, size.columns, size.lines, footer="Enter returns to controls; 9 refreshes"))
+                    clear_control_view()
+                    print(panel_health.render(report, size.columns, size.lines))
                     if read_field("Enter to return / 9 Refresh: ", required=False) != "9":
                         break
                     state, status = snapshot(repo)
@@ -4807,9 +4854,16 @@ def interactive(repo, view="auto", attention_only=False):
                 try:
                     rooms, incomplete = room.discover(repo)
                     width = max(1, shutil.get_terminal_size().columns)
-                    from panel_view import clipped
-                    for index, shared in enumerate(rooms, 1):
-                        print(clipped("%s %s / %s" % (index, shared["id"], shared.get("title") or "Untitled"), width))
+                    from panel_view import LIVE_STATES, clipped
+                    attempts = cache.get("state", {}).get("attempts", {})
+                    live = {ident for row in attempts.get("active_recent", []) + attempts.get("recent", [])
+                            if (row.get("panel") or {}).get("role") == "main" and
+                            row.get("state") in LIVE_STATES | {"review", "waiting_input", "waiting_approval"}
+                            for ident in (row.get("attempt_id"), (row.get("panel") or {}).get("room_participant"))
+                            if ident}
+                    clear_control_view()
+                    for line in room_listing(rooms, os.environ.get("OMS_ROOM_ID"), width, live_participants=live):
+                        print(line)
                     if incomplete:
                         print(clipped("Room scan incomplete; some rooms are unknown", width))
                     choice_room = read_field("Room number / n New / Enter Cancel: ", required=False)
