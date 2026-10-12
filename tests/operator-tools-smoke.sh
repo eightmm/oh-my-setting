@@ -8241,8 +8241,74 @@ with patch.dict(os.environ, {}):
         with bound(asked_all, "m1"), patch.object(room, "carry", side_effect=answering):
             moved = room.rollover(where, asked_all, "m1")
         assert room.status(where, moved)["carried"] and not room.status(where, moved)["open_questions"]
+        # Its next rollover still carries that answer, though each carry narrowed the question's audience.
         with bound(asked_all, "m1"):
             room.send(where, asked_all, "m1", "m2", "Still writable", "note")
+            chained = room.rollover(where, moved, "m1")
+        assert room.status(where, chained)["carried"] and not room.status(where, chained)["open_questions"]
+        assert answers[0]["id"] in {m["id"] for m in room.messages(where, chained)}
+        # A carried broadcast reaches only its audience on a cursored read too: a main that rejoined after it reads
+        # its own carried mail page by page and acknowledges all of it at once.
+        paged = fresh("m1", "m2", "m3")
+        notes = [room.send(where, paged, "m1", "m3", "Note %d" % n, "note")["id"] for n in range(3)]
+        room.append(where, paged, {"kind": "leave", "participant": "m3"}, "Participant left")
+        room.send(where, paged, "m1", "all", "Before m3 came back", "note")
+        room.join(where, paged, "m3", "codex", "main")
+        with bound(paged, "m1"):
+            moved = room.rollover(where, paged, "m1")
+        with bound(paged, "m3"):
+            page = room.updates(where, moved, "m3", limit=2)
+            rest = room.updates(where, moved, "m3", page["cursor"])
+            read = [r["room_event"]["id"] for r in page["turns"] + rest["turns"]]
+            assert page["has_more"] and read == notes, (page, rest)
+            room.acknowledge(where, moved, "m3", read)
+        # Nobody else takes the id of a rollover's note that unread mail stayed behind, so that note always lands.
+        hidden = fresh("m1", "m2", calls=[("call-h", "m1")])
+        note = "rollover-unread-" + hashlib.sha256(hidden.encode()).hexdigest()[:12]
+        worker = patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1", "OMS_ROOM_ID": hidden,
+                                         "OMS_ROOM_PARTICIPANT": "call-h", "OMS_ROOM_REPO": str(where)})
+        for who, acting in (("call-h", worker), ("m2", bound(hidden, "m2"))):
+            with acting:
+                try:
+                    room.send(where, hidden, who, "m1", "Harmless progress", "note", message_id=note)
+                except ValueError as error:
+                    assert "reserved for a rollover" in str(error), error
+                else:
+                    raise AssertionError("a participant took the id of a rollover's note")
+        for n in range(3):
+            room.send(where, hidden, "m1", "m2", "Unread %d" % n, "note")
+        with bound(hidden, "m1"), patch.object(room, "MESSAGE_RESERVE", 1):
+            moved = room.rollover(where, hidden, "m1")
+        landed = next(m for m in room.messages(where, moved) if m["id"] == note)
+        assert landed["sender"] == "m1" and "m2" in landed["targets"], landed
+        # Native sessions handed on between the first carry and the seal are released before they are taken: a
+        # main rebinds onto another main's old session, and a session dropped by a main that rejoined without
+        # one goes to a new main.
+        handed = fresh("m1", "m2", "x3")
+        s1, s2, sx = (member(handed, who)["consumer"] for who in ("m1", "m2", "x3"))
+        handoffs = []
+        def handing(repo, state, target, bounded=True):
+            moved = real_carry(repo, state, target, bounded)
+            if not handoffs:
+                handoffs.append(handed)
+                with bound(handed, "m2"):
+                    room.bind(where, handed, "m2", "sess-three", replaces=s2)
+                with bound(handed, "m1"):
+                    room.bind(where, handed, "m1", "sess-%s-m2" % handed, replaces=s1)
+                room.append(where, handed, {"kind": "leave", "participant": "x3"}, "Participant left")
+                room.join(where, handed, "y4", "claude", "main", native_session="sess-%s-x3" % handed)
+                room.join(where, handed, "x3", "codex", "main")
+            return moved
+        with bound(handed, "m1"), patch.object(room, "carry", side_effect=handing):
+            moved = room.rollover(where, handed, "m1")
+        people = {p["participant"]: p for p in room.status(where, moved)["participants"]}
+        assert room.status(where, moved)["carried"] and people["m1"]["consumer"] == s2, people
+        assert people["m2"]["consumer"] == hashlib.sha256(b"sess-three").hexdigest()[:32], people["m2"]
+        assert people["y4"]["consumer"] == sx and not people["x3"].get("consumer"), people
+        assert room.selected(where, sx) == (moved, "y4")
+        for who in ("m1", "m2"):
+            with bound(handed, who):
+                room.send(where, handed, who, "x3", "Still writable", "note")
         # A worker's flood of open questions to its parent does not block the rollover.
         flooded = fresh("m1", calls=[("call-w", "m1")])
         worker_env = {"OMS_HARNESS_CHILD": "1", "OMS_ROOM_ID": flooded, "OMS_ROOM_PARTICIPANT": "call-w",

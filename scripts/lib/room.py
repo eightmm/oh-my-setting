@@ -609,6 +609,9 @@ def validate_event(rows, event, text, repo=None):
                 or participant(state, event["sender"]).get("parent") != recipient):
             # result-<call> ids are reserved for a call's own handoff to its parent, which settles it on the board.
             raise ValueError("result-<participant> ids are reserved for that participant's handoff to its parent")
+        if str(event["id"]).startswith("rollover-unread-") and not carry:
+            # The rollover's note that unread mail stayed behind is skipped when its id exists, so nobody else takes it.
+            raise ValueError("rollover-unread- ids are reserved for a rollover's note")
         old = next((m for m in state["messages"] if m["id"] == event["id"]), None)
         if not old and message_capacity_reached(state):
             raise ValueError("room message limit reached; start a new bounded room")
@@ -621,8 +624,12 @@ def validate_event(rows, event, text, repo=None):
             if (carry and original and event["sender"] not in original["targets"] and repo is not None
                     and state["predecessor"]):
                 # A broadcast carried before its finished call answered it holds the audience carried then; the
-                # sealed log holds the one it was sent to.
-                original = _lineage_messages(repo, state, [event["reply_to"]]).get(event["reply_to"])
+                # sealed log it was sent in holds the one it was sent to, however many rollovers narrowed it since.
+                for earlier in _lineage(repo, state["id"]):
+                    original = next((m for m in project(records(repo, earlier))["messages"]
+                                     if m["id"] == event["reply_to"]), None)
+                    if not original or event["sender"] in original["targets"]:
+                        break
             if (not original or event["sender"] not in original["targets"]
                     or event["recipient"] != original["sender"]):
                 raise ValueError("reply must return to the sender of a message addressed to this participant")
@@ -819,14 +826,30 @@ def carry_plan(state, current=None, bounded=True):
     writes = [({"kind": "leave", "participant": who}, "Participant left", None) for who in gone]
     held = {members[w].get("consumer") for w in keep} | {
         p.get("consumer") for w, p in there.items() if p["joined"] and w not in gone}
+    # Sessions each member holds in current as the writes so far leave it: a member waits while another still
+    # holds the session it moves to, so a session handed from one member to another is released before it is taken.
+    holding = {w: p.get("consumer") for w, p in there.items() if p["joined"] and w not in gone}
+    queue = []
     for p in order:
         who = p["participant"]
-        # Only a Codex/Claude main takes a native bind; any other member rejoins with its current session.
+        # Only a Codex/Claude main takes a native bind; any other member, or one left without a session, rejoins.
         bindable = p["role"] == "main" and p["provider"] in {"codex", "claude"}
         now = there.get(who) if who in present else None
-        if now is not None and not bindable and p.get("consumer") and now.get("consumer") != p["consumer"]:
+        if now is not None and now.get("consumer") != p.get("consumer") and (not bindable or not p.get("consumer")):
             writes.append(({"kind": "leave", "participant": who}, "Participant left", None))
+            holding.pop(who, None)
             now = None
+        queue.append((p, now, bindable))
+
+    def ready(entry):
+        p, now, _ = entry
+        taken = {c for w, c in holding.items() if c and w != p["participant"]}
+        return p.get("consumer") not in taken and (now is not None or not p.get("parent") or p["parent"] in holding)
+    while queue:
+        # With no member ready the sessions form a cycle; its first write is refused as before.
+        p, now, bindable = queue.pop(next((i for i, entry in enumerate(queue) if ready(entry)), 0))
+        who = p["participant"]
+        holding[who] = p.get("consumer")
         if now is None:
             event = {"kind": "join", "participant": who, "provider": p["provider"], "role": p["role"],
                      "model": p.get("model"), "label": p["label"], "owns": list(p.get("owns", []))}
@@ -1151,10 +1174,11 @@ def scope(repo, ident, who, owns):
 
 
 def visible(row, who, joined_seq=0):
+    # A carried broadcast follows every carried join, so its audience, not the join order, says who it reached.
     event = row.get("room_event", {})
     return (event.get("kind") == "message" and event.get("message_kind") != "status"
             and row.get("seq", 0) > joined_seq and event.get("sender") != who
-            and event.get("recipient") in ("all", who))
+            and event.get("recipient") in ("all", who) and who in event.get("audience", [who]))
 
 
 def updates(repo, room, who, after="", budget=8192, limit=50, *, state=None):
