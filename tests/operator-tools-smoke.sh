@@ -11081,8 +11081,11 @@ dock_mail["room"].update(closed=False, messages=[{"sender": "advisor", "targets"
 for surface in ("graph", "tree"):
     mail_control_nav = {"surface": surface, "tab": "detail", "preview": {"target": ("chat", "main-1")}}
     with patch.object(panel.room, "status", return_value=dock_mail["room"]), \
+            patch.object(panel.panel_messages, "read", return_value=dock_mail["room"]["messages"]) as mail_log, \
             patch.object(panel.room, "acknowledge", side_effect=AssertionError("control acknowledged mail")):
         choice, text = dock_read(mail_control_nav, state=dock_mail, batches=[[('f',)], [('q',)]])
+    # The reader page comes from the whole bounded log, not the status window.
+    assert mail_log.called, "mail reader skipped the full log"
     assert choice == "9" and "LAST MAIL LINE" in text and "```bash" in text and "|------|-------|" in text, text
     assert mail_control_nav.get("offset") == 0 and "detail" not in mail_control_nav
     empty_control_nav = {"surface": surface, "tab": "detail", "preview": {"target": ("chat", "main-1")}}
