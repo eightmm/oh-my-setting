@@ -134,7 +134,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             status += sep + "? %s open" % open_count(room, main["participant"])
         context = context_note(report, main)
         if context:
-            status += sep + "c%s%%" % context[0]
+            status += sep + "ctx %s%% used" % context[0]
         add(label if width < 60 else label + sep + status, "dim" if state == "idle" else "codex" if main.get("provider") == "codex" else "main",
             action, bool(attached))
         if width < 60:

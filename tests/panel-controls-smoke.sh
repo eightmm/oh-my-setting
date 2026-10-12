@@ -247,16 +247,25 @@ with patch("subprocess.run", side_effect=AssertionError("health projection execu
     data = panel_health.project(report)
     check(data["level"] == "full" and any(r["label"] == "Room messages" and r["status"] == "full" for r in data["items"]),
           "full room/slot limits not reported")
-    check(next(r for r in data["items"] if r["label"] == "Codex reported weekly use")["status"] == "unknown",
+    check(next(r for r in data["items"] if r["label"] == "Codex weekly left")["status"] == "unknown",
           "unavailable quota became a reading")
+    claude_quota = next(r for r in data["items"] if r["label"] == "Claude weekly left")
+    check(claude_quota["used"] == 5 and claude_quota["status"] == "warning",
+          "weekly remaining quota did not preserve the 90% warning threshold")
+    untouched_quota = panel_health.project({"collection": {"ok": True}, "provider_status": {
+        "claude": {"weekly_used": 0, "source": "HUD"}}})
+    untouched = next(r for r in untouched_quota["items"] if r["kind"] == "quota")
+    check(untouched["used"] == 100 and untouched["status"] == "ok",
+          "unused weekly quota was treated as a full quota")
     for width, height in ((1, 1), (15, 5), (40, 12), (40, 30), (100, 40)):
         text = panel_health.render(report, width, height)
         check(len(text.splitlines()) <= height and all(display_width(line) <= width for line in text.splitlines()),
               "capacity view exceeded its viewport")
         if (width, height) == (40, 30):
-            claude = next(line for line in text.splitlines() if "Claude main" in line)
-            check("%" in claude and "[" in claude and "Codex" not in text and "Main: 1 live" in text,
+            claude = next(line for line in text.splitlines() if "Claude context" in line)
+            check("97% used" in claude and "[" in claude and "Codex" not in text and "Main: 1 live" in text,
                   "capacity values/providers/main count were not readable")
+            check("5% left [warning] Claude weekly" in text, "weekly quota was not rendered as left")
     pi_report = dict(report, room={"participants": [{"participant": "pi-main", "role": "main", "joined": True,
                                                     "provider": "codex"}]}, attempts={"active_recent": [{
         "attempt_id": "pi-main", "state": "working", "panel": {"role": "main", "harness": "pi"}}]})
@@ -298,7 +307,7 @@ with patch.dict(os.environ, {"TMUX": "/tmp/x,1,0", "TMUX_PANE": "%999", "OMS_PAN
     check(terminal_panel.interactive(Path("repo")) == 0, "capacity control did not return")
     check(snapshots.call_count == 1 and readings.call_count == private.call_count == dead.call_count == 2,
           "9 did not re-collect all capacity readings")
-    check("3% left" in capacity_output.getvalue() and "32% left" in capacity_output.getvalue(),
+    check("97% used" in capacity_output.getvalue() and "68% used" in capacity_output.getvalue(),
           "9 did not redraw changed capacity values")
 check(TerminalInput().decode(b"\x0cku0") == [("repaint",), ("k",), ("u",), ("0",)], "capacity/repaint keys unavailable")
 

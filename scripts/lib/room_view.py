@@ -196,7 +196,7 @@ def open_count(room, participant):
 
 
 def context_note(report, member):
-    """(percent, 'dim'|None|'alert') of the context left for this main, from the reading the board already collected."""
+    """(percent used, 'dim'|None|'alert') for this main's collected context reading."""
     if member.get("role") != "main":
         return None
     row = mapping(mapping(report.get("provider_status")).get(member.get("provider")))
@@ -204,7 +204,8 @@ def context_note(report, member):
         return None
     from panel_metrics import percent
     left = percent(row.get("context_left"))
-    return None if left is None else (left, "dim" if left > 30 else "alert" if left <= 15 else None)
+    used = None if left is None else 100 - left
+    return None if used is None else (used, "alert" if used >= 85 else "dim" if used < 70 else None)
 
 
 def main_names(members):
@@ -1384,7 +1385,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             ctx = context_note(report, m)
             if ctx:
                 status += "".join((" · " if unicode else " / ") + part for part in
-                                  ["ctx %s%%" % ctx[0]] + ["compact soon"] * (ctx[1] == "alert"))
+                                  ["ctx %s%% used" % ctx[0]] + ["compact soon"] * (ctx[1] == "alert"))
             if m.get("role") != "main" and primary and not sole_live:
                 status += " · for " + clean(name_of(primary))
             task = task_of(m)

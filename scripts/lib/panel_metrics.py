@@ -157,13 +157,18 @@ def usage_line(report, width=100, unicode=True):
     parts = []
     for provider, title in (("claude", "Claude"), ("codex", "Codex")):
         row = mapping(mapping(report.get("provider_status")).get(provider))
-        week, context = percent(row.get("weekly_used")), percent(row.get("context_left"))
+        week_used, context_left = percent(row.get("weekly_used")), percent(row.get("context_left"))
+        week = None if week_used is None else 100 - week_used
+        context = None if context_left is None else 100 - context_left
         if week is None and context is None:
             parts.append(title + " --")
             continue
         mark = lambda value: "--" if value is None else "%s%%" % value
-        parts.append("%s week %s%sctx %s" % (title, mark(week), " · " if unicode else " / ", mark(context)))
+        parts.append("%s week %s%s%sctx %s%s" % (
+            title, mark(week), " left" if week is not None else "", " · " if unicode else " / ",
+            mark(context), " used" if context is not None else ""))
     line = (" │ " if unicode else " | ").join(parts)
     if len(line) > width:
-        line = (" │ " if unicode else " | ").join(p.replace(" week ", " W ").replace("ctx ", "C ") for p in parts)
+        line = (" │ " if unicode else " | ").join(
+            p.replace(" week ", " W ").replace("ctx ", "C ") for p in parts)
     return line

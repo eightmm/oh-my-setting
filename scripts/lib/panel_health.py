@@ -9,12 +9,17 @@ import room
 def project(report):
     items = []
 
-    def add(kind, label, used, limit, action, unknown=False, warning_at=None, urgent_at=None):
+    def add(kind, label, used, limit, action, unknown=False, warning_at=None, urgent_at=None,
+            warning_at_most=None, full_at_most=None):
         unknown = (unknown or report.get("capacity_stale") is True or type(used) is not int or used < 0
                    or type(limit) is not int or limit <= 0)
-        status = ("unknown" if unknown else "full" if used >= limit else
+        status = ("unknown" if unknown else "full" if
+                  ((full_at_most is not None and used <= full_at_most) or
+                   (full_at_most is None and used >= limit)) else
                   "urgent" if urgent_at is not None and used >= urgent_at else
-                  "warning" if used >= (warning_at if warning_at is not None else limit * .9) else "ok")
+                  "warning" if warning_at_most is not None and used <= warning_at_most else
+                  "warning" if warning_at_most is None and
+                  used >= (warning_at if warning_at is not None else limit * .9) else "ok")
         items.append({"kind": kind, "label": label, "used": None if unknown else used,
                       "limit": limit, "status": status, "action": action})
 
@@ -30,8 +35,10 @@ def project(report):
         add("context", title + " context used", None if context is None else 100 - context, 100,
             "Use native compaction or an explicit handoff; clearing the board does not free model context.",
             context is None or not readable, warning_at=100 - warn, urgent_at=100 - urgent)
-        add("quota", provider.capitalize() + " reported weekly use", weekly, 100,
-            "Check the native quota/reset; OMS keeps the selected model and provider.", weekly is None or not readable)
+        weekly_left = None if weekly is None else 100 - weekly
+        add("quota", provider.capitalize() + " weekly left", weekly_left, 100,
+            "Check the native quota/reset; OMS keeps the selected model and provider.", weekly is None or not readable,
+            warning_at_most=10, full_at_most=0)
     shared = mapping(report.get("room"))
     members = shared.get("participants")
     if isinstance(members, list) and not shared.get("error"):
@@ -90,15 +97,16 @@ def render(report, width, height, footer=None):
             continue
         row = mapping(mapping(report.get("provider_status")).get(provider))
         known = readable and row.get("source") not in {"cache stale", "unavailable"}
-        context = percent(row.get("context_left")) if known else None
-        weekly = percent(row.get("weekly_used")) if known else None
+        context_left = percent(row.get("context_left")) if known else None
+        context = None if context_left is None else 100 - context_left
+        weekly_used = percent(row.get("weekly_used")) if known else None
+        weekly = None if weekly_used is None else 100 - weekly_used
         warn = env_int("OMS_CTX_WARN_PCT", 15, minimum=1, maximum=90)
         urgent = min(env_int("OMS_CTX_URGENT_PCT", 8, minimum=0, maximum=89), warn)
-        status = "unknown" if context is None else "full" if context <= 0 else "urgent" if context <= urgent else "warning" if context <= warn else "ok"
-        rows.append(("%s main: context [%s]" % (provider.capitalize(), status) if context is None else
-                     "%s%% left [%s] %s main" % (context, status, provider.capitalize())))
-        rows.append("%s used [%s] %s weekly" % ("--" if weekly is None else "%s%%" % weekly,
-                    "unknown" if weekly is None else "full" if weekly >= 100 else "warning" if weekly >= 90 else "ok", provider.capitalize()))
+        status = "unknown" if context is None else "full" if context >= 100 else "urgent" if context >= 100 - urgent else "warning" if context >= 100 - warn else "ok"
+        rows.append("%s used [%s] %s context" % ("--" if context is None else "%s%%" % context, status, provider.capitalize()))
+        rows.append("%s left [%s] %s weekly" % ("--" if weekly is None else "%s%%" % weekly,
+                    "unknown" if weekly is None else "full" if weekly <= 0 else "warning" if weekly <= 10 else "ok", provider.capitalize()))
     mains = sum(m.get("role") == "main" and m.get("state") in
                 LIVE_STATES | {"blocked", "waiting_input", "waiting_approval", "review"} for m in members)
     rows.append("Main: %s live" % mains)

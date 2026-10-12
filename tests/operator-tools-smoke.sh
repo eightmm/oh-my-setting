@@ -8793,7 +8793,7 @@ for columns, rows in ((100, 44), (76, 36), (60, 36), (36, 28), (2, 8)):
 # The tree exposes every joined main, maps cells from the drawn frame, and
 # never manufactures a parent or changes room data while folding/scrolling.
 from panel_input import TerminalInput, choose
-from panel_metrics import cached, collect, pane_reading, percent
+from panel_metrics import cached, collect, pane_reading, percent, usage_line
 tree_room = deepcopy(room_view)
 tree_room["room"]["participants"].extend([
     {"participant": "extra-main", "provider": "codex", "model": "gpt-6-sol", "role": "main",
@@ -9528,17 +9528,22 @@ with tempfile.TemporaryDirectory() as slug_root:
         assert panel.split_panel(odd) == 0
         assert ["tmux", "set-option", "-t", "oms-panel-aaaaaaaaaaaa", "@oms_panel_repo", str(odd)] in \
             [c.args[0] for c in adopted.call_args_list]
-# The context left rides on the shown main's card in three bands; only the proven main carries it.
+# Context used rides on the shown main's card in three bands; only the proven main carries it.
 claude_main = next(m for m in flow["room"]["participants"] if m.get("role") == "main" and m.get("provider") == "claude")["participant"]
-for left, words in ((42, "ctx 42%"), (22, "ctx 22%"), (12, "ctx 12% · compact soon")):
+for left, words in ((50, "ctx 50% used"), (78, "ctx 22% used"), (10, "ctx 90% used · compact soon")):
     metered = dict(flow, provider_status={"claude": {"participant": claude_main, "context_left": left}})
     picture = render(metered, "codex", 110, 30, view="graph", navigation={"selected": ("chat", claude_main)})
-    # The usage row already says "ctx N%"; the card is the second place.
+    # The usage row already says "ctx N% used"; the card is the second place.
     assert picture.count(words) == 1 + (left > 15), (left, picture)
     plain = render(metered, "codex", 110, 30, view="graph", unicode=False, navigation={"selected": ("chat", claude_main)})
     assert plain.count(words.replace("·", "/")) == 1 + (left > 15) and not any(g in plain for g in "─│·"), (left, plain)
+    note = room_view.context_note(metered, next(m for m in flow["room"]["participants"] if m["participant"] == claude_main))
+    assert note == (100 - left, "alert" if left <= 15 else "dim" if left > 30 else None), note
+picture_80x40 = render(dict(flow, provider_status={"claude": {"participant": claude_main, "context_left": 10}}),
+                       "codex", 80, 40, view="graph", navigation={"selected": ("chat", claude_main)})
+assert "ctx 90% used · compact soon" in picture_80x40, picture_80x40
 assert render(dict(flow, provider_status={"claude": {"participant": "someone-else", "context_left": 42}}), "codex", 110, 30,
-              view="graph", navigation={"selected": ("chat", claude_main)}).count("ctx 42%") == 1
+              view="graph", navigation={"selected": ("chat", claude_main)}).count("ctx 58% used") == 1
 # The board shows only its own main's calls, expanded or not.
 for board_nav in ({}, {"expanded": True}):
     assert "ONLY OTHER OWNER" not in render(flow, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation=board_nav)
@@ -11037,8 +11042,12 @@ for order_width, order_height in ((100, 30), (100, 40), (160, 60)):
         one["provider_status"] = {provider: {"weekly_used": 41, "context_left": 70}}
         usage_row = graph_text.render_graph(one, order_width, order_height).splitlines()[1]
         other = "Codex" if provider == "claude" else "Claude"
-        assert "%s week 41%% · ctx 70%%" % provider.title() in usage_row and other + " --" in usage_row, usage_row
+        assert "%s week 59%% left · ctx 30%% used" % provider.title() in usage_row and other + " --" in usage_row, usage_row
         assert render(one, provider, order_width, order_height, view="tree", navigation={}).splitlines()[1] == usage_row
+        ascii_row = graph_text.render_graph(one, order_width, order_height, unicode=False).splitlines()[1]
+        assert "%s week 59%% left / ctx 30%% used" % provider.title() in ascii_row, ascii_row
+        narrow_row = usage_line(one, 36, True)
+        assert "%s W 59%% left" % provider.title() in narrow_row and "C 30% used" in narrow_row, narrow_row
 # Keep the short graph fixture within its card capacity; negative dispatch actors
 # above must not select the separately covered compact fallback.
 short_words = deepcopy(words)
