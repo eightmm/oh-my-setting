@@ -470,10 +470,10 @@ def inbox_items(report, unicode=True):
     from review_backlog import warning
     for participant, total in mapping(backlog.get("counts")).items():
         if total > backlog.get("threshold", 8) and participant in byid:
-            # Undated, so it leads the decide class, which waits longest first.
-            items.append({"stamp": "", "glyph": "!", "who": who(byid[participant]),
-                          "what": warning(total), "style": "review", "action": ("chat", participant),
-                          "row_id": ("review-backlog", participant), "cls": "decide"})
+            # Undated and ahead of other undated rows, so it leads the decide class, which waits longest first.
+            items.insert(0, {"stamp": "", "glyph": "!", "who": who(byid[participant]),
+                             "what": warning(total), "style": "review", "action": ("chat", participant),
+                             "row_id": ("review-backlog", participant), "cls": "decide"})
     return sorted(items, key=lambda item: item["stamp"], reverse=True)
 
 

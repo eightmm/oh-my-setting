@@ -13633,8 +13633,10 @@ with patch("review_backlog.policy", wraps=backlog_policy) as policy_reads, \
         patch("review_backlog.counts", wraps=backlog_counts) as backlog_count_reads:
     many_patches["review_backlog"] = backlog_project(many_patches)
     for board_view in ("graph", "tree"):
-        strip = needs_strip(many_patches, 160, True)
-        assert "review first" in strip[0]["text"] and strip[0]["action"] == ("chat", "m1"), strip
+        # The warning leads the decide class, so it follows the two needs-you rows and the failure.
+        strip = needs_strip(many_patches, 160, True, limit=4)
+        assert "10 decide" in strip[0]["text"] and "review first" in strip[4]["text"] \
+            and strip[4]["action"] == ("chat", "m1"), strip
         drawing = render(many_patches, "claude", 160, 50, view=board_view)
         assert "review first" in drawing, (board_view, drawing)
     assert policy_reads.call_count == backlog_count_reads.call_count == 1, (policy_reads.call_count, backlog_count_reads.call_count)
