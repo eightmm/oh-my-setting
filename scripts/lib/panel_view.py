@@ -752,9 +752,10 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
             footer.append("F5 control / F12 keys / Ctrl-b d detach")
     sep = " · " if unicode else " / "
     wide = "A finished call is not accepted until its main records it" + sep + "native subagents other than the built-in advisor are not shown"
-    footer.extend([wide if display_width(wide) <= width else "Finished is not accepted" + sep + "some subagents not shown"]
-                  if width >= 54 else ["Finished is not accepted", "Some native subagents not shown"])
-    if height < 20:
+    if width >= 28:
+        footer.extend([wide if display_width(wide) <= width else "Finished is not accepted" + sep + "some subagents not shown"]
+                      if width >= 54 else ["Finished is not accepted", "Some native subagents not shown"])
+    if height < 20 and width >= 28:
         footer = (footer[:1] if menu else []) + ["Finished is not accepted"]
     alerts = status_alerts(report)
     footer_space = max(0, height - int(menu) - 1 - len(alerts))
@@ -834,7 +835,8 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
 
     room = mapping(report.get("room"))
     if room and height >= 20:
-        add("ROOM / " + (clean(room.get("title") or room.get("id"), 160) or "unavailable"), "main")
+        narrow = width < 28
+        add(("Room: " if narrow else "ROOM / ") + (clean(room.get("title") or room.get("id"), 160) or "unavailable"), "main")
         from room_view import main_names, nodes
         members = nodes(report)
         mains = [member for member in members if member.get("role") == "main"]
@@ -843,33 +845,34 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
             if live_mains:
                 labels = main_names(members)
                 names = [labels[member["participant"]] for member in live_mains[:2]]
-                add("Joined mains %s / %s%s" % (len(live_mains), ", ".join(names),
+                add(("Mains " if narrow else "Joined mains ") + "%s / %s%s" % (len(live_mains), ", ".join(names),
                     " +%s" % (len(live_mains) - 2) if len(live_mains) > 2 else ""), "dim")
             else:
-                add("Mains: none live (%s exited)" % len(mains), "dim")
-        if view == "graph":
+                add(("Mains " if narrow else "Mains: none live (") + ("0 live / %s exited" % len(mains) if narrow else "%s exited)" % len(mains)), "dim")
+        if view == "graph" and not narrow:
             add("Graph needs 76x16 / showing list", "dim")
-        add(sep.join(["Messages: %s unread" % room.get("pending_count", "?"), "%s read" % room.get("received_count", "?"),
-                      "%s answered" % room.get("answered_count", "?")]), "dim")
+        add(("Unread %s" % room.get("pending_count", "?") if narrow else
+             sep.join(["Messages: %s unread" % room.get("pending_count", "?"), "%s read" % room.get("received_count", "?"),
+                       "%s answered" % room.get("answered_count", "?")])), "dim")
     if not main_attempt:
         preset = policy()["main"].get(provider, {})
         if not any(root.get("id") for root in roots):
-            add("NEXT MAIN / %s / %s / %s (preset)" % (
+            add(("Next: " + PROVIDER_NAMES.get(provider, provider) if width < 28 else "NEXT MAIN / %s / %s / %s (preset)" % (
                 PROVIDER_NAMES.get(provider, provider), MODEL_NAMES.get(preset.get("model"), preset.get("model")) or "native",
-                preset.get("effort") or "native settings"), "main")
+                preset.get("effort") or "native settings")), "main")
         if not roots:
             add("Goal: " + (mapping(report.get("goal")).get("text") or "No goal recorded"))
 
     acceptance = mapping(report.get("acceptance"))
     counts = mapping(acceptance.get("counts"))
     if acceptance.get("available"):
-        evidence = "REPO ACCEPT  %s/%s verified" % (counts.get("verified", 0), acceptance.get("total", "?"))
+        evidence = ("Accept " if width < 28 else "REPO ACCEPT  ") + "%s/%s%s" % (counts.get("verified", 0), acceptance.get("total", "?"), " ok" if width < 28 else " verified")
         extras = "  ".join("%s=%s" % (key, counts[key]) for key in ("failed", "missing", "stale") if counts.get(key))
         if extras:
             evidence += "  " + extras
         evidence_tone = "bad" if counts.get("failed") else "good" if acceptance.get("complete") else "alert"
     else:
-        evidence, evidence_tone = "REPO ACCEPT  evidence unavailable", "alert"
+        evidence, evidence_tone = ("Accept unknown" if width < 28 else "REPO ACCEPT  evidence unavailable"), "alert"
     status_lines = [(evidence, evidence_tone)]
     items = sorted(listing(mapping(report.get("attention")).get("items")), key=lambda row: row.get("priority") or "P9")
     if items and height >= (30 if menu else 24):
@@ -965,7 +968,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
               and (not main_attempt or row.get("parent_attempt_id") == main_attempt or row.get("attempt_id") == main_attempt)]
     remaining = budget - len(lines) - len(status_lines)
     if remaining >= 2 and recent:
-        add("RECENT / not acceptance", "dim")
+        add("Recent" if width < 28 else "RECENT / not acceptance", "dim")
         for row in recent[:min(2, remaining - 1)]:
             operation = next((item for item in listing(mapping(report.get("operations")).get("recent"))
                               if row.get("attempt_id") and item.get("attempt_id") == row["attempt_id"]), {})

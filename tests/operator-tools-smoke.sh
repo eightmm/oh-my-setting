@@ -7841,6 +7841,24 @@ main_states["attempts"]["recent"] = [{"attempt_id": "exited-attempt", "state": "
 # The narrow board dashboard (under 28 columns) counts live mains only.
 mixed_mains = render(main_states, "claude", 27, 30, view="graph")
 assert "Joined mains 1 /" in mixed_mains and "Mains: none live" not in mixed_mains, mixed_mains
+compact_dashboard = deepcopy(main_states)
+compact_dashboard["attempts"]["active_recent"] = []
+compact_dashboard["attempts"]["recent"] = []
+compact_dashboard["room"]["participants"] = [m for m in compact_dashboard["room"]["participants"] if m["participant"] == "main-live"]
+compact_dashboard["goal"] = {"text": "Keep the narrow board useful"}
+compact_dashboard["acceptance"] = {"available": True, "complete": False, "total": 4, "counts": {"verified": 2}}
+compact_dashboard["room"].update({"title": "Visual team", "pending_count": 3, "received_count": 8, "answered_count": 5})
+for columns in (19, 22, 27):
+    board = render(compact_dashboard, "claude", columns, 30, view="graph")
+    assert "Graph needs" not in board and "Finished is not accepted" not in board and "Some native subagents" not in board, board
+    assert all(fact in board for fact in ("Room: Visual team", "Mains 1 /", "Unread 3", "Next: Claude",
+                                          "Goal: Keep", "Accept 2/4")), board
+    assert len(board.splitlines()) <= 30 and all(display_width(line) <= columns for line in board.splitlines()), board
+boundary_dashboard = render(compact_dashboard, "claude", 28, 30, view="graph")
+assert "Graph needs" in boundary_dashboard and "REPO ACCEPT" in boundary_dashboard, boundary_dashboard
+unknown_capacity = panel_health.render({"collection": {"ok": False}, "room": {"participants": [
+    {"participant": "unknown-main", "provider": "claude", "role": "main", "state": "working", "joined": True}]}}, 80, 20)
+assert "Claude main: context [unknown]" in unknown_capacity, unknown_capacity
 main_states["attempts"]["active_recent"] = []
 main_states["attempts"]["recent"].append({"attempt_id": "live-exited-attempt", "state": "cancelled",
     "panel": {"role": "main", "room_id": main_states["room"]["id"], "room_participant": "main-live"}})

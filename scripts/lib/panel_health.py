@@ -93,7 +93,8 @@ def render(report, width, height, footer=None):
         warn = env_int("OMS_CTX_WARN_PCT", 15, minimum=1, maximum=90)
         urgent = min(env_int("OMS_CTX_URGENT_PCT", 8, minimum=0, maximum=89), warn)
         status = "unknown" if context is None else "full" if context <= 0 else "urgent" if context <= urgent else "warning" if context <= warn else "ok"
-        rows.append("%s left [%s] %s main" % ("--" if context is None else "%s%%" % context, status, provider.capitalize()))
+        rows.append(("%s main: context [%s]" % (provider.capitalize(), status) if context is None else
+                     "%s%% left [%s] %s main" % (context, status, provider.capitalize())))
         rows.append("%s used [%s] %s weekly" % ("--" if weekly is None else "%s%%" % weekly,
                     "unknown" if weekly is None else "full" if weekly >= 100 else "warning" if weekly >= 90 else "ok", provider.capitalize()))
     mains = sum(m.get("role") == "main" and m.get("state") in
