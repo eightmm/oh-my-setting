@@ -886,6 +886,7 @@ grep -Fq 'persisted trace context' "$TMP/bad-trace.out" ||
 # Reuse this operator suite for the new front end. Providers are protocol
 # fixtures; the real consult/delegate/review and artifact writers run below.
 PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/scripts/lib" "$TMP" <<'PY' || fail "shared panel cache regression"
+import io
 import json
 import os
 from pathlib import Path
@@ -7879,7 +7880,7 @@ main_states["attempts"]["recent"] = [{"attempt_id": "exited-attempt", "state": "
     "panel": {"role": "main", "room_id": main_states["room"]["id"], "room_participant": "main-exited"}}]
 # The narrow board dashboard (under 28 columns) counts live mains only.
 mixed_mains = render(main_states, "claude", 27, 30, view="graph")
-assert "Joined mains 1 /" in mixed_mains and "Mains: none live" not in mixed_mains, mixed_mains
+assert "Mains 1 /" in mixed_mains and "0 live" not in mixed_mains, mixed_mains
 compact_dashboard = deepcopy(main_states)
 compact_dashboard["attempts"]["active_recent"] = []
 compact_dashboard["attempts"]["recent"] = []
@@ -7902,7 +7903,7 @@ main_states["attempts"]["active_recent"] = []
 main_states["attempts"]["recent"].append({"attempt_id": "live-exited-attempt", "state": "cancelled",
     "panel": {"role": "main", "room_id": main_states["room"]["id"], "room_participant": "main-live"}})
 exited_mains = render(main_states, "claude", 27, 30, view="graph")
-assert "Joined mains" not in exited_mains and "Mains: none live (2 exited)" in exited_mains, exited_mains
+assert "Joined mains" not in exited_mains and "Mains 0 live / 2 exited" in exited_mains, exited_mains
 for source_view, dimensions in ((room_view, ((80, 11), (80, 12), (60, 14), (100, 16))),
                                 (degraded, ((100, 30),))):
     for columns, rows in dimensions:
