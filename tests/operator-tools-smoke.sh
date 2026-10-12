@@ -8708,8 +8708,25 @@ for guard in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_HARNESS_DELEGATE_DEPTH": "1"}):
             else:
                 raise AssertionError("a worker wrote a panel result handoff")
             assert len(room.records(project, declared)) == before_child_result
+        # Nor can it pre-claim the panel's judgment notice or hide its mail from the parent.
+        for forged in ({"message_id": "judgment-decl-peer"}, {"quiet": True}):
+            try:
+                room.send(project, declared, "decl-peer", "decl-main", "All good", **forged)
+            except ValueError as error:
+                assert "written by the panel, not by a worker" in str(error), error
+            else:
+                raise AssertionError("a worker forged a panel notice")
         child_note = room.send(project, declared, "decl-peer", "decl-main", "Scoped worker observation")
     room.acknowledge(project, declared, "decl-main", [child_note["id"]])
+# Outside workers too, a judgment id names its own call and only a result handoff is quiet.
+for forged, reason in (({"message_id": "judgment-decl-other"}, "judgment-<participant> ids are reserved"),
+                       ({"quiet": True}, "only a call's result handoff can be quiet")):
+    try:
+        room.send(project, declared, "decl-peer", "decl-main", "Panel-shaped note", **forged)
+    except ValueError as error:
+        assert reason in str(error), error
+    else:
+        raise AssertionError("a panel notice id or quiet flag was accepted on ordinary mail")
 room.join(project, declared, "decl-unparented", "codex", role="worker")
 with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1", "OMS_ROOM_ID": declared,
                              "OMS_ROOM_PARTICIPANT": "decl-unparented"}):

@@ -498,6 +498,8 @@ def validate_event(rows, event, text, repo=None):
         if kind == "message":
             if str(event["id"]).startswith("result-"):
                 raise ValueError("result handoffs are written by the panel, not by a worker")
+            if str(event["id"]).startswith("judgment-") or event.get("quiet"):
+                raise ValueError("judgment notices and quiet mail are written by the panel, not by a worker")
             parent = member.get("parent")
             if not parent or event.get("recipient") != parent:
                 raise ValueError("a worker can only message its parent %s" % (parent or "<missing>"))
@@ -697,6 +699,11 @@ def validate_event(rows, event, text, repo=None):
                 or participant(state, event["sender"]).get("parent") != recipient):
             # result-<call> ids are reserved for a call's own handoff to its parent, which settles it on the board.
             raise ValueError("result-<participant> ids are reserved for that participant's handoff to its parent")
+        if str(event["id"]).startswith("judgment-") and event["id"] != "judgment-" + event["sender"]:
+            # The panel's judgment notice for a call is the one place a failed verify or review verdict reaches its parent.
+            raise ValueError("judgment-<participant> ids are reserved for the panel's notice about that call")
+        if event.get("quiet") and (event["id"] != "result-" + event["sender"] or event["message_kind"] != "handoff"):
+            raise ValueError("only a call's result handoff can be quiet")
         if str(event["id"]).startswith("rollover-unread-") and not carry:
             # The rollover's note that unread mail stayed behind is skipped when its id exists, so nobody else takes it.
             raise ValueError("rollover-unread- ids are reserved for a rollover's note")
@@ -1390,7 +1397,11 @@ def _sealed_predecessors(repo, ident):
             return
         sealed = _tail_successor(repo, old)
         if sealed is None:
-            return  # A prospective successor cannot expose its predecessor before the seal.
+            # A prospective successor cannot expose its predecessor before the seal; after its carry the
+            # predecessor was sealed, so an unreadable tail fails closed instead of dropping its claims.
+            if _carried(repo, current):
+                raise ValueError("structured result lineage is unreadable")
+            return
         if old in seen or successor_id(old) != current or sealed != current:
             raise ValueError("structured result lineage is not sealed")
         yield old
