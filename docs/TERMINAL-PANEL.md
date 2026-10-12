@@ -11,28 +11,12 @@ When the first read fails, or a window switches to a room it has not successfull
 
 ## Quick start
 
-1. Run `oms` in a terminal: window 0 is the control window, an inbox for you.
-2. A new tmux split panel opens one main, preferring Claude Code, then Pi, then Codex when installed.
-   Inline layouts (without tmux, including Windows Git Bash) and Herdr without `--launch`
-   open controls, preselecting nonempty `OMS_PANEL_HARNESS`, otherwise the new-panel main
-   (the installed `OMS_PANEL_MAINS` name or first installed Claude/Pi/Codex), falling back to Claude.
-   Press the selected harness's key (`1` Claude, `2` Pi, `0` Codex) to start it.
-   `OMS_PANEL_MAINS=pi` (one harness name) selects Pi, and an empty value opens only controls.
-   A legacy comma list such as `OMS_PANEL_MAINS=claude,pi` opens no main and prints a stderr warning.
-   In controls, `1` starts Claude, `2` Pi, and `0` Codex.
-   Finish the current main before starting a replacement. Existing sessions are preserved.
-3. Panel-wide keys are F-keys only: `F9` swaps focus between the main's chat and its board, `F5` opens the control window, `F12` shows the panel keys (`?` on a board lists the board keys); `Ctrl-b d` detaches.
-4. The control window's **Needs you** lists failed or timed-out calls, calls and mains
-   waiting for approval or input, broadcasts from mains and patches awaiting admission.
-5. Arrow keys or a click select a row; Enter or a click opens that main's chat
-   or the call's result. Without a raw-key terminal the menu takes key + Enter.
-6. The board is the left pane of a main's window and its native chat is on the right. On a board,
-   click or Enter on a main opens its chat; on a call it opens the call in a reader pane above the
-   chat. Esc closes the reader (then backs out), `F9` returns to chat.
-7. Results: `t` on a board opens the tree and a call's retained answer; `r` in the control
-   menu browses recorded results. Debates: the Debate tab of the board's bottom box (`Tab`, `←→`, `Enter`, `f`), the
-   `COUNCIL` branch of a main in the tree, or `c` to start one.
-8. `?` in the control menu lists every other shortcut.
+1. Run `oms` in a terminal. The control window is the inbox; the panel starts at most one live main, using Claude by default. Pi is the explicit alternative (`OMS_PANEL_MAINS=pi` or the Pi start key).
+2. The main window keeps the board fixed on the left; the right side is the reader for workers, advisors, reviews and results, alongside the native conversation. At wide widths it shows the graph; narrower layouts fall back to the tree. At fewer than 20 columns the board omits its tab box.
+3. The compact goal banner and pinned **Needs you** strip stay above activity; the full goal is in the Plan tab. The bottom box contains Detail, Plan, Debate, Messages and Needs you tabs when its height permits; if only one row fits, the tab strip remains visible without a body.
+4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
+5. `Tab` cycles visible tabs; arrows move within the current surface; Enter opens or expands. `Esc` closes a reader or backs out. The detailed keys and their surfaces are listed under [Keys](#keys).
+6. At a main's exit prompt, `r` restarts it in the same pane when its recorded session can be resumed; `q` or Enter closes according to the prompt. `F9` switches between the main chat and board; `F5` opens the control window; `F12` shows panel-wide keys.
 
 ```bash
 oms panel --repo . --layout inline         # portable menu, no tmux needed
@@ -791,39 +775,31 @@ The launcher does not autonomously fan out before the main has a task.
 | Claude main (default) | `claude-opus-5-5` | high |
 | Codex main / Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
 
-Each role selects a capability tier and optionally prefers a provider; a dispatch
-takes its installed preferred candidate, otherwise the first installed tier
-candidate, and pins the newest catalog version within that model family.
-Recorded `weekly_used` readings from the same HUD/pane collection as the board's
-usage line exclude a provider at 90% or above when another tier candidate is
-installed; unknown readings remain available, and a sole installed candidate is
-retained. If every candidate in a multi-provider tier reports 90% or above, the
-route fails. No provider CLI is invoked to query usage. No installed candidate is
-a clear error; `--to PROVIDER [--model ID]` stays the explicit provider route and
-does not switch providers for usage.
+Each role takes the first installed model of its capability tier, checking either provider in the listed order. Routine roles (`worker`, `builder`, `refactorer`, `documenter`, `integrator`, `performance-engineer`) use routine; frontier roles (`reviewer`, `advisor`, `architect`, `critic`, `verifier`, `security-auditor`, `release-engineer`) use frontier. Researcher always uses the light tier at low effort. Installation and recorded availability filter candidates; a role preference may choose among remaining installed candidates. No provider is invoked to probe model availability.
 
-| Tier | Candidates in fallback order |
+| Tier | First installed model candidates (effort) |
 | --- | --- |
-| light | `claude-haiku-5-5` low, `gpt-6-luna` low |
-| routine | `claude-sonnet-5-5` medium, `gpt-6-luna` medium |
-| deep | `claude-opus-5-5` high, `gpt-6.1-sol` high |
-| frontier | `claude-fable-5-1` high, `gpt-6-astra` high |
+| light | `claude-haiku-5-5` (low), `gpt-6-luna` (low) |
+| routine | `claude-sonnet-5-5` (medium), `gpt-6-luna` (medium) |
+| deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high) |
+| frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high) |
 
 | Role | Default tier | Preferred provider | Access | Front door |
 | --- | --- | --- | --- | --- |
-| `researcher` | light (always) | tier order | read | `peer-delegate --role researcher` |
-| `worker`, `builder`, `refactorer`, `documenter` | routine | Codex | read or write | `peer-delegate --role` (`analysis-worker` / `implementation-worker` for `worker`) |
-| `release-engineer` | routine | Codex | read | `peer-delegate --role release-engineer` |
-| `integrator`, `performance-engineer` | deep | Codex | read or write | `peer-delegate --role` |
-| `architect`, `critic`, `verifier`, `security-auditor` | frontier | Claude | read | `peer-delegate --role --read-only` |
-| `reviewer` | frontier | Claude | read | `peer-review --gate --verify` |
-| `advisor` | frontier | Claude | read | `advise` |
+| `researcher` | light, low effort | tier order | read | `peer-delegate --role researcher` |
+| `worker`, `builder`, `refactorer`, `documenter` | routine | Codex | read or write | `peer-delegate --role` |
+| `integrator`, `performance-engineer` | routine | Codex | read or write | `peer-delegate --role` |
+| `reviewer`, `advisor`, `architect`, `critic`, `verifier`, `security-auditor`, `release-engineer` | frontier | Claude | read | `peer-review`, `advise` or `peer-delegate --role --read-only` |
 
 `--workload light|routine|deep|frontier` overrides the tier for one dispatch and
-`--reasoning-effort` its effort. Installation and recorded availability filter
-candidates first, then role preference applies, with reviewer/verifier/security-auditor/critic
-independence overriding preference when both providers remain available and the
-preferred provider is the main's. Their records keep the board kinds `worker`, `researcher`,
+`--reasoning-effort` overrides its effort. The panel supplies `OMS_PEER_VERIFY_TIMEOUT=20m`
+for write dispatches with `--verify` when unset; peer commands outside this
+panel retain their 10m default. Set `OMS_PEER_VERIFY_TIMEOUT` in the
+environment to choose another verification wall. `--to` and `--model` apply only when
+a specific provider is explicitly required; an explicit route does not fall back
+to another provider or model. Reviewer/verifier/security-auditor/critic
+independence can override provider preference when both providers are available
+and the preferred provider is the main's. Their records keep the board kinds `worker`, `researcher`,
 `advisor` (advisor, architect, critic) and `reviewer` (reviewer, verifier,
 security-auditor) in `panel_role`; the strategy itself is the recorded purpose
 (plain workers record explain/investigate/implement). `oms panel --routes`
@@ -952,6 +928,13 @@ when known, with `compact soon` at 15% or less.
 
 ## Layout and activity
 
+### Keys
+
+Keys apply to the surface that has focus. On a board, `Tab` changes the tab, arrows navigate calls or the selected tab's items, `Home`/`End` move to the first/last item or reader edge, and `Enter` opens a chat/result or expands a message. `f` opens the full result from a result preview; in Debate it opens the recorded debate result. `v` expands/collapses the board view. `q` quits an inline watcher or detaches from the control window; `Esc` closes a reader or returns to the previous board surface. `n` starts the sole main, then `1` selects Claude, `2` Pi, or `0` Codex in the harness chooser. `k` opens the capacity screen on a board or from the control menu. At the native main's exit prompt, `r` restarts there. Mouse clicks select rows and tabs or open the selected target. `footer_hints` displays the subset available for the current surface and width.
+
+A dispatched call settles only after its supervisor proves the whole process tree exited. On macOS and Windows, where that supervisor is unsupported, the call stays pending and the panel prints a manual-clear hint; independently stop every provider descendant before clearing its retained scope.
+
+
 `--host auto|inline|tmux|herdr` selects the terminal host independently of
 the activity view. Auto reuses an existing local POSIX Herdr pane; otherwise
 the existing layout selection applies. `--host inline` disables host automation;
@@ -971,7 +954,7 @@ scope and unknown values. A socket error does not stop the native sibling.
 The board is always the full-height left pane of the main window (28 percent of the
 window the first time, sized from the terminal that is attaching; optional integer
 `OMS_PANEL_BOARD_PERCENT` overrides this default, clamped to 25–35 percent, with invalid values ignored), with the native
-CLI on its right; a call opened from the board shows in a reader pane above the CLI.
+CLI to its right; opening a call places its reader to the right of the board, splitting the chat column.
 Herdr uses the same left board, starting at the same 28 percent share and honoring
 `OMS_PANEL_BOARD_PERCENT`. Later Herdr resizing is not recorded or shared;
 `SplitSync` synchronizes widths only in tmux.
@@ -997,7 +980,7 @@ provider readings, recorded messages or repository tasks. Missing router,
 progress, locks or billing data is never invented. Smaller interactive panes
 retain tree navigation; passive output shows the list.
 Clicking a main requests navigation to its original chat; workers show their
-content in the reader pane (or the detail area). The right pane remains the provider's native interactive terminal,
+content in the right-side reader (or the board detail area). The remaining chat pane retains the provider's native interactive terminal,
 including editing, pasted input and permission prompts. `--launch` opens this
 layout in the checkout's panel when tmux is available, while `--host inline
 --launch` runs the CLI alone.
@@ -1057,7 +1040,7 @@ session is taken over. A live legacy `oms-panel-<12 hex>` session proven for the
 under its name, because its processes carry that name; new panels use the new name. The first `split` creates it with a control window and records the
 checkout on the session. A new panel opened without `--launch` also opens one
 installed main (Claude, then Pi, then Codex) in its own window with a new room;
-`OMS_PANEL_MAINS=codex` names a different harness and an empty value opens none.
+`OMS_PANEL_MAINS=pi` selects Pi; an empty value opens no main.
 A legacy comma list such as `OMS_PANEL_MAINS=claude,pi` opens none and prints a stderr warning.
 Inline and Herdr without `--launch` instead open the control menu, preselecting nonempty
 `OMS_PANEL_HARNESS`, otherwise the new-panel main (the installed `OMS_PANEL_MAINS` name
@@ -1082,10 +1065,10 @@ detaches while work continues. Quit in the control pane also detaches. Failed
 construction rolls back only the new OMS session or added window. Inline returns to the menu
 when the native CLI exits and refreshes then; it has no permanent sidebar.
 
-Each recorded MAIN has a closed card, orange for Claude and blue for Codex; workers are teal and advisors lavender, and a selection is a block in its own colour. ADVISORS, REVIEWERS and WORKERS
-share that card's borders, with separate labelled role dividers. Individual
-calls keep their title and metadata inside the role section without nested
-boxes. The repository control view shows `NEXT MAIN` as a one-line preset;
+The board has one MAIN card for its live main, with its team grouped into
+ADVISORS, REVIEWERS and WORKERS. Team counts and elapsed time appear with the
+main summary; call rows show state, model and task title. Calls remain attached
+to their recorded parent, and each row opens its reader. The repository control view shows `NEXT MAIN` as a one-line preset;
 that preset never fills missing model/effort fields in a recorded main.
 The native main card shows provider, requested model/effort and recorded task
 when supplied at launch. Missing fields remain unrecorded.
@@ -1101,23 +1084,17 @@ stay in wide metadata rows or Details. Details gives bounded titles separate
 wrapped lines, so long titles need not compete with location and purpose.
 No absolute home paths or transcripts are added to panel metadata.
 
-Activity has three levels: a recorded MAIN, its ADVISORS / REVIEWERS / WORKERS,
-then each call and its task title. The repository view keeps each recorded native
-main in its own card, in stable attempt-ID order with UNLINKED last. The
-available space expands cards with attention calls first; a card that cannot
-fit is a one-line summary with its leading attention/task title and role counts.
-A native window uses its main card as the root.
-Legacy calls without explicit panel ownership appear under UNLINKED; a generic
-attempt parent is never promoted into a native-main relationship. A linked
-owner whose metadata has left the display window is labelled unavailable.
+Activity is organized under the window's sole live MAIN: ADVISORS / REVIEWERS /
+WORKERS, followed by each call and its task title. The control window shows the
+selected main and its team counts. Legacy calls without explicit panel ownership
+remain unlinked; a generic attempt parent is never promoted into a native-main
+relationship. A linked owner whose metadata is unavailable is labelled so.
 
 Press `v` to cycle auto / compact / detail. Auto selects compact when the
 recorded calls would crowd the pane. Compact retains model, state and one task
 title line. At 80 columns or wider, these share one row with metadata on the
 right; narrow views place metadata below the title. Detail expands wrapped
-titles and location/effort metadata. Up to eight calls fit the bounded view;
-role dividers report hidden calls and the overflow line shows nonzero counts
-with `8 Details`. Small panes use borderless summaries. Press `b` to
+titles and location/effort metadata. The view prioritizes attention calls and reports overflow when calls do not fit. Small panes use compact summaries. Press `b` to
 toggle attention-only: waiting input, waiting approval, blocked, review and
 orphaned calls, plus retained failed terminal outcomes. Filtered calls are
 counted rather than changing their states. Settled calls stay in the Past tab
@@ -1127,11 +1104,9 @@ settings when opened, and the control sidebar follows subsequent menu changes.
 CLI `--view` overrides a watch's window density; `--attention-only` keeps its
 filter enabled. These flags apply only to the menu or watch, not model operations.
 
-The top has one `Claude` row and one `Codex` row, each prioritizing weekly
+The usage line has one `Claude` reading and one `Codex` reading, prioritizing weekly
 **used** percentage and the selected main's context **left** percentage.
-The exact current main wins; otherwise the live, then the newest, main of that
-provider in the room. Missing readings show `--`.
-Claude's existing session HUD cache supplies reported context and optional
+Missing readings show `--`. Claude's existing session HUD cache supplies reported context and optional
 `seven_day` usage, with a ten-minute TTL and expired reset values suppressed.
 The consumer hash selects that session's cache; no newest-session guess is
 made. A proven existing tmux pane can supply numeric fields from its last
@@ -1252,10 +1227,7 @@ On supported ordinary layouts (80x40, 157x60 and 126x90), its bounds stay fixed
 as calls come and go. Physically short terminals adapt the readable body, strip,
 or tree fallback to available space. The tabs stay clickable when only the strip fits.
 
-The tree shows a main's `? N open` questions and `cN%` context left on its status line,
-like the graph. When the tree is taller than the screen, earlier mains other than this window's
-and the selected one fold to that line so every main stays visible; selecting one
-(arrows or click) unfolds it.
+Messages shows up to 200 retained messages, with sender, recipient, unread state and message kind. Left/Right cycles all messages, messages to/from the selected main, and messages to/from this window's main. Up/Down selects; Enter or a click expands a message. Reading does not acknowledge it. Unread counts use recorded pending recipient pairs for live readers; complete projections show an exact count and truncated projections show a lower bound with `+`.
 
 Detail is the selected call's persistent, reserved reader; it remains present
 when dismissed or when there is no selection. Past lists every settled call of the room's mains
