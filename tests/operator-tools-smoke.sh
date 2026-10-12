@@ -11457,7 +11457,7 @@ for columns, rows in ((108, 36), (100, 28), (42, 24), (32, 28)):
     scrolled = render(boxed_room, "codex", columns, rows, view="tree", navigation=nav)
     assert scrolled.count("╭") == scrolled.count("╰") == expected_boxes, scrolled
     assert any(hit["action"] == ("task", "layout") for hit in nav["hits"]), nav
-assert "Claude W 100% · C 0%" in render(dict(usage_board, provider_status={"claude": {
+assert "Claude W 0% left · C 100% used" in render(dict(usage_board, provider_status={"claude": {
     "weekly_used": 100, "context_left": 0}}), "claude", 32, 28, view="summary")
 empty_room = dict(usage_board, room={"id": "empty", "participants": []}, attempts={"active_recent": [], "recent": []})
 # The control menu is an inbox: empty rooms onboard, failures and waits list under "Needs you", one key acts.
