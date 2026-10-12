@@ -44,3 +44,41 @@ oms_check_parallel() (
   done
   exit "$rc"
 )
+
+# The operator suite keeps dependent phases in one section and assigns the
+# independent fixtures to the remaining shards. Use the same process-group
+# ownership as scripts-smoke so cancellation reaches shard descendants.
+oms_operator_parallel() (
+  set -euo pipefail
+  local suite="$1" jobs="$2" logs index status=0 started=$SECONDS
+  local pids=()
+  logs="$(mktemp -d "${TMPDIR:-/tmp}/oms-operator-shards.XXXXXX")"
+  cleanup_operator() {
+    local pid
+    trap - EXIT HUP INT TERM
+    for pid in ${pids[@]+"${pids[@]}"}; do
+      [ -z "$pid" ] || kill -TERM -- "-$pid" 2>/dev/null || true
+    done
+    for pid in ${pids[@]+"${pids[@]}"}; do
+      [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+    done
+    rm -rf "$logs"
+  }
+  trap cleanup_operator EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  set -m
+  for ((index=1; index<=jobs; index++)); do
+    bash "$suite" --shard "$index/$jobs" > "$logs/$index.log" 2>&1 &
+    pids+=("$!")
+  done
+  set +m
+  for ((index=1; index<=jobs; index++)); do
+    wait "${pids[$((index - 1))]}" || status=1
+    pids[$((index - 1))]=""
+    cat "$logs/$index.log"
+  done
+  echo "operator-tools-shards: wall $((SECONDS - started))s ($jobs shards, exit $status)"
+  exit "$status"
+)

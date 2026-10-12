@@ -963,6 +963,8 @@ if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
       else
         stage affected-scripts-smoke env OMS_SMOKE_SUITE="$ROOT/$affected_test" bash tests/run-smoke-shard.sh --jobs "${OMS_SMOKE_JOBS:-4}"
       fi
+    elif [ "$affected_test" = tests/operator-tools-smoke.sh ]; then
+      stage operator-tools bash "$ROOT/tests/operator-tools-smoke.sh" --jobs "${OMS_OPERATOR_JOBS:-4}"
     elif [ "${affected_test%.py}" != "$affected_test" ]; then
       affected_args=()
       affected_index=0
@@ -1002,7 +1004,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage draft-pr bash tests/draft-pr-smoke.sh
   stage autonomy-plan-run bash tests/autonomy-plan-run-smoke.sh
   stage autopilot bash tests/autopilot-smoke.sh
-  stage operator-tools bash tests/operator-tools-smoke.sh
+  stage operator-tools bash tests/operator-tools-smoke.sh --jobs "${OMS_OPERATOR_JOBS:-4}"
   stage goal-drive-recovery-2 env OMS_GDR_PART=2 bash tests/goal-drive-recovery-smoke.sh
   stage goal-drive-recovery-1 env OMS_GDR_PART=1 bash tests/goal-drive-recovery-smoke.sh
   stage atomic-state bash tests/atomic-state-smoke.sh
