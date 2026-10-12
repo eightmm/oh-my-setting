@@ -836,8 +836,10 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
         return lines + ["", "Loading its recorded result...", "", metadata], targets
     if not listing(loaded.get("rows")):
         return lines + ["", "No result recorded yet (%s)" % said(state), "", metadata], targets
-    row = listing(loaded.get("rows"))[0]
-    answer = readable(latest_answer(loaded), paragraphs=True)
+    # A whole-main result is adopted by every child of that main; only the call's own task speaks for it.
+    rows = listing(loaded.get("rows"))
+    row = next((r for r in rows if member.get("task_id") and r.get("task_id") == member["task_id"]), rows[0])
+    answer = readable(latest_answer({"rows": [row]}), paragraphs=True)
     outcome = {"accepted": "Accepted by its main", "completed": "Completed; the main recorded a summary",
                "failed": "Marked failed by its main"}.get(row.get("outcome"), "Not reviewed by its main yet")
     check = mapping(row.get("verification")).get("status")

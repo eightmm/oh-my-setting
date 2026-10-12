@@ -9406,6 +9406,12 @@ assert lines.index("Main's summary:") < lines.index("Worker's answer:"), lines
 assert "  OWNER DECISION" in lines and "  RAW WORKER ANSWER" in lines
 assert "Accepted by its main · checks passed" in lines
 assert any("Permissions unrecorded" in line for line in lines) and not any("Read-only" in line for line in lines)
+# A running call never borrows a whole-main result its main recorded for another task.
+adopted = {"rows": [{"task_id": "main-wide", "outcome": "completed", "summary": "OTHER TASK SUMMARY", "calls": []},
+                    {"task_id": "own-task", "outcome": None, "summary": None, "calls": []}]}
+lines, targets = graph_text.detail(dict(worker, task_id="own-task", state="working"), {"report": adopted}, 76, people)
+assert not any("OTHER TASK SUMMARY" in line for line in lines), lines
+assert "Not reviewed by its main yet · no checks run" in lines, lines
 long_recorded = deepcopy(recorded)
 long_recorded["rows"][0]["summary"] = "\n".join("decision line %s" % i for i in range(1000))
 long_recorded["rows"][0]["calls"][0]["answer"] = "answer " * 20000
