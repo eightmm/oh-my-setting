@@ -9537,7 +9537,7 @@ for left, words in ((50, "ctx 50% used"), (78, "ctx 22% used"), (10, "ctx 90% us
     assert picture.count(words) == 1 + (left > 15), (left, picture)
     plain = render(metered, "codex", 110, 30, view="graph", unicode=False, navigation={"selected": ("chat", claude_main)})
     assert plain.count(words.replace("·", "/")) == 1 + (left > 15) and not any(g in plain for g in "─│·"), (left, plain)
-    note = room_view.context_note(metered, next(m for m in flow["room"]["participants"] if m["participant"] == claude_main))
+    note = sys.modules["room_view"].context_note(metered, next(m for m in flow["room"]["participants"] if m["participant"] == claude_main))
     assert note == (100 - left, "alert" if left <= 15 else "dim" if left > 30 else None), note
 picture_80x40 = render(dict(flow, provider_status={"claude": {"participant": claude_main, "context_left": 10}}),
                        "codex", 80, 40, view="graph", navigation={"selected": ("chat", claude_main)})
