@@ -14907,7 +14907,10 @@ next(m for m in review_fixture["room"]["participants"] if m["participant"] == "s
 stale_node = next(m for m in graph_view.nodes(review_fixture) if m["participant"] == "stale-patch")
 assert graph_view.call_classifier(review_fixture)(stale_node) == "review"
 assert ("result", "stale-patch") in {item["action"] for item in inbox_items(review_fixture)}
-assert len(needs_strip(review_fixture, 120, True)) == len(inbox_items(review_fixture)), \
+# The Attention strip counts the same actionable items in its header and lists each below it.
+review_strip = needs_strip(review_fixture, 120, True, limit=100)
+assert review_strip[0]["text"].startswith("Attention %s" % len(inbox_items(review_fixture))) \
+    and len(review_strip) - 1 == len(inbox_items(review_fixture)), \
     "Needs-you strip count must match actionable inbox items"
 # An exited owner with an exited successor did not adopt the patch; a live successor did.
 handoff = deepcopy(review_fixture)
