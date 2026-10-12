@@ -7918,6 +7918,7 @@ for columns in (19, 22, 27):
     assert len(board.splitlines()) <= 30 and all(display_width(line) <= columns for line in board.splitlines()), board
 boundary_dashboard = render(compact_dashboard, "claude", 28, 30, view="graph")
 assert "Graph needs" in boundary_dashboard and "REPO ACCEPT" in boundary_dashboard, boundary_dashboard
+import panel_health
 unknown_capacity = panel_health.render({"collection": {"ok": False}, "room": {"participants": [
     {"participant": "unknown-main", "provider": "claude", "role": "main", "state": "working", "joined": True}]}}, 80, 20)
 assert "Claude main: context [unknown]" in unknown_capacity, unknown_capacity
@@ -8262,14 +8263,18 @@ for window, cells in split_widths:
             assert board_calls("%d %d 1 $1\t%s\t" % (window, height, name)) == recorded + attached_split
             assert board_calls("80 24 0 $1\t%s\t" % name, terminal=(window, height)) == recorded + detached_split
 assert board_calls("60 24 0 $1\tclaude\t") == [], "unknown terminal size ignored a narrow tmux window"
-assert board_calls("80 24 1 $1\tclaude\tleft:70c") == [], "stored width left the CLI unusable"
+# A dragged (recorded) width is the person's choice; it is only bounded by the 20-cell chat floor.
+assert board_calls("80 24 1 $1\tclaude\tleft:70c") == [left_split("59")]
 for configured, cells in (("25", 50), ("35", 70), ("1", 50), ("99", 70), ("-1", 50),
                           ("garbage", 56), ("28.5", 56), ("2_8", 56)):
     assert board_calls("200 50 1 $1\tcodex\t", percent=configured) == [
         ["set-option", "-t", "$1", "@oms_panel_split", "left:%dc" % cells], left_split(str(cells))]
     assert board_calls("200 50 1 $1\tclaude\tleft:90c", percent=configured) == [left_split("90")]
 assert board_calls("50 24 1 $1\tcodex\t", percent="25") == []
-assert board_calls("61 24 1 $1\tcodex\t", percent="35") == []
+assert board_calls("61 24 1 $1\tcodex\t", percent="35") == [
+    ["set-option", "-t", "$1", "@oms_panel_split", "left:20c"], left_split("20")]
+# Unknown terminal size: the share is taken from the clamped cells, so the CLI keeps its 40 cells.
+assert board_calls("61 24 0 $1\tcodex\t", percent="35") == [left_split("33%")]
 def sync_run(sync, *reads):
     with patch.dict(os.environ, {"OMS_PANEL_SESSION": "s", "TMUX_PANE": "%1"}), \
             patch.object(panel.subprocess, "run") as tmux_run:

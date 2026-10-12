@@ -2511,6 +2511,9 @@ def board_split(pane, repo, command):
         cells = board_split_cells(stored or ("left", share, True), (sized or window)[0], explicit=stored is not None)
         if cells is None:
             return
+    if not sized and window:
+        # Unknown terminal: keep a share so the board scales on attach, but the share of the clamped cells.
+        width = "%d%%" % max(1, min(99, (200 * cells + window[0]) // (2 * window[0])))
     if sized:
         width = str(cells) if attached else "%d%%" % max(1, min(99, (200 * cells + sized[0]) // (2 * sized[0])))
         if session and parts[1] != "control" and (stored is None or stored[2]):
