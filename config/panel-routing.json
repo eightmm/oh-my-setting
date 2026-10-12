@@ -17,18 +17,18 @@
   },
   "roles": {
     "researcher": {"tier": "light"},
-    "worker": {"tier": "routine", "prefer": "codex"},
-    "builder": {"tier": "routine", "prefer": "codex"},
-    "refactorer": {"tier": "routine", "prefer": "codex"},
-    "documenter": {"tier": "routine", "prefer": "codex"},
-    "release-engineer": {"tier": "routine", "prefer": "codex"},
-    "reviewer": {"tier": "frontier", "prefer": "claude"},
-    "verifier": {"tier": "frontier", "prefer": "claude"},
-    "security-auditor": {"tier": "frontier", "prefer": "claude"},
-    "architect": {"tier": "frontier", "prefer": "claude"},
-    "critic": {"tier": "frontier", "prefer": "claude"},
-    "integrator": {"tier": "deep", "prefer": "codex"},
-    "performance-engineer": {"tier": "deep", "prefer": "codex"},
-    "advisor": {"tier": "frontier", "prefer": "claude"}
+    "worker": {"tier": "routine"},
+    "builder": {"tier": "routine"},
+    "refactorer": {"tier": "routine"},
+    "documenter": {"tier": "routine"},
+    "release-engineer": {"tier": "routine"},
+    "reviewer": {"tier": "frontier"},
+    "verifier": {"tier": "frontier"},
+    "security-auditor": {"tier": "frontier"},
+    "architect": {"tier": "frontier"},
+    "critic": {"tier": "frontier"},
+    "integrator": {"tier": "deep"},
+    "performance-engineer": {"tier": "deep"},
+    "advisor": {"tier": "frontier"}
   }
 }

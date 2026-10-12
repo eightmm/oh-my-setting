@@ -1630,7 +1630,7 @@ for name in [n for n in os.environ if n in ("TMUX", "TMUX_PANE") or n.startswith
     del os.environ[name]
 sys.path.insert(0, str(root / "scripts/lib"))
 import terminal_panel as panel
-from panel_routing import allocate
+from panel_routing import allocate, policy
 from dashboard_projection import display_width
 from panel_view import render, inbox_items, needs_strip
 from panel_input import passive_click
@@ -3039,14 +3039,19 @@ for name in ("grok", "antigravity", "muse"):
 assert registered["muse"]["access"] == ["read"]
 assert registered["codex"]["native_launch"] and registered["claude"]["native_launch"]
 assert shlex.split(panel.shell_command(["bash", str(panel.ENTRY), str(project)]))[1:] == ["bash", str(panel.ENTRY), str(project)]
-# Role preferences split execution and judgment; independence and availability take precedence.
+# Roles pick by tier, not provider: the first installed candidate of the tier; independence and availability reorder it.
 both = {"claude", "codex"}
-assert allocate("codex", tier="light", installed=both)["model"] == "gpt-6-luna"
+assert allocate("codex", tier="light", installed=both)["model"] == "claude-haiku-5-5"
 assert allocate("claude", tier="light", installed={"codex"})["model"] == "gpt-6-luna"
 assert allocate("codex", installed={"claude"})["model"] == "claude-sonnet-5-5"
-for role in ("worker", "builder", "refactorer", "documenter", "performance-engineer", "integrator", "release-engineer"):
+assert allocate("claude", installed={"codex"})["model"] == "gpt-6-luna"
+assert not any("prefer" in rule for rule in policy()["roles"].values()), "default roles carry no provider preference"
+for role, model in (("worker", "claude-sonnet-5-5"), ("builder", "claude-sonnet-5-5"), ("refactorer", "claude-sonnet-5-5"),
+                    ("documenter", "claude-sonnet-5-5"), ("release-engineer", "claude-sonnet-5-5"),
+                    ("performance-engineer", "claude-opus-5-5"), ("integrator", "claude-opus-5-5")):
     for owner in both:
-        assert allocate(owner, role=role, installed=both)["provider"] == "codex"
+        assert allocate(owner, role=role, installed=both)["model"] == model
+    assert allocate("claude", role=role, installed={"codex"})["provider"] == "codex"
 assert allocate("claude", role="advisor", installed=both)["model"] == "claude-fable-5-1"
 assert allocate("claude", role="advisor", installed={"codex"})["model"] == "gpt-6-astra"
 assert allocate("claude", role="verifier", installed={"claude"})["model"] == "claude-fable-5-1"
@@ -3055,9 +3060,9 @@ for role in ("reviewer", "verifier", "security-auditor", "critic"):
     assert allocate("claude", role=role, installed=both)["provider"] == "codex"
     assert allocate("codex", role=role, installed=both)["provider"] == "claude"
 assert allocate("codex", role="researcher", installed=both)["model"] == "claude-haiku-5-5"
-for used, expected in ((89, "codex"), (90, "claude"), (100, "claude"),
-                       (None, "codex"), (True, "codex"), ("90", "codex"), (101, "codex")):
-    readings = {"codex": {"weekly_used": used}}
+for used, expected in ((89, "claude"), (90, "codex"), (100, "codex"),
+                       (None, "claude"), (True, "claude"), ("90", "claude"), (101, "claude")):
+    readings = {"claude": {"weekly_used": used}}
     assert allocate("codex", installed=both, provider_status=readings)["provider"] == expected
 assert allocate("claude", role="reviewer", installed=both,
                 provider_status={"codex": {"weekly_used": 90}})["provider"] == "claude"
@@ -3427,10 +3432,10 @@ for owner in panel.PROVIDERS:
     main_attempts[owner] = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
                                "start", "--provider", owner, "--tool", "panel-main", "--ref", "panel_role=main",
                                "--then", "starting", "--then", "working"]).strip()
-cases = [("codex", "worker", "light", "read", "explain", "gpt-6-luna"),
-         ("codex", "worker", None, "read", "explain", "gpt-6-luna"),
-         ("codex", "worker", "deep", "read", "investigate", "gpt-6.1-sol"),
-         ("claude", "builder", None, "write", None, "gpt-6-luna"),
+cases = [("codex", "worker", "light", "read", "explain", "claude-haiku-5-5"),
+         ("codex", "worker", None, "read", "explain", "claude-sonnet-5-5"),
+         ("codex", "worker", "deep", "read", "investigate", "claude-opus-5-5"),
+         ("claude", "builder", None, "write", None, "claude-sonnet-5-5"),
          ("claude", "advisor", None, "read", None, "claude-fable-5-1"),
          ("codex", "advisor", "deep", "read", None, "claude-opus-5-5"),
          ("claude", "reviewer", None, "read", None, "gpt-6-astra"),
