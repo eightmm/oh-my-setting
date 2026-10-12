@@ -4529,6 +4529,18 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                     return "9"
                 if event[0] == "eof":
                     raise EOFError
+                # Match the watch loop: refresh and health keys stay board controls,
+                # while graph dock tabs/readers get first chance at their own input.
+                if (event[0] not in {"u", "k"} and navigation.get("surface") == "graph"
+                        and tab_event(event, navigation)):
+                    target = navigation.pop("open_call", None)
+                    if target:
+                        width = max(1, shutil.get_terminal_size().columns)
+                        navigate(repo, target, cache.get("state", {}), navigation, width)
+                        if navigation.get("opening"):
+                            finish_opening(navigation, read_evidence(repo, navigation["opening"]))
+                    show(repo, provider, previous, view=view, attention_only=attention_only, navigation=navigation, cache=cache)
+                    continue
                 if len(event) == 1 and len(event[0]) == 1 and event[0] != " ":
                     # Keys typed ahead run on the next read, not lost with this one.
                     navigation["queued"] = events[position + 1:]
@@ -4623,7 +4635,7 @@ def interactive(repo, view="auto", attention_only=False):
                 continue
             if choice == "?":
                 width = max(1, shutil.get_terminal_size().columns)
-                print("\n".join(menu_rows(width, 40, terminal_style()[2], expanded=True, managed=managed_session(), occupied=navigation.get("main_occupied", True))))
+                print("\n".join(menu_rows(width, 40, terminal_style()[2], expanded=True, managed=managed_session(), occupied=navigation.get("main_occupied", True), installed=navigation.get("installed"))))
                 read_field("Press Enter to return to the panel: ", required=False)
                 continue
             if choice == "k":
@@ -4803,7 +4815,7 @@ def interactive(repo, view="auto", attention_only=False):
                 previous = "app delivery: " + delivered["receipt"]["status"]
             elif choice != "9":
                 available = menu_rows(200, 100, expanded=True, managed=managed_session(),
-                                      occupied=navigation.get("main_occupied", True))
+                                      occupied=navigation.get("main_occupied", True), installed=navigation.get("installed"))
                 raise ValueError("choose " + ", ".join(re.findall(r"\[([^]]+)\]", " ".join(available))))
         except EOFError:
             return 0

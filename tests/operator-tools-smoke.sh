@@ -10272,6 +10272,44 @@ with patch.object(panel, "menu_input", return_value=GraphInput()), patch.object(
 # The first frame, the card click and the wheel paint; the plain-text click does not.
 assert painted.call_count == 3 and graph_nav["preview"].get("report") == {} and moved.call_count == 1, (
     painted.call_count, moved.call_args_list)
+# The control pane routes graph dock events before returning a control choice.
+class DockInput(ReaderInput):
+    def __init__(self, batches): self.batches = batches
+dock_nav = {"surface": "graph", "tab": "detail", "hits": [], "tab_strip_visible": True}
+with patch.object(panel, "menu_input", return_value=DockInput([[('tab',)], [('q',)]])), \
+        patch.object(panel, "show"):
+    assert panel.read_choice(Path("."), "codex", "ready", "auto", False, dock_nav, {}) == "q"
+assert dock_nav["tab"] == "plan", dock_nav
+# A Messages-tab f request opens the recorded target before returning the queued control key.
+message_nav = {"surface": "graph", "tab": "messages", "box": {"y1": 1, "y2": 10},
+               "message_ids": ["m1"], "message_calls": {"m1": ("result", "w1")},
+               "messages_view": {"selected": "m1"}}
+def request_message_open(repo, target, state, navigation, width):
+    navigation["opening"] = target
+message_input = DockInput([[('f',)], [('k',)]])
+with patch.object(panel, "menu_input", return_value=message_input), patch.object(panel, "show"), \
+        patch.object(panel, "navigate", side_effect=request_message_open) as moved, \
+        patch.object(panel, "read_evidence", return_value=(('result', 'w1'), {"rows": []}, None)) as evidence, \
+        patch.object(panel, "finish_opening", wraps=panel.finish_opening) as opened:
+    assert panel.read_choice(Path("."), "codex", "ready", "auto", False, message_nav, {}) == "k"
+moved.assert_called_once()
+evidence.assert_called_once_with(Path("."), ("result", "w1"))
+opened.assert_called_once()
+assert "open_call" not in message_nav, message_nav
+# Expanded interactive help uses the installed harness list from navigation.
+with patch.object(panel, "managed_session", return_value=False), \
+        patch.object(panel, "panel_mains", return_value=["claude"]), \
+        patch.object(panel, "main_owner", return_value="claude"), \
+        patch.object(panel, "main_installed", side_effect=lambda name: name in {"claude", "codex"}), \
+        patch.object(panel, "read_choice", side_effect=["?", "q"]), \
+        patch.object(panel, "read_field", return_value="") as prompt, \
+        patch.object(panel, "show"), \
+        patch.object(panel.sys, "stdout", io.StringIO()) as help_text:
+    assert panel.interactive(Path(".")) == 0
+assert "Pi" not in help_text.getvalue(), help_text.getvalue()
+with patch.object(panel, "menu_input", return_value=DockInput([[('x',)]])), \
+        patch.object(panel, "show"):
+    assert panel.read_choice(Path("."), "codex", "ready", "auto", False, dock_nav, {}) == "x"
 # Empty and blank Detail body rows have no hit, but still must not trigger a redraw.
 empty_graph = {"room": {"id": "empty-graph", "participants": []}}
 empty_graph_nav = {"dismissed": True}
