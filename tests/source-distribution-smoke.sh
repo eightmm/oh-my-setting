@@ -145,6 +145,16 @@ grep -Fq -- '--scripts-smoke-only' "$workflow" ||
   fail "each matrix child must run only its assigned scripts-smoke shard"
 grep -Fq 'OMS_SMOKE_TIMINGS: "1"' "$workflow" ||
   fail "CI smoke shards must emit bounded timing evidence"
+# oms land installs on a CI run whose jobs show the full selection; ci-query.py
+# reads that from these exact names, so a rename must fail here, not silently
+# make every run look partial.
+for job_name in 'name: focused (${{ matrix.lane }}/4)' 'name: scripts-smoke (${{ matrix.shard }}/4)' \
+    'name: native (${{ matrix.os }}, ${{ matrix.link_mode }})' '"os":"ubuntu-latest","link_mode":"copy"'; do
+  grep -Fq -- "$job_name" "$workflow" || fail "ci-query.py full-selection evidence needs: $job_name"
+done
+for job_name in '"focused (%d/4)"' '"scripts-smoke (%d/4)"' '"native (ubuntu-latest, copy)"' '"lint"' '"gate"' '"affected_plan"'; do
+  grep -Fq -- "$job_name" "$ROOT/scripts/lib/ci-query.py" || fail "ci-query.py no longer reads $job_name"
+done
 # Pull requests first project the graph mode. Positive evidence runs one narrow
 # job; a fail-open result reuses the existing focused and smoke matrices rather
 # than serializing the complete gate on one runner.
@@ -401,7 +411,7 @@ with tempfile.TemporaryDirectory(prefix="oms-native-plan-") as tmp:
         }
         AFFECTED_MODE=; AFFECTED_REASONS=; AFFECTED_TESTS=(); AFFECTED_CASE_LANGS=()
         AFFECTED_CASE_PATHS=(); AFFECTED_CASE_SELECTORS=(); QUICK_FROM=base; QUICK_TO=HEAD
-        CHECK_RUNTIME="$PROBE_ROOT"; SKIP_LINT=0
+        CHECK_RUNTIME="$PROBE_ROOT"; SKIP_LINT=0; CI_PARITY=0
         ''' + selector + '\nprepare_affected_gate\nprintf "%s\\n" "$AFFECTED_NATIVE"\n'
         result = subprocess.run(["bash", "-eu", "-c", probe], cwd=tmp,
                                 env=dict(os.environ, PROBE_PATHS=str(changed), PROBE_ROOT=tmp),

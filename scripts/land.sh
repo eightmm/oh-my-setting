@@ -27,7 +27,9 @@ Usage: land.sh [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD]
 Preconditions: a clean tracked tree, HEAD ahead of REMOTE/TARGET with the
 remote tip as an ancestor (rebase first otherwise), and a gate command
 (default: bash scripts/check.sh when the repo has one; the harness checkout
-uses --affected against REMOTE/TARGET, falling back to full when selected).
+uses --affected --ci-parity against REMOTE/TARGET: a full selection runs lint
+and the quick lane, without provider CLIs on PATH, plus a Bash 3.2 parse of
+changed shell files, and leaves the full lanes to CI).
 Stages, each recorded beside its gate log under
 $XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/<sha>-<request-digest>.json,
 outside the repo:
@@ -38,9 +40,12 @@ outside the repo:
           are unchanged since the gate started
   ci      the GitHub run for the pushed commit, polled up to --ci-wait
           seconds (default 1500; 0 skips; needs gh)
-  update  only after CI success and a full gate (an affected gate pushes but
-          does not install), the matching install checkout's update.sh;
-          its target must still be the verified SHA. Skipped CI never updates.
+  update  only after CI success plus full proof for the SHA: a full local
+          gate (gate.scope=full) or a CI run whose jobs show the full
+          selection (ci.scope=full; an affected-only or unreadable run
+          does not count), the matching install checkout's update.sh; its
+          target must still be the verified SHA. update.authority records
+          which proof installed. Skipped CI never updates.
   sibling live autopilot runs (proposing, proposal-review, driving) in sibling
           worktrees are reported at intake and waited for before push, up to
           --sibling-wait seconds (default 1800; 0 checks once and blocks at
@@ -481,7 +486,7 @@ run_job() {
     success|skipped) ;;
     *) finish failed "pushed $SHORT but ci $conclusion"; return 1 ;;
   esac
-  local install installed_tree
+  local install installed_tree authority="" ci_scope
   # A skipped update records why, so a passed land that left the install
   # behind is distinguishable from one that could not find it.
   if [ "$UPDATE" -ne 1 ]; then
@@ -489,10 +494,36 @@ run_job() {
   elif ! install="$(install_root)"; then
     rset update.reason=no-install-for-remote
   fi
-  if [ "$UPDATE" -eq 1 ] && [ -n "${install:-}" ] && [ "$(receipt_value gate.scope)" != full ]; then
-    rset update.reason=partial-gate
-    finish passed "pushed $SHORT; ci $conclusion; install needs a full gate: oms land --gate 'bash scripts/check.sh --parallel'"
-    return 0
+  # Install needs full proof for this SHA: the local full gate, or a successful
+  # CI run that executed the full selection. CI's selector already runs the
+  # full lanes for exactly the ranges the local gate would fall back on.
+  if [ "$UPDATE" -eq 1 ] && [ -n "${install:-}" ]; then
+    if [ "$(receipt_value gate.scope)" = full ]; then
+      authority=gate.scope=full
+    elif [ "$conclusion" = success ]; then
+      run_id="${run_id:-$(receipt_value ci.run_id)}"
+      if [ "$resume" -eq 1 ] && [ "$(receipt_value ci.scope)" = full ]; then
+        ci_scope=full
+      else
+        rc=0
+        ci_scope="$(python3 "$ROOT/scripts/lib/ci-query.py" scope \
+          "$(git remote get-url --push "$REMOTE")" "${run_id:-0}" "$SHA" 30 2>> "$LOG")" || rc=$?
+        ci_scope="$(oms_strip_cr "$ci_scope")"
+        rset ci.scope_query_rc="$rc"
+        if [ "$rc" -ne 0 ]; then
+          rset ci.scope=unknown update.reason=ci-scope-unknown
+          finish blocked "pushed $SHORT; ci success but its scope query exit $rc (see $LOG); install needs full proof; retry to resume"
+          return 1
+        fi
+      fi
+      rset ci.scope="$ci_scope"
+      [ "$ci_scope" != full ] || authority=ci.scope=full
+    fi
+    if [ -z "$authority" ]; then
+      rset update.reason=partial-gate
+      finish passed "pushed $SHORT; ci $conclusion; install needs a full gate or a full-selection CI run: oms land --gate 'bash scripts/check.sh --parallel'"
+      return 0
+    fi
   fi
   if [ "$UPDATE" -eq 1 ] && [ -n "${install:-}" ]; then
     if [ "$conclusion" != success ]; then
@@ -508,11 +539,13 @@ run_job() {
     fi
     rc=0
     OH_MY_SETTING_UPDATE_EXPECTED_TARGET="$SHA" "$install/scripts/update.sh" >> "$LOG" 2>&1 || rc=$?
-    rset update.rc="$rc" update.expected_sha="$SHA" update.root="$install"
+    rset update.rc="$rc" update.expected_sha="$SHA" update.root="$install" update.authority="$authority"
     if [ "$rc" -ne 0 ]; then
       finish failed "pushed $SHORT but install update exit $rc; ci $conclusion"
       return 1
     fi
+    # A resumed install must not keep the reason an earlier attempt stopped for.
+    rset update.reason=installed
   fi
   finish passed "pushed $SHORT to $REMOTE/$TARGET; ci $conclusion"
 }
@@ -574,6 +607,8 @@ print("  gate: %s (%ss)  push: %s  update: %s  ci: %s%s" % (
     "ok" if p.get("rc") == 0 else p.get("rc", "-"),
     "ok" if u.get("rc") == 0 else "%s%s" % (u.get("rc", "-"), " (%s)" % u["reason"] if u.get("reason") else ""),
     c.get("conclusion", "-"), " (run %s)" % c["run_id"] if c.get("run_id") else ""))
+if u.get("authority") or c.get("scope"):
+    print("  install proof: %s  ci scope: %s" % (u.get("authority", "-"), c.get("scope", "-")))
 if r.get("summary"):
     print("  %s" % r["summary"])
 s = r.get("siblings", {})
@@ -628,7 +663,7 @@ if [ -z "$GATE" ]; then
     # Quote the destination as shell data: remote and branch names can contain
     # shell metacharacters even though Git accepts them.
     printf -v gate_destination '%q' "$REMOTE/$TARGET"
-    GATE="$GATE --affected --changed-from $gate_destination --changed-to HEAD"
+    GATE="$GATE --affected --ci-parity --changed-from $gate_destination --changed-to HEAD"
   fi
 fi
 git -C "$REPO" fetch -q "$REMOTE" || { echo "error: fetch from $REMOTE failed" >&2; exit 2; }

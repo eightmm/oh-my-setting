@@ -66,6 +66,14 @@ test_smoke_shards_partition_every_definition() {
   LC_ALL=C sort "$combined" > "$TMP/actual"
   cmp -s "$expected" "$TMP/actual" || fail "smoke shards omit or invent test definitions"
   [ -z "$(LC_ALL=C sort "$combined" | uniq -d)" ] || fail "smoke shards overlap"
+  # The cost weights keep the heaviest tests apart, and the shard holding the
+  # heaviest one carries fewer tests to make up for it.
+  local heavy_a heavy_b fewest
+  heavy_a="$(grep -lx test_agent_plan_lifecycle "$TMP"/shard-[1-4])"
+  heavy_b="$(grep -lx test_worker_guard_rejects_any_worker_authority_state_change "$TMP"/shard-[1-4])"
+  [ -n "$heavy_a" ] && [ "$heavy_a" != "$heavy_b" ] || fail "the two heaviest smoke tests share a shard"
+  fewest="$(wc -l "$TMP"/shard-[1-4] | sort -n | head -n 1 | awk '{print $2}')"
+  [ "$fewest" = "$heavy_a" ] || fail "the heaviest smoke test's shard is not the lightest by count"
   if "$ROOT/tests/run-smoke-shard.sh" --list --shard 0/4 >/dev/null 2>&1; then
     fail "zero-indexed smoke shard should be rejected"
   fi
@@ -831,6 +839,57 @@ EOF
     fail "affected gate rejected its own selector-boundary change"
   printf '%s\n' "$out" | grep >/dev/null -Fx autonomy-hook ||
     fail "check.sh trusted the graph to validate its own selector change: $out"
+  # oms land's default caps that fallback: whole lint, the quick lane and a
+  # real Bash 3.2 parse here; the focused and smoke lanes are CI's.
+  out="$(cd "$gate" && bash scripts/check.sh --affected --ci-parity \
+    --changed-from "$boundary_base" --changed-to "$head" --list-stages 2>/dev/null)" ||
+    fail "ci-parity gate rejected a selector-boundary change"
+  for stage_name in shellcheck source-distribution bash32-parse; do
+    grep -Fxq "$stage_name" <<< "$out" || fail "capped fallback omitted $stage_name: $out"
+  done
+  if grep -Eqx 'autonomy-hook|shellcheck-changed' <<< "$out"; then
+    fail "capped fallback ran full lanes or repeated lint: $out"
+  fi
+  # A selected test sees PATH as a CI host does: no provider CLI, every other tool.
+  mkdir -p "$TMP/parity-bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-bin/codex"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-bin/parity-helper"
+  printf '#!/usr/bin/env bash\nprintf "docker:%%s\\n" "$*" >> "$OMS_TEST_AFFECTED_LOG"\n' > "$TMP/parity-bin/fake-docker"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-bin/fake-shellcheck"
+  chmod +x "$TMP/parity-bin/"*
+  cat > "$gate/tests/leaf-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'shell-file\n' >> "$OMS_TEST_AFFECTED_LOG"
+printf 'codex:%s helper:%s\n' "$(command -v codex || echo absent)" \
+  "$(command -v parity-helper >/dev/null && echo present)" >> "$OMS_TEST_AFFECTED_LOG"
+EOF
+  git -C "$gate" add tests/leaf-smoke.sh
+  git -C "$gate" commit -qm parity-leaf
+  base="$head"
+  head="$(git -C "$gate" rev-parse HEAD)"
+  : > "$log"
+  out="$(cd "$gate" && PATH="$TMP/parity-bin:$PATH" OMS_TEST_AFFECTED_LOG="$log" \
+    OMS_SHELLCHECK_BIN="$TMP/parity-bin/fake-shellcheck" OMS_DOCKER_BIN="$TMP/parity-bin/fake-docker" \
+    bash scripts/check.sh --affected --ci-parity --changed-from "$base" --changed-to "$head" 2>&1)" ||
+    fail "ci-parity gate failed: $out"
+  grep -Fxq 'check: ok (affected tests; mode=affected; ci-parity)' <<< "$out" || fail "ci-parity verdict missing: $out"
+  # Git Bash cannot shadow PATH with links and only Linux parses through docker
+  # (macOS has /bin/bash); those hosts must say so instead.
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      grep -Fq 'skip: provider-less PATH' <<< "$out" || fail "Windows provider-less skip was silent: $out" ;;
+    *) grep -Fxq 'codex:absent helper:present' "$log" ||
+         fail "ci-parity PATH kept a provider CLI or lost a tool: $(cat "$log")" ;;
+  esac
+  if [ "$(uname -s)" = Linux ]; then
+    grep -Eq '^docker:run .* bash:3\.2 .* tests/leaf-smoke\.sh$' "$log" ||
+      fail "ci-parity did not parse the changed shell file with Bash 3.2: $(cat "$log")"
+    out="$(cd "$gate" && OMS_TEST_AFFECTED_LOG="$log" OMS_SHELLCHECK_BIN="$TMP/parity-bin/fake-shellcheck" \
+      OMS_DOCKER_BIN="$TMP/parity-bin/absent-docker" \
+      bash scripts/check.sh --affected --ci-parity --changed-from "$base" --changed-to "$head" 2>&1)" ||
+      fail "ci-parity without docker failed instead of skipping: $out"
+    grep -Fq 'skip: bash32-parse (docker is not installed)' <<< "$out" || fail "absent docker skip was silent: $out"
+  fi
 
   # Prose changes need no graph or unrelated runtime suites. Agent policy is
   # not prose-only, and the changed tree must still match what gets checked.

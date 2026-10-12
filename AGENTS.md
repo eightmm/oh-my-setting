@@ -32,12 +32,15 @@
   checks; positive graph evidence selects tests; critical/uncertain changes
   use full coverage. Skill/template prose and the model registry use their
   bounded contract suites; executable templates and permission policy stay broad.
-- Before deployment/installing changed OMS code, run `bash scripts/check.sh`
-  once. Prefer `oms land`: it checks the committed HEAD and pushes only while
-  HEAD and the tracked tree remain unchanged, without a duplicate hook gate.
-  Its default gate is the affected selection; an affected-only gate pushes but
-  never installs. Installation follows a full gate and successful CI and must
-  target that same SHA.
+- Deploy/install changed OMS code with `oms land`: it checks the committed HEAD
+  and pushes only while HEAD and the tracked tree remain unchanged, without a
+  duplicate hook gate. Its default gate is `check.sh --affected --ci-parity`:
+  a full selection runs lint and the quick lane, never CI's full lanes, with
+  provider CLIs hidden from PATH and a Bash 3.2 parse of changed shell files.
+  Installation needs successful CI for that same SHA plus full proof: a full
+  local gate (`--gate 'bash scripts/check.sh --parallel'`) or a CI run whose
+  jobs executed the full selection. Affected-only gates and runs push but
+  never install; the receipt's `update.authority` names the proof.
   Direct pushes keep the full hook unless the destination requires CI's
   risk-based `gate`; only then may local quick feedback replace it. Workflow
   presence alone is not branch protection.
@@ -45,5 +48,7 @@
   smoke and copy lifecycle coverage. Native macOS/Windows lifecycle, stock Bash
   3.2/BSD and Python 3.9 run for install/lifecycle/portability/Python compatibility
   changes and weekly/manual runs. Only plan-authorized skips pass the stable
-  gate. In this repository `oms land` defaults to affected checks against the
-  destination; explicit `--gate` wins and CI remains authoritative.
+  gate. In this repository `oms land` defaults to CI-parity affected checks
+  against the destination; explicit `--gate` wins and CI remains
+  authoritative. Smoke shards and focused lanes balance by measured cost
+  (`# smoke-weight:` lines, focused registration order); refresh from CI timings.

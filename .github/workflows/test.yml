@@ -74,8 +74,10 @@ jobs:
 
   # scripts-smoke is the dominant wall-clock cost. Native matrix children get
   # separate runners instead of four process trees racing on one VM. The
-  # deterministic partition and bounded slow-test timing make rebalancing
-  # evidence-driven.
+  # partition is deterministic and cost-weighted ("# smoke-weight:" lines in
+  # scripts-smoke.sh, refreshed from the smoke-timing lines these jobs print),
+  # so one slow test no longer stretches its shard. Job names are install
+  # evidence: scripts/lib/ci-query.py reads a full selection from them.
   smoke_shard:
     needs: affected_plan
     if: needs.affected_plan.outputs.mode == 'full'
@@ -90,6 +92,7 @@ jobs:
       - name: smoke shard
         env:
           OMS_SMOKE_TIMINGS: "1"
+          OMS_SMOKE_TIMING_LIMIT: "25"
         run: bash scripts/check.sh --scripts-smoke-only --shard "${{ matrix.shard }}/4"
 
   # Select once and run narrow checks in this job. Full selections fan out to

@@ -275,6 +275,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms land`'s default gate is `check.sh --affected --ci-parity`: a full
+  selection runs lint and the quick lane instead of the 50-minute local full
+  gate CI repeats, test stages run with provider CLIs hidden from PATH, and
+  changed shell files are parsed by a real Bash 3.2 (docker `bash:3.2` or
+  macOS `/bin/bash`, skipped with a reason otherwise), the two CI failures
+  f698ac9's local gate missed. Install accepts either a full local gate or a
+  successful CI run whose jobs executed the full selection for the SHA
+  (`ci-query.py scope`); affected-only or unreadable runs never install, and
+  `update.authority` records the proof.
+- CI's scripts-smoke shards split by measured cost (`# smoke-weight:` lines)
+  instead of round-robin, and the focused stages are re-ordered from five full
+  runs, so neither one slow test nor operator-tools stretches a lane (estimated
+  max 654s to 505s for smoke, 839s to 572s for focused).
 - The current-thread rule (owner task, valid id, thread file, TTL) lives once,
   in `thread_live.current_thread`; `thread.sh` calls it and the prompt and
   edit hooks use it in process instead of starting `thread.sh current`.

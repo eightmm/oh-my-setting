@@ -481,6 +481,7 @@ PY
   git -C "$project" worktree prune >/dev/null 2>&1 || true
 }
 
+# smoke-weight: 20
 test_delegate_marker_set_lock_does_not_grow_per_run() {
   local project="$TMP/delegate-marker-set-lock"
   local bin_dir="$project/bin"
@@ -4571,6 +4572,7 @@ test_peer_ask_print_timeout() {
     --prompt "Ask with custom print timeout" >/dev/null
 }
 
+# smoke-weight: 20
 test_peer_ask_debate_dry_run() {
   local project="$TMP/ask-debate"
   local artifact_dir="$project/artifacts"
@@ -6023,6 +6025,7 @@ test_agent_plan_lock_single_winner() {
   [ "$winners" = 1 ] || fail "exactly one worker should claim P1, got $winners"
 }
 
+# smoke-weight: 300
 test_agent_plan_lifecycle() {
   local d="$TMP/agent-plan-life"
   local SH="$ROOT/scripts/agent-plan.sh"
@@ -7784,6 +7787,7 @@ assert task["history"] == [{"schema": 1, "kind": "prior-review", "receipt": "rec
 ' || fail "cancellation overwrote existing task evidence, lease, owner or history"
 }
 
+# smoke-weight: 12
 test_agent_plan_retire_is_cas_fenced_and_evidence_honest() {
   local project="$TMP/agent-plan-retire"
   local active_project="$TMP/agent-plan-retire-active"
@@ -15490,6 +15494,7 @@ test_experiment_board_stale_reclaim() {
 }
 
 
+# smoke-weight: 15
 test_experiment_board_claim_is_atomic() {
   local d="$TMP/exp-claim-race"
   local board="$d/.oms/experiments.jsonl"
@@ -16213,6 +16218,7 @@ EOF
   fi
 }
 
+# smoke-weight: 20
 test_delegate_repair_retries_failed_verify() {
   local project="$TMP/delegate-repair"
   local artifact_dir="$project/artifacts"
@@ -18078,6 +18084,7 @@ test_delegation_liveness_in_state() {
   printf '%s' "$out" | grep >/dev/null -E "d2.*live" || fail "a live-pid delegation must show as live"
 }
 
+# smoke-weight: 15
 test_gc_reclaims_safely() {
   local project="$TMP/gc"
   local gc_err="$project/gc.err"
@@ -20436,6 +20443,7 @@ test_skill_router_auto_records_task_prompts() {
     fail "the same prompt on a new turn is a new request and must be recorded"
 }
 
+# smoke-weight: 70
 test_skill_router_auto_task_timeout_retries_owned_writer_once() {
   local d="$TMP/skill-router-auto-task-timeout"
   local foreign_pid
@@ -22106,6 +22114,7 @@ test_agent_plan_reopen_only_from_blocked() {
     fail "reopen should return a blocked task to ready"
 }
 
+# smoke-weight: 50
 test_agent_task_lifecycle_rotation_and_bounded_state() {
   # Reference liveness belongs to this shell invocation, not begin's transient
   # Python process or the native caller. A real reconcile overlaps real work.
@@ -24943,6 +24952,7 @@ EOF
   done
 }
 
+# smoke-weight: 20
 test_delegate_execution_config_guard_runs_before_git_capture() {
   local project="$TMP/worker-exec-config"
   local bin_dir="$project/bin"
@@ -26564,6 +26574,7 @@ test_worker_guard_reports_a_sibling_remote_ref_change_as_soft() {
     fail "strict remote-ref violation should be named: $result"
 }
 
+# smoke-weight: 30
 test_worker_guard_still_fails_on_a_local_branch_ref_change() {
   local project="$TMP/guard-hard-local-ref"
   local head
@@ -26818,6 +26829,7 @@ test_worker_guard_exempts_a_live_sibling_mid_removal() {
   fi
 }
 
+# smoke-weight: 20
 test_worker_guard_exempts_a_live_sibling_mid_creation() {
   local project="$TMP/guard-sibling-creation"
   local managed_root="$TMP/guard-sibling-creation-root"
@@ -27091,6 +27103,7 @@ test_worker_guard_exempts_a_sibling_marked_from_a_linked_worktree() {
   fi
 }
 
+# smoke-weight: 12
 test_worker_guard_softens_cleanup_of_a_dead_kept_sibling() {
   local project="$TMP/guard-sibling-cleanup"
   local managed_root="$TMP/guard-sibling-cleanup-root"
@@ -27168,6 +27181,7 @@ test_worker_guard_reports_a_bounded_scan() {
     fail "a truncated scan must say so: $out"
 }
 
+# smoke-weight: 80
 test_worker_guard_rejects_any_worker_authority_state_change() {
   local project="$TMP/guard-state"
   local result
@@ -27661,6 +27675,7 @@ EOF
   fi
 }
 
+# smoke-weight: 20
 test_worker_guard_sees_submodule_and_worktree_metadata() {
   local project="$TMP/guard-submodule"
   local source="$TMP/guard-submodule-src"
@@ -27940,6 +27955,7 @@ test_worker_guard_sees_an_edit_to_an_already_dirty_file() {
     fail "the tracked surface should catch a content change, not just its status: $result"
 }
 
+# smoke-weight: 12
 test_thread_appends_are_serialized() {
   local project="$TMP/thread-race"
   local i
@@ -28527,6 +28543,7 @@ test_worker_guard_spends_its_budget_on_untracked_before_ignored() {
   esac
 }
 
+# smoke-weight: 25
 test_worker_guard_splits_remote_tracking_and_stash_refs() {
   local project="$TMP/guard-remote-refs"
   local snap="$TMP/guard-remote-refs-snap"
@@ -28995,6 +29012,7 @@ test_task_verify_survives_a_gate_with_no_failure_line() {
     fail "a silent passing gate must verify, not abort"
 }
 
+# smoke-weight: 40
 test_delegate_interactive_conversation() {
   local fixture="$TMP/delegate-interactive" case_dir project scenario provider
   mkdir -p "$fixture/bin"
@@ -29242,6 +29260,7 @@ PY
   done
 }
 
+# smoke-weight: 15
 test_delegate_consults_an_advisor_after_a_repair_also_fails() {
   local project="$TMP/delegate-advise"
   local bin="$project/bin"

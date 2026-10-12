@@ -142,6 +142,8 @@ FOCUSED_STAGE_INDEX=0
 LIST_STAGES=0
 PRINT_AFFECTED_MODE=0
 CI_OUTPUT=""
+CI_PARITY=0
+AFFECTED_CAPPED=0
 usage() {
   cat <<'EOF'
 usage: check.sh [MODE] [OPTIONS]
@@ -174,6 +176,13 @@ manifest) then the test suites. With no arguments it runs both.
   --ci-output FILE      With --affected, append mode=affected|full and
                         native=true|false to FILE.
                         Run affected checks here; defer full checks to CI lanes.
+  --ci-parity           With --affected, the oms land default: a full fallback
+                        runs lint and the quick lane instead (CI runs the full
+                        selection), test stages run with provider CLIs hidden
+                        from PATH as on CI hosts, and changed shell files are
+                        parsed by a real Bash 3.2 (docker image bash:3.2 on
+                        Linux, /bin/bash on macOS; skipped with a reason when
+                        neither is available).
   --changed-from REF    Base tree for --quick or --affected.
   --changed-to REF      Target tree for --quick or --affected.
 EOF
@@ -212,6 +221,7 @@ while [ "$#" -gt 0 ]; do
     --ci-output)
       [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "error: --ci-output requires a file" >&2; exit 2; }
       CI_OUTPUT="$2"; shift 2 ;;
+    --ci-parity) CI_PARITY=1; shift ;;
     --changed-from)
       [ "$#" -ge 2 ] || { echo "error: --changed-from requires a ref" >&2; exit 2; }
       QUICK_FROM="$2"
@@ -237,6 +247,10 @@ if [ "$PRINT_AFFECTED_MODE" = 1 ] && { [ "$MODE" != affected ] || [ "$LIST_STAGE
 fi
 if [ -n "$CI_OUTPUT" ] && { [ "$MODE" != affected ] || [ "$LIST_STAGES" = 1 ] || [ "$PRINT_AFFECTED_MODE" = 1 ]; }; then
   echo "error: --ci-output requires --affected without listing/print-only flags" >&2
+  exit 2
+fi
+if [ "$CI_PARITY" = 1 ] && { [ "$MODE" != affected ] || [ -n "$CI_OUTPUT" ] || [ "$PRINT_AFFECTED_MODE" = 1 ]; }; then
+  echo "error: --ci-parity requires --affected without --ci-output or --print-affected-mode" >&2
   exit 2
 fi
 if [ "$SKIP_LINT" = 1 ] && [ "$MODE" != full ] && [ "$MODE" != lint ] && [ "$MODE" != affected ]; then
@@ -439,6 +453,82 @@ stage() {  # stage NAME COMMAND...
     exit "$rc"
   fi
   echo "ok: $name (${elapsed}s)"
+}
+
+# CI hosts have no provider CLI, so a suite that quietly depends on one passes
+# here and fails there (f698ac9: panel routing found no installed provider).
+# Each PATH directory holding one is replaced by a shadow of symlinks to its
+# other entries; dropping the directory would also drop oms, python3 and the
+# rest. Git Bash copies instead of linking, so Windows hosts skip with a reason.
+CHECK_PROVIDER_CLIS="claude codex pi agy gemini"
+hide_provider_clis() {
+  local rest="$PATH:" dir name entry base hit shadow count=0 filtered=""
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      echo "skip: provider-less PATH (no native symlinks on this host)"
+      return 0
+      ;;
+  esac
+  while [ -n "$rest" ]; do
+    dir="${rest%%:*}"
+    rest="${rest#*:}"
+    hit=0
+    for name in $CHECK_PROVIDER_CLIS; do
+      [ -z "$dir" ] || [ ! -e "$dir/$name" ] || hit=1
+    done
+    if [ "$hit" = 1 ]; then
+      count=$((count + 1))
+      shadow="$CHECK_RUNTIME/provider-less/$count"
+      mkdir -p "$shadow"
+      for entry in "$dir"/*; do
+        [ -e "$entry" ] || continue
+        base="${entry##*/}"
+        case " $CHECK_PROVIDER_CLIS " in *" $base "*) continue ;; esac
+        ln -s "$entry" "$shadow/$base"
+      done
+      dir="$shadow"
+    fi
+    [ -z "$dir" ] || filtered="${filtered:+$filtered:}$dir"
+  done
+  PATH="$filtered"
+  export PATH
+  hash -r
+  echo "ci-parity: provider CLIs hidden from PATH ($CHECK_PROVIDER_CLIS; shadowed PATH entries: $count)"
+}
+
+# The host bash -n accepts what Bash 3.2 cannot parse (f698ac9 shipped such a
+# file to the macOS leg), so ci-parity parses changed shell files with a real
+# 3.2. It never pulls an image: an absent docker, daemon or image is a printed
+# skip, and CI's macOS leg stays the authority.
+parse_with_bash32() {  # parse_with_bash32 FILE...
+  local docker="${OMS_DOCKER_BIN:-docker}" probe=()
+  if [ "$LIST_STAGES" = 1 ]; then
+    stage bash32-parse true
+    return 0
+  fi
+  case "$(uname -s 2>/dev/null)" in
+    Darwin)
+      stage bash32-parse env OMS_BASH32_BIN=/bin/bash bash scripts/check-bash32.sh "$@"
+      return 0
+      ;;
+    Linux) ;;
+    *)
+      echo "skip: bash32-parse (no Bash 3.2 parser on $(uname -s 2>/dev/null))"
+      return 0
+      ;;
+  esac
+  if ! command -v "$docker" >/dev/null 2>&1; then
+    echo "skip: bash32-parse (docker is not installed)"
+    return 0
+  fi
+  ! command -v timeout >/dev/null 2>&1 || probe=(timeout 30)
+  if ! ${probe[@]+"${probe[@]}"} "$docker" image inspect bash:3.2 >/dev/null 2>&1; then
+    echo "skip: bash32-parse (docker image bash:3.2 is absent or docker is not running; docker pull bash:3.2 enables it)"
+    return 0
+  fi
+  # shellcheck disable=SC2016 # $f and $@ expand inside the container.
+  stage bash32-parse "$docker" run --rm --network none -v "$ROOT:/r:ro" bash:3.2 \
+    bash -c 'for f in "$@"; do bash -n "/r/$f" || exit 1; done' bash32-parse "$@"
 }
 
 compile_affected_plan() {  # compile_affected_plan PLAN_JSON
@@ -652,6 +742,15 @@ prepare_affected_gate() {
     AFFECTED_REASONS="${AFFECTED_REASONS:-positive graph evidence}"
     RUN_QUICK=1
     echo "affected: ${AFFECTED_REASONS:-positive graph evidence}; ${#AFFECTED_TESTS[@]} selected test file(s)" >&2
+  elif [ "$CI_PARITY" = 1 ]; then
+    # CI's own selector reaches the same verdict for the pushed range and runs
+    # the full lanes on separate runners; repeating them here cost 50 minutes.
+    AFFECTED_MODE=full
+    AFFECTED_CAPPED=1
+    AFFECTED_REASONS="${AFFECTED_REASONS:-uncertain}; capped by --ci-parity"
+    [ "$SKIP_LINT" = 1 ] || RUN_LINT=1
+    RUN_QUICK=1
+    echo "affected: full selection ($AFFECTED_REASONS) runs lint and the quick lane; CI runs the full lanes" >&2
   else
     AFFECTED_MODE=full
     [ "$SKIP_LINT" = 1 ] || RUN_LINT=1
@@ -676,6 +775,9 @@ if [ "$RUN_QUICK" = 1 ] || [ "$RUN_AFFECTED" = 1 ]; then
     . "$ROOT/scripts/lib/test-growth.sh"
     echo "changed: $(oms_test_growth "$QUICK_FROM" "$QUICK_TO")" >&2
   fi
+fi
+if [ "$CI_PARITY" = 1 ] && [ "$LIST_STAGES" != 1 ]; then
+  hide_provider_clis
 fi
 if [ "$RUN_AFFECTED" = 1 ]; then
   prepare_affected_gate
@@ -763,7 +865,10 @@ if [ "$RUN_QUICK" = 1 ]; then
     esac
   done < "$changed_file"
 
-  if [ "${#quick_shell_files[@]}" -gt 0 ] && [ "$SKIP_LINT" = 0 ]; then
+  # A capped full selection already ran the whole lint above.
+  quick_lint=0
+  [ "$SKIP_LINT" = 1 ] || [ "$RUN_LINT" = 1 ] || quick_lint=1
+  if [ "${#quick_shell_files[@]}" -gt 0 ] && [ "$quick_lint" = 1 ]; then
     command -v "$SHELLCHECK" >/dev/null 2>&1 || {
       echo "FATAL: shellcheck is required for changed shell files" >&2
       exit 1
@@ -771,8 +876,11 @@ if [ "$RUN_QUICK" = 1 ]; then
     stage shellcheck-changed lint_shell "${quick_shell_files[@]}"
     stage bash-compat-changed bash scripts/check-bash32.sh "${quick_shell_files[@]}"
   fi
-  [ "$SKIP_LINT" = 1 ] || [ "$quick_python" = 0 ] || stage python-syntax bash scripts/check-python.sh "${quick_python_files[@]}"
-  [ "$SKIP_LINT" = 1 ] || [ "$quick_skills" = 0 ] || stage skill-manifest bash scripts/install-skills.sh
+  if [ "${#quick_shell_files[@]}" -gt 0 ] && [ "$SKIP_LINT" = 0 ] && [ "$CI_PARITY" = 1 ]; then
+    parse_with_bash32 "${quick_shell_files[@]}"
+  fi
+  [ "$quick_lint" = 0 ] || [ "$quick_python" = 0 ] || stage python-syntax bash scripts/check-python.sh "${quick_python_files[@]}"
+  [ "$quick_lint" = 0 ] || [ "$quick_skills" = 0 ] || stage skill-manifest bash scripts/install-skills.sh
   if [ "$quick_docs" = 1 ] || [ "$quick_harness" = 0 ]; then
     stage source-distribution bash tests/source-distribution-smoke.sh --docs-only
   else
@@ -843,88 +951,91 @@ fi
 
 if [ "$RUN_FOCUSED" = 1 ]; then
   # Registration order decides the lanes. --focused-lane I/N takes every Nth
-  # stage from here, so the order below is not thematic. It interleaves a
-  # longest-processing-time assignment over eight lanes (the local parallel
-  # gate) of stage costs measured under that gate on 2026-10-01 (autopilot
-  # 148s, goal-drive-recovery halves 146s and 114s, draft-pr 111s, graph 57s
-  # once its unittest classes ran in parallel, the rest under 95s): the longest
-  # of eight lanes carries about 175s, and CI's four lanes, which pair lanes k
-  # and k+4, about 340s. Re-derive the order when a heavy suite is added or one
-  # changes by minutes: sort by cost, assign each to the lightest of eight
-  # lanes, then list lane 1..8, 1..8, ...
-  stage autopilot bash tests/autopilot-smoke.sh
-  stage goal-drive-recovery-1 env OMS_GDR_PART=1 bash tests/goal-drive-recovery-smoke.sh
-  stage goal-drive-recovery-2 env OMS_GDR_PART=2 bash tests/goal-drive-recovery-smoke.sh
+  # stage from here, so the order below is not thematic. It is a cardinality-
+  # constrained longest-processing-time assignment over eight lanes (the local
+  # parallel gate) whose lane pairs k and k+4 also balance CI's four lanes,
+  # from the mean stage costs of five full CI runs on 2026-10-10..12
+  # (operator-tools 447s, goal-drive-recovery-1 209s, autopilot 188s, draft-pr
+  # 157s, goal-drive-recovery-2 147s, autonomy-plan-run 125s, graph 119s, the
+  # rest under 65s): each CI lane carries about 572s (it was 410-839s) and the
+  # longest local lane is operator-tools' own. Re-derive the order when a heavy
+  # suite is added or one changes by minutes: assign by cost to the lightest
+  # lane that still has a slot, swap to balance the k/k+4 pairs, then list
+  # lane 1..8, 1..8, ... The Linux-only stages close the list, so the other
+  # hosts keep the same lanes for every stage before them.
+  stage graph bash tests/graph-smoke.sh
+  stage supervisor bash tests/supervisor-smoke.sh
   stage draft-pr bash tests/draft-pr-smoke.sh
   stage autonomy-plan-run bash tests/autonomy-plan-run-smoke.sh
-  stage state-surfaces bash tests/state-surfaces-smoke.sh
-  stage graph bash tests/graph-smoke.sh
-  stage runtime-core bash tests/runtime-core-smoke.sh
-  stage functional-evolution bash tests/functional-evolution-smoke.sh
-  stage harness-enhancements bash tests/harness-enhancements-smoke.sh
+  stage autopilot bash tests/autopilot-smoke.sh
+  stage operator-tools bash tests/operator-tools-smoke.sh
+  stage goal-drive-recovery-2 env OMS_GDR_PART=2 bash tests/goal-drive-recovery-smoke.sh
+  stage goal-drive-recovery-1 env OMS_GDR_PART=1 bash tests/goal-drive-recovery-smoke.sh
+  stage atomic-state bash tests/atomic-state-smoke.sh
   stage provider-registry bash tests/provider-registry-smoke.sh
+  stage patch-land-approval bash tests/patch-land-approval-smoke.sh
+  stage runtime-core bash tests/runtime-core-smoke.sh
   stage land bash tests/land-smoke.sh
-  stage supervisor bash tests/supervisor-smoke.sh
+  stage artifact-supersession bash tests/artifact-supersession-smoke.sh
+  stage autonomy-hook bash tests/autonomy-hook-smoke.sh
+  stage work-journal bash tests/work-journal-smoke.sh
+  stage tick bash tests/tick-smoke.sh
+  stage patch-admit-verifier-floor bash tests/patch-admit-verifier-floor-smoke.sh
+  stage state-surfaces bash tests/state-surfaces-smoke.sh
+  stage model-routing bash tests/model-routing-smoke.sh
+  stage durable-writers bash tests/durable-writers-contract-smoke.sh
+  stage source-distribution bash tests/source-distribution-smoke.sh
   # The real install/update/uninstall lifecycle in a sandboxed HOME. It ran
   # CI-only until a rename shipped green locally and reddened all four
   # install-e2e legs on a stale catalog assertion: the one suite the local
   # gate could not see was the one that broke. 30s buys that back.
   stage install-lifecycle bash tests/install-lifecycle-smoke.sh
-  stage patch-land-approval bash tests/patch-land-approval-smoke.sh
-  stage work-journal bash tests/work-journal-smoke.sh
-  stage runtime-core-integration bash tests/runtime-core-integration-smoke.sh
+  stage debate-delta bash tests/debate-delta-smoke.sh
+  stage lifecycle-events bash tests/lifecycle-events-smoke.sh
+  stage doctor-model-capability bash tests/doctor-model-capability-smoke.sh
+  stage update-v04 bash tests/update-v04-smoke.sh
+  stage lifecycle-provider-integration bash tests/lifecycle-provider-integration-smoke.sh
+  stage council-failure-symmetry bash tests/council-failure-symmetry-smoke.sh
+  stage install-profile bash tests/install-profile-smoke.sh
+  stage functional-evolution bash tests/functional-evolution-smoke.sh
+  stage autonomy-verification bash tests/autonomy-verification-smoke.sh
+  stage harness-enhancements bash tests/harness-enhancements-smoke.sh
+  stage failure-attention bash tests/failure-attention-smoke.sh
+  stage model-doctor bash tests/model-doctor-smoke.sh
   stage read-time-expiry bash tests/read-time-expiry-smoke.sh
   stage lifecycle-hardening bash tests/lifecycle-hardening-smoke.sh
-  stage lifecycle-events bash tests/lifecycle-events-smoke.sh
-  stage tick bash tests/tick-smoke.sh
-  stage durable-writers bash tests/durable-writers-contract-smoke.sh
-  stage model-routing bash tests/model-routing-smoke.sh
-  stage update-v04 bash tests/update-v04-smoke.sh
-  stage model-doctor bash tests/model-doctor-smoke.sh
-  stage artifact-supersession bash tests/artifact-supersession-smoke.sh
-  stage autonomy-hook bash tests/autonomy-hook-smoke.sh
-  stage doctor-model-capability bash tests/doctor-model-capability-smoke.sh
-  stage install-lifecycle-lock bash tests/install-lifecycle-lock-smoke.sh
-  stage council-failure-symmetry bash tests/council-failure-symmetry-smoke.sh
-  stage debate-delta bash tests/debate-delta-smoke.sh
-  stage doctor-surfaces bash tests/doctor-surfaces-smoke.sh
-  stage prompt-budget bash tests/prompt-budget-smoke.sh
-  stage provider-permissions-mcp-boundary bash tests/provider-permissions-mcp-boundary-smoke.sh
-  stage lifecycle-provider-integration bash tests/lifecycle-provider-integration-smoke.sh
-  stage autonomy-verification bash tests/autonomy-verification-smoke.sh
-  stage advisor-routing bash tests/advisor-routing-smoke.sh
+  stage codex-hud-config bash tests/codex-hud-config-smoke.sh
   stage ci-status bash tests/ci-status-smoke.sh
-  stage patch-admit-verifier-floor bash tests/patch-admit-verifier-floor-smoke.sh
-  stage failure-attention bash tests/failure-attention-smoke.sh
-  stage skill-lifecycle bash tests/skill-lifecycle-smoke.sh
-  stage windows-durable-writer bash tests/windows-durable-writer-smoke.sh
   stage platform-portability bash tests/platform-portability-smoke.sh
-  stage seat-reliability bash tests/seat-reliability-smoke.sh
-  stage atomic-state bash tests/atomic-state-smoke.sh
+  stage doctor-surfaces bash tests/doctor-surfaces-smoke.sh
   stage self-advice-disclosure bash tests/self-advice-disclosure-smoke.sh
-  stage models-surface bash tests/models-smoke.sh
+  stage prompt-budget bash tests/prompt-budget-smoke.sh
   stage fail-ledger-hook-filter bash tests/fail-ledger-hook-filter-smoke.sh
+  stage skill-lifecycle bash tests/skill-lifecycle-smoke.sh
+  stage context-core bash tests/context-core-smoke.sh
+  stage advisor-session bash tests/advisor-session-smoke.sh
+  stage runtime-core-integration bash tests/runtime-core-integration-smoke.sh
+  stage install-lifecycle-lock bash tests/install-lifecycle-lock-smoke.sh
+  stage patch-admit-structural bash tests/patch-admit-structural-smoke.sh
+  stage turn-guard-fuse bash tests/turn-guard-fuse-smoke.sh
   stage autonomy-failure bash tests/autonomy-failure-smoke.sh
-  stage operator-tools bash tests/operator-tools-smoke.sh
+  stage provider-permissions-mcp-boundary bash tests/provider-permissions-mcp-boundary-smoke.sh
   stage panel-controls bash tests/panel-controls-smoke.sh
+  stage windows-durable-writer bash tests/windows-durable-writer-smoke.sh
+  stage advisor-routing bash tests/advisor-routing-smoke.sh
+  stage file-lock-boundary bash tests/file-lock-boundary-smoke.sh
+  stage tool-lock bash tests/tool-lock-smoke.sh
+  stage harness-residue-boundary bash tests/harness-residue-boundary-smoke.sh
+  stage models-surface bash tests/models-smoke.sh
+  stage seat-reliability bash tests/seat-reliability-smoke.sh
+  stage tsp-queue bash tests/tsp-queue-smoke.sh
+  stage bsd-portability bash tests/bsd-portability-smoke.sh
   # panel jobs need Linux subreaper+pidfd and a POSIX pty; other hosts keep the
   # core lifecycle without them rather than counting a missing native proof.
   if [ "$(uname -s 2>/dev/null)" = Linux ]; then
     stage terminal-control bash tests/terminal-control-smoke.sh
     stage panel-workspaces bash tests/panel-workspaces-smoke.sh
   fi
-  stage tool-lock bash tests/tool-lock-smoke.sh
-  stage file-lock-boundary bash tests/file-lock-boundary-smoke.sh
-  stage bsd-portability bash tests/bsd-portability-smoke.sh
-  stage source-distribution bash tests/source-distribution-smoke.sh
-  stage patch-admit-structural bash tests/patch-admit-structural-smoke.sh
-  stage advisor-session bash tests/advisor-session-smoke.sh
-  stage tsp-queue bash tests/tsp-queue-smoke.sh
-  stage install-profile bash tests/install-profile-smoke.sh
-  stage turn-guard-fuse bash tests/turn-guard-fuse-smoke.sh
-  stage codex-hud-config bash tests/codex-hud-config-smoke.sh
-  stage harness-residue-boundary bash tests/harness-residue-boundary-smoke.sh
-  stage context-core bash tests/context-core-smoke.sh
 fi
 
 if [ "$LIST_STAGES" = 1 ]; then
@@ -954,7 +1065,14 @@ case "$MODE" in
   scripts-smoke) echo "check: ok (scripts-smoke only)" ;;
   quick) echo "check: ok (quick local checks; full CI gate required)" ;;
   affected)
-    if [ "$SKIP_LINT" = 1 ]; then echo "check: ok (affected tests; mode=$AFFECTED_MODE; without lint)"
-    else echo "check: ok (affected tests; mode=$AFFECTED_MODE)"; fi ;;
+    check_suffix=""
+    [ "$SKIP_LINT" = 0 ] || check_suffix="; without lint"
+    [ "$CI_PARITY" = 0 ] || check_suffix="$check_suffix; ci-parity"
+    # oms land reads "mode=full" alone as install proof; a capped run is not.
+    if [ "$AFFECTED_CAPPED" = 1 ]; then
+      echo "check: ok (affected tests; mode=full capped to lint and quick lane$check_suffix)"
+    else
+      echo "check: ok (affected tests; mode=$AFFECTED_MODE$check_suffix)"
+    fi ;;
   *) if [ "$SKIP_LINT" = 1 ]; then echo "check: ok (without lint)"; else echo "check: ok"; fi ;;
 esac

@@ -19,7 +19,10 @@ usage() {
 Usage: run-smoke-shard.sh [--list] [--shard I/N] [--jobs N] [--only NAME]
 
 Run every test_* function defined in scripts-smoke.sh. --shard selects one
-deterministic, 1-based round-robin partition. --jobs runs N shards in parallel.
+deterministic, 1-based partition balanced by cost: a "# smoke-weight: SECONDS"
+line directly above a definition records its measured cost, weighted tests go
+heaviest first to the lightest shard, and the rest (2s each) fill the
+lightest shard in definition order. --jobs runs N shards in parallel.
 --only NAME runs just that test (repeatable); it is the focused-verification
 path between edits, so a change to one behaviour does not cost the whole suite.
 Combine --only with --jobs or --shard to partition just the selected tests.
@@ -112,8 +115,46 @@ noncanonical="$(awk '
 duplicates="$(manifest | LC_ALL=C sort | uniq -d)"
 [ -z "$duplicates" ] || fail "duplicate smoke test definition: $duplicates"
 
+# One assignment serves --list, the worker count and the rewritten suite, so
+# they cannot disagree. A single test dominated one CI shard (an agent-plan
+# lifecycle test at 171-461s of a 255-828s shard), which a positional
+# round-robin cannot see; the weights come from CI's OMS_SMOKE_TIMINGS lines.
+shard_members() {  # the selected tests of SHARD/TOTAL, in definition order
+  awk -v shard="$SHARD" -v total="$TOTAL" -v only=" $ONLY " '
+    function place(i, cost,   s, pick) {
+      pick = 1
+      for (s = 2; s <= total; s++) if (load[s] < load[pick]) pick = s
+      owner[i] = pick
+      load[pick] += cost
+    }
+    /^# smoke-weight: [0-9]+$/ { pending = $3 + 0; next }
+    /^test_[[:alnum:]_]+\(\) \{/ {
+      name = $1
+      sub(/\(\)$/, "", name)
+      cost = pending
+      pending = 0
+      if (only != "  " && index(only, " " name " ") == 0) next
+      names[++count] = name
+      weight[count] = cost
+      next
+    }
+    { pending = 0 }
+    END {
+      for (;;) {
+        best = 0
+        for (i = 1; i <= count; i++)
+          if (weight[i] > 0 && !(i in owner) && (best == 0 || weight[i] > weight[best])) best = i
+        if (best == 0) break
+        place(best, weight[best])
+      }
+      for (i = 1; i <= count; i++) if (!(i in owner)) place(i, 2)
+      for (i = 1; i <= count; i++) if (owner[i] == shard) print names[i]
+    }
+  ' "$SUITE"
+}
+
 if [ "$MODE" = "list" ]; then
-  manifest | awk -v shard="$SHARD" -v total="$TOTAL" '(NR - 1) % total == shard - 1'
+  shard_members
   exit 0
 fi
 
@@ -131,11 +172,8 @@ $only_name
     *) fail "unknown test: $only_name (see --list)" ;;
   esac
 done
-run_count="$(printf '%s\n' "$all_manifest" | awk -v only=" $ONLY " -v shard="$SHARD" -v total="$TOTAL" '
-  only != "  " && index(only, " " $0 " ") == 0 { next }
-  (++selected - 1) % total == shard - 1 { count++ }
-  END { print count+0 }
-')"
+members="$(shard_members)"
+run_count="$(printf '%s' "$members" | awk 'END { print NR }')"
 if [ "$run_count" -eq 0 ]; then
   echo "scripts-smoke: skipped (shard $SHARD/$TOTAL, no selected tests)"
   exit 0
@@ -195,7 +233,7 @@ fi
 
 # Rewrite the explicitly marked legacy call tail in memory and derive calls
 # from definitions, so a newly added test can never be silently omitted.
-awk -v shard="$SHARD" -v total="$TOTAL" -v timings="$TIMINGS" -v only=" $ONLY " '
+awk -v timings="$TIMINGS" -v members=" $(printf '%s' "$members" | tr '\n' ' ') " '
   /^test_[[:alnum:]_]+\(\) \{/ {
     name=$1
     sub(/\(\)$/, "", name)
@@ -214,10 +252,7 @@ awk -v shard="$SHARD" -v total="$TOTAL" -v timings="$TIMINGS" -v only=" $ONLY " 
       print "}"
     }
     for (i=1; i<=count; i++) {
-      if (only != "  ") {
-        if (index(only, " " names[i] " ") == 0) continue
-      }
-      if ((++selected - 1) % total != shard - 1) continue
+      if (index(members, " " names[i] " ") == 0) continue
       # The marker names the test a failure belongs to.
       print "printf \047smoke-test: %s\\n\047 " names[i]
       if (timings == "1") print "oms_smoke_run_test " names[i]

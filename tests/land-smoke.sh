@@ -320,7 +320,7 @@ grep -Eq 'SigIgn:.*[0-9a-f]*[01489]$' "$(log_of "$receipt")" ||
 mkdir -p "$repo/scripts/lib"
 : > "$repo/scripts/lib/check-parallel.sh"
 git -C "$repo" add scripts/lib/check-parallel.sh
-gate 'test "$*" = "--affected --changed-from origin/main --changed-to HEAD"'
+gate 'test "$*" = "--affected --ci-parity --changed-from origin/main --changed-to HEAD"'
 OMS_INSTALL_RECEIPT="$TMP/no-install-receipt.json" "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 \
   > "$TMP/source-default.out" 2>&1 || fail "source checkout did not select its affected gate"
 
@@ -353,6 +353,25 @@ PY
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
+if [ "$2" = view ]; then
+  # A run's jobs: the full selection, an affected-only run, or neither.
+  echo jobs >> "$OMS_TEST_LAND_EVENTS"
+  [ "${OMS_TEST_CI_SCOPE:-affected}" != error ] || exit 4
+  sha="$(git -C "$OMS_TEST_LAND_REPO" rev-parse HEAD)"
+  case "${OMS_TEST_CI_SCOPE:-affected}" in
+    full)
+      jobs='"lint","affected_plan","gate","native (ubuntu-latest, copy)","focused (1/4)","focused (2/4)","focused (3/4)","focused (4/4)","scripts-smoke (1/4)","scripts-smoke (2/4)","scripts-smoke (3/4)","scripts-smoke (4/4)"' ;;
+    ambiguous) jobs='"lint","affected_plan","gate","focused (1/4)"' ;;
+    *) jobs='"affected_plan","gate"' ;;
+  esac
+  python3 -c 'import json, sys
+names = json.loads("[" + sys.argv[2] + "]")
+rows = [{"name": name, "conclusion": "success"} for name in names]
+if "lint" not in names:
+    rows.append({"name": "lint", "conclusion": "skipped"})
+print(json.dumps({"headSha": sys.argv[1], "status": "completed", "conclusion": "success", "jobs": rows}))' "$sha" "$jobs"
+  exit 0
+fi
 echo ci >> "$OMS_TEST_LAND_EVENTS"
 [ "${OMS_TEST_CI_DELAY:-0}" = 0 ] || sleep "$OMS_TEST_CI_DELAY"
 if [ "${OMS_TEST_CI_RC:-0}" != 0 ]; then echo 'authentication required' >&2; exit "$OMS_TEST_CI_RC"; fi
@@ -677,33 +696,62 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
   fail "successful CI and update failed to land"
 [ "$(cat "$TMP/events")" = "$(printf 'ci\nupdate')" ] || fail "successful update did not follow CI"
 grep -q ': passed' "$TMP/update-pass.out" || fail "successful update receipt was not passed"
-grep -rqs '"command": *"bash scripts/check.sh --affected --changed-from origin/main --changed-to HEAD"' "$receipt_dir" ||
+grep -rqs '"command": *"bash scripts/check.sh --affected --ci-parity --changed-from origin/main --changed-to HEAD"' "$receipt_dir" ||
   fail "the harness checkout's default gate must select against the destination"
-gate 'if [ "$#" = 0 ]; then echo "check: ok"; else echo "check: ok (affected tests; mode=affected)"; fi'
+# The default gate caps a full selection to lint and the quick lane: that
+# verdict names mode=full but is not install proof; an affected-only CI run is not either.
+gate 'if [ "$#" = 0 ]; then echo "check: ok"; else echo "check: ok (affected tests; mode=full capped to lint and quick lane; ci-parity)"; fi'
 : > "$TMP/events"
 OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/affected-pass.out" 2>&1 ||
   fail "an affected gate failed to land: $(cat "$TMP/affected-pass.out")"
-[ "$(cat "$TMP/events")" = ci ] || fail "an affected gate must push and wait for CI without installing"
-grep -q 'install needs a full gate' "$TMP/affected-pass.out" || fail "the skipped install must name the full gate"
+[ "$(cat "$TMP/events")" = "$(printf 'ci\njobs')" ] || fail "an affected gate and affected CI must push without installing"
+grep -q 'install needs a full gate or a full-selection CI run' "$TMP/affected-pass.out" ||
+  fail "the skipped install must name the missing proof"
+land_field() { "$LAND" status --repo "$repo" --json | python3 -c 'import json,sys
+r = json.load(sys.stdin)
+for key in sys.argv[1].split("."): r = r.get(key, {}) if isinstance(r, dict) else {}
+print(r if r != {} else "")' "$1"; }
+[ "$(land_field gate.scope)" = partial ] && [ "$(land_field ci.scope)" = affected ] ||
+  fail "capped gate or affected CI was recorded as full proof"
+# Unreadable or ambiguous CI scope blocks the install; the retry resumes and a
+# full-selection run for the exact SHA installs it without re-running the gate.
+for scope in error ambiguous; do
+  : > "$TMP/events"
+  if OMS_TEST_CI_SCOPE="$scope" OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+      "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/scope-$scope.out" 2>&1; then
+    fail "a $scope CI scope passed: $(cat "$TMP/scope-$scope.out")"
+  fi
+  [ "$(cat "$TMP/events")" = jobs ] || fail "a $scope CI scope installed or re-ran CI: $(cat "$TMP/events")"
+  [ "$(land_field ci.scope)" = unknown ] || fail "a $scope CI scope was not recorded as unknown"
+done
+: > "$TMP/events"
+OMS_TEST_CI_SCOPE=full OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+  "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/scope-full.out" 2>&1 ||
+  fail "a full-selection CI run did not install: $(cat "$TMP/scope-full.out")"
+[ "$(cat "$TMP/events")" = "$(printf 'jobs\nupdate')" ] || fail "full CI scope did not install after its query"
+[ "$(land_field update.authority)" = ci.scope=full ] && [ "$(land_field update.reason)" = installed ] ||
+  fail "install did not record its CI proof or kept the blocked reason"
+[ "$(grep -c '^check: ok (affected tests; mode=full capped' "$(land_field log)")" = 1 ] || fail "resume re-ran the gate"
 # The advertised recovery verifies the already-pushed SHA in full and installs it.
 : > "$TMP/events"
 OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --gate 'bash scripts/check.sh' --wait --ci-wait 1 > "$TMP/full-recovery.out" 2>&1 ||
   fail "full-gate recovery of a pushed SHA failed: $(cat "$TMP/full-recovery.out")"
 [ "$(cat "$TMP/events")" = "$(printf 'ci\nupdate')" ] || fail "full-gate recovery did not install after CI"
+[ "$(land_field update.authority)" = gate.scope=full ] || fail "install did not record its full-gate proof"
 gate 'echo "check: ok (quick local checks; full CI gate required)"'
 : > "$TMP/events"
 OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --gate 'bash scripts/check.sh --quick' --wait --ci-wait 1 > "$TMP/quick-pass.out" 2>&1 ||
   fail "a quick gate failed to land: $(cat "$TMP/quick-pass.out")"
-[ "$(cat "$TMP/events")" = ci ] || fail "a gate without full proof must not install"
+[ "$(cat "$TMP/events")" = "$(printf 'ci\njobs')" ] || fail "a gate without full proof must not install"
 gate 'echo "check: ok (parallel gate without lint)"'
 : > "$TMP/events"
 OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --gate 'bash scripts/check.sh --parallel --no-lint' --wait --ci-wait 1 > "$TMP/no-lint.out" 2>&1 ||
   fail "a no-lint gate failed to land: $(cat "$TMP/no-lint.out")"
-[ "$(cat "$TMP/events")" = ci ] || fail "a gate that skipped lint must not install"
+[ "$(cat "$TMP/events")" = "$(printf 'ci\njobs')" ] || fail "a gate that skipped lint must not install"
 
 # Probe the real job function with deterministic wait/push interleavings.
 # Git is stubbed: this cannot publish or mutate the caller's repository.
