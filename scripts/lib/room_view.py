@@ -248,7 +248,7 @@ def handled_results(room):
 def closed_tasks(report):
     """Task ids the plan records done or cancelled, or whose owner completed or accepted them."""
     plan = {t.get("id") for t in map(mapping, listing(mapping(report.get("plan")).get("tasks")))
-            if t.get("state") in {"done", "cancelled"}}
+            if t.get("state") in {"done", "cancelled", "retired", "superseded"}}
     return {ident for ident in plan if ident} | {ident for ident, outcome in mapping(report.get("finalized")).items()
                                                   if outcome in {"completed", "accepted"}}
 
@@ -269,6 +269,11 @@ def settler(report):
     finalized = mapping(report.get("finalized"))
     closed = closed_tasks(report)
     attempts_seen = mapping(report.get("attempts"))
+    plan_tasks = {t.get("id"): t for t in map(mapping, listing(mapping(report.get("plan")).get("tasks")))
+                  if t.get("id")}
+    members = nodes(report)
+    mains = {key: m for m in members if m.get("role") == "main"
+             for key in (m.get("participant"), m.get("attempt")) if key}
     # Only complete active evidence permits hiding an old unknown; it does not prove completion.
     complete = attempts_seen.get("available") is True and valid_count(attempts_seen.get("active")) is not None and (
         valid_count(attempts_seen.get("active")) <= len(listing(attempts_seen.get("active_recent"))))
@@ -281,8 +286,21 @@ def settler(report):
         # Finished or aged-out calls, and failed ones whose result its main has read or finalized, leave the board.
         # A review or a block ends only with the owner's recorded decision on the task, never by reading a result.
         decided = finalized.get(call.get("task_id")) in {"completed", "accepted"}
-        return (call["state"] in FINISHED or call["state"] == "presence unknown" and aged(call)
-                or failure_handled(report, call, read_results, closed) or call["state"] in {"review", "blocked"} and decided)
+        task_id = call.get("task_id")
+        review = call["state"] == "review" or call["state"] == "done" and call.get("participant") in listing(report.get("awaiting_admission"))
+        task = plan_tasks.get(task_id)
+        owner = mains.get(call.get("parent"))
+        owner_exited = owner is not None and main_state(owner) == "exited"
+        claimant = task.get("claimed_by") or task.get("claimed_by_participant") if task else None
+        successor = mains.get(claimant)
+        adopted = successor is not None and successor is not owner and main_state(successor) not in TERMINAL_STATES
+        unowned_old = review and task is None and (joined_seconds(call) or 0) > 12 * 60 * 60
+        handed_off = review and owner_exited and not adopted
+        finished = call["state"] in FINISHED and not (
+            call["state"] == "done" and call.get("participant") in listing(report.get("awaiting_admission")))
+        return (finished or call["state"] == "presence unknown" and aged(call)
+                or failure_handled(report, call, read_results, closed) or call["state"] in {"review", "blocked"} and decided
+                or review and (task_id in closed or unowned_old or handed_off))
     return settled, aged
 
 
@@ -294,7 +312,8 @@ def call_classifier(report):
     mains = {key for m in nodes(report) if m.get("role") == "main" for key in (m["participant"], m.get("attempt")) if key}
 
     def classify(call):
-        if call["state"] == "review" and not settled(call) or (call["state"] == "done" and call.get("participant") in awaiting):
+        if call["state"] == "review" and not settled(call) or (
+                call["state"] == "done" and call.get("participant") in awaiting and not settled(call)):
             return "review"
         return "past" if settled(call) and not (call.get("parent") in mains and lingering(call)) else "live"
     return classify

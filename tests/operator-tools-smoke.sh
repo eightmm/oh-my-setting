@@ -14525,6 +14525,31 @@ classified = {m["participant"]: classify(m) for m in graph_view.nodes(grouped_bo
 assert classified == {"adv-worker": "live", "review-call": "review", "pending-patch": "review", "past-call": "past",
                       "blocked-call": "live", "waiting-call": "live", "live-call": "live",
                       "old-unknown": "past", "fresh-unknown": "live"}, classified
+# An unadmitted patch follows the same Past classification as the board and the Needs-you strip.
+review_fixture = deepcopy(grouped_board)
+review_fixture["room"]["participants"] = [claude_main, dict(failed_worker, participant="stale-patch", label="Stale patch")]
+review_fixture["attempts"] = {"available": True, "active": 0, "active_recent": [], "recent": [{
+    "attempt_id": "stale-patch", "state": "done", "task_id": "retired-task", "panel": {
+        "room_id": "adv-room", "room_participant": "stale-patch", "role": "worker"}}]}
+review_fixture["awaiting_admission"] = ["stale-patch"]
+review_fixture["plan"] = {"tasks": [{"id": "retired-task", "state": "retired"}]}
+stale_node = next(m for m in graph_view.nodes(review_fixture) if m["participant"] == "stale-patch")
+assert graph_view.call_classifier(review_fixture)(stale_node) == "past"
+assert ("result", "stale-patch") not in {item["action"] for item in inbox_items(review_fixture)}
+past_nav = {"tab": "past"}
+render(review_fixture, "codex", 120, 80, view="tree", navigation=past_nav)
+assert past_nav["past_ids"] == [("result", "stale-patch")], past_nav
+review_fixture["plan"] = {"tasks": []}
+next(m for m in review_fixture["room"]["participants"] if m["participant"] == "stale-patch")["joined_at"] = minutes_ago(13 * 60)
+stale_node = next(m for m in graph_view.nodes(review_fixture) if m["participant"] == "stale-patch")
+assert graph_view.call_classifier(review_fixture)(stale_node) == "past"
+assert ("result", "stale-patch") not in {item["action"] for item in inbox_items(review_fixture)}
+next(m for m in review_fixture["room"]["participants"] if m["participant"] == "stale-patch")["joined_at"] = minutes_ago(10)
+stale_node = next(m for m in graph_view.nodes(review_fixture) if m["participant"] == "stale-patch")
+assert graph_view.call_classifier(review_fixture)(stale_node) == "review"
+assert ("result", "stale-patch") in {item["action"] for item in inbox_items(review_fixture)}
+assert len(needs_strip(review_fixture, 120, True)) == len(inbox_items(review_fixture)), \
+    "Needs-you strip count must match actionable inbox items"
 # The owner's recorded decision on a task closes its review and its block; a failed decision does not.
 for outcome, expected in (("completed", "past"), ("accepted", "past"), ("failed", None)):
     decided = graph_view.call_classifier(dict(grouped_board, finalized={"decided-task": outcome}))

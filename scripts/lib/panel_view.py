@@ -376,9 +376,10 @@ def age_label(stamp, now=None):
 
 def inbox_items(report, unicode=True):
     """What the person must act on, newest first: failures, waits, broadcasts from mains, patches to admit."""
-    from room_view import (closed_tasks, failure_handled, handled_results, main_names, main_state, message_address,
-                           nodes, readable)
+    from room_view import (call_classifier, closed_tasks, failure_handled, handled_results, main_names, main_state,
+                           message_address, nodes, readable)
     members = nodes(report)
+    classify = call_classifier(report)
     titles = main_names(members)
     name = lambda m: MODEL_NAMES.get(m.get("model"), m.get("model")) or m.get("provider") or "unknown"
     mains = {ident: m for m in members if m.get("role") == "main"
@@ -407,9 +408,9 @@ def inbox_items(report, unicode=True):
             what, shown, style, kind = FAILED_WORDS[state], state, "bad", "failed"
         elif state in WAITING_WORDS:
             what, shown, style, kind = WAITING_WORDS[state], state, "alert", "needs"
-        elif state == "done" and member["participant"] in awaiting:
+        elif state == "done" and member["participant"] in awaiting and classify(member) != "past":
             what, shown, style, kind = "patch awaits admission", "review", "review", "decide"
-        elif state == "review" and finalized.get(member.get("task_id")) not in {"completed", "accepted"}:
+        elif state == "review" and classify(member) != "past" and finalized.get(member.get("task_id")) not in {"completed", "accepted"}:
             what, shown, style, kind = "awaiting decision", "review", "review", "decide"
         else:
             continue
