@@ -12,9 +12,10 @@ PANEL_SESSION = r"oms-[a-z0-9][a-z0-9-]{0,47}"
 
 
 class TerminalInput:
-    def __init__(self, managed=False, active=True):
+    def __init__(self, managed=False, active=True, extra_keys=()):
         self.managed = managed
         self.active = active
+        self.extra_keys = tuple(extra_keys)
         self.fd = None
         self.saved = None
         self.pending = b""
@@ -105,7 +106,7 @@ class TerminalInput:
                 output.append(("tab",))
             elif value == b"\x0c":
                 output.append(("repaint",))
-            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"f", b"?", b"n", b"0", b"1", b"2", b"k", b"u"):
+            elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"f", b"?", b"n", b"0", b"1", b"2", b"k", b"u") or value.decode("ascii", "ignore") in self.extra_keys:
                 output.append((value.decode(),))
         if not self.pending:
             self.escape_since = None

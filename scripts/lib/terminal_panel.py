@@ -34,7 +34,8 @@ from panel_view import INBOX_LIMIT, main_occupied, menu_rows, render, render_res
 from panel_input import PANEL_SESSION
 from panel_routing import (allocate, command as routed_command, policy, KINDS, MODEL_IDS, TIERS, WRITERS,
                            newest_route_model, route_family)
-from panel_results import DURABLE, _read, _write, _lock, finalize, outcomes, results, retry_delivery, verified_patch
+from panel_results import (DURABLE, _read, _write, _lock, finalize, outcomes, results, results_snapshot,
+                           retry_delivery, verified_patch)
 from panel_cache import read_shared
 from room_repository import EXECUTION_ENV, native_repository, state_repository, work_repository
 
@@ -3805,6 +3806,71 @@ def call_results(repo, action):
             else results(repo, room_participant=ident))
 
 
+def render_call_view(repo, participant, view, width, task_id=None, cache=None):
+    """Render one participant's retained result, event tail, or verified patch."""
+    from room_view import ROLES, model_name, said
+    from panel_results import _indexed
+
+    cache = {} if cache is None else cache
+    if "snapshot" not in cache:
+        cache["snapshot"] = results_snapshot(repo, task_id, participant)
+    report, (unused_attempts, indexed) = cache["snapshot"]
+    if participant and not cache.get("filtered"):
+        report["rows"] = [row for row in report["rows"] if row.get("calls")]
+        cache["filtered"] = True
+    row = next(iter(report.get("rows", [])), {})
+    heading = ("%s %s · %s" % (ROLES.get(row.get("role"), "Worker"), model_name(row),
+                                said(row.get("process_state")))) if participant else None
+    call = next((item for item in reversed(row.get("calls", [])) if item.get("attempt_id")), {})
+    if view == "Result":
+        return panel_reader.render_view(view, report, call, width=width, heading=heading)
+
+    if view == "Diff":
+        patch, patch_error = None, False
+        if call.get("patch"):
+            try:
+                patch = verified_patch(repo, call)
+            except (OSError, ValueError, TypeError):
+                patch_error = True
+        return panel_reader.render_view(view, report, call, patch=patch, width=width,
+                                        patch_error=patch_error, heading=heading)
+
+    if view == "Events" and "timeline" not in cache:
+        cache["timeline"] = (panel_reader.event_tail(repo, call.get("attempt_id"))
+                             if call.get("attempt_id") else ([], False))
+    timeline_rows, timeline_truncated = cache.get("timeline", ([], False)) if view == "Events" else ([], False)
+    timeline = list(timeline_rows)
+    task_id, attempt_id = row.get("task_id"), call.get("attempt_id")
+    call_by_event = {item.get("event_id"): item for item in row.get("calls", []) if item.get("event_id")}
+    for item in indexed:
+        kind = item.get("kind")
+        if ((item.get("attempt_id") == attempt_id and kind in ("review", "patch-admit")) or
+                (kind == "patch-land" and item.get("task_id") == task_id and
+                 item.get("patch_sha256") == call.get("patch_sha256")) or
+                (item.get("task_id") == task_id and kind in ("panel-delivery", "panel-delivery-pending"))):
+            detail = dict(item)
+            review = call_by_event.get(item.get("event_id")) if kind == "review" else None
+            if review:
+                detail["verdict"] = "passed" if review.get("exit") == 0 else "failed"
+                detail["summary"] = review.get("answer") or "review summary unavailable"
+            if kind in ("panel-delivery", "panel-delivery-pending"):
+                try:
+                    delivery = json.loads(_indexed(repo, item, 4096))
+                    detail["status"] = delivery.get("receipt", {}).get("status")
+                except (OSError, ValueError, TypeError, AttributeError):
+                    detail["summary"] = "delivery receipt unavailable"
+            timeline.append(detail)
+    if call.get("kind") == "review" and not any(item.get("kind") == "review" and
+                                                    item.get("event_id") == call.get("event_id") for item in timeline):
+        review = {"kind": "review", "ts": call.get("ts"),
+                  "verdict": "passed" if call.get("exit") == 0 else "failed",
+                  "summary": call.get("answer") or "review summary unavailable"}
+        timeline.append(review)
+    return panel_reader.render_view(view, report, call, timeline, width=width,
+                                    timeline_truncated=timeline_truncated,
+                                    heading=heading)
+
+
 def advisor_command(repo, room_id, member):
     """A fresh control-path dispatch for one main: inherited caller identity is removed, never reused."""
     return ["env", "-u", "OMS_ROOM_PARTICIPANT", "-u", "OMS_PANEL_MAIN_ATTEMPT", "-u", "OMS_ATTEMPT_ID",
@@ -5407,24 +5473,22 @@ def main(argv=None):
         if args.results:
             participant = args.participant and room.identifier(args.participant, "participant")
 
+            def reader(width, view="Result"):
+                return render_call_view(repo, participant, view, width, args.task_id, reader_cache)
+
+            reader_cache = {}
+
             def report():
                 read = results(repo, args.task_id, participant)
                 if participant:
                     read["rows"] = [row for row in read["rows"] if row.get("calls")]
                 return read
-            def reader(width):
-                from room_view import ROLES, model_name, said
-                read = report()
-                row = next(iter(read["rows"]), {})
-                heading = ("%s %s · %s" % (ROLES.get(row.get("role"), "Worker"), model_name(row),
-                                            said(row.get("process_state")))) if participant else None
-                return render_results(read, width, heading=heading)
 
             board = os.environ.get(panel_reader.BOARD, "")
             if args.json:
                 print(json.dumps(report(), ensure_ascii=False, indent=2))
             elif panel_reader.PANE.fullmatch(board) and sys.stdin.isatty() and sys.stdout.isatty():
-                return panel_reader.page(reader, board)
+                return panel_reader.page(reader, board, on_refresh=reader_cache.clear)
             else:
                 print(reader(shutil.get_terminal_size().columns))
             return 0

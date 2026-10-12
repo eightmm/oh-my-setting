@@ -551,10 +551,12 @@ def pending_admissions(repo, task_ids, _tick=None):
     return patches - admitted
 
 
-def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None):
+def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None, _records_data=None):
     if task_id and not ID.fullmatch(task_id):
         raise ValueError('invalid task ID')
-    if _tick is not None:
+    if _records_data is not None:
+        attempts, rows = _records_data
+    elif _tick is not None:
         attempts, rows = _tick.records()
     elif _shared:
         from panel_cache import read_shared
@@ -664,3 +666,10 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
     return {'schema': 1, 'kind': 'oms-panel-results', 'rows': output,
             'coverage': 'latest 300 attempts and 1000 artifact events',
             'truncated': capped or (bool(task_id) and not chosen)}
+
+
+def results_snapshot(repo, task_id=None, room_participant=None):
+    """Collect retained result records once for a reader that also needs their event index."""
+    records = _records(repo)
+    report = results(repo, task_id, room_participant, _records_data=records)
+    return report, records
