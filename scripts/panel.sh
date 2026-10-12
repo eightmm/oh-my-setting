@@ -27,6 +27,7 @@ if [ "$board" = 1 ] && [ -n "${TMUX:-}" ]; then
     status=0
     python3 "$ROOT/scripts/lib/terminal_panel.py" "$@" || status=$?
     [ "$status" -ne 0 ] || exit 0
+    [ "$status" -ne 3 ] || exit "$status"
     printf '\nOMS board stopped (exit %s); restarting in %ss\n' "$status" "$delay" >&2
     sleep "$delay"
     [ "$delay" -ge 30 ] || delay=$((delay * 2))

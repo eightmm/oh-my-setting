@@ -5175,7 +5175,7 @@ def main(argv=None):
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             if " is not a git repository; open it in a git repository or pass --repo PATH" in str(error):
                 print("oms panel: " + clean(str(error), 200), file=sys.stderr)
-                return 2
+                return 3
             raise
     if args.release_main is not None:
         import panel_release
@@ -5526,7 +5526,7 @@ def main(argv=None):
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         if " is not a git repository; open it in a git repository or pass --repo PATH" in str(error):
             print("oms panel: " + clean(str(error), 200), file=sys.stderr)
-            return 2
+            return 3
         print("error: " + clean(str(error), 200), file=sys.stderr)
         return 1
 

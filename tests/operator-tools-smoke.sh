@@ -1599,6 +1599,7 @@ cat > "$board_bin/python3" <<BOARD
 case "\$1" in *terminal_panel.py) ;; *) exec "$real_python" "\$@" ;; esac
 count=\$(( \$(cat "$TMP/board-runs" 2>/dev/null || echo 0) + 1 ))
 echo "\$count" > "$TMP/board-runs"
+[ "\${PANEL_REAL:-0}" != 1 ] || exec "$real_python" "\$@"
 [ "\$count" -ge 2 ]
 BOARD
 chmod +x "$board_bin/python3"
@@ -1606,6 +1607,27 @@ TMUX=fixture OMS_PANEL_SESSION=oms-fixture PATH="$board_bin:$PATH" bash "$ROOT/s
   fail "a crashed panel board must restart, not exit: $(cat "$TMP/board-err")"
 [ "$(cat "$TMP/board-runs")" = 2 ] && grep -q 'OMS board stopped (exit 1); restarting' "$TMP/board-err" ||
   fail "the board should say it restarts and run again: $(cat "$TMP/board-err")"
+rm -f "$TMP/board-runs"
+mkdir -p "$TMP/non-repo-panel"
+python3 - "$ROOT" "$TMP" <<'PY' || fail "a non-repository board must exit promptly without restarting"
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root, temporary = map(Path, sys.argv[1:])
+env = dict(os.environ, TMUX="fixture", OMS_PANEL_SESSION="oms-fixture", PANEL_REAL="1")
+env["PATH"] = str(temporary / "board-bin") + os.pathsep + env.get("PATH", "")
+try:
+    result = subprocess.run(["bash", str(root / "scripts/panel.sh"), "--watch"],
+                            cwd=temporary / "non-repo-panel", env=env,
+                            capture_output=True, text=True, timeout=5)
+except subprocess.TimeoutExpired:
+    raise SystemExit("managed non-repository board looped instead of exiting")
+assert result.returncode == 3, (result.returncode, result.stderr)
+assert "is not a git repository" in result.stderr, result.stderr
+assert (temporary / "board-runs").read_text().strip() == "1"
+PY
 rm -f "$TMP/board-runs"
 if TMUX='' OMS_PANEL_SESSION=oms-fixture PATH="$board_bin:$PATH" bash "$ROOT/scripts/panel.sh" --repo "$repo" --watch 2>/dev/null; then
   fail "outside tmux a failed board must exit with its failure"
@@ -3310,7 +3332,7 @@ for options in ([], ["--watch", "--count", "1"], ["--launch", "codex", "--dry-ru
                 ["--spawn-main", "codex", "--json"], ["--reopen"]):
     refused = subprocess.run(panel_front + options, cwd=plain_directory, env=resolver_env,
                              capture_output=True, text=True, timeout=30)
-    assert refused.returncode == 2 and missing_repo_message in refused.stderr, refused
+    assert refused.returncode == 3 and missing_repo_message in refused.stderr, refused
 assert not list(plain_directory.iterdir())
 for options in (["--providers", "--json"], ["--routes"], ["--help"]):
     informational = subprocess.run(panel_front + options, cwd=plain_directory, env=selected_env,
@@ -3321,14 +3343,14 @@ for options in (["--providers", "--json"], ["--routes"], ["--help"]):
     assert wrapped.returncode == 0, wrapped
 explicit = subprocess.run(panel_front + ["--repo", str(plain_directory), "--dry-run"],
                           cwd=plain_directory, env=resolver_env, capture_output=True, text=True, timeout=30)
-assert explicit.returncode == 2 and missing_repo_message in explicit.stderr, explicit
+assert explicit.returncode == 3 and missing_repo_message in explicit.stderr, explicit
 wrapper = subprocess.run(["bash", str(root / "scripts/panel.sh")], cwd=plain_directory,
                          env=resolver_env, capture_output=True, text=True, timeout=30)
-assert wrapper.returncode == 2 and missing_repo_message in wrapper.stderr, wrapper
+assert wrapper.returncode == 3 and missing_repo_message in wrapper.stderr, wrapper
 equals_explicit = subprocess.run(panel_front + ["--repo=" + str(plain_directory), "--dry-run"],
                                  cwd=ordinary_root, env=resolver_env, capture_output=True,
                                  text=True, timeout=30)
-assert equals_explicit.returncode == 2 and missing_repo_message in equals_explicit.stderr, equals_explicit
+assert equals_explicit.returncode == 3 and missing_repo_message in equals_explicit.stderr, equals_explicit
 repeated_repo = subprocess.run(panel_front + ["--repo", str(plain_directory), "--repo", str(ordinary_root), "--dry-run"],
                                cwd=ordinary_root, env=resolver_env, capture_output=True,
                                text=True, timeout=30)
