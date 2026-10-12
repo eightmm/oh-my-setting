@@ -10800,13 +10800,15 @@ with patch("room_view.nodes", return_value=admission_members), \
 # Both plan collectors retain tasks beyond their former 20/40 caps for pagination.
 long_tasks = [{"id": "long-%02d" % i, "title": "Plan task %s" % i,
                "state": "ready" if i == 44 else "done"} for i in range(45)]
+long_tasks[0]["lease_id"] = "lease_projection"
 long_plan_repo = Path(sys.argv[2]) / "long-plan"
 (long_plan_repo / ".oms/plan").mkdir(parents=True)
 (long_plan_repo / ".oms/plan/tasks.json").write_text(json.dumps({"tasks": long_tasks}), encoding="utf-8")
 from dashboard_projection import plan_tasks
 assert len(plan_tasks(str(long_plan_repo))) == 45
 projected = plan_tasks(str(long_plan_repo))
-assert projected[0] == {"id": "long-00", "title": "Plan task 0", "state": "done", "claimed_by": None}, projected[0]
+assert projected[0] == {"id": "long-00", "title": "Plan task 0", "state": "done", "lease_id": "lease_projection",
+                       "claimed_by": None}, projected[0]
 completion_tasks = [dict(row) for row in long_tasks]
 completion_tasks[0]["completion_kind"] = "research-accepted"
 completion_tasks[0]["claimed_at"] = "2026-10-10T10:00:00Z"
@@ -11107,6 +11109,18 @@ held_flow["plan"] = {"present": True, "goal": "Count held work honestly", "task_
                      "by_state": {"done": 4, "cancelled": 3, "running": 3}, "tasks": held_tasks}
 held_flow["room"]["repo_tasks"] = held_tasks
 assert graph_text.held_split(held_flow) == ({"t-review"}, {"t-ended"})
+# Lease lineage survives claim refreshes: an old ended call cannot make a touched claim look fresh,
+# a matching live call still holds it, and a re-claimed lease rejects the prior call.
+lease_flow = deepcopy(held_flow)
+lease_tasks = {task["id"]: task for task in lease_flow["plan"]["tasks"]}
+lease_attempts = {row["attempt_id"]: row for row in lease_flow["attempts"]["active_recent"]}
+lease_tasks["t-ended"].update(lease_id="lease-current-ended", claimed_at="2026-10-12T00:00:00Z")
+lease_attempts["researcher"].setdefault("panel", {})["lease_id"] = "lease-current-ended"
+lease_tasks["t-live"]["lease_id"] = "lease-current-live"
+lease_attempts["builder"].setdefault("panel", {})["lease_id"] = "lease-current-live"
+lease_tasks["t-review"].update(lease_id="lease-reclaimed", claimed_at="2026-10-12T00:00:00Z")
+lease_attempts["explorer"].setdefault("panel", {})["lease_id"] = "lease-previous"
+assert graph_text.held_split(lease_flow) == (set(), {"t-ended", "t-review"}), graph_text.held_split(lease_flow)
 assert graph_text.plan_summary(held_flow)[1:] == (4, 7, 0, 2, 1), graph_text.plan_summary(held_flow)
 held_wide = graph_text.goal_banner(held_flow, 127, True)[0][0]
 assert held_wide.endswith(" 4/7 verified · 2 claimed · 1 stale ]") and display_width(held_wide) == 127, held_wide

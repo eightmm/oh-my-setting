@@ -93,6 +93,7 @@ def nodes(report):
                            guard=member.get("participant") in guarded,
                            model=model, model_at_launch=meta.get("model") or member.get("model"),
                            task_id=attempt.get("task_id"), location=meta.get("location"),
+                           lease_id=meta.get("lease_id"),
                            effort=effort, access=meta.get("access") or attempt.get("access"),
                            harness=mapping(attempt.get("panel")).get("harness"),
                            title=member.get("label_override") or meta.get("label") or member.get("label")))
@@ -473,7 +474,9 @@ def held_split(report, members=None):
     Only the holder's own calls count: the claimant itself, or calls of the claiming main that joined at or after
     the claim, so an earlier holder's calls never speak for a fresh claim. Every counted call terminal: ended.
     Otherwise each open call waits in review, blocked or admission: awaiting.
-    A task with no such call, a live or an unknown call stays claimed; a claim never proves a process."""
+    A recorded lease must match the current task lease; otherwise old calls cannot hold a refreshed claim.
+    Legacy rows without leases retain the claim-time fallback. Without lease lineage, no matching call, a live
+    call or an unknown call stays claimed; a claim never proves a process."""
     admission = set(listing(report.get("awaiting_admission")))
     members = nodes(report) if members is None else members
     classify = call_classifier(report)
@@ -489,14 +492,22 @@ def held_split(report, members=None):
             continue
         claimant = task.get("claimed_by") or task.get("claimed_by_participant")
         since = str(task.get("claimed_at") or "")
+        lease = task.get("lease_id")
+        lease_recorded = bool(lease or any(m.get("lease_id") for m in calls.get(task.get("id"), [])))
         states = ["review" if (m.get("state") == "done" and m.get("participant") in admission
                                 or m.get("state") == "review") and classify(m) == "review"
                   else "done" if m.get("state") in {"review", "done"} else m.get("state")
                   for m in calls.get(task.get("id"), [])
-                  if classify(m) == "review" or claimant and m.get("participant") == claimant or
-                  (not claimant or owners.get(m.get("parent"), m.get("parent")) == owners.get(claimant, claimant))
-                  and not (since and m.get("joined_at") and str(m["joined_at"]) < since)]
+                  if lease and m.get("lease_id") == lease
+                  and (claimant and m.get("participant") == claimant or not claimant
+                       or owners.get(m.get("parent"), m.get("parent")) == owners.get(claimant, claimant))
+                  or not lease and not m.get("lease_id")
+                  and (classify(m) == "review" or claimant and m.get("participant") == claimant or
+                       (not claimant or owners.get(m.get("parent"), m.get("parent")) == owners.get(claimant, claimant))
+                       and not (since and m.get("joined_at") and str(m["joined_at"]) < since))]
         if not states:
+            if lease_recorded:
+                ended.add(task["id"])
             continue
         if all(state in TERMINAL_STATES for state in states):
             ended.add(task["id"])

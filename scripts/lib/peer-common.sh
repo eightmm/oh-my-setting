@@ -3228,6 +3228,7 @@ PY
         start_args+=(--ref "panel_location=$panel_location")
         [ -z "${OMS_ROOM_ID:-}" ] || start_args+=(--ref "panel_room_id=$OMS_ROOM_ID")
         [ -z "${OMS_ROOM_PARTICIPANT:-}" ] || start_args+=(--ref "panel_room_participant=$OMS_ROOM_PARTICIPANT")
+        [ -z "${OMS_PLAN_LEASE_ID:-}" ] || start_args+=(--ref "panel_lease_id=$OMS_PLAN_LEASE_ID")
       fi
       [ -z "${OMS_ATTEMPT_MAX_WALL_SECONDS:-}" ] ||
         start_args+=(--max-wall-seconds "$OMS_ATTEMPT_MAX_WALL_SECONDS")

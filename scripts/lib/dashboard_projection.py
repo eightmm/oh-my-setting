@@ -103,7 +103,7 @@ def panel_metadata(row):
     if refs.get("panel_role") not in ("main", "worker", "advisor", "reviewer", "researcher"):
         return {}
     return {"panel": {key: clean(refs.get("panel_" + key), 160) or None for key in (
-        "role", "owner", "harness", "purpose", "workload", "model", "effort", "location", "access", "label", "room_id", "room_participant"
+        "role", "owner", "harness", "purpose", "workload", "model", "effort", "location", "access", "label", "room_id", "room_participant", "lease_id"
     )}, "parent_attempt_id": clean(row.get("parent_attempt_id")) or None}
 
 
@@ -254,10 +254,11 @@ def read_plan(repo_path):
 
 
 def plan_tasks(repo_path):
-    """Bounded id/title/state/claimant rows of the repository plan; empty when it cannot be read."""
+    """Bounded id/title/state/lease/claimant rows of the repository plan; empty when it cannot be read."""
     _, rows = read_plan(repo_path)
     return [{"id": clean(row.get("id"), 40), "title": clean(row.get("title"), 80),
              "state": clean(row.get("state"), 20),
+             "lease_id": clean(row.get("lease_id"), 80) or None,
              **({"completion_kind": clean(row["completion_kind"], 40)}
                 if isinstance(row.get("completion_kind"), str) else {}),
              "claimed_by": clean(row.get("claimed_by_participant"), 80) or None,
