@@ -9139,7 +9139,13 @@ for columns in (28, 76, 110):
             assert lines[row].startswith("    "), (columns, lines[row])
     finished_text = " ".join(lines[row].strip() for row in targets if targets[row] == ("result", team[2]["participant"]))
     assert finished_text.endswith("DETAIL END"), finished_text
-    assert any(line.rstrip().endswith("MESSAGE END") for line in lines), lines
+    message_start = next(i for i, line in enumerate(lines) if line.startswith("Messages to ")) + 1
+    message_preview = []
+    for line in lines[message_start:]:
+        if not line.startswith(("  From ", "    ")):
+            break
+        message_preview.append(line)
+    assert len(message_preview) <= 2 and message_preview[-1].rstrip().endswith("..."), message_preview
     message_row = next(i for i, line in enumerate(lines) if line.startswith("  From "))
     for row in range(message_row, lines.index("", message_row)):
         assert display_width(lines[row].lstrip()) <= columns - 4, (columns, lines[row])
@@ -9159,6 +9165,16 @@ mail_room = {"participants": [dict(team[2], parent="flow-main")],
 mail_detail = graph_text.detail(main, {}, 100, people, mail_room, everyone={"flow-main": team})[0]
 assert "INTERNAL HANDOFF" not in "\n".join(mail_detail) and "DIRECT MESSAGE" in "\n".join(mail_detail), mail_detail
 assert "Messages to Sol 6 main: 1 (4 unread)" in mail_detail, mail_detail
+structured_message = dict(mail_room, messages=[{"sender": "advisor", "targets": ["flow-main"],
+    "text": "Summary\n\n| size | issue |\n|------|-------|\n| large | joined |\n\n```bash\noms panel | size\n```"}])
+structured_detail = graph_text.detail(main, {}, 80, people, structured_message, everyone={"flow-main": team})[0]
+structured_start = next(i for i, line in enumerate(structured_detail) if line.startswith("Messages to ")) + 1
+structured_preview = []
+for line in structured_detail[structured_start:]:
+    if not line.startswith(("  From ", "    ")):
+        break
+    structured_preview.append(line)
+assert len(structured_preview) == 2 and "| size | issue |" in structured_preview[1] and structured_preview[1].endswith("..."), structured_preview
 assert not any(line.startswith("Scope:") for line in lines)
 scoped_main = graph_text.detail(dict(main, owns=["scripts/lib", "docs"]), {}, 76, people, {}, everyone={"flow-main": team})[0]
 assert "Scope: scripts/lib, docs" in scoped_main, scoped_main
@@ -10254,6 +10270,9 @@ for columns in (36, 50, 80, 127):
                     if columns >= 80 and not tabs:
                         assert "v Expand" in foot, (columns, hint_nav, hints)
 assert "F9 Swap" in footer_hints({"selected": ("chat", "m1")}, 46, True, True, None, False)[0]
+expanded_message_nav = {"tab_strip_visible": True, "tab": "messages",
+                        "messages_view": {"selected": "message-1", "open": "message-1"}}
+assert "Enter Collapse" in " ".join(footer_hints(expanded_message_nav, 80, True, True, None, True))
 assert "Sol 6.1 worker for Opus 5.5 · failed: Fix parser" in inbox, inbox
 assert "waiting for approval: Run migration" in inbox and "patch awaits admission: Write patch" in inbox, inbox
 assert "Opus 5.5 main · to all: Which branch?" in inbox and "\033" not in inbox, inbox
@@ -10717,6 +10736,12 @@ with patch.object(panel, "menu_input", return_value=DockInput([[('x',)]])), \
 empty_graph = {"room": {"id": "empty-graph", "participants": []}}
 empty_graph_nav = {"dismissed": True}
 empty_graph_frame = render_graph(empty_graph, 100, 30, navigation=empty_graph_nav)
+hint_graph = deepcopy(flow)
+hint_graph["room"]["participants"] = [p for p in hint_graph["room"]["participants"] if p.get("role") == "main"]
+hint_graph["attempts"]["active_recent"] = []
+hint_graph["attempts"]["recent"] = []
+hint_graph_80x39 = render_graph(hint_graph, 80, 39, unicode=False, navigation={})
+assert "no advisors / a ask" in hint_graph_80x39, hint_graph_80x39
 hint_y = next(i for i, line in enumerate(empty_graph_frame.splitlines(), 1)
               if "No call selected" in line)
 blank_y = next(i for i, line in enumerate(empty_graph_frame.splitlines(), 1)

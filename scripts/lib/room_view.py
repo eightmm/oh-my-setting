@@ -752,10 +752,28 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
             lines.append("%s earlier finished · see the Past tab" % (len(finished) - 5))
         lines.append("Messages to %s: %s%s" % (who(member, labels), len(inbox), " (%s unread)" % unread if unread else ""))
         for m in inbox[-3:]:
-            text = "From %s: %s" % (names.get(m.get("sender"), clean(m.get("sender"))),
-                                    readable(m.get("text"), " ") or "(empty)")
-            for index, part in enumerate(wrapped(text, max(1, width - 4), max(1, len(text)), max_chars=len(text))):
-                lines.append(("  " if index == 0 else "    ") + part)
+            sender = names.get(m.get("sender"), clean(m.get("sender")))
+            text = readable(m.get("text"), "\n", True) or "(empty)"
+            preview = []
+            truncated = False
+            for source_index, source_line in enumerate(text.splitlines()):
+                if not source_line.strip():
+                    continue
+                prefix = "From %s: " % sender if not preview else ""
+                available = max(1, width - 4 - display_width(prefix))
+                parts = wrapped(source_line, available, max(1, len(source_line))) if source_line else [""]
+                for part in parts:
+                    if len(preview) == 2:
+                        truncated = True
+                        break
+                    preview.append(prefix + part)
+                    prefix = ""
+                if truncated:
+                    break
+            if truncated and preview:
+                preview[-1] = clipped(preview[-1], max(0, width - 7)) + "..."
+            for index, part in enumerate(preview[:2]):
+                lines.append(("  " if index == 0 else "    ") + clipped(part, max(0, width - (2 if index == 0 else 4))))
         if not inbox:
             lines.append("  No messages received")
         lines += ["", "Works %s%s" % (where, " · effort " + member["effort"] if member.get("effort") else "")]
@@ -1350,8 +1368,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if shown_judges:
         band(shown_judges, "review", "judge", True)
     elif primary and height >= 24:
-        add(padded(" " * max(0, root_top - 10) + "◇ no advisors · a ask" if unicode else
-                   " " * max(0, root_top - 10) + "no advisors / a ask", width), "dim")
+        hint = "◇ no advisors · a ask" if unicode else "no advisors / a ask"
+        left = min(max(0, root_top - 10), max(0, width - display_width(hint)))
+        add(padded(" " * left + hint, width), "dim")
     if primary:
         cards([primary], hue(primary), centered=True,
               top=bool(shown_judges), bottom=bool(shown_workers))
@@ -1772,7 +1791,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
     worktree = bool(member and kind == "result" and str(member.get("location") or "").startswith("worktree:"))
     if navigation.get("keys_help"):
         keys = ["? Hide", "Esc Back", "F5 Control" if managed else "", "k Capacity", "u Refresh",
-                "Enter Expand" if tabs and navigation.get("tab") == "messages" else
+                ("Enter Collapse" if navigation.get("messages_view", {}).get("open") is not None and navigation.get("messages_view", {}).get("open") == navigation.get("messages_view", {}).get("selected") else "Enter Expand") if tabs and navigation.get("tab") == "messages" else
                 "Enter Open right" if managed and kind in {"result", "debate"} else "Enter Open",
                 move + " Move", "Space Fold", "a Ask advisor",
                 "w Worktree" if worktree else "", "f Open right" if managed and navigation.get("full_result") else
@@ -1793,8 +1812,9 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
         navigation.get("tab") in navigation.get("visible_tabs", [navigation.get("tab")]) else None
     right = managed and (kind in {"result", "debate"} or navigation.get("preview") and
                         navigation["preview"].get("target", (None,))[0] in {"result", "debate"})
-    contextual = (["Enter Expand", "f Open right", move + " Message", arrows + " Filter"] if tab == "messages" and navigation.get("message_has_call")
-                  else [move + " Message", "Enter Expand", arrows + " Filter"] if tab == "messages"
+    expanded_message = navigation.get("messages_view", {}).get("open") == navigation.get("messages_view", {}).get("selected") and navigation.get("messages_view", {}).get("open") is not None
+    contextual = (["Enter Collapse" if expanded_message else "Enter Expand", "f Open right", move + " Message", arrows + " Filter"] if tab == "messages" and navigation.get("message_has_call")
+                  else [move + " Message", "Enter Collapse" if expanded_message else "Enter Expand", arrows + " Filter"] if tab == "messages"
                   else [move + " Seat", "Enter Open right" if managed else "Enter Open", arrows + " Target"] if tab == "debate" and not navigation.get("debate_empty")
                   else ["Tab Next tab"] if tab == "debate"
                   else [move + " Call", "Enter Detail", "f Open right" if managed else "f Full result"] if tab == "past"
