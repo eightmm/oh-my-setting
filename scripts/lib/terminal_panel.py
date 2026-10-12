@@ -4531,7 +4531,7 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                     raise EOFError
                 # Match the watch loop: refresh and health keys stay board controls,
                 # while graph dock tabs/readers get first chance at their own input.
-                if (event[0] not in {"u", "k"} and navigation.get("surface") == "graph"
+                if (event[0] not in {"u", "k"} and navigation.get("surface") in {"graph", "tree"}
                         and tab_event(event, navigation)):
                     target = navigation.pop("open_call", None)
                     if target:

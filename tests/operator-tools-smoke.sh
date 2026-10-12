@@ -2185,6 +2185,83 @@ stale_inbox_nav = {"selected": ("result", "w1"), "selected_row": 2, "row_ids": [
 render_tree(msg_report, 110, 40, navigation=stale_inbox_nav)
 assert stale_inbox_nav["selected"] is None and "selected_row" not in stale_inbox_nav and "row_ids" not in stale_inbox_nav, stale_inbox_nav
 assert tree_nav["selected"] == ("chat", "m2") and tree_nav["selected"] in tree_nav["items"], tree_nav
+last_error = "error: Pi is not installed"
+for columns in (57, 42):
+    control_tree = render_tree(msg_report, columns, 24, menu=True, previous=last_error)
+    board_tree = render_tree(msg_report, columns, 24, menu=False, previous=last_error)
+    assert "Last: " + last_error in control_tree and "Last: " + last_error not in board_tree, (columns, control_tree)
+    assert len(control_tree.splitlines()) <= 23, control_tree
+control_graph = render_graph(msg_report, 80, 39, menu=True, previous=last_error)
+board_graph = render_graph(msg_report, 80, 39, menu=False, previous=last_error)
+assert "Last: " + last_error in control_graph and "Last: " + last_error not in board_graph, control_graph
+assert len(control_graph.splitlines()) <= 38, control_graph
+# Overflow re-renders the tree with auto-fold enabled, even for a single main's long team.
+last_team = deepcopy(msg_report)
+last_team["room"]["participants"] = [msg_members[0]] + [
+    {"participant": "last-worker-%d" % n, "role": "worker", "joined": True, "provider": "codex",
+     "model": "gpt-6-luna", "seq": 10 + n, "parent": "m1", "state": "working"} for n in range(6)]
+last_team["attempts"]["active_recent"] = [last_team["attempts"]["active_recent"][0]]
+last_team["attempts"]["active_recent"] += [
+    {"attempt_id": "last-call-%d" % n, "state": "working", "parent_attempt_id": "a1",
+     "panel": {"room_id": "r", "room_participant": "last-worker-%d" % n, "role": "worker"}} for n in range(6)]
+last_team["attempts"]["recent"] = []
+from panel_view import clipped
+from dashboard_projection import use_unicode
+for glyphs in (True, False):
+    use_unicode(glyphs)
+    with patch("panel_tree.render_tree", wraps=render_tree) as folded:
+        folded_last = render_tree(last_team, 42, 24, menu=True, previous=last_error, unicode=glyphs)
+    assert folded.called, "fixture must exercise the auto-fold re-render"
+    assert "Last: " + last_error in folded_last and len(folded_last.splitlines()) <= 23, folded_last
+    assert glyphs or folded_last.isascii(), folded_last
+# Ordinary errors use one clipped row; only multiline messages and recovery commands wrap.
+ordinary_last = "error: native resume requires an existing session; this operation needs Codex CLI (install Codex CLI)"
+release_id = "a" + "._:-09AZaz" * 15 + "._:-09AZa"
+release_command = "oms panel --release-main " + release_id
+assert len(release_id) == 160
+release_last = "error: this panel already has a live main or unverified owner; if crashed:\n" + release_command
+for renderer, columns in ((render_tree, 28), (render_graph, 76)):
+    for glyphs in (True, False):
+        use_unicode(glyphs)
+        ordinary = renderer(last_team, columns, 24, menu=True, previous=ordinary_last, unicode=glyphs)
+        ordinary_rows = ordinary.splitlines()
+        assert ordinary_rows[-1] == clipped("Last: " + ordinary_last, columns), ordinary
+        assert next(n for n, row in enumerate(ordinary_rows) if row.startswith("Last: ")) == len(ordinary_rows) - 1, ordinary
+        for previous in (release_last, release_last.replace("\n", " ")):
+            for nav in (None, {"menu_help": True, "notice": "capacity checked"}):
+                recovery = renderer(last_team, columns, 16, menu=True, previous=previous,
+                                    unicode=glyphs, navigation=deepcopy(nav))
+                recovery_rows = recovery.splitlines()
+                last_at = next(n for n, row in enumerate(recovery_rows) if row.startswith("Last: "))
+                assert len(recovery_rows) <= 15 and all(display_width(row) <= columns for row in recovery_rows), recovery
+                assert release_command in "".join(recovery_rows[last_at:]), recovery
+        board_last = renderer(last_team, columns, 16, menu=False, previous=release_last, unicode=glyphs)
+        assert board_last == renderer(last_team, columns, 16, menu=False, unicode=glyphs), board_last
+        for rows_high in (1, 2, 4, 8):
+            tiny = renderer(last_team, columns, rows_high, menu=True, previous=release_last, unicode=glyphs)
+            assert len(tiny.splitlines()) <= rows_high - 1, tiny
+grouped_last = deepcopy(last_team)
+grouped_last["attempts"]["active_recent"][-1]["state"] = "review"
+grouped_text = render_graph(grouped_last, 76, 24, menu=True, previous=last_error,
+                            navigation={"group_tree": True, "expanded_groups": {("review", "m1")}})
+assert "Last: " + last_error in grouped_text and len(grouped_text.splitlines()) <= 23, grouped_text
+for columns in (42, 76):
+    dispatched = render(last_team, "codex", columns, 24, view="graph", menu=True,
+                        previous=last_error, navigation={})
+    assert "Last: " + last_error in dispatched and len(dispatched.splitlines()) <= 23, dispatched
+# Status shares the footer budget; pinned attention, the task tail and dock borders remain reachable.
+last_attention = deepcopy(last_team)
+last_attention["attempts"]["active_recent"][-1]["state"] = "failed"
+for columns, rows_high in ((42, 24), (50, 50)):
+    last_nav = {}
+    last_picture = render_tree(last_attention, columns, rows_high, menu=True,
+                               previous=last_error, navigation=last_nav)
+    assert "Needs you" in "\n".join(last_picture.splitlines()[:10]), last_picture
+    assert any(hit["action"] == ("task", "t-rev") for hit in last_nav["hits"]), last_picture
+    assert last_nav["tab_strip_visible"] and len(last_picture.splitlines()) <= rows_high - 1, last_picture
+    if rows_high == 50:
+        assert last_nav["tab_body_visible"] and last_nav["box"]["y2"] - last_nav["box"]["y1"] + 1 == 14, last_nav
+use_unicode(True)
 # Tree and graph share tab navigation; a separate detail screen consumes its own keys.
 assert tab_event(("tab",), tree_nav) and not tab_event(("tab",), dict(tree_nav, surface="graph", detail={"target": ("chat", "m2")}))
 helped = render_tree(msg_report, 110, 40, navigation=dict(tree_nav, keys_help=True))
@@ -10291,14 +10368,15 @@ with patch.object(panel, "menu_input", return_value=GraphInput()), patch.object(
 # The first frame, the card click and the wheel paint; the plain-text click does not.
 assert painted.call_count == 3 and graph_nav["preview"].get("report") == {} and moved.call_count == 1, (
     painted.call_count, moved.call_args_list)
-# The control pane routes graph dock events before returning a control choice.
+# The control pane routes tree and graph dock events before returning a control choice.
 class DockInput(ReaderInput):
     def __init__(self, batches): self.batches = batches
-dock_nav = {"surface": "graph", "tab": "detail", "hits": [], "tab_strip_visible": True}
-with patch.object(panel, "menu_input", return_value=DockInput([[('tab',)], [('q',)]])), \
-        patch.object(panel, "show"):
-    assert panel.read_choice(Path("."), "codex", "ready", "auto", False, dock_nav, {}) == "q"
-assert dock_nav["tab"] == "plan", dock_nav
+for surface in ("graph", "tree"):
+    dock_nav = {"surface": surface, "tab": "detail", "hits": [], "tab_strip_visible": True}
+    with patch.object(panel, "menu_input", return_value=DockInput([[('tab',)], [('q',)]])), \
+            patch.object(panel, "show"):
+        assert panel.read_choice(Path("."), "codex", "ready", "auto", False, dock_nav, {}) == "q"
+    assert dock_nav["tab"] == "plan", dock_nav
 # A Messages-tab f request opens the recorded target before returning the queued control key.
 message_nav = {"surface": "graph", "tab": "messages", "box": {"y1": 1, "y2": 10},
                "message_ids": ["m1"], "message_calls": {"m1": ("result", "w1")},

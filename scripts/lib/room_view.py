@@ -774,7 +774,8 @@ def latest_answer(report):
 
 
 def render_graph(report, width, height, color=False, unicode=True, frame=None, menu=False,
-                 attention_only=False, main_attempt=None, navigation=None, managed=False):
+                 attention_only=False, main_attempt=None, navigation=None, managed=False,
+                 previous=None):
     """Page real parent relationships without inventing routers or progress."""
     from panel_view import tone
     from dashboard_projection import use_unicode
@@ -822,7 +823,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         if any(grouped.get(owner, {}).get(kind) for kind, owner in navigation.get("expanded_groups", set())):
             from panel_tree import render_tree
             return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
-                               main_attempt, navigation, managed=managed)
+                               main_attempt, navigation, managed=managed, previous=previous)
         navigation.pop("group_tree", None)
     linked_children = team(primary, every=True) if primary else []
     # Finished calls leave the board (results stay in the main's detail and the tree); attention stays.
@@ -875,6 +876,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             fixed = "  ".join(footer_hints({}, width, managed, unicode, None, True)[-1].split("  ")[-2:])
             footer = [clipped(clean(navigation["notice"], 180), max(1, width - display_width(fixed) - 2)) + "  " + fixed]
             hint_rows = 1
+    if menu and previous is not None:
+        from panel_view import message_rows
+        last_rows = (message_rows("Last: " + previous, width)
+                     if "\n" in previous or "oms panel --release-main " in previous else ["Last: " + previous])
+        footer = footer[:max(0, height - 1 - len(last_rows))] + last_rows[:max(0, height - 1)]
     bar = None if menu else spawn_bar(width, navigation)
     if bar:
         footer.append(bar[0])
@@ -1109,7 +1115,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         navigation.pop("full_result", None)
         text = render(report, primary.get("provider", "codex") if primary else "codex", width, height,
                       color, unicode, menu=menu, managed=managed, main_attempt=main_attempt, frame=frame,
-                      view="tree" if interactive else "compact", attention_only=attention_only, navigation=navigation)
+                      view="tree" if interactive else "compact", attention_only=attention_only, navigation=navigation,
+                      previous=previous)
         return text
     dock, (embedded, wires), warn_reserve = plan
     budget = total_rows - dock - warn_reserve

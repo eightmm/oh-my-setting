@@ -719,15 +719,17 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
                           and width >= 20 and height >= 12):
         from panel_tree import render_tree
         return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
-                           main_attempt, navigation, summary=view == "summary", managed=managed)
+                           main_attempt, navigation, summary=view == "summary", managed=managed,
+                           previous=previous)
     if view == "graph" and width >= 76 and height >= 16:
         from room_view import render_graph
-        return render_graph(report, width, height, color, unicode, frame, menu, attention_only, main_attempt, navigation, managed)
+        return render_graph(report, width, height, color, unicode, frame, menu, attention_only,
+                            main_attempt, navigation, managed, previous=previous)
     if (view == "graph" and navigation is not None and mapping(report.get("room")).get("participants")
             and width >= 20 and height >= 8):
         from panel_tree import render_tree
         return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
-                           main_attempt, navigation, managed=managed)
+                           main_attempt, navigation, managed=managed, previous=previous)
     lines = []
 
     def add(text="", style=None):

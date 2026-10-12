@@ -10,7 +10,8 @@ from room_view import (action as member_action, call_order, context_note, open_c
 
 
 def render_tree(report, width, height, color=False, unicode=True, frame=None, menu=False,
-                attention_only=False, main_attempt=None, navigation=None, summary=False, managed=False):
+                attention_only=False, main_attempt=None, navigation=None, summary=False, managed=False,
+                previous=None):
     from panel_view import use_unicode
     use_unicode(unicode)
     interactive = navigation is not None
@@ -217,6 +218,12 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         footer = menu_rows(width, 1, unicode, managed=managed, occupied=navigation["main_occupied"],
                            installed=navigation.get("installed")) if menu else hints(False)
         hint_rows = 0 if menu else len(footer)
+    if menu and previous is not None:
+        from panel_view import message_rows
+        last_rows = (message_rows("Last: " + previous, width)
+                     if "\n" in previous or "oms panel --release-main " in previous else ["Last: " + previous])
+        # Reserve status before optional body/dock rows; recovery commands must stay copyable.
+        footer = footer[:max(0, height - 1 - len(last_rows))] + last_rows[:height - 1]
     bar = None if menu or height < 8 else spawn_bar(width, navigation)
     if bar:
         # The start bar sits just above the key hints, which stay the last rows.
@@ -299,7 +306,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         extra = {m["participant"] for m in mains} - keep
         inner = dict(navigation, collapsed=collapsed | extra, _auto_fold=True)
         text = render_tree(report, width, height, color, unicode, frame, menu, attention_only,
-                           main_attempt, inner, summary, managed)
+                           main_attempt, inner, summary, managed, previous=previous)
         reachable = any(i[0] == "result" for i in inner["items"]) or not any(i[0] == "result" for i in items)
         if reachable and all(inner["positions"].get(("chat", m["participant"]), 0) < inner["viewport"] for m in mains):
             navigation.update({k: v for k, v in inner.items() if k not in ("collapsed", "_auto_fold")})
