@@ -124,7 +124,7 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
                 available.append(candidate)
                 used_by[candidate["provider"]] = used
         if not available:
-            raise ValueError("all installed providers in the %s tier report >=90%% weekly usage" % tier)
+            raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left" % tier)
         # With a reading for every remaining provider, the one with more weekly quota left goes first;
         # otherwise the configured tier order stands (sorted() keeps ties in that order).
         if None not in used_by.values():

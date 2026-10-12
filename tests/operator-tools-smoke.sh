@@ -3110,7 +3110,7 @@ try:
     allocate("codex", installed=both, provider_status={p: {"weekly_used": 90} for p in both})
     raise AssertionError("all saturated candidates were accepted")
 except ValueError as error:
-    assert ">=90% weekly usage" in str(error), error
+    assert "<=10% weekly quota left" in str(error), error
 routes = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--routes"]))
 assert set(routes["tiers"]) == set(panel.TIERS) and set(routes["roles"]) == set(routes["kinds"]) == set(panel.KINDS)
 assert routes["writers"] == sorted(panel.WRITERS) and report["routing"]["roles"] == routes["roles"]
