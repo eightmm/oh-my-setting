@@ -13,7 +13,7 @@ When the first read fails, or a window switches to a room it has not successfull
 
 1. Run `oms` in a terminal. The control window is the inbox; the panel starts at most one live main, using Claude by default. Pi is the explicit alternative (`OMS_PANEL_MAINS=pi` or the Pi start key).
 2. The main window keeps the board fixed on the left; the right side is the reader for workers, advisors, reviews and results, alongside the native conversation. At wide widths it shows the graph; narrower layouts fall back to the tree. At fewer than 20 columns the board omits its tab box.
-3. The compact goal banner and pinned **Needs you** strip stay above activity; the full goal is in the Plan tab. The bottom box contains Detail, Plan, Debate and Messages tabs, plus Needs you only while the inbox has items, when its height permits; if only one row fits, the tab strip remains visible without a body.
+3. The compact goal banner and Plan tab show a bounded goal preview (up to 200 characters and, in Plan, two wrapped lines); `oms agent-plan list` prints the full plan. The pinned **Needs you** strip stays above activity. The bottom box contains Detail, Plan, Debate and Messages tabs, plus Needs you only while the inbox has items, when its height permits; if only one row fits, the tab strip remains visible without a body.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
 5. `Tab` cycles visible tabs; arrows move within the current surface; Enter opens or expands. `Esc` closes a reader or backs out. The detailed keys and their surfaces are listed under [Keys](#keys).
 6. At a main's exit prompt, `r` resumes or restarts in that pane and Enter closes the window. `F9` switches between chat and board; `F5` opens the control window, and from that window returns to the previous one; `F12` shows panel-wide keys.
@@ -133,9 +133,10 @@ while current Sol defaults and Sol 6.1 calls are labelled accordingly. GPT
 labels include their model version (Sol 6, Luna 6, Astra 6 and Sol 6.1). Native
 chat rows are never updated; SQLite may coordinate its existing reader locks.
 
-Expanded main details group calls by attention, active and finished state; every
-team row opens that call's recorded result. Recent messages precede historical
-and status-unavailable calls, whose identities and result links stay separate. Result details put the main's decision
+Expanded main details list calls as Needs attention, Active, No record and Finished,
+then recent messages and the work location; every team row opens that call's
+recorded result, and status-unavailable calls keep separate identities and result
+links. Result details put the main's decision
 and verification before the worker's answer. Long excerpts remain scrollable and
 point to the full retained result rather than filling the board with raw output.
 Press `f` in a call preview (or click or Enter on the call) to open that complete
@@ -344,7 +345,7 @@ live-main (resumed mains count by their participant) and
 pending counts, and an incomplete room scan says so; graphs of different rooms
 are never merged, and `o Rooms` in the control window switches. Room scans for
 that line are cached for 30 seconds; liveness comes from the current snapshot.
-The bottom box state (tab, previewed target and detail scroll) is shared by the panel session in `@oms_panel_bottom`; changes reach every board on refresh, and entering a window does not reset the selection. The reading dock reserves geometry from the fixed header and ordinary layout, so worker count or running/finished state does not move it.
+The bottom box state (tab, previewed target and detail scroll) is shared by the panel session in `@oms_panel_bottom`, capped at 512 bytes; malformed or oversized state is ignored, and a target that does not name a participant in the current room is not applied. Changes reach every board on refresh, and entering a window does not reset the selection. The reading dock reserves geometry from the fixed header and ordinary layout, so worker count or running/finished state does not move it.
 Terminals attached to the same panel session share its current window, so
 navigating from one client also moves the other. The wheel scrolls only the band or detail under the
 pointer.
@@ -769,7 +770,7 @@ The launcher does not autonomously fan out before the main has a task.
 | Claude main (default) | `claude-opus-5-5` | high |
 | Codex main / Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
 
-Routing filters a tier to installed providers, then removes providers reporting at least 90% weekly usage when another candidate remains (missing, stale or malformed readings stay eligible; if all usable providers report at least 90%, routing fails). It applies the role's configured provider preference, then independence ordering moves reviewer, verifier, security-auditor and critic away from the owner's provider when another candidate remains. Researcher is pinned to the light tier at low effort. Role defaults are shown below.
+Routing filters a tier to installed providers. Only when multiple providers are installed does it remove providers reporting at least 90% weekly usage; missing, stale or malformed readings stay eligible, and routing fails if every installed candidate reports at least 90%. A sole installed provider remains eligible regardless of usage. It then applies the role's configured provider preference, followed by independence ordering that moves reviewer, verifier, security-auditor and critic away from the owner's provider when another candidate remains. Researcher is pinned to the light tier at low effort. Role defaults are shown below.
 
 | Tier | Configured model candidates (effort) |
 | --- | --- |
@@ -785,6 +786,8 @@ Routing filters a tier to installed providers, then removes providers reporting 
 | `integrator`, `performance-engineer` | deep | Codex | read or write | `peer-delegate --role` |
 | `release-engineer` | routine | Codex | read | `peer-delegate --role release-engineer` |
 | `reviewer`, `advisor`, `architect`, `critic`, `verifier`, `security-auditor` | frontier | Claude | read | `peer-review`, `advise` or `peer-delegate --role --read-only` |
+
+For the plain `worker` role, the read front door is `analysis-worker` and the write front door is `implementation-worker`; other roles keep their role names.
 
 `--workload light|routine|deep|frontier` overrides the tier for one dispatch and
 `--reasoning-effort` overrides one dispatch's effort. Any panel dispatch with `--verify` gets `OMS_PEER_VERIFY_TIMEOUT=20m` when unset; peer commands elsewhere default to 10m. Set the variable in the environment to override it. Use `--to` and `--model` only when a specific provider is explicitly required; `--model` requires `--to`, and an exact route does not silently fall back. Tier routes use the configured model as a floor and pin the newest catalog version in that same provider family by numeric version (an omitted minor version counts as zero). Availability comes from installed/cached provider data; no paid model probe runs, and a chosen model failure does not substitute an older or more expensive family. `--workload` cannot be combined with explicit `--to`. Independence ordering applies to reviewer, verifier, security-auditor and critic when both providers remain available. Their records keep the board kinds `worker`, `researcher`,
@@ -953,8 +956,7 @@ the chat. Drag the border and the board keeps the new width; a zoomed board and 
 control window are left alone.
 A watcher whose OMS sources change re-executes itself once they compile, so
 updated boards need no manual restart; an open reader stays. Select `v` in the
-task panel to expand its graph; `Esc` collapses it,
-and closing the watcher restores its own zoom. Native input and permission
+task panel to expand its graph; `Esc` or watcher shutdown collapses it. Native input and permission
 prompts stay in the original CLI. The room's detailed tree and graph remain
 available. A successfully exited native main is labelled `exited`, independently
 of a worker result, verifier or owner acceptance.
@@ -1062,7 +1064,8 @@ The native main card shows provider, requested model/effort and recorded task
 when supplied at launch. Missing fields remain unrecorded.
 Tasks entered later inside the native conversation are not intercepted:
 its main title stays unrecorded unless supplied at launch, while dispatched child
-titles are recorded. Purple ADVISORS and cyan WORKERS show lifecycle state,
+titles are recorded. The palette uses warm Claude, blue Codex, teal workers and
+lavender advisors and reviewers. Role cards show lifecycle state,
 model, task title/ID, read/write authority, effort and location. Worktree locations
 use a relative unique suffix; repository calls show `repository`. Detached
 worker worktrees can be cleaned after completion; their locations remain history.
@@ -1077,7 +1080,7 @@ WORKERS, followed by each call and its task title. Main rows can show `? N open`
 remain unlinked; a generic attempt parent is never promoted into a native-main
 relationship. A linked owner whose metadata is unavailable is labelled so.
 
-Press `v` to toggle board expansion between the current overview and an expanded graph; `Esc` or closing the watcher restores the prior zoom. In compact layouts, calls retain their model, state and task title. At 80 columns or wider, these share one row with metadata on the
+Press `v` to toggle board expansion between the current overview and an expanded graph; `Esc` or closing the watcher collapses any expansion. In compact layouts, calls retain their model, state and task title. At 80 columns or wider, these share one row with metadata on the
 right; narrow views place metadata below the title. Detail expands wrapped
 titles and location/effort metadata. The view prioritizes attention calls and reports overflow when calls do not fit. Small panes use compact summaries. Press `b` to
 toggle attention-only: waiting input, waiting approval, blocked, review and
