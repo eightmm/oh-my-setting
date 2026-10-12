@@ -3535,7 +3535,7 @@ with patch.object(panel, "provider_catalog", return_value=[codex_only, claude_ca
         patch.object(panel, "snapshot", return_value=({}, 1)), \
         patch("panel_metrics.collect", side_effect=ValueError("unavailable reading")):
     assert panel.selected_route("codex", "worker", None, "read", None,
-                                repo=project, room_id="quota-room")["provider"] == "codex"
+                                repo=project, room_id="quota-room")["provider"] == "claude"
 with patch.object(panel, "provider_catalog", return_value=[dict(codex_only, installed=False)]):
     try:
         panel.selected_route("codex", "worker", None, "read", None)
@@ -3682,7 +3682,7 @@ for options in (["--to", "muse"], ["--to", "muse", "--model", "provider-default"
     assert worker_log.read_bytes() == before
 # A role route keeps its tier's model and takes a per-dispatch effort.
 harder = json.loads(call(external_base + ["--workload", "light", "--reasoning-effort", "high", "--dry-run"]))
-assert harder["route"]["model"] == "gpt-6-luna" and harder["route"]["effort"] == "high", harder
+assert harder["route"]["model"] == "claude-haiku-5-5" and harder["route"]["effort"] == "high", harder
 assert harder["argv"][harder["argv"].index("--reasoning-effort") + 1] == "high", harder["argv"]
 profile_route = json.loads(call(external_base + ["--to", "vibe", "--dry-run"]))
 assert profile_route["route"]["model"] == "provider-default" and "--model" not in profile_route["argv"]
@@ -5383,7 +5383,7 @@ answer = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--roo
 assert "artifact:" in answer, answer
 state = room.status(project, shared)
 child = next(p for p in state["participants"] if p["role"] == "worker")
-assert child["parent"] == room_owner and child["model"] == "gpt-6-luna", child
+assert child["parent"] == room_owner and child["model"] == "claude-haiku-5-5", child
 handoff = next(m for m in state["messages"] if m["sender"] == child["participant"])
 assert handoff["recipient"] == room_owner and "parent acceptance pending" in handoff["text"], handoff
 assert "inspected the bounded repository task" in handoff["text"], handoff
@@ -6684,7 +6684,7 @@ def exercise_observed_worker_leases():
                    OMS_PEER_TIMEOUT="90")
         argv = ["bash", str(panel.ENTRY), "panel", "--repo", str(source), "--room", test_room,
                 "--dispatch", role, "--owner", owner, "--access", access]
-        argv += ["--workload", workload] if workload else ["--to", worker]
+        argv += ["--to", worker, "--model", model, "--reasoning-effort", effort]
         if role == "researcher":
             argv += ["--prompt", "Inspect the native source read-only."]
         else:
@@ -6729,10 +6729,8 @@ def exercise_observed_worker_leases():
             enrolled = room.participant(room.project(room.records(project, test_room)), observed["participant"])
             assert enrolled["parent"] == main_member and observed["parent"] == main_attempt, enrolled
             assert enrolled["role"] == role and enrolled["owns"] == [], enrolled
-            route = panel.selected_route(owner, role, workload, access, purpose if role == "worker" else None,
-                                         None if workload else worker)
-            validation_route = dict(provider=route["provider"], model=route["model"],
-                                    reasoning_effort=route["effort"], fallback_model="")
+            validation_route = dict(provider=worker, model=model,
+                                    reasoning_effort=effort, fallback_model="")
             binding = panel.PlanBinding(row["plan_id"], task_id, row["lease_id"], row["provider"], owner,
                                         main_member, main_attempt, test_room)
             assert binding._asdict() == observed_binding, binding
