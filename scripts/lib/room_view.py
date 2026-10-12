@@ -139,6 +139,9 @@ def main_state(member):
                 return "waiting_approval"
             if reading.get("kind") == "input":
                 return "waiting_input"
+        if reading.get("interrupted") is True or (reading.get("state") == "busy"
+                                                   and reading.get("origin") == "user"):
+            return "manual"
         if reading.get("state") == "busy":
             return "working"
         if reading.get("state") == "idle":

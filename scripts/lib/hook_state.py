@@ -1470,12 +1470,30 @@ def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> 
         if (event == "PostToolUse" and same and old.get("state") == "busy"
                 and type(updated) in (int, float) and 0 <= updated <= now and now - updated < 10):
             return
+        prompt = payload.get("prompt")
+        origin = old.get("origin") if same else None
+        if event == "UserPromptSubmit":
+            # Claude's first prompt is the panel bootstrap. Later harness wakes
+            # have stable prefixes; only an unmarked prompt is user takeover.
+            if payload_agent(payload) == "claude" and not same:
+                origin = "harness"
+            elif isinstance(prompt, str):
+                origin = "harness" if re.match(
+                    r"^\s*(?:<task-notification(?:\s|>)|\[SYSTEM NOTIFICATION\b)", prompt
+                ) else "user"
+            else:
+                origin = None
         state = "waiting" if kind else "idle" if event == "Stop" else "busy"
         since = old.get("since") if same and old.get("state") == state and event == "PostToolUse" else now
         if type(since) not in (int, float) or not 0 <= since <= now:
             since = now
         row = {"schema": 1, "participant": participant, "attempt": attempt,
                "room": room_id, "state": state, "since": since, "updated_at": now}
+        if origin in ("user", "harness"):
+            row["origin"] = origin
+        transcript = payload.get("transcript_path") or payload.get("transcriptPath")
+        if isinstance(transcript, str) and transcript and len(transcript) <= 4096:
+            row["transcript_path"] = transcript
         if kind:
             row["kind"] = kind
         write_json_atomic(path, row)

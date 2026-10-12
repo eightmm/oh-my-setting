@@ -6,6 +6,7 @@ from contextlib import nullcontext
 import datetime
 import hashlib
 import json
+import math
 import os
 import queue
 from pathlib import Path
@@ -3300,6 +3301,79 @@ def managed_session():
 
 # Pane text is hashed and discarded; board repaints must not reset native silence.
 MAIN_OUTPUT = {}
+MAIN_INTERRUPT_CACHE = {}
+
+
+def _interrupted_transcript(path_value, since):
+    """Return whether a Claude transcript tail records an interrupt after this turn began."""
+    if (not isinstance(path_value, str) or not path_value or len(path_value) > 4096
+            or not isinstance(since, (int, float)) or isinstance(since, bool)
+            or not math.isfinite(float(since))):
+        return False
+    try:
+        import panel_chats
+        path = Path(path_value)
+        projects = (panel_chats._claude_home() / "projects").resolve()
+        resolved = path.resolve(strict=True)
+        if resolved.parent.parent != projects or resolved.suffix != ".jsonl":
+            return False
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            return False
+        cache_key = (str(resolved), before.st_size, before.st_mtime_ns, since)
+        if cache_key in MAIN_INTERRUPT_CACHE:
+            return MAIN_INTERRUPT_CACHE[cache_key]
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                    or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)):
+                return False
+            start = max(0, opened.st_size - 16384)
+            partial_first_line = False
+            if start:
+                handle.seek(start - 1)
+                partial_first_line = handle.read(1) != b"\n"
+            handle.seek(start)
+            tail = handle.read(16384)
+        if partial_first_line:
+            first_newline = tail.find(b"\n")
+            tail = tail[first_newline + 1:] if first_newline >= 0 else b""
+    except (OSError, ValueError, RuntimeError):
+        return False
+    from datetime import datetime
+    interrupted = False
+    for line in tail.splitlines():
+        try:
+            row = json.loads(line.decode("utf-8"))
+            message = row.get("message") if isinstance(row, dict) and row.get("type") == "user" else None
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list):
+                content = "".join(
+                    block.get("text", "") for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                )
+            if (not isinstance(message, dict) or message.get("role") != "user"
+                    or not isinstance(content, str)
+                    or not re.fullmatch(r"\[Request interrupted by user(?: for tool use)?\]", content)):
+                continue
+            stamp = row.get("timestamp")
+            if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+                interrupted_at = float(stamp)
+            elif isinstance(stamp, str):
+                interrupted_at = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+            else:
+                continue
+        except (ValueError, TypeError, OverflowError, OSError, RecursionError):
+            continue
+        if math.isfinite(interrupted_at) and interrupted_at >= since:
+            interrupted = True
+            break
+    MAIN_INTERRUPT_CACHE[cache_key] = interrupted
+    while len(MAIN_INTERRUPT_CACHE) > 128:
+        MAIN_INTERRUPT_CACHE.pop(next(iter(MAIN_INTERRUPT_CACHE)))
+    return interrupted
 
 
 def main_activity(repo, members, windows=()):
@@ -3320,8 +3394,13 @@ def main_activity(repo, members, windows=()):
                                for k in ("since", "updated_at"))):
                 continue
             result[who] = {k: row.get(k) for k in ("state", "since", "updated_at", "attempt", "room")}
+            if row.get("origin") in ("user", "harness"):
+                result[who]["origin"] = row["origin"]
             if row["state"] == "waiting":
                 result[who]["kind"] = row["kind"]
+            if (row["state"] == "busy" and member.get("provider") == "claude"
+                    and _interrupted_transcript(row.get("transcript_path"), row["since"])):
+                result[who]["interrupted"] = True
         except (OSError, ValueError, TypeError, RecursionError):
             continue
     session = os.environ.get("OMS_PANEL_SESSION", "")
@@ -3353,7 +3432,8 @@ def main_activity(repo, members, windows=()):
                 digest = hashlib.sha256(capture.stdout).hexdigest()
                 unchanged = previous[2] if previous and previous[1] == digest else now
                 MAIN_OUTPUT[key] = (now, digest, unchanged)
-            if now - row["updated_at"] >= 90 and now - unchanged >= 90:
+            if (row.get("origin") != "user" and not row.get("interrupted") and now - row["updated_at"] >= 90
+                    and now - unchanged >= 90):
                 result[who] = dict(row, state="quiet", since=max(row["updated_at"], unchanged))
         except (OSError, ValueError, subprocess.SubprocessError):
             MAIN_OUTPUT.pop((str(repo), session, native, attempt), None)

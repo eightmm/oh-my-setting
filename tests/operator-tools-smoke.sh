@@ -14140,6 +14140,98 @@ activity_path = activity_repo / ".oms/hooks/panel-activity/activity-main.json"
 activity_path.parent.mkdir(parents=True)
 activity_path.write_text(json.dumps(activity_row))
 activity_windows = [["activity-main", "%777", str(activity_repo), "activity-attempt"]]
+import hook_state
+activity_env = {"OMS_PANEL_SESSION": "oms-fixture", "OMS_PANEL_MAIN_ATTEMPT": "activity-attempt",
+                "OMS_ROOM_PARTICIPANT": "activity-main", "OMS_ROOM_ID": "activity-room",
+                "OMS_ROOM_REPO": str(activity_repo)}
+with patch.dict(os.environ, activity_env):
+    activity_path.unlink()
+    with patch.object(hook_state.time, "time", return_value=100):
+        hook_state.record_panel_activity({"hook_event_name": "UserPromptSubmit", "prompt": "panel bootstrap"}, activity_repo)
+    bootstrap = json.loads(activity_path.read_text())
+    assert bootstrap["origin"] == "harness" and "panel bootstrap" not in activity_path.read_text(), bootstrap
+    with patch.object(hook_state.time, "time", return_value=200):
+        hook_state.record_panel_activity({"hook_event_name": "UserPromptSubmit", "prompt": "my manual request"}, activity_repo)
+    user_prompt = json.loads(activity_path.read_text())
+    assert user_prompt["origin"] == "user" and "my manual request" not in activity_path.read_text(), user_prompt
+    assert graph_view.main_state(dict(activity_main, attempt="activity-attempt", state="working",
+                                      panel_activity=user_prompt)) == "manual"
+    assert graph_view.main_state(dict(activity_main, attempt="activity-attempt", state="working",
+                                      panel_activity=dict(user_prompt, state="waiting", kind="approval"))) == "waiting_approval"
+    assert graph_view.main_state(dict(activity_main, attempt="activity-attempt", state="working",
+                                      panel_activity=dict(user_prompt, state="waiting", kind="input"))) == "waiting_input"
+    with patch.object(hook_state.time, "time", return_value=250):
+        hook_state.record_panel_activity({"hook_event_name": "Stop"}, activity_repo)
+    completed_user_turn = json.loads(activity_path.read_text())
+    assert completed_user_turn["state"] == "idle"
+    assert graph_view.main_state(dict(activity_main, attempt="activity-attempt", state="working",
+                                      panel_activity=completed_user_turn)) == "idle"
+    with patch.object(hook_state.time, "time", return_value=300):
+        hook_state.record_panel_activity({"hook_event_name": "UserPromptSubmit",
+                                          "prompt": " \n<task-notification>background complete"}, activity_repo)
+    harness_prompt = json.loads(activity_path.read_text())
+    assert harness_prompt["origin"] == "harness" and "background complete" not in activity_path.read_text(), harness_prompt
+    assert graph_view.main_state(dict(activity_main, attempt="activity-attempt", state="working",
+                                      panel_activity=harness_prompt)) == "working"
+
+claude_home = temporary / "claude-home"
+transcript = claude_home / "projects" / "fixture-project" / "session.jsonl"
+transcript.parent.mkdir(parents=True)
+transcript.write_text(json.dumps({"type": "user", "timestamp": "1970-01-01T00:05:01Z",
+                                 "message": {"role": "user", "content": "[Request interrupted by user]"}}) + "\n")
+interrupted_row = dict(activity_row, since=300, updated_at=300, origin="user", transcript_path=str(transcript))
+activity_path.write_text(json.dumps(interrupted_row))
+assert "[Request interrupted by user]" not in activity_path.read_text(), "transcript text stays out of activity records"
+with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude_home)}):
+    terminal_panel.MAIN_INTERRUPT_CACHE.clear()
+    real_open = os.open
+    transcript_opens = []
+    def count_transcript_open(path, *args, **kwargs):
+        if str(path) == str(transcript):
+            transcript_opens.append(path)
+        return real_open(path, *args, **kwargs)
+    with patch.object(terminal_panel.os, "open", side_effect=count_transcript_open):
+        interrupted_activity = panel.main_activity(activity_repo, [activity_main])
+        cached_interrupted = panel.main_activity(activity_repo, [activity_main])
+    assert len(transcript_opens) == 1, transcript_opens
+    assert cached_interrupted["activity-main"].get("interrupted") is True, cached_interrupted
+    quoted = transcript.parent / "quoted.jsonl"
+    quoted.write_text(json.dumps({"type": "assistant", "timestamp": "1970-01-01T00:05:02Z",
+                                  "message": {"role": "assistant", "content": "[Request interrupted by user]"}}) + "\n")
+    activity_path.write_text(json.dumps(dict(interrupted_row, transcript_path=str(quoted))))
+    assert not panel.main_activity(activity_repo, [activity_main])["activity-main"].get("interrupted"), \
+        "assistant text quoting the interrupt marker is not an interrupt"
+    harness_interrupt = transcript.parent / "harness-interrupt.jsonl"
+    harness_interrupt.write_text(json.dumps({"type": "user", "timestamp": "1970-01-01T00:05:03Z",
+        "message": {"role": "user", "content": [{"type": "text",
+        "text": "[Request interrupted by user for tool use]"}]}}) + "\n")
+    harness_activity = dict(interrupted_row, origin="harness", transcript_path=str(harness_interrupt))
+    activity_path.write_text(json.dumps(harness_activity))
+    assert panel.main_activity(activity_repo, [activity_main])["activity-main"].get("interrupted") is True, \
+        "Claude's user-role text-block interrupt marks a harness-origin turn interrupted"
+    partial = transcript.parent / "partial.jsonl"
+    partial.write_bytes(b" " * 16384 + (json.dumps({"type": "user", "timestamp": "1970-01-01T00:05:03Z",
+                   "message": {"role": "user", "content": "[Request interrupted by user]"}}).encode("utf-8") + b"\n"))
+    activity_path.write_text(json.dumps(dict(interrupted_row, transcript_path=str(partial))))
+    assert not panel.main_activity(activity_repo, [activity_main])["activity-main"].get("interrupted"), \
+        "the partial first line of a transcript tail is ignored"
+    activity_path.write_text(json.dumps(interrupted_row))
+    interrupted_activity = panel.main_activity(activity_repo, [activity_main])
+    assert interrupted_activity["activity-main"].get("interrupted") is True, interrupted_activity
+    interrupted_report = dict(activity_report, main_activity=interrupted_activity)
+    interrupted_main = next(m for m in graph_view.nodes(interrupted_report) if m["role"] == "main")
+    assert graph_view.main_state(interrupted_main) == "manual"
+    with patch.dict(os.environ, activity_env):
+        with patch.object(hook_state.time, "time", return_value=302):
+            hook_state.record_panel_activity({"hook_event_name": "UserPromptSubmit",
+                                              "prompt": "<task-notification>next turn"}, activity_repo)
+        assert "next turn" not in activity_path.read_text(), "harness prompt text stays out of activity records"
+        cleared_activity = panel.main_activity(activity_repo, [activity_main])
+        assert not cleared_activity["activity-main"].get("interrupted"), cleared_activity
+        cleared_main = next(m for m in graph_view.nodes(dict(activity_report, main_activity=cleared_activity))
+                            if m["role"] == "main")
+        assert graph_view.main_state(cleared_main) == "working", cleared_main
+activity_path.write_text(json.dumps(activity_row))
 panel.MAIN_OUTPUT.clear()
 with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"native prompt", b"")) as capture:
     with patch.object(panel.time, "time", return_value=1000):
@@ -14154,6 +14246,9 @@ with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProc
     with patch.object(panel.time, "time", return_value=100 + 7 * 24 * 60 * 60):
         silent = panel.main_activity(activity_repo, [activity_main], activity_windows)
         assert silent["activity-main"]["state"] == "quiet" and silent["activity-main"]["since"] == 1000, silent
+        activity_path.write_text(json.dumps(dict(activity_row, origin="user")))
+        manual = panel.main_activity(activity_repo, [activity_main], activity_windows)
+        assert manual["activity-main"]["state"] == "busy" and manual["activity-main"]["origin"] == "user", manual
         for kind in ("approval", "input"):
             activity_path.write_text(json.dumps(dict(activity_row, state="waiting", kind=kind)))
             before_capture = capture.call_count
@@ -14200,6 +14295,9 @@ with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProc
 for reading, word in (({}, "live"), ({"activity-main": dict(activity_row, since=280)}, "working · 12m"),
                       ({"activity-main": dict(activity_row, state="quiet", since=280)}, "quiet · 12m"),
                       ({"activity-main": dict(activity_row, state="idle", since=280)}, "idle · 12m"),
+                      ({"activity-main": dict(activity_row, origin="user", since=280)}, "manual"),
+                      ({"activity-main": dict(activity_row, state="waiting", kind="approval", origin="user", since=280)}, "needs approval · 12m"),
+                      ({"activity-main": dict(activity_row, state="waiting", kind="input", origin="user", since=280)}, "needs input · 12m"),
                       ({"activity-main": dict(activity_row, state="waiting", kind="approval", since=280)}, "needs approval · 12m"),
                       ({"activity-main": dict(activity_row, state="waiting", kind="input", since=280)}, "needs input · 12m"),
                       ({"activity-main": dict(activity_row, state="waiting", kind="approval", attempt="old")}, "live"),
@@ -14210,7 +14308,7 @@ for reading, word in (({}, "live"), ({"activity-main": dict(activity_row, since=
         assert projected_main["state"] == "working", "presentation must preserve attempt lifecycle"
         expected_state = ("waiting_approval" if word.startswith("needs approval") else "waiting_input" if word.startswith("needs input")
                           else "idle" if word.startswith("idle") else "quiet" if word.startswith("quiet")
-                          else "working" if word.startswith("working") else "live marker")
+                          else "manual" if word == "manual" else "working" if word.startswith("working") else "live marker")
         assert graph_view.main_state(projected_main) == expected_state
         assert graph_view.main_words(projected_main) == word
         for ascii_only in (False, True):
