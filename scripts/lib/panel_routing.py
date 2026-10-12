@@ -85,7 +85,7 @@ def policy():
 
 
 def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None):
-    """Availability, role preference, then independent judgment; explicit targets narrow installed."""
+    """Availability, quota left, role preference, then independent judgment; explicit targets narrow installed."""
     if not owner or role not in KINDS:
         raise ValueError("choose a supported main and role")
     routes = policy()
@@ -116,14 +116,19 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         # Use the board's rounded reading; stale, malformed and missing readings remain available.
         from panel_metrics import percent
         readings = provider_status if isinstance(provider_status, dict) else {}
-        available = []
+        available, used_by = [], {}
         for candidate in usable:
             row = readings.get(candidate["provider"])
             used = percent(row.get("weekly_used")) if isinstance(row, dict) else None
             if used is None or used < 90:
                 available.append(candidate)
+                used_by[candidate["provider"]] = used
         if not available:
             raise ValueError("all installed providers in the %s tier report >=90%% weekly usage" % tier)
+        # With a reading for every remaining provider, the one with more weekly quota left goes first;
+        # otherwise the configured tier order stands (sorted() keeps ties in that order).
+        if None not in used_by.values():
+            available = sorted(available, key=lambda c: used_by[c["provider"]])
         usable = available
     if preferred:
         usable = sorted(usable, key=lambda c: c["provider"] != preferred)

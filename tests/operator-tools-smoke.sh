@@ -3066,6 +3066,15 @@ for used, expected in ((89, "claude"), (90, "codex"), (100, "codex"),
     assert allocate("codex", installed=both, provider_status=readings)["provider"] == expected
 assert allocate("claude", role="reviewer", installed=both,
                 provider_status={"codex": {"weekly_used": 90}})["provider"] == "claude"
+# With both readings, more weekly quota left wins inside the tier; a missing reading keeps the tier order.
+for claude_used, codex_used, expected in ((60, 20, "codex"), (20, 60, "claude"), (40, 40, "claude"), (60, None, "claude")):
+    readings = {"claude": {"weekly_used": claude_used}, "codex": {"weekly_used": codex_used}}
+    assert allocate("claude", role="builder", installed=both, provider_status=readings)["provider"] == expected, readings
+    assert allocate("codex", role="integrator", installed=both, provider_status=readings)["provider"] == expected, readings
+assert allocate("claude", role="reviewer", installed=both,
+                provider_status={"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}})["provider"] == "codex"
+assert allocate("codex", role="reviewer", installed=both,
+                provider_status={"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}})["provider"] == "claude"
 assert allocate("codex", installed={"codex"}, provider_status={"codex": {"weekly_used": 100}})["provider"] == "codex"
 try:
     allocate("codex", installed=both, provider_status={p: {"weekly_used": 90} for p in both})
