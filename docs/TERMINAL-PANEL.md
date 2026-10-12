@@ -240,10 +240,11 @@ a summary, not another agent. The main is the central card and shows its
 coordination role. Advisors/reviewers sit above it and join its top edge;
 workers branch from its bottom edge. Each child connects to the main itself,
 so workers do not appear to report to an advisor. `Needs review (N)` groups contain lifecycle `review` calls and
-completed write calls awaiting patch admission. `Past work (N)` contains
-`done`/`cancelled` calls, failures already handled under the existing read or
-finalization rules, and old unknown calls eligible for the existing display
-cutoff. Both groups default collapsed. Click a group or select it with Up/Down
+completed write calls awaiting patch admission. Past calls are not a board
+group: `done`/`cancelled` calls, failures already handled (result read, a later
+round of the same task, or the task done, cancelled or finalized) and old unknown
+calls eligible for the existing display cutoff are listed in the bottom box's
+Past tab instead. The group defaults collapsed. Click a group or select it with Up/Down
 and press Enter or Space to expand it. Graph groups for the selected main open
 the scrollable tree; Esc Back or `g` Graph returns directly to the graph and
 resets local group expansion. Collapsing all inspected groups also returns. Expansion
@@ -267,13 +268,19 @@ Groups, the cards, the bottom tab box and the footer follow; status alerts sit u
 The usage line always covers both providers (`Claude week 66% · ctx 73% │ Codex --`); a provider without a
 reading reads `Codex --`, whichever main the window belongs to. The goal box is a card titled `GOAL` with the
 plan goal on at most two rows and the progress right-aligned on the title row
-(`╭─ GOAL ──── ▕██████░░░░▏ 6/9 verified · 1 review · 2 claimed ─╮`; ASCII `+- GOAL` and `[######....]`). On a
+(`╭─ GOAL ──── ▕██████░░░░▏ 6/9 verified · 1 review · 2 claimed ─╮`; ASCII `+- GOAL` and `[######....]`).
+Cancelled tasks are closed, never verified, so they leave the total (the `[oms plan]` sentence uses the
+same total). A running task whose recorded calls all ended counts as `stale` instead of `claimed`, one whose
+calls wait in review or admission counts as `review`; expired claims and abandoned review leases are stale too.
+Zero counts are omitted and `stale` is dropped first on narrow boards; the full box adds
+`N stale, not counted: no live worker · release with oms agent-plan release --id ID`. On a
 board under 20 rows (or when the pinned rows would starve the body) the box shrinks to one row,
 `[ GOAL  <goal>  <bar> <counts> ]`, before any pinned row is dropped. Clicking the box selects the
 `("tab", "plan")` target on every row it draws. Without an active plan (none, no goal, or idle for 7 days)
 it is a one-row dim box, `[ GOAL · none · oms agent-plan init --goal TEXT ]`. While `oms land status --json` reports `active: true` (a probe of the land lock, never the receipt), one more row reads `LANDING <sha7> · <step> · <N>m`. `oms agent-plan claim` run by a panel main
 also records its room participant (`claimed_by_participant`); the main's card then adds
-`Task: <id> · <state>` beside its title, or, without a recorded title, `Now: <declared status>`
+`Task: <id> · <state>` beside its title (`+N more running` counts only held tasks with a live or unknown
+call, `N awaiting review` those waiting in review; tasks whose calls all ended are left out), or, without a recorded title, `Now: <declared status>`
 (with its age past 30 minutes and `(stale)` past an hour) or a dim `no status yet`. Every prompt of a panel main
 carries a `[oms plan]` sentence (goal, progress, the main's task, the next ready task and its claim
 command) and, when its declared status is missing or older than 20 minutes, a reminder to set it.
@@ -287,7 +294,8 @@ minutes on every hook and `overdue` from fifteen; the asker's own hook records o
 `Needs you` list shows the question from twenty minutes. A `--kind answer` without
 `--reply-to` links the one open question from that recipient, or is refused with the ids.
 
-The bottom box has four tabs: Detail, Plan, Debate and Messages; the Messages tab is a
+The bottom box has four tabs, Detail, Plan, Debate and Messages, plus Past while any call is settled
+and Needs you while anything needs the person; the Messages tab is a
 filtered room log. A main without an advisor or reviewer shows one dim
 `◇ Advisors: none active · a asks one` row above its card. The pinned usage line
 (`Claude week 66% · ctx 73% │ Codex week 2% · ctx 84%`) holds the readings; the model-call totals
@@ -1050,8 +1058,8 @@ role dividers report hidden calls and the overflow line shows nonzero counts
 with `8 Details`. Small panes use borderless summaries. Press `b` to
 toggle attention-only: waiting input, waiting approval, blocked, review and
 orphaned calls, plus retained failed terminal outcomes. Filtered calls are
-counted rather than changing their states. Settled calls classified as Past work
-remain hidden. Both controls affect presentation, not the main identity or
+counted rather than changing their states. Settled calls stay in the Past tab
+and are hidden from the board. Both controls affect presentation, not the main identity or
 dispatch authority. A native window inherits these
 settings when opened, and the control sidebar follows subsequent menu changes.
 CLI `--view` overrides a watch's window density; `--attention-only` keeps its
@@ -1172,10 +1180,10 @@ failed seats remain visible and the owner still decides the outcome. All seats
 are read-only. There is no model fallback or additional synthesis-model call.
 
 The board's bottom is one box whose top edge is a tab strip: Detail, Plan,
-Debate and Messages. The selected tab is bracketed; a `•` after Debate marks a
-debate running or finished since the tab was last opened, and a number after
-Messages counts the unread mail for live participants. A click on a tab name or
-Tab (Detail, Plan, Debate, Messages, then around) switches; a tab never changes
+Debate, Messages and, while settled calls exist, Past. The selected tab is bracketed; a `•` after Debate marks a
+debate running or finished since the tab was last opened, a number after
+Messages counts the unread mail for live participants and one after Past counts its calls. A click on a tab name or
+Tab (Detail, Plan, Debate, Messages, Past, then around) switches; a tab never changes
 by itself, and the box stays after Esc. The box is reserved before the upper
 layout is drawn, with spare padding above it. It persists when empty or dismissed.
 On supported ordinary layouts (80x40, 157x60 and 126x90), its bounds stay fixed
@@ -1188,7 +1196,10 @@ and the selected one fold to that line so every main stays visible; selecting on
 (arrows or click) unfolds it.
 
 Detail is the selected call's persistent, reserved reader; it remains present
-when dismissed or when there is no selection. Plan shows the shared repository plan:
+when dismissed or when there is no selection. Past lists every settled call of the room's mains
+and of calls with no known main, newest first, one row each (role and model, task, how it ended,
+end time). Up/Down pick a row; Enter or a click shows it in Detail exactly as a board card would,
+and `f` opens its full result on the right. Plan shows the shared repository plan:
 the goal, then one row per task (state glyph, id, title, claimant by the board's
 main name or provider, verify command) ordered verified, review, running or
 claimed, ready, blocked. Debate shows the shown main's debates, newest first
