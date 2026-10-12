@@ -186,15 +186,23 @@ if [ -n "$JOBS" ]; then
 
   LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/oms-smoke-shards.XXXXXX")"
   PIDS=""
+  # Only shards this shell still runs are signalled, and only as the process
+  # groups set -m made them lead: a reaped shard's PID may already belong to
+  # another session's gate or land job.
   cleanup_workers() {
-    local pid
+    local pid running signalled=""
     trap - EXIT HUP INT TERM
+    running=" $(jobs -pr | tr '\n' ' ') "
     for pid in $PIDS; do
-      kill -TERM -- "-$pid" >/dev/null 2>&1 || kill -TERM "$pid" >/dev/null 2>&1 || true
+      case "$running" in
+        *" $pid "*) kill -TERM -- "-$pid" >/dev/null 2>&1 && signalled="$signalled $pid" ;;
+      esac
     done
     sleep 1
-    for pid in $PIDS; do
-      kill -KILL -- "-$pid" >/dev/null 2>&1 || kill -KILL "$pid" >/dev/null 2>&1 || true
+    # A group with a live member keeps its ID reserved, so a shard signalled a
+    # second ago may still be killed even if its leader already exited.
+    for pid in $signalled; do
+      kill -0 -- "-$pid" >/dev/null 2>&1 && { kill -KILL -- "-$pid" >/dev/null 2>&1 || true; }
     done
     for pid in $PIDS; do
       wait "$pid" 2>/dev/null || true
@@ -221,6 +229,8 @@ if [ -n "$JOBS" ]; then
     if ! wait "$pid"; then
       status=1
     fi
+    # A reaped shard leaves the cleanup set before its PID can be reused.
+    PIDS="$(printf ' %s ' $PIDS | sed "s/ $pid / /")"
     echo "== smoke shard $i/$JOBS =="
     cat "$LOG_DIR/$i.log"
     i=$((i + 1))
@@ -281,6 +291,7 @@ awk -v timings="$TIMINGS" -v members=" $(printf '%s' "$members" | tr '\n' ' ') "
 # agent has to read and pay for. A failure prints everything.
 run_log="$(mktemp "${TMPDIR:-/tmp}/oms-smoke-run.XXXXXX")"
 timing_file=""
+trap 'rm -f "$RUN_SCRIPT" "$run_log" ${timing_file:+"$timing_file"}' EXIT
 if [ "$TIMINGS" = "1" ]; then
   case "$TIMING_LIMIT" in
     *[!0-9]*|"") fail "OMS_SMOKE_TIMING_LIMIT requires a positive integer" ;;

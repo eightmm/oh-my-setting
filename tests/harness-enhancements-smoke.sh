@@ -494,7 +494,7 @@ EOF
 
   local signal_suite="$TMP/signal-smoke.sh"
   local signal_tmp="$TMP/signal-tmp"
-  local leader child status=0
+  local leader child fast status=0
   mkdir -p "$signal_tmp"
   cat > "$signal_suite" <<'EOF'
 test_slow_one() {
@@ -511,17 +511,32 @@ test_slow_two() {
   echo "$!" >> "$OMS_TEST_PID_FILE"
   wait "$!"
 }
+test_fast() {
+  echo "$PPID" > "$OMS_TEST_FAST_FILE"
+}
 # SMOKE_TEST_CALLS_BEGIN
 test_slow_one
 test_slow_two
+test_fast
 # SMOKE_TEST_CALLS_END
 echo done
 EOF
-  TMPDIR="$signal_tmp" OMS_TEST_PID_FILE="$signal_tmp/pids" OMS_SMOKE_SUITE="$signal_suite" \
-    "$ROOT/tests/run-smoke-shard.sh" --jobs 2 >/dev/null 2>&1 &
+  # Every kill the runner sends is logged, so a signal to the already-finished
+  # shard's group (whose PID another process may reuse) is caught.
+  printf '%s\n' 'kill() { printf "%s %s\n" "$$" "$*" >> "$OMS_TEST_KILL_LOG"; builtin kill "$@"; }' \
+    > "$signal_tmp/kill-log.bash"
+  TMPDIR="$signal_tmp" OMS_TEST_PID_FILE="$signal_tmp/pids" OMS_TEST_FAST_FILE="$signal_tmp/fast" \
+    OMS_TEST_KILL_LOG="$signal_tmp/kills" BASH_ENV="$signal_tmp/kill-log.bash" OMS_SMOKE_SUITE="$signal_suite" \
+    "$ROOT/tests/run-smoke-shard.sh" --jobs 3 >/dev/null 2>&1 &
   leader=$!
   for _ in $(seq 1 100); do
-    [ -f "$signal_tmp/pids" ] && [ "$(wc -l < "$signal_tmp/pids")" -ge 4 ] && break
+    [ -f "$signal_tmp/pids" ] && [ "$(wc -l < "$signal_tmp/pids")" -ge 4 ] && [ -s "$signal_tmp/fast" ] && break
+    sleep 0.05
+  done
+  [ -s "$signal_tmp/fast" ] || fail "the fast smoke shard did not run"
+  fast="$(cat "$signal_tmp/fast")"
+  for _ in $(seq 1 100); do
+    kill -0 "$fast" 2>/dev/null || break
     sleep 0.05
   done
   [ -f "$signal_tmp/pids" ] || fail "parallel smoke workers did not start"
@@ -552,6 +567,11 @@ EOF
   fi
   [ -z "$(find "$signal_tmp" -maxdepth 1 -type d -name 'oms-smoke-shards.*' -print -quit)" ] ||
     fail "parallel smoke log directory survived parent TERM"
+  ! grep -Eq "^$leader .*(^| )-?$fast( |\$)" "$signal_tmp/kills" ||
+    fail "parallel smoke cleanup signalled the finished shard $fast: $(grep "^$leader " "$signal_tmp/kills" | tr '\n' ';')"
+  grep -q "^$leader " "$signal_tmp/kills" || fail "parallel smoke cleanup sent no signal to running shards"
+  [ -z "$(find "$signal_tmp" -maxdepth 1 -name 'oms-smoke-run.*' -print -quit)" ] ||
+    fail "a terminated smoke shard left its run log behind"
 }
 
 test_smoke_runner_reports_bounded_opt_in_timings() {
