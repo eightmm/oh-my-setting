@@ -1739,8 +1739,11 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
             rows = summary + messages_body(report, width - 4, capacity - len(summary), navigation, unicode)
         previous_target = None
         for n in range(capacity):
-            text, target, picked = rows[n] if n < len(rows) else ("", None, False)
-            if not color and target and target == navigation.get("selected") and target != previous_target:
+            row = rows[n] if n < len(rows) else ("", None, False)
+            text, target, picked = row[:3]
+            # Attention rows are one per item, and neighbouring items may share an action, so only the picked row is marked.
+            if not color and target and (picked if active == "needs" else target == navigation.get("selected")
+                                         and target != previous_target):
                 text = clipped(text, max(0, width - 6)) + " <"
             previous_target = target
             line = box_row(text, width, unicode)
@@ -1749,7 +1752,8 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                 # Body text without its own link is passive, so a click that selects text changes nothing.
                 hits.append({"y": top + 1 + n, "x1": 1, "x2": width, "action": target,
                              **({"preview": True, "passive": n in plain} if active == "detail" else
-                                {active: True} if active in {"past", "needs"} else {})})
+                                dict({active: True}, **{"key": row[3]} if len(row) > 3 else {})
+                                if active in {"past", "needs"} else {})})
         lines.extend([box_row("", width, unicode)] * (rows_high - 2 - capacity))
         lines.append(paint(box_edge("", width, unicode, "bottom"), style))
         navigation["box"] = {"y1": top, "y2": top + rows_high - 1, "pages": bool(previewed) or active == "plan"}
@@ -1814,35 +1818,47 @@ def attention_body(ranked, width, capacity, navigation, unicode):
         group = [item for item in ranked if item["cls"] == kind]
         if group:
             lines.append((clipped("%s (%s)" % (heading, len(group)) + (sep + "oldest first" if kind == "decide" else ""),
-                                  width), None))
-            lines += [("  " + attention_row(item, width - 2, unicode, tag=False), item["action"]) for item in group]
-    ids = list(dict.fromkeys(target for unused, target in lines if target))
-    navigation["needs_ids"] = ids
+                                  width), None, None))
+            lines += [("  " + attention_row(item, width - 2, unicode, tag=False), item["action"], item["row_id"])
+                      for item in group]
+    # Items may share an action (a main's question and its note both open its chat), so rows are picked by item.
+    picks = [(target, key) for unused, target, key in lines if target]
+    navigation["needs_ids"], navigation["needs_keys"] = [p[0] for p in picks], [p[1] for p in picks]
     view = navigation.setdefault("needs_view", {})
     header = capacity >= 3
     page = max(1, capacity - int(header))
     first = min(max(0, view.get("scroll", 0)), max(0, len(lines) - page))
-    selected = navigation.get("selected")
-    if view.pop("reveal", False) and selected in ids:
-        at = next(n for n, (unused, target) in enumerate(lines) if target == selected)
+    pick = past_pick(navigation, "needs")
+    if view.pop("reveal", False) and pick is not None:
+        at = next(n for n, line in enumerate(lines) if line[2] == pick)
         first = at if at < first else max(first, at - page + 1)
     view.update(scroll=first, page=page)
     title = attention_header(ranked, width, unicode)
     hint = title + sep + "Enter shows one in Detail"
     rows = [(hint if display_width(hint) <= width else title, None, False)] if header else []
-    return rows + [(text, target, target is not None and target == selected) for text, target in lines[first:first + page]]
+    return rows + [(text, target, key is not None and key == pick, key) for text, target, key in lines[first:first + page]]
+
+
+def past_pick(navigation, tab):
+    """The key of the chosen row in a Past or Attention list: the last row picked while it still has the selection."""
+    ids = navigation.get(tab + "_ids", [])
+    keys, selected, pick = navigation.get(tab + "_keys", ids), navigation.get("selected"), navigation.get(tab + "_pick")
+    if pick in keys and ids[keys.index(pick)] == selected:
+        return pick
+    return keys[ids.index(selected)] if selected in ids else None
 
 
 def past_event(event, navigation, tab="past"):
     """Past- and Attention-tab keys: arrows pick a row, Enter or a click shows it in Detail, f opens it on the right."""
     ids, kind, selected = navigation.get(tab + "_ids", []), event[0], navigation.get("selected")
+    keys, pick = navigation.get(tab + "_keys", ids), past_pick(navigation, tab)
     view = navigation.setdefault(tab + "_view", {})
     if kind in {"up", "down", "home", "end"}:
         if ids:
-            at = ids.index(selected) if selected in ids else (-1 if kind == "down" else len(ids))
+            at = keys.index(pick) if pick is not None else (-1 if kind == "down" else len(ids))
             at = 0 if kind == "home" else len(ids) - 1 if kind == "end" else \
                 min(len(ids) - 1, max(0, at + (1 if kind == "down" else -1)))
-            navigation["selected"] = ids[at]
+            navigation["selected"], navigation[tab + "_pick"] = ids[at], keys[at]
             view["reveal"] = True
         return True
     if kind in {"scroll", "pageup", "pagedown"}:
@@ -1856,6 +1872,7 @@ def past_event(event, navigation, tab="past"):
         if hit is None:
             return False
         target = hit["action"]
+        navigation[tab + "_pick"] = hit.get("key", target)
     elif kind in {"enter", "f"} and selected in ids:
         target = selected
     else:
@@ -1959,7 +1976,9 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                   else [move + " Message", "Enter Collapse" if expanded_message else "Enter Expand", arrows + " Filter"] if tab == "messages"
                   else [move + " Seat", "Enter Open right" if managed else "Enter Open", arrows + " Target"] if tab == "debate" and not navigation.get("debate_empty")
                   else ["Tab Next tab"] if tab == "debate"
-                  else [move + " Call", "Enter Detail", "f Open right" if managed else "f Full result"] if tab == "past"
+                  else [move + " Call", "Enter Plan" if kind == "tab" else "Enter Detail",
+                        ("f Open right" if managed else "f Full result") if tab == "past" or kind in {"result", "debate"} else ""]
+                  if tab in {"past", "needs"}
                   else ["wheel Scroll", "Tab Next tab"] if tab == "plan" else None)
     contextual = contextual or (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + [
                   "Enter Open right" if right else "",

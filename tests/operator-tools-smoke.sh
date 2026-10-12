@@ -10401,16 +10401,31 @@ assert summary[1].strip() == attention_row(ranked[1], 400, True)[:127 - 13].stri
 group_nav = {}
 group_rows = graph_text.attention_body(ranked, 123, 30, group_nav, True)
 assert group_rows[0][0] == full_header + " · Enter shows one in Detail", group_rows[0]
-assert [text for text, unused, unused_pick in group_rows[1:] if not text.startswith("  ")] == [
+assert [row[0] for row in group_rows[1:] if not row[0].startswith("  ")] == [
     "Needs you (3)", "Failed (3)", "Awaiting decision (2) · oldest first", "Stale holds (1)", "Mail (1)", "Other (1)"]
-assert [target for unused, target, unused_pick in group_rows if target] == [item["action"] for item in ranked if item["action"]]
-assert group_nav["needs_ids"] == list(dict.fromkeys(item["action"] for item in ranked if item["action"]))
+assert [row[1] for row in group_rows if row[1]] == [item["action"] for item in ranked if item["action"]]
+selectable = [item for item in ranked if item["action"]]
+assert group_nav["needs_ids"] == [item["action"] for item in selectable] and \
+    group_nav["needs_keys"] == [item["row_id"] for item in selectable], group_nav
+# Rows are picked per item: the main's question and its note share an action but light up and step one at a time.
+def picked_rows():
+    return [row[0].strip() for row in graph_text.attention_body(ranked, 123, 30, group_nav, True) if row[2]]
+group_nav["selected"] = ("chat", "flow-main")
+assert picked_rows() == ["» Sol 6 main · to all: Which way?"], picked_rows()
+stops = []
+for unused in range(8):
+    assert graph_text.past_event(("down",), group_nav, "needs")
+    stops.append(group_nav["needs_pick"])
+assert stops == [item["row_id"] for item in selectable[3:]] + [selectable[-1]["row_id"]], stops
+assert group_nav["selected"] == ("chat", "flow-main") and picked_rows() == ["» Sol 6 main · to all: Status for all"]
+assert graph_text.past_event(("up",), group_nav, "needs") and group_nav["selected"] == ("tab", "plan") and \
+    picked_rows() == [attention_row(ranked[8], 121, True, tag=False)], picked_rows()
 for columns, rows_high in ((127, 40), (57, 40)):
     tab_nav = {"tab": "needs", "dismissed": True}
     tab_picture = render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
     assert tab_nav["tab_body_visible"] and ("Attention 11" if columns == 127 else "Attn 11") in tab_picture, tab_picture
     assert "Needs you (3)" in tab_picture and "Enter shows one in Detail" in tab_picture, tab_picture
-    # Arrows pick a row, Enter shows it in Detail; End reaches the stale hold, whose Enter opens the Plan tab.
+    # Arrows pick a row, Enter shows it in Detail; End reaches the last mail, the stale hold above it opens the Plan tab.
     assert panel.tab_event(("home",), tab_nav) and tab_nav["selected"] == ("result", "builder"), tab_nav
     assert panel.tab_event(("enter",), tab_nav) and tab_nav["tab"] == "detail" and \
         tab_nav["preview"] == {"target": ("result", "builder")}, tab_nav
@@ -10418,8 +10433,10 @@ for columns, rows_high in ((127, 40), (57, 40)):
     assert "WORKER / Sonnet 5.5" in "\n".join(shown.splitlines()[tab_nav["box"]["y1"] - 1:]), shown
     tab_nav["tab"] = "needs"
     render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
-    assert panel.tab_event(("end",), tab_nav) and tab_nav["selected"] == ("tab", "plan"), tab_nav
-    render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav, main_attempt="flow-attempt")
+    assert panel.tab_event(("end",), tab_nav) and tab_nav["needs_pick"] == ("message", "note-all"), tab_nav
+    assert panel.tab_event(("up",), tab_nav) and tab_nav["selected"] == ("tab", "plan"), tab_nav
+    assert "Enter Plan" in render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav,
+                                  main_attempt="flow-attempt").splitlines()[-1]
     assert tab_nav["needs_view"]["scroll"] > 0 or columns == 127, tab_nav["needs_view"]
     assert panel.tab_event(("enter",), tab_nav) and tab_nav["tab"] == "plan", tab_nav
     # A click on a queue row shows that call in Detail, and f opens its full result.
@@ -10429,6 +10446,34 @@ for columns, rows_high in ((127, 40), (57, 40)):
     hit = next(h for h in tab_nav["hits"] if h.get("needs") and h["action"] == ("result", "advisor"))
     assert panel.tab_event(("click", hit["x1"], hit["y"]), tab_nav) and tab_nav["tab"] == "detail" and \
         tab_nav["preview"] == {"target": ("result", "advisor")}, tab_nav
+    # The footer names the tab's own keys; f is offered and works only on a call, not on a main's row.
+    tab_nav["tab"] = "needs"
+    footer = render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav,
+                    main_attempt="flow-attempt").splitlines()[-1]
+    assert "Enter Detail" in footer and "f Full result" in footer and "Enter Show" not in footer, footer
+    assert panel.tab_event(("home",), tab_nav) and panel.tab_event(("f",), tab_nav) and \
+        tab_nav["open_call"] == ("result", "builder") and tab_nav["tab"] == "detail", tab_nav
+    tab_nav.update(tab="needs", selected=("chat", "flow-main"))
+    tab_nav.pop("open_call")
+    footer = render(queue, "codex", columns, rows_high, view="graph", navigation=tab_nav,
+                    main_attempt="flow-attempt").splitlines()[-1]
+    assert "Enter Detail" in footer and "f Full" not in footer and "Enter Chat" not in footer, footer
+    assert panel.tab_event(("f",), tab_nav) and "open_call" not in tab_nav, tab_nav
+# Without color only the picked row is marked, also when the row above it opens the same chat.
+asked = deepcopy(queue)
+asked["room"]["messages"].append(dict(asked["room"]["messages"][1], id="ask-all2", text="Which file?"))
+asked_ranked = attention_items(asked)
+pair = [item["row_id"] for item in asked_ranked if item["action"] == ("chat", "flow-main") and item["cls"] == "needs"]
+assert len(pair) == 2, asked_ranked
+plain_nav = {"tab": "needs", "dismissed": True, "selected": ("chat", "flow-main"), "needs_pick": pair[1]}
+plain = render(asked, "codex", 127, 40, view="graph", navigation=plain_nav, main_attempt="flow-attempt").splitlines()
+marked = [line for line in plain[plain_nav["box"]["y1"]:] if line.rstrip("│ ").endswith(" <")]
+assert len(marked) == 1 and "Which file?" in marked[0] and any("Which way?" in line for line in plain), plain
+# The Attention tab gets the reading dock a Past list gets, also on a 24-row tree.
+for columns, rows_high in ((28, 16), (42, 24), (57, 24), (80, 24), (110, 24)):
+    dock_nav = {"tab": "needs"}
+    render(queue, "codex", columns, rows_high, view="tree", navigation=dock_nav, main_attempt="flow-attempt")
+    assert dock_nav["tab_body_visible"] and dock_nav["box"], (columns, rows_high, dock_nav.get("box"))
 # One ranked list per frame: the strip, the spare-row summary and the tab share a single inbox computation.
 real_inbox = panel_view.inbox_items
 for fixture, columns, rows_high, mode in ((summary_room, 127, 40, "graph"), (queue, 127, 40, "graph"),

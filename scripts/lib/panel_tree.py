@@ -249,8 +249,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         if row.get("action") and row["action"][0] == "chat":
             main_rows.setdefault(row["action"], i)
     activity_floor = (max(main_rows.values()) + 1 if main_rows else 1) + int(bool(tasks))
-    # A chosen preview or an open Past list is what the person asked to read, so the dock may push later mains down.
-    reading = navigation.get("preview") or navigation.get("tab") == "past" and past
+    # A chosen preview or an open Past or Attention list is what the person asked to read, so the dock may push later mains down.
+    reading = navigation.get("preview") or navigation.get("tab") == "past" and past or navigation.get("tab") == "needs" and ranked
     if reading or interactive and height >= 32:
         activity_floor = min(activity_floor, 3 + int(bool(tasks)))
     activity_floor += 2 if boxed else 0
