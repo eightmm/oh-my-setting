@@ -10792,7 +10792,7 @@ test_delegate_missing_cli_writes_exit_and_index() {
   # A structured provider failure followed by a successful panel fallback is
   # judged on the fallback's own output: not blocked (126), indexed to it.
   local swap="$TMP/delegate-provider-fallback"
-  mkdir -p "$swap/bin" "$swap/home"
+  mkdir -p "$swap/bin" "$swap/user-home"
   make_committed_repo "$swap/repo"
   cat > "$swap/bin/codex" <<'EOF'
 #!/usr/bin/env bash
@@ -10807,7 +10807,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"stop_reaso
 EOF
   chmod +x "$swap/bin/codex" "$swap/bin/claude"
   rc=0
-  HOME="$swap/home" NVM_DIR="$swap/home/.nvm" PATH="$swap/bin:/usr/bin:/bin" \
+  HOME="$swap/user-home" NVM_DIR="$swap/user-home/.nvm" PATH="$swap/bin:/usr/bin:/bin" \
     OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker OMS_PANEL_FALLBACK_PROVIDER=claude \
     OMS_PANEL_FALLBACK_MODEL=claude-sonnet-5-5 OMS_PANEL_FALLBACK_EFFORT=medium \
     "$ROOT/scripts/peer-delegate.sh" --to codex --model gpt-6.1-sol \

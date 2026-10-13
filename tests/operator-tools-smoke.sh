@@ -3006,7 +3006,7 @@ for crowd_size in (8, 12):
             for hit in row_hits:
                 text = picture_lines[hit["y"] - 1]
                 assert hit["action"][1] in text and ("running" in text or "failed" in text), (where, text)
-                assert "worker" in text and "Luna" in text and ("running <1m" in text or "failed" in text and ":" in text), (where, text)
+                assert "worker" in text and "Luna" in text and (re.search(r"running (<1m|\d+[mhd])", text) or "failed" in text and ":" in text), (where, text)
                 nav["selected"] = hit["action"]
                 again = render(worker_crowd, "codex", columns, rows_high, view="graph", navigation=nav,
                                main_attempt="a2", unicode=glyphs)

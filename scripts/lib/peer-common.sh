@@ -1603,7 +1603,7 @@ last = json.load(open(sys.argv[1], encoding=\"utf-8\"))[\"attempts\"][-1]
 fields = [last.get(k) for k in (\"provider\", \"model\", \"exit\", \"output\", \"stop_reason\")]
 fields[2] = str(fields[2]) if isinstance(fields[2], int) and not isinstance(fields[2], bool) else None
 ok = (isinstance(fields[0], str) and re.fullmatch(r\"[a-z0-9_-]+\", fields[0])
-      and isinstance(fields[1], str) and re.fullmatch(r\"[^\\s]{0,200}\", fields[1])
+      and isinstance(fields[1], str) and re.fullmatch(r\"[^\\t\\r\\n]{0,200}\", fields[1])
       and fields[2] is not None
       and isinstance(fields[3], str) and re.fullmatch(r\"[A-Za-z0-9][A-Za-z0-9._-]*\\.out\", fields[3])
       and isinstance(fields[4], str) and re.fullmatch(r\"[^\\t\\r\\n]{0,300}\", fields[4]))
