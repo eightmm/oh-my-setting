@@ -2013,7 +2013,8 @@ for view in ('auto', 'graph', 'tree'):
             assert stale['room_id'] == 'one'
             assert '[1] Claude' not in drawn and 'Press 1' not in drawn, drawn
 assert 'o selects a room, 9 retries' in draw(bad[0], 'codex', 100, 28, menu=True)
-assert '\033' in draw(bad[0], 'codex', 100, 28, color=True)
+with patch.dict(os.environ, {}, clear=True):
+    assert '\033' in draw(bad[0], 'codex', 100, 28, color=True)
 assert 'unavailable' not in draw(healthy, 'codex', 100, 28, menu=True).split('Actions')[0]
 assert 'Collection degraded' in draw(dict(bad[0], room={'id': 'one', 'participants': [], 'error': 'x'}), 'codex', 100, 28)
 assert bad[0] == {'repo': {'name': 'fixture'}, 'collection': {'ok': False}}
@@ -3006,7 +3007,7 @@ for columns, rows_high in ((42, 24), (50, 50)):
     assert any(hit["action"] == ("task", "t-rev") for hit in last_nav["hits"]), last_picture
     assert last_nav["tab_strip_visible"] and len(last_picture.splitlines()) <= rows_high - 1, last_picture
     if rows_high == 50:
-        assert last_nav["tab_body_visible"] and last_nav["box"]["y2"] - last_nav["box"]["y1"] + 1 == 10, last_nav
+        assert last_nav["tab_body_visible"] and last_nav["box"]["y2"] - last_nav["box"]["y1"] + 1 >= 10, last_nav
 use_unicode(True)
 # Tree and graph share tab navigation; a separate detail screen consumes its own keys.
 assert tab_event(("tab",), tree_nav) and not tab_event(("tab",), dict(tree_nav, surface="graph", detail={"target": ("chat", "m2")}))
@@ -3067,7 +3068,7 @@ for crowd_size in (8, 12):
         if attempt["attempt_id"] in ("priority-worker-0", "priority-worker-1", "priority-worker-2"):
             attempt["state"] = "failed"
     running_ids = sorted("priority-worker-%d" % n for n in range(3, crowd_size))
-    for columns, rows_high in ((190, 63), (157, 67), (127, 40), (110, 30), (80, 24), (42, 24)):
+    for columns, rows_high in ((190, 63), (157, 67), (157, 61), (127, 40), (110, 30), (80, 24), (42, 24)):
         for glyphs in (True, False):
             where = (crowd_size, columns, rows_high, glyphs)
             branch, last, marked = ("├╌ ", "└╌ ", "├╌ ▸ ") if glyphs else ("+- ", "`- ", "+- > ")
@@ -3078,6 +3079,7 @@ for crowd_size in (8, 12):
                                  main_attempt="a2", unicode=glyphs)
                 picture_lines = picture.splitlines()
                 assert len(picture_lines) == rows_high and all(display_width(line) <= columns for line in picture_lines), (where, picture)
+                assert all(line.strip() for line in picture_lines[:nav["box"]["y1"]]), (where, picture)
                 assert glyphs or picture.isascii(), (where, picture)
                 assert all(1 <= hit["x1"] <= hit["x2"] <= columns and 1 <= hit["y"] <= rows_high for hit in nav["hits"]), (where, nav)
                 tree_hits = [hit for hit in nav["hits"] if hit.get("tree")]
@@ -3180,11 +3182,11 @@ for width, height in ((80, 40), (157, 60), (126, 90)):
                                 strip = {h["action"][1]: h["y"] for h in nav["hits"] if h["action"][0] == "tab"}
                                 assert strip == {key: y1 for key, _ in visible_tabs}, (where, strip)
                                 baseline.add((tab, y1, y2))
-    # One box for every ordinary count, selection, task text, tab, drawing set and open state; it holds a first page.
+    # The dock grows into unused call rows while retaining its bottom edge and a usable first page.
     for tab, _ in room_view.TABS:
         positions = {(y1, y2) for key, y1, y2 in baseline if key == tab}
-        assert len(positions) == 1 and next(iter(positions))[1] - next(iter(positions))[0] + 1 >= 10, (width, height, tab, positions)
-# Compact Messages keeps the same dock while an advisor stays and workers finish.
+        assert all(y2 == height - 2 and y2 - y1 + 1 >= 10 for y1, y2 in positions), (width, height, tab, positions)
+# Compact Messages uses freed call rows while retaining its bottom edge and readable body.
 compact_docks = set()
 for worker_count in (0, 3):
     for phase in ("working", "done"):
@@ -3197,7 +3199,7 @@ for worker_count in (0, 3):
         compact_docks.add((compact_nav["box"]["y1"], compact_nav["box"]["y2"]))
         assert "Filter: all" in compact_text and "line 29" in compact_text, compact_text
         assert len(compact_text.splitlines()) == 24 and all(display_width(line) <= 110 for line in compact_text.splitlines()), compact_text
-assert len(compact_docks) == 1, compact_docks
+assert all(y2 == 22 and y2 - y1 + 1 >= 5 for y1, y2 in compact_docks), compact_docks
 # A main with an unanswered question shows "? N open" on its card; the person sees it in "Needs you" from 20 minutes.
 import panel_view as question_view
 import time as question_time
@@ -5231,6 +5233,16 @@ for left, right in (('| ', ' |'), ('', ''), ('| ', ''), ('', ' |')):
         [t('  ' + line) for line in table_lines] + [t('    **continuation**')]))
 
 from panel_view import _result_blocks
+aggregate_results = {'rows': [{'task_id': 'aggregate-first', 'summary': 'FIRST_TASK_BODY'},
+                              {'task_id': 'aggregate-second', 'summary': 'SECOND_TASK_BODY'}]}
+for compact_results in (False, True):
+    aggregate_text = render_results(aggregate_results, 100, compact=compact_results)
+    assert 'aggregate-first' in aggregate_text and 'aggregate-second' in aggregate_text, aggregate_text
+aggregate_out = io.StringIO()
+with patch.object(panel, 'results', return_value=aggregate_results), \
+        patch.object(panel.sys, 'stdout', aggregate_out):
+    assert panel.main(['--repo', str(project), '--results']) == 0
+assert 'FIRST_TASK_BODY' in aggregate_out.getvalue() and 'SECOND_TASK_BODY' in aggregate_out.getvalue()
 from dashboard_projection import ELLIPSIS, use_unicode
 import unicodedata
 previous_unicode = ELLIPSIS[0] == '…'
@@ -5686,7 +5698,7 @@ with patch.dict(os.environ, {}, clear=False), patch.object(panel.room, "status",
 assert any(item["label"] == "Room closed" and item["status"] == "full" for item in json.loads(health_out.getvalue())["items"])
 snapshot = call(["bash", str(panel.ENTRY), "panel", "--watch", "--count", "1", "--owner", "claude"],
                 dict(environment, OMS_HARNESS_CHILD="1", NO_COLOR=""))
-assert "MAIN / Claude Code" in snapshot and "\033" not in snapshot, snapshot
+assert "MAIN " in snapshot and "\033" not in snapshot, snapshot
 filtered = call(["bash", str(panel.ENTRY), "panel", "--watch", "--count", "1", "--view", "compact", "--attention-only"],
                 dict(environment, OMS_HARNESS_CHILD="1", NO_COLOR=""))
 assert "compact" in filtered and "\033" not in filtered, filtered
@@ -5893,11 +5905,10 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 subprocess.run(tmux + ["set-option", "-w", "-t", listing[1], "@oms_panel_view", "compact"], env=env, check=True)
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "b"], env=env, check=True)
                 tmux_wait(["show-option", "-w", "-v", "-t", listing[1], "@oms_panel_attention"], "1")
-                sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]],
-                                    "MAIN / " + ("Codex" if owner == "codex" else "Claude Code"))
-                assert "MAIN / " + ("Codex" if owner == "codex" else "Claude Code") in sidebar, sidebar
-                assert "OMS activity" in sidebar, sidebar
-                assert "OMS activity / attention" in sidebar, sidebar
+                sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "MAIN ")
+                assert "MAIN " in sidebar, sidebar
+                assert "Activity" in sidebar, sidebar
+                assert "attention" in sidebar, sidebar
                 assert subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", listing[1],
                     "@oms_panel_view"], env=env, text=True).strip() == "compact"
                 pane_cmd = subprocess.check_output(tmux + ["display-message", "-p", "-t", listing[1],
@@ -5909,8 +5920,10 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 # Select tree in the watcher and click its own current main.
                 # The existing native pane is focused, with no second launch.
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "t"], env=env, check=True)
-                tree_sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "this window · ")
-                clicked_row = next(n + 1 for n, line in enumerate(tree_sidebar.splitlines()) if "this window · " in line)
+                tmux_wait(["show-option", "-w", "-v", "-t", listing[1], "@oms_panel_view"], "tree")
+                subprocess.run(tmux + ["send-keys", "-t", listing[1], "Home"], env=env, check=True)
+                tree_sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "╭╌ MAIN ")
+                clicked_row = next(n + 1 for n, line in enumerate(tree_sidebar.splitlines()) if "MAIN " in line)
                 subprocess.run(tmux + ["select-pane", "-t", listing[1]], env=env, check=True)
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "\033[<0;8;%sM" % clicked_row], env=env, check=True)
                 tmux_wait(["display-message", "-p", "-t", session + ":" + owner, "#{pane_id}"], listing[0])
@@ -6098,8 +6111,13 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             board_width = int(subprocess.check_output(tmux + ["display-message", "-p", "-t", graph_pane,
                                                               "#{pane_width}"], env=env, text=True))
             assert board_width < 76, board_width
-            board_picture = tmux_wait(["capture-pane", "-p", "-t", graph_pane], "this window · Sol 6.1")
+            board_picture = tmux_wait(["capture-pane", "-p", "-t", graph_pane], "MAIN ")
             assert "Activity" in board_picture, board_picture
+            board_attempt = subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", top_window,
+                                                            "@oms_panel_main_attempt"], env=env, text=True).strip()
+            board_main = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
+                                          "show", "--attempt", board_attempt, "--json"], env))
+            assert board_main["refs"]["panel_model"] == "gpt-6.1-sol", board_main
             native_pid = subprocess.check_output(tmux + ["display-message", "-p", "-t", chat_pane, "#{pane_pid}"], env=env, text=True)
             assert subprocess.check_output(tmux + ["display-message", "-p", "-t", top_window, "#{pane_id}"], env=env, text=True).strip() == chat_pane
             subprocess.run(tmux + ["send-keys", "-t", graph_pane, "-l", "v"], env=env, check=True)
@@ -6138,7 +6156,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             assert subprocess.check_output(tmux + ["display-message", "-p", "-t", chat_pane, "#{pane_pid}"], env=env, text=True) == native_pid
             restored = tmux_wait(["list-panes", "-t", top_window, "-F", "#{pane_id}\t#{pane_start_command}"], "--watch")
             graph_pane = next(row.split("\t", 1)[0] for row in restored.splitlines() if "--watch" in row)
-            tmux_wait(["capture-pane", "-p", "-t", graph_pane], "this window · Sol 6.1")
+            tmux_wait(["capture-pane", "-p", "-t", graph_pane], "MAIN ")
             tmux_wait(["show-option", "-p", "-v", "-t", graph_pane, "@oms_panel_main_watch"], "1")
             restored_attempt = subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", graph_pane,
                                                 "@oms_panel_main_attempt"], env=env, text=True).strip()
@@ -6154,7 +6172,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                     "reopened main board did not restore cancellation authority"
             assert int(subprocess.check_output(tmux + ["display-message", "-p", "-t", graph_pane,
                                                       "#{pane_width}"], env=env, text=True)) == board_width
-            restored_picture = tmux_wait(["capture-pane", "-p", "-t", graph_pane], "this window · Sol 6.1")
+            restored_picture = tmux_wait(["capture-pane", "-p", "-t", graph_pane], "MAIN ")
             assert "Activity" in restored_picture, restored_picture
             with patch.dict(os.environ, reopen_env, clear=True), patch.object(panel.sys.stdin, "isatty", return_value=True), \
                     patch.object(panel.sys.stdout, "isatty", return_value=True), \
@@ -6337,7 +6355,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             assert swap_attempt in panel.lineage_ids(project, "codex", swap_member, codex_attempt)
             swap_board = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", menu_room,
                                "--watch", "--count", "1", "--view", "graph"], watched_env)
-            assert "SESSION / MAIN Sol 6.1" in swap_board and "took over from Opus 5.5" in swap_board, swap_board
+            assert "MAIN Sol 6.1 · took over from Opus 5.5" in swap_board, swap_board
             assert "[s] Swap main" in "\n".join(panel.menu_rows(100, 28, occupied=True))
             fallback = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                                         "--swap-main", "claude", "--json"],
@@ -6366,7 +6384,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             assert carried_swap["attempt"] == codex_attempt and carried_swap["to"] == "claude"
             continued_board = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", continued_room,
                                     "--watch", "--count", "1", "--view", "graph"], watched_env)
-            assert "SESSION / MAIN Opus 5.5" in continued_board and "took over from Sol 6.1" in continued_board
+            assert "MAIN Opus 5.5 · took over from Sol 6.1" in continued_board, continued_board
             subprocess.run(tmux + ["detach-client", "-s", session], env=env, check=True)
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
@@ -6775,6 +6793,7 @@ for fixture_call in (auto_call, "call-auto-review-off", "call-auto-review-read",
                      "call-auto-review-preflight",
                      "call-review-gate-fail", "call-review-gate-pass", "call-review-gate-nonzero",
                      "call-review-gate-timeout", "call-review-gate-last-fail",
+                     "call-review-gate-fenced-suffix",
                      "call-review-gate-guard-stop", "call-review-gate-missing"):
     room.join(project, shared, fixture_call, "codex", "worker", parent=room_owner)
 auto_attempt = {"attempt_id": auto_attempt, "task_id": auto_task,
@@ -7291,6 +7310,8 @@ for reviewer_call, answer, exit_status, expected in (
         ("call-review-gate-nonzero", "Findings: checked.\nGATE: pass", 1, "failed or is inconclusive"),
         ("call-review-gate-timeout", "Findings: checked.\nGATE: pass", 124, "failed or is inconclusive"),
         ("call-review-gate-last-fail", "GATE: pass\nFindings: blocking issue.\nGATE: fail", 0,
+         "Review verdict FAIL"),
+        ("call-review-gate-fenced-suffix", "GATE: fail\n```\n```example\nGATE: pass\n```", 0,
          "Review verdict FAIL"),
         ("call-review-gate-guard-stop", "The worker guard stopped this run.\nGATE: pass", 0,
          "failed or is inconclusive"),
@@ -12699,8 +12720,8 @@ roomy_lines = roomy.splitlines()
 detail_top = next(i for i, line in enumerate(roomy_lines) if "[Detail]" in line)
 detail_end = next(i for i in range(detail_top + 1, len(roomy_lines)) if roomy_lines[i].startswith("╰"))
 # The board fills the pane (key hints pinned to the last row) and the tab box takes the rows the cards leave,
-# so switching tabs never resizes it and no blank band sits under it.
-assert detail_end - detail_top == 9 and len(roomy_lines) == 60, roomy
+# retaining a complete first page and no blank band under it.
+assert detail_end - detail_top >= 9 and len(roomy_lines) == 60, roomy
 assert not any(line.strip() for line in roomy_lines[detail_end + 1:-3]) or roomy_lines[detail_end + 1].strip(), roomy
 closed_board = render(flow, "codex", 100, 26, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
 assert "Latest statement:" not in closed_board and "No call selected" in closed_board, closed_board
@@ -12715,8 +12736,7 @@ for rows_high in (26, 28, 30, 34, 60, 90):
         assert ("MAIN Sol 6" in shown.splitlines()[nav["box"]["y1"]]) == (label == "auto") and ("No call selected" in shown) == (label == "closed"), shown
         assert "no known main" in shown, shown
     assert kept["auto"] == kept["closed"], (rows_high, kept)
-# A room with four recorded mains and one worker: advisors 0 to 3, other rooms and an unlinked call
-# change neither the box nor the visibility of their own warning.
+# A room with four recorded mains and one worker retains its dock body and warnings as calls release rows.
 four = deepcopy(msg_report)
 four["room"]["participants"].append({"participant": "m4", "role": "main", "joined": True, "model": "gpt-6-luna", "seq": 4,
                                      "provider": "codex", "attempt": "a4"})
@@ -12748,7 +12768,8 @@ for variant in ("plain", "other", "unlinked"):
                     assert len(text.splitlines()) == rows_high, text
                     assert ("OTHER ROOMS" in text) == (variant == "other") and ("no known main" in text) == (variant == "unlinked"), text
                     kept.add((nav["box"]["y1"], nav["box"]["y2"]))
-        assert len(kept) == 1, (variant, rows_high, kept)
+        minimum_dock = 10 if rows_high >= 40 else 7
+        assert all(y2 == rows_high - 2 and y2 - y1 + 1 >= minimum_dock for y1, y2 in kept), (variant, rows_high, kept)
 # A short board keeps the compact main card and one row per call, so its box takes every row they leave;
 # neither size keeps the previous box, and open-in-full follows the box this frame draws.
 for rows_high in (19, 16):
@@ -13095,16 +13116,16 @@ picture = render(same_model, "codex", 110, 40, view="graph", main_attempt="flow-
 assert "From Sol 6 worker:" not in picture and "Mail" in picture, picture
 sent_board = render(same_model, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                     navigation={"dismissed": True, "tab": "messages"})
-assert "WORKER Sol 6 · Same model worker → MAIN Sol 6 · Failed (exit 1)." in sent_board, sent_board
-# A finished call stays reachable after scrolling past the main's active team rows.
+assert "WORKER Sol 6 · Same model worker → MAIN Sol 6 · Main native chat · Failed (exit 1)." in sent_board, sent_board
+# A finished call stays reachable through the Past tab after leaving the active tree.
 done_flow = deepcopy(flow)
 for attempt in done_flow["attempts"]["active_recent"]:
     if attempt["attempt_id"] == "builder":
         attempt["state"] = "done"
-team_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}, "band_offsets": {"detail": 1}}
+team_nav = {"tab": "past", "preview": {"target": ("chat", "flow-main"), "report": {}}, "band_offsets": {"detail": 1}}
 render(done_flow, "codex", 110, 40, view="graph", main_attempt="flow-attempt", navigation=team_nav)
 row = next(h for h in team_nav["hits"] if h["action"] == ("result", "builder"))
-assert choose(("click", row["x1"], row["y"]), team_nav) is None and team_nav["preview"] == {"target": ("result", "builder")}
+assert tab_event(("click", row["x1"], row["y"]), team_nav) and team_nav["preview"] == {"target": ("result", "builder")}
 assert "WORKER Sonnet 5.5" in render(done_flow, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                                                   navigation=team_nav)
 # Expanded detail puts decisions before raw answers and keeps every grouped team row actionable.
@@ -16668,7 +16689,7 @@ for reading, word in (({}, "live"), ({"activity-main": dict(activity_row, since=
                 if ascii_only:
                     screen.encode("ascii")
                 if word.startswith("idle") and activity_view == "graph":
-                    assert ("o " if ascii_only else "○ ") + expected in screen, screen
+                    assert status_tag("idle", unicode=not ascii_only) in screen and expected in screen, screen
         for ascii_only in (False, True):
             legacy = render(report, "claude", 120, 44, view="compact", main_attempt="activity-attempt",
                             frame=2, unicode=not ascii_only)
@@ -16713,13 +16734,15 @@ debate_navigation = {}
 debate_connected = render(native_report, "claude", 91, 40, view="tree", main_attempt="fresh-attempt",
                           navigation=debate_navigation)
 assert "COUNCIL (1)" in debate_connected and "Debate: Pick next work" in debate_connected, debate_connected
-assert "1 seat(s) answering" in debate_connected and "this window" in debate_connected, debate_connected
+assert "1 seat(s) answering" in debate_connected and "MAIN fixture-model" in debate_connected, debate_connected
 assert ("debate", ("decide", member)) in debate_navigation["items"]
 council_only = dict(native_report, room=dict(native_report["room"], participants=[
     m for m in native_report["room"]["participants"] if m["participant"] == member]))
+council_detail_nav = {}
 council_detail = render(council_only, "claude", 91, 40, view="tree",
-                        main_attempt="fresh-attempt", navigation={})
-assert "Team: 1 active" in council_detail, council_detail
+                        main_attempt="fresh-attempt", navigation=council_detail_nav)
+assert "MAIN fixture-model" in council_detail and "1 seat(s) answering" in council_detail, council_detail
+assert ("debate", ("decide", member)) in council_detail_nav["items"], council_detail_nav
 # Claude Code's built-in advisor shows above its main only while unanswered, read from the
 # main's own transcript tail; finalized failed calls leave the board.
 from datetime import datetime, timezone

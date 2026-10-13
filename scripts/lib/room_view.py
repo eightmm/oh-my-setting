@@ -1199,7 +1199,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     def tree(group, name, slots):
         if not group or not slots:
             return
-        visible = slots - int(slots < len(group))
+        visible = min(len(group), slots - int(slots < len(group)))
         visible = max(1, visible)
         start = min(max(0, offsets.get(name, 0)), max(0, len(group) - visible))
         index = next((i for i, m in enumerate(group) if action(m) == selected), None)
@@ -1237,9 +1237,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     tree(judges, "judges", allocation["judges"])
     if primary:
         tag = tagged(primary)
+        activity_note = main_words(primary, unicode)
+        status_text = tag + " / " + activity_note
         ctx = context_note(report, primary)
         context = "ctx %s%% used" % ctx[0] if ctx else ""
-        status = clipped(tag, main_width - 4) + " " * max(2, main_width - 4 - display_width(tag + context)) + context if context else tag
+        status = clipped(status_text, main_width - 4) + " " * max(2, main_width - 4 - display_width(status_text + context)) + context if context else status_text
         question_count = open_count(room, primary["participant"])
         if question_count:
             status += " / ? %s open" % question_count
@@ -1296,12 +1298,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     for text, actor, token in session_log(report, width, spare, unicode):
         lines.append(text.replace(actor, styled(actor, token)) if actor else styled(text, token))
     navigation["band_offsets"] = offsets
-    if active != "detail" and (height > width or height <= 20):
+    if not (active == "detail" and reader_target):
         dock_rows = max(1, total_rows - len(lines))
     dock_rows = min(dock_rows, max(0, total_rows - len(lines)))
     navigation.update(tab_strip_visible=bool(dock_rows), tab_body_visible=dock_rows >= 3)
     if dock_rows:
-        lines += [""] * max(0, total_rows - dock_rows - len(lines))
         top = len(lines)
         dock_lines, dock_hits = tab_box(report, width, dock_rows, navigation, color, unicode, members=members,
             primary=primary, previewed=previewed, preview=preview, everyone=everyone, teams=everyone, labels=labels,
@@ -1903,7 +1904,8 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
     contextual = contextual or (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + [
                   "Enter Open right" if right else "",
                   "f Open right" if managed and navigation.get("full_result") else "f Full result" if navigation.get("full_result") else "",
-                  "Esc Close" if navigation.get("preview") or navigation.get("detail") else "",
+                  "Esc Close" if navigation.get("detail") or navigation.get("preview") and
+                  navigation.get("tab_body_visible", True) else "",
                   "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "" if right else "Enter Show",
                   "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
                   "Tab Next tab" if tabs and not navigation.get("detail") else "",

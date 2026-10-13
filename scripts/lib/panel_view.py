@@ -1163,7 +1163,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         title = root["title"] + (sep + root["label"] if root.get("label") else "")
         list_row(title, main_state(main) if main else root["state"], "main" if root["id"] else "unknown",
                  ("chat", main["participant"] if main else root["id"]),
-                 (age_label(main.get("joined_at")) or "unknown") if main else "unknown",
+                 main_words(main, unicode) if main else "unknown",
                  [root.get("label") or "No task recorded"])
         for row in workers[:max(0, space - int(len(records) > shown + space))]:
             child(row)

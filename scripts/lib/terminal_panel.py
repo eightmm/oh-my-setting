@@ -1540,7 +1540,8 @@ def _review_verdict(answer, with_conflict=False):
             token = marker.group(1)
             if fence is None:
                 fence = token
-            elif token[0] == fence[0] and len(token) >= len(fence):
+            elif re.fullmatch(r" {0,3}" + re.escape(fence[0]) +
+                              "{%d,} *" % len(fence), line.expandtabs(4)):
                 fence = None
             continue
         if fence or stripped.startswith(">"):
@@ -5175,7 +5176,6 @@ def call_results(repo, action):
 
 def render_call_view(repo, participant, view, width, task_id=None, cache=None):
     """Render one participant's retained result, event tail, or verified patch."""
-    from room_view import model_name
     from panel_view import call_identity
     from panel_results import _indexed
 
@@ -5187,9 +5187,10 @@ def render_call_view(repo, participant, view, width, task_id=None, cache=None):
         report["rows"] = [row for row in report["rows"] if row.get("calls")]
         cache["filtered"] = True
     row = next(iter(report.get("rows", [])), {})
-    heading = call_identity(row.get("role") or "worker", model_name(row),
-                            row.get("title") or row.get("task_id")) if participant else None
     call = next((item for item in reversed(row.get("calls", [])) if item.get("attempt_id")), {})
+    model = row.get("model") or call.get("served_model") or call.get("selected_model") or call.get("requested_model")
+    heading = call_identity(row.get("role") or "worker", model,
+                            row.get("title") or row.get("task_id")) if participant else None
     def reader_text(value):
         return panel_reader.ReaderText(value, artifact=(call.get("attempt_id"), call.get("artifact")),
                                        updated_at=call.get("ts") or row.get("updated_at"))
@@ -7117,6 +7118,8 @@ def main(argv=None):
             participant = args.participant and room.identifier(args.participant, "participant")
 
             def reader(width, view="Summary"):
+                if not participant:
+                    return render_results(report(), width)
                 return render_call_view(repo, participant, view, width, args.task_id, reader_cache)
 
             reader_cache = {}

@@ -84,7 +84,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     def call_row(call, connector="", action=None, fold=False, extra=""):
         state = main_state(call) if call.get("role") == "main" else call["state"]
         tag = status_tag(state, exit_code=call.get("exit"), unicode=unicode)
-        age = age_label(call.get("joined_at")) or "unknown"
+        age = main_words(call, unicode) if call.get("role") == "main" else age_label(call.get("joined_at")) or "unknown"
         tail = tag + "  " + age
         label = call.get("title") or (None if call.get("role") == "main" else call["participant"])
         identity = call_identity(visual_role(call), call.get("model"), label)
@@ -154,7 +154,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 add(root_stem + (end if last_group else prefix) + "%s %s (%s)" % (mark, heading, len(children)),
                     "review" if role == "review" else "dim", ("group", group_key))
                 if group_key not in expanded:
-                    continue
+                    if height >= 16:
+                        continue
+                    # A short viewport still exposes a call directly, alongside the group control.
+                    children = children[:1]
             else:
                 add(root_stem + (end if last_group else prefix) + heading + " (%s)" % len(children), role_style(role))
             indent = root_stem
@@ -345,9 +348,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             offset = position - body_budget + 1
     shown = list(head)
     if activity_head:
-        heading = "Activity%s%s main%s%s%s call%s%s" % (
-            sep, len(mains), "" if len(mains) == 1 else "s", sep, len(calls),
-            "" if len(calls) == 1 else "s", sep + "attention" if attention_only else "")
+        heading = "Activity%s%s%s main%s%s%s call%s" % (
+            sep + "attention" if attention_only else "", sep, len(mains),
+            "" if len(mains) == 1 else "s", sep, len(calls), "" if len(calls) == 1 else "s")
         shown.append({"text": box_edge(heading, width, unicode) if boxed else clipped(heading, width),
                       "style": "border"})
     shown += body[offset:offset + body_budget]
@@ -389,7 +392,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     while output and not output[-1].strip():
         output.pop()
     spare = max(0, budget - dock_rows - len(output))
-    if dock_rows and height > width:
+    if dock_rows and not (navigation.get("tab", "detail") == "detail" and reader_target):
         # Put unused activity rows into the dock; the dock's body can use them
         # for reading instead of separating it from the activity tree with a blank band.
         dock_rows += spare
