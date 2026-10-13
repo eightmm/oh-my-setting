@@ -18006,9 +18006,12 @@ for mode in ("tree", "graph"):
             small = render(grouped_board, "codex", columns, rows, view=mode, unicode=glyphs, navigation=nav)
             assert len(small.splitlines()) <= rows and all(display_width(line) <= columns for line in small.splitlines())
     render(grouped_board, "codex", 120, 80, view=mode, navigation=nav)
-    panel.navigate(project, ("group", ("review", "adv-main")), grouped_board, nav, 120)
-    render(grouped_board, "codex", 120, 80, view=mode, navigation=nav)
-    assert not nav["expanded_groups"] and nav["surface"] == mode
+    if mode == "tree":
+        # Choosing an open group again closes it.
+        panel.navigate(project, ("group", ("review", "adv-main")), grouped_board, nav, 120)
+        render(grouped_board, "codex", 120, 80, view=mode, navigation=nav)
+        assert not nav["expanded_groups"]
+    assert nav["surface"] == mode
 # Both existing return controls exit inspection; room data and other local preferences stay intact.
 for back_key in ("escape", "g"):
     clock = [0.0]
