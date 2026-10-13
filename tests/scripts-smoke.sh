@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Libraries are linted on their own; following ~40 sourcing sites cost shellcheck 17+ GB here.
+# shellcheck source=/dev/null
 set -euo pipefail
 
 if [ "${OMS_SMOKE_RUNNER_ACTIVE:-0}" != "1" ]; then
