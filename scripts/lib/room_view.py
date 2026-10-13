@@ -1174,7 +1174,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     offsets = dict(mapping(navigation.get("band_offsets")))
     drawn = []
 
+    awaiting_admission = set(listing(report.get("awaiting_admission")))
+
     def tagged(member):
+        # A finished write call with an unadmitted patch says so; "done" alone would hide the decision it needs.
+        if member.get("state") == "done" and member.get("participant") in awaiting_admission:
+            return status_tag("review", unicode=unicode).replace("awaiting decision", "patch awaits admission")
         return execution_tag(member, unicode) + (" / guard stop" if member.get("guard") else "")
 
     def card_lines(member, content, indent=0, tree_card=False):
