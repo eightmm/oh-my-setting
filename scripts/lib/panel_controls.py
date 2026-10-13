@@ -111,9 +111,10 @@ def row_line(number, row, width):
 
 def render(rows, notes, page, width, height, show_finished, archived=False):
     """Return (lines, page) for the clamped page; no ANSI, within width columns and height lines."""
+    from panel_view import box_edge, box_row
     shown = visible(rows, show_finished)
     finished = sum(r["kind"] == "job" and r["state"] in FINISHED for r in rows)
-    head = ["%s: %d shown, %d finished %s%s" % ("History" if archived else "Terminals and jobs",
+    head = ["%s: %d shown, %d finished %s%s" % ("History" if archived else "Terminals and Jobs",
         len(shown), finished, "hidden (f shows)" if finished and not show_finished else
         "shown (f hides)" if show_finished else "hidden",
         " [partial]" if notes else "")] + list(notes)
@@ -129,6 +130,10 @@ def render(rows, notes, page, width, height, show_finished, archived=False):
         lines.append("No terminals or jobs.")
     lines.append("page %d/%d  n/p page, u refresh, f finished, h history, c archive finished, o shell, r job, number select, Enter exit"
                  % (page + 1, pages))
+    if width >= 20 and height >= 3:
+        return ([box_edge("OMS · " + lines[0], width)] +
+                [box_row(line, width) for line in lines[1:-1]] +
+                [box_edge(lines[-1], width, kind="bottom")])[:height], page
     return [clip(line, width) for line in lines][:height], page
 
 

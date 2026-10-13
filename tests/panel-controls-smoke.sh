@@ -133,7 +133,9 @@ def check(cond, message):
 # Completed jobs collapse by default, unknown stays, toggle shows them; listing and exit do nothing.
 sh, jb = Shells([shell("t1")]), Jobs([job("j1"), job("j2", "completed"), job("j3", "weird\x1b[2J")])
 text = drive(["f", "f", "q"], sh, jb)
-first, second, third = text.split("Terminals and jobs")[1:]
+first, second, third = text.split("Terminals and Jobs")[1:]
+check(any(frame.startswith("╭") and frame.rstrip().endswith("╯") for frame in FRAMES),
+      "controls list lost its neutral solid container")
 check("1 finished hidden (f shows)" in first and "j2" not in first, "completed jobs not collapsed")
 check("j3" in first and "weird?[2J" in first and "\x1b" not in text, "unknown job hidden or unsanitized")
 check("j2" in second and "1 finished shown (f hides)" in second, "toggle did not show finished jobs")
@@ -146,7 +148,7 @@ many = Shells([shell("t%d" % i, "終端%d 한글한글한글한글" % i) for i i
 text = drive(["n", "n", "p", "q"], many, Jobs([]), width=30, height=8)
 check(all(display_width(line) <= 30 for line in text.splitlines()), "line wider than width")
 check("page 1/2" in text and "page 2/2" in text and "page 3" not in text, "pages not shown")
-check(max(len(s.splitlines()) for s in text.split("Terminals and jobs")[1:]) <= 8, "page taller than height")
+check(all(len(frame.splitlines()) <= 8 for frame in FRAMES), "page taller than height")
 
 # Unsupported/failing backend is a truthful partial listing.
 class Broken:
@@ -263,10 +265,12 @@ with patch("subprocess.run", side_effect=AssertionError("health projection execu
         check(len(text.splitlines()) <= height and all(display_width(line) <= width for line in text.splitlines()),
               "capacity view exceeded its viewport")
         if (width, height) == (40, 30):
+            check(text.startswith("╭") and text.splitlines()[-1].startswith("╰"),
+                  "capacity view lost its neutral solid container")
             claude = next(line for line in text.splitlines() if "Claude main" in line)
             check("97% used" in claude and "[" in claude and "Codex" not in text and "Main: 1 live" in text,
                   "capacity values/providers/main count were not readable")
-            check("5% left [warning] Claude weekly" in text, "weekly quota was not rendered as left")
+            check("Claude · week 5% left [warning]" in text, "weekly quota was not rendered as left")
     pi_report = dict(report, room={"participants": [{"participant": "pi-main", "role": "main", "joined": True,
                                                     "provider": "codex"}]}, attempts={"active_recent": [{
         "attempt_id": "pi-main", "state": "working", "panel": {"role": "main", "harness": "pi"}}]})

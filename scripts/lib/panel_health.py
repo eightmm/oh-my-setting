@@ -78,7 +78,7 @@ def alerts(report):
 
 
 def render(report, width, height, footer=None):
-    from panel_view import clipped, LIVE_STATES
+    from panel_view import box_edge, box_row, clipped, LIVE_STATES
     from room_view import nodes
     members = nodes(report)
     providers = []
@@ -86,7 +86,7 @@ def render(report, width, height, footer=None):
         provider = "pi" if member.get("harness") == "pi" else member.get("provider")
         if provider in {"claude", "codex", "pi"} and provider not in providers:
             providers.append(provider)
-    rows = ["OMS / Capacity and recovery"]
+    rows = []
     stale = report.get("capacity_stale") is True
     if stale:
         rows.append("Stale readings; status unknown")
@@ -105,9 +105,9 @@ def render(report, width, height, footer=None):
         urgent = min(env_int("OMS_CTX_URGENT_PCT", 8, minimum=0, maximum=89), warn)
         status = "unknown" if context is None else "full" if context >= 100 else "urgent" if context >= 100 - urgent else "warning" if context >= 100 - warn else "ok"
         rows.append(("%s main: context [%s]" % (provider.capitalize(), status) if context is None else
-                     "%s%% used [%s] %s main" % (context, status, provider.capitalize())))
-        rows.append("%s left [%s] %s weekly" % ("--" if weekly is None else "%s%%" % weekly,
-                    "unknown" if weekly is None else "full" if weekly <= 0 else "warning" if weekly <= 10 else "ok", provider.capitalize()))
+                     "%s main · ctx %s%% used [%s]" % (provider.capitalize(), context, status)))
+        rows.append("%s · week %s left [%s]" % (provider.capitalize(), "--" if weekly is None else "%s%%" % weekly,
+                    "unknown" if weekly is None else "full" if weekly <= 0 else "warning" if weekly <= 10 else "ok"))
     mains = sum(m.get("role") == "main" and m.get("state") in
                 LIVE_STATES | {"blocked", "waiting_input", "waiting_approval", "review"} for m in members)
     rows.append("Main: %s live" % mains)
@@ -134,7 +134,14 @@ def render(report, width, height, footer=None):
         if item["status"] != "ok":
             rows.append("  " + item["action"])
     footer = footer if footer is not None else "k / Esc board; u / Ctrl+L refresh"
-    omitted = max(0, len(rows) - max(0, height - 2))
+    boxed = width >= 20 and height >= 4
+    space = max(0, height - (3 if boxed else 2))
+    omitted = max(0, len(rows) - space)
     if omitted:
-        rows = rows[:max(0, height - 2)] + ["%d more; oms panel --health --json" % omitted]
-    return "\n".join(clipped(line, width) for line in (rows + [footer])[:max(0, height)])
+        rows = rows[:max(0, space - 1)] + ["%d more; oms panel --health --json" % (omitted + 1)]
+    if boxed:
+        return "\n".join([box_edge("OMS · Capacity and Recovery", width)] +
+                         [box_row(line, width) for line in rows] +
+                         [box_row(footer, width), box_edge("", width, kind="bottom")])
+    return "\n".join(clipped(line, width) for line in
+                     (["OMS · Capacity and Recovery"] + rows + [footer])[:max(0, height)])

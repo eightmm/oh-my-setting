@@ -1161,6 +1161,7 @@ room_text = "\n".join(panel.room_listing(room_rows, "room-current", 200, now=179
                                           live_participants={"main-live"}))
 assert "* 1 room-current" in room_text and "1 live mains" in room_text and "2 unread" in room_text, room_text
 assert "last 2m ago / open" in room_text, room_text
+assert room_text.startswith("╭─ OMS · Rooms") and room_text.splitlines()[-1].startswith("╰"), room_text
 
 with patch.object(panel.shutil, "get_terminal_size", return_value=os.terminal_size((57, 24))), \
         patch("sys.stdout", new=io.StringIO()) as provider_text:
@@ -6095,7 +6096,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             assert reader_at[1] == chat_at[1] and int(reader_at[2]) < int(chat_at[2]), rows
             assert next(row for row in rows if row[0] == graph_pane)[1] == "0", rows
             # The reused reader's previous view already has the close footer.
-            tmux_wait(["capture-pane", "-p", "-t", reader], "Worker unknown · unknown")
+            tmux_wait(["capture-pane", "-p", "-t", reader], "WORKER model unknown")
             tmux_wait(["capture-pane", "-p", "-t", reader], "q/Esc close")
             with patch.dict(os.environ, reopen_env, clear=True):
                 assert panel.panel_reader.open_reader(graph_pane, panel.reader_shell(
@@ -11872,6 +11873,9 @@ import panel_reader
 from datetime import datetime
 import tempfile
 import re
+assert panel._review_verdict("GATE: pass\n> GATE: fail\n```text\nGATE: fail\n```\nGATE: fail",
+                             with_conflict=True) == ("fail", True)
+assert panel._review_verdict("> GATE: pass\n~~~\nGATE: fail\n~~~", with_conflict=True) == (None, False)
 write_call = {"kind": "delegate", "attempt_id": "attempt-write", "patch": ".oms/artifacts/patch.diff"}
 read_call = {"kind": "ask", "attempt_id": "attempt-read"}
 timeline = [{"ts": "2026-10-12T09:02:00+09:00", "event_type": "attempt.heartbeat"},
@@ -11883,9 +11887,11 @@ local_start = datetime.fromisoformat("2026-10-12T09:00:00+09:00").astimezone().s
 local_verify = datetime.fromisoformat("2026-10-12T09:03:00+09:00").astimezone().strftime("%H:%M:%S")
 assert event_view.index(local_start) < event_view.index(local_verify) and "2 heartbeats" in event_view, event_view
 artifact_view = panel_reader.render_view("Events", {}, write_call, [
-    {"ts": "2026-10-12T09:05:00+09:00", "kind": "review", "verdict": "passed", "summary": "Reviewed changes"},
+    {"ts": "2026-10-12T09:05:00+09:00", "kind": "review", "verdict": "GATE: pass", "summary": "Reviewed changes"},
     {"ts": "2026-10-12T09:06:00+09:00", "kind": "patch-land", "summary": "Landed"}])
-assert "review · passed · Reviewed changes" in artifact_view and "patch-land · Landed" in artifact_view, artifact_view
+assert "review · Reviewed changes" in artifact_view and "[GATE: pass]" in artifact_view and "patch-land · Landed" in artifact_view, artifact_view
+assert any(line.endswith("[GATE: pass]") and display_width(line) == 100
+           for line in artifact_view.splitlines()), artifact_view
 long_events = panel_reader.render_view("Events", {}, write_call, [
     {"ts": "2026-10-12T09:05:00+09:00", "kind": "review", "verdict": "passed",
      "summary": "A long review summary that must wrap to the available terminal width without overflowing a row " * 3}], width=40)
@@ -11897,15 +11903,28 @@ assert all(len(line) <= 40 for line in plain_truncated), plain_truncated
 patch_text = b"diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n"
 diff_view = panel_reader.render_view("Diff", {}, write_call, patch=patch_text)
 assert "file.py" in diff_view and "old" in diff_view and "new" in diff_view, diff_view
-assert "?[32m" not in diff_view and "\033[32m" in diff_view, diff_view
+assert "?[32m" not in diff_view and "\033[" not in diff_view, diff_view
+with patch.dict(os.environ, {"NO_COLOR": "1"}):
+    plain_diff = panel_reader.render_view("Diff", {}, write_call, patch=patch_text, color=True)
+assert "+new" in plain_diff and "-old" in plain_diff and "\033[" not in plain_diff, plain_diff
+with patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
+    colored_diff = panel_reader.render_view("Diff", {}, write_call, patch=patch_text, color=True)
+assert "\033[38;5;114m+new\033[0m" in colored_diff and "\033[38;5;203m-old\033[0m" in colored_diff, colored_diff
 indented_patch = b"diff --git a/file.py b/file.py\n@@ -1 +1 @@\n context\n+  indented\n"
-assert "\033[32m+  indented\033[0m" in panel_reader.render_view("Diff", {}, write_call, patch=indented_patch), "diff indentation was collapsed"
-assert "no patch" in panel_reader.render_view("Diff", {}, read_call), "read-only calls need an explicit no-patch view"
+assert "+  indented" in panel_reader.render_view("Diff", {}, write_call, patch=indented_patch), "diff indentation was collapsed"
+assert "No patch recorded" in panel_reader.render_view("Diff", {}, read_call), "read-only calls need an explicit no-patch view"
 assert "patch unreadable (digest mismatch / read error)" in panel_reader.render_view(
     "Diff", {}, write_call, patch_error=True), "invalid patch evidence was mistaken for a read-only call"
 assert "patch capped" in panel_reader.render_view("Diff", {}, write_call, patch=b"x" * (panel_reader.PATCH_LIMIT + 1)), "large patches need a cap note"
-assert panel_reader.VIEWS == ("Result", "Events", "Diff")
-assert "Result" in panel_reader.render_view("Result", {"rows": []}, write_call)
+assert panel_reader.VIEWS == ("Summary", "Raw", "Events", "Diff", "Run info")
+assert "Summary" in panel_reader.render_view("Summary", {"rows": []}, write_call)
+markdown_call = dict(write_call, answer="# Heading\n- first\n```\n  code\n```\n| a | b |\n|---|---|",
+                     artifact="answer.txt", answer_truncated=True)
+raw_view = panel_reader.render_view("Raw", {"rows": [{"role": "worker", "model": "gpt-6.1-sol"}]}, markdown_call)
+assert "# Heading" in raw_view and "  - first" in raw_view and "  code" in raw_view and "| a | b |" in raw_view
+assert "partial answer" in raw_view and "\033[7m" not in raw_view, raw_view
+run_info = panel_reader.render_view("Run info", {"rows": [{"provider": "codex", "model": "gpt-6.1-sol"}]}, markdown_call)
+assert "Provider: codex" in run_info and "Attempt: attempt-write" in run_info and "answer.txt" in run_info, run_info
 assert panel_reader.TerminalInput(extra_keys=("r", "e", "d")).decode(b"\tred") == [("tab",), ("r",), ("e",), ("d",)]
 assert panel_reader.TerminalInput().decode(b"red") == [("unbound",)] * 3
 with tempfile.TemporaryDirectory() as reader_repo_name:
@@ -11947,9 +11966,9 @@ finished_report = {"rows": [{"role": "worker", "model": "fixture", "process_stat
                              "calls": [production_call]}]}
 with patch.object(panel, "results_snapshot", side_effect=[(running_report, ([], [])),
                                                             (finished_report, ([], []))]) as collected:
-    running_view = panel.render_call_view(project, "worker-1", "Result", 100, cache=refresh_cache)
+    running_view = panel.render_call_view(project, "worker-1", "Summary", 100, cache=refresh_cache)
     refresh_cache.clear()
-    finished_view = panel.render_call_view(project, "worker-1", "Result", 100, cache=refresh_cache)
+    finished_view = panel.render_call_view(project, "worker-1", "Summary", 100, cache=refresh_cache)
 assert collected.call_count == 2 and "running" in running_view and "finished" in finished_view, (
     collected.call_count, running_view, finished_view)
 indexed_events = [
@@ -11964,13 +11983,13 @@ with patch.object(panel, "results_snapshot", return_value=(production_report, ([
         patch.object(panel_results, "_records", return_value=([], indexed_events)), \
         patch.object(panel_results, "_indexed", return_value=b'{"receipt":{"status":"sent"}}'), \
         patch.object(panel, "verified_patch", return_value=patch_text):
-    result_view = panel.render_call_view(project, "worker-1", "Result", 100, cache=reader_cache)
+    result_view = panel.render_call_view(project, "worker-1", "Summary", 100, cache=reader_cache)
     timeline_view = panel.render_call_view(project, "worker-1", "Events", 100, cache=reader_cache)
     production_diff = panel.render_call_view(project, "worker-1", "Diff", 100, cache=reader_cache)
 assert collected.call_count == 1 and event_read.call_count == 1, (collected.call_count, event_read.call_count)
-assert "Result" in result_view and "Events" in timeline_view and "Diff" in production_diff
-assert "timeline truncated" in timeline_view and "review · passed · Reviewed the change" in timeline_view
-assert "patch-land · Landed" in timeline_view and "panel-delivery · sent" in timeline_view, timeline_view
+assert "Summary" in result_view and "Events" in timeline_view and "Diff" in production_diff
+assert "timeline truncated" in timeline_view and "review · Reviewed the change" in timeline_view and "[GATE not recorded]" in timeline_view
+assert "patch-land · Landed" in timeline_view and "panel-delivery" in timeline_view and "[sent]" in timeline_view, timeline_view
 diff_cache = {}
 with patch.object(panel, "results_snapshot", return_value=(production_report, ([], []))) as collected, \
         patch.object(panel.panel_reader, "event_tail") as event_read, \
@@ -12036,7 +12055,7 @@ assert close_calls("%1\t40\t\n%9\t24\t%1\n%2\t15\t\n") == (True, [
     ["list-panes", "-t", "%1", "-F", "#{pane_id}\t#{pane_height}\t#{@oms_panel_reader}"], ["kill-pane", "-t", "%9"]])
 assert close_calls("%1\t40\t\n%2\t40\t\n")[0] is False and close_calls("x", board="1; kill")[1] == []
 # Completion at the same terminal size and line count is repainted without losing the person's scroll.
-def read_page(render, batches, on_refresh=None):
+def read_page(render, batches, on_refresh=None, size=(80, 4)):
     clock, waits = [0.0], []
     class PageInput:
         def __enter__(self):
@@ -12050,7 +12069,7 @@ def read_page(render, batches, on_refresh=None):
             return next(batches)
     with patch.object(panel_reader, "TerminalInput", return_value=PageInput()), \
             patch.object(panel_reader.time, "monotonic", side_effect=lambda: clock[0]), \
-            patch.object(panel_reader.shutil, "get_terminal_size", return_value=os.terminal_size((80, 4))), \
+            patch.object(panel_reader.shutil, "get_terminal_size", return_value=os.terminal_size(size)), \
             patch.object(panel_reader, "tmux", return_value=subprocess.CompletedProcess([], 0, "%1\n", "")) as tmux_run, \
             patch.object(panel_reader.sys, "stdout", io.StringIO()) as output:
         assert panel_reader.page(render, "%1", on_refresh=on_refresh) == 0
@@ -12071,23 +12090,39 @@ assert rendered.call_count == 2 and waits == [1, 1, 1], "reader evidence polling
 assert "done 3\ndone 4\ndone 5" in output and output.count("4-6/8") == 2, output
 with patch.object(panel, "render_results", side_effect=["\n".join(str(i) for i in range(8)), "short"]) as rendered:
     output, unused = read_page(rendered, iter([[("end",)], [], [("escape",)]]))
-assert "short\n\n\nq/Esc" in output and "1-1/1" in output, "shrinking evidence left the reader out of range"
+assert "short" in output and "rows 1-1/1" in output, "shrinking evidence left the reader out of range"
 failure = "bad\033]52;c;payload\a\x9b31m\u200b\r\n" + "x" * 250
 with patch.object(panel, "render_results", side_effect=ValueError(failure)) as rendered:
     output, unused = read_page(rendered, iter([[("q",)]]))
-assert "Result evidence unavailable: " + panel.clean(failure, 200) in output, output
+assert "[✗ unavailable] bad?]52;c;payload" in output, output
 assert "\033]52" not in output and not any(c in output for c in ("\a", "\x9b", "\u200b", "\r")), output
+output, unused = read_page(lambda width: "\033[32mspoof\033[0m", iter([[("q",)]]))
+assert "\033[32mspoof" not in output and "?[32mspoof" in output, output
+with patch.object(panel, "render_results", side_effect=["first\nsecond", ValueError("refresh lost")]) as rendered:
+    output, unused = read_page(rendered, iter([[], [], [("q",)]]), size=(80, 10))
+assert "showing earlier content" in output and "first" in output and "second" in output, output
 # A slow result query runs off the input thread: q closes the reader at once, showing the pending notice.
 slow_started = time.time()
 output, unused = read_page(lambda width: (time.sleep(3), "late")[1], iter([[("q",)]]))
-assert time.time() - slow_started < 2 and "Reading the recorded result..." in output, output
+assert time.time() - slow_started < 2 and "Reading recorded result…" in output, output
 selected_views = []
 def switching_reader(width, view):
     selected_views.append(view)
     return panel_reader.render_view(view, {"rows": []}, read_call)
 output, unused = read_page(switching_reader, iter([[('tab',)], [('r',)], [('e',)], [('d',)], [('q',)]]))
-assert selected_views[0] == "Result" and "Events" in selected_views and "Diff" in selected_views, selected_views
-assert "Result" in output and "Events" in output and "Diff" in output, output
+assert selected_views[0] == "Summary" and "Events" in selected_views and "Diff" in selected_views, selected_views
+assert "No result recorded yet" in output and "No retained events" in output and "No patch recorded" in output, output
+long_report = {"rows": [{"role": "worker", "title": "Pinned reader", "process_state": "working",
+                         "task_id": "reader-task"}]}
+long_call = {"answer": "\n".join("line %d" % i for i in range(20))}
+output, unused = read_page(lambda width, view: panel_reader.render_view(view, long_report, long_call),
+                           iter([[("pagedown",)], [("q",)]]), size=(80, 10))
+assert output.count("WORKER model unknown · Pinned reader") >= 2 and output.count("[Summary]") >= 2, output
+assert "rows 1-" in output and "updated unknown" in output, output
+output, unused = read_page(lambda width, view: panel_reader.render_view(view, long_report, markdown_call),
+                           iter([[("tab",)], [("q",)]]), size=(80, 10))
+raw_frame = output.split("\033[H\033[2J")[-1]
+assert raw_frame.count("[Raw]") == 1 and "# Heading" in raw_frame, raw_frame
 # A room transition closes the reader through the watcher's close path; refreshes of the same room do not.
 class RoomFrameReceived(Exception):
     pass
@@ -12834,7 +12869,11 @@ for harness, shown in (("claude", "Claude Code"), ("codex", "Codex"), ("pi", "Pi
     header_state["room"]["participants"][0]["harness"] = harness
     header_state["room"]["participants"][0]["provider"] = harness
     label = panel.context_header_text(header_state, "header-main", Path("repo"))
-    assert shown in label and "TASK —" in label and "feature##one" in label, label
+    assert shown in label and "task unrecorded" in label and "feature##one" in label, label
+header_state["room"]["participants"][0]["harness"] = "claude"
+header_state["room"]["participants"][0]["provider"] = "claude"
+header_state["provider_status"] = {"claude": {"participant": "header-main", "context_left": 39}}
+assert "ctx 61% used" in panel.context_header_text(header_state, "header-main", Path("repo"))
 assert "unknown" in panel.context_header_text({"repo": {}}, "absent", Path("repo"))
 
 def header_window_fixture(local_values, reader=False, fail_capture=False,
@@ -12884,7 +12923,7 @@ def header_window_fixture(local_values, reader=False, fail_capture=False,
         if reader:
             reader_headers = [args[-1] for args in calls if args[0] == "set-option" and
                               args[-2] == panel.HEADER_OPTION and args[-3] == "%9"]
-            assert any(value.startswith("RESULT · Build result") for value in reader_headers), calls
+            assert reader_headers and all(value == "" for value in reader_headers), calls
         if not local_values:
             unset = {args[-1] for args in calls if args[0] == "set-option" and "-u" in args}
             assert {"pane-border-status", "pane-border-format"} <= unset, calls

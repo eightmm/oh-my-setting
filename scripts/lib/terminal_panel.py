@@ -321,7 +321,7 @@ def clear_control_view():
 
 def room_listing(rooms, current, width, now=None, live_participants=None):
     """Format bounded discovery snapshots without reading rooms again."""
-    from panel_view import clipped
+    from panel_view import box_edge, box_row, clipped
     now = time.time() if now is None else now
     lines = []
     for index, shared in enumerate(rooms, 1):
@@ -350,6 +350,9 @@ def room_listing(rooms, current, width, now=None, live_participants=None):
         line = "%s %s %s / %s / %d live mains / %d unread / last %s / %s" % (
             marker, index, clean(shared.get("id", ""), 128), title, mains, unread, age, state)
         lines.append(clipped(line, width))
+    if width >= 20:
+        return [box_edge("OMS · Rooms", width)] + [box_row(line, width) for line in lines] + [
+            box_edge("", width, kind="bottom")]
     return lines
 
 
@@ -1528,9 +1531,25 @@ def _judgment_mail(repo, room_id, member, caller, task_id, message):
         return False
 
 
-def _review_verdict(answer):
-    matches = re.findall(r"(?im)^\s*GATE\s*:\s*(pass|fail)\s*$", str(answer or ""))
-    return matches[-1].lower() if matches else None
+def _review_verdict(answer, with_conflict=False):
+    matches, fence = [], None
+    for line in str(answer or "").splitlines():
+        stripped = line.lstrip()
+        marker = re.match(r"^(`{3,}|~{3,})", stripped)
+        if marker:
+            token = marker.group(1)
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = None
+            continue
+        if fence or stripped.startswith(">"):
+            continue
+        match = re.fullmatch(r"\s*GATE\s*:\s*(pass|fail)\s*", line, re.I)
+        if match:
+            matches.append(match.group(1).lower())
+    verdict = matches[-1] if matches else None
+    return (verdict, len(set(matches)) > 1) if with_conflict else verdict
 
 
 def _review_dispatch_context(repo, room_id, member):
@@ -5156,7 +5175,8 @@ def call_results(repo, action):
 
 def render_call_view(repo, participant, view, width, task_id=None, cache=None):
     """Render one participant's retained result, event tail, or verified patch."""
-    from room_view import ROLES, model_name, said
+    from room_view import model_name
+    from panel_view import call_identity
     from panel_results import _indexed
 
     cache = {} if cache is None else cache
@@ -5167,11 +5187,19 @@ def render_call_view(repo, participant, view, width, task_id=None, cache=None):
         report["rows"] = [row for row in report["rows"] if row.get("calls")]
         cache["filtered"] = True
     row = next(iter(report.get("rows", [])), {})
-    heading = ("%s %s · %s" % (ROLES.get(row.get("role"), "Worker"), model_name(row),
-                                said(row.get("process_state")))) if participant else None
+    heading = call_identity(row.get("role") or "worker", model_name(row),
+                            row.get("title") or row.get("task_id")) if participant else None
     call = next((item for item in reversed(row.get("calls", [])) if item.get("attempt_id")), {})
-    if view == "Result":
-        return panel_reader.render_view(view, report, call, width=width, heading=heading)
+    def reader_text(value):
+        return panel_reader.ReaderText(value, artifact=(call.get("attempt_id"), call.get("artifact")),
+                                       updated_at=call.get("ts") or row.get("updated_at"))
+    if view in ("Summary", "Raw", "Run info"):
+        if call.get("kind") == "review":
+            call = dict(call)
+            verdict, conflict = _review_verdict(call.get("answer"), with_conflict=True)
+            call["review_verdict"] = ("GATE: " + verdict if verdict else "not recorded") + (
+                " (conflicting declarations)" if conflict else "")
+        return reader_text(panel_reader.render_view(view, report, call, width=width, heading=heading))
 
     if view == "Diff":
         patch, patch_error = None, False
@@ -5180,8 +5208,8 @@ def render_call_view(repo, participant, view, width, task_id=None, cache=None):
                 patch = verified_patch(repo, call)
             except (OSError, ValueError, TypeError):
                 patch_error = True
-        return panel_reader.render_view(view, report, call, patch=patch, width=width,
-                                        patch_error=patch_error, heading=heading)
+        return reader_text(panel_reader.render_view(view, report, call, patch=patch, width=width,
+                                                    patch_error=patch_error, heading=heading))
 
     if view == "Events" and "timeline" not in cache:
         cache["timeline"] = (panel_reader.event_tail(repo, call.get("attempt_id"))
@@ -5199,7 +5227,9 @@ def render_call_view(repo, participant, view, width, task_id=None, cache=None):
             detail = dict(item)
             review = call_by_event.get(item.get("event_id")) if kind == "review" else None
             if review:
-                detail["verdict"] = "passed" if review.get("exit") == 0 else "failed"
+                verdict, conflict = _review_verdict(review.get("answer"), with_conflict=True)
+                detail["verdict"] = ("GATE: " + verdict if verdict else "GATE not recorded") + (
+                    " (conflicting declarations)" if conflict else "")
                 detail["summary"] = review.get("answer") or "review summary unavailable"
             if kind in ("panel-delivery", "panel-delivery-pending"):
                 try:
@@ -5210,13 +5240,15 @@ def render_call_view(repo, participant, view, width, task_id=None, cache=None):
             timeline.append(detail)
     if call.get("kind") == "review" and not any(item.get("kind") == "review" and
                                                     item.get("event_id") == call.get("event_id") for item in timeline):
+        verdict, conflict = _review_verdict(call.get("answer"), with_conflict=True)
         review = {"kind": "review", "ts": call.get("ts"),
-                  "verdict": "passed" if call.get("exit") == 0 else "failed",
+                  "verdict": ("GATE: " + verdict if verdict else "GATE not recorded") + (
+                      " (conflicting declarations)" if conflict else ""),
                   "summary": call.get("answer") or "review summary unavailable"}
         timeline.append(review)
-    return panel_reader.render_view(view, report, call, timeline, width=width,
-                                    timeline_truncated=timeline_truncated,
-                                    heading=heading)
+    return reader_text(panel_reader.render_view(view, report, call, timeline, width=width,
+                                               timeline_truncated=timeline_truncated,
+                                               heading=heading))
 
 
 def advisor_command(repo, room_id, member):
@@ -5327,24 +5359,26 @@ def _header_safe(value):
 
 
 def context_header_text(state, main_attempt, repo):
-    from room_view import nodes, main_words, model_name, context_note
+    from room_view import nodes, model_name, context_note
+    from panel_view import call_identity, status_tag
     member = next((m for m in nodes(state) if m.get("role") == "main" and
                    main_attempt in (m.get("participant"), m.get("attempt"))), None)
-    task = "TASK " + _header_safe(member.get("task_id")) if member and member.get("task_id") else "TASK —"
+    task = _header_safe(member.get("task_id")) if member and member.get("task_id") else "task unrecorded"
     model = _header_safe(model_name(member)) if member else "unknown"
     provider = _header_safe({"claude": "Claude Code", "codex": "Codex", "pi": "Pi"}.get(
         member.get("harness") or member.get("provider"), member.get("provider"))) if member else "unknown"
-    status = _header_safe(main_words(member)) if member else "idle"
+    status = _header_safe(status_tag(member.get("state") or "unknown")) if member else _header_safe(status_tag("unknown"))
     context = ""
     if member:
         note = context_note(state, member)
         if note:
-            context = " · ctx %s%% left" % note[0]
+            context = "   ctx %s%% used" % note[0]
     branch = _header_safe((state.get("repo") or {}).get("branch"))
     location = _header_safe((state.get("repo") or {}).get("name") or repo.name)
     if branch:
         location += "/" + branch
-    return "MAIN · %s · %s · %s · %s · %s%s" % (provider, model, task, location, status, context)
+    return "%s   %s%s   via %s · %s" % (_header_safe(call_identity("main", model, task)),
+                                        status, context, provider, location)
 
 
 def _tmux_output_value(value):
@@ -5404,18 +5438,8 @@ def update_context_header(state, main_attempt, repo, navigation=None):
                 run("set-option", "-p", "-t", target, HEADER_OPTION, label)
         reader = panel_reader.find(pane)
         if reader:
-            from room_view import nodes, model_name
-            target = (navigation or {}).get("reader_target")
-            ident = target[-1][-1] if target and target[0] == "debate" else target[-1] if target else None
-            call = next((m for m in nodes(state) if ident and m.get("participant") == ident), None)
-            label = "RESULT · %s · %s · %s" % (
-                _header_safe(call.get("title") or call.get("participant")) if call else "call unavailable",
-                _header_safe(call.get("role") or "call") if call else "call",
-                _header_safe(model_name(call)) if call else "unknown")
-            width = run("display-message", "-p", "-t", reader, "#{pane_width}")
-            if width.returncode == 0 and width.stdout.strip().isdigit():
-                from dashboard_projection import fit
-                label = fit(label, int(width.stdout.strip()))
+            # The reader shell pins its identity; an additional pane title would repeat it.
+            label = ""
             current = run("show-option", "-p", "-v", "-t", reader, HEADER_OPTION)
             if current.returncode or _tmux_output_value(current.stdout) != label:
                 run("set-option", "-p", "-t", reader, HEADER_OPTION, label)
@@ -5808,6 +5832,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
     def open_call(target):
         """Show a recorded call in the reader pane right of the board; False keeps its detail in the board."""
         if not managed_session() or panel_host.herdr_active():
+            navigation["notice"] = "Right reader unavailable at this size/host"
             return False
         board = os.environ.get("TMUX_PANE", "")
         try:
@@ -5815,11 +5840,14 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             if pane and expanded:
                 expand(False)  # splitting a zoomed window unzooms it
         except (OSError, ValueError, subprocess.SubprocessError):
+            navigation["notice"] = "Right reader unavailable at this size/host"
             return False
         if pane:
             navigation["reader_open"] = True
             navigation["reader_target"] = target
             navigation["notice"] = "Opened on the right; Esc closes it"
+        else:
+            navigation["notice"] = "Right reader unavailable at this size/host"
         return bool(pane)
 
     def close_call():
@@ -6422,12 +6450,14 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                                 board, reader_shell(repo, target, board, navigation.get("room_id")), repo))
                             if pane:
                                 navigation["reader_open"] = True
+                                navigation["reader_target"] = target
                                 navigation["notice"] = "Opened on the right; Esc closes it"
                             else:
                                 navigate(repo, target, cache.get("state", {}), navigation,
                                          max(1, shutil.get_terminal_size().columns))
+                                navigation["notice"] = "Right reader unavailable at this size/host"
                         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-                            navigation["notice"] = clean(str(error), 160)
+                            navigation["notice"] = "Right reader unavailable at this size/host: " + clean(str(error), 120)
                         repaint()
                     continue
                 if len(event) == 1 and len(event[0]) == 1 and event[0] != " ":
@@ -7086,7 +7116,7 @@ def main(argv=None):
         if args.results:
             participant = args.participant and room.identifier(args.participant, "participant")
 
-            def reader(width, view="Result"):
+            def reader(width, view="Summary"):
                 return render_call_view(repo, participant, view, width, args.task_id, reader_cache)
 
             reader_cache = {}
