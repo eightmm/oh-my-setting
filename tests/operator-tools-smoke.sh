@@ -2136,7 +2136,7 @@ os.environ.pop("NO_COLOR", None)
 import terminal_panel as panel
 from panel_routing import allocate, policy
 from dashboard_projection import display_width
-from panel_view import render, inbox_items, needs_strip
+from panel_view import render, inbox_items, needs_strip, attention_items
 from panel_input import passive_click
 from room_view import render_graph, plan_rows as render_plan_rows
 from panel_view import wrapped
@@ -5888,6 +5888,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                     assert subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", control, name],
                                                    env=env, text=True).strip() == value
             for owner, key in (("codex", "0"), ("claude", "1")):
+                identity = "MAIN Sol 6.1" if owner == "codex" else "MAIN Opus 5.5"
                 subprocess.run(tmux + ["send-keys", "-t", control, key], env=env, check=True)
                 tmux_wait(["list-windows", "-t", session, "-F", "#{window_name}"], owner)
                 # [native chat, board]: the board is the window's first (left) pane.
@@ -5906,7 +5907,9 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "b"], env=env, check=True)
                 tmux_wait(["show-option", "-w", "-v", "-t", listing[1], "@oms_panel_attention"], "1")
                 sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "MAIN ")
-                assert "MAIN " in sidebar, sidebar
+                assert "MAIN " in sidebar and "OMS · " in sidebar, sidebar
+                native_header = tmux_wait(["show-option", "-p", "-v", "-t", listing[0], "@oms_panel_header"], identity)
+                assert identity in native_header, native_header
                 assert "Activity" in sidebar, sidebar
                 assert "attention" in sidebar, sidebar
                 assert subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", listing[1],
@@ -5922,8 +5925,8 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "t"], env=env, check=True)
                 tmux_wait(["show-option", "-w", "-v", "-t", listing[1], "@oms_panel_view"], "tree")
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "Home"], env=env, check=True)
-                tree_sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "╭╌ MAIN ")
-                clicked_row = next(n + 1 for n, line in enumerate(tree_sidebar.splitlines()) if "MAIN " in line)
+                tree_sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "╭╌ " + identity)
+                clicked_row = next(n + 1 for n, line in enumerate(tree_sidebar.splitlines()) if identity in line)
                 subprocess.run(tmux + ["select-pane", "-t", listing[1]], env=env, check=True)
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "\033[<0;8;%sM" % clicked_row], env=env, check=True)
                 tmux_wait(["display-message", "-p", "-t", session + ":" + owner, "#{pane_id}"], listing[0])
@@ -5932,8 +5935,8 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "v"], env=env, check=True)
                 tmux_wait(["display-message", "-p", "-t", listing[1], "#{window_zoomed_flag}"], "1")
                 # The tree dock also labels its auto preview MAIN; wait for the graph card.
-                enlarged = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "╭╌ ▸ MAIN ")
-                main_row, main_text = next((n + 1, line) for n, line in enumerate(enlarged.splitlines()) if "MAIN " in line)
+                enlarged = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "╭╌ ▸ " + identity)
+                main_row, main_text = next((n + 1, line) for n, line in enumerate(enlarged.splitlines()) if identity in line)
                 main_col = main_text.index("MAIN ") + 2
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "\033[<0;%s;%sM" % (main_col, main_row)], env=env, check=True)
                 tmux_wait(["display-message", "-p", "-t", listing[1], "#{window_zoomed_flag}"], "0")
@@ -6112,7 +6115,8 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                                                               "#{pane_width}"], env=env, text=True))
             assert board_width < 76, board_width
             board_picture = tmux_wait(["capture-pane", "-p", "-t", graph_pane], "MAIN ")
-            assert "Activity" in board_picture, board_picture
+            assert "Activity" in board_picture and "OMS · " in board_picture, board_picture
+            tmux_wait(["show-option", "-p", "-v", "-t", chat_pane, "@oms_panel_header"], "MAIN Sol 6.1")
             board_attempt = subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", top_window,
                                                             "@oms_panel_main_attempt"], env=env, text=True).strip()
             board_main = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
@@ -6173,7 +6177,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             assert int(subprocess.check_output(tmux + ["display-message", "-p", "-t", graph_pane,
                                                       "#{pane_width}"], env=env, text=True)) == board_width
             restored_picture = tmux_wait(["capture-pane", "-p", "-t", graph_pane], "MAIN ")
-            assert "Activity" in restored_picture, restored_picture
+            assert "Activity" in restored_picture and "OMS · " in restored_picture, restored_picture
             with patch.dict(os.environ, reopen_env, clear=True), patch.object(panel.sys.stdin, "isatty", return_value=True), \
                     patch.object(panel.sys.stdout, "isatty", return_value=True), \
                     patch.object(panel, "reopen_panel", wraps=panel.reopen_panel) as reopen_again:
@@ -11234,6 +11238,7 @@ for source_view, dimensions in ((room_view, ((80, 11), (80, 12), (60, 14), (100,
         assert any(item[0] == "chat" for item in nav["items"]), (columns, rows, nav, screen)
         assert any(item[0] == "result" for item in nav["items"]), (columns, rows, nav, screen)
         assert any(hit["action"][0] == "chat" for hit in nav["hits"]), (columns, rows, nav, screen)
+        assert any(hit["action"][0] == "result" for hit in nav["hits"]), (columns, rows, nav, screen)
         assert len(screen.splitlines()) <= rows and all(display_width(line) <= columns for line in screen.splitlines())
         if source_view is degraded:
             assert "State unavailable" in screen and "Room evidence unavailable" in screen
@@ -14657,7 +14662,7 @@ def exercise_exited_main_mail():
                 assert len(screen.splitlines()) <= height and all(display_width(line) <= columns for line in screen.splitlines())
                 board = render(report, "codex", columns, height, unicode=glyphs, view="tree", navigation={"tab": "messages"})
                 assert len(board.splitlines()) <= height and all(display_width(line) <= columns for line in board.splitlines())
-                assert ("Messages 4 unread" if columns >= 76 else "[ Msg 4 ]") in board, board
+                assert ("Messages 4" if columns >= 76 else "[Msg 4]") in board and "Messages: 4 unread" in board, board
                 assert "\x1b" not in screen + board and (glyphs or (screen + board).isascii())
         assert report == before, "display changed room evidence"
 

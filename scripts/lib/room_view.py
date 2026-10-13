@@ -1060,6 +1060,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         unlinked = [m for m in unlinked if classify(m) != "past" and (m["state"] in ATTENTION_STATES or classify(m) == "review")]
     all_calls += unlinked
     children = [c for c in everyone.get(primary["participant"], []) if classify(c) != "past"] if primary else []
+    hidden_calls = [c for c in everyone.get(primary["participant"], []) if not c.get("_native")] if primary else []
+    compact = height < 20 or mapping(report.get("collection")).get("ok") is not True or room.get("error")
+    folded_calls = hidden_calls if interactive and compact and not attention_only and not children else []
     children.sort(key=lambda m: (m["state"] not in LIVE_STATES, call_order(m)[1:]))
     judges = [c for c in children if role_style(c.get("role"), c.get("purpose")) == "judge"]
     workers = [c for c in children if c not in judges]
@@ -1124,7 +1127,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         dock_body = 0 if same_reader else 1
     dock_rows = dock_body + 2 if dock_body else 1
     main_rows = 5 if height >= 28 else 4 if height >= 20 else 3
-    minimum_tree = sum(min(2, len(group)) for group in (judges, workers))
+    minimum_tree = sum(min(2, len(group)) for group in (judges, workers)) or int(bool(folded_calls))
     goal_rows = goal_box(report, width, unicode)
     goal_cap = max(3, total_rows - len(lines) - min(dock_rows, 4) - main_rows - minimum_tree - 1)
     goal_overflow = len(goal_rows) > goal_cap
@@ -1214,11 +1217,13 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             token = role_style(member.get("role"), member.get("purpose"))
             connector = ("└╌ " if n == len(shown) - 1 and not hidden else "├╌ ") if unicode else ("`- " if n == len(shown) - 1 and not hidden else "+- ")
             mark = glyph("selected", unicode) + " " if action(member) == selected else "  "
-            tail = tagged(member) + "  " + (elapsed(member.get("joined_at")) or "unknown")
+            tag = tagged(member)
+            available = max(0, width - stem - display_width(connector + mark))
+            tail = clipped(tag + "  " + (elapsed(member.get("joined_at")) or "unknown"), max(0, available - 3))
             label = clipped(member_identity(member), max(1, width - stem - display_width(connector + mark + tail) - 2))
             gap = max(2, width - stem - display_width(connector + mark + label + tail))
             lines.append(" " * stem + styled(connector, token) + mark + styled(label, token, action(member) == selected) +
-                         " " * gap + styled(tagged(member), tone(member.get("state"))) + styled("  " + (elapsed(member.get("joined_at")) or "unknown"), "metadata"))
+                         " " * gap + styled(tail[:len(tag)], tone(member.get("state"))) + styled(tail[len(tag):], "metadata"))
             hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action(member), "preview": True, "tree": True})
             drawn.append(member)
             if expansion and member is selected_member:
@@ -1226,7 +1231,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 hits.pop()
                 card_lines(member, [tagged(member) + "  " + (elapsed(member.get("joined_at")) or "unknown"),
                                     "Task: " + clean(member.get("title"))], indent=4, tree_card=True)
-        if hidden:
+        if hidden and slots > 1:
             after = [m for m in group[start + visible:] if m in hidden]
             add(padded(" " * stem + ("└╌ " if unicode else "`- ") + glyph("ellipsis", unicode) + " %s more %s / scroll" % (
                 len(hidden), "judges" if name == "judges" else "workers"), width), "metadata")
@@ -1278,6 +1283,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         for text in card("Main", ["No main connected / n starts a main"], main_width, main_rows, unicode):
             add(" " * main_left + text, "metadata")
     tree(workers, "calls", allocation["calls"])
+    if folded_calls:
+        add(" " * stem + glyph("ellipsis", unicode) + " %s more calls / Enter Detail" % len(folded_calls), "metadata")
+        hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action(folded_calls[0]), "preview": True, "tree": True})
     warnings = []
     if unlinked:
         open_unlinked = [c for c in unlinked if classify(c) != "past"]

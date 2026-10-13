@@ -185,6 +185,26 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     if unlinked:
         add("Calls with no known main", "alert")
         call_groups(unlinked, "unlinked", "")
+    if interactive and height < 16 and not attention_only and calls and not any(
+            item[0] in {"result", "debate"} for item in items):
+        hidden = [c for c in calls if not c.get("_native")]
+        if hidden:
+            add("  " + glyph("ellipsis", unicode) + " %s more calls / Enter Detail" % len(hidden),
+                "dim", member_action(hidden[0]))
+    if height < 16:
+        # Compact boards spend their activity rows on identities, rather than group headings or expanded cards.
+        compact_rows, seen = [], set()
+        for row in rows:
+            target = row.get("action")
+            if target and target[0] in {"chat", "result", "debate"} and target not in seen:
+                compact_rows.append(row)
+                seen.add(target)
+        if compact_rows:
+            first_main_row = next((r for r in compact_rows if r["action"][0] == "chat"), None)
+            first_call_row = next((r for r in compact_rows if r["action"][0] in {"result", "debate"}), None)
+            leading = [r for r in compact_rows if r is first_main_row or r is first_call_row]
+            rows = leading + [r for r in compact_rows if r not in leading]
+            items = [r["action"] for r in rows]
     if not mains and not calls:
         add("No main connected" if room.get("id") else "Select a work room", "dim")
         if menu and not navigation["main_occupied"]:
@@ -270,9 +290,13 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         if len(labels) > maximum:
             labels = labels[:maximum - 1] + ["+%s models / expand for more" % (len(labels) - maximum + 1)]
         content = [("Model use, last 8 calls", "dim")] + [(line, None) for line in labels]
-        head.append({"text": box_edge("USAGE", width, unicode), "style": "dim"})
-        head += [{"text": box_row(line, width, unicode), "style": style} for line, style in content]
-        head.append({"text": box_edge("", width, unicode, "bottom"), "style": "dim"})
+        usage_boxed = width >= 76 and height >= 32
+        if usage_boxed:
+            head.append({"text": box_edge("USAGE", width, unicode), "style": "dim"})
+        head += [{"text": box_row(line, width, unicode) if usage_boxed else clipped(line, width),
+                  "style": style} for line, style in content]
+        if usage_boxed:
+            head.append({"text": box_edge("", width, unicode, "bottom"), "style": "dim"})
     # The viewport owns its borders, so scrolling never leaves an open card.
     if boxed and budget - len(head) < 3:
         head = head[:pinned]
@@ -282,7 +306,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     for i, row in enumerate(rows):
         if row.get("action") and row["action"][0] == "chat":
             main_rows.setdefault(row["action"], i)
-    activity_floor = (max(main_rows.values()) + 1 if main_rows else 1) + int(bool(tasks))
+    first_call = next((i + 1 for i, row in enumerate(rows) if row.get("action") and
+                       row["action"][0] in {"result", "debate"}), 0)
+    activity_floor = max(max(main_rows.values(), default=-1) + 1, first_call, 1) + int(bool(tasks))
     # A chosen preview or an open Past or Attention list is what the person asked to read, so the dock may push later mains down.
     reading = navigation.get("preview") or navigation.get("tab") == "past" and past or navigation.get("tab") == "needs" and ranked
     if reading or interactive and height >= 32:
@@ -324,7 +350,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     for index, row in enumerate(task_tail):
         if row.get("action"):
             positions.setdefault(row["action"], len(body) + index)
-    scroll_row = len(body) > body_budget and body_budget > 0
+    scroll_row = len(body) > body_budget and body_budget > body_floor
     if scroll_row and task_tail:
         # The task tail already marks the bottom of this viewport; keep the
         # last room row instead of spending another row on a scroll counter.
