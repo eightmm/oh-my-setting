@@ -1042,7 +1042,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     mains = [m for m in members if m.get("role") == "main"]
     selected = navigation.get("selected")
     owners = {key: m for m in mains for key in (m["participant"], m.get("attempt")) if key}
-    primary = owners.get(main_attempt) or next((m for m in mains if m["state"] in LIVE_STATES), next(iter(mains), None))
+    # A held current main (blocked, waiting, presence unknown) still leads any ended predecessor.
+    primary = owners.get(main_attempt) or next((m for m in mains if m["state"] in LIVE_STATES), next(
+        (m for m in mains if m["state"] not in TERMINAL_STATES), next(iter(mains), None)))
     picked = next((m for m in members if selected and selected[1] == m["participant"]), None)
     if picked:
         primary = picked if picked.get("role") == "main" else owners.get(picked.get("parent"), primary)
@@ -1091,6 +1093,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     crowded_board = width >= 110 and height >= 30 and len(workers) > 3
     worker_capacity = next((n for n in (5, 4, 3) if (width - n - 1) // n >= WORKER_CARD_MIN), 3) if crowded_board else 3
     unlinked = [m for m in members if m.get("role") != "main" and m.get("parent") not in owners]
+    # An ended main's unfinished calls are not on this board; they stay counted so t still reaches them.
+    stranded = [c for m in mains if m is not primary and m["state"] in TERMINAL_STATES for c in teams[m["participant"]]]
     if attention_only:
         unlinked = [m for m in unlinked if classify(m) != "past" and
                     (m["state"] in ATTENTION_STATES or classify(m) == "review")]
@@ -1352,7 +1356,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if height <= 20:
         target = min(height * 2 // 5, height - 17) if interactive else 0
     target = target if target >= 3 else int(interactive)
-    warn_possible = int(bool(unlinked) or len(children) > len(shown_judges) + len(shown_workers))
+    warn_possible = int(bool(unlinked or stranded) or len(children) > len(shown_judges) + len(shown_workers))
 
     def upper_fit(rows_left, stable):
         """(embedded branches, wire rows) when the upper region fits rows_left, else None."""
@@ -1586,6 +1590,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             row_hits.append(m)
     omitted = len(children) - len(shown_judges) - len(shown_workers) - len(row_hits)
     parts, open_unlinked = ["%s more calls (scroll)" % omitted] if omitted else [], []
+    if stranded:
+        parts.append("%s call%s of an ended main · t shows them" % (len(stranded), "" if len(stranded) == 1 else "s"))
     if omitted or unlinked:
         open_unlinked = [m for m in unlinked if classify(m) != "past"]
         if open_unlinked:
@@ -1600,12 +1606,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         for text in board_summary(report, [c for calls in everyone.values() for c in calls] + unlinked,
                                   classify, width, spare, unicode, ranked):
             add(text, "dim")
-    if omitted or unlinked:
+    if omitted or unlinked or stranded:
         if parts and len(lines) < total_rows - dock:
             # The warning sits on the row just above the box, so it holds still as the upper region changes.
             if height > 20 and height <= width:
                 lines.extend([""] * max(0, total_rows - dock - 1 - len(lines)) * bool(dock))
-            add(" / ".join(parts), "alert" if open_unlinked else "dim")
+            add(" / ".join(parts), "alert" if open_unlinked or stranded else "dim")
     # The box keeps the rows it was given whatever the upper region drew; only an overflowing region shrinks it.
     rows_high = (max(0, total_rows - len(lines)) if height <= 20 or height > width else
                  min(dock, max(0, total_rows - len(lines)))) if dock else 0
@@ -1710,7 +1716,8 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     labels = main_names(members) if labels is None else labels
     mains = [m for m in members if m.get("role") == "main"]
     if primary is None:
-        primary = next((m for m in mains if main_attempt in (m["participant"], m.get("attempt"))), next(iter(mains), None))
+        primary = next((m for m in mains if main_attempt and main_attempt in (m["participant"], m.get("attempt"))),
+                       next(iter(mains), None))
     if everyone is None:
         everyone = {m["participant"]: [c for c in members if c.get("role") != "main" and
                     c.get("parent") in (m["participant"], m.get("attempt"))] for m in mains}

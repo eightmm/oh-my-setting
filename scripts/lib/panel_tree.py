@@ -2,7 +2,7 @@
 
 from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import usage_line
-from panel_view import (ATTENTION_STATES, PALETTE, activity, box_edge, box_row, clipped,
+from panel_view import (ATTENTION_STATES, LIVE_STATES, PALETTE, activity, box_edge, box_row, clipped,
                         main_occupied, menu_rows, status_alerts, TERMINAL_STATES, tone, usage_words, worker_rows, wrapped)
 from room_view import (action as member_action, call_order, past_calls, context_note, open_count, footer_hints, live_unread,
                        goal_banner, main_names, model_name, native_advisors, nodes, plan_idle, readable, said,
@@ -35,10 +35,17 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     expanded = navigation.get("expanded_groups", set())
     current = next((m["participant"] for m in members if main_attempt and
                     (m["participant"] == main_attempt or m.get("attempt") == main_attempt)), None)
-    # This window's main leads so its team stays on screen; earlier mains of the room follow.
-    mains = sorted([m for m in members if m.get("role") == "main"], key=lambda m: m["participant"] != current)
+    # One main owns the root. Earlier mains remain in room history and lineage.
+    all_mains = [m for m in members if m.get("role") == "main"]
+    live_mains = [m for m in all_mains if m["state"] not in TERMINAL_STATES]
+    # Without this window's own main, a main with live attempt evidence leads one held or of unknown presence;
+    # once every main has ended, the window's own or the first one keeps the root, as on the board.
+    live_main = next((m for m in live_mains if m["participant"] == current), None) or next(
+        (m for m in live_mains if m["state"] in LIVE_STATES), next(iter(live_mains), None)) or next(
+        (m for m in all_mains if m["participant"] == current), next(iter(all_mains), None))
+    mains = [live_main] if live_main else []
     calls = [m for m in members if m.get("role") != "main"] + native_advisors(report, members)
-    owners = {ident: m for m in mains for ident in (m["participant"], m.get("attempt")) if ident}
+    owners = {ident: m for m in all_mains for ident in (m["participant"], m.get("attempt")) if ident}
     for row in worker_rows(report):
         if row["source"] == "council" and row["parent"] in owners:
             owner = owners[row["parent"]]
@@ -115,8 +122,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 for line in wrapped(label, max(1, content_width - display_width(indent) - 3), 2):
                     add(indent + "   " + line, None, child_action)
 
-    roots = set(owners)
-    for n, main in enumerate(mains):
+    roots = {ident for m in mains for ident in (m["participant"], m.get("attempt")) if ident}
+    for main in mains:
         root_stem = "  "
         attached = [m for m in calls if m.get("parent") and
                     m["parent"] in {main["participant"], main.get("attempt")}]
@@ -283,22 +290,6 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 body[first + 1:first + 1 + old_count] = [{"text": prefix_text + text, "style": None,
                     "action": target} for text in title_rows]
     unique = list(dict.fromkeys([row["action"] for row in head if row.get("action") and row["action"][0] != "tab"] + items))
-    if len(body) > room_budget > 0 and not navigation.get("_auto_fold"):
-        # Too short for everything: earlier mains other than the selected one drop to their status line, kept only if that puts every main on screen and leaves a call to select.
-        keep = {current} | {m["participant"] for m in mains if selected and (
-            selected == ("chat", m["participant"]) or any(
-                member_action(c) == selected for c in calls
-                if c.get("parent") in {m["participant"], m.get("attempt")}))}
-        keep = keep if keep - {None} else {m["participant"] for m in mains[:1]}
-        extra = {m["participant"] for m in mains} - keep
-        inner = dict(navigation, collapsed=collapsed | extra, _auto_fold=True, _attention=ranked)
-        text = render_tree(report, width, height, color, unicode, frame, menu, attention_only,
-                           main_attempt, inner, summary, managed, previous=previous)
-        reachable = any(i[0] == "result" for i in inner["items"]) or not any(i[0] == "result" for i in items)
-        if reachable and all(inner["positions"].get(("chat", m["participant"]), 0) < inner["viewport"] for m in mains):
-            navigation.update({k: v for k, v in inner.items() if k not in ("collapsed", "_auto_fold")})
-            navigation["items"] = list(dict.fromkeys(unique + navigation["items"]))
-            return text
     # Keep the repository task tail reachable while the longer room tree scrolls.
     task_rows = body[task_start:]
     first_call = next((i + 1 for i, row in enumerate(body) if row.get("action") and
@@ -387,7 +378,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     dock_top = len(output)
     everyone = {m["participant"]: [c for c in calls if c.get("parent") in
                 {m["participant"], m.get("attempt")}] for m in mains}
-    dock_lines, dock_hits = tab_box(report, width, dock_rows, navigation, color, unicode,
+    dock_lines, dock_hits = tab_box(report, width, dock_rows, navigation, color, unicode, primary=live_main,
                                     main_attempt=main_attempt, everyone=everyone, past=past, attention=ranked)
     if dock_rows == 1:
         dock_lines = [line.replace("╭", "[").replace("╮", "]") for line in dock_lines]

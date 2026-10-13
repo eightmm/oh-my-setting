@@ -207,7 +207,7 @@ def worker_rows(report):
 
 
 def hierarchy(report, rows, main_attempt=None, include_empty=True):
-    """Parent IDs establish ownership; legacy calls retain an unlinked root."""
+    """Show the live main's calls; historical owners remain in lineage and Past."""
     attempts = mapping(report.get("attempts"))
     mains = {a.get("attempt_id"): a for a in listing(attempts.get("recent")) +
              listing(attempts.get("active_recent")) if a.get("attempt_id")
@@ -215,13 +215,21 @@ def hierarchy(report, rows, main_attempt=None, include_empty=True):
     from room_view import nodes
     projected = {m["attempt"]: m for m in nodes(report)
                  if m.get("role") == "main" and m.get("attempt")}
+    live = [ident for ident, attempt in mains.items()
+            if attempt.get("state") and attempt["state"] not in TERMINAL_STATES]
+    current = main_attempt if main_attempt in mains else next(iter(live), None)
+
+    def owner(row):
+        # Calls of any other recorded main surface as unlinked so none is hidden.
+        parent = row.get("parent")
+        return None if parent in mains and parent != current else parent
+
     roots = []
-    parents = list(dict.fromkeys(r.get("parent") for r in rows))
-    if include_empty:
-        parents += [ident for ident, a in mains.items() if ident not in parents
-                    and a.get("state") and a["state"] not in TERMINAL_STATES]
+    parents = list(dict.fromkeys(owner(r) for r in rows))
+    if include_empty and current and current not in parents:
+        parents.append(current)
     for ident in parents:
-        children = [r for r in rows if r.get("parent") == ident]
+        children = [r for r in rows if owner(r) == ident]
         main = mains.get(ident, {})
         metadata = mapping(main.get("panel"))
         model = projected[ident].get("model") if ident in projected else metadata.get("model")

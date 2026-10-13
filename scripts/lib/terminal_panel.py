@@ -3080,10 +3080,13 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=
     if owner not in PROVIDERS:
         raise ValueError("choose a supported council owner")
     argv = council_command(repo, prompt, task_id, label, thread, rounds)
-    primary_calls = 4 * (rounds + 1)
+    # Advertise the seats actually launched: route tiers may hold fewer or more than two entries.
+    seats = argv[argv.index("--providers") + 1].split(",")
+    families = len({seat.split(":", 1)[0] for seat in seats})
+    primary_calls = len(seats) * (rounds + 1)
     if dry_run:
         print(json.dumps({"schema": 1, "kind": "oms-panel-council-plan", "argv": argv,
-                          "seats": 4, "families": 2, "primary_calls": primary_calls,
+                          "seats": len(seats), "families": families, "primary_calls": primary_calls,
                           "max_format_repairs": primary_calls, "max_calls": primary_calls * 2,
                           "executes": False}))
         return 0
@@ -3109,8 +3112,8 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=1, dry_run=
     env.update(OMS_TASK_ID=task_id, OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE="advisor",
                OMS_PANEL_PURPOSE="advise", OMS_PANEL_WORKLOAD="main",
                OMS_PANEL_LABEL=safe_label(label))
-    print("council: 4 seats / 2 families / %s primary calls + up to %s format repairs" %
-          (primary_calls, primary_calls), flush=True)
+    print("council: %s seats / %s families / %s primary calls + up to %s format repairs" %
+          (len(seats), families, primary_calls, primary_calls), flush=True)
     refs = ["start", "--provider", owner, "--tool", "panel-council", "--task-id", task_id,
             "--ref", "panel_role=advisor", "--ref", "panel_owner=" + owner,
             "--ref", "panel_label=" + safe_label(label), "--ref", "panel_purpose=advise",

@@ -2211,7 +2211,8 @@ swapped_tree["attempts"]["active_recent"].append(
 swapped_row = next(r for r in worker_rows(swapped_tree) if r["work"] == "Swapped worker")
 assert swapped_row["provider"] == "claude" and "fallback: provider-capacity" in swapped_row["model"], swapped_row
 forest = hierarchy(tree, worker_rows(tree))
-assert {r["title"] for r in forest} == {"MAIN / Sol 6", "MAIN / Opus 5.5", "No known main"}, forest
+assert {r["title"] for r in forest} == {"MAIN / Sol 6", "No known main"}, forest
+assert "Opus child blocked" in {r["work"] for g in next(r for r in forest if r["title"] == "No known main")["groups"] for r in g[1]}, forest
 full_tree = render(tree, "codex", 100, 60, view="detail")
 assert full_tree.index("MAIN / Sol 6 /") < full_tree.index("ADVISORS (1)") < full_tree.index("Architecture advice"), full_tree
 assert "REVIEWERS (1)" in full_tree and "Opus child blocked" in full_tree and "No known main" in full_tree
@@ -2846,7 +2847,7 @@ control_graph = render_graph(msg_report, 80, 39, menu=True, previous=last_error)
 board_graph = render_graph(msg_report, 80, 39, menu=False, previous=last_error)
 assert "Last: " + last_error in control_graph and "Last: " + last_error not in board_graph, control_graph
 assert len(control_graph.splitlines()) <= 38, control_graph
-# Overflow re-renders the tree with auto-fold enabled, even for a single main's long team.
+# A single main's long team stays fully reachable when it overflows.
 last_team = deepcopy(msg_report)
 last_team["room"]["participants"] = [msg_members[0]] + [
     {"participant": "last-worker-%d" % n, "role": "worker", "joined": True, "provider": "codex",
@@ -2860,9 +2861,9 @@ from panel_view import clipped
 from dashboard_projection import use_unicode
 for glyphs in (True, False):
     use_unicode(glyphs)
-    with patch("panel_tree.render_tree", wraps=render_tree) as folded:
-        folded_last = render_tree(last_team, 42, 24, menu=True, previous=last_error, unicode=glyphs)
-    assert folded.called, "fixture must exercise the auto-fold re-render"
+    folded_nav = {}
+    folded_last = render_tree(last_team, 42, 24, menu=True, previous=last_error, unicode=glyphs, navigation=folded_nav)
+    assert all(("result", "last-worker-%d" % n) in folded_nav["items"] for n in range(6)), folded_nav
     assert "Last: " + last_error in folded_last and len(folded_last.splitlines()) <= 23, folded_last
     assert glyphs or folded_last.isascii(), folded_last
 # Ordinary errors use one clipped row; only multiline messages and recovery commands wrap.
@@ -2917,7 +2918,7 @@ use_unicode(True)
 assert tab_event(("tab",), tree_nav) and not tab_event(("tab",), dict(tree_nav, surface="graph", detail={"target": ("chat", "m2")}))
 helped = render_tree(msg_report, 110, 40, navigation=dict(tree_nav, keys_help=True))
 assert "Tab Next tab" in helped and "Tab badges" not in helped and "n New main" not in render_tree(msg_report, 110, 40, navigation={"keys_help": True}), helped
-# On a short tree every recorded main stays on screen: earlier mains other than the selected one drop to their status line, which carries ? and context badges.
+# A crowded short tree exposes one live main root and keeps every call, including an earlier main's, reachable.
 short_tree = deepcopy(msg_report)
 short_tree["room"]["open_questions"] = [{"id": "q1", "sender": "m1", "recipient": "m3", "ts": "2026-10-07T10:00:00Z"}]
 short_tree["room"]["participants"] = msg_members + [
@@ -2926,17 +2927,15 @@ short_tree["room"]["participants"] = msg_members + [
 short_tree["attempts"]["active_recent"] += [
     {"attempt_id": "w%d" % n, "state": "working", "panel": {
         "room_id": "r", "room_participant": "w%d" % n, "role": "worker"}} for n in range(6)]
-every_main = {("chat", m) for m in ("m1", "m2", "m3")}
+one_live_root = {("chat", "m3")}
 for ascii_only in (False, True):
     short_nav = {"selected": ("chat", "m1")}
     short_text = render_tree(short_tree, 90, 18, navigation=short_nav, unicode=not ascii_only)
     assert "? 1 open" in short_text and (not ascii_only or short_text.isascii()), short_text
-    assert every_main <= {h["action"] for h in short_nav["hits"]}, short_text
-    assert all(short_nav["positions"][main] < short_nav["viewport"] for main in every_main), short_nav
-    plain_nav = {"selected": ("chat", "m1"), "_auto_fold": True}
-    render_tree(short_tree, 90, 18, navigation=plain_nav, unicode=not ascii_only)
-    assert any(plain_nav["positions"][main] >= plain_nav["viewport"] for main in every_main), \
-        "the fold is what brings every main on screen"
+    assert one_live_root == {item for item in short_nav["items"] if item[0] == "chat"}, short_nav
+    assert one_live_root <= {h["action"] for h in short_nav["hits"]}, short_text
+    assert all(short_nav["positions"][main] < short_nav["viewport"] for main in one_live_root), short_nav
+    assert all(("result", "w%d" % n) in short_nav["items"] for n in range(6)), short_nav
 # Detail keeps its content after Esc dismissed the preview: the box stays so every tab remains reachable.
 nav, dismissed = board("plan", 110, 40, nav={"dismissed": True, "tab": "plan"})
 assert "t-ver" in dismissed and "[ Plan ]" in dismissed and "RECENT MESSAGES" not in dismissed, dismissed
@@ -2964,11 +2963,12 @@ def crowd(report, advisors, workers, label=None, parent="a2", prefix="x"):
 
 # Many workers: roomy boards fit 4-5 readable cards per row and list the rest as selectable one-line rows,
 # running calls first; smaller boards keep the three-card band.
+import time as crowd_clock
 for crowd_size in (8, 12):
     worker_crowd = crowd(msg_report, 0, crowd_size, parent="a2", prefix="priority")
     for member in worker_crowd["room"]["participants"]:
         if member["role"] == "worker":
-            member["joined_at"] = "2026-10-13T10:00:00Z"
+            member["joined_at"] = crowd_clock.strftime("%Y-%m-%dT%H:%M:%SZ", crowd_clock.gmtime())
     for attempt in worker_crowd["attempts"]["active_recent"]:
         if attempt["attempt_id"] in ("priority-worker-0", "priority-worker-1", "priority-worker-2"):
             attempt["state"] = "failed"
@@ -3091,7 +3091,7 @@ assert not [i for i in question_view.inbox_items(asked_report) if i["glyph"] == 
 empty_calls = deepcopy(tree)
 empty_calls["attempts"]["active_recent"] = empty_calls["attempts"]["active_recent"][:2]
 idle_mains = render(empty_calls, "codex", 100, 40)
-assert "MAIN / Sol 6 / working" in idle_mains and "MAIN / Opus 5.5 / working" in idle_mains
+assert "MAIN / Sol 6 / working" in idle_mains and "MAIN / Opus 5.5 / working" not in idle_mains
 assert "No active child calls" in idle_mains
 own_tree = render(tree, "codex", 100, 60, main_attempt="att_main", view="detail")
 assert "Sol main task" in own_tree and "Opus child blocked" not in own_tree and "legacy-unlinked" not in own_tree
@@ -3111,8 +3111,8 @@ assert "2 advisor" not in short_tree
 changed_tree = deepcopy(tree)
 changed_tree["attempts"]["active_recent"][4]["state"] = "blocked"
 changed_text = render(changed_tree, "codex", 100, 60, view="detail")
-assert full_tree.index("MAIN / Sol 6 /") < full_tree.index("MAIN / Opus") < full_tree.index("No known main")
-assert changed_text.index("MAIN / Sol 6 /") < changed_text.index("MAIN / Opus") < changed_text.index("No known main")
+assert full_tree.index("MAIN / Sol 6 /") < full_tree.index("No known main")
+assert changed_text.index("MAIN / Sol 6 /") < changed_text.index("No known main")
 missing_model = deepcopy(tree)
 missing_model["attempts"]["active_recent"][0]["panel"].pop("model")
 missing_text = render(missing_model, "codex", 42, 34, main_attempt="att_main")
@@ -4531,7 +4531,17 @@ for rounds in (1, 2):
     assert planned["families"] == 2 and planned["executes"] is False
     assert planned["argv"][planned["argv"].index("--providers") + 1] == \
         "codex:model=gpt-6.1-sol,claude:model=claude-opus-5-5,claude:model=claude-fable-5-1,codex:model=gpt-6-astra"
+    assert len(planned["argv"][planned["argv"].index("--providers") + 1].split(",")) == 4 == planned["seats"]
 assert (project / ".oms/artifacts/index.jsonl").read_bytes() == before_index
+# A one-route tier launches three seats, and the plan advertises three.
+import io
+one_route = deepcopy(panel.policy())
+one_route["tiers"]["frontier"] = one_route["tiers"]["frontier"][:1]
+with patch.object(panel, "policy", return_value=one_route), patch("sys.stdout", new=io.StringIO()) as plan_text:
+    panel.council(project, "codex", "council-one-route", "One route", "Compare options.", dry_run=True)
+one_plan = json.loads(plan_text.getvalue())
+assert one_plan["seats"] == 3 == len(one_plan["argv"][one_plan["argv"].index("--providers") + 1].split(","))
+assert one_plan["primary_calls"] == 6 and one_plan["max_calls"] == 12 and one_plan["families"] == 2, one_plan
 call(council_args, dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]))
 council_attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"]))
 council_attempts = [a for a in council_attempts if a.get("task_id") == "panel-council-test"]
@@ -10864,7 +10874,7 @@ for columns, rows in ((100, 44), (76, 36), (60, 36), (36, 28), (2, 8)):
         assert "\033" not in drawn
         if ascii_only:
             assert "╭" not in drawn and "─" not in drawn
-# The tree exposes every joined main, maps cells from the drawn frame, and
+# The tree roots one live main, maps cells from the drawn frame, and
 # never manufactures a parent or changes room data while folding/scrolling.
 from panel_input import TerminalInput, choose
 from panel_metrics import cached, collect, pane_reading, percent, usage_line
@@ -10925,6 +10935,33 @@ for glyphs in (False, True):
     predecessor_cards = render(successor_flow, "codex", 127, 40, view="graph", unicode=glyphs,
                                navigation={"dismissed": True, "selected": ("result", "foreign-child")})
     assert "running %s for Opus 5.5" % ("·" if glyphs else "/") in predecessor_cards, predecessor_cards
+# A sole main stays the primary in every non-terminal state, so its running worker stays a target.
+for main_state in ("blocked", "waiting_input", "presence unknown"):
+    held = deepcopy(single_flow)
+    held["attempts"]["active_recent"] = [a for a in held["attempts"]["active_recent"] if a["attempt_id"] != "flow-attempt"]
+    if main_state == "presence unknown":
+        for member in held["room"]["participants"]:
+            member["parent"] = "flow-main" if member.get("parent") == "flow-attempt" else member.get("parent")
+    else:
+        held["attempts"]["active_recent"].append({"attempt_id": "flow-attempt", "state": main_state,
+            "panel": {"room_id": "flow-room", "room_participant": "flow-main", "role": "main"}})
+    # A failed predecessor ordered first never takes the lead from the held current main.
+    preceded = deepcopy(held)
+    preceded["room"]["participants"].insert(0, deepcopy(next(m for m in flow_members if m["participant"] == "flow-other")))
+    next(a for a in preceded["attempts"]["active_recent"] if a["attempt_id"] == "flow-other")["state"] = "failed"
+    for report, view, columns, rows in [(r, ) + size for r in (held, preceded) for size in (("graph", 127, 40), ("tree", 42, 24))]:
+        held_nav = {"dismissed": True}
+        render(report, "codex", columns, rows, view=view, navigation=held_nav)
+        assert {("chat", "flow-main"), ("result", "builder")} <= set(held_nav["items"]), (main_state, view, held_nav)
+# An ended main's unfinished calls stay visible beside the live main and selectable in the tree.
+gone_flow = deepcopy(successor_flow)
+gone_flow["room"]["participants"] = [m for m in gone_flow["room"]["participants"] if m["participant"] != "unlinked-child"]
+gone_board = render(gone_flow, "codex", 157, 50, view="graph", navigation={"dismissed": True})
+assert "1 call of an ended main" in gone_board, gone_board
+for columns, rows in ((42, 24), (157, 50)):
+    gone_nav = {"dismissed": True}
+    render(gone_flow, "codex", columns, rows, view="tree", navigation=gone_nav)
+    assert ("result", "foreign-child") in gone_nav["items"] and ("chat", "flow-other") not in gone_nav["items"], gone_nav
 # A predecessor with no attempt evidence is not shown live either, so the live main's calls still drop "for <main>".
 unproven_flow = deepcopy(flow)
 unproven_flow["attempts"]["active_recent"] = [a for a in flow["attempts"]["active_recent"] if a["attempt_id"] != "flow-other"]
@@ -11022,17 +11059,21 @@ for columns, rows in ((110, 44), (100, 24), (76, 18), (76, 21)):
                 if not glyphs:
                     assert "╭" not in picture and "─" not in picture
 assert render(flow, "codex", 100, 24, view="graph", frame=0) != render(flow, "codex", 100, 24, view="graph", frame=1)
-# The tree keeps this window's main first; earlier mains of the room follow.
-tree = render(flow, "codex", 110, 40, view="tree", main_attempt="flow-attempt")
-assert tree.index("Main native chat") < tree.index("Other native chat"), tree
+# The tree roots only this window's main; another main's call stays selectable without a root of its own.
+own_root_nav = {"dismissed": True}
+tree = render(flow, "codex", 110, 40, view="tree", main_attempt="flow-attempt", navigation=own_root_nav)
+assert "Main native chat" in tree and "Other native chat" not in tree, tree
+assert {item for item in own_root_nav["items"] if item[0] == "chat"} == {("chat", "flow-main")}, own_root_nav
+assert ("result", "foreign-child") in own_root_nav["items"], own_root_nav
 # A main on an earlier main's model is told apart by its id tail; the first listed (live, then newest) keeps the name.
 twin = deepcopy(flow)
 twin["room"]["participants"].append({"participant": "twin-main-9f3c", "role": "main", "joined": True, "provider": "claude",
                                      "model": "claude-opus-5-5", "label": "Twin native chat"})
 twin["attempts"]["active_recent"].append({"attempt_id": "twin-main-9f3c", "state": "working", "panel": {
     "room_id": "flow-room", "room_participant": "twin-main-9f3c", "role": "main"}})
-twin_tree = render(twin, "codex", 157, 40, view="tree")
-assert "Opus 5.5 #9f3c" in twin_tree and "Opus 5.5 #ther" not in twin_tree, twin_tree
+from room_view import main_names, nodes
+twin_names = main_names(nodes(twin))
+assert twin_names["twin-main-9f3c"] == "Opus 5.5 #9f3c" and twin_names["flow-other"] == "Opus 5.5", twin_names
 twin_detail = render(twin, "codex", 157, 40, view="graph", navigation={"selected": ("result", "foreign-child"),
     "preview": {"target": ("result", "foreign-child"), "report": {}}})
 assert "for Opus 5.5 main" in twin_detail, twin_detail
@@ -13165,9 +13206,11 @@ navigation = {}
 connected = render(tree_room, "codex", 91, 99, view="tree", navigation=navigation)
 usage_row = connected.splitlines()[1]
 assert "Claude" in usage_row and "Codex" in usage_row and connected.count("Codex --") + connected.count("Codex week") == 1, connected
-assert "Third main" in connected and "연결 근거 없는 작업" in connected and "Calls with no known main" in connected
+assert "Third main" not in connected and "연결 근거 없는 작업" in connected and "Calls with no known main" in connected, connected
 assert "No joined worker" not in connected and "participants outside graph" not in connected
-assert len([i for i in navigation["items"] if i[0] == "chat"]) == 4, navigation
+# One root: a main with live attempt evidence, never the joined main that has none.
+tree_roots = [i for i in navigation["items"] if i[0] == "chat"]
+assert len(tree_roots) == 1 and tree_roots != [("chat", "extra-main")], navigation
 target = next(hit for hit in navigation["hits"] if hit["action"][0] == "result")
 assert choose(("click", 8, target["y"]), navigation) == target["action"]
 assert choose(("click", 92, target["y"]), navigation) is None
@@ -13212,7 +13255,7 @@ for key in ("home", "end"):
     choose((key,), traversal)
     traversed = render(flow, "codex", 42, 24, view="tree", navigation=traversal)
     assert any(hit["action"] == traversal["selected"] for hit in traversal["hits"]), (key, traversal, traversed)
-wheel_tree = {"_auto_fold": True}
+wheel_tree = {}
 render(flow, "codex", 42, 24, view="tree", navigation=wheel_tree)
 choose(("home",), wheel_tree)
 render(flow, "codex", 42, 24, view="tree", navigation=wheel_tree)
@@ -14063,6 +14106,10 @@ summary_room["attempts"]["recent"].append({"attempt_id": "summary-exited-main", 
 for attempt in summary_room["attempts"]["active_recent"] + summary_room["attempts"]["recent"]:
     if attempt.get("panel", {}).get("role") == "main":
         attempt["state"] = "done"
+# The room's other joined mains have no attempt record; they ended too, so no main is live.
+summary_room["attempts"]["recent"] += [{"attempt_id": "summary-ended-" + m["participant"], "state": "done",
+    "panel": {"role": "main", "room_id": shared, "room_participant": m["participant"]}}
+    for m in nodes(summary_room) if m.get("role") == "main" and not m.get("attempt")]
 for columns, rows in ((32, 28), (80, 24), (2, 8)):
     nav = {}
     compact_panel = render(summary_room, "codex", columns, rows, view="summary", navigation=nav)
