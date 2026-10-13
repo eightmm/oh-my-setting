@@ -3,7 +3,9 @@
 from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import usage_line
 from panel_view import (ATTENTION_STATES, LIVE_STATES, PALETTE, activity, box_edge, box_row, clipped,
-                        main_occupied, menu_rows, status_alerts, TERMINAL_STATES, tone, usage_words, worker_rows, wrapped)
+                        main_occupied, menu_rows, status_alerts, TERMINAL_STATES, tone, usage_words, worker_rows, wrapped,
+                        role_style, call_identity, status_tag, glyph, paint, color_count, light_theme, age_label,
+                        JUDGE_ROLES, WORKER_ROLES, paint_card_edges)
 from room_view import (action as member_action, call_order, past_calls, context_note, open_count, footer_hints, live_unread,
                        goal_banner, main_names, model_name, native_advisors, nodes, plan_idle, readable, said,
                        settler, spawn_bar, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
@@ -14,6 +16,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 previous=None):
     from panel_view import use_unicode
     use_unicode(unicode)
+    color = bool(paint("x", "text", color=color) != "x")
     interactive = navigation is not None
     navigation = navigation if interactive else {}
     navigation.update(tab_strip_visible=False, tab_body_visible=False, help_rows=max(4, height // 3))
@@ -52,12 +55,22 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             calls.append({"participant": row["task"], "role": "council", "parent": row["parent"],
                           "state": row["state"], "title": row["work"], "model": row["name"],
                           "_action": ("debate", (row["task"], owner["participant"]))})
-    calls.sort(key=call_order)
+    attempts = listing(mapping(report.get("attempts")).get("active_recent")) + listing(mapping(report.get("attempts")).get("recent"))
+
+    def purpose(call):
+        meta = next((mapping(a.get("panel")) for a in attempts if a.get("attempt_id") == call.get("attempt")
+                     and a.get("attempt_id")), {})
+        return meta.get("purpose") or call.get("purpose")
+
+    def visual_role(call):
+        return purpose(call) if purpose(call) in JUDGE_ROLES | WORKER_ROLES else call.get("role")
+
+    calls.sort(key=lambda call: call["state"] not in LIVE_STATES)
     if attention_only:
         calls = [m for m in calls if classify(m) != "past" and
                  (m["state"] in ATTENTION_STATES or classify(m) == "review")]
     past = past_calls(calls, classify)
-    prefix, end, stem = ("├─ ", "└─ ", "│  ") if unicode else ("|- ", "`- ", "|  ")
+    prefix, end, stem = ("├╌╌ ", "└╌╌ ", "│   ") if unicode else ("+-  ", "`-  ", "|   ")
     rows, items = [], []
     boxed = width >= 28 and height >= 16
     content_width = width - 4 if boxed else width
@@ -68,17 +81,67 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         if action:
             items.append(action)
 
-    def phrase(call):
-        from room_view import LIVE_STATES, elapsed, end_words
-        if call.get("_native"):
-            return "answered" if call.get("_finished") else "running"
-        words = end_words(call, said(call["state"]))
-        return " ".join(part for part in (words, elapsed(call.get("joined_at")) if call["state"] in LIVE_STATES else "") if part)
+    def call_row(call, connector="", action=None, fold=False, extra=""):
+        state = main_state(call) if call.get("role") == "main" else call["state"]
+        tag = status_tag(state, exit_code=call.get("exit"), unicode=unicode)
+        age = age_label(call.get("joined_at")) or "unknown"
+        tail = tag + "  " + age
+        label = call.get("title") or (None if call.get("role") == "main" else call["participant"])
+        identity = call_identity(visual_role(call), call.get("model"), label)
+        if extra:
+            identity += sep + extra
+        if call.get("role") == "main":
+            opened = open_count(room, call["participant"])
+            if opened:
+                identity += sep + "? %s open" % opened
+            context = context_note(report, call)
+            if context:
+                identity += sep + "ctx %s%% used" % context[0]
+        available = max(0, content_width - 2 - display_width(connector))
+        # Fit identity and state separately, before any ANSI spans or hit geometry.
+        tail = clipped(tail, max(0, available - 4))
+        room_for_identity = max(0, available - display_width(tail) - 2)
+        identity = clipped(identity, room_for_identity)
+        gutter = glyph("selected", unicode) + " " if action and selected == action else "  "
+        padding = " " * max(2, available - display_width(identity) - display_width(tail))
+        text = gutter + connector + identity + padding + tail
+        style = role_style(call.get("role"), purpose(call))
+        add(text, None, action, fold)
+        rows[-1]["spans"] = [(gutter, "text"), (connector, style), (identity, style),
+                             (padding, "text"), (tag if tail.startswith(tag) else tail, tone(state)),
+                             (tail[len(tag):] if tail.startswith(tag) else "", "metadata")]
+        rows[-1]["identity"] = action == selected
+        if call.get("role") == "main" and action != selected:
+            for note in declared_status(room, call["participant"], max(1, content_width - 6))[:1]:
+                add("    " + note, "dim")
+        if action and action == selected:
+            lead = "" if content_width < 60 else "  " + " " * display_width(connector)
+            card_width = max(4, content_width - display_width(lead))
+            rows.pop()
+            add(lead + box_edge(call_identity(visual_role(call), call.get("model")), card_width, unicode, dashed=True), style, action, fold)
+            add(lead + box_row(tag + "  " + age, card_width, unicode, dashed=True), None, action)
+            rows[-1]["tag_span"] = (tag, tone(state))
+            rows[-1]["card_role"] = style
+            for line in wrapped(label or "No task recorded", max(1, card_width - 4), 2):
+                add(lead + box_row(line, card_width, unicode, dashed=True), None, action)
+                rows[-1]["card_role"] = style
+            notes = declared_status(room, call["participant"], max(1, card_width - 4)) if call.get("role") == "main" else []
+            context = context_note(report, call) if call.get("role") == "main" else None
+            if context:
+                notes.append("ctx %s%% used" % context[0])
+            if extra:
+                notes.append(extra)
+            if call.get("_native"):
+                notes.append("answer stays in the main transcript")
+            for note in notes:
+                add(lead + box_row(note, card_width, unicode, dashed=True), None, action)
+                rows[-1]["card_role"] = style
+            add(lead + box_edge("", card_width, unicode, "bottom", dashed=True), style, action)
 
     def call_groups(attached, owner, root_stem):
-        from room_view import clock_stamp
-        groups = [(role, [m for m in attached if m.get("role") == role and classify(m) == "live"])
-                  for role in ("council", "advisor", "reviewer", "researcher", "worker")]
+        roles = list(dict.fromkeys(visual_role(m) for m in attached))
+        groups = [(role, [m for m in attached if visual_role(m) == role and classify(m) == "live"])
+                  for role in roles]
         groups += [(kind, [m for m in attached if classify(m) == kind]) for kind, _ in CALL_GROUPS]
         groups = [(role, children) for role, children in groups if children]
         for group_index, (role, children) in enumerate(groups):
@@ -93,34 +156,15 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 if group_key not in expanded:
                     continue
             else:
-                add(root_stem + (end if last_group else prefix) + heading + " (%s)" % len(children),
-                    "worker" if role in {"worker", "researcher"} else "review")
-            indent = root_stem + ("   " if last_group else stem)
+                add(root_stem + (end if last_group else prefix) + heading + " (%s)" % len(children), role_style(role))
+            indent = root_stem
             for child_index, child in enumerate(children):
                 branch = end if child_index == len(children) - 1 else prefix
-                model = model_name(child)
-                if child.get("role") == "researcher":
-                    model = "Researcher " + model
-                label = child.get("title") or child["participant"]
                 child_action = child.get("_action") or ("result", child["participant"])
                 if child.get("_native"):
                     child_action = None
-                    label += sep + "answer stays in the main transcript"
-                clock = " → ".join(filter(None, (clock_stamp(child.get("joined_at")), clock_stamp(child.get("ended"))))) if unicode else \
-                    " -> ".join(filter(None, (clock_stamp(child.get("joined_at")), clock_stamp(child.get("ended")))))
-                if child.get("_native"):
-                    clock = child.get("_finished") or child["_native"]
-                lead = indent + branch + activity(child["state"], frame, unicode) + " " + phrase(child)
-                text = lead + sep + model
-                if display_width(text + sep + clock) <= content_width and clock:
-                    text += sep + clock
-                if display_width(text) > content_width:
-                    text = lead + sep + clipped(model, max(0, content_width - display_width(lead + sep)))
-                add(text, tone(child["state"]), child_action)
-                if child["state"] == "done" and child.get("participant") in listing(report.get("awaiting_admission")):
-                    add(indent + "   patch awaits admission", "alert", child_action)
-                for line in wrapped(label, max(1, content_width - display_width(indent) - 3), 2):
-                    add(indent + "   " + line, None, child_action)
+                call_row(child, indent + branch, child_action,
+                         extra="patch awaits admission" if child["state"] == "done" and child.get("participant") in listing(report.get("awaiting_admission")) else "")
 
     roots = {ident for m in mains for ident in (m["participant"], m.get("attempt")) if ident}
     for main in mains:
@@ -129,34 +173,11 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                     m["parent"] in {main["participant"], main.get("attempt")}]
         action = ("chat", main["participant"])
         folded = main["participant"] in collapsed
-        toggle = ("▸" if folded else "▾") if unicode else (">" if folded else "v")
-        state = main_state(main)
-        said_state = main_words(main, unicode)
-        model = names.get(main["participant"]) or model_name(main)
-        # The node carries one mark: the fold arrow, or its state where there is nothing to fold.
-        label = "%s %s%s" % (toggle if attached else activity(state, frame, unicode),
-                             "this window" + sep if main["participant"] == current else "", model)
-        status = said_state + (sep + "%s calls" % len(attached) if folded else "")
-        if open_count(room, main["participant"]):
-            status += sep + "? %s open" % open_count(room, main["participant"])
-        context = context_note(report, main)
-        if context:
-            status += sep + "ctx %s%% used" % context[0]
-        from review_backlog import needs_review_hint
-        if needs_review_hint(report, main["participant"]):
-            status += sep + "review first"
-        add(label if width < 60 else label + sep + status, "dim" if state == "idle" else "codex" if main.get("provider") == "codex" else "main",
-            action, bool(attached))
-        if width < 60:
-            add("  " + status, "dim" if state == "idle" else tone(state), action)
-        title = main.get("title")
-        if title and title != "Native task not recorded":
-            for line in wrapped(title, max(1, content_width - 7), 3 if height >= 40 else 2):
-                add(root_stem + "  " + line, None, action)
-        for line in declared_status(room, main["participant"], max(1, content_width - 4)):
-            add(root_stem + "  " + line, None, action)
         if not folded:
-            call_groups(attached, main["participant"], root_stem)
+            call_groups([m for m in attached if role_style(m.get("role"), purpose(m)) == "judge"], main["participant"], root_stem)
+        call_row(main, action=action, fold=bool(attached), extra="%s calls" % len(attached) if folded else "")
+        if not folded:
+            call_groups([m for m in attached if role_style(m.get("role"), purpose(m)) != "judge"], main["participant"], root_stem)
     unlinked = [m for m in calls if m.get("parent") not in roots]
     if unlinked:
         add("Calls with no known main", "alert")
@@ -272,23 +293,6 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     boxed = boxed and budget - len(head) - dock_rows >= 5
     room_budget = max(0, budget - len(head) - dock_rows - (2 if boxed else int(activity_head)))
     body = rows
-    # Spend spare tree rows on a third title row while the nested group renderer stays shared.
-    if height >= 40 and room_budget > len(body):
-        for child in calls:
-            if child.get("_native"):
-                continue
-            target = child.get("_action") or ("result", child["participant"])
-            first = next((i for i, row in enumerate(body) if row.get("action") == target), None)
-            if first is None or first + 1 >= len(body) or body[first + 1].get("action") != target:
-                continue
-            prefix_text = body[first + 1]["text"][:len(body[first + 1]["text"]) - len(body[first + 1]["text"].lstrip())]
-            title_rows = wrapped(child.get("title") or child["participant"], max(1, content_width - len(prefix_text)), 3)
-            old_count = 0
-            while first + 1 + old_count < len(body) and body[first + 1 + old_count].get("action") == target:
-                old_count += 1
-            if len(title_rows) > old_count and len(title_rows) - old_count <= room_budget - len(body):
-                body[first + 1:first + 1 + old_count] = [{"text": prefix_text + text, "style": None,
-                    "action": target} for text in title_rows]
     unique = list(dict.fromkeys([row["action"] for row in head if row.get("action") and row["action"][0] != "tab"] + items))
     # Keep the repository task tail reachable while the longer room tree scrolls.
     task_rows = body[task_start:]
@@ -338,7 +342,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             sep, len(mains), "" if len(mains) == 1 else "s", sep, len(calls),
             "" if len(calls) == 1 else "s", sep + "attention" if attention_only else "")
         shown.append({"text": box_edge(heading, width, unicode) if boxed else clipped(heading, width),
-                      "style": "main"})
+                      "style": "border"})
     shown += body[offset:offset + body_budget]
     if scroll_row:
         shown.append({"text": clipped("%s-%s / %s rows / %s" % (offset + 1, min(len(body), offset + body_budget), len(body),
@@ -346,23 +350,32 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                       "style": "dim", "action": None})
     shown += task_tail
     if boxed:
-        shown.append({"text": box_edge("", width, unicode, "bottom"), "style": "main"})
+        shown.append({"text": box_edge("", width, unicode, "bottom"), "style": "border"})
     output, hits = [], []
     previous_action = None
     for y, row in enumerate(shown):
         value = row["text"]
         style = row.get("style")
         inner = boxed and len(head) < y < len(shown) - 1
-        if not color and row.get("action") and row["action"] == selected and row["action"] != previous_action:
+        if not color and not row.get("spans") and row.get("action") and row["action"] == selected and row["action"] != previous_action:
             span = content_width if inner else width
-            value = clipped(value, max(0, span - 2)) + " <" if span >= 2 else "<"
+            value = glyph("selected", unicode) + " " + clipped(value, max(0, span - 2)) if span >= 2 else ">"
         previous_action = row.get("action")
         if inner:
             value = box_edge(value, width, unicode, "divider") if row.get("divider") else box_row(value, width, unicode)
-        if color and row.get("action") and row["action"] == selected:
-            value = PALETTE[style or "head"] + "\033[7m" + value + "\033[0m"
+        if color and row.get("spans"):
+            styled = "".join(paint(text, token, color=True, colors=color_count(), light=light_theme(),
+                                   bold=token in {"main", "judge", "worker", "unknown"}) for text, token in row["spans"])
+            value = value.replace(row["text"], styled, 1)
+        elif color and row.get("tag_span"):
+            tag, token = row["tag_span"]
+            value = value.replace(tag, paint(tag, token, color=True, colors=color_count(), light=light_theme()), 1)
         elif color and style:
-            value = PALETTE[style] + value + "\033[0m"
+            value = paint(value, style, color=True, colors=color_count(), light=light_theme(),
+                          bold=row.get("action") == selected)
+        if row.get("card_role"):
+            value = paint_card_edges(value, row["card_role"], unicode=unicode, color=color,
+                                     colors=color_count(), light=light_theme())
         output.append(value)
         if row.get("action"):
             hits.append({"y": y + 1, "x1": 1, "x2": width, "action": row["action"], "fold": row.get("fold", False)})

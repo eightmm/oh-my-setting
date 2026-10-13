@@ -4,7 +4,7 @@ import os
 import re
 import unicodedata
 
-from dashboard_projection import (clean, count, display_width, fit, listing, mapping, number, use_unicode,
+from dashboard_projection import (clean, count, display_width, fit, listing, mapping, number,
                                   wrap_label as wrapped)
 from panel_routing import policy
 
@@ -18,11 +18,107 @@ def light_theme():
     return os.environ.get("COLORFGBG", "").rpartition(";")[2] in ("7", "15")
 
 
-# 256-colour hues: Claude warm, Codex blue, workers teal, advisors lavender; darker shades on light themes.
-PALETTE = {name: "\033[%s38;5;%sm" % ("1;" if name in ("main", "codex", "head") else "", shade[light_theme()])
-           for name, shade in {"main": (209, 166), "codex": (75, 25), "worker": (80, 30), "review": (141, 97),
-                               "head": (117, 24), "good": (114, 28), "alert": (221, 130), "bad": (203, 160),
-                               "dim": (245, 242)}.items()}
+ROLE_COLORS = {"main": (215, 130, 33), "judge": (141, 97, 35),
+               "worker": (114, 28, 32), "unknown": (245, 242, 90)}
+STATE_COLORS = {"running": (117, 24, 36), "good": (114, 28, 32),
+                "alert": (221, 130, 33), "bad": (203, 160, 31), "dim": (245, 242, 90)}
+TOKEN_COLORS = dict(ROLE_COLORS, **STATE_COLORS, metadata=(245, 242, 90), border=(240, 245, 90),
+                    text=(None, None, 39))
+# Compatibility tokens share semantic colours while older consumers migrate.
+TOKEN_ALIASES = {"codex": "main", "review": "judge", "head": "text"}
+JUDGE_ROLES = {"advisor", "reviewer", "critic", "verifier", "security-auditor", "architect", "council", "judge"}
+WORKER_ROLES = {"worker", "builder", "researcher", "refactorer", "documenter", "integrator",
+                "performance-engineer", "release-engineer"}
+GLYPHS = {"running": ("⟳", "~"), "spinner": ("⠋⠙⠹⠸", "|/-\\"),
+          "verified": ("✓", "+"), "failed": ("✗", "!"),
+          "waiting": ("!", "!"), "unknown": ("?", "?"), "idle": ("○", "o"),
+          "selected": ("▸", ">"), "expanded": ("▾", "v"), "dot": ("•", "o"),
+          "swatch": ("■", "#"), "separator": ("·", "/"), "ellipsis": ("…", "..."),
+          "right": ("→", "->"), "up": ("↑", "^"), "down": ("↓", "v"),
+          "top_left": ("╭", "+"), "top_right": ("╮", "+"), "bottom_left": ("╰", "+"),
+          "bottom_right": ("╯", "+"), "horizontal": ("─", "-"), "vertical": ("│", "|"),
+          "dashed_horizontal": ("╌", "- "), "dashed_vertical": ("╎", ":"),
+          "branch": ("├", "+"), "endpoint": ("└", "`"), "junction_right": ("┤", "+"),
+          "junction_down": ("┬", "+"), "junction_up": ("┴", "+"), "junction": ("┼", "+")}
+_UNICODE = True
+
+
+def use_unicode(flag):
+    global _UNICODE
+    from dashboard_projection import use_unicode as configure
+    _UNICODE = bool(flag)
+    configure(flag)
+
+
+def glyph(name, unicode=True):
+    return GLYPHS[name][0 if unicode else 1]
+
+
+def role_style(role, purpose=None) -> str:
+    chosen = purpose if purpose in JUDGE_ROLES | WORKER_ROLES else role
+    return "main" if role == "main" else "judge" if chosen in JUDGE_ROLES else "worker" if chosen in WORKER_ROLES else "unknown"
+
+
+def call_identity(role, model, label=None, short_id=None) -> str:
+    identity = (clean(role) or "unknown").upper() + " " + (MODEL_NAMES.get(model, clean(model)) or "model unknown")
+    if short_id:
+        identity += " #" + clean(short_id).lstrip("#")
+    if label:
+        identity += " " + glyph("separator", _UNICODE) + " " + clean(label)
+    return identity
+
+
+def status_tag(state, *, exit_code=None, unicode=True) -> str:
+    state = {"working": "running", "live marker": "running", "waiting_input": "needs input",
+             "waiting_approval": "needs approval", "review": "awaiting decision", "timed_out": "timed out",
+             "orphaned": "lost process", "lost_process": "lost process", "unresolved": "status unknown",
+             "unknown": "status unknown", "presence unknown": "status unknown", "exited": "finished",
+             "done": "finished", "checks_passed": "checks passed", "checks_not_run": "checks not run",
+             "checks_unknown": "checks unknown", "test_failed": "test failed",
+             "acceptance_pending": "acceptance pending"}.get(state, state)
+    mark = ("running" if state in {"starting", "running", "verifying", "loading"} else
+            "idle" if state == "idle" else "waiting" if state in {"blocked", "needs approval", "awaiting decision"} else
+            "unknown" if state in {"needs input", "status unknown"} else
+            "failed" if state in {"failed", "timed out", "abandoned", "lost process", "unavailable"} else
+            "verified" if state in {"finished", "checks passed", "accepted"} or re.fullmatch(r"\d+/\d+ pass", str(state)) else None)
+    known = mark is not None or state in {"cancelled", "checks not run", "checks unknown", "acceptance pending", "test failed"}
+    if not known:
+        state, mark = "status unknown", "unknown"
+    if state in {"finished", "failed", "test failed"} and type(exit_code) is int:
+        state += ": exit %s" % exit_code
+    return "[" + (glyph(mark, unicode) + " " if mark else "") + state + "]"
+
+
+def paint(text, token, *, color=False, colors=16, light=False, bold=False) -> str:
+    preference = os.environ.get("OMS_PANEL_COLOR", "").lower()
+    if not color or preference in {"0", "no", "false", "never"} or "NO_COLOR" in os.environ:
+        return text
+    return _sgr(token, colors, light, bold) + text + "\033[0m"
+
+
+def paint_card_edges(text, token, *, unicode=True, color=False, colors=16, light=False):
+    edge = glyph("dashed_vertical", unicode)
+    left, right = text.find(edge), text.rfind(edge)
+    if not color or left < 0 or right <= left:
+        return text
+    styled = paint(edge, token, color=True, colors=colors, light=light)
+    return text[:left] + styled + text[left + 1:right] + styled + text[right + 1:]
+
+
+def _sgr(token, colors, light, bold):
+    token = TOKEN_ALIASES.get(token, token)
+    dark, bright, sgr = TOKEN_COLORS.get(token, TOKEN_COLORS["unknown"])
+    code = "38;5;%s" % (bright if light else dark) if colors >= 256 and dark is not None else str(
+        37 if light and token in {"unknown", "dim", "metadata"} else sgr)
+    return "\033[" + ("1;" if bold else "") + code + "m"
+
+
+def color_count():
+    return 256 if "256color" in os.environ.get("TERM", "") else 16
+
+
+PALETTE = {name: _sgr(name, color_count(), light_theme(), name in {"main", "codex", "head"})
+           for name in list(TOKEN_COLORS) + list(TOKEN_ALIASES)}
 PROVIDER_NAMES = {"codex": "Codex", "claude": "Claude Code", "pi": "Pi"}
 TERMINAL_STATES = {"done", "failed", "cancelled", "timed_out", "abandoned"}
 TASK_NAMES = {"peer-delegate": "Implement patch", "delegate": "Implement patch",
@@ -40,18 +136,16 @@ PURPOSE_NAMES = {"implement": "Implement patch", "explain": "Explain code",
                  "architect": "Structure design", "critic": "Find failure cases", "verifier": "Verify against request",
                  "security-auditor": "Security audit", "reviewer": "Review changes", "advisor": "Advise decision",
                  "researcher": "Look up sources", "worker": "Work"}
-LIVE_STATES = {"starting", "working", "verifying", "live marker"}
+LIVE_STATES = {"starting", "working", "running", "verifying", "live marker"}
 ATTENTION_STATES = {"blocked", "waiting_input", "waiting_approval", "review", "orphaned",
                     "failed", "timed_out", "abandoned"}
 
 
 def activity(state, frame=None, unicode=True):
     if state in LIVE_STATES:
-        return (("⠋⠙⠹⠸" if unicode else "|/-\\")[frame % 4]
-                if frame is not None else "●" if unicode else "*")
-    return {"idle": "○" if unicode else "o", "done": "✓" if unicode else "+", "failed": "!", "timed_out": "!",
-            "blocked": "!", "waiting_input": "?", "waiting_approval": "⚑" if unicode else "A",
-            "review": "◇" if unicode else "o"}.get(state, "·" if unicode else "-")
+        return (glyph("spinner", unicode)[frame % 4]
+                if frame is not None else glyph("running", unicode))
+    return status_tag(state, unicode=unicode)[1:2] if state != "cancelled" else glyph("idle", unicode)
 
 
 def location_label(value):
@@ -123,15 +217,14 @@ def message_rows(text, width):
 
 
 def tone(state):
-    if state in {"failed", "timed_out", "abandoned", "orphaned", "unresolved"}:
+    tag = status_tag(state, unicode=False)
+    if tag.startswith(("[! failed", "[! timed out", "[! abandoned", "[! lost process", "[! unavailable", "[test failed")):
         return "bad"
-    if state == "cancelled":
-        return "dim"
-    if state in {"waiting_input", "waiting_approval", "blocked"}:
+    if tag.startswith(("[! blocked", "[! needs approval", "[! awaiting decision", "[? needs input")):
         return "alert"
-    if state in {"review", "verifying"}:
-        return "review"
-    return "dim" if state in TERMINAL_STATES else "worker"
+    if tag.startswith("[~"):
+        return "running"
+    return "good" if tag.startswith(("[+ checks passed", "[+ accepted")) or re.match(r"\[\+ \d+/\d+ pass\]", tag) else "dim"
 
 
 def worker_rows(report):
@@ -156,7 +249,7 @@ def worker_rows(report):
         rows.append({"state": state, "provider": row.get("provider") or "unknown", "work": detail,
                      "task": row.get("task_id") or "unrecorded", "model": model,
                      "name": MODEL_NAMES.get(row.get("requested_model"), row.get("requested_model")) or
-                             PROVIDER_NAMES.get(row.get("provider"), "Unknown"),
+                             "model unknown",
                      "role": "worker", "source": "marker", "parent": None,
                      "location": row.get("location"), "effort": row.get("reasoning_effort"), "access": None})
     # A running council owns its seats: same task and parent, shown as one debate.
@@ -195,8 +288,10 @@ def worker_rows(report):
                      "work": "Seat answering" if key in councils else
                              metadata.get("label") or PURPOSE_NAMES.get(metadata.get("purpose"), detail),
                      "task": row.get("task_id") or "unrecorded", "model": model,
-                     "name": MODEL_NAMES.get(model_id, model_id) or PROVIDER_NAMES.get(row.get("provider"), "Unknown"),
+                     "name": MODEL_NAMES.get(model_id, model_id) or "model unknown",
                      "role": "council" if key in councils else metadata.get("role") or "worker",
+                     "purpose": metadata.get("purpose"), "attempt": row.get("attempt_id"),
+                     "joined_at": row.get("started_at") or row.get("created_at"), "exit": row.get("exit_code"),
                      "source": "attempt",
                      "parent": row.get("parent_attempt_id") if metadata.get("role") else None,
                      "location": metadata.get("location"),
@@ -233,12 +328,13 @@ def hierarchy(report, rows, main_attempt=None, include_empty=True):
         main = mains.get(ident, {})
         metadata = mapping(main.get("panel"))
         model = projected[ident].get("model") if ident in projected else metadata.get("model")
-        title = ("MAIN / " + (MODEL_NAMES.get(model, model) or
-                 PROVIDER_NAMES.get(main.get("provider"), "recorded owner")) if main else
+        title = (call_identity("main", model) if main else
                  "LINKED OWNER / metadata unavailable" if ident else "No known main")
-        groups = [(role, [r for r in children if r["role"] == key]) for role, key in
-                  (("COUNCIL", "council"), ("ADVISORS", "advisor"), ("REVIEWERS", "reviewer"),
-                   ("RESEARCHERS", "researcher"), ("WORKERS", "worker"))]
+        kinds = list(dict.fromkeys(r.get("purpose") if r.get("purpose") in JUDGE_ROLES | WORKER_ROLES else r["role"] for r in children))
+        groups = [(key.upper() + ("" if key == "council" else "S"), sorted(
+            [r for r in children if (r.get("purpose") if r.get("purpose") in JUDGE_ROLES | WORKER_ROLES else r["role"]) == key],
+            key=lambda r: r["state"] not in LIVE_STATES)) for key in kinds]
+        groups.sort(key=lambda group: role_style(group[1][0]["role"], group[1][0].get("purpose")) != "judge")
         roots.append({"id": ident, "title": title, "label": metadata.get("label"),
                       "state": main.get("state"), "groups": [(g, rs) for g, rs in groups if rs]})
     if main_attempt:
@@ -303,15 +399,18 @@ def usage_words(report, unicode=True, costs=False):
             for label in usage_labels(report, costs)]
 
 
-def box_edge(title, width, unicode=True, kind="top"):
+def box_edge(title, width, unicode=True, kind="top", dashed=False):
     left, right, bar = (("╭", "╮", "─") if kind == "top" else
                         ("├", "┤", "─") if kind == "divider" else ("╰", "╯", "─")) if unicode else ("+", "+", "-")
+    if dashed:
+        bar = glyph("dashed_horizontal", unicode)
     label = " " + clipped(title, max(1, width - 6)) + " " if title else ""
-    return left + bar + label + bar * max(0, width - display_width(label) - 3) + right
+    fill = max(0, width - display_width(label) - 3)
+    return left + bar[0] + label + (bar * fill)[:fill] + right
 
 
-def box_row(text, width, unicode=True):
-    edge = "│" if unicode else "|"
+def box_row(text, width, unicode=True, dashed=False):
+    edge = glyph("dashed_vertical" if dashed else "vertical", unicode)
     text = clipped(text, width - 4)
     return edge + " " + text + " " * max(0, width - display_width(text) - 3) + edge
 
@@ -437,7 +536,7 @@ def inbox_items(report, unicode=True):
         if (sender and message.get("recipient") == "all" and message.get("message_kind") != "answer"
                 and not message.get("answered") and message.get("pending_for")):
             text = readable(message.get("text"), " ")
-            items.append({"stamp": message.get("ts") or "", "glyph": ">" if not unicode else "»",
+            items.append({"stamp": message.get("ts") or "", "glyph": glyph("right", unicode),
                           "who": who(sender), "what": "to all: " + clean(text, 80),
                           "style": "alert", "action": ("chat", sender["participant"]),
                           "row_id": ("message", str(message.get("id")) if message.get("id") else ("position", index)),
@@ -566,7 +665,7 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
     if len(footer) > height - 1 - 4:
         footer = menu_rows(width, 1, unicode, managed=managed, occupied=occupied, installed=navigation.get("installed"))
     budget = max(0, height - 1 - len(footer))
-    head = [("✳ " if unicode else "* ") + "OMS control panel / " +
+    head = ["OMS" + sep +
             (clean(room.get("title") or room.get("id")) or mapping(report.get("repo")).get("name") or "repository")]
     styles = ["head"]
     from panel_metrics import usage_line
@@ -755,7 +854,7 @@ def render_unavailable(report, width, height, color, unicode, previous, menu, ma
     if len(footer) > budget - 1:
         footer = menu_rows(width, 1, unicode, managed=managed, occupied=True) if menu else []
     alert = "! Room state unavailable" if width >= 24 else "! Room state unknown" if width >= 20 else "! Unknown" if width >= 9 else "?"
-    head = [(("✳ " if unicode else "* ") + "OMS " + ("control panel" if menu else "dashboard") + " / " +
+    head = [("OMS" + (" · " if unicode else " / ") +
              (clean(mapping(report.get("repo")).get("name")) or "repository"), "head"),
             ("! " + clean(mapping(report.get("room")).get("error"), 160) if mapping(report.get("room")).get("error") else alert, "bad"),
             ("This room could not be read; its work and messages are unknown, not empty.", "dim"),
@@ -774,13 +873,12 @@ def render_unavailable(report, width, height, color, unicode, previous, menu, ma
 
 
 def needs_strip(report, width, unicode, limit=3, ranked=None):
-    """Pinned attention: the queue's class counts, which open the Attention tab, then its top items by rank."""
+    """Pinned queue counts; the complete ranked queue stays in Attention."""
     ranked = attention_items(report, unicode) if ranked is None else ranked
     if not ranked:
         return []
     rows = [{"text": attention_header(ranked, width, unicode), "style": ranked[0]["style"], "action": ("tab", "needs")}]
-    return rows + [{"text": attention_row(item, width, unicode), "style": item["style"], "action": item["action"]}
-                   for item in ranked[:max(0, limit)]]
+    return rows
 
 
 def render(report, provider, width=100, height=28, color=False, unicode=True,
@@ -788,6 +886,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
            view="auto", attention_only=False, navigation=None):
     width, height = max(1, min(200, width)), max(1, height)
     use_unicode(unicode)
+    color = bool(paint("x", "text", color=color) != "x")
     if navigation is not None:
         navigation.update(tab_strip_visible=False, tab_body_visible=False, help_rows=max(4, height // 3))
     if room_unreadable(report):
@@ -974,65 +1073,78 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         " / " + ("compact" if compact else "detail"), "alert" if attention_only else "dim")
     space = max(0, budget - len(lines) - len(status_lines) - 1)
     roots.sort(key=lambda r: (r["id"] is None, r["id"] or ""))
-    plans = []
-    for root in roots:
-        prelude = []
-        shown_main = shown_mains.get(root["id"])
-        state_word = main_words(shown_main, unicode) if shown_main else root["state"]
-        title = root["title"] + (" / " + state_word if state_word else " / ownership unrecorded")
-        if main_attempt:
-            title = "MAIN / " + PROVIDER_NAMES.get(metadata.get("harness") or main.get("provider") or provider, provider)
-            prelude += [(line, None) for line in wrapped("Goal: " + (metadata.get("label") or "Native task not recorded"),
-                                                       width - 4, 1 if compact else 2)]
-            prelude.append(("%s %s / %s / %s" % (activity(main_state(shown_main) if shown_main else main.get("state"), frame, unicode),
-                MODEL_NAMES.get(metadata.get("model"), metadata.get("model")) or "model unrecorded",
-                metadata.get("effort") or "effort unrecorded", state_word or "unobserved"), "dim"))
-        elif root.get("label") and not compact:
-            prelude = [(line, None) for line in wrapped(root["label"], width - 4, 2)]
-        if not root["groups"]:
-            prelude.append(("No active calls need attention" if attention_only else "No active child calls", "dim"))
-        records = [row for _, rs in root["groups"] for row in rs]
-        per_call = 1 if compact and width >= 80 else 2 if compact else 3
-        minimum = 2 + len(prelude) + len(root["groups"])
-        desired = minimum + sum((per_call + (0 if compact else len(wrapped(row["work"], width - 6,
-                        3 if width < 54 else 2)) - 1)) for row in records[:8])
-        plans.append({"title": title, "prelude": prelude, "minimum": minimum, "desired": desired,
-                      "records": records, "slots": 1})
-    remaining = max(0, space - len(plans))
-    priority = sorted(range(len(plans)), key=lambda i: (not any(r["state"] in ATTENTION_STATES
-                      for r in plans[i]["records"]), i))
-    for index in priority:
-        plan = plans[index]
-        need = plan["desired"] - 1
-        if width >= 28 and remaining >= plan["minimum"] - 1:
-            extra = min(remaining, need)
-            plan["slots"] += extra
-            remaining -= extra
     shown = 0
-    for root_index, root in enumerate(roots):
+    selected = (navigation or {}).get("selected")
+
+    def list_row(identity, state, style, action=None, age="unknown", details=None, exit_code=None, connector=""):
+        nonlocal space
+        if space <= 0:
+            return
+        tag = status_tag(state, exit_code=exit_code, unicode=unicode)
+        tail = clipped(tag + "  " + age, max(0, width - display_width(connector) - 8))
+        identity = clipped(identity, max(0, width - display_width(connector + tail) - 4))
+        gutter = glyph("selected", unicode) + " " if action and action == selected else "  "
+        lead = gutter + connector + identity
+        gap = " " * max(2, width - display_width(lead + tail))
+        if action and action == selected and space >= 4 and width >= 28:
+            add(box_edge(identity, width, unicode, dashed=True), style)
+            state_line = box_row(tag + "  " + age, width, unicode, dashed=True)
+            state_line = state_line.replace(tag, paint(tag, tone(state), color=color,
+                                                      colors=color_count(), light=light_theme()), 1)
+            lines.append(paint_card_edges(state_line, style, unicode=unicode, color=color,
+                                          colors=color_count(), light=light_theme()))
+            kept = (details or [])[:max(0, space - 3)]
+            for detail in kept:
+                lines.append(paint_card_edges(box_row(detail, width, unicode, dashed=True), style,
+                                              unicode=unicode, color=color, colors=color_count(), light=light_theme()))
+            add(box_edge("", width, unicode, "bottom", dashed=True), style)
+            space -= 3 + len(kept)
+        else:
+            value = clipped(lead + gap + tail, width)
+            if color:
+                value = (paint(gutter, "text", color=True, colors=color_count(), light=light_theme()) +
+                         paint(connector + identity, style, color=True, colors=color_count(), light=light_theme(), bold=True) + gap +
+                         paint(tag if tail.startswith(tag) else tail, tone(state), color=True, colors=color_count(), light=light_theme()) +
+                         paint(tail[len(tag):] if tail.startswith(tag) else "", "metadata", color=True, colors=color_count(), light=light_theme()))
+            lines.append(value)
+            space -= 1
+
+    for root in roots:
         if space <= 0:
             break
-        plan = plans[root_index]
-        title, prelude = plan["title"], plan["prelude"]
-        allocated = min(space, plan["slots"])
-        if width < 28 or allocated < plan["minimum"]:
-            warning = next((r for r in plan["records"] if r["state"] in ATTENTION_STATES), None)
-            leading = warning or next(iter(plan["records"]), None)
-            summary = title + (" / " + leading["work"] if leading else "")
-            summary += " / " + ", ".join("%s %s" % (g, len(rs)) for g, rs in root["groups"])
-            add(summary, "alert" if warning else "main" if root["id"] else "dim")
+        records = [row for _, group in root["groups"] for row in group]
+        councils = {(r["task"], r["parent"]) for r in records if r["source"] == "council"}
+        records = [r for r in records if r["source"] == "council" or r["role"] != "council" or (r["task"], r["parent"]) not in councils]
+        judges = sorted([r for r in records if role_style(r["role"], r.get("purpose")) == "judge"], key=lambda r: r["state"] not in LIVE_STATES)
+        workers = sorted([r for r in records if role_style(r["role"], r.get("purpose")) != "judge"], key=lambda r: r["state"] not in LIVE_STATES)
+        # Reserve the main and one worker before fitting the judges above it.
+        judge_count = min(len(judges), max(0, space - 1 - int(bool(workers))))
+
+        def child(row):
+            role = row.get("purpose") if row.get("purpose") in JUDGE_ROLES | WORKER_ROLES else row["role"]
+            connector = "    " + glyph("branch", unicode) + glyph("dashed_horizontal", unicode)[0] + " "
+            if frame is not None and row["state"] in LIVE_STATES:
+                point = 1 + frame % 2
+                connector = connector[:point] + glyph("dot", unicode) + connector[point + 1:]
+            list_row(call_identity(role, row["name"], row["work"]), row["state"], role_style(row["role"], row.get("purpose")),
+                     ("result", row.get("attempt")), age_label(row.get("joined_at")) or "unknown",
+                     [row["work"], location_label(row.get("location")), row["model"]], row.get("exit"),
+                     connector)
+        for row in judges[:judge_count]:
+            child(row)
+            shown += 1
+        main = shown_mains.get(root["id"])
+        title = root["title"] + (sep + root["label"] if root.get("label") else "")
+        list_row(title, main_state(main) if main else root["state"], "main" if root["id"] else "unknown",
+                 ("chat", main["participant"] if main else root["id"]),
+                 (age_label(main.get("joined_at")) or "unknown") if main else "unknown",
+                 [root.get("label") or "No task recorded"])
+        for row in workers[:max(0, space - int(len(records) > shown + space))]:
+            child(row)
+            shown += 1
+        if not records and space:
+            add("No active calls need attention" if attention_only else "No active child calls", "dim")
             space -= 1
-            continue
-        add(box_edge(title, width, unicode), "main" if root["id"] else "dim")
-        for text, style in prelude:
-            add(box_row(text, width, unicode), style)
-        content, count_shown = call_groups(root["groups"], width, allocated - len(prelude) - 2,
-                                          compact, frame, unicode, 8 - shown)
-        for text, style in content:
-            add(text, style)
-        add(box_edge("", width, unicode, "bottom"), "main" if root["id"] else "dim")
-        space -= len(prelude) + len(content) + 2
-        shown += count_shown
     if not roots and space > 0:
         add("No active calls need attention" if attention_only and attempts.get("available") else
             "No active records" if attempts.get("available") else "Worker state unavailable", "dim")
@@ -1062,7 +1174,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
             source = "served" if operation.get("served_model") else "selected"
             work = (data["role"] + ": " + PURPOSE_NAMES.get(data.get("purpose"), row.get("tool") or "work")
                     if data else TASK_NAMES.get(row.get("tool"), row.get("tool") or "work"))
-            add("[%s] %s / %s%s" % (row.get("state"), row.get("provider") or "unknown", work,
+            add("%s %s / %s%s" % (status_tag(row.get("state"), exit_code=row.get("exit_code"), unicode=unicode), row.get("provider") or "unknown", work,
                   " / %s: %s" % (source, model) if model else ""), tone(row.get("state")))
     if len(lines) > max(0, budget - len(status_lines)):
         # Tiny panes prioritize summaries; no bordered card is emitted there.
@@ -1274,7 +1386,7 @@ def _result_structured(line, width, indent=""):
         cells = 8 - (display_width(prefix) + used) % 8 if char == "\t" else display_width(char)
         if used + cells > width - display_width(prefix):
             yield prefix + "".join(piece)
-            prefix, piece, used = indent + ("↪ " if ELLIPSIS[0] == "…" else "+ "), [], 0
+            prefix, piece, used = indent + glyph("right", ELLIPSIS[0] == "…") + " ", [], 0
             cells = 8 - display_width(prefix) % 8 if char == "\t" else cells
         piece.append(char)
         used += cells

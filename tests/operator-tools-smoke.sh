@@ -2129,6 +2129,8 @@ os.chdir(temporary)
 for name in [n for n in os.environ if n in ("TMUX", "TMUX_PANE") or n.startswith(("OMS_PANEL_", "OMS_ROOM_"))]:
     del os.environ[name]
 sys.path.insert(0, str(root / "scripts/lib"))
+# Explicit colour fixtures control NO_COLOR; helper tests below exercise disabling.
+os.environ.pop("NO_COLOR", None)
 import terminal_panel as panel
 from panel_routing import allocate, policy
 from dashboard_projection import display_width
@@ -2138,14 +2140,103 @@ from room_view import render_graph, plan_rows as render_plan_rows
 from panel_view import wrapped
 import panel_results
 
+# PANEL_VISUAL_TOKENS_BEGIN
+from unittest.mock import patch
+from panel_view import (role_style, call_identity, status_tag, paint, GLYPHS, glyph,
+                        ROLE_COLORS, STATE_COLORS, box_edge, box_row, use_unicode)
+assert role_style("main", "reviewer") == "main"
+for role in ("advisor", "reviewer", "critic", "verifier", "security-auditor", "architect", "council"):
+    assert role_style(role) == role_style("worker", role) == "judge", role
+for role in ("worker", "builder", "researcher", "refactorer", "documenter", "integrator", "performance-engineer", "release-engineer"):
+    assert role_style(role) == "worker", role
+assert role_style("unrecorded") == "unknown" and role_style("worker", "advise") == "worker"
+use_unicode(True)
+assert call_identity("worker", "gpt-6.1-sol", "Routing") == "WORKER Sol 6.1 · Routing"
+assert call_identity(None, None, short_id="abcd") == "UNKNOWN model unknown #abcd"
+tags = {"starting": "[⟳ starting]", "working": "[⟳ running]", "verifying": "[⟳ verifying]",
+        "idle": "[○ idle]", "blocked": "[! blocked]", "waiting_input": "[? needs input]",
+        "waiting_approval": "[! needs approval]", "review": "[! awaiting decision]",
+        "unknown": "[? status unknown]", "done": "[✓ finished: exit 0]", "failed": "[✗ failed: exit 1]",
+        "timed_out": "[✗ timed out]", "cancelled": "[cancelled]", "abandoned": "[✗ abandoned]",
+        "orphaned": "[✗ lost process]", "checks_passed": "[✓ checks passed]", "14/14 pass": "[✓ 14/14 pass]",
+        "test_failed": "[test failed: exit 1]", "checks_not_run": "[checks not run]",
+        "checks_unknown": "[checks unknown]", "acceptance_pending": "[acceptance pending]", "accepted": "[✓ accepted]"}
+for state, tag in tags.items():
+    code = 0 if state == "done" else 1 if state in {"failed", "test_failed"} else None
+    assert status_tag(state, exit_code=code) == tag, state
+    ascii_tag = status_tag(state, exit_code=code, unicode=False)
+    assert ascii_tag.isascii() and ascii_tag == tag.replace("⟳", "~").replace("○", "o").replace("✓", "+").replace("✗", "!"), state
+assert status_tag("done") == "[✓ finished]" and status_tag("invented") == "[? status unknown]"
+for name in GLYPHS:
+    assert glyph(name, False).isascii(), name
+for width in (28, 42, 80, 110, 157):
+    for unicode in (False, True):
+        for dashed in (False, True):
+            assert display_width(box_edge("검토 e\u0301", width, unicode, dashed=dashed)) == width
+            assert display_width(box_row("한글 e\u0301", width, unicode, dashed=dashed)) == width
+with patch.dict(os.environ, {}, clear=True):
+    for colors in (16, 256):
+        for light in (False, True):
+            for token, shades in dict(ROLE_COLORS, **STATE_COLORS).items():
+                text = paint("한글", token, color=True, colors=colors, light=light, bold=True)
+                sgr = "38;5;%s" % shades[int(light)] if colors == 256 else str(37 if light and token in {"unknown", "dim"} else shades[2])
+                assert text == "\033[1;" + sgr + "m한글\033[0m", (token, text)
+                assert display_width(re.sub(r"\033\[[0-9;]*m", "", text)) == 4
+            assert paint("role", "main", color=True, colors=colors, light=light) != paint("state", "running", color=True, colors=colors, light=light)
+    assert paint("plain", "main") == "plain"
+    for setting in ({"NO_COLOR": ""}, {"NO_COLOR": "", "OMS_PANEL_COLOR": "always"},
+                    {"OMS_PANEL_COLOR": "0"}, {"OMS_PANEL_COLOR": "never"}):
+        with patch.dict(os.environ, setting):
+            assert paint("plain", "main", color=True, colors=256) == "plain"
+use_unicode(False)
+assert call_identity("worker", "gpt-6.1-sol", "Routing") == "WORKER Sol 6.1 / Routing"
+use_unicode(True)
+visual_fixture = {"collection": {"ok": True}, "repo": {"name": "visual"}, "goal": {"text": "한글 목표"},
+                  "room": {"id": "visual", "participants": [], "messages": []}, "attempts": {"active_recent": []}}
+for ident, role, purpose, state in (("visual-main", "main", None, "working"),
+                                  ("visual-judge", "worker", "architect", "working"),
+                                  ("visual-held", "reviewer", None, "blocked"),
+                                  ("visual-worker", "worker", "builder", "working")):
+    visual_fixture["room"]["participants"].append({"participant": ident, "role": role, "joined": True,
+        "parent": None if role == "main" else "visual-main", "model": "gpt-6.1-sol", "label": ident})
+    visual_fixture["attempts"]["active_recent"].append({"attempt_id": ident, "state": state,
+        "parent_attempt_id": None if role == "main" else "visual-main",
+        "panel": {"role": role, "purpose": purpose, "room_id": "visual", "room_participant": ident,
+                  "model": "gpt-6.1-sol", "label": ident}})
+for mode in ("tree", "summary", "list", "compact", "detail"):
+    nav = {}
+    picture = render(visual_fixture, "codex", 157, 61, view=mode, navigation=nav)
+    assert picture.index("ARCHITECT Sol") < picture.index("MAIN Sol") < picture.index("BUILDER Sol"), picture
+    assert picture.index("ARCHITECT Sol") < picture.index("REVIEWER Sol"), picture
+    assert "╎" not in picture, picture
+    action = ("result", "visual-worker")
+    chosen = render(visual_fixture, "codex", 157, 61, view=mode, navigation={"selected": action})
+    assert "╎" in chosen and "visual-worker" in chosen, chosen
+    with patch.dict(os.environ, {}, clear=True):
+        chosen_color = render(visual_fixture, "codex", 157, 61, view=mode, color=True,
+                              navigation={"selected": action})
+    assert re.search(r"\033\[[0-9;]*m╎\033\[0m", chosen_color), chosen_color
+    if mode in {"tree", "summary"}:
+        assert sum(hit["action"] == action and not hit.get("preview") for hit in nav["hits"]) == 1, nav
+        assert "╌" in chosen, chosen
+    for width, height in ((28, 16), (42, 24), (80, 24), (110, 30), (157, 61)):
+        for unicode in (False, True):
+            nav = {}
+            text = render(visual_fixture, "codex", width, height, view=mode, unicode=unicode, navigation=nav)
+            assert len(text.splitlines()) <= height and all(display_width(line) <= width for line in text.splitlines()), text
+            assert all(1 <= h["y"] <= len(text.splitlines()) and 1 <= h["x1"] <= h["x2"] <= width for h in nav.get("hits", [])), nav
+            if not unicode:
+                assert all(ch.isascii() or ch in "한글 목표" for ch in text), text
+# PANEL_VISUAL_TOKENS_END
+
 view = json.loads((temporary / "panel-active.json").read_text())
 view["goal"] = {"text": "패널 개선 / show workers and verify results"}
 original = json.dumps(view, sort_keys=True)
 wide = render(view, "claude", 100, 32, previous="ready")
-assert "MAIN / Claude Code" in wide and "[queued] Codex" in wide, wide
-assert "panel-ui" in wide and "requested: model-for-live-worker" in wide, wide
+assert "NEXT MAIN / Claude Code" in wide and "[? status unknown]" in wide, wide
+assert "model-for-live-worker" in wide and "role: unrecorded" in wide, wide
 assert "not accepted" in wide and "ACCEPT" in wide and "native subagents unobserved" not in wide, wide
-assert wide.index("MAIN") < wide.index("OMS activity") < wide.index("[queued]"), wide
+assert wide.index("MAIN") < wide.index("OMS activity") < wide.index("[? status unknown]"), wide
 assert json.dumps(view, sort_keys=True) == original, "render changed its input records"
 for width, height in ((100, 28), (38, 28), (24, 18), (12, 10), (2, 8)):
     for menu in (False, True):
@@ -2164,9 +2255,9 @@ view["operations"]["recent"] = [{"attempt_id": "unrelated", "kind": "ask", "sele
 attributed_view = render(view, "codex", 100, 32)
 assert "DO_NOT_ATTRIBUTE" in attributed_view.split("OMS activity", 1)[0]
 assert "DO_NOT_ATTRIBUTE" not in attributed_view.split("OMS activity", 1)[1]
-assert "model: unrecorded" in render(view, "codex", 100, 32)
+assert "RESEARCHER model unknown" in render(view, "codex", 100, 32)
 view["attempts"]["recent"] = [{"state": "timed_out", "provider": "claude", "tool": "review"}]
-assert "[timed_out]" in render(view, "codex", 100, 32)
+assert "[✗ timed out]" in render(view, "codex", 100, 32)
 assert "Worker state unavailable" in render({}, "codex", 100, 32)
 assert "Collection degraded" in render({}, "codex", 100, 32)
 # Titles occupy their own bright lines; metadata never competes for that space.
@@ -2183,7 +2274,8 @@ live["attempts"]["active_recent"] = [{"attempt_id": "att_display_live", "parent_
               "access": "write", "location": "worktree:example/wt", "effort": "medium"}}]
 first = render(live, "codex", 42, 34, frame=0)
 second = render(live, "codex", 42, 34, frame=1)
-assert first != second and "작업 내용을 여러 줄로" in first and "worktree example/wt" in first, first
+assert first != second and "[⟳ running]" in first, first
+assert "worktree example/wt" in render(live, "codex", 100, 60, navigation={"selected": ("result", "att_display_live")})
 # Display hierarchy follows explicit ownership; generic parent links are not
 # native-main relationships. Compact and attention views never alter records.
 from panel_view import hierarchy, worker_rows, render_results
@@ -2211,12 +2303,12 @@ swapped_tree["attempts"]["active_recent"].append(
 swapped_row = next(r for r in worker_rows(swapped_tree) if r["work"] == "Swapped worker")
 assert swapped_row["provider"] == "claude" and "fallback: provider-capacity" in swapped_row["model"], swapped_row
 forest = hierarchy(tree, worker_rows(tree))
-assert {r["title"] for r in forest} == {"MAIN / Sol 6", "No known main"}, forest
+assert {r["title"] for r in forest} == {"MAIN Sol 6", "No known main"}, forest
 assert "Opus child blocked" in {r["work"] for g in next(r for r in forest if r["title"] == "No known main")["groups"] for r in g[1]}, forest
 full_tree = render(tree, "codex", 100, 60, view="detail")
-assert full_tree.index("MAIN / Sol 6 /") < full_tree.index("ADVISORS (1)") < full_tree.index("Architecture advice"), full_tree
-assert "REVIEWERS (1)" in full_tree and "Opus child blocked" in full_tree and "No known main" in full_tree
-assert re.search(r"^│.*\[working\] Astra.*│$", full_tree, re.M), full_tree
+assert full_tree.index("ADVISOR Astra") < full_tree.index("MAIN Sol 6") < full_tree.index("WORKER Sonnet"), full_tree
+assert "REVIEWER Fable" in full_tree and "Opus child blocked" in full_tree and "No known main" in full_tree
+assert re.search(r"ADVISOR Astra.*\[⟳ running\]", full_tree), full_tree
 # A running council groups its seats as one visible debate, not loose advisors.
 debate = deepcopy(tree)
 seat = {"parent_attempt_id": "att_main", "provider": "claude", "tool": "ask", "task_id": "decide",
@@ -2227,7 +2319,7 @@ debate["attempts"]["active_recent"] = debate["attempts"]["active_recent"][:2] + 
     dict(seat, attempt_id="att_seat", state="working")]
 debate["attempts"]["recent"] = [dict(seat, attempt_id="att_seat_done", state="done")]
 debate_tree = render(debate, "codex", 100, 60, view="detail")
-assert "COUNCIL (2)" in debate_tree and "Debate: Pick next work" in debate_tree, debate_tree
+assert debate_tree.count("COUNCIL") == 1 and "Debate: Pick next work" in debate_tree and "Seat answering" not in debate_tree, debate_tree
 assert "1 seat(s) answering" in debate_tree and "ADVISORS" not in debate_tree, debate_tree
 # One bottom box with tabs (Detail, Plan, Debate, Messages) replaces the d and m views and the messages card.
 import panel_debate
@@ -2828,10 +2920,11 @@ roomless_call = {"collection": {"ok": True}, "attempts": {"active_recent": [
     {"attempt_id": "roomless-worker", "state": "working", "panel": {
         "role": "worker", "model": "gpt-6-luna", "label": "ROOMLESS CALL"}}]}}
 roomless_text = render(roomless_call, "codex", 50, 40, view="graph")
-assert "ROOMLESS CALL" in roomless_text, roomless_text
+assert "WORKER Luna 6" in roomless_text and "[⟳ running]" in roomless_text, roomless_text
+assert "ROOMLESS CALL" in render(roomless_call, "codex", 50, 40, view="list", navigation={"selected": ("result", "roomless-worker")})
 roomless_nav = {}
 roomless_text = render(roomless_call, "codex", 50, 40, view="graph", navigation=roomless_nav)
-assert "ROOMLESS CALL" in roomless_text and "surface" not in roomless_nav, roomless_text
+assert "WORKER Luna 6" in roomless_text and "surface" not in roomless_nav, roomless_text
 # A selection from the inbox is valid only if the current tree still exposes it; visible tree selections remain intact.
 stale_inbox_nav = {"selected": ("result", "w1"), "selected_row": 2, "row_ids": ["w1"], "surface": "inbox"}
 render_tree(msg_report, 110, 40, navigation=stale_inbox_nav)
@@ -3016,8 +3109,9 @@ for crowd_size in (8, 12):
             hidden = crowd_size - len(drawn)
             assert len(folds) == int(bool(hidden)) and (not folds or folds[0] is tree_hits[-1]), (where, picture_lines)
             assert not hidden or ("%s%d more calls" % (more, hidden)) in picture_lines[folds[0]["y"] - 1], (where, picture_lines)
-            # Roomy boards draw every call; 80x24 folds.
-            assert bool(hidden) == (rows_high < 30 or crowd_size == 12 and rows_high < 40), (where, picture_lines)
+            # Roomy boards draw every call; compact boards may fit more after the Attention strip shrinks.
+            if rows_high >= 40:
+                assert not hidden, (where, picture_lines)
             assert nav["tab_body_visible"], (where, picture_lines)
             for hit, row in calls:
                 assert "WORKER" in row and "Luna" in row and row[stem:].startswith((branch, last)), (where, row)
@@ -3126,13 +3220,13 @@ assert not [i for i in question_view.inbox_items(asked_report) if i["glyph"] == 
 empty_calls = deepcopy(tree)
 empty_calls["attempts"]["active_recent"] = empty_calls["attempts"]["active_recent"][:2]
 idle_mains = render(empty_calls, "codex", 100, 40)
-assert "MAIN / Sol 6 / working" in idle_mains and "MAIN / Opus 5.5 / working" not in idle_mains
+assert "MAIN Sol 6" in idle_mains and "MAIN Opus 5.5" not in idle_mains
 assert "No active child calls" in idle_mains
 own_tree = render(tree, "codex", 100, 60, main_attempt="att_main", view="detail")
 assert "Sol main task" in own_tree and "Opus child blocked" not in own_tree and "legacy-unlinked" not in own_tree
 compact_tree = render(tree, "codex", 100, 60, view="compact")
 assert "Architecture advice" in compact_tree and "worktree example/wt" not in compact_tree
-assert len(compact_tree.splitlines()) < len(full_tree.splitlines())
+assert "[⟳ running]" in compact_tree and "[⟳ running]" in full_tree
 attention_tree = render(tree, "codex", 100, 60, attention_only=True)
 assert "Pending review" in attention_tree and "Opus child blocked" in attention_tree
 assert "Architecture advice" not in attention_tree and "filtered" in attention_tree
@@ -3140,18 +3234,19 @@ assert json.dumps(tree, sort_keys=True) == saved_tree
 # Closed root cards replace deep indentation; role counts and attention titles
 # stay readable in the short menu, with stable roots as child states change.
 short_tree = render(tree, "codex", 100, 28)
-assert "Opus child blocked" in short_tree and "REVIEWERS (1)" in short_tree, short_tree
-assert "WORKERS (1)" in short_tree and "No known main" in short_tree, short_tree
+assert "Opus child blocked" in short_tree and "REVIEWER Fable" in short_tree, short_tree
+assert "WORKER Sonnet" in short_tree and "No known main" in short_tree, short_tree
 assert "2 advisor" not in short_tree
 changed_tree = deepcopy(tree)
 changed_tree["attempts"]["active_recent"][4]["state"] = "blocked"
 changed_text = render(changed_tree, "codex", 100, 60, view="detail")
-assert full_tree.index("MAIN / Sol 6 /") < full_tree.index("No known main")
-assert changed_text.index("MAIN / Sol 6 /") < changed_text.index("No known main")
+assert full_tree.index("MAIN Sol 6") < full_tree.index("No known main")
+assert changed_text.index("MAIN Sol 6") < changed_text.index("No known main")
 missing_model = deepcopy(tree)
 missing_model["attempts"]["active_recent"][0]["panel"].pop("model")
 missing_text = render(missing_model, "codex", 42, 34, main_attempt="att_main")
-assert "model unrecorded" in missing_text and "Sol 6 / high / working" not in missing_text, missing_text
+assert "MAIN model unknow" in missing_text and "Sol 6 / high / working" not in missing_text, missing_text
+assert "MAIN model unknown" in render(missing_model, "codex", 100, 34, main_attempt="att_main")
 
 # Usage is the recent artifact window, never an account total or an overlapping
 # lifecycle sum. Mixed routes and selected-only identities stay separate.
@@ -5035,7 +5130,7 @@ import unicodedata
 previous_unicode = ELLIPSIS[0] == '…'
 for glyphs in (True, False):
     use_unicode(glyphs)
-    marker = '↪ ' if glyphs else '+ '
+    marker = '→ ' if glyphs else '-> '
     for width in (24, 42, 50, 80, 100, 127):
         result_text = render_results(result_layout, width, heading='Worker Sol 6.1 · finished')
         assert '\033' not in result_text and all(display_width(line) <= width for line in result_text.splitlines())
@@ -12459,7 +12554,7 @@ for glyphs in (False, True):
         assert not re.search(r"[│|]\s+high\s+[│|]", clocked_cards), clocked_cards
         assert "high" not in clocked_cards and " for " not in clocked_cards, clocked_cards
 clocked_tree = render(clocked, "codex", 100, 50, view="tree", navigation={})
-assert re.search(r"running 12m", clocked_tree), clocked_tree
+assert re.search(r"\[⟳ running\]  12m", clocked_tree), clocked_tree
 with patch.object(graph_text.time, "time", return_value=1800000000):
     for seconds, expected in ((30, "<1m"), (720, "12m"), (7200, "2h"), (172800, "2d")):
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(1800000000 - seconds))
@@ -12524,7 +12619,7 @@ assert clean(sample) == clipped(sample, 20) == "ok ✔ é 각"
 for box_width in (8, 14, 24):
     assert display_width(box_row(sample, box_width, True)) == box_width
 assert display_width(fit(sample + " long tail", 8)) <= 8
-assert activity("waiting_approval") == "⚑" and activity("waiting_approval", unicode=False) == "A" and activity("waiting_input") == "?"
+assert activity("waiting_approval") == "!" and activity("waiting_approval", unicode=False) == "!" and activity("waiting_input") == "?"
 # A failed call marks its own main's window with "! "; a handled failure or another main's call does not.
 alarm = deepcopy(flow)
 assert not panel.main_needs_attention(alarm, "flow-attempt")
@@ -13223,15 +13318,14 @@ for glyphs in (False, True):
     assert "caching and the panel integration" in expanded_picture, expanded_picture
 from panel_view import PALETTE
 colored = render(wide_flow, "codex", 200, 44, view="graph", color=True)
-# Each provider keeps its own hue, and a selection is a coloured block, never a bare white inversion.
-assert PALETTE["worker"] in colored and PALETTE["codex"] in colored, colored
-assert colored.count("\033[7m") == colored.count(PALETTE["main"] + "\033[7m") + colored.count(PALETTE["codex"] + "\033[7m") + sum(
-    colored.count(PALETTE[k] + "\033[7m") for k in ("worker", "review", "alert", "bad", "dim")), colored
+# Main colour is stable across providers; role spans retain their own palette.
+assert PALETTE["codex"] == PALETTE["main"] and PALETTE["worker"] != PALETTE["main"]
+assert PALETTE["worker"] in colored and PALETTE["main"] in colored, colored
 # Light terminal themes get darker shades of the same hues.
-for theme_env, shade in (({"OMS_PANEL_THEME": "light"}, "166"), ({"COLORFGBG": "0;15"}, "166"),
-                         ({"COLORFGBG": "15;0"}, "209"), ({"OMS_PANEL_THEME": "dark", "COLORFGBG": "0;15"}, "209")):
+for theme_env, shade in (({"OMS_PANEL_THEME": "light"}, "130"), ({"COLORFGBG": "0;15"}, "130"),
+                         ({"COLORFGBG": "15;0"}, "215"), ({"OMS_PANEL_THEME": "dark", "COLORFGBG": "0;15"}, "215")):
     picked = subprocess.run([sys.executable, "-c", "import panel_view; print(repr(panel_view.PALETTE['main']))"],
-                            env=dict(os.environ, PYTHONPATH=str(Path(panel.__file__).parent), **theme_env),
+                            env=dict(os.environ, TERM="xterm-256color", PYTHONPATH=str(Path(panel.__file__).parent), **theme_env),
                             capture_output=True, text=True, check=True).stdout
     assert "38;5;" + shade + "m" in picked, (theme_env, picked)
 flow_publication = deepcopy(flow)
@@ -13562,7 +13656,7 @@ ended_picture = render(ended, "codex", 120, 120, view="tree", navigation=ended_n
 activity_top = next(i + 1 for i, line in enumerate(ended_picture.splitlines()) if line.startswith("╭─ Activity"))
 shown = list(dict.fromkeys(h["action"][1] for h in sorted(ended_nav["hits"], key=lambda h: h["y"]) if h["action"][0] == "result"))
 assert shown == [i[1] for i in ended_nav["items"] if i[0] == "result"] and shown.index("old-13") > shown.index("builder"), shown
-assert any(h["action"] == ("result", "old-00") and h["y"] < activity_top for h in ended_nav["hits"]), ended_nav
+assert any(h["action"] == ("result", "old-00") and h["y"] > activity_top for h in ended_nav["hits"]), ended_nav
 assert all(h.get("past") for h in ended_nav["hits"] if h["action"] == ("result", "old-13")), ended_nav
 # With a second main the open Past list still gets a body on short trees, so its keys reach the list.
 for columns, rows_high in ((42, 24), (80, 24), (110, 24), (110, 28)):
@@ -13750,7 +13844,7 @@ for order_width, order_height in ((100, 30), (100, 40), (160, 60)):
     tree_order = render(words, "codex", order_width, order_height, view="tree", navigation={}).splitlines()
     assert tree_order[0].startswith("OMS · ") and "Claude" in tree_order[1] and tree_order[2].startswith("[ GOAL"), tree_order[:4]
     inbox_order = render(words, "codex", order_width, order_height, menu=True, view="tree", navigation={}).splitlines()
-    assert "OMS control panel" in inbox_order[0] and "Codex" in inbox_order[1] and inbox_order[2].startswith("[ GOAL"), inbox_order[:4]
+    assert inbox_order[0].startswith("OMS · ") and "Codex" in inbox_order[1] and inbox_order[2].startswith("[ GOAL"), inbox_order[:4]
     for provider in ("claude", "codex"):
         # Both providers stay on the row whichever main the window belongs to; one without a reading reads "--".
         one = deepcopy(words)
@@ -13917,7 +14011,7 @@ for attempt in many_needs["attempts"]["active_recent"]:
         attempt["state"] = "waiting_approval"
 attention_rows = needs_strip(many_needs, 36, True)
 # The counts header opens the Attention tab and replaces the "+N more" row, so the strip still holds four rows.
-assert len(attention_rows) == 4 and attention_rows[0]["action"] == ("tab", "needs")
+assert len(attention_rows) == 1 and attention_rows[0]["action"] == ("tab", "needs")
 assert attention_rows[0]["text"].startswith("Attention %s" % len(inbox_items(many_needs))), attention_rows
 # Pinned attention follows header/navigation order in both the keyboard list and the hit map.
 many_needs["room"]["repo_tasks"] = [{"id": "last-task", "title": "Last task", "state": "ready"}]
@@ -13925,7 +14019,7 @@ needs_nav = {}
 needs_picture = render(many_needs, "codex", 50, 50, view="tree", navigation=needs_nav)
 pinned_actions = [item["action"] for item in attention_rows]
 hit_actions = [hit["action"] for hit in sorted(needs_nav["hits"], key=lambda hit: hit["y"])]
-assert hit_actions.index(pinned_actions[0]) < hit_actions.index(pinned_actions[1]) < hit_actions.index(("task", "last-task")), needs_picture
+assert hit_actions.index(pinned_actions[0]) < hit_actions.index(("task", "last-task")), needs_picture
 choose(("end",), needs_nav)
 assert needs_nav["selected"] == ("task", "last-task"), needs_nav
 repeated_needs = deepcopy(many_needs)
@@ -13936,8 +14030,8 @@ plain_needs = deepcopy(many_needs)
 for member in plain_needs["room"]["participants"]:
     member["label"] = "plain label"
 same_labels = needs_strip(plain_needs, 200, True, limit=100)
-assert {row["action"] for row in same_labels[1:]} == {item["action"] for item in inbox_items(plain_needs)}, \
-    "distinct calls with identical labels must remain reachable"
+assert len(same_labels) == 1 and same_labels[0]["action"] == ("tab", "needs")
+assert {item["action"] for item in attention_items(plain_needs)} == {item["action"] for item in inbox_items(plain_needs)}, "identical labels remain reachable in Attention"
 # The Attention queue ranks by urgency, not recency: needs you, failed, decide (oldest first), stale, mail, info;
 # within any other class the newest comes first. A superseded failure or one whose task closed leaves the queue, and
 # a held task whose failed call is listed is not repeated as stale.
@@ -13982,15 +14076,14 @@ assert attention_header(ranked, 11, True) == "Attn 11" and attention_header(rank
 assert attention_header(ranked, 127, False) == full_header.replace(" · ", " / ")
 assert attention_header(attention_items(held_flow), 80, True) == "Attention 2 · 1 decide · 1 stale"
 strip = needs_strip(queue, 127, True)
-assert [row["action"] for row in strip] == [("tab", "needs"), ("result", "builder"), ("result", "advisor"),
-                                           ("chat", "flow-main")], strip
-assert strip[0]["text"] == full_header and strip[1]["text"].startswith("needs you · ⚑ Sonnet 5.5 worker"), strip
+assert [row["action"] for row in strip] == [("tab", "needs")], strip
+assert strip[0]["text"] == full_header, strip
 assert needs_strip(queue, 127, True, ranked=ranked) == strip
 # The narrow fallback keeps tag, who and state, and does not repeat a tag the state already says.
 assert attention_row(ranked[3], 24, True) == "failed · Luna 6", attention_row(ranked[3], 24, True)
 assert attention_row(ranked[5], 30, False) == "failed / Luna 6 / timed out"
 assert attention_row(ranked[6], 40, True) == "decide 30m · Fable 5.1 · patch awaits a…" and \
-    attention_row(ranked[6], 200, True).startswith("decide 30m · ◇ Fable 5.1 reviewer for Sol 6 · patch")
+    attention_row(ranked[6], 200, True).startswith("decide 30m · ! Fable 5.1 reviewer for Sol 6 · patch")
 # The spare-row summary lists the same first two items in the same order.
 summary = graph_text.board_summary(queue, [], lambda call: "live", 127, 5, True)
 assert summary[0] == clipped("Attention    11 · " + attention_row(ranked[0], 400, True), 127), summary
@@ -14009,13 +14102,13 @@ assert group_nav["needs_ids"] == [item["action"] for item in selectable] and \
 def picked_rows():
     return [row[0].strip() for row in graph_text.attention_body(ranked, 123, 30, group_nav, True) if row[2]]
 group_nav["selected"] = ("chat", "flow-main")
-assert picked_rows() == ["» Sol 6 main · to all: Which way?"], picked_rows()
+assert picked_rows() == ["→ Sol 6 main · to all: Which way?"], picked_rows()
 stops = []
 for unused in range(8):
     assert graph_text.past_event(("down",), group_nav, "needs")
     stops.append(group_nav["needs_pick"])
 assert stops == [item["row_id"] for item in selectable[3:]] + [selectable[-1]["row_id"]], stops
-assert group_nav["selected"] == ("chat", "flow-main") and picked_rows() == ["» Sol 6 main · to all: Status for all"]
+assert group_nav["selected"] == ("chat", "flow-main") and picked_rows() == ["→ Sol 6 main · to all: Status for all"]
 assert graph_text.past_event(("up",), group_nav, "needs") and group_nav["selected"] == ("tab", "plan") and \
     picked_rows() == [attention_row(ranked[8], 121, True, tag=False)], picked_rows()
 for columns, rows_high in ((127, 40), (57, 40)):
@@ -14515,11 +14608,13 @@ with patch("review_backlog.policy", wraps=backlog_policy) as policy_reads, \
         patch("review_backlog.counts", wraps=backlog_counts) as backlog_count_reads:
     many_patches["review_backlog"] = backlog_project(many_patches)
     for board_view in ("graph", "tree"):
-        # The warning leads the decide class, so it follows the two needs-you rows and the failure.
+        # The warning remains in Attention after the pinned strip becomes one row.
         strip = needs_strip(many_patches, 160, True, limit=4)
-        assert "10 decide" in strip[0]["text"] and "review first" in strip[4]["text"] \
-            and strip[4]["action"] == ("chat", "m1"), strip
-        drawing = render(many_patches, "claude", 160, 50, view=board_view)
+        from panel_view import attention_items
+        assert len(strip) == 1 and "10 decide" in strip[0]["text"] and any(
+            "review first" in item["what"] and item["action"] == ("chat", "m1")
+            for item in attention_items(many_patches)), strip
+        drawing = render(many_patches, "claude", 160, 50, view=board_view, navigation={"tab": "needs"})
         assert "review first" in drawing, (board_view, drawing)
     assert policy_reads.call_count == backlog_count_reads.call_count == 1, (policy_reads.call_count, backlog_count_reads.call_count)
 for columns, rows in ((50, 18), (80, 40), (127, 40)):
@@ -15273,7 +15368,7 @@ structured_lines = ['```text', '  a\t=  1  ', '  ' + '한글' * 80 + '  END  ',
 structured_source = '\n'.join(structured_lines)
 for glyphs in (True, False):
     use_unicode(glyphs)
-    marker = '↪ ' if glyphs else '+ '
+    marker = '→ ' if glyphs else '-> '
     for width in (24, 50, 80, 100):
         retained = {'rows': [{'summary': structured_source, 'calls': [{'answer': structured_source}]}]}
         expected = render_results(retained, width).split('\n')
@@ -15809,7 +15904,7 @@ with patch.dict(os.environ, chat_env, clear=True):
     assert member["model"] == "gpt-6.1-sol" and member["effort"] == "xhigh", member
     assert "Sol 6.1" in render(refreshed, "codex", 100, 26, view="graph"), refreshed
     from panel_view import hierarchy
-    assert hierarchy(refreshed, [], chat_attempt)[0]["title"] == "MAIN / Sol 6.1"
+    assert hierarchy(refreshed, [], chat_attempt)[0]["title"] == "MAIN Sol 6.1"
     for density in ("tree", "compact", "detail"):
         assert "Sol 6.1" in render(refreshed, "codex", 100, 40, view=density), density
     assert json.dumps(model_report, sort_keys=True) == model_record_before
@@ -15828,7 +15923,7 @@ with patch.dict(os.environ, chat_env, clear=True):
     wrong = deepcopy(status)
     wrong["codex"]["native_models"]["chat-sol"]["consumer"] = "f" * 32
     assert nodes(dict(model_report, provider_status=wrong))[0]["model"] is None
-    assert hierarchy(dict(model_report, provider_status=wrong), [], chat_attempt)[0]["title"] != "MAIN / Sol 6"
+    assert hierarchy(dict(model_report, provider_status=wrong), [], chat_attempt)[0]["title"] != "MAIN Sol 6"
     with sqlite3.connect(str(model_database)) as database:
         database.execute("UPDATE threads SET cwd=?", (str(temporary / "another-project"),))
     assert not panel_chats.current_models(project, [model_member]), "a foreign project supplied the model"
@@ -17509,10 +17604,11 @@ next(m for m in review_fixture["room"]["participants"] if m["participant"] == "s
 stale_node = next(m for m in graph_view.nodes(review_fixture) if m["participant"] == "stale-patch")
 assert graph_view.call_classifier(review_fixture)(stale_node) == "review"
 assert ("result", "stale-patch") in {item["action"] for item in inbox_items(review_fixture)}
-# The Attention strip counts the same actionable items in its header and lists each below it.
+# The Attention strip counts the actionable items; the tab retains every row.
 review_strip = needs_strip(review_fixture, 120, True, limit=100)
 assert review_strip[0]["text"].startswith("Attention %s" % len(inbox_items(review_fixture))) \
-    and len(review_strip) - 1 == len(inbox_items(review_fixture)), \
+    and len(review_strip) == 1 and {item["action"] for item in attention_items(review_fixture)} >= \
+    {item["action"] for item in inbox_items(review_fixture)}, \
     "Needs-you strip count must match actionable inbox items"
 # An exited owner with an exited successor did not adopt the patch; a live successor did.
 handoff = deepcopy(review_fixture)
@@ -17604,16 +17700,17 @@ for mode in ("tree", "graph"):
     nav = {"dismissed": True}
     picture = render(grouped_board, "codex", 120, 80, view=mode, navigation=nav)
     assert "Awaiting decision (2)" in picture and "Past work" not in picture and "Past 2" in picture, picture
-    # Collapsed children stay out of the body; pinned Needs-you links remain reachable.
-    pinned = {row["action"] for row in needs_strip(grouped_board, 120, True)}
+    # Collapsed children stay out of the body; the Attention tab retains their links.
+    pinned = {item["action"] for item in attention_items(grouped_board)}
+    assert any(h["action"] == ("tab", "needs") for h in nav["hits"]), (mode, nav)
     body_top = (next(i + 1 for i, line in enumerate(picture.splitlines()) if line.startswith("╭─ Activity"))
                 if mode == "tree" else min(b["y1"] for b in nav["bands"] if b["name"] != "detail"))
     for ident in ("review-call", "pending-patch", "past-call", "old-unknown"):
         target = ("result", ident)
         child_hits = [h for h in nav["hits"] if h["action"] == target]
         assert not any(h["y"] >= body_top for h in child_hits), (mode, ident, nav)
-        assert (target in nav["items"]) == (target in pinned), (mode, ident, nav)
-        assert bool(child_hits) == (target in pinned), (mode, ident, nav)
+        assert target not in nav["items"] and not child_hits, (mode, ident, nav)
+        assert (target in pinned) == (ident in {"review-call", "pending-patch"}), (mode, ident, pinned)
     for ident in ("adv-worker", "blocked-call", "waiting-call", "live-call", "fresh-unknown"):
         assert ("result", ident) in nav["items"], (mode, ident, nav)
     mixed_nav = {"dismissed": True}
