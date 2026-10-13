@@ -3669,6 +3669,7 @@ environment = dict(os.environ, HOME=str(home), NVM_DIR=str(home / ".nvm"),
                    OMS_PANEL_ENTRYPOINT=str(panel.ENTRY), PANEL_TEST_LOG=str(log),
                    PANEL_TEST_WORKER_LOG=str(worker_log), OMS_CAPABILITY_SKIP_MODELS="1",
                    OMS_PEER_TIMEOUT="30", OMS_ROLE_ROUTING="0")
+os.environ["CODEX_HOME"] = str(home / ".codex")
 for key in ("OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH", "OMS_PANEL_SESSION", "TMUX",
             "OMS_PANEL_MAIN_ATTEMPT", "OMS_PANEL_DISPATCH", "OMS_ATTEMPT_ID",
             "OH_MY_SETTING_CALL_DRY_RUN", "OH_MY_SETTING_REVIEW_DRY_RUN"):
@@ -3714,7 +3715,7 @@ for name in ("grok", "antigravity", "muse"):
 assert registered["muse"]["access"] == ["read"]
 assert registered["codex"]["native_launch"] and registered["claude"]["native_launch"]
 assert shlex.split(panel.shell_command(["bash", str(panel.ENTRY), str(project)]))[1:] == ["bash", str(panel.ENTRY), str(project)]
-# Roles pick by tier, not provider: the first installed candidate of the tier; independence and availability reorder it.
+# Roles pick by tier, quota and availability; missing readings spread load away from the owner.
 both = {"claude", "codex"}
 assert allocate("codex", tier="light", installed=both)["model"] == "claude-haiku-5-5"
 assert allocate("claude", tier="light", installed={"codex"})["model"] == "gpt-6-luna"
@@ -3725,12 +3726,14 @@ for role, model in (("worker", "claude-sonnet-5-5"), ("builder", "claude-sonnet-
                     ("documenter", "claude-sonnet-5-5"), ("release-engineer", "claude-sonnet-5-5"),
                     ("performance-engineer", "claude-opus-5-5"), ("integrator", "claude-opus-5-5")):
     for owner in both:
-        assert allocate(owner, role=role, installed=both)["model"] == model
+        expected = model if owner == "codex" else ("gpt-6.1-sol" if role in (
+            "performance-engineer", "integrator") else "gpt-6-luna")
+        assert allocate(owner, role=role, installed=both)["model"] == expected
     assert allocate("claude", role=role, installed={"codex"})["provider"] == "codex"
-assert allocate("claude", role="advisor", installed=both)["model"] == "claude-fable-5-1"
+assert allocate("claude", role="advisor", installed=both)["model"] == "gpt-6-astra"
 assert allocate("claude", role="advisor", installed={"codex"})["model"] == "gpt-6-astra"
 assert allocate("claude", role="verifier", installed={"claude"})["model"] == "claude-fable-5-1"
-assert allocate("claude", role="architect", installed=both)["model"] == "claude-fable-5-1"
+assert allocate("claude", role="architect", installed=both)["model"] == "gpt-6-astra"
 for role in ("reviewer", "verifier", "security-auditor", "critic"):
     assert allocate("claude", role=role, installed=both)["provider"] == "codex"
     assert allocate("codex", role=role, installed=both)["provider"] == "claude"
@@ -3741,11 +3744,14 @@ for used, expected in ((89, "claude"), (90, "codex"), (100, "codex"),
     assert allocate("codex", installed=both, provider_status=readings)["provider"] == expected
 assert allocate("claude", role="reviewer", installed=both,
                 provider_status={"codex": {"weekly_used": 90}})["provider"] == "claude"
-# With both readings, more weekly quota left wins inside the tier; a missing reading keeps the tier order.
-for claude_used, codex_used, expected in ((60, 20, "codex"), (20, 60, "claude"), (40, 40, "claude"), (60, None, "claude")):
+# With both readings, more weekly quota left wins; missing readings put the owner last.
+for claude_used, codex_used, expected in ((60, 20, "codex"), (20, 60, "claude"), (40, 40, "claude")):
     readings = {"claude": {"weekly_used": claude_used}, "codex": {"weekly_used": codex_used}}
     assert allocate("claude", role="builder", installed=both, provider_status=readings)["provider"] == expected, readings
     assert allocate("codex", role="integrator", installed=both, provider_status=readings)["provider"] == expected, readings
+for readings in ({}, {"claude": {"weekly_used": 60}}, {"codex": {"weekly_used": 20}}):
+    for owner in both:
+        assert allocate(owner, role="builder", installed=both, provider_status=readings)["provider"] != owner
 assert allocate("claude", role="reviewer", installed=both,
                 provider_status={"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}})["provider"] == "codex"
 assert allocate("codex", role="reviewer", installed=both,
@@ -3769,7 +3775,7 @@ for role, tier in routing_roles.items():
     for scenario, readings in usage_scenarios.items():
         for owner in both:
             selected = allocate(owner, role=role, installed=both, provider_status=readings)
-            expected = {"none": "claude", "claude-70-codex-20": "codex",
+            expected = {"none": "codex" if owner == "claude" else "claude", "claude-70-codex-20": "codex",
                         "codex-70-claude-20": "claude"}[scenario]
             if role in ("reviewer", "verifier", "security-auditor", "critic"):
                 expected = "codex" if owner == "claude" else "claude"
@@ -4194,13 +4200,13 @@ for owner in panel.PROVIDERS:
 cases = [("codex", "worker", "light", "read", "explain", "claude-haiku-5-5"),
          ("codex", "worker", None, "read", "explain", "claude-sonnet-5-5"),
          ("codex", "worker", "deep", "read", "investigate", "claude-opus-5-5"),
-         ("claude", "builder", None, "write", None, "claude-sonnet-5-5"),
-         ("claude", "advisor", None, "read", None, "claude-fable-5-1"),
+         ("claude", "builder", None, "write", None, "gpt-6-luna"),
+         ("claude", "advisor", None, "read", None, "gpt-6-astra"),
          ("codex", "advisor", "deep", "read", None, "claude-opus-5-5"),
          ("claude", "reviewer", None, "read", None, "gpt-6-astra"),
          ("claude", "security-auditor", None, "read", None, "gpt-6-astra"),
          ("codex", "researcher", None, "read", None, "claude-haiku-5-5"),
-         ("claude", "researcher", None, "read", None, "claude-haiku-5-5")]
+         ("claude", "researcher", None, "read", None, "gpt-6-luna")]
 for index, (owner, role, workload, access, purpose, expected) in enumerate(cases):
     request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", role,
                "--owner", owner, "--access", access, "--task-id", "panel-route-%s" % index,
@@ -6415,7 +6421,7 @@ answer = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--roo
 assert "artifact:" in answer, answer
 state = room.status(project, shared)
 child = next(p for p in state["participants"] if p["role"] == "worker")
-assert child["parent"] == room_owner and child["model"] == "claude-haiku-5-5", child
+assert child["parent"] == room_owner and child["model"] == "gpt-6-luna", child
 handoff = next(m for m in state["messages"] if m["sender"] == child["participant"])
 assert handoff["recipient"] == room_owner and "parent acceptance pending" in handoff["text"], handoff
 assert "inspected the bounded repository task" in handoff["text"], handoff
@@ -10912,7 +10918,7 @@ for columns, rows in ((100, 44), (76, 36), (60, 36), (36, 28), (2, 8)):
 # The tree roots one live main, maps cells from the drawn frame, and
 # never manufactures a parent or changes room data while folding/scrolling.
 from panel_input import TerminalInput, choose
-from panel_metrics import cached, collect, pane_reading, percent, usage_line
+from panel_metrics import cached, codex_weekly_reading, collect, pane_reading, percent, usage_line
 tree_room = deepcopy(room_view)
 tree_room["room"]["participants"].extend([
     {"participant": "extra-main", "provider": "codex", "model": "gpt-6-sol", "role": "main",
@@ -14094,6 +14100,71 @@ assert decoder.decode(b"7M\033[<0;8;7m\033[<65;8;7M\033[A\r") == [
 assert decoder.decode(b"\033[<32;1;1M") == []
 assert percent(True) is None and percent(float("nan")) is None and percent(10**1000) is None
 assert percent(0) == 0 and percent(100) == 100
+quota_home = temporary / "codex-quota-home"
+quota_day = quota_home / "sessions" / "2026" / "10" / "13"
+quota_day.mkdir(parents=True)
+quota_log = quota_day / "rollout-quota.jsonl"
+quota_now = time.time()
+quota_limits = {"primary": {"used_percent": 9.0, "window_minutes": 10080,
+                            "resets_at": quota_now + 60},
+                "secondary": {"used_percent": 70, "window_minutes": 300,
+                              "resets_at": quota_now + 60}}
+with patch.dict(os.environ, {"CODEX_HOME": str(quota_home)}):
+    assert codex_weekly_reading(quota_now) == {}
+    for weekly_slot in ("primary", "secondary"):
+        limits = quota_limits if weekly_slot == "primary" else {
+            "primary": quota_limits["secondary"], "secondary": quota_limits["primary"]}
+        quota_log.write_text(json.dumps({"rate_limits": dict(quota_limits,
+            primary=dict(quota_limits["primary"], used_percent=80))}) + "\n" +
+            json.dumps({"payload": {"type": "token_count", "rate_limits": limits}}) + "\n" +
+            json.dumps({"payload": {"type": "other"}}) + "\n")
+        assert codex_weekly_reading(quota_now)["weekly_used"] == 9
+    with patch("panel_metrics.os.open", side_effect=AssertionError("unchanged log was reread")):
+        assert codex_weekly_reading(quota_now)["weekly_used"] == 9
+        assert codex_weekly_reading(quota_now + 61) == {}, "cache retained an expired quota"
+    # A Claude main with no Codex pane still supplies the board and routing with quota.
+    quota_report = {"room": {"id": "quota-room", "participants": [{"participant": "quota-main",
+        "role": "main", "provider": "claude", "joined": True}]}}
+    with patch("panel_chats.windows", return_value={}), patch("panel_chats.current_models", return_value={}):
+        quota_status = collect(quota_report, now=quota_now)
+    assert quota_status["codex"]["weekly_used"] == 9
+    assert "Codex week 91% left" in usage_line({"provider_status": quota_status}, width=200)
+    quota_status["claude"]["weekly_used"] = 60
+    assert allocate("claude", installed=both, provider_status=quota_status)["provider"] == "codex"
+    quota_main = {"room": {"id": "quota-room", "participants": [{"participant": "quota-codex",
+        "role": "main", "provider": "codex", "joined": True}]}}
+    for visible, expected in (({"weekly_used": 39, "context_left": 83, "source": "TUI"}, 39),
+                              ({"weekly_used": None, "context_left": 83, "source": "TUI"}, 9)):
+        with patch("panel_chats.windows", return_value={"quota-codex": [{"pane": "%42"}]}), \
+                patch("panel_chats.current_models", return_value={}), \
+                patch("panel_metrics.pane_reading", return_value=visible):
+            live_status = collect(quota_main, now=quota_now, repo=project)["codex"]
+        assert live_status["weekly_used"] == expected and live_status["context_left"] == 83
+    quota_log.write_text(json.dumps({"rate_limits": dict(quota_limits,
+        primary=dict(quota_limits["primary"], resets_at=quota_now - 1))}) + "\n")
+    assert codex_weekly_reading(quota_now) == {}
+    quota_log.write_text('{"rate_limits": malformed}\n')
+    assert codex_weekly_reading(quota_now) == {}
+    quota_log.write_text(json.dumps({"rate_limits": quota_limits}) + "\n")
+    os.utime(quota_log, (quota_now - 604801, quota_now - 604801))
+    assert codex_weekly_reading(quota_now) == {}, "old log supplied weekly quota"
+    # The newest file wins, and a quota outside the bounded tail stays unknown.
+    newest_log = quota_day / "rollout-newest.jsonl"
+    newest_log.write_text(json.dumps({"rate_limits": quota_limits}) + "\n")
+    assert codex_weekly_reading(quota_now)["weekly_used"] == 9
+    newest_log.write_text(json.dumps({"rate_limits": quota_limits}) + "\n" + "x" * (256 * 1024) + "\n")
+    assert codex_weekly_reading(quota_now) == {}
+    older_day = quota_day.parent / "10"
+    older_day.mkdir()
+    (older_day / "rollout-older.jsonl").write_text(json.dumps({"rate_limits": quota_limits}) + "\n")
+    for day in ("11", "12"):
+        (quota_day.parent / day).mkdir()
+    assert codex_weekly_reading(quota_now) == {}, "searched beyond the newest three day directories"
+    with patch("panel_metrics.os.scandir", side_effect=OSError("unavailable sessions")):
+        assert codex_weekly_reading(quota_now) == {}
+    with patch.dict(os.environ, {"CODEX_HOME": ""}), \
+            patch("panel_metrics.Path.home", side_effect=RuntimeError("home unavailable")):
+        assert codex_weekly_reading(quota_now) == {}
 hud = temporary / "panel-hud"
 hud.mkdir()
 consumer = "a" * 32

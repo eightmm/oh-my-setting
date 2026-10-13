@@ -112,6 +112,94 @@ def numeric_reading(text, provider):
     return dict(reading, source="TUI") if any(v is not None for v in reading.values()) else {}
 
 
+CODEX_WEEK_SECONDS = 10080 * 60
+CODEX_TAIL_BYTES = 256 * 1024
+_CODEX_QUOTA_CACHE = (None, {})
+
+
+def _codex_session_file(home):
+    remaining = 4096
+
+    def entries(folder, pattern, directory):
+        nonlocal remaining
+        found = []
+        with os.scandir(folder) as scan:
+            for entry in scan:
+                remaining -= 1
+                if remaining < 0:
+                    raise ValueError("Codex session search limit reached")
+                if (re.fullmatch(pattern, entry.name) and
+                        (entry.is_dir(follow_symlinks=False) if directory
+                         else entry.is_file(follow_symlinks=False))):
+                    found.append(Path(entry.path))
+        return sorted(found, reverse=True)
+
+    days = []
+    for year in entries(home / "sessions", r"[0-9]{4}", True):
+        for month in entries(year, r"(?:0[1-9]|1[0-2])", True):
+            for day in entries(month, r"(?:0[1-9]|[12][0-9]|3[01])", True):
+                days.append(day)
+                if len(days) == 3:
+                    break
+            if len(days) == 3:
+                break
+        if len(days) == 3:
+            break
+    files = [path for day in days for path in entries(day, r"rollout-.*\.jsonl", False)]
+    return max(files, key=lambda path: path.stat().st_mtime_ns) if files else None
+
+
+def codex_weekly_reading(now):
+    """Use only the newest log's bounded quota tail, rechecking expiry on cache hits."""
+    global _CODEX_QUOTA_CACHE
+    try:
+        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+        path = _codex_session_file(home)
+        if path is None:
+            return {}
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or now - info.st_mtime > CODEX_WEEK_SECONDS:
+            return {}
+        key = (str(path), info.st_ino, info.st_mtime_ns, info.st_size)
+        cached_key, limits = _CODEX_QUOTA_CACHE
+        if key != cached_key:
+            limits = {}
+            fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+            with os.fdopen(fd, "rb") as handle:
+                opened = os.fstat(handle.fileno())
+                if not stat.S_ISREG(opened.st_mode):
+                    return {}
+                start = max(0, opened.st_size - CODEX_TAIL_BYTES)
+                handle.seek(start)
+                body = handle.read(CODEX_TAIL_BYTES)
+            if start:
+                body = body.partition(b"\n")[2]
+            for line in reversed(body.splitlines()):
+                if b'"rate_limits"' not in line:
+                    continue
+                try:
+                    row = mapping(json.loads(line))
+                except (ValueError, UnicodeError, RecursionError):
+                    continue
+                payload = mapping(row.get("payload"))
+                if "rate_limits" in row or "rate_limits" in payload:
+                    limits = mapping(row.get("rate_limits") if "rate_limits" in row
+                                     else payload.get("rate_limits"))
+                    break
+            _CODEX_QUOTA_CACHE = (key, limits)
+        for name in ("primary", "secondary"):
+            window = mapping(limits.get(name))
+            if window.get("window_minutes") != 10080:
+                continue
+            used, reset = percent(window.get("used_percent")), number(window.get("resets_at"))
+            if used is not None and reset is not None and reset > now:
+                return {"weekly_used": used, "source": "session log"}
+        return {}
+    except (OSError, ValueError, TypeError, OverflowError, RuntimeError):
+        return {}
+
+
 def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
     from panel_chats import current_models, windows
     from room_view import nodes
@@ -129,6 +217,7 @@ def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
         selected = selected or candidates[:1]
         row = {"context_left": None, "weekly_used": None, "source": "unavailable"}
         if provider == "codex":
+            row.update(codex_weekly_reading(now))
             row.update(native_models=current, native_model_checked=repo is not None)
         if selected:
             main = selected[0]
@@ -148,7 +237,7 @@ def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
                         if reading.get(key) is None and visible.get(key) is not None:
                             reading[key] = visible[key]
                             reading["source"] = "HUD/TUI"
-            row.update(reading)
+            row.update({key: value for key, value in reading.items() if value is not None})
             if main["state"] in {"done", "failed", "cancelled", "timed_out", "abandoned"}:
                 row["context_left"] = None
         output[provider] = row

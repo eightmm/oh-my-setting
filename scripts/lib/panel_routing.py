@@ -136,9 +136,11 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         if not available:
             raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left" % tier)
         # With a reading for every remaining provider, the one with more weekly quota left goes first;
-        # otherwise the configured tier order stands (sorted() keeps ties in that order).
+        # otherwise spread load away from the provider the main itself consumes.
         if None not in used_by.values():
             available = sorted(available, key=lambda c: used_by[c["provider"]])
+        else:
+            available = sorted(available, key=lambda c: c["provider"] == owner)
         usable = available
     if preferred:
         usable = sorted(usable, key=lambda c: c["provider"] != preferred)
