@@ -2617,11 +2617,8 @@ def _stop_dispatch_groups(process, identity, evidence, before_force=None, reaped
             except ProcessLookupError:
                 pass
         for row in pids:
-            if row["group"] not in groups and panel_terminals.matches(row["pid"], row["identity"]):
-                try:
-                    os.kill(row["pid"], number)
-                except ProcessLookupError:
-                    pass
+            if row["group"] not in groups:
+                panel_terminals.signal_process(row["pid"], row["identity"], number)
         return bool(groups or pids)
 
     for number, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 1)):

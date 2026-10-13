@@ -147,12 +147,9 @@ def supervise(repo, member, digest, argv):
                     import panel_terminals
                     for row in rows:
                         key = (row['pid'], row['identity'], escalation)
-                        if key not in sent and panel_terminals.matches(row['pid'], row['identity']):
-                            try:
-                                os.kill(row['pid'], signal.SIGKILL if escalation else number)
-                                sent.add(key)
-                            except ProcessLookupError:
-                                pass
+                        if key not in sent and panel_terminals.signal_process(
+                                row['pid'], row['identity'], signal.SIGKILL if escalation else number):
+                            sent.add(key)
                 elif escalation and status is None and child.pid not in sent:
                     try:
                         os.kill(child.pid, signal.SIGKILL)

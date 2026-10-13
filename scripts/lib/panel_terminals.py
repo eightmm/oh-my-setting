@@ -7,6 +7,7 @@ The same private-file primitives are used by panel_jobs; no room events occur.
 
 import argparse
 import contextlib
+import errno
 try:
     import fcntl
 except ImportError:  # Core OMS remains importable on hosts without POSIX ownership.
@@ -18,6 +19,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import stat
 import subprocess
 import sys
@@ -111,6 +113,47 @@ def state_directory(repo):
 def matches(pid, identity):
     current = process(pid)
     return bool(current and current["state"] not in {"Z", "X"} and current["identity"] == identity)
+
+
+def signal_process(pid, identity, number):
+    """Signal PID only if it still has the observed start identity; True when sent.
+
+    A pidfd opened before the identity read pins that kernel process, so a
+    reused PID can never be signalled. Hosts without pidfd (macOS, older Linux,
+    seccomp-filtered containers, Windows Git Bash) re-check identity right before
+    os.kill; that narrows but cannot close the check-to-kill PID reuse race.
+    """
+    if type(pid) is not int or pid <= 0:
+        return False
+    opener, sender = getattr(os, "pidfd_open", None), getattr(signal, "pidfd_send_signal", None)
+    if callable(opener) and callable(sender):
+        try:
+            descriptor = opener(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            descriptor = None
+        if descriptor is not None:
+            try:
+                if not matches(pid, identity):
+                    return False
+                try:
+                    sender(descriptor, number)
+                    return True
+                except ProcessLookupError:
+                    return False
+                except OSError as error:
+                    if error.errno != errno.ENOSYS:
+                        raise
+            finally:
+                os.close(descriptor)
+    if not matches(pid, identity):
+        return False
+    try:
+        os.kill(pid, number)
+        return True
+    except ProcessLookupError:
+        return False
 
 
 def process_gone(pid, identity):

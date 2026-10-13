@@ -693,6 +693,7 @@ def padded(text, width):
 
 
 FLANK_WIDTH = 140
+WORKER_CARD_MIN = 30  # narrowest worker card that still shows role, model, task and state
 
 
 def layout(width, count, centered=False):
@@ -1083,7 +1084,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     # Running judges first; answered ones linger after them.
     judges = sorted((m for m in children if m.get("role") in {"advisor", "reviewer", "council"}),
                     key=lambda m: m["state"] in FINISHED)
-    workers = [m for m in children if m.get("role") in {"worker", "researcher"}]
+    # Running workers lead; the rest keep their order after them.
+    workers = sorted((m for m in children if m.get("role") in {"worker", "researcher"}),
+                     key=lambda m: m["state"] not in LIVE_STATES)
+    # Roomy boards fit more cards per row at a readable width; calls beyond them become one-line rows.
+    crowded_board = width >= 110 and height >= 30 and len(workers) > 3
+    worker_capacity = next((n for n in (5, 4, 3) if (width - n - 1) // n >= WORKER_CARD_MIN), 3) if crowded_board else 3
     unlinked = [m for m in members if m.get("role") != "main" and m.get("parent") not in owners]
     if attention_only:
         unlinked = [m for m in unlinked if classify(m) != "past" and
@@ -1091,16 +1097,17 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     offset = max(0, navigation.get("offset", 0))
     scrolled = mapping(navigation.get("band_offsets"))
     judge_start = min(scrolled.get("judge", offset), max(0, len(judges) - 3))
-    worker_start = min(scrolled.get("worker", offset), max(0, len(workers) - 3))
+    worker_start = 0 if crowded_board else min(scrolled.get("worker", offset), max(0, len(workers) - worker_capacity))
     if selected != navigation.get("graph_selected"):
         for group, name in ((judges, "judge"), (workers, "worker")):
             index = next((i for i, m in enumerate(group) if action(m) == selected), None)
             if index is not None:
                 if name == "judge":
                     judge_start = index // 3 * 3
-                else:
-                    worker_start = index // 3 * 3
-    shown_judges, shown_workers = judges[judge_start:judge_start + 3], workers[worker_start:worker_start + 3]
+                elif not crowded_board:
+                    worker_start = index // worker_capacity * worker_capacity
+    shown_judges = judges[judge_start:judge_start + 3]
+    shown_workers = workers[worker_start:worker_start + worker_capacity]
     preview = mapping(navigation.get("preview"))
     previewed = next((m for m in mains + [c for calls in everyone.values() for c in calls] + unlinked
                       if action(m) == preview.get("target")), None)
@@ -1338,6 +1345,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     target = max(0, total_rows - fixed_header - ordinary - 1) if interactive else 0
     compact_target = min(height * 2 // 5, max(0, total_rows - fixed_header - compact_shape - 1)) if interactive else 0
     target = max(target, compact_target)
+    if crowded_board:
+        # Keep the tabs and one readable body row; the live worker cards take the space.
+        target = compact_target = 3
     if height <= 20:
         target = min(height * 2 // 5, height - 17) if interactive else 0
     target = target if target >= 3 else int(interactive)
@@ -1391,9 +1401,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     def drawn_rows(card_height):
         return sum(max(minimum_rows(g), min(card_height, needed(g, g == [primary]))) for g in shown_groups)
 
+    # Calls the cards cannot hold become one-line rows; reserve their rows before the cards grow.
+    overflow = (workers[worker_capacity:] + judges[3:]) if crowded_board else []
     available_cards = budget - used - wires
+    reserved = min(len(overflow), max(0, available_cards - drawn_rows(4)))
     card_height = next((candidate for candidate in range(6, 2, -1)
-                        if drawn_rows(candidate) <= available_cards), 3)
+                        if drawn_rows(candidate) <= available_cards - reserved), 3)
     automatic = False
     if interactive and not previewed and primary and dock >= 5 and not navigation.get("dismissed"):
         # The box shows the shown main by default; it never displaces a choice.
@@ -1550,7 +1563,22 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         add(" " * max(0, root_bottom - 10) + ("▢ no workers" if unicode else
                                                "no workers"), "dim")
     body_drawn = False
-    omitted = len(children) - len(shown_judges) - len(shown_workers)
+    row_hits = []
+    if overflow:
+        # Rows take the space above the warning line and the dock; each opens the same Detail as a card.
+        room_rows = max(0, total_rows - dock - warn_reserve - len(lines))
+        for m in overflow[:room_rows]:
+            state = main_state(m)
+            right = "%s %s" % (activity(state, frame, unicode), call_span(m, "→" if unicode else "->"))
+            left = ("▸ " if unicode else "> ") * (action(m) == selected) + "%s %s" % (m.get("role", "worker"), name_of(m))
+            task = clipped(task_of(m), max(0, width - 4 - display_width(left) - display_width(right) - 6))
+            text = "  " + left + (" · " + task if task else "") + " · " + right
+            text = clipped(text, width)
+            style = tone(m["state"]) if m["state"] in ATTENTION_STATES else "worker"
+            add(chosen(text, style) if action(m) == selected and color else text, style)
+            hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action(m), "preview": True})
+            row_hits.append(m)
+    omitted = len(children) - len(shown_judges) - len(shown_workers) - len(row_hits)
     parts, open_unlinked = ["%s more calls (scroll)" % omitted] if omitted else [], []
     if omitted or unlinked:
         open_unlinked = [m for m in unlinked if classify(m) != "past"]
@@ -1616,7 +1644,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         row = len(lines) - (hint_rows + 1 if not menu else 1)
         lines[row] = paint(lines[row], "main" if bar[1] else "dim")
         hits += [{"y": row + 1, "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
-    visible = shown_judges + shown_workers
+    visible = shown_judges + shown_workers + row_hits
     # Keys reach only what this board draws: its main and that main's calls.
     items = [("chat", primary["participant"])] if primary else []
     items += [action(m) for m in visible]

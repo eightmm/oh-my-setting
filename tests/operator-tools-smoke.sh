@@ -2952,6 +2952,63 @@ def crowd(report, advisors, workers, label=None, parent="a2", prefix="x"):
     return crowded
 
 
+# Many workers: roomy boards fit 4-5 readable cards per row and list the rest as selectable one-line rows,
+# running calls first; smaller boards keep the three-card band.
+for crowd_size in (8, 12):
+    worker_crowd = crowd(msg_report, 0, crowd_size, parent="a2", prefix="priority")
+    for member in worker_crowd["room"]["participants"]:
+        if member["role"] == "worker":
+            member["joined_at"] = "2026-10-13T10:00:00Z"
+    for attempt in worker_crowd["attempts"]["active_recent"]:
+        if attempt["attempt_id"] in ("priority-worker-0", "priority-worker-1", "priority-worker-2"):
+            attempt["state"] = "failed"
+    for columns, rows_high in ((190, 63), (127, 40), (110, 30), (80, 24), (57, 24), (42, 24), (28, 16)):
+        for glyphs in (True, False):
+            nav = {"dismissed": True}
+            picture = render(worker_crowd, "codex", columns, rows_high, view="graph", navigation=nav,
+                             main_attempt="a2", unicode=glyphs)
+            picture_lines = picture.splitlines()
+            where = (crowd_size, columns, rows_high, glyphs)
+            assert len(picture_lines) == rows_high and all(display_width(line) <= columns for line in picture_lines), (where, picture)
+            assert max(display_width(line) for line in picture_lines) == columns, (where, picture)
+            assert glyphs or picture.isascii(), (where, picture)
+            assert all(1 <= hit["x1"] <= hit["x2"] <= columns and 1 <= hit["y"] <= rows_high for hit in nav["hits"]), (where, nav)
+            wide = columns >= 110 and rows_high >= 30
+            call_hits = [hit for hit in nav["hits"] if hit["action"][0] == "result"
+                         and hit["action"][1].startswith("priority-worker-") and hit.get("preview")]
+            row_hits = [hit for hit in call_hits if hit["x1"] == 1 and hit["x2"] == columns]
+            card_hits = [hit for hit in call_hits if hit not in row_hits]
+            if not wide:
+                assert not row_hits and len({hit["action"] for hit in card_hits}) <= 6, (where, nav)
+                continue
+            per_row = {190: 5, 127: 4, 110: 3}[columns]
+            assert len({hit["action"] for hit in card_hits}) == per_row, (where, nav, picture)
+            assert min(hit["x2"] - hit["x1"] + 1 for hit in card_hits) >= 30, (where, card_hits)
+            # 110x30 has seven spare rows: a twelfth call past them stays reachable by keyboard and is counted.
+            hidden = 2 if (crowd_size, columns, rows_high) == (12, 110, 30) else 0
+            assert len(row_hits) == crowd_size - per_row - hidden, (where, nav, picture)
+            assert ("%d more calls" % hidden in picture) == bool(hidden), (where, picture)
+            assert nav["tab_body_visible"] and nav["box"]["y2"] - nav["box"]["y1"] + 1 <= 3, (where, nav, picture)
+            shown = list(dict.fromkeys(hit["action"][1] for hit in sorted(call_hits, key=lambda hit: (hit["y"], hit["x1"]))))
+            assert len(shown) == crowd_size - hidden, (where, shown)
+            finished_flags = [name[-2:] in ("-0", "-1", "-2") for name in shown]
+            assert finished_flags == sorted(finished_flags), (where, shown)
+            for hit in row_hits:
+                text = picture_lines[hit["y"] - 1]
+                assert hit["action"][1] in text and ("running" in text or "failed" in text), (where, text)
+                assert "worker" in text and "Luna" in text and ("running <1m" in text or "failed" in text and ":" in text), (where, text)
+                nav["selected"] = hit["action"]
+                again = render(worker_crowd, "codex", columns, rows_high, view="graph", navigation=nav,
+                               main_attempt="a2", unicode=glyphs)
+                assert hit["action"] in nav["items"], (where, nav["items"])
+                assert any(h["action"] == hit["action"] and h["x1"] == 1 and h["x2"] == columns for h in nav["hits"]), (where, nav)
+                assert len(again.splitlines()) == rows_high and all(display_width(l) <= columns for l in again.splitlines()), (where, again)
+                assert again != picture, (where, hit["action"])
+            order = [i[1] for i in nav["items"] if i[0] == "result" and i[1].startswith("priority-worker-")]
+            assert sorted(order[:crowd_size - 3]) == sorted("priority-worker-%d" % n for n in range(3, crowd_size)) and \
+                sorted(order[crowd_size - 3:]) == ["priority-worker-%d" % n for n in (0, 1, 2)], (where, nav["items"])
+
+
 long_label = "A normal recorded task with sufficient words to wrap to a second line"
 for width, height in ((80, 40), (157, 60), (126, 90)):
     baseline = set()
@@ -6751,6 +6808,7 @@ assert "message-id conflict: result-screen-call" in conflict.getvalue()
 panel._settle_dispatch = real_test_settle
 # OPERATOR_SECTION_BEGIN dispatch_exit
 def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner, room_env):
+    import errno
     import io
     import signal
     import stat
@@ -6760,6 +6818,59 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
     if os.name != "posix":
         return
     import panel_terminals
+    # PID reuse: the identity lookup reports an impostor. pidfd pins the original
+    # process, so the impostor is rejected before the pinned handle signals; the
+    # fallback re-checks identity right before os.kill. Neither path signals it.
+    reused_pid = 2147483645
+    def reuse_probe(pidfd, identity_now):
+        read_end, write_end = os.pipe()
+        os.close(write_end)
+        opened = Mock(return_value=read_end) if pidfd else None
+        sender = Mock() if pidfd else None
+        found = {"pid": reused_pid, "identity": identity_now, "state": "S"}
+        with patch.object(panel_terminals.os, "pidfd_open", opened, create=True), \
+                patch.object(panel_terminals.signal, "pidfd_send_signal", sender, create=True), \
+                patch.object(panel_terminals, "process", return_value=found) as lookup, \
+                patch.object(panel_terminals.os, "kill") as numeric:
+            sent = panel_terminals.signal_process(reused_pid, "original", signal.SIGTERM)
+            lookup.assert_called_once_with(reused_pid)
+        if not pidfd:
+            os.close(read_end)
+        return sent, opened, sender, numeric, read_end
+    for pidfd in (True, False):
+        sent, opened, sender, numeric, handle = reuse_probe(pidfd, "reused")
+        assert sent is False
+        numeric.assert_not_called()
+        if pidfd:
+            opened.assert_called_once_with(reused_pid, 0)
+            sender.assert_not_called()
+            try:
+                os.fstat(handle)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("pidfd leaked after an impostor was rejected")
+        sent, opened, sender, numeric, handle = reuse_probe(pidfd, "original")
+        assert sent is True
+        if pidfd:
+            sender.assert_called_once_with(handle, signal.SIGTERM)
+            numeric.assert_not_called()
+            try:
+                os.fstat(handle)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("pidfd leaked after signalling")
+        else:
+            numeric.assert_called_once_with(reused_pid, signal.SIGTERM)
+    # A pidfd the host refuses (seccomp, old kernel) degrades to the fallback.
+    with patch.object(panel_terminals.os, "pidfd_open", side_effect=OSError(errno.EPERM, "denied"), create=True), \
+            patch.object(panel_terminals.signal, "pidfd_send_signal", Mock(), create=True) as sender, \
+            patch.object(panel_terminals, "process", return_value={"pid": reused_pid, "identity": "original", "state": "S"}), \
+            patch.object(panel_terminals.os, "kill") as numeric:
+        assert panel_terminals.signal_process(reused_pid, "original", signal.SIGTERM)
+        numeric.assert_called_once_with(reused_pid, signal.SIGTERM)
+        sender.assert_not_called()
     original_members = {p["participant"] for p in room.status(project, shared)["participants"]}
     # PID zero is a process-group selector, not a child identity (argv-observer
     # uses that sentinel). Never let an invalid or self PID reach signal APIs.
