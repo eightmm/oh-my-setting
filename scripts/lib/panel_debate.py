@@ -6,7 +6,7 @@ Debate text is untrusted peer data: every line passes through clean()/wrapped(),
 import re
 
 from dashboard_projection import clean, fit, listing, mapping
-from panel_view import MODEL_NAMES, PROVIDER_NAMES, TERMINAL_STATES, wrapped
+from panel_view import MODEL_NAMES, PROVIDER_NAMES, TERMINAL_STATES, wrapped, call_identity, status_tag
 from panel_results import MAX_RESULT as MAX_SEAT_ANSWER
 
 MAX_DEBATES, MAX_SYNTHESIS = 10, 64 * 1024
@@ -236,7 +236,7 @@ def tab_body(report, main, width, cap, navigation, labels, unicode=True):
         seat = seats[state["seat"]]
         latest = max(seat["rounds"]) if seat["rounds"] else 0
         title = "%s %s round %s answer · Esc back" % (
-            MODEL_NAMES.get(seat["model"]) or clean(seat["model"], 40) or "Unknown model", dash, latest)
+            call_identity("council", seat["model"]), dash, latest)
         text = readable(seat["rounds"].get(latest, "No answer recorded"), "\n", True)
         body = [(title, None, False)]
         notice = seat["truncated"].get(latest)
@@ -251,8 +251,8 @@ def tab_body(report, main, width, cap, navigation, labels, unicode=True):
     done = entry["state"] in TERMINAL_STATES
     stamp = clock_stamp(entry["time"])
     head = "%s · opened by %s%s · %d of %d seats answered · %s" % (
-        entry["title"], name, " · " + stamp if stamp else "", answered, len(seats),
-        "round %d of %d" % (rounds, rounds) if done else "running")
+        call_identity("council", None, entry["title"]), name, " · " + stamp if stamp else "", answered, len(seats),
+        ("round %d of %d" % (rounds, rounds) + " " + status_tag(entry["state"], unicode=unicode)) if done else status_tag(entry["state"], unicode=unicode))
     if len(entries) > 1:
         head += " · debate %d of %d (%s)" % (state["index"] + 1, len(entries), "←→" if unicode else "<>")
     synthesis = mapping(report_.get("synthesis"))
@@ -264,7 +264,7 @@ def tab_body(report, main, width, cap, navigation, labels, unicode=True):
     starts = {}
     mark = "▸ " if unicode else "> "
     for i, seat in enumerate(seats):
-        model = MODEL_NAMES.get(seat["model"]) or clean(seat["model"], 40) or "Unknown model"
+        model = call_identity("council", seat["model"])
         if seat["rounds"]:
             first, last = seat["rounds"][min(seat["rounds"])], seat["rounds"][max(seat["rounds"])]
             stance = fit(clean(_stance(last)[1], 400) or "No answer recorded", 140)

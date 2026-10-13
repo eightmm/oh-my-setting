@@ -39,7 +39,7 @@ def stamp(value, now=None):
 
 def _people(report, navigation):
     """(name_of, mains, me, members) from the board's own names."""
-    from room_view import main_names, nodes, who
+    from room_view import main_names, nodes, member_identity
     members = nodes(report)
     labels = main_names(members)
     index = {m["participant"]: m for m in members}
@@ -53,7 +53,7 @@ def _people(report, navigation):
         if ident not in index:
             return clean(ident, 40) or "unknown"
         # Every name carries its role, so a Sol worker never reads like the Sol main.
-        return clean(who(index[ident], labels, task=True), 100)
+        return clean(member_identity(index[ident]), 100)
     return name_of, mains, me, members
 
 
@@ -130,7 +130,7 @@ def exited_mail(message, index):
 
 
 def call_rows(rows, members, name_of, room, width, unicode=True):
-    from room_view import said
+    from panel_view import status_tag
     index = {m["participant"]: m for m in members}
     output = []
     for member in members:
@@ -148,7 +148,12 @@ def call_rows(rows, members, name_of, room, width, unicode=True):
         row["call"] = ("result", member["participant"]) if messages else None
         row["unread"] = any(r["unread"] for r in messages)
         tail = (" · +%s" % (len(notes) - 1) if len(notes) > 1 else "") + (" · unread" if row["unread"] else "")
-        state = " · " + clean("decided" if member.get("_decided") else said(member.get("state")))
+        phase = "timed_out" if member.get("exit") == 124 else member.get("state")
+        if member.get("_decided"):
+            code = member.get("exit")
+            phase = "done" if code == 0 else "failed" if type(code) is int else "unknown"
+        state = " " + status_tag(phase, exit_code=member.get("exit"), unicode=unicode)
+        state += " [accepted]" if member.get("decision") == "accepted" else " [main decided]" if member.get("_decided") else ""
         budget = max(0, width - 2)
         tail = clipped(tail, budget)
         available = max(0, budget - display_width(tail))

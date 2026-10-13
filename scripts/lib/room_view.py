@@ -6,7 +6,9 @@ import time
 
 from dashboard_projection import ELLIPSIS, clean, count as valid_count, display_width, fit, listing, mapping
 from panel_view import (ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
-                        clipped, location_label, main_occupied, menu_rows, status_alerts, swap_line, worker_rows, wrapped)
+                        clipped, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
+                        role_style, call_identity, status_tag, paint, paint_card_edges, color_count, light_theme, glyph,
+                        JUDGE_ROLES, WORKER_ROLES, swap_line)
 
 
 def room_ids(room):
@@ -83,7 +85,7 @@ def nodes(report):
                   mapping(mapping(room.get("call_results")).get(member.get("participant"))))
         code = result.get("exit")
         derived = "presence unknown" if member.get("role") == "main" or type(code) is not int else \
-            "done" if code == 0 else "failed"
+            "done" if code == 0 else "timed_out" if code == 124 else "failed"
         state = attempt.get("state") or derived
         # Display only: a review whose task its main completed or accepted reads "decided"; the state stays.
         decided = state == "review" and finalized.get(attempt.get("task_id")) in {"completed", "accepted"}
@@ -92,9 +94,10 @@ def nodes(report):
                            ended=result.get("ts"), exit=code if type(code) is int else None,
                            guard=member.get("participant") in guarded,
                            model=model, model_at_launch=meta.get("model") or member.get("model"),
-                           task_id=attempt.get("task_id"), location=meta.get("location"),
+                           task_id=attempt.get("task_id"), decision=finalized.get(attempt.get("task_id")), location=meta.get("location"),
                            lease_id=meta.get("lease_id") or attempt.get("lease_id"),
-                           effort=effort, access=meta.get("access") or attempt.get("access"),
+                           effort=effort, purpose=clean(meta.get("purpose") or meta.get("strategy"), 60),
+                           access=meta.get("access") or attempt.get("access"),
                            harness=mapping(attempt.get("panel")).get("harness"),
                            title=member.get("label_override") or meta.get("label") or member.get("label")))
         if member.get("_predecessor") and not owed(report, output[-1]):
@@ -522,7 +525,8 @@ def plan_summary(report):
 
     Cancelled tasks are closed, never verified, so they leave the total; stale holds have no live call."""
     plan = mapping(report.get("plan"))
-    goal = clean(plan.get("goal"), 200)
+    goal_text = str(plan.get("goal") or "")
+    goal = clean(goal_text, max(1, len(goal_text)))
     if not plan.get("present") or not goal or (plan_idle(report) or 0) >= 7:
         return None
     by_state = mapping(plan.get("by_state"))
@@ -538,62 +542,61 @@ def plan_summary(report):
 
 
 def goal_banner(report, width, unicode, compact=False):
-    """The one-row board goal, linked by its caller to the full Plan tab."""
-    rows = goal_box(report, width, unicode, True)
-    land = mapping(report.get("land"))
-    if land.get("active") is True:
-        sep = " · " if unicode else " / "
-        minutes = valid_count(land.get("minutes"))
-        text = "LANDING " + clean(str(land.get("sha") or ""))[:7] + sep + clean(str(land.get("step") or "land"))[:12]
-        landing = text + (sep + "%sm" % minutes if minutes is not None else "")
-        goal = rows[0][0][2:-2].rstrip()
-        rows = [(one_row(clipped(goal, max(1, width - display_width(landing) - 7)) + sep + landing, width), "head")]
-    return rows
+    """Full goal on the board; bounded summaries retain the compact fallback."""
+    if compact or width < 76:
+        summary = plan_summary(report)
+        goal = summary[0] if summary else "No goal recorded"
+        counts = "%s/%s verified" % summary[1:3] if summary else ""
+        text = "Goal / " + goal + (" / " + counts if counts else "")
+        return [(one_row(text, width), "metadata")]
+    return goal_box(report, width, unicode, compact)
 
 
 def one_row(text, width):
-    """A box short enough for one row: square brackets stand in for the card's edges."""
     text = clipped(text, max(1, width - 4))
     return "[ " + text + " " * max(0, width - display_width(text) - 4) + " ]"
 
 
-def goal_box(report, width, unicode, compact):
+def goal_box(report, width, unicode, compact=False):
     summary = plan_summary(report)
-    sep = " · " if unicode else " / "
-    if summary is None:
-        return [(one_row("GOAL" + sep + "none" + sep + "oms agent-plan init --goal TEXT", width), "dim")]
-    goal, done, total, review, claimed, stale = summary
-    filled = min(10, 10 * done // total) if total else 0
-    bar = ("▕" + "█" * filled + "░" * (10 - filled) + "▏") if unicode else "[" + "#" * filled + "." * (10 - filled) + "]"
-    counts = "%s/%s verified" % (done, total)
+    goal = summary[0] if summary else "No goal recorded"
+    counts = "%s/%s verified" % summary[1:3] if summary else ""
     locally_done = sum(1 for task in listing(mapping(report.get("room")).get("repo_tasks"))
-                      if task.get("state") != "done" and task.get("id") in mapping(report.get("completed_tasks")))
+                       if task.get("state") != "done" and task.get("id") in mapping(report.get("completed_tasks")))
     if locally_done:
-        counts += sep + "%s locally completed" % locally_done
-    # A claim is not proof of running work, and work waiting for review is progress: review outlives the bar.
-    reviewing, claiming, staling = (sep + "%s %s" % (n, word) if n else "" for n, word in
-                                    ((review, "in review"), (claimed, "claimed"), (stale, "stale")))
-    options = [bar + " " + counts + reviewing + claiming + staling, bar + " " + counts + reviewing + claiming,
-               bar + " " + counts + reviewing, counts + reviewing, "%s/%s%s" % (done, total, reviewing), "%s/%s" % (done, total)]
-    inner = max(1, width - 4)
-    if compact:
-        prefix = "GOAL  "
-        right = next((o for o in options if inner - display_width(o) - 2 - len(prefix) >= 12), options[-1])
-        text = fit(prefix + goal, max(1, inner - display_width(right) - 2))
-        return [(one_row(text + " " * max(2, inner - display_width(text) - display_width(right)) + right, width), "head")]
-    top = box_edge("GOAL", width, unicode)
-    left, bar_char, closing = ("╭─ GOAL ", "─", "─╮") if unicode else ("+- GOAL ", "-", "-+")
-    right = next((o for o in options if width - len(left) - display_width(o) - 6 >= 2), None)
+        counts += " / %s locally completed" % locally_done
+    if summary:
+        counts += "".join(" / %s %s" % (n, label) for n, label in zip(summary[3:], ("in review", "claimed", "stale")) if n)
+    title = "Goal"
+    right = clipped(counts, max(1, width - 14))
+    edge = box_edge(title, width, unicode)
     if right:
-        top = left + bar_char * (width - len(left) - display_width(right) - 2 - len(closing)) + " " + right + " " + closing
-    note, command = "%s stale, not counted: no live worker" % stale, "oms agent-plan release --id ID"
-    # Narrow boxes wrap the note and the release command apart, so the command is never clipped.
-    note = [] if not stale else [note + sep + "release with " + command] \
-        if display_width(note + sep + "release with " + command) <= inner else \
-        wrapped(note, inner, 2) + wrapped(next((text for text in ("release: " + command, command)
-                                               if display_width(text) <= inner), command), inner, 2)
-    return [(top, "head")] + [(box_row(line, width, unicode), "head") for line in wrapped(goal, inner, 2)] \
-        + [(box_row(line, width, unicode), "dim") for line in note] + [(box_edge("", width, unicode, "bottom"), "head")]
+        prefix, closing = edge[:8], edge[-2:]
+        edge = prefix + ("─" if unicode else "-") * max(0, width - display_width(prefix + closing + right) - 2) + " " + right + " " + closing
+    parts = wrapped(goal, max(1, width - 4), max(1, len(goal)), max_chars=max(1, len(goal)))
+    if summary and summary[-1]:
+        note = "%s stale, not counted: no live worker / release with oms agent-plan release --id ID" % summary[-1]
+        parts += wrapped(note, max(1, width - 4), len(note))
+    return [(edge, "border")] + [
+        (box_row(line, width, unicode), None) for line in parts] + [
+        (box_edge("", width, unicode, "bottom"), "border")]
+
+
+def execution_tag(member, unicode=True):
+    phase = "timed_out" if member.get("exit") == 124 else main_state(member)
+    return status_tag(phase, exit_code=member.get("exit"), unicode=unicode)
+
+
+def member_identity(member, label=True):
+    purpose = member.get("purpose")
+    role = purpose if purpose in JUDGE_ROLES | WORKER_ROLES else member.get("role")
+    if member.get("role") == "main":
+        role = "main"
+    title = member.get("title") if label else None
+    if title in {"Native task not recorded", "Task unrecorded"}:
+        title = None
+    return call_identity(role, member.get("model"), title, member.get("_short_id"))
+
 
 
 def claims_by_main(report):
@@ -664,13 +667,9 @@ def padded(text, width):
     return text + " " * max(0, width - display_width(text))
 
 
-FLANK_WIDTH = 140
-TREE_RESERVE = 6  # calls the tree holds before it takes rows from the reading dock
-
-
 def layout(width):
     """(width, left column) of the centered main card."""
-    span = min(58 if width >= FLANK_WIDTH else width - 8, width - 8)
+    span = max(12, width - 12)
     return span, (width - span) // 2
 
 
@@ -952,33 +951,39 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
 FINISHED = {"done", "cancelled"}
 
 
-def board_summary(report, calls, classify, width, rows, unicode=True, ranked=None):
-    """Attention, In progress and Recent in at most `rows` rows; the board's own counts, in the same words."""
-    from panel_view import attention_items, attention_row
-    sep = " · " if unicode else " / "
-    calls = list({action(c): c for c in calls if not c.get("_native")}.values())
-    ranked = attention_items(report, unicode) if ranked is None else ranked
-    attention = [attention_row(item, 400, unicode) for item in ranked]
-    running = [c for c in calls if c["state"] in LIVE_STATES]
-    oldest = min((str(c["joined_at"]) for c in running if c.get("joined_at")), default="")
-    recent = sorted((c for c in calls if c["state"] in TERMINAL_STATES and c.get("ended")),
-                    key=lambda c: str(c["ended"]), reverse=True)
-    recent = [sep.join(p for p in ("%s %s" % (model_name(c), ROLES.get(c.get("role"), "Worker").lower()),
-                                   end_words(c, said(c["state"])) + " " + clock_stamp(c["ended"]) +
-                                   (", awaiting decision" if c["state"] == "done" and classify(c) == "review" else ""),
-                                   clean(c.get("title"))) if p) for c in recent]
-    sections = [["Attention    %s" % len(attention) + (sep + attention[0] if attention else sep + "nothing waiting")]
-                + attention[1:2],
-                ["In progress  %s call%s" % (len(running), "" if len(running) == 1 else "s") +
-                 (sep + "oldest " + elapsed(oldest) if oldest else "")],
-                ["Recent       " + (recent[0] if recent else "no finished calls yet")] + recent[1:3]]
-    # Each section keeps its first row; spare rows go to attention, then recent.
-    keep = [1, 1, 1]
-    for index in (0, 2, 2):
-        if sum(keep) < rows and keep[index] < len(sections[index]):
-            keep[index] += 1
-    return [clipped((" " * 13 if n else "") + text, width)
-            for section, count in zip(sections, keep) for n, text in enumerate(section[:count])][:rows]
+def session_log(report, width, rows, unicode=True):
+    """Recorded events only, deduplicated by message identity, in spare rows."""
+    if rows < 3:
+        return []
+    room = mapping(report.get("room"))
+    events, seen = [], set()
+    people = {m["participant"]: m for m in nodes(report)}
+    for message in listing(room.get("messages")):
+        ident = message.get("id")
+        if not ident or ident in seen:
+            continue
+        seen.add(ident)
+        events.append(message)
+    if not events:
+        return []
+    output = [(box_edge("Session log", width, unicode), None, "border")]
+    for message in events[-min(5, rows - 2):]:
+        member = people.get(message.get("sender"), {"role": "unknown"})
+        identity = member_identity(member, False)
+        role, model = identity.split(" ", 1)
+        actor = "[" + role.lower() + " " + model + "]"
+        try:
+            moment = time.localtime(calendar.timegm(time.strptime(str(message.get("ts")), "%Y-%m-%dT%H:%M:%SZ")))
+            stamp = time.strftime("%H:%M:%S" if moment[:3] == time.localtime()[:3] else "%m-%d %H:%M:%S", moment)
+        except ValueError:
+            stamp = "unknown"
+        left = stamp + " " + actor + " "
+        outcome = "[" + clean(message["outcome"], 30) + "]" if message.get("outcome") else ""
+        text = clipped(readable(message.get("text"), " ") or "(empty)", max(1, width - 6 - display_width(left + outcome)))
+        plain = left + text + " " * max(2, width - 4 - display_width(left + text + outcome)) + outcome
+        output.append((box_row(plain, width, unicode), actor, role_style(member.get("role"), member.get("purpose"))))
+    output.append((box_edge("", width, unicode, "bottom"), None, "border"))
+    return output
 
 
 def latest_answer(report):
@@ -996,8 +1001,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                  previous=None):
     """Page real parent relationships without inventing routers or progress."""
     from panel_view import tone
-    from dashboard_projection import use_unicode
+    from panel_view import use_unicode
     use_unicode(unicode)
+    if height < 16:
+        from panel_tree import render_tree
+        return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
+                           main_attempt, navigation, managed=managed, previous=previous)
     interactive = navigation is not None
     navigation = navigation if interactive else {}
     navigation.pop("box", None)
@@ -1040,523 +1049,424 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         # Judges precede workers in the team lists the dock shows; the board tree orders by state.
         return sorted(calls, key=lambda m: (m.get("role") in {"worker", "researcher"},) + call_order(m))
 
-    teams = {m["participant"]: team(m, every=True) for m in mains}
-    grouped = {key: {kind: [c for c in calls if classify(c) == kind] for kind, _ in CALL_GROUPS}
-               for key, calls in teams.items()}
+    everyone = {m["participant"]: team(m, every=True) for m in mains}
     if navigation.get("group_tree"):
-        if any(grouped.get(owner, {}).get(kind) for kind, owner in navigation.get("expanded_groups", set())):
-            from panel_tree import render_tree
-            return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
-                               main_attempt, navigation, managed=managed, previous=previous)
-        navigation.pop("group_tree", None)
-    linked_children = team(primary, every=True) if primary else []
-    # Finished calls leave the board (results stay in the main's detail and the tree); attention stays.
-    settled, _ = settler(report)
-    everyone = teams
-    teams = {key: [c for c in calls if classify(c) == "live"] for key, calls in teams.items()}
-    # The tree under the main: running calls, then calls needing attention, then finished ones.
-    children = sorted(teams[primary["participant"]], key=lambda m: (2 - call_order(m)[0],) + call_order(m)[1:]) \
-        if primary else []
+        from panel_tree import render_tree
+        return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
+                           main_attempt, navigation, managed=managed, previous=previous)
+    all_calls = [c for calls in everyone.values() for c in calls]
     unlinked = [m for m in members if m.get("role") != "main" and m.get("parent") not in owners]
-    # An ended main's unfinished calls are not on this board; they stay counted so t still reaches them.
-    stranded = [c for m in mains if m is not primary and m["state"] in TERMINAL_STATES for c in teams[m["participant"]]]
     if attention_only:
-        unlinked = [m for m in unlinked if classify(m) != "past" and
-                    (m["state"] in ATTENTION_STATES or classify(m) == "review")]
-    offset = max(0, navigation.get("offset", 0))
-    scrolled = mapping(navigation.get("band_offsets"))
+        unlinked = [m for m in unlinked if classify(m) != "past" and (m["state"] in ATTENTION_STATES or classify(m) == "review")]
+    all_calls += unlinked
+    children = [c for c in everyone.get(primary["participant"], []) if classify(c) != "past"] if primary else []
+    children.sort(key=lambda m: (m["state"] not in LIVE_STATES, call_order(m)[1:]))
+    judges = [c for c in children if role_style(c.get("role"), c.get("purpose")) == "judge"]
+    workers = [c for c in children if c not in judges]
+    selected_member = next((c for c in members + all_calls if action(c) == selected), None)
     preview = mapping(navigation.get("preview"))
-    previewed = next((m for m in mains + [c for calls in everyone.values() for c in calls] + unlinked
-                      if action(m) == preview.get("target")), None)
+    previewed = next((c for c in members + all_calls if action(c) == preview.get("target")), None)
+    automatic = not previewed and not navigation.get("dismissed") and primary is not None
+    if automatic:
+        previewed, preview = primary, {"target": action(primary), "report": {}}
+    navigation["cancel_owner"] = {"participant": owners[main_attempt]["participant"], "attempt": main_attempt} if main_attempt in owners else None
+    navigation["main_attempt"] = main_attempt
     navigation["full_mail"] = None
     navigation.pop("full_result", None)
-    if previewed and previewed.get("role") != "main" and not previewed.get("_native"):
-        navigation["full_result"] = action(previewed)
-    if menu:
-        footer = menu_rows(
-            width, 1, unicode, navigation.get("menu_help", False), managed,
-            occupied=navigation["main_occupied"], installed=navigation.get("installed"))
-    else:
-        chosen_member = next((m for m in mains + [c for calls in everyone.values() for c in calls]
-                              if action(m) == selected), None)
-        footer = footer_hints(navigation, width, managed, unicode, chosen_member, True)
-    hints = list(footer)
-    hint_rows = len(footer)
-    if navigation.get("notice"):
-        if height >= 20 or menu:
-            footer.append(clean(navigation["notice"], 180))
-        else:
-            # A short board shows the notice in place of the hints, never silently.
-            fixed = "  ".join(footer_hints({}, width, managed, unicode, None, True)[-1].split("  ")[-2:])
-            footer = [clipped(clean(navigation["notice"], 180), max(1, width - display_width(fixed) - 2)) + "  " + fixed]
-            hint_rows = 1
-    if menu and previous is not None:
-        from panel_view import message_rows
-        last_rows = (message_rows("Last: " + previous, width)
-                     if "\n" in previous or "oms panel --release-main " in previous else ["Last: " + previous])
-        footer = footer[:max(0, height - 1 - len(last_rows))] + last_rows[:max(0, height - 1)]
-    bar = None if menu else spawn_bar(width, navigation)
-    if bar:
-        footer.append(bar[0])
-    if not menu:
-        # The key hints are always the board's last rows; notices, delivery and the start bar sit just above.
-        footer = footer[hint_rows:] + footer[:hint_rows]
-    lines, hits, bands_hit = [], [], []
-
-    def add(value, style=None):
-        value = clipped(value, width)
-        lines.append(PALETTE[style] + value + "\033[0m" if color and style else value)
-
-    def paint(text, style):
-        return PALETTE[style] + text + "\033[0m" if color and style else text
-
-    def chosen(text, style):
-        # A selection is a block in its own colour, never a plain white inversion.
-        return PALETTE[style] + "\033[7m" + text + "\033[0m" if color else text
-
-    def hue(m):
-        return "codex" if m.get("provider") == "codex" else "main"
-
-    def name_of(m):
-        return labels.get(m["participant"]) or model_name(m)
-
     claims = claims_by_main(report)
-    awaiting_tasks, ended_tasks = held_split(report, members)
-
-    def claim_line(m):
-        held = claims.get(m["participant"], [])
-        if not held:
-            return ""
-        # A task whose calls all ended is not running work; one whose calls wait in review is counted apart.
-        current = [t for t in held if t.get("id") not in awaiting_tasks | ended_tasks]
-        lead = (current or held)[0]
-        word = "awaiting decision" if lead.get("id") in awaiting_tasks else "worker ended" \
-            if lead.get("id") in ended_tasks else "in review" if lead.get("state") == "review" else lead.get("state")
-        waiting = sum(t.get("id") in awaiting_tasks and t is not lead for t in held)
-        return "Task: %s · %s" % (lead.get("id"), word) + (
-            " · +%s more running" % (len(current) - 1) if len(current) > 1 else "") + (
-            " · %s awaiting decision" % waiting if waiting else "")
-
-    def declared_of(m):
-        # The card already labels it "Now:"; a status written as "Now: ..." would read twice.
-        return without_now(readable(mapping(mapping(room.get("statuses")).get(m["participant"])).get("text"), " "))
-
-    def now_line(m):
-        """"Now: text" with the status age once it is older than 30 minutes; the text is peer data."""
-        text = declared_of(m)
-        stamp = mapping(mapping(room.get("statuses")).get(m["participant"])).get("ts")
-        try:
-            seconds = time.time() - calendar.timegm(time.strptime(str(stamp), "%Y-%m-%dT%H:%M:%SZ"))
-        except ValueError:
-            seconds = 0
-        return "Now: " + text + ((" · " if unicode else " / ") + ago(stamp) + " (stale)"
-                                 if seconds > 1800 else "") if text else ""
-
-    def task_of(m):
-        task = clean(m.get("title")) or "Task unrecorded"
-        known = task not in ("Native task not recorded", "Task unrecorded")
-        if m.get("role") == "main":
-            # The plan task a main holds rides beside its title; without one its declared status stands in.
-            return " · ".join(part for part in (task if known else "", claim_line(m), "" if known else now_line(m)) if part) \
-                or "no status yet"
-        return task if known else "no task title yet"
-
-    def task_lines(m, span, limit):
-        title = task_of(m)
-        now = now_line(m) if m.get("role") == "main" else ""
-
-        def status_fit(text, available):
-            stale = " (stale)" if " (stale)" in text and available > len(" (stale)") else ""
-            return clipped(text.replace(stale, "") if stale else text, max(1, available - len(stale))) + stale
-
-        if now and clean(m.get("title")) not in (None, "", "Native task not recorded", "Task unrecorded"):
-            if limit == 1:
-                return [clipped(title, max(1, span // 2 - 2)) + " / " + status_fit(now, max(1, span // 2 - 1))]
-            return wrapped(title, span, 1) + [status_fit(now, span)]
-        parts = wrapped(title, span, limit)
-        if now and "(stale)" in now and not any("(stale)" in line for line in parts):
-            parts[-1] = status_fit(parts[-1] + " (stale)", span)
-        return parts
-
-    # Mail to finished calls is never read again; unread mail to mains and running calls is counted.
+    settled, _ = settler(report)
     unread_total = live_unread(report, members, settled)
+    from panel_view import attention_items, attention_header, tone
+    from panel_metrics import percent
+    ranked = attention_items(report, unicode)
+    lines, hits, bands = [], [], []
+    colors, light = color_count(), light_theme()
+
+    def styled(text, token="text", bold=False):
+        return paint(text, token, color=color, colors=colors, light=light, bold=bold)
+
+    def add(text, token="text", bold=False):
+        lines.append(styled(clipped(text, width), token, bold))
+
     import os
     repo = mapping(report.get("repo"))
-    heading_text = "OMS · " + (os.path.basename(clean(repo.get("name")) or str(repo.get("path") or "").rstrip("/\\")) or "repository")
+    title = "OMS · " + (os.path.basename(clean(repo.get("name")) or str(repo.get("path") or "").rstrip("/\\")) or "repository")
     clock = time.strftime("%m-%d ") + WEEKDAYS[time.localtime().tm_wday] + time.strftime(" %H:%M")
-    if display_width(heading_text) + len(clock) + 2 <= width:
-        heading_text += " " * (width - display_width(heading_text) - len(clock)) + clock
-    add(heading_text, "head")
-    from panel_metrics import usage_line
-    add(usage_line(report, width, unicode), "dim")
-    for text, style in goal_banner(report, width, unicode, compact=height < 20):
-        hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": ("tab", "plan")})
-        add(text, style)
-    if room.get("swaps") and height >= 24:
-        add("SESSION / " + swap_line(room), "main")
-    if report.get("swap_state"):
-        add("SWAP / " + clean(report["swap_state"], 80), "alert")
-    for alert in status_alerts(report):
-        add(alert, "bad")
-    from panel_view import attention_items, needs_strip
-    # One ranked queue per frame feeds the strip, the spare-row summary and the Attention tab.
-    ranked = attention_items(report, unicode)
-    attention_rows = needs_strip(report, width, unicode, ranked=ranked)
-    for row in attention_rows:
-        if row["action"]:
-            hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": row["action"]})
-        add(row["text"], row["style"])
-    group_actions = []
-    if primary:
-        group_labels = []
-        for kind, title in CALL_GROUPS:
-            calls = grouped[primary["participant"]][kind]
-            if not calls:
-                continue
-            target = ("group", (kind, primary["participant"]))
-            group_actions.append(target)
-            label = "%s %s (%s)" % ("▸" if unicode else ">", title, len(calls))
-            if not sole_live:
-                label += " / " + name_of(primary)
-            group_labels.append((label, target, "review" if kind == "review" else "dim"))
-        if sole_live and group_labels:
-            group_width = max(1, (width - 3 * (len(group_labels) - 1)) // len(group_labels))
-            group_labels = [(clipped(label, group_width), target, style) for label, target, style in group_labels]
-            column = 1
-            for label, target, unused in group_labels:
-                hits.append({"y": len(lines) + 1, "x1": column,
-                             "x2": min(width, column + display_width(label) - 1), "action": target})
-                column += display_width(label) + 3
-            add(" · ".join(label for label, unused, style in group_labels), "dim")
-        else:
-            for label, target, style in group_labels:
-                hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": target})
-                add(label, style)
-    others = listing(room.get("other_rooms"))
-    if room.get("other_rooms_incomplete") and height >= 20 and not others:
-        add("OTHER ROOMS / scan incomplete; mains in other rooms may be missing", "alert")
-    if others and height >= 20:
-        # Other rooms may hold history or mains outside this panel; keep their graphs separate from this single-main board.
-        add("OTHER ROOMS" + (" (scan incomplete)" if room.get("other_rooms_incomplete") else "") + " / " + " | ".join("%s %s live main%s%s" % (clean(r.get("id"), 24), r.get("mains"),
-            "s" if r.get("mains") != 1 else "",
-            " / %s pending" % r["pending"] if r.get("pending") else "") for r in others[:3]) +
-            (" | +%s" % (len(others) - 3) if len(others) > 3 else "") + " / o Rooms in control", "alert")
-    total_rows = max(0, height - int(menu) - len(footer))
-    used = len(lines)
-    main_width, main_left = layout(width)
-    # Each call is one row of the tree under the main; a main without calls keeps one hint row on taller boards.
-    tree_rows = len(children) or int(bool(primary) and height >= 24)
-
-    def full_title(m, reflow=False):
-        role = "MAIN" if m.get("role") == "main" else m.get("role", "worker").upper()
-        return role + (" " if reflow else " / ") + name_of(m)
-
-    def heading(m):
-        mark = ("▸ " if unicode else "> ") if action(m) == selected else ""
-        return mark + full_title(m)
-
-    # A main title too long for its top edge moves inside the card.
-    reflow = bool(primary) and display_width(heading(primary)) > main_width - 6
-    main_min = (4 + len(task_lines(primary, main_width - 4, 2)) if reflow else 3) if primary else 0
-    # Boards under 24 rows keep the compact main card; taller ones let it grow to its title, task and team.
-    main_need = max(main_min, min(6, 4 + int(reflow) + len(task_lines(primary, main_width - 4, 2)))) \
-        if primary and height >= 24 else main_min
-    # At least the selected call and the fold line stay drawn.
-    minimum_total = main_min + min(tree_rows, 2) if primary else 0
-    # Calls up to TREE_RESERVE never move the reading dock; the main card keeps its full height beside them.
-    ordinary = main_need + TREE_RESERVE if primary else 0
-    compact_shape = 3 + 3 if primary else 0
-    fixed_header = 3 + len(status_alerts(report)) + len(attention_rows)
-    fixed_header += int(bool(others or room.get("other_rooms_incomplete")) and height >= 20)
-    target = max(0, total_rows - fixed_header - ordinary - 1) if interactive else 0
-    compact_target = min(height * 2 // 5, max(0, total_rows - fixed_header - compact_shape - 1)) if interactive else 0
-    target = max(target, compact_target)
-    # Calls past the reserve take one row each from the dock, never below a third of the board.
-    spilled = max(0, len(children) - TREE_RESERVE)
-    floor = max(3, total_rows // 3)
-    target, compact_target = (max(min(value, floor), value - spilled) for value in (target, compact_target))
-    if height <= 20:
-        target = min(height * 2 // 5, height - 17) if interactive else 0
-    target = target if target >= 3 else int(interactive)
-    warn_possible = int(bool(unlinked or stranded))
-
-    def upper_fit(rows_left, stable):
-        # Group headings use space vacated by finished calls without moving the dock.
-        return rows_left >= max(minimum_total, (ordinary + fixed_header - used) * stable)
-
-    plan = None
-    tiers = ((True, max(11, compact_target), target), (False, 3, target), (False, 1, min(target, 1)), (False, 0, 0)) if interactive else ((False, 0, 0),)
-    # A visible warning outranks a bigger box, but not the tab strip; the strip outranks the warning.
-    for warn in (1, 0) if warn_possible else (0,):
-        for stable, low, high in tiers:
-            if stable and height <= 20 or high < low or warn and not high:
-                continue
-            for dock_rows in range(high, low - 1, -1):
-                reserve = (warn or stable) * bool(dock_rows)
-                if upper_fit(total_rows - used - dock_rows - reserve, stable):
-                    plan = (dock_rows, reserve)
-                    break
-            if plan:
-                break
-        if plan:
-            break
-    if plan is None:
-        navigation["tab_strip_visible"] = False
-        from panel_view import render
-        navigation.update(hits=[], items=[], viewport=0, positions={})
-        navigation.pop("full_result", None)
-        text = render(report, primary.get("provider", "codex") if primary else "codex", width, height,
-                      color, unicode, menu=menu, managed=managed, main_attempt=main_attempt, frame=frame,
-                      view="tree" if interactive else "compact", attention_only=attention_only, navigation=navigation,
-                      previous=previous)
-        return text
-    dock, warn_reserve = plan
-    available = total_rows - dock - warn_reserve - used
-    # Calls come before a taller main; the main grows into rows the calls leave.
-    main_rows = max(main_min, min(main_need, available - tree_rows))
-    card_height = 6 if available >= 0 else 3
-    automatic = False
-    if interactive and not previewed and primary and dock >= 5 and not navigation.get("dismissed"):
-        # The box shows the shown main by default; it never displaces a choice.
-        previewed, preview, automatic = primary, {"target": action(primary), "report": {}}, True
-
-    def main_card(m, style, rooted):
-        rows_h = main_rows
-        title = "" if reflow else heading(m)
-        words = end_words(m, main_words(m, unicode))
-        status = "%s %s" % (activity(main_state(m), frame, unicode), words)
-        if open_count(room, m["participant"]):
-            status += (" · " if unicode else " / ") + "? %s open" % open_count(room, m["participant"])
-        ctx = context_note(report, m)
-        if ctx:
-            status += "".join((" · " if unicode else " / ") + part for part in
-                              ["ctx %s%% used" % ctx[0]] + ["compact soon"] * (ctx[1] == "alert"))
-        from review_backlog import needs_review_hint
-        if needs_review_hint(report, m["participant"]):
-            status += (" · " if unicode else " / ") + "review first"
-        content = [status + " / " + task_of(m)] if rows_h == 3 else [status] + task_lines(m, main_width - 4, rows_h - 3)
-        if rows_h >= 4:
-            where = "Team: " + (" · ".join(team_counts(everyone.get(m["participant"], []), classify)) or "no calls yet")
-            latest_swap = listing(room.get("swaps"))[-1:] if m.get("role") == "main" else []
-            takeover = (swap_line(room) if latest_swap and latest_swap[0].get("participant") == m.get("participant")
-                        else "")
-            tail = [takeover or where] if rows_h >= 5 + int(reflow) else []
-            first = (("▸ " if unicode else "> ") if action(m) == selected else "") + full_title(m, reflow=True)
-            content = ([first] if reflow else []) + [status] + task_lines(
-                m, main_width - 4, max(1, min(2, rows_h - 3 - len(tail) - int(reflow)))) + tail
-        block = card(title, content, main_width, rows_h, unicode)
-        if rooted:
-            block[-1] = joint(block[-1], 2, "┬" if unicode else "+")[0]
-        flanks = width >= FLANK_WIDTH and rows_h >= 5
-        if flanks:
-            left_width, right_width = main_left - 2, width - main_left - main_width - 2
-            linked_workers = [c for c in linked_children if c.get("role") in {"worker", "researcher"}]
-            status_rows = ["Workers %s / live %s" % (len(linked_workers), sum(c["state"] in LIVE_STATES for c in linked_workers)),
-                           "Advisors %s / reviewers %s" % (sum(c.get("role") == "advisor" for c in linked_children),
-                                                          sum(c.get("role") == "reviewer" for c in linked_children)),
-                           "Needs attention %s" % sum(c["state"] in ATTENTION_STATES for c in linked_children)]
-            pending = sum(valid_count(mapping(p).get("pending")) or 0 for p in listing(room.get("pairs"))
-                          if mapping(p).get("recipient") == m["participant"])
-            inbox = [message for message in listing(room.get("messages")) if m["participant"] in listing(message.get("targets"))]
-            mail = ["Pending %s / recent %s" % (pending, len(inbox))]
-            if inbox:
-                last = inbox[-1]
-                sender = next((s for s in members if s["participant"] == last.get("sender")), {})
-                sender_name = name_of(sender) if sender else last.get("sender", "unknown")
-                mail += ["From " + clean(sender_name)] + wrapped(clean(last.get("text")) or "", right_width - 4, rows_h - 4)
-            else:
-                mail += ["No addressed message recorded"]
-            left_card = card("WORK STATUS", status_rows, left_width, rows_h, unicode)
-            right_card = card("MAIL / to main", mail, right_width, rows_h, unicode)
-        start = len(lines) + 1
-        for row in range(rows_h):
-            hits.append({"y": start + row, "x1": main_left + 1, "x2": main_left + main_width, "action": action(m),
-                         "preview": False})
-            cell = block[row]
-            if color:
-                cell_style = "dim" if row == 1 and main_state(m) == "idle" else tone(m["state"]) \
-                    if row == 1 and m["state"] in ATTENTION_STATES else style
-                cell = (PALETTE[cell_style] + "\033[7m" if action(m) == selected else
-                        "\033[1m" + PALETTE[cell_style]) + cell + "\033[0m"
-            value = (paint(left_card[row], "dim") + "  " if flanks else " " * main_left) + cell
-            if flanks:
-                value += "  " + paint(right_card[row], "alert" if pending else "dim")
-            lines.append(value)
-
-    stem = main_left + 2
-    arrow = "→" if unicode else "->"
-
-    def branch(last, marked):
-        if unicode:
-            return ("└" if last else "├") + ("▸ " if marked else "─ ")
-        return ("`" if last else "|") + ("-> " if marked else "-- ")
-
-    def tree_line(prefix, body, rights=("",)):
-        """One board-wide row: the label is clipped beside the longest right-aligned state that leaves it room."""
-        room_left = width - stem - display_width(prefix)
-        right = next((text for text in rights if room_left - display_width(text) - 2 >= 8), rights[-1])
-        body = clipped(body, max(1, room_left - (display_width(right) + 2 if right else 0)))
-        return " " * stem + prefix + body + " " * max(0, room_left - display_width(body) - display_width(right)) + right
-
-    def call_row(m, last):
-        marked = action(m) == selected
-        state = main_state(m)
-        body = "%s %s %s · %s" % (activity(state, frame, unicode), ROLES.get(m.get("role"), "Worker").upper()
-                                  if m.get("role") != "council" else "COUNCIL", name_of(m), task_of(m))
-        span = call_span(m, arrow)
-        text = tree_line(branch(last, marked), body, ([span + " · for " + clean(name_of(primary))] if not sole_live else [])
-                         + [span, end_words(m, said(state))])
-        style = tone(m["state"]) if m["state"] in ATTENTION_STATES else \
-            "review" if m.get("role") in {"advisor", "reviewer", "council"} else "worker"
-        lines.append(chosen(text, style) if marked and color else paint(text, style))
-        hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action(m), "preview": True, "tree": True})
-
-    scrolled_now = {}
-    if primary:
-        main_card(primary, hue(primary), bool(tree_rows))
-    else:
-        prompt = "No main connected · " if navigation["main_occupied"] else "No main · n, then "
-        prompt += menu_rows(width, 1, unicode, managed=managed, occupied=navigation["main_occupied"],
-                            installed=navigation.get("installed"))[0]
-        for line in card("MAIN", [prompt], width, card_height, unicode):
-            add(line, "main")
-    body_drawn = False
-    drawn, start = [], 0
-    if children:
-        slots = max(1, min(len(children), total_rows - dock - warn_reserve - len(lines)))
-        if slots < len(children):
-            slots -= 1  # the fold line
-        start = min(scrolled.get("calls", 0), len(children) - slots)
-        index = next((i for i, m in enumerate(children) if action(m) == selected), None)
-        if index is not None and selected != navigation.get("graph_selected"):
-            start = index if index < start else index - slots + 1 if index >= start + slots else start
-        drawn = children[start:start + slots]
-        if index is not None and children[index] not in drawn and drawn:
-            # Wheel scrolling past the selected call keeps it drawn at the edge nearest its place.
-            drawn = [children[index]] + drawn[1:] if index < start else drawn[:-1] + [children[index]]
-        folded = [m for m in children if m not in drawn]
-        first = len(lines) + 1
-        for n, m in enumerate(drawn):
-            call_row(m, n == len(drawn) - 1 and not folded)
-        if folded:
-            # The fold line opens the next hidden call, which scrolls the tree to draw it.
-            after = [m for m in children[start + slots:] if m in folded]
-            text = tree_line(branch(True, False), "%s %s more call%s" % (
-                ELLIPSIS[0], len(folded), "" if len(folded) == 1 else "s"))
-            add(text, "dim")
-            hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action((after or folded)[0]),
-                         "preview": True, "tree": True})
-        bands_hit.append({"name": "calls", "y1": first, "y2": len(lines), "x1": 1, "x2": width})
-        scrolled_now["calls"] = start
-    elif tree_rows:
-        add(tree_line(branch(True, False), "no calls yet · a ask"), "dim")
-    parts, open_unlinked = [], []
-    if stranded:
-        parts.append("%s call%s of an ended main · t shows them" % (len(stranded), "" if len(stranded) == 1 else "s"))
-    if unlinked:
-        open_unlinked = [m for m in unlinked if classify(m) != "past"]
-        if open_unlinked:
-            # Settled ones are listed in the Past tab; only open calls need the tree.
-            parts.append("%s call%s with no known main%s · t shows them" % (
-                len(open_unlinked), "" if len(open_unlinked) == 1 else "s",
-                " (+%s past)" % (len(unlinked) - len(open_unlinked)) if len(open_unlinked) < len(unlinked) else ""))
-    # Rows the cards and the box leave blank carry a display-only summary; it never takes their rows.
-    spare = total_rows - dock - len(lines) - bool(parts) - 1
-    # Under 21 rows the box takes every row the board leaves, so no summary competes for them.
-    if dock and spare >= 3 and height > 20:
-        lines.append("")
-        for text in board_summary(report, [c for calls in everyone.values() for c in calls] + unlinked,
-                                  classify, width, spare, unicode, ranked):
-            add(text, "dim")
-    if parts and len(lines) < total_rows - dock:
-        # The warning sits on the row just above the box, so it holds still as the upper region changes.
-        if height > 20 and height <= width:
-            lines.extend([""] * max(0, total_rows - dock - 1 - len(lines)) * bool(dock))
-        add(" / ".join(parts), "alert" if open_unlinked or stranded else "dim")
-    # The box keeps the rows it was given whatever the upper region drew; only an overflowing region shrinks it.
-    rows_high = (max(0, total_rows - len(lines)) if height <= 20 or height > width else
-                 min(dock, max(0, total_rows - len(lines)))) if dock else 0
-    rows_high = 1 if 0 < rows_high < 3 else rows_high
-    navigation.update(tab_strip_visible=bool(rows_high), tab_body_visible=rows_high >= 3)
-    if rows_high:
-        lines.extend([""] * (total_rows - rows_high - len(lines)))
-        dock_lines, dock_hits = tab_box(report, width, rows_high, navigation, color, unicode,
-            members=members, primary=primary, previewed=previewed, preview=preview, teams=teams,
-            everyone=everyone, labels=labels, main_attempt=main_attempt, automatic=automatic,
-            claims=claims, classify=classify, attention=ranked,
-            past=past_calls([c for calls in everyone.values() for c in calls] + unlinked, classify))
-        top = len(lines)
-        lines += dock_lines
-        hits += [dict(hit, y=hit["y"] + top) for hit in dock_hits]
-        body_drawn = navigation["tab_body_visible"]
-        scrolled_now["detail"] = navigation.get("band_offsets", {}).get("detail", 0)
-        if navigation.get("box"):
-            navigation["box"] = {**navigation["box"], "y1": navigation["box"]["y1"] + top,
-                                 "y2": navigation["box"]["y2"] + top}
-            bands_hit.append(dict(navigation["box"], name="detail", x1=1, x2=width, step=3))
-    if body_drawn and not menu and navigation.get("tab") not in navigation.get("visible_tabs", []) + [None, "detail"] \
-            and footer[-hint_rows:] == hints:
-        # The hints were fitted before the dock fell back to Detail for a tab it does not show.
-        fitted_hints = footer_hints(navigation, width, managed, unicode, chosen_member, True)
-        footer[-hint_rows:] = fitted_hints[:hint_rows] + [""] * max(0, hint_rows - len(fitted_hints))
-    if body_drawn and navigation.get("tab") == "debate" and not navigation.get("debate_view", {}).get("shown") and not menu:
-        footer[-hint_rows:] = footer_hints(dict(navigation, debate_empty=True), width, managed, unicode, chosen_member, True)
-    if navigation.get("full_mail") and not menu:
-        fitted = footer_hints(navigation, width, managed, unicode, chosen_member, True)
-        footer[:hint_rows] = fitted[:hint_rows] + [""] * max(0, hint_rows - len(fitted))
-    if not body_drawn:
-        navigation.pop("full_result", None)
-    if not body_drawn and not menu and footer[-hint_rows:] == hints:
-        # A strip can switch tabs without a body; an absent strip offers neither action.
-        fitted_hints = footer_hints(dict(navigation, preview=None, detail=None, full_result=None, tab_body_visible=False),
-                                    width, managed, unicode, chosen_member, True)
-        footer[-hint_rows:] = fitted_hints + [""] * max(0, hint_rows - len(fitted_hints))
-    lines += [""] * max(0, height - int(menu) - len(lines) - len(footer))
-    lines += [clipped(line, width) for line in footer]
+    room_clock = width - display_width(title) - display_width(clock)
+    lines.append(styled(clipped(title, width), bold=True) + (" " * room_clock + styled(clock, "metadata") if room_clock >= 2 else ""))
+    legend = "  ".join(glyph("swatch", unicode) + " " + label for label in ("Main", "Judges", "Workers"))
+    legend_state = "  ~ running  + verified  ! attention"
+    if room.get("id") and display_width(legend + legend_state) <= width:
+        legend += legend_state
+    # Role swatches carry only role colour, independent of execution state.
+    for label, token in (("Main", "main"), ("Judges", "judge"), ("Workers", "worker")):
+        legend = legend.replace(glyph("swatch", unicode) + " " + label, styled(glyph("swatch", unicode) + " " + label, token))
+    lines.append(legend)
+    hints = menu_rows(width, 1, unicode, navigation.get("menu_help", False), managed,
+                      occupied=navigation["main_occupied"], installed=navigation.get("installed")) if menu else []
+    footer_extra = []
+    if menu and previous:
+        from panel_view import message_rows
+        footer_extra = message_rows("Last: " + previous, width) if "\n" in previous or "oms panel --release-main " in previous else [clipped("Last: " + previous, width)]
+    if navigation.get("notice"):
+        footer_extra.append(clean(navigation["notice"], 180))
+    bar = None if menu else spawn_bar(width, navigation)
     if bar:
-        row = len(lines) - (hint_rows + 1 if not menu else 1)
-        lines[row] = paint(lines[row], "main" if bar[1] else "dim")
-        hits += [{"y": row + 1, "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
-    # Keys reach only what this board draws: its main and that main's calls, in tree order.
-    items = [("chat", primary["participant"])] if primary else []
-    items += [action(m) for m in children]
-    items += group_actions
+        footer_extra.append(bar[0])
+    help_rows = len(footer_hints(navigation, width, managed, unicode, selected_member, True)) if navigation.get("keys_help") and not menu else 1
+    total_rows = max(0, height - int(menu) - 1 - help_rows - len(footer_extra))
+    # Detail releases its body when the right reader already owns that call.
+    active = navigation.get("tab", "detail")
+    reader_target = navigation.get("reader_target") if navigation.get("reader_open") else None
+    same_reader = reader_target and previewed and reader_target == action(previewed)
+    dock_body = (8 if height >= 40 else 5 if height >= 28 else 2) if active == "detail" else max(2, height - 20)
+    if active == "detail" and reader_target:
+        dock_body = 0 if same_reader else 1
+    dock_rows = dock_body + 2 if dock_body else 1
+    main_rows = 5 if height >= 28 else 4 if height >= 20 else 3
+    minimum_tree = sum(min(2, len(group)) for group in (judges, workers))
+    goal_rows = goal_box(report, width, unicode)
+    goal_cap = max(3, total_rows - len(lines) - min(dock_rows, 4) - main_rows - minimum_tree - 1)
+    goal_overflow = len(goal_rows) > goal_cap
+    if goal_overflow:
+        parts = goal_rows[1:-1]
+        count = max(1, goal_cap - 3)
+        start = min(max(0, mapping(navigation.get("band_offsets")).get("goal", navigation.get("goal_offset", 0))), max(0, len(parts) - count))
+        goal_rows = goal_rows[:1] + parts[start:start + count] + [(box_row("Goal lines %s-%s/%s / full goal in Plan / wheel" % (
+            start + 1, start + count, len(parts)), width, unicode), "metadata")] + goal_rows[-1:]
+    goal_top = len(lines) + 1
+    for text, token in goal_rows:
+        hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": ("tab", "plan")})
+        add(text, token or "text")
+    if goal_overflow:
+        bands.append({"name": "goal", "y1": goal_top, "y2": len(lines), "x1": 1, "x2": width})
+    if room.get("swaps") and height >= 24:
+        add(swap_line(room), "metadata")
+    if report.get("swap_state"):
+        add("[! swapping main] " + clean(report["swap_state"], 80), "alert")
+    unavailable = mapping(report.get("collection")).get("ok") is not True or room.get("error")
+    strip = "! State unavailable" + (" / " + clean(room.get("error"), 120) if room.get("error") else "") + " / u Refresh" if unavailable else attention_header(ranked, width, unicode)
+    add(strip, "bad" if unavailable else "alert" if ranked else "metadata")
+    hits.append({"y": len(lines), "x1": 1, "x2": width, "action": ("tab", "needs")})
+    if total_rows - len(lines) - dock_rows - main_rows < minimum_tree:
+        dock_rows = max(1, total_rows - len(lines) - main_rows - minimum_tree)
+        if dock_rows == 2:
+            dock_rows = 1
+    remaining = max(0, total_rows - len(lines) - dock_rows - main_rows)
+    expansion = 3 if selected_member and selected_member in children and remaining >= minimum_tree + 3 else 0
+    remaining -= expansion
+    allocation = {"judges": 0, "calls": 0}
+    for name, group in (("judges", judges), ("calls", workers)):
+        allocation[name] = min(len(group), 2, max(0, remaining - sum(allocation.values())))
+    while sum(allocation.values()) < remaining:
+        changed = False
+        for name, group in (("judges", judges), ("calls", workers)):
+            if allocation[name] < len(group) and sum(allocation.values()) < remaining:
+                allocation[name] += 1
+                changed = True
+        if not changed:
+            break
+    main_width, main_left = layout(width)
+    stem = main_left + 2
+    offsets = dict(mapping(navigation.get("band_offsets")))
+    drawn = []
+
+    def tagged(member):
+        return execution_tag(member, unicode) + (" / guard stop" if member.get("guard") else "")
+
+    def card_lines(member, content, indent=0, tree_card=False):
+        token = role_style(member.get("role"), member.get("purpose"))
+        identity = member_identity(member)
+        mark = glyph("selected", unicode) + " " if action(member) == selected else ""
+        card_width, card_left = main_width - indent, main_left + indent
+        block = [box_edge(mark + identity, card_width, unicode, dashed=True)]
+        block += [box_row(text, card_width, unicode, dashed=True) for text in content]
+        block += [box_edge("", card_width, unicode, "bottom", dashed=True)]
+        for n, cell in enumerate(block):
+            if n in (0, len(block) - 1):
+                cell = styled(cell, token, n == 0)
+            else:
+                cell = paint_card_edges(cell, token, unicode=unicode, color=color, colors=colors, light=light)
+                tag = tagged(member)
+                if tag in cell:
+                    cell = cell.replace(tag, styled(tag, tone(member.get("state"))))
+            lines.append(" " * card_left + cell + " " * max(0, width - card_left - card_width))
+            hits.append({"y": len(lines), "x1": 1 if tree_card and n == 0 else card_left + 1,
+                         "x2": width if tree_card and n == 0 else card_left + card_width,
+                         "action": action(member), "preview": member.get("role") != "main",
+                         **({"tree": True, "expanded": True} if tree_card and n == 0 else {})})
+
+    def tree(group, name, slots):
+        if not group or not slots:
+            return
+        visible = slots - int(slots < len(group))
+        visible = max(1, visible)
+        start = min(max(0, offsets.get(name, 0)), max(0, len(group) - visible))
+        index = next((i for i, m in enumerate(group) if action(m) == selected), None)
+        if index is not None and selected != navigation.get("graph_selected"):
+            start = min(start, index) if index < start else max(start, index - visible + 1)
+        shown = group[start:start + visible]
+        if index is not None and group[index] not in shown:
+            shown = [group[index]] + shown[1:] if index < start else shown[:-1] + [group[index]]
+        hidden = [c for c in group if c not in shown]
+        first = len(lines) + 1
+        for n, member in enumerate(shown):
+            token = role_style(member.get("role"), member.get("purpose"))
+            connector = ("└╌ " if n == len(shown) - 1 and not hidden else "├╌ ") if unicode else ("`- " if n == len(shown) - 1 and not hidden else "+- ")
+            mark = glyph("selected", unicode) + " " if action(member) == selected else "  "
+            tail = tagged(member) + "  " + (elapsed(member.get("joined_at")) or "unknown")
+            label = clipped(member_identity(member), max(1, width - stem - display_width(connector + mark + tail) - 2))
+            gap = max(2, width - stem - display_width(connector + mark + label + tail))
+            lines.append(" " * stem + styled(connector, token) + mark + styled(label, token, action(member) == selected) +
+                         " " * gap + styled(tagged(member), tone(member.get("state"))) + styled("  " + (elapsed(member.get("joined_at")) or "unknown"), "metadata"))
+            hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action(member), "preview": True, "tree": True})
+            drawn.append(member)
+            if expansion and member is selected_member:
+                lines.pop()
+                hits.pop()
+                card_lines(member, [tagged(member) + "  " + (elapsed(member.get("joined_at")) or "unknown"),
+                                    "Task: " + clean(member.get("title"))], indent=4, tree_card=True)
+        if hidden:
+            after = [m for m in group[start + visible:] if m in hidden]
+            add(padded(" " * stem + ("└╌ " if unicode else "`- ") + glyph("ellipsis", unicode) + " %s more %s / scroll" % (
+                len(hidden), "judges" if name == "judges" else "workers"), width), "metadata")
+            hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action((after or hidden)[0]), "preview": True, "tree": True})
+        bands.append({"name": name, "y1": first, "y2": len(lines), "x1": 1, "x2": width})
+        offsets[name] = start
+
+    tree(judges, "judges", allocation["judges"])
+    if primary:
+        tag = tagged(primary)
+        ctx = context_note(report, primary)
+        context = "ctx %s%% used" % ctx[0] if ctx else ""
+        status = clipped(tag, main_width - 4) + " " * max(2, main_width - 4 - display_width(tag + context)) + context if context else tag
+        question_count = open_count(room, primary["participant"])
+        if question_count:
+            status += " / ? %s open" % question_count
+        held = claims.get(primary["participant"], [])
+        awaiting_tasks, ended_tasks = held_split(report, members)
+        current = [t for t in held if t.get("id") not in awaiting_tasks | ended_tasks]
+        lead = (current or held)[0] if held else {}
+        task = primary.get("task_id") or lead.get("id") or primary.get("title") or "no status yet"
+        if task == "Native task not recorded":
+            task = "no status yet"
+        if lead:
+            word = "awaiting decision" if lead.get("id") in awaiting_tasks else "worker ended" if lead.get("id") in ended_tasks else "in review" if lead.get("state") == "review" else clean(lead.get("state"))
+            task += " · " + word
+            if len(current) > 1:
+                task += " · +%s more running" % (len(current) - 1)
+            waiting = sum(t.get("id") in awaiting_tasks and t is not lead for t in held)
+            if waiting:
+                task += " · %s awaiting decision" % waiting
+        content = [status, "Task: " + clean(task)]
+        latest = declared_status(room, primary["participant"], main_width - 4)
+        latest_text = " ".join(latest) if latest else "No latest statement recorded"
+        stale = " (stale)" if any("(stale)" in line for line in latest) else ""
+        def statement(span):
+            return clipped(latest_text.replace(stale, "") if stale else latest_text, max(1, span - len(stale))) + stale
+        if main_rows >= 5:
+            content.append(statement(main_width - 4))
+        elif main_rows == 4 and latest:
+            task_span = max(10, (main_width - 7) // 2)
+            content[1] = clipped(content[1], task_span) + " / " + statement(main_width - 7 - task_span)
+        if main_rows == 3:
+            content = [status + " / Task: " + clean(task)]
+        card_lines(primary, content)
+    else:
+        for text in card("Main", ["No main connected / n starts a main"], main_width, main_rows, unicode):
+            add(" " * main_left + text, "metadata")
+    tree(workers, "calls", allocation["calls"])
+    warnings = []
+    if unlinked:
+        open_unlinked = [c for c in unlinked if classify(c) != "past"]
+        if open_unlinked:
+            warnings.append("%s call%s with no known main%s / t shows them" % (len(open_unlinked),
+                "s" if len(open_unlinked) != 1 else "", " (+%s past)" % (len(unlinked) - len(open_unlinked)) if len(open_unlinked) < len(unlinked) else ""))
+    stranded = [c for m in mains if m is not primary and m["state"] in TERMINAL_STATES for c in everyone[m["participant"]] if classify(c) != "past"]
+    if stranded:
+        warnings.append("%s call%s of an ended main / t shows them" % (len(stranded), "s" if len(stranded) != 1 else ""))
+    others = listing(room.get("other_rooms"))
+    if others or room.get("other_rooms_incomplete"):
+        warnings.append("OTHER ROOMS / " + " / ".join(clean(r.get("id"), 24) for r in others[:3]) +
+                        (" / scan incomplete" if room.get("other_rooms_incomplete") else ""))
+    spare = max(0, total_rows - dock_rows - len(lines))
+    if warnings and spare:
+        add(" / ".join(warnings), "alert")
+        spare -= 1
+    for text, actor, token in session_log(report, width, spare, unicode):
+        lines.append(text.replace(actor, styled(actor, token)) if actor else styled(text, token))
+    navigation["band_offsets"] = offsets
+    if active != "detail" and (height > width or height <= 20):
+        dock_rows = max(1, total_rows - len(lines))
+    dock_rows = min(dock_rows, max(0, total_rows - len(lines)))
+    navigation.update(tab_strip_visible=bool(dock_rows), tab_body_visible=dock_rows >= 3)
+    if dock_rows:
+        lines += [""] * max(0, total_rows - dock_rows - len(lines))
+        top = len(lines)
+        dock_lines, dock_hits = tab_box(report, width, dock_rows, navigation, color, unicode, members=members,
+            primary=primary, previewed=previewed, preview=preview, everyone=everyone, teams=everyone, labels=labels,
+            main_attempt=main_attempt, automatic=automatic, claims=claims, classify=classify, attention=ranked,
+            past=past_calls(all_calls, classify))
+        lines.extend(dock_lines)
+        hits.extend(dict(hit, y=hit["y"] + top) for hit in dock_hits)
+        if navigation.get("box"):
+            navigation["box"] = {**navigation["box"], "y1": navigation["box"]["y1"] + top, "y2": navigation["box"]["y2"] + top}
+            bands.append(dict(navigation["box"], name="detail", x1=1, x2=width, step=3))
+    lines += [""] * max(0, total_rows - len(lines))
+    footer = "Workers %s/%s / Judges %s/%s / Mail %s" % (
+        sum(c["state"] in LIVE_STATES for c in all_calls if role_style(c.get("role"), c.get("purpose")) == "worker"),
+        sum(role_style(c.get("role"), c.get("purpose")) == "worker" for c in all_calls),
+        sum(c["state"] in LIVE_STATES for c in all_calls if role_style(c.get("role"), c.get("purpose")) == "judge"),
+        sum(role_style(c.get("role"), c.get("purpose")) == "judge" for c in all_calls), unread_total)
+    if unavailable:
+        footer = "Workers ?/? / Judges ?/? / Mail ?"
+    health = status_alerts(report)
+    land = mapping(report.get("land"))
+    condition = "State unavailable" if unavailable else " / ".join(health) if health else ""
+    if land.get("active"):
+        condition += " / LANDING %s %s" % (clean(land.get("sha"), 80)[:7], clean(land.get("step"), 30) or "land")
+    if room.get("other_rooms_incomplete"):
+        condition += " / other rooms scan incomplete"
+    essential = footer + (" / " + condition.strip(" / ") if condition else "")
+    quotas = []
+    for provider, reading in mapping(report.get("provider_status")).items():
+        used = percent(mapping(reading).get("weekly_used"))
+        if used is not None:
+            quotas.append("%s week %s%% left" % (provider, 100 - used))
+    quota = " / ".join(quotas)
+    footer = essential + (" / " + quota if quota and display_width(essential + " / " + quota) <= width else "")
+    add(footer, "metadata")
+    if not menu:
+        for text in footer_extra:
+            add(text, "alert" if text == navigation.get("notice") else "metadata")
+    final_hints = hints or footer_hints(navigation, width, managed, unicode, selected_member, True)
+    if navigation.get("tab") == "debate" and not mapping(navigation.get("debate_view")).get("shown") and not menu:
+        final_hints = footer_hints(dict(navigation, debate_empty=True), width, managed, unicode, selected_member, True)
+    for text in final_hints[:help_rows]:
+        add(text, "metadata")
+    if menu:
+        for text in footer_extra:
+            add(text, "metadata")
+    if bar:
+        bar_y = len(lines) - 1
+        hits += [{"y": bar_y, "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
+    items = [action(c) for c in judges] + ([action(primary)] if primary else []) + [action(c) for c in workers]
     items += [hit["action"] for hit in hits if hit["action"][0] in {"result", "debate"}]
-    navigation.update(hits=hits, items=list(dict.fromkeys(items)), offset=offset, viewport=max(1, len(drawn)),
-                      body_rows=len(children), positions={item: i for i, item in enumerate(items)},
-                      room_id=room.get("id"), graph_selected=selected, surface="graph",
-                      primary=("chat", primary["participant"]) if primary else None,
-                      cancel_owner={"participant": owners[main_attempt]["participant"], "attempt": main_attempt}
-                      if main_attempt in owners else None,
-                      bands=bands_hit, band_offsets=scrolled_now)
-    if not color and selected:
-        previous = None
-        for hit in hits:
-            if hit["action"] != selected or hit.get("tree") or navigation.get("box") and hit["y"] >= navigation["box"]["y1"]:
-                continue
-            if previous != hit["y"] - 1:
-                # Card runs share an action; mark their first row, preserving other columns.
-                line = padded(lines[hit["y"] - 1], width)
-                columns = [0]
-                for char in line:
-                    columns.append(columns[-1] + display_width(char))
-                first = next(i for i, column in enumerate(columns) if column >= hit["x1"] - 1)
-                last = next(i for i, column in enumerate(columns) if column >= hit["x2"])
-                left, cell, right = line[:first], line[first:last], line[last:]
-                if not cell.rstrip().endswith("<"):
-                    span = hit["x2"] - hit["x1"] + 1
-                    border = cell[-1:] if cell.endswith(("╮", "+")) else ""
-                    space = max(0, span - 2 - len(border))
-                    if border:
-                        end = max(i for i, column in enumerate(columns) if column <= hit["x1"] - 1 + space)
-                        text = line[first:end]
-                    else:
-                        text = clipped(cell.rstrip(), space)
-                    lines[hit["y"] - 1] = left + padded(text, space) + " <" + border + right
-            previous = hit["y"]
-    text = "\n".join(lines)
-    # Plain-word separators keep one-cell ASCII stand-ins, so hit columns do not move.
+    navigation.update(hits=hits, items=list(dict.fromkeys(items)), viewport=max(1, len(drawn)), offset=0,
+        positions={item: i for i, item in enumerate(items)}, body_rows=len(children), room_id=room.get("id"),
+        graph_selected=selected, surface="graph", primary=action(primary) if primary else None, bands=bands)
+    limit = max(0, height - int(menu))
+    if len(lines) > limit:
+        # Tiny direct graph callers retain recovery text; ordinary navigation uses the tree fallback.
+        tail = footer_extra if menu and footer_extra else lines[-2:]
+        lines = lines[:max(0, limit - len(tail))] + tail[-limit:] if limit else []
+        hits = [h for h in hits if h["y"] <= len(lines) - len(tail)]
+        navigation["hits"] = hits
+    text = "\n".join(lines[:limit])
     return text if unicode else text.translate({ord("·"): "/", ord("→"): ">", ord("×"): "x", ord("│"): "|"})
+
+
+def summary_card(member, preview, width, room=None, unicode=True):
+    """Eight evidence lanes, independent of the full retained-answer reader."""
+    if not member:
+        return ["No call selected / click a main or a call to see it here"], {}
+    room = mapping(room)
+    loaded = mapping(preview.get("report"))
+    rows = listing(loaded.get("rows"))
+    row = next((r for r in rows if member.get("task_id") and r.get("task_id") == member["task_id"]), next(iter(rows), {}))
+    calls = listing(row.get("calls"))
+    own_role = member.get("purpose") or member.get("role")
+    candidates = [c for c in calls if c.get("answer") and (own_role == "reviewer" or c.get("kind") != "review")]
+    own_call = next((c for c in reversed(candidates) if member.get("attempt") and c.get("attempt_id") == member["attempt"]),
+                    next(iter(reversed(candidates)), {}))
+    answer = str(own_call.get("answer") or "")
+    lines = [member_identity(member) + " " + execution_tag(member, unicode)]
+    if any(c.get("answer_truncated") is True for c in calls):
+        lines.append("[partial answer] Retained excerpt / open the reader for source limits")
+    transitions = listing(member.get("transitions"))
+    recorded = ["%s %s" % (clock_stamp(t.get("ts")) or "unknown", clean(t.get("state"), 30))
+                for t in map(mapping, transitions) if t.get("state")]
+    if not recorded:
+        if member.get("joined_at"):
+            recorded.append((clock_stamp(member["joined_at"]) or "unknown") + " launched")
+        if member.get("ended"):
+            recorded.append((clock_stamp(member["ended"]) or "unknown") + " " + status_tag(member.get("state"), exit_code=member.get("exit"), unicode=unicode))
+    lines.append("Transitions: " + ((" " + glyph("right", unicode) + " ").join(recorded) or "not recorded"))
+    verification = mapping(row.get("verification"))
+    code = verification.get("exit")
+    if type(code) is not int:
+        code = next((c["verify_exit"] for c in reversed(calls) if type(c.get("verify_exit")) is int), None)
+    verify = "command exit %s" % code if type(code) is int else "checks not run" if verification.get("status") == "not_run" else "checks unknown"
+    from terminal_panel import _review_verdict
+    review, source = None, None
+    for message in reversed(listing(room.get("messages"))):
+        if message.get("id") != "judgment-" + member["participant"]:
+            continue
+        text = str(message.get("text") or "")
+        review = _review_verdict(text)
+        if review is None:
+            review = "pass" if text.startswith("Review passed for task ") else "fail" if text.startswith("Review verdict FAIL for task ") else None
+        if review:
+            source = "judgment mail"
+            break
+    if not review:
+        review_call = next((c for c in reversed(calls) if c.get("kind") == "review" and c.get("answer")), None)
+        review_text = review_call.get("answer") if review_call else answer if member.get("role") == "reviewer" or member.get("purpose") == "reviewer" else ""
+        review = _review_verdict(review_text)
+        source = "parsed answer" if review else None
+    decision = {"accepted": "admitted", "completed": "completed (admission not recorded)", "failed": "rejected"}.get(row.get("outcome"), "pending")
+    lines.append("Verify: %s / Review: %s / Main decision: %s" % (
+        verify, (review + " (" + source + ")") if review else "not recorded", decision))
+    lines.append("Next: " + ("decision recorded; check landing evidence" if decision == "admitted" else
+                              "check findings and the patch, then admit or reject" if rows else "wait for recorded result, then check evidence"))
+    role = member.get("purpose") or member.get("role")
+    headings = {"worker": ("What changed",), "builder": ("What changed",), "advisor": ("Answer", "Recommendation"),
+                "researcher": ("Answer", "Recommendation"), "reviewer": ("Findings",), "critic": ("Findings",),
+                "council": ("Recommendation", "Disagreement")}.get(role, ())
+
+    def excerpt(names):
+        from panel_debate import HEADING
+        current, found = None, []
+        for line in answer.splitlines():
+            heading = HEADING.match(line)
+            inline = re.match(r"^\s*(%s):\s*(.*)$" % "|".join(re.escape(n) for n in names), line, re.I) if names else None
+            if heading:
+                current = (heading[1] or heading[2]).strip()
+            elif inline:
+                current = inline[1]
+                found.append(inline[2])
+            elif current and current.lower() in {n.lower() for n in names} and line.strip():
+                found.append(line)
+        return readable(" ".join(found), " ")
+
+    headline = excerpt(headings) if headings else ""
+    if not headline:
+        headline = next((readable(p, " ") for p in answer.split("\n\n") if readable(p, " ")), "")
+        label = "First paragraph (excerpt)"
+    else:
+        label = " / ".join(headings) + " (excerpt)"
+    if member.get("role") == "main":
+        status = declared_status(room, member["participant"], width)
+        headline = " / ".join(status) or "No latest statement recorded"
+        label = "Latest statement"
+    if member.get("_native"):
+        headline, label = "Its answer stays inside the main's chat; no retained result", "Built-in advisor"
+    if preview.get("error"):
+        headline, label = readable(preview["error"], " "), "Result unavailable"
+    elif not rows and member.get("role") != "main" and not member.get("_native"):
+        headline, label = "No result recorded yet" if preview.get("report") is not None else ("Reading recorded result…" if unicode else "Reading recorded result..."), "Result"
+    lines.append(label + ": " + (headline or "No answer recorded"))
+    limits = excerpt(("Remaining uncertainty", "Limits", "Limitations"))
+    lines.append("Author-reported limits: " + (limits or "not recorded"))
+    changes = next((mapping(c.get("changes")) for c in reversed(calls) if c.get("changes")), {})
+    change = "unavailable" if changes.get("issue") else "%s files +%s -%s" % (
+        changes.get("count"), changes.get("added", "?"), changes.get("removed", "?")) if "count" in changes else "not recorded"
+    source_path = clean(own_call.get("artifact"), 160)
+    lines.append("Changes: " + change + (" / source: " + source_path if source_path else ""))
+    summary = readable(row.get("summary"), " ")
+    if summary:
+        lines.append("Owner summary: " + summary)
+    return [clipped(line, width) for line in lines], {}
 
 
 def tab_box(report, width, rows, navigation, color=False, unicode=True, *, members=None,
@@ -1607,26 +1517,12 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     scrolled_now = dict(scrolled)
     lines, hits = [], []
 
-    def paint(text, style):
-        return PALETTE[style] + text + "\033[0m" if color and style else text
-
-    def chosen(text, style):
-        return PALETTE[style] + "\033[7m" + text + "\033[0m" if color else text
-
-    def hue(member):
-        return "codex" if member.get("provider") == "codex" else "main"
-
-    def name_of(member):
-        return labels.get(member["participant"]) or model_name(member)
-
     from panel_debate import signature, tab_body as debate_body
     from panel_messages import tab_body as messages_body
     top = 1
     from panel_view import attention_items
     attention = attention_items(report, unicode) if attention is None else attention
     active = navigation.get("tab") if navigation.get("tab") in dict(TABS) else "detail"
-    if active == "needs" and not attention:
-        active = "detail"
     if active == "detail" and rows_high >= 3 and previewed and previewed.get("role") == "main":
         from panel_messages import main_mail
         participant = previewed["participant"]
@@ -1637,8 +1533,14 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
             navigation["full_mail"] = ("mail", previewed["participant"])
     navigation["main_attempt"] = main_attempt
     claims = claims_by_main(report) if claims is None else claims
-    body, targets = detail(previewed, preview, width - 4, members, room, teams, everyone, labels,
-                           claims=claims, classify=classify) if previewed else (
+    offset_key = (active, action(previewed) if active == "detail" and previewed else None)
+    offsets = navigation.setdefault("dock_offsets", {})
+    previous_key = navigation.get("dock_offset_key")
+    if previous_key is not None and previous_key != offset_key:
+        offsets[previous_key] = scrolled.get("detail", 0)
+        scrolled["detail"] = offsets.get(offset_key, 0)
+    navigation["dock_offset_key"] = offset_key
+    body, targets = summary_card(previewed, preview, width - 4, room, unicode) if previewed else (
         ["No call selected · click a main or a call to see it here"], {})
     strip_only = rows_high < 3
     capacity = max(1, rows_high - 2)
@@ -1647,21 +1549,17 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     digest = signature(report, shown_main)
     if active == "debate":
         seen[shown_main] = digest
-    marks = {"debate": (" •" if unicode else " *") if digest and seen.get(shown_main) != digest else "",
-             "messages": " %s unread" % unread_total if unread_total else "", "past": " %s" % len(past),
-             "needs": " %s" % len(attention)}
-    tabs = [entry for entry in TABS if (entry[0] != "needs" or attention) and (entry[0] != "past" or past)]
-    if active not in dict(tabs):
-        active = "detail"
+    marks = {"messages": " %s" % unread_total, "past": " %s" % len(past), "needs": " %s" % len(attention)}
+    tabs = list(TABS)
     navigation["visible_tabs"] = [key for key, unused in tabs]
     abbreviations = {"detail": "Dtl", "plan": "Plan", "debate": "Dbt", "messages": "Msg", "past": "Past", "needs": "Attn"}
     for short in (0, 1, 2):
         gap = " " if short == 2 else "  "
         tiny = {"detail": "D", "plan": "P", "debate": "B", "messages": "M", "past": "H", "needs": "A"}
-        texts = [(("[%s]" if short == 2 else "[ %s ]") if key == active else "%s") % (
+        texts = [(("[%s]") if key == active else "%s") % (
             (name if short == 0 else abbreviations[key] if short == 1 else tiny[key]) +
             (marks.get(key, "") if short == 0 else " %s" % unread_total if key == "messages" and unread_total else
-             " %s" % len(attention) if key == "needs" else ""))
+             " %s" % len(attention) if key == "needs" else " %s" % len(past) if key == "past" else ""))
             for key, name in tabs]
         if display_width(gap.join(texts)) <= width - 6:
             break
@@ -1673,31 +1571,36 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
             hits.append({"y": top, "x1": x1, "x2": x2, "action": ("tab", key)})
             span = (column, x2) if key == active else span
         column += display_width(text) + len(gap)
-    role = previewed.get("role", "worker").upper() if previewed else ""
-    style = (hue(previewed) if role == "MAIN" else "review" if role not in {"WORKER", "RESEARCHER"} else "worker") if previewed else "dim"
-    lines.append(paint(edge, style) if span is None or not color else
-                 paint(edge[:span[0]], style) + chosen(edge[span[0]:span[1]], style) + paint(edge[span[1]:], style))
+    style = "border"
+    colors, light = color_count(), light_theme()
+    lines.append(paint(edge, style, color=color, colors=colors, light=light) if span is None else
+                 paint(edge[:span[0]], style, color=color, colors=colors, light=light) +
+                 paint(edge[span[0]:span[1]], "text", color=color, colors=colors, light=light, bold=True) +
+                 paint(edge[span[1]:], style, color=color, colors=colors, light=light))
     # No room for a body: the strip alone keeps every tab one click away.
     if strip_only:
         navigation.pop("box", None)
     else:
         first, plain = 0, set()
-        if active == "detail" and capacity == 1 and body:
-            # One row holds the content line itself; a title there would leave nothing to scroll.
-            first = min(scrolled.get("detail", 0), len(body) - 1)
+        if active == "detail":
+            reader_target = navigation.get("reader_target") if navigation.get("reader_open") else None
+            if reader_target and previewed and reader_target != action(previewed):
+                verdict = next((line for line in body if line.startswith("Verify:")), "verdict not recorded")
+                reader_id = clipped(clean(str(reader_target[1]), 80), min(24, max(8, (width - 4) // 4)))
+                prefix = "reader: %s %s selected" % (reader_id, "≠" if unicode else "!=")
+                next_step = "Next: check selected evidence"
+                available = max(1, width - 4 - display_width(prefix + next_step) - 6)
+                compact_verdict = verdict.split(" / Review: ", 1)[-1].split(" / Main decision: ", 1)[0]
+                body = [prefix + " / " + clipped(compact_verdict, available) + " / " + next_step]
+            first = min(scrolled.get("detail", 0), max(0, len(body) - capacity))
             scrolled_now["detail"] = first
-            rows = [(body[first], targets.get(first, action(previewed)) if previewed else None, False)]
-            plain = {0} if first not in targets else set()
-        elif active == "detail":
-            first = min(scrolled.get("detail", 0), max(0, len(body) - (capacity - 1)))
-            scrolled_now["detail"] = first
-            head = "%s / %s%s" % (role, name_of(previewed), " / auto" if automatic else "") if previewed else "DETAIL"
-            if len(body) > capacity - 1:
-                head += " / %s-%s of %s / wheel" % (first + 1, min(len(body), first + capacity - 1), len(body))
-            rows = [(head, action(previewed) if previewed else None, False)] + [
-                (text, targets.get(first + i, action(previewed)) if previewed else None, False)
-                for i, text in enumerate(body[first:first + capacity - 1])]
-            plain = {i + 1 for i in range(capacity - 1) if first + i not in targets}
+            rows = [(text, action(previewed) if previewed else None, False) for text in body[first:first + capacity]]
+            if len(body) > capacity and rows:
+                rows[-1] = (clipped(rows[-1][0], max(1, width - 34)) + " / rows %s-%s/%s / wheel" % (
+                    first + 1, min(len(body), first + capacity), len(body)), rows[-1][1], False)
+            if first > 0 and len(body) > 1 and body[1].startswith("[partial answer]") and rows:
+                rows = [(body[1], action(previewed) if previewed else None, False)] + rows[:max(0, capacity - 1)]
+            plain = set(range(capacity))
         elif active == "plan":
             plan = [(text, None) for text, unused in goal_box(report, width - 4, unicode, False)] + plan_rows(report, labels, width - 4, unicode)
             if capacity == 1 and len(plan) > 1:
@@ -1731,7 +1634,20 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                 text = clipped(text, max(0, width - 6)) + " <"
             previous_target = target
             line = box_row(text, width, unicode)
-            lines.append("\033[7m" + line + "\033[0m" if color and picked else line)
+            if active == "detail" and n == 0 and previewed and first == 0:
+                identity = clipped(member_identity(previewed), width - 4)
+                line = line.replace(identity, paint(identity, role_style(previewed.get("role"), previewed.get("purpose")),
+                    color=color, colors=colors, light=light, bold=True), 1)
+            elif active in {"messages", "debate", "past"}:
+                from panel_view import MODEL_NAMES
+                identities = [member_identity(m, False) for m in members]
+                if active == "debate":
+                    identities += [call_identity("council", model) for model in MODEL_NAMES]
+                for identity in sorted(identities, key=display_width, reverse=True):
+                    if identity in line:
+                        token = role_style(identity.split(" ", 1)[0].lower())
+                        line = line.replace(identity, paint(identity, token, color=color, colors=colors, light=light, bold=picked))
+            lines.append(line)
             if target:
                 # Body text without its own link is passive, so a click that selects text changes nothing.
                 hits.append({"y": top + 1 + n, "x1": 1, "x2": width, "action": target,
@@ -1739,9 +1655,10 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                                 dict({active: True}, **{"key": row[3]} if len(row) > 3 else {})
                                 if active in {"past", "needs"} else {})})
         lines.extend([box_row("", width, unicode)] * (rows_high - 2 - capacity))
-        lines.append(paint(box_edge("", width, unicode, "bottom"), style))
+        lines.append(paint(box_edge("", width, unicode, "bottom"), style, color=color, colors=colors, light=light))
         navigation["box"] = {"y1": top, "y2": top + rows_high - 1, "pages": bool(previewed) or active == "plan"}
     navigation["band_offsets"] = scrolled_now
+    offsets[offset_key] = scrolled_now.get("detail", 0)
     if not unicode:
         lines = [line.translate({ord("·"): "/", ord("→"): ">", ord("×"): "x", ord("│"): "|"}) for line in lines]
     return lines, hits
@@ -1777,18 +1694,25 @@ def past_body(past, width, capacity, navigation, labels, unicode):
     rows = [("%s past call%s, newest first%sEnter shows one in Detail" % (len(ids), "" if len(ids) == 1 else "s", sep),
              None, False)] if header else []
     for call in past[first:first + page]:
-        who = labels.get(call.get("participant")) or "%s %s" % (ROLES.get(call.get("role"), "Worker"), model_name(call))
-        end = clock_stamp(call["ended"]) if call.get("ended") else call.get("_finished") or ""
-        words = end_words(call, said(call["state"]))
-        title = clean(call.get("title")) or "no task title"
-        # Narrow rows give up the role word, then the time, then the model before the task title: rows differ by task.
-        model = model_name(call)
-        for head, tail in ((who, (words, end)), (model, (words, end)), (model, (words,)), ("", (words,))):
-            tail = sep.join(p for p in tail if p)
-            space = width - display_width(head) - display_width(tail) - display_width(sep) * (bool(head) + bool(tail))
-            if space >= 10:
-                break
-        text = sep.join(p for p in (head, fit(title, space) if space >= 1 else "", tail) if p)
+        end = clock_stamp(call.get("ended")) if call.get("ended") else call.get("_finished") or "unknown"
+        state = "timed_out" if call.get("exit") == 124 else call.get("state")
+        if call.get("_decided"):
+            code = call.get("exit")
+            state = "done" if code == 0 else "failed" if type(code) is int else "unknown"
+        acceptance = " [accepted]" if call.get("decision") == "accepted" else " [main decided]" if call.get("_decided") or call.get("decision") == "completed" else " [acceptance pending]"
+        tag = status_tag(state, exit_code=call.get("exit"), unicode=unicode)
+        identity = member_identity(call)
+        tails = [tag + acceptance + "  " + end, tag + acceptance + "  " + end[-5:], tag + acceptance]
+        tail = next((value for value in tails if display_width(identity + value) + 2 <= width), tails[-1])
+        if width < 60:
+            identity = clean(call.get("title")) or identity
+            tail = status_tag(state, unicode=unicode)
+        available = max(1, width - display_width(tail) - 2)
+        if available < 12 and width >= 60:
+            tail = status_tag(state, exit_code=call.get("exit"), unicode=unicode) + (" [decided]" if call.get("_decided") else "")
+            available = max(1, width - display_width(tail) - 2)
+        left = clipped(identity, available)
+        text = left + " " * max(2, width - display_width(left + tail)) + tail
         rows.append((clipped(text, width), action(call), action(call) == selected))
     return rows
 
@@ -1972,6 +1896,10 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                         ("f Open right" if managed else "f Full result") if tab == "past" or kind in {"result", "debate"} else ""]
                   if tab in {"past", "needs"}
                   else ["wheel Scroll", "Tab Next tab"] if tab == "plan" else None)
+    if tab in {"past", "needs"} and tab + "_ids" in navigation and not navigation.get(tab + "_ids"):
+        contextual = ["Tab Next tab"]
+    if tab == "messages" and "message_ids" in navigation and not navigation.get("message_ids"):
+        contextual = [arrows + " Filter", "Tab Next tab"]
     contextual = contextual or (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + [
                   "Enter Open right" if right else "",
                   "f Open right" if managed and navigation.get("full_result") else "f Full result" if navigation.get("full_result") else "",

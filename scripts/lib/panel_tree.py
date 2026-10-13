@@ -285,9 +285,16 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     if reading or interactive and height >= 32:
         activity_floor = min(activity_floor, 3 + int(bool(tasks)))
     activity_floor += 2 if boxed else 0
-    dock_rows = (14 if budget - len(head) >= 14 + activity_floor else int(budget > len(head))) if width >= 20 else 0
+    detail_body = 8 if height >= 40 else 5 if height >= 28 else 2
+    reader_target = navigation.get("reader_target") if navigation.get("reader_open") else None
+    main_action = next((r["action"] for r in rows if r.get("action") and r["action"][0] == "chat"), None)
+    target = mapping(navigation.get("preview")).get("target") or selected or main_action
+    if navigation.get("tab", "detail") == "detail" and reader_target:
+        detail_body = 0 if reader_target == target else 1
+    desired_dock = (detail_body + 2 if detail_body else 1) if navigation.get("tab", "detail") == "detail" else 14
+    dock_rows = (desired_dock if budget - len(head) >= desired_dock + activity_floor else int(budget > len(head))) if width >= 20 else 0
     if dock_rows == 1 and reading and budget - len(head) - activity_floor >= 3:
-        dock_rows = min(14, budget - len(head) - activity_floor)
+        dock_rows = min(desired_dock, budget - len(head) - activity_floor)
     navigation.update(tab_strip_visible=bool(dock_rows), tab_body_visible=dock_rows >= 3)
     activity_head = boxed and budget - len(head) - dock_rows >= 2
     boxed = boxed and budget - len(head) - dock_rows >= 5
