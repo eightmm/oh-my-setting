@@ -3382,13 +3382,17 @@ def snapshot(repo, room_id=None, _tick=None):
                 state["room"] = room.status(repo, ident)
                 chain = room.lineage(repo, state["room"])
                 if chain:
-                    state["room"]["lineage"] = [old for old, _, _ in chain]
+                    state["room"]["lineage"] = [old for old, *_ in chain]
                     state["room"]["predecessor_calls"] = room.predecessor_calls(repo, state["room"], chain)
                     # A sealed room's delivery receipt stands until a later room records one for the same target.
                     published = {}
-                    for _, _, receipts in chain:
+                    # A call carried on rejoins with a new seq; the room it was launched in and its seq there order it.
+                    origins = {}
+                    for depth, (_, _, receipts, seqs) in enumerate(chain, 1):
                         for target, receipt in receipts.items():
                             published.setdefault(target, receipt)
+                        origins.update((who, [-depth, seq]) for who, seq in seqs.items())
+                    state["room"]["call_origins"] = origins
                     state["room"]["predecessor_publications"] = {
                         target: receipt for target, receipt in published.items()
                         if target not in state["room"].get("publications", {})}

@@ -1408,7 +1408,7 @@ _SEALED_VIEWS = {}
 
 
 def _sealed(repo, ident):
-    """(predecessor, successor, settled calls, publications) of a sealed log, read once per change of the log."""
+    """(predecessor, successor, settled calls, publications, call seqs) of a sealed log, read once per change."""
     info = thread_live.thread_path(repo, ident).stat()
     stamp = (info.st_dev, info.st_ino, info.st_size)
     cached = _SEALED_VIEWS.get((str(repo), ident))
@@ -1422,13 +1422,14 @@ def _sealed(repo, ident):
             code = result["exit"]
             calls.append(dict(member, state="done" if code == 0 else "failed", ended=result["ts"], exit=code,
                               read=result["read"], attempt=None, title=member.get("label"), _predecessor=ident))
+        seqs = {member["participant"]: member["seq"] for member in before["participants"] if member.get("parent")}
         cached = _SEALED_VIEWS[(str(repo), ident)] = (stamp, (before.get("predecessor"), before.get("successor"),
-                                                               calls, before.get("publications") or {}))
+                                                               calls, before.get("publications") or {}, seqs))
     return cached[1]
 
 
 def lineage(repo, state):
-    """The sealed rooms this one continues, nearest first, as (id, settled calls, publications).
+    """The sealed rooms this one continues, nearest first, as (id, settled calls, publications, call seqs).
 
     A room is followed back only while it names the later one as its successor, at most MAX_HOPS rooms."""
     found, later, old = [], state.get("id"), state.get("predecessor")
@@ -1437,12 +1438,12 @@ def lineage(repo, state):
         if not old or old in seen:
             break
         try:
-            before, successor, calls, published = _sealed(repo, old)
+            before, successor, calls, published, seqs = _sealed(repo, old)
         except (OSError, ValueError, KeyError, TypeError):
             break
         if successor != later:
             break
-        found.append((old, calls, published))
+        found.append((old, calls, published, seqs))
         seen.add(old)
         later, old = old, before
     return found
@@ -1452,7 +1453,7 @@ def predecessor_calls(repo, state, chain=None):
     """Settled calls of the rooms this one continues, shaped like board call nodes; a call's nearest room wins."""
     here = {p["participant"] for p in state.get("participants", [])}
     calls = {}
-    for _, settled, _ in lineage(repo, state) if chain is None else chain:
+    for _, settled, *_ in lineage(repo, state) if chain is None else chain:
         for call in settled:
             if call["participant"] not in here:
                 calls.setdefault(call["participant"], call)

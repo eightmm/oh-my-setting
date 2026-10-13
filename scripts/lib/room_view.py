@@ -98,9 +98,12 @@ def nodes(report):
                            title=member.get("label_override") or meta.get("label") or member.get("label")))
         if member.get("_predecessor") and not owed(report, output[-1]):
             output.pop()
-    # Seq numbers restart in every room: calls from the rooms this one continues come first, the oldest room first.
+    # Seq numbers restart in every room: calls launched in the rooms this one continues come first, the oldest room
+    # first, a carried call by the room it was launched in.
     depth = {old: -n for n, old in enumerate(listing(room.get("lineage")), 1)}
-    order = lambda m: (depth.get(m["_predecessor"], -1) if m.get("_predecessor") else 0, m.get("seq", 0))
+    origins = mapping(room.get("call_origins"))
+    order = lambda m: tuple(origins.get(m["participant"]) or (
+        depth.get(m["_predecessor"], -1) if m.get("_predecessor") else 0, m.get("seq", 0)))
     # A continued worker shares its task with the earlier rounds of the same main.
     rounds = {}
     for member in sorted(output, key=order):

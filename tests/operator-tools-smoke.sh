@@ -8408,15 +8408,23 @@ with patch.dict(os.environ, {}):
         assert room.status(where, moved)["closed"]
         # Attention keeps what still waits on the person one and two rollovers on: finished calls whose results the
         # main read (so not carried) with a patch to admit or a review to decide, a task its ended calls still
-        # hold and the sealed room's failed wake-up. Attempts launched in the first room keep their metadata on
+        # hold and the sealed room's failed wake-ups. Attempts launched in the first room keep their metadata on
         # the newest board, a carried call's among them, from the dashboard rows and from the full ledger alike.
-        owing = fresh("m1", calls=[("call-adm", "m1"), ("call-rev", "m1"), ("call-held", "m1"), ("call-run", "m1")])
-        for who, code in (("call-adm", 0), ("call-rev", 0), ("call-held", 1)):
+        # A patch already admitted and a review already accepted are only past; a call carried on rejoins with a
+        # new seq yet the later launch still supersedes it.
+        owing = fresh("m1", calls=[("call-adm", "m1"), ("call-rev", "m1"), ("call-held", "m1"), ("call-run", "m1"),
+                                   ("call-x", "m1"), ("call-y", "m1"), ("call-landed", "m1"), ("call-decided", "m1")])
+        for who, code in (("call-adm", 0), ("call-rev", 0), ("call-held", 1), ("call-x", 1), ("call-y", 1),
+                          ("call-landed", 0), ("call-decided", 0)):
             room.send(where, owing, who, "m1", "Call exit=%d; done" % code, "handoff", message_id="result-" + who)
+        claude_app_notify = __import__("claude_app_notify")
         with bound(owing, "m1"):
-            room.acknowledge(where, owing, "m1", ["result-call-adm", "result-call-rev", "result-call-held"])
-            with patch.object(codex_app_notify, "deliver", return_value={"status": "failed"}):
+            room.acknowledge(where, owing, "m1", ["result-" + who for who in (
+                "call-adm", "call-rev", "call-held", "call-y", "call-landed", "call-decided")])
+            with patch.object(codex_app_notify, "deliver", return_value={"status": "failed"}), \
+                    patch.object(claude_app_notify, "deliver", return_value={"status": "failed"}):
                 room.publish(where, owing)
+                room.publish(where, owing, app="claude", recipient="m1", allow_wakeup=True)
         launched = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         shown_rows = [{"attempt_id": "att-" + who, "state": "review", "task_id": "task-" + who, "updated_at": launched,
                        "panel": {"room_id": owing, "room_participant": who, "role": "worker", "label": "Launched " + who,
@@ -8426,8 +8434,13 @@ with patch.dict(os.environ, {}):
                            "panel": {"room_id": owing, "room_participant": "m1", "role": "advisor"}})
         ledger = [{"attempt_id": "att-" + who, "state": state, "task_id": "task-" + who, "updated_at": launched,
                    "refs": dict({"panel_room_id": owing, "panel_room_participant": who, "panel_role": "worker"}, **refs)}
-                  for who, state, refs in (("call-adm", "done", {"panel_access": "write"}), ("call-held", "failed", {}))]
-        tasks = [{"id": "task-call-held", "state": "running", "claimed_by": "m1"}]
+                  for who, state, refs in (("call-adm", "done", {"panel_access": "write"}), ("call-held", "failed", {}),
+                                           ("call-landed", "done", {"panel_access": "write"}), ("call-decided", "review", {}))]
+        ledger += [{"attempt_id": "att-" + who, "state": "failed", "task_id": "task-pair", "updated_at": launched,
+                    "refs": {"panel_room_id": owing, "panel_room_participant": who, "panel_role": "worker"}}
+                   for who in ("call-x", "call-y")]
+        tasks = [{"id": "task-call-held", "state": "running", "claimed_by": "m1"},
+                 {"id": "task-pair", "state": "running", "claimed_by": "m1"}]
         dashboard_state = {"repo": {"name": "x"}, "attempts": {"recent": shown_rows},
                            "plan": {"present": True, "goal": "Owed work", "tasks": tasks}}
 
@@ -8438,7 +8451,8 @@ with patch.dict(os.environ, {}):
         def collect(target):
             with patch.object(panel, "dashboard", side_effect=lambda *a, **k: (deepcopy(dashboard_state), 0)), \
                     patch.object(panel, "managed_session", return_value=False), \
-                    patch.object(panel, "outcomes", return_value={}), \
+                    patch.object(panel, "outcomes", side_effect=lambda repo, ids, **k: {
+                        task: "accepted" for task in ids if task == "task-call-decided"}), \
                     patch.object(panel_results, "pending_admissions",
                                  side_effect=lambda repo, ids, _tick=None: {"task-call-adm"} & set(ids)), \
                     patch.object(panel.subprocess, "run", side_effect=evidence):
@@ -8447,7 +8461,8 @@ with patch.dict(os.environ, {}):
             with bound(owing, "m1"):
                 current = room.rollover(where, room.resolve(where, owing, fresh=True), "m1")
             joined = {p["participant"] for p in room.status(where, current)["participants"]}
-            assert "call-run" in joined and not {"call-adm", "call-rev", "call-held"} & joined, joined
+            assert "call-run" in joined and ("call-x" in joined) == (hops == 1), joined
+            assert not {"call-adm", "call-rev", "call-held", "call-y", "call-landed", "call-decided"} & joined, joined
             board = collect(current)
             assert board["room"]["id"] == current and len(board["room"]["lineage"]) == hops, board["room"].get("lineage")
             assert board["awaiting_admission"] == ["call-adm"], board.get("awaiting_admission")
@@ -8455,13 +8470,38 @@ with patch.dict(os.environ, {}):
             assert sorted((item["cls"], item["what"]) for item in queue) == [
                 ("decide", "awaiting decision: Launched call-rev"), ("decide", "awaiting decision: Launched call-run"),
                 ("decide", "patch awaits admission: call-adm"), ("info", ""),
-                ("stale", "workers ended, still held")], (hops, queue)
+                ("stale", "workers ended, still held"), ("stale", "workers ended, still held")], (hops, queue)
             assert next(item["who"] for item in queue if item["cls"] == "info") == "Main wake-up delivery failed"
             drawn = {m["participant"]: m for m in room_view.nodes(board)}
             assert [drawn[who]["location"] for who in ("call-rev", "call-run")] == ["worktree:call-rev", "worktree:call-run"]
             assert drawn["call-adm"]["access"] == "write" and drawn["call-held"]["state"] == "failed", drawn
-            assert room_view.held_split(board) == (set(), {"task-call-held"})
+            assert drawn["call-x"].get("superseded") is True and not drawn["call-y"].get("superseded"), drawn
+            assert not {"call-landed", "call-decided"} & set(drawn), drawn
+            assert room_view.held_split(board) == (set(), {"task-call-held", "task-pair"})
             assert [d["task"] for d in panel_debate.debates(board)] == ["task-council"]
+            # The Past tab lists what the board no longer draws, once; a call still owed stays off it.
+            past_navigation = {"tab": "past"}
+            room_view.tab_box(board, 100, 12, past_navigation)
+            past = past_navigation["past_ids"]
+            assert len(past) == len(set(past)) and {("result", "call-landed"), ("result", "call-decided")} <= set(past)
+            assert not {("result", "call-adm"), ("result", "call-rev"), ("result", "call-run")} & set(past), past
+            if hops == 1:
+                # The newest room's own receipt replaces the sealed one for its target; one room on, the nearer
+                # room's receipt still wins, while the first room's other failure stays two rooms on.
+                assert set(board["room"]["predecessor_publications"]) == {"codex", "claude.m1"}
+                with bound(current, "m1"), patch.object(codex_app_notify, "deliver", return_value={"status": "persisted"}):
+                    room.publish(where, current)
+                    room.acknowledge(where, current, "m1", ["result-call-x"])
+                assert set(collect(current)["room"]["predecessor_publications"]) == {"claude.m1"}
+            else:
+                assert {target: receipt["status"] for target, receipt in board["room"]["predecessor_publications"].items()} == {
+                    "codex": "persisted", "claude.m1": "failed"}
+                # A call read only in the nearer room is read; the chain stops at a room that does not continue in
+                # the later one, and after MAX_HOPS rooms.
+                assert "result-call-x" in room_view.handled_results(board["room"])
+                assert room.lineage(where, {"id": "room-elsewhere", "predecessor": board["room"]["lineage"][0]}) == []
+                with patch.object(room, "MAX_HOPS", 1):
+                    assert [old for old, *_ in room.lineage(where, board["room"])] == board["room"]["lineage"][:1]
         # A later round in the newest room supersedes the held call, though seq numbers restart in every room: its
         # own failure, not the stale hold, is what the person sees.
         room.join(where, current, "call-again", "codex", "worker", parent="m1")
@@ -8472,7 +8512,7 @@ with patch.dict(os.environ, {}):
         assert drawn["call-held"].get("superseded") is True and not drawn["call-again"].get("superseded"), drawn
         queue = __import__("panel_view").attention_items(board)
         assert ("failed", "failed: call-again") in {(item["cls"], item["what"]) for item in queue}, queue
-        assert not [item for item in queue if item["cls"] == "stale"], queue
+        assert [item["row_id"] for item in queue if item["cls"] == "stale"] == [("task", "task-pair")], queue
     for mode, panel_env in (("stripped", False), ("panel", True)):
         rollover_regressions(temporary / ("rollover regressions " + mode), panel_env)
 recorded = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--limit", "300", "--json"]))
