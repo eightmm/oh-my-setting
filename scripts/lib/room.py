@@ -655,12 +655,12 @@ def validate_event(rows, event, text, repo=None):
         identifier(event.get("call_id"), "call")
         identifier(event.get("review_call_id"), "call")
         _result_participant(repo, state, event["call_id"])
+        if not _controller_review_ids(event):
+            raise ValueError("automatic review ids do not match the reviewed call")
         claims = [previous for previous in structured
-                  if previous.get("kind") == "review-dispatch"
-                  and previous.get("patch_sha256") == event["patch_sha256"]]
+                  if previous.get("kind") == "review-dispatch" and _same_review(previous, event)]
         failures = {previous.get("attempt") for previous in structured
-                    if previous.get("kind") == "review-dispatch-failed"
-                    and previous.get("patch_sha256") == event["patch_sha256"]}
+                    if previous.get("kind") == "review-dispatch-failed" and _same_review(previous, event)}
         expected_attempt = len(claims) + 1
         if (event["attempt"] != expected_attempt or expected_attempt > 2
                 or claims and claims[-1].get("attempt") not in failures):
@@ -671,13 +671,13 @@ def validate_event(rows, event, text, repo=None):
         identifier(event.get("call_id"), "call")
         identifier(event.get("review_call_id"), "call")
         _result_participant(repo, state, event["call_id"])
+        if not _controller_review_ids(event):
+            raise ValueError("automatic review ids do not match the reviewed call")
         claim = next((previous for previous in reversed(structured)
-                      if previous.get("kind") == "review-dispatch"
-                      and previous.get("patch_sha256") == event["patch_sha256"]
+                      if previous.get("kind") == "review-dispatch" and _same_review(previous, event)
                       and previous.get("attempt") == event["attempt"]), None)
         if not claim or event["attempt"] in {previous.get("attempt") for previous in structured
-                if previous.get("kind") == "review-dispatch-failed"
-                and previous.get("patch_sha256") == event["patch_sha256"]}:
+                if previous.get("kind") == "review-dispatch-failed" and _same_review(previous, event)}:
             raise ValueError("automatic review failure does not match an active claim")
     elif kind == "message":
         identifier(event.get("id"), "message")
@@ -798,6 +798,26 @@ def append(repo, room, event, text):
         if target == literal and not unfinished:
             raise
     return _write(repo, target, event, text)
+
+
+def review_ids(call_id, digest, attempt):
+    """Claim, failure and reviewer ids the controller derives for one call's patch attempt."""
+    stem = "%s-%s-%d" % (call_id, digest, attempt)
+    reviewer = "call-" + hashlib.sha256(stem.encode("utf-8")).hexdigest()[:16]
+    return "review-dispatch-" + stem, "review-dispatch-failed-" + stem, reviewer
+
+
+def _controller_review_ids(event):
+    # A row naming any other reviewer or id was not written by the controller and claims nothing.
+    claim, failed, reviewer = review_ids(event["call_id"], event["patch_sha256"], event["attempt"])
+    return (event["review_call_id"] == reviewer
+            and event["event_id"] == (claim if event["kind"] == "review-dispatch" else failed))
+
+
+def _same_review(previous, event):
+    # One reviewed patch is one call's output: identical bytes from another call get their own review.
+    return (previous.get("patch_sha256") == event["patch_sha256"]
+            and previous.get("call_id") == event["call_id"])
 
 
 def claim_review(repo, ident, event):
@@ -1427,6 +1447,8 @@ def _structured_rows(repo, ident, rows=None):
             event = row.get("room_event", {})
             if event.get("kind") in {"call-result", "review-dispatch", "review-dispatch-failed"}:
                 event_shape(event)
+                if event["kind"] != "call-result" and not _controller_review_ids(event):
+                    continue
                 events.append(row)
     return events
 

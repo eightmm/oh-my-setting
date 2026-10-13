@@ -1479,8 +1479,10 @@ def _judgment_mail(repo, room_id, member, caller, task_id, message):
     try:
         room.send(repo, room_id, member, caller, message, "note",
                   message_id="judgment-" + member, quiet=False)
+        return True
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         print("OMS judgment notification unavailable for task " + task_id, file=sys.stderr)
+        return False
 
 
 def _review_verdict(answer):
@@ -1534,7 +1536,168 @@ def _review_verifier(repo, room_id, member, caller, task_id):
         return None
 
 
+def _settlement_claim_path(member):
+    return "settlement-" + hashlib.sha256(member.encode("utf-8")).hexdigest() + ".json"
+
+
+def _settlement_owner_identity(pid):
+    import panel_terminals
+    return panel_terminals._process_helpers().process_identity(pid)
+
+
+# Members this process is delivering now; a durable active flag outside it is a failed release.
+SETTLEMENTS_HELD, SETTLEMENTS_HELD_LOCK = set(), threading.Lock()
+
+
+def _settlement_claim(repo, member, status):
+    """Serialize result delivery and allow only its idle owner or a successor."""
+    identity = _settlement_owner_identity(os.getpid())
+    if not identity:
+        raise ValueError("settlement owner identity unavailable")
+    path = _settlement_claim_path(member)
+    with SETTLEMENTS_HELD_LOCK, _lock(repo, "panel-call-settle"):
+        try:
+            old = dispatch_store.read(repo, path)
+        except FileNotFoundError:
+            old = None
+        if old is not None:
+            required = {"schema", "member", "exit", "claim_id", "owner_pid", "owner_identity",
+                        "active", "complete", "steps"}
+            if (not isinstance(old, dict) or set(old) != required or old.get("schema") != 1
+                    or old.get("member") != member or type(old.get("exit")) is not int
+                    or not isinstance(old.get("claim_id"), str)
+                    or not old["claim_id"] or type(old.get("owner_pid")) is not int
+                    or not isinstance(old.get("owner_identity"), str) or not old["owner_identity"]
+                    or type(old.get("active")) is not bool or type(old.get("complete")) is not bool
+                    or not isinstance(old.get("steps"), dict)
+                    or not set(old["steps"]) <= {"settlement", "room_result", "structured_event",
+                                                  "auto_review", "room_quiet", "review_launch"}
+                    or any(type(value) is not bool for value in old["steps"].values())):
+                raise ValueError("invalid call settlement claim")
+            if old["exit"] != status:
+                raise ValueError("call result conflicts with prior settlement")
+            if old["complete"]:
+                return None
+            owner_live = not _settlement_owner_gone(old["owner_pid"], old["owner_identity"])
+            same_owner = old["owner_pid"] == os.getpid() and old["owner_identity"] == identity
+            if owner_live and (not same_owner or member in SETTLEMENTS_HELD):
+                return None
+            claim = dict(old, owner_pid=os.getpid(), owner_identity=identity, active=True)
+            dispatch_store.write(repo, path, claim)
+            SETTLEMENTS_HELD.add(member)
+            return claim
+        claim = {"schema": 1, "member": member, "exit": status, "claim_id": uuid.uuid4().hex,
+                 "owner_pid": os.getpid(), "owner_identity": identity, "active": True,
+                 "complete": False, "steps": {}}
+        dispatch_store.write(repo, path, claim, exclusive=True)
+        SETTLEMENTS_HELD.add(member)
+        return claim
+
+
+def _settlement_owner_gone(pid, identity):
+    import panel_terminals
+    return panel_terminals.process_gone(pid, identity)
+
+
+def _settlement_step(repo, member, claim, name, done=True):
+    with _lock(repo, "panel-call-settle"):
+        path = _settlement_claim_path(member)
+        current = dispatch_store.read(repo, path)
+        if current.get("claim_id") != claim["claim_id"]:
+            raise ValueError("call settlement claim changed")
+        current.setdefault("steps", {})[name] = done
+        current["complete"] = all(current["steps"].get(step) is True
+                                   for step in ("settlement", "room_result", "structured_event", "auto_review"))
+        dispatch_store.write(repo, path, current)
+        claim.update(current)
+
+
+def _settlement_release(repo, member, claim):
+    with _lock(repo, "panel-call-settle"):
+        path = _settlement_claim_path(member)
+        current = dispatch_store.read(repo, path)
+        if current.get("claim_id") == claim["claim_id"]:
+            current["active"] = False
+            dispatch_store.write(repo, path, current)
+
+
+def _settlement_delivery_pending(repo, room_id, member):
+    try:
+        claim = dispatch_store.read(repo, _settlement_claim_path(member))
+    except FileNotFoundError:
+        try:
+            state = room.status(repo, room_id)
+            return member not in state.get("call_results", {})
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+            return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
+    return isinstance(claim, dict) and claim.get("complete") is not True
+
+
+def _review_launch_state(repo, member):
+    """Launch evidence for a reserved reviewer: the launch record precedes the spawn, the process record follows it."""
+    if not isinstance(member, str):
+        return "unknown"
+    try:
+        process = dispatch_store.read(repo, member + "-process.json")
+    except FileNotFoundError:
+        try:
+            dispatch_store.read(repo, member + "-launch.json")
+            return "possible"
+        except FileNotFoundError:
+            return "absent"
+        except (OSError, ValueError, KeyError, TypeError):
+            return "unknown"
+    except (OSError, ValueError, KeyError, TypeError):
+        return "unknown"
+    valid = isinstance(process, dict) and type(process.get("pid")) is int and process["pid"] > 0 and (
+        set(process) == {"pid"} or set(process) == {"pid", "identity", "group"}
+        and isinstance(process.get("identity"), str) and bool(process["identity"])
+        and type(process.get("group")) is int and process["group"] == process["pid"])
+    return "launched" if valid else "unknown"
+
+
 def deliver_result(repo, room_id, member, caller, task_id, status):
+    """Settle and publish one finished call under its durable per-call claim."""
+    try:
+        claim = _settlement_claim(repo, member, status)
+    except ValueError as error:
+        if "conflicts with prior settlement" in str(error):
+            print("OMS room result message-id conflict: result-" + member, file=sys.stderr)
+            return False
+        raise
+    if claim is None:
+        try:
+            old = dispatch_store.read(repo, _settlement_claim_path(member))
+            return bool(old.get("complete") and old.get("exit") == status)
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+    try:
+        try:
+            call = _dispatch_call_record(repo, room_id, {"participant": member, "parent": caller})
+            if call:
+                _write(repo, _dispatch_call_path(member, True), _dispatch_exit_record(call, status))
+            _settle_dispatch(repo, room_id, member, status)
+            _settlement_step(repo, member, claim, "settlement")
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            print("OMS call attempt settlement unavailable.", file=sys.stderr)
+            return False
+        return _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
+        print("OMS call result delivery incomplete: " + clean(str(error), 180), file=sys.stderr)
+        return False
+    finally:
+        try:
+            _settlement_release(repo, member, claim)
+        except (OSError, ValueError, KeyError, TypeError):
+            print("OMS call settlement release unavailable; this process may retry it.", file=sys.stderr)
+        finally:
+            with SETTLEMENTS_HELD_LOCK:
+                SETTLEMENTS_HELD.discard(member)
+
+
+def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim):
     """Keep the numeric outcome deliverable when a worker summary cannot be shared."""
     review_context = _review_dispatch_context(repo, room_id, member)
     if review_context and isinstance(review_context.get("task_id"), str):
@@ -1546,13 +1709,18 @@ def deliver_result(repo, room_id, member, caller, task_id, status):
         summary = next((c.get("answer") for c in reversed(calls) if c.get("answer")), summary)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         pass
+    policy_available = True
     try:
         auto_review = policy().get("auto_review", True)
     except (OSError, ValueError, KeyError, TypeError):
         auto_review = False
+        policy_available = False
     result_event, result_record = None, {}
+    structured_done = False
     try:
         result_event, result_record = _call_result_event(repo, room_id, member, task_id, status)
+        _settlement_step(repo, member, claim, "structured_event")
+        structured_done = True
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         print("OMS structured call result unavailable for task " + task_id, file=sys.stderr)
     role = (result_event or {}).get("role")
@@ -1582,6 +1750,10 @@ def deliver_result(repo, room_id, member, caller, task_id, status):
                   "worker exited with status %s" % status)
         _judgment_mail(repo, room_id, member, caller, task_id,
                        "Task %s needs judgment: %s (exit %s)." % (task_id, reason, status))
+    auto_review_done = bool(result_event and policy_available and not (result_event.get("needs_review") and status == 0
+                                                  and not guard_stop
+                                                  and result_event.get("verify_status") != "failed"
+                                                  and auto_review))
     if (result_event and result_event.get("needs_review") and status == 0 and not guard_stop
             and result_event.get("verify_status") != "failed" and auto_review):
         digest = result_event["patch_sha256"]
@@ -1592,65 +1764,113 @@ def deliver_result(repo, room_id, member, caller, task_id, status):
                   "Assess correctness and safety. Do not apply or execute the patch.\n"
                   "End with exactly one final line: GATE: pass or GATE: fail, then concise findings before it.")
         verifier = _review_verifier(repo, room_id, member, caller, task_id)
+        manual_notice = False
+        unconfirmed = ("Task %s has a write patch that could not launch automatic review; manual review is needed."
+                       % task_id)
         try:
             if not verifier:
-                _judgment_mail(repo, room_id, member, caller, task_id,
+                manual_notice = _judgment_mail(repo, room_id, member, caller, task_id,
                                "Task %s has a write patch but no recorded verifier; manual review is needed."
                                % task_id)
                 raise LookupError("no verifier is available for automatic review")
             work_repo = _dispatch_execution_repository(repo, room_id, member, caller)
             if work_repo is None:
-                _judgment_mail(repo, room_id, member, caller, task_id,
+                manual_notice = _judgment_mail(repo, room_id, member, caller, task_id,
                                "Task %s execution repository is unknown or no longer available; manual review is needed."
                                % task_id)
                 raise LookupError("execution repository is unknown or unavailable")
             _validate_dry_run_inputs(prompt, None)
             owner = os.environ.get("OMS_AGENT", caller_owner())
             events = room.structured_events(repo, room_id)
+            # Claims are per call: identical patch bytes from another call get their own review.
             claims = [event for event in events if event.get("kind") == "review-dispatch"
-                      and event.get("patch_sha256") == digest]
-            attempt = len(claims) + 1
-            review_member = "call-" + hashlib.sha256((digest + "/" + str(attempt)).encode()).hexdigest()[:16]
-            review_event = {"kind": "review-dispatch",
-                            "event_id": "review-dispatch-" + digest + "-" + str(attempt),
-                            "task_id": task_id, "call_id": member, "patch_sha256": digest,
-                            "review_call_id": review_member, "attempt": attempt}
-            if room.claim_review(repo, room_id, review_event):
-                try:
-                    with redirect_stdout(io.StringIO()):
-                        dispatch(repo, owner, "reviewer", None, "read", None, prompt=prompt, verify=verifier,
-                                 task_id=task_id, dry_run=True, label="Automatic patch review")
-                    dispatch(repo, owner, "reviewer", None, "read", None, prompt=prompt, verify=verifier,
-                             task_id=task_id, label="Automatic patch review", member_id=review_member,
-                             work_repo=work_repo)
-                    review_delivered = True
-                except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-                    room.fail_review(repo, room_id, {
-                        "kind": "review-dispatch-failed",
-                        "event_id": "review-dispatch-failed-" + digest + "-" + str(attempt),
-                        "task_id": task_id, "call_id": member, "patch_sha256": digest,
-                        "review_call_id": review_member, "attempt": attempt})
-                    raise
+                      and event.get("patch_sha256") == digest and event.get("call_id") == member]
+            failures = {event.get("attempt") for event in events
+                        if event.get("kind") == "review-dispatch-failed"
+                        and event.get("patch_sha256") == digest and event.get("call_id") == member}
+            pending_claim = claims[-1] if claims and claims[-1].get("attempt") not in failures else None
+            launch = _review_launch_state(repo, pending_claim.get("review_call_id")) if pending_claim else "absent"
+            if pending_claim and claim["steps"].get("review_launch") is True:
+                review_delivered = True
+                auto_review_done = True
+            elif pending_claim and launch == "launched":
+                _settlement_step(repo, member, claim, "review_launch")
+                review_delivered = True
+                auto_review_done = True
+            elif pending_claim and launch == "unknown":
+                # Unreadable launch evidence keeps the reservation; a later retry decides.
+                review_delivered = False
+                auto_review_done = False
+            elif pending_claim and launch == "possible":
+                # Past the spawn point a reviewer may exist: never relaunch, hand the review to the main.
+                review_delivered = False
+                auto_review_done = _judgment_mail(repo, room_id, member, caller, task_id, unconfirmed)
             else:
-                previous = [event for event in events if event.get("kind") in {
-                    "review-dispatch", "review-dispatch-failed"} and event.get("patch_sha256") == digest]
-                review_delivered = bool(previous and previous[-1].get("kind") == "review-dispatch")
-        except LookupError:
-            pass
+                attempt = pending_claim.get("attempt") if pending_claim else len(claims) + 1
+                claim_id, failed_id, review_member = room.review_ids(member, digest, attempt)
+                review_event = pending_claim or {
+                    "kind": "review-dispatch",
+                    "event_id": claim_id,
+                    "task_id": task_id, "call_id": member, "patch_sha256": digest,
+                    "review_call_id": review_member, "attempt": attempt}
+                if pending_claim or room.claim_review(repo, room_id, review_event):
+                    try:
+                        with redirect_stdout(io.StringIO()):
+                            dispatch(repo, owner, "reviewer", None, "read", None, prompt=prompt, verify=verifier,
+                                     task_id=task_id, dry_run=True, label="Automatic patch review")
+                        dispatch(repo, owner, "reviewer", None, "read", None, prompt=prompt, verify=verifier,
+                                 task_id=task_id, label="Automatic patch review", member_id=review_member,
+                                 work_repo=work_repo)
+                    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                        if _review_launch_state(repo, review_member) != "absent":
+                            # A launch record means the spawn may have happened; keep the reservation.
+                            raise LookupError("automatic review launch is unconfirmed")
+                        room.fail_review(repo, room_id, {
+                            "kind": "review-dispatch-failed",
+                            "event_id": failed_id,
+                            "task_id": task_id, "call_id": member, "patch_sha256": digest,
+                            "review_call_id": review_member, "attempt": attempt})
+                        raise
+                    # The started reviewer keeps its reservation; a lost receipt is recovered from its process record.
+                    review_delivered = True
+                    try:
+                        _settlement_step(repo, member, claim, "review_launch")
+                        auto_review_done = True
+                    except (OSError, ValueError, KeyError, TypeError):
+                        print("OMS automatic review receipt unavailable for task " + task_id, file=sys.stderr)
+                else:
+                    review_delivered = False
+                    exhausted = (len(claims) >= 2
+                                 and all(item.get("attempt") in failures for item in claims))
+                    auto_review_done = (_judgment_mail(repo, room_id, member, caller, task_id, unconfirmed)
+                                        if exhausted else False)
+        except LookupError as error:
+            if "unconfirmed" in str(error):
+                manual_notice = _judgment_mail(repo, room_id, member, caller, task_id, unconfirmed)
+            # Completion needs the durable manual-review notice; without it the claim stays retryable.
+            auto_review_done = manual_notice
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-            _judgment_mail(repo, room_id, member, caller, task_id,
-                           "Task %s has a write patch that could not launch automatic review; manual review is needed."
-                           % task_id)
+            _judgment_mail(repo, room_id, member, caller, task_id, unconfirmed)
             print("OMS automatic review unavailable for task %s: %s" % (task_id, clean(str(error), 180)),
                   file=sys.stderr)
+            # Preflight/dispatch failures with no launch evidence retain their bounded retry.
+            auto_review_done = False
+    if auto_review_done:
+        _settlement_step(repo, member, claim, "auto_review")
+    else:
+        _settlement_step(repo, member, claim, "auto_review", False)
+    if "room_quiet" not in claim["steps"]:
+        _settlement_step(repo, member, claim, "room_quiet", bool(review_delivered))
+    room_quiet = claim["steps"]["room_quiet"]
     prefix = "Call exit=%d; parent acceptance pending.\n" % status
     message = (prefix + str(summary)).encode("utf-8")[:3800].decode("utf-8", "ignore")
     message_id = "result-" + member
     for retry in (False, True):
         try:
             room.send(repo, room_id, member, caller, message, "handoff", message_id=message_id,
-                      quiet=review_delivered)
-            return
+                      quiet=room_quiet)
+            _settlement_step(repo, member, claim, "room_result")
+            return bool(structured_done and auto_review_done)
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             if not retry and isinstance(error, ValueError) and "sensitive" in str(error).lower():
                 message = (prefix + "Summary withheld by the sensitive-content screen; read it with "
@@ -1661,7 +1881,8 @@ def deliver_result(repo, room_id, member, caller, task_id, status):
             else:
                 print("OMS room result delivery unavailable; inspect oms panel --results --task-id " + task_id,
                       file=sys.stderr)
-            return
+            return False
+    return False
 
 
 def _rollover_if_needed(repo, room_id, state, caller):
@@ -2306,16 +2527,13 @@ def _reconcile_dispatch(repo, room_id, state, caller, parent):
             continue
         try:
             pending = _dispatch_pending(repo, call)
-            if not live and (not member.get("owns") or _dispatch_released(repo, call)):
+            if (not live and (not member.get("owns") or _dispatch_released(repo, call))
+                    and not _settlement_delivery_pending(repo, room_id, member["participant"])):
                 continue
             if (any(row.get("task_id") != pending["task_id"] for row in live)
                     or not _dispatch_call_finished(repo, room_id, member)):
                 continue
-            _write(repo, _dispatch_call_path(member["participant"], True), _dispatch_exit_record(call, pending["exit"]))
-            try:
-                _settle_dispatch(repo, room_id, member["participant"], pending["exit"])
-            finally:
-                deliver_result(repo, room_id, member["participant"], caller, pending["task_id"], pending["exit"])
+            deliver_result(repo, room_id, member["participant"], caller, pending["task_id"], pending["exit"])
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
             # Missing pending records describe calls still running in another dispatch controller.
             continue
@@ -2775,17 +2993,11 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             if member and exit_verified:
                 try:
                     record_pending()
-                    _record_dispatch_call(repo, room_id, member, caller, process, identity, status)
                 except (OSError, ValueError):
                     exit_verified = False
                     print("OMS call exit record unavailable; non-terminal scopes remain reserved.", file=sys.stderr)
             if member and exit_verified:
-                try:
-                    _settle_dispatch(repo, room_id, member, status)
-                except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-                    print("OMS call attempt settlement unavailable.", file=sys.stderr)
-                finally:
-                    deliver_result(repo, room_id, member, caller, task_id, status)
+                deliver_result(repo, room_id, member, caller, task_id, status)
             elif member and process is None and spawn_failed:
                 try:
                     room.append(repo, room_id, {"kind": "leave", "participant": member}, "Call spawn failed")
