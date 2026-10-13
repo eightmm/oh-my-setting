@@ -5988,6 +5988,193 @@ if os.name == "posix" and operator_selected_py("native-pty"):
 # The canonical operator suite also covers the room front door and native open contract.
 import room
 import codex_app_notify
+# A child can send and acknowledge through its controller's pinned queue even
+# when its own room repository path is unavailable. The queue accepts no
+# alternate sender, event kind, or room from the client.
+import tempfile
+import threading
+import shutil
+def test_room_relay():
+    relay_room = room.create(project, "worker-relay", "Sandbox worker relay")
+    room.join(project, relay_room, "relay-main", "codex", role="main")
+    room.join(project, relay_room, "relay-worker", "codex", role="worker", parent="relay-main")
+    room.send(project, relay_room, "relay-main", "relay-worker", "consume through relay", message_id="relay-incoming")
+    relay_queue = tempfile.mkdtemp(prefix="oms-room-relay-", dir=str(temporary))
+    relay_env = dict(os.environ, OMS_HARNESS_CHILD="1", OMS_HARNESS_DELEGATE_DEPTH="1",
+                    OMS_ROOM_ID=relay_room, OMS_ROOM_PARTICIPANT="relay-worker",
+                    OMS_ROOM_ADMITTED_PARTICIPANT="relay-worker", OMS_ROOM_RELAY_ALLOWED="1",
+                    OMS_ROOM_REPO=str(project))
+    with patch.dict(os.environ, relay_env):
+        relay_server = room._RoomRelay(relay_queue, project, relay_room, "relay-worker", temporary)
+        relay_thread = threading.Thread(target=relay_server.serve_forever, kwargs={"poll_interval": .01})
+        relay_thread.daemon = True
+        relay_thread.start()
+        try:
+            deadline = time.monotonic() + 2
+            while not os.path.exists(os.path.join(relay_queue, ".ready")) and time.monotonic() < deadline:
+                time.sleep(.01)
+            assert os.path.exists(os.path.join(relay_queue, ".ready")), "controller relay queue did not start"
+            sandbox_env = dict(relay_env, OMS_ROOM_RELAY_QUEUE=relay_queue)
+            note = subprocess.run(["bash", str(room.ENTRY), "room", "send", "--repo", "/proc",
+                                   "--id", relay_room, "--participant", "relay-worker", "--text", "worker note",
+                                   "--json"], env=sandbox_env, capture_output=True, text=True, timeout=5)
+            assert note.returncode == 0, note.stderr
+            sent_id = json.loads(note.stdout)["id"]
+            assert any(row.get("room_event", {}).get("id") == sent_id and
+                       row.get("room_event", {}).get("sender") == "relay-worker"
+                       for row in room.records(project, relay_room)), "sandboxed note did not reach the room"
+            ack = subprocess.run(["bash", str(room.ENTRY), "room", "ack", "--repo", "/proc",
+                                  "--id", relay_room, "--participant", "relay-worker", "--message", "relay-incoming",
+                                  "--json"], env=sandbox_env, capture_output=True, text=True, timeout=5)
+            assert ack.returncode == 0 and json.loads(ack.stdout)["status"] == "consumed", ack.stderr
+            assert any(row.get("room_event", {}).get("kind") == "received" and
+                       row.get("room_event", {}).get("participant") == "relay-worker" and
+                       "relay-incoming" in row.get("room_event", {}).get("messages", [])
+                       for row in room.records(project, relay_room)), "sandboxed ack did not reach the room"
+            before_refusal = len(room.records(project, relay_room))
+            forged = [
+                {"action": "send", "room": relay_room, "participant": "relay-main", "to": "relay-worker",
+                 "kind": "note", "text": "forged sender"},
+                {"action": "send", "room": relay_room, "participant": "relay-worker", "to": "relay-main",
+                 "kind": "publication", "text": "forged kind"},
+                {"action": "send", "room": "another-room", "participant": "relay-worker", "to": "relay-main",
+                 "kind": "note", "text": "forged room"},
+                {"action": "send", "room": relay_room, "participant": "relay-worker", "sender": "relay-main",
+                 "to": "relay-main", "kind": "note", "text": "forged sender field"},
+            ]
+            for request in forged:
+                try:
+                    room._relay_request(relay_queue, request)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("relay accepted forged sender, kind, or room request")
+            assert len(room.records(project, relay_room)) == before_refusal, "forged relay requests wrote room events"
+            oversized = {"action": "send", "room": relay_room, "participant": "relay-worker",
+                         "to": "relay-main", "kind": "note", "text": "x" * 4001}
+            try:
+                room._relay_request(relay_queue, oversized)
+            except ValueError as error:
+                assert "4000" in str(error), error
+            else:
+                raise AssertionError("relay accepted an oversized note")
+            for index in range(19):
+                room._relay_request(relay_queue, {"action": "send", "room": relay_room,
+                                    "participant": "relay-worker", "to": "relay-main", "kind": "note",
+                                    "text": "rate %d" % index})
+            before_rate_refusal = len(room.records(project, relay_room))
+            try:
+                room._relay_request(relay_queue, {"action": "send", "room": relay_room,
+                                    "participant": "relay-worker", "to": "relay-main", "kind": "note",
+                                    "text": "over rate"})
+            except ValueError as error:
+                assert "rate limit" in str(error), error
+            else:
+                raise AssertionError("relay exceeded its per-minute request bound")
+            assert len(room.records(project, relay_room)) == before_rate_refusal, "rate refusal wrote a room event"
+        finally:
+            relay_server.shutdown()
+            relay_thread.join(timeout=2)
+            shutil.rmtree(relay_queue)
+test_room_relay()
+# The relay pins its queue directory and never opens a worker-chosen path to
+# stop: swapped components, links, FIFOs and a planted .stop touch nothing outside.
+def test_room_relay_paths():
+    path_room = room.create(project, "worker-relay-paths", "Relay path safety")
+    room.join(project, path_room, "path-main", "codex", role="main")
+    room.join(project, path_room, "path-worker", "codex", role="worker", parent="path-main")
+    path_env = dict(os.environ, OMS_HARNESS_CHILD="1", OMS_HARNESS_DELEGATE_DEPTH="1",
+                    OMS_ROOM_ID=path_room, OMS_ROOM_PARTICIPANT="path-worker",
+                    OMS_ROOM_ADMITTED_PARTICIPANT="path-worker", OMS_ROOM_RELAY_ALLOWED="1",
+                    OMS_ROOM_REPO=str(project))
+    def request_bytes(text):
+        return (json.dumps({"action": "send", "room": path_room, "participant": "path-worker",
+                            "to": "path-main", "kind": "note", "text": text}) + "\n").encode("utf-8")
+    def snapshot(directory):
+        return {name: open(os.path.join(directory, name), "rb").read() for name in sorted(os.listdir(directory))
+                if os.path.isfile(os.path.join(directory, name)) and not os.path.islink(os.path.join(directory, name))}
+    outside = tempfile.mkdtemp(prefix="oms-room-outside-", dir=str(temporary))
+    try:
+        # A swapped queue path: the pinned directory keeps being served, the new target is never read or written.
+        queue = tempfile.mkdtemp(prefix="oms-room-pin-", dir=str(temporary))
+        decoy = os.path.join(outside, "req-" + "a" * 32 + ".json")
+        with open(decoy, "wb") as handle:
+            handle.write(request_bytes("decoy outside the queue"))
+        with open(os.path.join(outside, "keep"), "wb") as handle:
+            handle.write(b"keep\n")
+        before_outside = snapshot(outside)
+        with patch.dict(os.environ, path_env):
+            pinned = room._RoomRelay(queue, project, path_room, "path-worker", temporary)
+            moved = queue + ".moved"
+            os.rename(queue, moved)
+            os.symlink(outside, queue)
+            with open(os.path.join(moved, "req-" + "b" * 32 + ".json"), "wb") as handle:
+                handle.write(request_bytes("inside the pinned queue"))
+            pinned.handle_pending()
+            assert os.path.exists(os.path.join(moved, "res-" + "b" * 32 + ".json")), "pinned queue was not served"
+            assert snapshot(outside) == before_outside, "a swapped queue path redirected relay file operations"
+            assert not any(row.get("room_event", {}).get("text") == "decoy outside the queue"
+                           for row in room.records(project, path_room)), "relay read a request through a swapped path"
+            # Links and FIFOs inside the queue are refused without blocking, and only the queue entry goes away.
+            os.link(os.path.join(outside, "keep"), os.path.join(moved, "req-" + "c" * 32 + ".json"))
+            os.symlink(decoy, os.path.join(moved, "req-" + "d" * 32 + ".json"))
+            os.mkfifo(os.path.join(moved, "req-" + "e" * 32 + ".json"))
+            worker = threading.Thread(target=pinned.handle_pending)
+            worker.daemon = True
+            worker.start()
+            worker.join(timeout=3)
+            assert not worker.is_alive(), "relay blocked on a FIFO request"
+            for name in "cde":
+                refusal = json.loads(open(os.path.join(moved, "res-" + name * 32 + ".json")).read())
+                assert refusal["ok"] is False, refusal
+            assert snapshot(outside) == before_outside, "a linked or symlinked request touched files outside the queue"
+            # A directory in a request's name is refused on every poll without keeping a descriptor open.
+            os.mkdir(os.path.join(moved, "req-" + "f" * 32 + ".json"))
+            open_fds = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+            for unused in range(3):
+                pinned.handle_pending()
+            assert open_fds is None or len(os.listdir("/proc/self/fd")) == open_fds, "directory requests leaked descriptors"
+            os.close(pinned.queue_fd)
+        os.unlink(queue)
+        shutil.rmtree(moved)
+        # Shutdown never opens .stop: a symlink or FIFO planted there is neither followed nor waited on.
+        queue = tempfile.mkdtemp(prefix="oms-room-stop-", dir=str(temporary))
+        sentinel = os.path.join(outside, "sentinel")
+        with open(sentinel, "wb") as handle:
+            handle.write(b"sentinel\n")
+        with patch.dict(os.environ, path_env):
+            stopped = room._RoomRelay(queue, project, path_room, "path-worker", temporary)
+            thread = threading.Thread(target=stopped.serve_forever, kwargs={"poll_interval": .01})
+            thread.daemon = True
+            thread.start()
+            os.symlink(sentinel, os.path.join(queue, ".stop"))
+            stopped.shutdown()
+            thread.join(timeout=3)
+            assert not thread.is_alive(), "relay shutdown hung"
+        assert open(sentinel, "rb").read() == b"sentinel\n", "relay shutdown followed a .stop symlink"
+        os.unlink(os.path.join(queue, ".stop"))
+        os.mkfifo(os.path.join(queue, ".stop"))
+        server = subprocess.Popen([sys.executable, str(Path(room.__file__).resolve()), "relay-server",
+                                   "--repo", str(project), "--id", path_room, "--participant", "path-worker",
+                                   "--queue", queue, "--worktree", str(temporary)],
+                                  env=path_env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 5
+            while not os.path.exists(os.path.join(queue, ".ready")) and server.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert os.path.exists(os.path.join(queue, ".ready")), "relay server did not start"
+            server.terminate()
+            server.wait(timeout=5)
+        finally:
+            if server.poll() is None:
+                server.kill()
+                server.wait()
+            server.stderr.close()
+        assert open(sentinel, "rb").read() == b"sentinel\n"
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
+        shutil.rmtree(queue, ignore_errors=True)
+test_room_relay_paths()
 # Typed close is authorized by enrollment or creation and retains unread mail.
 closed_room = room.create(project, "typed-close", "Close contract", creator="creator")
 room.join(project, closed_room, "close-writer", "codex")

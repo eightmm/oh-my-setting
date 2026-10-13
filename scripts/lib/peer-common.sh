@@ -2244,6 +2244,20 @@ ma_answer_language_block() {
   esac
 }
 
+# Stop a relay this shell started by PID alone: the queue directory belongs to
+# the worker, so no path inside it is opened to signal shutdown. TICKS bounds
+# the wait (50ms each) before the owned PID is killed and reaped.
+ma_room_relay_stop() {  # PID [TICKS]
+  local pid="$1" ticks="${2:-100}"
+  kill -TERM "$pid" 2>/dev/null || true
+  while [ "$ticks" -gt 0 ] && kill -0 "$pid" 2>/dev/null; do
+    ticks=$((ticks - 1))
+    sleep 0.05
+  done
+  if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+  wait "$pid" 2>/dev/null || true
+}
+
 ma_provider_attempt() {
   local provider="$1"
   local access="$2"
@@ -2271,6 +2285,7 @@ ma_provider_attempt() {
   local panel_worker_root=""
   local panel_worker_parent=""
   local seat_plans="" seat_plans_real="" workdir_real=""
+  local room_relay_dir="" room_relay_pid="" room_relay_ready=0 room_relay_attempt=0
   local -a cmd
 
   provider="$(oms_provider_normalize "$provider")" || {
@@ -2705,6 +2720,36 @@ ma_provider_attempt() {
       "$origin" "$state_repo" "$call_id" "$authority_before" "$authority_after" \
       "${cmd[@]}" || status=$?
   else
+    if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "${OMS_PANEL_ROLE:-}" = worker ] &&
+      [ "$access" = write ] && [ -n "${OMS_ROOM_ID:-}" ] &&
+      [ -n "${OMS_ROOM_PARTICIPANT:-}" ] &&
+      [ "${OMS_ROOM_ADMITTED_PARTICIPANT:-}" = "$OMS_ROOM_PARTICIPANT" ] &&
+      [ -z "${OMS_ROOM_RELAY_QUEUE:-}" ]; then
+      if command -v python3 >/dev/null 2>&1; then
+        room_relay_dir="$(mktemp -d "$workdir/.oms-room-relay.XXXXXX")" || room_relay_dir=""
+        if [ -n "$room_relay_dir" ] && chmod 700 "$room_relay_dir"; then
+          python3 "$(ma_scripts_dir)/lib/room.py" relay-server --repo "$state_repo" \
+            --id "$OMS_ROOM_ID" --participant "$OMS_ROOM_PARTICIPANT" \
+            --queue "$room_relay_dir" --worktree "$workdir" >/dev/null 2>&1 &
+          room_relay_pid=$!
+          while [ "$room_relay_attempt" -lt 25 ] && kill -0 "$room_relay_pid" 2>/dev/null; do
+            if [ -f "$room_relay_dir/.ready" ]; then
+              room_relay_ready=1
+              break
+            fi
+            room_relay_attempt=$((room_relay_attempt + 1))
+            sleep 0.04
+          done
+        fi
+      fi
+      if [ "$room_relay_ready" = 1 ]; then
+        export OMS_ROOM_RELAY_QUEUE="$room_relay_dir"
+      else
+        [ -z "$room_relay_pid" ] || ma_room_relay_stop "$room_relay_pid"
+        [ -z "$room_relay_dir" ] || rm -rf "$room_relay_dir"
+        room_relay_dir="" room_relay_pid=""
+      fi
+    fi
     (
       ma_export_child_env "$provider" "$origin" "$state_repo" "$call_id" "$access"
       if [ -n "$panel_worker_root" ]; then
@@ -2717,6 +2762,12 @@ ma_provider_attempt() {
     local pid="$!"
 
     if wait "$pid"; then status=0; else status=$?; fi
+    if [ -n "$room_relay_pid" ]; then
+      ma_room_relay_stop "$room_relay_pid"
+      room_relay_pid=""
+      unset OMS_ROOM_RELAY_QUEUE
+    fi
+    [ -z "$room_relay_dir" ] || rm -rf "$room_relay_dir"
   fi
   [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
   # Remove only a real directory at its physical spot inside this workdir: a

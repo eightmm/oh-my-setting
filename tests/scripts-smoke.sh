@@ -11674,6 +11674,14 @@ EOF
   bash -c '. "$1/scripts/lib/peer-common.sh"; ma_claude_envelope_to_text "$2"' _ "$ROOT" "$project/refused-odd"
   [ "$(head -n 1 "$project/refused-odd")" = 'stop-reason: provider=claude reason=refusal subtype=missing_result is_error=0 category=unrecognized' ] ||
     fail "an odd category was rewritten: $(head -n 1 "$project/refused-odd")"
+  # The room relay is stopped by its PID: a worker-planted .stop symlink is
+  # never opened, and a process that ignores TERM is killed after the bounded wait.
+  mkdir -p "$project/relay-stop"
+  printf 'keep\n' > "$project/relay-stop/outside"
+  ln -s "$project/relay-stop/outside" "$project/relay-stop/.stop"
+  bash -c '. "$1/scripts/lib/peer-common.sh"; trap "" TERM; sleep 30 & pid=$!; ma_room_relay_stop "$pid" 2; ! kill -0 "$pid" 2>/dev/null' _ "$ROOT" ||
+    fail 'ma_room_relay_stop must kill a relay that ignores TERM after the bounded wait'
+  [ "$(cat "$project/relay-stop/outside")" = keep ] || fail 'relay shutdown wrote through a planted .stop symlink'
   # End to end: a reasoning_extraction decline is terminal after one call and
   # says what to change instead of retrying.
   mkdir -p "$project/refuse-bin"

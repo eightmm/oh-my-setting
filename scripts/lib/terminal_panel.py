@@ -2868,6 +2868,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             raise
         env.update(OMS_ROOM_ID=room_id, OMS_ROOM_PARTICIPANT=member, OMS_ROOM_REPO=str(repo),
                    OMS_ROOM_ADMITTED_PARTICIPANT=member)
+        if access == "write" and route["kind"] == "worker":
+            env["OMS_ROOM_RELAY_ALLOWED"] = "1"
     argv[argv.index("--repo") + 1] = str(execution)
     print("%s / %s -> %s / %s / %s / %s" % (owner, role, route["provider"], route["model"],
                                             route["effort"] or "native-settings", access) +

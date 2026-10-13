@@ -8,10 +8,14 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import time
 import uuid
+import stat
+import threading
+from collections import deque
 
 import thread_live
 from dashboard_projection import clean
@@ -48,6 +52,11 @@ _CLOCK = time.monotonic  # bound at import: board fixtures script time.monotonic
 ACK_AFTER = REPEAT_AFTER = 300
 ASKER_AFTER, OVERDUE_AFTER, PERSON_AFTER, SECOND_REMINDER_AFTER = 600, 900, 1200, 1800
 MAX_REMINDERS = 3
+RELAY_MAX_REQUEST = 8192
+RELAY_MAX_RATE = 24
+RELAY_RATE_WINDOW = 60
+RELAY_MAX_PENDING = 32
+RELAY_MAX_SCAN_ENTRIES = 128
 
 
 def identifier(value, label="identifier"):
@@ -1485,6 +1494,194 @@ def acknowledge(repo, room, who, mids):
     append(repo, room, {"kind": "received", "participant": who, "messages": mids}, "Messages consumed")
 
 
+class _RoomRelay:
+    """Controller-owned, participant-pinned file queue for sandboxed workers."""
+    def __init__(self, queue_dir, repo, room_id, participant_id, worktree):
+        self.repo = state_repository(repo)
+        self.room_id = identifier(room_id, "room")
+        self.participant_id = identifier(participant_id, "participant")
+        if (os.environ.get("OMS_ROOM_ID") != self.room_id
+                or os.environ.get("OMS_ROOM_PARTICIPANT") != self.participant_id
+                or os.environ.get("OMS_ROOM_ADMITTED_PARTICIPANT") != self.participant_id
+                or os.environ.get("OMS_ROOM_RELAY_ALLOWED") != "1"
+                or not _child() or not _bound_room(records(self.repo, self.room_id), self.repo)):
+            raise ValueError("room relay must be started by the bound controller")
+        state = project(records(self.repo, self.room_id))
+        member = participant(state, self.participant_id)
+        if member["role"] == "main" or not member.get("parent"):
+            raise ValueError("room relay requires an admitted child participant")
+        self.parent_id = member["parent"]
+        if not (os.open in os.supports_dir_fd and os.unlink in os.supports_dir_fd
+                and os.rename in os.supports_dir_fd and os.scandir in os.supports_fd):
+            raise ValueError("room relay needs descriptor-relative filesystem calls")
+        worktree = os.path.realpath(worktree)
+        queue_real = os.path.realpath(queue_dir)
+        if (queue_real == worktree or os.path.commonpath([queue_real, worktree]) != worktree
+                or os.path.islink(queue_dir)):
+            raise ValueError("room relay queue must be a real directory inside the worker worktree")
+        # The worker can rename or replace any path component later. Pin the
+        # directory once and do every scan, open, unlink and rename through it.
+        self.queue_fd = os.open(queue_real, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info, named = os.fstat(self.queue_fd), os.stat(queue_real)
+            if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
+                raise ValueError("room relay queue is not the verified directory")
+        except BaseException:
+            os.close(self.queue_fd)
+            raise
+        self.requests = deque()
+        self.request_lock = threading.Lock()
+        self.closed = False
+
+    def shutdown(self, *_):
+        self.closed = True
+
+    def serve_forever(self, poll_interval=0.1):
+        owner_pid = os.getppid()
+        try:
+            try:
+                os.close(os.open(".ready", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=self.queue_fd))
+            except FileExistsError:
+                pass
+            while not self.closed and os.getppid() == owner_pid:
+                self.handle_pending()
+                time.sleep(poll_interval)
+        finally:
+            os.close(self.queue_fd)
+            self.queue_fd = -1
+
+    def handle_pending(self):
+        try:
+            names, scanned = [], 0
+            with os.scandir(self.queue_fd) as entries:
+                for entry in entries:
+                    scanned += 1
+                    if scanned > RELAY_MAX_SCAN_ENTRIES or len(names) >= RELAY_MAX_PENDING:
+                        break
+                    if re.fullmatch(r"req-[0-9a-f]{32}\.json", entry.name):
+                        names.append(entry.name)
+        except OSError:
+            return
+        for name in names:
+            ticket = name[4:-5]
+            try:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+                             dir_fd=self.queue_fd)
+                try:
+                    info = os.fstat(fd)
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > RELAY_MAX_REQUEST:
+                        raise ValueError("room relay request is oversized, linked or not a regular file")
+                    handle = os.fdopen(fd, "rb")
+                except BaseException:
+                    os.close(fd)
+                    raise
+                with handle:
+                    data = handle.read(RELAY_MAX_REQUEST + 1)
+                if len(data) > RELAY_MAX_REQUEST:
+                    raise ValueError("room relay request is oversized")
+                result = self.handle_request_data(data)
+                response = {"ok": True, "result": result}
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError, json.JSONDecodeError) as error:
+                response = {"ok": False, "error": str(error)[:240]}
+            try:
+                os.unlink(name, dir_fd=self.queue_fd)
+            except OSError:
+                pass
+            response_name = "res-" + ticket + ".json"
+            temp_name = ".tmp-" + ticket + ".json"
+            try:
+                fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                             dir_fd=self.queue_fd)
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+                os.replace(temp_name, response_name, src_dir_fd=self.queue_fd, dst_dir_fd=self.queue_fd)
+            except OSError:
+                try:
+                    os.unlink(temp_name, dir_fd=self.queue_fd)
+                except OSError:
+                    pass
+
+    def handle_request_data(self, data):
+        if len(data) > RELAY_MAX_REQUEST:
+            raise ValueError("room relay request is oversized")
+        request = json.loads(data.decode("utf-8"))
+        if not isinstance(request, dict) or request.get("room") != self.room_id:
+            raise ValueError("room relay request names another room")
+        if request.get("participant") != self.participant_id:
+            raise ValueError("room relay request names another participant")
+        now = time.monotonic()
+        with self.request_lock:
+            while self.requests and now - self.requests[0] >= RELAY_RATE_WINDOW:
+                self.requests.popleft()
+            if len(self.requests) >= RELAY_MAX_RATE:
+                raise ValueError("room relay rate limit reached")
+            self.requests.append(now)
+        action = request.get("action")
+        if action == "send":
+            if set(request) - {"action", "room", "participant", "to", "kind", "text", "reply_to", "message_id"}:
+                raise ValueError("unknown room relay request fields")
+            if request.get("to") not in (None, self.parent_id):
+                raise ValueError("a worker can only message its admitted parent")
+            if request.get("kind") not in KINDS:
+                raise ValueError("invalid room message kind")
+            result = send(self.repo, self.room_id, self.participant_id, self.parent_id,
+                          request.get("text"), request["kind"], request.get("reply_to"), request.get("message_id"))
+            return {"status": "sent", "id": result["id"]}
+        if action == "ack":
+            if set(request) != {"action", "room", "participant", "messages"}:
+                raise ValueError("invalid room ack request fields")
+            messages = request["messages"]
+            if not isinstance(messages, list) or not 1 <= len(messages) <= 200:
+                raise ValueError("ack requires 1..200 exact message ids")
+            for message in messages:
+                identifier(message, "message")
+            acknowledge(self.repo, self.room_id, self.participant_id, messages)
+            return {"status": "consumed", "approval": False}
+        raise ValueError("room relay accepts send and ack only")
+
+
+def _relay_request(queue_dir, request):
+    data = (json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(data) > RELAY_MAX_REQUEST:
+        raise ValueError("room relay request is oversized")
+    ticket = uuid.uuid4().hex
+    request_path = os.path.join(queue_dir, "req-" + ticket + ".json")
+    temp_path = os.path.join(queue_dir, ".tmp-req-" + ticket)
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    os.replace(temp_path, request_path)
+    response_path = os.path.join(queue_dir, "res-" + ticket + ".json")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            fd = os.open(response_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                         getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > RELAY_MAX_REQUEST:
+                    raise ValueError("room relay returned an invalid response")
+                response = handle.read(RELAY_MAX_REQUEST + 1)
+            try:
+                os.unlink(response_path)
+            except OSError:
+                pass
+            if len(response) > RELAY_MAX_REQUEST or not response.endswith(b"\n"):
+                raise ValueError("room relay returned an invalid response")
+            decoded = json.loads(response.decode("utf-8"))
+            if not decoded.get("ok"):
+                raise ValueError(decoded.get("error") or "room relay refused the request")
+            return decoded["result"]
+        except FileNotFoundError:
+            time.sleep(0.05)
+    try:
+        os.unlink(request_path)
+    except OSError:
+        pass
+    raise ValueError("room relay controller did not answer within 10 seconds")
+
+
 def _lineage_messages(repo, state, mids):
     """{id: message} for ids a rollover left in this room's sealed predecessors, nearest first as each log projects
     them; each log is read once however many ids are asked, since a worker's acknowledgment names up to 200."""
@@ -1709,7 +1906,7 @@ def publish(repo, ident, retry=False, app="codex", recipient=None, allow_wakeup=
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="OMS work rooms: shared threads, addressed messages and explicit consumption.")
-    parser.add_argument("action", choices=("new", "join", "bind", "scope", "describe", "leave", "close", "send", "updates", "ack", "show", "list", "publish", "rollover"))
+    parser.add_argument("action", choices=("new", "join", "bind", "scope", "describe", "leave", "close", "send", "updates", "ack", "show", "list", "publish", "rollover", "relay-server"))
     parser.add_argument("--repo", default=os.environ.get("OMS_ROOM_REPO") or os.getcwd())
     parser.add_argument("--id", default=os.environ.get("OMS_ROOM_ID"))
     parser.add_argument("--participant", default=os.environ.get("OMS_ROOM_PARTICIPANT"))
@@ -1736,8 +1933,21 @@ def main(argv=None):
     parser.add_argument("--retry", action="store_true", help="publish only: explicitly retry an uncertain snapshot; may duplicate output")
     parser.add_argument("--app", choices=("codex", "claude"), help="publish target; default Codex fixed receiver")
     parser.add_argument("--allow-wakeup", action="store_true", help="Claude publish only: authorize a native inbox post which can spend model usage")
+    parser.add_argument("--queue", help=argparse.SUPPRESS)
+    parser.add_argument("--worktree", help=argparse.SUPPRESS)
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(raw_argv)
+    if args.action == "relay-server":
+        if not args.queue or not args.worktree or not args.id or not args.participant:
+            parser.error("relay-server requires --queue, --worktree, --id and --participant")
+        try:
+            server = _RoomRelay(args.queue, args.repo, args.id, args.participant, args.worktree)
+            signal.signal(signal.SIGTERM, server.shutdown)
+            server.serve_forever(poll_interval=0.1)
+        except (OSError, ValueError) as error:
+            print("room relay: %s" % error, file=sys.stderr)
+            return 2
+        return 0
     if args.to is None and args.action != "send":
         args.to = "all"
     if args.action == "describe":
@@ -1772,6 +1982,25 @@ def main(argv=None):
     if args.exact and args.action != "show":
         parser.error("--exact applies to show only")
     try:
+        relay_queue = os.environ.get("OMS_ROOM_RELAY_QUEUE")
+        if relay_queue and args.action in {"send", "ack"}:
+            if args.action == "send":
+                if args.text_file or not args.text or not args.text.strip() or len(args.text.encode("utf-8")) > 4000:
+                    raise ValueError("relay send needs inline text of 1..4000 UTF-8 bytes")
+                request = {"action": "send", "room": args.id, "participant": args.participant,
+                           "to": args.to, "kind": args.kind, "text": args.text}
+                if args.reply_to:
+                    request["reply_to"] = args.reply_to
+                if args.message_id:
+                    request["message_id"] = args.message_id
+            else:
+                if not args.message:
+                    raise ValueError("ack requires the exact message ids consumed")
+                request = {"action": "ack", "room": args.id, "participant": args.participant,
+                           "messages": args.message}
+            result = _relay_request(relay_queue, request)
+            print(json.dumps(result, ensure_ascii=False) if args.json else result.get("status", "ok"))
+            return 0
         repo = state_repository(args.repo)
         if args.id and args.action not in {"new", "rollover"} and not args.exact:
             args.id = resolve(repo, identifier(args.id, "room"))
