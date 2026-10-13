@@ -18055,7 +18055,8 @@ for columns, rows in ((120, 80), (76, 16)):
     assert not any(item["who"] == "Main wake-up delivery failed" for item in inbox_items(published))
 # The graph board has no group drill-down any more; the tree view shows the inspected group.
 native_inspection = render(dict(grouped_board, native_advisors=open_call), "claude", 120, 80, view="tree",
-                          navigation={"group_tree": True, "expanded_groups": {("review", "adv-main")}})
+                          navigation={"group_tree": True, "expanded_groups": {("review", "adv-main")},
+                                      "selected": ("result", "native-advisor-adv-main")})
 assert "Fable 5.1" in native_inspection and "answer stays in the main transcript" in native_inspection
 attention_nav = {}
 attention = render(grouped_board, "codex", 120, 80, view="tree", attention_only=True, navigation=attention_nav)
