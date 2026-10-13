@@ -17990,6 +17990,8 @@ for mode in ("tree", "graph"):
         assert kept["expanded_groups"] == nav["expanded_groups"]
         reset = panel.refreshed_navigation(dict(nav), {"room": {"id": "different-room"}})
         assert not reset.get("expanded_groups")
+    # Narrow boards fall back to the tree view; open the decision group as a user would.
+    nav.setdefault("expanded_groups", set()).add(("review", "adv-main"))
     for columns in (40, 56):
         for glyphs in (True, False):
             narrow = render(grouped_board, "codex", columns, 80, view=mode, unicode=glyphs, navigation=nav)
