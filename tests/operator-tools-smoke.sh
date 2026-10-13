@@ -2961,8 +2961,8 @@ def crowd(report, advisors, workers, label=None, parent="a2", prefix="x"):
     return crowded
 
 
-# Many workers: roomy boards fit 4-5 readable cards per row and list the rest as selectable one-line rows,
-# running calls first; smaller boards keep the three-card band.
+# Calls hang below the main as one tree row each, running first, then failed; rows past the board fold into one
+# selectable "N more calls" line, the tree scrolls by wheel, keys and that line, and a selected call is always drawn.
 import time as crowd_clock
 for crowd_size in (8, 12):
     worker_crowd = crowd(msg_report, 0, crowd_size, parent="a2", prefix="priority")
@@ -2972,51 +2972,86 @@ for crowd_size in (8, 12):
     for attempt in worker_crowd["attempts"]["active_recent"]:
         if attempt["attempt_id"] in ("priority-worker-0", "priority-worker-1", "priority-worker-2"):
             attempt["state"] = "failed"
-    for columns, rows_high in ((190, 63), (127, 40), (110, 30), (80, 24), (57, 24), (42, 24), (28, 16)):
+    running_ids = sorted("priority-worker-%d" % n for n in range(3, crowd_size))
+    for columns, rows_high in ((190, 63), (157, 67), (127, 40), (110, 30), (80, 24), (42, 24)):
         for glyphs in (True, False):
-            nav = {"dismissed": True}
-            picture = render(worker_crowd, "codex", columns, rows_high, view="graph", navigation=nav,
-                             main_attempt="a2", unicode=glyphs)
-            picture_lines = picture.splitlines()
             where = (crowd_size, columns, rows_high, glyphs)
-            assert len(picture_lines) == rows_high and all(display_width(line) <= columns for line in picture_lines), (where, picture)
-            assert max(display_width(line) for line in picture_lines) == columns, (where, picture)
-            assert glyphs or picture.isascii(), (where, picture)
-            assert all(1 <= hit["x1"] <= hit["x2"] <= columns and 1 <= hit["y"] <= rows_high for hit in nav["hits"]), (where, nav)
-            wide = columns >= 110 and rows_high >= 30
-            call_hits = [hit for hit in nav["hits"] if hit["action"][0] == "result"
-                         and hit["action"][1].startswith("priority-worker-") and hit.get("preview")]
-            row_hits = [hit for hit in call_hits if hit["x1"] == 1 and hit["x2"] == columns]
-            card_hits = [hit for hit in call_hits if hit not in row_hits]
-            if not wide:
-                assert not row_hits and len({hit["action"] for hit in card_hits}) <= 6, (where, nav)
+            branch, last, marked = ("├─ ", "└─ ", "├▸ ") if glyphs else ("|-- ", "`-- ", "|-> ")
+            more = ("…" if glyphs else "...") + " "
+
+            def tree_board(nav):
+                picture = render(worker_crowd, "codex", columns, rows_high, view="graph", navigation=nav,
+                                 main_attempt="a2", unicode=glyphs)
+                picture_lines = picture.splitlines()
+                assert len(picture_lines) == rows_high and all(display_width(line) <= columns for line in picture_lines), (where, picture)
+                assert glyphs or picture.isascii(), (where, picture)
+                assert all(1 <= hit["x1"] <= hit["x2"] <= columns and 1 <= hit["y"] <= rows_high for hit in nav["hits"]), (where, nav)
+                tree_hits = [hit for hit in nav["hits"] if hit.get("tree")]
+                rows = [picture_lines[hit["y"] - 1] for hit in tree_hits]
+                assert tree_hits and all(hit["x1"] == 1 and hit["x2"] == columns for hit in tree_hits), (where, nav)
+                assert [hit["y"] for hit in tree_hits] == list(range(tree_hits[0]["y"], tree_hits[-1]["y"] + 1)), (where, nav)
+                assert all(display_width(row) == columns for row in rows), (where, rows)
+                stem = rows[0].index(rows[0].strip()[0])
+                assert picture_lines[tree_hits[0]["y"] - 2][stem] == ("┬" if glyphs else "+"), (where, picture)
+                assert all(row[stem:].startswith(branch[0]) for row in rows[:-1]) and rows[-1][stem:].startswith(last[0]), (where, rows)
+                folds = [hit for hit, row in zip(tree_hits, rows) if row[stem + len(branch):].startswith(more)]
+                calls = [(hit, row) for hit, row in zip(tree_hits, rows) if hit not in folds]
+                return picture_lines, tree_hits, folds, calls, stem
+
+            nav = {"dismissed": True}
+            if columns < 76:
+                # Below the graph's 76 columns the board is the tree view; every call it draws stays selectable.
+                picture = render(worker_crowd, "codex", columns, rows_high, view="graph", navigation=nav,
+                                 main_attempt="a2", unicode=glyphs)
+                assert nav["surface"] == "tree" and len(picture.splitlines()) <= rows_high, (where, picture)
+                assert all(display_width(line) <= columns for line in picture.splitlines()) and (glyphs or picture.isascii()), (where, picture)
+                assert all(1 <= hit["x1"] <= hit["x2"] <= columns and 1 <= hit["y"] <= rows_high for hit in nav["hits"]), (where, nav)
+                assert all(hit["action"] in nav["items"] for hit in nav["hits"] if hit["action"][0] == "result"), (where, nav)
                 continue
-            per_row = {190: 5, 127: 4, 110: 3}[columns]
-            assert len({hit["action"] for hit in card_hits}) == per_row, (where, nav, picture)
-            assert min(hit["x2"] - hit["x1"] + 1 for hit in card_hits) >= 30, (where, card_hits)
-            # 110x30 has seven spare rows: a twelfth call past them stays reachable by keyboard and is counted.
-            hidden = 2 if (crowd_size, columns, rows_high) == (12, 110, 30) else 0
-            assert len(row_hits) == crowd_size - per_row - hidden, (where, nav, picture)
-            assert ("%d more calls" % hidden in picture) == bool(hidden), (where, picture)
-            assert nav["tab_body_visible"], (where, nav, picture)
-            shown = list(dict.fromkeys(hit["action"][1] for hit in sorted(call_hits, key=lambda hit: (hit["y"], hit["x1"]))))
-            assert len(shown) == crowd_size - hidden, (where, shown)
-            finished_flags = [name[-2:] in ("-0", "-1", "-2") for name in shown]
-            assert finished_flags == sorted(finished_flags), (where, shown)
-            for hit in row_hits:
-                text = picture_lines[hit["y"] - 1]
-                assert hit["action"][1] in text and ("running" in text or "failed" in text), (where, text)
-                assert "worker" in text and "Luna" in text and (re.search(r"running (<1m|\d+[mhd])", text) or "failed" in text and ":" in text), (where, text)
-                nav["selected"] = hit["action"]
-                again = render(worker_crowd, "codex", columns, rows_high, view="graph", navigation=nav,
-                               main_attempt="a2", unicode=glyphs)
-                assert hit["action"] in nav["items"], (where, nav["items"])
-                assert any(h["action"] == hit["action"] and h["x1"] == 1 and h["x2"] == columns for h in nav["hits"]), (where, nav)
-                assert len(again.splitlines()) == rows_high and all(display_width(l) <= columns for l in again.splitlines()), (where, again)
-                assert again != picture, (where, hit["action"])
+            picture_lines, tree_hits, folds, calls, stem = tree_board(nav)
             order = [i[1] for i in nav["items"] if i[0] == "result" and i[1].startswith("priority-worker-")]
-            assert sorted(order[:crowd_size - 3]) == sorted("priority-worker-%d" % n for n in range(3, crowd_size)) and \
-                sorted(order[crowd_size - 3:]) == ["priority-worker-%d" % n for n in (0, 1, 2)], (where, nav["items"])
+            assert order == running_ids + ["priority-worker-%d" % n for n in (0, 1, 2)], (where, nav["items"])
+            drawn = [hit["action"][1] for hit, row in calls]
+            assert drawn == order[:len(drawn)], (where, drawn, order)
+            hidden = crowd_size - len(drawn)
+            assert len(folds) == int(bool(hidden)) and (not folds or folds[0] is tree_hits[-1]), (where, picture_lines)
+            assert not hidden or ("%s%d more calls" % (more, hidden)) in picture_lines[folds[0]["y"] - 1], (where, picture_lines)
+            # Roomy boards draw every call; 80x24 folds.
+            assert bool(hidden) == (rows_high < 30 or crowd_size == 12 and rows_high < 40), (where, picture_lines)
+            assert nav["tab_body_visible"], (where, picture_lines)
+            for hit, row in calls:
+                assert "WORKER" in row and "Luna" in row and row[stem:].startswith((branch, last)), (where, row)
+                assert re.search(r"(running (<1m|\d+[mhd])|\d\d:\d\d (→|->) failed) (·|/) for Sol 6\.1$", row), (where, row)
+            # Every drawn row opens its call; the fold line opens the next hidden call, which scrolls into view.
+            for hit in tree_hits:
+                pick = dict(nav, hits=nav["hits"])
+                assert choose(("click", columns, hit["y"]), pick) is None, (where, hit)
+                assert pick["selected"] == hit["action"] and pick["preview"]["target"] == hit["action"], (where, pick)
+                assert hit["action"] in nav["items"], (where, nav["items"])
+                again_lines, again_hits, again_folds, again_calls, unused = tree_board(pick)
+                chosen_rows = [row for shown, row in again_calls if shown["action"] == hit["action"]]
+                assert len(chosen_rows) == 1 and chosen_rows[0][stem:].startswith((marked, last[0] + marked[1:])), (where, again_lines)
+            if not hidden:
+                continue
+            # The wheel scrolls the tree one row; the selected first row stays drawn at the top edge.
+            band = next(b for b in nav["bands"] if b["name"] == "calls")
+            assert (band["y1"], band["y2"]) == (tree_hits[0]["y"], tree_hits[-1]["y"]), (where, band)
+            wheel = dict(nav, selected=("result", drawn[0]))
+            tree_board(wheel)
+            choose(("scroll", 1, 2, band["y1"]), wheel)
+            assert wheel["band_offsets"]["calls"] == 1, (where, wheel["band_offsets"])
+            unused, unused, unused, wheel_calls, unused = tree_board(wheel)
+            assert [hit["action"][1] for hit, row in wheel_calls] == [drawn[0]] + order[2:len(drawn) + 1], (where, wheel_calls)
+            assert wheel["band_offsets"]["calls"] == 1, (where, wheel["band_offsets"])
+            # Keys walk every call in tree order; each selected call is drawn and marked.
+            keys = {"dismissed": True}
+            tree_board(keys)
+            for expected in ["m2"] + order:
+                choose(("down",), keys)
+                assert keys["selected"][1] == expected, (where, keys["selected"])
+                key_lines, unused, key_folds, key_calls, unused = tree_board(keys)
+                assert expected == "m2" or [row for hit, row in key_calls if hit["action"][1] == expected], (where, key_lines)
+            assert len(key_folds) == 1 and key_calls[-1][0]["action"][1] == order[-1], (where, key_lines)
 
 
 long_label = "A normal recorded task with sufficient words to wrap to a second line"
@@ -10922,10 +10957,8 @@ for glyphs in (False, True):
     one_cards = render(single_flow, "codex", 80, 40, view="graph", unicode=glyphs, navigation=one_nav)
     assert " for " not in one_cards and "WORKER / " not in one_cards and "WRK" not in one_cards, one_cards
     for ident, title in (("researcher", "WORKER Luna 6"), ("builder", "WORKER Sonnet 5.5")):
-        edges = [hit for hit in one_nav["hits"] if hit["action"] == ("result", ident)]
-        edge = min(edges, key=lambda hit: hit["y"])
-        first_row = one_cards.splitlines()[edge["y"]][edge["x1"] - 1:edge["x2"]]
-        assert first_row.strip("│| ") == title, first_row
+        edge = next(hit for hit in one_nav["hits"] if hit["action"] == ("result", ident))
+        assert title in one_cards.splitlines()[edge["y"] - 1], one_cards
 # An exited predecessor leaves one live main: its calls drop "for <main>"; the predecessor's calls keep it.
 successor_flow = deepcopy(flow)
 next(a for a in successor_flow["attempts"]["active_recent"] if a["attempt_id"] == "flow-other")["state"] = "done"
@@ -10970,7 +11003,7 @@ assert next(m for m in room_nodes(unproven_flow) if m["participant"] == "flow-ot
 for glyphs in (False, True):
     unproven_cards = render(unproven_flow, "codex", 127, 40, view="graph", unicode=glyphs, navigation={"dismissed": True})
     assert " for " not in unproven_cards and "running" in unproven_cards, unproven_cards
-# Long headings leave the true midpoint free for a wire in either glyph set.
+# Every call is one tree row under the main in either glyph set; the selected one is drawn and opens on click.
 geometry_flow = deepcopy(flow)
 for attempt in geometry_flow["attempts"]["active_recent"]:
     if attempt["attempt_id"] == "builder":
@@ -10990,25 +11023,19 @@ for columns, rows, menu in ((34, 50, False), (56, 50, False), (76, 16, False), (
         if geometry_nav.get("surface") != "graph":
             assert any(hit["action"] == ("result", "builder") for hit in geometry_nav["hits"]), geometry_nav
             continue
-        for ident in ("researcher", "explorer", "builder"):
-            edges = [hit for hit in geometry_nav["hits"] if hit["action"] == ("result", ident) and hit.get("preview")]
-            edge = min(edges, key=lambda hit: hit["y"])
-            middle = edge["x1"] - 1 + (edge["x2"] - edge["x1"] + 1) // 2
-            assert geometry_lines[edge["y"] - 1][middle] == ("┴" if glyphs else "+"), geometry_picture
+        tree_rows = [hit for hit in geometry_nav["hits"] if hit.get("tree")]
+        drawn_calls = [hit["action"][1] for hit in tree_rows if "more call" not in geometry_lines[hit["y"] - 1]]
+        assert "builder" in drawn_calls and drawn_calls[-1] == "builder", (geometry_picture, drawn_calls)
+        for ident in drawn_calls:
+            edge = next(hit for hit in tree_rows if hit["action"] == ("result", ident))
+            row = geometry_lines[edge["y"] - 1]
+            assert display_width(row) == columns and edge["x1"] == 1 and edge["x2"] == columns, (row, edge)
+            assert row.strip()[0] in ("├└" if glyphs else "|`"), geometry_picture
             if ident == "builder":
-                # Cards to the left may hold wide glyphs, so cut by display columns, not code points.
-                def display_cut(line, first, last):
-                    cells, x = [], 0
-                    for glyph in line:
-                        if first - 1 <= x and x + display_width(glyph) <= last:
-                            cells.append(glyph)
-                        x += display_width(glyph)
-                    return "".join(cells)
-                card_text = "\n".join(display_cut(geometry_lines[hit["y"] - 1], edge["x1"], edge["x2"]) for hit in edges)
-                assert "Sonnet 5.5" in card_text and "needs approval" in card_text, card_text
-                assert "한글 작업 제목" in card_text and "builder" in card_text, card_text
+                assert row.strip()[1:3] == ("▸ " if glyphs else "->") and "Sonnet 5.5" in row and "needs approval" in row, row
+                assert columns < 100 or "한글 작업 제목" in row, row
             geometry_click = dict(geometry_nav, selected=None, preview={})
-            assert choose(("click", middle + 1, edge["y"] + 1), geometry_click) is None
+            assert choose(("click", 1, edge["y"]), geometry_click) is None
             assert geometry_click["selected"] == ("result", ident)
             assert geometry_click["preview"]["target"] == ("result", ident)
 import panel_chats
@@ -11036,9 +11063,10 @@ for columns, rows in ((110, 44), (100, 24), (76, 18), (76, 21)):
                 assert nav["surface"] == "graph", (alert, nav)
                 if alert:
                     assert alert in picture, picture
-                worker_heading = "WORKER / Luna" if "WORKER / Luna" in picture else "WORKER Luna"
-                assert "MAIN / Sol 6" in picture and "ADVISOR / Astra" in picture and worker_heading in picture, picture
-                assert picture.index("ADVISOR / Astra") < picture.index("MAIN / Sol 6") < picture.index(worker_heading), picture
+                # Calls hang below the main; a short board folds the rows it cannot draw.
+                assert "MAIN / Sol 6" in picture and "ADVISOR Astra" in picture, picture
+                assert picture.index("MAIN / Sol 6") < picture.index("ADVISOR Astra"), picture
+                assert "WORKER Luna" in picture or "more call" in picture, picture
                 assert "ONLY OTHER OWNER" not in picture and "NO PARENT PROOF" not in picture, picture
                 assert len(picture.splitlines()) <= rows - int(menu), picture
                 assert all(display_width(line) <= columns for line in picture.splitlines()), picture
@@ -11077,24 +11105,26 @@ assert twin_names["twin-main-9f3c"] == "Opus 5.5 #9f3c" and twin_names["flow-oth
 twin_detail = render(twin, "codex", 157, 40, view="graph", navigation={"selected": ("result", "foreign-child"),
     "preview": {"target": ("result", "foreign-child"), "report": {}}})
 assert "for Opus 5.5 main" in twin_detail, twin_detail
-# Wheel input scrolls only the band under the pointer.
+# Wheel input scrolls only the band under the pointer: the folded call tree, not the detail box.
 crowded = deepcopy(flow)
 crowded["room"]["participants"] += [{"participant": "extra-%s" % n, "role": "worker", "model": "gpt-6-luna",
     "joined": True, "parent": "flow-attempt", "label": "EXTRA WORKER %s" % n} for n in range(3)]
 crowded["attempts"]["active_recent"] += [{"attempt_id": "extra-%s" % n, "state": "working", "panel": {
     "room_id": "flow-room", "room_participant": "extra-%s" % n, "role": "worker"}} for n in range(3)]
 nav = {}
-render(crowded, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation=nav)
-lower = next(b for b in nav["bands"] if b["name"] == "worker")
+render(crowded, "codex", 110, 22, view="graph", main_attempt="flow-attempt", navigation=nav)
+lower = next(b for b in nav["bands"] if b["name"] == "calls")
+assert "2 more calls" in render(crowded, "codex", 110, 22, view="graph", main_attempt="flow-attempt", navigation=nav)
 choose(("scroll", 3, 5, lower["y1"]), nav)
-assert nav["band_offsets"]["worker"] == 1 and nav["band_offsets"]["judge"] == 0, nav["band_offsets"]
-assert "EXTRA WORKER 0" in render(crowded, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation=nav)
-assert nav["tab_body_visible"] and nav["band_offsets"]["worker"] == 1, nav
+assert nav["band_offsets"] == {"calls": 1, "detail": 0}, nav["band_offsets"]
+scrolled_tree = render(crowded, "codex", 110, 22, view="graph", main_attempt="flow-attempt", navigation=nav)
+assert "EXTRA WORKER 0" in scrolled_tree and "ADVISOR Astra" not in scrolled_tree, scrolled_tree
+assert nav["tab_body_visible"] and nav["band_offsets"]["calls"] == 1, nav
 nav["selected"] = ("result", "extra-2")
 for unused in range(2):
-    render(crowded, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation=nav)
-    # A crowded board already lists every other call as a row, so choosing one keeps the cards where they are.
-    assert nav["band_offsets"]["worker"] == 1 and nav["band_offsets"]["judge"] == 0, nav["band_offsets"]
+    render(crowded, "codex", 110, 22, view="graph", main_attempt="flow-attempt", navigation=nav)
+    # Choosing a drawn row keeps the tree where it is.
+    assert nav["band_offsets"]["calls"] == 1, nav["band_offsets"]
     assert any(h["action"] == nav["selected"] and h["y"] < nav["box"]["y1"] for h in nav["hits"]), nav
 # The overview keeps one-line cards while the selected block's content fills the lower detail area.
 mailed = deepcopy(flow)
@@ -11102,11 +11132,11 @@ mailed["room"]["messages"] = [{"sender": "advisor", "targets": ["flow-main"], "t
 mail_before = json.dumps(mailed, sort_keys=True)
 detail_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
 picture = render(mailed, "codex", 100, 30, view="graph", main_attempt="flow-attempt", navigation=detail_nav)
-assert "[ Detail ]" in picture and "MAIN / Sol 6 / 1-9 of" in picture and "Team: 5 active" in picture, picture
+assert "[ Detail ]" in picture and re.search(r"MAIN / Sol 6 / 1-\d+ of", picture) and "Team: 5 active" in picture, picture
 mail_last = render(mailed, "codex", 100, 30, view="graph", main_attempt="flow-attempt",
                    navigation={"preview": {"target": ("chat", "flow-main"), "report": {}}, "band_offsets": {"detail": 99}})
 assert "MAIL FOR MAIN" in mail_last, mail_last
-assert "ADVISOR / Astra" in picture and len(picture.splitlines()) <= 30, picture
+assert "ADVISOR Astra" in picture and len(picture.splitlines()) <= 30, picture
 assert json.dumps(mailed, sort_keys=True) == mail_before, "reading main detail changed room mail"
 detail_band = next(b for b in detail_nav["bands"] if b["name"] == "detail")
 choose(("scroll", 3, 5, detail_band["y1"] + 1), detail_nav)
@@ -12130,7 +12160,7 @@ assert page_nav["band_offsets"]["detail"] == 6, "a shown detail takes the page k
 page_nav = {"dismissed": True}
 render(crowded, "codex", 110, 30, view="graph", main_attempt="flow-attempt", navigation=page_nav)
 choose(("pagedown",), page_nav)
-assert page_nav["band_offsets"]["worker"] == 3, page_nav["band_offsets"]
+assert page_nav["band_offsets"]["calls"] == 3, page_nav["band_offsets"]
 # A results screen opened from the graph scrolls itself, not the graph's stale bands.
 from panel_tree import render_detail
 page_nav["surface"] = "inbox"  # A reader opened from the inbox must still receive page and wheel events.
@@ -12300,11 +12330,11 @@ for attempt in finished_flow["attempts"]["active_recent"]:
     if attempt["attempt_id"] == "builder":
         attempt["state"] = "done"
 finished_picture = render(finished_flow, "codex", 120, 34, view="graph", navigation={"dismissed": True})
-assert "WORKER / Sonnet" not in finished_picture and "Past work" not in finished_picture \
+assert "WORKER Sonnet" not in finished_picture and "Past work" not in finished_picture \
     and "Past 1" in finished_picture, finished_picture
 lines_of = finished_picture.splitlines()
-assert next(i for i, l in enumerate(lines_of) if "ADVISOR / Astra" in l) < next(i for i, l in enumerate(lines_of) if "MAIN / Sol 6" in l) \
-    < next(i for i, l in enumerate(lines_of) if "WORKER / Luna" in l), finished_picture
+assert next(i for i, l in enumerate(lines_of) if "MAIN / Sol 6" in l) < next(i for i, l in enumerate(lines_of) if "ADVISOR Astra" in l) \
+    < next(i for i, l in enumerate(lines_of) if "WORKER Luna" in l), finished_picture
 ordered = render(flow, "codex", 100, 30, view="graph", main_attempt="flow-attempt", navigation={"preview": {
     "target": ("result", "builder"), "report": {"rows": [{"outcome": "accepted", "calls": [{"answer": "DONE TEXT"}]}]}}})
 assert ordered.index("Accepted by its main") < ordered.index("DONE TEXT"), ordered
@@ -12366,13 +12396,14 @@ for variant in ("plain", "other", "unlinked"):
                     assert ("OTHER ROOMS" in text) == (variant == "other") and ("no known main" in text) == (variant == "unlinked"), text
                     kept.add((nav["box"]["y1"], nav["box"]["y2"]))
         assert len(kept) == 1, (variant, rows_high, kept)
-# Where a readable box cannot fit, the one-row tab strip stays reachable while the cards fit around it (19 rows;
-# at 16 the compact fallback draws none); neither keeps the previous box or its open-in-full target.
+# A short board keeps the compact main card and one row per call, so its box takes every row they leave;
+# neither size keeps the previous box, and open-in-full follows the box this frame draws.
 for rows_high in (19, 16):
     nav = {"preview": {"target": ("result", "builder"), "report": {}}, "box": {"y1": 1, "y2": 2}, "full_result": ("result", "builder")}
     shown = render(flow, "codex", 100, rows_high, view="graph", main_attempt="flow-attempt", navigation=nav)
-    assert nav["surface"] == "graph" and "box" not in nav and "full_result" not in nav and len(shown.splitlines()) == rows_high, nav
-    assert rows_high == 16 or shown.splitlines()[-2].startswith("╭─ [ Detail ]  Plan"), shown
+    assert nav["surface"] == "graph" and nav["box"]["y1"] > 2 and len(shown.splitlines()) == rows_high, nav
+    assert shown.splitlines()[nav["box"]["y1"] - 1].startswith("╭─ [ Detail ]  Plan"), shown
+    assert nav["box"]["y2"] == rows_high - 1 and nav.get("full_result") == ("result", "builder"), nav
 # Tabs and body actions follow the drawn dock through resize, including help and the tree fallback.
 for managed in (False, True):
     for keys_help in (False, True):
@@ -12387,8 +12418,7 @@ for managed in (False, True):
                 assert all(1 <= h["y"] <= len(shown.splitlines()) and 1 <= h["x1"] <= h["x2"] <= columns
                            for h in nav["hits"]), nav
                 if not keys_help:
-                    assert bool(strip) == (rows_high in (19, 30) or columns == 50), (columns, rows_high, nav, shown)
-                    assert bool(box) == (rows_high == 30), (columns, rows_high, nav, shown)
+                    assert strip and bool(box) == (columns != 50), (columns, rows_high, nav, shown)
                 footer = "\n".join(shown.splitlines()[-5:] if keys_help else shown.splitlines()[-1:])
                 if not box:
                     assert not any(hint in footer for hint in
@@ -12996,20 +13026,31 @@ for unused in range(12):
     choose(("pagedown",), full_nav)
 else:
     raise AssertionError("full reader could not reach the retained last line")
-# A one-row preview scrolls the same body index used by its title and click mapping.
+# A one-row preview scrolls the same body index used by its title and click mapping; a further call row is what
+# leaves short boards a one-row box.
+def with_calls(report, count):
+    report = deepcopy(report)
+    for n in range(count):
+        report["room"]["participants"].append({"participant": "row-%s" % n, "role": "worker", "model": "gpt-6-luna",
+                                               "joined": True, "parent": "flow-attempt", "label": "ROW %s" % n})
+        report["attempts"]["active_recent"].append({"attempt_id": "row-%s" % n, "state": "working", "panel": {
+            "room_id": "flow-room", "room_participant": "row-%s" % n, "role": "worker"}})
+    return report
+
+
 short_detail_cases = []
-for columns in (76, 100):
-    for rows in range(16, 28):
-        nav = {"preview": {"target": ("result", "builder"), "report": full_recorded}, "band_offsets": {"detail": 5}}
-        screen = render(done_flow, "codex", columns, rows, view="graph", navigation=nav)
-        band = next((b for b in nav.get("bands", []) if b["name"] == "detail"), None)
-        if band and band["y2"] - band["y1"] == 2:
-            body, _ = graph_text.detail(worker, {"report": full_recorded}, columns - 4, people)
-            first = nav["band_offsets"]["detail"]
-            assert body[first].strip() in screen.splitlines()[band["y1"]], (columns, rows, first, screen)
-            hit = next(h for h in nav["hits"] if h["y"] == band["y1"] + 1)
-            assert hit["action"] == ("result", "builder"), hit
-            short_detail_cases.append((columns, rows))
+short_flows = (done_flow, with_calls(done_flow, 1))
+for columns, rows, short_flow in [(c, r, f) for c in (76, 100) for r in range(16, 28) for f in short_flows]:
+    nav = {"preview": {"target": ("result", "builder"), "report": full_recorded}, "band_offsets": {"detail": 5}}
+    screen = render(short_flow, "codex", columns, rows, view="graph", navigation=nav)
+    band = next((b for b in nav.get("bands", []) if b["name"] == "detail"), None)
+    if band and band["y2"] - band["y1"] == 2:
+        body, _ = graph_text.detail(worker, {"report": full_recorded}, columns - 4, people)
+        first = nav["band_offsets"]["detail"]
+        assert body[first].strip() in screen.splitlines()[band["y1"]], (columns, rows, first, screen)
+        hit = next(h for h in nav["hits"] if h["y"] == band["y1"] + 1)
+        assert hit["action"] == ("result", "builder"), hit
+        short_detail_cases.append((columns, rows))
 assert short_detail_cases, "one-row preview fixture was not exercised"
 assert choose(("f",), {"surface": "graph", "items": [("result", "builder")], "preview": {"target": ("chat", "flow-main")},
     "full_result": ("result", "builder")}) is None, "a stale preview opened a result"
@@ -13107,9 +13148,9 @@ assert re.search(r"Now: Fixing the parser \(\d\d:\d\d\) \(stale\)", declared_pic
 # A board too small for the box keeps the one-row tab strip: its names switch tabs, and no hint names a closed box.
 for glyphs in (True, False):
     strips = 0
-    for rows_high in range(16, 33):
+    for rows_high, small_report in ((rows_high, report) for rows_high in range(16, 33) for report in (counted, with_calls(counted, 3))):
         small_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
-        small = render(counted, "codex", 80, rows_high, view="graph", main_attempt="flow-attempt", navigation=small_nav, unicode=glyphs)
+        small = render(small_report, "codex", 80, rows_high, view="graph", main_attempt="flow-attempt", navigation=small_nav, unicode=glyphs)
         tab_hits = [h for h in small_nav["hits"] if h["action"][0] == "tab"]
         tab_hits = [h for h in tab_hits if h["y"] == max(t["y"] for t in tab_hits)]
         if len(tab_hits) < 4:
@@ -13137,15 +13178,15 @@ for age, kept in ((60, True), (3600, False)):
     answered["room"]["call_results"] = {"reviewer": {"exit": 0, "read": True, "seq": 9, "ts": linger_clock.strftime(
         "%Y-%m-%dT%H:%M:%SZ", linger_clock.gmtime(linger_clock.time() - age))}}
     answered_lanes = render(answered, "codex", 160, 50, view="graph", navigation={"dismissed": True})
-    assert ("REVIEWER / " in answered_lanes and "Past 1" not in answered_lanes) is kept, answered_lanes
+    assert ("REVIEWER Fable" in answered_lanes and "Past 1" not in answered_lanes) is kept, answered_lanes
     assert ("Past 1" in answered_lanes) is not kept and "Past work" not in answered_lanes, answered_lanes
     # Attention-only views still hide settled calls, lingering or not.
-    assert "REVIEWER / " not in render(answered, "codex", 160, 50, view="graph", attention_only=True,
+    assert "REVIEWER Fable" not in render(answered, "codex", 160, 50, view="graph", attention_only=True,
                                     navigation={"dismissed": True}), answered_lanes
 lonely = deepcopy(flow)
 lonely["room"]["participants"] = [p for p in lonely["room"]["participants"] if p["participant"] == "flow-main"]
 alone = render(lonely, "codex", 120, 30, view="graph", main_attempt="flow-attempt", navigation={"dismissed": True})
-assert "◇ no advisors · a ask" in alone and "▢ no workers" in alone, alone
+assert "└─ no calls yet · a ask" in alone, alone
 assert json.dumps(flow, sort_keys=True) == flow_before
 wide_flow = deepcopy(flow)
 wide_flow["room"]["messages"] = [
@@ -13637,13 +13678,13 @@ assert graph_text.team_counts([{"state": state} for state in
         "1 attention", "1 active", "3 awaiting decision", "1 finished", "1 unrecorded"]
 assert graph_text.team_counts([{"state": "done"}, {"state": "cancelled"}]) == ["2 finished"]
 assert any("status unknown" in line for line in team_lines) and "failed (exit 1)" in "\n".join(team_lines), team_lines
-# Spare rows between the cards and the box carry a display-only summary; the cards and the box keep every row.
+# Spare rows between the call tree and the box carry a display-only summary; the tree and the box keep every row.
 summary_room = deepcopy(admission_team)
 next(a for a in summary_room["attempts"]["active_recent"] if a["attempt_id"] == "flow-other")["state"] = "done"
 summary_room["room"]["call_results"] = {"builder": {"exit": 0, "ts": minutes_ago(5), "seq": 9}}
-# Without judges their empty band is one row, so a tall board leaves rows blank above the box.
+# One running call leaves most of the tree's reserved rows blank above the box.
 summary_room["room"]["participants"] = [m for m in summary_room["room"]["participants"]
-                                        if m["participant"] not in {"advisor", "reviewer"}]
+                                        if m["participant"] not in {"advisor", "reviewer", "explorer"}]
 next(a for a in summary_room["attempts"]["active_recent"] if a["attempt_id"] == "builder")["state"] = "done"
 real_summary = graph_text.board_summary
 for columns, rows, shown in ((127, 60, True), (127, 40, True), (110, 24, False), (80, 24, False), (42, 24, False)):
@@ -13666,7 +13707,7 @@ for columns, rows, shown in ((127, 60, True), (127, 40, True), (110, 24, False),
             assert group_row.strip().endswith("Awaiting decision (1)"), group_row
         if shown:
             block = "\n".join(summary_board[i] for i in changed)
-            assert block.startswith("Attention    1 ") and "In progress  4 calls" in block, block
+            assert block.startswith("Attention    1 ") and "In progress  3 calls" in block, block
             assert "Recent       Sonnet 5.5 worker %s finished " % ("·" if glyphs else "/") in block, block
             assert block.splitlines()[-1].endswith("awaiting decision %s 한글 작업 제목 / builder" % ("·" if glyphs else "/")), block
 # Attempt evidence beats the result message, and the header clock carries date and weekday.
@@ -15045,7 +15086,7 @@ hint_graph["room"]["participants"] = [p for p in hint_graph["room"]["participant
 hint_graph["attempts"]["active_recent"] = []
 hint_graph["attempts"]["recent"] = []
 hint_graph_80x39 = render_graph(hint_graph, 80, 39, unicode=False, navigation={})
-assert "no advisors / a ask" in hint_graph_80x39, hint_graph_80x39
+assert "`-- no calls yet / a ask" in hint_graph_80x39, hint_graph_80x39
 hint_y = next(i for i, line in enumerate(empty_graph_frame.splitlines(), 1)
               if "No call selected" in line)
 blank_y = next(i for i, line in enumerate(empty_graph_frame.splitlines(), 1)
@@ -16314,7 +16355,7 @@ native_report["attempts"]["active_recent"][:0] = [
 linked = next(row for row in graph_view.nodes(native_report) if row["participant"] == member)
 assert linked["attempt"] == "fresh-attempt" and linked["model"] == "fixture-model", linked
 debate_graph = graph_view.render_graph(native_report, 110, 40)
-assert "COUNCIL / 1 seat(s) answering" in debate_graph and "Debate: Pick next work" in debate_graph, debate_graph
+assert "COUNCIL 1 seat(s) answering" in debate_graph and "Debate: Pick next work" in debate_graph, debate_graph
 debate_navigation = {}
 debate_connected = render(native_report, "claude", 91, 40, view="tree", main_attempt="fresh-attempt",
                           navigation=debate_navigation)

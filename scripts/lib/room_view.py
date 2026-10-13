@@ -649,34 +649,6 @@ def description(member, frame, unicode, width):
                     "id: " + member["participant"]]
 
 
-JOINTS = {frozenset("ud"): "│", frozenset("lr"): "─", frozenset("udlr"): "┼", frozenset("dlr"): "┬",
-          frozenset("ulr"): "┴", frozenset("udr"): "├", frozenset("udl"): "┤", frozenset("dr"): "┌",
-          frozenset("dl"): "┐", frozenset("ur"): "└", frozenset("ul"): "┘"}
-
-
-def connections(width, root, points, live, frame, unicode, upward=False, rows=1):
-    """Only admitted parent IDs draw branches; a particle moves along one live edge toward its consumer."""
-    if not points:
-        return []
-    child, parent = ("u", "d") if upward else ("d", "u")
-    low, high = min(points + [root]), max(points + [root])
-    branch = [" "] * width
-    for col in range(low, min(high, width - 1) + 1):
-        sides = ({"l"} if col > low else set()) | ({"r"} if col < high else set())
-        sides |= ({child} if col in points else set()) | ({parent} if col == root else set())
-        branch[col] = (JOINTS.get(frozenset(sides), "─") if unicode else
-                       "|" if sides == {"u", "d"} else "-" if sides <= {"l", "r"} else "+")
-    if live and frame is not None:
-        target = live[(frame // max(1, width // 3)) % len(live)]
-        path = list(range(min(root, target), max(root, target) + 1))
-        if (target > root) if upward else (target < root):
-            path.reverse()
-        branch[min(width - 1, path[frame % len(path)])] = "●" if unicode else "o"
-    line = "".join(branch).rstrip()
-    stem = " " * root + ("│" if unicode else "|")
-    return [line] if rows < 2 else [line, stem] if upward else [stem, line]
-
-
 def joint(line, column, glyph):
     """Attach a wire at the first free edge cell from column; titles are never displaced."""
     used = 0
@@ -693,13 +665,13 @@ def padded(text, width):
 
 
 FLANK_WIDTH = 140
-WORKER_CARD_MIN = 30  # narrowest worker card that still shows role, model, task and state
+TREE_RESERVE = 6  # calls the tree holds before it takes rows from the reading dock
 
 
-def layout(width, count, centered=False):
-    cap = 58 if width >= FLANK_WIDTH else width - 8
-    span = min(cap, width - 8) if centered else min(cap, (width - count - 1) // count)
-    return span, (width - (span * count + count - 1)) // 2
+def layout(width):
+    """(width, left column) of the centered main card."""
+    span = min(58 if width >= FLANK_WIDTH else width - 8, width - 8)
+    return span, (width - span) // 2
 
 
 WORDS = {"working": "running", "live marker": "running", "verifying": "checking", "done": "finished",
@@ -1065,7 +1037,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         if attention_only:
             calls = [m for m in calls if classify(m) != "past" and
                      (m["state"] in ATTENTION_STATES or classify(m) == "review")]
-        # Judges precede workers so keyboard order follows the drawing.
+        # Judges precede workers in the team lists the dock shows; the board tree orders by state.
         return sorted(calls, key=lambda m: (m.get("role") in {"worker", "researcher"},) + call_order(m))
 
     teams = {m["participant"]: team(m, every=True) for m in mains}
@@ -1082,16 +1054,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     settled, _ = settler(report)
     everyone = teams
     teams = {key: [c for c in calls if classify(c) == "live"] for key, calls in teams.items()}
-    children = teams[primary["participant"]] if primary else []
-    # Running judges first; answered ones linger after them.
-    judges = sorted((m for m in children if m.get("role") in {"advisor", "reviewer", "council"}),
-                    key=lambda m: m["state"] in FINISHED)
-    # Running workers lead; the rest keep their order after them.
-    workers = sorted((m for m in children if m.get("role") in {"worker", "researcher"}),
-                     key=lambda m: m["state"] not in LIVE_STATES)
-    # Roomy boards fit more cards per row at a readable width; calls beyond them become one-line rows.
-    crowded_board = width >= 110 and height >= 30 and len(workers) > 3
-    worker_capacity = next((n for n in (5, 4, 3) if (width - n - 1) // n >= WORKER_CARD_MIN), 3) if crowded_board else 3
+    # The tree under the main: running calls, then calls needing attention, then finished ones.
+    children = sorted(teams[primary["participant"]], key=lambda m: (2 - call_order(m)[0],) + call_order(m)[1:]) \
+        if primary else []
     unlinked = [m for m in members if m.get("role") != "main" and m.get("parent") not in owners]
     # An ended main's unfinished calls are not on this board; they stay counted so t still reaches them.
     stranded = [c for m in mains if m is not primary and m["state"] in TERMINAL_STATES for c in teams[m["participant"]]]
@@ -1100,18 +1065,6 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                     (m["state"] in ATTENTION_STATES or classify(m) == "review")]
     offset = max(0, navigation.get("offset", 0))
     scrolled = mapping(navigation.get("band_offsets"))
-    judge_start = min(scrolled.get("judge", offset), max(0, len(judges) - 3))
-    worker_start = min(scrolled.get("worker", offset), max(0, len(workers) - worker_capacity))
-    if selected != navigation.get("graph_selected"):
-        for group, name in ((judges, "judge"), (workers, "worker")):
-            index = next((i for i, m in enumerate(group) if action(m) == selected), None)
-            if index is not None:
-                if name == "judge":
-                    judge_start = index // 3 * 3
-                elif not crowded_board:
-                    worker_start = index // worker_capacity * worker_capacity
-    shown_judges = judges[judge_start:judge_start + 3]
-    shown_workers = workers[worker_start:worker_start + worker_capacity]
     preview = mapping(navigation.get("preview"))
     previewed = next((m for m in mains + [c for calls in everyone.values() for c in calls] + unlinked
                       if action(m) == preview.get("target")), None)
@@ -1286,10 +1239,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             (" | +%s" % (len(others) - 3) if len(others) > 3 else "") + " / o Rooms in control", "alert")
     total_rows = max(0, height - int(menu) - len(footer))
     used = len(lines)
-    wire_rows = 2 if height >= 32 else 1
-    base_wires = wire_rows * (bool(shown_judges) + bool(shown_workers))
-    # Empty advisor/worker places stay visible, one row each, so the structure never changes shape.
-    base_wires += (not shown_judges) + (not shown_workers) if primary and height >= 24 else 0
+    main_width, main_left = layout(width)
+    # Each call is one row of the tree under the main; a main without calls keeps one hint row on taller boards.
+    tree_rows = len(children) or int(bool(primary) and height >= 24)
 
     def full_title(m, reflow=False):
         role = "MAIN" if m.get("role") == "main" else m.get("role", "worker").upper()
@@ -1299,71 +1251,34 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         mark = ("▸ " if unicode else "> ") if action(m) == selected else ""
         return mark + full_title(m)
 
-    def compact(group, span):
-        # The top wire must meet the card midpoint, even with a selection mark.
-        limit = span // 2 - 4 if any(m.get("role") in {"main", "worker", "researcher"} for m in group) else span - 6
-        return any(display_width(heading(m)) > limit for m in group)
-
-    shown_groups = [g for g in (shown_judges, shown_workers) if g] + ([[primary]] if primary else [])
-
-    def minimum_rows(group):
-        span = layout(width, len(group), group == [primary])[0]
-        return 4 + max(len(task_lines(m, span - 4, 2)) for m in group) if compact(group, span) else 3
-
-    minimum_total = sum(minimum_rows(g) for g in shown_groups)
-
-    def plan_upper(rows_left):
-        """Wire rows and embedded branches of the main-and-bands board in `rows_left` rows."""
-        wires, embedded = base_wires, {}
-        if primary and height <= 20 and rows_left - wires < minimum_total:
-            main_span, main_left = layout(width, 1, True)
-            middle = main_left + main_span // 2
-            for name, group in (("judge", shown_judges), ("worker", shown_workers)):
-                if not group:
-                    continue
-                span, left = layout(width, len(group))
-                points = [left + span // 2 + i * (span + 1) for i in range(len(group))]
-                if not all(main_left < point < main_left + main_span - 1 for point in points):
-                    continue
-                title_start = None
-                if name == "judge":
-                    ports = sorted(set([main_left, middle, main_left + main_span - 1] + points))
-                    free = [(end - start - 1, start + 1) for start, end in zip(ports, ports[1:])]
-                    size, title_start = max(free)
-                    if size < display_width(heading(primary)) + 2:
-                        continue
-                embedded[name] = (points, group, title_start)
-            # A short graph can reuse a free main border for a branch without losing card content.
-            wires -= wire_rows * len(embedded)
-        return embedded, wires
-
-    # Reserve the ordinary band shape even for its empty placeholders, so
-    # call counts and finished groups cannot move the reading dock.
-    placeholders = bool(primary) and height >= 24
-    ordinary = (3 if primary else 0) + sum(wire_rows + 6 for group in
-                (shown_judges, shown_workers) if group or placeholders)
-    worker_floor = 5 if layout(width, 3)[0] // 2 - 4 < 21 else 3
-    compact_shape = 3 + 2 * wire_rows + 3 + worker_floor if primary else 0
+    # A main title too long for its top edge moves inside the card.
+    reflow = bool(primary) and display_width(heading(primary)) > main_width - 6
+    main_min = (4 + len(task_lines(primary, main_width - 4, 2)) if reflow else 3) if primary else 0
+    # Boards under 24 rows keep the compact main card; taller ones let it grow to its title, task and team.
+    main_need = max(main_min, min(6, 4 + int(reflow) + len(task_lines(primary, main_width - 4, 2)))) \
+        if primary and height >= 24 else main_min
+    # At least the selected call and the fold line stay drawn.
+    minimum_total = main_min + min(tree_rows, 2) if primary else 0
+    # Calls up to TREE_RESERVE never move the reading dock; the main card keeps its full height beside them.
+    ordinary = main_need + TREE_RESERVE if primary else 0
+    compact_shape = 3 + 3 if primary else 0
     fixed_header = 3 + len(status_alerts(report)) + len(attention_rows)
     fixed_header += int(bool(others or room.get("other_rooms_incomplete")) and height >= 20)
     target = max(0, total_rows - fixed_header - ordinary - 1) if interactive else 0
     compact_target = min(height * 2 // 5, max(0, total_rows - fixed_header - compact_shape - 1)) if interactive else 0
     target = max(target, compact_target)
-    if crowded_board:
-        # Calls beyond the cards take one row each from the dock, never below its tabs and one body row.
-        spilled = len(workers) + len(judges) - len(shown_workers) - len(shown_judges)
-        target, compact_target = max(3, target - spilled), max(3, compact_target - spilled)
+    # Calls past the reserve take one row each from the dock, never below a third of the board.
+    spilled = max(0, len(children) - TREE_RESERVE)
+    floor = max(3, total_rows // 3)
+    target, compact_target = (max(min(value, floor), value - spilled) for value in (target, compact_target))
     if height <= 20:
         target = min(height * 2 // 5, height - 17) if interactive else 0
     target = target if target >= 3 else int(interactive)
-    warn_possible = int(bool(unlinked or stranded) or len(children) > len(shown_judges) + len(shown_workers))
+    warn_possible = int(bool(unlinked or stranded))
 
     def upper_fit(rows_left, stable):
-        """(embedded branches, wire rows) when the upper region fits rows_left, else None."""
-        embedded, wires = plan_upper(rows_left)
         # Group headings use space vacated by finished calls without moving the dock.
-        return (embedded, wires) if rows_left >= max(wires + minimum_total,
-                                                    (ordinary + fixed_header - used) * stable) else None
+        return rows_left >= max(minimum_total, (ordinary + fixed_header - used) * stable)
 
     plan = None
     tiers = ((True, max(11, compact_target), target), (False, 3, target), (False, 1, min(target, 1)), (False, 0, 0)) if interactive else ((False, 0, 0),)
@@ -1373,9 +1288,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             if stable and height <= 20 or high < low or warn and not high:
                 continue
             for dock_rows in range(high, low - 1, -1):
-                got = upper_fit(total_rows - used - dock_rows - (warn or stable) * bool(dock_rows), stable)
-                if got is not None:
-                    plan = (dock_rows, got, (warn or stable) * bool(dock_rows))
+                reserve = (warn or stable) * bool(dock_rows)
+                if upper_fit(total_rows - used - dock_rows - reserve, stable):
+                    plan = (dock_rows, reserve)
                     break
             if plan:
                 break
@@ -1391,208 +1306,147 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                       view="tree" if interactive else "compact", attention_only=attention_only, navigation=navigation,
                       previous=previous)
         return text
-    dock, (embedded, wires), warn_reserve = plan
-    budget = total_rows - dock - warn_reserve
-
-    def extras(m):
-        return int(bool(m.get("location")))
-
-    def needed(group, centered=False):
-        span = layout(width, len(group), centered)[0]
-        reflow = int(compact(group, span))
-        return max(3 + (1 if m.get("role") == "main" else extras(m)) + reflow + len(task_lines(m, span - 4, 2)) for m in group)
-
-    # Cards never keep blank rows; rows they do not need go to the detail area.
-    def drawn_rows(card_height):
-        return sum(max(minimum_rows(g), min(card_height, needed(g, g == [primary]))) for g in shown_groups)
-
-    # Calls the cards cannot hold become one-line rows; reserve their rows before the cards grow.
-    overflow = [m for m in workers + judges if m not in shown_workers + shown_judges] if crowded_board else []
-    available_cards = budget - used - wires
-    reserved = min(len(overflow), max(0, available_cards - drawn_rows(4)))
-    card_height = next((candidate for candidate in range(6, 2, -1)
-                        if drawn_rows(candidate) <= available_cards - reserved), 3)
+    dock, warn_reserve = plan
+    available = total_rows - dock - warn_reserve - used
+    # Calls come before a taller main; the main grows into rows the calls leave.
+    main_rows = max(main_min, min(main_need, available - tree_rows))
+    card_height = 6 if available >= 0 else 3
     automatic = False
     if interactive and not previewed and primary and dock >= 5 and not navigation.get("dismissed"):
         # The box shows the shown main by default; it never displaces a choice.
         previewed, preview, automatic = primary, {"target": action(primary), "report": {}}, True
 
-    def cards(group, style, centered=False, top=False, bottom=False, before=None):
-        count = len(group)
-        cell_width, left = layout(width, count, centered)
-        rows_h = max(minimum_rows(group), min(card_height, needed(group, centered)))
-        reflow = compact(group, cell_width)
-        blocks, points, cursor = [], [], left
-        for m in group:
-            span = cell_width
-            title = heading(m)
-            if reflow:
-                title = ""
-            state = main_state(m)
-            words = end_words(m, main_words(m, unicode))
-            if m.get("role") != "main" and state in LIVE_STATES | FINISHED:
-                words = call_span(m, "→" if unicode else "->")
-            status = "%s %s" % (activity(state, frame, unicode), words)
-            if m.get("role") == "main" and open_count(room, m["participant"]):
-                status += (" · " if unicode else " / ") + "? %s open" % open_count(room, m["participant"])
-            ctx = context_note(report, m)
-            if ctx:
-                status += "".join((" · " if unicode else " / ") + part for part in
-                                  ["ctx %s%% used" % ctx[0]] + ["compact soon"] * (ctx[1] == "alert"))
-            if m.get("role") == "main":
-                from review_backlog import needs_review_hint
-                if needs_review_hint(report, m["participant"]):
-                    status += (" · " if unicode else " / ") + "review first"
-            if m.get("role") != "main" and primary and not sole_live:
-                status += " · for " + clean(name_of(primary))
-            task = task_of(m)
-            content = [status + " / " + task] if rows_h == 3 else [status] + task_lines(m, span - 4, rows_h - 3)
-            if rows_h >= 4:
-                where = ("@ " + location_label(m["location"]) + (" / " + m["effort"] if m.get("effort") else "")) if m.get("location") else ""
-                if m.get("role") == "main":
-                    where = "Team: " + (" · ".join(team_counts(everyone.get(m["participant"], []), classify)) or "no calls yet")
-                tail = [where] if where and rows_h >= 5 + int(reflow) else []
-                first = (("▸ " if unicode else "> ") if action(m) == selected else "") + full_title(m, reflow=True)
-                content = ([first] if reflow else []) + [status] + task_lines(
-                    m, span - 4, max(1, min(2, rows_h - 3 - len(tail) - int(reflow)))) + tail
-            block = card(title, content, span, rows_h, unicode)
-            column = span // 2
-            if top:
-                block[0], column = joint(block[0], column, "┴" if unicode else "+")
-            if bottom:
-                block[-1] = joint(block[-1], span // 2, "┬" if unicode else "+")[0]
-            if centered:
-                for name, (ports, linked, title_start) in embedded.items():
-                    upward = name == "judge"
-                    border = 0 if upward else -1
-                    edge = box_edge("", span, unicode) if upward else block[border]
-                    branch = connections(width, root_top if upward else root_bottom, ports,
-                                         [p for p, member in zip(ports, linked) if member["state"] in LIVE_STATES],
-                                         frame, unicode, upward, 1)[0]
-                    for absolute, glyph in enumerate(branch):
-                        if glyph != " " and cursor < absolute < cursor + span - 1:
-                            relative = absolute - cursor
-                            edge = edge[:relative] + glyph + edge[relative + 1:]
-                    if upward:
-                        relative = title_start - cursor
-                        caption = " " + title + " "
-                        edge = edge[:relative] + caption + edge[relative + len(caption):]
-                    block[border] = edge
-            blocks.append(block)
-            points.append(cursor + column)
-            cursor += span + 1
-        if before:
-            before(points)
+    def main_card(m, style, rooted):
+        rows_h = main_rows
+        title = "" if reflow else heading(m)
+        words = end_words(m, main_words(m, unicode))
+        status = "%s %s" % (activity(main_state(m), frame, unicode), words)
+        if open_count(room, m["participant"]):
+            status += (" · " if unicode else " / ") + "? %s open" % open_count(room, m["participant"])
+        ctx = context_note(report, m)
+        if ctx:
+            status += "".join((" · " if unicode else " / ") + part for part in
+                              ["ctx %s%% used" % ctx[0]] + ["compact soon"] * (ctx[1] == "alert"))
+        from review_backlog import needs_review_hint
+        if needs_review_hint(report, m["participant"]):
+            status += (" · " if unicode else " / ") + "review first"
+        content = [status + " / " + task_of(m)] if rows_h == 3 else [status] + task_lines(m, main_width - 4, rows_h - 3)
+        if rows_h >= 4:
+            where = "Team: " + (" · ".join(team_counts(everyone.get(m["participant"], []), classify)) or "no calls yet")
+            tail = [where] if rows_h >= 5 + int(reflow) else []
+            first = (("▸ " if unicode else "> ") if action(m) == selected else "") + full_title(m, reflow=True)
+            content = ([first] if reflow else []) + [status] + task_lines(
+                m, main_width - 4, max(1, min(2, rows_h - 3 - len(tail) - int(reflow)))) + tail
+        block = card(title, content, main_width, rows_h, unicode)
+        if rooted:
+            block[-1] = joint(block[-1], 2, "┬" if unicode else "+")[0]
+        flanks = width >= FLANK_WIDTH and rows_h >= 5
+        if flanks:
+            left_width, right_width = main_left - 2, width - main_left - main_width - 2
+            linked_workers = [c for c in linked_children if c.get("role") in {"worker", "researcher"}]
+            status_rows = ["Workers %s / live %s" % (len(linked_workers), sum(c["state"] in LIVE_STATES for c in linked_workers)),
+                           "Advisors %s / reviewers %s" % (sum(c.get("role") == "advisor" for c in linked_children),
+                                                          sum(c.get("role") == "reviewer" for c in linked_children)),
+                           "Needs attention %s" % sum(c["state"] in ATTENTION_STATES for c in linked_children)]
+            pending = sum(valid_count(mapping(p).get("pending")) or 0 for p in listing(room.get("pairs"))
+                          if mapping(p).get("recipient") == m["participant"])
+            inbox = [message for message in listing(room.get("messages")) if m["participant"] in listing(message.get("targets"))]
+            mail = ["Pending %s / recent %s" % (pending, len(inbox))]
+            if inbox:
+                last = inbox[-1]
+                sender = next((s for s in members if s["participant"] == last.get("sender")), {})
+                sender_name = name_of(sender) if sender else last.get("sender", "unknown")
+                mail += ["From " + clean(sender_name)] + wrapped(clean(last.get("text")) or "", right_width - 4, rows_h - 4)
+            else:
+                mail += ["No addressed message recorded"]
+            left_card = card("WORK STATUS", status_rows, left_width, rows_h, unicode)
+            right_card = card("MAIL / to main", mail, right_width, rows_h, unicode)
         start = len(lines) + 1
-        for i, m in enumerate(group):
-            for row in range(rows_h):
-                hits.append({"y": start + row, "x1": left + i * (cell_width + 1) + 1,
-                             "x2": left + i * (cell_width + 1) + cell_width, "action": action(m),
-                             "preview": m.get("role") != "main"})
         for row in range(rows_h):
-            value = " " * left
-            flanks = centered and width >= FLANK_WIDTH and rows_h >= 5
-            if flanks:
-                if row == 0:
-                    left_width, right_width = left - 2, width - left - cell_width - 2
-                    linked_workers = [m for m in linked_children if m.get("role") in {"worker", "researcher"}]
-                    status_rows = ["Workers %s / live %s" % (len(linked_workers), sum(m["state"] in LIVE_STATES for m in linked_workers)),
-                                   "Advisors %s / reviewers %s" % (sum(m.get("role") == "advisor" for m in linked_children),
-                                                                  sum(m.get("role") == "reviewer" for m in linked_children)),
-                                   "Needs attention %s" % sum(m["state"] in ATTENTION_STATES for m in linked_children)]
-                    ident = group[0]["participant"]
-                    pending = sum(valid_count(mapping(p).get("pending")) or 0 for p in listing(room.get("pairs"))
-                                  if mapping(p).get("recipient") == ident)
-                    inbox = [m for m in listing(room.get("messages")) if ident in listing(m.get("targets"))]
-                    mail = ["Pending %s / recent %s" % (pending, len(inbox))]
-                    if inbox:
-                        last = inbox[-1]
-                        sender = next((m for m in members if m["participant"] == last.get("sender")), {})
-                        sender_name = name_of(sender) if sender else last.get("sender", "unknown")
-                        mail += ["From " + clean(sender_name)] + wrapped(clean(last.get("text")) or "", right_width - 4, rows_h - 4)
-                    else:
-                        mail += ["No addressed message recorded"]
-                    left_card = card("WORK STATUS", status_rows, left_width, rows_h, unicode)
-                    right_card = card("MAIL / to main", mail, right_width, rows_h, unicode)
-                value = paint(left_card[row], "dim") + "  "
-            for i, block in enumerate(blocks):
-                cell = block[row]
-                if color:
-                    cell_style = "dim" if row == 1 and main_state(group[i]) == "idle" else tone(group[i]["state"]) if row == 1 and group[i]["state"] in ATTENTION_STATES else style
-                    cell = ((PALETTE[cell_style] + "\033[7m" if action(group[i]) == selected else
-                            ("\033[1m" if group[i].get("role") == "main" else "") + PALETTE[cell_style]) + cell + "\033[0m")
-                value += cell + (" " if i < count - 1 else "")
+            hits.append({"y": start + row, "x1": main_left + 1, "x2": main_left + main_width, "action": action(m),
+                         "preview": False})
+            cell = block[row]
+            if color:
+                cell_style = "dim" if row == 1 and main_state(m) == "idle" else tone(m["state"]) \
+                    if row == 1 and m["state"] in ATTENTION_STATES else style
+                cell = (PALETTE[cell_style] + "\033[7m" if action(m) == selected else
+                        "\033[1m" + PALETTE[cell_style]) + cell + "\033[0m"
+            value = (paint(left_card[row], "dim") + "  " if flanks else " " * main_left) + cell
             if flanks:
                 value += "  " + paint(right_card[row], "alert" if pending else "dim")
             lines.append(value)
-        return start, len(lines)
 
-    def band(group, style, name, upward):
-        def wire(points):
-            if name in embedded:
-                return
-            if upward:
-                points = [left + span // 2 + i * (span + 1) for i in range(len(group))]
-            for line in connections(width, root_top if upward else root_bottom, points,
-                                    [p for p, m in zip(points, group) if m["state"] in LIVE_STATES],
-                                    frame, unicode, upward, wire_rows):
-                add(line, style)
-        span, left = layout(width, len(group))
-        first, last = cards(group, style, top=not upward, bottom=upward, before=None if upward else wire)
-        bands_hit.append({"name": name, "y1": first, "y2": last, "x1": 1, "x2": width})
-        if upward:
-            wire(None)
+    stem = main_left + 2
+    arrow = "→" if unicode else "->"
 
-    scrolled_now = {"judge": judge_start, "worker": worker_start}
-    main_width, main_left = layout(width, 1, True)
-    root_bottom = main_left + main_width // 2
-    root_top = root_bottom
-    if shown_judges:
-        band(shown_judges, "review", "judge", True)
-    elif primary and height >= 24:
-        hint = "◇ no advisors · a ask" if unicode else "no advisors / a ask"
-        left = min(max(0, root_top - 10), max(0, width - display_width(hint)))
-        add(padded(" " * left + hint, width), "dim")
+    def branch(last, marked):
+        if unicode:
+            return ("└" if last else "├") + ("▸ " if marked else "─ ")
+        return ("`" if last else "|") + ("-> " if marked else "-- ")
+
+    def tree_line(prefix, body, rights=("",)):
+        """One board-wide row: the label is clipped beside the longest right-aligned state that leaves it room."""
+        room_left = width - stem - display_width(prefix)
+        right = next((text for text in rights if room_left - display_width(text) - 2 >= 8), rights[-1])
+        body = clipped(body, max(1, room_left - (display_width(right) + 2 if right else 0)))
+        return " " * stem + prefix + body + " " * max(0, room_left - display_width(body) - display_width(right)) + right
+
+    def call_row(m, last):
+        marked = action(m) == selected
+        state = main_state(m)
+        body = "%s %s %s · %s" % (activity(state, frame, unicode), ROLES.get(m.get("role"), "Worker").upper()
+                                  if m.get("role") != "council" else "COUNCIL", name_of(m), task_of(m))
+        span = call_span(m, arrow)
+        text = tree_line(branch(last, marked), body, ([span + " · for " + clean(name_of(primary))] if not sole_live else [])
+                         + [span, end_words(m, said(state))])
+        style = tone(m["state"]) if m["state"] in ATTENTION_STATES else \
+            "review" if m.get("role") in {"advisor", "reviewer", "council"} else "worker"
+        lines.append(chosen(text, style) if marked and color else paint(text, style))
+        hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action(m), "preview": True, "tree": True})
+
+    scrolled_now = {}
     if primary:
-        cards([primary], hue(primary), centered=True,
-              top=bool(shown_judges), bottom=bool(shown_workers))
+        main_card(primary, hue(primary), bool(tree_rows))
     else:
         prompt = "No main connected · " if navigation["main_occupied"] else "No main · n, then "
         prompt += menu_rows(width, 1, unicode, managed=managed, occupied=navigation["main_occupied"],
                             installed=navigation.get("installed"))[0]
         for line in card("MAIN", [prompt], width, card_height, unicode):
             add(line, "main")
-    if shown_workers:
-        band(shown_workers, "worker", "worker", False)
-    elif primary and height >= 24:
-        add(" " * max(0, root_bottom - 10) + ("▢ no workers" if unicode else
-                                               "no workers"), "dim")
     body_drawn = False
-    row_hits = []
-    if overflow:
-        # Rows take the space above the warning line and the dock; each opens the same Detail as a card.
-        room_rows = max(0, total_rows - dock - warn_reserve - len(lines))
-        drawn = overflow[:room_rows]
-        # A chosen call past the spare rows takes the last one, so selection never hides it.
-        chosen_call = next((m for m in overflow[room_rows:] if action(m) == selected), None)
-        if chosen_call and drawn:
-            drawn[-1] = chosen_call
-        for m in drawn:
-            state = main_state(m)
-            right = "%s %s" % (activity(state, frame, unicode), call_span(m, "→" if unicode else "->"))
-            left = ("▸ " if unicode else "> ") * (action(m) == selected) + "%s %s" % (m.get("role", "worker"), name_of(m))
-            task = clipped(task_of(m), max(0, width - 4 - display_width(left) - display_width(right) - 6))
-            text = "  " + left + (" · " + task if task else "") + " · " + right
-            text = clipped(text, width)
-            style = tone(m["state"]) if m["state"] in ATTENTION_STATES else "worker"
-            add(chosen(text, style) if action(m) == selected and color else text, style)
-            hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action(m), "preview": True})
-            row_hits.append(m)
-    omitted = len(children) - len(shown_judges) - len(shown_workers) - len(row_hits)
-    parts, open_unlinked = ["%s more calls (scroll)" % omitted] if omitted else [], []
+    drawn, start = [], 0
+    if children:
+        slots = max(1, min(len(children), total_rows - dock - warn_reserve - len(lines)))
+        if slots < len(children):
+            slots -= 1  # the fold line
+        start = min(scrolled.get("calls", 0), len(children) - slots)
+        index = next((i for i, m in enumerate(children) if action(m) == selected), None)
+        if index is not None and selected != navigation.get("graph_selected"):
+            start = index if index < start else index - slots + 1 if index >= start + slots else start
+        drawn = children[start:start + slots]
+        if index is not None and children[index] not in drawn and drawn:
+            # Wheel scrolling past the selected call keeps it drawn at the edge nearest its place.
+            drawn = [children[index]] + drawn[1:] if index < start else drawn[:-1] + [children[index]]
+        folded = [m for m in children if m not in drawn]
+        first = len(lines) + 1
+        for n, m in enumerate(drawn):
+            call_row(m, n == len(drawn) - 1 and not folded)
+        if folded:
+            # The fold line opens the next hidden call, which scrolls the tree to draw it.
+            after = [m for m in children[start + slots:] if m in folded]
+            text = tree_line(branch(True, False), "%s %s more call%s" % (
+                ELLIPSIS[0], len(folded), "" if len(folded) == 1 else "s"))
+            add(text, "dim")
+            hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action((after or folded)[0]),
+                         "preview": True, "tree": True})
+        bands_hit.append({"name": "calls", "y1": first, "y2": len(lines), "x1": 1, "x2": width})
+        scrolled_now["calls"] = start
+    elif tree_rows:
+        add(tree_line(branch(True, False), "no calls yet · a ask"), "dim")
+    parts, open_unlinked = [], []
     if stranded:
         parts.append("%s call%s of an ended main · t shows them" % (len(stranded), "" if len(stranded) == 1 else "s"))
-    if omitted or unlinked:
+    if unlinked:
         open_unlinked = [m for m in unlinked if classify(m) != "past"]
         if open_unlinked:
             # Settled ones are listed in the Past tab; only open calls need the tree.
@@ -1601,17 +1455,17 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 " (+%s past)" % (len(unlinked) - len(open_unlinked)) if len(open_unlinked) < len(unlinked) else ""))
     # Rows the cards and the box leave blank carry a display-only summary; it never takes their rows.
     spare = total_rows - dock - len(lines) - bool(parts) - 1
-    if dock and spare >= 3:
+    # Under 21 rows the box takes every row the board leaves, so no summary competes for them.
+    if dock and spare >= 3 and height > 20:
         lines.append("")
         for text in board_summary(report, [c for calls in everyone.values() for c in calls] + unlinked,
                                   classify, width, spare, unicode, ranked):
             add(text, "dim")
-    if omitted or unlinked or stranded:
-        if parts and len(lines) < total_rows - dock:
-            # The warning sits on the row just above the box, so it holds still as the upper region changes.
-            if height > 20 and height <= width:
-                lines.extend([""] * max(0, total_rows - dock - 1 - len(lines)) * bool(dock))
-            add(" / ".join(parts), "alert" if open_unlinked or stranded else "dim")
+    if parts and len(lines) < total_rows - dock:
+        # The warning sits on the row just above the box, so it holds still as the upper region changes.
+        if height > 20 and height <= width:
+            lines.extend([""] * max(0, total_rows - dock - 1 - len(lines)) * bool(dock))
+        add(" / ".join(parts), "alert" if open_unlinked or stranded else "dim")
     # The box keeps the rows it was given whatever the upper region drew; only an overflowing region shrinks it.
     rows_high = (max(0, total_rows - len(lines)) if height <= 20 or height > width else
                  min(dock, max(0, total_rows - len(lines)))) if dock else 0
@@ -1656,14 +1510,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         row = len(lines) - (hint_rows + 1 if not menu else 1)
         lines[row] = paint(lines[row], "main" if bar[1] else "dim")
         hits += [{"y": row + 1, "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
-    visible = shown_judges + shown_workers + row_hits
-    # Keys reach only what this board draws: its main and that main's calls.
+    # Keys reach only what this board draws: its main and that main's calls, in tree order.
     items = [("chat", primary["participant"])] if primary else []
-    items += [action(m) for m in visible]
-    items += [action(m) for m in everyone.get(primary["participant"], []) if classify(m) == "live"] if primary else []
+    items += [action(m) for m in children]
     items += group_actions
     items += [hit["action"] for hit in hits if hit["action"][0] in {"result", "debate"}]
-    navigation.update(hits=hits, items=list(dict.fromkeys(items)), offset=offset, viewport=3,
+    navigation.update(hits=hits, items=list(dict.fromkeys(items)), offset=offset, viewport=max(1, len(drawn)),
                       body_rows=len(children), positions={item: i for i, item in enumerate(items)},
                       room_id=room.get("id"), graph_selected=selected, surface="graph",
                       primary=("chat", primary["participant"]) if primary else None,
@@ -1673,7 +1525,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if not color and selected:
         previous = None
         for hit in hits:
-            if hit["action"] != selected or navigation.get("box") and hit["y"] >= navigation["box"]["y1"]:
+            if hit["action"] != selected or hit.get("tree") or navigation.get("box") and hit["y"] >= navigation["box"]["y1"]:
                 continue
             if previous != hit["y"] - 1:
                 # Card runs share an action; mark their first row, preserving other columns.
