@@ -5677,7 +5677,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
 
 # OPERATOR_FIXTURE_END pty
     # Raw single keys: no Enter, and no "oms> " prompt to wait for.
-    terminal(["bash", str(panel.ENTRY), "panel", "--layout", "inline"], b"9q", b"OMS control panel", trigger=b"Needs you")
+    terminal(["bash", str(panel.ENTRY), "panel", "--layout", "inline"], b"9q", "OMS · ".encode("utf-8"), trigger=b"Needs you")
     motion_attempt = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "start",
                            "--provider", "claude", "--tool", "panel-motion-fixture",
                            "--ref", "panel_role=worker", "--ref", "panel_model=claude-sonnet-5-5",
