@@ -21999,6 +21999,36 @@ test_resume_hook_prints_bounded_resume_block() {
   fi
   [ "$(printf '%s\n' "$out" | wc -l)" -le 15 ] || fail "resume block exceeds its line budget"
 
+  printf '{"cwd":"%s","hook_event_name":"SessionStart","model":"gpt-6","permission_mode":"default","session_id":"codex-session-start","source":"startup","transcript_path":null}' \
+    "$repo" > "$TMP/codex-sessionstart-input.json"
+  OMS_HOOK_AGENT=codex OMS_CODEX_HOME="$TMP/codex-home" OMS_LOCK_DIR="$TMP/locks" \
+    bash "$ROOT/scripts/resume-hook.sh" < "$TMP/codex-sessionstart-input.json" \
+    > "$TMP/codex-sessionstart-expected.txt" || fail "resume hook must accept Codex SessionStart input"
+  CLAUDE_PLUGIN_ROOT="$ROOT/plugins/oh-my-setting" \
+    OMS_CODEX_HOME="$TMP/codex-home" OMS_LOCK_DIR="$TMP/locks" \
+    bash "$ROOT/plugins/oh-my-setting/scripts/harness-hook.sh" resume-hook \
+    < "$TMP/codex-sessionstart-input.json" > "$TMP/codex-sessionstart-output.json" ||
+    fail "Codex plugin SessionStart hook must exit 0"
+  if ! python3 - "$TMP/codex-sessionstart-output.json" "$TMP/codex-sessionstart-expected.txt" <<'PY'
+import json, pathlib, sys
+
+actual = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+assert actual == {"hookSpecificOutput": {
+    "hookEventName": "SessionStart",
+    "additionalContext": expected,
+}}, actual
+PY
+  then
+    fail "Codex SessionStart output must use the exact hookSpecificOutput shape"
+  fi
+  OMS_RESUME_HOOK=0 CLAUDE_PLUGIN_ROOT="$ROOT/plugins/oh-my-setting" \
+    bash "$ROOT/plugins/oh-my-setting/scripts/harness-hook.sh" resume-hook \
+    < "$TMP/codex-sessionstart-input.json" > "$TMP/codex-sessionstart-silent.txt" ||
+    fail "a disabled Codex SessionStart hook must exit 0"
+  [ ! -s "$TMP/codex-sessionstart-silent.txt" ] ||
+    fail "a silent Codex SessionStart hook must not emit empty JSON"
+
   mkdir -p "$repo/src/nested"
   out="$(printf '{"cwd":"%s/src/nested"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
   contains "$out" 'Ship the resume surface' || fail "nested cwd lost the active task"
