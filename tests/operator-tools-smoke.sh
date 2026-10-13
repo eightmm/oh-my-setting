@@ -17964,7 +17964,11 @@ for mode in ("tree", "graph"):
     result_target = ("result", "pending-patch")
     result_hit = next(h for h in nav["hits"] if h["action"] == result_target)
     assert choose(("click", result_hit["x1"], result_hit["y"]), nav) == result_target
-    assert choose(("enter",), nav) == result_target
+    if nav.get("surface") == "graph":
+        # The graph board shows the call in its own detail area; Enter keeps that preview instead of opening a screen.
+        assert choose(("enter",), nav) is None and nav["preview"]["target"] == result_target
+    else:
+        assert choose(("enter",), nav) == result_target
     with patch.object(panel, "managed_session", return_value=False), \
             patch.object(panel.room, "status", return_value=grouped_board["room"]):
         panel.navigate(project, result_target, grouped_board, nav, 120)
