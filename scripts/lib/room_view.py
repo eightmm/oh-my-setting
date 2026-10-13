@@ -1097,7 +1097,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     offset = max(0, navigation.get("offset", 0))
     scrolled = mapping(navigation.get("band_offsets"))
     judge_start = min(scrolled.get("judge", offset), max(0, len(judges) - 3))
-    worker_start = 0 if crowded_board else min(scrolled.get("worker", offset), max(0, len(workers) - worker_capacity))
+    worker_start = min(scrolled.get("worker", offset), max(0, len(workers) - worker_capacity))
     if selected != navigation.get("graph_selected"):
         for group, name in ((judges, "judge"), (workers, "worker")):
             index = next((i for i, m in enumerate(group) if action(m) == selected), None)
@@ -1346,8 +1346,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     compact_target = min(height * 2 // 5, max(0, total_rows - fixed_header - compact_shape - 1)) if interactive else 0
     target = max(target, compact_target)
     if crowded_board:
-        # Keep the tabs and one readable body row; the live worker cards take the space.
-        target = compact_target = 3
+        # Calls beyond the cards take one row each from the dock, never below its tabs and one body row.
+        spilled = len(workers) + len(judges) - len(shown_workers) - len(shown_judges)
+        target, compact_target = max(3, target - spilled), max(3, compact_target - spilled)
     if height <= 20:
         target = min(height * 2 // 5, height - 17) if interactive else 0
     target = target if target >= 3 else int(interactive)
@@ -1402,7 +1403,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         return sum(max(minimum_rows(g), min(card_height, needed(g, g == [primary]))) for g in shown_groups)
 
     # Calls the cards cannot hold become one-line rows; reserve their rows before the cards grow.
-    overflow = (workers[worker_capacity:] + judges[3:]) if crowded_board else []
+    overflow = [m for m in workers + judges if m not in shown_workers + shown_judges] if crowded_board else []
     available_cards = budget - used - wires
     reserved = min(len(overflow), max(0, available_cards - drawn_rows(4)))
     card_height = next((candidate for candidate in range(6, 2, -1)
@@ -1567,7 +1568,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if overflow:
         # Rows take the space above the warning line and the dock; each opens the same Detail as a card.
         room_rows = max(0, total_rows - dock - warn_reserve - len(lines))
-        for m in overflow[:room_rows]:
+        drawn = overflow[:room_rows]
+        # A chosen call past the spare rows takes the last one, so selection never hides it.
+        chosen_call = next((m for m in overflow[room_rows:] if action(m) == selected), None)
+        if chosen_call and drawn:
+            drawn[-1] = chosen_call
+        for m in drawn:
             state = main_state(m)
             right = "%s %s" % (activity(state, frame, unicode), call_span(m, "→" if unicode else "->"))
             left = ("▸ " if unicode else "> ") * (action(m) == selected) + "%s %s" % (m.get("role", "worker"), name_of(m))
