@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Fixtures establish their own operator, panel and room identities, even when
 # invoked from a managed terminal or a delegated worker.
-unset TMUX TMUX_PANE OMS_STATE_REPO OMS_PLAN_LEASE_ID
+unset TMUX TMUX_PANE OMS_STATE_REPO OMS_PLAN_LEASE_ID OMS_TASK_ID OMS_ATTEMPT_ID
 for oms_smoke_inherited in $(compgen -e); do
   case "$oms_smoke_inherited" in
     HERDR_*|OMS_HARNESS_*|OMS_PANEL_*|OMS_ROOM_*) unset "$oms_smoke_inherited" ;;

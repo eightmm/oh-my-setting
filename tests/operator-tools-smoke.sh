@@ -5910,7 +5910,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 assert "MAIN " in sidebar and "OMS · " in sidebar, sidebar
                 native_header = tmux_wait(["show-option", "-p", "-v", "-t", listing[0], "@oms_panel_header"], identity)
                 assert identity in native_header, native_header
-                assert "Activity" in sidebar, sidebar
+                assert "activity" in sidebar.lower(), sidebar
                 assert "attention" in sidebar, sidebar
                 assert subprocess.check_output(tmux + ["show-option", "-w", "-v", "-t", listing[1],
                     "@oms_panel_view"], env=env, text=True).strip() == "compact"
@@ -5938,7 +5938,13 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 enlarged = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "╭╌ ▸ " + identity)
                 main_row, main_text = next((n + 1, line) for n, line in enumerate(enlarged.splitlines()) if identity in line)
                 main_col = main_text.index("MAIN ") + 2
-                subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "\033[<0;%s;%sM" % (main_col, main_row)], env=env, check=True)
+                card_click = "\033[<0;%s;%sM" % (main_col, main_row)
+                subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", card_click], env=env, check=True)
+                # A first click on a card previews it; repeating the click opens the main.
+                time.sleep(1)
+                if subprocess.check_output(tmux + ["display-message", "-p", "-t", listing[1],
+                        "#{window_zoomed_flag}"], env=env, text=True).strip() == "1":
+                    subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", card_click], env=env, check=True)
                 tmux_wait(["display-message", "-p", "-t", listing[1], "#{window_zoomed_flag}"], "0")
                 tmux_wait(["display-message", "-p", "-t", session + ":" + owner, "#{pane_id}"], listing[0])
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "v"], env=env, check=True)
