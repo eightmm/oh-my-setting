@@ -188,7 +188,10 @@ def worker_rows(report):
                  "selected: " + metadata["model"] if metadata.get("model") else
                  "model: unrecorded")
         model_id = operation.get("served_model") or operation.get("selected_model") or metadata.get("model")
-        rows.append({"state": row.get("state") or "unknown", "provider": row.get("provider") or "unknown",
+        if metadata.get("fallback"):
+            model += " | fallback: " + metadata["fallback"]
+        rows.append({"state": row.get("state") or "unknown",
+                     "provider": metadata.get("provider") or row.get("provider") or "unknown",
                      "work": "Seat answering" if key in councils else
                              metadata.get("label") or PURPOSE_NAMES.get(metadata.get("purpose"), detail),
                      "task": row.get("task_id") or "unrecorded", "model": model,

@@ -72,6 +72,25 @@ def artifact_sections_stream(handle, *, require_exit: bool = True) -> tuple[str,
     return "\n".join(body.splitlines()).strip(), exit_code
 
 
+def final_attempt_output(path: Path) -> str | None:
+    """The final attempt's own output named by the controller's sidecar.
+
+    None without a sidecar; empty when the sidecar cannot be read. Judging an
+    outcome reads this, not the transcript a failed primary still shares.
+    """
+    base = str(path)[:-3] if str(path).endswith(".md") else str(path)
+    sidecar = Path(base + ".attempts.json")
+    if not sidecar.exists():
+        return None
+    try:
+        name = json.loads(sidecar.read_text(encoding="utf-8"))["attempts"][-1]["output"]
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.out", name):
+            return ""
+        return (sidecar.parent / name).read_text(encoding="utf-8", errors="replace").strip()
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return ""
+
+
 def debate_sections(answer: str) -> tuple[str, list[tuple[str, str]]]:
     """Ignore quoted headings, retaining the last response after prompt echoes."""
     lines = answer.splitlines()
@@ -301,6 +320,9 @@ if __name__ == "__main__":
             stage_context(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])
             raise SystemExit(0)
         answer, _ = artifact_sections(Path(sys.argv[1]), require_exit=False)
+        if len(sys.argv) == 3 and sys.argv[2] in ("--deliberation-check", "--deliberation-missing", "--debate-unchanged"):
+            final = final_attempt_output(Path(sys.argv[1]))
+            answer = answer if final is None else final
         if len(sys.argv) == 4 and sys.argv[2] == "--debate-excerpt":
             answer = debate_excerpt(answer, min(4096, int(sys.argv[3])))
         elif len(sys.argv) == 3 and sys.argv[2] == "--deliberation-check":

@@ -735,6 +735,9 @@ module = runpy.run_path(sys.argv[1])
 assert module["panel_metadata"]({"refs": {"panel_role": "researcher",
     "panel_room_participant": "research-call"}, "parent_attempt_id": "main-call"})["panel"]["room_participant"] == "research-call"
 assert module["panel_metadata"]({"refs": {"panel_role": "unrecognized"}}) == {}
+swapped = module["panel_metadata"]({"refs": {"panel_role": "worker", "panel_provider": "claude",
+    "panel_model": "claude-sonnet-5-5", "panel_fallback": "provider-capacity"}})["panel"]
+assert swapped["provider"] == "claude" and swapped["fallback"] == "provider-capacity", swapped
 report = json.load(open(sys.argv[2], encoding="utf-8"))
 report["operations"]["recent"] *= 4
 report["attempts"]["recent"] *= 4
@@ -2200,6 +2203,13 @@ tree["attempts"]["active_recent"] = [
     {"attempt_id": "att_legacy", "parent_attempt_id": "att_main", "state": "working", "provider": "codex",
      "tool": "legacy-unlinked"}]
 saved_tree = json.dumps(tree, sort_keys=True)
+swapped_tree = deepcopy(tree)
+swapped_tree["attempts"]["active_recent"].append(
+    {"attempt_id": "att_swap", "parent_attempt_id": "att_main", "state": "working", "provider": "codex",
+     "panel": {"role": "worker", "provider": "claude", "model": "claude-sonnet-5-5",
+               "fallback": "provider-capacity", "label": "Swapped worker"}})
+swapped_row = next(r for r in worker_rows(swapped_tree) if r["work"] == "Swapped worker")
+assert swapped_row["provider"] == "claude" and "fallback: provider-capacity" in swapped_row["model"], swapped_row
 forest = hierarchy(tree, worker_rows(tree))
 assert {r["title"] for r in forest} == {"MAIN / Sol 6", "MAIN / Opus 5.5", "No known main"}, forest
 full_tree = render(tree, "codex", 100, 60, view="detail")
@@ -4232,8 +4242,42 @@ with patch.object(panel, "provider_catalog", return_value=[codex_only]):
     assert panel.selected_route("codex", "reviewer", None, "read", None)["provider"] == "codex"
     explicit = panel.selected_route("claude", "worker", None, "read", None, "codex")
     assert explicit["provider"] == "codex" and explicit["model"] == "gpt-6-luna" and explicit["effort"] == "medium"
+from panel_routing import alternate_route
+automatic = allocate("claude", role="builder", tier="routine", access="write",
+                     installed={"codex", "claude"})
+alternate = alternate_route(automatic, {"codex", "claude"})
+assert alternate and alternate["provider"] != automatic["provider"]
+assert alternate["workload"] == automatic["workload"] == "routine", alternate
+assert alternate_route(automatic, {automatic["provider"]}) is None
+# The fallback obeys the weekly-quota rule allocate() enforces: 90% used or more is excluded,
+# unknown or stale readings stay eligible, and without an eligible alternate nothing falls back.
+other = alternate["provider"]
+assert alternate_route(automatic, provider_status={other: {"weekly_used": 89}})["provider"] == other
+assert alternate_route(automatic, provider_status={other: {"weekly_used": None}})["provider"] == other
+assert alternate_route(automatic, provider_status={}) ["provider"] == other
+assert alternate_route(automatic, provider_status={other: {"weekly_used": 90}}) is None
+assert alternate_route(automatic, {"codex", "claude"}, {other: {"weekly_used": 97.2}}) is None
+with patch.object(panel, "selected_route", return_value=explicit), \
+        patch.object(panel, "provider_catalog", side_effect=AssertionError("explicit --to queried fallback")), \
+        patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-1]):
+    assert panel.dispatch(project, "claude", "worker", None, "read", None,
+                          prompt="explicit route", target="codex", model="gpt-6-luna") is None
 recorded = {"codex": {"weekly_used": 90}, "claude": {"weekly_used": None}}
 claude_candidate = {"provider": "claude", "binary": "claude", "installed": True, "models": [], "exact_model_override": True, "access": ["read", "write"]}
+def dispatched_fallback(readings):
+    catalog = [dict(row, installed=True) for row in (codex_only, claude_candidate)]
+    with patch.object(panel, "selected_route", return_value=dict(automatic, provider="claude", model="claude-sonnet-5-5",
+                                                                  binary="claude", effort="medium")), \
+            patch.object(panel, "provider_catalog", side_effect=lambda name="all": [row for row in catalog if row["provider"] == name]), \
+            patch.object(panel, "routing_status", return_value=readings), \
+            patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-1]):
+        return panel.dispatch(project, "claude", "worker", None, "write", "implement", brief=str(fallback_brief),
+                              verify="true")
+fallback_brief = temporary / "fallback-brief.md"
+fallback_brief.write_text("scoped brief\n")
+swapped = dispatched_fallback({})
+assert swapped and swapped["provider"] == "codex", swapped
+assert dispatched_fallback({"codex": {"weekly_used": 95}}) is None
 def fixture_selected_route(*args, **kwargs):
     target = args[5] if len(args) > 5 else kwargs.get("target")
     catalog = [row for row in (codex_only, claude_candidate) if target is None or row["provider"] == target]
@@ -9171,8 +9215,8 @@ def exercise_main_lineage():
                           parent_attempt_id=foreign["attempt_id"])
     rows = [old, resumed, live_old, live, foreign, blocked, unknown] + workers + [settled, live_worker, foreign_worker]
     caller = dict(environment, OMS_PANEL_MAIN_ATTEMPT=resumed["attempt_id"], OMS_ROOM_PARTICIPANT="lineage-stable")
-    def continue_task(task, env):
-        out, native, note = panel.continuation(project, "claude", None, task, {"provider": "codex"}, brief, env)
+    def continue_task(task, env, provider="codex"):
+        out, native, note = panel.continuation(project, "claude", None, task, {"provider": provider}, brief, env)
         try:
             assert "New instructions follow." in out.read_text()
             return native
@@ -9195,6 +9239,12 @@ def exercise_main_lineage():
         continue_task("lineage-task-0", caller)
         with patch.object(panel, "session_stored", return_value=True):
             assert continue_task("lineage-task-0", caller) == "lineage-safe-session"
+            # A provider fallback swaps the provider after the attempt row was written: the session
+            # belongs to the provider that ran, so only that provider resumes it.
+            workers[0]["refs"]["panel_provider"] = "claude"
+            assert continue_task("lineage-task-0", caller) is None
+            assert continue_task("lineage-task-0", caller, "claude") == "lineage-safe-session"
+            del workers[0]["refs"]["panel_provider"]
             def refuse_exit():
                 try:
                     continue_task("lineage-task-0", caller)

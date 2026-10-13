@@ -1274,7 +1274,8 @@ if fallback_model:
 fallback_reason = os.environ.get("OMS_INDEX_FALLBACK_REASON", "")
 if fallback_reason in ("capacity", "capacity-no-fallback", "capacity-dirty-worktree",
                        "model-unavailable", "policy-declined",
-                       "model-safeguard"):
+                       "model-safeguard", "provider-model-unavailable",
+                       "provider-capacity", "provider-down"):
     row["fallback_reason"] = fallback_reason
 row["fallback_used"] = os.environ.get("OMS_INDEX_FALLBACK_USED", "0") == "1"
 reasoning_effort = os.environ.get("OMS_INDEX_REASONING_EFFORT", "")
@@ -1592,6 +1593,35 @@ extract_output() {
   python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" "$1"
 }
 
+# Attempt boundaries and who produced each attempt come only from the
+# controller's ARTIFACT.attempts.json (ma_record_attempt), never from answer
+# text. An outcome is the final attempt's own; a failed primary before a
+# fallback stays in the transcript only as evidence.
+ma_attempt_route() { # SIDECAR -> provider TAB model TAB exit TAB output TAB stop_reason
+  python3 -c "import json, re, sys
+last = json.load(open(sys.argv[1], encoding=\"utf-8\"))[\"attempts\"][-1]
+fields = [last.get(k) for k in (\"provider\", \"model\", \"exit\", \"output\", \"stop_reason\")]
+fields[2] = str(fields[2]) if isinstance(fields[2], int) and not isinstance(fields[2], bool) else None
+ok = (isinstance(fields[0], str) and re.fullmatch(r\"[a-z0-9_-]+\", fields[0])
+      and isinstance(fields[1], str) and re.fullmatch(r\"[^\\s]{0,200}\", fields[1])
+      and fields[2] is not None
+      and isinstance(fields[3], str) and re.fullmatch(r\"[A-Za-z0-9][A-Za-z0-9._-]*\\.out\", fields[3])
+      and isinstance(fields[4], str) and re.fullmatch(r\"[^\\t\\r\\n]{0,300}\", fields[4]))
+print(chr(9).join(fields) if ok else \"\")" "$1" 2>/dev/null | tr -d '\r'
+}
+
+# Prints the final attempt's own output and succeeds when ARTIFACT has a
+# sidecar; a sidecar that cannot be read prints nothing. Fails without a
+# sidecar so the caller keeps its own Output window.
+ma_final_attempt_output() { # ARTIFACT [ROUTE]
+  local route="${2-}" out
+  [ -e "${1%.md}.attempts.json" ] || return 1
+  [ -n "$route" ] || route="$(ma_attempt_route "${1%.md}.attempts.json")"
+  [ -n "$route" ] || return 0
+  out="$(printf '%s\n' "$route" | cut -f4)"
+  [ ! -f "$(dirname "$1")/$out" ] || cat "$(dirname "$1")/$out"
+}
+
 # One transport/result contract for consultation and its advice prompt variant.
 ma_call_read_peer() {  # ARTIFACT_OUT PREVIEW AGENT_CALL_ARGS...
   local artifact_out="$1" preview="$2" log artifact rc=0
@@ -1636,7 +1666,7 @@ ma_answer_quality() {
     return 0
   fi
   tmp="$(agent_memory_mktemp)" || { printf 'blocked\n'; return 0; }
-  extract_output "$artifact" > "$tmp"
+  ma_final_attempt_output "$artifact" > "$tmp" || extract_output "$artifact" > "$tmp"
   if ! verdict="$(python3 "$helper" "$tmp" 2>/dev/null)" || [ -z "$verdict" ]; then
     rm -f "$tmp"
     echo "error: answer-quality helper failed on $artifact" >&2
@@ -1653,7 +1683,7 @@ ma_answer_quality() {
 ma_answer_block_reason() {
   local artifact="$1"
   [ -f "$artifact" ] || return 0
-  extract_output "$artifact" |
+  { ma_final_attempt_output "$artifact" || extract_output "$artifact"; } |
     grep -v -E '^\s*(model-route:|model-result:|\s*$)' |
     sed -n '1p' |
     cut -c1-200
@@ -2258,6 +2288,88 @@ ma_room_relay_stop() {  # PID [TICKS]
   wait "$pid" 2>/dev/null || true
 }
 
+# Provider failure signatures, never free text: only a CLI's own error events
+# (codex error/turn.failed, a claude result envelope that is an API error) and
+# its fixed "ERROR:"/"Error:"/"API Error:" line prefixes are read. Agent answers
+# ride item/assistant events, so a quoted "429" or "model not found" in the
+# agent's own work classifies as nothing. Unsure means no fallback.
+oms_panel_provider_error_scan() { # OUTPUT_FILE
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json, re, sys
+try:
+    raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except OSError:
+    raise SystemExit(0)
+PREFIX = re.compile(r"^(?:ERROR|Error|API Error)\s*:\s*(\S.*)$")
+ENVELOPE = re.compile(r"^(?:API Error\b|There's an issue with the selected model|"
+                      r"Claude AI usage limit reached|You've hit your (?:usage )?limit)")
+CODE = re.compile(r"(?:\bapi error:?\s*|\bstatus(?: code)?[:= ]+|\bhttp(?:/[\d.]+)?[: ]+|\bcode[:= ]+)(\d{3})\b", re.I)
+MODEL = re.compile(r"model_not_found|issue with the selected model|unknown model|invalid model|"
+                   r"model\b.{0,80}(?:does not exist|not found|not available|may not exist)|"
+                   r"do(?:es)? not have access to (?:the )?model", re.I)
+CAPACITY = re.compile(r"rate.?limit|too many requests|at capacity|overloaded|usage limit|hit your limit|"
+                      r"quota exceeded|resource.exhausted", re.I)
+DOWN = re.compile(r"service unavailable|bad gateway|gateway timeout|internal server error|"
+                  r"connection (?:refused|reset|timed out|closed)|stream disconnected|"
+                  r"error sending request|could not connect|econnreset|etimedout", re.I)
+
+
+def text(value):
+    if isinstance(value, dict):
+        value = value.get("message")
+    return value if isinstance(value, str) else ""
+
+
+messages, pending, completed = [], [], False
+for line in raw.splitlines():
+    candidate = line.strip()
+    if candidate.startswith("{") and '"type"' in candidate:
+        try:
+            doc = json.loads(candidate)
+        except ValueError:
+            doc = None
+        if isinstance(doc, dict):
+            kind = doc.get("type")
+            if kind == "turn.completed":
+                completed = True
+            elif kind == "turn.failed":
+                messages.append(text(doc.get("error")))
+            elif kind == "error":
+                pending.append(text(doc.get("message")) or text(doc.get("error")))
+            elif kind == "result" and doc.get("is_error") is True:
+                result = doc.get("result")
+                if isinstance(result, str) and ENVELOPE.match(result):
+                    messages.append(result)
+            continue
+    match = PREFIX.match(candidate)
+    if match:
+        messages.append(match.group(1))
+# A reconnect error the turn finished after is not the failure.
+if not completed:
+    messages.extend(pending)
+for message in messages:
+    code = CODE.search(message)
+    code = code.group(1) if code else ""
+    if MODEL.search(message):
+        print("model_unavailable")
+    elif code in ("429", "529") or CAPACITY.search(message):
+        print("capacity")
+    elif code in ("500", "502", "503", "504") or DOWN.search(message):
+        print("provider_down")
+    else:
+        continue
+    break
+PY
+}
+
+oms_panel_provider_error_classify() { # PROVIDER EXIT OUTPUT_FILE
+  local provider="$1" status="$2" file="$3"
+  [ "$status" -ne 0 ] || return 0
+  case "$provider" in codex|claude) ;; *) return 0 ;; esac
+  [ -f "$file" ] && [ -s "$file" ] || return 0
+  oms_panel_provider_error_scan "$file" | tr -d '\r'
+}
+
 ma_provider_attempt() {
   local provider="$1"
   local access="$2"
@@ -2288,6 +2400,10 @@ ma_provider_attempt() {
   local room_relay_dir="" room_relay_pid="" room_relay_ready=0 room_relay_attempt=0
   local -a cmd
 
+  OMS_PROVIDER_ERROR_CLASSIFICATION=""
+  OMS_PROVIDER_ERROR_EXIT=""
+  OMS_PROVIDER_ERROR_PROVIDER=""
+  export OMS_PROVIDER_ERROR_CLASSIFICATION OMS_PROVIDER_ERROR_EXIT OMS_PROVIDER_ERROR_PROVIDER
   provider="$(oms_provider_normalize "$provider")" || {
     echo "error: unsupported provider: $provider" > "$output_file"
     return 2
@@ -2769,6 +2885,14 @@ ma_provider_attempt() {
     fi
     [ -z "$room_relay_dir" ] || rm -rf "$room_relay_dir"
   fi
+  if [ "$status" -ne 0 ] && [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
+    OMS_PROVIDER_ERROR_CLASSIFICATION="$(oms_panel_provider_error_classify "$provider" "$status" "$output_file")"
+    if [ -n "$OMS_PROVIDER_ERROR_CLASSIFICATION" ]; then
+      OMS_PROVIDER_ERROR_EXIT="$status"
+      OMS_PROVIDER_ERROR_PROVIDER="$provider"
+    fi
+    export OMS_PROVIDER_ERROR_CLASSIFICATION OMS_PROVIDER_ERROR_EXIT OMS_PROVIDER_ERROR_PROVIDER
+  fi
   [ -z "$provider_scratch" ] || rm -rf "$provider_scratch"
   # Remove only a real directory at its physical spot inside this workdir: a
   # symlinked .oms or .oms/tmp must not steer the removal anywhere else.
@@ -2936,6 +3060,51 @@ ma_default_read_effort() {  # ma_default_read_effort PROVIDER ACCESS
   fi
 }
 
+# Attempt boundaries and attribution are controller facts, never parsed back
+# out of the answer stream: each attempt's raw output gets its own
+# ARTIFACT.attempt-N.out and an entry in ARTIFACT.attempts.json, written here
+# after the attempt and before the next one reuses ATTEMPT_FILE. The stop
+# reason is the line this controller's transform emitted, not answer text.
+ma_record_attempt() { # ARTIFACT PROVIDER MODEL EFFORT EXIT CLASSIFICATION ATTEMPT_FILE
+  python3 - "${1%.md}" "$2" "$3" "$4" "$5" "$6" "$7" <<'PY' 2>/dev/null ||
+import json, os, shutil, sys
+base, provider, model, effort, status, classification, source = sys.argv[1:]
+sidecar = base + ".attempts.json"
+attempts = []
+if os.path.exists(sidecar):
+    with open(sidecar, encoding="utf-8") as handle:
+        attempts = json.load(handle)["attempts"]
+    if not isinstance(attempts, list):
+        raise SystemExit(1)
+with open(source, encoding="utf-8", errors="replace") as handle:
+    lines = [line.rstrip("\r\n") for line in handle]
+prefix = "stop-reason: provider=%s " % provider
+stop = ""
+if provider in ("claude", "codex") and lines and lines[0].startswith(prefix):
+    stop = lines[0]
+elif provider == "antigravity":
+    tail = [line for line in lines if line.strip()]
+    if tail and tail[-1].startswith(prefix):
+        stop = tail[-1]
+name = "%s.attempt-%d.out" % (os.path.basename(base), len(attempts) + 1)
+shutil.copyfile(source, os.path.join(os.path.dirname(base) or ".", name))
+attempts.append({"provider": provider, "model": model, "effort": effort,
+                 "exit": int(status), "stop_reason": stop[len("stop-reason: "):],
+                 "classification": classification, "output": name})
+with open(sidecar + ".tmp", "w", encoding="utf-8") as handle:
+    json.dump({"attempts": attempts}, handle, indent=1)
+    handle.write("\n")
+os.replace(sidecar + ".tmp", sidecar)
+PY
+    {
+      # A stale record would make an earlier attempt's outcome authoritative; readers then fall back to the
+      # whole transcript, which judges the failed primary first.
+      rm -f "${1%.md}.attempts.json"
+      echo "warning: attempt record not written for $(basename "$1")" >&2
+    }
+  cat "$7" >> "$1"
+}
+
 ma_run_routed_provider_inner() {
   local provider="$1"
   local access="$2"
@@ -2946,6 +3115,9 @@ ma_run_routed_provider_inner() {
   local state_repo="$7"
   local call_id="$8"
   local attempt_file
+  local primary_error_provider=""
+  local primary_error_class=""
+  local primary_error_exit=""
   local before=""
   local after=""
   local status
@@ -2957,7 +3129,14 @@ ma_run_routed_provider_inner() {
 
   OMS_WORKER_AUTHORITY_VIOLATION=0
   export OMS_WORKER_AUTHORITY_VIOLATION
+  OMS_PANEL_PROVIDER_ERROR_CLASS=""
+  OMS_PANEL_PROVIDER_ERROR_EXIT=""
+  OMS_PANEL_PROVIDER_ERROR_PROVIDER=""
+  OMS_PANEL_PROVIDER_ERROR_RECORDED=0
+  export OMS_PANEL_PROVIDER_ERROR_CLASS OMS_PANEL_PROVIDER_ERROR_EXIT OMS_PANEL_PROVIDER_ERROR_PROVIDER OMS_PANEL_PROVIDER_ERROR_RECORDED
   provider="$(oms_provider_normalize "$provider")" || return $?
+  OMS_PROVIDER_SELECTED="$provider"
+  export OMS_PROVIDER_SELECTED
   oms_model_prepare "$provider" || return $?
   ma_default_read_effort "$provider" "$access"
   # After canonicalization: the ledger files seats under the canonical name.
@@ -2991,12 +3170,44 @@ ma_run_routed_provider_inner() {
   status=0
   ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
     "$OMS_MODEL_PRIMARY" "$OMS_REASONING_RESOLVED" "$origin" "$state_repo" "$call_id" || status=$?
+  primary_error_class="$OMS_PROVIDER_ERROR_CLASSIFICATION"
+  primary_error_exit="$OMS_PROVIDER_ERROR_EXIT"
+  primary_error_provider="$provider"
+  if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ -n "$primary_error_class" ]; then
+    OMS_PANEL_PROVIDER_ERROR_CLASS="$primary_error_class"
+    OMS_PANEL_PROVIDER_ERROR_EXIT="$primary_error_exit"
+    OMS_PANEL_PROVIDER_ERROR_PROVIDER="$provider"
+    export OMS_PANEL_PROVIDER_ERROR_CLASS OMS_PANEL_PROVIDER_ERROR_EXIT OMS_PANEL_PROVIDER_ERROR_PROVIDER
+    if [ -n "$OMS_ATTEMPT_ID" ] && [ -n "$state_repo" ]; then
+      local panel_events panel_error_record persisted_error
+      panel_events="$(ma_scripts_dir)/agent-events.sh"
+      if [ -x "$panel_events" ] &&
+        "$panel_events" --repo "$state_repo" usage --attempt "$OMS_ATTEMPT_ID" --actor provider-router \
+          --ref "provider_error=$primary_error_class" \
+          --ref "provider_error_provider=$primary_error_provider" \
+          --ref "provider_error_exit=$primary_error_exit" >/dev/null; then
+        panel_error_record="$("$panel_events" --repo "$state_repo" show --attempt "$OMS_ATTEMPT_ID" --json 2>/dev/null)" || panel_error_record=""
+        if [ -n "$panel_error_record" ]; then
+          persisted_error="$(printf "%s\\n" "$panel_error_record" | python3 -c "import json,sys; refs=json.load(sys.stdin).get(\"refs\",{}); value=refs.get(\"provider_error\",\"\"); print(value if refs.get(\"provider_error_provider\")==sys.argv[1] and refs.get(\"provider_error_exit\")==sys.argv[2] and value in (\"model_unavailable\",\"capacity\",\"provider_down\") else \"\")" "$primary_error_provider" "$primary_error_exit" | tr -d '\r')"
+        else
+          persisted_error=""
+        fi
+        if [ "$persisted_error" = "$primary_error_class" ]; then
+          primary_error_class="$persisted_error"
+          OMS_PANEL_PROVIDER_ERROR_RECORDED=1
+          export OMS_PANEL_PROVIDER_ERROR_RECORDED
+        else
+          primary_error_class=""
+        fi
+      fi
+    fi
+  fi
   if ! ma_write_post_attempt_guard "$access"; then
     OMS_WORKER_AUTHORITY_VIOLATION=1
     export OMS_WORKER_AUTHORITY_VIOLATION
     status=125
   fi
-  cat "$attempt_file" >> "$artifact"
+  ma_record_attempt "$artifact" "$provider" "$OMS_MODEL_PRIMARY" "$OMS_REASONING_RESOLVED" "$status" "$OMS_PROVIDER_ERROR_CLASSIFICATION" "$attempt_file"
 
   # Conversation completion, EOF, and protocol errors are never model retries.
   # Replaying the controller could attach another session or duplicate a turn.
@@ -3050,7 +3261,7 @@ ma_run_routed_provider_inner() {
           export OMS_WORKER_AUTHORITY_VIOLATION
           status=125
         fi
-        cat "$attempt_file" >> "$artifact"
+        ma_record_attempt "$artifact" "$provider" "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$status" "$OMS_PROVIDER_ERROR_CLASSIFICATION" "$attempt_file"
         [ "$OMS_WORKER_AUTHORITY_VIOLATION" != 1 ] || break
       done <<EOF
 $OMS_MODEL_SAFEGUARD_CHAIN
@@ -3090,7 +3301,7 @@ EOF
         export OMS_WORKER_AUTHORITY_VIOLATION
         status=125
       fi
-      cat "$attempt_file" >> "$artifact"
+      ma_record_attempt "$artifact" "$provider" "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$status" "$OMS_PROVIDER_ERROR_CLASSIFICATION" "$attempt_file"
       if [ "$OMS_WORKER_AUTHORITY_VIOLATION" = 1 ]; then
         rm -f "$attempt_file"
         return "$status"
@@ -3146,11 +3357,77 @@ EOF
         export OMS_WORKER_AUTHORITY_VIOLATION
         status=125
       fi
-      cat "$attempt_file" >> "$artifact"
+      ma_record_attempt "$artifact" "$provider" "$OMS_MODEL_SELECTED" "$OMS_REASONING_SELECTED" "$status" "$OMS_PROVIDER_ERROR_CLASSIFICATION" "$attempt_file"
       if [ "$OMS_WORKER_AUTHORITY_VIOLATION" = 1 ]; then
         rm -f "$attempt_file"
         return "$status"
       fi
+    fi
+  fi
+
+  # Panel failover needs a failed CLI whose own error signature was recorded
+  # on the attempt, and only one fallback per call. In write mode, require the
+  # provider to have left the worktree untouched before another provider sees it.
+  if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "$status" -ne 0 ] &&
+    [ "$OMS_MODEL_FALLBACK_USED" != 1 ] &&
+    [ "${OMS_PANEL_PROVIDER_ERROR_RECORDED:-0}" = 1 ] &&
+    [ -n "$primary_error_class" ] &&
+    ! oms_model_is_policy_decline_output "$attempt_file" "$prompt_file" &&
+    [ -n "${OMS_PANEL_FALLBACK_PROVIDER:-}" ] &&
+    [ -n "${OMS_PANEL_FALLBACK_MODEL:-}" ] &&
+    [ "$OMS_WORKER_AUTHORITY_VIOLATION" != 1 ]; then
+    local fallback_allowed=1
+    if [ "$access" = write ]; then
+      after="$(ma_worktree_fingerprint "$workdir")" || after="fingerprint-failed"
+      [ -n "$before" ] && [ "$after" = "$before" ] || fallback_allowed=0
+    fi
+    if [ "$fallback_allowed" = 1 ]; then
+      local swap_model_before="${OMS_MODEL_EXPLICIT-}" swap_resume="${OMS_RESUME_SESSION-}"
+      OMS_MODEL_EXPLICIT="$OMS_PANEL_FALLBACK_MODEL"
+      export OMS_MODEL_EXPLICIT
+      unset OMS_RESUME_SESSION
+      local fallback_provider
+      fallback_provider="$(oms_provider_normalize "$OMS_PANEL_FALLBACK_PROVIDER" 2>/dev/null)" || fallback_provider=""
+      if [ -n "$fallback_provider" ] && oms_model_prepare "$fallback_provider"; then
+        provider="$fallback_provider"
+        OMS_MODEL_PRIMARY="$OMS_PANEL_FALLBACK_MODEL"
+        OMS_MODEL_SELECTED="$OMS_PANEL_FALLBACK_MODEL"
+        OMS_REASONING_RESOLVED="${OMS_PANEL_FALLBACK_EFFORT:-}"
+        OMS_REASONING_SELECTED="$OMS_REASONING_RESOLVED"
+        OMS_MODEL_FALLBACK_USED=1
+        case "$primary_error_class" in
+          provider_down) OMS_MODEL_FALLBACK_REASON=provider-down ;;
+          *) OMS_MODEL_FALLBACK_REASON="provider-${primary_error_class//_/-}" ;;
+        esac
+        OMS_PROVIDER_SELECTED="$provider"
+        export OMS_PROVIDER_SELECTED
+        printf '\npanel-provider-fallback: provider=%s model=%s reason=%s exit=%s\n' \
+          "$provider" "$OMS_MODEL_PRIMARY" "$primary_error_class" "$primary_error_exit" >> "$artifact"
+        # The attempt must name the provider and model that actually ran.
+        if [ -n "$OMS_ATTEMPT_ID" ] && [ -n "$state_repo" ] &&
+          ! "$(ma_scripts_dir)/agent-events.sh" --repo "$state_repo" usage --attempt "$OMS_ATTEMPT_ID" \
+            --actor provider-router --ref "panel_provider=$provider" --ref "panel_model=$OMS_MODEL_PRIMARY" \
+            --ref "panel_effort=${OMS_REASONING_SELECTED:-auto}" \
+            --ref "panel_fallback=$OMS_MODEL_FALLBACK_REASON" >/dev/null; then
+          printf 'panel-provider-fallback: attempt route not updated\n' >> "$artifact"
+        fi
+        : > "$attempt_file"
+        status=0
+        ma_provider_attempt "$provider" "$access" "$prompt_file" "$attempt_file" "$workdir" \
+          "$OMS_MODEL_PRIMARY" "$OMS_REASONING_RESOLVED" "$origin" "$state_repo" "$call_id" || status=$?
+        if ! ma_write_post_attempt_guard "$access"; then
+          OMS_WORKER_AUTHORITY_VIOLATION=1
+          export OMS_WORKER_AUTHORITY_VIOLATION
+          status=125
+        fi
+        ma_record_attempt "$artifact" "$provider" "$OMS_MODEL_PRIMARY" "$OMS_REASONING_RESOLVED" "$status" "$OMS_PROVIDER_ERROR_CLASSIFICATION" "$attempt_file"
+      else
+        OMS_MODEL_EXPLICIT="$swap_model_before"
+        export OMS_MODEL_EXPLICIT
+        [ -z "$swap_resume" ] || { OMS_RESUME_SESSION="$swap_resume"; export OMS_RESUME_SESSION; }
+      fi
+    else
+      printf '\npanel-provider-fallback: skipped; write worktree changed after provider failure\n' >> "$artifact"
     fi
   fi
 
@@ -3229,6 +3506,8 @@ ma_run_routed_provider() {
 
   oms_require_peer_owner || return $?
 
+  # Names the provider that actually ran; a stale value from an earlier call must not stand in.
+  OMS_PROVIDER_SELECTED=""
   provider="$(oms_provider_normalize "$provider")" || return $?
   if [ "$access" = read ] && [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] &&
     [ -n "${MA_READ_SOURCE_REPO:-}" ] &&
@@ -3325,7 +3604,7 @@ PY
   # A zero exit is the liveness proof the no-answer rows claim is missing:
   # whatever the answer's quality, the CLI ran and returned. Clear the seat's
   # unresolved history here, at the same choke point every verb passes through.
-  [ "$status" -ne 0 ] || ma_resolve_seat_recovery "$provider"
+  [ "$status" -ne 0 ] || ma_resolve_seat_recovery "${OMS_PROVIDER_SELECTED:-$provider}"
 
   if [ -n "$OMS_ATTEMPT_ID" ] && [ -n "$state_repo" ] && [ -x "$events" ]; then
     duration_ms=$(((SECONDS - started_seconds) * 1000))
@@ -3358,6 +3637,10 @@ PY
     [ -z "$token_count" ] || usage_args+=(--tokens "$token_count")
     # The provider's own session id rides the attempt refs, never room text.
     [ -z "$native_session" ] || usage_args+=(--ref "native_session=$native_session")
+    [ -z "${OMS_PANEL_PROVIDER_ERROR_CLASS:-}" ] || [ "${OMS_PANEL_PROVIDER_ERROR_RECORDED:-0}" = 1 ] || usage_args+=(
+      --ref "provider_error=$OMS_PANEL_PROVIDER_ERROR_CLASS"
+      --ref "provider_error_provider=$OMS_PANEL_PROVIDER_ERROR_PROVIDER"
+      --ref "provider_error_exit=$OMS_PANEL_PROVIDER_ERROR_EXIT")
     # Parsed provider output is cumulative observability only. It is not an
     # authenticated hard-budget source because provider text and trusted-local
     # worker processes share this boundary.
@@ -3607,6 +3890,8 @@ PY_SEAT
   ma_run_routed_provider "$provider" read "$prompt_file" "$artifact" "$(ma_read_source_repo "${REPO:-$PWD}")" \
     "${MA_KIND:-call}" "${REPO:-}" "${OMS_OPERATION_ID:-}" || status=$?
 
+  # A panel provider fallback ran the call elsewhere; the row names who answered.
+  provider="${OMS_PROVIDER_SELECTED:-$provider}"
   printf '\n\n## Exit\n\n%s\n' "$status" >> "$artifact"
   ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" "$status" "$artifact" "" "$prompt_file" || true
   if [ "$status" -eq 0 ]; then

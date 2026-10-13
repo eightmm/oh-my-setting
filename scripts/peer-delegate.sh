@@ -1702,6 +1702,7 @@ EOF
   if [ "$route_captured" = 0 ]; then
     route_captured=1
     route_class="$OMS_MODEL_RESOLVED_CLASS"
+    route_provider="${OMS_PROVIDER_SELECTED:-$TO}"
     route_primary="$OMS_MODEL_PRIMARY"
     route_fallback="$OMS_MODEL_FALLBACK"
     route_selected="$OMS_MODEL_SELECTED"
@@ -1712,6 +1713,7 @@ EOF
     route_selected_reasoning="$OMS_REASONING_SELECTED"
   elif [ "$OMS_MODEL_FALLBACK_USED" = 1 ]; then
     route_selected="$OMS_MODEL_SELECTED"
+    route_provider="${OMS_PROVIDER_SELECTED:-$route_provider}"
     route_fallback_used=1
     route_fallback_reason="$OMS_MODEL_FALLBACK_REASON"
     route_selected_reasoning="$OMS_REASONING_SELECTED"
@@ -1720,6 +1722,11 @@ EOF
     route_fallback_reason="$OMS_MODEL_FALLBACK_REASON"
   fi
   case "$OMS_MODEL_FALLBACK_REASON:$worker_status" in
+    provider-*:*)
+      # The call moved to the other provider; a repair round would re-run the
+      # original provider with its own model and misattribute the final route.
+      route_retry_terminal=1
+      ;;
     policy-declined:*)
       # The provider declined the request. A repair round re-sends it, which is
       # not repair — it is asking again until the answer changes.
@@ -1732,7 +1739,8 @@ EOF
       [ "$worker_status" -eq 0 ] || route_retry_terminal=1
       ;;
   esac
-  if [ "$OMS_MODEL_FALLBACK_USED" = 1 ] && [ "$worker_status" -eq 0 ]; then
+  if [ "$OMS_MODEL_FALLBACK_USED" = 1 ] && [ "$worker_status" -eq 0 ] &&
+    [ "${OMS_PROVIDER_SELECTED:-$TO}" = "$TO" ]; then
     OMS_MODEL_EXPLICIT="$OMS_MODEL_SELECTED"
     OMS_MODEL_FALLBACK_EXPLICIT=""
     OMS_REASONING_EFFORT_REQUEST="$OMS_REASONING_SELECTED"
@@ -1890,6 +1898,7 @@ worker_attempt_state=""
 route_captured=0
 route_retry_terminal=0
 route_class=""
+route_provider="$TO"
 route_primary=""
 route_fallback=""
 route_selected=""
@@ -2110,7 +2119,7 @@ if [ "$DRY_RUN" != "1" ] && [ "$worker_status" -eq 0 ]; then
   if [ "$(ma_answer_quality "$artifact")" = "blocked" ]; then
     worker_blocked="$(ma_answer_block_reason "$artifact")"
     worker_status=126
-    echo "worker: $TO could not run: $worker_blocked" >&2
+    echo "worker: ${route_provider:-$TO} could not run: $worker_blocked" >&2
     printf '\n\n## Worker Blocked\n\n- %s\n- not a task failure: the CLI could not act, so no repair is attempted\n' \
       "$worker_blocked" >> "$artifact"
   fi
@@ -2414,7 +2423,7 @@ if [ -n "$worker_guard_dir" ]; then
     # Output above was never closed. Paths stay in the local bullets above.
     printf "\n\n## Output\n\nThe worker guard stopped this run: protected state changed outside the worker's worktree (%s). The worktree was kept for inspection; nothing was landed.\n\n## Exit\n\n1\n" \
       "$worker_guard_changed" >> "$artifact"
-    OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" ||
+    OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" ||
       echo "warning: worker-authority breach receipt was NOT indexed; inbox and recovery will not see it" >&2
     plan_failure_transition
     exit 1
@@ -2460,7 +2469,7 @@ if [ "$worker_status" -ne 0 ] || [ "${verify_status:-0}" -ne 0 ]; then
   index_exit=1
 fi
 OMS_INDEX_REPAIR_REPLAY_JSON="$repair_replay_json" \
-  OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "$TO" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" "$REVIEW_ARTIFACT" || true
+  OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" "$REVIEW_ARTIFACT" || true
 
 applied=0
 plan_reviewed=0
@@ -2514,7 +2523,7 @@ if [ -n "$THREAD_ID" ]; then
       fi
       extract_output "$artifact" | ma_sanitize_quoted_output 2>/dev/null || true
     } > "$thread_turn"
-    ma_thread_append "$REPO" "$THREAD_ID" answer "$thread_turn" "$TO" \
+    ma_thread_append "$REPO" "$THREAD_ID" answer "$thread_turn" "${route_provider:-$TO}" \
       "${OMS_MODEL_SELECTED:-}" "$artifact"
     rm -f "$thread_turn"
   fi

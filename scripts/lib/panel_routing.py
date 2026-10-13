@@ -90,6 +90,13 @@ def policy():
     return value
 
 
+def weekly_used(provider_status, provider):
+    """The board's rounded weekly usage for a provider; None when stale, malformed or missing."""
+    from panel_metrics import percent
+    row = provider_status.get(provider) if isinstance(provider_status, dict) else None
+    return percent(row.get("weekly_used")) if isinstance(row, dict) else None
+
+
 def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None):
     """Availability, quota left, role preference, then independent judgment; explicit targets narrow installed."""
     if not owner or role not in KINDS:
@@ -120,12 +127,9 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
             tier, ", ".join(sorted({c["provider"] for c in candidates})) or "none configured"))
     if len(usable) > 1:
         # Use the board's rounded reading; stale, malformed and missing readings remain available.
-        from panel_metrics import percent
-        readings = provider_status if isinstance(provider_status, dict) else {}
         available, used_by = [], {}
         for candidate in usable:
-            row = readings.get(candidate["provider"])
-            used = percent(row.get("weekly_used")) if isinstance(row, dict) else None
+            used = weekly_used(provider_status, candidate["provider"])
             if used is None or used < 90:
                 available.append(candidate)
                 used_by[candidate["provider"]] = used
@@ -142,6 +146,25 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         usable = sorted(usable, key=lambda c: c["provider"] == owner)
     route = dict(usable[0], effort="low") if role == "researcher" else dict(usable[0])
     return dict(route, role=role, kind=KINDS[role], owner=owner, workload=tier, access=access, purpose=purpose)
+
+
+def alternate_route(route, installed=None, provider_status=None):
+    """Return the other provider route from this exact tier that allocate() would also accept, if any."""
+    tier = route.get("workload")
+    if tier not in TIERS:
+        return None
+    candidates = [candidate for candidate in policy()["tiers"][tier]
+                  if candidate["provider"] != route.get("provider")
+                  and (installed is None or candidate["provider"] in installed)
+                  and (weekly_used(provider_status, candidate["provider"]) or 0) < 90]
+    if route.get("role") == "researcher":
+        candidates = [candidate for candidate in candidates
+                      if route_family(candidate["provider"], candidate["model"])[0] in RESEARCH_FAMILIES]
+    if not candidates:
+        return None
+    return dict(candidates[0], effort=route.get("effort"), role=route.get("role"),
+                kind=route.get("kind"), owner=route.get("owner"), workload=tier,
+                access=route.get("access"), purpose=route.get("purpose"))
 
 
 def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=None, resume=None):

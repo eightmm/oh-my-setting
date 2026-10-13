@@ -34,8 +34,8 @@ import dispatch_supervisor as dispatch_store
 from dashboard_projection import clean
 from panel_view import INBOX_LIMIT, main_occupied, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
-from panel_routing import (allocate, command as routed_command, policy, KINDS, MODEL_IDS, TIERS, WRITERS,
-                           newest_route_model, route_family)
+from panel_routing import (allocate, alternate_route, command as routed_command, policy, KINDS, MODEL_IDS,
+                           TIERS, WRITERS, newest_route_model, route_family)
 from panel_results import (DURABLE, _read, _write, _lock, finalize, outcomes, results, results_snapshot,
                            retry_delivery, verified_patch)
 from panel_cache import read_shared
@@ -1202,7 +1202,10 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None):
             where = " Your previous patch (%s) follows; apply what still fits.\n```diff\n%s```\n" % (name, body)
         else:
             where = " Your previous patch is %s in the main checkout (apply what still fits)." % name
-    resume = session if (session and last.get("provider") == route["provider"]
+    # A provider fallback swaps the attempt's provider after its row was written; the session belongs to
+    # the provider that actually ran.
+    ran = last.get("refs", {}).get("panel_provider") or last.get("provider")
+    resume = session if (session and ran == route["provider"]
                          and session_stored(route["provider"], session)) else None
     if resume:
         preamble = ("Your earlier work was on %s; the repository is now at %s.%s New instructions follow.\n\n"
@@ -1210,8 +1213,8 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None):
         note = "continuing round %d of %s in its native session" % (len(earlier) + 1, task_id)
     else:
         summary = clean(str(call.get("answer") or "no summary recorded"), 1500) if eligible_result else "no verified summary recorded"
-        reason = ("the earlier worker ran on %s, not %s" % (last.get("provider"), route["provider"])
-                  if session and last.get("provider") != route["provider"] else
+        reason = ("the earlier worker ran on %s, not %s" % (ran, route["provider"])
+                  if session and ran != route["provider"] else
                   "the earlier session is not recorded or no longer on disk")
         preamble = ("A fresh worker continues earlier work on %s (%s). The repository is now at %s.%s "
                     "Earlier summary: %s\nNew instructions follow.\n\n" % (task_id, reason, head, where, summary))
@@ -1274,8 +1277,23 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         temporary, task_id = brief, continue_task
         print(note, file=sys.stderr)
     try:
+        fallback = None
+        if not target:
+            fallback = alternate_route(route, provider_status=routing_status(repo, None, main))
+            if fallback:
+                try:
+                    peer = provider_catalog(fallback["provider"])[0]
+                    if (peer["installed"] and access in peer["access"] and peer["exact_model_override"]):
+                        fallback["binary"] = peer["binary"]
+                        fallback["model"] = newest_route_model(
+                            fallback["provider"], fallback["model"],
+                            peer.get("catalog_models", peer.get("models", [])))
+                    else:
+                        fallback = None
+                except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
+                    fallback = None
         return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
-                            dry_run, label, route, main, resume, scopes, work_repo, member_id)
+                            dry_run, label, route, main, resume, scopes, work_repo, member_id, fallback)
     finally:
         if temporary:
             temporary.unlink()
@@ -2712,7 +2730,7 @@ def _settle_dispatch(repo, room_id, member, status):
 
 
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
-                 dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None):
+                 dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None):
     source_repo = repo
     if os.environ.get("OMS_ROOM_REPO"):
         repo = repository(os.environ["OMS_ROOM_REPO"])
@@ -2759,6 +2777,13 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     env.pop("OMS_ATTEMPT_ID", None)
     env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE=route["kind"],
                OMS_PANEL_PURPOSE=route["purpose"], OMS_PANEL_WORKLOAD=route["workload"])
+    if fallback:
+        env.update(OMS_PANEL_FALLBACK_PROVIDER=fallback["provider"],
+                   OMS_PANEL_FALLBACK_MODEL=fallback["model"],
+                   OMS_PANEL_FALLBACK_EFFORT=fallback["effort"] or "")
+    else:
+        for name in ("OMS_PANEL_FALLBACK_PROVIDER", "OMS_PANEL_FALLBACK_MODEL", "OMS_PANEL_FALLBACK_EFFORT"):
+            env.pop(name, None)
     if label:
         env["OMS_PANEL_LABEL"] = label
     else:

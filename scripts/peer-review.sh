@@ -144,13 +144,20 @@ Do not put any text after the final GATE line.
 EOF
 }
 
+# The verdict window is the final attempt's own output (ma_final_attempt_output).
+# An artifact without a sidecar keeps the whole Output window; a sidecar that
+# cannot be read yields no window.
+review_final_attempt() { # ARTIFACT ROUTE
+  ma_final_attempt_output "$1" "$2" || awk '/^## Output$/{o=1;next} /^## Exit$/{o=0} o' "$1"
+}
+
 review_verdicts() {
   local vdir="$1"
   local forced_run_id="${2:-}"
   local json_out="${3:-}"
   local json_stdout="${4:-0}"
   local latest run_id base provider suf r f verdict overall found reason
-  local requested_model selected_model model_family
+  local requested_model selected_model model_family seat_provider attempt_route
   # bash 3.2 has no associative arrays; track one "provider<TAB>round<TAB>file"
   # record per candidate and pick the highest round per provider at the end.
   local vrecords="" providers
@@ -221,9 +228,11 @@ review_verdicts() {
       overall=2
       continue
     fi
+    attempt_route=""
+    [ ! -e "${f%.md}.attempts.json" ] || attempt_route="$(ma_attempt_route "${f%.md}.attempts.json")"
     # Verdict must be on its own line; a prompt echo inside the transcript
     # ("...exactly one line: GATE: pass or GATE: fail.") must not match.
-    verdict="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0} o' "$f" |
+    verdict="$(review_final_attempt "$f" "$attempt_route" |
       grep -E '^[*[:space:]]*GATE: (pass|fail)[*[:space:]]*$' | tail -n 1 | grep -oE 'pass|fail')" || verdict=""
     # The recorded exit is part of the verdict: a seat that died nonzero
     # (timeout, kill, provider error) left a partial transcript, and a GATE
@@ -239,20 +248,25 @@ review_verdicts() {
       died_exit="$exit_val"
       verdict=""
     fi
+    if [ -n "$attempt_route" ] && [ -z "$died_exit" ] && [ "$(printf '%s\n' "$attempt_route" | cut -f3)" != 0 ]; then
+      died_exit="$(printf '%s\n' "$attempt_route" | cut -f3)"
+      verdict=""
+    fi
     # A recorded stop reason outranks the text: a seat cut off at max_tokens
     # exits 0 with finished-looking sentences, and a GATE line above the cut
     # judged only what survived it. Same Output window as the GATE parse —
     # a replayed thread turn can quote a marker line into the prompt, and a
     # quoted marker is not the transport's verdict.
-    died_stop="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0}
-      o && /^\[agy\] print timeout after .+ with turn in progress; returning partial output[[:space:]]*$/{print "provider=antigravity reason=stream_truncated"; exit}
-      o && /^stop-reason: .*(reason=max_tokens|reason=stream_truncated|is_error=1)/{print substr($0, 14, 67); exit}' "$f")"
+    died_stop="$({ printf 'stop-reason: %s\n' "$(printf '%s\n' "$attempt_route" | cut -f5)"; review_final_attempt "$f" "$attempt_route"; } | awk '
+      # No early exit: a closed pipe would fail the upstream writer under pipefail.
+      !d && /^\[agy\] print timeout after .+ with turn in progress; returning partial output[[:space:]]*$/{print "provider=antigravity reason=stream_truncated"; d=1}
+      !d && /^stop-reason: .*(reason=max_tokens|reason=stream_truncated|is_error=1)/{print substr($0, 14, 67); d=1}')"
     if [ -n "$verdict" ] && [ -n "$died_stop" ]; then
       verdict=""
     fi
     # Stated confidence is advisory display for tiebreaks, never a gate
     # input: a confident wrong verdict must not outvote the mechanical check.
-    confidence="$(awk '/^## Output$/{o=1;next} /^## Exit$/{o=0} o' "$f" |
+    confidence="$(review_final_attempt "$f" "$attempt_route" |
       grep -E '^[*[:space:]]*CONFIDENCE: (0(\.[0-9]+)?|1(\.0+)?)[*[:space:]]*$' |
       tail -n 1 | grep -oE '0(\.[0-9]+)?|1(\.0+)?' | tail -n 1)" || confidence=""
     # Provider is the transport; model is the reviewed seat. Preserve both the
@@ -265,18 +279,26 @@ review_verdicts() {
       -e 's/^model-result: declined by [^ ]* (\([^)]*\));.*/\1/p' \
       "$f" | tail -n 1)"
     [ -n "$selected_model" ] || selected_model="$requested_model"
-    model_family="$(oms_provider_model_family "$provider" "$selected_model" 2>/dev/null || printf unknown)"
+    # The artifact name keeps the requested provider; the seat is the provider
+    # and model the controller recorded for the final attempt.
+    seat_provider="$provider"
+    if [ -n "$attempt_route" ]; then
+      seat_provider="$(printf '%s\n' "$attempt_route" | cut -f1)"
+      [ -z "$(printf '%s\n' "$attempt_route" | cut -f2)" ] ||
+        selected_model="$(printf '%s\n' "$attempt_route" | cut -f2)"
+    fi
+    model_family="$(oms_provider_model_family "$seat_provider" "$selected_model" 2>/dev/null || printf unknown)"
     suffix=""
     [ -z "$confidence" ] || suffix=" (confidence $confidence)"
     case "$verdict" in
       pass)
-        [ "$json_stdout" = 1 ] || echo "$provider: pass$suffix"
-        seat_rows="$seat_rows$provider	pass	$confidence	$seat_round	$(basename "$f")		$requested_model	$selected_model	$model_family
+        [ "$json_stdout" = 1 ] || echo "$seat_provider: pass$suffix"
+        seat_rows="$seat_rows$seat_provider	pass	$confidence	$seat_round	$(basename "$f")		$requested_model	$selected_model	$model_family
 "
         ;;
       fail)
-        [ "$json_stdout" = 1 ] || echo "$provider: fail$suffix"
-        seat_rows="$seat_rows$provider	fail	$confidence	$seat_round	$(basename "$f")		$requested_model	$selected_model	$model_family
+        [ "$json_stdout" = 1 ] || echo "$seat_provider: fail$suffix"
+        seat_rows="$seat_rows$seat_provider	fail	$confidence	$seat_round	$(basename "$f")		$requested_model	$selected_model	$model_family
 "
         if [ "$overall" -ne 2 ]; then overall=1; fi
         ;;
@@ -291,14 +313,14 @@ review_verdicts() {
           [ "$(ma_answer_quality "$f")" != "blocked" ] ||
           reason="$(ma_answer_block_reason "$f")"
         if [ -n "$reason" ]; then
-          [ "$json_stdout" = 1 ] || echo "$provider: no-verdict (blocked: $reason)"
+          [ "$json_stdout" = 1 ] || echo "$seat_provider: no-verdict (blocked: $reason)"
         elif [ -n "$died_exit" ] || [ -n "$died_stop" ]; then
           [ "$json_stdout" = 1 ] ||
-            echo "$provider: no-verdict (${died_exit:+provider exited $died_exit}${died_stop:+incomplete answer: $died_stop}; a GATE line in a partial transcript is not a verdict — re-run the review)"
+            echo "$seat_provider: no-verdict (${died_exit:+provider exited $died_exit}${died_stop:+incomplete answer: $died_stop}; a GATE line in a partial transcript is not a verdict — re-run the review)"
         else
-          [ "$json_stdout" = 1 ] || echo "$provider: no-verdict (complete but no GATE line)"
+          [ "$json_stdout" = 1 ] || echo "$seat_provider: no-verdict (complete but no GATE line)"
         fi
-        seat_rows="$seat_rows$provider	no-verdict		$seat_round	$(basename "$f")	$(printf '%s' "$reason" | tr '\t\n' '  ' | cut -c1-200)	$requested_model	$selected_model	$model_family
+        seat_rows="$seat_rows$seat_provider	no-verdict		$seat_round	$(basename "$f")	$(printf '%s' "$reason" | tr '\t\n' '  ' | cut -c1-200)	$requested_model	$selected_model	$model_family
 "
         overall=2
         ;;

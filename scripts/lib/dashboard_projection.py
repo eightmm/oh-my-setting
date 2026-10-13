@@ -29,7 +29,8 @@ MAX_LABEL = 160
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 COVERAGE_NOTE = "OMS-managed records only; native provider subagents are not observed"
 FALLBACK_REASONS = {"capacity", "capacity-no-fallback", "capacity-dirty-worktree",
-                    "model-unavailable", "policy-declined", "model-safeguard"}
+                    "model-unavailable", "policy-declined", "model-safeguard",
+                    "provider-model-unavailable", "provider-capacity", "provider-down"}
 MODEL_CLASSES = {"explicit", "provider-default", "role-default", "fast", "balanced", "deep"}
 ATTRIBUTIONS = {"transport", "configured-default", "ambiguous", "unknown"}
 ARTIFACT_STATUSES = {"success", "unresolved", "resolved"}
@@ -103,7 +104,7 @@ def panel_metadata(row):
     if refs.get("panel_role") not in ("main", "worker", "advisor", "reviewer", "researcher"):
         return {}
     return {"panel": {key: clean(refs.get("panel_" + key), 160) or None for key in (
-        "role", "owner", "harness", "purpose", "workload", "model", "effort", "location", "access", "label", "room_id", "room_participant", "lease_id"
+        "role", "owner", "harness", "purpose", "workload", "provider", "model", "effort", "fallback", "location", "access", "label", "room_id", "room_participant", "lease_id"
     )}, "parent_attempt_id": clean(row.get("parent_attempt_id")) or None}
 
 

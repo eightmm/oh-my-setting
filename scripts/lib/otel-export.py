@@ -27,6 +27,9 @@ FALLBACK_REASONS = {
     "model-unavailable",
     "policy-declined",
     "model-safeguard",
+    "provider-model-unavailable",
+    "provider-capacity",
+    "provider-down",
 }
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 MODEL_ATTRIBUTIONS = {"transport", "configured-default", "ambiguous", "unknown"}

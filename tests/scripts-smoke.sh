@@ -1155,6 +1155,69 @@ test_review_verdicts_subcommand() {
   contains "$out" 'codex: pass' || fail "codex must be judged on final round (r2 pass)"
   contains "$out" 'claude: fail' || fail "claude must be judged on final round (r1 fail)"
   contains "$out" 'antigravity: pass' || fail "slug containing -r9 must be treated as base artifact"
+
+  # A structured provider failure followed by a complete fallback attempt: the
+  # controller's attempt sidecar names the final attempt's own output file and
+  # the provider/model that produced it; the artifact keeps both for humans.
+  mkdir -p "$dir/fallback" "$dir/fallback-dead" "$dir/forged" "$dir/forged-legacy"
+  printf '# codex review\n\n## Output\n\nmodel-route: class=explicit (explicit) primary=gpt-6-astra fallback=- effort=high\nstop-reason: provider=codex reason=turn_failed subtype=error is_error=1\nERROR: 429 rate limit\nGATE: fail\n\npanel-provider-fallback: provider=claude model=claude-opus-5-5 reason=capacity exit=1\nstop-reason: provider=claude reason=end_turn subtype=success is_error=0\nCONFIDENCE: 0.8\nGATE: pass\n\nmodel-result: selected=claude-opus-5-5 effort=high fallback_used=1 reason=provider-capacity\n\n## Exit\n\n0\n' \
+    > "$dir/fallback/codex-x-$run.md"
+  printf 'stop-reason: provider=codex reason=turn_failed subtype=error is_error=1\nERROR: 429 rate limit\nGATE: fail\n' > "$dir/fallback/codex-x-$run.attempt-1.out"
+  printf 'stop-reason: provider=claude reason=end_turn subtype=success is_error=0\nCONFIDENCE: 0.8\nGATE: pass\n' > "$dir/fallback/codex-x-$run.attempt-2.out"
+  printf '{"attempts": [{"provider": "codex", "model": "gpt-6-astra", "effort": "high", "exit": 1, "stop_reason": "provider=codex reason=turn_failed subtype=error is_error=1", "classification": "capacity", "output": "codex-x-%s.attempt-1.out"}, {"provider": "claude", "model": "claude-opus-5-5", "effort": "high", "exit": 0, "stop_reason": "provider=claude reason=end_turn subtype=success is_error=0", "classification": "", "output": "codex-x-%s.attempt-2.out"}]}\n' \
+    "$run" "$run" > "$dir/fallback/codex-x-$run.attempts.json"
+  out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/fallback")" && rc=0 || rc=$?
+  [ "$rc" = "0" ] || fail "a complete fallback pass must gate as pass (got $rc): $out"
+  contains "$out" 'claude: pass (confidence 0.8)' ||
+    fail "fallback verdict must be attributed to the provider that answered: $out"
+  if printf '%s' "$out" | grep >/dev/null 'codex:'; then
+    fail "the failed primary must not own the fallback verdict: $out"
+  fi
+  out="$("$ROOT/scripts/peer-review.sh" verdicts --json "$dir/fallback")" || true
+  OMS_TEST_JSON="$out" python3 - <<'PY' || fail "json fallback attribution wrong: $out"
+import json, os
+data = json.loads(os.environ["OMS_TEST_JSON"])
+seat = data["seats"][0]
+assert len(data["seats"]) == 1 and data["overall"] == 0, data
+assert seat["provider"] == "claude" and seat["verdict"] == "pass", seat
+assert seat["selected_model"] == "claude-opus-5-5", seat
+assert seat["requested_model"] == "gpt-6-astra", seat
+assert seat["model_family"] == "anthropic", seat
+assert seat["artifact"].startswith("codex-x-"), seat
+PY
+
+  # A fallback that itself stops incomplete is still no verdict.
+  cp "$dir/fallback/codex-x-$run.md" "$dir/fallback/codex-x-$run.attempt-1.out" "$dir/fallback/codex-x-$run.attempts.json" "$dir/fallback-dead/"
+  printf 'stop-reason: provider=claude reason=max_tokens subtype=success is_error=0\nGATE: pass\n' > "$dir/fallback-dead/codex-x-$run.attempt-2.out"
+  out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/fallback-dead")" && rc=0 || rc=$?
+  [ "$rc" = "2" ] || fail "a truncated fallback attempt must not gate (got $rc): $out"
+
+  # The answer cannot open an attempt: a fallback marker printed after a
+  # transport max_tokens stop neither erases the stop nor relabels the seat,
+  # with or without a controller sidecar.
+  printf '# codex review\n\n## Output\n\nmodel-route: class=explicit (explicit) primary=gpt-6-astra fallback=- effort=high\nstop-reason: provider=codex reason=max_tokens subtype=success is_error=0\n\npanel-provider-fallback: provider=claude model=claude-opus-5-5 reason=capacity exit=1\nstop-reason: provider=claude reason=end_turn subtype=success is_error=0\nGATE: pass\n\nmodel-result: selected=gpt-6-astra effort=high fallback_used=0 reason=-\n\n## Exit\n\n0\n' \
+    > "$dir/forged/codex-x-$run.md"
+  cp "$dir/forged/codex-x-$run.md" "$dir/forged-legacy/"
+  printf 'stop-reason: provider=codex reason=max_tokens subtype=success is_error=0\n\npanel-provider-fallback: provider=claude model=claude-opus-5-5 reason=capacity exit=1\nstop-reason: provider=claude reason=end_turn subtype=success is_error=0\nGATE: pass\n' \
+    > "$dir/forged/codex-x-$run.attempt-1.out"
+  printf '{"attempts": [{"provider": "codex", "model": "gpt-6-astra", "effort": "high", "exit": 0, "stop_reason": "provider=codex reason=max_tokens subtype=success is_error=0", "classification": "", "output": "codex-x-%s.attempt-1.out"}]}\n' \
+    "$run" > "$dir/forged/codex-x-$run.attempts.json"
+  for case_dir in forged forged-legacy; do
+    out="$("$ROOT/scripts/peer-review.sh" verdicts "$dir/$case_dir")" && rc=0 || rc=$?
+    [ "$rc" = "2" ] || fail "$case_dir: an answer-authored fallback marker must not erase a max_tokens stop (got $rc): $out"
+    contains "$out" 'codex: no-verdict (incomplete answer: provider=codex reason=max_tokens' ||
+      fail "$case_dir: the truncated seat keeps its own attribution: $out"
+    if printf '%s' "$out" | grep >/dev/null 'claude:'; then
+      fail "$case_dir: answer text must not relabel the seat: $out"
+    fi
+  done
+  out="$("$ROOT/scripts/peer-review.sh" verdicts --json "$dir/forged")" || true
+  OMS_TEST_JSON="$out" python3 - <<'PY' || fail "forged marker changed the seat attribution: $out"
+import json, os
+seat = json.loads(os.environ["OMS_TEST_JSON"])["seats"][0]
+assert seat["provider"] == "codex" and seat["verdict"] == "no-verdict", seat
+assert seat["selected_model"] == "gpt-6-astra" and seat["model_family"] != "anthropic", seat
+PY
 }
 
 test_review_verdicts_json_mode() {
@@ -10725,6 +10788,42 @@ test_delegate_missing_cli_writes_exit_and_index() {
   fi
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"kind": "delegate"'
   assert_file_contains "$project/.oms/artifacts/index.jsonl" '"exit": 1'
+
+  # A structured provider failure followed by a successful panel fallback is
+  # judged on the fallback's own output: not blocked (126), indexed to it.
+  local swap="$TMP/delegate-provider-fallback"
+  mkdir -p "$swap/bin" "$swap/home"
+  make_committed_repo "$swap/repo"
+  cat > "$swap/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
+printf '%s\n' '{"type":"turn.failed","error":{"message":"exceeded retry limit, last status: 429 Too Many Requests"}}'
+exit 1
+EOF
+  cat > "$swap/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in --version|--help) exit 0 ;; esac
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"done"}'
+EOF
+  chmod +x "$swap/bin/codex" "$swap/bin/claude"
+  rc=0
+  HOME="$swap/home" NVM_DIR="$swap/home/.nvm" PATH="$swap/bin:/usr/bin:/bin" \
+    OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker OMS_PANEL_FALLBACK_PROVIDER=claude \
+    OMS_PANEL_FALLBACK_MODEL=claude-sonnet-5-5 OMS_PANEL_FALLBACK_EFFORT=medium \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --model gpt-6.1-sol \
+    --repo "$swap/repo" --artifact-dir "$swap/artifacts" \
+    --prompt "Fix after provider fallback" >"$swap/out" 2>"$swap/error" || rc=$?
+  [ "$rc" = 0 ] || fail "delegate after a successful fallback should exit 0, got $rc: $(cat "$swap/out" "$swap/error")"
+  if grep -Fq 'could not run' "$swap/out" "$swap/error"; then
+    fail "a successful fallback was reported as blocked: $(cat "$swap/error")"
+  fi
+  python3 - "$swap/repo" <<'PY' || fail "fallback delegate row is not the fallback's: $(cat "$swap/repo/.oms/artifacts/index.jsonl")"
+import json, pathlib, sys
+row = json.loads((pathlib.Path(sys.argv[1]) / '.oms/artifacts/index.jsonl').read_text().splitlines()[-1])
+assert row['kind'] == 'delegate' and row['exit'] == 0 and row['provider'] == 'claude', row
+assert row['selected_model'] == 'claude-sonnet-5-5' and row['fallback_used'] is True, row
+assert row['fallback_reason'] == 'provider-capacity', row
+PY
 }
 
 
@@ -10949,6 +11048,55 @@ assert type(row['prompt_bytes']) is int and row['prompt_bytes'] > len('Assess ar
 metric = json.loads((repo / 'telemetry.json').read_text())['usage']['prompt_bytes']
 assert metric['reports'] == 1 and metric['total'] == row['prompt_bytes'], metric
 assert 'not tokens' in metric['basis'] and 'repair' in metric['basis'], metric
+PY
+
+  # A panel read call that failed over to the other provider is indexed, printed
+  # and attributed to the provider that answered, never the one that failed.
+  local swap="$TMP/artifact-index-call-swap"
+  mkdir -p "$swap/bin" "$swap/repo"
+  cat > "$swap/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
+printf '%s\n' 'ERROR: model not found' >&2
+exit 7
+EOF
+  cat > "$swap/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in --version|--help) exit 0 ;; esac
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"ok"}'
+EOF
+  chmod +x "$swap/bin/codex" "$swap/bin/claude"
+  git -C "$swap/repo" init -q -b main
+  out="$(PATH="$swap/bin:$PATH" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=advisor OMS_PANEL_PURPOSE=advise \
+    OMS_PANEL_FALLBACK_PROVIDER=claude OMS_PANEL_FALLBACK_MODEL=claude-sonnet-5-5 \
+    OMS_PANEL_FALLBACK_EFFORT=medium OMS_AGENT=codex "$ROOT/scripts/agent-call.sh" \
+    --repo "$swap/repo" --artifact-dir "$swap/artifacts" --to codex --model gpt-6.1-sol \
+    --prompt "Assess provider fallback attribution" 2>&1)" || fail "fallback advisor call failed: $out"
+  contains "$out" 'ok: claude ->' || fail "fallback call did not name the provider that answered: $out"
+  python3 - "$swap/repo" "$swap/artifacts" <<'PY' || fail "fallback call was attributed to the provider that failed"
+import json, pathlib, sys
+repo = pathlib.Path(sys.argv[1])
+row = json.loads((repo / '.oms/artifacts/index.jsonl').read_text().splitlines()[-1])
+assert row['kind'] == 'call' and row['exit'] == 0 and row['provider'] == 'claude', row
+assert row['selected_model'] == 'claude-sonnet-5-5' and row['fallback_used'] is True, row
+assert row['fallback_reason'] == 'provider-model-unavailable', row
+events = [json.loads(line) for line in (repo / '.oms/lifecycle/events.jsonl').read_text().splitlines()]
+refs = {}
+for event in events:
+    if event['attempt_id'] == row['attempt_id']:
+        refs.update(event.get('refs') or {})
+assert refs['panel_provider'] == 'claude' and refs['panel_model'] == 'claude-sonnet-5-5', refs
+assert refs['panel_fallback'] == 'provider-model-unavailable', refs
+sidecars = list(pathlib.Path(sys.argv[2]).glob('*.attempts.json'))
+assert len(sidecars) == 1, sidecars
+attempts = json.loads(sidecars[0].read_text())['attempts']
+assert [(a['provider'], a['model'], a['exit']) for a in attempts] == [
+    ('codex', 'gpt-6.1-sol', 7), ('claude', 'claude-sonnet-5-5', 0)], attempts
+assert attempts[0]['classification'] == 'model_unavailable' and attempts[1]['effort'] == 'medium', attempts
+assert attempts[1]['stop_reason'].startswith('provider=claude reason=end_turn '), attempts
+outputs = [(sidecars[0].parent / a['output']).read_text() for a in attempts]
+assert 'ERROR: model not found' in outputs[0] and 'ok' in outputs[1].splitlines(), outputs
+assert 'ERROR: model not found' not in outputs[1], outputs
 PY
 }
 
@@ -11471,26 +11619,36 @@ test_consult_memory_is_opt_in() {
 
 test_panel_write_workers_get_private_test_state() {
   local fixture="$TMP/panel-private-test-state"
-  local root lifecycle repo out retained_root map_output
+  local root lifecycle repo out retained_root map_output retry_status
   local caller_fixture="${OMS_FIXTURE_ROOT-}"
   local original_lock="${OMS_LOCK_DIR-}" original_state="${XDG_STATE_HOME-}" original_cache="${XDG_CACHE_HOME-}"
   local fixture_lock="${OMS_LOCK_DIR:-$fixture/original-locks}"
   local fixture_state="${XDG_STATE_HOME:-$fixture/original-state}"
   local fixture_cache="${XDG_CACHE_HOME:-$fixture/original-cache}"
   local original_tmux="$fixture/original-tmux"
+  classify_provider_error() {
+    bash -c ". \"\$1/scripts/lib/peer-common.sh\"; oms_panel_provider_error_classify \"\$2\" \"\$3\" \"\$4\"" \
+      _ "$ROOT" "$@"
+  }
   mkdir -p "$fixture/bin" "$fixture/parent/worktree"
   cat > "$fixture/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) exit 0 ;; esac
+[ -z "${PANEL_RUNS:-}" ] || printf '%s\n' codex >> "$PANEL_RUNS"
 printf '%s\n' "$@" > "$PANEL_ARGV"
 printf '%s\n' "${OMS_FIXTURE_ROOT:-}" "${TMUX_TMPDIR:-}" "${OMS_LOCK_DIR:-}" \
   "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" > "$PANEL_ENV"
-[ "${PANEL_FAIL:-0}" != 1 ] || exit 7
+[ "${PANEL_FAIL:-0}" != 1 ] || {
+  [ -z "${PANEL_ERROR:-}" ] || printf '%s\n' "$PANEL_ERROR" >&2
+  [ -z "${PANEL_SPOOF:-}" ] || printf '%s\n' "$PANEL_SPOOF"
+  exit 7
+}
 printf '{}\n'
 EOF
   cat > "$fixture/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}" in --version|--help) exit 0 ;; esac
+[ -z "${PANEL_RUNS:-}" ] || printf '%s\n' claude >> "$PANEL_RUNS"
 printf '%s\n' "$@" > "$PANEL_ARGV"
 printf '%s\n' "${OMS_FIXTURE_ROOT:-}" "${TMUX_TMPDIR:-}" "${OMS_LOCK_DIR:-}" \
   "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" > "$PANEL_ENV"
@@ -11528,6 +11686,99 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
     [ "$(sed -n '4p' "$root/env")" = "$fixture_state" ] || fail "$provider worker XDG_STATE_HOME changed"
     [ "$(sed -n '5p' "$root/env")" = "$fixture_cache" ] || fail "$provider worker XDG_CACHE_HOME changed"
     [ "$provider" != codex ] || grep -Fxq -- 'workspace-write' "$root/argv" || fail 'Codex workspace-write sandbox changed'
+  done
+
+  # Provider fallback classification reads only a CLI's own error signatures:
+  # error/turn.failed events, an API-error result envelope and fixed ERROR:
+  # line prefixes. Free text from the agent's own work classifies as nothing.
+  local pe="$fixture/provider-output" crlf_line
+  classify_case() { # EXPECTED PROVIDER EXIT LABEL (output on stdin)
+    cat > "$pe"
+    classified="$(classify_provider_error "$2" "$3" "$pe")"
+    [ "$classified" = "$1" ] || fail "provider error case '$4': expected '$1', got '$classified'"
+  }
+  printf '%s\n' '{"type":"turn.failed","error":{"message":"exceeded retry limit, last status: 429 Too Many Requests"}}' |
+    classify_case capacity codex 1 'codex turn.failed 429'
+  printf '%s\n' 'ERROR: The model gpt-x does not exist or you do not have access to it' |
+    classify_case model_unavailable codex 1 'codex ERROR prefix model'
+  printf '%s\n' 'ERROR: stream disconnected before completion: error sending request' |
+    classify_case provider_down codex 1 'codex ERROR prefix transport'
+  printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}"}' |
+    classify_case capacity claude 1 'claude overloaded envelope'
+  printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"There'"'"'s an issue with the selected model (x). It may not exist or you may not have access to it."}' |
+    classify_case model_unavailable claude 1 'claude model envelope'
+  crlf_line=$'ERROR: service unavailable\r'
+  printf '%s\n' "$crlf_line" | classify_case provider_down codex 1 'CRLF line'
+  printf '%s\n' 'ERROR: service unavailable' | classify_case '' codex 0 'successful status'
+  printf '%s\n' 'ERROR: service unavailable' | classify_case '' agy 1 'provider without signatures'
+  # Reconnect errors the turn completed after are not the failure.
+  printf '%s\n' '{"type":"error","message":"Reconnecting... 2/5 (503 Service Unavailable)"}' \
+    '{"type":"turn.completed","usage":{}}' | classify_case '' codex 1 'reconnect then completed'
+  # False positives: the agent's own work and test output.
+  printf '%s\n' 'processed 429 records; assertion failed' | classify_case '' codex 1 'free-text 429'
+  printf '%s\n' 'E   AssertionError: model not found' | classify_case '' codex 1 'quoted model not found'
+  printf '%s\n' 'HTTP 429 rate limit' | classify_case '' codex 1 'bare rate limit'
+  printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"ERROR: model not found; HTTP 429 rate limit"}}' |
+    classify_case '' codex 1 'agent message quoting errors'
+  printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"processed 429 records; model not found"}' |
+    classify_case '' claude 1 'non-API error envelope'
+  printf '%s\n' 'ERROR: processed 429 records; assertion failed' | classify_case '' codex 1 'prefixed count without status context'
+
+  local retry_repo="$fixture/provider-retry/repo"
+  local retry_state="$fixture/provider-retry/state"
+  local retry_attempt retry_case retry_expect
+  mkdir -p "$fixture/provider-retry"
+  make_committed_repo "$retry_repo"
+  make_committed_repo "$retry_state"
+  printf 'fixture prompt\n' > "$fixture/provider-retry/prompt"
+  run_provider_retry() { # ATTEMPT; stub failure env comes from the caller
+    : > "$fixture/provider-retry/runs"
+    if PANEL_FAIL=1 PANEL_ARGV="$fixture/provider-retry/argv" \
+      PANEL_ENV="$fixture/provider-retry/env" PANEL_RUNS="$fixture/provider-retry/runs" \
+      PATH="$fixture/bin:$PATH" OMS_MODEL_EXPLICIT=gpt-6.1-sol OMS_PANEL_DISPATCH=1 \
+      OMS_PANEL_ROLE=worker OMS_PANEL_FALLBACK_PROVIDER=claude \
+      OMS_PANEL_FALLBACK_MODEL=claude-sonnet-5-5 OMS_PANEL_FALLBACK_EFFORT=medium \
+      OMS_ATTEMPT_ID="$1" OMS_AGENT=codex \
+      bash -c '. "$1/scripts/lib/peer-common.sh"; MA_KIND=delegate; REPO="$3"; OMS_MODEL_EXPLICIT=gpt-6.1-sol; export OMS_MODEL_EXPLICIT; ma_run_routed_provider codex write "$2/prompt" "$2/output" "$3" delegate "$4" "" ""' \
+        _ "$ROOT" "$fixture/provider-retry" "$retry_repo" "$retry_state" > "$fixture/provider-retry/log" 2>&1; then
+      retry_status=0
+    else
+      retry_status=$?
+    fi
+  }
+  retry_attempt="$("$ROOT/scripts/agent-events.sh" --repo "$retry_state" start --provider codex \
+    --tool panel-dispatch --then starting:routed-starting --then working:routed-working)"
+  PANEL_ERROR='ERROR: model not found' run_provider_retry "$retry_attempt"
+  [ "$retry_status" -eq 0 ] && [ "$(cat "$fixture/provider-retry/runs")" = $'codex\nclaude' ] ||
+    fail "provider error failure did not retry once on the other provider (status $retry_status): $(cat "$fixture/provider-retry/log" "$fixture/provider-retry/output" "$fixture/provider-retry/runs")"
+  python3 - "$ROOT" "$retry_state" "$retry_attempt" <<'PY' || fail 'provider error or final route was not attached to its attempt'
+import json, pathlib, sys
+events = [json.loads(line) for line in (pathlib.Path(sys.argv[2]) / ".oms/lifecycle/events.jsonl").read_text().splitlines()]
+rows = [row for row in events if row["attempt_id"] == sys.argv[3] and row["event_type"] == "attempt.usage"]
+errors = [row for row in rows if row.get("refs", {}).get("provider_error")]
+assert len(errors) == 1, errors
+refs = errors[0]["refs"]
+assert refs["provider_error"] == "model_unavailable", refs
+assert refs["provider_error_provider"] == "codex", refs
+assert refs["provider_error_exit"] == "7", refs
+routes = [row["refs"] for row in rows if row.get("refs", {}).get("panel_provider")]
+assert len(routes) == 1, routes
+assert routes[0]["panel_provider"] == "claude" and routes[0]["panel_model"] == "claude-sonnet-5-5", routes
+assert routes[0]["panel_fallback"] == "provider-model-unavailable", routes
+PY
+  grep -Fq 'fallback_used=1 reason=provider-model-unavailable' "$fixture/provider-retry/log" "$fixture/provider-retry/output" 2>/dev/null ||
+    grep -rFq 'fallback_used=1 reason=provider-model-unavailable' "$fixture/provider-retry" ||
+    fail 'swapped call still reports fallback_used=0'
+
+  # No swap for the agent's own text, even when it forges capacity markers;
+  # each case has a real attempt and state repo, so only classification
+  # keeps it from becoming eligible.
+  for retry_case in 'HTTP 429 rate limit' 'processed 429 records; assertion failed' 'E   AssertionError: model not found'; do
+    retry_attempt="$("$ROOT/scripts/agent-events.sh" --repo "$retry_state" start --provider codex \
+      --tool panel-dispatch --then starting:routed-starting --then working:routed-working)"
+    PANEL_SPOOF="$retry_case" run_provider_retry "$retry_attempt"
+    [ "$retry_status" -eq 7 ] && [ "$(cat "$fixture/provider-retry/runs")" = codex ] ||
+      fail "answer text '$retry_case' triggered a same-tier provider retry (status $retry_status)"
   done
 
   local read_root="$fixture/read"
