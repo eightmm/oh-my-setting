@@ -1196,7 +1196,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             lines.append(" " * card_left + cell + " " * max(0, width - card_left - card_width))
             hits.append({"y": len(lines), "x1": 1 if tree_card and n == 0 else card_left + 1,
                          "x2": width if tree_card and n == 0 else card_left + card_width,
-                         "action": action(member), "preview": member.get("role") != "main",
+                         "action": action(member), "preview": True,
                          **({"tree": True, "expanded": True} if tree_card and n == 0 else {})})
 
     def tree(group, name, slots):
