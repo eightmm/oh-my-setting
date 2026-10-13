@@ -3396,7 +3396,7 @@ EOF
         OMS_REASONING_SELECTED="$OMS_REASONING_RESOLVED"
         OMS_MODEL_FALLBACK_USED=1
         case "$primary_error_class" in
-          provider_down) OMS_MODEL_FALLBACK_REASON=provider-down ;;
+          provider_down) OMS_MODEL_FALLBACK_REASON="provider-down" ;;
           *) OMS_MODEL_FALLBACK_REASON="provider-${primary_error_class//_/-}" ;;
         esac
         OMS_PROVIDER_SELECTED="$provider"

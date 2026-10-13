@@ -11726,7 +11726,7 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
 
   local retry_repo="$fixture/provider-retry/repo"
   local retry_state="$fixture/provider-retry/state"
-  local retry_attempt retry_case retry_expect
+  local retry_attempt retry_case
   mkdir -p "$fixture/provider-retry"
   make_committed_repo "$retry_repo"
   make_committed_repo "$retry_state"
