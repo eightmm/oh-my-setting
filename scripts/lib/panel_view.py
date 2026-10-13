@@ -118,8 +118,14 @@ def color_count():
     return 256 if "256color" in os.environ.get("TERM", "") else 16
 
 
-PALETTE = {name: _sgr(name, color_count(), light_theme(), name in {"main", "codex", "head"})
-           for name in list(TOKEN_COLORS) + list(TOKEN_ALIASES)}
+class _Palette(dict):
+    # An unstyled or unknown token renders plain rather than failing the frame.
+    def __missing__(self, key):
+        return ""
+
+
+PALETTE = _Palette({name: _sgr(name, color_count(), light_theme(), name in {"main", "codex", "head"})
+                    for name in list(TOKEN_COLORS) + list(TOKEN_ALIASES)})
 
 
 def swap_line(room):
