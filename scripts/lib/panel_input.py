@@ -264,9 +264,7 @@ def choose(event, navigation):
             offset = navigation.get("offset", 0)
             navigation["offset"] = row if row < offset else max(0, row - max(1, navigation.get("viewport", 1)) + 1)
     elif kind == "enter":
-        if (navigation.get("surface") == "graph" and selected in items and selected[0] in ("result", "debate")
-                and (navigation.get("preview") or {}).get("target") != selected):
-            # The first Enter previews a call; Enter on the call already previewed opens it.
+        if navigation.get("surface") == "graph" and selected in items and selected[0] in ("result", "debate"):
             preview_target(navigation, selected)
             return None
         return selected if selected in items else None
