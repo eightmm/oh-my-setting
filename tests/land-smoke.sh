@@ -68,6 +68,10 @@ remote_tip() { git -C "$TMP/remote.git" rev-parse main; }
 out="$("$LAND" --repo "$repo" --wait --ci-wait 0)"
 printf '%s' "$out" | grep >/dev/null 'nothing to land' || fail "an up-to-date tree lands nothing: $out"
 [ ! -e "$state_land" ] || fail "an up-to-date landing must not leave receipt state"
+OMS_LOCK_FORCE_MKDIR=1 "$LAND" status --repo "$repo" --active-exit --json > "$TMP/fresh-lock.json" ||
+  fail "a fresh repository must expose its free land lock without a receipt"
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"active": False}' "$TMP/fresh-lock.json" ||
+  fail "fresh land lock JSON must report active=false"
 
 # --- 2. green worktree gate: state survives worktree removal ------------------
 peer="$TMP/landing-worktree"

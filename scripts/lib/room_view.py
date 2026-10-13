@@ -6,7 +6,7 @@ import time
 
 from dashboard_projection import ELLIPSIS, clean, count as valid_count, display_width, fit, listing, mapping
 from panel_view import (ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
-                        clipped, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped)
+                        clipped, location_label, main_occupied, menu_rows, status_alerts, swap_line, worker_rows, wrapped)
 
 
 def room_ids(room):
@@ -1192,6 +1192,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     for text, style in goal_banner(report, width, unicode, compact=height < 20):
         hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": ("tab", "plan")})
         add(text, style)
+    if room.get("swaps") and height >= 24:
+        add("SESSION / " + swap_line(room), "main")
+    if report.get("swap_state"):
+        add("SWAP / " + clean(report["swap_state"], 80), "alert")
     for alert in status_alerts(report):
         add(alert, "bad")
     from panel_view import attention_items, needs_strip
@@ -1333,7 +1337,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         content = [status + " / " + task_of(m)] if rows_h == 3 else [status] + task_lines(m, main_width - 4, rows_h - 3)
         if rows_h >= 4:
             where = "Team: " + (" · ".join(team_counts(everyone.get(m["participant"], []), classify)) or "no calls yet")
-            tail = [where] if rows_h >= 5 + int(reflow) else []
+            latest_swap = listing(room.get("swaps"))[-1:] if m.get("role") == "main" else []
+            takeover = (swap_line(room) if latest_swap and latest_swap[0].get("participant") == m.get("participant")
+                        else "")
+            tail = [takeover or where] if rows_h >= 5 + int(reflow) else []
             first = (("▸ " if unicode else "> ") if action(m) == selected else "") + full_title(m, reflow=True)
             content = ([first] if reflow else []) + [status] + task_lines(
                 m, main_width - 4, max(1, min(2, rows_h - 3 - len(tail) - int(reflow)))) + tail
@@ -1940,6 +1947,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                 "f Full result" if navigation.get("full_result") else "",
                 "Tab Next tab" if tabs else "", "g Graph", "t Tree",
                 "n New main" if managed and not navigation.get("main_occupied") else "",
+                "s Swap main" if managed and navigation.get("main_occupied") else "",
                 "v " + ("Collapse" if navigation.get("expanded") else "Expand"), "b Attention",
                 "Shift-drag Copy" if managed else "", "m Modes" if managed else "",
                 toggle if managed else "q Quit", "F12 Keys" if managed else ""]

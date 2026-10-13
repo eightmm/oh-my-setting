@@ -3752,7 +3752,22 @@ with open(os.environ["PANEL_TEST_LOG"], "a", encoding="utf-8") as f:
                         "entry": os.environ["OMS_PANEL_ENTRYPOINT"]}) + "\\n")
 print("NATIVE_FIXTURE_READY")
 INNER
-  if [ "${PANEL_TEST_NATIVE_HOLD:-0}" = 1 ]; then read -r reply || :; printf 'NATIVE_CHAT_REPLY:%s\\n' "$reply"; fi
+  if [ "${PANEL_TEST_NATIVE_HOLD:-0}" = 1 ]; then
+    read -r reply || :
+    case "$reply" in
+      *SWAP_HANDOFF*)
+        nonce="${reply#*SWAP_HANDOFF }"
+        nonce="${nonce%%:*}"
+        if [ "${PANEL_TEST_SWAP_HANDOFF:-1}" = 1 ]; then
+          bash "$OMS_PANEL_ENTRYPOINT" room send --repo "$OMS_ROOM_REPO" --id "$OMS_ROOM_ID" \
+            --participant "$OMS_ROOM_PARTICIPANT" --to all --kind handoff \
+            --text "SWAP_HANDOFF $nonce: Goal fixture; decisions kept; workers continue; next inspect plan." >/dev/null
+        fi
+        while read -r reply; do [ "$reply" = /exit ] && break; done
+        ;;
+      *) printf 'NATIVE_CHAT_REPLY:%s\\n' "$reply" ;;
+    esac
+  fi
 fi
 ''')
     executable.chmod(0o755)
@@ -6154,6 +6169,113 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                                                         env=env, text=True).splitlines():
                 assert time.monotonic() < deadline, "Enter left the old board window running"
                 time.sleep(.1)
+            # The next main takes the same native pane and room participant. A plan claim and
+            # worker parent remain anchored to that participant while the provider changes.
+            previous_pane = tmux_wait(["show-option", "-w", "-v", "-t", new_window,
+                                       "@oms_panel_native_pane"], "%").strip()
+            subprocess.run(tmux + ["send-keys", "-t", previous_pane, "-l", "finish"], env=env, check=True)
+            subprocess.run(tmux + ["send-keys", "-t", previous_pane, "Enter"], env=env, check=True)
+            tmux_wait(["capture-pane", "-p", "-t", previous_pane], "claude session exited (0)")
+            no_main = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                      "--swap-main", "codex", "--json"], env=env, capture_output=True, text=True)
+            assert no_main.returncode != 0 and "requires exactly one live main" in no_main.stderr, no_main.stderr
+            swap_spawn = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                          "--spawn-main", "claude", "--json"], env))
+            swap_window = subprocess.check_output(tmux + ["display-message", "-p", "-t",
+                                                   session + ":" + str(swap_spawn["window"]), "#{window_id}"],
+                                                  env=env, text=True).strip()
+            swap_pane = tmux_wait(["show-option", "-w", "-v", "-t", swap_window,
+                                   "@oms_panel_native_pane"], "%").strip()
+            tmux_wait(["capture-pane", "-p", "-t", swap_pane], "NATIVE_FIXTURE_READY")
+            swap_member = tmux_wait(["show-option", "-w", "-v", "-t", swap_window,
+                                     "@oms_panel_room_participant"], "att_").strip()
+            swap_attempt = tmux_wait(["show-option", "-w", "-v", "-t", swap_window,
+                                      "@oms_panel_main_attempt"], "att_").strip()
+            assert swap_spawn["room"] == menu_room
+            room.join(project, menu_room, "swap-worker", "codex", "worker", parent=swap_member)
+            worker_attempt = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "start",
+                                   "--provider", "codex", "--tool", "panel-worker", "--parent-attempt-id", swap_attempt,
+                                   "--ref", "panel_role=worker", "--ref", "panel_room_id=" + menu_room,
+                                   "--ref", "panel_room_participant=swap-worker", "--then", "starting",
+                                   "--then", "working"], env).strip()
+            plan_cli = ["bash", str(panel.ENTRY), "agent-plan", "--repo", str(project)]
+            call(plan_cli + ["init", "--goal", "Swap fixture"], env)
+            call(plan_cli + ["add", "--id", "swap-held", "--title", "Keep the claim"], env)
+            claim_env = dict(env, OMS_ROOM_PARTICIPANT=swap_member, OMS_PANEL_MAIN_ATTEMPT=swap_attempt)
+            call(plan_cli + ["claim", "--id", "swap-held", "--provider", "claude"], claim_env)
+            claim_before = json.loads(call(plan_cli + ["show", "--id", "swap-held"], env))
+            # The already-running Claude fixture will answer; only the next Codex fixture
+            # inherits this setting and forces the bounded automatic-digest path.
+            subprocess.run(tmux + ["set-environment", "-g", "PANEL_TEST_SWAP_HANDOFF", "0"], env=env, check=True)
+            unknown_swap = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                           "--swap-main", "missing"], env=env, capture_output=True, text=True)
+            assert unknown_swap.returncode != 0 and "unknown or not installed" in unknown_swap.stderr
+            uninstalled_swap = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                               "--swap-main", "pi"], env=env, capture_output=True, text=True)
+            assert uninstalled_swap.returncode != 0 and "unknown or not installed" in uninstalled_swap.stderr
+            with patch.object(panel, "main_installed", return_value=True), \
+                    patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
+                    ["land", "status"], 3, '{"active":true}', "")) as land_probe:
+                try:
+                    panel.swap_main(project, "codex")
+                except ValueError as error:
+                    assert "land is in progress" in str(error), error
+                else:
+                    raise AssertionError("main swap passed an active landing")
+                assert land_probe.call_count == 1, "land refusal touched a native pane"
+            swapped = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                       "--swap-main", "codex", "--model", "gpt-6.1-sol", "--json"],
+                                      dict(env, OMS_PANEL_SWAP_HANDOFF_SECONDS="2")))
+            assert swapped["handoff"] == "main" and swapped["window"] == swap_window, swapped
+            assert swapped["room"] == menu_room and swapped["participant"] == swap_member, swapped
+            handoff_path = project / ".oms" / "handoffs" / ("room-%s-swap-%s.md" % (menu_room, swap_attempt))
+            assert "Source: main" in handoff_path.read_text() and "Goal fixture" in handoff_path.read_text()
+            released = json.loads(panel.events(project, "show", "--attempt", swap_attempt, "--json", output=True))
+            assert released["state"] == "abandoned" and released["reason_code"] == "main_swapped"
+            assert released["refs"].get("native_session"), "old native session id was discarded"
+            tmux_wait(["capture-pane", "-p", "-t", swap_pane], "NATIVE_FIXTURE_READY")
+            assert room.participant(room.status(project, menu_room), swap_member)["provider"] == "codex"
+            assert room.participant(room.status(project, menu_room), "swap-worker")["parent"] == swap_member
+            room.send(project, menu_room, "swap-worker", swap_member, "worker result after swap", "note")
+            assert swap_member in room.status(project, menu_room)["messages"][-1]["targets"]
+            assert json.loads(call(plan_cli + ["show", "--id", "swap-held"], env))["lease_id"] == claim_before["lease_id"]
+            assert json.loads(call(plan_cli + ["show", "--id", "swap-held"], env))["claimed_by_participant"] == swap_member
+            assert panel.events(project, "show", "--attempt", worker_attempt, "--json", output=True)
+            codex_attempt = tmux_wait(["show-option", "-w", "-v", "-t", swap_window,
+                                       "@oms_panel_main_attempt"], "att_").strip()
+            assert swap_attempt in panel.lineage_ids(project, "codex", swap_member, codex_attempt)
+            swap_board = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", menu_room,
+                               "--watch", "--count", "1", "--view", "graph"], watched_env)
+            assert "SESSION / MAIN Sol 6.1" in swap_board and "took over from Opus 5.5" in swap_board, swap_board
+            assert "[s] Swap main" in "\n".join(panel.menu_rows(100, 28, occupied=True))
+            fallback = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                        "--swap-main", "claude", "--json"],
+                                       dict(env, OMS_PANEL_SWAP_HANDOFF_SECONDS="1")))
+            assert fallback["handoff"] == "automatic_digest" and fallback["window"] == swap_window, fallback
+            fallback_path = project / ".oms" / "handoffs" / ("room-%s-swap-%s.md" % (menu_room, codex_attempt))
+            assert "Source: automatic_digest" in fallback_path.read_text()
+            assert "swap-held" in fallback_path.read_text() and worker_attempt in fallback_path.read_text()
+            tmux_wait(["capture-pane", "-p", "-t", swap_pane], "NATIVE_FIXTURE_READY")
+            assert room.participant(room.status(project, menu_room), swap_member)["provider"] == "claude"
+            assert json.loads(call(plan_cli + ["show", "--id", "swap-held"], env))["lease_id"] == claim_before["lease_id"]
+            fallback_prompt = " ".join(json.loads(log.read_text().splitlines()[-1])["argv"])
+            assert all(part in fallback_prompt for part in ("Automatic OMS handoff", "swap-held", worker_attempt)), fallback_prompt
+            resumed_attempt = tmux_wait(["show-option", "-w", "-v", "-t", swap_window,
+                                         "@oms_panel_main_attempt"], "att_").strip()
+            resumed_session = json.loads(panel.events(project, "show", "--attempt", resumed_attempt,
+                                                       "--json", output=True))["refs"]["native_session"]
+            subprocess.run(tmux + ["send-keys", "-t", swap_pane, "-l", "finish"], env=env, check=True)
+            subprocess.run(tmux + ["send-keys", "-t", swap_pane, "Enter"], env=env, check=True)
+            tmux_wait(["capture-pane", "-p", "-t", swap_pane], "claude session exited (0)")
+            with patch.object(panel, "_run_native", return_value="resume accepted"):
+                assert panel.run_single_native("claude", project, resume=resumed_session) == "resume accepted"
+            continued_room = room.rollover(project, menu_room, actor=swap_member)
+            assert continued_room != menu_room
+            carried_swap = panel._latest_swap(project, room.status(project, continued_room))
+            assert carried_swap["attempt"] == codex_attempt and carried_swap["to"] == "claude"
+            continued_board = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", continued_room,
+                                    "--watch", "--count", "1", "--view", "graph"], watched_env)
+            assert "SESSION / MAIN Opus 5.5" in continued_board and "took over from Sol 6.1" in continued_board
             subprocess.run(tmux + ["detach-client", "-s", session], env=env, check=True)
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:

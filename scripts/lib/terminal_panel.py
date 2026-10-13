@@ -774,7 +774,9 @@ def run_single_native(provider, repo, resume=None, model=None, task=None, _exit_
                     current = enrolled.get("consumer") == digest
                     claims = [row for row in history if current or not row.get("refs", {}).get("panel_session_digest")
                               or row["refs"]["panel_session_digest"] == digest]
-                    if (not claims or any(row.get("provider") != provider or row.get("tool") != "panel-main"
+                    if (not claims or any((row.get("provider") != provider and not (
+                            row.get("terminal") is True and row.get("reason_code") == "main_swapped"))
+                            or row.get("tool") != "panel-main"
                             or row.get("refs", {}).get("panel_role") != "main" or row.get("terminal") is not True
                             or not room.same_room(repo, row.get("refs", {}).get("panel_room_id", state["id"]), state["id"])
                             or row.get("refs", {}).get("panel_room_participant", row.get("attempt_id")) != enrolled["participant"]
@@ -812,6 +814,17 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
     preset = policy()["main"].get(provider, {"model": "provider-default", "effort": "native-settings"})
     room_id = room_id or ensure_room(repo)
     member = None
+    if not resume and managed_session():
+        takeover = pane_option("@oms_panel_swap_participant")
+        if takeover:
+            state = room.status(repo, room_id)
+            enrolled = room.participant(state, takeover)
+            swap = _latest_swap(repo, state)
+            if (enrolled["role"] != "main" or enrolled["provider"] != provider
+                    or not swap or swap["participant"] != takeover or swap["to"] != provider
+                    or swap.get("attempt") != pane_option("@oms_panel_swap_attempt")):
+                raise ValueError("main swap lineage is unverified")
+            member = takeover
     if resume:
         digest = hashlib.sha256(resume.encode("utf-8")).hexdigest()[:32]
         prior = next((p for p in room.status(repo, room_id)["participants"]
@@ -819,7 +832,8 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         if prior:
             history = main_history(repo, room_id, prior["participant"])
             if (prior["provider"] != provider or prior["role"] != "main" or not history
-                    or any(row.get("tool") != "panel-main" or row.get("provider") != provider
+                    or any(row.get("tool") != "panel-main" or (row.get("provider") != provider and not (
+                           row.get("terminal") is True and row.get("reason_code") == "main_swapped"))
                            or row.get("refs", {}).get("panel_role") != "main" or row.get("terminal") is not True
                            or not room.same_room(repo, row.get("refs", {}).get("panel_room_id", room_id), room_id)
                            or row.get("refs", {}).get("panel_room_participant", prior["participant"]) != prior["participant"]
@@ -886,6 +900,8 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         try:
             if not member:
                 room.join(repo, room_id, native_member, provider, "main", model or preset["model"], label, native_session)
+            elif not resume and native_session:
+                room.bind(repo, room_id, native_member, native_session)
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
             reason = "room_join_failed"
             raise
@@ -924,6 +940,9 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                                         "@oms_panel_room_participant", native_member), check=True)
             subprocess.run(tmux_command("set-option", "-w", "-t", os.environ.get("TMUX_PANE", ""),
                                         "@oms_panel_repo", str(Path(repo).resolve())), check=True)
+            if member and not resume:
+                subprocess.run(tmux_command("set-option", "-w", "-u", "-t", os.environ.get("TMUX_PANE", ""),
+                                            "@oms_panel_swap_participant"), check=True)
         context_path = Path(context.name) / "context.txt"
         parents = lineage_ids(repo, provider, native_member, attempt)
         unsettled = []
@@ -996,9 +1015,14 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                 update_activity(repo, "usage", "--attempt", attempt, "--actor", "panel-main",
                                 "--ref", "panel_" + exit_kind + "_exit=confirmed",
                                 "--ref", "panel_" + exit_kind + "_exit_code=" + str(native_exit))
+            swapped = (managed_session() and pane_option("@oms_panel_swap_attempt") == attempt
+                       and not launch_inflight and (process is None or process.poll() is not None))
             if launch_inflight or process and process.poll() is None:
                 update_activity(repo, "transition", "--attempt", attempt, "--state", "blocked",
                                 "--actor", "panel-main", "--reason-code", "native_shutdown_unconfirmed")
+            elif swapped:
+                update_activity(repo, "transition", "--attempt", attempt, "--state", "blocked", "--then", "abandoned",
+                                "--actor", "panel-main", "--reason-code", "main_swapped")
             elif status == 0:
                 update_activity(repo, "transition", "--attempt", attempt, "--state", "verifying", "--then", "review",
                        "--then", "done", "--actor", "panel-main", "--reason-code", reason)
@@ -1082,9 +1106,10 @@ def lineage_ids_from_rows(rows, owner, participant, current_attempt):
         own = groups.get(participant, [])
 
         def confirmed(row):
-            return (row.get("tool") == "panel-main" and row.get("provider") == owner
+            prior_swap = row.get("terminal") is True and row.get("reason_code") == "main_swapped"
+            return (row.get("tool") == "panel-main" and (row.get("provider") == owner or prior_swap)
                     and row["refs"].get("panel_role") == "main"
-                    and row["refs"].get("panel_owner", owner) == owner
+                    and row["refs"].get("panel_owner", row.get("provider")) == row.get("provider")
                     and type(row.get("terminal")) is bool
                     and row.get("state") in TERMINAL_STATES | {
                         "queued", "starting", "working", "verifying", "review", "blocked",
@@ -3883,7 +3908,8 @@ def keys_help(installed=None):
     installed = set(name for name in ("claude", "pi", "codex") if main_installed(name)) if installed is None else set(installed)
     starts = [label for name, label in (("claude", "1 Claude"), ("pi", "2 Pi"), ("codex", "0 Codex"))
               if name in installed]
-    return (" ".join(starts + ["? More F5 Back"]), "F9 Chat/Board F8 Modes F5 Control ? Keys k Capacity i Headers")
+    return (" ".join(starts + ["s Swap main", "? More F5 Back"]),
+            "F9 Chat/Board F8 Modes F5 Control s Swap main ? Keys k Capacity i Headers")
 
 
 KEYS_HELP = keys_help()
@@ -4077,6 +4103,245 @@ def spawn_main(repo, provider, task=None, model=None):
         raise ValueError("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
     with _lock(repo, "panel-main-start", timeout=3):
         return spawn_single_main(repo, provider, task, model)
+
+
+def swap_choices(repo, ident):
+    """Installed main harnesses with exact configured models and recorded weekly readings."""
+    readings = routing_status(repo, ident)
+    defaults = policy()["main"]
+    choices = []
+    for harness in MAIN_HARNESSES:
+        if not main_installed(harness):
+            continue
+        owner = main_owner(harness)
+        model = defaults[owner]["model"]
+        reading = readings.get(owner, {})
+        used = reading.get("weekly_used")
+        left = 100 - used if type(used) is int and 0 <= used <= 100 else None
+        choices.append({"provider": harness, "model": model, "weekly_left": left})
+    return choices
+
+
+def _swap_main_window(repo, session):
+    found = subprocess.run(tmux_command("list-windows", "-t", "=" + session, "-F",
+                       "#{window_id}\t#{@oms_panel_main_attempt}\t#{@oms_panel_native_pane}\t"
+                       "#{@oms_panel_room_participant}\t#{@oms_panel_room}\t#{@oms_panel_repo}"),
+                       capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+    if found.returncode:
+        raise ValueError("main window status unavailable; swap refused")
+    candidates = []
+    for line in found.stdout.replace("\r", "").splitlines():
+        fields = line.split("\t")
+        if len(fields) != 6 or not fields[1]:
+            continue
+        window, attempt, pane, member, ident, owner = fields
+        if not re.fullmatch(r"att_[0-9a-f]{32}", attempt):
+            raise ValueError("main window binding is unverified; swap refused")
+        history = main_history(repo, room.resolve(repo, ident))
+        active = next((row for row in history if row.get("attempt_id") == attempt), None)
+        if active and active.get("terminal") is True:
+            continue
+        if (not re.fullmatch(r"@[0-9]+", window) or not re.fullmatch(r"%[0-9]+", pane)
+                or owner != str(repo)
+                or not ident or not member):
+            raise ValueError("main window binding is unverified; swap refused")
+        if active is None or active.get("terminal") is not False:
+            raise ValueError("main lifecycle is unverified; swap refused")
+        candidates.append((window, attempt, pane, member, room.resolve(repo, ident)))
+    if len(candidates) != 1:
+        raise ValueError("swap requires exactly one live main window")
+    return candidates[0]
+
+
+def _swap_digest(repo, ident, member):
+    state = room.status(repo, ident)
+    history = main_history(repo, ident)
+    active = [row for row in history if row.get("refs", {}).get("panel_role") == "worker"
+              and row.get("terminal") is False]
+    plan = subprocess.run(["bash", str(ENTRY), "agent-plan", "--repo", str(repo), "list", "--json"],
+                          capture_output=True, text=True, check=False, timeout=10, stdin=subprocess.DEVNULL)
+    try:
+        listed = json.loads(plan.stdout) if plan.returncode == 0 else {}
+        tasks = listed.get("tasks", []) if isinstance(listed, dict) else []
+    except (ValueError, TypeError):
+        tasks = []
+    if isinstance(tasks, dict):
+        tasks = list(tasks.values())
+    if not isinstance(tasks, list):
+        tasks = []
+    statuses = [m["text"] for m in state.get("messages", [])
+                if m.get("sender") == member and m.get("message_kind") == "status"]
+    decisions = [m["text"] for m in state.get("messages", []) if m.get("message_kind") == "decision"]
+    lines = ["Automatic OMS handoff; verify against live state.",
+             "Goal: " + clean(statuses[-1] if statuses else state.get("title", "unrecorded"), 350),
+             "Decisions: " + clean("; ".join(decisions[-3:]) or "none recorded", 650),
+             "In-flight workers: " + clean("; ".join("%s task=%s state=%s" %
+                 (row.get("attempt_id"), row.get("task_id") or "-", row.get("state"))
+                 for row in active[-12:]) or "none recorded", 900),
+             "Landed commits: " + clean(", ".join(str(t.get("landed_commit")) for t in tasks
+                 if isinstance(t, dict) and t.get("landed_commit")) or "none recorded", 350),
+             "Next tasks: " + clean("; ".join("%s %s" % (t.get("id"), t.get("state")) for t in tasks
+                 if isinstance(t, dict) and t.get("state") in {"ready", "claimed", "running", "review", "landing"})[:900]
+                 or "inspect shared plan and room", 950)]
+    return "\n".join(lines)
+
+
+def _latest_swap(repo, state, chain=None):
+    """Find a swap even if the room rolled over before its new native CLI started."""
+    if state.get("swaps"):
+        return state["swaps"][-1]
+    for old, *_ in (room.lineage(repo, state) if chain is None else chain):
+        prior = room.project(room.records(repo, old))
+        if prior.get("swaps"):
+            return prior["swaps"][-1]
+    return None
+
+
+def _swap_handoff_file(repo, ident, attempt, handoff, supplied):
+    """Keep the bounded handoff beside existing session handoffs for recovery."""
+    directory = Path(repo) / ".oms" / "handoffs"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", ident):
+        raise ValueError("invalid handoff room id")
+    if not re.fullmatch(r"att_[0-9a-f]{32}", attempt):
+        raise ValueError("invalid handoff attempt")
+    if (directory.parent.is_symlink() or directory.parent.resolve() != Path(repo).resolve() / ".oms"):
+        raise ValueError("room state directory is unsafe")
+    directory.mkdir(mode=0o700, exist_ok=True)
+    if directory.is_symlink() or directory.resolve() != (Path(repo).resolve() / ".oms" / "handoffs"):
+        raise ValueError("handoff state directory is unsafe")
+    path = directory / ("room-%s-swap-%s.md" % (ident, attempt))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write("Room: %s\nFrom attempt: %s\nSource: %s\n\n%s\n" % (
+                ident, attempt, "main" if supplied else "automatic_digest", handoff))
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def swap_main(repo, harness, model=None):
+    """Ask for a handoff, let the native CLI exit, then reuse its proven pane and participant."""
+    if not shutil.which("tmux") or harness not in MAIN_HARNESSES or not main_installed(harness):
+        raise ValueError("swap target is unknown or not installed")
+    owner = main_owner(harness)
+    configured = policy()["main"][owner]["model"]
+    model = model or configured
+    if not re.fullmatch(r"[A-Za-z0-9_./:-]{1,160}", model):
+        raise ValueError("invalid exact swap model")
+    if model != configured:
+        catalog = provider_catalog(owner)[0]
+        if model not in catalog.get("catalog_models", catalog.get("models", [])):
+            raise ValueError("swap model is not in the installed provider catalog")
+    with _lock(repo, "panel-main-start", timeout=.1):
+        land = subprocess.run(["bash", str(ENTRY), "land", "status", "--repo", str(repo),
+                               "--active-exit", "--json"],
+                              capture_output=True, text=True, check=False, timeout=10, stdin=subprocess.DEVNULL)
+        if land.returncode == 3:
+            raise ValueError("land is in progress; swap refused")
+        if land.returncode or not isinstance(json.loads(land.stdout), dict):
+            raise ValueError("land status is unavailable; swap refused")
+        if json.loads(land.stdout).get("active") is not False:
+            raise ValueError("land status is unverified; swap refused")
+        session, session_repo = resolve_session(repo, wait=False)
+        if session_repo != str(repo):
+            raise ValueError("no panel main to swap")
+        window, attempt, pane, member, ident = _swap_main_window(repo, session)
+        if live_mains(repo, session, ident) != 1:
+            raise ValueError("main liveness is unverified; swap refused")
+        old = next((r for r in main_history(repo, ident) if r.get("attempt_id") == attempt), None)
+        if (not old or old.get("tool") != "panel-main" or old.get("terminal") is not False
+                or old.get("state") != "working" or old.get("refs", {}).get("panel_room_participant", attempt) != member
+                or old.get("refs", {}).get("panel_host") != "tmux"
+                or old.get("refs", {}).get("panel_harness") == harness and old.get("refs", {}).get("panel_model") == model):
+            raise ValueError("current main ownership or requested change is unverified")
+        if old["refs"].get("panel_harness") == "pi":
+            raise ValueError("Pi native session has no verified resume binding; swap refused")
+        state = room.status(repo, ident)
+        current = room.participant(state, member)
+        if current["role"] != "main" or current["provider"] != old["provider"]:
+            raise ValueError("current room main binding is unverified")
+        nonce = "swap-" + uuid.uuid4().hex
+        request = ("Please hand off the current goal before a panel main swap. At a safe point, send one "
+                   "bounded room handoff (max 3000 bytes) covering goal, decisions, in-flight worker/task IDs, "
+                   "landed commits and next steps. Use oms room send --id %s --participant %s --to all "
+                   "--kind handoff --text 'SWAP_HANDOFF %s: <summary>'. Do not stop workers." % (ident, member, nonce))
+        subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_state", "waiting for handoff"),
+                       check=True, timeout=3, stdin=subprocess.DEVNULL)
+        try:
+            subprocess.run(tmux_command("send-keys", "-t", pane, "-l", request), check=True, timeout=3,
+                           stdin=subprocess.DEVNULL)
+            subprocess.run(tmux_command("send-keys", "-t", pane, "Enter"), check=True, timeout=3,
+                           stdin=subprocess.DEVNULL)
+            timeout = min(60, max(0, int(os.environ.get("OMS_PANEL_SWAP_HANDOFF_SECONDS", "20"))))
+            deadline = time.monotonic() + timeout
+            handoff = None
+            while time.monotonic() < deadline:
+                state = room.status(repo, ident)
+                handoff = next((m["text"].split(":", 1)[1].strip() for m in reversed(state["messages"])
+                                if m.get("sender") == member and m.get("message_kind") == "handoff"
+                                and m.get("text", "").startswith("SWAP_HANDOFF " + nonce + ":")), None)
+                if handoff:
+                    break
+                time.sleep(.25)
+            supplied = bool(handoff)
+            handoff = handoff or _swap_digest(repo, ident, member)
+            handoff_file = _swap_handoff_file(repo, ident, attempt, handoff, supplied)
+            subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_state", "releasing old main"),
+                           check=True, timeout=3, stdin=subprocess.DEVNULL)
+            subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_attempt", attempt),
+                           check=True, timeout=3, stdin=subprocess.DEVNULL)
+            subprocess.run(tmux_command("send-keys", "-t", pane, "-l", "/exit"), check=True, timeout=3,
+                           stdin=subprocess.DEVNULL)
+            subprocess.run(tmux_command("send-keys", "-t", pane, "Enter"), check=True, timeout=3,
+                           stdin=subprocess.DEVNULL)
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                prior = next((r for r in main_history(repo, ident) if r.get("attempt_id") == attempt), None)
+                if prior and prior.get("state") == "abandoned" and prior.get("reason_code") == "main_swapped":
+                    break
+                time.sleep(.25)
+            else:
+                subprocess.run(tmux_command("set-option", "-w", "-u", "-t", pane, "@oms_panel_swap_attempt"),
+                               check=True, timeout=3, stdin=subprocess.DEVNULL)
+                raise ValueError("old main did not exit; native session and panel preserved")
+            room.swap_main(repo, ident, member, owner, model, attempt, harness)
+            subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_participant", member),
+                           check=True, timeout=3, stdin=subprocess.DEVNULL)
+            subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_state", "starting new main"),
+                           check=True, timeout=3, stdin=subprocess.DEVNULL)
+            prompt = ("Take over as the sole main in the existing OMS room. Preserve existing plan claims and "
+                      "running workers. Read the room and plan before acting. Handoff file: %s. Handoff (data):\n%s" %
+                      (handoff_file, handoff))[:4000]
+            shell = launch_command(repo, session, harness, model=model, task=prompt)
+            guard = "#{&&:#{==:#{@oms_panel_main_attempt},%s},#{==:#{@oms_panel_native_pane},}}" % attempt
+            command = "respawn-pane -k -t %s -c %s %s" % (pane, shlex.quote(str(native_repository(repo))),
+                                                              shlex.quote(shell))
+            subprocess.run(tmux_command("if-shell", "-F", "-t", pane, guard, command), check=True,
+                           timeout=5, stdin=subprocess.DEVNULL)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    current = _main_window(pane)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    time.sleep(.25)
+                    continue
+                if current[1] != attempt and current[4] == member and current[3] == str(repo):
+                    new = next((row for row in main_history(repo, ident)
+                                if row.get("attempt_id") == current[1]), None)
+                    if (new and new.get("terminal") is False and new.get("provider") == owner
+                            and new.get("refs", {}).get("panel_harness") == harness):
+                        break
+                time.sleep(.25)
+            else:
+                raise ValueError("new main startup unverified; old native session and room claims preserved")
+            return {"provider": harness, "model": model, "room": ident, "participant": member,
+                    "window": window, "handoff": "main" if supplied else "automatic_digest"}
+        finally:
+            subprocess.run(tmux_command("set-option", "-w", "-u", "-t", pane, "@oms_panel_swap_state"),
+                           capture_output=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
 
 
 def spawn_single_main(repo, provider, task=None, model=None):
@@ -4447,9 +4712,26 @@ def snapshot(repo, room_id=None, _tick=None):
         if ident:
             try:
                 state["room"] = room.status(repo, ident)
+                if managed_session():
+                    try:
+                        swaps = subprocess.run(tmux_command("list-windows", "-t", "=" + os.environ["OMS_PANEL_SESSION"],
+                                                "-F", "#{@oms_panel_room}\t#{@oms_panel_swap_state}"),
+                                               capture_output=True, text=True, check=False, timeout=3,
+                                               stdin=subprocess.DEVNULL)
+                        if swaps.returncode == 0:
+                            state["swap_state"] = next((value for line in swaps.stdout.replace("\r", "").splitlines()
+                                for selected, sep, value in [line.partition("\t")]
+                                if sep and room.same_room(repo, selected, ident)
+                                and value in {"waiting for handoff", "releasing old main", "starting new main"}), None)
+                    except (OSError, ValueError, subprocess.SubprocessError):
+                        pass
                 chain = room.lineage(repo, state["room"])
                 if chain:
                     state["room"]["lineage"] = [old for old, *_ in chain]
+                    if not state["room"].get("swaps"):
+                        previous_swap = _latest_swap(repo, state["room"], chain)
+                        if previous_swap:
+                            state["room"]["swaps"] = [previous_swap]
                     state["room"]["predecessor_calls"] = room.predecessor_calls(repo, state["room"], chain)
                     # A sealed room's delivery receipt stands until a later room records one for the same target.
                     published = {}
@@ -5437,30 +5719,31 @@ def mark_window(attention, asked=False):
         pass
 
 
-def start_spawn(repo, provider, spawns, navigation):
+def start_spawn(repo, provider, spawns, navigation, swap=False):
     """Start a main off the input loop; a second request waits for the first."""
-    if any(proc.poll() is None for proc, unused, unused2 in spawns):
-        navigation["notice"] = "A main is already starting"
+    if any(entry[0].poll() is None for entry in spawns):
+        navigation["notice"] = "A main start or swap is already in progress"
         return
     env = os.environ.copy()
     env.pop("OMS_ROOM_PARTICIPANT", None)
     try:
-        proc = subprocess.Popen(["bash", str(ENTRY), "panel", "--repo", str(repo), "--spawn-main", provider, "--json"],
+        proc = subprocess.Popen(["bash", str(ENTRY), "panel", "--repo", str(repo),
+                                 "--swap-main" if swap else "--spawn-main", provider, "--json"],
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, env=env)
     except OSError as error:
         navigation["notice"] = clean(str(error), 160)
         return
-    spawns.append((proc, provider, time.monotonic()))
-    navigation["notice"] = "Starting %s main..." % provider.capitalize()
+    spawns.append((proc, provider, time.monotonic(), swap))
+    navigation["notice"] = ("Waiting for handoff to %s..." if swap else "Starting %s main...") % provider.capitalize()
 
 
 def reap_spawns(spawns, navigation):
     """Report finished spawns; True when one finished, so the board re-reads the room."""
     done = False
     for entry in list(spawns):
-        proc, provider, started = entry
-        if proc.poll() is None and time.monotonic() - started > 60:
+        proc, provider, started, swap = entry
+        if not swap and proc.poll() is None and time.monotonic() - started > 60:
             proc.kill()
         if proc.poll() is None:
             continue
@@ -5468,7 +5751,8 @@ def reap_spawns(spawns, navigation):
         out, err = proc.communicate()
         try:
             report = json.loads(out)
-            navigation["notice"] = "Started %s main in window %s" % (provider.capitalize(), report["window"])
+            navigation["notice"] = ("Swapped to %s in window %s" if swap else "Started %s main in window %s") % (
+                provider.capitalize(), report["window"])
         except (ValueError, KeyError, TypeError):
             navigation["notice"] = clean((err.strip().splitlines() or ["main did not start"])[-1], 160)
         done = True
@@ -5640,7 +5924,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     navigation["cancel_allowed"] = bool(owner and _cancel_watch_authority(
                         repo, main_attempt, owner["participant"]))
                     navigation.update(hits=[], items=[], expanded=expanded, installed=installed,
-                                      spawn_busy=any(proc.poll() is None for proc, unused, unused2 in spawns),
+                                      spawn_busy=any(entry[0].poll() is None for entry in spawns),
                                       spawn_managed=managed_session(),
                                       main_occupied=status != 0 or bool(navigation.get("capacity_stale")) or bool(main_occupied(state)) or any(m.get("role") == "main" and m.get("state") not in
                                           {"done", "failed", "cancelled", "timed_out", "abandoned"}
@@ -5717,12 +6001,34 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         revision += 1
                         navigation.pop("notice", None)
                         armed = navigation.pop("spawn_armed", False)
+                        swap_armed = navigation.pop("swap_armed", False)
                         spawn = None
                         if event[0] == "click" and not resized:
                             spawn = next((h["action"][1] for h in navigation.get("hits", []) if h["action"][0] == "spawn"
                                           and h["y"] == event[2] and h["x1"] <= event[1] <= h["x2"]), None)
                         elif armed and event[0] in {"1", "2", "0"}:
                             spawn = {"1": "claude", "2": "pi", "0": "codex"}[event[0]]
+                        if event[0] == "s" and managed_session():
+                            if not navigation.get("main_occupied"):
+                                navigation["notice"] = "No main to swap"
+                            else:
+                                choices = swap_choices(repo, navigation.get("room_id"))
+                                names = {"claude": "1", "pi": "2", "codex": "0"}
+                                navigation["notice"] = "Swap main: " + "  ".join(
+                                    "%s %s %s (%s weekly left)" % (names[c["provider"]], c["provider"], c["model"],
+                                    "%s%%" % c["weekly_left"] if c["weekly_left"] is not None else "unknown")
+                                    for c in choices)
+                                navigation["swap_armed"] = True
+                            size = redraw()
+                            continue
+                        if swap_armed and event[0] in {"1", "2", "0"}:
+                            selected = {"1": "claude", "2": "pi", "0": "codex"}[event[0]]
+                            if selected in installed:
+                                start_spawn(repo, selected, spawns, navigation, swap=True)
+                            else:
+                                navigation["notice"] = "%s is not installed" % selected.capitalize()
+                            size = redraw()
+                            continue
                         if spawn or armed and event[0] == "escape" or event[0] == "n":
                             if spawn:
                                 if navigation.get("main_occupied"):
@@ -6262,7 +6568,7 @@ def interactive(repo, view="auto", attention_only=False):
                     previous = "detached; existing sessions preserved"
                     continue
                 return 0
-            if choice == "s":
+            if choice == "j":
                 pane = os.environ.get("TMUX_PANE", "")
                 if not os.environ.get("TMUX") or not re.fullmatch(r"%[0-9]+", pane):
                     raise ValueError("terminals and jobs require a tmux pane")
@@ -6275,6 +6581,24 @@ def interactive(repo, view="auto", attention_only=False):
                 import panel_workspaces
                 panel_workspaces.open_workspace(repo, origin_session)
                 previous = "terminals and jobs opened in a separate workspace"
+                continue
+            if choice == "s":
+                choices = swap_choices(repo, os.environ.get("OMS_ROOM_ID"))
+                if not choices:
+                    raise ValueError("no installed main providers are available")
+                clear_control_view()
+                for choice_row in choices:
+                    left = ("%s%%" % choice_row["weekly_left"] if choice_row["weekly_left"] is not None else "unknown")
+                    print("%s  %s  weekly left %s" % (choice_row["provider"], choice_row["model"], left))
+                selected = read_field("Swap to provider (Enter to cancel): ", required=False)
+                if not selected:
+                    continue
+                if selected not in {row["provider"] for row in choices}:
+                    raise ValueError("select an installed main provider")
+                requested = read_field("Exact model (Enter for displayed model): ", required=False) or None
+                print("Waiting for handoff; the current main and workers remain visible on the board.", flush=True)
+                result = swap_main(repo, selected, requested)
+                previous = "Swapped to %s %s in the same room" % (result["provider"], result["model"])
                 continue
             if choice in ("1", "2", "0", "3"):
                 selected = {"1": "claude", "2": "pi", "0": "codex"}.get(choice) or read_field("Harness (claude/pi/codex or opted-in native adapter): ")
@@ -6458,9 +6782,11 @@ def main(argv=None):
     parser.add_argument("--launch", help="open the sole main (claude preferred, pi or codex)")
     parser.add_argument("--spawn-main", metavar="PROVIDER",
                         help="start the sole main in an empty panel without attaching; works without a terminal")
+    parser.add_argument("--swap-main", metavar="PROVIDER",
+                        help="replace the sole main in its panel pane after a bounded handoff")
     parser.add_argument("--reopen", action="store_true", help="restore an existing tmux board without restarting its input CLI")
     parser.add_argument("--resume", help="resume an exact native session ID (requires --launch)")
-    parser.add_argument("--model", help="exact model for --launch or --dispatch --to")
+    parser.add_argument("--model", help="exact model for --launch, --spawn-main, --swap-main or --dispatch --to")
     parser.add_argument("--to", help="explicit registered CLI target for --dispatch")
     parser.add_argument("--reasoning-effort", choices=("low", "medium", "high"), help="effort for this dispatch; a role route keeps its model")
     parser.add_argument("--providers", action="store_true", help="read registered CLI capabilities without running providers")
@@ -6526,7 +6852,7 @@ def main(argv=None):
         parser.error("--health is a read-only report; use --repo, --room and optional --json")
     if args.since is not None and not args.metrics:
         parser.error("--since requires --metrics")
-    if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.reopen, args.dispatch, args.routes,
+    if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.swap_main, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.finalize, args.retry_delivery, args.providers,
                                      args.chats, args.open_chat, args.health, args.mail, args.metrics)) > 1:
         parser.error("choose one panel operation")
@@ -6555,7 +6881,9 @@ def main(argv=None):
         parser.error("--no-animation requires --watch")
     if args.spawn_main and args.dry_run:
         parser.error("--spawn-main starts a main; it has no dry-run")
-    if (args.view or args.attention_only) and (args.launch or args.spawn_main or args.reopen or args.json or args.dry_run or args.routes
+    if args.swap_main and (args.dry_run or args.host not in {"auto", "tmux"} or args.layout == "inline"):
+        parser.error("--swap-main requires an existing tmux panel and has no dry-run")
+    if (args.view or args.attention_only) and (args.launch or args.spawn_main or args.swap_main or args.reopen or args.json or args.dry_run or args.routes
             or args.dispatch or args.council or args.results or args.finalize or args.retry_delivery or args.providers
             or args.chats or args.open_chat or args.mail or args.metrics):
         parser.error("--view and --attention-only apply to the interactive menu or --watch")
@@ -6619,8 +6947,8 @@ def main(argv=None):
         parser.error("--count must be between 1 and 1000000")
     if args.resume and not args.launch:
         parser.error("--resume requires --launch")
-    if args.model and not (args.launch or args.dispatch or args.spawn_main):
-        parser.error("--model requires --launch, --spawn-main or --dispatch --to")
+    if args.model and not (args.launch or args.dispatch or args.spawn_main or args.swap_main):
+        parser.error("--model requires --launch, --spawn-main, --swap-main or --dispatch --to")
     if args.json and args.launch:
         parser.error("--json is read-only; use --dry-run for a launch plan")
     if args.reopen and (args.json or args.dry_run or args.host in {"inline", "herdr"}):
@@ -6633,7 +6961,7 @@ def main(argv=None):
                        or not re.fullmatch(r"[A-Za-z0-9_./:-]+", args.model)):
         parser.error("invalid model ID")
     if (args.dispatch or args.council or args.finalize or args.retry_delivery or args.chats or args.open_chat
-            or args.spawn_main or not (
+            or args.spawn_main or args.swap_main or not (
             args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health or args.mail or args.metrics)) and (
             os.environ.get("OMS_HARNESS_CHILD") == "1"
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
@@ -6728,6 +7056,13 @@ def main(argv=None):
                 print(json.dumps(report))
             else:
                 print("Started %s main in window %s of room %s" % (report["provider"].capitalize(), report["window"], report["room"]))
+            return 0
+        if args.swap_main:
+            report = swap_main(repo, args.swap_main, args.model)
+            if args.json:
+                print(json.dumps(report))
+            else:
+                print("Swapped main to %s %s in room %s" % (report["provider"], report["model"], report["room"]))
             return 0
         if args.council:
             return council(repo, args.owner or caller_owner(), args.task_id, args.label, args.prompt,

@@ -273,6 +273,7 @@ def event_shape(event):
         raise ValueError("invalid persisted room event")
     kind = event.get("kind")
     required = {"created": (), "join": ("participant", "provider", "role", "label"), "bind": ("participant", "consumer"),
+                "main-swap": ("participant", "provider", "model", "attempt", "harness"),
                 "scope": ("participant",), "describe": ("participant", "label"),
                 "leave": ("participant",), "closed": ("participant",), "message": ("id", "sender", "recipient", "message_kind"),
                 "received": ("participant",), "publication": ("id", "digest", "status"),
@@ -285,6 +286,7 @@ def event_shape(event):
     if kind not in required or any(not isinstance(event.get(key), str) for key in required[kind]):
         raise ValueError("invalid persisted room event")
     for key in ("model", "consumer", "previous", "parent", "reply_to", "task_id", "turn_id", "target", "participant",
+                "harness",
                 "predecessor"):
         if event.get(key) is not None and not isinstance(event[key], str):
             raise ValueError("invalid room event field")
@@ -293,6 +295,8 @@ def event_shape(event):
             raise ValueError("invalid room event list")
     if kind == "scope" and "owns" not in event:
         raise ValueError("missing declared scopes")
+    if kind == "main-swap" and not isinstance(event.get("attempt"), str):
+        raise ValueError("invalid swapped main attempt")
     if kind == "received" and "messages" not in event:
         raise ValueError("missing room receipt ids")
     if kind == "publication" and type(event.get("delivery_unknown")) is not bool:
@@ -332,6 +336,7 @@ def project(rows):
     if created is None:
         raise ValueError("this thread is not a work room")
     members, messages, receipts, owner, publication, publications, successor = {}, [], {}, None, None, {}, None
+    swaps = []
     carried = False
     for row in rows:
         event = row.get("room_event", {})
@@ -345,6 +350,16 @@ def project(rows):
             members[event["participant"]]["initial_seq"] = initial_seq
             if owner is None and event["role"] == "main":
                 owner = event["participant"]
+        elif kind == "main-swap":
+            member = members[event["participant"]]
+            swaps.append({"participant": event["participant"], "from": member["provider"],
+                          "from_model": member.get("model"), "to": event["provider"],
+                          "harness": event["harness"], "model": event["model"],
+                          "attempt": event["attempt"], "ts": row.get("ts", "")})
+            member["provider"] = event["provider"]
+            member["model"] = event["model"]
+            member["consumer"] = None
+            member["initial_consumer"] = None
         elif kind == "leave" and event["participant"] in members:
             members[event["participant"]]["joined"] = False
         elif kind == "describe":
@@ -395,7 +410,7 @@ def project(rows):
             "task_id": created["room_event"].get("task_id"),
             "creator": created["room_event"].get("participant"),
             "closed": any(row.get("role") == "closed" or row.get("room_event", {}).get("kind") == "closed" for row in rows),
-            "participants": list(members.values()), "messages": messages, "publication": publication,
+            "participants": list(members.values()), "messages": messages, "swaps": swaps[-8:], "publication": publication,
             "publications": publications, "successor": successor,
             "predecessor": created["room_event"].get("predecessor"), "carried": carried,
             "delivery": "next safe point or explicit poll; acknowledgment is not approval"}
@@ -432,13 +447,14 @@ def declared_scopes(role, scopes):
 
 def validate_event(rows, event, text, repo=None):
     """Validate while thread.sh holds its existing file lock; no membership grants authority."""
-    if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "bind", "scope", "describe", "leave", "closed", "message", "received", "publication", "successor", "carried", "call-result", "review-dispatch", "review-dispatch-failed"}:
+    if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "main-swap", "bind", "scope", "describe", "leave", "closed", "message", "received", "publication", "successor", "carried", "call-result", "review-dispatch", "review-dispatch-failed"}:
         raise ValueError("invalid room event")
     event_shape(event)
     kind = event["kind"]
     carry = _carrying()
     keys = {"created": {"kind", "task_id", "participant", "predecessor"},
             "join": {"kind", "participant", "provider", "model", "role", "label", "consumer", "owns", "parent"},
+            "main-swap": {"kind", "participant", "provider", "model", "attempt", "harness"},
             "bind": {"kind", "participant", "consumer", "previous"},
             "scope": {"kind", "participant", "owns"},
             "describe": {"kind", "participant", "label"},
@@ -541,6 +557,25 @@ def validate_event(rows, event, text, repo=None):
             raise ValueError("successor room id does not derive from this room")
         if repo is not None and _predecessor(repo, event["target"]) != rows[0]["thread"]:
             raise ValueError("successor room does not name this room as its predecessor")
+    elif kind == "main-swap":
+        member = participant(state, event["participant"])
+        if member["role"] != "main" or member.get("parent"):
+            raise ValueError("swap needs the current main")
+        if (event["harness"] not in {"claude", "codex", "pi"}
+                or event["provider"] != ("codex" if event["harness"] == "pi" else event["harness"])
+                or not re.fullmatch(r"[A-Za-z0-9_./:-]{1,160}", event["model"])):
+            raise ValueError("invalid swap provider or model")
+        if not re.fullmatch(r"att_[0-9a-f]{32}", event["attempt"]):
+            raise ValueError("invalid swapped main attempt")
+        from terminal_panel import events
+        old = json.loads(events(repo, "show", "--attempt", event["attempt"], "--json", output=True))
+        refs = old.get("refs", {})
+        if (old.get("tool") != "panel-main" or old.get("provider") != member["provider"]
+                or refs.get("panel_harness") == event["harness"] and member.get("model") == event["model"]
+                or old.get("state") != "abandoned" or old.get("reason_code") != "main_swapped"
+                or refs.get("panel_room_participant", old.get("attempt_id")) != event["participant"]
+                or not same_room(repo, refs.get("panel_room_id"), state["id"])):
+            raise ValueError("swapped main release is unverified")
     elif kind == "describe":
         member = participant(state, event["participant"])
         if member["role"] != "main":
@@ -1307,6 +1342,14 @@ def bind(repo, ident, who, native_session, replaces=None):
     if replaces:
         event["previous"] = replaces
     append(repo, ident, event, "Native session rebound" if replaces else "Native session bound")
+    return event
+
+
+def swap_main(repo, ident, who, provider, model, attempt, harness):
+    """Retain one main's participant and worker mailbox after its native attempt was released."""
+    event = {"kind": "main-swap", "participant": who, "provider": provider,
+             "model": model, "attempt": attempt, "harness": harness}
+    append(repo, ident, event, "Main swapped to " + model)
     return event
 
 

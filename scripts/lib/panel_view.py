@@ -3,6 +3,7 @@
 import os
 import re
 import unicodedata
+from datetime import datetime
 
 from dashboard_projection import (clean, count, display_width, fit, listing, mapping, number,
                                   wrap_label as wrapped)
@@ -119,6 +120,21 @@ def color_count():
 
 PALETTE = {name: _sgr(name, color_count(), light_theme(), name in {"main", "codex", "head"})
            for name in list(TOKEN_COLORS) + list(TOKEN_ALIASES)}
+
+
+def swap_line(room):
+    swaps = listing(mapping(room).get("swaps"))
+    if not swaps:
+        return ""
+    latest = mapping(swaps[-1])
+    stamp = latest.get("ts", "")
+    try:
+        clock = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone().strftime("%H:%M")
+    except (ValueError, TypeError):
+        clock = "time unknown"
+    new = MODEL_NAMES.get(latest.get("model"), latest.get("model")) or "model unknown"
+    old = MODEL_NAMES.get(latest.get("from_model"), latest.get("from_model")) or "model unknown"
+    return "MAIN %s · took over from %s at %s" % (new, old, clock)
 PROVIDER_NAMES = {"codex": "Codex", "claude": "Claude Code", "pi": "Pi"}
 TERMINAL_STATES = {"done", "failed", "cancelled", "timed_out", "abandoned"}
 TASK_NAMES = {"peer-delegate": "Implement patch", "delegate": "Implement patch",
@@ -418,7 +434,7 @@ def box_row(text, width, unicode=True, dashed=False):
 def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=True, occupied=False, installed=None):
     """Starting a main, rooms, refresh and quit; the board's own keys are not repeated."""
     quit_label = "Detach" if managed else "Quit"
-    other = "[o] Rooms  [k] Capacity  [9] Refresh  [?] More  [q] " + quit_label
+    other = ("[s] Swap main  " if occupied else "") + "[o] Rooms  [k] Capacity  [9] Refresh  [?] More  [q] " + quit_label
     harnesses = [("claude", "[1] Claude"), ("pi", "[2] Pi"), ("codex", "[0] Codex")]
     start_keys = [label for name, label in harnesses if installed is None or name in installed]
     starts = "  ".join(start_keys + (["[3] Resume", "[t] Task"] if start_keys else []))
@@ -439,8 +455,8 @@ def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=T
             rows.append(current)
         return [clipped(line, row_width) for line in rows[:limit]]
     if height < 20 or width < 28:
-        options = (["[o] Rooms [k] Capacity [9] Refresh [?] [q] " + quit_label,
-                    "[o] [k] [9] [?] [q]"] if occupied else
+        options = (["[s] Swap main [o] Rooms [k] Capacity [9] Refresh [?] [q] " + quit_label,
+                    "[s] [o] [k] [9] [?] [q]"] if occupied else
                    [" ".join(start_keys + ["[?]", "[q] " + quit_label]),
                     " ".join(re.findall(r"\[[^]]+\]", " ".join(start_keys)) + ["[?]", "[q]"])])
         compact = next((line for line in options if display_width(line) <= width), "[?] [q]")
@@ -448,7 +464,7 @@ def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=T
     groups = ([] if occupied else [("START", starts)] if start_keys else []) + [("OTHER", other)]
     if expanded:
         groups += [("OPEN", "[h] Chats  [r] Results  [g] Graph  [z] Panel"),
-                   ("TERMINAL", "[s] Terminals and jobs"),
+                   ("TERMINAL", "[j] Terminals and jobs"),
                    ("WORK", "[5] Explain  [6] Implement  [e] Researcher  [a] Advisor  [7] Review  [c] Council"),
                    ("SETUP", "[4] Main provider  [p] CLIs  [8] Dashboard"),
                    ("RESULT", "[f] Finalize  [n] Retry delivery")]
@@ -681,6 +697,12 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
     for alert in status_alerts(report):
         head.append(alert)
         styles.append("bad")
+    if report.get("swap_state"):
+        head.append("SWAP / " + clean(report["swap_state"], 80))
+        styles.append("alert")
+    if room.get("swaps") and height >= 20:
+        head.append("SESSION / " + swap_line(room))
+        styles.append("main")
     if previous is not None and height >= 12:
         last = message_rows("Last: " + previous, width) if "\n" in previous or "oms panel --release-main " in previous else ["Last: " + previous]
         if len(last) > 1:
@@ -1021,6 +1043,10 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         narrow = width < 28
         add(("Room: " if narrow else "ROOM / ") + (clean(room.get("title") or room.get("id"), 160) or "unavailable")
             + (" (continues %s)" % clean(room["predecessor"], 160) if room.get("predecessor") else ""), "main")
+        if room.get("swaps"):
+            add(("Swap: " if narrow else "SESSION / ") + swap_line(room), "main")
+        if report.get("swap_state"):
+            add("SWAP / " + clean(report["swap_state"], 80), "alert")
         from room_view import main_names, nodes
         members = nodes(report)
         mains = [member for member in members if member.get("role") == "main"]
