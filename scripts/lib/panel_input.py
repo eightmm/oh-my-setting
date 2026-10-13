@@ -240,12 +240,8 @@ def choose(event, navigation):
                 navigation["selected_row"] = hit.get("row_id")
             if hit.get("fold") and event[1] <= 2:
                 return ("fold", target[1])
-            # A first click previews a call; repeating it opens.
-            if hit.get("preview") and target[0] != "chat":
+            if hit.get("preview"):
                 # A call's content stays in the board's detail area; no separate screen opens.
-                preview_target(navigation, target)
-                return None
-            if hit.get("preview") and (navigation.get("preview") or {}).get("target") != target:
                 preview_target(navigation, target)
                 return None
             return target
@@ -264,7 +260,7 @@ def choose(event, navigation):
             offset = navigation.get("offset", 0)
             navigation["offset"] = row if row < offset else max(0, row - max(1, navigation.get("viewport", 1)) + 1)
     elif kind == "enter":
-        if navigation.get("surface") == "graph" and selected in items and selected[0] in ("result", "debate"):
+        if navigation.get("surface") == "graph" and selected in items and selected[0] in ("chat", "result", "debate"):
             preview_target(navigation, selected)
             return None
         return selected if selected in items else None

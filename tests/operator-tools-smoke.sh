@@ -5906,7 +5906,9 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 subprocess.run(tmux + ["set-option", "-w", "-t", listing[1], "@oms_panel_view", "compact"], env=env, check=True)
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "b"], env=env, check=True)
                 tmux_wait(["show-option", "-w", "-v", "-t", listing[1], "@oms_panel_attention"], "1")
-                sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "MAIN ")
+                # The option changes before the watcher paints; MAIN also
+                # appears in the preceding frame, so wait for the new filter.
+                sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "attention")
                 assert "MAIN " in sidebar and "OMS · " in sidebar, sidebar
                 native_header = tmux_wait(["show-option", "-p", "-v", "-t", listing[0], "@oms_panel_header"], identity)
                 assert identity in native_header, native_header
@@ -5940,15 +5942,15 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 main_col = main_text.index("MAIN ") + 2
                 card_click = "\033[<0;%s;%sM" % (main_col, main_row)
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", card_click], env=env, check=True)
-                # A first click on a card previews it; repeating the click opens the main.
+                # Graph cards preview on every click and Enter, including the main.
+                subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", card_click], env=env, check=True)
+                subprocess.run(tmux + ["send-keys", "-t", listing[1], "Enter"], env=env, check=True)
                 time.sleep(1)
-                if subprocess.check_output(tmux + ["display-message", "-p", "-t", listing[1],
-                        "#{window_zoomed_flag}"], env=env, text=True).strip() == "1":
-                    subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", card_click], env=env, check=True)
-                tmux_wait(["display-message", "-p", "-t", listing[1], "#{window_zoomed_flag}"], "0")
-                tmux_wait(["display-message", "-p", "-t", session + ":" + owner, "#{pane_id}"], listing[0])
-                subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", "v"], env=env, check=True)
-                tmux_wait(["display-message", "-p", "-t", listing[1], "#{window_zoomed_flag}"], "1")
+                assert subprocess.check_output(tmux + ["display-message", "-p", "-t", listing[1],
+                    "#{window_zoomed_flag}"], env=env, text=True).strip() == "1"
+                assert subprocess.check_output(tmux + ["display-message", "-p", "-t", session + ":" + owner,
+                    "#{pane_id}"], env=env, text=True).strip() == listing[1]
+                tmux_wait(["capture-pane", "-p", "-t", listing[1]], "╭╌ ▸ " + identity)
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "Escape"], env=env, check=True)
                 tmux_wait(["display-message", "-p", "-t", listing[1], "#{window_zoomed_flag}"], "0")
                 tmux_wait(["show-option", "-w", "-v", "-t", listing[1], "@oms_panel_view"], "graph")
@@ -6190,7 +6192,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 assert panel.main(["--repo", str(project)]) == 0
                 assert reopen_again.called
             assert len(subprocess.check_output(tmux + ["list-panes", "-t", top_window], env=env, text=True).splitlines()) == 2
-            # A call opens in a reader pane right of the board, above the chat (the board's click/Enter choice is unit
+            # A call opens in a reader pane right of the board, above the chat (the tree's click/Enter choice is unit
             # tested with panel_reader.picked); another call reuses that reader, --reopen ignores it, Esc on the board
             # closes only it, and q in the reader closes it and returns focus to the board. The native chat process
             # is never touched.
@@ -12273,13 +12275,18 @@ for current_room in ("old-room", "new-room"):
             panel.watch(Path("."), "codex", count=1)
         except RoomFrameReceived:
             pass
-# A click or Enter that previews a call (or selects a main) on the board is what opens (or closes) the reader;
-# arrow keys and clicks elsewhere leave it alone.
+# Tree calls can open the reader; graph clicks and Enter stay in the board's detail area.
 chosen_nav = {"preview": {"target": ("result", "w1")}, "selected": ("result", "w1"),
               "hits": [{"y": 3, "x1": 1, "x2": 9, "action": ("result", "w1")}, {"y": 4, "x1": 1, "x2": 9, "action": ("group", "g")}]}
 assert panel_reader.picked(("enter",), chosen_nav) == ("result", "w1") == panel_reader.picked(("click", 2, 3), chosen_nav)
 assert panel_reader.picked(("click", 2, 4), chosen_nav) is None and panel_reader.picked(("down",), chosen_nav) is None
 assert panel_reader.picked(("enter",), dict(chosen_nav, preview={"target": ("chat", "m1")}, selected=("chat", "m1"))) == ("chat", "m1")
+for target in (("result", "w1"), ("debate", ("task", "seat")), ("chat", "m1")):
+    for event in (("click", 2, 3), ("enter",)):
+        graph_picked = dict(chosen_nav, surface="graph", selected=target, preview={"target": target},
+                            hits=[{"y": 3, "x1": 1, "x2": 9, "action": target}])
+        assert panel_reader.picked(event, graph_picked) is None, (event, target)
+        assert panel_reader.picked(event, dict(graph_picked, surface="tree")) == target, (event, target)
 # A reader pane is never discovered as a board or an input pane, so --reopen ignores it.
 reader_row = "oms-fixture\t@1\t%%3\t0\t%%1\texec bash %s panel --repo /repo --results --participant w1" % panel.ENTRY
 board_row = "oms-fixture\t@1\t%%1\t0\t\texec bash %s panel --repo /repo --watch" % panel.ENTRY
@@ -15299,6 +15306,9 @@ graph_nav = {"preview": {"target": ("chat", "flow-main"), "report": {}}}
 render(mailed, "codex", 100, 30, view="graph", main_attempt="flow-attempt", navigation=graph_nav)
 text_hit = next(h for h in graph_nav["hits"] if h.get("passive"))
 card_hit = next(h for h in graph_nav["hits"] if h["action"] == ("chat", "flow-main") and not h.get("passive") and h.get("preview"))
+for event in (("click", card_hit["x1"], card_hit["y"]), ("click", card_hit["x1"], card_hit["y"]), ("enter",)):
+    assert choose(event, graph_nav) is None and graph_nav["preview"]["target"] == ("chat", "flow-main")
+assert graph_nav["preview"]["report"] == {}, graph_nav
 box = next(b for b in graph_nav["bands"] if b["name"] == "detail")
 class GraphInput(ReaderInput):
     batches = [[("click", text_hit["x1"], text_hit["y"])], [("click", card_hit["x1"], card_hit["y"])],
@@ -15307,7 +15317,7 @@ with patch.object(panel, "menu_input", return_value=GraphInput()), patch.object(
         patch.object(panel, "navigate") as moved:
     assert panel.read_choice(Path("."), "codex", "ready", "auto", False, graph_nav, {}) == "q"
 # The first frame, the card click and the wheel paint; the plain-text click does not.
-assert painted.call_count == 3 and graph_nav["preview"].get("report") == {} and moved.call_count == 1, (
+assert painted.call_count == 3 and graph_nav["preview"].get("report") == {} and moved.call_count == 0, (
     painted.call_count, moved.call_args_list)
 # The control pane routes tree and graph dock events before returning a control choice.
 class DockInput(ReaderInput):
@@ -18054,10 +18064,14 @@ for columns, rows in ((120, 80), (76, 16)):
     assert "APP DELIVERY" not in shown and "att_" not in shown, shown
     assert not any(item["who"] == "Main wake-up delivery failed" for item in inbox_items(published))
 # The graph board has no group drill-down any more; the tree view shows the inspected group.
-native_inspection = render(dict(grouped_board, native_advisors=open_call), "claude", 120, 80, view="tree",
-                          navigation={"group_tree": True, "expanded_groups": {("review", "adv-main")},
-                                      "selected": ("result", "native-advisor-adv-main")})
-assert "Fable 5.1" in native_inspection and "answer stays in the main transcript" in native_inspection
+for native_call in (open_call, answered_call):
+    for glyphs in (False, True):
+        for selected in (("chat", "adv-main"), ("result", "native-advisor-adv-main")):
+            native_nav = {"group_tree": True, "expanded_groups": {("review", "adv-main")}, "selected": selected}
+            native_inspection = render(dict(grouped_board, native_advisors=native_call), "claude", 120, 80,
+                                       view="tree", unicode=glyphs, navigation=native_nav)
+            assert "Fable 5.1" in native_inspection and "answer stays in the main transcript" in native_inspection, native_inspection
+            assert ("result", "native-advisor-adv-main") not in native_nav["items"], native_nav
 attention_nav = {}
 attention = render(grouped_board, "codex", 120, 80, view="tree", attention_only=True, navigation=attention_nav)
 assert "Awaiting decision (2)" in attention and "Past work" not in attention
@@ -18100,7 +18114,8 @@ for mark in ("completed", "accepted"):
     decided_main = graph_view.render_graph(decided_board, 127, 80, navigation=decided_nav)
     assert "review-call" not in decided_main and "Past" in decided_main, decided_main
     decided_past = render(decided_board, "codex", 120, 80, view="graph", navigation={"dismissed": True, "tab": "past"})
-    assert any("review-call" in line and "decided" in line for line in decided_past.splitlines()), decided_past
+    decision_tag = "[accepted]" if mark == "accepted" else "[main decided]"
+    assert any("review-call" in line and decision_tag in line for line in decided_past.splitlines()), decided_past
     failed = next(m for m in graph_view.nodes(handled) if m["participant"] == "adv-worker")
     assert graph_view.call_classifier(handled)(failed) == "past"
     for mode in ("tree", "graph"):

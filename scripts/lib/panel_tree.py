@@ -114,7 +114,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         if call.get("role") == "main" and action != selected:
             for note in declared_status(room, call["participant"], max(1, content_width - 6))[:1]:
                 add("    " + note, "dim")
-        if action and action == selected:
+        # Native advisors have no retained result to open; their card still
+        # explains where the answer lives when no selectable action exists.
+        if call.get("_native") or action and action == selected:
             lead = "" if content_width < 60 else "  " + " " * display_width(connector)
             card_width = max(4, content_width - display_width(lead))
             rows.pop()

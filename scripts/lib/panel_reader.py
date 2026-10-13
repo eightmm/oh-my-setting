@@ -305,6 +305,8 @@ def target_args(target):
 
 def picked(event, navigation):
     """The call or main a click or Enter just chose on the board (it previews there), else None."""
+    if navigation.get("surface") == "graph":
+        return None
     target = (navigation.get("preview") or {}).get("target")
     if event[0] == "click":
         chosen = (hit_at(event, navigation) or {}).get("action")
