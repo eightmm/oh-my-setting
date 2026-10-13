@@ -15464,8 +15464,10 @@ hint_graph = deepcopy(flow)
 hint_graph["room"]["participants"] = [p for p in hint_graph["room"]["participants"] if p.get("role") == "main"]
 hint_graph["attempts"]["active_recent"] = []
 hint_graph["attempts"]["recent"] = []
-hint_graph_80x39 = render_graph(hint_graph, 80, 39, unicode=False, navigation={})
-assert "`-- no calls yet / a ask" in hint_graph_80x39, hint_graph_80x39
+hint_graph_nav = {}
+hint_graph_80x39 = render_graph(hint_graph, 80, 39, unicode=False, navigation=hint_graph_nav)
+assert "Workers 0/0 / Judges 0/0" in hint_graph_80x39 and "a Ask advisor" in hint_graph_80x39, hint_graph_80x39
+assert not any(target[0] == "result" for target in hint_graph_nav["items"]), hint_graph_nav
 hint_y = next(i for i, line in enumerate(empty_graph_frame.splitlines(), 1)
               if "No call selected" in line)
 blank_y = next(i for i, line in enumerate(empty_graph_frame.splitlines(), 1)
@@ -17985,7 +17987,9 @@ for mode in ("tree", "graph"):
             assert "patch awaits admission" in narrow and "finished" in narrow, narrow
             alert_row = next(i for i, line in enumerate(narrow.splitlines()) if "patch awaits admission" in line)
             label_row = next(i for i, line in enumerate(narrow.splitlines()) if "pending-patch" in line)
-            assert alert_row < label_row, narrow
+            assert label_row < alert_row, narrow
+            assert all(any(h["y"] == row + 1 and h["action"] == result_target for h in nav["hits"])
+                       for row in (label_row, alert_row)), (nav, narrow)
     for columns, rows in ((120, 80), (76, 16), (28, 12), (2, 8)):
         for glyphs in (True, False):
             small = render(grouped_board, "codex", columns, rows, view=mode, unicode=glyphs, navigation=nav)

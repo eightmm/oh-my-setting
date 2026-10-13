@@ -1551,6 +1551,13 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     navigation["dock_offset_key"] = offset_key
     body, targets = summary_card(previewed, preview, width - 4, room, unicode) if previewed else (
         ["No call selected · click a main or a call to see it here"], {})
+    if previewed and previewed.get("role") == "main":
+        native = next((c for c in everyone.get(previewed["participant"], []) if c.get("_native")), None)
+        if native:
+            note = "Built-in advisor: " + ("asked %s · running" % native["_native"] if native["state"] != "done"
+                                           else "last answered %s" % (native.get("_finished") or native["_native"]))
+            changes = next((i for i, line in enumerate(body) if line.startswith("Changes:")), len(body))
+            body.insert(changes, clipped(note, width - 4))
     strip_only = rows_high < 3
     capacity = max(1, rows_high - 2)
     seen = navigation.setdefault("debate_seen", {})
