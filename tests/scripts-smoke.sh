@@ -26939,6 +26939,10 @@ test_worker_guard_reports_foreign_checkout_ref_moves() {
   result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
     "git worktree add -q --detach \"\$PWD/inside\" HEAD && git -C \"\$PWD/inside\" checkout -q --no-track -b oms/inside")"
   [ "${result%%$'\t'*}" != 0 ] || fail "worker-created nested checkout was accepted: $result"
+  # The panel worker's private fixture root is a writable sibling of its worktree.
+  result="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" run_guarded_worker "$project" \
+    "mkdir \"\$PWD/../.oms-panel-fixtures.t\" && git worktree add -q --detach \"\$PWD/../.oms-panel-fixtures.t/co\" HEAD && git -C \"\$PWD/../.oms-panel-fixtures.t/co\" checkout -q --no-track -b oms/fixture")"
+  [ "${result%%$'\t'*}" != 0 ] || fail "worker-created fixture checkout was accepted: $result"
 
   local common fake_entry
   common="$(git -C "$project" rev-parse --git-common-dir)"

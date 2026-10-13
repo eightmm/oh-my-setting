@@ -1645,6 +1645,8 @@ oms_worker_path_is_managed_foreign_worktree() {  # PATH CURRENT_WORKTREE
   case "$physical" in "$root_physical"/*) ;; *) return 1 ;; esac
   worker_physical="$(oms_harness_physical_dir "$worker" 2>/dev/null)" || return 1
   case "$physical" in "$worker_physical"|"$worker_physical"/*) return 1 ;; esac
+  # The worker's private fixture root is a writable sibling of its worktree.
+  case "$physical" in "${worker_physical%/*}"/.oms-panel-fixtures.*) return 1 ;; esac
   return 0
 }
 
