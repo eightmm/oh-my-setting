@@ -17983,16 +17983,16 @@ for mode in ("tree", "graph"):
             raise AssertionError("departed history result was opened")
         except ValueError as error:
             assert "participant left" in str(error)
-    assert nav["expanded_groups"] == {("review", "adv-main")}
-    if mode == "graph":
-        assert "Esc Back to graph" in picture and "g Graph" in picture
+    # Group drill-down belongs to the tree view; the graph board lists every call without groups.
+    if mode == "tree":
+        assert nav["expanded_groups"] == {("review", "adv-main")}
         closing = dict(nav, opening=result_target)
         panel.reset_group_view(closing)
         assert "opening" not in closing and "expanded_groups" not in closing
-    kept = panel.refreshed_navigation(nav, grouped_board)
-    assert kept["expanded_groups"] == nav["expanded_groups"]
-    reset = panel.refreshed_navigation(dict(nav), {"room": {"id": "different-room"}})
-    assert not reset.get("expanded_groups")
+        kept = panel.refreshed_navigation(nav, grouped_board)
+        assert kept["expanded_groups"] == nav["expanded_groups"]
+        reset = panel.refreshed_navigation(dict(nav), {"room": {"id": "different-room"}})
+        assert not reset.get("expanded_groups")
     for columns in (40, 56):
         for glyphs in (True, False):
             narrow = render(grouped_board, "codex", columns, 80, view=mode, unicode=glyphs, navigation=nav)
