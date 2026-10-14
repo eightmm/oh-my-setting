@@ -107,10 +107,10 @@ def paint_card_edges(text, token, *, unicode=True, color=False, colors=16, light
 
 
 def _sgr(token, colors, light, bold):
-    token = TOKEN_ALIASES.get(token, token)
-    dark, bright, sgr = TOKEN_COLORS.get(token, TOKEN_COLORS["unknown"])
+    style = TOKEN_ALIASES.get(token, token)
+    dark, bright, sgr = TOKEN_COLORS.get(style, TOKEN_COLORS["unknown"])
     code = "38;5;%s" % (bright if light else dark) if colors >= 256 and dark is not None else str(
-        37 if light and token in {"unknown", "dim", "metadata"} else sgr)
+        37 if light and style in {"unknown", "dim", "metadata"} else sgr)
     return "\033[" + ("1;" if bold else "") + code + "m"
 
 

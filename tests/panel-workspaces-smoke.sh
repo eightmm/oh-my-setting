@@ -58,7 +58,7 @@ check(baseline_menu == [
     '╰────────────────────────────────────────────────────────────────────────────────────────╯'],
       'nonexpanded menu changed')
 expanded_menu = panel_view.menu_rows(90, 24, True, True, False)
-check('Terminals and jobs' in '\n'.join(expanded_menu), 'expanded terminal command missing')
+check('[j] Terminals and jobs' in '\n'.join(expanded_menu), 'expanded terminal command missing')
 expected_keys = [workspaces._key_command(repo, 'term-' + 'a' * 32, str(tmp / r'dollar $ literal \$ ${x} $_y $1 $$z end$'), action)
                  for _, action in workspaces.KEYS]
 for expected in expected_keys:
@@ -76,7 +76,7 @@ for name in ('TMUX', 'TMUX_PANE', 'OMS_PANEL_SESSION', 'OMS_ROOM_ID'):
     os.environ.pop(name, None)
 os.environ.update(TMUX='fixture,123,0', TMUX_PANE='%7')
 seen = []
-choices = ['s', 'q']
+choices = ['j', 'q']
 def fake_run(argv, **kwargs):
     check(argv == ['tmux', 'display-message', '-p', '-t', '%7', '#{session_id}'],
           'menu used an unexpected tmux query')
@@ -88,7 +88,7 @@ with patch.object(terminal_panel, 'read_choice', side_effect=lambda *a, **k: cho
 check(seen == [(repo, '$42')], 'menu did not open workspace for exact caller session: ' + repr(seen))
 
 os.environ.pop('TMUX', None)
-choices = ['s', 'g', 'q']
+choices = ['j', 'g', 'q']
 previouses = []
 with patch.object(terminal_panel, 'read_choice', side_effect=lambda *a, **k: (previouses.append(a[2]), choices.pop(0) if choices else 'q')[-1]), \
      patch.object(workspaces, 'open_workspace', side_effect=AssertionError('workspace opened without tmux')), \
@@ -98,7 +98,7 @@ check(previouses[1].startswith('error: terminals and jobs require a tmux pane'),
       'non-tmux caller was not refused with bounded feedback')
 
 os.environ.update(TMUX='fixture,123,0', TMUX_PANE='%8')
-choices = ['s', 'q']
+choices = ['j', 'q']
 previouses = []
 def foreign_run(argv, **kwargs):
     return subprocess.CompletedProcess(argv, 0, '$99\n', '')
@@ -276,7 +276,7 @@ try:
               'workspace identity')
         check(client_session().startswith('oms_ws_'), 'focus did not move the client to the workspace')
         check(tmux('display-message', '-p', '-t', ws, '#{pane_id}') == control, 'control pane is not focused')
-        wait_for(control, 'Terminals and jobs')
+        wait_for(control, 'Terminals and Jobs')
         wait_for(control, 'F4 controls   F5 back to origin')
         check('u refresh' in screen(control), 'refresh key not advertised')
         check(not (repo / '.oms').exists(), 'workspace wrote shared repository state')

@@ -1085,11 +1085,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     lines, hits, bands = [], [], []
     colors, light = color_count(), light_theme()
 
-    def styled(text, token="text", bold=False):
-        return paint(text, token, color=color, colors=colors, light=light, bold=bold)
+    def styled(text, style_key="text", bold=False):
+        return paint(text, style_key, color=color, colors=colors, light=light, bold=bold)
 
-    def add(text, token="text", bold=False):
-        lines.append(styled(clipped(text, width), token, bold))
+    def add(text, style_key="text", bold=False):
+        lines.append(styled(clipped(text, width), style_key, bold))
 
     import os
     repo = mapping(report.get("repo"))
@@ -1102,8 +1102,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if room.get("id") and display_width(legend + legend_state) <= width:
         legend += legend_state
     # Role swatches carry only role colour, independent of execution state.
-    for label, token in (("Main", "main"), ("Judges", "judge"), ("Workers", "worker")):
-        legend = legend.replace(glyph("swatch", unicode) + " " + label, styled(glyph("swatch", unicode) + " " + label, token))
+    for label, style_key in (("Main", "main"), ("Judges", "judge"), ("Workers", "worker")):
+        legend = legend.replace(glyph("swatch", unicode) + " " + label, styled(glyph("swatch", unicode) + " " + label, style_key))
     lines.append(legend)
     hints = menu_rows(width, 1, unicode, navigation.get("menu_help", False), managed,
                       occupied=navigation["main_occupied"], installed=navigation.get("installed")) if menu else []
@@ -1138,9 +1138,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         goal_rows = goal_rows[:1] + parts[start:start + count] + [(box_row("Goal lines %s-%s/%s / full goal in Plan / wheel" % (
             start + 1, start + count, len(parts)), width, unicode), "metadata")] + goal_rows[-1:]
     goal_top = len(lines) + 1
-    for text, token in goal_rows:
+    for text, style_key in goal_rows:
         hits.append({"y": len(lines) + 1, "x1": 1, "x2": width, "action": ("tab", "plan")})
-        add(text, token or "text")
+        add(text, style_key or "text")
     if goal_overflow:
         bands.append({"name": "goal", "y1": goal_top, "y2": len(lines), "x1": 1, "x2": width})
     if room.get("swaps") and height >= 24:
@@ -1183,7 +1183,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         return execution_tag(member, unicode) + (" / guard stop" if member.get("guard") else "")
 
     def card_lines(member, content, indent=0, tree_card=False):
-        token = role_style(member.get("role"), member.get("purpose"))
+        style_key = role_style(member.get("role"), member.get("purpose"))
         identity = member_identity(member)
         mark = glyph("selected", unicode) + " " if action(member) == selected else ""
         card_width, card_left = main_width - indent, main_left + indent
@@ -1192,9 +1192,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         block += [box_edge("", card_width, unicode, "bottom", dashed=True)]
         for n, cell in enumerate(block):
             if n in (0, len(block) - 1):
-                cell = styled(cell, token, n == 0)
+                cell = styled(cell, style_key, n == 0)
             else:
-                cell = paint_card_edges(cell, token, unicode=unicode, color=color, colors=colors, light=light)
+                cell = paint_card_edges(cell, style_key, unicode=unicode, color=color, colors=colors, light=light)
                 tag = tagged(member)
                 if tag in cell:
                     cell = cell.replace(tag, styled(tag, tone(member.get("state"))))
@@ -1219,7 +1219,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         hidden = [c for c in group if c not in shown]
         first = len(lines) + 1
         for n, member in enumerate(shown):
-            token = role_style(member.get("role"), member.get("purpose"))
+            style_key = role_style(member.get("role"), member.get("purpose"))
             connector = ("└╌ " if n == len(shown) - 1 and not hidden else "├╌ ") if unicode else ("`- " if n == len(shown) - 1 and not hidden else "+- ")
             mark = glyph("selected", unicode) + " " if action(member) == selected else "  "
             tag = tagged(member)
@@ -1227,7 +1227,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             tail = clipped(tag + "  " + (elapsed(member.get("joined_at")) or "unknown"), max(0, available - 3))
             label = clipped(member_identity(member), max(1, width - stem - display_width(connector + mark + tail) - 2))
             gap = max(2, width - stem - display_width(connector + mark + label + tail))
-            lines.append(" " * stem + styled(connector, token) + mark + styled(label, token, action(member) == selected) +
+            lines.append(" " * stem + styled(connector, style_key) + mark + styled(label, style_key, action(member) == selected) +
                          " " * gap + styled(tail[:len(tag)], tone(member.get("state"))) + styled(tail[len(tag):], "metadata"))
             hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action(member), "preview": True, "tree": True})
             drawn.append(member)
@@ -1308,8 +1308,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if warnings and spare:
         add(" / ".join(warnings), "alert")
         spare -= 1
-    for text, actor, token in session_log(report, width, spare, unicode):
-        lines.append(text.replace(actor, styled(actor, token)) if actor else styled(text, token))
+    for text, actor, style_key in session_log(report, width, spare, unicode):
+        lines.append(text.replace(actor, styled(actor, style_key)) if actor else styled(text, style_key))
     navigation["band_offsets"] = offsets
     if not (active == "detail" and reader_target):
         dock_rows = max(1, total_rows - len(lines))
@@ -1666,8 +1666,8 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                     identities += [call_identity("council", model) for model in MODEL_NAMES]
                 for identity in sorted(identities, key=display_width, reverse=True):
                     if identity in line:
-                        token = role_style(identity.split(" ", 1)[0].lower())
-                        line = line.replace(identity, paint(identity, token, color=color, colors=colors, light=light, bold=picked))
+                        style_key = role_style(identity.split(" ", 1)[0].lower())
+                        line = line.replace(identity, paint(identity, style_key, color=color, colors=colors, light=light, bold=picked))
             lines.append(line)
             if target:
                 # Body text without its own link is passive, so a click that selects text changes nothing.

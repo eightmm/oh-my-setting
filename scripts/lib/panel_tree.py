@@ -406,8 +406,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                                    bold=token in {"main", "judge", "worker", "unknown"}) for text, token in row["spans"])
             value = value.replace(row["text"], styled, 1)
         elif color and row.get("tag_span"):
-            tag, token = row["tag_span"]
-            value = value.replace(tag, paint(tag, token, color=True, colors=color_count(), light=light_theme()), 1)
+            tag, style_key = row["tag_span"]
+            value = value.replace(tag, paint(tag, style_key, color=True, colors=color_count(), light=light_theme()), 1)
         elif color and style:
             value = paint(value, style, color=True, colors=color_count(), light=light_theme(),
                           bold=row.get("action") == selected)

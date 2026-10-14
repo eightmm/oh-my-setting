@@ -5909,7 +5909,8 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 # The option changes before the watcher paints; MAIN also
                 # appears in the preceding frame, so wait for the new filter.
                 sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "attention")
-                assert "MAIN " in sidebar and "OMS · " in sidebar, sidebar
+                # Narrow boards reserve space for state and may clip the main role.
+                assert any(label in sidebar for label in ("MAIN ", "MA…")) and "OMS · " in sidebar, sidebar
                 native_header = tmux_wait(["show-option", "-p", "-v", "-t", listing[0], "@oms_panel_header"], identity)
                 assert identity in native_header, native_header
                 assert "activity" in sidebar.lower(), sidebar
@@ -6331,9 +6332,13 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             unknown_swap = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                                            "--swap-main", "missing"], env=env, capture_output=True, text=True)
             assert unknown_swap.returncode != 0 and "unknown or not installed" in unknown_swap.stderr
-            uninstalled_swap = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
-                                               "--swap-main", "pi"], env=env, capture_output=True, text=True)
-            assert uninstalled_swap.returncode != 0 and "unknown or not installed" in uninstalled_swap.stderr
+            # Pi may exist on the host PATH; model its absence explicitly.
+            uninstalled_error = io.StringIO()
+            with patch.dict(os.environ, env, clear=True), \
+                    patch.object(panel, "main_installed", return_value=False), \
+                    patch.object(panel.sys, "stderr", uninstalled_error):
+                uninstalled_status = panel.main(["--repo", str(project), "--swap-main", "pi"])
+            assert uninstalled_status != 0 and "unknown or not installed" in uninstalled_error.getvalue()
             with patch.object(panel, "main_installed", return_value=True), \
                     patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
                     ["land", "status"], 3, '{"active":true}', "")) as land_probe:
@@ -7987,7 +7992,14 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
                 assert process.wait(timeout=5) == 0, "surviving child was not reaped"
                 assert panel._dispatch_call_finished(project, shared, member), "gone descendants kept scope"
                 assert panel._dispatch_descendants_gone(snapshot), "reaped descendants stayed live"
-                assert panel._dispatch_session_gone(process.pid), "reaped session remained populated"
+                # A whole-host process snapshot can be inconclusive during churn.
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if panel._dispatch_session_gone(process.pid):
+                        break
+                    time.sleep(.02)
+                else:
+                    raise AssertionError("reaped session remained populated")
                 next_status, next_member, next_notice = dispatch_case("pass", "after-survivor-" + topology)
                 assert next_status == 0, "next dispatch failed after authentic descendant exit: " + next_notice
                 current = json.loads(panel.events(project, "show", "--attempt", fixture["row"]["attempt_id"], "--json", output=True))

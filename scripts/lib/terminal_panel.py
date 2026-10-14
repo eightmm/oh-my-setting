@@ -1537,9 +1537,9 @@ def _review_verdict(answer, with_conflict=False):
         stripped = line.lstrip()
         marker = re.match(r"^(`{3,}|~{3,})", stripped)
         if marker:
-            token = marker.group(1)
+            fence_marker = marker.group(1)
             if fence is None:
-                fence = token
+                fence = fence_marker
             elif re.fullmatch(r" {0,3}" + re.escape(fence[0]) +
                               "{%d,} *" % len(fence), line.expandtabs(4)):
                 fence = None
