@@ -6748,10 +6748,29 @@ if os.name == "posix" and operator_selected_py("native-pty"):
         finished = False
         client_output = bytearray()
         try:
-            def tmux_wait(arguments, expected, timeout=15, absent=()):
-                deadline = time.monotonic() + timeout
-                text = ""
+            wait_scale = float(os.environ.get("OMS_TMUX_WAIT_SCALE", "1"))
+            if wait_scale <= 0:
+                raise AssertionError("OMS_TMUX_WAIT_SCALE must be positive")
+
+            def tmux_wait_until(observe, description, timeout=30, interval=.15, stable_for=0):
+                deadline = time.monotonic() + timeout * wait_scale
+                stable_since = None
+                last = None
                 while time.monotonic() < deadline:
+                    last, ready = observe()
+                    now = time.monotonic()
+                    if ready:
+                        if stable_since is None:
+                            stable_since = now
+                        if now - stable_since >= stable_for * wait_scale:
+                            return last
+                    else:
+                        stable_since = None
+                    time.sleep(interval)
+                raise AssertionError((description, last, bytes(client_output[-4000:])))
+
+            def tmux_wait(arguments, expected, timeout=30, absent=()):
+                def observe():
                     if select.select([fd], [], [], .1)[0]:
                         try:
                             client_output.extend(os.read(fd, 65536))
@@ -6759,9 +6778,8 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                             pass
                     result = subprocess.run(tmux + arguments, capture_output=True, text=True, env=env)
                     text = result.stdout
-                    if result.returncode == 0 and expected in text and not any(needle in text for needle in absent):
-                        return text
-                raise AssertionError((arguments, expected, text, bytes(client_output[-4000:])))
+                    return text, result.returncode == 0 and expected in text and not any(needle in text for needle in absent)
+                return tmux_wait_until(observe, (arguments, expected), timeout)
 
             sessions = tmux_wait(["list-sessions", "-F", "#{session_name}"], "oms-panel-")
             session = next(s for s in sessions.splitlines() if s.startswith("oms-panel-"))
@@ -6850,11 +6868,18 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 # Graph cards preview on every click and Enter, including the main.
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "-l", card_click], env=env, check=True)
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "Enter"], env=env, check=True)
-                time.sleep(1)
+                def zoomed_and_focused():
+                    value = subprocess.run(tmux + ["display-message", "-p", "-t", session + ":" + owner,
+                        "#{window_zoomed_flag} #{pane_id}"], env=env, capture_output=True, text=True)
+                    observed = value.stdout.strip() if value.returncode == 0 else value.stderr.strip()
+                    return observed, value.returncode == 0 and observed == "1 " + listing[1]
+                tmux_wait_until(zoomed_and_focused, "Enter keeps the graph zoomed and focused")
                 assert subprocess.check_output(tmux + ["display-message", "-p", "-t", listing[1],
-                    "#{window_zoomed_flag}"], env=env, text=True).strip() == "1"
+                    "#{window_zoomed_flag}"], env=env, text=True).strip() == "1", \
+                    "Enter did not leave the graph zoomed"
                 assert subprocess.check_output(tmux + ["display-message", "-p", "-t", session + ":" + owner,
-                    "#{pane_id}"], env=env, text=True).strip() == listing[1]
+                    "#{pane_id}"], env=env, text=True).strip() == listing[1], \
+                    "Enter left focus on another pane after graph selection"
                 tmux_wait(["capture-pane", "-p", "-t", listing[1]], "╭╌ ▸ " + identity)
                 subprocess.run(tmux + ["send-keys", "-t", listing[1], "Escape"], env=env, check=True)
                 tmux_wait(["display-message", "-p", "-t", listing[1], "#{window_zoomed_flag}"], "0")
@@ -6921,11 +6946,23 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                                                        "#{pane_id}\t#{pane_start_command}"], env=env, text=True)
                 shared[owner] = next(row.split("\t")[0] for row in rows.splitlines() if "--watch" in row)
             subprocess.run(tmux + ["select-window", "-t", session + ":codex"], env=env, check=True)
-            time.sleep(2.5)  # the codex watcher must see its window active before the drag
+            def codex_geometry():
+                value = subprocess.run(tmux + ["display-message", "-p", "-t", shared["codex"],
+                    "#{window_active} #{window_width} #{window_height} #{pane_width}"],
+                    env=env, capture_output=True, text=True)
+                observed = value.stdout.strip() if value.returncode == 0 else value.stderr.strip()
+                try:
+                    active, window_width, unused_height, pane_width = map(int, observed.split())
+                    ready = value.returncode == 0 and active == 1 and pane_width < window_width
+                except ValueError:
+                    ready = False
+                return observed, ready
+            tmux_wait_until(codex_geometry,
+                "active codex board remains split before drag", stable_for=2.5)
             geometry = subprocess.check_output(tmux + ["display-message", "-p", "-t", shared["codex"],
                 "#{window_width} #{window_height} #{pane_width}"], env=env, text=True).split()
             window, extent = int(geometry[0]), "#{pane_width}"
-            assert int(geometry[2]) < window, geometry
+            assert int(geometry[2]) < window, "codex board was not split before drag: %r" % geometry
             claude_initial = subprocess.check_output(tmux + ["display-message", "-p", "-t", shared["claude"], extent],
                                                      env=env, text=True).strip()
             dragged = panel.split_cells(("left", window * 3 // 10, False), window)
@@ -6937,9 +6974,16 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             wider = panel.split_cells(("left", window * 7 // 10, False), window)
             subprocess.run(tmux + ["set-option", "-w", "-t", shared["claude"], "@oms_panel_split", panel.split_text(wider)],
                            env=env, check=True)
-            time.sleep(3)
+            def zoom_state():
+                value = subprocess.run(tmux + ["display-message", "-p", "-t", shared["claude"],
+                    "#{window_zoomed_flag}"], env=env, capture_output=True, text=True)
+                observed = value.stdout.strip() if value.returncode == 0 else value.stderr.strip()
+                return observed, value.returncode == 0 and observed == "1"
+            tmux_wait_until(zoom_state,
+                "zoomed claude board stays zoomed", stable_for=3)
             assert subprocess.check_output(tmux + ["display-message", "-p", "-t", shared["claude"],
-                "#{window_zoomed_flag}"], env=env, text=True).strip() == "1", "a zoomed board was resized"
+                "#{window_zoomed_flag}"], env=env, text=True).strip() == "1", \
+                "a zoomed board was resized after its split option changed"
             subprocess.run(tmux + ["resize-pane", "-t", shared["claude"], "-Z"], env=env, check=True)
             tmux_wait(["display-message", "-p", "-t", shared["claude"], extent], str(panel.work_split_cells(("left", wider, False), window)), timeout=20)
             control_sidebar = next(row.split("\t")[0] for row in panes if "--watch" in row)
@@ -7048,7 +7092,13 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             subprocess.run(tmux + ["resize-pane", "-Z", "-t", graph_pane], env=env, check=True)
             tmux_wait(["display-message", "-p", "-t", graph_pane, "#{window_zoomed_flag}"], "0")
             subprocess.run(tmux + ["send-keys", "-t", graph_pane, "Escape"], env=env, check=True)
-            time.sleep(.8)
+            def graph_zoom_state():
+                value = subprocess.run(tmux + ["display-message", "-p", "-t", graph_pane,
+                    "#{window_zoomed_flag}"], env=env, capture_output=True, text=True)
+                observed = value.stdout.strip() if value.returncode == 0 else value.stderr.strip()
+                return observed, value.returncode == 0 and observed == "0"
+            tmux_wait_until(graph_zoom_state,
+                "Esc leaves the unzoomed board unzoomed", stable_for=.8)
             assert subprocess.check_output(tmux + ["display-message", "-p", "-t", graph_pane, "#{window_zoomed_flag}"],
                                            env=env, text=True).strip() == "0", "Esc re-zoomed an unzoomed board"
             # F9 (the attached client's xterm F9) swaps focus between chat and board and keeps both alive;
@@ -7056,7 +7106,12 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             # and keep the CLI PID.
             subprocess.run(tmux + ["select-pane", "-t", graph_pane], env=env, check=True)
             subprocess.run(tmux + ["send-keys", "-t", graph_pane, "-l", "q"], env=env, check=True)
-            time.sleep(.5)
+            def focused_pane():
+                value = subprocess.run(tmux + ["display-message", "-p", "-t", top_window,
+                    "#{pane_id}"], env=env, capture_output=True, text=True)
+                observed = value.stdout.strip() if value.returncode == 0 else value.stderr.strip()
+                return observed, value.returncode == 0 and observed == graph_pane
+            tmux_wait_until(focused_pane, "q leaves focus on the board", stable_for=.5)
             assert subprocess.check_output(tmux + ["display-message", "-p", "-t", top_window, "#{pane_id}"],
                                            env=env, text=True).strip() == graph_pane, "q moved focus"
             os.write(fd, b"\033[20~")
