@@ -26,6 +26,7 @@ DURABLE = runpy.run_path(str(ROOT / 'scripts/lib/durable-jsonl.py'))
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}\Z')
 REVISION = re.compile(r'[0-9a-f]{24}\Z')
 MAX_SUMMARY, MAX_RESULT = 8192, 32768
+MAX_DRAFT = 4096
 
 
 def _owner():
@@ -297,6 +298,46 @@ def _write(repo, relative, payload):
         return path
     except SystemExit as error:
         raise ValueError('panel artifact write refused') from error
+
+
+def write_summary_draft(repo, row):
+    """Write a bounded owner-editable summary beside existing panel result artifacts."""
+    if not isinstance(row, dict) or not isinstance(row.get('task_id'), str) or not ID.fullmatch(row['task_id']):
+        raise ValueError('invalid result row for summary draft')
+    stages = row.get('stages') if isinstance(row.get('stages'), dict) else {}
+    lines = ['# Panel result draft', '', '- Task: ' + clean(row['task_id'], 160),
+             '- Next action: ' + clean(row.get('next_action') or 'unknown', 160), '', '## Stages']
+    for name in ('implement', 'verify', 'review', 'main_decision'):
+        stage = stages.get(name) if isinstance(stages.get(name), dict) else {}
+        lines.append('- %s: %s' % (name, clean(stage.get('state') or 'unknown', 80)))
+    refs = []
+    for call in row.get('calls', []):
+        if not isinstance(call, dict):
+            continue
+        for key in ('artifact', 'patch'):
+            value = call.get(key)
+            if value and value not in refs:
+                refs.append(value)
+    lines.extend(['', '## Artifacts'])
+    for value in refs:
+        try:
+            _relative(repo, value)
+        except (OSError, ValueError, TypeError):
+            continue
+        lines.append('- ' + value)
+    body = (sanitize_multiline('\n'.join(lines), MAX_DRAFT - 1, 512).rstrip() + '\n').encode('utf-8')
+    relative = '.oms/artifacts/panel-results/summary-%s-%s.md' % (row['task_id'], uuid.uuid4().hex[:12])
+    path = DURABLE['canonical_repo_path'](str(repo), relative, 'panel summary draft', True)
+    def immutable(old):
+        if old:
+            raise ValueError('summary draft already exists')
+        return body
+    try:
+        DURABLE['atomic_mutate'](path, immutable, str(repo), missing_ok=True,
+            create_parent=True, expected_exists=False, max_output=MAX_DRAFT, label='panel summary draft')
+    except SystemExit as error:
+        raise ValueError('panel summary draft write refused') from error
+    return relative
 
 
 def _register(repo, owner, task_id, path, kind='panel-result'):

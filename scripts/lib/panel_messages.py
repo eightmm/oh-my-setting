@@ -107,6 +107,8 @@ def _rows(messages, name_of, now=None, members=(), readers=(), width=100, unicod
 
 def routine(message, room, index, own_notes=True):
     from room_view import result_handoff
+    if str(message.get("id") or "").startswith("judgment-"):
+        return False  # Automatic review notes ask the parent for admission or a decision.
     sender = index.get(message.get("sender"), {})
     recipient = index.get(message.get("recipient"), {})
     targets = listing(message.get("targets"))
@@ -119,6 +121,21 @@ def routine(message, room, index, own_notes=True):
             or own_notes and sender.get("role") != "main" and sender.get("parent")
             and message.get("message_kind") == "note"
             and (message.get("recipient") == sender["parent"] or targets == [sender["parent"]]))
+
+
+def needs_main(report):
+    """Unacknowledged nonroutine questions or addressed mail for a main, counted once per message."""
+    from room_view import message_pending, nodes
+    room = mapping(report.get("room"))
+    index = {m["participant"]: m for m in nodes(report)}
+    mains = {ident for ident, m in index.items() if m.get("role") == "main"}
+    successors = mapping(report.get("message_successors"))
+    messages = map(mapping, listing(room.get("pending_messages")) if "pending_messages" in room else listing(room.get("messages")))
+    return [m for m in messages if message_pending(m, successors) & mains
+            and not m.get("answered") and not routine(m, room, index)
+            and (m.get("message_kind") == "question" or m.get("recipient") != "all"
+                 and (successors.get(m.get("recipient"), m.get("recipient")) in mains
+                      or {successors.get(t, t) for t in listing(m.get("targets"))} & mains))]
 
 
 def exited_mail(message, index):
@@ -285,7 +302,7 @@ def tab_body(report, width, cap, navigation, unicode=True):
     out += [(text, ("message", ident) if header and ident is not None else None,
              header and ident is not None and ident == state["selected"])
             for ident, text, header in body[scroll:scroll + budget]]
-    return [(clipped(text, width), action, selected) for text, action, selected in out[:cap]]
+    return [(clipped(text, width), action, selected) for text, action, selected in (out[-1:] if cap == 1 else out[:cap])]
 
 
 def clicked(event, navigation):

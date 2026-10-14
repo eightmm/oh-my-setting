@@ -37,7 +37,7 @@ from panel_input import PANEL_SESSION
 from panel_routing import (allocate, alternate_route, command as routed_command, policy, KINDS, MODEL_IDS,
                            TIERS, WRITERS, newest_route_model, route_family)
 from panel_results import (DURABLE, _read, _write, _lock, finalize, outcomes, results, results_snapshot,
-                           retry_delivery, verified_patch)
+                           retry_delivery, verified_patch, pending_admissions, write_summary_draft)
 from panel_cache import read_shared
 from room_repository import EXECUTION_ENV, native_repository, state_repository, work_repository
 
@@ -5345,6 +5345,10 @@ def tab_event(event, navigation):
         return panel_messages.handle(event, navigation)
     if tab == "debate" and kind != "q" and (hit is not None or kind != "click") and inside:
         return panel_debate.handle(event, navigation)
+    if tab == "plan" and kind != "q" and inside:
+        from room_view import plan_event
+        if plan_event(event, navigation):
+            return True
     if tab in {"past", "needs"} and kind != "q" and inside:
         from room_view import past_event
         return past_event(event, navigation, tab)
@@ -6107,6 +6111,21 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         elif event[0] == "escape" and navigation.get("health_view"):
                             navigation["health_view"] = False
                         elif tab_event(event, navigation):
+                            if navigation.get("finalize_call"):
+                                inputs.__exit__(None, None, None)
+                                try:
+                                    clear_control_view()
+                                    navigation["notice"] = finalize_selection(repo, provider, navigation, state)
+                                except (EOFError, KeyboardInterrupt):
+                                    navigation.pop("finalize_call", None)
+                                    navigation["notice"] = "Finalization cancelled"
+                                except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                                    navigation["notice"] = clean(str(error), 160)
+                                finally:
+                                    inputs.__enter__()
+                                    last, next_read = None, 0
+                                size = redraw()
+                                break  # Pending keys from the earlier frame cannot answer owner prompts.
                             target = navigation.pop("open_call", None)
                             if target:
                                 try:
@@ -6435,6 +6454,9 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                 # while graph dock tabs/readers get first chance at their own input.
                 if (event[0] not in {"u", "k"} and navigation.get("surface") in {"graph", "tree"}
                         and tab_event(event, navigation)):
+                    if navigation.get("finalize_call"):
+                        navigation["queued"] = events[position + 1:]
+                        return "f"
                     target = navigation.pop("open_call", None)
                     if target:
                         width = max(1, shutil.get_terminal_size().columns)
@@ -6503,6 +6525,105 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
             navigation.pop("queued", None)
             if time.monotonic() >= deadline:
                 return "9"
+
+
+def finalize_selection(repo, provider, navigation, state):
+    """Run the owner menu f prompts against the selected call; accepted still requires explicit input."""
+    request = navigation.pop("finalize_call", {})
+    selected = request.get("target") or navigation.get("selected")
+    if request.get("task_id") and selected and selected[0] not in {"task", "result"}:
+        selected = ("task", request["task_id"])
+    selected_task = None
+    selected_call = None
+    selected_member = None
+    selected_row = None
+    if isinstance(selected, tuple) and len(selected) == 2 and selected[0] in ("task", "result"):
+        if selected[0] == "task":
+            selected_task = selected[1]
+        else:
+            member = selected[1]
+            selected_member = member
+            attempt = (state.get("room_attempts") or {}).get(member) or {}
+            if not attempt:
+                from room_view import nodes
+                node = next((m for m in nodes(state) if m["participant"] == member), {})
+                attempt = {"attempt_id": node.get("attempt"), "task_id": node.get("task_id")}
+            selected_task = request.get("task_id") or attempt.get("task_id")
+            if selected_task:
+                call_report = results(repo, selected_task, room_participant=member)
+                selected_row = next((row for row in call_report.get("rows", [])
+                                     if row.get("task_id") == selected_task), None)
+                selected_call = next((call for call in (selected_row or {}).get("calls", [])
+                                      if attempt.get("attempt_id") and call.get("attempt_id") == attempt["attempt_id"]), None)
+    if selected_task:
+        task_id = read_field("Task ID [%s]: " % clean(selected_task, 160), required=False) or selected_task
+        row = selected_row
+        if task_id != selected_task:
+            selected_call, selected_member = None, None
+        if row is None or row.get("task_id") != task_id:
+            row = next((item for item in results(repo, task_id).get("rows", [])
+                        if item.get("task_id") == task_id), None)
+        summary = read_field("Summary file [Enter for draft]: ", required=False)
+        if not summary:
+            if row is None:
+                raise ValueError("selected task result is unavailable for a summary draft")
+            summary = write_summary_draft(repo, row)
+            print("Summary draft: " + summary)
+        if selected_call is None and row and (not selected or selected[0] != "result" or task_id != selected_task):
+            selected_call = next((call for call in reversed(row.get("calls", []))
+                                  if call.get("artifact")), None)
+            if selected_call:
+                selected_member = next((ident for ident, detail in
+                                        (state.get("room_attempts") or {}).items()
+                                        if detail.get("attempt_id") == selected_call.get("attempt_id")), None)
+        failed = bool(row and any(isinstance(stage, dict) and stage.get("state") == "failed"
+                                  for stage in (row.get("stages") or {}).values()))
+        default_outcome = "failed" if failed else "completed"
+        outcome = read_field("Outcome (completed/accepted/failed/rejected) [%s]: " % default_outcome,
+                             required=False) or default_outcome
+        evidence_default = None
+        artifact = selected_call.get("artifact") if selected_call else None
+        if artifact:
+            try:
+                from panel_results import _relative
+                _relative(repo, artifact)
+                evidence_default = artifact
+            except (OSError, ValueError, TypeError):
+                pass
+        launch = {}
+        if isinstance(selected_call, dict) and selected_member:
+            try:
+                launch = dispatch_store.read(repo, selected_member + "-launch.json")
+            except (OSError, ValueError, KeyError, TypeError):
+                launch = {}
+        verify_default = launch.get("verify") if isinstance(launch, dict) else None
+        if not isinstance(verify_default, str) or not verify_default.strip():
+            verify_default = None
+        verify = read_field("Verifier (required for accepted)%s: " %
+                             (" [%s]" % clean(verify_default, MAX_PROMPT) if verify_default else ""),
+                             required=False) or verify_default
+        evidence = read_field("Relative evidence file (required for accepted)%s: " %
+                              (" [%s]" % clean(evidence_default, 160) if evidence_default else ""),
+                              required=False) or evidence_default
+    else:
+        task_id = read_field("Task ID: ")
+        summary = read_field("Summary file: ")
+        outcome = read_field("Outcome (completed/accepted/failed): ")
+        verify = read_field("Verifier (required for accepted): ", required=False) or None
+        evidence = read_field("Relative evidence file (required for accepted): ", required=False) or None
+    report = finalize(repo, provider, task_id, summary, outcome, verify, evidence, notify=True)
+    print(render_results(results(repo, task_id), shutil.get_terminal_size().columns))
+    if selected_call and selected_call.get("patch") and task_id in pending_admissions(repo, {task_id}):
+        try:
+            verified_patch(repo, selected_call)
+        except (OSError, ValueError, TypeError):
+            pass
+        else:
+            print("Next step: oms patch-land --repo %s --patch %s" %
+                  (shlex.quote(str(repo)), shlex.quote(selected_call["patch"])))
+    previous = "result %s / app %s" % (outcome, report["delivery"]["receipt"]["status"])
+    read_field("Press Enter to return: ", required=False)
+    return previous
 
 
 def interactive(repo, view="auto", attention_only=False):
@@ -6762,15 +6883,7 @@ def interactive(repo, view="auto", attention_only=False):
                 previous = "council exit=%s / owner decision pending" % status
                 read_field("Press Enter to return: ", required=False)
             elif choice == "f":
-                task_id = read_field("Task ID: ")
-                summary = read_field("Summary file: ")
-                outcome = read_field("Outcome (completed/accepted/failed/rejected): ")
-                verify = read_field("Verifier (required for accepted): ", required=False) or None
-                evidence = read_field("Relative evidence file (required for accepted): ", required=False) or None
-                report = finalize(repo, provider, task_id, summary, outcome, verify, evidence, notify=True)
-                print(render_results(results(repo, task_id), shutil.get_terminal_size().columns))
-                previous = "result %s / app %s" % (outcome, report["delivery"]["receipt"]["status"])
-                read_field("Press Enter to return: ", required=False)
+                previous = finalize_selection(repo, provider, navigation, cache.get("state", {}))
             elif choice == "n":
                 task_id = read_field("Task ID to retry saved delivery (may duplicate an uncertain send): ")
                 delivered = retry_delivery(repo, task_id)
