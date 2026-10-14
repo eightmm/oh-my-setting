@@ -499,7 +499,9 @@ test_delegate_marker_set_lock_does_not_grow_per_run() {
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in --version:|--help:|exec:--help) echo 'fixture --effort low medium high'; exit 0 ;; esac
-if [ -n "${LEASE_NEGATIVE_STARTED:-}" ]; then printf 'started\n' > "$LEASE_NEGATIVE_STARTED"; fi
+if [ "${1:-}" = exec ] && [ -n "${LEASE_NEGATIVE_STARTED:-}" ]; then
+  printf 'started\n' > "$LEASE_NEGATIVE_STARTED"
+fi
 cat >/dev/null
 printf 'worker edit\n' >> file.txt
 echo done
@@ -639,7 +641,7 @@ with patch.dict(os.environ, env, clear=True), patch.object(panel.subprocess, "Po
 assert not started.exists()
 run(entry + ["agent-events", "--repo", str(repo), "transition", "--attempt", attempt,
              "--state", "cancelled", "--reason-code", "fixture-terminal"])
-refuse(json.dumps(current()), contains="main/room/admitted child mismatch")
+refuse(json.dumps(current()), contains="panel main and room caller identities disagree or are not live")
 print("observation negatives: malformed/duplicate/stale/foreign/injected/unsafe plan/assignment and real panel replacement barrier passed")
 OBSERVATION
 
@@ -6573,8 +6575,16 @@ if os.name == 'posix' and Path('/proc/self').is_dir():
     desktop_env.update(HOME=str(desktop_home), PYTHONPATH=str(shim),
                        CODEX_SESSION_ID=foreign_sid, CODEX_THREAD_ID=foreign_sid)
     desktop_participant = 'desktop-review-main'
+    call('agent-events.sh', 'transition', '--attempt', main, '--state', 'cancelled',
+         '--reason-code', 'fixture-desktop-handoff')
     call('room.sh', 'join', '--id', room, '--participant', desktop_participant,
          '--provider', 'codex', '--role', 'main', '--native-session', sid)
+    desktop_attempt = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
+                           '--ref', 'panel_role=main', '--ref', 'panel_room_id=' + room,
+                           '--ref', 'panel_room_participant=' + desktop_participant,
+                           '--then', 'starting', '--then', 'working')
+    main, participant = desktop_attempt, desktop_participant
+    env.update(OMS_ROOM_PARTICIPANT=participant, OMS_PANEL_MAIN_ATTEMPT=main)
     desktop = setup(main_report=True)
     current = plan(); original = current['tasks'][desktop['task_id']]
     original['claimed_by_participant'] = None  # Existing legacy contract, not a transferred owner.
@@ -6696,6 +6706,15 @@ if os.name == 'posix' and Path('/proc/self').is_dir():
     done_bytes = plan_path.read_bytes()
     desktop_call(accept_argv)
     call('room.sh', 'leave', '--id', room, '--participant', desktop_participant)
+    call('agent-events.sh', 'transition', '--attempt', desktop_attempt, '--state', 'cancelled',
+         '--reason-code', 'fixture-desktop-finished')
+    main = call('agent-events.sh', 'start', '--provider', 'codex', '--tool', 'panel-main',
+                '--ref', 'panel_role=main', '--ref', 'panel_room_id=' + room,
+                '--then', 'starting', '--then', 'working')
+    participant = main
+    call('room.sh', 'join', '--id', room, '--participant', participant,
+         '--provider', 'codex', '--role', 'main')
+    env.update(OMS_ROOM_PARTICIPANT=participant, OMS_PANEL_MAIN_ATTEMPT=main)
     native_path.unlink()
     desktop_call(accept_argv)
     desktop_call(['scripts/oms', 'agent-plan', 'show', '--repo', str(repo), '--id', desktop['task_id']])
@@ -32295,10 +32314,9 @@ with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, unbound,
     where = os.path.realpath(home)
     subprocess.run(["git", "init", "-q", where], check=True)
     ident = room_lib.create(where, title="Approver room")
-    for who in ("dm", "m2"):
-        room_lib.join(where, ident, who, "codex", "main", native_session="sess-" + who)
+    room_lib.join(where, ident, "dm", "codex", "main", native_session="sess-dm")
     assert m._room_approver(where, ident, "dm")[0] == m._sha(b"sess-dm")[:32]
-    moved = room_lib.rollover(where, ident, "m2")
+    moved = room_lib.rollover(where, ident, "dm")
     rejects(m._room_approver, where, ident, "dm")
     assert m._room_approver(where, moved, "dm")[0] == m._sha(b"sess-dm")[:32]
     room_lib.append(where, ident, {"kind": "leave", "participant": "dm"}, "Participant left")

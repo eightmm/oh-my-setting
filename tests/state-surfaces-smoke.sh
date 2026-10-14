@@ -75,7 +75,7 @@ assert bad and not (repo / ".oms/threads/rejected.jsonl").exists(), text
 # Addressed room messaging reuses the same core tools, without starting a CLI.
 import room
 room.create(repo, "room", "MCP work room")
-room.join(repo, "room", "sol", "codex", model="gpt-6-sol")
+room.join(repo, "room", "sol", "codex", "reviewer", model="gpt-6-sol")
 room.join(repo, "room", "opus", "claude", model="claude-opus-5-5")
 text, bad = call("oms_peer_start", kind="message", thread="room", participant="sol", to_participant="opus",
                  message_kind="question", message_id="mcp-question", prompt="Inspect the signature")

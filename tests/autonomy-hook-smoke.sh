@@ -456,7 +456,7 @@ assert not hook_state.live_thread_hint({"cwd": str(repo)}), "no shared nosession
 import room
 room.create(repo, "team", "Shared caller work")
 room.join(repo, "team", "sol", "codex", model="gpt-6-sol", native_session="room-sol")
-room.join(repo, "team", "opus", "claude", model="claude-opus-5-5", native_session="room-opus")
+room.join(repo, "team", "opus", "claude", "reviewer", model="claude-opus-5-5", native_session="room-opus")
 room.send(repo, "team", "sol", "opus", "Inspect the caller signature", "question", message_id="caller-question")
 call("new", "--id", "different-room-topic", "--live", "--topic", "Separate task")
 message = hook_state.live_thread_hint(payload("room-opus"))
@@ -474,7 +474,7 @@ room.join(repo, "team", "later", "grok", "worker", native_session="room-later", 
 assert not room.updates(repo, "team", "later")["turns"], "joining does not replay earlier broadcasts or direct mail"
 room.send(repo, "team", "sol", "all", "Shared review note", message_id="shared-note")
 assert room.status(repo, "team")["pending_count"] == 3  # reply to Sol plus two broadcast recipients
-room.join(repo, "team", "after-note", "antigravity", native_session="room-after-note")
+room.join(repo, "team", "after-note", "antigravity", "reviewer", native_session="room-after-note")
 assert not room.updates(repo, "team", "after-note")["turns"], "broadcast audience is fixed at send time"
 for who, to, text, kind, reply in [("stranger", "opus", "Forged", "note", None),
                                    ("sol", "missing", "Missing recipient", "note", None),
@@ -502,10 +502,10 @@ assert not hook_state.live_thread_hint(payload("room-stranger")), "CURRENT does 
 # A selected coordination room adds mail without replacing the native main's authority or cursor.
 room.create(repo, "coord-source", "Native task authority")
 room.join(repo, "coord-source", "coord-reader", "claude", native_session="coord-native")
-room.join(repo, "coord-source", "coord-writer", "codex")
+room.join(repo, "coord-source", "coord-writer", "codex", "reviewer")
 room.create(repo, "coord-target", "Coordination mail")
 room.join(repo, "coord-target", "coord-reader", "claude", native_session="coord-native")
-room.join(repo, "coord-target", "coord-writer", "codex")
+room.join(repo, "coord-target", "coord-writer", "codex", "reviewer")
 room.send(repo, "coord-source", "coord-writer", "coord-reader", "PRIMARY MAIL", message_id="primary-mail")
 room.send(repo, "coord-target", "coord-writer", "coord-reader", "COORDINATION MAIL", message_id="coord-mail")
 coord_env = {"OMS_ROOM_ID": "coord-source", "OMS_ROOM_PARTICIPANT": "coord-reader", "OMS_ROOM_REPO": str(repo),
@@ -590,7 +590,7 @@ with patch.dict(os.environ, coord_env), patch.object(hook_state.subprocess, "run
                           ("model", {"model": "changed-model"}), ("role", {"role": "worker", "parent": "coord-writer"})):
         target = "coord-wrong-" + case
         room.create(repo, target, "Rejected coordination")
-        room.join(repo, target, "coord-writer", "codex")
+        room.join(repo, target, "coord-writer", "codex", "reviewer")
         values = dict(provider="claude", native_session="coord-native")
         values.update(changes)
         room.join(repo, target, "coord-reader", **values)
@@ -621,7 +621,7 @@ with patch.dict(os.environ, coord_env), patch.object(hook_state.subprocess, "run
 # The hook skips mail its participant already consumed, yet moves its cursor past it.
 room.create(repo, "acked", "Consumed mail")
 room.join(repo, "acked", "writer", "codex", model="gpt-6-sol", native_session="ack-writer")
-room.join(repo, "acked", "reader", "claude", model="claude-opus-5-5", native_session="ack-reader")
+room.join(repo, "acked", "reader", "claude", "reviewer", model="claude-opus-5-5", native_session="ack-reader")
 def ack_turns(*mids, ack=()):
     for mid in mids:
         room.send(repo, "acked", "writer", "reader", "text " + mid, "note", message_id=mid)
@@ -641,7 +641,7 @@ assert room.status(repo, "acked")["pending_count"] == 6, "delivery still acks no
 # The hook caches its projection before updates opens the log for the first delivery.
 room.create(repo, "hook-race", "First hook delivery race")
 room.join(repo, "hook-race", "race-writer", "codex", native_session="hook-race-writer")
-room.join(repo, "hook-race", "race-reader", "claude", native_session="hook-race-reader")
+room.join(repo, "hook-race", "race-reader", "claude", "reviewer", native_session="hook-race-reader")
 selected_before_scan = room._selected
 def append_after_selection(*args, **kwargs):
     binding, state = selected_before_scan(*args, **kwargs)
@@ -663,7 +663,7 @@ base = clock_time.time() + 20  # slack: message stamps are whole seconds taken a
 at = lambda minutes: setattr(room, "now", lambda: base + minutes * 60)
 room.create(repo, "asks", "Open questions")
 room.join(repo, "asks", "asker", "codex", model="gpt-6.1-sol", native_session="ask-asker")
-room.join(repo, "asks", "target", "claude", model="claude-opus-5-5", native_session="ask-target")
+room.join(repo, "asks", "target", "claude", "reviewer", model="claude-opus-5-5", native_session="ask-target")
 asker, target = (lambda: hook_state.live_thread_hint(payload("ask-asker", "codex"))), (lambda: hook_state.live_thread_hint(payload("ask-target")))
 room.send(repo, "asks", "asker", "target", "SECRET-QUESTION-TEXT", "question", message_id="ask-q1")
 at(0.5)
@@ -760,7 +760,7 @@ assert not hook_state.live_thread_hint(payload("room-sol", "codex")), "closed ro
 # real hook payload without moving the join boundary past waiting messages.
 room.create(repo, "binding-room", "Fresh native binding")
 room.join(repo, "binding-room", "fresh-main", "claude")
-room.join(repo, "binding-room", "fresh-peer", "codex")
+room.join(repo, "binding-room", "fresh-peer", "codex", "reviewer")
 joined_seq = room.participant(room.status(repo, "binding-room"), "fresh-main")["seq"]
 room.send(repo, "binding-room", "fresh-peer", "fresh-main", "Mail queued before the first native hook", message_id="before-bind")
 os.environ.update(OMS_ROOM_ID="binding-room", OMS_ROOM_PARTICIPANT="fresh-main", OMS_ROOM_REPO=str(repo), OMS_HOOK_AGENT="claude")
@@ -1056,6 +1056,14 @@ os.environ.pop("OMS_PANEL_MAIN_ATTEMPT")
 assert not hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 os.environ.pop("OMS_PANEL_SESSION")
 # Codex mains switch threads on clear/resume/fork only; provider must be proven.
+events = ["bash", str(root / "scripts/oms"), "agent-events", "--repo", str(repo)]
+prior_attempt = subprocess.run(events + ["start", "--provider", "claude", "--tool", "panel-main",
+                                 "--ref", "panel_role=main", "--ref", "panel_room_id=binding-room",
+                                 "--ref", "panel_room_participant=fresh-main",
+                                 "--then", "starting", "--then", "working"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+subprocess.run(events + ["transition", "--attempt", prior_attempt, "--state", "cancelled",
+                         "--reason-code", "fixture-successor"], check=True)
 room.join(repo, "binding-room", "codex-main", "codex")
 room.bind(repo, "binding-room", "codex-main", "codex-thread-0")
 os.environ["OMS_ROOM_PARTICIPANT"] = "codex-main"
@@ -1104,11 +1112,12 @@ except ValueError:
 else:
     raise AssertionError("worker gained native binding authority")
 os.environ.pop("OMS_HARNESS_CHILD")
-room.join(repo, "binding-room", "provider-mismatch", "codex")
+room.join(repo, "binding-room", "provider-mismatch", "codex", "reviewer")
 os.environ["OMS_ROOM_PARTICIPANT"] = "provider-mismatch"
 room.send(repo, "binding-room", "fresh-main", "provider-mismatch", "Only the enrolled provider may read this", message_id="provider-only")
 assert not hook_state.live_thread_hint(payload("not-a-codex-session")), "wrong provider consumed an explicitly addressed message"
 assert not room.participant(room.status(repo, "binding-room"), "provider-mismatch").get("consumer")
+room.append(repo, "binding-room", {"kind": "leave", "participant": "codex-main"}, "Codex fixture main left")
 for key in ("OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT", "OMS_ROOM_REPO", "OMS_HOOK_AGENT"):
     os.environ.pop(key)
 room.append(repo, "binding-room", {"kind": "leave", "participant": "fresh-main"}, "Explicit subscription change")
@@ -1164,7 +1173,7 @@ repo = lineage
 old_sid = transcript("root-a")
 room.create(repo, "moved-room", "Moved main")
 room.join(repo, "moved-room", "moved-main", "claude", native_session=old_sid)
-room.join(repo, "moved-room", "moved-peer", "codex")
+room.join(repo, "moved-room", "moved-peer", "codex", "reviewer")
 before = room.participant(room.status(repo, "moved-room"), "moved-main")
 room.send(repo, "moved-room", "moved-peer", "moved-main", "Mail sent before the move", message_id="before-move")
 for sid, env in ((transcript("root-b"), {}), (transcript("root-a"), {"OMS_HARNESS_CHILD": "1"}),
@@ -1184,7 +1193,8 @@ assert "before-move" in hook_state.live_thread_hint(moved(new_sid, "UserPromptSu
 twin = transcript("root-c")
 room.create(repo, "twin-room", "Twin mains")
 room.join(repo, "twin-room", "twin-one", "claude", native_session=twin)
-room.join(repo, "twin-room", "twin-two", "claude", native_session=transcript("root-c"))
+room.create(repo, "twin-other-room", "Twin main in another room")
+room.join(repo, "twin-other-room", "twin-two", "claude", native_session=transcript("root-c"))
 assert not hook_state.rebind_lineage_session(moved(transcript("root-c")))
 assert room.participant(room.status(repo, "twin-room"), "twin-one")["consumer"] == hook_state.session_hash(moved(twin))
 # Missing, unreadable, truncated and ambiguous comparisons cannot establish uniqueness.
@@ -1195,7 +1205,7 @@ enrolled = {m["consumer"] for state in states for m in state["participants"]
             if m["joined"] and m["role"] == "main" and m["provider"] == "claude"}
 complete_index = panel_chats.native_index(enrolled)
 missing = dict(complete_index["claude"])
-other = room.participant(room.status(repo, "twin-room"), "twin-two")["consumer"]
+other = room.participant(room.status(repo, "twin-other-room"), "twin-two")["consumer"]
 missing.pop(other)
 with patch.object(panel_chats, "native_index", return_value={"claude": missing}):
     assert not hook_state.rebind_lineage_session(moved(transcript("root-c"))), "partial native index rebound a twin main"
@@ -1228,7 +1238,7 @@ healed = transcript("root-d")
 cache = repo / ".oms/hooks/sessions" / (hook_state.session_hash(moved(healed)) + ".lineage.json")
 assert not hook_state.rebind_lineage_session(moved(healed)) and cache.is_file()
 room.join(repo, "late-room", "late-main", "claude", native_session=late_sid)
-room.join(repo, "late-room", "late-peer", "codex")
+room.join(repo, "late-room", "late-peer", "codex", "reviewer")
 room.send(repo, "late-room", "late-peer", "late-main", "Mail for the late main", message_id="late-mail")
 assert not hook_state.live_thread_hint(moved(healed, "UserPromptSubmit")), "the negative cache was rescanned"
 cache.write_text(json.dumps({"schema": 1, "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 660))}))
@@ -1354,7 +1364,7 @@ else:
     repo.mkdir()
     room.create(repo, "pi-room", "Pi hook fixture")
     room.join(repo, "pi-room", "pi-main", "codex")
-    room.join(repo, "pi-room", "peer", "claude")
+    room.join(repo, "pi-room", "peer", "claude", "reviewer")
     room.send(repo, "pi-room", "peer", "pi-main", "Mail before Pi starts", message_id="pi-mail")
     required = {"OMS_PANEL_MAIN_ATTEMPT": "pi-attempt", "OMS_PANEL_SESSION": "oms-pi-fixture",
                 "OMS_PANEL_OWNER": "codex", "OMS_ROOM_ID": "pi-room", "OMS_ROOM_PARTICIPANT": "pi-main",
