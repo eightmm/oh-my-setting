@@ -15954,6 +15954,28 @@ nav = {}
 inbox = render(inbox_room, "codex", 100, 28, menu=True, navigation=nav)
 assert "Needs you" in inbox and "Nothing needs you" not in inbox and "Press 1" not in inbox and "START" not in inbox, inbox
 from review_backlog import counts as backlog_counts, project as backlog_project, warning as backlog_warning
+decision_fixture = deepcopy(inbox_room)
+decision_fixture["awaiting_admission"] = []
+decision_fixture["plan"] = {"present": True, "goal": "Decisions", "task_count": 2,
+                            "by_state": {"running": 2}, "tasks": [
+                                {"id": "life-a", "state": "running", "claimed_by_participant": "m1"},
+                                {"id": "life-b", "state": "running", "claimed_by_participant": "m1"}]}
+for participant, task_id, stamp in (("w1", "life-a", "2026-10-07T00:01:00Z"),
+                                    ("w2", "life-b", "2026-10-07T00:02:00Z")):
+    decision_call = next(row for row in decision_fixture["attempts"]["active_recent"]
+                if row["panel"].get("room_participant") == participant)
+    decision_call.update(state="review", task_id=task_id, updated_at=stamp)
+assert backlog_counts(decision_fixture) == {"m1": 2}, backlog_counts(decision_fixture)
+from panel_view import attention_items
+decision_rows = [item for item in attention_items(decision_fixture) if item["cls"] == "decide"]
+assert len(decision_rows) == 2 and all(item["age"] for item in decision_rows), decision_rows
+from room_view import attention_body, goal_box
+strip = attention_body(decision_rows, 120, 20, {}, True)
+assert all(any(item["age"] in row[0] for row in strip) for item in decision_rows), strip
+# The count lives in the Attention strip ("N decide"); the goal box keeps its plan counts only.
+assert "decisions" not in " ".join(row[0] for row in goal_box(decision_fixture, 120, True)), goal_box(decision_fixture, 120, True)
+decision_fixture["finalized"]["life-a"] = "rejected"
+assert backlog_counts(decision_fixture) == {"m1": 1}, backlog_counts(decision_fixture)
 inbox_room["plan"] = {"tasks": [{"id": "review-%s" % n, "state": "review",
                                   "claimed_by_participant": "m1"} for n in range(8)]}
 assert backlog_counts(inbox_room) == {"m1": 9}, backlog_counts(inbox_room)

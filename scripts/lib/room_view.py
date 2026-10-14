@@ -1921,6 +1921,8 @@ def attention_body(ranked, width, capacity, navigation, unicode):
         task = item.get("task") or (item["row_id"][1] if item["row_id"][0] == "task" else None)
         next_action = item.get("next_action") or ("admit or reject patch" if kind == "pending admission" else next_steps[item["cls"]])
         text = sep.join(str(part) for part in (kind, task, next_action) if part)
+        if item.get("cls") == "decide" and item.get("age"):
+            text += sep + item["age"]
         # Mail and room-wide warnings have no task to finalize, so keep their existing reader action.
         if not task:
             text += sep + item["what"]
