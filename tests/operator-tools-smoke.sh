@@ -33,7 +33,13 @@ SECTIONS = (
     ("native-pty", 1, "operator_tools_native_pty.py"),
     ("dispatch-exit", 2, "operator_tools_dispatch_exit.py"),
     ("worker-leases", 3, "operator_tools_worker_leases.py"),
+    ("salvage", 1, "operator_tools_salvage.py"),
+    ("scratch-state", 2, "operator_tools_scratch_state.py"),
+    ("auto-review", 1, "operator_tools_auto_review.py"),
+    ("room-rollover", 2, "operator_tools_room_rollover.py"),
 )
+# These bodies leave core before execution; no assertions replay to rebuild their fixtures.
+INLINE_SECTIONS = {"salvage", "scratch-state", "auto-review", "room-rollover"}
 LIB = Path(__file__).resolve().parent
 SOURCE = Path(sys.argv[1]) if __name__ == "__main__" and len(sys.argv) > 1 else None
 
@@ -81,7 +87,13 @@ def self_check(total):
         raise ValueError("unassigned or duplicated operator fixture")
     if len(re.findall(r'^PYTHONDONTWRITEBYTECODE=1 python3 - "\$ROOT/scripts/lib" "\$TMP"', source, re.M)) != 1:
         raise ValueError("shared-cache must have exactly one call")
-    for filename in files + ["operator_tools_fixture.py"]:
+    core = source.split("# OPERATOR_CORE_BEGIN\n", 1)[1].split("# OPERATOR_CORE_END\n", 1)[0]
+    count_asserts = lambda body: sum(isinstance(node, ast.Assert) for node in ast.walk(ast.parse(body)))
+    actual = count_asserts((LIB / "operator_tools_core.py").read_text(encoding="utf-8"))
+    actual += sum(count_asserts(extract(source, name.replace("-", "_"))) for name in INLINE_SECTIONS)
+    if actual != count_asserts(core):
+        raise ValueError("core extraction lost or duplicated assertions")
+    for filename in files + ["operator_tools_fixture.py", "operator_tools_core.py"]:
         if filename == "operator_tools_shared_cache.py":
             body = extract(source, "shared_cache")
             body = body.split("\n", 1)[1].rsplit("\nPY\n", 1)[0]
@@ -109,6 +121,13 @@ from copy import deepcopy
 from unittest.mock import Mock, patch
 sys.path.insert(0, str(root / 'scripts/lib'))
 import terminal_panel as panel, room
+import codex_app_notify, panel_results, panel_debate
+import panel_results as panel_result_store
+from contextlib import redirect_stderr
+from dashboard_projection import display_width
+from panel_view import render, inbox_items, needs_strip, attention_items, wrapped
+from panel_input import passive_click
+from room_view import render_graph, plan_rows as render_plan_rows
 from panel_routing import allocate
 def fixture_provider_catalog(providers=None):
     rows = [{"provider": name, "binary": name, "installed": True, "models": []}
@@ -118,6 +137,10 @@ def fixture_provider_catalog(providers=None):
         rows = [row for row in rows if row["provider"] in requested]
     return rows
 """
+    core = source.split("# OPERATOR_CORE_BEGIN\n", 1)[1].split("# OPERATOR_CORE_END\n", 1)[0]
+    for name in INLINE_SECTIONS:
+        core = core.replace(extract(source, name.replace("-", "_")), "")
+    (LIB / "operator_tools_core.py").write_text(core, encoding="utf-8")
     pty = extract(source, "pty", fixture=True).replace(' and operator_selected_py("native-pty")', '')
     (LIB / "operator_pty_helper.py").write_text(pty, encoding="utf-8")
     fixture = imports + extract(source, "provider", fixture=True) + pty
@@ -142,7 +165,7 @@ def _standalone(name, root, temporary):
     os.chdir(temporary)
     namespace = runpy.run_path(str(LIB / "operator_tools_fixture.py"),
                               init_globals={"root": root, "temporary": temporary})
-    if name in {"native-pty", "dispatch-exit"}:
+    if name in {"native-pty", "dispatch-exit", "auto-review"}:
         panel, room, call = (namespace[k] for k in ("panel", "room", "call"))
         project, environment = namespace["project"], namespace["environment"]
         mains = {}
@@ -156,7 +179,7 @@ def _standalone(name, root, temporary):
                 call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "transition",
                       "--attempt", mains[owner], "--state", "cancelled"])
         namespace["main_attempts"] = mains
-        if name == "dispatch-exit":
+        if name in {"dispatch-exit", "auto-review"}:
             shared = room.create(project, "operator-room", "Shared parser task")
             for owner in panel.PROVIDERS:
                 room.join(project, shared, mains[owner], owner)
@@ -168,7 +191,15 @@ def _standalone(name, root, temporary):
                              room_env=dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project),
                                            OMS_ROOM_PARTICIPANT=room_owner, OMS_PANEL_MAIN_ATTEMPT=room_owner))
     filename = next(filename for section, _, filename in SECTIONS if section == name)
-    exec(compile((LIB / filename).read_text(encoding="utf-8"), str(LIB / filename), "exec"), namespace)
+    code = compile((LIB / filename).read_text(encoding="utf-8"), str(LIB / filename), "exec")
+    if name == "auto-review":
+        (namespace["project"] / ".oms/plan").mkdir(parents=True, exist_ok=True)
+        # Match the core fixture: these result rows have no supervised child.
+        from unittest.mock import patch
+        with patch.object(namespace["panel"], "_settle_dispatch", return_value=None):
+            exec(code, namespace)
+    else:
+        exec(code, namespace)
 def record_timing(name, started):
     import os
     timing_file = os.environ.get("OMS_OPERATOR_TIMINGS")
@@ -193,9 +224,11 @@ def run_section(name, spec, namespace):
         # Fresh state for independent sections, including when N folds a
         # bucket into the core shard. Restore cwd before continuing core.
         import os
+        from unittest.mock import patch
         before = Path.cwd()
         try:
-            standalone(name, namespace["root"], namespace["temporary"])
+            with patch.dict(os.environ):
+                standalone(name, namespace["root"], namespace["temporary"])
         finally:
             os.chdir(before)
     else:
@@ -2282,7 +2315,9 @@ if TMUX='' OMS_PANEL_SESSION=oms-fixture PATH="$board_bin:$PATH" bash "$ROOT/scr
 fi
 [ "$(cat "$TMP/board-runs")" = 1 ] || fail "outside tmux the board must not loop"
 
-PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT" "$TMP" "$OPERATOR_SPEC" <<'PY' || fail "terminal panel regression failed"
+PYTHONDONTWRITEBYTECODE=1 python3 "$TMP/operator_tools_core.py" "$ROOT" "$TMP" "$OPERATOR_SPEC" || fail "terminal panel regression failed"
+: <<'PY'
+# OPERATOR_CORE_BEGIN
 import hashlib
 import importlib.util
 import json
@@ -4466,6 +4501,7 @@ assert all(report["providers"][p]["installed"] for p in panel.PROVIDERS)
 assert report["dashboard"]["kind"] == "oms-dashboard"
 assert not (project / ".oms").exists(), "panel query created a state store"
 assert subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"]) == baseline
+# OPERATOR_SECTION_BEGIN salvage
 # Salvage captures raw checkout bytes with a private index/config and owner-only admission.
 import contextlib
 import panel_salvage
@@ -4637,6 +4673,8 @@ assert panel_salvage.encoding_warnings('accent.txt', 'café\n'.encode(), b'cafe\
 assert not panel_salvage.encoding_warnings('added.txt', b'', '한글\n'.encode(), b'')
 assert not panel_salvage.encoding_warnings('kept.txt', '한글\n'.encode(), '한글!\n'.encode(), b'')
 
+# OPERATOR_SECTION_END salvage
+_operator_run("salvage")
 # Discovery is registry-driven and does not execute even marked adapters.
 inventory = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--providers", "--json"]))
 registered = {row["provider"]: row for row in inventory["providers"]}
@@ -4889,6 +4927,7 @@ with patch.dict(os.environ, environment, clear=True), patch.object(panel.shutil,
     assert pi_env["OMS_PANEL_OWNER"] == pi_env["OMS_AGENT"] == "codex" and pi_env["OMS_PANEL_HARNESS"] == "pi"
     assert "OMS_HOOK_AGENT" not in pi_env
 
+# OPERATOR_SECTION_BEGIN scratch_state
 # Scratch repository selection shares state without moving native execution.
 import room
 import room_repository as repo_paths
@@ -5097,6 +5136,8 @@ closed_read = json.loads(call(["bash", str(panel.ENTRY), "room", "updates", "--p
                                "--repo", str(working_root), "--json"], selected_env))
 assert not closed_read["turns"], "closed-room reads remain available"
 print("PASS: native scratch-state resolver and execution directory boundaries")
+# OPERATOR_SECTION_END scratch_state
+_operator_run("scratch-state")
 
 
 for owner in panel.PROVIDERS:
@@ -7641,6 +7682,7 @@ with patch.object(panel, "results", side_effect=AttributeError("invalid patch su
 fallback = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-missing-summary-call")
 assert "Call exit=1; parent acceptance pending." in fallback["text"]
 assert "Result evidence unavailable" in fallback["text"]
+# OPERATOR_SECTION_BEGIN auto_review
 # Settled results are structured room events, and review admission remains with the main.
 # Keep automatic-review calls out of the shared room used by the existing layout assertions.
 shared_before_auto, room_env_before_auto = shared, room_env
@@ -8407,6 +8449,8 @@ parallel_messages = [message for message in room.status(project, shared)["messag
 assert len(parallel_events) == len(parallel_messages) == 1, (parallel_events, parallel_messages)
 assert panel.dispatch_store.read(project, panel._settlement_claim_path(parallel_call))["complete"]
 shared, room_env = shared_before_auto, room_env_before_auto
+# OPERATOR_SECTION_END auto_review
+_operator_run("auto-review")
 import io
 from contextlib import redirect_stderr
 conflict = io.StringIO()
@@ -11147,6 +11191,7 @@ with patch.dict(os.environ, control_env, clear=True), \
             raise AssertionError("room call cap was not enforced")
     panel.events(project, "transition", "--attempt", second_owner, "--state", "cancelled")
     room.append(project, shared, {"kind": "leave", "participant": second_owner}, "Fixture owner stopped")
+# OPERATOR_SECTION_BEGIN room_rollover
 # A room past its rollover marks continues as a derived successor: running ids keep working, history stays.
 import threading
 roll = temporary / "rollover repo"
@@ -11709,14 +11754,24 @@ with patch.dict(os.environ, {}):
         # It runs in its own process, which has not seen the carry complete, and keeps its stale resolve.
         closing = fresh("m1", calls=[("call-c", "m1")])
         racer = {}
-        closer = ("import sys, time; sys.path.insert(0, sys.argv[1]); import room; room.RESOLVE_TTL = 600; "
+        close_ready = where / "racing-close-ready"
+        closer = ("import sys, time; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import room; room.RESOLVE_TTL = 600\n"
+                  "lock = room._rollover_lock\n"
+                  "def ready_lock(*args, **kwargs):\n"
+                  "    Path(sys.argv[4]).touch()\n"
+                  "    return lock(*args, **kwargs)\n"
+                  "room._rollover_lock = ready_lock\n"
                   "start = time.monotonic(); room.close(sys.argv[2], sys.argv[3], 'm1'); print(time.monotonic() - start)")
         def closing_carry(repo, state, target, bounded=True):
             if not racer:
                 racer["process"] = subprocess.Popen(
-                    [sys.executable, "-c", closer, str(Path(room.__file__).parent), str(where), closing],
+                    [sys.executable, "-c", closer, str(Path(room.__file__).parent), str(where), closing, str(close_ready)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                time.sleep(2)
+                deadline = time.monotonic() + 10
+                while not close_ready.exists() and time.monotonic() < deadline:
+                    assert racer["process"].poll() is None, "racing close exited before its lock"
+                    time.sleep(.01)
+                assert close_ready.exists(), "racing close did not reach its lock"
             return real_carry(repo, state, target, bounded)
         with bound(closing, "m1"), patch.object(room, "carry", side_effect=closing_carry):
             moved = room.rollover(where, closing, "m1")
@@ -12016,6 +12071,24 @@ with patch.dict(os.environ, {}):
         assert [item["row_id"] for item in queue if item["cls"] == "stale"] == [("task", "task-pair")], queue
     for mode, panel_env in (("stripped", False), ("panel", True)):
         rollover_regressions(temporary / ("rollover regressions " + mode), panel_env)
+# A selected room that rolled over names its successor: the new main and the session record get the successor.
+with patch.dict(os.environ, {"OMS_ROOM_ID": old, "OMS_PANEL_SESSION": "roll-session"}), \
+        patch.object(panel, "managed_session", return_value=True), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as recorded_room:
+    assert panel.panel_room(roll) == third
+    assert recorded_room.call_args.args[0][-3:] == ["=roll-session", "OMS_ROOM_ID", third], recorded_room.call_args
+# The running panel's tmux bindings follow the successor; a window naming another room is left alone.
+tmux_calls = []
+def tmux_fake(command, **kwargs):
+    tmux_calls.append(command)
+    return subprocess.CompletedProcess(command, 0, "@1\t%s\n@2\troom-elsewhere\n" % old if "list-windows" in command else "", "")
+with patch.object(panel, "recorded_room", return_value=old), patch.object(panel.shutil, "which", return_value="tmux"), \
+        patch.object(panel.subprocess, "run", side_effect=tmux_fake):
+    panel._adopt_successor(roll, "roll-session")
+assert [c[-3:] for c in tmux_calls if "list-windows" not in c] == [
+    ["=roll-session", "OMS_ROOM_ID", third], ["@1", "@oms_panel_room", third]], tmux_calls
+# OPERATOR_SECTION_END room_rollover
+_operator_run("room-rollover")
 recorded = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--limit", "300", "--json"]))
 room_attempt = next(a for a in recorded if a.get("refs", {}).get("panel_room_participant") == child["participant"])
 assert room_attempt["refs"]["panel_room_id"] == shared
@@ -13662,22 +13735,6 @@ with patch.dict(os.environ, {"OMS_ROOM_ID": "room-full"}), patch.object(panel, "
         patch.object(panel.room, "create", return_value="room-fresh") as fresh, \
         patch.object(panel, "managed_session", return_value=False):
     assert panel.panel_room(Path("/tmp/project-a")) == "room-fresh" and fresh.called
-# A selected room that rolled over names its successor: the new main and the session record get the successor.
-with patch.dict(os.environ, {"OMS_ROOM_ID": old, "OMS_PANEL_SESSION": "roll-session"}), \
-        patch.object(panel, "managed_session", return_value=True), \
-        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as recorded_room:
-    assert panel.panel_room(roll) == third
-    assert recorded_room.call_args.args[0][-3:] == ["=roll-session", "OMS_ROOM_ID", third], recorded_room.call_args
-# The running panel's tmux bindings follow the successor; a window naming another room is left alone.
-tmux_calls = []
-def tmux_fake(command, **kwargs):
-    tmux_calls.append(command)
-    return subprocess.CompletedProcess(command, 0, "@1\t%s\n@2\troom-elsewhere\n" % old if "list-windows" in command else "", "")
-with patch.object(panel, "recorded_room", return_value=old), patch.object(panel.shutil, "which", return_value="tmux"), \
-        patch.object(panel.subprocess, "run", side_effect=tmux_fake):
-    panel._adopt_successor(roll, "roll-session")
-assert [c[-3:] for c in tmux_calls if "list-windows" not in c] == [
-    ["=roll-session", "OMS_ROOM_ID", third], ["@1", "@oms_panel_room", third]], tmux_calls
 # --main without a room cannot fall through to an unowned call.
 with patch.dict(os.environ, {"OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": "", "OMS_PANEL_MAIN_ATTEMPT": ""}), \
         patch.object(panel, "child_environment", return_value={"PATH": os.environ.get("PATH", "")}), \
@@ -19581,6 +19638,7 @@ if soak_seconds:
           (cycles, time.monotonic() - started), flush=True)
 print("room: addressed handoff, graph bounds, saved receiver intents and native adapter passed")
 print("terminal-panel: both directions, isolated patches, reviews, guards and PTY passed")
+# OPERATOR_CORE_END
 PY
 
 else
