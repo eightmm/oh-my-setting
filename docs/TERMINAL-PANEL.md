@@ -46,14 +46,16 @@ oms panel --repo . --council --owner codex --task-id ID --label 'Decision' --pro
 Each dispatched call has a short room alias such as `B7`, shown before its role
 on the board, selected card, reader, session log and Results. `--alias NAME`
 chooses one (1–8 letters, digits or hyphens); otherwise the panel assigns the
-next role initial and number. Aliases are unique across a room lineage.
+next alias using the role letter and number. Aliases are unique across a room lineage.
 `--continue TASK_OR_ALIAS` retains the continued call's alias, and Results
-accepts an alias in `--task-id` when it resolves to one task.
+accepts an alias in `--task-id` when it resolves to one task. The default alias
+prefix is selected by role (for example, `B` for builder and `W` for worker).
 
 ## Salvaging a stopped worker
 
 Run `oms panel --repo . --salvage TASK_ID [--json]` to capture the latest stopped
-delegate's recorded, kept OMS worktree. It preserves that checkout and index,
+delegate's recorded, kept execution worktree, including a separate clone or
+scratch worktree. It preserves that checkout and index,
 and reports changed paths, before/after byte sizes, the patch path and its
 `.patch.json` metadata under `.oms/artifacts/delegate/`. Metadata and the patch
 header carry `salvaged_from` (task, attempt, kept path and stop reason), base and
@@ -104,6 +106,8 @@ matching passing result, including one recorded outside a panel session, while
 retaining the plan's review/acceptance state. Changed task generations, replaced
 plans, modified evidence and a later unverified result invalidate that display.
 Use `--verify-timeout SECONDS` to set the finalize verifier wall time (1–86400 seconds; default 1800).
+The verifier runs outside the shared result lock; finalization rechecks its
+snapshot before writing.
 Historical results without the binding remain available in Results.
 `--outcome failed` asks for rework, so the task's review and blocked calls stay on
 the board; `--outcome rejected` withdraws the work and moves them to Past. A review
@@ -310,8 +314,11 @@ board group, the goal box, the main card's `Team:` line, Detail, the Attention q
 - `finished`: a call's process exited; that alone admits or verifies nothing.
 - `awaiting decision`: a finished call whose patch awaits admission, or a call in lifecycle `review`, until
   its main records a decision on the task (`Awaiting decision (N)` on the board, `N awaiting decision` in `Team:`;
-  the Attention queue names the patch case `patch awaits admission`);
-  once its main completes or accepts the task, the call reads `decided` wherever it is shown.
+  the Attention queue names the patch case `patch awaits admission` and shows how long it has waited);
+  `completed`, `accepted` and `rejected` decide the same task across the board, Attention, window flag,
+  Plan fold and carried calls. `failed` keeps it in rework. A decision recorded under a different plan binding than the
+  current plan's task of the same id does not apply to it; decisions without a binding, and decisions for
+  tasks the current plan no longer holds, keep applying.
 - `unrecorded`: no live process, heartbeat or exit was seen (`status unknown`); it is not a failure and stays
   until its main decides. Detail says so in one line.
 - `in review`: plan tasks in the plan's `review` state only (`N in review` in the goal box, `in review` in the
@@ -327,12 +334,17 @@ same ranked list, computed once per frame. Its classes, in rank order and named 
 later round superseded and whose task is still open), `decide` (a finished call awaiting its main's decision
 or admission, oldest first, with its age), `stale` (a running plan task whose holder's calls all ended; its row
 opens the Plan tab), `mail` (other unanswered room mail from or to mains) and `info` (a failed main wake-up
-delivery). Within a class the newest comes first. Above the board a header such as
+delivery). Failed items open a reader with the ending, errors, kept worktree and a salvage hint when applicable.
+Within a class the newest comes first. Above the board a header such as
 `Attention 7 · 1 needs you · 2 failed · 3 decide · 1 stale` (zero classes dropped; narrower widths shorten
 the words to `1 you · 2 fail · 3 dec`, then `Attention 7`) opens the Attention tab and is followed by the top
 three items. The `Attention N` tab groups every item under a class heading; arrows pick one, Enter or a click
 shows it in Detail, and `f` opens a call's full result on the right. The queue is display-only: it changes no
 lifecycle state or authority.
+
+Results classify call endings as `cancelled`, `guard stop`, `timed out`,
+`verify failed`, `provider error` or `failed` from the recorded lifecycle,
+verification and provider evidence.
 
 When the graph leaves rows blank between the cards and the bottom box, a dim summary fills them:
 `Attention N` with the first two queue items, `In progress N calls · oldest Nm`, and `Recent` with the
@@ -376,7 +388,7 @@ live-main (resumed mains count by their participant) and
 pending counts, and an incomplete room scan says so; graphs of different rooms
 are never merged, and `o Rooms` in the control window switches. Room scans for
 that line are cached for 30 seconds; liveness comes from the current snapshot.
-The bottom box state (tab, previewed target and detail scroll) is shared by the panel session in `@oms_panel_bottom`, capped at 512 bytes; malformed or oversized state is ignored, and a target that does not name a participant in the current room is not applied. Changes reach every board on refresh, and entering a window does not reset the selection. At heights of 28 rows or more, each reading tab fits its rendered content within the dock cap (at least three body rows), releases unused rows to the session log or calls tree, and keeps its height until its content changes by at least two rows.
+The bottom box state (tab, previewed target and detail scroll) is shared by the panel session in `@oms_panel_bottom`, capped at 512 bytes; malformed or oversized state is ignored, and a target that does not name a participant in the current room is not applied. Changes reach every board on refresh, and entering a window does not reset the selection. At heights of 28 rows or more, the dock fits its selected tab's rendered rows up to the dock cap (at least three body rows) and releases the remaining space to the session log, which scrolls with the wheel or `[` / `]` when no dock tab has focus. The dock keeps its height until its content changes by at least two rows. A finished goal header reads `Goal finished N/N — retire + init next goal`.
 Terminals attached to the same panel session share its current window, so
 navigating from one client also moves the other. The wheel scrolls only the band or detail under the
 pointer.
@@ -852,7 +864,8 @@ the remote target. No upstream is needed. After verification, commit and run
 `oms land` pushes the verified SHA to its target. Nobody commits in the shared
 checkout. Mains in sessions outside this panel may land independently:
 a concurrent `oms land` exits 75 if the lock stays held past `OMS_LOCK_TIMEOUT` (default 300s); retry after the active land finishes.
-The worker guard treats `oms/*` branches and harness worktrees belonging to
+Worker guard stop diagnostics identify the snapshot, path and kind that caused
+the stop. The worker guard treats `oms/*` branches and harness worktrees belonging to
 mains in other sessions as soft, and `oms room scope` warns about overlapping files before the work
 starts.
 
@@ -861,6 +874,7 @@ scoped brief file and mechanical verifier. Read workers
 use isolated worktrees too. Write workers return a patch for parent inspection
 and admission; the panel does not apply it. Reviewers require a verifier and
 record a review gate. Workers cannot recursively dispatch or open owner sessions.
+An empty write patch from a panel dispatch or plan task exits 6 (`no changes`).
 Normal native permissions, harness policy and account consent remain in effect.
 
 ```bash
@@ -1412,7 +1426,9 @@ The same operator suite covers council routes, durable results, verifier and
 patch lineage, privacy refusal and delivery deduplication/retry after interruption.
 The notifier suite covers unloaded and busy receivers, shell wrappers, early
 events, lost acknowledgements and correlated persisted output.
-The operator suite also verifies the main hierarchy with earlier mains on record, legacy ownership,
+The operator suite prints per-section and per-shard timings. `ci-status history`
+shows recent completed CI runs and ranked failing jobs/tests. The operator suite
+also verifies the main hierarchy with earlier mains on record, legacy ownership,
 separate review groups, compact/detail budgets, attention filtering, numbered
 result selection, menu cycling and view inheritance in an existing tmux server.
 
