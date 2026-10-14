@@ -6349,6 +6349,17 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 else:
                     raise AssertionError("main swap passed an active landing")
                 assert land_probe.call_count == 1, "land refusal touched a native pane"
+            for state, expected in (("running", "land is in progress"), ("passed", "probe passed")):
+                with patch.object(panel, "main_installed", return_value=True), \
+                        patch.object(panel, "resolve_session", side_effect=ValueError("probe passed")), \
+                        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        ["land", "status"], 4, json.dumps({"active": None, "state": state}), "")):
+                    try:
+                        panel.swap_main(project, "codex")
+                    except ValueError as error:
+                        assert expected in str(error), (state, error)
+                    else:
+                        raise AssertionError("main swap ignored an unknown land lock")
             swapped = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                                        "--swap-main", "codex", "--model", "gpt-6.1-sol", "--json"],
                                       dict(env, OMS_PANEL_SWAP_HANDOFF_SECONDS="2")))

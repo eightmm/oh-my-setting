@@ -4259,12 +4259,13 @@ def swap_main(repo, harness, model=None):
         land = subprocess.run(["bash", str(ENTRY), "land", "status", "--repo", str(repo),
                                "--active-exit", "--json"],
                               capture_output=True, text=True, check=False, timeout=10, stdin=subprocess.DEVNULL)
-        if land.returncode == 3:
-            raise ValueError("land is in progress; swap refused")
-        if land.returncode or not isinstance(json.loads(land.stdout), dict):
+        status = json.loads(land.stdout) if land.returncode in (0, 3, 4) and land.stdout.strip() else None
+        if not isinstance(status, dict):
             raise ValueError("land status is unavailable; swap refused")
-        if json.loads(land.stdout).get("active") is not False:
-            raise ValueError("land status is unverified; swap refused")
+        # flock leaves its file behind, so a finished land reads as unknown; only a running receipt blocks then.
+        if land.returncode == 3 or status.get("active") is True or (
+                land.returncode == 4 and status.get("state") == "running"):
+            raise ValueError("land is in progress; swap refused")
         session, session_repo = resolve_session(repo, wait=False)
         if session_repo != str(repo):
             raise ValueError("no panel main to swap")
