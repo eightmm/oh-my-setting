@@ -4861,7 +4861,7 @@ def snapshot(repo, room_id=None, _tick=None):
                                if row.get("state") in {"failed", "timed_out", "abandoned", "orphaned", "review", "blocked"}}
                     if waiting:
                         state["finalized"] = {ident: outcome for ident, outcome in outcomes(repo, waiting, _shared=True, _tick=_tick).items()
-                                              if outcome in {"completed", "accepted"}}
+                                              if outcome in {"completed", "accepted", "failed"}}
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
                 state["awaiting_admission"] = awaiting_admission(repo, state, _tick=_tick)

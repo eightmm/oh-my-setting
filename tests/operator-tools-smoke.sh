@@ -1668,7 +1668,7 @@ metric_repo.mkdir()
 subprocess.run(['git', 'init', '-q', str(metric_repo)], check=True)
 (metric_repo / '.oms/plan').mkdir(parents=True)
 (metric_repo / '.oms/threads').mkdir()
-now_metric = time.time()
+now_metric = int(time.time())
 def stamp_metric(offset):
     return datetime.fromtimestamp(now_metric + offset, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 old_lock_dir = os.environ.get('OMS_LOCK_DIR')
@@ -1763,7 +1763,7 @@ assert expected_metrics['abandoned_calls'] == 1, expected_metrics
 assert expected_metrics['window']['until'] == expected_metrics['until'], expected_metrics
 assert expected_metrics['metric_scope']['completion']['coverage']['attempt_limit'] == 300, expected_metrics
 assert expected_metrics['pending']['awaiting_review']['count'] == 1, expected_metrics
-assert 80.0 <= expected_metrics['pending']['awaiting_review']['oldest_seconds'] < 81.0, expected_metrics
+assert expected_metrics['pending']['awaiting_review']['oldest_seconds'] == 80.0, expected_metrics
 assert expected_metrics['pending']['awaiting_admission']['count'] >= 0, expected_metrics
 assert expected_metrics['preflight']['tasks'] == 1, expected_metrics
 assert expected_metrics['interventions'] == {'manual_clears': 1, 'cancels': 1,
@@ -2975,6 +2975,8 @@ single["finalized"] = {"settled": "accepted"}
 decided_settle = settler(dict(single, finalized={"done-task": "completed"}))[0]
 assert decided_settle({"state": "failed", "task_id": "done-task", "participant": "fw", "parent": "m2"})
 assert not decided_settle({"state": "failed", "task_id": "open-task", "participant": "fw2", "parent": "m2"})
+assert settler(dict(single, finalized={"rejected-task": "failed"}))[0](
+    {"state": "failed", "task_id": "rejected-task", "participant": "fw3", "parent": "m2"})
 single["room"]["participants"] = [msg_members[1],
     {"participant": "w", "role": "worker", "joined": True, "parent": "m2", "model": "gpt-6.1-sol", "label": "Fix message reader"},
     {"participant": "rv", "role": "reviewer", "joined": True, "parent": "m2", "model": "gpt-6-luna"}]
@@ -6170,8 +6172,8 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                 # The option changes before the watcher paints; MAIN also
                 # appears in the preceding frame, so wait for the new filter.
                 sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "attention")
-                # Narrow boards reserve space for state and may clip the main role.
-                assert any(label in sidebar for label in ("MAIN ", "MA…")) and "OMS · " in sidebar, sidebar
+                # Two-column identities have no room for the clipping ellipsis.
+                assert any(label in sidebar for label in ("MAIN ", "MA…", "MA  [")) and "OMS · " in sidebar, sidebar
                 native_header = tmux_wait(["show-option", "-p", "-v", "-t", listing[0], "@oms_panel_header"], identity)
                 assert identity in native_header, native_header
                 assert "activity" in sidebar.lower(), sidebar
@@ -14254,15 +14256,18 @@ one_ended["room"]["participants"] = [m for m in one_ended["room"]["participants"
                                      if m["participant"] not in {"flow-other", "foreign-child", "unlinked-child"}]
 keys_nav = {"tab": "past"}
 render(one_ended, "codex", 57, 30, view="tree", navigation=keys_nav)
+# The fixed five-row dock leaves four call rows after the list heading.
+assert keys_nav["past_view"]["page"] == 4, keys_nav["past_view"]
+last_scroll = len(keys_nav["past_ids"]) - keys_nav["past_view"]["page"]
 picked = []
 for key in ("down", "down", "end", "up", "home"):
     assert panel.tab_event((key,), keys_nav), key
     render(one_ended, "codex", 57, 30, view="tree", navigation=keys_nav)
     picked.append((keys_nav["selected"][1], keys_nav["past_view"]["scroll"]))
-assert picked == [("old-13", 0), ("old-12", 0), ("old-01", 1), ("old-02", 1), ("old-13", 0)], picked
+assert picked == [("old-13", 0), ("old-12", 0), ("old-01", last_scroll), ("old-02", last_scroll), ("old-13", 0)], picked
 assert panel.tab_event(("scroll", 3, 5, keys_nav["box"]["y1"] + 2), keys_nav)
 render(one_ended, "codex", 57, 30, view="tree", navigation=keys_nav)
-assert keys_nav["selected"] == ("result", "old-13") and keys_nav["past_view"]["scroll"] == 1, keys_nav
+assert keys_nav["selected"] == ("result", "old-13") and keys_nav["past_view"]["scroll"] == 3, keys_nav
 assert panel.tab_event(("enter",), keys_nav) and keys_nav["tab"] == "detail" and \
     keys_nav["preview"] == {"target": ("result", "old-13")}, keys_nav
 f_nav = {"tab": "past"}
@@ -14274,7 +14279,8 @@ for columns in (28, 42):
     for glyphs in (True, False):
         narrow_past = render(one_ended, "codex", columns, 24, view="tree", unicode=glyphs, navigation={"tab": "past"})
         narrow_rows = [line for line in narrow_past.splitlines() if "finished" in line]
-        assert narrow_rows and all("Old job" in line for line in narrow_rows), narrow_rows
+        assert narrow_rows and all(re.search(r"Old job \d{2}\b", line) for line in narrow_rows), narrow_rows
+        assert len({re.search(r"Old job \d{2}\b", line)[0] for line in narrow_rows}) == len(narrow_rows), narrow_rows
 # Attention-only empties the whole Past list, owned and unowned calls alike.
 orphan_done = deepcopy(ended)
 next(a for a in orphan_done["attempts"]["active_recent"] if a["attempt_id"] == "unlinked-child")["state"] = "done"
@@ -14519,7 +14525,8 @@ for columns, rows_high, surface in ((36, 50, "tree"), (50, 50, "tree"), (80, 50,
     assert "needs" in nav["visible_tabs"], nav
     if (columns, rows_high) == (127, 90):
         upper_end = max(b["y2"] for b in nav["bands"] if b["name"] != "detail")
-        assert nav["box"]["y1"] - upper_end - 1 <= 2, shown
+        assert upper_end < nav["box"]["y1"] and nav["box"]["y2"] == rows_high - 2, shown
+        assert nav["box"]["y2"] - nav["box"]["y1"] - 1 == 12, nav["box"]
 many_needs = deepcopy(geometry_flow)
 for attempt in many_needs["attempts"]["active_recent"]:
     if attempt["panel"]["role"] != "main":
@@ -14547,7 +14554,7 @@ for member in plain_needs["room"]["participants"]:
 same_labels = needs_strip(plain_needs, 200, True, limit=100)
 assert len(same_labels) == 1 and same_labels[0]["action"] == ("tab", "needs")
 assert {item["action"] for item in attention_items(plain_needs)} == {item["action"] for item in inbox_items(plain_needs)}, "identical labels remain reachable in Attention"
-# The Attention queue ranks by urgency, not recency: needs you, failed, decide (oldest first), stale, mail, info;
+# The Attention queue ranks by urgency, not recency: needs you, failed, timed out, decide (oldest first), stale, mail, info;
 # within any other class the newest comes first. A superseded failure or one whose task closed leaves the queue, and
 # a held task whose failed call is listed is not repeated as stale.
 from panel_view import attention_items, attention_header, attention_row
@@ -14578,12 +14585,12 @@ assert graph_text.held_split(queue)[1] == {"t-ended", "t-crash"}, graph_text.hel
 ranked = attention_items(queue)
 assert [item["row_id"][1] for item in ranked] == ["builder", "advisor", "ask-all", "crash-new", "crash-held", "crash-old",
                                                   "reviewer", "explorer", "t-ended", "note-all", "wake-up"], ranked
-assert [item["cls"] for item in ranked] == ["needs"] * 3 + ["failed"] * 3 + ["decide"] * 2 + ["stale", "mail", "info"]
+assert [item["cls"] for item in ranked] == ["needs"] * 3 + ["failed"] * 2 + ["timed_out"] + ["decide"] * 2 + ["stale", "mail", "info"]
 assert [item["age"] for item in ranked[6:8]] == ["30m", "5m"] and not any(item["age"] for item in ranked[:6] + ranked[8:])
 assert ranked[8]["action"] == ("tab", "plan") and "Held t-ended" in ranked[8]["what"], ranked[8]
 # Counts drop zero classes; narrower widths shorten the class words, then keep only the total.
-full_header = "Attention 11 · 3 needs you · 3 failed · 2 decide · 1 stale · 1 mail · 1 info"
-short_header = "Attention 11 · 3 you · 3 fail · 2 dec · 1 stale · 1 mail · 1 info"
+full_header = "Attention 11 · 3 needs you · 2 failed · 1 timed out · 2 decide · 1 stale · 1 mail · 1 info"
+short_header = "Attention 11 · 3 you · 2 fail · 1 timeout · 2 dec · 1 stale · 1 mail · 1 info"
 assert attention_header(ranked, 127, True) == full_header
 assert attention_header(ranked, len(full_header) - 1, True) == short_header
 assert attention_header(ranked, len(short_header) - 1, True) == "Attention 11"
@@ -14596,7 +14603,7 @@ assert strip[0]["text"] == full_header, strip
 assert needs_strip(queue, 127, True, ranked=ranked) == strip
 # The narrow fallback keeps tag, who and state, and does not repeat a tag the state already says.
 assert attention_row(ranked[3], 24, True) == "failed · Luna 6", attention_row(ranked[3], 24, True)
-assert attention_row(ranked[5], 30, False) == "failed / Luna 6 / timed out"
+assert attention_row(ranked[5], 30, False) == "timed out / Luna 6"
 assert attention_row(ranked[6], 40, True) == "decide 30m · Fable 5.1 · patch awaits a…" and \
     attention_row(ranked[6], 200, True).startswith("decide 30m · ! Fable 5.1 reviewer for Sol 6 · patch")
 # The compact board repeats no ranked-item previews; Attention owns the full queue.
@@ -14607,7 +14614,7 @@ group_nav = {}
 group_rows = graph_text.attention_body(ranked, 123, 30, group_nav, True)
 assert group_rows[0][0] == full_header + " · Enter shows one in Detail", group_rows[0]
 assert [row[0] for row in group_rows[1:] if not row[0].startswith("  ")] == [
-    "Needs you (3)", "Failed (3)", "Awaiting decision (2) · oldest first", "Stale holds (1)", "Mail (1)", "Other (1)"]
+    "Needs you (3)", "Failed (2)", "Timed out (1)", "Awaiting decision (2) · oldest first", "Stale holds (1)", "Mail (1)", "Other (1)"]
 assert [row[1] for row in group_rows if row[1]] == [item["action"] for item in ranked if item["action"]]
 selectable = [item for item in ranked if item["action"]]
 assert group_nav["needs_ids"] == [item["action"] for item in selectable] and \
@@ -14961,9 +14968,11 @@ def exercise_exited_main_mail():
             for columns, height in ((50, 18), (127, 40), (200, 60)):
                 screen = render(report, "codex", columns, height, unicode=glyphs, menu=True)
                 assert len(screen.splitlines()) <= height and all(display_width(line) <= columns for line in screen.splitlines())
-                board = render(report, "codex", columns, height, unicode=glyphs, view="tree", navigation={"tab": "messages"})
+                mail_nav = {"tab": "messages"}
+                board = render(report, "codex", columns, height, unicode=glyphs, view="tree", navigation=mail_nav)
                 assert len(board.splitlines()) <= height and all(display_width(line) <= columns for line in board.splitlines())
-                assert ("Messages 4" if columns >= 76 else "[Msg 4]") in board and "Messages: 4 unread" in board, board
+                assert ("Messages 4" if columns >= 76 else "[Msg 4]") in board and "Filter: needs you (4)" in board, board
+                assert len(mail_nav["message_ids"]) == 4, mail_nav
                 assert "\x1b" not in screen + board and (glyphs or (screen + board).isascii())
         assert report == before, "display changed room evidence"
 

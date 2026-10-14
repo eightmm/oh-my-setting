@@ -311,7 +311,8 @@ def settler(report):
     def settled(call):
         # Finished or aged-out calls, and failed ones whose result its main has read, leave the board; the owner's
         # recorded decision on the task settles its failed, review and blocked calls, reading a result settles no review.
-        decided = finalized.get(call.get("task_id")) in {"completed", "accepted"}
+        # Any recorded owner outcome is a decision; a failed outcome stays in Past with its tag.
+        decided = finalized.get(call.get("task_id")) in {"completed", "accepted", "failed"}
         ending = call_ending(call)
         if ending == "cancelled":
             return True
@@ -1785,6 +1786,9 @@ def past_body(past, width, capacity, navigation, labels, unicode):
         if width < 60:
             identity = clean(call.get("title")) or identity
             tail = tag
+            # A successful exit is redundant when it would hide the task; error tags keep their evidence.
+            if display_width(identity + tail) + 2 > width and tag == status_tag("done", exit_code=0, unicode=unicode):
+                tail = status_tag("done", unicode=unicode)
         available = max(1, width - display_width(tail) - 2)
         if available < 12 and width >= 60:
             tail = tag + (" [decided]" if call.get("_decided") else "")
