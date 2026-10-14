@@ -1254,7 +1254,7 @@ room_rows = [{"id": "room-current", "title": "Shared work", "closed": False,
               "messages": [{"pending_for": ["a", "b"], "ts": "2026-10-12T00:00:00+00:00"}]}]
 room_text = "\n".join(panel.room_listing(room_rows, "room-current", 200, now=1791763320,
                                           live_participants={"main-live"}))
-assert "* 1 room-current" in room_text and "1 live mains" in room_text and "2 unread" in room_text, room_text
+assert "* 1 room-current" in room_text and "main live" in room_text and "live mains" not in room_text and "2 unread" in room_text, room_text
 assert "last 2m ago / open" in room_text, room_text
 assert room_text.startswith("╭─ OMS · Rooms") and room_text.splitlines()[-1].startswith("╰"), room_text
 
@@ -12401,9 +12401,14 @@ main_states["attempts"]["active_recent"] = [{"attempt_id": "live-attempt", "stat
     "panel": {"role": "main", "room_id": main_states["room"]["id"], "room_participant": "main-live"}}]
 main_states["attempts"]["recent"] = [{"attempt_id": "exited-attempt", "state": "failed",
     "panel": {"role": "main", "room_id": main_states["room"]["id"], "room_participant": "main-exited"}}]
-# The narrow board dashboard (under 28 columns) counts live mains only.
+# The narrow board dashboard names one live main; exited predecessors remain past.
 mixed_mains = render(main_states, "claude", 27, 30, view="graph")
-assert "Mains 1 /" in mixed_mains and "0 live" not in mixed_mains, mixed_mains
+assert "Main Sol 6" in mixed_mains and "Joined mains" not in mixed_mains, mixed_mains
+# A joined predecessor with no attempt evidence never displaces the working main when no owner is given.
+unknown_first = deepcopy(main_states)
+unknown_first["room"]["participants"].insert(0, {"participant": "main-unknown", "provider": "claude", "model": "opus",
+    "role": "main", "label": "Unknown main", "joined": True, "seq": 0})
+assert "Main Sol 6" in render(unknown_first, "claude", 27, 30, view="graph"), render(unknown_first, "claude", 27, 30, view="graph")
 compact_dashboard = deepcopy(main_states)
 compact_dashboard["attempts"]["active_recent"] = []
 compact_dashboard["attempts"]["recent"] = []
@@ -12414,7 +12419,7 @@ compact_dashboard["room"].update({"title": "Visual team", "pending_count": 3, "r
 for columns in (19, 22, 27):
     board = render(compact_dashboard, "claude", columns, 30, view="graph")
     assert "Graph needs" not in board and "Finished is not accepted" not in board and "Some native subagents" not in board, board
-    assert all(fact in board for fact in ("Room: Visual team", "Mains 1 /", "Unread 3", "Next: Claude",
+    assert all(fact in board for fact in ("Room: Visual team", "Main Sol 6", "Unread 3", "Next: Claude",
                                           "Goal: Keep", "Accept 2/4")), board
     assert len(board.splitlines()) <= 30 and all(display_width(line) <= columns for line in board.splitlines()), board
 boundary_dashboard = render(compact_dashboard, "claude", 28, 30, view="graph")
@@ -12429,7 +12434,7 @@ main_states["attempts"]["active_recent"] = []
 main_states["attempts"]["recent"].append({"attempt_id": "live-exited-attempt", "state": "cancelled",
     "panel": {"role": "main", "room_id": main_states["room"]["id"], "room_participant": "main-live"}})
 exited_mains = render(main_states, "claude", 27, 30, view="graph")
-assert "Joined mains" not in exited_mains and "Mains 0 live / 2 exited" in exited_mains, exited_mains
+assert "Joined mains" not in exited_mains and "Main 0 live / 2 exited" in exited_mains, exited_mains
 for source_view, dimensions in ((room_view, ((80, 11), (80, 12), (60, 14), (100, 16))),
                                 (degraded, ((100, 30),))):
     for columns, rows in dimensions:
@@ -12461,8 +12466,8 @@ tree_room["room"]["participants"].extend([
      "label": "연결 근거 없는 작업", "joined": True, "seq": 101, "parent": "outside-room"}])
 before_tree = json.dumps(tree_room, sort_keys=True)
 
-# The visual flow selects one exact parent, uses real role cards, and pages
-# other mains/calls through the same frame-local chat/result targets.
+# The visual flow selects one exact parent, keeps an ended main in history, and
+# uses real role cards with frame-local chat/result targets.
 flow_members = [{"participant": "flow-main", "role": "main", "joined": True, "provider": "codex",
                  "model": "gpt-6-sol", "label": "Main native chat"},
                 {"participant": "flow-other", "role": "main", "joined": True, "provider": "claude",
@@ -12478,7 +12483,8 @@ flow_members += [{"participant": "foreign-child", "role": "worker", "model": "gp
                   "parent": "missing-owner", "label": "NO PARENT PROOF"}]
 flow = {"collection": {"ok": True}, "room": {"id": "flow-room", "title": "Visual team", "participants": flow_members},
         "attempts": {"active_recent": [{"attempt_id": "flow-attempt" if m["participant"] == "flow-main" else m["participant"],
-            "state": "working", "panel": {"room_id": "flow-room", "room_participant": m["participant"], "role": m["role"]}}
+            "state": "done" if m["participant"] == "flow-other" else "working",
+            "panel": {"room_id": "flow-room", "room_participant": m["participant"], "role": m["role"]}}
             for m in flow_members]}, "operations": {"recent": [{"kind": "call", "event_id": model,
                 "served_model": model, "tokens": 10} for model in ("gpt-6-sol", "gpt-6-astra", "gpt-6-luna")]}}
 flow_before = json.dumps(flow, sort_keys=True)
@@ -12627,17 +12633,17 @@ for columns, rows in ((110, 44), (100, 24), (76, 18), (76, 21)):
                 if not glyphs:
                     assert "╭" not in picture and "─" not in picture
 assert render(flow, "codex", 100, 24, view="graph", frame=0) == render(flow, "codex", 100, 24, view="graph", frame=1)
-# The tree roots only this window's main; another main's call stays selectable without a root of its own.
+# The tree roots this window's live main; an ended predecessor's call stays attributable to history.
 own_root_nav = {"dismissed": True}
 tree = render(flow, "codex", 110, 40, view="tree", main_attempt="flow-attempt", navigation=own_root_nav)
 assert "Main native chat" in tree and "Other native chat" not in tree, tree
 assert {item for item in own_root_nav["items"] if item[0] == "chat"} == {("chat", "flow-main")}, own_root_nav
 assert ("result", "foreign-child") in own_root_nav["items"], own_root_nav
-# A main on an earlier main's model is told apart by its id tail; the first listed (live, then newest) keeps the name.
+# An ended predecessor on the same model keeps its id tail in historical detail.
 twin = deepcopy(flow)
 twin["room"]["participants"].append({"participant": "twin-main-9f3c", "role": "main", "joined": True, "provider": "claude",
                                      "model": "claude-opus-5-5", "label": "Twin native chat"})
-twin["attempts"]["active_recent"].append({"attempt_id": "twin-main-9f3c", "state": "working", "panel": {
+twin["attempts"]["active_recent"].append({"attempt_id": "twin-main-9f3c", "state": "done", "panel": {
     "room_id": "flow-room", "room_participant": "twin-main-9f3c", "role": "main"}})
 from room_view import main_names, nodes
 twin_names = main_names(nodes(twin))
@@ -13750,7 +13756,7 @@ with patch.object(panel.room, "discover", return_value=([
         {"id": "room-b", "closed": False, "pending_count": 0, "participants": [
             {"participant": "att-gone-too", "joined": True, "role": "main"}]}], False)):
     panel.ROOM_SUMMARY.clear()
-    assert panel.other_rooms(Path("/tmp/rooms"), "room-current", {"att-live"})[0] == [
+    assert panel.other_rooms(Path("/tmp/rooms"), "room-current", {"att-live", "att-gone"})[0] == [
         {"id": "room-a", "title": None, "pending": 0, "mains": 1}]
 with patch.object(panel.room, "discover", return_value=([{"id": "room-p", "closed": False, "messages": [
         {"pending_for": ["att-live", "x"]}], "participants": [{"participant": "att-live", "joined": True, "role": "main"}]}], True)):

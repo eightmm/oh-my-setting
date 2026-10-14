@@ -299,8 +299,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     head += needs_strip(report, width, unicode, ranked=ranked)
     others = listing(room.get("other_rooms"))
     if height >= 20 and (others or room.get("other_rooms_incomplete")):
-        head.append({"text": clipped("OTHER ROOMS / " + " | ".join("%s %s live mains" % (
-            clean(r.get("id"), 24), r.get("mains")) for r in others[:3]) +
+        head.append({"text": clipped("OTHER ROOMS / " + " | ".join("%s has a live main" % (
+            clean(r.get("id"), 24)) for r in others[:3]) +
             (" / scan incomplete" if room.get("other_rooms_incomplete") else ""), width), "style": "alert"})
     pinned = len(head)
     labels = usage_words(report, unicode)

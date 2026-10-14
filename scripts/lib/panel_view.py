@@ -1232,11 +1232,14 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
             live_mains = [member for member in mains if member.get("state") not in TERMINAL_STATES]
             if live_mains:
                 labels = main_names(members)
-                names = [labels[member["participant"]] for member in live_mains[:2]]
-                add(("Mains " if narrow else "Joined mains ") + "%s / %s%s" % (len(live_mains), ", ".join(names),
-                    " +%s" % (len(live_mains) - 2) if len(live_mains) > 2 else ""), "dim")
+                live_main = next((member for member in live_mains if main_attempt and main_attempt in
+                                  (member.get("participant"), member.get("attempt"))), None)
+                # Without an owner, the working main wins over a joined predecessor whose presence is unknown.
+                live_main = live_main or next((member for member in live_mains if member.get("state") == "working"),
+                                              live_mains[0])
+                add(("Main " if narrow else "Main / ") + labels[live_main["participant"]], "dim")
             else:
-                add(("Mains " if narrow else "Mains: none live (") + ("0 live / %s exited" % len(mains) if narrow else "%s exited)" % len(mains)), "dim")
+                add(("Main " if narrow else "Main: none live (") + ("0 live / %s exited" % len(mains) if narrow else "%s exited)" % len(mains)), "dim")
         if view == "graph" and not narrow:
             add("Graph needs 76x16 / showing list", "dim")
         add(("Unread %s" % room.get("pending_count", "?") if narrow else

@@ -326,8 +326,8 @@ def room_listing(rooms, current, width, now=None, live_participants=None):
     lines = []
     for index, shared in enumerate(rooms, 1):
         participants = shared.get("participants", [])
-        mains = sum(bool(p.get("joined")) and p.get("role") == "main" and
-                    p.get("participant") in (live_participants or set()) for p in participants)
+        main_live = any(bool(p.get("joined")) and p.get("role") == "main" and
+                        p.get("participant") in (live_participants or set()) for p in participants)
         unread = sum(len(message.get("pending_for", [])) for message in shared.get("messages", []))
         messages = shared.get("messages", [])
         age = "no messages"
@@ -347,8 +347,9 @@ def room_listing(rooms, current, width, now=None, live_participants=None):
                                                        clean(shared.get("successor", ""), 128), title)
             lines.append(clipped(line, width))
             continue
-        line = "%s %s %s / %s / %d live mains / %d unread / last %s / %s" % (
-            marker, index, clean(shared.get("id", ""), 128), title, mains, unread, age, state)
+        line = "%s %s %s / %s / %s / %d unread / last %s / %s" % (
+            marker, index, clean(shared.get("id", ""), 128), title,
+            "main live" if main_live else "no live main", unread, age, state)
         lines.append(clipped(line, width))
     if width >= 20:
         return [box_edge("OMS · Rooms", width)] + [box_row(line, width) for line in lines] + [
@@ -5910,7 +5911,7 @@ def other_rooms(repo, current, live):
                  "mains": [p["participant"] for p in state["participants"] if p["joined"] and p["role"] == "main"]}
                 for state in states if not state.get("closed") and not state.get("sealed")]
         cached = ROOM_SUMMARY[str(repo)] = (time.monotonic(), rows, incomplete)
-    rows = [dict(r, mains=sum(ident in live for ident in r["mains"])) for r in cached[1] if r["id"] != current]
+    rows = [dict(r, mains=int(any(ident in live for ident in r["mains"]))) for r in cached[1] if r["id"] != current]
     return [r for r in rows if r["mains"]], cached[2]
 
 
