@@ -311,8 +311,11 @@ def settler(report):
     def settled(call):
         # Finished or aged-out calls, and failed ones whose result its main has read, leave the board; the owner's
         # recorded decision on the task settles its failed, review and blocked calls, reading a result settles no review.
-        # Any recorded owner outcome is a decision; a failed outcome stays in Past with its tag.
-        decided = finalized.get(call.get("task_id")) in {"completed", "accepted", "failed"}
+        # A completed or accepted outcome closes the task's calls; a failed outcome closes only calls that already
+        # ended in failure, while its review and block stay for the rework the decision asks for.
+        outcome = finalized.get(call.get("task_id"))
+        decided = outcome in {"completed", "accepted"} or (
+            outcome == "failed" and call["state"] in {"failed", "timed_out", "abandoned", "orphaned"})
         ending = call_ending(call)
         if ending == "cancelled":
             return True
