@@ -1164,7 +1164,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         dock_body = 0 if same_reader else 1
     dock_rows = dock_body + 2 if dock_body else 1
     main_rows = 5 if height >= 28 else 4 if height >= 20 else 3
-    minimum_tree = int(bool(gates)) + int(bool(counsel)) + min(2, len(workers)) or int(bool(folded_calls))
+    minimum_tree = min(2, len(gates)) + min(2, len(counsel)) + min(2, len(workers)) or int(bool(folded_calls))
     goal_rows = goal_box(report, width, unicode)
     goal_cap = max(3, total_rows - len(lines) - min(dock_rows, 4) - main_rows - minimum_tree - 1)
     goal_overflow = len(goal_rows) > goal_cap
@@ -1198,7 +1198,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     groups = (("gate", gates), ("counsel", counsel), ("calls", workers))
     allocation = dict.fromkeys((name for name, _ in groups), 0)
     for name, group in groups:
-        allocation[name] = min(len(group), 1 if name != "calls" else 2, max(0, remaining - sum(allocation.values())))
+        # Two rows keep a band's first call beside its "N more" line.
+        allocation[name] = min(len(group), 2, max(0, remaining - sum(allocation.values())))
     while sum(allocation.values()) < remaining:
         changed = False
         for name, group in groups:

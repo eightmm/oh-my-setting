@@ -2380,6 +2380,8 @@ for ident, state, code, verify, reason, artifact, kind, expected, style in endin
     ending_fixture["room"]["messages"].append({"id": "result-" + ident, "sender": ident, "recipient": "ending-main",
         "message_kind": "handoff", "pending_for": ["ending-main"], "ts": ending_fixture["room"]["call_results"][ident]["ts"],
         "text": "Call exit=%s; parent acceptance pending." % code})
+# A provider error is named only from its recorded exit, never from a missing artifact.
+next(a for a in ending_fixture["attempts"]["active_recent"] if a["attempt_id"] == "provider-empty")["provider_error_exit"] = 3
 ending_members = {m["participant"]: m for m in judgment_nodes(ending_fixture)}
 for ident, state, code, verify, reason, artifact, kind, expected, style in ending_cases:
     member = ending_members[ident]

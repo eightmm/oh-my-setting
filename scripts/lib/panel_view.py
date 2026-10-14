@@ -193,7 +193,8 @@ def judgment_tone(tag, state):
 def call_ending(call):
     """Classify recorded terminal evidence without changing the lifecycle state."""
     state, code = call.get("state"), call.get("exit")
-    if state in LIVE_STATES or state in {"queued", "idle", "manual", "quiet", "blocked", "waiting_input", "waiting_approval", "presence unknown"}:
+    # A call in review awaits its owner's decision; its exit is evidence for that decision, not an ending.
+    if state in LIVE_STATES or state in {"queued", "idle", "manual", "quiet", "blocked", "review", "waiting_input", "waiting_approval", "presence unknown"}:
         return None
     reason = call.get("reason_code")
     if call.get("guard") or reason == "worker_authority_violation":
@@ -207,7 +208,8 @@ def call_ending(call):
             type(verify) is int and verify != 0 or call.get("verify_status") == "failed"):
         return "verify_failed"
     if type(code) is int and code != 0:
-        return "provider_error" if call.get("provider_error_exit") is not None or not call.get("artifact") else "failed"
+        # Only a recorded provider error names one; a missing artifact alone does not say who failed.
+        return "provider_error" if call.get("provider_error_exit") is not None else "failed"
     return "failed" if state == "failed" else None
 
 
