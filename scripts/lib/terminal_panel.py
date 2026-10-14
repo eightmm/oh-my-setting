@@ -4242,6 +4242,13 @@ def _swap_handoff_file(repo, ident, attempt, handoff, supplied):
     return path
 
 
+def _swap_submit(pane, text):
+    """Type into a native CLI and submit; an Enter inside the typed burst reads as a pasted newline."""
+    subprocess.run(tmux_command("send-keys", "-t", pane, "-l", text), check=True, timeout=3, stdin=subprocess.DEVNULL)
+    time.sleep(float(os.environ.get("OMS_PANEL_SWAP_SUBMIT_DELAY", ".8")))
+    subprocess.run(tmux_command("send-keys", "-t", pane, "Enter"), check=True, timeout=3, stdin=subprocess.DEVNULL)
+
+
 def swap_main(repo, harness, model=None):
     """Ask for a handoff, let the native CLI exit, then reuse its proven pane and participant."""
     if not shutil.which("tmux") or harness not in MAIN_HARNESSES or not main_installed(harness):
@@ -4292,11 +4299,8 @@ def swap_main(repo, harness, model=None):
         subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_state", "waiting for handoff"),
                        check=True, timeout=3, stdin=subprocess.DEVNULL)
         try:
-            subprocess.run(tmux_command("send-keys", "-t", pane, "-l", request), check=True, timeout=3,
-                           stdin=subprocess.DEVNULL)
-            subprocess.run(tmux_command("send-keys", "-t", pane, "Enter"), check=True, timeout=3,
-                           stdin=subprocess.DEVNULL)
-            timeout = min(60, max(0, int(os.environ.get("OMS_PANEL_SWAP_HANDOFF_SECONDS", "20"))))
+            _swap_submit(pane, request)
+            timeout = min(300, max(0, int(os.environ.get("OMS_PANEL_SWAP_HANDOFF_SECONDS", "90"))))
             deadline = time.monotonic() + timeout
             handoff = None
             while time.monotonic() < deadline:
@@ -4314,10 +4318,7 @@ def swap_main(repo, harness, model=None):
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_attempt", attempt),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
-            subprocess.run(tmux_command("send-keys", "-t", pane, "-l", "/exit"), check=True, timeout=3,
-                           stdin=subprocess.DEVNULL)
-            subprocess.run(tmux_command("send-keys", "-t", pane, "Enter"), check=True, timeout=3,
-                           stdin=subprocess.DEVNULL)
+            _swap_submit(pane, "/exit")
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 prior = next((r for r in main_history(repo, ident) if r.get("attempt_id") == attempt), None)
@@ -4327,6 +4328,7 @@ def swap_main(repo, harness, model=None):
             else:
                 subprocess.run(tmux_command("set-option", "-w", "-u", "-t", pane, "@oms_panel_swap_attempt"),
                                check=True, timeout=3, stdin=subprocess.DEVNULL)
+                handoff_file.unlink(missing_ok=True)  # the preserved main may be swapped again
                 raise ValueError("old main did not exit; native session and panel preserved")
             room.swap_main(repo, ident, member, owner, model, attempt, harness)
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_participant", member),
