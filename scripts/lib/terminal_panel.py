@@ -1291,9 +1291,47 @@ def scope_overlaps(repo, room_id, state, caller, scopes):
 
 def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
-             main=None, continue_task=None, scopes=None, work_repo=None, member_id=None):
+             main=None, continue_task=None, scopes=None, work_repo=None, member_id=None, alias=None):
     route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main)
     label = safe_label(label)
+    alias_pattern = r"[A-Za-z0-9-]{1,8}"
+    if alias is not None and not re.fullmatch(alias_pattern, alias):
+        raise ValueError("--alias must be 1-8 letters, digits or hyphens")
+    dispatch_env = child_environment(owner, repo)
+    room_id = room.resolve(repo, dispatch_env.get("OMS_ROOM_ID"))
+    call_rows = []
+    if room_id:
+        for attempt in json.loads(events(repo, "list", "--json", output=True)):
+            refs = attempt.get("refs", {})
+            if refs.get("panel_alias") and room.same_room(repo, refs.get("panel_room_id"), room_id):
+                call_rows.append(attempt)
+    if continue_task:
+        matches = {row.get("task_id") for row in call_rows
+                   if row.get("refs", {}).get("panel_alias") == continue_task and row.get("task_id")}
+        if matches:
+            if len(matches) != 1:
+                raise ValueError("call alias does not resolve to exactly one task in this room")
+            continue_task = next(iter(matches))
+        continued = next((row for row in reversed(call_rows) if row.get("task_id") == continue_task), None)
+        if continued:
+            existing_alias = continued.get("refs", {}).get("panel_alias")
+            if alias is not None and existing_alias and alias != existing_alias:
+                raise ValueError("--continue keeps the continued call's alias")
+            alias = existing_alias or alias
+    if alias is None:
+        letters = {"builder":"B", "worker":"W", "reviewer":"R", "verifier":"V", "security-auditor":"S",
+                   "advisor":"A", "critic":"C", "architect":"H", "documenter":"D", "integrator":"I",
+                   "performance-engineer":"P", "release-engineer":"E", "refactorer":"F", "researcher":"X"}
+        letter = letters.get(role, "W")
+        numbers = [row for row in call_rows
+                   if re.fullmatch(re.escape(letter) + r"\d+", row.get("refs", {}).get("panel_alias", ""))]
+        number = len(numbers) + 1
+        used = {row.get("refs", {}).get("panel_alias") for row in call_rows}
+        while letter + str(number) in used:
+            number += 1
+        alias = letter + str(number)
+    elif not continue_task and any(row.get("refs", {}).get("panel_alias") == alias for row in call_rows):
+        raise ValueError("call alias is already used in this room lineage")
     resume = None
     temporary = None
     if continue_task:
@@ -1320,7 +1358,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                 except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
                     fallback = None
         return run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
-                            dry_run, label, route, main, resume, scopes, work_repo, member_id, fallback)
+                            dry_run, label, route, main, resume, scopes, work_repo, member_id, fallback, alias)
     finally:
         if temporary:
             temporary.unlink()
@@ -2949,7 +2987,7 @@ def _settle_dispatch(repo, room_id, member, status):
 
 
 def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
-                 dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None):
+                 dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None):
     source_repo = repo
     if os.environ.get("OMS_ROOM_REPO"):
         repo = repository(os.environ["OMS_ROOM_REPO"])
@@ -3007,6 +3045,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         env["OMS_PANEL_LABEL"] = label
     else:
         env.pop("OMS_PANEL_LABEL", None)
+    if alias:
+        env["OMS_PANEL_ALIAS"] = alias
     env["OMS_TASK_ID"] = task_id
     room_id = room.resolve(repo, env.get("OMS_ROOM_ID"))
     if room_id:
@@ -5017,6 +5057,7 @@ def snapshot(repo, room_id=None, _tick=None):
                                 linked[who] = {"state": row["state"], "attempt_id": row["attempt_id"],
                                                "updated_at": row.get("updated_at"), "task_id": row.get("task_id"),
                                                "lease_id": refs.get("panel_lease_id"),
+                                               **({"alias": refs["panel_alias"]} if refs.get("panel_alias") else {}),
                                                **({"access": "write"} if refs.get("panel_access") == "write" else {})}
                         state["room_attempts"] = linked
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
@@ -5357,6 +5398,17 @@ def call_results(repo, action):
             else results(repo, room_participant=ident))
 
 
+def resolve_call_alias(repo, room_id, value):
+    if not room_id or not re.fullmatch(r"[A-Za-z0-9-]{1,8}", value or ""):
+        return value
+    matches = {row.get("task_id") for row in json.loads(events(repo, "list", "--json", output=True))
+               if row.get("task_id") and row.get("refs", {}).get("panel_alias") == value
+               and room.same_room(repo, row.get("refs", {}).get("panel_room_id"), room_id)}
+    if len(matches) > 1:
+        raise ValueError("call alias resolves to more than one task in this room lineage")
+    return next(iter(matches)) if matches else value
+
+
 def render_call_view(repo, participant, view, width, task_id=None, cache=None):
     """Render one participant's retained result, event tail, or verified patch."""
     from panel_view import call_identity
@@ -5398,7 +5450,7 @@ def render_call_view(repo, participant, view, width, task_id=None, cache=None):
             report["rows"] = [row]
     model = row.get("model") or call.get("served_model") or call.get("selected_model") or call.get("requested_model")
     heading = call_identity(row.get("role") or "worker", model,
-                            row.get("title") or row.get("task_id")) if participant else None
+                            row.get("title") or row.get("task_id"), alias=call.get("alias")) if participant else None
     def reader_text(value):
         return panel_reader.ReaderText(value, artifact=(call.get("attempt_id"), call.get("artifact")),
                                        updated_at=call.get("ts") or row.get("updated_at"))
@@ -7197,6 +7249,7 @@ def main(argv=None):
     parser.add_argument("--verify", help="mechanical verifier for a write or review")
     parser.add_argument("--task-id", help="existing plan/task identifier for the worker")
     parser.add_argument("--label", help="short task title for the role board")
+    parser.add_argument("--alias", help="short unique room call name (1-8 letters, digits or hyphens)")
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
     args = parser.parse_args(arguments)
     if args.salvage is not None:
@@ -7218,6 +7271,8 @@ def main(argv=None):
         parser.error("--health is a read-only report; use --repo, --room and optional --json")
     if args.since is not None and not args.metrics:
         parser.error("--since requires --metrics")
+    if args.alias is not None and not args.dispatch:
+        parser.error("--alias requires --dispatch")
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.swap_main, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.finalize, args.retry_delivery, args.providers,
                                      args.chats, args.open_chat, args.health, args.mail, args.metrics)) > 1:
@@ -7451,6 +7506,8 @@ def main(argv=None):
             return 0
         if args.results:
             participant = args.participant and room.identifier(args.participant, "participant")
+            if args.task_id:
+                args.task_id = resolve_call_alias(repo, room.resolve(repo, args.room), args.task_id)
 
             def reader(width, view="Summary"):
                 if not participant:
@@ -7503,7 +7560,7 @@ def main(argv=None):
             status = dispatch(repo, owner, args.dispatch, args.workload, args.access, args.purpose,
                               args.prompt, brief, args.verify, args.task_id, args.dry_run, args.label,
                               args.to, args.model, args.reasoning_effort, main=args.main,
-                              continue_task=args.continue_task, scopes=args.scope, work_repo=execution)
+                              continue_task=args.continue_task, scopes=args.scope, work_repo=execution, alias=args.alias)
             if asked:
                 read_field("Exit %s; the answer is in the main's room mail. Press Enter to close: " % status,
                            required=False)

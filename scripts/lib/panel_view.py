@@ -221,8 +221,10 @@ def call_tone(call):
     return tone(call_ending(call) or call.get("state"))
 
 
-def call_identity(role, model, label=None, short_id=None) -> str:
+def call_identity(role, model, label=None, short_id=None, alias=None) -> str:
     identity = (clean(role) or "unknown").upper() + " " + (MODEL_NAMES.get(model, clean(model)) or "model unknown")
+    if alias:
+        identity = clean(alias, 8) + " " + identity
     if short_id:
         identity += " #" + clean(short_id).lstrip("#")
     if label:
@@ -1677,9 +1679,10 @@ def render_results(report, width=100, compact=False, heading=None):
         calls = listing(row.get("calls"))
         latest = mapping(calls[-1]) if calls else {}
         model = row.get("model") or latest.get("served_model") or latest.get("selected_model") or latest.get("requested_model")
+        alias = latest.get("alias")
         purpose = PURPOSE_NAMES.get(row.get("purpose")) or TASK_NAMES.get(latest.get("kind")) or PURPOSE_NAMES.get(row.get("role")) or "Work"
-        add(" · ".join((MODEL_NAMES.get(model, model) or "unrecorded model", purpose,
-                        said(row.get("process_state")), row.get("title") or row.get("task_id") or "Task")))
+        add(" · ".join(([alias] if alias else []) + [MODEL_NAMES.get(model, model) or "unrecorded model", purpose,
+                        said(row.get("process_state")), row.get("title") or row.get("task_id") or "Task"]))
         add("Task: " + (row.get("task_id") or "unknown"), limit=3)
         add("Outcome: " + outcome + " · " + checks)
         if row.get("representative_state"):

@@ -3546,6 +3546,7 @@ ma_run_routed_provider() {
           --ref "panel_access=$access"
           --ref "panel_effort=${OMS_REASONING_SELECTED:-auto}")
         [ -z "${OMS_PANEL_LABEL:-}" ] || start_args+=(--ref "panel_label=$OMS_PANEL_LABEL")
+        [ -z "${OMS_PANEL_ALIAS:-}" ] || start_args+=(--ref "panel_alias=$OMS_PANEL_ALIAS")
         local panel_location
         panel_location="$(python3 - "$state_repo" "$5" <<'PY'
 import sys

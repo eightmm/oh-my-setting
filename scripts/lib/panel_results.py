@@ -680,6 +680,10 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                 continue
             call = {k: row[k] for k in ('kind', 'exit', 'verify_exit', 'artifact', 'patch', 'patch_sha256', 'event_id',
                                        'selected_model', 'requested_model', 'served_model', 'attempt_id') if k in row}
+            attempt_meta = next((a for a in matching if a.get('attempt_id') == row.get('attempt_id')), {})
+            alias = attempt_meta.get('refs', {}).get('panel_alias')
+            if alias:
+                call['alias'] = alias
             if (task_id or room_participant) and row.get('artifact') and row.get('kind') in ('ask', 'call', 'consult', 'delegate', 'review'):
                 try:
                     answer, _ = artifact_sections_stream(io.BytesIO(_indexed(repo, row, 1024 * 1024)))

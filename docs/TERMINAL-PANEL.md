@@ -41,6 +41,13 @@ oms panel --repo . --room team --open-chat sol-main --chat-surface app --dry-run
 oms panel --repo . --council --owner codex --task-id ID --label 'Decision' --prompt 'Compare options' --dry-run
 ```
 
+Each dispatched call has a short room alias such as `B7`, shown before its role
+on the board, selected card, reader, session log and Results. `--alias NAME`
+chooses one (1–8 letters, digits or hyphens); otherwise the panel assigns the
+next role initial and number. Aliases are unique across a room lineage.
+`--continue TASK_OR_ALIAS` retains the continued call's alias, and Results
+accepts an alias in `--task-id` when it resolves to one task.
+
 ## Salvaging a stopped worker
 
 Run `oms panel --repo . --salvage TASK_ID [--json]` to capture the latest stopped

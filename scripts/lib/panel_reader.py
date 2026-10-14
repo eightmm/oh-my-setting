@@ -119,7 +119,7 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
     row = next(iter(report.get("rows", [])), {})
     model = row.get("model") or call.get("served_model") or call.get("selected_model") or call.get("requested_model")
     identity = heading or call_identity(row.get("role") or "worker", model,
-                                        row.get("title") or row.get("task_id"))
+                                        row.get("title") or row.get("task_id"), alias=call.get("alias"))
     title = ink(clipped(identity, width), role_style(row.get("role"), row.get("purpose")), bold=True)
     state = status_tag(row.get("process_state") or "unknown")
     tone = ("running" if any(word in state for word in ("running", "starting", "verifying")) else

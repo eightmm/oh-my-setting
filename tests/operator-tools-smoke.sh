@@ -2250,6 +2250,7 @@ for role in ("worker", "builder", "refactorer", "documenter", "integrator", "per
 assert role_style("unrecorded") == "unknown" and role_style("worker", "advise") == "worker"
 use_unicode(True)
 assert call_identity("worker", "gpt-6.1-sol", "Routing") == "WORKER Sol 6.1 · Routing"
+assert call_identity("worker", "gpt-6.1-sol", "Routing", alias="B7") == "B7 WORKER Sol 6.1 · Routing"
 assert call_identity(None, None, short_id="abcd") == "UNKNOWN model unknown #abcd"
 tags = {"starting": "[⟳ starting]", "working": "[⟳ running]", "verifying": "[⟳ verifying]",
         "idle": "[○ idle]", "blocked": "[! blocked]", "waiting_input": "[? needs input]",
@@ -4995,7 +4996,7 @@ cases = [("codex", "worker", "light", "read", "explain", "claude-haiku-5-5"),
 for index, (owner, role, workload, access, purpose, expected) in enumerate(cases):
     request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", role,
                "--owner", owner, "--access", access, "--task-id", "panel-route-%s" % index,
-               "--label", "Inspect fixture source %s" % index]
+               "--label", "Inspect fixture source %s" % index, "--alias", "T%d" % index]
     request += (["--workload", workload] if workload else []) + (["--purpose", purpose] if purpose else [])
     if access == "write":
         request += ["--brief-file", str(brief), "--verify", "test \"$(tail -1 value.txt)\" = new"]
@@ -5034,6 +5035,10 @@ for index, (owner, role, workload, access, purpose, expected) in enumerate(cases
         role, "advise", "review", "research")), refs
     assert refs["panel_effort"] == route["route"]["effort"], refs
     assert refs["panel_access"] == access and refs["panel_label"] == "Inspect fixture source %s" % index, refs
+    assert refs["panel_alias"] == "T%d" % index, refs
+    retained = panel_results.results(project, "panel-route-%s" % index)["rows"][0]
+    assert any(call.get("attempt_id") == attempt["attempt_id"] and call.get("alias") == "T%d" % index
+               for call in retained["calls"]), retained
     assert attempt["parent_attempt_id"] == main_attempts[owner], attempt
     assert attempt["state"] == ("review" if access == "write" else "done"), attempt
     assert refs["panel_location"].startswith("worktree:") if role not in {"advisor", "reviewer"} else refs["panel_location"] == "repository", refs
@@ -5085,7 +5090,7 @@ assert alternate_route(automatic, provider_status={other: {"weekly_used": 90}}) 
 assert alternate_route(automatic, {"codex", "claude"}, {other: {"weekly_used": 97.2}}) is None
 with patch.object(panel, "selected_route", return_value=explicit), \
         patch.object(panel, "provider_catalog", side_effect=AssertionError("explicit --to queried fallback")), \
-        patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-1]):
+        patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-2]):
     assert panel.dispatch(project, "claude", "worker", None, "read", None,
                           prompt="explicit route", target="codex", model="gpt-6-luna") is None
 recorded = {"codex": {"weekly_used": 90}, "claude": {"weekly_used": None}}
@@ -5096,7 +5101,7 @@ def dispatched_fallback(readings):
                                                                   binary="claude", effort="medium")), \
             patch.object(panel, "provider_catalog", side_effect=lambda name="all": [row for row in catalog if row["provider"] == name]), \
             patch.object(panel, "routing_status", return_value=readings), \
-            patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-1]):
+            patch.object(panel, "run_dispatch", side_effect=lambda *args: args[-2]):
         return panel.dispatch(project, "claude", "worker", None, "write", "implement", brief=str(fallback_brief),
                               verify="true")
 fallback_brief = temporary / "fallback-brief.md"
@@ -10793,7 +10798,9 @@ with patch.dict(os.environ, control_env, clear=True), \
         patch.object(panel, "routed_command", return_value=[sys.executable, "-c", "pass", "--repo", str(project)]), \
         patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch):
     assert panel.dispatch(project, "claude", "worker", "light", "read", "investigate",
-                          prompt="Inspect the bounded source", task_id="control-owner", label="Control dispatch") == 0
+                          prompt="Inspect the bounded source", task_id="control-owner", label="Control dispatch",
+                          alias="B7") == 0
+    assert control_launch["env"]["OMS_PANEL_ALIAS"] == "B7"
     newest = room.status(project, shared)["participants"][-1]
     assert newest["parent"] == room_owner
     warning_report = {"room": {"id": shared, "participants": [dict(room.participant(

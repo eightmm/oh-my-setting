@@ -116,7 +116,8 @@ def nodes(report):
                            effort=effort, purpose=clean(meta.get("purpose") or meta.get("strategy"), 60),
                            access=meta.get("access") or attempt.get("access"),
                            harness=mapping(attempt.get("panel")).get("harness"),
-                           title=member.get("label_override") or meta.get("label") or member.get("label")))
+                           title=member.get("label_override") or meta.get("label") or member.get("label"),
+                           alias=extra.get("alias") or mapping(extra.get("refs")).get("panel_alias") or meta.get("alias")))
         if member.get("_predecessor") and not owed(report, output[-1]):
             output.pop()
     # Seq numbers restart in every room: calls launched in the rooms this one continues come first, the oldest room
@@ -665,7 +666,7 @@ def member_identity(member, label=True):
     title = member.get("title") if label else None
     if title in {"Native task not recorded", "Task unrecorded"}:
         title = None
-    return call_identity(role, member.get("model"), title, member.get("_short_id"))
+    return call_identity(role, member.get("model"), title, member.get("_short_id"), member.get("alias"))
 
 
 
