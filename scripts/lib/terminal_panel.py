@@ -5034,13 +5034,14 @@ def snapshot(repo, room_id=None, _tick=None):
                     pass
                 try:
                     # Each waiting call's own task is looked up, so an old decision is not lost past results()' window.
+                    from room_view import DECIDED
                     waiting = {row.get("task_id") for row in [r for key in ("active_recent", "recent")
                                                               for r in state.get("attempts", {}).get(key) or []]
                                + list((state.get("room_attempts") or {}).values())
                                if row.get("state") in {"failed", "timed_out", "abandoned", "orphaned", "review", "blocked"}}
                     if waiting:
                         state["finalized"] = {ident: outcome for ident, outcome in outcomes(repo, waiting, _shared=True, _tick=_tick).items()
-                                              if outcome in {"completed", "accepted", "failed", "rejected"}}
+                                              if outcome in DECIDED | {"failed"}}
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
                 state["awaiting_admission"] = awaiting_admission(repo, state, _tick=_tick)
@@ -5879,14 +5880,15 @@ def private_capacity(repo):
     return output
 
 
-WINDOW_ATTENTION = {"failed", "timed_out", "waiting_input", "waiting_approval", "blocked"}
+WINDOW_ATTENTION = {"failed", "timed_out", "waiting_input", "waiting_approval", "blocked", "review"}
 
 
 def main_needs_attention(state, main_attempt):
     """Whether this main waits on a person or its calls need attention."""
-    from room_view import nodes, handled_results, main_state
+    from room_view import DECIDED, call_classifier, nodes, handled_results, main_state
     from dashboard_projection import mapping
     members = nodes(state)
+    classify = call_classifier(state)
     ids = {key for m in members if main_attempt in (m.get("participant"), m.get("attempt")) and m.get("role") == "main"
            for key in (m.get("participant"), m.get("attempt")) if key}
     if any(m.get("role") == "main" and m.get("participant") in ids
@@ -5895,9 +5897,10 @@ def main_needs_attention(state, main_attempt):
     room, finalized = mapping(state.get("room")), mapping(state.get("finalized"))
     read = handled_results(room)
     return any(m.get("role") != "main" and m.get("parent") in ids and m["state"] in WINDOW_ATTENTION
+               and not (m["state"] == "review" and classify(m) == "past")
                and not (m["state"] in {"failed", "timed_out"} and "result-" + str(m.get("participant")) in read
                         or m["state"] in {"failed", "timed_out", "review", "blocked"}
-                        and finalized.get(m.get("task_id")) in {"completed", "accepted"})
+                        and finalized.get(m.get("task_id")) in DECIDED)
                for m in members)
 
 

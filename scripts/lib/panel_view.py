@@ -690,7 +690,7 @@ def age_label(stamp, now=None):
 
 def inbox_items(report, unicode=True):
     """What the person must act on, newest first: failures, waits, broadcasts from mains, patches to admit."""
-    from room_view import (call_classifier, closed_tasks, failure_handled, handled_results, main_names, main_state,
+    from room_view import (DECIDED, call_classifier, closed_tasks, failure_handled, handled_results, main_names, main_state,
                            message_address, nodes, readable)
     members = nodes(report)
     classify = call_classifier(report)
@@ -729,7 +729,7 @@ def inbox_items(report, unicode=True):
             what, shown, style, kind = WAITING_WORDS[state], state, "alert", "needs"
         elif state == "done" and member["participant"] in awaiting and classify(member) != "past":
             what, shown, style, kind = "patch awaits admission", "review", "review", "decide"
-        elif state == "review" and classify(member) != "past" and finalized.get(member.get("task_id")) not in {"completed", "accepted"}:
+        elif state == "review" and classify(member) != "past" and finalized.get(member.get("task_id")) not in DECIDED:
             what, shown, style, kind = "awaiting decision", "review", "review", "decide"
         else:
             continue

@@ -11,6 +11,8 @@ from panel_view import (ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STA
                         JUDGE_ROLES, WORKER_ROLES, swap_line, judge_band, band_style, role_legend,
                         judgment_tag, judgment_tone, call_ending, ending_tag, call_tone)
 
+DECIDED = frozenset({"completed", "accepted", "rejected"})
+
 
 def room_ids(room):
     """This room and the sealed rooms it continues: attempts started before a rollover name one of them."""
@@ -20,7 +22,7 @@ def room_ids(room):
 def owed(report, call):
     """Whether a call settled in an earlier room still waits on the person: a decision, an admission or a held task."""
     task = call.get("task_id")
-    if not task or mapping(report.get("finalized")).get(task) in {"completed", "accepted"}:
+    if not task or mapping(report.get("finalized")).get(task) in DECIDED:
         return False
     running = {t.get("id") for t in map(mapping, listing(mapping(report.get("plan")).get("tasks")))
                if t.get("state") == "running"}
@@ -98,8 +100,8 @@ def nodes(report):
         derived = "presence unknown" if member.get("role") == "main" or type(code) is not int else \
             "done" if code == 0 else "timed_out" if code == 124 else "failed"
         state = attempt.get("state") or derived
-        # Display only: a review whose task its main completed or accepted reads "decided"; the state stays.
-        decided = state == "review" and finalized.get(attempt.get("task_id")) in {"completed", "accepted"}
+        # Display only: a review whose task its main decided reads "decided"; the state stays.
+        decided = state == "review" and finalized.get(attempt.get("task_id")) in DECIDED
         output.append(dict(member, attempt=attempt.get("attempt_id"), state=state, _decided=decided,
                            panel_activity=mapping(mapping(report.get("main_activity")).get(member.get("participant"))),
                            ended=result.get("ts"), exit=code if type(code) is int else None,
@@ -268,11 +270,11 @@ def handled_results(room):
 
 
 def closed_tasks(report):
-    """Task ids the plan records done or cancelled, or whose owner completed or accepted them."""
+    """Task ids the plan records done or cancelled, or whose owner decided them."""
     plan = {t.get("id") for t in map(mapping, listing(mapping(report.get("plan")).get("tasks")))
             if t.get("state") in {"done", "cancelled", "retired", "superseded"}}
     return {ident for ident in plan if ident} | {ident for ident, outcome in mapping(report.get("finalized")).items()
-                                                  if outcome in {"completed", "accepted"}}
+                                                  if outcome in DECIDED}
 
 
 def failure_handled(report, call, read_results=None, closed=None):
@@ -281,7 +283,7 @@ def failure_handled(report, call, read_results=None, closed=None):
     closed = closed_tasks(report) if closed is None else closed
     if call_ending(call) == "guard_stop":
         return bool(call.get("task_id") and (call.get("task_id") in closed or
-                    mapping(report.get("finalized")).get(call["task_id"]) in {"completed", "accepted", "failed", "rejected"}))
+                    mapping(report.get("finalized")).get(call["task_id"]) in DECIDED | {"failed"}))
     return ((call_ending(call) in {"failed", "timed_out", "verify_failed", "provider_error"} or
              call["state"] in ATTENTION_STATES - {"waiting_input", "waiting_approval", "review", "blocked"})
             and ("result-" + str(call.get("participant")) in read_results or call.get("superseded") is True
@@ -311,11 +313,11 @@ def settler(report):
     def settled(call):
         # Finished or aged-out calls, and failed ones whose result its main has read, leave the board; the owner's
         # recorded decision on the task settles its failed, review and blocked calls, reading a result settles no review.
-        # A completed or accepted outcome closes the task's calls; a failed outcome closes only calls that already
+        # A decided outcome closes the task's calls; a failed outcome closes only calls that already
         # ended in failure, while its review and block stay for the rework the decision asks for.
         outcome = finalized.get(call.get("task_id"))
         # rejected withdraws the work: its review and block close too, unlike failed, which asks for rework.
-        decided = outcome in {"completed", "accepted", "rejected"} or (
+        decided = outcome in DECIDED or (
             outcome == "failed" and call["state"] in {"failed", "timed_out", "abandoned", "orphaned"})
         ending = call_ending(call)
         if ending == "cancelled":

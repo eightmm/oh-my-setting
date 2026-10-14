@@ -18708,6 +18708,27 @@ for outcome, expected in (("completed", "past"), ("accepted", "past"), ("failed"
     for ident in ("review-call", "blocked-call"):
         node = dict(next(m for m in graph_view.nodes(grouped_board) if m["participant"] == ident), task_id="decided-task")
         assert decided(node) == (expected or classified[ident]), (outcome, ident, decided(node))
+# A rejected predecessor review is no longer owed, surfaced, or counted as window attention.
+rejected_predecessor = deepcopy(review_fixture)
+old_review = next(m for m in rejected_predecessor["room"]["participants"] if m["participant"] == "stale-patch")
+rejected_predecessor["room"]["participants"].remove(old_review)
+rejected_predecessor["room"]["predecessor_calls"] = [dict(old_review, _predecessor="old-room", task_id="held-review")]
+rejected_predecessor["room"]["lineage"] = ["old-room"]
+rejected_predecessor["finalized"] = {"held-review": "rejected"}
+assert "stale-patch" not in {m["participant"] for m in graph_view.nodes(rejected_predecessor)}
+assert not any(item["action"] == ("result", "stale-patch") for item in attention_items(rejected_predecessor))
+assert "held-review" in graph_view.closed_tasks(rejected_predecessor)
+assert not panel.main_needs_attention(rejected_predecessor, "adv-main")
+window = {"room": {"id": "current", "participants": [
+    {"participant": "window-main", "role": "main", "joined": True},
+    {"participant": "window-review", "role": "review", "parent": "window-main", "joined": True, "task_id": "window-task"}]},
+    "attempts": {"recent": [
+        {"attempt_id": "window-main", "state": "working", "panel": {"room_id": "current", "room_participant": "window-main", "role": "main"}},
+        {"attempt_id": "window-review", "state": "review", "task_id": "window-task", "panel": {"room_id": "current", "room_participant": "window-review", "role": "review"}}]},
+    "room_attempts": {}, "finalized": {"window-task": "rejected"}}
+assert not panel.main_needs_attention(window, "window-main")
+window["finalized"] = {}
+assert panel.main_needs_attention(window, "window-main")
 # A review that a later --continue round of its task superseded no longer waits on the owner.
 superseded_review = dict(next(m for m in graph_view.nodes(grouped_board) if m["participant"] == "review-call"), superseded=True)
 assert graph_view.call_classifier(grouped_board)(superseded_review) == "past", superseded_review
