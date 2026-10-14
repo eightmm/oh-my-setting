@@ -757,8 +757,8 @@ oms_worker_state_violations() {
   local before="$2"
 
   [ -f "$before" ] || return 0
-  OMS_WG_REPO="$repo" OMS_WG_BEFORE="$before" OMS_WG_LIB="$OMS_COMMON_LIB_DIR" python3 - <<'PY'
-import hashlib, json, os, runpy, stat
+  OMS_WG_REPO="$repo" OMS_WG_BEFORE="$before" python3 - <<'PY'
+import hashlib, json, os, stat
 
 root = os.path.join(os.environ["OMS_WG_REPO"], ".oms")
 problems = []
@@ -822,12 +822,12 @@ def index_compacted(path, size, expected):
         for _event_id, _line, row in new
         if row.get("kind") == "artifact-resolution"
     }
-    # The store also keeps rows pinned by controller-side plan completion receipts; an
-    # unreadable or uncertain receipt scan grants no exemption.
+    # The store also keeps rows pinned by plan completion receipts. Only pins recorded with the
+    # baseline count, so a receipt written during the run cannot excuse a deletion.
     try:
-        store = runpy.run_path(os.path.join(os.environ.get("OMS_WG_LIB", ""), "artifact-index-store.py"))
-        pins = store["completion_pins"](os.environ["OMS_WG_REPO"]) or set()
-    except (Exception, SystemExit):
+        with open(os.environ["OMS_WG_BEFORE"] + ".completion-pins", encoding="utf-8") as handle:
+            pins = {pin for pin in json.load(handle) if isinstance(pin, str)}
+    except (OSError, ValueError, TypeError):
         pins = set()
     anchors = [i for i in retained if i not in targets and old[i][0] not in pins]
     return max(dropped) < min(anchors, default=len(old))
@@ -2587,5 +2587,16 @@ PY
   # recorded prefix digest before use, so a later append here is harmless.
   if [ -f "$repo/.oms/artifacts/index.jsonl" ] && [ ! -L "$repo/.oms/artifacts/index.jsonl" ]; then
     cp "$repo/.oms/artifacts/index.jsonl" "$dir/omsstate.artifact-index" 2>/dev/null || true
+    # Completion pins exist before the provider runs; a receipt created during the run pins nothing.
+    python3 - "$OMS_COMMON_LIB_DIR" "$repo" "$dir/omsstate.completion-pins" <<'PY' 2>/dev/null || true
+import json, os, runpy, sys
+lib, repo, out = sys.argv[1:]
+try:
+    pins = runpy.run_path(os.path.join(lib, "artifact-index-store.py"))["completion_pins"](repo) or set()
+except (Exception, SystemExit):
+    pins = set()
+with open(out, "w", encoding="utf-8") as handle:
+    json.dump(sorted(pins), handle)
+PY
   fi
 }

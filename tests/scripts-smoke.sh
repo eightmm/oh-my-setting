@@ -29423,7 +29423,16 @@ with open(os.path.join(sys.argv[1], hashlib.sha256(raw).hexdigest() + ".json"), 
 PY
   changed="$( . "$ROOT/scripts/lib/oms-common.sh"
     OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
-  [ -z "$changed" ] || fail "compaction keeping a receipt-pinned row must not be a violation, got: $changed"
+  [ "$changed" = shared-state ] ||
+    fail "a receipt written during the run must not excuse a deletion, got: ${changed:-<none>}"
+  # A pin that existed when the baseline was taken does.
+  cp "$snap/omsstate.artifact-index" "$index"
+  ( . "$ROOT/scripts/lib/oms-common.sh"
+    oms_worker_surface_snapshot "$project" "$snap" ) || fail "pinned index snapshot failed"
+  { sed -n '1p;4,6p' "$snap/omsstate.artifact-index"; printf '{"event_id":"e7","kind":"ask"}\n'; } > "$index"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
+  [ -z "$changed" ] || fail "compaction keeping a baseline-pinned row must not be a violation, got: $changed"
 }
 
 test_worker_guard_keeps_local_branch_refs_hard() {
