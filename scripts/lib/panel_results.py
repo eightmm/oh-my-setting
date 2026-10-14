@@ -15,6 +15,7 @@ import uuid
 
 import codex_app_notify
 from dashboard_projection import clean
+from call_ending import call_ending
 from peer_artifacts import artifact_sections_stream, debate_sections
 from work_journal import sanitize_multiline
 from path_scope import classify
@@ -678,7 +679,8 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
         for row in indexed[-30:]:
             if row.get('kind') not in ('ask', 'call', 'consult', 'delegate', 'review', 'ask-synthesis', 'patch-admit', 'patch-land'):
                 continue
-            call = {k: row[k] for k in ('kind', 'exit', 'verify_exit', 'artifact', 'patch', 'patch_sha256', 'event_id',
+            call = {k: row[k] for k in ('kind', 'exit', 'verify_exit', 'verify_status', 'state', 'reason_code', 'guard',
+                                       'provider_error_exit', 'artifact', 'patch', 'patch_sha256', 'event_id',
                                        'selected_model', 'requested_model', 'served_model', 'attempt_id') if k in row}
             attempt_meta = next((a for a in matching if a.get('attempt_id') == row.get('attempt_id')), {})
             alias = attempt_meta.get('refs', {}).get('panel_alias')
@@ -728,9 +730,35 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
         stages['main_decision'] = {'state': 'failed' if main_state == 'failed' else main_state}
         failed_stage = next((name for name in ('implement', 'verify', 'review', 'main_decision')
                              if stages[name]['state'] == 'failed'), None)
-        action = ('review main decision' if failed_stage == 'main_decision' else
-                  'retry ' + failed_stage if failed_stage else
-                  'record main decision' if stages['main_decision']['state'] == 'pending' else 'none')
+        failed_call = next((c for c in calls_by_stage.get(failed_stage, [])
+                            if c.get('stage_exit', c.get('exit')) not in (None, 0)), {}) if failed_stage else {}
+        ending = call_ending(failed_call) if failed_call else None
+        guard = failed_call.get('guard')
+        guard_name = clean(guard, 80) if isinstance(guard, str) else ''
+        if ending == 'cancelled':
+            representative = failed_stage + ' cancelled'
+            stages[failed_stage]['state'] = 'cancelled'
+            action = 'none'
+        elif ending == 'guard_stop':
+            representative = failed_stage + ' guard stop' + (' (' + guard_name + ')' if guard_name else '')
+            stages[failed_stage]['state'] = representative[len(failed_stage) + 1:]
+            action = 'inspect guard stop and salvage partial work'
+        elif ending == 'timed_out':
+            representative = 'timed out'
+            stages[failed_stage]['state'] = 'timed out'
+            action = 'continue with --continue TASK_ID'
+        elif ending == 'verify_failed':
+            representative, action = 'verify failed', 'retry verify'
+            stages[failed_stage]['state'] = 'verify failed'
+        elif ending == 'provider_error':
+            representative, action = failed_stage + ' provider error', 'retry ' + failed_stage
+            stages[failed_stage]['state'] = 'provider error'
+        elif failed_stage:
+            representative, action = failed_stage + ' failed', 'retry ' + failed_stage
+        else:
+            representative = stages['main_decision']['state']
+            action = ('review main decision' if failed_stage == 'main_decision' else
+                      'record main decision' if stages['main_decision']['state'] == 'pending' else 'none')
         output.append({'task_id': ident, 'title': clean(metadata.get('panel_label') or
                        ((result or {}).get('summary') or '').split('\n')[0], 160),
                        'model': clean(metadata.get('panel_model'), 160), 'role': metadata.get('panel_role'),
@@ -744,8 +772,7 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                        'delivery': (delivery or {}).get('receipt', {}).get('status', 'not_requested'),
                        'delivery_unknown': (delivery or {}).get('receipt', {}).get('delivery_unknown', False),
                        'issue': issue, 'missing_result': result is None,
-                       'stages': stages, 'representative_state': (failed_stage + ' failed' if failed_stage else
-                           stages['main_decision']['state']), 'next_action': action})
+                       'stages': stages, 'representative_state': representative, 'next_action': action})
     return {'schema': 1, 'kind': 'oms-panel-results', 'rows': output,
             'coverage': 'latest 300 attempts and 1000 artifact events',
             'truncated': capped or (bool(task_id) and not chosen), 'offset': offset,

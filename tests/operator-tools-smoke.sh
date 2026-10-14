@@ -6089,6 +6089,29 @@ with patch.dict(os.environ, environment, clear=True):
         assert staged["representative_state"] == "review failed" and staged["next_action"] == "retry review"
         page = saved.results(project, offset=0, limit=1)
         assert page["offset"] == 0 and page["omitted"] == 0 and page["omitted_range"] is None
+    endings = [
+        ("cancelled", {"exit": 130, "state": "cancelled", "reason_code": "cancelled_by_owner"},
+         "implement cancelled", "cancelled", "none"),
+        ("guard", {"exit": 1, "state": "failed", "guard": "scope"},
+         "implement guard stop (scope)", "guard stop (scope)", "inspect guard stop and salvage partial work"),
+        ("timeout", {"exit": 124, "state": "timed_out"},
+         "timed out", "timed out", "continue with --continue TASK_ID"),
+        ("verify", {"exit": 0, "verify_exit": 1, "state": "done", "reason_code": "verification_failed"},
+         "verify failed", "verify failed", "retry verify"),
+        ("provider", {"exit": 1, "state": "failed", "provider_error_exit": 1},
+         "implement provider error", "provider error", "retry implement"),
+        ("failure", {"exit": 1, "state": "failed"}, "implement failed", "failed", "retry implement"),
+    ]
+    for suffix, evidence, expected_state, expected_stage_state, expected_action in endings:
+        item = dict(task_id="ending-" + suffix, kind="delegate", attempt_id="att-ending-" + suffix, **evidence)
+        with patch.object(saved, "_records", return_value=([], [item])):
+            projected = saved.results(project, task_id="ending-" + suffix)["rows"][0]
+        assert projected["representative_state"] == expected_state, projected
+        assert projected["next_action"] == expected_action, projected
+        stage_name = "verify" if suffix == "verify" else "implement"
+        assert projected["stages"][stage_name]["state"] == expected_stage_state, projected
+        rendered = question_view.render_results({"rows": [projected]}, width=200)
+        assert expected_state in rendered and expected_action in rendered, rendered
     patch_a, patch_b = "a" * 64, "b" * 64
     with patch.object(saved, "_records", return_value=([], [
             {"task_id": "patch-pending", "kind": "delegate", "attempt_id": "attempt-a", "patch": "a.patch", "patch_sha256": patch_a},
