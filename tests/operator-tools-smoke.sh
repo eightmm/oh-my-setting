@@ -1692,6 +1692,10 @@ else:
     'followup': {'id': 'followup', 'state': 'running', 'claimed_at': stamp_metric(-1)},
     'claim-blocked': {'id': 'claim-blocked', 'state': 'blocked', 'provider': 'codex',
                       'claimed_at': stamp_metric(-1), 'lease_epoch': 1},
+    'preflight-check': {'id': 'preflight-check', 'state': 'done', 'claimed_at': stamp_metric(-1),
+                        'lease_epoch': 1},
+    'awaiting-review': {'id': 'awaiting-review', 'state': 'review', 'claimed_at': stamp_metric(-90),
+                        'updated_at': stamp_metric(-80), 'lease_epoch': 1},
     'ready-cancel': {'id': 'ready-cancel', 'state': 'cancelled', 'claimed_at': stamp_metric(-1),
                      'lease_epoch': 0, 'cancellation': {'state': 'ready', 'ts': stamp_metric(-90)}}}}), encoding='utf-8')
 
@@ -1756,16 +1760,25 @@ assert expected_metrics['completion'] == {'finished': 2, 'started': 5, 'rate': 0
 assert expected_metrics['review_wait_seconds'] == {'count': 2, 'median': 20.0, 'p90': 20.0}, expected_metrics
 assert expected_metrics['rework'] == {'tasks': 1, 'started': 5, 'rate': 0.2}, expected_metrics
 assert expected_metrics['abandoned_calls'] == 1, expected_metrics
+assert expected_metrics['window']['until'] == expected_metrics['until'], expected_metrics
+assert expected_metrics['metric_scope']['completion']['coverage']['attempt_limit'] == 300, expected_metrics
+assert expected_metrics['pending']['awaiting_review']['count'] == 1, expected_metrics
+assert expected_metrics['pending']['awaiting_review']['oldest_seconds'] == 80.0, expected_metrics
+assert expected_metrics['pending']['awaiting_admission']['count'] >= 0, expected_metrics
+assert expected_metrics['preflight']['tasks'] == 1, expected_metrics
 assert expected_metrics['interventions'] == {'manual_clears': 1, 'cancels': 1,
                                               'owner_finalized_failures': 1, 'total': 3}, expected_metrics
 metric_text = io.StringIO()
 with redirect_stdout(metric_text):
     assert panel.main(['--repo', str(metric_repo), '--metrics']) == 0
 assert 'completion: 2/5 (40.0%)' in metric_text.getvalue(), metric_text.getvalue()
+assert 'awaiting review: n=' in metric_text.getvalue(), metric_text.getvalue()
+assert 'coverage:' in metric_text.getvalue() and 'until ' in metric_text.getvalue(), metric_text.getvalue()
 metric_json = io.StringIO()
 with redirect_stdout(metric_json):
     assert panel.main(['--repo', str(metric_repo), '--metrics', '--json']) == 0
 assert json.loads(metric_json.getvalue())['completion'] == expected_metrics['completion']
+assert json.loads(metric_json.getvalue())['window'] == expected_metrics['window']
 metric_help = io.StringIO()
 try:
     with redirect_stdout(metric_help):

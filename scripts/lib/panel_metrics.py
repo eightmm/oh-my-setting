@@ -400,7 +400,7 @@ def aggregate(repo, since=None, now=None):
     Follow-up task IDs are not linked by any producer record; rework therefore
     counts only additional write rounds for the same task ID.
     """
-    from panel_results import _query, _read, _indexed
+    from panel_results import _query, _read, _indexed, pending_admissions
 
     repo = Path(repo)
     now = time.time() if now is None else now
@@ -461,9 +461,14 @@ def aggregate(repo, since=None, now=None):
         ident = attempt.get("task_id")
         if ident:
             attempts_by_task.setdefault(ident, []).append(attempt)
+    preflight_ids = {row.get("task_id") for row in attempts
+                     if isinstance(row.get("task_id"), str) and row["task_id"].startswith("preflight-")}
+    preflight_ids.update(task.get("id") for task in tasks
+                         if isinstance(task.get("id"), str) and task["id"].startswith("preflight-"))
+    rate_tasks = [task for task in tasks if not str(task.get("id", "")).startswith("preflight-")]
     started = []
     first_start = {}
-    for task in tasks:
+    for task in rate_tasks:
         history = task.get("history") if isinstance(task.get("history"), list) else []
         claim_times = [_stamp(item.get("ts")) for item in history if isinstance(item, dict)
                        and item.get("kind") in {"claim", "start", "started"}]
@@ -485,7 +490,7 @@ def aggregate(repo, since=None, now=None):
         elif ever_started and cutoff is not None and first is None:
             incomplete = True
     finished = sum(task.get("state") in {"done", "landed"} or bool(task.get("landing")) for task in started)
-    calls = attempts
+    calls = [row for row in attempts if not str(row.get("task_id", "")).startswith("preflight-")]
     write_calls = [row for row in calls if row.get("refs", {}).get("panel_role") == "worker"
                    and row.get("refs", {}).get("panel_access") == "write"
                    and not any(item.get("reason_code") == "manual_clear" for item in row.get("transitions", []))]
@@ -544,7 +549,7 @@ def aggregate(repo, since=None, now=None):
         except (OSError, ValueError, TypeError):
             continue
 
-    by_id = {attempt.get("attempt_id"): attempt for attempt in attempts}
+    by_id = {attempt.get("attempt_id"): attempt for attempt in calls}
     verdicts = [row for row in artifacts if row.get("kind") == "review-outcome"
                 and row.get("attempt_id") in by_id]
     waits = []
@@ -578,7 +583,38 @@ def aggregate(repo, since=None, now=None):
         upper = min(lower + 1, len(values) - 1)
         return round(values[lower] + (values[upper] - values[lower]) * (position - lower), 2)
 
-    return {"schema": 1, "kind": "oms-panel-metrics", "since": since,
+    def age_stats(stamps):
+        ages = sorted(max(0.0, now - stamp) for stamp in stamps if stamp is not None)
+        return {"count": len(stamps), "age_coverage": len(ages),
+                "oldest_seconds": round(max(ages), 2) if ages else None,
+                "median_seconds": percentile(ages, .5)}
+
+    review_tasks = [task for task in tasks if task.get("state") == "review"]
+    review_ages = [_stamp(task.get("updated_at") or task.get("claimed_at")) for task in review_tasks]
+    try:
+        admission_ids = pending_admissions(repo, [task.get("id") for task in tasks if task.get("id")])
+    except (OSError, ValueError, KeyError, TypeError):
+        admission_ids = set()
+        incomplete = True
+        incomplete_reasons.append("admission evidence unavailable")
+    admission_tasks = [task for task in tasks if task.get("id") in admission_ids]
+    admission_ages = [_stamp(task.get("updated_at") or task.get("claimed_at")) for task in admission_tasks]
+    until = datetime.fromtimestamp(now, timezone.utc).isoformat().replace("+00:00", "Z")
+    coverage = {"attempt_limit": METRIC_ATTEMPTS, "artifact_limit": 1000,
+                "attempts_observed": len(attempts), "artifact_events_observed": len(artifacts),
+                "lifecycle_missing_task_ids": sorted({task.get("id") for task in rate_tasks
+                    if task.get("id") and task.get("id") not in attempts_by_task}),
+                "incomplete": bool(incomplete)}
+    metric_scope = {"since": since, "until": until, "coverage": coverage}
+    return {"schema": 1, "kind": "oms-panel-metrics", "since": since, "until": until,
+            "window": {"since": since, "until": until}, "coverage": coverage,
+            "preflight": {"tasks": len(preflight_ids), "attempts": sum(
+                str(row.get("task_id", "")).startswith("preflight-") for row in attempts)},
+            "pending": {"scope": "current snapshot", "awaiting_review": age_stats(review_ages),
+                        "awaiting_admission": age_stats(admission_ages)},
+            "metric_scope": {"completion": metric_scope, "review_wait_seconds": metric_scope,
+                             "rework": metric_scope, "abandoned_calls": metric_scope,
+                             "interventions": metric_scope},
             "completion": {"finished": finished, "started": len(started),
                            "rate": round(finished / len(started), 4) if started else None},
             "review_wait_seconds": {"count": len(waits), "median": percentile(waits, .5),
@@ -589,7 +625,6 @@ def aggregate(repo, since=None, now=None):
             "interventions": {"manual_clears": clears, "cancels": cancels,
                               "owner_finalized_failures": owner_failures,
                               "total": clears + cancels + owner_failures},
-            "coverage": "plan tasks, latest 300 lifecycle attempts and 1000 artifact events, retained room logs",
             "incomplete": bool(incomplete),
             "incomplete_reason": "; ".join(incomplete_reasons) if incomplete_reasons else None}
 
@@ -602,7 +637,25 @@ def metrics_text(report):
     def seconds(value):
         return "none" if value is None else "%ss" % value
     return "\n".join((
-        "Panel metrics%s" % (" (since %s)" % report["since"] if report.get("since") else ""),
+        "Panel metrics (since %s; until %s)" % (report.get("since") or "all retained", report.get("until", "unknown")),
+        "coverage: %s attempts, %s artifact events (limits %s/%s); lifecycle missing task IDs=%d%s" % (
+            report.get("coverage", {}).get("attempts_observed", "?"),
+            report.get("coverage", {}).get("artifact_events_observed", "?"),
+            report.get("coverage", {}).get("attempt_limit", "?"),
+            report.get("coverage", {}).get("artifact_limit", "?"),
+            len(report.get("coverage", {}).get("lifecycle_missing_task_ids", [])),
+            "; partial evidence" if report.get("incomplete") else ""),
+        "preflight excluded from rates: %d tasks, %d attempts" % (
+            report.get("preflight", {}).get("tasks", 0), report.get("preflight", {}).get("attempts", 0)),
+        "awaiting review: n=%d oldest=%s median=%s" % (
+            report.get("pending", {}).get("awaiting_review", {}).get("count", 0),
+            seconds(report.get("pending", {}).get("awaiting_review", {}).get("oldest_seconds")),
+            seconds(report.get("pending", {}).get("awaiting_review", {}).get("median_seconds"))),
+        "awaiting admission: n=%d oldest=%s median=%s" % (
+            report.get("pending", {}).get("awaiting_admission", {}).get("count", 0),
+            seconds(report.get("pending", {}).get("awaiting_admission", {}).get("oldest_seconds")),
+            seconds(report.get("pending", {}).get("awaiting_admission", {}).get("median_seconds"))),
+        "pending counts use the current snapshot; rates and durations use the stated window",
         "completion: %d/%d (%s)" % (completion["finished"], completion["started"], rate(completion["rate"])),
         "review wait: n=%d median=%s p90=%s" % (waits["count"], seconds(waits["median"]), seconds(waits["p90"])),
         "rework: %d/%d (%s)" % (rework["tasks"], rework["started"], rate(rework["rate"])),
