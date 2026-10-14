@@ -18179,12 +18179,15 @@ handoff.pop("main_activity")
 owner_successor_done = next(m for m in graph_view.nodes(handoff) if m["participant"] == "stale-patch")
 assert graph_view.call_classifier(handoff)(owner_successor_done) == "past"
 assert graph_view.plan_summary(handoff)[3] == 0
-# The owner's recorded decision on a task closes its review and its block; a failed decision does not.
-for outcome, expected in (("completed", "past"), ("accepted", "past"), ("failed", None)):
+# The owner's recorded decision on a task closes its review and its block; a failed decision does not, a rejected one does.
+for outcome, expected in (("completed", "past"), ("accepted", "past"), ("failed", None), ("rejected", "past")):
     decided = graph_view.call_classifier(dict(grouped_board, finalized={"decided-task": outcome}))
     for ident in ("review-call", "blocked-call"):
         node = dict(next(m for m in graph_view.nodes(grouped_board) if m["participant"] == ident), task_id="decided-task")
         assert decided(node) == (expected or classified[ident]), (outcome, ident, decided(node))
+# A review that a later --continue round of its task superseded no longer waits on the owner.
+superseded_review = dict(next(m for m in graph_view.nodes(grouped_board) if m["participant"] == "review-call"), superseded=True)
+assert graph_view.call_classifier(grouped_board)(superseded_review) == "past", superseded_review
 # A stale admission flag cannot hide current work, uncertainty or an urgent failure.
 mixed = deepcopy(grouped_board)
 mixed["awaiting_admission"] = list(classified)

@@ -314,7 +314,8 @@ def settler(report):
         # A completed or accepted outcome closes the task's calls; a failed outcome closes only calls that already
         # ended in failure, while its review and block stay for the rework the decision asks for.
         outcome = finalized.get(call.get("task_id"))
-        decided = outcome in {"completed", "accepted"} or (
+        # rejected withdraws the work: its review and block close too, unlike failed, which asks for rework.
+        decided = outcome in {"completed", "accepted", "rejected"} or (
             outcome == "failed" and call["state"] in {"failed", "timed_out", "abandoned", "orphaned"})
         ending = call_ending(call)
         if ending == "cancelled":
@@ -336,7 +337,9 @@ def settler(report):
             call["state"] == "done" and call.get("participant") in listing(report.get("awaiting_admission")))
         return (finished or call["state"] == "presence unknown" and aged(call)
                 or failure_handled(report, call, read_results, closed) or decided and call["state"] in ATTENTION_STATES - {"waiting_input", "waiting_approval"}
-                or review and (task_id in closed or unowned_old or handed_off))
+                or review and (task_id in closed or unowned_old or handed_off
+                               # a later --continue round of the same task carries the decision now
+                               or call.get("superseded") is True))
     return settled, aged
 
 

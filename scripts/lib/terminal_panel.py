@@ -469,7 +469,7 @@ def bootstrap(provider, repo):
         "or reroute a policy denial. For a four-seat debate use oms panel "
         "--council --owner OWNER --task-id ID --label TITLE --prompt TEXT. "
         "Record an owner decision with oms panel --finalize --owner OWNER "
-        "--task-id ID --summary-file PATH --outcome completed|accepted|failed; "
+        "--task-id ID --summary-file PATH --outcome completed|accepted|failed|rejected; "
         "accepted requires --verify, --evidence and matching landed patches "
         "for all task or current-main write workers. "
         "Use --evidence with relative proof references, and --notify for each "
@@ -4861,7 +4861,7 @@ def snapshot(repo, room_id=None, _tick=None):
                                if row.get("state") in {"failed", "timed_out", "abandoned", "orphaned", "review", "blocked"}}
                     if waiting:
                         state["finalized"] = {ident: outcome for ident, outcome in outcomes(repo, waiting, _shared=True, _tick=_tick).items()
-                                              if outcome in {"completed", "accepted", "failed"}}
+                                              if outcome in {"completed", "accepted", "failed", "rejected"}}
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, subprocess.SubprocessError):
                     pass
                 state["awaiting_admission"] = awaiting_admission(repo, state, _tick=_tick)
@@ -6764,7 +6764,7 @@ def interactive(repo, view="auto", attention_only=False):
             elif choice == "f":
                 task_id = read_field("Task ID: ")
                 summary = read_field("Summary file: ")
-                outcome = read_field("Outcome (completed/accepted/failed): ")
+                outcome = read_field("Outcome (completed/accepted/failed/rejected): ")
                 verify = read_field("Verifier (required for accepted): ", required=False) or None
                 evidence = read_field("Relative evidence file (required for accepted): ", required=False) or None
                 report = finalize(repo, provider, task_id, summary, outcome, verify, evidence, notify=True)
@@ -6853,7 +6853,7 @@ def main(argv=None):
     parser.add_argument("--chat-surface", choices=("auto", "terminal", "app"), default="auto")
     parser.add_argument("--finalize", action="store_true", help="record an owner result")
     parser.add_argument("--summary-file", help="bounded owner summary for --finalize")
-    parser.add_argument("--outcome", choices=("completed", "accepted", "failed"))
+    parser.add_argument("--outcome", choices=("completed", "accepted", "failed", "rejected"))
     parser.add_argument("--evidence", action="append", help="safe repository-relative evidence for --finalize (up to eight)")
     parser.add_argument("--notify", action="store_true", help="deliver the recorded result to Codex app")
     parser.add_argument("--retry-delivery", action="store_true", help="retry delivery of a saved task result without its original summary file")

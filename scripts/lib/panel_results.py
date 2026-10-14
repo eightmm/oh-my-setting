@@ -317,7 +317,7 @@ def _load_result(repo, row):
     result = json.loads(_indexed(repo, row))
     if (not isinstance(result, dict) or result.get('schema') != 1 or result.get('kind') != 'oms-panel-result'
             or result.get('task_id') != row.get('task_id') or not REVISION.fullmatch(str(result.get('revision', '')))
-            or result.get('owner') not in ('codex', 'claude') or result.get('outcome') not in ('completed', 'accepted', 'failed')
+            or result.get('owner') not in ('codex', 'claude') or result.get('outcome') not in ('completed', 'accepted', 'failed', 'rejected')
             or not isinstance(result.get('summary'), str) or not isinstance(result.get('evidence'), list)):
         raise ValueError('invalid result artifact')
     return result
@@ -414,7 +414,7 @@ def _plan_hint(repo, task_id):
 
 def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=None, notify=False):
     _owner()
-    if owner not in ('codex', 'claude') or not ID.fullmatch(task_id) or outcome not in ('completed', 'accepted', 'failed'):
+    if owner not in ('codex', 'claude') or not ID.fullmatch(task_id) or outcome not in ('completed', 'accepted', 'failed', 'rejected'):
         raise ValueError('invalid owner result')
     summary = _safe_summary(summary_file, repo)
     refs = [_relative(repo, value) for value in (evidence or [])] if not isinstance(evidence, str) else [_relative(repo, evidence)]
