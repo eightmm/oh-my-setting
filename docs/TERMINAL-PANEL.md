@@ -33,6 +33,7 @@ oms panel --repo . --room team --watch --view tree
 oms panel --repo . --launch codex --task 'Explain the parser and fix its bounded bug'
 oms panel --repo . --launch claude --resume SESSION_ID
 oms panel --repo . --launch codex --model MODEL --dry-run
+oms panel --repo . --swap-main codex [--model MODEL]
 oms panel --repo . --results               # summaries first, ordinary scrollable text
 oms panel --repo . --results --task-id ID --json
 oms panel --repo . --room team --chats --json
@@ -47,6 +48,18 @@ integration, required checks and owner finalization. A worker's exit or review
 handoff is an intermediate step. The main continues actionable work within the
 user's scope, or records a concrete blocker and the next action. Publication
 still requires the user's authority; a local result can be completed first.
+
+The `s` board key lists installed main targets and their weekly quota readings, then
+requests a bounded handoff before swapping. `oms panel --swap-main PROVIDER
+[--model MODEL]` is the command form. It requires an existing tmux panel, one
+verified live main and an inactive landing operation. The current main is asked
+for a handoff of at most 3000 bytes (20 seconds by default, capped at 60); if
+none arrives, OMS uses a recorded-state digest. OMS then exits the old main and
+relaunches the replacement in the same pane and room without stopping workers.
+If the old main does not exit or new ownership cannot be verified, the panel
+preserves the existing session and room claims. A current Pi main cannot be
+swapped because its native session has no verified resume binding. `--model`
+selects an exact installed catalog model; swap has no dry-run and requires tmux.
 
 Use the shared `OMS_ROOM_REPO` for plan and result records when editing elsewhere.
 For `--dispatch`, it selects the state repository for the room, main attempt,
@@ -68,8 +81,8 @@ when no main is active. A click, or `n` then `1` (Claude), `2` (Pi) or `0` (Code
 sole main without leaving the current window. While a main is active or its lifecycle is
 unverified, the row explains the limit and offers no start targets. Startup is serialized;
 an invocation-scoped lease also prevents concurrent inline/Herdr/native main processes.
-Parallel tasks use workers, advisors and reviewers under this main. Mains that ended
-stay on record in the room; the board draws the live one, and the tree lists earlier ones.
+Parallel tasks use workers, advisors and reviewers under this main. The panel
+does not start a second live main.
 
 To start a main in an empty existing panel without a terminal:
 
@@ -203,54 +216,37 @@ session's native chat windows. Redirected
 output stays plain and passive. Unsupported terminals
 retain the existing control-menu chat/result selection.
 
-The graph shows joined mains, advisors/reviewers, workers, a mailbox, the
-repository's canonical task board, declared scopes and the latest room log.
-A running council launched by a shown main appears in the advisor card as
-`Debate` (`DEB` on a narrow card) with its answering seat count; its seats never stand in for the main.
-The default tree keeps the same evidence in a `COUNCIL` branch; clicking it
-reads that task's results scoped to its main participant.
-Only explicit parent IDs draw call connections. Lifecycle state drives moving
-particles/spinners; joining without lifecycle evidence says `presence unknown`.
-A call that fell out of the dashboard's recent-attempt rows still shows its real state (`review`, `blocked`, ...) from the full attempt projection; its result message's exit code is only the fallback after that.
-At 140 columns or wider, when the graph has room for five-row cards, the main
-has two information cards beside it: linked worker/advisor counts and mail
-addressed to that exact main. Mail counts use recorded recipient pairs; the
-preview covers only the recent room-message window. These cards add no call
-connections or click targets. An unspecified native task says `Task title
-unrecorded`; OMS does not infer a task from the native chat. `WORK STATUS` is
-a summary, not another agent. The main is the central card and shows its
-coordination role. Advisors/reviewers sit above it and join its top edge;
-workers branch from its bottom edge. Each child connects to the main itself,
-so workers do not appear to report to an advisor. `Awaiting decision (N)` groups contain lifecycle `review` calls and
-completed write calls awaiting patch admission. Past calls are not a board
-group: `done`/`cancelled` calls, failures already handled (result read, a later
-round of the same task, or the task done, cancelled or finalized) and old unknown
-calls eligible for the existing display cutoff are listed in the bottom box's
-Past tab instead. The group defaults collapsed. Click a group or select it with Up/Down
-and press Enter or Space to expand it. Graph groups for the selected main open
-the scrollable tree; Esc Back or `g` Graph returns directly to the graph and
-resets local group expansion. Collapsing all inspected groups also returns. Expansion
-survives refresh and resize, but resets on a room change. The tree keeps each
-group under its explicit main, with participant-scoped result actions.
-Unknown calls retain `status unknown` and an `N unrecorded` count; neither
-age nor process exit establishes acceptance. The unknown cutoff requires a
-complete active list and ten minutes of age. Unproven unknowns, unhandled
-failures, blocked and waiting calls remain visible. Review counts remain in
-attention-only mode and the inbox includes actual review requests. Group
-actions only change local display state; result activation retains existing
-fresh participant/result validation. No records, acknowledgments or lifecycle
-states change. Wires attach at the card
-edges, and a particle on a live edge moves toward its consumer. Child status
-names its main (`for Opus 5.5`) only when another main could be meant: more than one live main, or a shown
-main that exited while another lives. Under the sole live main it would only crowd out state and elapsed time. Cards stay bounded in width instead of stretching a lone worker
-across the terminal.
+The board shows one live main per panel. In graph view its order is the header
+and legend, the wrapping Goal box, attention strip, judges (reviewer, verifier,
+security-auditor, critic, advisor and architect), a dashed MAIN card, writer
+calls below the main, the session log and footer. The tree groups calls under
+their recorded role and parent. Calls appear as one-line rows; selecting one
+expands it into a dashed card. Status tags are bracketed and role colours
+distinguish judges, the main and writers. A finished write call awaiting patch
+admission is tagged `patch awaits admission`.
 
-Three rows are pinned at the top of every board (graph and tree of the sole main window, and the control
-window), in this order, and never scroll away: the header (`OMS · …`), the usage line, then the goal box.
-Groups, the cards, the bottom tab box and the footer follow; status alerts sit under the goal box.
+Click or Enter on a graph call selects its preview; Enter in the tree opens the
+call. Group drill-down is available in the tree. The right reader shows the
+selected call in `Summary`, `Raw`, `Events`, `Diff` and `Run info` views
+(Tab changes views; `r`, `e`, `d` and `i` select Raw, Events, Diff and Run
+info). A selected call's reader is revalidated against its recorded result.
+Clicking the main previews its card. Child connections use explicit parent
+IDs. Lifecycle state drives activity marks; joining without lifecycle evidence
+shows `presence unknown`. Missing or old call records do not establish
+acceptance. Unknown calls retain their unknown status, and unhandled failures,
+blocked and waiting calls remain visible. Actions only change the display;
+they do not change room records, acknowledgments or lifecycle states.
+
+The graph pins its header, legend, Goal box and attention strip above the call
+layout. The full goal wraps instead of being clipped, and its counts summarize
+the plan. When it exceeds the visible space, scroll over the Goal box to move through
+its lines; the Plan tab also shows the full goal with plan details and supports
+scrolling. The tree pins the header, usage line and goal preview. Small
+boards retain selection for the main and at least one call.
+
 The usage line always covers both providers (`Claude week 66% · ctx 73% │ Codex --`); a provider without a
 reading reads `Codex --`, whichever main the window belongs to. The goal box is a card titled `GOAL` with the
-plan goal on at most two rows and the progress right-aligned on the title row
+full wrapped plan goal, with progress right-aligned on the title row
 (`╭─ GOAL ──── ▕██████░░░░▏ 6/9 verified · 1 in review · 2 claimed ─╮`; ASCII `+- GOAL` and `[######....]`).
 Cancelled tasks are closed, never verified, so they leave the total (the `[oms plan]` sentence uses the
 same total). A running task whose recorded calls all ended counts as `stale` instead of `claimed`; one whose
@@ -634,7 +630,7 @@ Sources: [Codex thread links](https://learn.chatgpt.com/docs/reference/commands#
 fixed Codex app receiver. It saves a delivery intent before sending and its
 receipt afterward; repeated persisted/uncertain snapshots do not resend.
 `--retry` is an explicit retry that can duplicate uncertain output. Busy,
-absent and failed delivery leave work status unchanged. No new receiver chat
+absent and failed delivery leave the task state unchanged. No new receiver chat
 is created, and a persisted command output is not proof of a desktop popup.
 The detailed moving panel is available in the app's integrated terminal; a
 native custom graph widget or automatic app subscription is not implemented.
@@ -770,7 +766,7 @@ The launcher does not autonomously fan out before the main has a task.
 | Claude main (default) | `claude-opus-5-5` | high |
 | Codex main / Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
 
-Routing filters a tier to installed providers. Only when multiple providers are installed does it remove providers reporting at least 90% weekly usage; missing, stale or malformed readings stay eligible, and routing fails if every installed candidate reports at least 90%. A sole installed provider remains eligible regardless of usage. Inside the tier, providers with more weekly quota left come first (configured tier order breaks ties or missing readings); independence ordering then moves reviewer, verifier, security-auditor and critic away from the owner's provider when another candidate remains. No role prefers a provider. Researcher is pinned to the light tier at low effort. Role defaults are shown below.
+Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. A tie follows configured tier order. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the main's when one remains. Researchers are pinned to the light tier at low effort. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
 
 | Tier | Configured model candidates (effort) |
 | --- | --- |
@@ -921,7 +917,38 @@ when known, with `compact soon` at 15% or less.
 
 ### Keys
 
-Keys apply to the surface that has focus. On a board, `Tab` changes the tab, arrows navigate calls or the selected tab's items, `Home`/`End` move to the first/last item or reader edge, and `Enter` opens a chat/result or expands a message. `f` opens the full result from a result preview; in Debate it opens the recorded debate result. `v` expands/collapses the board view. `q` quits an inline watcher or detaches from the control window; `Esc` closes a reader or returns to the previous board surface. At the main exit prompt only `r` and Enter are actions. `n` starts the sole main, then `1` selects Claude, `2` Pi, or `0` Codex in the harness chooser. `k` opens the capacity screen on a board or from the control menu. At the native main's exit prompt, `r` resumes/restarts there and Enter closes the window. `F5` opens the control window from a main and returns to the previous window from control. Mouse clicks select rows and tabs or open the selected target. `footer_hints` displays the subset available for the current surface and width.
+Keys apply to the focused surface. The board and reader bindings are contextual; `?` shows live board hints for the current surface and width.
+
+| Key | Graph/tree board | Result reader |
+| --- | --- | --- |
+| Arrow keys | Move through calls or the selected tab's items | Move through result lines |
+| `Home` / `End` | First / last item | Start / end of result |
+| `PageUp` / `PageDown`, wheel | Page through calls or selected Detail/Plan content; wheel over a graph band (including Goal) scrolls that band | Scroll result |
+| `Tab` | Next visible tab | Next reader view |
+| `Enter` | Preview a graph call; open a tree call; expand a message/group | Finish search input |
+| `Space` | Expand/collapse a selected group or fold a main in the tree | Page down |
+| `f` | Open the selected full result; open the recorded Debate result | — |
+| `r` / `e` / `d` | — | Raw / Events / Diff view |
+| `i` | Toggle pane context headers in a managed panel | Run info view |
+| `g` / `t` | Graph / tree view | — |
+| `b` / `v` | Toggle attention-only / expand or collapse the board | — |
+| `n`, then `1` / `2` / `0` | Start Claude / Pi / Codex when no main is active in a managed panel | `n` next search match |
+| `N` | — | Previous search match |
+| `s`, then `1` / `2` / `0` | Swap main to Claude / Pi / Codex in a managed panel | — |
+| `a` / `w` / `c` | Ask advisor / open selected worker worktree / request selected call cancellation | — |
+| `k` / `u` | Capacity / refresh | — |
+| `m` | Cycle Work / Overview / Focus in a managed panel | — |
+| `[` / `]` / `o` | — | Previous / next section / outline |
+| `/` | — | Search result text |
+| `z` | — | Zoom the tmux reader pane when width is under 120 columns or it is already zoomed |
+| `Esc` / `q` | `Esc` closes detail or returns; `q` quits an inline watcher, does nothing on a managed board, and detaches from the control menu | Close reader |
+| `?` | Show/hide board key help | — |
+| `Ctrl+L` | Repaint the board | Repaint the reader |
+| `F5` / `F8` / `F9` / `F12` | Control window (when present) / cycle layout / swap chat-board focus / panel-wide key list in tmux | — |
+| Shift-drag | Copy terminal selection in a managed panel | — |
+| Mouse click | Select a row/tab; graph calls and the main preview their cards | — |
+
+At the native main's exit prompt, `r` resumes/restarts there and Enter closes the window. The terminal/job workspace has its own controls; this table covers only the board and result reader.
 
 A dispatched call settles only after its supervisor proves the whole process tree exited. On macOS and Windows, where that supervisor is unsupported, the call stays pending and the panel prints a manual-clear hint; independently stop every provider descendant before clearing its retained scope.
 
@@ -1093,7 +1120,7 @@ wrapped lines, so long titles need not compete with location and purpose.
 No absolute home paths or transcripts are added to panel metadata.
 
 Activity is organized under the window's sole live MAIN: ADVISORS / REVIEWERS /
-WORKERS, followed by each call and its task title. Main rows can show `? N open` questions and `cN%` context used. When space is short, earlier mains fold to their status rows automatically; the selected main and the main owning the selected call stay expanded. The control window renders the Needs you attention inbox; the main board carries the MAIN card and its team counts. Legacy calls without explicit panel ownership
+WORKERS, followed by each call and its task title. Main rows can show `? N open` questions and `cN%` context used. When room history contains earlier mains, they fold to their status rows automatically; the selected main and the main owning the selected call stay expanded. The control window renders the Needs you attention inbox; the main board carries the MAIN card and its team counts. Legacy calls without explicit panel ownership
 remain unlinked; a generic attempt parent is never promoted into a native-main
 relationship. A linked owner whose metadata is unavailable is labelled so.
 
