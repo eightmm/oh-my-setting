@@ -445,6 +445,24 @@ def declared_scopes(role, scopes):
             raise ValueError("use normalized repository-relative scopes")
 
 
+def _main_enrollment(rows, state, member, predecessors):
+    """A carried join retains its sealed predecessor's enrollment; a local rejoin starts another."""
+    for previous in predecessors:
+        copied_until = next((row["seq"] for row in rows if row.get("room_event", {}).get("kind") == "carried"), 0)
+        if not state.get("predecessor") or member["seq"] > copied_until:
+            break
+        state = project(previous)
+        member = next((p for p in state["participants"] if p["participant"] == member["participant"]
+                       and p["joined"] and p["role"] == "main"), None)
+        if member is None:
+            return None
+        rows = previous
+    copied_until = next((row["seq"] for row in rows if row.get("room_event", {}).get("kind") == "carried"), 0)
+    if state.get("predecessor") and member["seq"] <= copied_until:
+        return None
+    return state["id"], member
+
+
 def validate_event(rows, event, text, repo=None):
     """Validate while thread.sh holds its existing file lock; no membership grants authority."""
     if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "main-swap", "bind", "scope", "describe", "leave", "closed", "message", "received", "publication", "successor", "carried", "call-result", "review-dispatch", "review-dispatch-failed"}:
@@ -674,6 +692,44 @@ def validate_event(rows, event, text, repo=None):
             if peers >= (MAX_CALLS if called else MAX_PARTICIPANTS):
                 raise ValueError("room call limit reached; start a new bounded room" if called
                                  else "room participant limit reached")
+        if event["role"] == "main" and not carry:
+            others = [p for p in state["participants"] if p["joined"] and p["role"] == "main"
+                      and p["participant"] != event["participant"]]
+            if others:
+                from terminal_panel import main_history
+                from room_view import room_ids
+                try:
+                    history = main_history(repo, state["id"]) if repo is not None else []
+                    predecessors = [records(repo, old) for old in _sealed_predecessors(repo, state["id"])] if repo is not None else []
+                    here = room_ids({"id": state["id"], "lineage": [previous[0]["thread"] for previous in predecessors]})
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    history, predecessors, here = [], [], set()
+                for other in others:
+                    related = [row for row in history if row.get("tool") == "panel-main"
+                               and row.get("refs", {}).get("panel_role") == "main"
+                               and row.get("refs", {}).get("panel_room_id") in here
+                               and row.get("refs", {}).get(
+                        "panel_room_participant", row.get("attempt_id")) == other["participant"]]
+                    enrollment = _main_enrollment(rows, state, other, predecessors)
+                    current = []
+                    if enrollment:
+                        started_in, enrolled = enrollment
+                        for attempt in related:
+                            bound = (enrolled["seq"] == enrolled["initial_seq"]
+                                     and attempt.get("attempt_id") == enrolled["participant"]
+                                     and attempt.get("refs", {}).get("panel_room_id") == started_in)
+                            try:
+                                newer = time.strptime(attempt.get("created_at", ""), "%Y-%m-%dT%H:%M:%SZ") > time.strptime(
+                                    enrolled.get("joined_at", ""), "%Y-%m-%dT%H:%M:%SZ")
+                            except (ValueError, TypeError):
+                                newer = False
+                            if bound or newer:
+                                current.append(attempt)
+                    if not current or any(row.get("terminal") is not True for row in related):
+                        raise ValueError("main %s is live or its release is unverified; use oms panel --swap-main "
+                                         "PROVIDER to hand off the main" % other["participant"])
+            # main-swap retains its participant after verifying the old attempt's release;
+            # it never authorizes a different participant to join alongside a live main.
     elif kind == "leave":
         participant(state, event.get("participant"))
     elif kind == "call-result":

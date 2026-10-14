@@ -106,7 +106,8 @@ class PlanBinding(NamedTuple):
                 or env.get("OMS_ROOM_ADMITTED_PARTICIPANT") != env.get("OMS_ROOM_PARTICIPANT")):
             raise ValueError("foreign plan observation caller")
         state = room.project(room.records(repo, self.room_id))
-        main = active_mains(repo, self.room_id, state, self.owner_provider).get(self.owner_participant)
+        main = active_mains(repo, self.room_id, state, self.owner_provider,
+                            caller=self.owner_participant, attempt=self.owner_attempt).get(self.owner_participant)
         child = room.participant(state, env["OMS_ROOM_PARTICIPANT"])
         if (state["closed"] or not main or main.get("attempt_id") != self.owner_attempt
                 or not room.same_room(repo, main.get("refs", {}).get("panel_room_id", self.room_id), self.room_id)
@@ -1046,23 +1047,36 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
     return status
 
 
-def active_mains(repo, room_id, state, owner):
-    """Enrolled mains of this provider with exactly one live panel-main attempt."""
-    history = main_history(repo, room_id)
+def active_mains(repo, room_id, state, owner, *, caller=None, attempt=None):
+    """One live main, or the caller's own main in a legacy room with concurrent mains."""
+    history = [row for row in main_history(repo, room_id) if row.get("tool") == "panel-main"
+               and row.get("refs", {}).get("panel_role") == "main"]
     candidates = {}
     for enrolled in state["participants"]:
-        if not enrolled["joined"] or enrolled["role"] != "main" or enrolled["provider"] != owner:
+        if not enrolled["joined"] or enrolled["role"] != "main":
             continue
         related = [row for row in history if row.get("refs", {}).get("panel_room_participant", row.get("attempt_id")) == enrolled["participant"]]
         current = [row for row in related if row.get("terminal") is not True]
         if len(current) != 1:
             continue
         current = current[0]
-        if (current.get("tool") == "panel-main" and current.get("provider") == owner
+        if (current.get("tool") == "panel-main" and current.get("provider") == enrolled["provider"]
                 and current.get("refs", {}).get("panel_role") == "main"
                 and current.get("state") in {"starting", "working", "verifying", "review", "waiting_input", "waiting_approval"}):
             candidates[enrolled["participant"]] = current
-    return candidates
+    caller = caller or os.environ.get("OMS_ROOM_PARTICIPANT")
+    attempt = attempt or os.environ.get("OMS_PANEL_MAIN_ATTEMPT")
+    if attempt:
+        bound = [who for who, row in candidates.items() if row["attempt_id"] == attempt]
+        if len(bound) != 1 or caller and caller != bound[0]:
+            raise ValueError("panel main and room caller identities disagree or are not live")
+        caller = bound[0]
+    if caller:
+        candidates = {caller: candidates[caller]} if caller in candidates else {}
+    elif len(candidates) > 1:
+        raise ValueError("select a unique active main: legacy room has multiple live mains; "
+                         "dispatch from the main's own session")
+    return {who: row for who, row in candidates.items() if row.get("provider") == owner}
 
 
 def session_stored(provider, session):
@@ -1148,16 +1162,22 @@ def owning_attempt(repo, owner, main, env):
         repo = repository(env["OMS_ROOM_REPO"])
     parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
     if parent:
+        if main:
+            current = json.loads(events(repo, "show", "--attempt", parent, "--json", output=True))
+            participant = env.get("OMS_ROOM_PARTICIPANT") or current.get("refs", {}).get("panel_room_participant", parent)
+            if main != participant:
+                raise ValueError("--main names a different main than this caller")
         return lineage_ids(repo, owner, env.get("OMS_ROOM_PARTICIPANT"), parent)
     room_id = env.get("OMS_ROOM_ID")
     if not room_id:
         raise ValueError("--continue needs the main that owns the worker; select its room with --room")
-    candidates = active_mains(repo, room_id, room.project(room.records(repo, room_id)), owner)
-    if main:
-        candidates = {main: candidates[main]} if main in candidates else {}
+    candidates = active_mains(repo, room_id, room.project(room.records(repo, room_id)), owner,
+                              caller=env.get("OMS_ROOM_PARTICIPANT"), attempt=parent)
     if len(candidates) != 1:
         raise ValueError("select a unique active main in this room before continuing a worker")
     participant, current = next(iter(candidates.items()))
+    if main and main != participant:
+        raise ValueError("--main names a different main than this caller")
     return lineage_ids(repo, owner, participant, current["attempt_id"])
 
 
@@ -1435,7 +1455,8 @@ def plan_link(repo, owner, task_id, env, caller, access="read"):
             raise ValueError("plan task %s is not this main's to run; reopen or claim it before "
                              "dispatching a write worker" % task_id)
         return None
-    main = active_mains(repo, ident, room.project(room.records(repo, ident)), owner).get(caller)
+    main = active_mains(repo, ident, room.project(room.records(repo, ident)), owner,
+                        caller=caller, attempt=attempt).get(caller)
     if not main or main["attempt_id"] != attempt:
         raise ValueError("plan observation requires the current room main")
     if state == "ready":
@@ -3018,7 +3039,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             raise ValueError("--scope declares a write role's files; use it with --access write")
         scopes = list(dict.fromkeys(room.normalize_scope(scope) for scope in scopes))
         room.declared_scopes(route["kind"], scopes)
-    if dry_run and not (scopes and os.environ.get("OMS_ROOM_ID")):
+    if dry_run and not main and not (scopes and os.environ.get("OMS_ROOM_ID")):
         print(json.dumps(dict(plan, overlaps=[]) if scopes else plan))
         return 0
     if not dry_run and not shutil.which(route.get("binary", route["provider"])):
@@ -3069,27 +3090,15 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     caller = env.get("OMS_ROOM_PARTICIPANT")
     if room_id:
         state = room.project(room.records(repo, room_id))
-        if not caller:
-            if parent:
-                caller = record.get("refs", {}).get("panel_room_participant", parent)
-            elif moved:
-                caller = moved[1]
-                record = active_mains(repo, room_id, state, owner).get(caller)
-                if record:
-                    parent = env["OMS_PANEL_MAIN_ATTEMPT"] = record["attempt_id"]
-            else:
-                candidates = active_mains(repo, room_id, state, owner)
-                if main:
-                    # An explicit choice narrows the same live-main proof; it never adds a caller.
-                    candidates = {main: candidates[main]} if main in candidates else {}
-                if len(candidates) != 1:
-                    raise ValueError("select a unique active main in this room before dispatching")
-                caller = next(iter(candidates))
-                record = candidates[caller]
-                parent = record["attempt_id"]
-                env["OMS_PANEL_MAIN_ATTEMPT"] = parent
+        caller = caller or (record.get("refs", {}).get("panel_room_participant", parent) if parent
+                            else moved[1] if moved else None)
+        candidates = active_mains(repo, room_id, state, owner, caller=caller, attempt=parent)
+        if len(candidates) != 1:
+            raise ValueError("select a unique active main in this room before dispatching")
+        caller, record = next(iter(candidates.items()))
+        parent = env["OMS_PANEL_MAIN_ATTEMPT"] = record["attempt_id"]
         if main and caller != main:
-            raise ValueError("--main names a different main than this caller; dispatch from that main or the control window")
+            raise ValueError("--main names a different main than this caller; dispatch from that main's own session")
         member_state = room.participant(state, caller)
         if member_state["role"] != "main" or member_state["provider"] != owner:
             raise ValueError("room caller must be a main of the selected owner provider")
@@ -3113,6 +3122,9 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             if dry_run:
                 print(json.dumps(dict(plan, overlaps=found)))
                 return 0
+        if dry_run:
+            print(json.dumps(plan))
+            return 0
         _dispatch_capacity(room_id, state)
     if access == "write":
         # Delegate's dry-run validates the same brief and route without starting a worker.
@@ -7227,7 +7239,7 @@ def main(argv=None):
     parser.add_argument("--routes", action="store_true", help="show the panel role policy without calling models")
     parser.add_argument("--task", help="task for the native main (requires --launch)")
     parser.add_argument("--dispatch", choices=tuple(KINDS), metavar="ROLE", help="run one bounded role task: " + ", ".join(KINDS))
-    parser.add_argument("--main", help="room participant of the active main that owns this dispatch")
+    parser.add_argument("--main", help="assert the dispatch caller's own main participant (never select another main)")
     parser.add_argument("--scope", action="append", metavar="PATH",
                         help="repeatable repo-relative scope a write worker declares; overlaps warn, never lock")
     parser.add_argument("--council", action="store_true", help="run the four-seat, two-family debate")

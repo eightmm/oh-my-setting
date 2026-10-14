@@ -166,7 +166,7 @@ def _standalone(name, root, temporary):
     namespace = runpy.run_path(str(LIB / "operator_tools_fixture.py"),
                               init_globals={"root": root, "temporary": temporary})
     if name in {"native-pty", "dispatch-exit", "auto-review"}:
-        panel, room, call = (namespace[k] for k in ("panel", "room", "call"))
+        panel, room, call, legacy_main_join = (namespace[k] for k in ("panel", "room", "call", "legacy_main_join"))
         project, environment = namespace["project"], namespace["environment"]
         mains = {}
         for owner in panel.PROVIDERS:
@@ -182,11 +182,11 @@ def _standalone(name, root, temporary):
         if name in {"dispatch-exit", "auto-review"}:
             shared = room.create(project, "operator-room", "Shared parser task")
             for owner in panel.PROVIDERS:
-                room.join(project, shared, mains[owner], owner)
+                legacy_main_join(project, shared, mains[owner], owner)
             room_owner = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
                                "start", "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
                                "--ref", "panel_model=claude-opus-5-5", "--then", "starting", "--then", "working"]).strip()
-            room.join(project, shared, room_owner, "claude", model="claude-opus-5-5", label="Active Opus")
+            legacy_main_join(project, shared, room_owner, "claude", model="claude-opus-5-5", label="Active Opus")
             namespace.update(shared=shared, room_owner=room_owner,
                              room_env=dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_REPO=str(project),
                                            OMS_ROOM_PARTICIPANT=room_owner, OMS_PANEL_MAIN_ATTEMPT=room_owner))
@@ -4359,6 +4359,18 @@ with patch.dict(os.environ, {"TERM": "xterm", "OMS_PANEL_COLOR": "always"}, clea
     assert panel.terminal_style()[1] is False, "redirected output must stay plain"
 
 # OPERATOR_FIXTURE_BEGIN provider
+# Historical multi-main rooms remain readable; write their old join records explicitly.
+def legacy_main_join(repo, ident, *args, **kwargs):
+    with patch.object(room, "append"):
+        event = room.join(repo, ident, *args, **kwargs)
+    assert event["role"] == "main"
+    rows = room.records(repo, ident)
+    row = {"schema": 1, "ts": rows[-1]["ts"], "thread": ident, "seq": rows[-1]["seq"] + 1,
+           "role": "note", "agent": "fixture", "text": "Joined: " + event["label"], "room_event": event}
+    with (repo / ".oms/threads" / (ident + ".jsonl")).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+    return event
+
 project = temporary / "panel repo 'quoted'; dollar$"
 project.mkdir()
 home = temporary / "panel-home"
@@ -5161,6 +5173,10 @@ for restricted in (["updates", "--participant", "not-enrolled"],
     assert refused.returncode, refused
 
 execution_log = temporary / "resolution-native.jsonl"
+call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(shared_root), "start",
+      "--provider", "codex", "--tool", "panel-main", "--ref", "panel_role=main",
+      "--ref", "panel_room_id=" + shared_id, "--ref", "panel_room_participant=resolution-owner",
+      "--then", "starting", "--then", "cancelled"], resolver_env)
 with patch.dict(os.environ, dict(selected_env, PANEL_TEST_LOG=str(execution_log)), clear=True), \
         patch.object(panel.sys.stdin, "isatty", return_value=True), \
         patch.object(panel.sys.stdout, "isatty", return_value=True):
@@ -7635,7 +7651,7 @@ test_room_relay_paths()
 # Typed close is authorized by enrollment or creation and retains unread mail.
 closed_room = room.create(project, "typed-close", "Close contract", creator="creator")
 room.join(project, closed_room, "close-writer", "codex")
-room.join(project, closed_room, "close-reader", "claude")
+room.join(project, closed_room, "close-reader", "claude", role="worker")
 room.send(project, closed_room, "close-writer", "close-reader", "Preserve until read", message_id="close-mail")
 for who in ("outsider",):
     try:
@@ -7683,7 +7699,7 @@ mail_room = room.create(project, "enrollment-mail", "Enrollment mailbox")
 room.join(project, mail_room, "mail-writer", "codex")
 room.send(project, mail_room, "mail-writer", "all", "Pre-enrollment mail", message_id="old-mail")
 legacy_cursor = room.thread_live.updates(project, mail_room, limit=1)["cursor"]
-room.join(project, mail_room, "mail-reader", "claude")
+room.join(project, mail_room, "mail-reader", "claude", role="worker")
 room.send(project, mail_room, "mail-writer", "mail-reader", "Assignment", message_id="first-mail")
 initial_mail = room.updates(project, mail_room, "mail-reader", budget=1)
 assert [r["room_event"]["id"] for r in initial_mail["turns"]] == ["first-mail"], "initial mail traversed pre-enrollment history"
@@ -7691,18 +7707,18 @@ assert not room.updates(project, mail_room, "mail-reader", initial_mail["cursor"
 assert [r["room_event"]["id"] for r in room.updates(project, mail_room, "mail-reader", legacy_cursor)["turns"]] == ["first-mail"], "old cursors remain readable"
 resume_room = room.create(project, "resume-mail", "Resume cutoff")
 room.join(project, resume_room, "resume-writer", "codex")
-room.join(project, resume_room, "resume-reader", "claude")
+room.join(project, resume_room, "resume-reader", "claude", role="worker")
 room.send(project, resume_room, "resume-writer", "resume-reader", "Before resume", message_id="before-resume")
 room.append(project, resume_room, {"kind": "leave", "participant": "resume-reader"}, "Participant left")
-room.join(project, resume_room, "resume-reader", "claude")
+room.join(project, resume_room, "resume-reader", "claude", role="worker")
 room.send(project, resume_room, "resume-writer", "resume-reader", "After resume", message_id="after-resume")
 assert [r["room_event"]["id"] for r in room.updates(project, resume_room, "resume-reader")["turns"]] == [
     "after-resume"], "resume replayed mail from before the participant cutoff"
 # Default reads are addressed unread mail; explicit cursors remain raw stream deltas.
 unread_room = room.create(project, "unread-mail", "Unread mailbox")
 room.join(project, unread_room, "unread-a", "codex")
-room.join(project, unread_room, "unread-b", "claude")
-room.join(project, unread_room, "unread-c", "codex")
+room.join(project, unread_room, "unread-b", "claude", role="worker")
+room.join(project, unread_room, "unread-c", "codex", role="worker")
 start_cursor = room.updates(project, unread_room, "unread-b")["cursor"]
 for number in range(60):
     message_id = "old-%s" % number
@@ -7741,8 +7757,8 @@ else:
 # A cached hook projection must not move its cursor past mail appended before the scan.
 race_room = room.create(project, "first-mail-race", "First delivery race")
 room.join(project, race_room, "race-writer", "codex")
-room.join(project, race_room, "race-reader", "claude")
-room.join(project, race_room, "race-other", "codex")
+room.join(project, race_room, "race-reader", "claude", role="worker")
+room.join(project, race_room, "race-other", "codex", role="worker")
 room.send(project, race_room, "race-writer", "race-reader", "Consumed", message_id="race-old")
 room.acknowledge(project, race_room, "race-reader", ["race-old"])
 cached_room = room.project(room.records(project, race_room))
@@ -7759,21 +7775,139 @@ assert {r["room_event"]["id"] for r in room.updates(project, race_room, "race-re
     "race-direct", "race-broadcast"}, "delivery consumed mail or replayed acknowledged mail"
 room.append(project, race_room, {"kind": "leave", "participant": "race-reader"}, "Reader left")
 room.send(project, race_room, "race-writer", "all", "While absent", message_id="race-absent")
-room.join(project, race_room, "race-reader", "claude")
+room.join(project, race_room, "race-reader", "claude", role="worker")
 stale_membership = room.updates(project, race_room, "race-reader", state=cached_room)
 assert not stale_membership["turns"] and stale_membership["has_more"]
 assert not room.updates(project, race_room, "race-reader", stale_membership["cursor"])["turns"], "cached enrollment leaked broadcast to a later join"
 assert not room.updates(project, race_room, "race-reader")["turns"], "rejoining replayed mail from the previous enrollment"
+single_room = room.create(project, "single-main-room", "Single main admission")
+single_owner = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main",
+    "--ref", "panel_role=main", "--ref", "panel_room_id=" + single_room,
+    "--ref", "panel_harness=claude", "--then", "starting", "--then", "working", output=True)
+room.join(project, single_room, single_owner, "claude", model="claude-opus-5-5")
+single_before = room.records(project, single_room)
+for provider in ("claude", "codex"):
+    try:
+        room.join(project, single_room, "second-main", provider)
+    except ValueError as error:
+        assert single_owner in str(error) and "--swap-main" in str(error), error
+    else:
+        raise AssertionError("a second live main joined the room")
+assert room.records(project, single_room) == single_before
+# Handoff text alone cannot authorize a different participant alongside its live sender.
+room.send(project, single_room, single_owner, "all", "SWAP_HANDOFF swap-fixture: bounded handoff", "handoff")
+try:
+    room.join(project, single_room, "forged-successor", "codex")
+except ValueError as error:
+    assert "--swap-main" in str(error), error
+else:
+    raise AssertionError("handoff text authorized an unrelated live main")
+# Council records use the main's participant but cannot change its native ownership proof.
+single_council = panel.events(project, "start", "--provider", "claude", "--tool", "panel-council",
+    "--parent-attempt-id", single_owner, "--ref", "panel_role=advisor",
+    "--ref", "panel_room_id=" + single_room, "--ref", "panel_room_participant=" + single_owner,
+    "--then", "starting", "--then", "working", "--then", "verifying", "--then", "review", "--then", "done",
+    output=True)
+assert any(row["attempt_id"] == single_council and row["terminal"] is True
+           for row in panel.main_history(project, single_room, single_owner))
+# The recorded swap retains the same participant after the exact old attempt released.
+panel.events(project, "transition", "--attempt", single_owner, "--state", "blocked", "--then", "abandoned",
+             "--reason-code", "main_swapped")
+room.swap_main(project, single_room, single_owner, "codex", "gpt-6.1-sol", single_owner, "codex")
+swap_record = room.status(project, single_room)["swaps"][-1]
+assert swap_record["participant"] == single_owner and swap_record["attempt"] == single_owner
+assert swap_record["from"] == "claude" and swap_record["to"] == "codex"
+room.join(project, single_room, single_owner, "codex", model="gpt-6.1-sol")
+assert len(room.status(project, single_room)["participants"]) == 1
+room.join(project, single_room, "terminal-successor", "codex")
+# Council-only evidence cannot prove that a joined main released its native attempt.
+panel.events(project, "start", "--provider", "codex", "--tool", "panel-council", "--ref", "panel_role=advisor",
+    "--ref", "panel_room_id=" + single_room, "--ref", "panel_room_participant=terminal-successor",
+    "--then", "starting", "--then", "working", "--then", "verifying", "--then", "review", "--then", "done")
+try:
+    room.join(project, single_room, "unknown-successor", "claude")
+except ValueError as error:
+    assert "terminal-successor" in str(error) and "unverified" in str(error), error
+else:
+    raise AssertionError("missing attempt evidence was treated as terminal")
+room.append(project, single_room, {"kind": "leave", "participant": "terminal-successor"}, "Left")
+room.join(project, single_room, "unknown-successor", "claude")
+# A matching name in another room, or in a prior enrollment, cannot release this main.
+enrollment_room = room.create(project, "main-enrollment-room", "Main enrollment evidence")
+foreign_room = room.create(project, "main-foreign-room", "Foreign main evidence")
+room.join(project, enrollment_room, "owner", "codex")
+foreign_main = panel.events(project, "start", "--provider", "codex", "--tool", "panel-main",
+    "--ref", "panel_role=main", "--ref", "panel_room_id=" + foreign_room,
+    "--ref", "panel_room_participant=owner", "--then", "starting", "--then", "cancelled", output=True)
+try:
+    room.join(project, enrollment_room, "foreign-successor", "codex")
+except ValueError as error:
+    assert "owner" in str(error) and "unverified" in str(error), error
+else:
+    raise AssertionError("a terminal main from another room released this main")
+# Named enrollments have no attempt ID binding; a later creation timestamp must prove ownership.
+time.sleep(1.1)
+current_main = panel.events(project, "start", "--provider", "codex", "--tool", "panel-main",
+    "--ref", "panel_role=main", "--ref", "panel_room_id=" + enrollment_room,
+    "--ref", "panel_room_participant=owner", "--then", "starting", "--then", "cancelled", output=True)
+room.join(project, enrollment_room, "current-successor", "codex")
+room.append(project, enrollment_room, {"kind": "leave", "participant": "current-successor"}, "Left")
+time.sleep(1.1)
+room.append(project, enrollment_room, {"kind": "leave", "participant": "owner"}, "Left")
+room.join(project, enrollment_room, "owner", "codex")
+for same_second in (False, True):
+    candidate_rows = room.records(project, enrollment_room)
+    # Equal-second timestamps are ambiguous too, even when the old attempt predates the rejoin.
+    if same_second:
+        candidate_rows[-1]["ts"] = json.loads(panel.events(project, "show", "--attempt", current_main,
+                                                           "--json", output=True))["created_at"]
+    try:
+        room.validate_event(candidate_rows, {"kind": "join", "participant": "stale-successor", "provider": "codex",
+                            "role": "main", "label": "Stale successor", "model": None, "owns": []}, "Joined", repo=project)
+    except ValueError as error:
+        assert "owner" in str(error) and "unverified" in str(error), error
+    else:
+        raise AssertionError("a pre-rejoin main attempt released the current enrollment")
+try:
+    room.join(project, enrollment_room, "stale-successor", "codex")
+except ValueError as error:
+    assert "owner" in str(error) and "unverified" in str(error), error
+else:
+    raise AssertionError("an old same-room attempt released a rejoined main")
+time.sleep(1.1)
+panel.events(project, "start", "--provider", "codex", "--tool", "panel-main", "--ref", "panel_role=main",
+    "--ref", "panel_room_id=" + enrollment_room, "--ref", "panel_room_participant=owner",
+    "--then", "starting", "--then", "cancelled")
+enrollment_room = room.rollover(project, enrollment_room, "owner")
+room.join(project, enrollment_room, "carried-successor", "codex")
+# Native startup's first join binds its participant to an attempt created before enrollment.
+native_enrollment = room.create(project, "native-enrollment-room", "Native enrollment binding")
+native_owner = panel.events(project, "start", "--provider", "codex", "--tool", "panel-main", "--ref", "panel_role=main",
+    "--ref", "panel_room_id=" + native_enrollment, "--then", "starting", "--then", "cancelled", output=True)
+room.join(project, native_enrollment, native_owner, "codex")
+room.join(project, native_enrollment, "native-successor", "codex")
+room.append(project, native_enrollment, {"kind": "leave", "participant": "native-successor"}, "Left")
+room.append(project, native_enrollment, {"kind": "leave", "participant": native_owner}, "Left")
+room.join(project, native_enrollment, native_owner, "codex")
+try:
+    room.join(project, native_enrollment, "rebound-successor", "codex")
+except ValueError as error:
+    assert native_owner in str(error) and "unverified" in str(error), error
+else:
+    raise AssertionError("rejoining revived the first enrollment's attempt ID binding")
 shared = room.create(project, "operator-room", "Shared parser task")
 room.join(project, shared, main_attempts["codex"], "codex", model="gpt-6-sol", label="Sol main")
-room.join(project, shared, main_attempts["claude"], "claude", model="claude-opus-5-5", label="Opus main")
+legacy_main_join(project, shared, main_attempts["claude"], "claude", model="claude-opus-5-5", label="Opus main")
+for fixture_attempt in main_attempts.values():
+    panel.events(project, "usage", "--attempt", fixture_attempt, "--ref", "panel_room_id=" + shared)
 room_env = dict(environment, OMS_ROOM_ID=shared, OMS_ROOM_PARTICIPANT=main_attempts["claude"],
                 OMS_ROOM_REPO=str(project), OMS_PANEL_MAIN_ATTEMPT=main_attempts["claude"])
 # Parent identities were intentionally closed by earlier negative cases; use a fresh owner here.
 room_owner = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "start",
                    "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+                   "--ref", "panel_room_id=" + shared,
                    "--ref", "panel_model=claude-opus-5-5", "--then", "starting", "--then", "working"]).strip()
-room.join(project, shared, room_owner, "claude", model="claude-opus-5-5", label="Active Opus")
+legacy_main_join(project, shared, room_owner, "claude", model="claude-opus-5-5", label="Active Opus")
 room_env.update(OMS_PANEL_MAIN_ATTEMPT=room_owner, OMS_ROOM_PARTICIPANT=room_owner)
 answer = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared,
                "--dispatch", "worker", "--owner", "claude", "--purpose", "investigate",
@@ -10035,7 +10169,8 @@ def exercise_observed_worker_leases():
                                        "joined": False} for i in range(room.MAX_CALLS)]
         participants_before = len(state["participants"])
         main_record = {"tool": "panel-main", "provider": "claude", "terminal": False,
-                       "refs": {"panel_room_participant": argv_binding.owner_participant,
+                       "attempt_id": argv_binding.owner_attempt, "state": "working",
+                       "refs": {"panel_role": "main", "panel_room_participant": argv_binding.owner_participant,
                                 "panel_room_id": "foreign-room" if scenario == "foreign-main" else argv_binding.room_id}}
         notices, children, leaves = [], [], []
         def rollback(repo, room_id, event, text):
@@ -10077,6 +10212,7 @@ def exercise_observed_worker_leases():
                 patch.object(panel, "native_repository", return_value=project), \
                 patch.object(panel, "events", side_effect=lambda repo, operation, *args, **kwargs:
                              json.dumps(main_record if operation == "show" else live_rows)), \
+                patch.object(panel, "main_history", return_value=[main_record]), \
                 patch.object(panel, "plan_link", return_value=argv_binding) as observed_plan, \
                 patch.multiple(room, records=Mock(return_value=[]), project=Mock(return_value=state),
                                join=Mock(side_effect=enroll), rollover=rolling, send=Mock(side_effect=notice),
@@ -10155,7 +10291,7 @@ def exercise_observed_worker_leases():
                         "--provider", provider, "--tool", "panel-main", "--ref", "panel_role=main",
                         "--ref", "panel_room_id=" + test_room, "--ref", "panel_room_participant=" + participant,
                         "--then", "starting", "--then", "working"]).strip()
-        room.join(project, test_room, participant, provider, "main")
+        legacy_main_join(project, test_room, participant, provider, "main")
         mains[provider] = participant, attempt
     source = Path(call(["bash", str(panel.ENTRY), "scratch-worktree", "add", "--repo", str(project),
                         "--owner-pid", str(os.getpid())]).strip())
@@ -10990,7 +11126,7 @@ except ValueError as error:
     assert "reserved" in str(error), error
 else:
     raise AssertionError("a call sent a result under a sibling's name")
-room.join(project, declared, "decl-elsewhere", "claude", model="claude-opus-5-5")
+legacy_main_join(project, declared, "decl-elsewhere", "claude", model="claude-opus-5-5")
 try:
     room.send(project, declared, "decl-other", "decl-elsewhere", "Call exit=0;", kind="handoff", message_id="result-decl-other")
 except ValueError as error:
@@ -11195,6 +11331,19 @@ with patch.dict(os.environ, control_env, clear=True), \
     assert control_launch["env"]["OMS_PANEL_ALIAS"] == "B7"
     newest = room.status(project, shared)["participants"][-1]
     assert newest["parent"] == room_owner
+    live_council = panel.events(project, "start", "--provider", "claude", "--tool", "panel-council",
+        "--parent-attempt-id", room_owner, "--ref", "panel_role=advisor", "--ref", "panel_room_id=" + shared,
+        "--ref", "panel_room_participant=" + room_owner, "--then", "starting", "--then", "working", output=True)
+    try:
+        assert any(row["attempt_id"] == live_council and row["terminal"] is False
+                   for row in panel.main_history(project, shared, room_owner))
+        with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": room_owner, "OMS_PANEL_MAIN_ATTEMPT": room_owner}):
+            assert panel.dispatch(project, "claude", "worker", "light", "read", "investigate",
+                                  prompt="Inspect source while the council runs", task_id="council-live-dispatch") == 0
+        assert control_launch["env"]["OMS_PANEL_MAIN_ATTEMPT"] == room_owner
+        assert room.status(project, shared)["participants"][-1]["parent"] == room_owner
+    finally:
+        panel.events(project, "transition", "--attempt", live_council, "--state", "cancelled")
     warning_report = {"room": {"id": shared, "participants": [dict(room.participant(
         room.status(project, shared), room_owner))]}, "attempts": {"recent": [], "active_recent": []},
         "plan": {"tasks": [{"id": "review-%s" % n, "state": "review",
@@ -11242,17 +11391,41 @@ with patch.dict(os.environ, control_env, clear=True), \
             raise AssertionError("control dispatch chose an exited owner")
     second_owner = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
                                 "--ref", "panel_room_id=" + shared, "--then", "starting", "--then", "working", output=True)
-    room.join(project, shared, second_owner, "claude")
+    legacy_main_join(project, shared, second_owner, "claude")
     try:
         panel.dispatch(project, "claude", "worker", "light", "read", "investigate", prompt="Inspect source")
     except ValueError as error:
         assert "unique active main" in str(error)
     else:
         raise AssertionError("control dispatch silently chose between two mains")
-    # An explicit main resolves the ambiguity but cannot name a non-live caller.
-    assert panel.dispatch(project, "claude", "advisor", None, "read", None,
-                          prompt="Advise the second main", main=second_owner) == 0
-    assert room.status(project, shared)["participants"][-1]["parent"] == second_owner
+    # --main asserts identity; it cannot resolve an unbound legacy caller.
+    for dry in (False, True):
+        try:
+            panel.dispatch(project, "claude", "advisor", None, "read", None,
+                           prompt="Ambiguous advice", main=second_owner, dry_run=dry)
+        except ValueError as error:
+            assert "multiple live mains" in str(error), error
+        else:
+            raise AssertionError("--main selected a main for an ambiguous caller")
+    for binding in ({"OMS_ROOM_PARTICIPANT": second_owner}, {"OMS_PANEL_MAIN_ATTEMPT": second_owner},
+                    {"OMS_ROOM_PARTICIPANT": second_owner, "OMS_PANEL_MAIN_ATTEMPT": second_owner}):
+        with patch.dict(os.environ, binding):
+            before_preview = room.records(project, shared)
+            assert panel.dispatch(project, "claude", "advisor", None, "read", None,
+                                  prompt="Preview the second main", main=second_owner, dry_run=True) == 0
+            assert room.records(project, shared) == before_preview
+            assert panel.dispatch(project, "claude", "advisor", None, "read", None,
+                                  prompt="Advise the second main", main=second_owner) == 0
+        assert room.status(project, shared)["participants"][-1]["parent"] == second_owner
+        assert control_launch["env"]["OMS_PANEL_MAIN_ATTEMPT"] == second_owner
+    with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": room_owner,
+                                "OMS_PANEL_MAIN_ATTEMPT": second_owner}):
+        try:
+            panel.dispatch(project, "claude", "advisor", None, "read", None, prompt="Conflicting caller")
+        except ValueError as error:
+            assert "identities disagree" in str(error), error
+        else:
+            raise AssertionError("dispatch accepted conflicting caller identities")
     try:
         panel.dispatch(project, "claude", "advisor", None, "read", None,
                        prompt="Advise nobody", main="outside-main")
@@ -11583,7 +11756,7 @@ with patch.dict(os.environ, {}):
     # unread mail beyond the reserve stays in the sealed log and the successor says where.
     full_room = room.create(roll, title="Full room")
     room.join(roll, full_room, "main-full", "codex", "main")
-    room.join(roll, full_room, "main-full-b", "codex", "main")
+    legacy_main_join(roll, full_room, "main-full-b", "codex", "main")
     room.join(roll, full_room, "call-full", "codex", "worker", parent="main-full")
     unread = room.send(roll, full_room, "main-full-b", "main-full", "Old unread note", "note")["id"]
     rows = room.records(roll, full_room)
@@ -11613,7 +11786,7 @@ with patch.dict(os.environ, {}):
         def fresh(*mains, calls=()):
             ident = room.create(where, title="Regression room")
             for who in mains:
-                room.join(where, ident, who, "claude" if who.endswith("1") else "codex", "main",
+                legacy_main_join(where, ident, who, "claude" if who.endswith("1") else "codex", "main",
                           native_session="sess-" + ident + "-" + who)
             for who, parent in calls:
                 room.join(where, ident, who, "codex", "worker", parent=parent)
@@ -11743,7 +11916,7 @@ with patch.dict(os.environ, {}):
         question = room.send(where, raced, "m1", "m2", "Which file?", "question")["id"]
         broadcast = room.send(where, raced, "m1", "all", "Before the call joined", "note")["id"]
         room.join(where, raced, "call-y", "codex", "worker", parent="m1")
-        room.join(where, raced, "pi1", "pi", "main", native_session="pi-one")
+        legacy_main_join(where, raced, "pi1", "pi", "main", native_session="pi-one")
         steps = []
         def racing(repo, state, target, bounded=True):
             steps.append(target)
@@ -11751,9 +11924,9 @@ with patch.dict(os.environ, {}):
                 moved = real_carry(repo, state, target, bounded)
                 room.append(where, raced, {"kind": "leave", "participant": "m3"}, "Participant left")
                 # A session freed by a member that left is taken by a new one; a Pi main rejoins on a new session.
-                room.join(where, raced, "m4", "claude", "main", native_session="sess-%s-m3" % raced)
+                legacy_main_join(where, raced, "m4", "claude", "main", native_session="sess-%s-m3" % raced)
                 room.append(where, raced, {"kind": "leave", "participant": "pi1"}, "Participant left")
-                room.join(where, raced, "pi1", "pi", "main", native_session="pi-two")
+                legacy_main_join(where, raced, "pi1", "pi", "main", native_session="pi-two")
                 with bound(raced, "m2"):
                     room.scope(where, raced, "m2", ["src"])
                     room.send(where, raced, "m2", "m1", "src.py", "answer", reply_to=question)
@@ -11840,7 +12013,7 @@ with patch.dict(os.environ, {}):
             except subprocess.TimeoutExpired:
                 pass
         room.append(where, noted, {"kind": "leave", "participant": "m2"}, "Participant left")
-        room.join(where, noted, "m4", "claude", "main", native_session="sess-%s-m2" % noted)
+        legacy_main_join(where, noted, "m4", "claude", "main", native_session="sess-%s-m2" % noted)
         assert room.successor_id(noted) not in {s["id"] for s in room.discover(where)[0]}
         with bound(noted, "m1"), patch.object(room, "MESSAGE_RESERVE", 1):
             moved = room.rollover(where, noted, "m1")
@@ -11933,7 +12106,7 @@ with patch.dict(os.environ, {}):
         notes = [room.send(where, paged, "m1", "m3", "Note %d" % n, "note")["id"] for n in range(3)]
         room.append(where, paged, {"kind": "leave", "participant": "m3"}, "Participant left")
         room.send(where, paged, "m1", "all", "Before m3 came back", "note")
-        room.join(where, paged, "m3", "codex", "main")
+        legacy_main_join(where, paged, "m3", "codex", "main")
         with bound(paged, "m1"):
             moved = room.rollover(where, paged, "m1")
         with bound(paged, "m3"):
@@ -11976,8 +12149,8 @@ with patch.dict(os.environ, {}):
                 with bound(handed, "m1"):
                     room.bind(where, handed, "m1", "sess-%s-m2" % handed, replaces=s1)
                 room.append(where, handed, {"kind": "leave", "participant": "x3"}, "Participant left")
-                room.join(where, handed, "y4", "claude", "main", native_session="sess-%s-x3" % handed)
-                room.join(where, handed, "x3", "codex", "main")
+                legacy_main_join(where, handed, "y4", "claude", "main", native_session="sess-%s-x3" % handed)
+                legacy_main_join(where, handed, "x3", "codex", "main")
             return moved
         with bound(handed, "m1"), patch.object(room, "carry", side_effect=handing):
             moved = room.rollover(where, handed, "m1")
@@ -12056,15 +12229,15 @@ with patch.dict(os.environ, {}):
         # a rebound main keeps the session it first joined with, so resume ownership still knows that session.
         created = room.create(where, title="Creator room", creator="c0")
         for who in ("m1", "m2", "m3"):
-            room.join(where, created, who, "codex", "main", native_session="sess-%s-%s" % (created, who))
+            legacy_main_join(where, created, who, "codex", "main", native_session="sess-%s-%s" % (created, who))
         first = member(created, "m1")["consumer"]
         # A main that rejoined without a native session stays unbound; its released session is not revived.
         released = member(created, "m3")["consumer"]
         room.append(where, created, {"kind": "leave", "participant": "m3"}, "Participant left")
-        room.join(where, created, "m3", "codex", "main")
-        room.join(where, created, "pi9", "pi", "main", native_session="pi-a")
+        legacy_main_join(where, created, "m3", "codex", "main")
+        legacy_main_join(where, created, "pi9", "pi", "main", native_session="pi-a")
         room.append(where, created, {"kind": "leave", "participant": "pi9"}, "Participant left")
-        room.join(where, created, "pi9", "pi", "main", native_session="pi-b")
+        legacy_main_join(where, created, "pi9", "pi", "main", native_session="pi-b")
         with bound(created, "m1"):
             room.bind(where, created, "m1", "sess-rebound", replaces=first)
         with bound(created, "m2"):
@@ -17086,7 +17259,7 @@ if os.name == "posix":
                 "--ref", "panel_room_participant=herdr-other",
                 *[arg for key, value in other_refs.items() for arg in ("--ref", key + "=" + value)],
                 "--then", "starting", "--then", "working", output=True)
-            room.join(project, host_room, "herdr-other", "codex")
+            legacy_main_join(project, host_room, "herdr-other", "codex")
             host_state = room.status(project, host_room)
             assert set(panel_host.targets(project, host_room, host_state)) == {"herdr-main", "herdr-other"}
             pane_errors.add("w1:p2")
@@ -17250,7 +17423,7 @@ assert room.status(project, shared)["publication"]["status"] == "timeout"
 # Native Claude app/terminal delivery has its own receiver and durable intent.
 import hashlib
 import claude_app_notify
-room.join(project, shared, "opus-app", "claude", native_session="fixture-claude-app", label="Opus app")
+legacy_main_join(project, shared, "opus-app", "claude", native_session="fixture-claude-app", label="Opus app")
 before = room.records(project, shared)
 with patch.object(claude_app_notify, "deliver", side_effect=AssertionError("wakeup was not authorized")):
     blocked = room.publish(project, shared, app="claude", recipient="opus-app")
@@ -17291,7 +17464,7 @@ with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}):
         raise AssertionError("worker could publish")
 # The current shortcut stores a native session hash, never the exported token/socket.
 with patch.object(claude_app_notify, "current_session", return_value="fixture-current-app"):
-    bound = room.join(project, shared, "current-app", "claude", native_session="current")
+    bound = legacy_main_join(project, shared, "current-app", "claude", native_session="current")
 assert bound["consumer"] == hashlib.sha256(b"fixture-current-app").hexdigest()[:32]
 assert "socket" not in bound and "token" not in bound
 room_view["room"] = room.status(project, shared)
@@ -17316,7 +17489,7 @@ bad_codex = "22222222-2222-4222-8222-222222222222"
 chat_claude = "33333333-3333-4333-8333-333333333333"
 for who, provider, native in (("chat-sol", "codex", chat_codex), ("bad-sol", "codex", bad_codex),
                                ("chat-opus", "claude", chat_claude)):
-    room.join(project, shared, who, provider)
+    legacy_main_join(project, shared, who, provider)
     room.bind(project, shared, who, native)
 codex_home = home / "chat-codex"
 codex_day = codex_home / "sessions/2026/10/05"
@@ -17729,6 +17902,9 @@ chat_file.symlink_to(codex_day / ("rollout-x-" + bad_codex + ".jsonl"))
 with patch.dict(os.environ, chat_cli_env, clear=True):
     assert next(r for r in panel_chats.catalog(project, shared)["rows"] if r["participant"] == "chat-sol")["status"] == "unresolved"
 end_fixture_mains()
+# Historical app fixtures have no attempt to release; retire them before native-start coverage.
+for fixture_main in ("opus-app", "current-app", "bad-sol", "chat-opus", "chat-sol"):
+    room.append(project, shared, {"kind": "leave", "participant": fixture_main}, "Fixture main left")
 # A new adapter opts into native open without changing a provider-specific panel branch.
 open_log = temporary / "native-open.json"
 open_context = temporary / "native-context.txt"
@@ -19013,7 +19189,7 @@ def clear_process(command, **kwargs):
     clear_launches.append((command, env["OMS_ROOM_PARTICIPANT"], env["OMS_PANEL_MAIN_ATTEMPT"]))
     clear_rooms.append(env.get("OMS_ROOM_ID"))
     if len(clear_launches) == 1:
-        room.join(project, clear_room, "clear-peer", "codex")
+        room.join(project, clear_room, "clear-peer", "codex", role="worker")
         room.send(project, clear_room, "clear-peer", env["OMS_ROOM_PARTICIPANT"], "Keep this mailbox", message_id="clear-mail")
         with patch.dict(os.environ, env, clear=True):
             assert hook_state.rebind_cleared_session({"hook_event_name": "SessionStart", "source": "clear", "session_id": clear_session})

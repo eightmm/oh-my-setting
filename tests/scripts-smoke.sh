@@ -18915,7 +18915,7 @@ room.append(project, "gc-room-left", {"kind": "leave", "participant": "creator"}
 room.append(project, "gc-room-closed", {"kind": "leave", "participant": "creator"}, "Left")
 room.close(project, "gc-room-closed", "creator")
 room.close(project, "gc-room-closedjoined", "creator")
-room.join(project, "gc-room-unread", "reader", "claude")
+room.join(project, "gc-room-unread", "reader", "claude", role="worker")
 room.send(project, "gc-room-unread", "creator", "reader", "Unread", message_id="gc-unread")
 room.append(project, "gc-room-unread", {"kind": "leave", "participant": "reader"}, "Left")
 room.close(project, "gc-room-unread", "creator")
