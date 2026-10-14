@@ -4526,6 +4526,7 @@ assert subprocess.check_output(["git", "-C", str(project), "status", "--porcelai
 import contextlib
 import panel_salvage
 salvage_repo = temporary / 'salvage-repo'
+salvage_execution_repo = temporary / 'salvage-execution-repo'
 salvage_registry = temporary / 'salvage-registry'
 salvage_tree = salvage_registry / 'oh-my-setting-delegate.fixture' / 'wt'
 salvage_tree.parent.mkdir(parents=True)
@@ -4538,11 +4539,12 @@ for key, value in (('user.email', 'test@example.com'), ('user.name', 'test')):
 (salvage_repo / '.gitattributes').write_text('*.txt filter=trap working-tree-encoding=UTF-8\n')
 subprocess.run(['git', '-C', str(salvage_repo), 'add', '.'], check=True)
 subprocess.run(['git', '-C', str(salvage_repo), 'commit', '-qm', 'base'], check=True)
-subprocess.run(['git', '-C', str(salvage_repo), 'worktree', 'add', '--detach', str(salvage_tree)],
+subprocess.run(['git', 'clone', '-q', str(salvage_repo), str(salvage_execution_repo)], check=True)
+subprocess.run(['git', '-C', str(salvage_execution_repo), 'worktree', 'add', '--detach', str(salvage_tree)],
                check=True, stdout=subprocess.DEVNULL)
 (salvage_tree.parent / '.oh-my-setting-tmp').write_text(
     'kind=oh-my-setting-temp\ntemporary=1\npid=99999999\nrepo=%s\nworktree=%s\n' %
-    (salvage_repo, salvage_tree))
+    (salvage_execution_repo, salvage_tree))
 (salvage_tree / 'unicode.txt').write_text('label:   cafe\n', encoding='utf-8')
 (salvage_tree / 'deleted.txt').unlink()
 (salvage_tree / 'binary.dat').write_bytes(b'\0new\xfe')
@@ -4550,7 +4552,7 @@ subprocess.run(['git', '-C', str(salvage_repo), 'worktree', 'add', '--detach', s
 trap_file = temporary / 'salvage-git-executed'
 trap_command = 'touch ' + shlex.quote(str(trap_file))
 for key in ('filter.trap.clean', 'filter.trap.smudge', 'diff.external', 'core.fsmonitor'):
-    subprocess.run(['git', '-C', str(salvage_repo), 'config', key, trap_command], check=True)
+    subprocess.run(['git', '-C', str(salvage_execution_repo), 'config', key, trap_command], check=True)
 # Native-path conversion handles Bash marker spellings before Python resolves them.
 path_bin = temporary / 'salvage-path-bin'
 path_bin.mkdir()
@@ -4558,7 +4560,7 @@ bash_registry = '/c/oms-fixture/registry'
 bash_tree = bash_registry + '/oh-my-setting-delegate.fixture/wt'
 bash_repo = '/c/oms-fixture/repo'
 path_mapping = {bash_registry: str(salvage_registry), bash_tree: str(salvage_tree),
-                bash_repo: str(salvage_repo), '/c/oms-fixture/foreign': str(project)}
+                bash_repo: str(salvage_execution_repo), '/c/oms-fixture/foreign': str(project)}
 (path_bin / 'cygpath').write_text('#!%s\nimport sys\n' % sys.executable +
     'mapping = %r\nassert sys.argv[1] == "-m"\nsys.stdout.write(mapping.get(sys.argv[2], sys.argv[2]) + "\\r\\n")\n' % path_mapping)
 (path_bin / 'cygpath').chmod(0o755)
@@ -4570,11 +4572,11 @@ try:
     marker_path.write_text('kind=oh-my-setting-temp\ntemporary=1\npid=99999999\nrepo=%s\nworktree=%s\n' %
                            (bash_repo, bash_tree))
     with patch.dict(os.environ, path_env):
-        assert panel_salvage._native_path(bash_repo) == salvage_repo, 'CRLF native path not normalized'
-        assert panel_salvage._managed(salvage_repo, bash_tree)[0] == salvage_tree
+        assert panel_salvage._native_path(bash_repo) == salvage_execution_repo, 'CRLF native path not normalized'
+        assert panel_salvage._managed(salvage_execution_repo, bash_tree)[0] == salvage_tree
         marker_path.write_text('kind=oh-my-setting-temp\ntemporary=1\nrepo=/c/oms-fixture/foreign\nworktree=%s\n' % bash_tree)
         try:
-            panel_salvage._managed(salvage_repo, bash_tree)
+            panel_salvage._managed(salvage_execution_repo, bash_tree)
         except ValueError as error:
             assert 'does not belong' in str(error), error
         else:
@@ -4584,21 +4586,67 @@ finally:
 
 index_path = panel_salvage._git_directory(salvage_tree) / 'index'
 index_before = index_path.read_bytes()
-metadata_before = {p: p.read_bytes() for p in salvage_repo.joinpath('.git').rglob('*')
+metadata_before = {p: p.read_bytes() for p in salvage_execution_repo.joinpath('.git').rglob('*')
                    if p.is_file()}
 salvage_attempt = {'task_id': 'salvage-task', 'attempt_id': 'att_fixture', 'tool': 'peer-delegate',
                    'created_at': '2026-10-14T00:00:00Z', 'terminal': True, 'state': 'failed',
                    'reason_code': 'worker_authority_violation',
-                   'refs': {'panel_location': 'worktree:oh-my-setting-delegate.fixture/wt'}}
+                   'refs': {'panel_location': 'worktree:oh-my-setting-delegate.fixture/wt',
+                            'panel_room_participant': 'call-0123456789abcdef', 'panel_room_id': 'room-fixture'}}
 def salvage_query(repo, verb, *args):
     return [salvage_attempt] if verb == 'agent-events' else {'rows': []}
 salvage_env = {'OMS_DELEGATE_WORKTREE_ROOT': str(salvage_registry),
-               'OMS_HARNESS_CHILD': '0', 'OMS_HARNESS_DELEGATE_DEPTH': '0'}
-with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', side_effect=salvage_query):
+               'OMS_HARNESS_CHILD': '0', 'OMS_HARNESS_DELEGATE_DEPTH': '0',
+               'OMS_ROOM_ID': 'room-fixture', 'OMS_ROOM_REPO': str(salvage_repo)}
+with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', side_effect=salvage_query), \
+        patch.object(panel_salvage.dispatch_supervisor, 'read', return_value={
+            'call': {'participant': 'call-0123456789abcdef', 'room': 'room-fixture',
+                     'task_id': 'salvage-task'},
+            'execution_repo': str(salvage_execution_repo)}):
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task', '--json']) == 0
+    room_salvaged = json.loads(output.getvalue())
+    assert Path(room_salvaged['patch_path']).is_relative_to(salvage_repo)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert panel.main(['--repo', str(salvage_execution_repo), '--salvage', 'salvage-task', '--json']) == 0
     salvaged = json.loads(output.getvalue())
+    scratch_execution_repo = temporary / 'salvage-scratch-execution'
+    scratch_tree = salvage_registry / 'oh-my-setting-delegate.scratch' / 'wt'
+    scratch_tree.parent.mkdir(parents=True)
+    subprocess.run(['git', '-C', str(salvage_repo), 'worktree', 'add', '--detach',
+                    str(scratch_execution_repo)], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(['git', '-C', str(scratch_execution_repo), 'worktree', 'add', '--detach',
+                    str(scratch_tree)], check=True, stdout=subprocess.DEVNULL)
+    (scratch_tree.parent / '.oh-my-setting-tmp').write_text(
+        'kind=oh-my-setting-temp\ntemporary=1\nrepo=%s\nworktree=%s\n' % (salvage_repo, scratch_tree))
+    (scratch_tree / 'unicode.txt').write_text('scratch change\n')
+    scratch_attempt = {'task_id': 'scratch-task', 'attempt_id': 'att_scratch_fixture',
+                       'tool': 'peer-delegate', 'created_at': '2026-10-14T00:01:00Z',
+                       'terminal': True, 'reason_code': 'worker_authority_violation',
+                       'refs': {'panel_location': 'worktree:oh-my-setting-delegate.scratch/wt',
+                                'panel_room_participant': 'call-abcdef0123456789',
+                                'panel_room_id': 'room-fixture'}}
+    def scratch_query(repo, verb, *args):
+        return [scratch_attempt] if verb == 'agent-events' else {'rows': []}
+    with patch.object(panel_results, '_query', side_effect=scratch_query), \
+            patch.object(panel_salvage.dispatch_supervisor, 'read', return_value={
+                'call': {'participant': 'call-abcdef0123456789', 'room': 'room-fixture',
+                         'task_id': 'scratch-task'},
+                'execution_repo': str(scratch_execution_repo)}):
+        scratch_salvaged = panel_salvage.salvage(salvage_repo, 'scratch-task', scratch_execution_repo)
+        assert Path(scratch_salvaged['patch_path']).is_relative_to(salvage_repo)
+    with patch.object(panel_salvage.dispatch_supervisor, 'read', return_value={
+            'call': {'participant': 'call-0123456789abcdef', 'room': 'room-fixture',
+                     'task_id': 'another-task'},
+            'execution_repo': str(salvage_execution_repo)}):
+        try:
+            panel_salvage.salvage(salvage_repo, 'salvage-task', salvage_execution_repo)
+        except ValueError as error:
+            assert 'matching recorded execution repository' in str(error), error
+        else:
+            raise AssertionError('a launch anchor recorded for another task was accepted')
     assert salvaged['salvaged_from'] == {'task': 'salvage-task', 'attempt': 'att_fixture',
         'kept_path': str(salvage_tree), 'stop_reason': 'worker_authority_violation'}
     assert {f['path'] for f in salvaged['files']} == {'unicode.txt', 'deleted.txt', 'binary.dat', 'new.txt'}
@@ -4608,6 +4656,7 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
     saved_patch = Path(salvaged['patch_path'])
     assert saved_patch.exists() and Path(salvaged['metadata_path']).exists()
     assert saved_patch.read_bytes().startswith(panel_salvage.PREFIX)
+    assert saved_patch.is_relative_to(salvage_repo), 'salvaged artifact was not written to the room repository'
     assert not trap_file.exists(), 'salvage executed repository Git config'
     assert index_path.read_bytes() == index_before, 'salvage changed kept index'
     assert all(p.read_bytes() == data for p, data in metadata_before.items()), 'salvage changed Git metadata'
@@ -4681,7 +4730,7 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
         pointer.write_bytes(pointer_before)
 # The generated binary patch restores exact bytes through Git's normal apply path.
 for key in ('filter.trap.clean', 'filter.trap.smudge', 'diff.external', 'core.fsmonitor'):
-    subprocess.run(['git', '-C', str(salvage_repo), 'config', '--unset', key], check=True)
+    subprocess.run(['git', '-C', str(salvage_execution_repo), 'config', '--unset', key], check=True)
 subprocess.run(['git', '-C', str(salvage_repo), 'apply', '--check', '--binary', str(saved_patch)], check=True)
 subprocess.run(['git', '-C', str(salvage_repo), 'apply', '--binary', str(saved_patch)], check=True)
 assert (salvage_repo / 'new.txt').read_bytes() == '새 파일\r\n'.encode()

@@ -41,6 +41,8 @@ oms panel --repo . --room team --open-chat sol-main --chat-surface app --dry-run
 oms panel --repo . --council --owner codex --task-id ID --label 'Decision' --prompt 'Compare options' --dry-run
 ```
 
+`oms panel --salvage TASK_ID` verifies a kept worktree against the execution repository recorded for that room call and saves its patch and provenance in the room repository.
+
 Each dispatched call has a short room alias such as `B7`, shown before its role
 on the board, selected card, reader, session log and Results. `--alias NAME`
 chooses one (1–8 letters, digits or hyphens); otherwise the panel assigns the

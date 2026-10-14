@@ -14,8 +14,9 @@ import tempfile
 import unicodedata
 import uuid
 
+import dispatch_supervisor
 import panel_results
-from room_repository import LIBRARY, state_repository
+from room_repository import LIBRARY, state_repository, work_repository
 
 PREFIX = b'# oms-salvage: '
 MAX_EVIDENCE = 8 * 1024 * 1024
@@ -76,10 +77,10 @@ def _managed(repo, path):
         if not equals or key in fields:
             raise ValueError('invalid kept worktree marker')
         fields[key] = value
+    marker_repo = _native_path(fields.get('repo', '')).resolve(strict=True)
     if (fields.get('kind') != 'oh-my-setting-temp' or fields.get('temporary') != '1' or
             _native_path(fields.get('worktree', '')).resolve() != physical or
-            _common(_git_directory(_native_path(fields.get('repo', '')).resolve(strict=True))) !=
-            _common(_git_directory(repo))):
+            _common(_git_directory(marker_repo)) != _common(_git_directory(repo))):
         raise ValueError('kept worktree marker does not belong to this repository')
     directory = _git_directory(physical)
     common = _common(_git_directory(repo))
@@ -124,7 +125,30 @@ def _latest(repo, task):
     if len(set(paths)) != 1:
         raise ValueError('conflicting kept worktree evidence')
     reason = attempt.get('reason_code') or ('delegate exit ' + str(record.get('exit', 'unknown')))
-    return paths[-1], attempt.get('attempt_id') or record.get('attempt_id'), reason
+    refs = attempt.get('refs', {})
+    participant, room = refs.get('panel_room_participant'), refs.get('panel_room_id')
+    if (not isinstance(participant, str) or not re.fullmatch(r'call-[0-9a-f]{16}', participant) or
+            not isinstance(room, str)):
+        raise ValueError('latest delegate has no recorded room execution owner')
+    owned = [row for row in attempts if row.get('refs', {}).get('panel_room_participant') == participant and
+             row.get('refs', {}).get('panel_room_id') == room]
+    if (len(owned) != 1 or owned[0].get('attempt_id') != attempt.get('attempt_id') or
+            owned[0].get('task_id') != task):
+        raise ValueError('room call does not uniquely own the latest delegate attempt')
+    anchor = dispatch_supervisor.read(repo, participant + '-launch.json')
+    call = anchor.get('call') if isinstance(anchor, dict) else None
+    execution = anchor.get('execution_repo') if isinstance(anchor, dict) else None
+    if (not isinstance(call, dict) or call.get('participant') != participant or
+            call.get('room') != room or
+            call.get('task_id') != task or
+            call.get('attempt_id', attempt.get('attempt_id')) != attempt.get('attempt_id') or
+            not isinstance(execution, str) or not os.path.isabs(execution)):
+        raise ValueError('latest delegate has no matching recorded execution repository')
+    try:
+        execution = work_repository(execution)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise ValueError('recorded execution repository is unavailable') from error
+    return paths[-1], attempt.get('attempt_id') or record.get('attempt_id'), reason, execution
 
 
 def _skeleton(line):
@@ -354,11 +378,15 @@ def record_provenance(repo, metadata):
     return relative
 
 
-def salvage(repo, task):
-    path, attempt, reason = _latest(repo, task)
-    kept, common, base = _managed(repo, path)
+def salvage(repo, task, selected_repo=None):
+    path, attempt, reason, execution = _latest(repo, task)
+    if selected_repo is not None:
+        selected = work_repository(selected_repo)
+        if selected not in {Path(repo).resolve(strict=True), execution}:
+            raise ValueError('selected repository is neither the room repository nor the recorded execution repository')
+    kept, common, base = _managed(execution, path)
     patch, files, warnings = _capture(kept, common, base)
-    if _managed(repo, path) != (kept, common, base):
+    if _managed(execution, path) != (kept, common, base):
         raise ValueError('kept worktree identity moved during capture')
     if not patch:
         raise ValueError('kept worktree has no changes')
@@ -419,8 +447,11 @@ def cli_main(arguments=None):
         panel_results._owner()
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}', args.salvage):
             raise ValueError('invalid task ID')
-        repo = state_repository(Path(args.repo or os.getcwd()).resolve(strict=True))
-        result = salvage(repo, args.salvage)
+        selected = Path(args.repo or os.getcwd()).resolve(strict=True)
+        inherited = os.environ.get('OMS_ROOM_REPO') if os.environ.get('OMS_ROOM_ID') else None
+        repo = (state_repository(Path(inherited).resolve(strict=True)) if inherited else
+                state_repository(selected))
+        result = salvage(repo, args.salvage, selected if args.repo else None)
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:

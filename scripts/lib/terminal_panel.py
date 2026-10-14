@@ -2389,10 +2389,13 @@ def _dispatch_verifier(repo, room_id, member, caller):
     return verify if isinstance(verify, str) and verify.strip() else None
 
 
-def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution_repo=None, rework=None):
+def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution_repo=None, rework=None,
+                           task_id=None):
     call = {"schema": 2, "kind": "oms-panel-call", "room": room_id, "participant": member,
             "parent": caller, "nonce": uuid.uuid4().hex,
             "backend": "subreaper" if sys.platform == "linux" else "unsupported"}
+    if task_id is not None:
+        call["task_id"] = task_id
     path = Path(repo) / _dispatch_call_path(member)
     # The existing durable writer anchors parents, refuses links and creates 0600.
     # Even an empty precreated file must refuse launch, rather than become evidence.
@@ -2450,9 +2453,12 @@ def _dispatch_call_record(repo, room_id, member):
             return None
         fields = {"schema", "kind", "room", "participant", "parent"}
         if call["schema"] == 2:
-            if (set(call) != fields | {"nonce", "backend"} or data != dispatch_store.encoded(call)
+            required = fields | {"nonce", "backend"}
+            if (set(call) not in (required, required | {"task_id"}) or data != dispatch_store.encoded(call)
                     or not isinstance(call["nonce"], str) or not re.fullmatch(r"[0-9a-f]{32}", call["nonce"])
                     or call["backend"] not in {"subreaper", "unsupported"}
+                    or "task_id" in call and (not isinstance(call["task_id"], str)
+                                                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", call["task_id"]))
                     or set(anchor) - {"call", "generation", "verify", "execution_repo", "rework"}
                     or "rework" in anchor and not _valid_rework_context(anchor["rework"], name)
                     or "verify" in anchor and (not isinstance(anchor["verify"], str) or not anchor["verify"].strip())
@@ -3197,7 +3203,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 recorded_brief = repo / recorded_brief
             rework = (dict(role=role, scope=scopes or [], workload=route["workload"],
                            brief=_read_dispatch_brief(recorded_brief).decode("utf-8")) if access == "write" else None)
-            launch = _prepare_dispatch_call(repo, room_id, control_member, caller, verify, execution, rework)
+            launch = _prepare_dispatch_call(repo, room_id, control_member, caller, verify, execution, rework,
+                                             task_id=task_id)
             command = argv
             if launch and launch["backend"] == "subreaper":
                 digest = _dispatch_exit_record(launch, 0)["launch_sha256"]
