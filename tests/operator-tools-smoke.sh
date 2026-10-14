@@ -7762,6 +7762,132 @@ for reviewer_call, answer, exit_status, expected in (
     verdict_mail = next(m for m in room.status(project, shared)["messages"]
                         if m["id"] == "judgment-" + reviewer_call)
     assert expected in verdict_mail["text"] and room_owner in verdict_mail["targets"]
+# Completed negative automatic gates draft fixes for the main without dispatching another worker.
+draft_main = {"attempt_id": "attempt-fix-draft-main", "tool": "panel-main", "provider": "claude",
+              "state": "working", "terminal": False, "created_at": "2026-10-14T00:00:00Z",
+              "refs": {"panel_role": "main", "panel_owner": "claude", "panel_room_id": shared,
+                       "panel_room_participant": room_owner}}
+original_fix_brief = "# Task\n\nRepair scripts/fixture.py only.\n\n# Constraints\n\nNo commits or dependency changes.\n"
+fix_verify = "python3 -c 'print(\"it works\")'"
+fix_execution = Path("/home/fixture-owner/review-worktree")
+fix_finding_blocks = ("- [P0] Validate `%s/scripts/fixture.py:7`.\n  Keep the caller contract." % project,
+                      "- **P1** Refuse the unsafe path in `%s/scripts/fixture.py:9`.\n"
+                      "  ```python\nP0: example within the finding\n  ```" % fix_execution,
+                      "### P2 Preserve the verifier.", "P3: Keep the manual dispatch step.")
+fix_findings = "\n".join(fix_finding_blocks)
+for case_number, (case, expected_draft) in enumerate((
+        ("failed-gate", True), ("cap", True), ("truncated-summary", True), ("multiline-verify", True),
+        ("private-verifier", False),
+        ("no-priorities", False), ("passed-gate", False), ("missing-context", False),
+        ("bad-digest", False), ("private-path", False), ("stale-review", False),
+        ("failed-provider", False), ("failed-verifier", False), ("oversized", False))):
+    fix_task = "fix-draft-" + case
+    fix_worker = "call-%016x" % (0xD400 + case_number)
+    claim_id, _, fix_reviewer = room.review_ids(fix_worker, auto_digest, 1)
+    for ident, kind in ((fix_worker, "worker"), (fix_reviewer, "reviewer")):
+        room.join(project, shared, ident, "codex", kind, parent=room_owner)
+    worker_attempt = dict(auto_attempt, attempt_id="attempt-" + fix_worker, task_id=fix_task,
+        sequence=3, parent_attempt_id=draft_main["attempt_id"],
+        refs=dict(auto_attempt["refs"], panel_room_participant=fix_worker, panel_owner="claude"))
+    reviewer_attempt = dict(worker_attempt, attempt_id="attempt-" + fix_reviewer,
+        refs=dict(worker_attempt["refs"], panel_room_participant=fix_reviewer, panel_role="reviewer",
+                  panel_access="read"))
+    fix_history = [draft_main, worker_attempt, reviewer_attempt]
+    if case == "cap":
+        fix_history[1:1] = [dict(worker_attempt, attempt_id="attempt-prior-%d" % n, sequence=n,
+                                refs=dict(worker_attempt["refs"], panel_room_participant="prior-%d" % n))
+                            for n in (1, 2)]
+    if case == "stale-review":
+        fix_history.append(dict(worker_attempt, attempt_id="attempt-later-worker", sequence=4,
+                                refs=dict(worker_attempt["refs"], panel_room_participant="later-worker")))
+    verifier = fix_verify if case != "multiline-verify" else "printf first\nprintf second"
+    if case == "private-verifier":
+        verifier = "test -f " + str(fix_execution) + "/scripts/fixture.py"
+    metadata = dict(role="builder", scope=["scripts/fixture.py"], workload="routine", brief=original_fix_brief)
+    panel._prepare_dispatch_call(project, shared, fix_worker, room_owner, verifier, fix_execution,
+                                 None if case == "missing-context" else metadata)
+    room.append(project, shared, {"kind": "review-dispatch", "event_id": claim_id, "task_id": fix_task,
+        "call_id": fix_worker, "review_call_id": fix_reviewer, "patch_sha256": auto_digest, "attempt": 1},
+        "Automatic review fixture")
+    review_answer = fix_findings
+    if case == "no-priorities":
+        review_answer = "No parseable priorities."
+    if case == "private-path":
+        review_answer += "\n  Read /home/unrelated-user/private.txt."
+    if case in {"truncated-summary", "oversized"}:
+        review_answer += "\n  " + "complete evidence " * (2300 if case == "truncated-summary" else 5000)
+    gate = "pass" if case == "passed-gate" else "fail"
+    review_answer = "> P0: quoted example\n```\nP1: fenced example\n```\n" + review_answer + "\nGATE: " + gate
+    review_relative = ".oms/artifacts/fixture/review-" + case + ".md"
+    review_file = project / review_relative
+    review_file.write_text("## Output\n" + review_answer + "\n## Exit\n" +
+                           ("1" if case == "failed-provider" else "0") + "\n", encoding="utf-8")
+    review_index = {"kind": "review", "task_id": fix_task, "attempt_id": reviewer_attempt["attempt_id"],
+                    "artifact": review_relative, "artifact_sha256": hashlib.sha256(review_file.read_bytes()).hexdigest(),
+                    "exit": 0}
+    if case == "bad-digest":
+        review_index["artifact_sha256"] = "0" * 64
+    # The real peer-review controller returns 1 for a completed GATE: fail and writes an outcome artifact
+    # after the provider artifact. Provider failures and verifier failures still require manual judgment.
+    outcome_index = dict(review_index, kind="review-outcome", exit=0 if gate == "pass" else 1,
+                         review={"gate_verify_exit": 1 if case == "failed-verifier" else 0,
+                                 "seats": [{"verdict": gate, "artifact": Path(review_relative).name}]})
+    projected_answer = "Retained prefix without the verdict" if case == "truncated-summary" else review_answer
+    with patch.object(panel_result_store, "_records", return_value=(fix_history, [review_index, outcome_index])), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": projected_answer,
+                "answer_truncated": case == "truncated-summary"}]}]}), \
+            patch.object(panel, "dispatch") as draft_dispatch, patch.dict(os.environ, room_env, clear=True):
+        assert panel.deliver_result(project, shared, fix_reviewer, room_owner, fix_task, outcome_index["exit"])
+        assert panel.deliver_result(project, shared, fix_reviewer, room_owner, fix_task, outcome_index["exit"])
+        draft_dispatch.assert_not_called()
+    draft_relative = str(Path(review_relative).with_suffix(".fix-brief.md"))
+    draft_file = project / draft_relative
+    draft_mail = [m for m in room.status(project, shared)["messages"] if m["id"] == "judgment-" + fix_reviewer]
+    assert len(draft_mail) == 1 and room_owner in draft_mail[0]["targets"], draft_mail
+    assert draft_file.exists() == expected_draft, (case, draft_mail)
+    if expected_draft:
+        draft_text = draft_file.read_text(encoding="utf-8")
+        assert fix_task in draft_text and original_fix_brief in draft_text, draft_text
+        for finding in fix_finding_blocks:
+            relative_finding = finding.replace(str(project) + "/", "").replace(str(fix_execution) + "/", "")
+            assert relative_finding in draft_text, relative_finding
+        assert "Declared scope: scripts/fixture.py" in draft_text and verifier in draft_text
+        assert "Fix every finding; same scope and authority as the previous round." in draft_text
+        assert "/home/" not in draft_text and str(project) not in draft_text
+        assert "quoted example" not in draft_text and "fenced example" not in draft_text
+        assert "P0: example within the finding" in draft_text
+        assert "\n" not in draft_mail[0]["text"], draft_mail
+        command = draft_mail[0]["text"].split("manual command: ", 1)[1]
+        capture = subprocess.run(["bash", "-c", "oms() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\"; }; " + command],
+                                 capture_output=True, text=True, check=True)
+        assert json.loads(capture.stdout) == ["panel", "--dispatch", "builder", "--continue", fix_task,
+                                              "--brief-file", draft_relative, "--verify", verifier,
+                                              "--access", "write", "--scope", "scripts/fixture.py"], command
+        if case == "cap":
+            assert "cap of 2 rework rounds is reached" in draft_text and "consider --workload deep" in draft_text
+            assert "--workload" not in command and "rework cap reached" in draft_mail[0]["text"]
+        if case == "truncated-summary":
+            assert "complete evidence " * 2300 in draft_text
+        assert draft_file.stat().st_mode & 0o077 == 0
+# Draft writes preserve existing evidence and reject links just like the call artifacts.
+try:
+    panel._write_brief_artifact(project, ".oms/artifacts/fixture/review-failed-gate.fix-brief.md",
+                                "overwrite existing evidence")
+except ValueError:
+    pass
+else:
+    raise AssertionError("draft artifact was overwritten")
+if os.name == "posix":
+    draft_link = project / ".oms/artifacts/fixture/review-link.fix-brief.md"
+    draft_link.symlink_to(review_file)
+    link_target = review_file.read_bytes()
+    try:
+        panel._write_brief_artifact(project, str(draft_link.relative_to(project)), "follow a link")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("draft artifact followed a symlink")
+    assert review_file.read_bytes() == link_target
 # Two exhausted review reservations become a retryable manual decision until its notice is durable.
 r5_call = "call-f5f5f5f5f5f5f5f5"
 r5_attempt = dict(auto_attempt, attempt_id="attempt-review-reservations-exhausted",
@@ -10479,7 +10605,7 @@ with patch.dict(os.environ, control_env, clear=True), \
             patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch), \
             redirect_stderr(warning_output):
         warning_status = panel.dispatch(project, "claude", "worker", "light", "write", "implement",
-                                        brief="Change nothing.", verify="true", task_id="backlog-warning",
+                                        brief=brief, verify="true", task_id="backlog-warning",
                                         label="Backlog warning")
     assert warning_status == 0, (warning_status, warning_output.getvalue(), control_launch)
     assert warning_output.getvalue().splitlines() == [
@@ -10495,7 +10621,7 @@ with patch.dict(os.environ, control_env, clear=True), \
             patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch), \
             redirect_stderr(warning_output):
         assert panel.dispatch(project, "claude", "worker", "light", "write", "implement",
-                              brief="Change nothing.", verify="true", task_id="backlog-at-threshold",
+                              brief=os.path.relpath(brief, project), verify="true", task_id="backlog-at-threshold",
                               label="Backlog at threshold") == 0
     assert warning_output.getvalue().splitlines() == [
         "plan backlog-at-threshold has no recorded task; panel left it unchanged; plan protection is absent"], \
