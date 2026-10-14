@@ -14887,6 +14887,20 @@ cancelled_goal = deepcopy(words)
 cancelled_goal["plan"]["by_state"]["cancelled"] = 2
 assert "cancelled" not in graph_text.goal_banner(cancelled_goal, 120, True)[0][0]
 assert "6/7 verified" in graph_text.goal_banner(cancelled_goal, 120, True)[0][0]
+finished_goal = deepcopy(words)
+finished_goal["plan"].update(task_count=9, idle_days=44, by_state={"done": 6, "cancelled": 3})
+wide_finished = graph_text.goal_banner(finished_goal, 120, True)[0][0]
+narrow_finished = graph_text.goal_banner(finished_goal, 42, True)[0][0]
+assert "Goal finished 6/6 verified · 3 cancelled" in wide_finished and "retire + init next goal" in wide_finished, wide_finished
+assert "Goal finished 6/6" in narrow_finished and "—" not in narrow_finished and "Ship the shared plan board" not in narrow_finished, narrow_finished
+finished_box = graph_text.goal_box(finished_goal, 80, True)
+assert len(finished_box) == 3 and finished_box[1][1] == "metadata" and "Goal finished" in finished_box[1][0], finished_box
+for columns in (28, 42, 80, 120):
+    for glyphs in (True, False):
+        finished_rows = graph_text.goal_box(finished_goal, columns, glyphs)
+        assert len(finished_rows) == 3 and all(display_width(text) == columns for text, _ in finished_rows), finished_rows
+        if columns == 28:
+            assert "Finished 6/6" in finished_rows[1][0] and "..." not in finished_rows[1][0], finished_rows
 # Cancelled tasks are closed, never verified: they leave the total. A running task whose calls all ended is stale,
 # one whose call awaits its main's decision stays claimed ("in review" is the plan's review state only), and the
 # main's card counts neither as running.

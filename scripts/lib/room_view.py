@@ -558,18 +558,19 @@ def held_split(report, members=None):
 
 
 def plan_summary(report):
-    """(goal, verified, total, review, claimed, stale) of the active plan; None when there is no goal or it idled a week.
+    """(goal, verified, total, review, claimed, stale) of the current plan.
 
     Cancelled tasks are closed, never verified, so they leave the total; stale holds have no live call."""
     plan = mapping(report.get("plan"))
     goal_text = str(plan.get("goal") or "")
     goal = clean(goal_text, max(1, len(goal_text)))
-    if not plan.get("present") or not goal or (plan_idle(report) or 0) >= 7:
-        return None
     by_state = mapping(plan.get("by_state"))
     number = lambda *names: sum(valid_count(by_state.get(name)) or 0 for name in names)
     total = valid_count(plan.get("task_count"))
     total = total if total is not None else sum(valid_count(v) or 0 for v in by_state.values())
+    finished = total > 0 and number("done", "cancelled") >= total
+    if not plan.get("present") or not goal or ((plan_idle(report) or 0) >= 7 and not finished):
+        return None
     awaiting, ended = held_split(report)
     stale_claims, stale_reviews = (valid_count(plan.get(key)) or 0 for key in ("stale_claims", "stale_reviews"))
     return (goal, number("done"), max(0, total - number("cancelled")),
@@ -580,8 +581,11 @@ def plan_summary(report):
 
 def goal_banner(report, width, unicode, compact=False):
     """Full goal on the board; bounded summaries retain the compact fallback."""
+    summary = plan_summary(report)
+    if summary and _plan_finished(report):
+        text = _finished_goal_text(report, summary, width)
+        return [(one_row(text, width), "metadata")]
     if compact or width < 76:
-        summary = plan_summary(report)
         goal = summary[0] if summary else "No goal recorded"
         counts = "%s/%s verified" % summary[1:3] if summary else ""
         text = "Goal / " + goal + (" / " + counts if counts else "")
@@ -594,8 +598,38 @@ def one_row(text, width):
     return "[ " + text + " " * max(0, width - display_width(text) - 4) + " ]"
 
 
+def _plan_finished(report):
+    plan = mapping(report.get("plan"))
+    by_state = mapping(plan.get("by_state"))
+    total = valid_count(plan.get("task_count"))
+    total = total if total is not None else sum(valid_count(v) or 0 for v in by_state.values())
+    closed = sum(valid_count(by_state.get(name)) or 0 for name in ("done", "cancelled"))
+    return total > 0 and closed >= total
+
+
+def _finished_goal_text(report, summary, width):
+    verified, total = summary[1:3]
+    cancelled = valid_count(mapping(mapping(report.get("plan")).get("by_state")).get("cancelled")) or 0
+    count = "%s/%s verified" % (verified, total)
+    canceled = "%s cancelled" % cancelled if cancelled else ""
+    action = "retire + init next goal"
+    if width < 46:
+        # Preserve the completion ratio before optional detail or guidance.
+        return "Goal finished %s/%s" % (verified, total) if width >= 32 else "Finished %s/%s" % (verified, total)
+    if width < 76:
+        canceled = "%s canceled" % cancelled if cancelled else ""
+        action = "next"
+    if canceled:
+        count += " · " + canceled
+    return "Goal finished " + count + " — " + action
+
+
 def goal_box(report, width, unicode, compact=False):
     summary = plan_summary(report)
+    if summary and _plan_finished(report):
+        return [(box_edge("Goal", width, unicode), "border"),
+                (box_row(_finished_goal_text(report, summary, width), width, unicode), "metadata"),
+                (box_edge("", width, unicode, "bottom"), "border")]
     goal = summary[0] if summary else "No goal recorded"
     counts = "%s/%s verified" % summary[1:3] if summary else ""
     locally_done = sum(1 for task in listing(mapping(report.get("room")).get("repo_tasks"))
