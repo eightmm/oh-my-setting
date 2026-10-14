@@ -595,10 +595,8 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
         ids = [i for i in ids if i in own or (adopting and i not in owned and i in has_result)]
     chosen = [task_id] if task_id in ids else [] if task_id else list(ids)
     chosen = list(reversed(chosen))
-    total = len(chosen)
-    chosen = chosen[offset:offset + limit] if not task_id else chosen
-    output = []
-    capped = offset + len(chosen) < total
+    # Page over the rows that survive the scope checks below, so skipped tasks never count as omitted.
+    output, passed, capped = [], 0, False
     for ident in chosen:
         metadata_attempts = [a for a in attempts if a.get('task_id') == ident]
         matching = metadata_attempts
@@ -627,6 +625,12 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             indexed = [r for r in indexed if r.get("attempt_id") in linked]
         if scoped and not matching:
             continue
+        passed += 1
+        if not task_id and passed <= offset:
+            continue
+        if not task_id and len(output) >= limit:
+            capped = True
+            break
         last = metadata_attempts[-1] if metadata_attempts else {}
         metadata = last.get('refs', {})
         calls = []
@@ -700,8 +704,9 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
     return {'schema': 1, 'kind': 'oms-panel-results', 'rows': output,
             'coverage': 'latest 300 attempts and 1000 artifact events',
             'truncated': capped or (bool(task_id) and not chosen), 'offset': offset,
-            'omitted': max(0, total - offset - len(output)),
-            'omitted_range': ([offset + len(output), total] if capped else None)}
+            # A capped page knows only that more rows follow, not how many survive the scope checks.
+            'omitted': None if capped else 0,
+            'omitted_range': ([offset + len(output), None] if capped else None)}
 
 
 def results_snapshot(repo, task_id=None, room_participant=None):

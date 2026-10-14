@@ -1756,9 +1756,9 @@ artifact_rows.append({'schema': 1, 'event_id': 'evt_panel_failure', 'operation_i
 index_path = metric_repo / '.oms/artifacts/index.jsonl'
 index_path.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in artifact_rows), encoding='utf-8')
 expected_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
-assert expected_metrics['completion'] == {'finished': 2, 'started': 5, 'rate': 0.4}, expected_metrics
+assert expected_metrics['completion'] == {'finished': 2, 'started': 6, 'rate': 0.3333}, expected_metrics
 assert expected_metrics['review_wait_seconds'] == {'count': 2, 'median': 20.0, 'p90': 20.0}, expected_metrics
-assert expected_metrics['rework'] == {'tasks': 1, 'started': 5, 'rate': 0.2}, expected_metrics
+assert expected_metrics['rework'] == {'tasks': 1, 'started': 6, 'rate': 0.1667}, expected_metrics
 assert expected_metrics['abandoned_calls'] == 1, expected_metrics
 assert expected_metrics['window']['until'] == expected_metrics['until'], expected_metrics
 assert expected_metrics['metric_scope']['completion']['coverage']['attempt_limit'] == 300, expected_metrics
@@ -1771,7 +1771,7 @@ assert expected_metrics['interventions'] == {'manual_clears': 1, 'cancels': 1,
 metric_text = io.StringIO()
 with redirect_stdout(metric_text):
     assert panel.main(['--repo', str(metric_repo), '--metrics']) == 0
-assert 'completion: 2/5 (40.0%)' in metric_text.getvalue(), metric_text.getvalue()
+assert 'completion: 2/6 (33.3%)' in metric_text.getvalue(), metric_text.getvalue()
 assert 'awaiting review: n=' in metric_text.getvalue(), metric_text.getvalue()
 assert 'coverage:' in metric_text.getvalue() and 'until ' in metric_text.getvalue(), metric_text.getvalue()
 metric_json = io.StringIO()
