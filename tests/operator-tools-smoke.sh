@@ -2162,9 +2162,9 @@ from unittest.mock import patch
 from panel_view import (role_style, call_identity, status_tag, paint, GLYPHS, glyph,
                         ROLE_COLORS, STATE_COLORS, box_edge, box_row, use_unicode)
 assert role_style("main", "reviewer") == "main"
-for role in ("advisor", "reviewer", "critic", "verifier", "security-auditor", "architect", "council"):
+for role in ("advisor", "reviewer", "critic", "verifier", "security-auditor", "architect", "council", "researcher"):
     assert role_style(role) == role_style("worker", role) == "judge", role
-for role in ("worker", "builder", "researcher", "refactorer", "documenter", "integrator", "performance-engineer", "release-engineer"):
+for role in ("worker", "builder", "refactorer", "documenter", "integrator", "performance-engineer", "release-engineer"):
     assert role_style(role) == "worker", role
 assert role_style("unrecorded") == "unknown" and role_style("worker", "advise") == "worker"
 use_unicode(True)
@@ -2174,7 +2174,7 @@ tags = {"starting": "[⟳ starting]", "working": "[⟳ running]", "verifying": "
         "idle": "[○ idle]", "blocked": "[! blocked]", "waiting_input": "[? needs input]",
         "waiting_approval": "[! needs approval]", "review": "[! awaiting decision]",
         "unknown": "[? status unknown]", "done": "[✓ finished: exit 0]", "failed": "[✗ failed: exit 1]",
-        "timed_out": "[✗ timed out]", "cancelled": "[cancelled]", "abandoned": "[✗ abandoned]",
+        "timed_out": "[⏱ timed out]", "cancelled": "[⊘ cancelled]", "abandoned": "[✗ abandoned]",
         "orphaned": "[✗ lost process]", "checks_passed": "[✓ checks passed]", "14/14 pass": "[✓ 14/14 pass]",
         "test_failed": "[test failed: exit 1]", "checks_not_run": "[checks not run]",
         "checks_unknown": "[checks unknown]", "acceptance_pending": "[acceptance pending]", "accepted": "[✓ accepted]"}
@@ -2182,7 +2182,7 @@ for state, tag in tags.items():
     code = 0 if state == "done" else 1 if state in {"failed", "test_failed"} else None
     assert status_tag(state, exit_code=code) == tag, state
     ascii_tag = status_tag(state, exit_code=code, unicode=False)
-    assert ascii_tag.isascii() and ascii_tag == tag.replace("⟳", "~").replace("○", "o").replace("✓", "+").replace("✗", "!"), state
+    assert ascii_tag.isascii() and ascii_tag == tag.replace("⟳", "~").replace("○", "o").replace("✓", "+").replace("✗", "!").replace("⏱", "!").replace("⊘", "x"), state
 assert status_tag("done") == "[✓ finished]" and status_tag("invented") == "[? status unknown]"
 for name in GLYPHS:
     assert glyph(name, False).isascii(), name
@@ -2224,7 +2224,7 @@ for mode in ("tree", "summary", "list", "compact", "detail"):
     nav = {}
     picture = render(visual_fixture, "codex", 157, 61, view=mode, navigation=nav)
     assert picture.index("ARCHITECT Sol") < picture.index("MAIN Sol") < picture.index("BUILDER Sol"), picture
-    assert picture.index("ARCHITECT Sol") < picture.index("REVIEWER Sol"), picture
+    assert (picture.index("REVIEWER Sol") < picture.index("ARCHITECT Sol")) == (mode in {"tree", "summary"}), picture
     assert "╎" not in picture, picture
     action = ("result", "visual-worker")
     chosen = render(visual_fixture, "codex", 157, 61, view=mode, navigation={"selected": action})
@@ -2245,6 +2245,215 @@ for mode in ("tree", "summary", "list", "compact", "detail"):
             if not unicode:
                 assert all(ch.isascii() or ch in "한글 목표" for ch in text), text
 # PANEL_VISUAL_TOKENS_END
+
+# Judge bands use bounded, cached artifact judgments rather than command exits.
+from panel_view import judgment_tag, judge_band, _JUDGMENTS, ROLE_COLORS
+import time as judgment_clock
+from copy import deepcopy
+assert judge_band("worker", "verifier") == "gate" and judge_band("researcher") == "counsel"
+assert judge_band("main", "advisor") is None and ROLE_COLORS["counsel"] != ROLE_COLORS["judge"]
+judgment_root = temporary / "judgment-board"
+judgment_artifacts = judgment_root / ".oms/artifacts"
+judgment_artifacts.mkdir(parents=True)
+judgment_fixture = {"collection": {"ok": True}, "repo": {"name": "judgments", "path": str(judgment_root)},
+    "room": {"id": "judgments", "participants": [], "messages": [], "call_results": {}},
+    "attempts": {"active_recent": []}, "goal": {"text": "Review the patch and choose the next step"}}
+for ident, role, state, code, answer in (
+        ("judge-main", "main", "working", None, None),
+        ("gate-pass", "reviewer", "done", 0, "GATE: pass\n> GATE: fail\n```\nGATE: fail\n```"),
+        ("gate-fail", "verifier", "failed", 2, "GATE: fail\n- [P1] Missing validation\nP2: Selection\n### P2 Cache\n```\nP0: example\n```\n> P3: quote"),
+        ("counsel-verdict", "critic", "failed", 2, "VERDICT: REVISE"),
+        ("judge-worker", "worker", "working", None, None)):
+    judgment_fixture["room"]["participants"].append({"participant": ident, "role": role, "joined": True,
+        "parent": None if role == "main" else "judge-main", "model": "gpt-6.1-sol", "label": ident})
+    judgment_fixture["attempts"]["active_recent"].append({"attempt_id": ident, "state": state,
+        "panel": {"role": role, "room_id": "judgments", "room_participant": ident, "model": "gpt-6.1-sol"}})
+    if answer is not None:
+        (judgment_artifacts / (ident + ".md")).write_text("## Output\n" + answer + "\n## Exit\n" + str(code) + "\n")
+        judgment_fixture["room"]["call_results"][ident] = {"exit": code, "artifact": ".oms/artifacts/" + ident + ".md",
+            "ts": judgment_clock.strftime("%Y-%m-%dT%H:%M:%SZ", judgment_clock.gmtime())}
+from room_view import nodes as judgment_nodes
+judge_members = {m["participant"]: m for m in judgment_nodes(judgment_fixture)}
+assert judgment_tag(judge_members["gate-pass"], judgment_fixture) == "[✓ gate pass]"
+assert judgment_tag(judge_members["gate-fail"], judgment_fixture) == "[✗ gate fail · P1 1 · P2 2]"
+assert judgment_tag(judge_members["counsel-verdict"], judgment_fixture) == "[verdict revise]"
+_JUDGMENTS.clear()
+with patch("panel_view.os.open", wraps=os.open) as judge_open:
+    for glyphs in (False, True):
+        judgment_tag(judge_members["gate-pass"], judgment_fixture, glyphs)
+        judgment_tag(judge_members["gate-pass"], judgment_fixture, glyphs)
+    assert judge_open.call_count == 1
+    (judgment_artifacts / "gate-pass.md").write_text("GATE: fail\nP0: changed\n")
+    assert judgment_tag(judge_members["gate-pass"], judgment_fixture) == "[✗ gate fail · P0 1]"
+    assert judge_open.call_count == 2
+(judgment_artifacts / "gate-pass.md").write_text("GATE: pass\n")
+sample_judge = dict(judge_members["counsel-verdict"])
+for answer, expected in (("Recommendation: PROCEED", "[verdict proceed]"),
+                         ("Recommendation: proceed\nVERDICT: revise", "[verdict revise]"),
+                         ("An arbitrary first sentence", "[✗ no verdict (exit 2)]"),
+                         ("```\nVERDICT: proceed\n```", "[✗ no verdict (exit 2)]")):
+    (judgment_artifacts / "counsel-verdict.md").write_text(answer)
+    assert judgment_tag(sample_judge, judgment_fixture) == expected
+(judgment_artifacts / "counsel-verdict.md").write_text("VERDICT: revise\n")
+assert judgment_tag(dict(sample_judge, role="researcher"), judgment_fixture) == "[answered]"
+assert judgment_tag(dict(sample_judge, state="working"), judgment_fixture) == "[⟳ running]"
+assert judgment_tag(dict(sample_judge, artifact=".oms/artifacts/missing.md"), judgment_fixture) == "[✗ no verdict (exit 2)]"
+assert judgment_tag(dict(sample_judge, exit=0, artifact=".oms/artifacts/missing.md"), judgment_fixture) == "[✗ failed: exit 0]"
+assert judgment_tag(dict(sample_judge, artifact=".oms/artifacts/../outside.md"), judgment_fixture) == "[✗ no verdict (exit 2)]"
+large_artifact = judgment_artifacts / "large.md"
+large_artifact.write_text("GATE: fail\n" + "x" * 70000 + "\nGATE: pass\n")
+assert judgment_tag(dict(judge_members["gate-pass"], artifact=".oms/artifacts/large.md"), judgment_fixture) == "[✓ gate pass]"
+(judgment_artifacts / "denied.md").write_text("VERDICT: proceed\n")
+with patch("panel_view.os.open", side_effect=PermissionError) as denied_open:
+    for _ in range(2):
+        assert judgment_tag(dict(sample_judge, artifact=".oms/artifacts/denied.md"), judgment_fixture) == "[✗ no verdict (exit 2)]"
+    assert denied_open.call_count == 1
+if os.name == "posix":
+    os.mkfifo(judgment_artifacts / "pipe")
+    (judgment_artifacts / "linked.md").symlink_to(large_artifact)
+    with patch("panel_view.os.open", side_effect=AssertionError("unsafe artifact was opened")):
+        for name in ("pipe", "linked.md"):
+            assert judgment_tag(dict(sample_judge, artifact=".oms/artifacts/" + name), judgment_fixture) == "[✗ no verdict (exit 2)]"
+for view_mode in ("graph", "tree"):
+    for glyphs in (False, True):
+        fixture_nav = {"dismissed": True, "expanded_groups": {("review", "judge-main"), ("counsel:review", "judge-main")}}
+        drawn_judges = render(judgment_fixture, "codex", 120, 40, view=view_mode, unicode=glyphs, navigation=fixture_nav)
+        assert drawn_judges.index("REVIEWER Sol") < drawn_judges.index("CRITIC Sol") < drawn_judges.index("MAIN Sol") < drawn_judges.index("WORKER Sol"), drawn_judges
+        for tag in ("gate pass", "gate fail", "P1 1", "P2 2", "verdict revise", "Gate", "Counsel"):
+            assert tag in drawn_judges, drawn_judges
+        assert glyphs or drawn_judges.isascii(), drawn_judges
+        for hit in fixture_nav["hits"]:
+            assert 1 <= hit["y"] <= 40 and 1 <= hit["x1"] <= hit["x2"] <= 120, hit
+        if view_mode == "tree":
+            fold_report = deepcopy(judgment_fixture)
+            for attempt in fold_report["attempts"]["active_recent"]:
+                if attempt["attempt_id"] in {"gate-pass", "counsel-verdict"}:
+                    attempt["state"] = "review"
+            fold_nav = dict(fixture_nav)
+            render(fold_report, "codex", 120, 40, view="tree", unicode=glyphs, navigation=fold_nav)
+            fold_keys = [h["action"][1] for h in fold_nav["hits"] if h["action"][0] == "group"]
+            assert ("review", "judge-main") in fold_keys and ("counsel:review", "judge-main") in fold_keys
+            folded_counsel = render(fold_report, "codex", 120, 40, view="tree", unicode=glyphs,
+                navigation={"dismissed": True, "expanded_groups": {("review", "judge-main")}})
+            assert "gate pass" in folded_counsel and "verdict revise" not in folded_counsel, folded_counsel
+        for ident in ("gate-pass", "gate-fail", "counsel-verdict", "judge-worker"):
+            chosen_nav = dict(fixture_nav, selected=("result", ident))
+            chosen_judges = render(judgment_fixture, "codex", 120, 40, view=view_mode, unicode=glyphs, navigation=chosen_nav)
+            assert "╎" in chosen_judges if glyphs else ":" in chosen_judges, chosen_judges
+            assert any(h["action"] == ("result", ident) for h in chosen_nav["hits"]), chosen_nav
+        for columns, rows in ((28, 16), (42, 24), (80, 11), (80, 24), (120, 30)):
+            small_nav = {"dismissed": True}
+            small_judges = render(judgment_fixture, "codex", columns, rows, view=view_mode, unicode=glyphs, navigation=small_nav)
+            assert len(small_judges.splitlines()) <= rows and all(display_width(line) <= columns for line in small_judges.splitlines()), small_judges
+            assert any(h["action"] == ("chat", "judge-main") for h in small_nav["hits"]), small_nav
+            assert any(h["action"][0] == "result" for h in small_nav["hits"]), small_nav
+capture = render_graph(judgment_fixture, 120, 30, unicode=False, navigation={"dismissed": True})
+assert len(capture.splitlines()) == 30 and capture.isascii(), capture
+(temporary / "judge-board-ascii.txt").write_text(capture + "\n")
+
+# Ending names come from typed result/lifecycle evidence, including a successful worker whose verification failed.
+from panel_view import call_ending, ending_tag, call_tone, attention_header
+from room_view import execution_tag, end_words, call_classifier, session_log, past_body, past_calls
+ending_fixture = {"collection": {"ok": True}, "repo": {"name": "endings"},
+    "room": {"id": "endings", "participants": [{"participant": "ending-main", "role": "main", "joined": True,
+        "model": "gpt-6.1-sol"}], "messages": [], "call_results": {}},
+    "attempts": {"active_recent": [{"attempt_id": "ending-main", "state": "working",
+        "panel": {"role": "main", "room_id": "endings", "room_participant": "ending-main"}}]}}
+ending_cases = (
+    ("cancel-exit", "failed", 143, None, None, None, "cancelled", "[⊘ cancelled]", "dim"),
+    ("cancel-record", "cancelled", 1, None, "cancelled_by_owner", ".oms/artifacts/cancel.md", "cancelled", "[⊘ cancelled]", "dim"),
+    ("guard-record", "failed", 125, None, "worker_authority_violation", ".oms/artifacts/guard.md", "guard_stop", "[⛔ guard stop]", "alert"),
+    ("timeout-exit", "failed", 124, None, None, None, "timed_out", "[⏱ timed out]", "bad"),
+    ("verify-result", "failed", 0, 2, None, ".oms/artifacts/verify.md", "verify_failed", "[✗ verify failed]", "bad"),
+    ("provider-empty", "failed", 3, None, None, None, "provider_error", "[✗ provider error · exit 3]", "bad"),
+    ("failure-output", "failed", 1, None, None, ".oms/artifacts/failure.md", "failed", "[✗ failed: exit 1]", "bad"),
+    ("owner-decision", "review", 0, 0, None, ".oms/artifacts/decision.md", None, "[! awaiting decision]", "alert"))
+for ident, state, code, verify, reason, artifact, kind, expected, style in ending_cases:
+    ending_fixture["room"]["participants"].append({"participant": ident, "role": "worker", "parent": "ending-main",
+        "joined": True, "label": ident, "model": "gpt-6.1-sol"})
+    ending_fixture["attempts"]["active_recent"].append({"attempt_id": ident, "state": state,
+        "reason_code": reason, "task_id": ident,
+        "panel": {"role": "worker", "room_id": "endings", "room_participant": ident, "purpose": "builder"}})
+    ending_fixture["room"]["call_results"][ident] = {"exit": code, "verify_exit": verify,
+        "verify_status": "failed" if verify else "passed" if verify == 0 else "not_run", "artifact": artifact,
+        "ts": judgment_clock.strftime("%Y-%m-%dT%H:%M:%SZ", judgment_clock.gmtime())}
+    ending_fixture["room"]["messages"].append({"id": "result-" + ident, "sender": ident, "recipient": "ending-main",
+        "message_kind": "handoff", "pending_for": ["ending-main"], "ts": ending_fixture["room"]["call_results"][ident]["ts"],
+        "text": "Call exit=%s; parent acceptance pending." % code})
+ending_members = {m["participant"]: m for m in judgment_nodes(ending_fixture)}
+for ident, state, code, verify, reason, artifact, kind, expected, style in ending_cases:
+    member = ending_members[ident]
+    assert call_ending(member) == kind, member
+    assert execution_tag(member) == expected, member
+    assert call_tone(member) == style, member
+    ascii_tag = execution_tag(member, False)
+    assert ascii_tag.isascii() and ascii_tag == expected.replace("⊘", "x").replace("⛔", "!").replace("⏱", "!").replace("✗", "!").replace("·", "/"), ascii_tag
+    if kind:
+        assert end_words(member, "wrong") .startswith(kind.replace("_", " ")), member
+    log_report = deepcopy(ending_fixture)
+    log_report["room"]["messages"] = [m for m in log_report["room"]["messages"] if m["sender"] == ident]
+    log = "\n".join(line for line, _, _ in session_log(log_report, 150, 3))
+    if kind:
+        assert expected in log and (kind == "failed" or "Failed (exit" not in log), log
+for code in (129, 130, 143):
+    assert status_tag("failed", exit_code=code) == "[⊘ cancelled]"
+assert call_ending(dict(ending_members["verify-result"], state="done")) == "verify_failed"
+assert call_ending(dict(ending_members["verify-result"], verify_exit=None, reason_code="verification_failed")) == "verify_failed"
+assert call_ending(dict(ending_members["provider-empty"], artifact=".oms/artifacts/output.md", provider_error_exit=3)) == "provider_error"
+assert call_ending(dict(ending_members["cancel-exit"], state="working")) is None
+ending_queue = attention_items(ending_fixture)
+assert {item["cls"] for item in ending_queue} == {"failed", "guard_stop", "timed_out", "verify_failed", "provider_error", "decide"}, ending_queue
+assert len(ending_queue) == 6 and not any("cancel" in str(item["row_id"]) for item in ending_queue), ending_queue
+assert all(item["cls"] != "stale" for item in ending_queue)
+assert call_classifier(ending_fixture)(ending_members["cancel-exit"]) == "past"
+guard_read = deepcopy(ending_fixture)
+next(m for m in guard_read["room"]["messages"] if m["sender"] == "guard-record")["pending_for"] = []
+assert any(item["cls"] == "guard_stop" for item in attention_items(guard_read))
+guard_read["finalized"] = {"guard-record": "accepted"}
+assert not any(item["cls"] == "guard_stop" for item in attention_items(guard_read))
+projection_extra = deepcopy(ending_fixture)
+projection_extra["attempts"]["active_recent"] = [a for a in projection_extra["attempts"]["active_recent"] if a["attempt_id"] != "guard-record"]
+projection_extra["room_attempts"] = {"guard-record": {"attempt_id": "guard-record", "state": "failed",
+    "task_id": "guard-record", "reason_code": "worker_authority_violation", "refs": {"provider_error_exit": "125"}}}
+projected_guard = next(m for m in judgment_nodes(projection_extra) if m["participant"] == "guard-record")
+assert projected_guard["guard"] and projected_guard["provider_error_exit"] == 125, projected_guard
+projection_extra["attempts"]["active_recent"].append({"attempt_id": "guard-record", "state": "failed",
+    "panel": {"role": "worker", "room_id": "endings", "room_participant": "guard-record"}})
+assert next(m for m in judgment_nodes(projection_extra) if m["participant"] == "guard-record")["guard"]
+projection_extra["room_attempts"]["guard-record"]["attempt_id"] = "another-attempt"
+assert not next(m for m in judgment_nodes(projection_extra) if m["participant"] == "guard-record")["guard"]
+operation_verify = deepcopy(ending_fixture)
+operation_verify["room"]["call_results"]["verify-result"].pop("verify_exit")
+operation_verify["operations"] = {"recent": [{"attempt_id": "verify-result", "task_id": "verify-result",
+    "kind": "delegate", "verify_exit": 7}]}
+assert next(m for m in judgment_nodes(operation_verify) if m["participant"] == "verify-result")["verify_exit"] == 7
+for mode in ("graph", "tree"):
+    for glyphs in (False, True):
+        nav = {"dismissed": True, "expanded_groups": {("review", "ending-main")}}
+        picture = render(ending_fixture, "codex", 150, 50, view=mode, unicode=glyphs, navigation=nav)
+        assert "cancel-exit" not in picture and "cancel-record" not in picture, picture
+        assert "guard stop" in picture and "verify failed" in picture and "provider error" in picture, picture
+        assert all(display_width(line) <= 150 for line in picture.splitlines()), picture
+        for ident in ("guard-record", "timeout-exit", "verify-result", "provider-empty", "failure-output"):
+            expanded = render(ending_fixture, "codex", 150, 50, view=mode, unicode=glyphs,
+                navigation=dict(nav, selected=("result", ident)))
+            assert "╎" in expanded if glyphs else ":" in expanded, expanded
+            assert ident in expanded, expanded
+ending_board = render_graph(ending_fixture, 150, 45, navigation={"dismissed": True})
+ending_capture = [next(line for line in ending_board.splitlines() if line.startswith("Attention "))]
+ending_capture += [next(line for line in ending_board.splitlines() if ident in line and "[" in line)
+                   for ident in ("guard-record", "timeout-exit", "verify-result", "provider-empty", "failure-output", "owner-decision")]
+ending_past = past_calls(list(ending_members.values()), call_classifier(ending_fixture))
+ending_capture += [text for text, _, _ in past_body(ending_past, 150, 10, {}, {}, True) if "cancel-exit" in text]
+(temporary / "ending-kinds-capture.txt").write_text("\n".join(ending_capture) + "\n")
+with patch.dict(os.environ, {}, clear=True):
+    past_colours = render(ending_fixture, "codex", 150, 50, view="graph", color=True,
+        navigation={"dismissed": True, "tab": "past"})
+    assert paint("[⊘ cancelled]", "dim", color=True, colors=16) in past_colours, past_colours
+    attention_colours = render(ending_fixture, "codex", 150, 50, view="graph", color=True,
+        navigation={"dismissed": True, "tab": "needs"})
+    assert re.search(r"\033\[33m[^\n]*guard stop", attention_colours), attention_colours
+    assert re.search(r"\033\[31m[^\n]*provider error", attention_colours), attention_colours
 
 view = json.loads((temporary / "panel-active.json").read_text())
 view["goal"] = {"text": "패널 개선 / show workers and verify results"}
@@ -2274,7 +2483,7 @@ assert "DO_NOT_ATTRIBUTE" in attributed_view.split("OMS activity", 1)[0]
 assert "DO_NOT_ATTRIBUTE" not in attributed_view.split("OMS activity", 1)[1]
 assert "RESEARCHER model unknown" in render(view, "codex", 100, 32)
 view["attempts"]["recent"] = [{"state": "timed_out", "provider": "claude", "tool": "review"}]
-assert "[✗ timed out]" in render(view, "codex", 100, 32)
+assert "[⏱ timed out]" in render(view, "codex", 100, 32)
 assert "Worker state unavailable" in render({}, "codex", 100, 32)
 assert "Collection degraded" in render({}, "codex", 100, 32)
 # Titles occupy their own bright lines; metadata never competes for that space.
@@ -3257,7 +3466,7 @@ for columns, rows_high in ((157, 61), (110, 30), (80, 24)):
         assert sum(line.startswith("Attention ") for line in visual_rows) == 1, visual
         strip = [h for h in visual_nav["hits"] if h["action"][0] == "tab" and h["y"] == visual_nav["box"]["y1"]]
         assert [h["action"][1] for h in strip] == [key for key, _ in room_view.TABS], strip
-        assert "more judges" in visual or sum(h.get("tree", False) and h["action"][1].startswith("board-advisor") for h in visual_nav["hits"]) == 4, visual
+        assert "more counsel" in visual or sum(h.get("tree", False) and h["action"][1].startswith("board-advisor") for h in visual_nav["hits"]) == 4, visual
         if rows_high == 61:
             assert "GOAL END" in visual and "Session log" in visual, visual
             assert visual.count("Recorded check finished") == 1 and "[main Opus 5.5]" in visual, visual
@@ -12955,6 +13164,8 @@ truth["room"]["messages"] = [{"id": "result-builder", "sender": "builder", "reci
 truth["room"]["call_results"] = {"builder": {"exit": 1, "ts": stamp, "seq": 5, "read": False}}
 for attempt in truth["attempts"]["active_recent"]:
     attempt["state"] = {"builder": "failed", "researcher": "review", "explorer": "review"}.get(attempt["attempt_id"], attempt["state"])
+    if attempt["attempt_id"] == "builder":
+        attempt["reason_code"] = "worker_authority_violation"
 for glyphs, dot, ending in ((True, "·", "→"), (False, "/", "->")):
     board = render(truth, "codex", 157, 40, view="graph", unicode=glyphs, main_attempt="flow-attempt", navigation={})
     assert "Now: 방 범위 선언" in board and "Now: Now:" not in board, board
@@ -12963,6 +13174,8 @@ for glyphs, dot, ending in ((True, "·", "→"), (False, "/", "->")):
     assert board.count("awaiting decision") >= 2, board
 nonguard = deepcopy(truth)
 nonguard["room"]["messages"][0]["text"] = "Call exit=1; parent acceptance pending."
+nonguard["room"]["call_results"]["builder"]["artifact"] = ".oms/artifacts/failed-output.md"
+next(a for a in nonguard["attempts"]["active_recent"] if a["attempt_id"] == "builder")["reason_code"] = None
 assert "failed: exit 1" in render(nonguard, "codex", 157, 40, view="graph", main_attempt="flow-attempt", navigation={})
 # The tree never doubles "Now:" and a main with no readings gets one usage line instead of a box.
 tree_board = render(truth, "codex", 157, 40, view="tree", navigation={})
@@ -14137,8 +14350,8 @@ for team_report, expected_team in ((flow, "5 active"),
 assert graph_text.team_counts([{"state": state} for state in
     ("presence unknown", "done", "working", "failed", "cancelled", "done", "review")],
     lambda call: "review" if call["state"] in {"done", "review"} else "live") == [
-        "1 attention", "1 active", "3 awaiting decision", "1 finished", "1 unrecorded"]
-assert graph_text.team_counts([{"state": "done"}, {"state": "cancelled"}]) == ["2 finished"]
+        "1 attention", "1 active", "3 awaiting decision", "1 cancelled", "1 unrecorded"]
+assert graph_text.team_counts([{"state": "done"}, {"state": "cancelled"}]) == ["1 finished", "1 cancelled"]
 assert any("status unknown" in line for line in team_lines) and "failed (exit 1)" in "\n".join(team_lines), team_lines
 # Spare rows between the call tree and the box carry a display-only summary; the tree and the box keep every row.
 summary_room = deepcopy(admission_team)

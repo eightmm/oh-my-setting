@@ -5,7 +5,8 @@ from panel_metrics import usage_line
 from panel_view import (ATTENTION_STATES, LIVE_STATES, PALETTE, activity, box_edge, box_row, clipped,
                         main_occupied, menu_rows, status_alerts, TERMINAL_STATES, tone, usage_words, worker_rows, wrapped,
                         role_style, call_identity, status_tag, glyph, paint, color_count, light_theme, age_label,
-                        JUDGE_ROLES, WORKER_ROLES, paint_card_edges)
+                        JUDGE_ROLES, WORKER_ROLES, paint_card_edges, judge_band, band_style, role_legend,
+                        judgment_tag, judgment_tone, call_ending, ending_tag)
 from room_view import (action as member_action, call_order, past_calls, context_note, open_count, footer_hints, live_unread,
                        goal_banner, main_names, model_name, native_advisors, nodes, plan_idle, readable, said,
                        settler, spawn_bar, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
@@ -83,7 +84,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
 
     def call_row(call, connector="", action=None, fold=False, extra=""):
         state = main_state(call) if call.get("role") == "main" else call["state"]
-        tag = status_tag(state, exit_code=call.get("exit"), unicode=unicode)
+        tag = judgment_tag(dict(call, purpose=purpose(call)), report, unicode,
+                           ending_tag(dict(call, state=state), unicode))
+        tag_tone = judgment_tone(tag, call_ending(call) or state)
         age = main_words(call, unicode) if call.get("role") == "main" else age_label(call.get("joined_at")) or "unknown"
         tail = tag + "  " + age
         label = call.get("title") or (None if call.get("role") == "main" else call["participant"])
@@ -105,10 +108,10 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         gutter = glyph("selected", unicode) + " " if action and selected == action else "  "
         padding = " " * max(2, available - display_width(identity) - display_width(tail))
         text = gutter + connector + identity + padding + tail
-        style = role_style(call.get("role"), purpose(call))
+        style = band_style(call.get("role"), purpose(call))
         add(text, None, action, fold)
         rows[-1]["spans"] = [(gutter, "text"), (connector, style), (identity, style),
-                             (padding, "text"), (tag if tail.startswith(tag) else tail, tone(state)),
+                             (padding, "text"), (tag if tail.startswith(tag) else tail, tag_tone),
                              (tail[len(tag):] if tail.startswith(tag) else "", "metadata")]
         rows[-1]["identity"] = action == selected
         if call.get("role") == "main" and action != selected:
@@ -122,7 +125,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             rows.pop()
             add(lead + box_edge(call_identity(visual_role(call), call.get("model")), card_width, unicode, dashed=True), style, action, fold)
             add(lead + box_row(tag + "  " + age, card_width, unicode, dashed=True), None, action)
-            rows[-1]["tag_span"] = (tag, tone(state))
+            rows[-1]["tag_span"] = (tag, tag_tone)
             rows[-1]["card_role"] = style
             for line in wrapped(label or "No task recorded", max(1, card_width - 4), 2):
                 add(lead + box_row(line, card_width, unicode, dashed=True), None, action)
@@ -140,7 +143,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
                 rows[-1]["card_role"] = style
             add(lead + box_edge("", card_width, unicode, "bottom", dashed=True), style, action)
 
-    def call_groups(attached, owner, root_stem):
+    def call_groups(attached, owner, root_stem, band=None):
         roles = list(dict.fromkeys(visual_role(m) for m in attached))
         groups = [(role, [m for m in attached if visual_role(m) == role and classify(m) == "live"])
                   for role in roles]
@@ -150,18 +153,25 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             last_group = group_index == len(groups) - 1
             group_title = dict(CALL_GROUPS).get(role)
             group_key = (role, owner)
+            # Keep existing group keys unless two judgment bands would share one fold control.
+            if band == "counsel" and group_title and any(
+                    judge_band(m.get("role"), purpose(m)) == "gate" and classify(m) == role
+                    and m.get("parent") in {owner, owners.get(owner, {}).get("attempt")} for m in calls):
+                group_key = ("counsel:" + role, owner)
             heading = group_title or ("COUNCIL" if role == "council" else role.upper() + "S")
+            if band and group_index == 0:
+                heading = glyph(band, unicode) + " " + band.title() + sep + heading
             if group_title:
                 mark = ("▾" if group_key in expanded else "▸") if unicode else ("v" if group_key in expanded else ">")
                 add(root_stem + (end if last_group else prefix) + "%s %s (%s)" % (mark, heading, len(children)),
-                    "review" if role == "review" else "dim", ("group", group_key))
+                    ("judge" if band == "gate" else "counsel") if band else "review" if role == "review" else "dim", ("group", group_key))
                 if group_key not in expanded:
                     if height >= 16:
                         continue
                     # A short viewport still exposes a call directly, alongside the group control.
                     children = children[:1]
             else:
-                add(root_stem + (end if last_group else prefix) + heading + " (%s)" % len(children), role_style(role))
+                add(root_stem + (end if last_group else prefix) + heading + " (%s)" % len(children), band_style(role))
             indent = root_stem
             for child_index, child in enumerate(children):
                 branch = end if child_index == len(children) - 1 else prefix
@@ -179,7 +189,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         action = ("chat", main["participant"])
         folded = main["participant"] in collapsed
         if not folded:
-            call_groups([m for m in attached if role_style(m.get("role"), purpose(m)) == "judge"], main["participant"], root_stem)
+            for band in ("gate", "counsel"):
+                call_groups([m for m in attached if judge_band(m.get("role"), purpose(m)) == band],
+                            main["participant"], root_stem, band)
         call_row(main, action=action, fold=bool(attached), extra="%s calls" % len(attached) if folded else "")
         if not folded:
             call_groups([m for m in attached if role_style(m.get("role"), purpose(m)) != "judge"], main["participant"], root_stem)
@@ -275,6 +287,13 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     banner = goal_banner(report, width, unicode, True)
     head = [{"text": clipped(heading, width), "style": "main"},
             {"text": clipped(usage_line(report, width, unicode), width), "style": "dim"}]
+    if height >= 20:
+        legend_spans, room_left = [], width
+        for i, (text, style) in enumerate(role_legend(unicode)):
+            part = clipped(text + ("  " if i < 3 else ""), room_left)
+            legend_spans.append((part, style))
+            room_left -= display_width(part)
+        head.append({"text": "".join(part for part, _ in legend_spans), "spans": legend_spans})
     head += [{"text": clipped(text, width), "style": style, "action": ("tab", "plan")} for text, style in banner]
     head += [{"text": clipped(alert, width), "style": "bad"} for alert in alerts]
     head += needs_strip(report, width, unicode, ranked=ranked)
@@ -403,7 +422,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             value = box_edge(value, width, unicode, "divider") if row.get("divider") else box_row(value, width, unicode)
         if color and row.get("spans"):
             styled = "".join(paint(text, token, color=True, colors=color_count(), light=light_theme(),
-                                   bold=token in {"main", "judge", "worker", "unknown"}) for text, token in row["spans"])
+                                   bold=token in {"main", "judge", "counsel", "worker", "unknown"}) for text, token in row["spans"])
             value = value.replace(row["text"], styled, 1)
         elif color and row.get("tag_span"):
             tag, style_key = row["tag_span"]

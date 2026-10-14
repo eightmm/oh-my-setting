@@ -8,7 +8,8 @@ from dashboard_projection import ELLIPSIS, clean, count as valid_count, display_
 from panel_view import (ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, PALETTE, activity, box_edge, box_row,
                         clipped, location_label, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
                         role_style, call_identity, status_tag, paint, paint_card_edges, color_count, light_theme, glyph,
-                        JUDGE_ROLES, WORKER_ROLES, swap_line)
+                        JUDGE_ROLES, WORKER_ROLES, swap_line, judge_band, band_style, role_legend,
+                        judgment_tag, judgment_tone, call_ending, ending_tag, call_tone)
 
 
 def room_ids(room):
@@ -50,8 +51,6 @@ def nodes(report):
             linked.setdefault(ident, []).append(row)
     output = []
     finalized = mapping(report.get("finalized"))
-    guarded = {m.get("sender") for m in map(mapping, listing(room.get("messages")))
-               if result_handoff(room, m) and "worker guard stopped this run" in str(m.get("text")).lower()}
     present = {mapping(m).get("participant") for m in listing(room.get("participants"))}
     # Calls settled in a room this one continues are not carried, yet some still wait on the person; only one with
     # attempt evidence has a task to wait on, which bounds the work however long the chain grows.
@@ -68,6 +67,14 @@ def nodes(report):
             # Outside the projection window: the full-projection row for this call, when the snapshot found one.
             attempt = mapping(mapping(report.get("room_attempts")).get(member.get("participant")))
         meta = mapping(attempt.get("panel"))
+        refs = mapping(attempt.get("refs"))
+        extra = mapping(mapping(report.get("room_attempts")).get(member.get("participant")))
+        if not attempt.get("attempt_id") or extra.get("attempt_id") != attempt.get("attempt_id") or extra.get("state") != attempt.get("state"):
+            extra = {}
+        reason = attempt.get("reason_code") or extra.get("reason_code") or member.get("reason_code")
+        operation = next((r for r in listing(mapping(report.get("operations")).get("recent"))
+                          if attempt.get("attempt_id") and r.get("attempt_id") == attempt["attempt_id"]
+                          and r.get("task_id") == attempt.get("task_id") and r.get("kind") in {"delegate", "call", "ask", "review", "consult"}), {})
         status = mapping(mapping(report.get("provider_status")).get("codex"))
         native = mapping(status.get("native_models"))
         reading = mapping(native.get(member.get("participant")))
@@ -83,7 +90,11 @@ def nodes(report):
         # Attempt evidence wins; a call's result message is the fallback once its attempt left the projection.
         result = ({"exit": member.get("exit"), "ts": member.get("ended")} if member.get("_predecessor") else
                   mapping(mapping(room.get("call_results")).get(member.get("participant"))))
-        code = result.get("exit")
+        code = result.get("exit", attempt.get("exit", member.get("exit")))
+        provider_error = attempt.get("provider_error_exit", refs.get("provider_error_exit", extra.get("provider_error_exit",
+                            mapping(extra.get("refs")).get("provider_error_exit", member.get("provider_error_exit")))))
+        if isinstance(provider_error, str):
+            provider_error = int(provider_error) if re.fullmatch(r"\d{1,4}", provider_error) else None
         derived = "presence unknown" if member.get("role") == "main" or type(code) is not int else \
             "done" if code == 0 else "timed_out" if code == 124 else "failed"
         state = attempt.get("state") or derived
@@ -92,7 +103,11 @@ def nodes(report):
         output.append(dict(member, attempt=attempt.get("attempt_id"), state=state, _decided=decided,
                            panel_activity=mapping(mapping(report.get("main_activity")).get(member.get("participant"))),
                            ended=result.get("ts"), exit=code if type(code) is int else None,
-                           guard=member.get("participant") in guarded,
+                           artifact=result.get("artifact") or attempt.get("artifact") or member.get("artifact"),
+                           reason_code=reason, guard=member.get("guard") is True or reason == "worker_authority_violation",
+                           verify_exit=result.get("verify_exit", attempt.get("verify_exit", operation.get("verify_exit", member.get("verify_exit")))),
+                           verify_status=result.get("verify_status", attempt.get("verify_status", member.get("verify_status"))),
+                           provider_error_exit=provider_error if type(provider_error) is int else None,
                            model=model, model_at_launch=meta.get("model") or member.get("model"),
                            task_id=attempt.get("task_id"), decision=finalized.get(attempt.get("task_id")), location=meta.get("location"),
                            lease_id=meta.get("lease_id") or attempt.get("lease_id"),
@@ -261,10 +276,14 @@ def closed_tasks(report):
 
 
 def failure_handled(report, call, read_results=None, closed=None):
-    """A consumed result handoff, a later round of its task, or the task's close settles a failure."""
+    """A handoff, later round or closed task settles failures; guard stops need an owner decision."""
     read_results = handled_results(mapping(report.get("room"))) if read_results is None else read_results
     closed = closed_tasks(report) if closed is None else closed
-    return (call["state"] in ATTENTION_STATES - {"waiting_input", "waiting_approval", "review", "blocked"}
+    if call_ending(call) == "guard_stop":
+        return bool(call.get("task_id") and (call.get("task_id") in closed or
+                    mapping(report.get("finalized")).get(call["task_id"]) in {"completed", "accepted", "failed", "rejected"}))
+    return ((call_ending(call) in {"failed", "timed_out", "verify_failed", "provider_error"} or
+             call["state"] in ATTENTION_STATES - {"waiting_input", "waiting_approval", "review", "blocked"})
             and ("result-" + str(call.get("participant")) in read_results or call.get("superseded") is True
                  or bool(call.get("task_id")) and call.get("task_id") in closed))
 
@@ -293,6 +312,11 @@ def settler(report):
         # Finished or aged-out calls, and failed ones whose result its main has read, leave the board; the owner's
         # recorded decision on the task settles its failed, review and blocked calls, reading a result settles no review.
         decided = finalized.get(call.get("task_id")) in {"completed", "accepted"}
+        ending = call_ending(call)
+        if ending == "cancelled":
+            return True
+        if ending in {"guard_stop", "verify_failed", "timed_out", "provider_error"}:
+            return failure_handled(report, call, read_results, closed) or decided
         task_id = call.get("task_id")
         review = call["state"] == "review" or call["state"] == "done" and call.get("participant") in listing(report.get("awaiting_admission"))
         task = plan_tasks.get(task_id)
@@ -320,6 +344,11 @@ def call_classifier(report):
     mains = {key for m in nodes(report) if m.get("role") == "main" for key in (m["participant"], m.get("attempt")) if key}
 
     def classify(call):
+        ending = call_ending(call)
+        if ending == "cancelled":
+            return "past"
+        if ending == "guard_stop" and not settled(call):
+            return "live"
         if call["state"] == "review" and not settled(call) or (
                 call["state"] == "done" and call.get("participant") in awaiting and not settled(call)):
             return "review"
@@ -363,13 +392,12 @@ def elapsed(ts):
 def end_words(call, hint):
     if call.get("_decided"):
         return "decided"
-    if call.get("state") == "failed":
-        if call.get("guard"):
-            return "guard stop"
-        if call.get("exit") == 124:
-            return "timed out"
-        if call.get("exit") is not None:
-            return "failed (exit %s)" % call["exit"]
+    ending = call_ending(call)
+    if ending:
+        words = ending.replace("_", " ")
+        if ending in {"failed", "provider_error"} and type(call.get("exit")) is int:
+            words += " (exit %s)" % call["exit"]
+        return words
     return hint
 
 
@@ -583,8 +611,7 @@ def goal_box(report, width, unicode, compact=False):
 
 
 def execution_tag(member, unicode=True):
-    phase = "timed_out" if member.get("exit") == 124 else main_state(member)
-    return status_tag(phase, exit_code=member.get("exit"), unicode=unicode)
+    return ending_tag(dict(member, state=main_state(member)), unicode)
 
 
 def member_identity(member, label=True):
@@ -757,10 +784,12 @@ def declared_status(room, participant, width):
 
 
 def team_counts(calls, classify=None):
-    counts = dict.fromkeys(("attention", "active", "awaiting decision", "finished", "unrecorded"), 0)
+    counts = dict.fromkeys(("attention", "active", "awaiting decision", "finished", "cancelled", "unrecorded"), 0)
     for call in calls:
         state = call.get("state")
-        if classify and classify(call) == "review":
+        if call_ending(call) == "cancelled":
+            bucket = "cancelled"
+        elif classify and classify(call) == "review":
             bucket = "awaiting decision"  # the board's group of the same name counts the same calls
         elif state in ATTENTION_STATES and classify and classify(call) == "past":
             bucket = "finished"  # handled, superseded by a later round, or its task closed
@@ -978,8 +1007,14 @@ def session_log(report, width, rows, unicode=True):
         except ValueError:
             stamp = "unknown"
         left = stamp + " " + actor + " "
-        outcome = "[" + clean(message["outcome"], 30) + "]" if message.get("outcome") else ""
-        text = clipped(readable(message.get("text"), " ") or "(empty)", max(1, width - 6 - display_width(left + outcome)))
+        result_tag = judgment_tag(member, report, unicode, execution_tag(member, unicode))
+        outcome = (result_tag if result_handoff(room, message) and call_ending(member) else
+                   "[" + clean(message["outcome"], 30) + "]" if message.get("outcome") else "")
+        source_text = str(message.get("text") or "")
+        if result_handoff(room, message) and call_ending(member):
+            words = result_tag[1:-1] if judge_band(member.get("role"), member.get("purpose")) else end_words(member, "finished")
+            source_text = re.sub(r"^Call exit=\d+; parent acceptance pending\.?", words + ".", source_text)
+        text = clipped(readable(source_text, " ") or "(empty)", max(1, width - 6 - display_width(left + outcome)))
         plain = left + text + " " * max(2, width - 4 - display_width(left + text + outcome)) + outcome
         output.append((box_row(plain, width, unicode), actor, role_style(member.get("role"), member.get("purpose"))))
     output.append((box_edge("", width, unicode, "bottom"), None, "border"))
@@ -1065,6 +1100,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     folded_calls = hidden_calls if interactive and compact and not attention_only and not children else []
     children.sort(key=lambda m: (m["state"] not in LIVE_STATES, call_order(m)[1:]))
     judges = [c for c in children if role_style(c.get("role"), c.get("purpose")) == "judge"]
+    gates = [c for c in judges if judge_band(c.get("role"), c.get("purpose")) == "gate"]
+    counsel = [c for c in judges if c not in gates]
     workers = [c for c in children if c not in judges]
     selected_member = next((c for c in members + all_calls if action(c) == selected), None)
     preview = mapping(navigation.get("preview"))
@@ -1097,13 +1134,13 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     clock = time.strftime("%m-%d ") + WEEKDAYS[time.localtime().tm_wday] + time.strftime(" %H:%M")
     room_clock = width - display_width(title) - display_width(clock)
     lines.append(styled(clipped(title, width), bold=True) + (" " * room_clock + styled(clock, "metadata") if room_clock >= 2 else ""))
-    legend = "  ".join(glyph("swatch", unicode) + " " + label for label in ("Main", "Judges", "Workers"))
+    legend = "  ".join(text for text, _ in role_legend(unicode))
     legend_state = "  ~ running  + verified  ! attention"
     if room.get("id") and display_width(legend + legend_state) <= width:
         legend += legend_state
     # Role swatches carry only role colour, independent of execution state.
-    for label, style_key in (("Main", "main"), ("Judges", "judge"), ("Workers", "worker")):
-        legend = legend.replace(glyph("swatch", unicode) + " " + label, styled(glyph("swatch", unicode) + " " + label, style_key))
+    for text, style_key in role_legend(unicode):
+        legend = legend.replace(text, styled(text, style_key))
     lines.append(legend)
     hints = menu_rows(width, 1, unicode, navigation.get("menu_help", False), managed,
                       occupied=navigation["main_occupied"], installed=navigation.get("installed")) if menu else []
@@ -1127,7 +1164,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         dock_body = 0 if same_reader else 1
     dock_rows = dock_body + 2 if dock_body else 1
     main_rows = 5 if height >= 28 else 4 if height >= 20 else 3
-    minimum_tree = sum(min(2, len(group)) for group in (judges, workers)) or int(bool(folded_calls))
+    minimum_tree = int(bool(gates)) + int(bool(counsel)) + min(2, len(workers)) or int(bool(folded_calls))
     goal_rows = goal_box(report, width, unicode)
     goal_cap = max(3, total_rows - len(lines) - min(dock_rows, 4) - main_rows - minimum_tree - 1)
     goal_overflow = len(goal_rows) > goal_cap
@@ -1158,12 +1195,13 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     remaining = max(0, total_rows - len(lines) - dock_rows - main_rows)
     expansion = 3 if selected_member and selected_member in children and remaining >= minimum_tree + 3 else 0
     remaining -= expansion
-    allocation = {"judges": 0, "calls": 0}
-    for name, group in (("judges", judges), ("calls", workers)):
-        allocation[name] = min(len(group), 2, max(0, remaining - sum(allocation.values())))
+    groups = (("gate", gates), ("counsel", counsel), ("calls", workers))
+    allocation = dict.fromkeys((name for name, _ in groups), 0)
+    for name, group in groups:
+        allocation[name] = min(len(group), 1 if name != "calls" else 2, max(0, remaining - sum(allocation.values())))
     while sum(allocation.values()) < remaining:
         changed = False
-        for name, group in (("judges", judges), ("calls", workers)):
+        for name, group in groups:
             if allocation[name] < len(group) and sum(allocation.values()) < remaining:
                 allocation[name] += 1
                 changed = True
@@ -1180,11 +1218,11 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         # A finished write call with an unadmitted patch says so; "done" alone would hide the decision it needs.
         if member.get("state") == "done" and member.get("participant") in awaiting_admission:
             return status_tag("review", unicode=unicode).replace("awaiting decision", "patch awaits admission")
-        return execution_tag(member, unicode) + (" / guard stop" if member.get("guard") else "")
+        return judgment_tag(member, report, unicode, execution_tag(member, unicode))
 
-    def card_lines(member, content, indent=0, tree_card=False):
-        style_key = role_style(member.get("role"), member.get("purpose"))
-        identity = member_identity(member)
+    def card_lines(member, content, indent=0, tree_card=False, band_prefix=""):
+        style_key = band_style(member.get("role"), member.get("purpose"))
+        identity = band_prefix + member_identity(member)
         mark = glyph("selected", unicode) + " " if action(member) == selected else ""
         card_width, card_left = main_width - indent, main_left + indent
         block = [box_edge(mark + identity, card_width, unicode, dashed=True)]
@@ -1197,7 +1235,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
                 cell = paint_card_edges(cell, style_key, unicode=unicode, color=color, colors=colors, light=light)
                 tag = tagged(member)
                 if tag in cell:
-                    cell = cell.replace(tag, styled(tag, tone(member.get("state"))))
+                    cell = cell.replace(tag, styled(tag, judgment_tone(tag, call_ending(member) or member.get("state"))))
             lines.append(" " * card_left + cell + " " * max(0, width - card_left - card_width))
             hits.append({"y": len(lines), "x1": 1 if tree_card and n == 0 else card_left + 1,
                          "x2": width if tree_card and n == 0 else card_left + card_width,
@@ -1219,32 +1257,34 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         hidden = [c for c in group if c not in shown]
         first = len(lines) + 1
         for n, member in enumerate(shown):
-            style_key = role_style(member.get("role"), member.get("purpose"))
+            style_key = band_style(member.get("role"), member.get("purpose"))
             connector = ("└╌ " if n == len(shown) - 1 and not hidden else "├╌ ") if unicode else ("`- " if n == len(shown) - 1 and not hidden else "+- ")
             mark = glyph("selected", unicode) + " " if action(member) == selected else "  "
+            band_prefix = (glyph(name, unicode) + " " + (name.title() + " " if n == 0 else "")) if name != "calls" else ""
             tag = tagged(member)
             available = max(0, width - stem - display_width(connector + mark))
             tail = clipped(tag + "  " + (elapsed(member.get("joined_at")) or "unknown"), max(0, available - 3))
-            label = clipped(member_identity(member), max(1, width - stem - display_width(connector + mark + tail) - 2))
+            label = clipped(band_prefix + member_identity(member), max(1, width - stem - display_width(connector + mark + tail) - 2))
             gap = max(2, width - stem - display_width(connector + mark + label + tail))
             lines.append(" " * stem + styled(connector, style_key) + mark + styled(label, style_key, action(member) == selected) +
-                         " " * gap + styled(tail[:len(tag)], tone(member.get("state"))) + styled(tail[len(tag):], "metadata"))
+                         " " * gap + styled(tail[:len(tag)], judgment_tone(tag, call_ending(member) or member.get("state"))) + styled(tail[len(tag):], "metadata"))
             hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action(member), "preview": True, "tree": True})
             drawn.append(member)
             if expansion and member is selected_member:
                 lines.pop()
                 hits.pop()
                 card_lines(member, [tagged(member) + "  " + (elapsed(member.get("joined_at")) or "unknown"),
-                                    "Task: " + clean(member.get("title"))], indent=4, tree_card=True)
+                                    "Task: " + clean(member.get("title"))], indent=4, tree_card=True, band_prefix=band_prefix)
         if hidden and slots > 1:
             after = [m for m in group[start + visible:] if m in hidden]
             add(padded(" " * stem + ("└╌ " if unicode else "`- ") + glyph("ellipsis", unicode) + " %s more %s / scroll" % (
-                len(hidden), "judges" if name == "judges" else "workers"), width), "metadata")
+                len(hidden), name if name != "calls" else "workers"), width), "metadata")
             hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action((after or hidden)[0]), "preview": True, "tree": True})
         bands.append({"name": name, "y1": first, "y2": len(lines), "x1": 1, "x2": width})
         offsets[name] = start
 
-    tree(judges, "judges", allocation["judges"])
+    tree(gates, "gate", allocation["gate"])
+    tree(counsel, "counsel", allocation["counsel"])
     if primary:
         tag = tagged(primary)
         activity_note = main_words(primary, unicode)
@@ -1404,7 +1444,7 @@ def summary_card(member, preview, width, room=None, unicode=True):
         if member.get("joined_at"):
             recorded.append((clock_stamp(member["joined_at"]) or "unknown") + " launched")
         if member.get("ended"):
-            recorded.append((clock_stamp(member["ended"]) or "unknown") + " " + status_tag(member.get("state"), exit_code=member.get("exit"), unicode=unicode))
+            recorded.append((clock_stamp(member["ended"]) or "unknown") + " " + execution_tag(member, unicode))
     lines.append("Transitions: " + ((" " + glyph("right", unicode) + " ").join(recorded) or "not recorded"))
     verification = mapping(row.get("verification"))
     code = verification.get("exit")
@@ -1673,6 +1713,15 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                     if identity in line:
                         style_key = role_style(identity.split(" ", 1)[0].lower())
                         line = line.replace(identity, paint(identity, style_key, color=color, colors=colors, light=light, bold=picked))
+                if active == "past":
+                    ended_call = next((call for call in past if action(call) == target), None)
+                    if ended_call:
+                        tag = execution_tag(ended_call, unicode)
+                        line = line.replace(tag, paint(tag, call_tone(ended_call), color=color, colors=colors, light=light), 1)
+            elif active == "needs" and len(row) > 3:
+                item = next((item for item in attention if item["row_id"] == row[3]), None)
+                if item:
+                    line = line.replace(text, paint(text, item["style"], color=color, colors=colors, light=light), 1)
             lines.append(line)
             if target:
                 # Body text without its own link is passive, so a click that selects text changes nothing.
@@ -1726,16 +1775,18 @@ def past_body(past, width, capacity, navigation, labels, unicode):
             code = call.get("exit")
             state = "done" if code == 0 else "failed" if type(code) is int else "unknown"
         acceptance = " [accepted]" if call.get("decision") == "accepted" else " [main decided]" if call.get("_decided") or call.get("decision") == "completed" else " [acceptance pending]"
-        tag = status_tag(state, exit_code=call.get("exit"), unicode=unicode)
+        if call_ending(call) == "cancelled":
+            acceptance = ""
+        tag = execution_tag(dict(call, state=state), unicode)
         identity = member_identity(call)
         tails = [tag + acceptance + "  " + end, tag + acceptance + "  " + end[-5:], tag + acceptance]
         tail = next((value for value in tails if display_width(identity + value) + 2 <= width), tails[-1])
         if width < 60:
             identity = clean(call.get("title")) or identity
-            tail = status_tag(state, unicode=unicode)
+            tail = tag
         available = max(1, width - display_width(tail) - 2)
         if available < 12 and width >= 60:
-            tail = status_tag(state, exit_code=call.get("exit"), unicode=unicode) + (" [decided]" if call.get("_decided") else "")
+            tail = tag + (" [decided]" if call.get("_decided") else "")
             available = max(1, width - display_width(tail) - 2)
         left = clipped(identity, available)
         text = left + " " * max(2, width - display_width(left + tail)) + tail
