@@ -73,6 +73,7 @@ prompt="$(cat)"
 }
 case "${OMS_TASK_ID:-}:$prompt" in
   t2:*) printf 'two\n' > delegated2.txt ;;
+  t9:*) printf 'one\nrepair\n' > delegated.txt ;;
   executor:*|executor-recovery:*) printf 'executor\n' > executor.txt ;;
   resume-fail:*|fresh-fail:*) printf 'repair\n' > repair.txt ;;
   repair-signal:*) printf 'signal-repair\n' > signal-repair.txt ;;

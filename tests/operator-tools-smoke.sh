@@ -4189,6 +4189,9 @@ end = time.monotonic() + 60
 while not Path(os.environ["LEASE_FIXTURE_RELEASE"]).exists():
     assert time.monotonic() < end, "worker fixture barrier exceeded"
     time.sleep(.05)
+if os.environ.get("OMS_PANEL_PURPOSE") == "implement":
+    with Path("value.txt").open("a", encoding="utf-8") as handle:
+        handle.write("worker change\\n")
 LEASEWAIT
   fi
   cat > "${PANEL_TEST_PROMPT:-/dev/null}"
@@ -9501,7 +9504,7 @@ assert json.loads(call(plan_cli + ["show", "--id", "plan-standalone"]))["state"]
 # Missing tasks retain the legacy unprotected write path.
 missing_before = worker_log.read_bytes()
 legacy = subprocess.run(write_plan_dispatch + ["--task-id", "plan-not-recorded", "--label", "Legacy write"],
-                        env=room_env, capture_output=True, text=True)
+                        env=dict(room_env, PANEL_TEST_MODE="write"), capture_output=True, text=True)
 assert legacy.returncode == 0 and worker_log.read_bytes() != missing_before, legacy
 finish_fixture_reviews()
 call(plan_cli + ["review", "--id", "plan-link", "--lease-id", held["lease_id"]])
@@ -9856,7 +9859,8 @@ def exercise_observed_worker_leases():
                 call(plan_api + ["reclaim", "--include-running", "--ttl", "1"], env)
                 assert (project / ".oms/plan/tasks.json").read_bytes() == plan_bytes, "live exact lease changed"
             release.touch()
-            output, errors = child_process.communicate(timeout=30)
+            # A write worker now captures a patch and an automatic review; full gates run this beside other suites.
+            output, errors = child_process.communicate(timeout=120)
             assert child_process.returncode == 0, (output, errors)
             delegate_rows = [r for r in json.loads(call(["bash", str(panel.ENTRY), "artifact-index", "--repo",
                              str(project), "list", "1000", "--json"]))["rows"]

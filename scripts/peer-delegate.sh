@@ -52,6 +52,8 @@ DELEGATION_NATIVE_PID_SOURCE=""
 DELEGATION_STARTED=""
 VERIFY_CMD=""
 NO_VERIFY=0
+ALLOW_NO_CHANGE=0
+no_change=0
 ARTIFACT_DIR=""
 APPLY=0
 ALLOW_RESTRUCTURE=0
@@ -144,6 +146,9 @@ Options:
                        never a patch; the role's prose mandate gains the
                        matching authority. Incompatible with --apply.
   --no-verify          Skip the default scripts/check.sh verification.
+  --allow-no-change    Treat an empty write patch as an allowed no_change result.
+                       Otherwise a panel dispatch or plan task whose write
+                       patch is empty exits 6 (no changes); direct calls exit 0.
   --repair N           On worker or verify failure, re-run the same worker in
                        the same worktree up to N times (1-3), feeding back the
                        original brief, its rejected patch, and the failing
@@ -326,6 +331,10 @@ while [ "$#" -gt 0 ]; do
       NO_VERIFY=1
       shift
       ;;
+    --allow-no-change)
+      ALLOW_NO_CHANGE=1
+      shift
+      ;;
     --read-only)
       WORKER_ACCESS="read"
       shift
@@ -462,6 +471,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "$ALLOW_NO_CHANGE" = 1 ] && [ -n "$PLAN_TASK_ID" ]; then
+  fail "--allow-no-change cannot complete a plan task; record a no-change result without --plan-task"
+fi
+# Only orchestrated writes (a panel dispatch or a plan task) fail on an empty
+# patch; a direct call still records and prints no_change but exits 0.
+if [ "${OMS_PANEL_DISPATCH:-0}" != 1 ] && [ -z "$PLAN_TASK_ID" ]; then
+  ALLOW_NO_CHANGE=1
+fi
 
 if [ -n "$AUTOPILOT_OWNER_ID" ]; then
   case "$AUTOPILOT_OWNER_ID" in owner_*) ;; *) fail "autopilot owner id is invalid" ;; esac
@@ -2495,6 +2512,15 @@ if [ "$DRY_RUN" != "1" ] && [ "$worker_status" -eq 0 ] &&
   fi
 fi
 
+# Classify the final captured result after all repair attempts. A successful
+# repair can still leave no patch, which must not be reported as a verified write.
+if [ "$WORKER_ACCESS" = write ] && [ "$DRY_RUN" != 1 ] &&
+  [ "$worker_status" -eq 0 ] && [ "${verify_status:-0}" -eq 0 ] &&
+  [ ! -s "$patch_file" ]; then
+  no_change=1
+  printf '\n\n## Result\n\nno_change\n' >> "$artifact"
+fi
+
 # Preserve the first route contract in lineage even when a verification repair
 # continued on the already-selected fallback model.
 if [ "$route_captured" = 1 ]; then
@@ -2512,11 +2538,18 @@ if [ "$route_captured" = 1 ]; then
   export OMS_REASONING_RESOLVED OMS_REASONING_FALLBACK OMS_REASONING_SELECTED
 fi
 
-printf '\n\n## Exit\n\n%s\n' "$worker_status" >> "$artifact"
+result_exit="$worker_status"
+if [ "$no_change" = 1 ] && [ "$ALLOW_NO_CHANGE" != 1 ]; then
+  result_exit=6
+fi
+printf '\n\n## Exit\n\n%s\n' "$result_exit" >> "$artifact"
 
 index_exit=0
 if [ "$worker_status" -ne 0 ] || [ "${verify_status:-0}" -ne 0 ]; then
   index_exit=1
+fi
+if [ "$no_change" = 1 ] && [ "$ALLOW_NO_CHANGE" != 1 ]; then
+  index_exit=6
 fi
 OMS_INDEX_REPAIR_REPLAY_JSON="$repair_replay_json" \
   OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" "$REVIEW_ARTIFACT" || true
@@ -2592,11 +2625,19 @@ if [ "$REPAIR" -gt 0 ]; then
   echo "repair: $repair_used/$REPAIR round(s) used"
 fi
 echo "artifact: $artifact"
-echo "patch: ${patch_file:-none (read-only)}"
+if [ "$WORKER_ACCESS" = read ]; then
+  echo "patch: none (read-only)"
+elif [ "$no_change" = 1 ]; then
+  echo "patch: none (no changes)"
+else
+  echo "patch: ${patch_file:-none (read-only)}"
+fi
 if [ "$WORKER_ACCESS" = read ]; then
   :
 elif [ "$applied" = 1 ]; then
   echo "applied: yes (review with: git -C $REPO diff)"
+elif [ "$no_change" = 1 ]; then
+  echo "applied: no (no changes)"
 else
   # Printed landing commands use the admission front door, never a gate bypass:
   # a raw `git apply` would land an unreviewed patch outside patch-land's
@@ -2613,7 +2654,8 @@ if [ "$KEEP_WORKTREE" = 1 ]; then
   echo "worktree kept: $worktree"
 fi
 
-if [ "$worker_status" -ne 0 ] || [ "${verify_status:-0}" -ne 0 ]; then
+if [ "$worker_status" -ne 0 ] || [ "${verify_status:-0}" -ne 0 ] ||
+  { [ "$no_change" = 1 ] && [ "$ALLOW_NO_CHANGE" != 1 ]; }; then
   if [ "$INTERACTIVE" = 1 ]; then
     python3 - "$artifact" "$patch_file" "$worker_status" "$verify_status" <<'PY' >&3
 import json, sys
@@ -2624,6 +2666,7 @@ PY
   fi
   delegate_attempt_fail_if_live delegate_failed delegate-final-failed || true
   plan_failure_transition
+  [ "$no_change" = 1 ] && [ "$ALLOW_NO_CHANGE" != 1 ] && exit 6
   # A wall-clock timeout keeps its own code so a caller can offer --continue.
   [ "$worker_status" -ne 124 ] || exit 124
   exit 1
@@ -2632,10 +2675,13 @@ if [ "$applied" = 1 ]; then
   : # patch-land already recorded lineage and finished a coupled plan task.
 elif [ "$plan_reviewed" = 1 ]; then
   : # A rejected landing deliberately remains in review for repair/inspection.
+elif [ "$no_change" = 1 ]; then
+  : # Empty writes are recorded as no_change, never published as reviewed patches.
 else
   plan_publish_review "$artifact" "$patch_file"
 fi
-if [ "$APPLY" = 1 ] && [ "$DRY_RUN" != "1" ] && [ "$applied" = 0 ]; then
+if [ "$APPLY" = 1 ] && [ "$DRY_RUN" != "1" ] && [ "$applied" = 0 ] &&
+  [ "$no_change" = 0 ]; then
   echo "error: worker succeeded but requested landing did not complete" >&2
   exit 1
 fi

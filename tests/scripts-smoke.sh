@@ -2360,6 +2360,7 @@ EOF
     --to codex \
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
+    --allow-no-change \
     --prompt "Auto verify run" >/dev/null
 
   assert_one_artifact_contains "$artifact_dir" 'codex-auto-verify-run-*.md' 'check-contract-ran'
@@ -2370,6 +2371,7 @@ EOF
     --repo "$project" \
     --artifact-dir "$artifact_dir" \
     --no-verify \
+    --allow-no-change \
     --prompt "No verify run" >/dev/null
 
   artifact="$(find "$artifact_dir" -type f -name 'codex-no-verify-run-*.md' | head -n 1)"
@@ -5194,7 +5196,7 @@ EOF
       OMS_CONTEXT_CAPTURE="$capture" OMS_GRAPH_EXPECT_READY="$expect_ready" \
       OMS_GRAPH_TEST_LIB="$ROOT/scripts/lib" PATH="$bin_dir:/usr/bin:/bin" \
       "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
-      --artifact-dir "$TMP/delegate-auto-graph-artifacts" --no-verify \
+      --artifact-dir "$TMP/delegate-auto-graph-artifacts" --no-verify --allow-no-change \
       --prompt "$query" ${flags[@]+"${flags[@]}"} >/dev/null || {
         tail -35 "$TMP/delegate-auto-graph-artifacts"/codex-*.md >&2
         fail "automatic graph worker probe failed ($mode)"
@@ -5262,7 +5264,7 @@ EOF
     OMS_CONTEXT_CAPTURE="$capture" PATH="$bin_dir:/usr/bin:/bin" \
     "$ROOT/scripts/peer-delegate.sh" \
     --to codex --repo "$project" --artifact-dir "$artifact_dir" \
-    --context-manifest --no-verify --prompt "Use compiled context" >/dev/null
+    --context-manifest --no-verify --allow-no-change --prompt "Use compiled context" >/dev/null
 
   assert_file_contains "$capture" '## Compiled repository context'
   assert_file_contains "$capture" 'delegate-context-sentinel reaches the worker'
@@ -5309,6 +5311,7 @@ PY
   cat > "$bin_dir/codex" <<'EOF'
 #!/usr/bin/env bash
 cat > "$OMS_CONTEXT_DEBT_CAPTURE"
+printf 'VALUE = 2\n' >> large.py
 printf 'worker done\n'
 EOF
   chmod +x "$bin_dir/codex"
@@ -10667,7 +10670,7 @@ EOF
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     FIXTURE_LOG="$log" FIXTURE_SESSION="$session" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
     "$ROOT/scripts/peer-delegate.sh" --to claude --repo "$project" \
-    --artifact-dir "$project/artifacts" --no-verify --resume-session "$session" \
+    --artifact-dir "$project/artifacts" --no-verify --allow-no-change --resume-session "$session" \
     --prompt "Your earlier work was on abc; New instructions follow." >/dev/null ||
     fail "resumed delegate failed"
   assert_file_contains "$log" "--resume $session"
@@ -10687,7 +10690,7 @@ EOF
     HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
       FIXTURE_LOG="$log" FIXTURE_SESSION="$session" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
       "$ROOT/scripts/peer-delegate.sh" --to claude --repo "$project" \
-      --artifact-dir "$project/artifacts" --no-verify --resume-session "$session" \
+      --artifact-dir "$project/artifacts" --no-verify --allow-no-change --resume-session "$session" \
       --prompt p >"$log.out" 2>"$log.err"
   }
   next_tied_mtime_ns() {
@@ -10812,7 +10815,7 @@ EOF
     OMS_PANEL_FALLBACK_MODEL=claude-sonnet-5-5 OMS_PANEL_FALLBACK_EFFORT=medium \
     "$ROOT/scripts/peer-delegate.sh" --to codex --model gpt-6.1-sol \
     --repo "$swap/repo" --artifact-dir "$swap/artifacts" \
-    --prompt "Fix after provider fallback" >"$swap/out" 2>"$swap/error" || rc=$?
+    --allow-no-change --prompt "Fix after provider fallback" >"$swap/out" 2>"$swap/error" || rc=$?
   [ "$rc" = 0 ] || fail "delegate after a successful fallback should exit 0, got $rc: $(cat "$swap/out" "$swap/error")"
   if grep -Fq 'could not run' "$swap/out" "$swap/error"; then
     fail "a successful fallback was reported as blocked: $(cat "$swap/error")"
@@ -11804,7 +11807,7 @@ PY
     OMS_DELEGATE_WORKTREE_ROOT="$lifecycle/worktrees" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
     OMS_LOCK_DIR="$fixture_lock" XDG_STATE_HOME="$fixture_state" XDG_CACHE_HOME="$fixture_cache" \
     PANEL_ARGV="$lifecycle/argv" PANEL_ENV="$lifecycle/env" \
-    "$ROOT/scripts/peer-delegate.sh" --repo "$repo" --to codex --prompt 'fixture task' --no-verify 2>&1)" ||
+    "$ROOT/scripts/peer-delegate.sh" --repo "$repo" --to codex --prompt 'fixture task' --no-verify --allow-no-change 2>&1)" ||
     fail "panel delegate success fixture failed: $out"
   retained_root="$(sed -n '1p' "$lifecycle/env")"
   [ -n "$retained_root" ] && [ ! -e "$retained_root" ] &&
@@ -11814,7 +11817,7 @@ PY
     OMS_DELEGATE_WORKTREE_ROOT="$lifecycle/worktrees" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
     OMS_LOCK_DIR="$fixture_lock" XDG_STATE_HOME="$fixture_state" XDG_CACHE_HOME="$fixture_cache" \
     PANEL_ARGV="$lifecycle/argv" PANEL_ENV="$lifecycle/env" \
-    "$ROOT/scripts/peer-delegate.sh" --repo "$repo" --to codex --prompt 'fixture task' --no-verify --keep-worktree 2>&1)" ||
+    "$ROOT/scripts/peer-delegate.sh" --repo "$repo" --to codex --prompt 'fixture task' --no-verify --keep-worktree --allow-no-change 2>&1)" ||
     fail "panel delegate keep-worktree fixture failed: $out"
   retained_root="$(sed -n '1p' "$lifecycle/env")"
   [ -n "$retained_root" ] && [ -d "$retained_root" ] && [ -d "$(dirname "$retained_root")" ] ||
@@ -16657,6 +16660,8 @@ test_delegate_repair_retries_failed_verify() {
   local bin_dir="$project/bin"
   local home_dir="$project/home"
   local rc=0
+  local verify_script="$TMP/delegate-repair-no-change-verify.sh"
+  local plan_worktree_root="$project/plan-no-change-worktrees"
 
   python3 - "$ROOT/scripts/lib" <<'PY' || fail "repair replay policy contract failed"
 import copy, sys
@@ -16746,16 +16751,83 @@ EOF
   python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "repair trace not recorded"
 import json, sys
 row = json.loads(open(sys.argv[1]).readlines()[-1])
+assert "repair_replay" in row, row
 trace = row["repair_replay"]
 assert trace["policy"] == "budget" and trace["samples"] == 0, trace
 assert len(trace["steps"]) == 2 and trace["steps"][-1]["verify"] == 0, trace
 PY
 
+  # A repair can finish successfully without producing a patch. Classify the
+  # final capture, and require explicit opt-in for that result to exit zero.
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "worker completed without changes"
+EOF
+  chmod +x "$bin_dir/codex"
+  cat > "$verify_script" <<EOF
+#!/usr/bin/env bash
+count=0
+[ ! -f "$TMP/delegate-repair-no-change-verify-count" ] ||
+  count="\$(cat "$TMP/delegate-repair-no-change-verify-count")"
+count=\$((count + 1))
+printf '%s\\n' "\$count" > "$TMP/delegate-repair-no-change-verify-count"
+[ "\$count" -ge 2 ]
+EOF
+  chmod +x "$verify_script"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --model fixture-model --verify "bash '$verify_script'" --repair 1 \
+    --prompt 'Repair to no changes' > "$project/no-change.out" 2>&1 || rc=$?
+  [ "$rc" = 6 ] || fail "a panel worker's repaired empty patch must exit 6 by default, got $rc: $(cat "$project/no-change.out")"
+  grep -Fq 'repair: 1/1 round(s) used' "$project/no-change.out" ||
+    fail "repaired empty patch did not run a repair round: $(cat "$project/no-change.out")"
+  assert_file_contains "$project/no-change.out" 'patch: none (no changes)'
+  artifact="$(sed -n 's/^artifact: //p' "$project/no-change.out" | head -1)"
+  assert_file_contains "$artifact" 'no_change'
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "repaired no_change exit missing from index"
+import json, sys
+row = json.loads(open(sys.argv[1]).readlines()[-1])
+assert row["exit"] == 6, row
+PY
+
+  rm -f "$TMP/delegate-repair-no-change-verify-count"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --model fixture-model --verify "bash '$verify_script'" --repair 1 \
+    --prompt 'Direct repaired no changes' \
+    > "$project/no-change-allowed.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "a direct call's repaired empty patch reports no_change and exits 0, got $rc"
+  assert_file_contains "$project/no-change-allowed.out" 'patch: none (no changes)'
+  grep -Fq 'repair: 1/1 round(s) used' "$project/no-change-allowed.out" ||
+    fail "allowed empty patch did not run a repair round: $(cat "$project/no-change-allowed.out")"
+  artifact="$(sed -n 's/^artifact: //p' "$project/no-change-allowed.out" | head -1)"
+  assert_file_contains "$artifact" 'no_change'
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "allowed repaired no_change exit missing from index"
+import json, sys
+row = json.loads(open(sys.argv[1]).readlines()[-1])
+assert row["exit"] == 0, row
+PY
+
+  rc=0
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
+    OMS_DELEGATE_WORKTREE_ROOT="$plan_worktree_root" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --prompt x --plan-task task-no-change --allow-no-change 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "--allow-no-change with --plan-task must be rejected"
+  contains "$out" '--allow-no-change cannot complete a plan task' ||
+    fail "plan-task incompatibility should have a clear usage error: $out"
+  [ ! -e "$plan_worktree_root" ] || fail "incompatible arguments must fail before worktree setup"
+
   # Seed complete, distinct historical fixture episodes without provider calls.
   python3 - "$project/.oms/artifacts/index.jsonl" <<'PY'
 import copy, hashlib, json, sys, uuid
 path = sys.argv[1]
-baseline = json.loads(open(path).readlines()[-1])
+baseline = next(row for row in reversed([json.loads(line) for line in open(path)])
+                if isinstance(row.get("repair_replay"), dict) and row["repair_replay"].get("steps"))
 with open(path, "a") as handle:
     for i in range(12):
         row = copy.deepcopy(baseline)
@@ -26343,6 +26415,42 @@ EOF
     fail "the worker's work should still come back as a patch"
 }
 
+test_delegate_empty_write_is_no_change_unless_allowed() {
+  local project="$TMP/worker-no-change"
+  local bin_dir="$project/bin"
+  local home_dir="$project/home"
+  local verify_marker="$TMP/worker-no-change-verify-ran"
+  local out artifact rc=0
+
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "worker made no changes"
+EOF
+  chmod +x "$bin_dir/codex"
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --verify "touch '$verify_marker'" 2>&1)" || rc=$?
+  [ "$rc" -eq 6 ] || fail "a panel worker's empty write must exit 6 by default, got $rc: $out"
+  [ -f "$verify_marker" ] || fail "the configured verifier must still run for an empty patch"
+  contains "$out" 'patch: none (no changes)' || fail "empty writes need a clear patch status: $out"
+  contains "$out" 'worker: codex exit 0' || fail "the worker exit should remain accurate: $out"
+  artifact="$(printf '%s\n' "$out" | sed -n 's/^artifact: //p' | head -1)"
+  assert_file_contains "$artifact" 'no_change'
+  assert_file_contains "$project/.oms/artifacts/index.jsonl" '"exit": 6'
+
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --no-verify 2>&1)" || fail "a direct empty write records no_change and exits 0: $out"
+  contains "$out" 'patch: none (no changes)' || fail "allowed empty writes need a clear patch status: $out"
+  artifact="$(printf '%s\n' "$out" | sed -n 's/^artifact: //p' | head -1)"
+  assert_file_contains "$artifact" 'no_change'
+}
+
 test_delegate_rejects_a_worker_commit_in_its_managed_worktree() {
   local project="$TMP/worker-guard-own-commit"
   local bin_dir="$project/bin"
@@ -27183,7 +27291,7 @@ run_guarded_worker() {  # run_guarded_worker DIR WORKER_BODY -> prints "rc<TAB>o
   out="$(HOME="$guard_home" NVM_DIR="$guard_home/.nvm" PATH="$dir-bin:/usr/bin:/bin" \
     OMS_WORKER_GUARD_STRICT="${OMS_WORKER_GUARD_STRICT:-0}" \
     OMS_WORKER_AUTHORITY_EXCLUSIVE="${OMS_WORKER_AUTHORITY_EXCLUSIVE:-0}" \
-    "$ROOT/scripts/peer-delegate.sh" --repo "$dir" --to codex --prompt x \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$dir" --to codex --prompt x ${3:+--allow-no-change} \
     --no-verify 2>&1)" || rc=$?
   printf '%s\t%s' "$rc" "$out"
 }
@@ -27196,18 +27304,18 @@ test_worker_guard_sees_planted_and_ignored_files() {
   # A planted untracked file is executable later from the primary tree.
   # Untracked churn cannot be attributed — the user editing their own repo looks
   # identical — so it is reported, not failed, unless the caller asks for strict.
-  result="$(run_guarded_worker "$project" "printf 'evil\n' > $project/sitecustomize.py")"
+  result="$(run_guarded_worker "$project" "printf 'evil\n' > $project/sitecustomize.py" allow)"
   [ "${result%%	*}" = 0 ] || fail "unattributable churn must not fail an ordinary run: $result"
   contains "$result" 'changed outside the worktree during this run: files' ||
     fail "the untracked surface should still be reported: $result"
-  result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$project" "printf 'evil2\n' > $project/sitecustomize2.py")"
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$project" "printf 'evil2\n' > $project/sitecustomize2.py" allow)"
   [ "${result%%	*}" != 0 ] || fail "strict mode should fail on a planted file: $result"
 
   # git status collapses a fully ignored directory to one entry, so replacing a
   # file inside it is invisible there; the stat scan is what catches it.
   local swap="$TMP/guard-ignored"
   make_guard_repo "$swap"
-  result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$swap" "printf 'tampered\n' > $swap/venv/bin/python")"
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$swap" "printf 'tampered\n' > $swap/venv/bin/python" allow)"
   [ "${result%%	*}" != 0 ] ||
     fail "replacing a file inside an ignored directory should fail a strict run"
   contains "$result" 'outside its worktree: files' ||
@@ -27613,7 +27721,7 @@ run_delegate_beside_sibling() {  # run_delegate_beside_sibling PROJECT MANAGED_R
   chmod +x "$bin_dir/codex"
   out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
-    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x ${4:+--allow-no-change} \
     --no-verify 2>&1)" || rc=$?
   printf '%s\t%s' "$rc" "$out"
 }
@@ -27870,7 +27978,7 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
   make_guard_repo "$project"
   dead_pid="$(sh -c 'echo $$')"
   body="mkdir -p $sibling_parent && git -C $project worktree add --quiet --detach $sibling_parent/wt HEAD >/dev/null 2>&1 && printf 'kind=oh-my-setting-temp\\npid=$dead_pid\\nrepo=$project\\nworktree=$sibling_parent/wt\\ntemporary=1\\n' > $sibling_parent/.oh-my-setting-tmp"
-  result="$(run_delegate_beside_sibling "$project" "$managed_root" "$body")"
+  result="$(run_delegate_beside_sibling "$project" "$managed_root" "$body" --allow-no-change)"
   [ "${result%%	*}" = 0 ] ||
     fail "a sibling started and kept mid-run must not fail the run: $result"
   contains "$result" 'during this run: kept-sibling' ||
@@ -27878,13 +27986,13 @@ test_worker_guard_softens_a_sibling_started_and_kept_mid_run() {
 
   make_guard_repo "$project-strict"
   result="$(OMS_WORKER_GUARD_STRICT=1 run_delegate_beside_sibling "$project-strict" "$managed_root" \
-    "${body//$project/$project-strict}")"
+    "${body//$project/$project-strict}" --allow-no-change)"
   [ "${result%%	*}" != 0 ] ||
     fail "strict mode must keep a late kept sibling hard: $result"
 
   make_guard_repo "$project-branch"
   body="mkdir -p $sibling_parent-b && git -C $project-branch worktree add --quiet -b late $sibling_parent-b/wt HEAD >/dev/null 2>&1 && printf 'kind=oh-my-setting-temp\\npid=$dead_pid\\nrepo=$project-branch\\nworktree=$sibling_parent-b/wt\\ntemporary=1\\n' > $sibling_parent-b/.oh-my-setting-tmp"
-  result="$(run_delegate_beside_sibling "$project-branch" "$managed_root" "$body")"
+  result="$(run_delegate_beside_sibling "$project-branch" "$managed_root" "$body" --allow-no-change)"
   [ "${result%%	*}" != 0 ] ||
     fail "a late sibling on a branch must stay a hard violation: $result"
 }
@@ -30347,13 +30455,13 @@ test_delegate_refuses_to_nest_beyond_the_depth_cap() {
   rc=0
   HOME="$home_dir" PATH="$bin:/usr/bin:/bin" OMS_HARNESS_DELEGATE_DEPTH=1 \
     OMS_DELEGATE_MAX_DEPTH=2 "$ROOT/scripts/peer-delegate.sh" --to codex \
-    --repo "$project" --prompt "explicitly nested" --no-verify >/dev/null 2>&1 || rc=$?
+    --repo "$project" --prompt "explicitly nested" --no-verify --allow-no-change >/dev/null 2>&1 || rc=$?
   [ "$rc" = 0 ] || fail "an explicitly raised cap should allow one more level"
 
   # And the top level is unaffected.
   rc=0
   HOME="$home_dir" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/peer-delegate.sh" \
-    --to codex --repo "$project" --prompt "top level" --no-verify >/dev/null 2>&1 || rc=$?
+    --to codex --repo "$project" --prompt "top level" --no-verify --allow-no-change >/dev/null 2>&1 || rc=$?
   [ "$rc" = 0 ] || fail "an ordinary delegation must still run"
 }
 
