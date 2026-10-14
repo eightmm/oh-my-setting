@@ -41,6 +41,27 @@ oms panel --repo . --room team --open-chat sol-main --chat-surface app --dry-run
 oms panel --repo . --council --owner codex --task-id ID --label 'Decision' --prompt 'Compare options' --dry-run
 ```
 
+## Salvaging a stopped worker
+
+Run `oms panel --repo . --salvage TASK_ID [--json]` to capture the latest stopped
+delegate's recorded, kept OMS worktree. It preserves that checkout and index,
+and reports changed paths, before/after byte sizes, the patch path and its
+`.patch.json` metadata under `.oms/artifacts/delegate/`. Metadata and the patch
+header carry `salvaged_from` (task, attempt, kept path and stop reason), base and
+payload hashes, file sizes and `encoding_warnings` for display. Admission uses
+controller records in `.oms/salvage-provenance/`, keyed by the diff payload hash;
+editing headers, sidecars or warning lists cannot change those records.
+The flags guard the salvaged artifact as captured; an edited or reformatted
+patch is a different patch that ordinary admission checks, so encoding-loss
+detection on every patch belongs to patch-admit, not to salvage identity.
+Warnings flag hunks whose
+replacement has the same ASCII skeleton after Unicode decomposition but fewer
+non-ASCII characters, and files losing more than half their non-ASCII bytes.
+These are review hints; they can include intentional edits or deletions.
+Review the patch before using `oms patch-land --patch PATH --accept-salvaged`.
+Flagged encoding loss also requires `--accept-encoding-loss`; normal admission
+checks still run. Salvage captures evidence and never admits or applies it.
+
 ## Starting the sole main
 
 Panel mains carry the assigned goal through worker recovery, result inspection,

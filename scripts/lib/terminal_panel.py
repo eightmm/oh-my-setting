@@ -7138,6 +7138,7 @@ def main(argv=None):
     parser.add_argument("--rounds", type=int, default=1, help="council debate rounds, 1 or 2")
     parser.add_argument("--thread", help="council thread ID")
     parser.add_argument("--results", action="store_true", help="read bounded durable task results")
+    parser.add_argument("--salvage", metavar="TASK_ID", help="capture a stopped worker's kept worktree for owner review")
     parser.add_argument("--mail", metavar="PARTICIPANT", help="read messages addressed to one main in --room")
     parser.add_argument("--participant", help="--results of one room call (with --task-id, one council seat)")
     parser.add_argument("--chats", action="store_true", help="read enrolled native chats and navigation capabilities")
@@ -7162,6 +7163,9 @@ def main(argv=None):
     parser.add_argument("--label", help="short task title for the role board")
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
     args = parser.parse_args(arguments)
+    if args.salvage is not None:
+        import panel_salvage
+        return panel_salvage.cli_main(arguments)
     if args.repo is not None:
         try:
             git_toplevel(args.repo)

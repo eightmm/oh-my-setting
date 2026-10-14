@@ -49,6 +49,8 @@ PLAN_VERIFY_RAW=""
 ALLOW_VERIFIER_CHANGE=0
 ALLOW_TEST_REDUCTION=0
 ALLOW_RESTRUCTURE=0
+ACCEPT_SALVAGED=0
+ACCEPT_ENCODING_LOSS=0
 RECOVER=0
 LANDING_ID=""
 REQUEST_APPROVAL=0
@@ -94,6 +96,8 @@ Options:
   --allow-restructure  Forward to patch-admit: permit an unscoped patch that
                    adds top-level files or moves files across directories
                    (normally rejected by the structural floor).
+  --accept-salvaged  Accept a salvaged worker patch after owner review.
+  --accept-encoding-loss  Also accept encoding-loss warnings on that patch.
   --request-approval  Create an exact, expiring landing approval request and
                    apply nothing.
   --approval ID    Consume this approved patch-land request.
@@ -141,6 +145,8 @@ while [ "$#" -gt 0 ]; do
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     --allow-test-reduction) ALLOW_TEST_REDUCTION=1; shift ;;
     --allow-restructure) ALLOW_RESTRUCTURE=1; shift ;;
+    --accept-salvaged) ACCEPT_SALVAGED=1; shift ;;
+    --accept-encoding-loss) ACCEPT_ENCODING_LOSS=1; shift ;;
     --request-approval) REQUEST_APPROVAL=1; shift ;;
     --approval) [ "$#" -ge 2 ] || fail "--approval requires id"; APPROVAL_ID="$2"; shift 2 ;;
     --approval-token) [ "$#" -ge 2 ] || fail "--approval-token requires a token"; APPROVAL_GRANT="$2"; shift 2 ;;
@@ -1038,6 +1044,8 @@ APPROVAL_PARAMETERS="$( \
   OMS_APPROVAL_ML="$approval_ml" \
   OMS_APPROVAL_VERIFY_EXPLICIT="$approval_verify_explicit" \
   OMS_APPROVAL_VERIFY_SHA="$approval_verify_sha" \
+  OMS_APPROVAL_ACCEPT_SALVAGED="$ACCEPT_SALVAGED" \
+  OMS_APPROVAL_ACCEPT_ENCODING_LOSS="$ACCEPT_ENCODING_LOSS" \
   OMS_APPROVAL_EXECUTOR_ID="" \
   OMS_APPROVAL_EXECUTOR_SOUL="" \
   python3 <<'PY'
@@ -1052,6 +1060,8 @@ print(json.dumps({
     "allow_restructure": flag("OMS_APPROVAL_RESTRUCTURE"),
     "allow_test_reduction": flag("OMS_APPROVAL_TEST_REDUCTION"),
     "allow_verifier_change": flag("OMS_APPROVAL_VERIFIER_CHANGE"),
+    "accept_salvaged": os.environ["OMS_APPROVAL_ACCEPT_SALVAGED"] == "1",
+    "accept_encoding_loss": os.environ["OMS_APPROVAL_ACCEPT_ENCODING_LOSS"] == "1",
     "ml": flag("OMS_APPROVAL_ML"),
     "verify_explicit": flag("OMS_APPROVAL_VERIFY_EXPLICIT"),
     "verify_sha256": os.environ["OMS_APPROVAL_VERIFY_SHA"],
@@ -1104,6 +1114,20 @@ CAPTURE_PATCH="$(python3 "$CAPTURE_HELPER" allocate "$STATE_REPO" "$SOURCE_PATCH
   fail "cannot reserve and capture patch bytes before admission"
 CAPTURE_PATCH="${CAPTURE_PATCH//$'\r'/}"
 PATCH="$CAPTURE_PATCH"
+
+# Salvage acceptance is evaluated on the native capture that admission and
+# publication use, after hashing; the caller's pathname can change meanwhile.
+python3 - "$ROOT_LIB" "$PATCH" "$ACCEPT_SALVAGED" "$ACCEPT_ENCODING_LOSS" "$SOURCE_PATCH" "$STATE_REPO" <<'PY' ||
+import sys
+sys.path.insert(0, sys.argv[1])
+from panel_salvage import admission
+try:
+    admission(sys.argv[2], sys.argv[3] == '1', sys.argv[4] == '1',
+              source=sys.argv[5], state_repo=sys.argv[6])
+except (OSError, ValueError) as error:
+    sys.exit('error: ' + str(error))
+PY
+  fail "salvage admission refused"
 
 frozen_patch_matches() {
   local current_sha
@@ -1343,7 +1367,7 @@ if ! frozen_patch_matches; then
   fail "frozen patch changed after admission; verified bytes were not applied"
 fi
 
-if ! git -C "$REPO" apply --binary "$PATCH"; then
+if ! python3 "$CAPTURE_HELPER" apply "$STATE_REPO" "$CAPTURE_PATCH" "$REPO" "$PATCH_SHA"; then
   if ! finish_not_applied_receipts apply-failed; then
     echo "warning: patch-land: apply failed and recovery receipts remain incomplete" >&2
   fi

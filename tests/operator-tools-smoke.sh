@@ -4281,6 +4281,177 @@ assert all(report["providers"][p]["installed"] for p in panel.PROVIDERS)
 assert report["dashboard"]["kind"] == "oms-dashboard"
 assert not (project / ".oms").exists(), "panel query created a state store"
 assert subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"]) == baseline
+# Salvage captures raw checkout bytes with a private index/config and owner-only admission.
+import contextlib
+import panel_salvage
+salvage_repo = temporary / 'salvage-repo'
+salvage_registry = temporary / 'salvage-registry'
+salvage_tree = salvage_registry / 'oh-my-setting-delegate.fixture' / 'wt'
+salvage_tree.parent.mkdir(parents=True)
+subprocess.run(['git', 'init', '-q', str(salvage_repo)], check=True)
+for key, value in (('user.email', 'test@example.com'), ('user.name', 'test')):
+    subprocess.run(['git', '-C', str(salvage_repo), 'config', key, value], check=True)
+(salvage_repo / 'unicode.txt').write_text('label: 한글 ─ café\n', encoding='utf-8')
+(salvage_repo / 'deleted.txt').write_text('delete me\n')
+(salvage_repo / 'binary.dat').write_bytes(b'\0old\xff')
+(salvage_repo / '.gitattributes').write_text('*.txt filter=trap working-tree-encoding=UTF-8\n')
+subprocess.run(['git', '-C', str(salvage_repo), 'add', '.'], check=True)
+subprocess.run(['git', '-C', str(salvage_repo), 'commit', '-qm', 'base'], check=True)
+subprocess.run(['git', '-C', str(salvage_repo), 'worktree', 'add', '--detach', str(salvage_tree)],
+               check=True, stdout=subprocess.DEVNULL)
+(salvage_tree.parent / '.oh-my-setting-tmp').write_text(
+    'kind=oh-my-setting-temp\ntemporary=1\npid=99999999\nrepo=%s\nworktree=%s\n' %
+    (salvage_repo, salvage_tree))
+(salvage_tree / 'unicode.txt').write_text('label:   cafe\n', encoding='utf-8')
+(salvage_tree / 'deleted.txt').unlink()
+(salvage_tree / 'binary.dat').write_bytes(b'\0new\xfe')
+(salvage_tree / 'new.txt').write_bytes('새 파일\r\n'.encode('utf-8'))
+trap_file = temporary / 'salvage-git-executed'
+trap_command = 'touch ' + shlex.quote(str(trap_file))
+for key in ('filter.trap.clean', 'filter.trap.smudge', 'diff.external', 'core.fsmonitor'):
+    subprocess.run(['git', '-C', str(salvage_repo), 'config', key, trap_command], check=True)
+# Native-path conversion handles Bash marker spellings before Python resolves them.
+path_bin = temporary / 'salvage-path-bin'
+path_bin.mkdir()
+bash_registry = '/c/oms-fixture/registry'
+bash_tree = bash_registry + '/oh-my-setting-delegate.fixture/wt'
+bash_repo = '/c/oms-fixture/repo'
+path_mapping = {bash_registry: str(salvage_registry), bash_tree: str(salvage_tree),
+                bash_repo: str(salvage_repo), '/c/oms-fixture/foreign': str(project)}
+(path_bin / 'cygpath').write_text('#!%s\nimport sys\n' % sys.executable +
+    'mapping = %r\nassert sys.argv[1] == "-m"\nsys.stdout.write(mapping.get(sys.argv[2], sys.argv[2]) + "\\r\\n")\n' % path_mapping)
+(path_bin / 'cygpath').chmod(0o755)
+path_env = {'MSYSTEM': 'MINGW64', 'PATH': str(path_bin) + os.pathsep + os.environ['PATH'],
+            'OMS_DELEGATE_WORKTREE_ROOT': bash_registry}
+marker_path = salvage_tree.parent / '.oh-my-setting-tmp'
+marker_before = marker_path.read_bytes()
+try:
+    marker_path.write_text('kind=oh-my-setting-temp\ntemporary=1\npid=99999999\nrepo=%s\nworktree=%s\n' %
+                           (bash_repo, bash_tree))
+    with patch.dict(os.environ, path_env):
+        assert panel_salvage._native_path(bash_repo) == salvage_repo, 'CRLF native path not normalized'
+        assert panel_salvage._managed(salvage_repo, bash_tree)[0] == salvage_tree
+        marker_path.write_text('kind=oh-my-setting-temp\ntemporary=1\nrepo=/c/oms-fixture/foreign\nworktree=%s\n' % bash_tree)
+        try:
+            panel_salvage._managed(salvage_repo, bash_tree)
+        except ValueError as error:
+            assert 'does not belong' in str(error), error
+        else:
+            raise AssertionError('foreign Bash marker repository passed native identity validation')
+finally:
+    marker_path.write_bytes(marker_before)
+
+index_path = panel_salvage._git_directory(salvage_tree) / 'index'
+index_before = index_path.read_bytes()
+metadata_before = {p: p.read_bytes() for p in salvage_repo.joinpath('.git').rglob('*')
+                   if p.is_file()}
+salvage_attempt = {'task_id': 'salvage-task', 'attempt_id': 'att_fixture', 'tool': 'peer-delegate',
+                   'created_at': '2026-10-14T00:00:00Z', 'terminal': True, 'state': 'failed',
+                   'reason_code': 'worker_authority_violation',
+                   'refs': {'panel_location': 'worktree:oh-my-setting-delegate.fixture/wt'}}
+def salvage_query(repo, verb, *args):
+    return [salvage_attempt] if verb == 'agent-events' else {'rows': []}
+salvage_env = {'OMS_DELEGATE_WORKTREE_ROOT': str(salvage_registry),
+               'OMS_HARNESS_CHILD': '0', 'OMS_HARNESS_DELEGATE_DEPTH': '0'}
+with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', side_effect=salvage_query):
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task', '--json']) == 0
+    salvaged = json.loads(output.getvalue())
+    assert salvaged['salvaged_from'] == {'task': 'salvage-task', 'attempt': 'att_fixture',
+        'kept_path': str(salvage_tree), 'stop_reason': 'worker_authority_violation'}
+    assert {f['path'] for f in salvaged['files']} == {'unicode.txt', 'deleted.txt', 'binary.dat', 'new.txt'}
+    flagged = {(w['file'], w['kind']) for w in salvaged['encoding_warnings']}
+    assert ('unicode.txt', 'transliteration_hunk') in flagged, flagged
+    assert ('unicode.txt', 'non_ascii_drop') in flagged, flagged
+    saved_patch = Path(salvaged['patch_path'])
+    assert saved_patch.exists() and Path(salvaged['metadata_path']).exists()
+    assert saved_patch.read_bytes().startswith(panel_salvage.PREFIX)
+    assert not trap_file.exists(), 'salvage executed repository Git config'
+    assert index_path.read_bytes() == index_before, 'salvage changed kept index'
+    assert all(p.read_bytes() == data for p, data in metadata_before.items()), 'salvage changed Git metadata'
+    for options, message in (({}, '--accept-salvaged'),
+                             ({'accept_salvaged': True}, '--accept-encoding-loss')):
+        try:
+            panel_salvage.admission(saved_patch, repo=salvage_repo, **options)
+        except ValueError as error:
+            assert message in str(error), error
+        else:
+            raise AssertionError('salvaged patch passed without explicit acceptance')
+    panel_salvage.admission(saved_patch, True, True, repo=salvage_repo)
+    copy = temporary / 'copied-salvage.patch'
+    copy.write_bytes(saved_patch.read_bytes())
+    try:
+        panel_salvage.admission(copy, repo=salvage_repo)
+    except ValueError as error:
+        assert '--accept-salvaged' in str(error)
+    else:
+        raise AssertionError('copied salvage lost admission protection')
+    controller_path = salvage_repo / salvaged['provenance']
+    controller_before = controller_path.read_bytes()
+    original_body = saved_patch.read_bytes()
+    first, unused, payload = original_body.partition(b'\n')
+    display = json.loads(first[len(panel_salvage.PREFIX):])
+    display.pop('encoding_warnings')
+    stripped = panel_salvage.PREFIX + json.dumps(display).encode() + b'\n' + payload
+    for body in (b'\n' + original_body, stripped, payload, original_body + b'\n'):
+        copy.write_bytes(body)
+        for options, message in (({}, '--accept-salvaged'),
+                                 ({'accept_salvaged': True}, '--accept-encoding-loss')):
+            try:
+                panel_salvage.admission(copy, repo=salvage_repo, **options)
+            except ValueError as error:
+                assert message in str(error), error
+            else:
+                raise AssertionError('editable display provenance bypassed controller record')
+        panel_salvage.admission(copy, True, True, repo=salvage_repo)
+    assert controller_path.read_bytes() == controller_before
+    # Recording the same payload with fewer warnings never erases earlier ones.
+    panel_salvage.record_provenance(salvage_repo, dict(salvaged, encoding_warnings=[]))
+    try:
+        panel_salvage.admission(copy, True, repo=salvage_repo)
+    except ValueError as error:
+        assert '--accept-encoding-loss' in str(error)
+    else:
+        raise AssertionError('a repeated payload erased controller warnings')
+    # An unrecorded payload is ordinary even with forged or malformed display metadata.
+    unrecorded = temporary / 'unrecorded-salvage.patch'
+    unrecorded.write_bytes(b'# oms-salvage: not JSON\n' + payload.replace(b'label:   cafe', b'label: unrelated'))
+    panel_salvage.admission(unrecorded, repo=salvage_repo)
+    with patch.dict(salvage_attempt, terminal=False), contextlib.redirect_stderr(io.StringIO()):
+        assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task']) == 2
+    for invalid in (['--dry-run'], ['--dispatch', 'worker'], ['--results']):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task', *invalid])
+        except SystemExit as error:
+            assert error.code == 2
+        else:
+            raise AssertionError('salvage accepted conflicting operation')
+    with patch.dict(os.environ, {'OMS_HARNESS_CHILD': '1'}), contextlib.redirect_stderr(io.StringIO()):
+        assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task']) == 2
+    pointer = salvage_tree / '.git'
+    pointer_before = pointer.read_bytes()
+    pointer.write_bytes((project / '.git').read_bytes() if (project / '.git').is_file() else b'gitdir: /missing\n')
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            assert panel.main(['--repo', str(salvage_repo), '--salvage', 'salvage-task']) == 2
+    finally:
+        pointer.write_bytes(pointer_before)
+# The generated binary patch restores exact bytes through Git's normal apply path.
+for key in ('filter.trap.clean', 'filter.trap.smudge', 'diff.external', 'core.fsmonitor'):
+    subprocess.run(['git', '-C', str(salvage_repo), 'config', '--unset', key], check=True)
+subprocess.run(['git', '-C', str(salvage_repo), 'apply', '--check', '--binary', str(saved_patch)], check=True)
+subprocess.run(['git', '-C', str(salvage_repo), 'apply', '--binary', str(saved_patch)], check=True)
+assert (salvage_repo / 'new.txt').read_bytes() == '새 파일\r\n'.encode()
+assert (salvage_repo / 'binary.dat').read_bytes() == b'\0new\xfe'
+assert (salvage_repo / 'unicode.txt').read_bytes() == b'label:   cafe\n'
+assert not (salvage_repo / 'deleted.txt').exists()
+assert panel_salvage.encoding_warnings('accent.txt', 'café\n'.encode(), b'cafe\n',
+                                       b'@@ -1 +1 @@\n-caf\xc3\xa9\n+cafe\n')
+assert not panel_salvage.encoding_warnings('added.txt', b'', '한글\n'.encode(), b'')
+assert not panel_salvage.encoding_warnings('kept.txt', '한글\n'.encode(), '한글!\n'.encode(), b'')
+
 # Discovery is registry-driven and does not execute even marked adapters.
 inventory = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--providers", "--json"]))
 registered = {row["provider"]: row for row in inventory["providers"]}

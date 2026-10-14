@@ -344,6 +344,24 @@ def publish(repo, capture, target):
     D['_fsync_directory_path'](os.path.dirname(target), 'landing publication')
 
 
+def apply_verified(repo, capture, execution_repo, expected):
+    item = find(repo, capture=capture)
+    if item['sha256'] != expected:
+        raise ValueError('apply digest differs from native capture')
+    value = certificate(item)
+    raw = object_bytes(item, value['objects']['capture'])
+    publication = value['objects']['publication']
+    if (object_bytes(item, publication) != raw or
+            identity(os.lstat(publication['path'])) != publication['identity'] or
+            identity(os.lstat(capture)) != value['objects']['capture']['identity']):
+        raise ValueError('verified apply input was replaced')
+    # Git receives the buffer just verified against native anchors, never a
+    # pathname another process can replace after validation.
+    result = subprocess.run(['git', '-C', execution_repo, 'apply', '--binary', '-'], input=raw)
+    if result.returncode:
+        raise ValueError('git apply of verified capture failed')
+
+
 def admission_records(repo, report):
     relative = os.path.relpath(os.path.abspath(report), repo)
     if not relative.startswith('.oms/artifacts/'):
@@ -871,6 +889,8 @@ def main(args):
         print(allocate(repo, *args))
     elif action == 'publish':
         publish(repo, *args)
+    elif action == 'apply':
+        apply_verified(repo, *args)
     elif action == 'seal':
         seal(repo, *args)
     elif action == 'gc':

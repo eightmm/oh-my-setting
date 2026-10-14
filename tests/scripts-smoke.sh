@@ -17769,6 +17769,140 @@ test_patch_land_admits_then_applies() {
   if grep -Fq pwned "$project/scripts/check.sh"; then
     fail "rejected patch must not touch the tree"
   fi
+  # Kept-worker patches require owner acceptance even when admission would pass.
+  python3 - "$ROOT/scripts/lib" "$project" "$ok_patch" <<'PYMETA'
+import hashlib, json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from panel_salvage import record_provenance, _payload
+patch = Path(sys.argv[3])
+meta = {"schema": 1, "salvaged_from": {"task": "t1", "attempt": "att_fixture",
+        "kept_path": "fixture/wt", "stop_reason": "timeout"},
+        "encoding_warnings": [], "base_sha": "fixture",
+        "payload_sha256": hashlib.sha256(_payload(patch.read_bytes())).hexdigest()}
+record_provenance(Path(sys.argv[2]), meta)
+Path(str(patch) + ".json").write_text(json.dumps(meta))
+PYMETA
+  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" --verify true >"$TMP/salvage-refusal" 2>&1 ); then
+    fail "patch-land accepted salvage without owner acceptance"
+  fi
+  assert_file_contains "$TMP/salvage-refusal" '--accept-salvaged'
+  if grep -Fq landed "$project/file.txt"; then
+    fail "salvage refusal changed the tree"
+  fi
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" --verify true --accept-salvaged >/dev/null 2>&1 ) ||
+    fail "reviewed salvage without warnings should land"
+  git -C "$project" checkout -q file.txt
+  python3 - "$ROOT/scripts/lib" "$project" "$ok_patch" <<'PYMETA'
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from panel_salvage import record_provenance
+path = Path(sys.argv[3] + ".json")
+meta = json.loads(path.read_text())
+meta["encoding_warnings"] = [{"file": "file.txt", "kind": "transliteration_hunk", "hunk": "@@ -1 +1 @@"}]
+record_provenance(Path(sys.argv[2]), meta)
+path.write_text(json.dumps(meta))
+PYMETA
+  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" --verify true --accept-salvaged >"$TMP/salvage-refusal" 2>&1 ); then
+    fail "patch-land accepted flagged salvage without encoding-loss acceptance"
+  fi
+  assert_file_contains "$TMP/salvage-refusal" '--accept-encoding-loss'
+  if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" --verify true --accept-encoding-loss >"$TMP/salvage-refusal" 2>&1 ); then
+    fail "encoding-loss acceptance alone bypassed salvage acceptance"
+  fi
+  assert_file_contains "$TMP/salvage-refusal" '--accept-salvaged'
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" --verify true --accept-salvaged --accept-encoding-loss >/dev/null 2>&1 ) ||
+    fail "owner accepted flagged salvage should still pass normal admission and land"
+  git -C "$project" checkout -q file.txt
+  printf '{invalid metadata\n' > "$ok_patch.json"
+  ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" --verify true --accept-salvaged --accept-encoding-loss >/dev/null 2>&1 ) ||
+    fail "display-only malformed sidecar must not override recorded acceptance"
+  git -C "$project" checkout -q file.txt
+
+  local display_patch="$TMP/salvage-display.patch"
+  local wrapper
+  for wrapper in blank stripped; do
+    python3 - "$ok_patch" "$display_patch" "$wrapper" <<'PYMETA'
+import json, sys
+from pathlib import Path
+payload = Path(sys.argv[1]).read_bytes()
+meta = {"salvaged_from": {"task": "display"}, "encoding_warnings": []}
+header = b'# oms-salvage: ' + json.dumps(meta).encode() + b'\n'
+Path(sys.argv[2]).write_bytes((b'\n' if sys.argv[3] == 'blank' else b'') + header + payload)
+PYMETA
+    if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$display_patch" --verify true >"$TMP/salvage-refusal" 2>&1 ); then
+      fail "edited $wrapper display metadata bypassed salvage acceptance"
+    fi
+    assert_file_contains "$TMP/salvage-refusal" '--accept-salvaged'
+    if ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$display_patch" --verify true --accept-salvaged >"$TMP/salvage-refusal" 2>&1 ); then
+      fail "edited $wrapper display warnings bypassed encoding acceptance"
+    fi
+    assert_file_contains "$TMP/salvage-refusal" '--accept-encoding-loss'
+    ( cd "$project" && "$ROOT/scripts/patch-land.sh" --patch "$display_patch" --verify true --accept-salvaged --accept-encoding-loss >/dev/null 2>&1 ) ||
+      fail "recorded edited-display salvage should land with both flags"
+    git -C "$project" checkout -q file.txt
+  done
+
+  # Replace the ordinary input after the old acceptance-check position, at
+  # hashing before capture. The final capture, including its flags, must win.
+  local race_bin="$TMP/salvage-race-bin"
+  local ordinary_patch="$TMP/salvage-ordinary.patch"
+  local replacement_patch="$TMP/salvage-replacement.patch"
+  local race_marker="$TMP/salvage-swap-observed"
+  local real_python
+  real_python="$(command -v python3)"
+  mkdir -p "$race_bin"
+  rm -f "$ok_patch.json"
+  cp "$ok_patch" "$ordinary_patch"
+  python3 - "$ordinary_patch" "$replacement_patch" <<'PYMETA'
+import hashlib, json, sys
+from pathlib import Path
+payload = Path(sys.argv[1]).read_bytes()
+meta = {"schema": 1, "salvaged_from": {"task": "swap", "attempt": "att_swap",
+        "kept_path": "fixture/wt", "stop_reason": "timeout"},
+        "encoding_warnings": [{"file": "file.txt", "kind": "non_ascii_drop"}],
+        "payload_sha256": hashlib.sha256(payload).hexdigest()}
+Path(sys.argv[2]).write_bytes(b'# oms-salvage: ' + json.dumps(meta).encode() + b'\n' + payload)
+PYMETA
+  cat > "$race_bin/sha256sum" <<'EOFHASH'
+#!/usr/bin/env bash
+exec "$OMS_T_REAL_PYTHON" -c '
+import hashlib, os, sys
+from pathlib import Path
+data = sys.stdin.buffer.read()
+marker = Path(os.environ["OMS_T_SWAP_MARKER"])
+if not marker.exists() and data == Path(os.environ["OMS_T_ORDINARY_PATCH"]).read_bytes():
+    data = Path(os.environ["OMS_T_REPLACEMENT_PATCH"]).read_bytes()
+    Path(os.environ["OMS_T_SWAP_PATCH"]).write_bytes(data)
+    marker.write_text("swapped before hashing/capture\n")
+print(hashlib.sha256(data).hexdigest() + "  -")'
+EOFHASH
+  chmod +x "$race_bin/sha256sum"
+  local acceptance
+  for acceptance in none salvage; do
+    cp "$ordinary_patch" "$ok_patch"
+    rm -f "$race_marker"
+    local race_args=()
+    [ "$acceptance" != salvage ] || race_args=(--accept-salvaged)
+    if ( cd "$project" && PATH="$race_bin:$PATH" OMS_T_REAL_PYTHON="$real_python" \
+      OMS_T_SWAP_MARKER="$race_marker" OMS_T_SWAP_PATCH="$ok_patch" \
+      OMS_T_ORDINARY_PATCH="$ordinary_patch" OMS_T_REPLACEMENT_PATCH="$replacement_patch" \
+      "$ROOT/scripts/patch-land.sh" --patch "$ok_patch" --verify true ${race_args[@]+"${race_args[@]}"} \
+      >"$TMP/salvage-refusal" 2>&1 ); then
+      fail "swapped salvage bypassed captured-byte acceptance ($acceptance)"
+    fi
+    [ -f "$race_marker" ] || fail "salvage swap fixture never reached hashing"
+    if [ "$acceptance" = salvage ]; then
+      assert_file_contains "$TMP/salvage-refusal" '--accept-encoding-loss'
+    else
+      assert_file_contains "$TMP/salvage-refusal" '--accept-salvaged'
+    fi
+    if grep -Fq landed "$project/file.txt"; then
+      fail "swapped salvage refusal changed the tree"
+    fi
+  done
+
 }
 
 test_patch_land_finishes_plan_task() {
@@ -24670,6 +24804,62 @@ PY
   "$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1 |
     grep -Fq '0 recovered, 0 abandoned' ||
     fail "a completed land leaves nothing to recover"
+  # A hostile replacement at Git's final read boundary cannot replace the
+  # verified buffer. Restore the name afterwards to expose the old silent race.
+  git -C "$project" checkout -q -- file.txt
+  local replacement="$TMP/landing-txn-replacement.patch"
+  local apply_bin="$TMP/landing-txn-bin"
+  local marker="$TMP/landing-txn-swap.json"
+  local real_git real_python
+  real_git="$(command -v git)"
+  real_python="$(command -v python3)"
+  printf 'base\nforeign\n' > "$project/file.txt"
+  git -C "$project" diff > "$replacement"
+  git -C "$project" checkout -q -- file.txt
+  mkdir -p "$apply_bin"
+  cat > "$apply_bin/git" <<'EOFGIT'
+#!/usr/bin/env bash
+exec "$OMS_T_REAL_PYTHON" "$0.py" "$@"
+EOFGIT
+  cat > "$apply_bin/git.py" <<'PYGIT'
+import hashlib, json, os, subprocess, sys
+from pathlib import Path
+args = sys.argv[1:]
+repo = Path(os.environ['OMS_T_APPLY_REPO'])
+if len(args) == 5 and args[:2] == ['-C', str(repo)] and args[2:4] == ['apply', '--binary']:
+    rows = [json.loads(line) for line in (repo / '.oms/landings.jsonl').read_text().splitlines()]
+    target = Path([row for row in rows if row['event'] == 'intent'][-1]['patch'])
+    backup = target.with_name(target.name + '.before-swap')
+    target.rename(backup)
+    try:
+        target.write_bytes(Path(os.environ['OMS_T_APPLY_REPLACEMENT']).read_bytes())
+        data = sys.stdin.buffer.read() if args[-1] == '-' else None
+        Path(os.environ['OMS_T_APPLY_MARKER']).write_text(json.dumps({
+            'argv': args, 'stdin_sha256': hashlib.sha256(data).hexdigest() if data is not None else None}))
+        result = subprocess.run([os.environ['OMS_T_REAL_GIT'], *args], input=data)
+    finally:
+        target.unlink()
+        backup.rename(target)
+    sys.exit(result.returncode)
+os.execv(os.environ['OMS_T_REAL_GIT'], [os.environ['OMS_T_REAL_GIT'], *args])
+PYGIT
+  chmod +x "$apply_bin/git"
+  PATH="$apply_bin:$PATH" OMS_T_REAL_GIT="$real_git" OMS_T_REAL_PYTHON="$real_python" \
+    OMS_T_APPLY_REPO="$project" OMS_T_APPLY_REPLACEMENT="$replacement" OMS_T_APPLY_MARKER="$marker" \
+    "$ROOT/scripts/patch-land.sh" --patch "$patch" --repo "$project" --verify true >"$TMP/landing-txn-swap.out" 2>&1 ||
+    fail "verified-buffer landing failed: $(cat "$TMP/landing-txn-swap.out")"
+  grep -Fxq added "$project/file.txt" && ! grep -Fxq foreign "$project/file.txt" ||
+    fail "final apply consumed the swapped pathname instead of verified bytes"
+  python3 - "$marker" "$patch" <<'PY' || fail "final Git apply did not consume the exact verified buffer"
+import hashlib, json, sys
+from pathlib import Path
+row = json.loads(Path(sys.argv[1]).read_text())
+assert row['argv'][-1] == '-', row
+assert row['stdin_sha256'] == hashlib.sha256(Path(sys.argv[2]).read_bytes()).hexdigest(), row
+PY
+  "$ROOT/scripts/patch-land.sh" --repo "$project" --recover 2>&1 |
+    grep -Fq '0 recovered, 0 abandoned' || fail "verified-buffer land lost its terminal receipts"
+
 }
 
 test_patch_land_recovers_an_interrupted_land() {
