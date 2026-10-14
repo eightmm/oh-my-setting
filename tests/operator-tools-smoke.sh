@@ -1878,9 +1878,10 @@ else:
 events_module = runpy.run_path(str(Path(sys.argv[1]) / 'agent-events.py'))
 new_event = events_module['new_event']
 event_rows = []
-def add_attempt(attempt_id, task_id, role, access, start, end, final, reason='', parent='main-metric'):
+def add_attempt(attempt_id, task_id, role, access, start, end, final, reason='', parent='main-metric', extra_refs=None):
     refs = {'panel_role': role, 'panel_access': access,
             'panel_room_id': 'metric-room', 'panel_room_participant': attempt_id}
+    refs.update(extra_refs or {})
     created = new_event(attempt_id, 1, 'attempt.created', run_id='run-metric', task_id=task_id,
                         parent_attempt_id=parent, provider='codex', tool='panel-dispatch',
                         refs=refs, to_state='queued')
@@ -1936,6 +1937,7 @@ assert expected_metrics['completion'] == {'finished': 2, 'started': 6, 'rate': 0
 assert expected_metrics['review_wait_seconds'] == {'count': 2, 'median': 20.0, 'p90': 20.0}, expected_metrics
 assert expected_metrics['rework'] == {'tasks': 1, 'started': 6, 'rate': 0.1667}, expected_metrics
 assert expected_metrics['abandoned_calls'] == 1, expected_metrics
+assert expected_metrics['endings'] == {'timed_out': 2, 'cancelled': 1}, expected_metrics
 assert expected_metrics['window']['until'] == expected_metrics['until'], expected_metrics
 assert expected_metrics['metric_scope']['completion']['coverage']['attempt_limit'] == 300, expected_metrics
 assert expected_metrics['pending']['awaiting_review']['count'] == 1, expected_metrics
@@ -2055,6 +2057,24 @@ empty_json = io.StringIO()
 with redirect_stdout(empty_json):
     assert panel.main(['--repo', str(empty_metrics_repo), '--metrics', '--json']) == 0
 assert json.loads(empty_json.getvalue())['review_wait_seconds']['p90'] is None
+# Add the shared ending fixture only after legacy metric assertions, so it
+# verifies the vocabulary without changing their established input snapshot.
+event_rows = []
+add_attempt('ending-guard', 'ending-guard', 'worker', 'write', -12, -11, 'failed',
+            'worker_authority_violation')
+add_attempt('ending-cancel', 'ending-cancel', 'worker', 'write', -10, -9, 'cancelled', 'cancelled_by_owner')
+add_attempt('ending-timeout', 'ending-timeout', 'worker', 'write', -8, -7, 'timed_out')
+add_attempt('ending-failure', 'ending-failure', 'worker', 'write', -6, -5, 'failed')
+lifecycle.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in event_rows), encoding='utf-8')
+ending_metrics = panel_metrics.aggregate(metric_repo, now=now_metric)
+assert ending_metrics['endings'] == {'guard_stop': 1, 'cancelled': 1, 'timed_out': 1, 'failed': 1}, ending_metrics
+from call_ending import call_ending
+attention_ending_counts = {}
+for state, reason in (('failed', 'worker_authority_violation'), ('cancelled', 'cancelled_by_owner'),
+                      ('timed_out', ''), ('failed', '')):
+    ending = call_ending({'state': state, 'reason_code': reason})
+    attention_ending_counts[ending] = attention_ending_counts.get(ending, 0) + 1
+assert {key: ending_metrics['endings'].get(key, 0) for key in attention_ending_counts} == attention_ending_counts
 shutil.rmtree(metric_repo)
 shutil.rmtree(empty_metrics_repo)
 

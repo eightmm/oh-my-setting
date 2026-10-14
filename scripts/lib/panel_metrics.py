@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
 from dashboard_projection import mapping, number
+from call_ending import call_ending
 from panel_view import TERMINAL_STATES
 
 
@@ -491,6 +492,17 @@ def aggregate(repo, since=None, now=None):
             incomplete = True
     finished = sum(task.get("state") in {"done", "landed"} or bool(task.get("landing")) for task in started)
     calls = [row for row in attempts if not str(row.get("task_id", "")).startswith("preflight-")]
+    ending_counts = {}
+    for call in calls:
+        if not in_window(call.get("updated_at")):
+            continue
+        evidence = dict(call.get("refs", {}))
+        evidence.update(state=call.get("state"), reason_code=call.get("reason_code"))
+        # Lifecycle records retain the terminal state and reason. Preserve any
+        # richer typed result evidence carried in refs for the shared classifier.
+        ending = call_ending(evidence)
+        if ending is not None:
+            ending_counts[ending] = ending_counts.get(ending, 0) + 1
     write_calls = [row for row in calls if row.get("refs", {}).get("panel_role") == "worker"
                    and row.get("refs", {}).get("panel_access") == "write"
                    and not any(item.get("reason_code") == "manual_clear" for item in row.get("transitions", []))]
@@ -622,6 +634,7 @@ def aggregate(repo, since=None, now=None):
             "rework": {"tasks": len(reworked), "started": len(started),
                        "rate": round(len(reworked) / len(started), 4) if started else None},
             "abandoned_calls": abandoned,
+            "endings": ending_counts,
             "interventions": {"manual_clears": clears, "cancels": cancels,
                               "owner_finalized_failures": owner_failures,
                               "total": clears + cancels + owner_failures},
