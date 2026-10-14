@@ -1217,18 +1217,29 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         footer_extra.append(bar[0])
     help_rows = len(footer_hints(navigation, width, managed, unicode, selected_member, True)) if navigation.get("keys_help") and not menu else 1
     total_rows = max(0, height - int(menu) - 1 - help_rows - len(footer_extra))
-    # Detail releases its body when the right reader already owns that call.
+    # Compact Detail releases its body when the right reader owns that call.
     active = navigation.get("tab", "detail")
     reader_target = navigation.get("reader_target") if navigation.get("reader_open") else None
     same_reader = reader_target and previewed and reader_target == action(previewed)
     dock_body = dock_body_rows(height)
-    if active == "detail" and reader_target:
+    if active == "detail" and reader_target and height < 28:
         dock_body = 0 if same_reader else 1
     dock_rows = dock_body + 2 if dock_body else 1
+    dock_args = dict(members=members, primary=primary, previewed=previewed, preview=preview,
+                     everyone=everyone, teams=everyone, labels=labels, main_attempt=main_attempt,
+                     automatic=automatic, claims=claims, classify=classify, attention=ranked,
+                     past=past_calls(all_calls, classify))
+    dock_lines, dock_hits = tab_box(report, width, dock_rows, navigation, color, unicode,
+                                   height=height, **dock_args) if height >= 28 else ([], [])
+    if height >= 28:
+        dock_rows = len(dock_lines)
     main_rows = 5 if height >= 28 else 4 if height >= 20 else 3
     minimum_tree = min(2, len(gates)) + min(2, len(counsel)) + min(2, len(workers)) or int(bool(folded_calls))
     goal_rows = goal_box(report, width, unicode)
-    goal_cap = max(3, total_rows - len(lines) - min(dock_rows, 4) - main_rows - minimum_tree - 1)
+    goal_reserve = dock_rows if height >= 28 else min(dock_rows, 4)
+    if height >= 28:
+        goal_reserve += int(bool(room.get("swaps"))) + int(bool(report.get("swap_state")))
+    goal_cap = max(3, total_rows - len(lines) - goal_reserve - main_rows - minimum_tree - 1)
     goal_overflow = len(goal_rows) > goal_cap
     if goal_overflow:
         parts = goal_rows[1:-1]
@@ -1414,21 +1425,22 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     log_top = len(lines)
     navigation.pop("log_box", None)
     log_lines = session_log(report, width, spare, unicode, navigation if interactive else None)
+    if log_lines and height >= 28:
+        log_lines[-1:-1] = [(box_row("", width, unicode), None, "border")] * (spare - len(log_lines))
     if log_lines and interactive:
         navigation["log_box"] = {"y1": log_top + 1, "y2": log_top + len(log_lines)}
     for text, actor, style_key in log_lines:
         lines.append(text.replace(actor, styled(actor, style_key)) if actor else styled(text, style_key))
     navigation["band_offsets"] = offsets
     dock_rows = min(dock_rows, max(0, total_rows - len(lines)))
-    # Every tab keeps one fixed height at the bottom; rows the log did not use stay above it.
-    lines += [""] * max(0, total_rows - len(lines) - dock_rows)
+    # With no recorded events, the calls tree keeps the rest of the viewport.
+    filler = " " * stem + ("│" if unicode else "|") if height >= 28 else ""
+    lines += [filler] * max(0, total_rows - len(lines) - dock_rows)
     navigation.update(tab_strip_visible=bool(dock_rows), tab_body_visible=dock_rows >= 3)
     if dock_rows:
         top = len(lines)
-        dock_lines, dock_hits = tab_box(report, width, dock_rows, navigation, color, unicode, members=members,
-            primary=primary, previewed=previewed, preview=preview, everyone=everyone, teams=everyone, labels=labels,
-            main_attempt=main_attempt, automatic=automatic, claims=claims, classify=classify, attention=ranked,
-            past=past_calls(all_calls, classify))
+        if len(dock_lines) != dock_rows:
+            dock_lines, dock_hits = tab_box(report, width, dock_rows, navigation, color, unicode, **dock_args)
         lines.extend(dock_lines)
         hits.extend(dict(hit, y=hit["y"] + top) for hit in dock_hits)
         if navigation.get("box"):
@@ -1582,13 +1594,13 @@ def summary_card(member, preview, width, room=None, unicode=True, *, report=None
 
 
 def dock_body_rows(height):
-    """One body height for every bottom tab, so Detail, Plan and Debate do not resize the board."""
+    """Maximum reading body height, shared by all bottom tabs."""
     return 12 if height >= 56 else 8 if height >= 40 else 5 if height >= 28 else 2
 
 
 def tab_box(report, width, rows, navigation, color=False, unicode=True, *, members=None,
             primary=None, previewed=None, preview=None, teams=None, everyone=None, labels=None,
-            main_attempt=None, automatic=False, claims=None, classify=None, past=None, attention=None):
+            main_attempt=None, automatic=False, claims=None, classify=None, past=None, attention=None, height=None):
     """The shared reading dock; hit rows are relative to the returned lines."""
     rows_high = rows if rows >= 3 else int(rows > 0)
     navigation["full_mail"] = None
@@ -1701,45 +1713,66 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
     if strip_only:
         navigation.pop("box", None)
     else:
-        first, plain = 0, set()
-        if active == "detail":
-            reader_target = navigation.get("reader_target") if navigation.get("reader_open") else None
-            if reader_target and previewed and reader_target != action(previewed):
-                verdict = next((line for line in body if line.startswith("Stages:")), "")
-                reader_id = clipped(clean(str(reader_target[1]), 80), min(24, max(8, (width - 4) // 4)))
-                prefix = "reader: %s %s selected" % (reader_id, "≠" if unicode else "!=")
-                next_step = "Next: check selected evidence"
-                available = max(1, width - 4 - display_width(prefix + next_step) - 6)
-                compact_verdict = verdict.split(" / Review: ", 1)[-1].split(" / Main decision: ", 1)[0]
-                body = [prefix + " / " + clipped(compact_verdict, available) + " / " + next_step]
-            first = min(scrolled.get("detail", 0), max(0, len(body) - capacity))
-            scrolled_now["detail"] = first
-            rows = [(text, action(previewed) if previewed else None, False) for text in body[first:first + capacity]]
-            if len(body) > capacity and rows:
-                rows[-1] = (clipped(rows[-1][0], max(1, width - 34)) + " / rows %s-%s/%s / wheel" % (
-                    first + 1, min(len(body), first + capacity), len(body)), rows[-1][1], False)
-            if first > 0 and len(body) > 1 and body[1].startswith("[partial answer]") and rows:
-                rows = [(body[1], action(previewed) if previewed else None, False)] + rows[:max(0, capacity - 1)]
-            plain = set(range(capacity))
-        elif active == "plan":
-            plan = plan_rows(report, labels, width - 4, unicode, navigation)
-            navigation["plan_ids"] = [target for unused, target in plan if target]
-            navigation["plan_positions"] = {target: n for n, (unused, target) in enumerate(plan) if target}
-            navigation["plan_page"] = capacity
-            if navigation.get("plan_pick") not in navigation["plan_ids"]:
-                navigation.pop("plan_pick", None)
-            first = min(scrolled.get("detail", 0), max(0, len(plan) - capacity))
-            scrolled_now["detail"] = first
-            rows = [(text, target, target == navigation.get("plan_pick")) for text, target in plan[first:first + capacity]]
-        elif active == "debate":
-            rows = debate_body(report, shown_main, width - 4, capacity, navigation, labels, unicode)
-        elif active == "past":
-            rows = past_body(past, width - 4, capacity, navigation, labels, unicode)
-        elif active == "needs":
-            rows = attention_body(attention, width - 4, capacity, navigation, unicode)
-        else:
-            summary = [("Messages: %s unread for live participants" % unread_total, None, False)]
-            rows = summary + messages_body(report, width - 4, capacity - len(summary), navigation, unicode)
+        def body_rows(capacity, navigation):
+            first, plain = 0, set()
+            content = body
+            if active == "detail":
+                reader_target = navigation.get("reader_target") if navigation.get("reader_open") else None
+                if reader_target and previewed and reader_target != action(previewed):
+                    verdict = next((line for line in content if line.startswith("Stages:")), "")
+                    reader_id = clipped(clean(str(reader_target[1]), 80), min(24, max(8, (width - 4) // 4)))
+                    prefix = "reader: %s %s selected" % (reader_id, "≠" if unicode else "!=")
+                    next_step = "Next: check selected evidence"
+                    available = max(1, width - 4 - display_width(prefix + next_step) - 6)
+                    compact_verdict = verdict.split(" / Review: ", 1)[-1].split(" / Main decision: ", 1)[0]
+                    content = [prefix + " / " + clipped(compact_verdict, available) + " / " + next_step]
+                first = min(scrolled.get("detail", 0), max(0, len(content) - capacity))
+                scrolled_now["detail"] = first
+                rows = [(text, action(previewed) if previewed else None, False) for text in content[first:first + capacity]]
+                if len(content) > capacity and rows:
+                    rows[-1] = (clipped(rows[-1][0], max(1, width - 34)) + " / rows %s-%s/%s / wheel" % (
+                        first + 1, min(len(content), first + capacity), len(content)), rows[-1][1], False)
+                if first > 0 and len(content) > 1 and content[1].startswith("[partial answer]") and rows:
+                    rows = [(content[1], action(previewed) if previewed else None, False)] + rows[:max(0, capacity - 1)]
+                plain = set(range(capacity))
+            elif active == "plan":
+                plan = plan_rows(report, labels, width - 4, unicode, navigation)
+                navigation["plan_ids"] = [target for unused, target in plan if target]
+                navigation["plan_positions"] = {target: n for n, (unused, target) in enumerate(plan) if target}
+                navigation["plan_page"] = capacity
+                if navigation.get("plan_pick") not in navigation["plan_ids"]:
+                    navigation.pop("plan_pick", None)
+                first = min(scrolled.get("detail", 0), max(0, len(plan) - capacity))
+                scrolled_now["detail"] = first
+                rows = [(text, target, target == navigation.get("plan_pick")) for text, target in plan[first:first + capacity]]
+            elif active == "debate":
+                rows = debate_body(report, shown_main, width - 4, capacity, navigation, labels, unicode)
+            elif active == "past":
+                rows = past_body(past, width - 4, capacity, navigation, labels, unicode)
+            elif active == "needs":
+                rows = attention_body(attention, width - 4, capacity, navigation, unicode)
+            else:
+                summary = [("Messages: %s unread for live participants" % unread_total, None, False)]
+                rows = summary + messages_body(report, width - 4, capacity - len(summary), navigation, unicode)
+            return rows, first, plain
+
+        fitting = height is not None and height >= 28 and capacity >= 3
+        # Measuring must not consume a reader's reveal or change its scroll before the fitted page renders.
+        if fitting:
+            from copy import deepcopy
+        rows, first, plain = body_rows(capacity, deepcopy(navigation) if fitting else navigation)
+        navigation["dock_content_rows"] = len(rows)
+        if fitting:
+            sizes = navigation.setdefault("dock_sizes", {})
+            key = active
+            count, fitted = sizes.get(key, (len(rows), min(capacity, max(3, len(rows)))))
+            if abs(len(rows) - count) >= 2:
+                count, fitted = len(rows), min(capacity, max(3, len(rows)))
+            sizes[key] = (count, fitted)
+            if fitted != capacity:
+                capacity = min(capacity, fitted)
+                rows_high = capacity + 2
+            rows, first, plain = body_rows(capacity, navigation)
         previous_target = None
         for n in range(capacity):
             row = rows[n] if n < len(rows) else ("", None, False)

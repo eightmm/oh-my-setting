@@ -322,7 +322,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     if boxed and budget - len(head) < 3:
         head = head[:pinned]
     head = head[:budget]
-    from room_view import tab_box, dock_body_rows
+    from room_view import tab_box, dock_body_rows, session_log
     main_rows = {}
     for i, row in enumerate(rows):
         if row.get("action") and row["action"][0] == "chat":
@@ -339,9 +339,17 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     reader_target = navigation.get("reader_target") if navigation.get("reader_open") else None
     main_action = next((r["action"] for r in rows if r.get("action") and r["action"][0] == "chat"), None)
     target = mapping(navigation.get("preview")).get("target") or selected or main_action
-    if navigation.get("tab", "detail") == "detail" and reader_target:
+    if navigation.get("tab", "detail") == "detail" and reader_target and height < 28:
         detail_body = 0 if reader_target == target else 1
     desired_dock = detail_body + 2 if detail_body else 1
+    everyone = {m["participant"]: [c for c in calls if c.get("parent") in
+                {m["participant"], m.get("attempt")}] for m in mains}
+    dock_args = dict(primary=live_main, main_attempt=main_attempt, everyone=everyone,
+                     past=past, attention=ranked)
+    dock_lines, dock_hits = tab_box(report, width, desired_dock, navigation, color, unicode,
+                                   height=height, **dock_args) if height >= 28 and width >= 20 else ([], [])
+    if dock_lines:
+        desired_dock = len(dock_lines)
     dock_rows = (desired_dock if budget - len(head) >= desired_dock + activity_floor else int(budget > len(head))) if width >= 20 else 0
     if dock_rows == 1 and reading and budget - len(head) - activity_floor >= 3:
         dock_rows = min(desired_dock, budget - len(head) - activity_floor)
@@ -439,12 +447,23 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     while output and not output[-1].strip():
         output.pop()
     spare = max(0, budget - dock_rows - len(output))
-    output += [""] * spare
+    navigation.pop("log_box", None)
+    log_lines = session_log(report, width, spare, unicode, navigation if interactive else None) if height >= 28 else []
+    if log_lines:
+        log_lines[-1:-1] = [(box_row("", width, unicode), None, "border")] * (spare - len(log_lines))
+        if interactive:
+            navigation["log_box"] = {"y1": len(output) + 1, "y2": len(output) + len(log_lines)}
+        for text, actor, style_key in log_lines:
+            styled = paint(actor or text, style_key, color=color, colors=color_count(), light=light_theme())
+            output.append(text.replace(actor, styled) if actor else styled)
+    elif height >= 28 and boxed and spare:
+        output[-1:-1] = [box_row("", width, unicode)] * spare
+    else:
+        output += [("│" if unicode else "|") if height >= 28 else ""] * spare
     dock_top = len(output)
-    everyone = {m["participant"]: [c for c in calls if c.get("parent") in
-                {m["participant"], m.get("attempt")}] for m in mains}
-    dock_lines, dock_hits = tab_box(report, width, dock_rows, navigation, color, unicode, primary=live_main,
-                                    main_attempt=main_attempt, everyone=everyone, past=past, attention=ranked)
+    # A hidden dock still runs tab_box so it clears its box, preview and key ownership.
+    if len(dock_lines) != dock_rows or not dock_rows:
+        dock_lines, dock_hits = tab_box(report, width, dock_rows, navigation, color, unicode, **dock_args)
     if dock_rows == 1:
         dock_lines = [line.replace("╭", "[").replace("╮", "]") for line in dock_lines]
     output += dock_lines
