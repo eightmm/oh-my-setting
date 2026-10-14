@@ -7769,7 +7769,7 @@ draft_main = {"attempt_id": "attempt-fix-draft-main", "tool": "panel-main", "pro
                        "panel_room_participant": room_owner}}
 original_fix_brief = "# Task\n\nRepair scripts/fixture.py only.\n\n# Constraints\n\nNo commits or dependency changes.\n"
 fix_verify = "python3 -c 'print(\"it works\")'"
-fix_execution = Path("/home/fixture-owner/review-worktree")
+fix_execution = Path.home() / "oms-fixture-review-worktree"
 fix_finding_blocks = ("- [P0] Validate `%s/scripts/fixture.py:7`.\n  Keep the caller contract." % project,
                       "- **P1** Refuse the unsafe path in `%s/scripts/fixture.py:9`.\n"
                       "  ```python\nP0: example within the finding\n  ```" % fix_execution,
@@ -7813,7 +7813,7 @@ for case_number, (case, expected_draft) in enumerate((
     if case == "no-priorities":
         review_answer = "No parseable priorities."
     if case == "private-path":
-        review_answer += "\n  Read /home/unrelated-user/private.txt."
+        review_answer += "\n  Read %s." % (Path.home() / "oms-unrelated-private.txt")
     if case in {"truncated-summary", "oversized"}:
         review_answer += "\n  " + "complete evidence " * (2300 if case == "truncated-summary" else 5000)
     gate = "pass" if case == "passed-gate" else "fail"
@@ -7853,7 +7853,7 @@ for case_number, (case, expected_draft) in enumerate((
             assert relative_finding in draft_text, relative_finding
         assert "Declared scope: scripts/fixture.py" in draft_text and verifier in draft_text
         assert "Fix every finding; same scope and authority as the previous round." in draft_text
-        assert "/home/" not in draft_text and str(project) not in draft_text
+        assert str(Path.home()) + "/" not in draft_text and str(project) not in draft_text
         assert "quoted example" not in draft_text and "fenced example" not in draft_text
         assert "P0: example within the finding" in draft_text
         assert "\n" not in draft_mail[0]["text"], draft_mail
