@@ -29406,6 +29406,24 @@ test_worker_guard_accepts_only_artifact_index_compaction() {
     OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
   [ "$changed" = shared-state ] ||
     fail "rewriting a surviving row must stay a violation, got: ${changed:-<none>}"
+
+  # The store keeps a row a plan completion receipt pins ahead of the dropped ones.
+  { sed -n '1p;4,6p' "$snap/omsstate.artifact-index"; printf '{"event_id":"e7","kind":"ask"}\n'; } > "$index"
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
+  [ "$changed" = shared-state ] ||
+    fail "an unpinned survivor ahead of dropped rows must stay a violation, got: ${changed:-<none>}"
+  mkdir -p "$project/.oms/plan/completions"
+  python3 - "$project/.oms/plan/completions" <<'PY'
+import hashlib, json, os, sys
+raw = json.dumps({"bundle": {"research": {"classification": "research-only", "index_event_id": "e1",
+                                          "artifact": {"path": "notes.md"}}}}).encode()
+with open(os.path.join(sys.argv[1], hashlib.sha256(raw).hexdigest() + ".json"), "wb") as handle:
+    handle.write(raw)
+PY
+  changed="$( . "$ROOT/scripts/lib/oms-common.sh"
+    OMS_ARTIFACT_INDEX_KEEP=5 oms_worker_surface_diff "$project" "$snap" )"
+  [ -z "$changed" ] || fail "compaction keeping a receipt-pinned row must not be a violation, got: $changed"
 }
 
 test_worker_guard_keeps_local_branch_refs_hard() {
