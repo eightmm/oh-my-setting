@@ -7236,6 +7236,8 @@ def main(argv=None):
     parser.add_argument("--summary-file", help="bounded owner summary for --finalize")
     parser.add_argument("--outcome", choices=("completed", "accepted", "failed", "rejected"))
     parser.add_argument("--evidence", action="append", help="safe repository-relative evidence for --finalize (up to eight)")
+    parser.add_argument("--verify-timeout", type=int,
+                        help="finalize verifier timeout in seconds, 1..86400 (default: 1800)")
     parser.add_argument("--notify", action="store_true", help="deliver the recorded result to Codex app")
     parser.add_argument("--retry-delivery", action="store_true", help="retry delivery of a saved task result without its original summary file")
     parser.add_argument("--result-id", help="saved result revision for --retry-delivery")
@@ -7331,7 +7333,7 @@ def main(argv=None):
         parser.error("--label requires --dispatch or --council")
     if (args.rounds != 1 or args.thread) and not args.council:
         parser.error("--rounds and --thread require --council")
-    if (args.summary_file or args.outcome or args.evidence or args.notify) and not args.finalize:
+    if (args.summary_file or args.outcome or args.evidence or args.notify or args.verify_timeout is not None) and not args.finalize:
         parser.error("finalization options require --finalize")
     if args.retry_delivery and not args.task_id:
         parser.error("--retry-delivery requires --task-id")
@@ -7532,7 +7534,8 @@ def main(argv=None):
             return 0
         if args.finalize:
             report = finalize(repo, args.owner, args.task_id, args.summary_file, args.outcome,
-                              args.verify, args.evidence, args.notify)
+                              args.verify, args.evidence, args.notify,
+                              1800 if args.verify_timeout is None else args.verify_timeout)
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0
         if args.retry_delivery:

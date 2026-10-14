@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import signal
 import subprocess
 import sys
 import time
@@ -454,27 +455,72 @@ def _plan_hint(repo, task_id):
         pass
 
 
-def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=None, notify=False):
+def _run_verifier(repo, verify, timeout):
+    creationflags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0) if os.name == 'nt' else 0
+    process = subprocess.Popen(['bash', '-c', verify], cwd=str(repo),
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, start_new_session=os.name == 'posix',
+                               creationflags=creationflags)
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        if os.name == 'posix':
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            try:
+                subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=5, check=False)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            if process.poll() is None:
+                process.kill()
+        process.wait()
+        raise ValueError('verifier timed out after %s s' % timeout) from error
+    return returncode
+
+
+def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
+    binding = _plan_bindings(repo, {task_id}).get(task_id)
+    attempts, rows = _records(repo, full=True)
+    if main_id:
+        main = next((a for a in attempts if a.get('attempt_id') == main_id), {})
+        if main.get('tool') != 'panel-main' or main.get('provider') != owner:
+            raise ValueError('finalizing main identity is unavailable or does not match the owner')
+    related = [a for a in attempts if a.get('task_id') == task_id
+               or (main_id and a.get('parent_attempt_id') == main_id)]
+    workers = sorted([a for a in related if a.get('refs', {}).get('panel_access') == 'write'
+                      and a.get('refs', {}).get('panel_role') == 'worker'], key=lambda a: a.get('created_at', ''))
+    admissions = [_admission(repo, rows, a.get('task_id'), a) for a in workers]
+    attempt_ids = {a.get('attempt_id') for a in related}
+    related_rows = [r for r in rows if r.get('task_id') == task_id or r.get('attempt_id') in attempt_ids]
+    finalized = [{'row': r, 'record': _load_result(repo, r)} for r in rows
+                 if r.get('kind') == 'panel-result' and r.get('task_id') == task_id]
+    return {'binding': binding, 'main_attempt_id': main_id, 'related_attempts': related,
+            'related_rows': related_rows, 'admissions': admissions, 'evidence': evidence,
+            'finalized': finalized}, attempts, rows, related, workers, admissions
+
+
+def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=None, notify=False,
+             verify_timeout=1800):
     _owner()
     if owner not in ('codex', 'claude') or not ID.fullmatch(task_id) or outcome not in ('completed', 'accepted', 'failed', 'rejected'):
         raise ValueError('invalid owner result')
+    if isinstance(verify_timeout, bool) or not isinstance(verify_timeout, int) or not 1 <= verify_timeout <= 86400:
+        raise ValueError('verify timeout must be between 1 and 86400 seconds')
     summary = _safe_summary(summary_file, repo)
     refs = [_relative(repo, value) for value in (evidence or [])] if not isinstance(evidence, str) else [_relative(repo, evidence)]
     if len(refs) > 8:
         raise ValueError('use at most eight evidence references')
+    main_id = os.environ.get('OMS_PANEL_MAIN_ATTEMPT')
     with _lock(repo):
-        binding = _plan_bindings(repo, {task_id}).get(task_id)
-        attempts, rows = _records(repo, full=True)
-        main_id = os.environ.get('OMS_PANEL_MAIN_ATTEMPT')
-        if main_id:
-            main = next((a for a in attempts if a.get('attempt_id') == main_id), {})
-            if main.get('tool') != 'panel-main' or main.get('provider') != owner:
-                raise ValueError('finalizing main identity is unavailable or does not match the owner')
-        related = [a for a in attempts if a.get('task_id') == task_id
-                   or (main_id and a.get('parent_attempt_id') == main_id)]
-        workers = sorted([a for a in related if a.get('refs', {}).get('panel_access') == 'write'
-                          and a.get('refs', {}).get('panel_role') == 'worker'], key=lambda a: a.get('created_at', ''))
-        admissions = [_admission(repo, rows, a.get('task_id'), a) for a in workers]
+        evidence_refs = [dict(ref) for ref in refs]
+        snapshot, attempts, rows, related, workers, admissions = _finalize_snapshot(
+            repo, owner, task_id, main_id, evidence_refs)
+        binding = snapshot['binding']
         if outcome == 'accepted':
             for worker in workers:
                 owns = _worker_owns(repo, worker)
@@ -491,20 +537,28 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
             raise ValueError('write worker needs matching landed patch evidence')
         if outcome == 'accepted' and (not verify or not refs):
             raise ValueError('accepted requires an evidence reference and a passing verifier')
-        verification = {'status': 'not_run'}
-        if verify:
-            # Output remains local; a verifier transcript is never exported as a summary.
-            checked = subprocess.run(['bash', '-c', verify], cwd=str(repo),
-                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL, timeout=300, check=False)
-            verification = {'status': 'passed' if checked.returncode == 0 else 'failed',
-                            'exit': checked.returncode, 'command_sha256': hashlib.sha256(verify.encode()).hexdigest()}
-            if outcome == 'accepted' and checked.returncode:
-                raise ValueError('accepted verifier failed (exit %s)' % checked.returncode)
-            if any(_relative(repo, ref['path']) != ref for ref in refs):
-                raise ValueError('evidence changed during verification')
-        if binding != _plan_bindings(repo, {task_id}).get(task_id):
-            raise ValueError('plan task changed during result verification')
+    verification = {'status': 'not_run'}
+    if verify:
+        # Output remains local; a verifier transcript is never exported as a summary.
+        verify_exit = _run_verifier(repo, verify, verify_timeout)
+        verification = {'status': 'passed' if verify_exit == 0 else 'failed',
+                        'exit': verify_exit, 'command_sha256': hashlib.sha256(verify.encode()).hexdigest()}
+        if outcome == 'accepted' and verify_exit:
+            raise ValueError('accepted verifier failed (exit %s)' % verify_exit)
+    with _lock(repo):
+        current_evidence = [_relative(repo, ref['path']) for ref in refs]
+        current, attempts, rows, related, workers, admissions = _finalize_snapshot(
+            repo, owner, task_id, main_id, current_evidence)
+        for field, message in (
+                ('binding', 'plan task changed during result verification'),
+                ('evidence', 'evidence changed during verification'),
+                ('admissions', 'admission evidence changed during verification'),
+                ('related_attempts', 'related attempts changed during verification'),
+                ('related_rows', 'related artifact evidence changed during verification'),
+                ('finalized', 'another finalize for this task landed during verification'),
+                ('main_attempt_id', 'finalizing main identity changed during verification')):
+            if current[field] != snapshot[field]:
+                raise ValueError(message)
         payload = {'schema': 1, 'kind': 'oms-panel-result', 'task_id': task_id,
                    'owner': owner, 'outcome': outcome, 'summary': summary,
                    'summary_sha256': hashlib.sha256(summary.encode()).hexdigest(),

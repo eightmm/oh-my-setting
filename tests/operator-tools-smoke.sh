@@ -5892,6 +5892,59 @@ call(["bash", str(panel.ENTRY), "patch-land", "--repo", str(project), "--patch",
 write_finalize[write_finalize.index("--verify") + 1] = "test \"$(tail -1 value.txt)\" = new"
 whole_finalize[whole_finalize.index("--verify") + 1] = "test \"$(tail -1 value.txt)\" = new"
 assert json.loads(call(write_finalize))["outcome"] == "accepted"
+# Finalize does not hold the shared results lock while a verifier runs.
+import threading
+slow_started, release_slow = threading.Event(), threading.Event()
+slow_errors = []
+def controlled_verifier(repo, command, timeout):
+    if command == "slow":
+        slow_started.set()
+        if not release_slow.wait(5):
+            raise AssertionError("slow verifier was not released")
+    return 0
+def finalize_slow():
+    try:
+        saved.finalize(project, "codex", "finalize-slow-a", str(summary), "completed", "slow")
+    except Exception as error:
+        slow_errors.append(error)
+with patch.dict(os.environ, environment, clear=True), patch.object(saved, "_register"), \
+        patch.object(saved, "_plan_hint"), patch.object(saved, "_run_verifier", side_effect=controlled_verifier):
+    slow_thread = threading.Thread(target=finalize_slow)
+    slow_thread.start()
+    assert slow_started.wait(2), "slow verifier did not start"
+    try:
+        other_result = saved.finalize(project, "codex", "finalize-fast-b", str(summary), "completed", "fast")
+        assert other_result["outcome"] == "completed" and slow_thread.is_alive(), \
+            "task B waited for task A verifier"
+    finally:
+        release_slow.set()
+        slow_thread.join(5)
+    assert not slow_thread.is_alive() and not slow_errors, slow_errors
+
+timeout_args = list(final_args)
+timeout_args[timeout_args.index("--task-id") + 1] = "finalize-timeout"
+timeout_args[timeout_args.index("--outcome") + 1] = "completed"
+timeout_args += ["--verify-timeout", "1"]
+timeout_args[timeout_args.index("--verify") + 1] = "sleep 5"
+timeout_result = subprocess.run(timeout_args, cwd=project, env=environment, capture_output=True, text=True)
+assert timeout_result.returncode != 0 and "verifier timed out after 1 s" in timeout_result.stderr, timeout_result.stderr
+assert "Traceback" not in timeout_result.stderr, timeout_result.stderr
+assert not any(row.get("kind") == "panel-result" and row.get("task_id") == "finalize-timeout"
+               for row in saved._records(project)[1]), "timed-out verifier wrote a result"
+
+drift_args = list(final_args)
+drift_args[drift_args.index("--task-id") + 1] = "finalize-evidence-drift"
+drift_args[drift_args.index("--outcome") + 1] = "completed"
+drift_args[drift_args.index("--verify") + 1] = "printf changed > value.txt"
+evidence_before = (project / "value.txt").read_bytes()
+try:
+    drift_result = subprocess.run(drift_args, cwd=project, env=environment, capture_output=True, text=True)
+    assert drift_result.returncode != 0 and "evidence" in drift_result.stderr and "changed during verification" in drift_result.stderr, \
+        drift_result.stderr
+    assert not any(row.get("kind") == "panel-result" and row.get("task_id") == "finalize-evidence-drift"
+                   for row in saved._records(project)[1]), "changed evidence wrote a result"
+finally:
+    (project / "value.txt").write_bytes(evidence_before)
 # BEGIN patch-scope finalize regression (also runnable as an isolated case).
 scope_patch = project / ".oms/artifacts/scope-result.patch"
 scope_worker = {"attempt_id": "att_scope_write", "task_id": "scope-result", "parent_attempt_id": "scope-main",

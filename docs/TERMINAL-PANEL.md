@@ -100,6 +100,7 @@ binds to the current plan and task. Plan displays **completed locally** for a
 matching passing result, including one recorded outside a panel session, while
 retaining the plan's review/acceptance state. Changed task generations, replaced
 plans, modified evidence and a later unverified result invalidate that display.
+Use `--verify-timeout SECONDS` to set the finalize verifier wall time (1–86400 seconds; default 1800).
 Historical results without the binding remain available in Results.
 `--outcome failed` asks for rework, so the task's review and blocked calls stay on
 the board; `--outcome rejected` withdraws the work and moves them to Past. A review
