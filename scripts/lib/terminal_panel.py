@@ -4344,7 +4344,7 @@ def swap_main(repo, harness, model=None):
                                                               shlex.quote(shell))
             subprocess.run(tmux_command("if-shell", "-F", "-t", pane, guard, command), check=True,
                            timeout=5, stdin=subprocess.DEVNULL)
-            deadline = time.monotonic() + 15
+            deadline = time.monotonic() + 45  # a native CLI may take tens of seconds to start under load
             while time.monotonic() < deadline:
                 try:
                     current = _main_window(pane)
