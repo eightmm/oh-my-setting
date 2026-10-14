@@ -59,8 +59,9 @@ payload hashes, file sizes and `encoding_warnings` for display. Admission uses
 controller records in `.oms/salvage-provenance/`, keyed by the diff payload hash;
 editing headers, sidecars or warning lists cannot change those records.
 The flags guard the salvaged artifact as captured; an edited or reformatted
-patch is a different patch that ordinary admission checks, so encoding-loss
-detection on every patch belongs to patch-admit, not to salvage identity.
+patch is a different patch that ordinary admission checks. `patch-admit`
+examines every textual patch hunk for encoding loss, independent of salvage
+identity; `--accept-encoding-loss` records owner acceptance for detected hunks.
 Warnings flag hunks whose
 replacement has the same ASCII skeleton after Unicode decomposition but fewer
 non-ASCII characters, and files losing more than half their non-ASCII bytes.

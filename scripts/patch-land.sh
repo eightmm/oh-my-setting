@@ -1249,6 +1249,7 @@ admit_cmd=("$ROOT/scripts/patch-admit.sh" --patch "$PATCH" --repo "$REPO")
 [ "$ALLOW_VERIFIER_CHANGE" = 1 ] && admit_cmd+=(--allow-verifier-change)
 [ "$ALLOW_TEST_REDUCTION" = 1 ] && admit_cmd+=(--allow-test-reduction)
 [ "$ALLOW_RESTRUCTURE" = 1 ] && admit_cmd+=(--allow-restructure)
+[ "$ACCEPT_ENCODING_LOSS" = 1 ] && admit_cmd+=(--accept-encoding-loss)
 # Admission may persist a report even when it fails. Keep its actual input path
 # and bytes available; uncertain receipt writes are not permission to unlink.
 CAPTURE_PERSIST=1

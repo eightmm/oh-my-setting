@@ -17670,6 +17670,64 @@ test_patch_admit_rejects_a_patch_that_deletes_assertions() {
     fail "a patch that adds assertions must still be ADMITTED"
 }
 
+test_patch_admit_detects_encoding_loss_from_patch_hunks() {
+  local project="$TMP/admit-encoding-loss"
+  local report
+
+  make_committed_repo "$project"
+  mkdir -p "$project/tests" "$project/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/check.sh"
+  chmod +x "$project/scripts/check.sh"
+  printf 'assert result == "안녕하세요"\n' > "$project/tests/assertions.py"
+  printf 'ascii base\n' > "$project/tests/ascii.txt"
+  git -C "$project" add scripts/check.sh tests/assertions.py tests/ascii.txt
+  git -C "$project" commit -qm 'add utf8 assertion fixture'
+
+  printf 'assert result == ""\n' > "$project/tests/assertions.py"
+  git -C "$project" diff > "$project/lossy.patch"
+  git -C "$project" checkout -q -- tests/assertions.py
+  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/lossy.patch" --verify true \
+       >"$TMP/encoding-loss-refusal" 2>&1 ); then
+    fail "patch that rewrites a Korean assertion as ASCII must be REJECTED"
+  fi
+  report="$(ls -t "$project"/.oms/artifacts/admit/*.md | head -n 1)"
+  assert_file_contains "$report" 'tests/assertions.py:@@'
+  assert_file_contains "$report" '--accept-encoding-loss'
+  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/lossy.patch" --verify true \
+      --accept-encoding-loss >/dev/null 2>&1 ) ||
+    fail "--accept-encoding-loss should admit intentional transliteration"
+
+  # Hunk captions and trailing wrapper text do not bind detection to salvage
+  # payload identity or one patch formatting.
+  python3 - "$project/lossy.patch" "$project/reformatted.patch" <<'PY_ENCODING'
+from pathlib import Path
+import sys
+payload = Path(sys.argv[1]).read_bytes()
+payload = payload.replace(b'@@ -1 +1 @@', b'@@ -1 +1 @@ reformatted caption')
+Path(sys.argv[2]).write_bytes(payload + b'\n# trailing patch text\n')
+PY_ENCODING
+  if ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/reformatted.patch" --verify true \
+       >"$TMP/encoding-loss-reformatted" 2>&1 ); then
+    fail "reformatted lossy patch must still be REJECTED"
+  fi
+  report="$(ls -t "$project"/.oms/artifacts/admit/*.md | head -n 1)"
+  assert_file_contains "$report" 'reformatted caption'
+
+  printf 'ASCII changed\n' > "$project/tests/ascii.txt"
+  git -C "$project" diff > "$project/ascii.patch"
+  git -C "$project" checkout -q -- tests/ascii.txt
+  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/ascii.patch" --verify true \
+      >/dev/null 2>&1 ) || fail "editing ASCII-only assertion text must remain admitted"
+
+  printf '# 새 UTF-8 text\n' > "$project/tests/new_text.py"
+  git -C "$project" add tests/new_text.py
+  git -C "$project" diff --cached > "$project/new-utf8.patch"
+  git -C "$project" reset -q HEAD -- tests/new_text.py
+  rm -f "$project/tests/new_text.py"
+  ( cd "$project" && "$ROOT/scripts/patch-admit.sh" --patch "$project/new-utf8.patch" --verify true \
+      >/dev/null 2>&1 ) || fail "adding new UTF-8 text without deleting old text must remain admitted"
+}
+
 test_patch_admit_rejects_a_deleted_test_file() {
   local project="$TMP/admit-test-deleted"
 

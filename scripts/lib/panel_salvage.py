@@ -138,6 +138,12 @@ def encoding_warnings(path, before, after, diff):
     if old_count and new_count * 2 < old_count:
         warnings.append({'file': path, 'kind': 'non_ascii_drop',
                          'before_non_ascii_bytes': old_count, 'after_non_ascii_bytes': new_count})
+    warnings.extend(_transliteration_warnings(path, diff))
+    return warnings
+
+
+def _transliteration_warnings(path, diff):
+    warnings = []
     removed, added, hunk = [], [], None
 
     def inspect():
@@ -160,6 +166,67 @@ def encoding_warnings(path, before, after, diff):
         elif hunk and line.startswith('+'):
             added.append(line[1:])
     inspect()
+    return warnings
+
+
+def patch_encoding_warnings(patch):
+    """Find encoding loss from unified diff hunks, without salvage provenance."""
+    import shlex
+
+    text = patch.decode('utf-8', errors='replace') if isinstance(patch, bytes) else str(patch)
+    warnings = []
+    path = None
+    hunk = None
+    removed, added = [], []
+    hunks = []
+
+    def inspect_file():
+        if path is None or not hunks:
+            return
+        old_bytes = sum(sum(byte >= 128 for byte in line.encode('utf-8')) for _, old, _ in hunks for line in old)
+        new_bytes = sum(sum(byte >= 128 for byte in line.encode('utf-8')) for _, _, new in hunks for line in new)
+        if old_bytes and new_bytes * 2 < old_bytes:
+            for heading, old, _ in hunks:
+                if any(any(ord(char) >= 128 for char in line) for line in old):
+                    warnings.append({'file': path, 'kind': 'non_ascii_drop', 'hunk': heading,
+                                     'before_non_ascii_bytes': old_bytes,
+                                     'after_non_ascii_bytes': new_bytes})
+        for heading, old, new in hunks:
+            fragment = (heading + '\n' + ''.join('-' + line + '\n' for line in old) +
+                        ''.join('+' + line + '\n' for line in new)).encode('utf-8')
+            warnings.extend(_transliteration_warnings(path, fragment))
+
+    def finish_hunk():
+        if hunk is not None:
+            hunks.append((hunk, removed, added))
+
+    for line in text.splitlines():
+        if line.startswith('diff --git '):
+            finish_hunk()
+            inspect_file()
+            path = None
+            try:
+                fields = shlex.split(line)
+                if len(fields) >= 4 and fields[3].startswith('b/'):
+                    path = fields[3][2:]
+            except ValueError:
+                pass
+            hunk, removed, added, hunks = None, [], [], []
+        elif line.startswith(('GIT binary patch', 'Binary files ')):
+            finish_hunk()
+            hunk, removed, added, hunks = None, [], [], []
+            path = None
+        elif line.startswith('@@'):
+            finish_hunk()
+            hunk, removed, added = line, [], []
+        elif hunk and line.startswith('-') and not line.startswith('---'):
+            removed.append(line[1:])
+        elif hunk and line.startswith('+') and not line.startswith('+++'):
+            added.append(line[1:])
+        elif hunk and line.startswith('\\ No newline'):
+            continue
+    finish_hunk()
+    inspect_file()
     return warnings
 
 

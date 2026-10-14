@@ -32,6 +32,7 @@ ML=0
 ALLOW_VERIFIER_CHANGE=0
 ALLOW_TEST_REDUCTION=0
 ALLOW_RESTRUCTURE=0
+ACCEPT_ENCODING_LOSS=0
 KEEP_WORKTREE=0
 REPORT=""
 PLAN_TASK=""
@@ -88,6 +89,7 @@ Options:
   --allow-restructure  Admit a patch that adds a new top-level file or moves a
                  file across directories (normally rejected when no scope is
                  supplied: nothing else says where the patch may write).
+  --accept-encoding-loss  Accept detected non-ASCII loss or transliteration in patch hunks.
   -h, --help     Show this help.
 
 Ladder: patch applies cleanly (not stale) -> changed files stay in scope ->
@@ -151,6 +153,7 @@ while [ "$#" -gt 0 ]; do
     --allow-verifier-change) ALLOW_VERIFIER_CHANGE=1; shift ;;
     --allow-test-reduction) ALLOW_TEST_REDUCTION=1; shift ;;
     --allow-restructure) ALLOW_RESTRUCTURE=1; shift ;;
+    --accept-encoding-loss) ACCEPT_ENCODING_LOSS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -523,6 +526,34 @@ PY
       record "tests" "FAIL" "patch weakens the tests: $test_reduction (override: --allow-test-reduction)"
     else
       record "tests" "PASS" "patch does not net-remove test assertions"
+    fi
+
+    # Salvage provenance is owner-facing evidence, not a reliable detector:
+    # arbitrary patch formatting can erase its identity. Inspect the hunks
+    # themselves so every patch uses the same content-based encoding check.
+    encoding_loss="$(OMS_PATCH="$PATCH" OMS_SALVAGE_LIB="$ROOT_LIB" python3 - <<'PY' | tr -d '\r'
+import os
+import sys
+sys.path.insert(0, os.environ['OMS_SALVAGE_LIB'])
+from panel_salvage import patch_encoding_warnings
+with open(os.environ['OMS_PATCH'], 'rb') as handle:
+    warnings = patch_encoding_warnings(handle.read())
+seen = set()
+for warning in warnings:
+    item = '%s:%s' % (warning['file'], warning.get('hunk') or '<unknown hunk>')
+    if item not in seen:
+        print(item)
+        seen.add(item)
+PY
+)"
+    if [ -n "$encoding_loss" ] && [ "$ACCEPT_ENCODING_LOSS" = 0 ]; then
+      encoding_detail="$(printf '%s\n' "$encoding_loss" | awk 'NF { printf "%s%s", separator, $0; separator=", " } END { if (separator != "") print "" }')"
+      record "encoding-loss" "FAIL" "patch hunks lose non-ASCII text: $encoding_detail (override: --accept-encoding-loss)"
+    elif [ -n "$encoding_loss" ]; then
+      encoding_detail="$(printf '%s\n' "$encoding_loss" | awk 'NF { printf "%s%s", separator, $0; separator=", " } END { if (separator != "") print "" }')"
+      record "encoding-loss" "PASS" "encoding loss accepted for: $encoding_detail"
+    else
+      record "encoding-loss" "PASS" "no encoding loss detected in patch hunks"
     fi
 
     surface_detail="$(printf '%s\n' "$verification_surface" | awk '
