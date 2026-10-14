@@ -962,7 +962,7 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `a` / `w` / `c` | Ask advisor / open selected worker worktree / request selected call cancellation | — |
 | `k` / `u` | Capacity / refresh | — |
 | `m` | Cycle Work / Overview / Focus in a managed panel | — |
-| `[` / `]` / `o` | — | Previous / next section / outline |
+| `[` / `]` / `o` | `[` / `]` scroll the session log older / newer when no dock tab has focus; wheel scrolls over the log | Previous / next section / outline |
 | `/` | — | Search result text |
 | `z` | — | Zoom the tmux reader pane when width is under 120 columns or it is already zoomed |
 | `Esc` / `q` | `Esc` closes detail or returns; `q` quits an inline watcher, does nothing on a managed board, and detaches from the control menu | Close reader |

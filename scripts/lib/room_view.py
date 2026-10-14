@@ -1023,7 +1023,7 @@ def detail(member, preview, width, members=(), room=None, teams=None, everyone=N
 FINISHED = {"done", "cancelled"}
 
 
-def session_log(report, width, rows, unicode=True):
+def session_log(report, width, rows, unicode=True, navigation=None):
     """Recorded events only, deduplicated by message identity, in spare rows."""
     if rows < 3:
         return []
@@ -1037,9 +1037,27 @@ def session_log(report, width, rows, unicode=True):
         seen.add(ident)
         events.append(message)
     if not events:
+        if navigation is not None:
+            navigation["log_offset"] = 0
+            navigation.pop("log_latest_id", None)
+            navigation.pop("log_box", None)
         return []
-    output = [(box_edge("Session log", width, unicode), None, "border")]
-    for message in events[-min(5, rows - 2):]:
+    count = min(rows - 2, len(events))
+    offset = max(0, int((navigation or {}).get("log_offset", 0)))
+    if navigation is not None:
+        latest = events[-1].get("id")
+        previous = navigation.get("log_latest_id")
+        if offset > 0 and previous and previous != latest:
+            previous_index = next((i for i, message in enumerate(events) if message.get("id") == previous), None)
+            if previous_index is not None:
+                offset += max(0, len(events) - 1 - previous_index)
+        offset = min(offset, max(0, len(events) - count))
+        navigation.update(log_offset=offset, log_latest_id=latest)
+    visible_end = len(events) - offset
+    older = (" older ↑" if unicode else " older ^") if offset else ""
+    title = "Session log" + ((" · %s" % offset) + older if offset else "")
+    output = [(box_edge(title, width, unicode), None, "border")]
+    for message in events[max(0, visible_end - count):visible_end]:
         member = people.get(message.get("sender"), {"role": "unknown"})
         identity = member_identity(member, False)
         role, model = identity.split(" ", 1)
@@ -1392,7 +1410,12 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if warnings and spare:
         add(" / ".join(warnings), "alert")
         spare -= 1
-    for text, actor, style_key in session_log(report, width, spare, unicode):
+    log_top = len(lines)
+    navigation.pop("log_box", None)
+    log_lines = session_log(report, width, spare, unicode, navigation if interactive else None)
+    if log_lines and interactive:
+        navigation["log_box"] = {"y1": log_top + 1, "y2": log_top + len(log_lines)}
+    for text, actor, style_key in log_lines:
         lines.append(text.replace(actor, styled(actor, style_key)) if actor else styled(text, style_key))
     navigation["band_offsets"] = offsets
     dock_rows = min(dock_rows, max(0, total_rows - len(lines)))

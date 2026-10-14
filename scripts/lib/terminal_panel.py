@@ -5509,6 +5509,14 @@ def tab_event(event, navigation):
     kind = event[0]
     if navigation.get("surface") not in {"graph", "tree"} or navigation.get("detail"):
         return False
+    log_box = navigation.get("log_box") or {}
+    log_y = event[3] if kind == "scroll" and len(event) > 3 else None
+    if kind == "scroll" and log_y in range(log_box.get("y1", -1), log_box.get("y2", -2) + 1):
+        navigation["log_offset"] = max(0, navigation.get("log_offset", 0) - event[1])
+        return True
+    if tab == "detail" and kind in {"[", "]"}:
+        navigation["log_offset"] = max(0, navigation.get("log_offset", 0) + (3 if kind == "[" else -3))
+        return True
     if kind == "tab":
         if not navigation.get("tab_strip_visible", True):
             return False

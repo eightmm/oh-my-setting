@@ -3612,6 +3612,39 @@ assert "Goal lines 2-" in scrolled_goal and long_goal_nav["band_offsets"]["goal"
 long_goal_nav["band_offsets"]["goal"] = len(room_view.goal_box(long_objective, 108, True))
 last_goal = render_graph(long_objective, 110, 30, navigation=long_goal_nav, main_attempt="a2")
 assert "LAST GOAL WORD" in last_goal and "Goal:" not in "\n".join(last_goal.splitlines()[long_goal_nav["box"]["y1"]:]), last_goal
+# The session log fills all spare board rows and keeps an older view anchored as new events arrive.
+log_board = deepcopy(board_fixture)
+log_board["room"]["messages"] = [dict(board_fixture["room"]["messages"][-1], id="log-%02d" % index,
+    text="Session event %02d" % index, ts="2026-10-13T12:00:%02dZ" % index) for index in range(18)]
+log_nav = {"dismissed": True}
+log_tall = render_graph(log_board, 120, 61, navigation=log_nav, main_attempt="a2", unicode=False)
+assert log_nav["log_box"]["y2"] - log_nav["log_box"]["y1"] + 1 > 7, log_nav
+assert "Session event 17" in log_tall and "Session event 00" not in log_tall, log_tall
+(temporary / "session-log-tall.txt").write_text(log_tall + "\n")
+log_board["room"]["messages"].append(dict(log_board["room"]["messages"][-1], id="log-18",
+    text="Session event 18", ts="2026-10-13T12:00:18Z"))
+log_live_board = render_graph(log_board, 120, 61, navigation=log_nav, main_attempt="a2", unicode=False)
+assert log_nav["log_offset"] == 0 and "Session event 18" in log_live_board and "Session event 05" not in log_live_board, log_live_board
+assert tab_event(("[",), log_nav) and log_nav["log_offset"] == 3
+log_scrolled = render_graph(log_board, 120, 61, navigation=log_nav, main_attempt="a2", unicode=False)
+assert "Session log / 3 older ^" in log_scrolled and "Session event 15" in log_scrolled and "Session event 18" not in log_scrolled, log_scrolled
+(temporary / "session-log-scrolled.txt").write_text(log_scrolled + "\n")
+log_board["room"]["messages"].append(dict(log_board["room"]["messages"][-1], id="log-19",
+    text="Session event 19", ts="2026-10-13T12:00:19Z"))
+anchored = render_graph(log_board, 120, 61, navigation=log_nav, main_attempt="a2", unicode=False)
+assert log_nav["log_offset"] == 4 and "Session event 15" in anchored and "Session event 16" not in anchored, anchored
+box = log_nav["log_box"]
+assert tab_event(("scroll", -2, 20, box["y1"],), log_nav) and log_nav["log_offset"] == 6
+log_nav["log_offset"] = 3
+log_nav["tab"] = "messages"
+assert tab_event(("scroll", -2, 20, box["y2"]), log_nav) and log_nav["log_offset"] == 5
+assert not tab_event(("scroll", -2, 20, box["y1"] - 1), log_nav) and log_nav["log_offset"] == 5
+log_nav["tab"] = "detail"
+log_nav["log_offset"] = 3
+assert tab_event(("]",), log_nav) and log_nav["log_offset"] == 0
+log_nav["log_offset"] = 999
+clamped = render_graph(log_board, 120, 61, navigation=log_nav, main_attempt="a2", unicode=False)
+assert log_nav["log_offset"] == 7 and "Session event 12" in clamped and "Session event 18" not in clamped, log_nav
 # Only recorded result evidence drives verify/review/acceptance; partial previews warn before all judgments.
 summary_member = {"participant": "summary-worker", "role": "worker", "model": "gpt-6.1-sol", "state": "done", "exit": 0,
                   "title": "Bounded fix", "task_id": "summary-task", "joined_at": "2026-10-13T12:00:00Z"}
