@@ -495,11 +495,13 @@ def _finalize_snapshot(repo, owner, task_id, main_id, evidence):
     workers = sorted([a for a in related if a.get('refs', {}).get('panel_access') == 'write'
                       and a.get('refs', {}).get('panel_role') == 'worker'], key=lambda a: a.get('created_at', ''))
     admissions = [_admission(repo, rows, a.get('task_id'), a) for a in workers]
-    attempt_ids = {a.get('attempt_id') for a in related}
+    # Only this task's records are compared across verification; the main's other calls keep moving meanwhile.
+    task_attempts = [a for a in related if a.get('task_id') == task_id]
+    attempt_ids = {a.get('attempt_id') for a in task_attempts}
     related_rows = [r for r in rows if r.get('task_id') == task_id or r.get('attempt_id') in attempt_ids]
     finalized = [{'row': r, 'record': _load_result(repo, r)} for r in rows
                  if r.get('kind') == 'panel-result' and r.get('task_id') == task_id]
-    return {'binding': binding, 'main_attempt_id': main_id, 'related_attempts': related,
+    return {'binding': binding, 'main_attempt_id': main_id, 'related_attempts': task_attempts,
             'related_rows': related_rows, 'admissions': admissions, 'evidence': evidence,
             'finalized': finalized}, attempts, rows, related, workers, admissions
 
