@@ -1003,6 +1003,19 @@ EOF
   [ ! -s "$TMP/common-inline.log" ] ||
     fail "common runtime CI selector executed inline affected checks: $(cat "$TMP/common-inline.log")"
   base="$head"
+  mkdir -p "$gate/scripts/lib"
+  printf '# panel view\n' > "$gate/scripts/lib/room_view.py"
+  git -C "$gate" add scripts/lib/room_view.py
+  git -C "$gate" commit -qm panel-view
+  head="$(git -C "$gate" rev-parse HEAD)"
+  (cd "$gate" && OMS_TEST_GRAPH_MODE=affected GITHUB_STEP_SUMMARY="$TMP/panel-summary.md" \
+    bash scripts/check.sh --affected --changed-from "$base" --changed-to "$head" \
+      --ci-output "$TMP/panel-ci-mode" >/dev/null) ||
+    fail "CI selector rejected the panel view change"
+  grep -Fxq 'mode=full' "$TMP/panel-ci-mode" || fail "panel suite cost escaped the split full lanes"
+  grep -Fq 'cost-boundary:scripts/lib/room_view.py' "$TMP/panel-summary.md" ||
+    fail "panel CI summary omitted the cost boundary reason"
+  base="$head"
   git -C "$gate" mv lib/new.py docs/code.md
   git -C "$gate" commit -qm rename-code
   head="$(git -C "$gate" rev-parse HEAD)"

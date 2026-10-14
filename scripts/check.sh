@@ -700,6 +700,13 @@ prepare_affected_gate() {
         break
         ;;
       custom-skills/*.md|templates/*.md|config/models.json) ;;
+      # The panel suite alone takes ~20 minutes on a CI runner; inline after other affected suites it
+      # crosses the 35-minute step limit, so panel changes use the existing split full lanes.
+      scripts/lib/terminal_panel.py|scripts/lib/room_view.py|scripts/lib/panel_*.py|tests/operator-tools-smoke.sh)
+        AFFECTED_MODE=full
+        AFFECTED_REASONS="cost-boundary:$path"
+        break
+        ;;
       install.sh|scripts/install*|scripts/uninstall*|scripts/update*|scripts/doctor.sh|\
       scripts/python-runtime.sh|scripts/land.sh|scripts/patch-admit.sh|scripts/pre-push-check.sh|\
       scripts/lib/oms-common.sh|\
