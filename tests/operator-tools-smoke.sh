@@ -2356,6 +2356,7 @@ with patch("panel_input.time.monotonic", return_value=10.05), \
         patch("panel_input.select.select", return_value=([], [], [])):
     assert stale_prefix.wait(0) == [] and stale_prefix.pending == b"\033[200"
 assert TerminalInput().decode(b"m") == [("m",)]
+assert TerminalInput().decode(b"i") == [("i",)], "board i toggles the context headers"
 msg_members = [{"participant": "m1", "role": "main", "joined": True, "model": "claude-opus-5-5", "seq": 1, "provider": "claude", "attempt": "a1"},
                {"participant": "m2", "role": "main", "joined": True, "model": "gpt-6.1-sol", "seq": 2, "provider": "codex", "attempt": "a2"},
                {"participant": "m3", "role": "main", "joined": True, "model": "gpt-6-luna", "seq": 3, "provider": "codex", "attempt": "a3"}]
