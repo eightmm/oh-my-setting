@@ -5366,11 +5366,36 @@ def render_call_view(repo, participant, view, width, task_id=None, cache=None):
     if "snapshot" not in cache:
         cache["snapshot"] = results_snapshot(repo, task_id, participant)
     report, (unused_attempts, indexed) = cache["snapshot"]
+    attempts = unused_attempts
     if participant and not cache.get("filtered"):
         report["rows"] = [row for row in report["rows"] if row.get("calls")]
         cache["filtered"] = True
     row = next(iter(report.get("rows", [])), {})
     call = next((item for item in reversed(row.get("calls", [])) if item.get("attempt_id")), {})
+    if participant and not call:
+        # Artifactless failures have no indexed call row, but the same snapshot
+        # carries the retained lifecycle projection and its workspace refs.
+        attempt = next((item for item in reversed(attempts)
+                        if item.get("refs", {}).get("panel_room_participant") == participant and
+                        (task_id is None or item.get("task_id") == task_id)), {})
+        if attempt:
+            refs = attempt.get("refs", {})
+            reason = attempt.get("reason_code")
+            state = attempt.get("state")
+            ending = ("guard_stop" if reason == "worker_authority_violation" else
+                      "verify_failed" if reason in {"verification_failed", "verify_failed"} else
+                      "provider_error" if refs.get("provider_error_exit") else state)
+            location = refs.get("panel_location")
+            row = {"task_id": attempt.get("task_id"), "title": refs.get("panel_label"),
+                   "model": refs.get("panel_model"), "role": refs.get("panel_role"),
+                   "process_state": state, "location": location,
+                   "next_action": ("oms panel --salvage " + str(attempt.get("task_id"))
+                                   if isinstance(location, str) and location.startswith("worktree:") else
+                                   "inspect the failure and retry or finalize the task")}
+            call = {"attempt_id": attempt.get("attempt_id"), "state": state, "ending": ending,
+                    "error": reason, "worktree": location if isinstance(location, str) and
+                    location.startswith("worktree:") else None}
+            report["rows"] = [row]
     model = row.get("model") or call.get("served_model") or call.get("selected_model") or call.get("requested_model")
     heading = call_identity(row.get("role") or "worker", model,
                             row.get("title") or row.get("task_id")) if participant else None

@@ -130,7 +130,7 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
     lines = []
     if view == "Summary":
         if not row:
-            lines.append("No result recorded yet")
+            lines.extend(("No result recorded yet", "Run info: no result or attempt row was retained."))
         else:
             if call.get("answer_truncated"):
                 lines.append("[partial answer: retained preview is incomplete]")
@@ -147,8 +147,28 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
                           "Main decision: " + str(outcome)))
             if call.get("ts"):
                 lines.append("Recorded: " + clean(str(call["ts"]), 80))
+            # Failed calls can have lifecycle metadata but no answer artifact. Keep the
+            # reason and recovery path visible in the reader instead of an empty result.
+            if not (call.get("answer") or row.get("summary")):
+                ending = call.get("ending") or call.get("state") or row.get("process_state")
+                if ending:
+                    lines.append("Ending: " + clean(str(ending).replace("_", " "), 160))
+                for error in (call.get("error"), call.get("error_lines"), row.get("issue")):
+                    if error:
+                        values = error if isinstance(error, (list, tuple)) else str(error).splitlines()
+                        lines.extend("Error: " + clean(str(value), 240) for value in values if str(value).strip())
+                location = call.get("worktree") or call.get("location") or row.get("location")
+                if location:
+                    lines.append("Kept worktree: " + clean(str(location), 500))
+                action = row.get("next_action") or call.get("next_action")
+                if location and row.get("task_id"):
+                    action = "oms panel --salvage " + str(row["task_id"])
+                elif ending:
+                    action = action or "inspect Run info and retry or finalize the task"
+                if action:
+                    lines.append("Next: " + clean(str(action), 240))
             answer = call.get("answer") or row.get("summary")
-            if outcome == "pending":
+            if outcome == "pending" and (call.get("answer") or row.get("summary")):
                 lines.append("Next: check the answer" + (" and patch" if call.get("patch") else "") +
                              ", then decide")
             lines.append("")
@@ -197,6 +217,15 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
                              ("Answer artifact", call.get("artifact")), ("Patch", call.get("patch")),
                              ("Patch digest", call.get("patch_sha256")), ("Owner result", row.get("artifact"))):
             lines.extend(wrapped(label + ": " + str(value or "not recorded"), max(8, width), 100))
+        for label, value in (("Ending", (call.get("ending") or call.get("state") or row.get("process_state") or "")
+                             .replace("_", " ")),
+                             ("Error", call.get("error") or call.get("error_lines") or row.get("issue")),
+                             ("Kept worktree", call.get("worktree") or call.get("location") or row.get("location"))):
+            if value:
+                values = value if isinstance(value, (list, tuple)) else str(value).splitlines()
+                for item in values:
+                    if str(item).strip():
+                        lines.extend(wrapped(label + ": " + clean(str(item), 500), max(8, width), 100))
         for stage, detail in (row.get("stages") or {}).items():
             if isinstance(detail, dict):
                 lines.extend(wrapped("Stage %s: %s" % (stage.replace("_", " "), detail.get("state", "not_run")),

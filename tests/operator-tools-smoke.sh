@@ -12816,8 +12816,26 @@ markdown_call = dict(write_call, answer="# Heading\n- first\n```\n  code\n```\n|
 raw_view = panel_reader.render_view("Raw", {"rows": [{"role": "worker", "model": "gpt-6.1-sol"}]}, markdown_call)
 assert "# Heading" in raw_view and "  - first" in raw_view and "  code" in raw_view and "| a | b |" in raw_view
 assert "partial answer" in raw_view and "\033[7m" not in raw_view, raw_view
-run_info = panel_reader.render_view("Run info", {"rows": [{"provider": "codex", "model": "gpt-6.1-sol"}]}, markdown_call)
+run_info = panel_reader.render_view("Run info", {"rows": [{"provider": "codex", "model": "gpt-6.1-sol",
+    "process_state": "failed", "issue": "provider error"}]}, markdown_call)
 assert "Provider: codex" in run_info and "Attempt: attempt-write" in run_info and "answer.txt" in run_info, run_info
+assert "Ending: failed" in run_info and "Error: provider error" in run_info, run_info
+# Attention's result action must leave a useful reader even when the failure has no answer artifact.
+for ending, error, location, expected in (
+        ("guard_stop", "guard: workspace boundary", "/tmp/kept-tree",
+         ("guard stop", "workspace boundary", "oms panel --salvage failed-task")),
+        ("cancelled", "provider cancelled", None, ("cancelled", "provider cancelled")),
+        ("timed_out", None, None, ("timed out", "retry"))):
+    failed_report = {"rows": [{"task_id": "failed-task", "role": "worker", "process_state": ending,
+                               "issue": error, "location": location, "next_action": "retry failed stage", "calls": []}]}
+    failed_view = panel_reader.render_view("Summary", failed_report, {"attempt_id": "failed-attempt"}, color=False)
+    assert all(part in failed_view for part in expected), failed_view
+    assert "No result recorded yet" in failed_view and "Summary" in failed_view, failed_view
+artifact_failure = panel_reader.render_view("Summary", {"rows": [{"task_id": "failed-task", "role": "worker",
+    "process_state": "failed", "calls": [{"attempt_id": "artifact-attempt", "state": "failed",
+    "artifact": "failure.txt", "answer": "Recorded failure details"}]}]},
+    {"attempt_id": "artifact-attempt", "state": "failed", "artifact": "failure.txt", "answer": "Recorded failure details"}, color=False)
+assert "Recorded failure details" in artifact_failure and "Ending:" not in artifact_failure, artifact_failure
 assert panel_reader.TerminalInput(extra_keys=("r", "e", "d")).decode(b"\tred") == [("tab",), ("r",), ("e",), ("d",)]
 assert panel_reader.TerminalInput().decode(b"red") == [("unbound",)] * 3
 with tempfile.TemporaryDirectory() as reader_repo_name:
@@ -12864,6 +12882,17 @@ with patch.object(panel, "results_snapshot", side_effect=[(running_report, ([], 
     finished_view = panel.render_call_view(project, "worker-1", "Summary", 100, cache=refresh_cache)
 assert collected.call_count == 2 and "running" in running_view and "finished" in finished_view, (
     collected.call_count, running_view, finished_view)
+artifactless_attempt = {"attempt_id": "guarded-attempt", "task_id": "guarded-task", "state": "failed",
+    "reason_code": "worker_authority_violation", "refs": {"panel_room_participant": "guarded-worker",
+    "panel_role": "worker", "panel_label": "Guarded work", "panel_location": "worktree:kept"}}
+artifactless_report = {"rows": [{"task_id": "guarded-task", "role": "worker", "calls": []}]}
+with patch.object(panel, "results_snapshot", return_value=(artifactless_report, ([artifactless_attempt], []))):
+    artifactless_view = panel.render_call_view(project, "guarded-worker", "Summary", 100)
+    artifactless_info = panel.render_call_view(project, "guarded-worker", "Run info", 100)
+assert all(part in artifactless_view for part in ("guard stop", "worker_authority_violation",
+    "worktree:kept", "oms panel --salvage guarded-task")), artifactless_view
+assert all(part in artifactless_info for part in ("Ending: guard stop", "worker_authority_violation",
+    "Kept worktree: worktree:kept")), artifactless_info
 indexed_events = [
     {"kind": "review", "attempt_id": "call-attempt", "event_id": "review-event", "ts": "2026-10-12T09:03:00Z"},
     {"kind": "patch-land", "task_id": "reader-task", "patch_sha256": "digest",
@@ -18971,6 +19000,14 @@ assert {item["action"] for item in inbox_items(grouped_board)} >= {("result", "r
 needs_words = {item["action"]: item["what"] for item in inbox_items(grouped_board)}
 assert needs_words[("result", "review-call")].startswith("awaiting decision") \
     and needs_words[("result", "pending-patch")].startswith("patch awaits admission"), needs_words
+# The real board keys select an artifactless failure from Attention and Enter opens its call detail.
+attention_keys = {"tab": "needs"}
+render(grouped_board, "codex", 120, 80, view="tree", attention_only=True, navigation=attention_keys)
+guard_target = ("result", "adv-worker")
+assert guard_target in attention_keys["needs_ids"], attention_keys
+for unused in range(attention_keys["needs_ids"].index(guard_target) + 1):
+    assert panel.tab_event(("down",), attention_keys)
+assert panel.tab_event(("enter",), attention_keys) and attention_keys["preview"]["target"] == guard_target, attention_keys
 # Reading a call's own handoff handles its failure, but cannot settle a block or admit a patch.
 for sender, recipient, pending, visible in (("adv-worker", "adv-main", [], False),
                                            ("adv-worker", "adv-main", ["adv-main"], True),
