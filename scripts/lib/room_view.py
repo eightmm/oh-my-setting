@@ -290,8 +290,8 @@ def settler(report):
         return complete and (joined_seconds(call) or 0) > 600
 
     def settled(call):
-        # Finished or aged-out calls, and failed ones whose result its main has read or finalized, leave the board.
-        # A review or a block ends only with the owner's recorded decision on the task, never by reading a result.
+        # Finished or aged-out calls, and failed ones whose result its main has read, leave the board; the owner's
+        # recorded decision on the task settles its failed, review and blocked calls, reading a result settles no review.
         decided = finalized.get(call.get("task_id")) in {"completed", "accepted"}
         task_id = call.get("task_id")
         review = call["state"] == "review" or call["state"] == "done" and call.get("participant") in listing(report.get("awaiting_admission"))
@@ -307,7 +307,7 @@ def settler(report):
         finished = call["state"] in FINISHED and not (
             call["state"] == "done" and call.get("participant") in listing(report.get("awaiting_admission")))
         return (finished or call["state"] == "presence unknown" and aged(call)
-                or failure_handled(report, call, read_results, closed) or call["state"] in {"review", "blocked"} and decided
+                or failure_handled(report, call, read_results, closed) or decided and call["state"] in ATTENTION_STATES - {"waiting_input", "waiting_approval"}
                 or review and (task_id in closed or unowned_old or handed_off))
     return settled, aged
 

@@ -2759,6 +2759,10 @@ single["attempts"] = {"active_recent": [
     {"attempt_id": "w", "state": "working", "panel": {"room_id": "r", "room_participant": "w", "role": "worker"}},
     {"attempt_id": "rv", "task_id": "settled", "state": "review", "panel": {"room_id": "r", "room_participant": "rv", "role": "reviewer"}}]}
 single["finalized"] = {"settled": "accepted"}
+# The owner's recorded decision also settles a failed call of that task; an undecided failure stays.
+decided_settle = settler(dict(single, finalized={"done-task": "completed"}))[0]
+assert decided_settle({"state": "failed", "task_id": "done-task", "participant": "fw", "parent": "m2"})
+assert not decided_settle({"state": "failed", "task_id": "open-task", "participant": "fw2", "parent": "m2"})
 single["room"]["participants"] = [msg_members[1],
     {"participant": "w", "role": "worker", "joined": True, "parent": "m2", "model": "gpt-6.1-sol", "label": "Fix message reader"},
     {"participant": "rv", "role": "reviewer", "joined": True, "parent": "m2", "model": "gpt-6-luna"}]
