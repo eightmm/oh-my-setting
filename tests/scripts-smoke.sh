@@ -14884,6 +14884,35 @@ EOF
   if OMS_GH_BIN=__oms_absent_gh__ "$ROOT/scripts/ci-status.sh" main >/dev/null 2>&1; then
     fail "ci-status should fail when gh is absent"
   fi
+
+  # History is read-only, bounded, and aggregates jobs/tests once per run.
+  cat > "$d/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"run list"*)
+    echo '[{"databaseId":11,"headSha":"abcdef0123456789","status":"completed","conclusion":"failure","createdAt":"2026-10-14T00:00:00Z","updatedAt":"2026-10-14T00:35:00Z"},{"databaseId":12,"headSha":"123456789abcdeff","status":"completed","conclusion":"failure","createdAt":"2026-10-13T00:00:00Z","updatedAt":"2026-10-13T00:20:00Z"},{"databaseId":13,"headSha":"fedcba9876543210","status":"completed","conclusion":"success","createdAt":"2026-10-12T00:00:00Z","updatedAt":"2026-10-12T00:10:00Z"}]'
+    ;;
+  *"run view 11"*|*"run view 12"*)
+    printf 'Linux smoke\tcheck\tcheck: scripts-smoke.test_tmux_flake FAILED\n'
+    printf 'Linux smoke\tcheck\tcheck: scripts-smoke.test_once FAILED\n'
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$d/bin/gh"
+  out="$(OMS_GH_BIN="$d/bin/gh" "$ROOT/scripts/ci-status.sh" history --limit 2 main)" ||
+    fail "ci-status history failed: $out"
+  contains "$out" "abcdef012345  failure  35m" || fail "history missing run duration: $out"
+  contains "$out" "Linux smoke: 2" || fail "history missing ranked job count: $out"
+  contains "$out" "scripts-smoke.test_tmux_flake: 2 — quarantine candidate" ||
+    fail "history missing repeated-test quarantine candidate: $out"
+  contains "$out" "scripts-smoke.test_once: 2 — quarantine candidate" ||
+    fail "history missing parsed failed test: $out"
+  if OMS_GH_BIN=__oms_absent_gh__ "$ROOT/scripts/ci-status.sh" history >/dev/null 2>&1; then
+    fail "ci-status history should fail when gh is absent"
+  else
+    [ "$?" -eq 2 ] || fail "ci-status history missing-gh exit must be 2"
+  fi
 }
 
 test_install_hooks_writes_pre_push() {

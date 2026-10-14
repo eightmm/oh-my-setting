@@ -25,19 +25,30 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GH="${OMS_GH_BIN:-gh}"
 ACTION="status"
 branch=""
+limit=20
 while [ "$#" -gt 0 ]; do
   case "$1" in
     status) ACTION="status"; shift ;;
     record|--record) ACTION="record"; shift ;;
     tick) ACTION="tick"; shift ;;
+    history) ACTION="history"; shift ;;
+    --limit)
+      [ "$#" -ge 2 ] || { echo "error: --limit needs a positive integer" >&2; exit 2; }
+      limit="$2"
+      case "$limit" in *[!0-9]*|"") echo "error: --limit must be a positive integer" >&2; exit 2 ;; esac
+      [ "$limit" -gt 0 ] || { echo "error: --limit must be a positive integer" >&2; exit 2; }
+      shift 2
+      ;;
     -h|--help)
       cat <<'EOF'
 Usage: ci-status.sh [status|record|tick] [branch]
+       ci-status.sh history [--limit N] [branch]
 
 status  Print the latest CI run and fail on a completed red result (default).
 record  Also append the result to .oms/ci.jsonl and Work Journal.
 tick    Fail-open bounded refresh for prompt/session boundaries. A completed
         current SHA and a recent pending lookup are local no-ops.
+history Show recent completed runs and ranked failing jobs/tests (read-only).
 
 Environment:
   OMS_CI_TICK_INTERVAL  Minimum seconds between unresolved lookups (default 120).
@@ -130,6 +141,65 @@ PY
   # network I/O. The next scheduled pass can retry.
   oms_try_file_lock "$marker" ci_tick_locked || true
   exit 0
+fi
+
+if [ "$ACTION" = history ]; then
+  command -v "$GH" >/dev/null 2>&1 || { echo "ci-status history: gh CLI not installed" >&2; exit 2; }
+  [ -n "$branch" ] || branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+  # This action deliberately has no ledger/journal path: it only reads GitHub.
+  HISTORY_JSON="$("$GH" run list --branch "$branch" --status completed --limit "$limit" \
+    --json databaseId,headSha,conclusion,createdAt,updatedAt 2>/dev/null)" || {
+    echo "ci-status history: gh could not list completed runs" >&2; exit 2;
+  }
+  OMS_HISTORY_JSON="$HISTORY_JSON" OMS_HISTORY_LIMIT="$limit" OMS_HISTORY_GH="$GH" python3 - "$branch" <<'PY'
+import collections, datetime, json, os, re, subprocess, sys
+branch = sys.argv[1]
+try:
+    runs = json.loads(os.environ.get("OMS_HISTORY_JSON", ""))
+    if not isinstance(runs, list):
+        raise ValueError("not a list")
+except (ValueError, TypeError):
+    print("ci-status history: gh returned an unreadable run list", file=sys.stderr)
+    raise SystemExit(2)
+limit = int(os.environ["OMS_HISTORY_LIMIT"])
+runs = [r for r in runs if isinstance(r, dict) and r.get("status", "completed") == "completed"][:limit]
+gh = os.environ["OMS_HISTORY_GH"]
+job_runs, test_runs = collections.Counter(), collections.Counter()
+for run in runs:
+    sha = str(run.get("headSha") or "?")[:12]
+    conclusion = run.get("conclusion") or "unknown"
+    try:
+        start = datetime.datetime.fromisoformat((run.get("createdAt") or "").replace("Z", "+00:00"))
+        end = datetime.datetime.fromisoformat((run.get("updatedAt") or "").replace("Z", "+00:00"))
+        minutes = max(0, int((end - start).total_seconds() // 60))
+    except (ValueError, TypeError):
+        minutes = 0
+    print("%s  %s  %dm" % (sha, conclusion, minutes))
+    if conclusion != "success" and run.get("databaseId") is not None:
+        proc = subprocess.run([gh, "run", "view", str(run["databaseId"]), "--log-failed"],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              universal_newlines=True, timeout=120, check=False)
+        seen_jobs, seen_tests = set(), set()
+        for line in proc.stdout.splitlines():
+            # gh log-failed prefixes each record with the job name and tabs.
+            if "\t" in line:
+                name = line.split("\t", 1)[0].strip()
+                if name:
+                    seen_jobs.add(name)
+            match = re.search(r"check:\s*([A-Za-z0-9_.-]+)\s+FAILED\b", line)
+            if match:
+                seen_tests.add(match.group(1))
+        job_runs.update(seen_jobs)
+        test_runs.update(seen_tests)
+print("Failing jobs (runs):")
+for name, count in sorted(job_runs.items(), key=lambda item: (-item[1], item[0])):
+    print("  %s: %d" % (name, count))
+print("Failing tests (runs):")
+for name, count in sorted(test_runs.items(), key=lambda item: (-item[1], item[0])):
+    suffix = " — quarantine candidate" if count >= 2 else ""
+    print("  %s: %d%s" % (name, count, suffix))
+PY
+  exit $?
 fi
 
 command -v "$GH" >/dev/null 2>&1 || { echo "ci-status: gh CLI not installed" >&2; exit 2; }
