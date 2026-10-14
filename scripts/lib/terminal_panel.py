@@ -6787,7 +6787,7 @@ def finalize_selection(repo, provider, navigation, state):
     else:
         task_id = read_field("Task ID: ")
         summary = read_field("Summary file: ")
-        outcome = read_field("Outcome (completed/accepted/failed): ")
+        outcome = read_field("Outcome (completed/accepted/failed/rejected): ")
         verify = read_field("Verifier (required for accepted): ", required=False) or None
         evidence = read_field("Relative evidence file (required for accepted): ", required=False) or None
     report = finalize(repo, provider, task_id, summary, outcome, verify, evidence, notify=True)
