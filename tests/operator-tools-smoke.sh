@@ -2130,6 +2130,27 @@ with patch.object(panel_results, '_records', return_value=([], many)), \
     assert panel_results.outcomes(project, {'task-00', 'task-29', 'missing', '../bad'}) == {'task-00': 'completed', 'task-29': 'completed'}
     assert panel_results.outcomes(project, set()) == {}
 
+# Recorded owner decisions are scoped to their plan task generation when bound.
+current_binding = {'plan_id': 'replacement-plan', 'task_sha256': 'current-task'}
+outcome_rows = [
+    {'kind': 'panel-result', 'task_id': 'reused-task'},
+    {'kind': 'panel-result', 'task_id': 'same-task'},
+    {'kind': 'panel-result', 'task_id': 'legacy-task'},
+    {'kind': 'panel-result', 'task_id': 'retired-task'},
+]
+result_payloads = {
+    'reused-task': {'outcome': 'rejected', 'plan_binding': {'plan_id': 'retired-plan', 'task_sha256': 'old-task'}},
+    'same-task': {'outcome': 'rejected', 'plan_binding': current_binding},
+    'legacy-task': {'outcome': 'rejected'},
+    'retired-task': {'outcome': 'completed', 'plan_binding': {'plan_id': 'retired-plan', 'task_sha256': 'gone'}},
+}
+with patch.object(panel_results, '_records', return_value=([], outcome_rows)), \
+        patch.object(panel_results, '_plan_bindings', return_value={
+            'reused-task': current_binding, 'same-task': current_binding}), \
+        patch.object(panel_results, '_load_result', side_effect=lambda repo, row: result_payloads[row['task_id']]):
+    assert panel_results.outcomes(project, {'reused-task', 'same-task', 'legacy-task', 'retired-task'}) == {
+        'same-task': 'rejected', 'legacy-task': 'rejected', 'retired-task': 'completed'}
+
 def changing():
     plan.write_text('changed while collecting', encoding='utf-8')
     return {'number': 42}

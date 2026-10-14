@@ -600,6 +600,7 @@ def outcomes(repo, task_ids, _shared=False, _tick=None):
     wanted = {i for i in task_ids if isinstance(i, str) and ID.fullmatch(i)}
     if not wanted:
         return {}
+    bindings = _plan_bindings(repo, wanted)
     if _tick is not None:
         _, rows = _tick.records()
     elif _shared:
@@ -612,7 +613,13 @@ def outcomes(repo, task_ids, _shared=False, _tick=None):
         result_rows = [r for r in rows if r.get('task_id') == ident and r.get('kind') == 'panel-result']
         if result_rows:
             try:
-                found[ident] = _load_result(repo, result_rows[-1]).get('outcome')
+                result = _load_result(repo, result_rows[-1])
+                # Only a same-named task of the current plan supersedes the recorded generation; tasks the
+                # current plan no longer holds keep their decisions after a retire.
+                if (result.get('plan_binding') is not None and bindings.get(ident) is not None
+                        and result.get('plan_binding') != bindings.get(ident)):
+                    continue
+                found[ident] = result.get('outcome')
             except (OSError, ValueError, KeyError, TypeError):
                 pass
     return found
