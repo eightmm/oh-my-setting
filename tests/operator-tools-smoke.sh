@@ -6363,7 +6363,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
                         raise AssertionError("main swap ignored an unknown land lock")
             swapped = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                                        "--swap-main", "codex", "--model", "gpt-6.1-sol", "--json"],
-                                      dict(env, OMS_PANEL_SWAP_HANDOFF_SECONDS="2")))
+                                      dict(env, OMS_PANEL_SWAP_HANDOFF_SECONDS="15")))
             assert swapped["handoff"] == "main" and swapped["window"] == swap_window, swapped
             assert swapped["room"] == menu_room and swapped["participant"] == swap_member, swapped
             handoff_path = project / ".oms" / "handoffs" / ("room-%s-swap-%s.md" % (menu_room, swap_attempt))
