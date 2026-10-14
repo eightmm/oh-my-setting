@@ -25390,9 +25390,29 @@ EOF
   printf '%s' "$out" | grep >/dev/null -E 'hooks|execution-state' ||
     fail "an installed hook/config mutation should name the earliest boundary: $out"
 
+  python3 - "$project" "$ROOT/scripts/lib" <<'PY' || fail "guard hint should be recorded in the artifact and ledger"
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from peer_artifacts import artifact_sections
+repo = Path(sys.argv[1])
+index = [json.loads(line) for line in (repo / ".oms/artifacts/index.jsonl").read_text().splitlines()]
+answer, code = artifact_sections(repo / index[-1]["artifact"])
+hint = "Protected surfaces changed outside this worker's worktree during the run."
+assert code == "1" and hint in answer, (code, answer)
+assert "Inspect the preserved evidence and re-dispatch from a fresh base after the concurrent change." in answer, answer
+assert "`" not in answer and "git add" not in answer and "git diff" not in answer, answer
+failures = [json.loads(line) for line in (repo / ".oms/failures.jsonl").read_text().splitlines()]
+failure = [row for row in failures if row.get("cmd") == "peer-delegate --to codex worker-authority"][-1]
+assert failure["failure_code"] == "guard_parent_interference", failure
+assert "execution-state" in failure["summary"] and "plan" in failure["next"], failure
+assert "Inspect the preserved evidence and re-dispatch from a fresh base after the concurrent change." in failure["next"], failure
+assert "`" not in failure["next"] and "git add" not in failure["next"] and "git diff" not in failure["next"], failure
+PY
+
   # The refusal is durable memory, not just a message.
   ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --unresolved ) |
-    grep -Fq 'worker changed protected state' ||
+    grep -Fq 'worker guard stopped run' ||
     fail "the violation should be recorded in the fail-ledger"
 
   # Branch-tracking relief stops at the shape Git writes: a remote that is not
@@ -28342,6 +28362,17 @@ row = [json.loads(line) for line in (repo / ".oms/artifacts/index.jsonl").read_t
 answer, code = artifact_sections(repo / row["artifact"])
 reason = "The worker guard stopped this run: protected state changed outside the worker's worktree (gitmeta)."
 assert code == "1" and answer.startswith(reason) and "nothing was landed" in answer, (code, answer)
+assert "gitmeta worktrees/" in answer, answer
+details = answer.split("Changed paths/refs (up to 20 sanitized lines):\n", 1)[1].split("\nProtected surfaces changed", 1)[0]
+assert 1 <= len(details.splitlines()) <= 20, details
+assert str(repo) not in answer, answer
+failures = [json.loads(line) for line in (repo / ".oms/failures.jsonl").read_text().splitlines()]
+failure = [row for row in failures if row.get("cmd") == "peer-delegate --to codex worker-authority"][-1]
+assert failure["failure_code"] == "guard_parent_interference", failure
+assert failure["recovery"] == "inspect_guard_evidence_and_redispatch", failure
+assert "gitmeta worktrees/" in failure["summary"], failure
+assert "Inspect the preserved evidence and re-dispatch from a fresh base after the concurrent change." in failure["next"], failure
+assert "`" not in failure["next"] and "git add" not in failure["next"] and "git diff" not in failure["next"], failure
 assert str(repo) not in answer, answer
 calls = panel_results.results(repo, "guard-worktree")["rows"][0]["calls"]
 assert any(reason in call.get("answer", "") for call in calls), calls

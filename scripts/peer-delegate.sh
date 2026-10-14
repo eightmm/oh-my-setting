@@ -2050,6 +2050,7 @@ worker_protected_surface_diff() {
   printf '%s' "$changed"
 }
 if [ -n "$worker_guard_dir" ]; then
+  worker_guard_identity_valid=1
   OMS_WRITE_POST_ATTEMPT_GUARD_FN=worker_execution_boundary_check
 fi
 conversation_boundary_check() {
@@ -2326,6 +2327,7 @@ if [ -n "$worker_guard_dir" ]; then
     worker_guard_changed="$(worker_protected_surface_diff)"
   fi
   if ! worker_worktree_require_identity "final worker guard"; then
+    worker_guard_identity_valid=0
     printf '%s\n' "$worker_identity_detail" > "$worker_guard_dir/worktree-identity-detail"
     worker_guard_changed="${worker_guard_changed:+$worker_guard_changed, }worktree-identity"
   fi
@@ -2411,18 +2413,142 @@ if [ -n "$worker_guard_dir" ]; then
       echo "error: worktree kept at $worktree" >&2
     fi
     echo "error: nothing from this run should be landed" >&2
+    # The captured manifests include hashes and checkout paths. Only report
+    # sanitized names, with a strict line bound and no hash values.
+    guard_manifest_safe=1
+    if [ "$worker_guard_identity_valid" != 1 ] ||
+      ! oms_git_execution_state_assert_unchanged "$REPO" \
+        "$worker_guard_dir/git-execution-state" "$worker_git_execution_snapshot_sha" ||
+      ! oms_git_execution_state_assert_unchanged "$worktree" \
+        "$worker_guard_dir/worktree-git-execution-state" "$worker_worktree_execution_snapshot_sha" ||
+      ! oms_git_assert_safe_execution_config "$REPO" ||
+      ! oms_git_assert_safe_execution_config "$worktree"; then
+      guard_manifest_safe=0
+    fi
+    if [ -n "$worker_source_guard_dir" ] && {
+      ! oms_git_execution_state_assert_unchanged "$delegate_worktree_repo" \
+        "$worker_source_guard_dir/git-execution-state" "$worker_source_execution_snapshot_sha" ||
+      ! oms_git_assert_safe_execution_config "$delegate_worktree_repo";
+    }; then
+      guard_manifest_safe=0
+    fi
+    if [ "$guard_manifest_safe" = 1 ]; then
+      for guard_manifest_dir in "$worker_guard_dir" "$worker_source_guard_dir"; do
+        [ -n "$guard_manifest_dir" ] || continue
+        guard_repo_dir="$REPO"
+        [ "$guard_manifest_dir" != "$worker_source_guard_dir" ] ||
+          guard_repo_dir="$delegate_worktree_repo"
+        case ",$worker_guard_changed," in
+          *,gitmeta,*)
+            if [ ! -s "$guard_manifest_dir/gitmeta-admin-now" ] &&
+              [ ! -s "$guard_manifest_dir/gitmeta-now" ]; then
+              oms_worker_surface_capture_one "$guard_repo_dir" gitmeta \
+                "$worker_guard_worktree_physical" > "$guard_manifest_dir/guard-report-gitmeta-now" || true
+            fi ;;
+        esac
+        case ",$worker_guard_changed," in
+          *,refs,*)
+            if [ ! -s "$guard_manifest_dir/refs-now" ]; then
+              oms_worker_surface_capture_one "$guard_repo_dir" refs \
+                "$worker_guard_worktree_physical" > "$guard_manifest_dir/guard-report-refs-now" || true
+            fi ;;
+        esac
+      done
+    fi
+    guard_metadata_details="$(python3 - "$worker_guard_dir" "$worker_guard_changed" <<'PY'
+import os, re, sys
+
+root, changed = sys.argv[1:]
+surfaces = {part.strip() for part in changed.split(",")}
+rows = []
+def read(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return set(line.rstrip("\r\n") for line in handle if line.strip())
+    except OSError:
+        return set()
+
+def safe_name(value):
+    value = value.replace("\\", "/")
+    if value.startswith("/") or any(part == ".." for part in value.split("/")):
+        return "[redacted path]"
+    if not re.fullmatch(r"[A-Za-z0-9._/@+ -]{1,180}", value):
+        return "[redacted path]"
+    if re.search(r"(^|[._/-])(secret|token|credential|password|\.env)([._/-]|$)", value, re.I):
+        return "[redacted path]"
+    return value
+
+def metadata_name(line):
+    # Names keep their spaces: only a trailing digest is split off, as the manifest producer writes it.
+    kind, _, value = line.rstrip("\r\n").partition(" ")
+    if not kind:
+        return ""
+    if kind == "worktree-dir":
+        return safe_name(value) if value else ""
+    if kind in {"worktree", "worktree-link", "worktree-entry", "module"}:
+        return safe_name(value.rsplit(" ", 1)[0]) if value else ""
+    return safe_name(kind)
+
+def ref_name(line):
+    fields = line.split()
+    if len(fields) > 1 and fields[1].startswith("refs/"):
+        return "ref " + safe_name(fields[1])
+    if len(fields) > 1 and fields[1] == "HEAD-identity":
+        return "HEAD identity"
+    if fields and re.fullmatch(r"[0-9a-fA-F]{40,64}", fields[0]):
+        return "HEAD"
+    return ""
+
+directories = [(root, "")]
+source = os.path.join(root, "source")
+if os.path.isdir(source):
+    directories.append((source, "source "))
+for directory, prefix in directories:
+    if "gitmeta" in surfaces:
+        before = read(os.path.join(directory, "gitmeta"))
+        now = set()
+        for name in ("gitmeta-admin-now", "gitmeta-now", "guard-report-gitmeta-now"):
+            now = read(os.path.join(directory, name))
+            if now:
+                break
+        for line in sorted(before ^ now):
+            name = metadata_name(line)
+            if name:
+                rows.append("gitmeta " + prefix + name)
+    if "refs" in surfaces:
+        before = read(os.path.join(directory, "refs"))
+        now = read(os.path.join(directory, "refs-now")) or read(os.path.join(directory, "guard-report-refs-now"))
+        for line in sorted(before ^ now):
+            name = ref_name(line)
+            if name:
+                rows.append("refs " + prefix + name)
+
+unique = sorted(set(rows))
+if not unique:
+    print("no path/ref detail available in the preserved manifests")
+else:
+    for row in unique[:19 if len(unique) > 20 else 20]:
+        print(row)
+    if len(unique) > 20:
+        print("additional changed paths/refs omitted")
+PY
+)"
+    guard_failure_hint="Protected surfaces changed outside this worker's worktree during the run. The guard does not identify the actor; concurrent causes can include the parent editing shared Git metadata or the plan, or another worker adding or removing a worktree on this repository. Inspect the preserved evidence and re-dispatch from a fresh base after the concurrent change."
+    guard_failure_summary="worker guard stopped run; changed surfaces: $worker_guard_changed; changed paths/refs: $guard_metadata_details"
+    guard_failure_summary="${guard_failure_summary:0:1200}"
     # The breach is loud now (this run exits 1), but a later patch-land or
     # inbox read only knows what these two rows remember. If either write
     # fails, say so instead of letting the breach become invisible one
     # command later.
     (cd "$REPO" && "$(ma_scripts_dir)/fail-ledger.sh" record --kind delegate \
       --cmd "peer-delegate --to $TO worker-authority" --exit 1 \
-      --summary "worker changed protected state: $worker_guard_changed") >/dev/null 2>&1 ||
+      --failure-code guard_parent_interference \
+      --summary "$guard_failure_summary" --next "$guard_failure_hint") >/dev/null 2>&1 ||
       echo "warning: worker-authority breach was NOT recorded in the fail ledger; later commands will not remember it" >&2
     # Result readers relay the last Output before the last Exit, and the worker's
     # Output above was never closed. Paths stay in the local bullets above.
-    printf "\n\n## Output\n\nThe worker guard stopped this run: protected state changed outside the worker's worktree (%s). The worktree was kept for inspection; nothing was landed.\n\n## Exit\n\n1\n" \
-      "$worker_guard_changed" >> "$artifact"
+    printf "\n\n## Output\n\nThe worker guard stopped this run: protected state changed outside the worker's worktree (%s).\nChanged paths/refs (up to 20 sanitized lines):\n%s\n%s\nThe worktree was kept for inspection; nothing was landed.\n\n## Exit\n\n1\n" \
+      "$worker_guard_changed" "$guard_metadata_details" "$guard_failure_hint" >> "$artifact"
     OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" ||
       echo "warning: worker-authority breach receipt was NOT indexed; inbox and recovery will not see it" >&2
     plan_failure_transition

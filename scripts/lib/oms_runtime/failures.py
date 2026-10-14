@@ -15,6 +15,7 @@ from .common import bounded_line
 # that produced nothing; a seat that timed out carries exit 124 and is still
 # classified as a timeout before this loop runs.
 FAILURE_RULES: List[Tuple[str, re.Pattern[str], Dict[str, Any]]] = [
+    ("guard_parent_interference", re.compile(r"worker-authority|worker guard stopped this run", re.I), {"retryable": False, "fallback_allowed": False, "context_escalation_allowed": False, "recovery": "inspect_guard_evidence_and_redispatch"}),
     ("provider_capacity", re.compile(r"capacity|overloaded|rate.?limit|temporarily unavailable", re.I), {"retryable": True, "fallback_allowed": True, "context_escalation_allowed": False, "recovery": "one_explicit_fallback"}),
     ("provider_timeout", re.compile(r"timeout|timed out|wall clock", re.I), {"retryable": False, "fallback_allowed": False, "context_escalation_allowed": False, "recovery": "resize_task_or_budget"}),
     ("outbound_context_refused", re.compile(r"outbound context refused|sensitive-looking content", re.I), {"retryable": False, "fallback_allowed": False, "context_escalation_allowed": False, "recovery": "remove_sensitive_context"}),
