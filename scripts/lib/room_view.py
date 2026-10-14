@@ -1122,7 +1122,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     active = navigation.get("tab", "detail")
     reader_target = navigation.get("reader_target") if navigation.get("reader_open") else None
     same_reader = reader_target and previewed and reader_target == action(previewed)
-    dock_body = (8 if height >= 40 else 5 if height >= 28 else 2) if active == "detail" else max(2, height - 20)
+    dock_body = dock_body_rows(height)
     if active == "detail" and reader_target:
         dock_body = 0 if same_reader else 1
     dock_rows = dock_body + 2 if dock_body else 1
@@ -1311,9 +1311,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     for text, actor, style_key in session_log(report, width, spare, unicode):
         lines.append(text.replace(actor, styled(actor, style_key)) if actor else styled(text, style_key))
     navigation["band_offsets"] = offsets
-    if not (active == "detail" and reader_target):
-        dock_rows = max(1, total_rows - len(lines))
     dock_rows = min(dock_rows, max(0, total_rows - len(lines)))
+    # Every tab keeps one fixed height at the bottom; rows the log did not use stay above it.
+    lines += [""] * max(0, total_rows - len(lines) - dock_rows)
     navigation.update(tab_strip_visible=bool(dock_rows), tab_body_visible=dock_rows >= 3)
     if dock_rows:
         top = len(lines)
@@ -1481,6 +1481,11 @@ def summary_card(member, preview, width, room=None, unicode=True):
     if summary:
         lines.append("Owner summary: " + summary)
     return [clipped(line, width) for line in lines], {}
+
+
+def dock_body_rows(height):
+    """One body height for every bottom tab, so Detail, Plan and Debate do not resize the board."""
+    return 12 if height >= 56 else 8 if height >= 40 else 5 if height >= 28 else 2
 
 
 def tab_box(report, width, rows, navigation, color=False, unicode=True, *, members=None,

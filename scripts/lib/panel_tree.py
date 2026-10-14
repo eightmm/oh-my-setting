@@ -303,7 +303,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     if boxed and budget - len(head) < 3:
         head = head[:pinned]
     head = head[:budget]
-    from room_view import tab_box
+    from room_view import tab_box, dock_body_rows
     main_rows = {}
     for i, row in enumerate(rows):
         if row.get("action") and row["action"][0] == "chat":
@@ -316,13 +316,13 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     if reading or interactive and height >= 32:
         activity_floor = min(activity_floor, 3 + int(bool(tasks)))
     activity_floor += 2 if boxed else 0
-    detail_body = 8 if height >= 40 else 5 if height >= 28 else 2
+    detail_body = dock_body_rows(height)
     reader_target = navigation.get("reader_target") if navigation.get("reader_open") else None
     main_action = next((r["action"] for r in rows if r.get("action") and r["action"][0] == "chat"), None)
     target = mapping(navigation.get("preview")).get("target") or selected or main_action
     if navigation.get("tab", "detail") == "detail" and reader_target:
         detail_body = 0 if reader_target == target else 1
-    desired_dock = (detail_body + 2 if detail_body else 1) if navigation.get("tab", "detail") == "detail" else 14
+    desired_dock = detail_body + 2 if detail_body else 1
     dock_rows = (desired_dock if budget - len(head) >= desired_dock + activity_floor else int(budget > len(head))) if width >= 20 else 0
     if dock_rows == 1 and reading and budget - len(head) - activity_floor >= 3:
         dock_rows = min(desired_dock, budget - len(head) - activity_floor)
@@ -420,12 +420,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     while output and not output[-1].strip():
         output.pop()
     spare = max(0, budget - dock_rows - len(output))
-    if dock_rows and not (navigation.get("tab", "detail") == "detail" and reader_target):
-        # Put unused activity rows into the dock; the dock's body can use them
-        # for reading instead of separating it from the activity tree with a blank band.
-        dock_rows += spare
-    else:
-        output += [""] * spare
+    output += [""] * spare
     dock_top = len(output)
     everyone = {m["participant"]: [c for c in calls if c.get("parent") in
                 {m["participant"], m.get("attempt")}] for m in mains}
