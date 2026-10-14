@@ -135,7 +135,7 @@ def fixture_provider_catalog(providers=None):
         (LIB / filename).write_text(body, encoding="utf-8")
 
 
-def standalone(name, root, temporary):
+def _standalone(name, root, temporary):
     temporary = temporary / name
     temporary.mkdir()
     import os
@@ -169,6 +169,21 @@ def standalone(name, root, temporary):
                                            OMS_ROOM_PARTICIPANT=room_owner, OMS_PANEL_MAIN_ATTEMPT=room_owner))
     filename = next(filename for section, _, filename in SECTIONS if section == name)
     exec(compile((LIB / filename).read_text(encoding="utf-8"), str(LIB / filename), "exec"), namespace)
+def record_timing(name, started):
+    import os
+    timing_file = os.environ.get("OMS_OPERATOR_TIMINGS")
+    if timing_file:
+        elapsed = int(__import__("time").time() - started)
+        with open(timing_file, "a", encoding="utf-8") as output:
+            output.write("%s\t%s\n" % (elapsed, name))
+
+
+def standalone(name, root, temporary):
+    started = __import__("time").time()
+    try:
+        return _standalone(name, root, temporary)
+    finally:
+        record_timing(name, started)
 
 
 def run_section(name, spec, namespace):
@@ -183,9 +198,11 @@ def run_section(name, spec, namespace):
             standalone(name, namespace["root"], namespace["temporary"])
         finally:
             os.chdir(before)
-        return
-    filename = next(filename for section, _, filename in SECTIONS if section == name)
-    exec(compile((LIB / filename).read_text(encoding="utf-8"), str(LIB / filename), "exec"), namespace)
+    else:
+        started = __import__("time").time()
+        filename = next(filename for section, _, filename in SECTIONS if section == name)
+        exec(compile((LIB / filename).read_text(encoding="utf-8"), str(LIB / filename), "exec"), namespace)
+        record_timing(name, started)
 
 
 def main(args):
@@ -222,7 +239,24 @@ PY
 # Interactive fixtures allocate and answer their own private PTYs.
 exec < /dev/null
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-operator-tools.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+operator_cleanup() {
+  if [ -n "${OPERATOR_CORE_STARTED:-}" ] && [ -n "${OMS_OPERATOR_TIMINGS:-}" ]; then
+    printf '%s\tcore\n' "$((SECONDS - OPERATOR_CORE_STARTED))" >> "$OMS_OPERATOR_TIMINGS"
+  fi
+  if [ -n "${OMS_OPERATOR_TIMINGS:-}" ] && [ -z "${OMS_OPERATOR_TIMINGS_DIR:-}" ] && [ -f "$OMS_OPERATOR_TIMINGS" ]; then
+    while IFS="$(printf '\t')" read -r duration section; do
+      [ -n "$section" ] && echo "operator-section: ${duration}s $section"
+    done < <(sort -nr -k1,1 "$OMS_OPERATOR_TIMINGS")
+  fi
+  if [ "${OPERATOR_SPEC:-1/1}" != 1/1 ] && [ -n "${OMS_OPERATOR_TIMINGS_DIR:-}" ]; then
+    printf '%s %s\n' "$OPERATOR_SPEC" "$((SECONDS - OPERATOR_SHARD_STARTED))" > "$OMS_OPERATOR_TIMINGS_DIR/operator-shard.${OPERATOR_SPEC%/*}"
+  fi
+  rm -rf "$TMP"
+}
+trap operator_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 # Tier routing only routes to providers on PATH. CI hosts have no provider CLIs, so inert
 # stand-ins sit last on PATH; a developer's real CLIs still win and no fixture executes them.
 mkdir -p "$TMP/provider-standins"
@@ -235,6 +269,7 @@ oms_smoke_use_fixture_root
 export OMS_LOCK_DIR="$TMP/locks"
 mkdir -p "$OMS_LOCK_DIR"
 OPERATOR_STARTED=$SECONDS
+OPERATOR_SHARD_STARTED=$SECONDS
 operator_materialize
 OPERATOR_SPEC="${OMS_OPERATOR_SHARD:-1/1}"
 OPERATOR_MODE=run
@@ -244,6 +279,23 @@ case "${1:-}" in
     # shellcheck source=scripts/lib/check-parallel.sh
     . "$ROOT/scripts/lib/check-parallel.sh"
     python3 "$TMP/operator_tools_shards.py" "${BASH_SOURCE[0]}" --self-check "$2"
+    OMS_OPERATOR_TIMINGS_DIR="$TMP"
+    export OMS_OPERATOR_TIMINGS_DIR
+    # The jobs summary replaces the ordinary cleanup trap in the parent.
+    operator_timing_summary() {
+      if [ -d "$OMS_OPERATOR_TIMINGS_DIR" ]; then
+        while IFS="$(printf '\t')" read -r duration section; do
+          [ -n "$section" ] && echo "operator-section: ${duration}s $section"
+        done < <(cat "$OMS_OPERATOR_TIMINGS_DIR"/operator-timings.* 2>/dev/null | sort -nr -k1,1)
+        for timing in "$OMS_OPERATOR_TIMINGS_DIR"/operator-shard.*; do
+          [ -f "$timing" ] || continue
+          read -r shard duration < "$timing"
+          echo "operator-shard: $shard ${duration}s"
+        done
+      fi
+      rm -rf "$TMP"
+    }
+    trap operator_timing_summary EXIT
     oms_operator_parallel "${BASH_SOURCE[0]}" "$2"
     exit $? ;;
   --list|--self-check)
@@ -267,8 +319,17 @@ if [ "$OPERATOR_MODE" = list ]; then
 fi
 OPERATOR_SELECTION="$(python3 "$TMP/operator_tools_shards.py" "${BASH_SOURCE[0]}" --selection "$OPERATOR_SPEC" | tr -d '\r')"
 read -r OPERATOR_CORE OPERATOR_CACHE OPERATOR_SPEC <<< "$OPERATOR_SELECTION"
+if [ -n "${OMS_OPERATOR_TIMINGS_DIR:-}" ] && [ "$OPERATOR_SPEC" != 1/1 ]; then
+  OMS_OPERATOR_TIMINGS="$OMS_OPERATOR_TIMINGS_DIR/operator-timings.${OPERATOR_SPEC%/*}"
+  export OMS_OPERATOR_TIMINGS
+fi
+if [ -z "${OMS_OPERATOR_TIMINGS:-}" ]; then
+  OMS_OPERATOR_TIMINGS="$TMP/operator-timings.single"
+  export OMS_OPERATOR_TIMINGS
+fi
 
 if [ "$OPERATOR_CORE" = 1 ]; then
+OPERATOR_CORE_STARTED=$SECONDS
 repo="$TMP/repo with space"
 mkdir -p "$repo/.oms/artifacts" "$repo/.oms/hooks" "$repo/.oms/plan" \
   "$repo/.oms/delegations" "$repo/.oms/lifecycle" \
@@ -1134,6 +1195,7 @@ fi
 # Reuse this operator suite for the new front end. Providers are protocol
 # fixtures; the real consult/delegate/review and artifact writers run below.
 if [ "$OPERATOR_CACHE" = 1 ]; then
+OPERATOR_CACHE_STARTED=$SECONDS
 # OPERATOR_SECTION_BEGIN shared_cache
 PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/scripts/lib" "$TMP" <<'PY' || fail "shared panel cache regression"
 import inspect
@@ -2151,6 +2213,7 @@ before = cache.fingerprint(project)
 assert cache.fingerprint(project) != before, 'worktree HEAD was omitted'
 PY
 # OPERATOR_SECTION_END shared_cache
+printf '%s\tshared-cache\n' "$((SECONDS - OPERATOR_CACHE_STARTED))" >> "${OMS_OPERATOR_TIMINGS:-/dev/null}"
 fi
 if [ "$OPERATOR_CORE" = 1 ]; then
 # A panel board restarts after a crash instead of closing its pane; outside a
