@@ -5485,12 +5485,44 @@ with patch.dict(os.environ, environment, clear=True):
         assert [r["task_id"] for r in selected["rows"]] == ["old-worker"]
         assert [call["attempt_id"] for call in selected["rows"][0]["calls"]] == ["att_old"]
         assert not saved.results(project, "old-worker", "chat-other")["rows"][0]["calls"]
+    preflight_attempt = {"attempt_id": "att_preflight", "task_id": "preflight-check", "state": "done",
+                         "updated_at": "2026-04-01", "refs": {}}
+    staged_attempt = {"attempt_id": "att_staged", "task_id": "stage-check", "state": "done",
+                      "updated_at": "2026-04-02", "refs": {}}
+    staged_calls = [dict(kind="delegate", task_id="stage-check", attempt_id="att_staged", exit=0, verify_exit=0),
+                    dict(kind="review", task_id="stage-check", attempt_id="att_review", exit=2)]
+    with patch.object(saved, "_records", return_value=([preflight_attempt, staged_attempt], staged_calls)):
+        default_results = saved.results(project)
+        assert [row["task_id"] for row in default_results["rows"]] == ["stage-check"]
+        assert {row["task_id"] for row in saved.results(project, include_preflight=True)["rows"]} == {
+            "preflight-check", "stage-check"}
+        staged = default_results["rows"][0]
+        assert staged["stages"]["implement"]["state"] == "passed"
+        assert staged["stages"]["verify"]["state"] == "passed"
+        assert staged["stages"]["review"]["state"] == "failed"
+        assert staged["representative_state"] == "review failed" and staged["next_action"] == "retry review"
+        page = saved.results(project, offset=0, limit=1)
+        assert page["offset"] == 0 and page["omitted"] == 0 and page["omitted_range"] is None
+    patch_a, patch_b = "a" * 64, "b" * 64
+    with patch.object(saved, "_records", return_value=([], [
+            {"task_id": "patch-pending", "kind": "delegate", "attempt_id": "attempt-a", "patch": "a.patch", "patch_sha256": patch_a},
+            {"task_id": "patch-pending", "kind": "patch-land", "attempt_id": "attempt-a", "patch_sha256": patch_a},
+            {"task_id": "patch-pending", "kind": "delegate", "attempt_id": "attempt-b", "patch": "b.patch", "patch_sha256": patch_b}])):
+        assert saved.pending_admissions(project, ["patch-pending"]) == {"patch-pending"}
+    # The main's own attempt lands the exact bytes; the digest alone settles the patch.
+    with patch.object(saved, "_records", return_value=([], [
+            {"task_id": "patch-pending", "kind": "delegate", "attempt_id": "attempt-b", "patch": "b.patch", "patch_sha256": patch_b},
+            {"task_id": "patch-pending", "kind": "patch-land", "attempt_id": "main-attempt", "patch_sha256": patch_b}])):
+        assert saved.pending_admissions(project, ["patch-pending"]) == set()
     twenty = [dict(a, parent_attempt_id="mine-main") for a in noise[:20]]
     foreign_owner = {"kind": "panel-result", "task_id": "foreign-owner", "ts": "2025-01-01"}
     with patch.object(saved, "_records", return_value=(twenty, [foreign_owner])), \
             patch.object(saved, "_load_result", return_value={"main_attempt_id": "foreign-main", "revision": "unused"}):
         twenty_results = saved.results(project, room_participant="chat-new")
         assert len(twenty_results["rows"]) == 20 and not twenty_results["truncated"], twenty_results
+        assert twenty_results["omitted"] == 0 and twenty_results["omitted_range"] is None
+        next_page = saved.results(project, room_participant="chat-new", offset=20)
+        assert [row["task_id"] for row in next_page["rows"]] == ["new-%02d" % n for n in range(4, -1, -1)]
     uncertain = {"status": "timeout", "persisted": False, "delivery_unknown": True}
     with patch.object(saved.codex_app_notify, "deliver", return_value=uncertain) as transport:
         delivered = saved.finalize(project, "codex", "result-retry", str(summary), "completed", notify=True)

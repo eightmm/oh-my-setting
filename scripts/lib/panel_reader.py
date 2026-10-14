@@ -197,6 +197,12 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
                              ("Answer artifact", call.get("artifact")), ("Patch", call.get("patch")),
                              ("Patch digest", call.get("patch_sha256")), ("Owner result", row.get("artifact"))):
             lines.extend(wrapped(label + ": " + str(value or "not recorded"), max(8, width), 100))
+        for stage, detail in (row.get("stages") or {}).items():
+            if isinstance(detail, dict):
+                lines.extend(wrapped("Stage %s: %s" % (stage.replace("_", " "), detail.get("state", "not_run")),
+                                     max(8, width), 100))
+        if row.get("representative_state"):
+            lines.extend(wrapped("Next action: " + str(row.get("next_action") or "none"), max(8, width), 100))
         for evidence in (row.get("evidence") or []):
             if isinstance(evidence, dict) and evidence.get("path"):
                 lines.extend(wrapped("Evidence: " + clean(str(evidence["path"]), 2000), max(8, width), 100))

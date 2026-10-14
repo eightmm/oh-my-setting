@@ -259,6 +259,8 @@ def worker_rows(report):
                if row.get("state") not in TERMINAL_STATES and row.get("attempt_id") not in seen]
     locations = {mapping(row.get("panel")).get("location") for row in active}
     for row in listing(report.get("delegations")):
+        if str(row.get("task_id") or "").startswith("preflight-"):
+            continue
         if row.get("location") and row["location"] in locations:
             continue
         state = "live marker" if row.get("live") else "orphaned"
@@ -279,6 +281,8 @@ def worker_rows(report):
                 if row.get("tool") == "panel-council"}
     seats = {}
     for row in active:
+        if str(row.get("task_id") or "").startswith("preflight-"):
+            continue
         key = (row.get("task_id"), row.get("parent_attempt_id"))
         if key in councils and row.get("tool") != "panel-council":
             seats[key] = seats.get(key, 0) + 1
@@ -1488,6 +1492,12 @@ def render_results(report, width=100, compact=False, heading=None):
                         said(row.get("process_state")), row.get("title") or row.get("task_id") or "Task")))
         add("Task: " + (row.get("task_id") or "unknown"), limit=3)
         add("Outcome: " + outcome + " · " + checks)
+        if row.get("representative_state"):
+            add("Stage: %s · Next: %s" % (row["representative_state"], row.get("next_action") or "none"))
+        stages = mapping(row.get("stages"))
+        if stages:
+            add("Stages: " + " / ".join("%s %s" % (name, mapping(stages.get(name)).get("state", "not_run"))
+                                        for name in ("implement", "verify", "review", "main_decision")), "  ")
         for line in changed_lines(row):
             add(line)
         if delivery and delivery != "not_requested":

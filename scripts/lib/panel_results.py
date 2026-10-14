@@ -520,6 +520,10 @@ def outcomes(repo, task_ids, _shared=False, _tick=None):
     return found
 
 
+SHA256 = re.compile(r'[0-9a-f]{64}')
+EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+
+
 def pending_admissions(repo, task_ids, _tick=None):
     """Recorded patches without admission; capped evidence stays conservatively pending.
 
@@ -542,18 +546,25 @@ def pending_admissions(repo, task_ids, _tick=None):
         if not isinstance(ident, str) or ident not in wanted:
             continue
         seen.add(ident)
+        digest = row.get('patch_sha256')
+        # A digest names exact patch bytes (the empty patch names none); rows without one match by task.
+        digest = digest if isinstance(digest, str) and SHA256.fullmatch(digest) and digest != EMPTY_SHA256 else None
         if kind in ('patch-admit', 'patch-land'):
-            admitted.add(ident)
+            admitted.add((ident, digest))
         elif kind in ('ask', 'call', 'consult', 'delegate', 'review', 'ask-synthesis') and row.get('patch'):
-            patches.add(ident)
+            patches.add((ident, digest))
     if len(attempts) >= 300 or len(rows) >= 1000:
-        patches.update(wanted - seen)
-    return patches - admitted
+        patches.update((ident, None) for ident in wanted - seen)
+    return {ident for ident, digest in patches if not any(
+        task == ident and (digest is None or done is None or done == digest) for task, done in admitted)}
 
 
-def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None, _records_data=None):
+def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None, _records_data=None,
+            include_preflight=False, offset=0, limit=20):
     if task_id and not ID.fullmatch(task_id):
         raise ValueError('invalid task ID')
+    if not isinstance(offset, int) or offset < 0 or not isinstance(limit, int) or limit < 1:
+        raise ValueError('invalid results page')
     if _records_data is not None:
         attempts, rows = _records_data
     elif _tick is not None:
@@ -570,6 +581,8 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             latest.pop(ident, None)
             latest[ident] = None
     ids = list(latest)
+    if not include_preflight:
+        ids = [ident for ident in ids if not ident.startswith('preflight-')]
     scoped = bool(room_participant and not task_id)
     if scoped:
         # Select within this participant's retained tasks before the 20-task cap;
@@ -581,9 +594,12 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
         has_result = {r.get('task_id') for r in rows if r.get('kind') == 'panel-result'}
         ids = [i for i in ids if i in own or (adopting and i not in owned and i in has_result)]
     chosen = [task_id] if task_id in ids else [] if task_id else list(ids)
+    chosen = list(reversed(chosen))
+    total = len(chosen)
+    chosen = chosen[offset:offset + limit] if not task_id else chosen
     output = []
-    capped = False
-    for ident in reversed(chosen):
+    capped = offset + len(chosen) < total
+    for ident in chosen:
         metadata_attempts = [a for a in attempts if a.get('task_id') == ident]
         matching = metadata_attempts
         indexed = [r for r in rows if r.get('task_id') == ident]
@@ -611,9 +627,6 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             indexed = [r for r in indexed if r.get("attempt_id") in linked]
         if scoped and not matching:
             continue
-        if len(output) >= 20:
-            capped = True
-            break
         last = metadata_attempts[-1] if metadata_attempts else {}
         metadata = last.get('refs', {})
         calls = []
@@ -650,6 +663,25 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                 except (OSError, ValueError, TypeError):
                     call['changes'] = {'issue': 'patch evidence unavailable'}
             calls.append(call)
+        calls_by_stage = {'implement': [], 'verify': [], 'review': [], 'main_decision': []}
+        for call in calls:
+            if call.get('verify_exit') is not None:
+                calls_by_stage['verify'].append(dict(call, stage_exit=call.get('verify_exit')))
+            stage = ('review' if call.get('kind') == 'review' else
+                     'implement' if call.get('kind') in ('delegate', 'call', 'ask', 'consult') else None)
+            if stage:
+                calls_by_stage[stage].append(call)
+        stages = {name: ({'state': ('failed' if any(c.get('stage_exit', c.get('exit')) not in (None, 0) for c in values) else 'passed'),
+                          'attempt_id': (values[-1].get('attempt_id') if values else None),
+                          'exit': (values[-1].get('stage_exit', values[-1].get('exit')) if values else None)} if values else {'state': 'not_run'})
+                  for name, values in calls_by_stage.items()}
+        main_state = (result or {}).get('outcome') or 'pending'
+        stages['main_decision'] = {'state': 'failed' if main_state == 'failed' else main_state}
+        failed_stage = next((name for name in ('implement', 'verify', 'review', 'main_decision')
+                             if stages[name]['state'] == 'failed'), None)
+        action = ('review main decision' if failed_stage == 'main_decision' else
+                  'retry ' + failed_stage if failed_stage else
+                  'record main decision' if stages['main_decision']['state'] == 'pending' else 'none')
         output.append({'task_id': ident, 'title': clean(metadata.get('panel_label') or
                        ((result or {}).get('summary') or '').split('\n')[0], 160),
                        'model': clean(metadata.get('panel_model'), 160), 'role': metadata.get('panel_role'),
@@ -662,10 +694,14 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                        'evidence': result.get('evidence', []) if result else [], 'calls': calls[-8:],
                        'delivery': (delivery or {}).get('receipt', {}).get('status', 'not_requested'),
                        'delivery_unknown': (delivery or {}).get('receipt', {}).get('delivery_unknown', False),
-                       'issue': issue, 'missing_result': result is None})
+                       'issue': issue, 'missing_result': result is None,
+                       'stages': stages, 'representative_state': (failed_stage + ' failed' if failed_stage else
+                           stages['main_decision']['state']), 'next_action': action})
     return {'schema': 1, 'kind': 'oms-panel-results', 'rows': output,
             'coverage': 'latest 300 attempts and 1000 artifact events',
-            'truncated': capped or (bool(task_id) and not chosen)}
+            'truncated': capped or (bool(task_id) and not chosen), 'offset': offset,
+            'omitted': max(0, total - offset - len(output)),
+            'omitted_range': ([offset + len(output), total] if capped else None)}
 
 
 def results_snapshot(repo, task_id=None, room_participant=None):
