@@ -25851,6 +25851,25 @@ EOF
     [ ! -e "$marker" ] || fail "$mode command executed during post-worker capture"
     contains "$out" 'execution-state' ||
       fail "$mode did not name the raw execution-state boundary: $out"
+    if [ "$mode" = fsmonitor ]; then
+      contains "$out" 'snapshot=canonical repository path=config kind=config key delta=' ||
+        fail "execution-state detail should name the canonical config snapshot and key: $out"
+      case "$out" in
+        *"$bin_dir/marker"*) fail "config value leaked into guard diagnostics: $out" ;;
+      esac
+      python3 - "$project" "$ROOT/scripts/lib" "$bin_dir/marker" <<'PY' ||
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from peer_artifacts import artifact_sections
+repo = Path(sys.argv[1])
+index = [json.loads(line) for line in (repo / ".oms/artifacts/index.jsonl").read_text().splitlines()]
+answer, _ = artifact_sections(repo / index[-1]["artifact"])
+assert "snapshot=canonical repository path=config kind=config key delta=core.fsmonitor" in answer, answer
+assert sys.argv[3] not in answer, "config value leaked into the delegate artifact"
+PY
+        fail "execution-state detail should be recorded without config values"
+    fi
     # Restore raw trusted bytes without asking Git to parse hostile config.
     cp "$base_config" "$project/.git/config"
     git -c core.fsmonitor=false -c diff.external= -C "$project" checkout -- file.txt
@@ -28747,9 +28766,9 @@ row = [json.loads(line) for line in (repo / ".oms/artifacts/index.jsonl").read_t
 answer, code = artifact_sections(repo / row["artifact"])
 reason = "The worker guard stopped this run: protected state changed outside the worker's worktree (gitmeta)."
 assert code == "1" and answer.startswith(reason) and "nothing was landed" in answer, (code, answer)
-assert "gitmeta worktrees/" in answer, answer
-details = answer.split("Changed paths/refs (up to 20 sanitized lines):\n", 1)[1].split("\nProtected surfaces changed", 1)[0]
-assert 1 <= len(details.splitlines()) <= 20, details
+assert "snapshot=canonical repository gitmeta worktrees/" in answer, answer
+details = answer.split("Changed paths/refs by snapshot (up to 8 sanitized lines):\n", 1)[1].split("\nExecution-state details:", 1)[0]
+assert 1 <= len(details.splitlines()) <= 8, details
 assert str(repo) not in answer, answer
 failures = [json.loads(line) for line in (repo / ".oms/failures.jsonl").read_text().splitlines()]
 failure = [row for row in failures if row.get("cmd") == "peer-delegate --to codex worker-authority"][-1]

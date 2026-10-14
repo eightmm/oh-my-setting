@@ -529,15 +529,123 @@ for key, sep, value in delta:
 PY
 }
 
+# Emit bounded, value-free execution-state diagnostics from a frozen snapshot.
+oms_git_execution_state_diagnostics() {  # SNAPSHOT ROLE
+  python3 -I -B - "$1" "$1.config" "$2" "$OMS_GIT_INDEX_SIGNATURE_PY" <<'PY'
+import base64
+import collections
+import hashlib
+import os
+import re
+import stat
+import subprocess
+import sys
+snapshot, saved_config, role, signature_source = sys.argv[1:]
+exec(signature_source)
+try:
+    rows = open(snapshot, "rb").read().splitlines()
+except OSError:
+    raise SystemExit(0)
+
+def raw_signature(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "unreadable"
+    if not stat.S_ISREG(info.st_mode):
+        return "non-regular:%o" % info.st_mode
+    if info.st_size > 64 * 1024 * 1024:
+        return "oversized:%d" % info.st_size
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return "unreadable"
+    return "regular:%o:%d:%s" % (stat.S_IMODE(info.st_mode), info.st_size, digest.hexdigest())
+
+def config_keys(path):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    try:
+        out = subprocess.check_output(
+            ["git", "config", "--file", path, "--no-includes", "--list", "-z"],
+            env=env, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return [(key, value) for item in out.split(b"\0") if item
+            for key, _, value in [item.partition(b"\n")]]
+
+for row in rows:
+    try:
+        encoded, expected = row.split(b"\t", 1)
+        path = os.fsdecode(base64.b64decode(encoded, validate=True))
+        expected = expected.decode("ascii", "strict")
+    except (ValueError, UnicodeError):
+        continue
+    basename = os.path.basename(path)
+    if expected.startswith("index:"):
+        try:
+            with open(path, "rb") as handle:
+                current_index = "index:%d:%s" % (
+                    int(expected.split(":", 2)[1]),
+                    index_signature(handle.read(), int(expected.split(":", 2)[1])))
+        except (OSError, ValueError):
+            current_index = "unreadable"
+        if current_index == expected:
+            continue
+        kind = "hidden index flag/index signature"
+    else:
+        current = raw_signature(path)
+        if current == expected:
+            continue
+        old, new = expected.split(":"), current.split(":")
+        kind = "content"
+        if (len(old) == 4 and len(new) == 4 and old[0] == new[0] == "regular"
+                and old[1] != new[1] and old[2:] == new[2:]):
+            kind = "mode"
+        if basename == "config":
+            before, after = config_keys(saved_config), config_keys(path)
+            if before is not None and after is not None:
+                added = collections.Counter(after) - collections.Counter(before)
+                removed = collections.Counter(before) - collections.Counter(after)
+                delta = sorted({key.decode("ascii", "replace")
+                                for key, _ in list(added.elements()) + list(removed.elements())})
+                if delta:
+                    safe = [key if re.fullmatch(r"[A-Za-z0-9.-]+", key) else "[unusual key]"
+                            for key in delta[:8]]
+                    kind = "config key delta=" + ",".join(safe)
+                    if len(delta) > 8:
+                        kind += ",additional keys omitted"
+    name = basename if re.fullmatch(r"[A-Za-z0-9._-]+", basename) else "[unusual path]"
+    print("snapshot=%s path=%s kind=%s" % (role, name, kind))
+PY
+}
+
+oms_git_execution_state_report_failure() {  # SNAPSHOT ROLE [DETAIL_FILE]
+  local details=""
+  details="$(oms_git_execution_state_diagnostics "$1" "$2" 2>/dev/null || true)"
+  echo "Git execution config or hidden index state changed" >&2
+  if [ -n "$details" ]; then
+    printf '%s\n' "$details" >&2
+    [ -z "${3:-}" ] || printf '%s\n' "$details" > "$3"
+  fi
+}
+
 # Compare with the same no-Git raw walk and bind the private snapshot bytes to
 # the hash held by the parent shell. A worker that finds and edits SNAPSHOT
 # cannot manufacture a new trusted baseline.
-oms_git_execution_state_assert_unchanged() {  # REPO SNAPSHOT EXPECTED_SHA
+oms_git_execution_state_assert_unchanged() {  # REPO SNAPSHOT EXPECTED_SHA [ROLE [DETAIL_FILE]]
   local root="$1"
   local snapshot="$2"
   local expected_sha="$3"
   local actual_sha=""
   local changed_config=""
+  local role="${4:-repository}"
+  local detail_file="${5:-}"
 
   # Root is part of the public signature for callers and documents which
   # repository the receipt belongs to. The trusted snapshot contains the
@@ -621,12 +729,12 @@ for number, row in enumerate(rows):
 PY
 )"
   then
-    echo "Git execution config or hidden index state changed" >&2
+    oms_git_execution_state_report_failure "$snapshot" "$role" "$detail_file"
     return 2
   fi
   if [ -n "$changed_config" ] &&
     ! oms_git_config_delta_is_branch_tracking "$snapshot.config" "$changed_config"; then
-    echo "Git execution config or hidden index state changed" >&2
+    oms_git_execution_state_report_failure "$snapshot" "$role" "$detail_file"
     return 2
   fi
   return 0

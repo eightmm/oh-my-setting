@@ -2034,10 +2034,12 @@ fi
 worker_execution_boundary_check() {
   oms_git_execution_state_assert_unchanged "$REPO" \
     "$worker_guard_dir/git-execution-state" \
-    "$worker_git_execution_snapshot_sha" || return 2
+    "$worker_git_execution_snapshot_sha" "canonical repository" \
+    "$worker_guard_dir/execution-state-canonical-detail" || return 2
   oms_git_execution_state_assert_unchanged "$worktree" \
     "$worker_guard_dir/worktree-git-execution-state" \
-    "$worker_worktree_execution_snapshot_sha" || return 2
+    "$worker_worktree_execution_snapshot_sha" "worker worktree" \
+    "$worker_guard_dir/execution-state-worktree-detail" || return 2
   oms_git_assert_safe_execution_config "$REPO" || return 2
   oms_git_assert_safe_execution_config "$worktree" || return 2
   oms_git_assert_plain_index "$REPO" || return 2
@@ -2046,7 +2048,8 @@ worker_execution_boundary_check() {
   oms_git_assert_plain_index "$worktree" || return 2
   if [ -n "$worker_source_guard_dir" ]; then
     oms_git_execution_state_assert_unchanged "$delegate_worktree_repo" \
-      "$worker_source_guard_dir/git-execution-state" "$worker_source_execution_snapshot_sha" || return 2
+      "$worker_source_guard_dir/git-execution-state" "$worker_source_execution_snapshot_sha" \
+      "source clone" "$worker_source_guard_dir/execution-state-source-detail" || return 2
     oms_git_assert_safe_execution_config "$delegate_worktree_repo" || return 2
     oms_git_assert_plain_index "$delegate_worktree_repo" || return 2
   fi
@@ -2435,16 +2438,19 @@ if [ -n "$worker_guard_dir" ]; then
     guard_manifest_safe=1
     if [ "$worker_guard_identity_valid" != 1 ] ||
       ! oms_git_execution_state_assert_unchanged "$REPO" \
-        "$worker_guard_dir/git-execution-state" "$worker_git_execution_snapshot_sha" ||
+        "$worker_guard_dir/git-execution-state" "$worker_git_execution_snapshot_sha" \
+        "canonical repository" "$worker_guard_dir/execution-state-canonical-detail" ||
       ! oms_git_execution_state_assert_unchanged "$worktree" \
-        "$worker_guard_dir/worktree-git-execution-state" "$worker_worktree_execution_snapshot_sha" ||
+        "$worker_guard_dir/worktree-git-execution-state" "$worker_worktree_execution_snapshot_sha" \
+        "worker worktree" "$worker_guard_dir/execution-state-worktree-detail" ||
       ! oms_git_assert_safe_execution_config "$REPO" ||
       ! oms_git_assert_safe_execution_config "$worktree"; then
       guard_manifest_safe=0
     fi
     if [ -n "$worker_source_guard_dir" ] && {
       ! oms_git_execution_state_assert_unchanged "$delegate_worktree_repo" \
-        "$worker_source_guard_dir/git-execution-state" "$worker_source_execution_snapshot_sha" ||
+        "$worker_source_guard_dir/git-execution-state" "$worker_source_execution_snapshot_sha" \
+        "source clone" "$worker_source_guard_dir/execution-state-source-detail" ||
       ! oms_git_assert_safe_execution_config "$delegate_worktree_repo";
     }; then
       guard_manifest_safe=0
@@ -2474,6 +2480,48 @@ if [ -n "$worker_guard_dir" ]; then
     fi
     guard_metadata_details="$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worker-guard-details.py" \
       "$worker_guard_dir" "$worker_guard_changed")"
+    guard_metadata_details="$(printf '%s\n' "$guard_metadata_details" | python3 -c '
+import sys
+lines = [line.rstrip("\r\n") for line in sys.stdin]
+details = []
+for value in lines:
+    if value.startswith("gitmeta source "):
+        details.append("snapshot=source clone gitmeta " + value[len("gitmeta source "):])
+    elif value.startswith("source "):
+        details.append("snapshot=source clone " + value[len("source "):])
+    elif value.startswith("gitmeta "):
+        details.append("snapshot=canonical repository gitmeta " + value[len("gitmeta "):])
+    elif value and value != "no path/ref detail available in the preserved manifests":
+        details.append("snapshot=canonical repository " + value)
+    else:
+        details.append(value)
+for value in details[:8]:
+    print(value)
+if len(details) > 8:
+    print("additional changed paths omitted")
+')"
+    guard_execution_details="$(
+      for guard_detail_file in \
+        "$worker_guard_dir/execution-state-canonical-detail" \
+        "$worker_guard_dir/execution-state-worktree-detail" \
+        "$worker_source_guard_dir/execution-state-source-detail"; do
+        [ -s "$guard_detail_file" ] || continue
+        cat "$guard_detail_file"
+      done
+    )"
+    if [ -n "$guard_execution_details" ] || [ -n "$guard_metadata_details" ]; then
+      {
+        printf '\n## Worker guard detail\n\n'
+        if [ -n "$guard_execution_details" ]; then
+          printf -- '- execution-state details:\n'
+          printf '%s\n' "$guard_execution_details" | sed 's/^/  - /'
+        fi
+        if [ -n "$guard_metadata_details" ]; then
+          printf -- '- changed paths/refs by snapshot:\n'
+          printf '%s\n' "$guard_metadata_details" | sed 's/^/  - /'
+        fi
+      } >> "$artifact"
+    fi
     guard_failure_hint="Protected surfaces changed outside this worker's worktree during the run. The guard does not identify the actor; concurrent causes can include the parent editing shared Git metadata or the plan, or another worker adding or removing a worktree on this repository. Inspect the preserved evidence and re-dispatch from a fresh base after the concurrent change."
     guard_failure_summary="worker guard stopped run; changed surfaces: $worker_guard_changed; changed paths/refs: $guard_metadata_details"
     guard_failure_summary="${guard_failure_summary:0:1200}"
@@ -2488,8 +2536,8 @@ if [ -n "$worker_guard_dir" ]; then
       echo "warning: worker-authority breach was NOT recorded in the fail ledger; later commands will not remember it" >&2
     # Result readers relay the last Output before the last Exit, and the worker's
     # Output above was never closed. Paths stay in the local bullets above.
-    printf "\n\n## Output\n\nThe worker guard stopped this run: protected state changed outside the worker's worktree (%s).\nChanged paths/refs (up to 20 sanitized lines):\n%s\n%s\nThe worktree was kept for inspection; nothing was landed.\n\n## Exit\n\n1\n" \
-      "$worker_guard_changed" "$guard_metadata_details" "$guard_failure_hint" >> "$artifact"
+    printf "\n\n## Output\n\nThe worker guard stopped this run: protected state changed outside the worker's worktree (%s).\nChanged paths/refs by snapshot (up to 8 sanitized lines):\n%s\nExecution-state details:\n%s\n%s\nThe worktree was kept for inspection; nothing was landed.\n\n## Exit\n\n1\n" \
+      "$worker_guard_changed" "$guard_metadata_details" "$guard_execution_details" "$guard_failure_hint" >> "$artifact"
     OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" 1 "$artifact" "$patch_file" "$prompt_file" "" "$REVIEW_ARTIFACT" ||
       echo "warning: worker-authority breach receipt was NOT indexed; inbox and recovery will not see it" >&2
     plan_failure_transition
