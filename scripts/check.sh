@@ -934,7 +934,8 @@ if [ "$RUN_QUICK" = 1 ]; then
   [ "$quick_seats" = 0 ] || stage seat-reliability bash tests/seat-reliability-smoke.sh
   # Only a CI-parity gate hides provider CLIs; a capped full selection has no
   # graph selection to reach this suite otherwise.
-  [ "$CI_PARITY" = 0 ] || [ "$quick_routing" = 0 ] || stage operator-tools bash tests/operator-tools-smoke.sh
+  # Sharded like CI and the other two call sites; the single-process run is not a CI shape.
+  [ "$CI_PARITY" = 0 ] || [ "$quick_routing" = 0 ] || stage operator-tools bash tests/operator-tools-smoke.sh --jobs "${OMS_OPERATOR_JOBS:-4}"
 fi
 
 affected_test_was_run_by_quick() {  # affected_test_was_run_by_quick PATH

@@ -558,7 +558,7 @@ expected = {
 }
 # CI parity's quick lane may also run operator-tools; --ci-parity never sets
 # RUN_FOCUSED, so one run still invokes it once.
-parity = '[ "$CI_PARITY" = 0 ] || [ "$quick_routing" = 0 ] || stage operator-tools bash tests/operator-tools-smoke.sh'
+parity = '[ "$CI_PARITY" = 0 ] || [ "$quick_routing" = 0 ] || stage operator-tools bash tests/operator-tools-smoke.sh --jobs "${OMS_OPERATOR_JOBS:-4}"'
 for stage, suite in expected.items():
     invocation = "stage %s bash tests/%s" % (stage, suite)
     if focused.count(invocation) != 1:
