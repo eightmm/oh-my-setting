@@ -2447,7 +2447,8 @@ def _tee_dispatch_output(stream, destination, tail, lock):
         return
     try:
         while True:
-            chunk = stream.read(8192)
+            # read1 returns what is available, so output streams live instead of waiting for 8 KiB or EOF.
+            chunk = stream.read1(8192) if hasattr(stream, "read1") else stream.read(8192)
             if not chunk:
                 break
             with lock:

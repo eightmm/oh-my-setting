@@ -8312,6 +8312,19 @@ assert output_child.wait(timeout=5) == 2
 for tee in tees:
     tee.join(timeout=5)
 panel._save_dispatch_output(output_fd, output_tail)
+# Short output reaches the tail while the child is still running, not only at EOF.
+live_child = subprocess.Popen([sys.executable, "-c", "import sys, time; sys.stdout.write('live'); sys.stdout.flush(); time.sleep(3)"],
+                              stdout=subprocess.PIPE)
+live_tail, live_sink = bytearray(), io.StringIO()
+live_tee = threading.Thread(target=panel._tee_dispatch_output, args=(live_child.stdout, live_sink, live_tail, threading.Lock()),
+                            daemon=True)
+live_tee.start()
+live_deadline = time.monotonic() + 2.5
+while not live_tail and time.monotonic() < live_deadline:
+    time.sleep(.05)
+assert bytes(live_tail) == b"live" and live_child.poll() is None, (bytes(live_tail), live_child.poll())
+live_child.wait(timeout=10)
+live_tee.join(timeout=5)
 with patch.object(panel, "results", side_effect=AttributeError("invalid patch summary")):
     panel.deliver_result(project, shared, missing_summary_call, room_owner, "screen-task", 2)
 fallback = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-" + missing_summary_call)
