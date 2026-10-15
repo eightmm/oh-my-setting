@@ -162,6 +162,7 @@ manifest) then the test suites. With no arguments it runs both.
                         automatically and the lane union is always the whole
                         focused list.
   --scripts-smoke-only  Run only tests/scripts-smoke.sh.
+  invariants            Run the fast repository-wide pre-land invariant set.
   --shard I/N           Select one scripts-smoke shard (with the mode above).
   --list-stages         Print the stage names the selected mode and lane
                         would run, one per line, without running anything.
@@ -206,6 +207,7 @@ while [ "$#" -gt 0 ]; do
     --lint-only) select_mode lint; shift ;;
     --focused-only) select_mode focused; shift ;;
     --scripts-smoke-only) select_mode scripts-smoke; shift ;;
+    invariants) select_mode invariants; shift ;;
     --shard)
       [ "$#" -ge 2 ] || { echo "error: --shard requires I/N" >&2; exit 2; }
       SMOKE_SHARD="$2"
@@ -319,6 +321,7 @@ fi
 RUN_LINT=0
 RUN_FOCUSED=0
 RUN_SMOKE=0
+RUN_INVARIANTS=0
 RUN_QUICK=0
 RUN_AFFECTED=0
 case "$MODE" in
@@ -330,6 +333,7 @@ case "$MODE" in
   lint) RUN_LINT=1 ;;
   focused) RUN_FOCUSED=1 ;;
   scripts-smoke) RUN_SMOKE=1 ;;
+  invariants) RUN_INVARIANTS=1 ;;
   quick) RUN_QUICK=1 ;;
   affected) RUN_AFFECTED=1 ;;
 esac
@@ -836,6 +840,62 @@ if [ "$RUN_LINT" = 1 ]; then
   stage skill-manifest bash scripts/install-skills.sh
 fi
 
+if [ "$RUN_INVARIANTS" = 1 ]; then
+  stage invariants-smoke-tests bash tests/run-smoke-shard.sh \
+    --only test_oms_allowlist_stays_in_sync_with_scripts \
+    --only test_peer_review_warns_untracked_files \
+    --only test_peer_review_gate_binds_complete_diff_and_refuses_truncation
+  stage invariants-provider-registry bash -c '
+    set -e
+    . scripts/lib/provider-registry.sh
+    for provider in $(oms_provider_supported_names); do oms_provider_is_builtin "$provider"; done
+    for alias in agy cursor-agent grok-build gemini-cli qwen-code opencode2 dsh deepseek-harness mistral-vibe github-copilot factory-droid; do
+      normalized="$(oms_provider_normalize "$alias")"
+      oms_provider_is_builtin "$normalized"
+    done
+  '
+  stage invariants-skill-manifest bash scripts/install-skills.sh
+  stage invariants-doc-references bash tests/source-distribution-smoke.sh --docs-only
+  stage invariants-changed-syntax bash -c '
+    set -e
+    if [ -n "${OMS_CHECK_INVARIANTS_BASE:-}" ]; then
+      base="$OMS_CHECK_INVARIANTS_BASE"
+    else
+      base="$(git symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)"
+      if [ -z "$base" ]; then
+        for candidate in refs/remotes/origin/main refs/remotes/origin/master; do
+          if git show-ref --verify --quiet "$candidate"; then base="$candidate"; break; fi
+        done
+      fi
+    fi
+    [ -n "$base" ] || { echo "error: no remote target ref; set OMS_CHECK_INVARIANTS_BASE" >&2; exit 2; }
+    git rev-parse --verify "$base^{tree}" >/dev/null 2>&1 || {
+      echo "error: invariant base is not a tree: $base" >&2; exit 2;
+    }
+    changed="$(mktemp "${TMPDIR:-/tmp}/oms-invariants-files.XXXXXX")"
+    trap "rm -f \"\$changed\"" EXIT HUP INT TERM
+    {
+      git diff --name-only --no-renames -z "$base" HEAD --
+      git diff --name-only --no-renames --cached -z --
+      git diff --name-only --no-renames -z --
+      git ls-files --others --exclude-standard -z
+    } > "$changed"
+    shell_files=()
+    python_files=()
+    while IFS= read -r -d "" file; do
+      [ -f "$file" ] || continue
+      case "$file" in
+        *.sh) shell_files[${#shell_files[@]}]="$file" ;;
+        *.py) python_files[${#python_files[@]}]="$file" ;;
+      esac
+    done < "$changed"
+    for file in "${shell_files[@]}"; do bash -n "$file"; done
+    if [ "${#python_files[@]}" -gt 0 ]; then
+      bash scripts/check-python.sh "${python_files[@]}"
+    fi
+  '
+fi
+
 if [ "$MODE" = lint ]; then
   verify_oms_state
   echo "check: ok (lint only)"
@@ -1107,6 +1167,7 @@ verify_oms_state
 case "$MODE" in
   focused) echo "check: ok (focused only)" ;;
   scripts-smoke) echo "check: ok (scripts-smoke only)" ;;
+  invariants) echo "check: ok (invariants only; pre-land)" ;;
   quick) echo "check: ok (quick local checks; full CI gate required)" ;;
   affected)
     check_suffix=""

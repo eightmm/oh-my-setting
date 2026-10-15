@@ -1396,6 +1396,71 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             temporary.unlink()
 
 
+def _validate_dispatch_verifier(repo, verify):
+    """Refuse missing suite files and unknown selectors before launching a worker."""
+    if not isinstance(verify, str) or not verify.strip():
+        return
+    try:
+        lexer = shlex.shlex(verify, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return
+    separators = {"&&", "||", ";", "|", "&", ";;", "(", ")"}
+    repo = Path(repo)
+    for index, token in enumerate(tokens[:-1]):
+        if token != "bash":
+            continue
+        suite = tokens[index + 1]
+        if not re.fullmatch(r"(?:tests|scripts)/[A-Za-z0-9_.-]+\.sh", suite):
+            continue
+        target = repo / suite
+        if not target.is_file():
+            raise ValueError("--verify names missing suite file: %s" % suite)
+        cursor = index + 2
+        while cursor < len(tokens):
+            option = tokens[cursor]
+            if option in separators:
+                break  # selectors after a shell separator belong to the next command
+            if option not in {"--section", "--only"}:
+                cursor += 1
+                continue
+            if cursor + 1 >= len(tokens):
+                break
+            selector = tokens[cursor + 1]
+            if option == "--section" and suite == "tests/operator-tools-smoke.sh":
+                listing = ["bash", str(target), "--list-sections"]
+                env = os.environ.copy()
+            elif option == "--only" and _uses_smoke_runner(suite, target):
+                listing = ["bash", str(repo / "tests/run-smoke-shard.sh"), "--list"]
+                selected_suite = (repo / "tests/scripts-smoke.sh" if suite == "tests/run-smoke-shard.sh"
+                                  else target)
+                env = dict(os.environ, OMS_SMOKE_SUITE=str(selected_suite))
+            else:
+                cursor += 2
+                continue
+            try:
+                valid = subprocess.check_output(listing, cwd=str(repo), env=env,
+                                                text=True, stderr=subprocess.STDOUT).splitlines()
+            except (OSError, subprocess.CalledProcessError) as error:
+                raise ValueError("could not validate --verify selector for %s" % suite) from error
+            requested = selector.split(",") if option == "--section" else [selector]
+            unknown = [name for name in requested if name not in valid]
+            if unknown:
+                raise ValueError("unknown %s value(s): %s; valid names: %s" %
+                                 (option, ", ".join(unknown), ", ".join(valid)))
+            cursor += 2
+
+
+def _uses_smoke_runner(suite, target):
+    if suite == "tests/run-smoke-shard.sh":
+        return True
+    try:
+        return "run-smoke-shard.sh" in target.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
 def plan_link(repo, owner, task_id, env, caller, access="read"):
     """Start a main's owned task; freeze observation without giving its worker plan authority."""
     base = ["bash", str(ENTRY), "agent-plan", "--repo", str(repo)]
@@ -3128,6 +3193,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         execution = work_repository(work_repo or source_repo)
     elif route["kind"] in {"worker", "researcher"}:
         execution = native_repository(repo)
+    _validate_dispatch_verifier(execution, verify)
     if dry_run:
         _validate_dry_run_inputs(prompt, brief)
     if task_id is None:

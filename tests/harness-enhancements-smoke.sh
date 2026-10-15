@@ -732,6 +732,76 @@ EOF
     fail "check gate treated ambient-only .oms creation as a suite leak"
 }
 
+test_invariants_gate_checks_committed_staged_and_worktree_sources() {
+  local gate="$TMP/check-invariants-gate"
+  local base log="$TMP/invariants-python-files" shell_log="$TMP/invariants-shell-files"
+  local smoke_log="$TMP/invariants-smoke-args" real_bash out
+
+  mkdir -p "$gate/scripts/lib" "$gate/tests"
+  cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
+  cp "$ROOT/scripts/lib/oms-state-inventory.py" "$ROOT/scripts/lib/check-maintenance.sh" \
+    "$ROOT/scripts/lib/file-lock.sh" "$ROOT/scripts/lib/poll.sh" \
+    "$ROOT/scripts/lib/provider-registry.sh" "$gate/scripts/lib/"
+  cat > "$gate/scripts/check-python.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "$OMS_TEST_INVARIANTS_PYTHON_LOG"
+EOF
+  cat > "$gate/tests/run-smoke-shard.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$OMS_TEST_INVARIANTS_SMOKE_LOG"
+EOF
+  real_bash="$(command -v bash)"
+  mkdir -p "$gate/bin"
+  cat > "$gate/bin/bash" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = -n ]; then printf '%s\n' "$2" >> "$OMS_TEST_INVARIANTS_SHELL_LOG"; fi
+exec "$OMS_TEST_INVARIANTS_REAL_BASH" "$@"
+EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/install-skills.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/tests/source-distribution-smoke.sh"
+  chmod +x "$gate/bin/bash" "$gate/scripts/check-python.sh" "$gate/tests/run-smoke-shard.sh" \
+    "$gate/scripts/install-skills.sh" "$gate/tests/source-distribution-smoke.sh"
+  git -C "$gate" init -q -b main
+  git -C "$gate" config user.name test
+  git -C "$gate" config user.email test@example.com
+  printf 'true\n' > "$gate/committed.sh"
+  printf 'value = 0\n' > "$gate/committed.py"
+  git -C "$gate" add .
+  git -C "$gate" commit -qm base
+  base="$(git -C "$gate" rev-parse HEAD)"
+  git -C "$gate" update-ref refs/remotes/origin/main "$base"
+  git -C "$gate" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+
+  printf 'true\n# committed\n' > "$gate/committed.sh"
+  printf 'value = 1\n' > "$gate/committed.py"
+  git -C "$gate" add committed.sh committed.py
+  git -C "$gate" commit -qm committed-changes
+  printf 'true\n' > "$gate/staged.sh"
+  printf 'value = 2\n' > "$gate/staged.py"
+  git -C "$gate" add staged.sh staged.py
+  printf 'true\n' > "$gate/unstaged.sh"
+  printf 'value = 3\n' > "$gate/unstaged.py"
+  git -C "$gate" add unstaged.sh unstaged.py
+  printf '# worktree edit\n' >> "$gate/unstaged.sh"
+  printf 'value = 4\n' > "$gate/untracked.py"
+  printf 'true\n' > "$gate/untracked.sh"
+
+  out="$(cd "$gate" && PATH="$gate/bin:$PATH" OMS_TEST_INVARIANTS_REAL_BASH="$real_bash" \
+    OMS_LOCK_DIR="$gate/locks" OMS_TEST_INVARIANTS_PYTHON_LOG="$log" \
+    OMS_TEST_INVARIANTS_SHELL_LOG="$shell_log" OMS_TEST_INVARIANTS_SMOKE_LOG="$smoke_log" \
+    "$real_bash" scripts/check.sh invariants 2>&1)" || fail "invariants lane failed in fixture: $out"
+  for file in committed.py staged.py unstaged.py untracked.py; do
+    grep -Fxq "$file" "$log" || fail "invariants syntax stage omitted $file"
+  done
+  for file in committed.sh staged.sh unstaged.sh untracked.sh; do
+    grep -Fxq "$file" "$shell_log" || fail "invariants syntax stage omitted $file"
+  done
+  for name in test_oms_allowlist_stays_in_sync_with_scripts test_peer_review_warns_untracked_files \
+      test_peer_review_gate_binds_complete_diff_and_refuses_truncation; do
+    grep -Fq -- "--only $name" "$smoke_log" || fail "invariants lane omitted $name"
+  done
+}
+
 test_affected_gate_runs_positive_evidence_and_fails_open() {
   local gate="$TMP/check-affected-gate"
   local base head boundary_base out policy_path log="$TMP/check-affected.log"
@@ -769,6 +839,7 @@ EOF
 test_selected() {
   printf 'shell-selected\n' >> "$OMS_TEST_AFFECTED_LOG"
 }
+
 test_unselected() {
   printf 'shell-unselected\n' >> "$OMS_TEST_AFFECTED_LOG"
 }
@@ -1231,6 +1302,7 @@ test_large_artifact_index_compacts_before_append
 test_smoke_runner_tail_and_signal_cleanup
 test_smoke_runner_reports_bounded_opt_in_timings
 test_affected_gate_runs_positive_evidence_and_fails_open
+test_invariants_gate_checks_committed_staged_and_worktree_sources
 test_gate_fingerprints_full_oms_state
 test_uninstall_stops_before_unlink_on_removal_failure
 test_install_owner_guards_and_stale_status

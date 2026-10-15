@@ -5490,6 +5490,38 @@ call(["bash", "-c", heartbeat_probe, "verify-heartbeat", str(root),
       str(heartbeat_temporary), verify_functions])
 
 # OPERATOR_SECTION_BEGIN dispatch_results
+execution_repo = temporary / "verification-execution-root"
+execution_repo.mkdir()
+try:
+    panel.run_dispatch(root, "codex", "worker", "read", "inspect", None,
+                       "bash tests/scripts-smoke.sh --only test_oms_allowlist_stays_in_sync_with_scripts",
+                       None, True, None, {"kind": "worker", "purpose": "investigate"}, None,
+                       None, None, work_repo=execution_repo)
+    raise AssertionError("verifier present only in source repo was accepted")
+except ValueError as error:
+    assert "missing suite file" in str(error), error
+try:
+    panel._validate_dispatch_verifier(root, "bash tests/operator-tools-smoke.sh --section not-a-section")
+    raise AssertionError("unknown operator section was accepted")
+except ValueError as error:
+    assert "valid names" in str(error), error
+panel._validate_dispatch_verifier(root, "bash tests/operator-tools-smoke.sh --section dispatch-exit")
+try:
+    panel._validate_dispatch_verifier(root, "bash tests/scripts-smoke.sh --only test_missing_smoke_case")
+    raise AssertionError("unknown smoke test was accepted")
+except ValueError as error:
+    assert "valid names" in str(error), error
+panel._validate_dispatch_verifier(root, "bash tests/scripts-smoke.sh --only test_oms_allowlist_stays_in_sync_with_scripts")
+# Selectors after a shell separator belong to the next suite, not the first one.
+panel._validate_dispatch_verifier(root, "bash tests/scripts-smoke.sh --only test_oms_allowlist_stays_in_sync_with_scripts"
+                                  " && bash tests/operator-tools-smoke.sh --section dispatch-exit")
+try:
+    panel._validate_dispatch_verifier(root, "bash tests/run-smoke-shard.sh --only test_missing_smoke_case")
+    raise AssertionError("unknown direct smoke-runner test was accepted")
+except ValueError as error:
+    assert "valid names" in str(error), error
+panel._validate_dispatch_verifier(root, "bash tests/run-smoke-shard.sh --only test_oms_allowlist_stays_in_sync_with_scripts")
+panel._validate_dispatch_verifier(root, "bash tests/autonomy-plan-run-smoke.sh --only test_context_pack")
 for owner in panel.PROVIDERS:
     env = dict(environment, OMS_AGENT=owner)
     peer = "claude" if owner == "codex" else "codex"

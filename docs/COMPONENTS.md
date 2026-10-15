@@ -1326,6 +1326,11 @@ service or proof of measured CI savings.
 `bash scripts/check.sh` is the repository gate: shell lint, Bash 3.2 parsing,
 Python 3.9 grammar, skill validation, focused suites, and sharded smoke tests.
 Development uses affected tests and static checks, not this full gate per edit.
+Before landing a bundle, run `bash scripts/check.sh invariants` for the fast
+repository-wide allowlist/review-state, skill and provider registry,
+documentation reference and changed-source syntax checks; this lane is
+intentionally limited to these invariants and does not replace affected checks
+or the full landing gate.
 For committed ranges, `--affected --changed-from BASE --changed-to HEAD` checks
 ordinary README/docs changes directly, otherwise selects existing tests from
 positive graph evidence. Skill/template Markdown uses the direct skill validator
