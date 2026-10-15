@@ -1446,6 +1446,8 @@ resize, reduced motion, attribution and unsafe-label tests cover the renderer.
 A PTY watch verifies actual incremental animation output without lifecycle writes. The
 lifecycle-events suite covers bounded refs and immutable idempotency. Fixture
 execution does not establish account access or a live main's judgment quality.
+When a sandbox denies Unix sockets, the suite reports socket-dependent sections
+as skipped and exits 77; parent verification outside that sandbox remains authoritative.
 The same operator suite covers council routes, durable results, verifier and
 patch lineage, privacy refusal and delivery deduplication/retry after interruption.
 The notifier suite covers unloaded and busy receivers, shell wrappers, early

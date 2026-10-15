@@ -20,6 +20,7 @@ operator_materialize() {
 """Deterministic section ownership for the canonical operator suite."""
 import ast
 from collections import Counter
+import os
 from pathlib import Path
 import re
 import runpy
@@ -223,6 +224,9 @@ def standalone(name, root, temporary):
 def run_section(name, spec, namespace):
     if not selected(name, spec):
         return
+    if os.environ.get("OMS_OPERATOR_SOCKET_DENIED") == "1" and name == "native-pty":
+        print("operator-native-pty: skipped (sandbox denies unix sockets)", flush=True)
+        return
     if spec != "1/1":
         # Fresh state for independent sections, including when N folds a
         # bucket into the core shard. Restore cwd before continuing core.
@@ -258,6 +262,9 @@ def main(args):
         self_check(shard(spec)[1])
         for name, _, _ in SECTIONS:
             if name not in {"core", "shared-cache"} and selected(name, spec):
+                if os.environ.get("OMS_OPERATOR_SOCKET_DENIED") == "1" and name == "native-pty":
+                    print("operator-native-pty: skipped (sandbox denies unix sockets)", flush=True)
+                    continue
                 standalone(name, root, temporary)
     else:
         raise ValueError("invalid operator shard runner arguments")
@@ -270,6 +277,42 @@ if __name__ == "__main__":
         print("error: " + str(error), file=sys.stderr)
         sys.exit(2)
 PY
+}
+
+# A sandbox may deny AF_UNIX even when tmux and PTY support are installed.
+# Probe the exact capability in TMP so workers can report partial coverage.
+OPERATOR_SOCKET_DENIED=0
+if python3 - "${TMPDIR:-/tmp}" <<'PY'
+import os
+import socket
+import sys
+path = os.path.join(sys.argv[1], "socket-probe")
+probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    probe.bind(path)
+except (OSError, AttributeError):
+    sys.exit(1)
+finally:
+    probe.close()
+try:
+    os.unlink(path)
+except OSError:
+    pass
+PY
+then
+  :
+else
+  OPERATOR_SOCKET_DENIED=1
+fi
+OPERATOR_SOCKET_SKIPS=0
+export OMS_OPERATOR_SOCKET_DENIED="$OPERATOR_SOCKET_DENIED"
+operator_skip_socket_section() {
+  if [ "$OPERATOR_SOCKET_DENIED" = 1 ]; then
+    echo "operator-$1: skipped (sandbox denies unix sockets)"
+    OPERATOR_SOCKET_SKIPS=$((OPERATOR_SOCKET_SKIPS + 1))
+    return 0
+  fi
+  return 1
 }
 
 # Interactive fixtures allocate and answer their own private PTYs.
@@ -332,6 +375,23 @@ case "${1:-}" in
       rm -rf "$TMP"
     }
     trap operator_timing_summary EXIT
+    if [ "$OPERATOR_SOCKET_DENIED" = 1 ]; then
+      OMS_OPERATOR_PARTIAL_MARKER_DIR="$TMP"
+      export OMS_OPERATOR_PARTIAL_MARKER_DIR
+      if oms_operator_parallel "${BASH_SOURCE[0]}" "$2"; then
+        parallel_status=0
+      else
+        parallel_status=$?
+      fi
+      partial_count=0
+      for marker in "$TMP"/operator-partial.*; do
+        [ -f "$marker" ] && partial_count=$((partial_count + 1))
+      done
+      if [ "$parallel_status" -ne 0 ] && [ "$partial_count" -eq "$2" ]; then
+        exit 77
+      fi
+      exit "$parallel_status"
+    fi
     oms_operator_parallel "${BASH_SOURCE[0]}" "$2"
     exit $? ;;
   --list|--self-check)
@@ -355,6 +415,12 @@ if [ "$OPERATOR_MODE" = list ]; then
 fi
 OPERATOR_SELECTION="$(python3 "$TMP/operator_tools_shards.py" "${BASH_SOURCE[0]}" --selection "$OPERATOR_SPEC" | tr -d '\r')"
 read -r OPERATOR_CORE OPERATOR_CACHE OPERATOR_SPEC <<< "$OPERATOR_SELECTION"
+if [ "$OPERATOR_SOCKET_DENIED" = 1 ]; then
+  [ "$OPERATOR_CORE" = 1 ] && operator_skip_socket_section core || true
+  if [ "$((2 % ${OPERATOR_SPEC#*/} + 1))" = "${OPERATOR_SPEC%/*}" ]; then
+    operator_skip_socket_section room-rollover || true
+  fi
+fi
 if [ -n "${OMS_OPERATOR_TIMINGS_DIR:-}" ] && [ "$OPERATOR_SPEC" != 1/1 ]; then
   OMS_OPERATOR_TIMINGS="$OMS_OPERATOR_TIMINGS_DIR/operator-timings.${OPERATOR_SPEC%/*}"
   export OMS_OPERATOR_TIMINGS
@@ -2357,7 +2423,7 @@ operator_shard = sys.argv.pop()
 root, temporary = map(Path, sys.argv[1:])
 sys.path.insert(0, str(temporary))
 from operator_tools_shards import run_section, selected as operator_selected
-operator_selected_py = lambda name: operator_selected(name, operator_shard)
+operator_selected_py = lambda name: operator_selected(name, operator_shard) and not (os.environ.get("OMS_OPERATOR_SOCKET_DENIED") == "1" and name == "native-pty")
 def _operator_run(name):
     run_section(name, operator_shard, globals())
 # Later core phases share the PTY helper without replaying native assertions.
@@ -17403,7 +17469,7 @@ end_fixture_mains()
 
 # Exercise the real bounded JSON socket client without installing a host or
 # running agents; lifecycle and room admission use the canonical OMS tools.
-if os.name == "posix":
+if os.name == "posix" and os.environ.get("OMS_OPERATOR_SOCKET_DENIED") != "1":
     import panel_host
     import panel_chats
     import socket
@@ -17562,7 +17628,7 @@ with patch("panel_chats.plan", return_value={"method": "claude-desktop"}), \
     else:
         raise AssertionError("tree navigation started a desktop CLI")
     launched.assert_not_called()
-if os.name != "nt":
+if os.name != "nt" and os.environ.get("OMS_OPERATOR_SOCKET_DENIED") != "1":
     master, slave = pty.openpty()
     original = termios.tcgetattr(slave)
     try:
@@ -19305,7 +19371,7 @@ for change in ("attempt", "native-pane", "moved-pane"):
 # Run the same close path against a real isolated server: ownership changes
 # after display-message returns but before if-shell evaluates on that server.
 close_tmux_binary = shutil.which("tmux")
-if close_tmux_binary and os.name != "nt":
+if close_tmux_binary and os.name != "nt" and os.environ.get("OMS_OPERATOR_SOCKET_DENIED") != "1":
     close_tmux = [close_tmux_binary, "-S", str(temporary / "close-race.sock"), "-f", "/dev/null"]
     real_run = subprocess.run
     real_run(close_tmux + ["new-session", "-d", "-s", "close-race", "sleep 60"], check=True)
@@ -20225,8 +20291,16 @@ PY
 else
   PYTHONDONTWRITEBYTECODE=1 python3 "$TMP/operator_tools_shards.py" "${BASH_SOURCE[0]}" --standalone "$ROOT" "$TMP" "$OPERATOR_SPEC"
 fi
-if [ "$OPERATOR_SPEC" = 1/1 ]; then
+if [ "$OPERATOR_SOCKET_DENIED" = 1 ]; then
+  echo "operator-tools-smoke: partial (shard $OPERATOR_SPEC; socket checks skipped)" >&2
+elif [ "$OPERATOR_SPEC" = 1/1 ]; then
   echo 'operator-tools-smoke: ok'
 else
   echo "operator-tools-smoke: ok (shard $OPERATOR_SPEC, $((SECONDS - OPERATOR_STARTED))s)"
+fi
+if [ "$OPERATOR_SOCKET_DENIED" = 1 ]; then
+  if [ -n "${OMS_OPERATOR_PARTIAL_MARKER_DIR:-}" ]; then
+    : > "$OMS_OPERATOR_PARTIAL_MARKER_DIR/operator-partial.${OPERATOR_SPEC%/*}"
+  fi
+  exit 77
 fi
