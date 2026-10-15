@@ -869,8 +869,9 @@ with patch.object(hook_state, "percent_left_from_cache", return_value=10), \
     assert json.loads(capture_path.read_text())["captured"] is False, "warning band latched a skipped capture"
     hook_state.context_pressure_hint(pressure_payload)
     assert launch.call_count == 2, "an announced band suppressed the failed capture retry"
-tower = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
-assert "control-tower main" in tower and "--owner claude --room binding-room" in tower, tower
+with patch.dict(os.environ, OMS_HOOK_AGENT="codex"):
+    tower = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
+assert "control-tower main" in tower and "--owner codex --room binding-room" in tower, tower
 assert "trust boundaries" in tower, tower
 for trigger in ("security-auditor for risky changes (permissions, secrets, destructive operations, scripts, hooks, install)",
                 "verifier before declaring completion (original request against final result)",
@@ -889,6 +890,11 @@ assert not hook_state.panel_main_hint(payload("tower")), "only prompts carry the
 # The shared plan rides on the same line: no plan, no plan sentence; then progress, the main's own task and the next ready one.
 assert "[oms plan]" not in tower, tower
 assert "set your status: oms room send" in tower and "--kind status" in tower, tower
+with patch.object(hook_state, "panel_status_hint", return_value=""):
+    short = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
+assert len(short) <= 200 and "control-tower main" in short and "your system prompt" in short, short
+assert "Delegate implementation" not in short and "keep review/admission/finalize" in short, short
+assert "oms room scope" in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 plan_dir = repo / ".oms" / "plan"
 plan_dir.mkdir(parents=True)
 from dashboard_projection import MAX_SOURCE_BYTES, plan_tasks as dashboard_tasks
@@ -954,7 +960,7 @@ def plan_file(tasks):
         t["id"]: dict(t, title=t.get("title", t["id"]), created=stamp, updated=stamp) for t in tasks}}))
 plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "ready", "depends": ["t1"], "title": "Wire banner"},
            {"id": "t3", "state": "ready", "depends": ["t9"]}, {"id": "t4", "state": "cancelled"}])
-free = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
+free = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
 # Cancelled work is closed, never verified: it leaves the total as on the panel goal banner.
 assert "[oms plan] Goal: Ship the shared plan board" in free and "1 of 3 verified · 1 cancelled" in free, free
 assert "yours:" not in free and "next ready: t2 Wire banner → oms agent-plan claim --id t2 --provider claude" in free, free
@@ -962,7 +968,7 @@ assert "claim the next ready task before starting new work" in free and "t3" not
 assert len(free.split("[oms plan]")[1].split("set your status")[0]) < 420 and "\n" not in free, free
 plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
            {"id": "t3", "state": "ready"}])
-held = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
+held = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
 assert "yours: t2 (running) → oms agent-plan brief --id t2" in held and "next ready: t3" in held and "before starting new work" not in held, held
 from unittest.mock import patch
 clock = int(time.time())
@@ -1031,7 +1037,7 @@ assert heartbeat_hint([foreign], dormant=True) == ""
 plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "claimed_by_participant": owner},
            {"id": "t3", "state": "ready"}])
 room.send(repo, "binding-room", os.environ["OMS_ROOM_PARTICIPANT"], "all", "Wiring the banner", kind="status")
-assert "set your status" not in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
+assert "set your status" not in hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
 plan_file([{"id": "old-review", "state": "review", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
            {"id": "current-work", "state": "running", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
            {"id": "foreign-work", "state": "running", "claimed_by_participant": "someone-else"}])
@@ -1070,23 +1076,40 @@ assert "your plan task: t2 (running); 1 open question to you; 0 workers running 
 assert "SECRET" not in resumed and "\n" not in resumed, resumed
 plan_file([{"id": "t1", "state": "done"}])
 assert "your plan task: none;" in hook_state.panel_resume_line(dict(payload("tower"), source="clear"))
-def start(source, **env):
+def start(source, session=None, **env):
     return subprocess.run(["python3", str(root / "scripts/lib/hook_state.py"), "relay-hint"], capture_output=True, text=True,
-                          input=json.dumps(dict(payload("resume-" + source), hook_event_name="SessionStart", source=source)),
-                          env=dict(os.environ, **env)).stdout
+                          input=json.dumps(dict(payload(session or "resume-" + source), hook_event_name="SessionStart", source=source)),
+                          env=dict(os.environ, **env), check=True).stdout
 # (A "clear" start would rebind the fixture main; its wording is covered by the direct call above.)
 assert "[oms panel] resumed after compact" in start("compact")
 assert "resumed after" not in start("startup") and "resumed after" not in start("compact", OMS_PANEL_MAIN_ATTEMPT="")
-# Codex may not show SessionStart output to the model: its first prompt repeats the line once.
-start("compact", OMS_HOOK_AGENT="codex")
-first = subprocess.run(["python3", str(root / "scripts/lib/hook_state.py"), "route", "--manifest", str(repo / "manifest.json")],
-                       capture_output=True, text=True, env=dict(os.environ, OMS_HOOK_AGENT="codex"),
-                       input=json.dumps(dict(payload("resume-compact"), hook_event_name="UserPromptSubmit", prompt="/x"))).stdout
-assert first.count("resumed after compact") == 1, first
-again = subprocess.run(["python3", str(root / "scripts/lib/hook_state.py"), "route", "--manifest", str(repo / "manifest.json")],
-                       capture_output=True, text=True, env=dict(os.environ, OMS_HOOK_AGENT="codex"),
-                       input=json.dumps(dict(payload("resume-compact"), hook_event_name="UserPromptSubmit", prompt="/x"))).stdout
-assert "resumed after" not in again, again
+# Codex and Pi share one generation marker; skipped prompts never consume it.
+for command in ("route", "panel-hook"):
+    session = "context-" + command
+    def prompt_hook(prompt="Continue work", agent="codex", **env):
+        return subprocess.run(["python3", str(root / "scripts/lib/hook_state.py"), command,
+                               *(["--manifest", str(repo / "manifest.json")] if command == "route" else [])],
+                              capture_output=True, text=True, env=dict(os.environ, OMS_HOOK_AGENT=agent, **env),
+                              input=json.dumps(dict(payload(session), hook_event_name="UserPromptSubmit", prompt=prompt)),
+                              check=True).stdout
+    marker = hook_state.resume_pending_path(payload(session))
+    assert "You are a control-tower main" in prompt_hook(), command
+    assert json.loads(marker.read_text())["delivered"] is True
+    for source in (None, "startup", "compact", "clear", "resume"):
+        if source:
+            start(source, session=session, OMS_HOOK_AGENT="codex")
+        saved = marker.read_bytes()
+        assert "[oms panel]" not in prompt_hook("<task-notification>done</task-notification>"), command
+        assert marker.read_bytes() == saved, "notification consumed the generation marker"
+        text = prompt_hook()
+        assert ("You are a control-tower main" in text) == bool(source), (source, text)
+        assert ("resumed after " in text) == (source in ("compact", "clear", "resume")), (source, text)
+        again = prompt_hook()
+        assert "control-tower main:" in again and "You are a control-tower main" not in again, again
+        assert "resumed after" not in again, again
+    assert "your system prompt" in prompt_hook(agent="claude")
+    assert "[oms panel]" not in prompt_hook("<task-notification>done</task-notification>", agent="claude")
+    assert "[oms panel]" not in prompt_hook(OMS_PANEL_MAIN_ATTEMPT=""), "non-main received a reminder"
 os.environ.pop("OMS_PANEL_MAIN_ATTEMPT")
 assert not hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit"))
 os.environ.pop("OMS_PANEL_SESSION")
@@ -1429,17 +1452,19 @@ for (const overrides of [{ OMS_PANEL_MAIN_ATTEMPT: "" }, { OMS_HARNESS_CHILD: "1
   process.env = original;
 }
 register(pi);
-assert.deepEqual([...handlers.keys()], ["before_agent_start", "tool_execution_end", "agent_end"]);
+assert.deepEqual([...handlers.keys()], ["session_start", "session_compact", "before_agent_start", "tool_execution_end", "agent_end"]);
 const ctx = { cwd: repo };
 const activity = join(repo, ".oms/hooks/panel-activity/pi-main.json");
 const row = () => JSON.parse(readFileSync(activity, "utf8"));
 const prompt = "PI PRIVATE PROMPT MUST NOT PERSIST";
+await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
 const first = await handlers.get("before_agent_start")({ prompt }, ctx);
 assert.equal(row().state, "busy");
 assert.equal(first.message.customType, "oms-room");
 assert.equal(first.message.display, false);
 assert.match(first.message.content, /Mail before Pi starts/);
 assert.match(first.message.content, /oms room ack/);
+assert.match(first.message.content, /You are a control-tower main/);
 assert.equal("systemPrompt" in first, false);
 assert.ok(Buffer.byteLength(first.message.content) <= 16384);
 const send = `import sys; sys.path.insert(0, sys.argv[1]); import room; from pathlib import Path; room.send(Path(sys.argv[2]), "pi-room", "peer", "pi-main", "Mail after a Pi tool", message_id="pi-tool-mail")`;
@@ -1453,22 +1478,42 @@ assert.ok(row().updated_at > 0);
 assert.equal(row().state, "busy");
 const second = await handlers.get("before_agent_start")({ prompt }, ctx);
 assert.match(second.message.content, /Mail after a Pi tool/);
+assert.match(second.message.content, /control-tower main:/);
+assert.doesNotMatch(second.message.content, /You are a control-tower main/);
+// Drive the registered Pi lifecycle callbacks, including manual and automatic compaction.
+for (const event of [
+  ...["manual", "threshold", "overflow"].map(reason => ({ type: "session_compact", reason, fromExtension: false })),
+  ...["new", "resume", "fork"].map(reason => ({ type: "session_start", reason })),
+]) {
+  await handlers.get(event.type)(event, ctx);
+  const notification = await handlers.get("before_agent_start")({ prompt: "<task-notification>done</task-notification>" }, ctx);
+  assert.doesNotMatch(notification?.message.content ?? "", /control-tower main/);
+  const restored = await handlers.get("before_agent_start")({ prompt }, ctx);
+  assert.match(restored.message.content, /You are a control-tower main/);
+  assert.doesNotMatch((await handlers.get("before_agent_start")({ prompt }, ctx)).message.content, /You are a control-tower main/);
+}
 // A reloaded extension keeps the enrolled receiver and still gets mail.
 const reloaded = new Map();
 register({ on: (event, handler) => reloaded.set(event, handler) });
+await reloaded.get("session_start")({ type: "session_start", reason: "reload" }, ctx);
 execFileSync("python3", ["-c", send.replace(/Mail after a Pi tool/, "Mail after reload").replace(/pi-tool-mail/, "pi-reload-mail"), join(extension, ".."), repo], { stdio: "ignore" });
-assert.match((await reloaded.get("before_agent_start")({ prompt }, ctx)).message.content, /Mail after reload/);
+const afterReload = (await reloaded.get("before_agent_start")({ prompt }, ctx)).message.content;
+assert.match(afterReload, /Mail after reload/);
+assert.doesNotMatch(afterReload, /You are a control-tower main/);
 // Stop must finish after an outstanding fire-and-forget heartbeat.
 handlers.get("tool_execution_end")({ toolName: "read", result: prompt }, ctx);
 await handlers.get("agent_end")({ messages: [prompt] }, ctx);
 assert.equal(row().state, "idle");
 const before = readFileSync(activity, "utf8");
 process.env.OMS_HARNESS_CHILD = "1";
+await handlers.get("session_start")({ type: "session_start", reason: "new" }, ctx);
+await handlers.get("session_compact")({ type: "session_compact", reason: "manual" }, ctx);
 assert.equal(await handlers.get("before_agent_start")({ prompt }, ctx), undefined);
 handlers.get("tool_execution_end")({ toolName: "read" }, ctx);
 await handlers.get("agent_end")({}, ctx);
 assert.equal(readFileSync(activity, "utf8"), before);
 delete process.env.OMS_HARNESS_CHILD;
+assert.doesNotMatch((await handlers.get("before_agent_start")({ prompt }, ctx)).message.content, /You are a control-tower main/);
 const scan = path => {
   for (const item of readdirSync(path, { withFileTypes: true })) {
     const child = join(path, item.name);

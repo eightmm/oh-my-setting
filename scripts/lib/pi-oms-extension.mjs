@@ -69,6 +69,20 @@ export default function (pi) {
     return pending;
   };
 
+  const resetContext = async (source, ctx) => {
+    if (!enabled()) return;
+    await enqueue("relay-hint", payload("SessionStart", ctx, { source }));
+  };
+  pi.on("session_start", async (event, ctx) => {
+    // Reload keeps the conversation; new/resumed/forked sessions replace it.
+    if (event.reason === "reload") return;
+    const source = event.reason === "new" ? "clear"
+      : ["resume", "fork"].includes(event.reason) ? "resume" : "startup";
+    await resetContext(source, ctx);
+  });
+  pi.on("session_compact", async (_event, ctx) => {
+    await resetContext("compact", ctx);
+  });
   pi.on("before_agent_start", async (event, ctx) => {
     if (!enabled()) return;
     const content = await enqueue("panel-hook", payload("UserPromptSubmit", ctx, { prompt: event.prompt }));

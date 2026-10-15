@@ -1500,17 +1500,37 @@ def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> 
 
 
 def panel_main_hint(payload: dict[str, Any]) -> str:
-    """Restate a panel main's control-tower role on every prompt.
-
-    The launch bootstrap reaches Codex only as a first user turn, compaction
-    fades it, and a main started before a policy change never saw it; this
-    line reaches every live panel main from the current checkout's hook."""
+    """Keep the role brief, restoring Codex/Pi rules once per context generation."""
     if (payload.get("hook_event_name") or payload.get("hookEventName")) != "UserPromptSubmit":
         return ""
     if not is_panel_main():
         return ""
+    if "prompt" in payload and should_skip_prompt(str(payload.get("prompt") or "")):
+        return ""
     room = os.environ.get("OMS_ROOM_ID", "")
-    return panel_main_base(payload, room) + panel_plan_hint(payload) + panel_status_hint(payload, room)
+    # Callers without a prompt inspect the full role contract rather than submit a turn.
+    if "prompt" not in payload:
+        return panel_main_base(payload, room) + panel_plan_hint(payload) + panel_status_hint(payload, room)
+    agent = payload_agent(payload)
+    base = ("[oms panel] control-tower main: delegate via oms panel --dispatch ROLE; "
+            "keep review/admission/finalize; full rules in "
+            + ("your system prompt." if agent == "claude" else "this context."))
+    path = None
+    state = {}
+    if agent == "codex":
+        path = resume_pending_path(payload)
+        state = load_state(path) if path else {}
+        if not state.get("delivered"):
+            base = panel_main_base(payload, room)
+            source = state.get("source")
+            if source in ("compact", "clear", "resume"):
+                line = panel_resume_line(dict(payload, source=source))
+                if line:
+                    base = line + "\n" + base
+    message = base + panel_plan_hint(payload) + panel_status_hint(payload, room)
+    if path and not state.get("delivered"):
+        write_json_atomic(path, dict(state, schema=1, updated_at=utc_now(), delivered=True))
+    return message
 
 
 def plain_line(value: Any, limit: int) -> str:
@@ -1698,11 +1718,6 @@ def cmd_route(args: argparse.Namespace) -> int:
     with contextlib.suppress(Exception):
         tower = panel_main_hint(payload)
         if tower:
-            pending = resume_pending_path(payload)
-            if pending and pending.is_file():
-                source = load_state(pending).get("source") or "compact"
-                pending.unlink()
-                print(panel_resume_line(dict(payload, source=source)))
             print(tower)
     collaboration = live_thread_hint(payload)
     if collaboration:
@@ -2648,15 +2663,18 @@ def cmd_relay_hint(_: argparse.Namespace) -> int:
     if hint:
         print(hint)
     if (is_panel_main() and (payload.get("hook_event_name") or payload.get("hookEventName")) == "SessionStart"
-            and payload.get("source") in ("compact", "clear")):
+            and payload.get("source") in ("startup", "compact", "clear", "resume")):
+        if payload_agent(payload) == "codex":
+            # The same marker tracks initial delivery and resets after context loss.
+            # Codex/Pi can drop SessionStart output; only a non-skipped prompt consumes it.
+            with contextlib.suppress(Exception):
+                path = resume_pending_path(payload)
+                if path:
+                    write_json_atomic(path, {"schema": 1, "updated_at": utc_now(), "source": payload.get("source")})
         with contextlib.suppress(Exception):
-            line = panel_resume_line(payload)
+            line = panel_resume_line(payload) if payload.get("source") in ("compact", "clear") else ""
             if line:
                 print(line)
-                # Codex may drop SessionStart output; the first prompt repeats the line until it has been shown there.
-                path = resume_pending_path(payload)
-                if path and payload_agent(payload) == "codex":
-                    write_json_atomic(path, {"schema": 1, "updated_at": utc_now(), "source": payload.get("source")})
     return 0
 
 
