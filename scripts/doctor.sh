@@ -2017,6 +2017,36 @@ check_provider_auth() {
 }
 check_provider_auth
 
+check_claude_registry_path() {
+  python3 - "$ROOT/scripts/lib" <<'PY' || return 0
+import os
+from pathlib import Path
+import shlex
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from claude_app_notify import _owned_path
+
+registry = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "sessions"
+if not registry.exists():
+    raise SystemExit(0)
+try:
+    _owned_path(registry, directory=True, private=True)
+except (OSError, ValueError) as exc:
+    message = str(exc)
+    if "mode " not in message:
+        raise SystemExit(0)
+    detail, mode = message.rsplit(" mode ", 1)
+    reason, path = detail.split(": ", 1)
+    # The registry itself must be private (0700); its parents only must not be group/world-writable.
+    fix = "go-rwx" if reason == "inbox is not private" else "go-w"
+    print("warn: Claude session registry disabled: %s %s mode %s; "
+          "advisor card lookup, session lineage rebind, and app notify may degrade. "
+          "Fix with: chmod %s %s" % (reason, path, mode, fix, shlex.quote(path)))
+PY
+}
+check_claude_registry_path
+
 check_bash_version
 
 check_optional_cmd timeout

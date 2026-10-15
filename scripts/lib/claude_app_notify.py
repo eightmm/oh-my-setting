@@ -35,10 +35,12 @@ def _owned_path(path, directory=False, private=False, protected_record=False):
             if directory and not stat.S_ISDIR(info.st_mode):
                 raise ValueError("invalid registry directory")
             if private and info.st_mode & 0o077:
-                raise ValueError("inbox is not private")
+                raise ValueError("inbox is not private: %s mode %04o" %
+                                 (part, stat.S_IMODE(info.st_mode)))
         if info.st_mode & 0o022 and not (part == path and protected_record) and not (stat.S_ISDIR(info.st_mode)
                 and info.st_mode & stat.S_ISVTX and info.st_uid == 0):
-            raise ValueError("writable inbox path")
+            raise ValueError("writable inbox path: %s mode %04o" %
+                             (part, stat.S_IMODE(info.st_mode)))
     return path.lstat()
 
 

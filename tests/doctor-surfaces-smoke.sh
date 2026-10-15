@@ -100,6 +100,36 @@ run_surfaces() {
     bash "$ROOT/scripts/doctor.sh" --surfaces 2>&1
 }
 
+test_claude_registry_permissions_warn() {
+  local home="$TMP/registry-permissions"
+  local out
+
+  make_fixture "$home"
+  mkdir -p "$home/claude/sessions"
+  chmod 700 "$home" "$home/claude"
+  chmod 775 "$home/claude/sessions"
+  out="$(CLAUDE_CONFIG_DIR="$home/claude" run_default_doctor "$home")"
+  case "$out" in
+    *"warn: Claude session registry disabled: inbox is not private $home/claude/sessions mode 0775; advisor card lookup, session lineage rebind, and app notify may degrade. Fix with: chmod go-rwx $home/claude/sessions"*) ;;
+    *) printf '%s\n' "$out"; fail "writable Claude registry should warn with path, mode, degradation and remedy" ;;
+  esac
+
+  chmod 700 "$home/claude/sessions"
+  chmod 775 "$home/claude"
+  out="$(CLAUDE_CONFIG_DIR="$home/claude" run_default_doctor "$home")"
+  case "$out" in
+    *"writable inbox path $home/claude mode 0775"*"Fix with: chmod go-w $home/claude"*) ;;
+    *) printf '%s\n' "$out"; fail "a writable registry parent should warn with go-w" ;;
+  esac
+
+  rmdir "$home/claude/sessions"
+  chmod 700 "$home/claude"
+  out="$(CLAUDE_CONFIG_DIR="$home/claude" run_default_doctor "$home")"
+  case "$out" in
+    *"Claude session registry disabled"*) printf '%s\n' "$out"; fail "private Claude registry must not warn" ;;
+  esac
+}
+
 # --- expected-surface manifest ----------------------------------------------
 
 test_print_expected_emits_the_registration_list() {
@@ -830,5 +860,6 @@ test_expected_surface_list_is_bump_gated
 test_capability_receipt_names_tool_absences
 test_receiptless_home_keeps_legacy_wording
 test_apparmor_userns_restriction_warns_only_on_linux
+test_claude_registry_permissions_warn
 
 echo "doctor-surfaces-smoke: ok"
