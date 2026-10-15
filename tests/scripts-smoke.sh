@@ -3883,6 +3883,42 @@ test_blocked_outbound_context_is_not_a_seat_failure() {
   fi
   assert_file_contains "$project/.oms/failures.jsonl" "outbound context refused before send"
   assert_file_contains "$project/.oms/failures.jsonl" "outbound_context_refused"
+  python3 - "$project/.oms/failures.jsonl" "$project/error" <<'PY'
+import json, re, sys
+row = json.loads(open(sys.argv[1], encoding="utf-8").readline())
+matches = row.get("outbound_evidence", [])
+matched_path = "/hom" + "e/researcher/secret"
+assert any(m.get("tier") == "machine" and m.get("pattern") == "home-path"
+           and m.get("source") == "prompt" and isinstance(m.get("line"), int)
+           and m["line"] > 0 for m in matches), matches
+assert matched_path not in open(sys.argv[1], encoding="utf-8").read()
+assert matched_path not in open(sys.argv[2], encoding="utf-8").read()
+assert re.search(r"machine-tier match in prompt at line [1-9][0-9]*:home-path",
+                 open(sys.argv[2], encoding="utf-8").read())
+PY
+  [ "$?" = "0" ] || fail "machine refusal evidence should identify tier, pattern, source and line without the path"
+
+  local secret_project="$TMP/outbound-secret-evidence"
+  rc=0
+  mkdir -p "$secret_project"
+  OH_MY_SETTING_ASK_DRY_RUN=0 "$ROOT/scripts/agent-call.sh" \
+    --repo "$secret_project" --to claude \
+    --prompt "Use GITHUB_TOK""EN=ghx-not-real-1234" \
+    >"$secret_project/out" 2>"$secret_project/error" || rc=$?
+  [ "$rc" = "3" ] || fail "a secret-looking outbound context should exit 3, got $rc"
+  python3 - "$secret_project/.oms/failures.jsonl" "$secret_project/error" <<'PY'
+import json, re, sys
+row = json.loads(open(sys.argv[1], encoding="utf-8").readline())
+matches = row.get("outbound_evidence", [])
+assert any(m.get("tier") == "secret" and m.get("pattern") == "token-assignment"
+           and m.get("source") == "prompt" and isinstance(m.get("line"), int)
+           and m["line"] > 0 for m in matches), matches
+assert "ghx-not-real-1234" not in open(sys.argv[1], encoding="utf-8").read()
+assert "ghx-not-real-1234" not in open(sys.argv[2], encoding="utf-8").read()
+assert re.search(r"secret-tier match in prompt at line [1-9][0-9]*:token-assignment",
+                 open(sys.argv[2], encoding="utf-8").read())
+PY
+  [ "$?" = "0" ] || fail "secret refusal evidence should identify tier, pattern, source and line without the token"
 }
 
 test_peer_review_dry_run_artifacts() {
@@ -12295,9 +12331,9 @@ test_scrubber_refusal_names_tier_and_region() {
   } > "$prompt"
   bash -c '. "$1/scripts/lib/agent-memory-common.sh"; agent_memory_sensitive_report "$2"' \
     _ "$ROOT" "$prompt" > "$out" 2>&1
-  grep -Fq 'machine-tier match in your prompt at line 2' "$out" ||
+  grep -Fq 'machine-tier match in prompt at line 2:home-path' "$out" ||
     fail "the report should place the machine-tier match in the caller's own prompt: $(cat "$out")"
-  grep -Fq 'secret-tier match in attached harness context at line 4' "$out" ||
+  grep -Fq 'secret-tier match in context bundle at line 4:credential-assignment' "$out" ||
     fail "the report should place the secret-tier match in the attached context: $(cat "$out")"
   # Composed delegate prompt: lines inside the brief count from the brief's
   # first line; role/wrapper lines are labelled apart.
@@ -12308,8 +12344,8 @@ test_scrubber_refusal_names_tier_and_region() {
   } > "$project/composed.txt"
   OMS_SCAN_BRIEF_RANGE=5:5 bash -c '. "$1/scripts/lib/agent-memory-common.sh"; agent_memory_sensitive_report "$2"' \
     _ "$ROOT" "$project/composed.txt" > "$project/composed.report" 2>&1
-  grep -Fq 'machine-tier match in your brief at line 1:' "$project/composed.report" &&
-    grep -Fq 'machine-tier match in the delegate role/wrapper text at line 2:' "$project/composed.report" ||
+  grep -Fq 'machine-tier match in brief file at line 1:home-path' "$project/composed.report" &&
+    grep -Fq 'machine-tier match in prompt at line 2:home-path' "$project/composed.report" ||
     fail "brief-relative report wrong: $(cat "$project/composed.report")"
   # The pointer is a line number and a tier, never the matched text.
   ! grep -Fq 'abcdefghijklmnop' "$out" ||
@@ -12324,7 +12360,22 @@ test_scrubber_refusal_names_tier_and_region() {
     --prompt "the tree under /hom""e/someone/project needs a fix" \
     >"$project/out" 2>"$project/error" || rc=$?
   [ "$rc" = "3" ] || fail "blocked call should exit 3 (scrubber), got $rc"
-  assert_file_contains "$project/error" "machine-tier match in your prompt"
+  assert_file_contains "$project/error" "machine-tier match in prompt at line"
+  assert_file_contains "$project/error" ":home-path"
+  if bash -c '. "$1/scripts/lib/agent-memory-common.sh"; agent_memory_file_has_sensitive_content "$2"' \
+    _ "$ROOT" "$project/error"; then
+    fail "quoting the refusal message must not be refused again"
+  fi
+
+  local prior_diagnostic="$project/prior-diagnostic.txt"
+  printf 'machine-tier match in prompt: /home%scluster paths were blocked\n' '/' > "$prior_diagnostic"
+  local matched_pattern
+  matched_pattern="$(bash -c '. "$1/scripts/lib/agent-memory-common.sh"; agent_memory_sensitive_line_pattern machine "$(cat "$2")"' \
+    _ "$ROOT" "$prior_diagnostic")"
+  [ "$matched_pattern" = "home-path" ] || fail "the quoted legacy diagnostic should map to home-path, got $matched_pattern"
+  printf 'Use /hom%s/operator/private for this task\n' 'e' > "$project/absolute-path.txt"
+  bash -c '. "$1/scripts/lib/agent-memory-common.sh"; agent_memory_file_has_sensitive_content "$2"' \
+    _ "$ROOT" "$project/absolute-path.txt" || fail "real absolute machine paths must remain blocked"
 }
 
 test_scrubber_no_function_name_bypass() {

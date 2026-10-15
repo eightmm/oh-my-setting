@@ -325,6 +325,8 @@ agent_memory_sensitive_report() {  # FILE
   local begin end tier re line number region
   local prompt_lines context_lines prompt_count context_count
   local wrap_lines wrap_count brief_first=0 brief_last=0
+  local pattern source_name
+  MA_OUTBOUND_EVIDENCE=""
 
   [ -s "$file" ] || return 0
   # Optional FIRST:LAST of the caller's own text inside a composed prompt
@@ -354,6 +356,9 @@ agent_memory_sensitive_report() {  # FILE
     while IFS= read -r line; do
       number="${line%%:*}"
       case "$number" in *[!0-9]*|"") continue ;; esac
+      line="$(sed -n "${number}p" "$file")"
+      pattern="$(agent_memory_sensitive_line_pattern "$tier" "$line")"
+      [ -n "$pattern" ] || continue
       region=prompt
       if [ "$begin" -gt 0 ] && [ "$number" -gt "$begin" ] &&
         { [ "$end" -eq 0 ] || [ "$number" -lt "$end" ]; }; then
@@ -361,26 +366,72 @@ agent_memory_sensitive_report() {  # FILE
       fi
       if [ "$region" = context ]; then
         context_count=$((context_count + 1))
-        [ "$context_count" -gt 3 ] || context_lines="${context_lines:+$context_lines, }$number"
+        source_name='context bundle'
+        [ "$context_count" -gt 3 ] || context_lines="${context_lines:+$context_lines, }$number:$pattern"
       elif [ "$brief_first" -gt 0 ] && { [ "$number" -lt "$brief_first" ] || [ "$number" -gt "$brief_last" ]; }; then
         wrap_count=$((wrap_count + 1))
-        [ "$wrap_count" -gt 3 ] || wrap_lines="${wrap_lines:+$wrap_lines, }$number"
+        source_name='prompt'
+        [ "$wrap_count" -gt 3 ] || wrap_lines="${wrap_lines:+$wrap_lines, }$number:$pattern"
       else
         [ "$brief_first" -eq 0 ] || number=$((number - brief_first + 1))
         prompt_count=$((prompt_count + 1))
-        [ "$prompt_count" -gt 3 ] || prompt_lines="${prompt_lines:+$prompt_lines, }$number"
+        source_name='prompt'
+        [ "$brief_first" -eq 0 ] || source_name='brief file'
+        [ "$prompt_count" -gt 3 ] || prompt_lines="${prompt_lines:+$prompt_lines, }$number:$pattern"
       fi
+      MA_OUTBOUND_EVIDENCE="${MA_OUTBOUND_EVIDENCE}${MA_OUTBOUND_EVIDENCE:+
+}${tier},${pattern},${source_name// /-},${number}"
     done <<EOF
 $(agent_memory_scan_input "$file" 2>/dev/null | grep -Ein "$re" | cut -d: -f1)
 EOF
     if [ "$brief_first" -gt 0 ]; then
-      agent_memory_sensitive_report_line "$tier" "your brief" "$prompt_lines" "$prompt_count"
-      agent_memory_sensitive_report_line "$tier" "the delegate role/wrapper text" "$wrap_lines" "$wrap_count"
+      agent_memory_sensitive_report_line "$tier" 'brief file' "$prompt_lines" "$prompt_count"
+      agent_memory_sensitive_report_line "$tier" prompt "$wrap_lines" "$wrap_count"
     else
-      agent_memory_sensitive_report_line "$tier" "your prompt" "$prompt_lines" "$prompt_count"
+      agent_memory_sensitive_report_line "$tier" prompt "$prompt_lines" "$prompt_count"
     fi
-    agent_memory_sensitive_report_line "$tier" "attached harness context" "$context_lines" "$context_count"
+    agent_memory_sensitive_report_line "$tier" 'context bundle' "$context_lines" "$context_count"
   done
+}
+
+agent_memory_sensitive_line_pattern() {  # TIER LINE
+  local tier="$1" line="$2" lower
+  lower="$(printf '%s' "$line" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  if [ "$tier" = secret ]; then
+    case "$lower" in *authorization:*) printf 'authorization\n'; return 0 ;; esac
+    case "$lower" in *bearer\ *) printf 'bearer\n'; return 0 ;; esac
+    case "$lower" in *://*:*@*) printf 'url-credentials\n'; return 0 ;; esac
+    case "$lower" in *hook[s].slac[k].com/service[s]/*|*discord[a]pp.com/api/webhook[s]/*) printf 'webhook-url\n'; return 0 ;; esac
+    case "$lower" in *machine\ *login\ *password\ *) printf 'machine-login\n'; return 0 ;; esac
+    case "$lower" in *token*=*|*secret*=*|*password*=*|*credential*=*) printf 'token-assignment\n'; return 0 ;; esac
+    case "$lower" in *api_[k]ey=*|*api-[k]ey=*|*private_[k]ey=*|*private-[k]ey=*) printf 'credential-assignment\n'; return 0 ;; esac
+    case "$lower" in *ghp_*|*gho_*|*ghu_*|*ghs_*|*ghr_*|*github_pat_*) printf 'github-token\n'; return 0 ;; esac
+    case "$lower" in *npm_*) printf 'npm-token\n'; return 0 ;; esac
+    case "$lower" in *hf_*) printf 'hf-token\n'; return 0 ;; esac
+    case "$lower" in *glpat-*) printf 'gitlab-token\n'; return 0 ;; esac
+    case "$lower" in *sk_live_*|*sk_test_*) printf 'stripe-key\n'; return 0 ;; esac
+    case "$lower" in *eyj*.*.*) printf 'jwt-like\n'; return 0 ;; esac
+    case "$lower" in *akia*) printf 'aws-key\n'; return 0 ;; esac
+    case "$lower" in *aiza*) printf 'google-key\n'; return 0 ;; esac
+    case "$lower" in *-----be[g]in*) printf 'private-key\n'; return 0 ;; esac
+    case "$lower" in *token*|*secret*|*password*|*credential*|*sk-*|*xoxb-*|*xoxp-*|*xoxa-*|*xoxr-*) printf 'token-like\n'; return 0 ;; esac
+    printf 'token-like\n'
+    return 0
+  else
+    case "$lower" in */hom[e]/*) printf 'home-path\n'; return 0 ;; esac
+    case "$lower" in */user[s]/*) printf 'user-path\n'; return 0 ;; esac
+    case "$lower" in */scratc[h]/*) printf 'scratch-path\n'; return 0 ;; esac
+    case "$lower" in */lustr[e]/*) printf 'lustre-path\n'; return 0 ;; esac
+    case "$lower" in */gpf[s]/*) printf 'gpfs-path\n'; return 0 ;; esac
+    case "$lower" in */beegf[s]/*) printf 'beegfs-path\n'; return 0 ;; esac
+    case "$lower" in */.ss[h]/*) printf 'ssh-dir\n'; return 0 ;; esac
+    case "$lower" in */.aw[s]/*) printf 'aws-dir\n'; return 0 ;; esac
+    case "$lower" in *cluster*[=:]*) printf 'cluster-field\n'; return 0 ;; esac
+    case "$lower" in *partition*[=:]*) printf 'partition-field\n'; return 0 ;; esac
+    case "$lower" in *nodelist*[=:]*) printf 'nodelist-field\n'; return 0 ;; esac
+    case "$lower" in *sbatch*--partition*) printf 'sbatch-partition\n'; return 0 ;; esac
+  fi
+  return 1
 }
 
 agent_memory_sensitive_report_line() {  # TIER WHERE LINES COUNT
@@ -389,13 +440,7 @@ agent_memory_sensitive_report_line() {  # TIER WHERE LINES COUNT
 
   [ "$count" -gt 0 ] || return 0
   [ "$count" -le 3 ] || more=" (+$((count - 3)) more)"
-  if [ "$tier" = secret ]; then
-    printf 'secret-tier match in %s at line %s%s: credential material is never sent\n' \
-      "$where" "$lines" "$more"
-  else
-    printf 'machine-tier match in %s at line %s%s: home/cluster paths and node fields; write them repository-relative\n' \
-      "$where" "$lines" "$more"
-  fi
+  printf '%s-tier match in %s at line %s%s\n' "$tier" "$where" "$lines" "$more"
 }
 
 agent_memory_file_has_secret_content() {

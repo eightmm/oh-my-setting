@@ -34,6 +34,7 @@ UNRESOLVED_ONLY=0
 AS_JSON=0
 LIMIT=0
 IGNORE_STATE=0
+OUTBOUND_EVIDENCE=()
 ACTION=""
 
 usage() {
@@ -183,6 +184,7 @@ while [ "$#" -gt 0 ]; do
     --summary) [ "$#" -ge 2 ] || fail "--summary requires text"; SUMMARY="$2"; shift 2 ;;
     --next) [ "$#" -ge 2 ] || fail "--next requires text"; NEXT="$2"; shift 2 ;;
     --failure-code) [ "$#" -ge 2 ] || fail "--failure-code requires a value"; FAILURE_CODE="$2"; shift 2 ;;
+    --outbound-evidence) [ "$#" -ge 2 ] || fail "--outbound-evidence requires tier,pattern,source,line"; OUTBOUND_EVIDENCE+=("$2"); shift 2 ;;
     --fingerprint) [ "$#" -ge 2 ] || fail "--fingerprint requires a value"; FINGERPRINT="$2"; shift 2 ;;
     --how) [ "$#" -ge 2 ] || fail "--how requires text"; HOW="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
@@ -233,6 +235,19 @@ case "$ACTION" in
   record)
     [ -n "$CMD" ] || fail "record requires --cmd"
     case "$EXIT_CODE" in *[!0-9]*|"") fail "record requires --exit N (non-negative integer)" ;; esac
+    for evidence in "${OUTBOUND_EVIDENCE[@]}"; do
+      IFS=, read -r evidence_tier evidence_pattern evidence_source evidence_line <<EOF
+$evidence
+EOF
+      case "$evidence_tier" in secret|machine) ;; *) fail "invalid outbound evidence tier" ;; esac
+      case "$evidence_pattern" in
+        credential-assignment|authorization|bearer|url-credentials|webhook-url|machine-login|token-assignment|github-token|npm-token|hf-token|gitlab-token|stripe-key|jwt-like|aws-key|google-key|private-key|token-like|home-path|user-path|scratch-path|lustre-path|gpfs-path|beegfs-path|ssh-dir|aws-dir|cluster-field|partition-field|nodelist-field|sbatch-partition) ;;
+        *) fail "invalid outbound evidence pattern" ;;
+      esac
+      case "$evidence_source" in prompt|brief-file|context-bundle) ;; *) fail "invalid outbound evidence source" ;; esac
+      case "$evidence_line" in ''|*[!0-9]*) fail "invalid outbound evidence line" ;; esac
+      [ "$evidence_line" -gt 0 ] || fail "outbound evidence line must be positive"
+    done
     # Refuse secret-tier content; machine paths were already normalized above.
     scan="$(mktemp)" || fail "mktemp failed"
     printf '%s\n%s\n' "$CMD" "$SUMMARY" > "$scan"
@@ -246,7 +261,12 @@ case "$ACTION" in
     mkdir -p "$(dirname "$LEDGER")"
     agent_memory_ensure_oms_ignore_for_path "$LEDGER" 2>/dev/null || true
     row_tmp="$(mktemp)" || fail "mktemp failed"
-    OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \
+    outbound_evidence=""
+    for evidence in "${OUTBOUND_EVIDENCE[@]}"; do
+      outbound_evidence="${outbound_evidence}${outbound_evidence:+
+}${evidence}"
+    done
+    OMS_OUTBOUND_EVIDENCE="$outbound_evidence" OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \
       OMS_FP="$fp" OMS_KIND="$KIND" OMS_CMD="$CMD" OMS_EXIT="$EXIT_CODE" OMS_SUMMARY="$SUMMARY" OMS_NEXT="$NEXT" \
       OMS_STATE_FP="$(state_fingerprint)" \
       OMS_RUNTIME_LIB="$ROOT/scripts/lib" OMS_FAILURE_CODE="${FAILURE_CODE:-}" \
@@ -261,6 +281,16 @@ if os.environ.get("OMS_SUMMARY"):
     row["summary"] = os.environ["OMS_SUMMARY"]
 if os.environ.get("OMS_NEXT"):
     row["next"] = os.environ["OMS_NEXT"]
+evidence = []
+for item in os.environ.get("OMS_OUTBOUND_EVIDENCE", "").splitlines():
+    try:
+        tier, pattern, source, line = item.split(",", 3)
+        evidence.append({"tier": tier, "pattern": pattern, "source": source,
+                         "line": int(line)})
+    except Exception:
+        continue
+if evidence:
+    row["outbound_evidence"] = evidence
 # Canonical taxonomy rides beside the free-form reason: every producer that
 # records a failure funnels through here, so one annotation point covers the
 # provider, supervisor, delegation, admission, plan-run, and goal-drive paths.

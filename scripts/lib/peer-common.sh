@@ -450,7 +450,6 @@ ma_prompt_has_sensitive_content() {
 
 ma_validate_outbound_prompt() {
   local prompt="$1"
-  local report_line
 
   if ma_prompt_has_sensitive_content "$prompt"; then
     echo "error: outbound provider context contains sensitive-looking content; external call blocked" >&2
@@ -459,11 +458,7 @@ ma_validate_outbound_prompt() {
     # the caller the whole round and then a guess -- the pattern set is private
     # and the caller cannot tell its own sentence from attached memory, task or
     # git context. Line numbers, never the matched text.
-    while IFS= read -r report_line; do
-      [ -z "$report_line" ] || echo "error: $report_line" >&2
-    done <<EOF
-$(agent_memory_sensitive_report "$prompt")
-EOF
+    agent_memory_sensitive_report "$prompt" >&2
     echo "hint: remove secrets, private keys, absolute machine paths, cluster details, raw logs, datasets, or checkpoints from task/memory/prompt context" >&2
     return 3
   fi
@@ -1811,7 +1806,7 @@ ma_thread_append_nonanswer() {
 # advise threshold; the exit rides in --summary. Best-effort by construction — a
 # council must not fail because its bookkeeping did.
 ma_record_seat_failure() {
-  local provider="$1" status="$2"
+  local provider="$1" status="$2" evidence
 
   # A dry run never called the provider. Durable failure memory must not carry a
   # failure that never happened.
@@ -1823,12 +1818,17 @@ ma_record_seat_failure() {
   # again. The refused context is shared by every seat, so the row is not
   # per-provider either. Two field occurrences read as seat failures before this.
   if [ "$status" = 3 ]; then
-    "$(ma_scripts_dir)/fail-ledger.sh" --repo "${REPO:-$PWD}" record --kind cmd \
+    set -- --repo "${REPO:-$PWD}" record --kind cmd \
       --cmd "peer-${MA_KIND:-call} outbound context" --exit "$status" \
       --failure-code outbound_context_refused \
       --summary "outbound context refused before send (sensitive-looking content); no seat was called" \
-      --next "remove absolute machine paths, secrets, cluster details, or raw logs from the prompt, task, or memory context" \
-      >/dev/null 2>&1 || true
+      --next "remove absolute machine paths, secrets, cluster details, or raw logs from the prompt, task, or memory context"
+    while IFS= read -r evidence; do
+      [ -z "$evidence" ] || set -- "$@" --outbound-evidence "$evidence"
+    done <<EOF
+${MA_OUTBOUND_EVIDENCE:-}
+EOF
+    "$(ma_scripts_dir)/fail-ledger.sh" "$@" >/dev/null 2>&1 || true
     return 0
   fi
   "$(ma_scripts_dir)/fail-ledger.sh" --repo "${REPO:-$PWD}" record --kind cmd \
