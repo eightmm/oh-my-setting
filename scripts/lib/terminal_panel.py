@@ -4,6 +4,7 @@
 import argparse
 from contextlib import nullcontext, redirect_stdout
 import datetime
+import fnmatch
 import hashlib
 import io
 import json
@@ -37,7 +38,7 @@ from panel_input import PANEL_SESSION
 from panel_routing import (allocate, alternate_route, command as routed_command, policy, KINDS, MODEL_IDS,
                            TIERS, WRITERS, newest_route_model, route_family)
 from panel_results import (DURABLE, _read, _write, _lock, finalize, outcomes, results, results_snapshot,
-                           retry_delivery, verified_patch, pending_admissions, write_summary_draft)
+                           retry_delivery, verified_patch, _patch_paths, pending_admissions, write_summary_draft)
 from panel_cache import read_shared
 from room_repository import EXECUTION_ENV, native_repository, state_repository, work_repository
 
@@ -1546,6 +1547,30 @@ def _safe_patch_path(value):
             all(part not in {"", ".", ".."} for part in value.split("/")))
 
 
+_AUTO_REVIEW_FRONTIER_PATHS = (
+    "hooks/*", "scripts/lib/hook_state.py", "scripts/install*", "scripts/uninstall*",
+    "scripts/land.sh", "scripts/lib/landing-capture.py", ".github/workflows/*",
+    "config/*permission*", "config/*settings*", "*permission*", "*settings*", "*policy*",
+    "rules/*",
+)
+
+
+def _automatic_review_workload(repo, result_event):
+    """Choose a conservative tier from the verified patch paths, never worker claims."""
+    try:
+        if not isinstance(result_event, dict):
+            return "frontier"
+        paths = _patch_paths(verified_patch(repo, result_event))
+        if not paths or any(not _safe_patch_path(path) for path in paths):
+            return "frontier"
+        if any(fnmatch.fnmatchcase(path, pattern)
+               for path in paths for pattern in _AUTO_REVIEW_FRONTIER_PATHS):
+            return "frontier"
+        return "deep"
+    except Exception:
+        return "frontier"
+
+
 def _call_result_event(repo, room_id, member, task_id, status):
     import panel_results
     attempts, artifacts = panel_results._records(repo, full=True)
@@ -2119,10 +2144,11 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                     "review_call_id": review_member, "attempt": attempt}
                 if pending_claim or room.claim_review(repo, room_id, review_event):
                     try:
+                        review_workload = _automatic_review_workload(repo, result_event)
                         with redirect_stdout(io.StringIO()):
-                            dispatch(repo, owner, "reviewer", None, "read", None, prompt=prompt, verify=verifier,
+                            dispatch(repo, owner, "reviewer", review_workload, "read", None, prompt=prompt, verify=verifier,
                                      task_id=task_id, dry_run=True, label="Automatic patch review")
-                        dispatch(repo, owner, "reviewer", None, "read", None, prompt=prompt, verify=verifier,
+                        dispatch(repo, owner, "reviewer", review_workload, "read", None, prompt=prompt, verify=verifier,
                                  task_id=task_id, label="Automatic patch review", member_id=review_member,
                                  work_repo=work_repo)
                     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
