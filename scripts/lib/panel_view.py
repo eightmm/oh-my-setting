@@ -408,6 +408,9 @@ def tone(state):
 
 def worker_rows(report):
     """Only explicit panel metadata identifies advisors and main ownership."""
+    from room_view import call_classifier, nodes
+    classify = call_classifier(report)
+    projected = {member.get("attempt"): member for member in nodes(report) if member.get("attempt")}
     rows = []
     attempts = mapping(report.get("attempts"))
     active = list(listing(attempts.get("active_recent")))
@@ -445,6 +448,9 @@ def worker_rows(report):
             seats[key] = seats.get(key, 0) + 1
     for row in active:
         metadata = mapping(row.get("panel"))
+        member = projected.get(row.get("attempt_id"))
+        if member is not None and classify(member) == "past":
+            continue
         key = (row.get("task_id"), row.get("parent_attempt_id"))
         if row.get("tool") == "panel-council":
             rows.append({"state": row.get("state") or "unknown", "provider": row.get("provider") or "unknown",

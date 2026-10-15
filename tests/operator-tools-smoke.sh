@@ -2632,6 +2632,10 @@ assert {item["cls"] for item in ending_queue} == {"failed", "guard_stop", "timed
 assert len(ending_queue) == 6 and not any("cancel" in str(item["row_id"]) for item in ending_queue), ending_queue
 assert all(item["cls"] != "stale" for item in ending_queue)
 assert call_classifier(ending_fixture)(ending_members["cancel-exit"]) == "past"
+compact_decided = deepcopy(ending_fixture)
+compact_decided["finalized"] = {"owner-decision": "completed"}
+compact_decided_text = render(compact_decided, "codex", 150, 18, view="compact", attention_only=True)
+assert "owner-decision" not in compact_decided_text and "awaiting decision" not in compact_decided_text, compact_decided_text
 guard_read = deepcopy(ending_fixture)
 next(m for m in guard_read["room"]["messages"] if m["sender"] == "guard-record")["pending_for"] = []
 assert any(item["cls"] == "guard_stop" for item in attention_items(guard_read))
