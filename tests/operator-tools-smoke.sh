@@ -19724,6 +19724,7 @@ def clear_option(name):
                     clear_window("%42")[1:])).get(name, "")
 clear_env = dict(environment, TMUX="fixture", TMUX_PANE="%42", OMS_PANEL_SESSION="oms-clear", OMS_ROOM_ID=clear_room)
 with patch.dict(os.environ, clear_env, clear=True), patch.object(panel, "check_legacy_main"), \
+        patch.object(panel, "session_stored", return_value=True), \
         patch.object(panel, "run_single_native", side_effect=clear_native), patch.object(panel, "managed_session", return_value=True), \
         patch.object(panel, "_main_window", side_effect=clear_window, create=True), patch.object(panel, "pane_option", side_effect=clear_option), \
         patch.object(panel, "session_owner", return_value=str(project.resolve())), \
