@@ -81,6 +81,7 @@ def nodes(report):
         native = mapping(status.get("native_models"))
         reading = mapping(native.get(member.get("participant")))
         live_native = (member.get("role") == "main" and member.get("provider") == "codex"
+                       and meta.get("harness") != "pi"
                        and attempt.get("state") not in TERMINAL_STATES
                        and member.get("consumer"))
         current = (live_native and reading.get("consumer") == member.get("consumer")

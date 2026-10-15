@@ -7483,6 +7483,9 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             codex_attempt = tmux_wait(["show-option", "-w", "-v", "-t", swap_window,
                                        "@oms_panel_main_attempt"], "att_").strip()
             assert swap_attempt in panel.lineage_ids(project, "codex", swap_member, codex_attempt)
+            swapped_main = json.loads(panel.events(project, "show", "--attempt", codex_attempt,
+                                                    "--json", output=True))
+            assert swapped_main["refs"]["panel_model"] == "gpt-6.1-sol", swapped_main
             swap_board = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", menu_room,
                                "--watch", "--count", "1", "--view", "graph"], watched_env)
             assert "MAIN Sol 6.1 · took over from Opus 5.5" in swap_board, swap_board
@@ -17879,6 +17882,18 @@ with patch.dict(os.environ, chat_env, clear=True):
     wrong["codex"]["native_models"]["chat-sol"]["consumer"] = "f" * 32
     assert nodes(dict(model_report, provider_status=wrong))[0]["model"] is None
     assert hierarchy(dict(model_report, provider_status=wrong), [], chat_attempt)[0]["title"] != "MAIN Sol 6"
+    # Pi uses Codex's room provider identity, but its selected model is recorded
+    # in the panel attempt rather than Codex's native thread database.
+    pi_main = deepcopy(model_report)
+    pi_main["attempts"]["active_recent"][0]["panel"]["harness"] = "pi"
+    pi_member = dict(model_member, consumer="pi-session")
+    pi_main["room"]["participants"] = [pi_member]
+    pi_status = deepcopy(status)
+    pi_status["codex"]["native_models"] = {}
+    pi_main["provider_status"] = pi_status
+    pi_node = nodes(pi_main)[0]
+    assert pi_node["model"] == "gpt-6-sol" and pi_node["model_at_launch"] == "gpt-6-sol", pi_node
+    assert hierarchy(pi_main, [], chat_attempt)[0]["title"] == "MAIN Sol 6"
     with sqlite3.connect(str(model_database)) as database:
         database.execute("UPDATE threads SET cwd=?", (str(temporary / "another-project"),))
     assert not panel_chats.current_models(project, [model_member]), "a foreign project supplied the model"
