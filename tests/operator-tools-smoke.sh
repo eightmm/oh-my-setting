@@ -3306,8 +3306,8 @@ def pending_projection(count, consumed=0):
     rows += [{"seq": count + 4 + i, "room_event": dict(kind="received", participant=p,
               messages=["pending-%d" % n for n in range(consumed)])} for i, p in enumerate(("m1", "m2"))]
     with patch.object(room, "records", return_value=rows):
-        projection = room.status("unused", "r")
-        log = room.messages("unused", "r")
+        projection = room.status(str(temporary), "r")
+        log = room.messages(str(temporary), "r")
     return projection, log
 
 many_pending = deepcopy(msg_report)
@@ -6641,10 +6641,13 @@ with patch.dict(os.environ, environment, clear=True):
     try:
         link.symlink_to(summary)
         try:
-            saved.finalize(project, "codex", "bad-result", str(link), "completed")
+            from contextlib import redirect_stderr
+            error_text = io.StringIO()
+            with redirect_stderr(error_text):
+                saved.finalize(project, "codex", "bad-result", str(link), "completed")
             raise AssertionError("linked summary accepted")
         except ValueError:
-            pass
+            assert "panel evidence must be a regular non-symlink, non-hard-linked file" in error_text.getvalue(), error_text.getvalue()
     except (OSError, NotImplementedError):
         if os.name != "nt":
             raise
@@ -14140,7 +14143,11 @@ except ValueError as error:
 else:
     raise AssertionError("advisor action ran without a selected main")
 with patch.object(panel.sys.stdin, "isatty", return_value=False), patch.dict(os.environ, {}, clear=False):
-    assert panel.main(["--repo", str(root), "--dispatch", "advisor", "--owner", "claude", "--main", "flow-main"]) == 1
+    from contextlib import redirect_stderr
+    error_text = io.StringIO()
+    with redirect_stderr(error_text):
+        assert panel.main(["--repo", str(root), "--dispatch", "advisor", "--owner", "claude", "--main", "flow-main"]) == 1
+    assert "advisor dispatch needs --prompt or an interactive terminal" in error_text.getvalue(), error_text.getvalue()
 with patch.object(panel, "session_owner", return_value="/elsewhere"):
     try:
         panel.split_panel(Path("/tmp/project-a"))
@@ -16494,7 +16501,7 @@ def exercise_exited_main_mail():
                   "recipient": "all", "message_kind": "status"}} for i in range(12)]
         def projected():
             with patch.object(room, "records", return_value=rows):
-                return dict(report, room=room.status("unused", "mail"))
+                return dict(report, room=room.status(str(temporary), "mail"))
         window = projected()
         assert len(window["room"]["messages"]) == 12 and all(m["id"] != "old-note" for m in window["room"]["messages"])
         assert len(window["room"]["pending_messages"][0]["text"]) == 300
