@@ -13417,12 +13417,15 @@ assert done == ["follow", None] and calls == [["resize-pane", "-t", "%1", "-x", 
 # A same-orientation window resize scales the recorded board share proportionally.
 done, calls = sync_run(panel.SplitSync(), reading(True, (100, 50), (25, 50), "left:25c"), reading(True, (120, 50), (30, 50), "left:25c"))
 assert done == [None, "record"] and calls == [["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:30c"]], (done, calls)
-# Portrait geometry keeps a left board when width permits, shifts above the CLI below 61 columns,
-# and returns left at 65 columns to provide four columns of hysteresis.
+# When a resize leaves the pane on a new edge, rescale its prior fraction and record that edge; never use left columns as top rows.
 done, calls = sync_run(panel.SplitSync(), reading(False, (80, 90), (22, 90), "left:22c"),
                        reading(False, (60, 90), (60, 40), "left:22c"),
-                       reading(False, (65, 90), (65, 40), "top:40r"))
-assert done == [None, "follow", "follow"], (done, calls)
+                       reading(False, (65, 90), (65, 40), "top:25r"))
+assert done == [None, "follow", "record"] and calls == [
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:25r"],
+    ["resize-pane", "-t", "%1", "-y", "25"],
+    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:20c"],
+    ["list-panes", "-t", "%1", "-F", "#{pane_id} #{pane_width} #{pane_height}"]], (done, calls)
 # Cap after scaling the original record, so repeated window shrinks preserve its fraction.
 done, calls = sync_run(panel.SplitSync(), reading(True, (400, 50), (112, 50), "left:112c"),
                        reading(True, (200, 50), (56, 50), "left:112c"),
@@ -13485,12 +13488,12 @@ def flip_run(first, second, listing):
         done = [sync.tick(second)]
     return done, [call.args[0][1:] for call in tmux_run.call_args_list]
 done, calls = flip_run(reading(False, (120, 50), (30, 50), "left:30c"),
-                       reading(False, (80, 90), (30, 90), "left:30c"),
-                       "%1 80 30\n%2 40 45\n%3 40 44\n")
+                       reading(False, (60, 90), (30, 90), "left:30c"),
+                       "%1 60 30\n%2 30 45\n%3 30 44\n")
 assert done[-1] == "follow" and [call for call in calls if call[0] == "join-pane"] == [
     ["join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-v", "-l", "23"]], (done, calls)
 done, calls = flip_run(reading(False, (200, 50), (60, 50), "left:30"),
-                       reading(False, (80, 90), (24, 90), "left:30"),
+                       reading(False, (60, 90), (24, 90), "left:30"),
                        "%1 80 30\n%2 40 45\n")
 assert done[-1] == "follow" and [call for call in calls if call[0] == "join-pane"] == [
     ["join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-v", "-l", "27"]], (done, calls)
@@ -13506,12 +13509,14 @@ done, calls = sync_run(panel.SplitSync(), reading(False, (100, 50), (25, 50), "l
                        reading(False, (100, 51), (25, 51), "left:25c"),
                        reading(False, (100, 52), (25, 52), "left:25c"))
 assert done == [None, None, None] and calls == [], (done, calls)
-done, calls = sync_run_panes(panel.SplitSync(), [reading(False, (100, 50), (100, 25), "top:25r"),
-                                                  reading(False, (100, 49), (100, 25), "top:25r"),
-                                                  reading(False, (100, 47), (100, 25), "top:25r")],
+# A top board returns left as soon as the width clears the left threshold plus four columns,
+# and stays above the CLI inside that band.
+done, calls = sync_run_panes(panel.SplitSync(), [reading(False, (100, 50), (100, 25), "top:25r")],
                              "%1 100 25\n%2 80 25\n")
-assert done == [None, None, "follow"] and calls[-1] == [
-    "join-pane", "-d", "-f", "-s", "%1", "-t", "%2", "-b", "-h", "-l", "51"], (done, calls)
+assert done == ["follow"] and any(call[0] == "join-pane" and "-h" in call for call in calls), (done, calls)
+done, calls = sync_run_panes(panel.SplitSync(), [reading(False, (63, 50), (63, 25), "top:25r")],
+                             "%1 63 25\n%2 63 24\n")
+assert done == [None] and not any(call[0] == "join-pane" for call in calls), (done, calls)
 # The new unsplit narrow-window path keeps the original single-pane/F9 regressions.
 done, calls = sync_run(panel.SplitSync(), reading(True, (42, 24), (42, 24), "left:22c", panes=1))
 assert done == [None] and calls == [], (done, calls)

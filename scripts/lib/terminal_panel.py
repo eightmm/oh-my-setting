@@ -3964,6 +3964,17 @@ class SplitSync:
                 self.last = None
                 return "follow"
             return "record"
+        if mode == "work" and stored[0] != orientation:
+            source_axis = (before[0][1] if before[3] == "top" else before[0][0]) \
+                if before is not None and before[3] != orientation else 0
+            if source_axis > 0:
+                cells = (before[1] * axis + source_axis // 2) // source_axis
+            else:
+                share = BOARD_HEIGHT_SHARE if orientation == "top" else BOARD_SHARE
+                cells = (share * axis + 50) // 100
+            cells = work_split_cells((orientation, cells, False), axis)
+            stored = (orientation, cells, False)
+            record(cells)
         if mode != "work":
             return None
         done = None
