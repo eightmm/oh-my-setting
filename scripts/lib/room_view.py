@@ -586,6 +586,15 @@ def goal_banner(report, width, unicode, compact=False):
     """Full goal on the board; bounded summaries retain the compact fallback."""
     summary = plan_summary(report)
     if summary and _plan_finished(report):
+        if width >= 46:
+            available = max(1, width - 6)
+            # One extra line: the cost of each retire disposition; retire --check prints the exact command.
+            lines = [_finished_goal_text(report, summary, width),
+                     "retire: superseded (instant) or completed-external (re-runs acceptance ~9 min);"
+                     " oms agent-plan retire --check"]
+            return [(box_row(part, width, unicode), "metadata")
+                    for line in lines
+                    for part in wrapped(line, available, max(1, (len(line) + available - 1) // available))]
         text = _finished_goal_text(report, summary, width)
         return [(one_row(text, width), "metadata")]
     if compact or width < 76:

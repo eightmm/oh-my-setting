@@ -16092,7 +16092,11 @@ finished_goal = deepcopy(words)
 finished_goal["plan"].update(task_count=9, idle_days=44, by_state={"done": 6, "cancelled": 3})
 wide_finished = graph_text.goal_banner(finished_goal, 120, True)[0][0]
 narrow_finished = graph_text.goal_banner(finished_goal, 42, True)[0][0]
-assert "Goal finished 6/6 verified · 3 cancelled" in wide_finished and "retire + init next goal" in wide_finished, wide_finished
+wide_finished_text = " ".join(line for line, _ in graph_text.goal_banner(finished_goal, 120, True))
+assert "Goal finished 6/6 verified · 3 cancelled" in wide_finished, wide_finished
+assert "superseded (instant)" in wide_finished_text and "completed-external (re-runs acceptance ~9 min)" in wide_finished_text, wide_finished_text
+assert "oms agent-plan retire --check" in wide_finished_text, wide_finished_text
+assert len(graph_text.goal_banner(finished_goal, 120, True)) <= 4, "a finished goal banner must stay compact"
 assert "Goal finished 6/6" in narrow_finished and "—" not in narrow_finished and "Ship the shared plan board" not in narrow_finished, narrow_finished
 finished_box = graph_text.goal_box(finished_goal, 80, True)
 assert len(finished_box) == 3 and finished_box[1][1] == "metadata" and "Goal finished" in finished_box[1][0], finished_box
