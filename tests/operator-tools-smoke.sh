@@ -239,7 +239,6 @@ def run_section(name, spec, namespace):
     if spec != "1/1":
         # Fresh state for independent sections, including when N folds a
         # bucket into the core shard. Restore cwd before continuing core.
-        import os
         from unittest.mock import patch
         before = Path.cwd()
         try:
@@ -2520,6 +2519,8 @@ for role in ("worker", "builder", "refactorer", "documenter", "integrator", "per
 assert role_style("unrecorded") == "unknown" and role_style("worker", "advise") == "worker"
 use_unicode(True)
 assert call_identity("worker", "gpt-6.1-sol", "Routing") == "WORKER Sol 6.1 · Routing"
+assert call_identity("reviewer", "gpt-6.1-sol", "Goal verification", purpose="verifier") == "VERIFIER Sol 6.1 · Goal verification"
+assert call_identity("reviewer", "gpt-6.1-sol", purpose="security-auditor") == "SECURITY AUDITOR Sol 6.1"
 assert call_identity("worker", "gpt-6.1-sol", "Routing", alias="B7") == "B7 WORKER Sol 6.1 · Routing"
 assert call_identity(None, None, short_id="abcd") == "UNKNOWN model unknown #abcd"
 tags = {"starting": "[⟳ starting]", "working": "[⟳ running]", "manual": "[⟳ running]", "verifying": "[⟳ verifying]",
@@ -8350,6 +8351,17 @@ import panel_results as panel_result_store
 auto_task, auto_call, auto_attempt = "auto-review-task", "call-aaaaaaaaaaaaaaaa", "attempt-auto-review-fixture"
 auto_patch = b"diff --git a/scripts/fixture.py b/scripts/fixture.py\nindex 1111111..2222222 100644\n--- a/scripts/fixture.py\n+++ b/scripts/fixture.py\n@@ -1 +1 @@\n-old\n+new\n"
 auto_digest = hashlib.sha256(auto_patch).hexdigest()
+ordinary_review_patch = (b"diff --git a/docs/TERMINAL-PANEL.md b/docs/TERMINAL-PANEL.md\n"
+                         b"--- a/docs/TERMINAL-PANEL.md\n+++ b/docs/TERMINAL-PANEL.md\n@@ -1 +1 @@\n-old\n+new\n"
+                         b"diff --git a/scripts/fixture.py b/scripts/fixture.py\n"
+                         b"--- a/scripts/fixture.py\n+++ b/scripts/fixture.py\n@@ -1 +1 @@\n-old\n+new\n")
+hooks_review_patch = (b"diff --git a/hooks/pre-commit b/hooks/pre-commit\n"
+                      b"--- a/hooks/pre-commit\n+++ b/hooks/pre-commit\n@@ -1 +1 @@\n-old\n+new\n")
+with patch.object(panel, "verified_patch", side_effect=[ordinary_review_patch, hooks_review_patch,
+                                                          b"not a patch"]):
+    assert panel._automatic_review_workload(project, {"patch": "fixture.patch", "patch_sha256": "a"}) == "deep"
+    assert panel._automatic_review_workload(project, {"patch": "fixture.patch", "patch_sha256": "b"}) == "frontier"
+    assert panel._automatic_review_workload(project, {"patch": "unknown.patch", "patch_sha256": "c"}) == "frontier"
 auto_artifact = ".oms/artifacts/fixture/result.json"
 auto_patch_path = ".oms/artifacts/fixture/change.patch"
 auto_artifact_file = project / auto_artifact
@@ -8423,6 +8435,7 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     prompt = dispatch_args[4]
     assert auto_artifact in prompt and auto_patch_path in prompt and str(project) not in prompt
     assert dispatch_args[2:4] == ("reviewer", "read")
+    assert dispatch_args[10]["workload"] == "deep", dispatch_args[10]
     assert dispatch_args[10]["provider"] != "claude", dispatch_args[10]
     assert dispatch_kwargs == {}
     assert dispatch_args[15] == room.review_ids(auto_call, auto_digest, 1)[2]
@@ -13925,6 +13938,11 @@ assert "patch unreadable (digest mismatch / read error)" in panel_reader.render_
 assert "patch capped" in panel_reader.render_view("Diff", {}, write_call, patch=b"x" * (panel_reader.PATCH_LIMIT + 1)), "large patches need a cap note"
 assert panel_reader.VIEWS == ("Summary", "Raw", "Events", "Diff", "Run info")
 assert "Summary" in panel_reader.render_view("Summary", {"rows": []}, write_call)
+starting_reader = panel_reader.render_view("Summary", {"rows": []}, dict(write_call, state="working"))
+assert "[⟳ running]" in starting_reader and "status unknown" not in starting_reader, starting_reader
+verifier_reader = panel_reader.render_view("Summary", {"rows": [{"role": "reviewer", "purpose": "verifier",
+    "model": "gpt-6.1-sol"}]}, write_call)
+assert "VERIFIER Sol 6.1" in verifier_reader and "REVIEWER Sol 6.1" not in verifier_reader, verifier_reader
 markdown_call = dict(write_call, answer="# Heading\n- first\n```\n  code\n```\n| a | b |\n|---|---|",
                      artifact="answer.txt", answer_truncated=True)
 raw_view = panel_reader.render_view("Raw", {"rows": [{"role": "worker", "model": "gpt-6.1-sol"}]}, markdown_call)
@@ -14148,6 +14166,9 @@ def switching_reader(width, view):
 output, unused = read_page(switching_reader, iter([[('tab',)], [('r',)], [('e',)], [('d',)], [('q',)]]))
 assert selected_views[0] == "Summary" and "Events" in selected_views and "Diff" in selected_views, selected_views
 assert "No result recorded yet" in output and "No retained events" in output and "No patch recorded" in output, output
+output, unused = read_page(lambda width, view: "[Summary]  Events  Diff\nA dispatched call",
+                           iter([[('q',)]]))
+assert "[⟳ starting]" in output and "status unknown" not in output, output
 long_report = {"rows": [{"role": "worker", "title": "Pinned reader", "process_state": "working",
                          "task_id": "reader-task"}]}
 long_call = {"answer": "\n".join("line %d" % i for i in range(20))}
@@ -20128,6 +20149,10 @@ for native_call in (open_call, answered_call):
             native_inspection = render(dict(grouped_board, native_advisors=native_call), "claude", 120, 80,
                                        view="tree", unicode=glyphs, navigation=native_nav)
             assert "Fable 5.1" in native_inspection and "answer stays in the main transcript" in native_inspection, native_inspection
+            if glyphs:
+                tree_rows = native_inspection.splitlines()
+                assert not any("└╌╌" in left and "└╌╌" in right
+                               for left, right in zip(tree_rows, tree_rows[1:])), native_inspection
             assert ("result", "native-advisor-adv-main") not in native_nav["items"], native_nav
 attention_nav = {}
 attention = render(grouped_board, "codex", 120, 80, view="tree", attention_only=True, navigation=attention_nav)
