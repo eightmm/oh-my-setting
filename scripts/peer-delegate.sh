@@ -938,9 +938,15 @@ cleanup_delegated_worktree() {
 }
 
 stop_verify_heartbeat() {
-  local pid="${verify_heartbeat_pid:-}"
+  local pid="${verify_heartbeat_pid:-}" tries=0
   [ -n "$pid" ] || return 0
   kill "$pid" 2>/dev/null || true
+  # Bash defers the TERM trap while a ledger append (which may wait on the
+  # ledger lock) runs in the foreground; do not let that hold the delegate.
+  while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 20 ]; do
+    sleep 0.1; tries=$((tries + 1))
+  done
+  kill -KILL "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   verify_heartbeat_pid=""
 }
@@ -1570,6 +1576,7 @@ delegate_attempt_recover_verify_heartbeat() {
   events="$(ma_scripts_dir)/agent-events.sh"
   snapshot="$("$events" --repo "$REPO" show --attempt "$worker_attempt_id" --json 2>/dev/null)" || return 1
   sequence="$(printf '%s\n' "$snapshot" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sequence", ""))' 2>/dev/null)" || return 1
+  sequence="${sequence//$'\r'/}"
   case "$sequence" in ''|*[!0-9]*) return 1 ;; esac
   "$events" --repo "$REPO" recover-verify-heartbeat \
     --attempt "$worker_attempt_id" --expected-sequence "$sequence" >/dev/null
