@@ -21,12 +21,13 @@ operator_materialize() {
 import ast
 from collections import Counter
 import os
+import json
 from pathlib import Path
 import re
 import runpy
 import sys
 
-# Keep the dependent integration chain together. The other buckets own only
+# Keep each dependent integration chain together. Independent buckets own
 # their protocol fixture and never replay assertions to reconstruct state.
 SECTIONS = (
     ("core", 0, None),
@@ -34,13 +35,14 @@ SECTIONS = (
     ("native-pty", 1, "operator_tools_native_pty.py"),
     ("dispatch-exit", 2, "operator_tools_dispatch_exit.py"),
     ("worker-leases", 3, "operator_tools_worker_leases.py"),
+    ("dispatch-results", 1, "operator_tools_dispatch_results.py"),
     ("salvage", 1, "operator_tools_salvage.py"),
     ("scratch-state", 2, "operator_tools_scratch_state.py"),
     ("auto-review", 1, "operator_tools_auto_review.py"),
     ("room-rollover", 2, "operator_tools_room_rollover.py"),
 )
 # These bodies leave core before execution; no assertions replay to rebuild their fixtures.
-INLINE_SECTIONS = {"salvage", "scratch-state", "auto-review", "room-rollover"}
+INLINE_SECTIONS = {"salvage", "scratch-state", "auto-review", "room-rollover", "dispatch-results"}
 LIB = Path(__file__).resolve().parent
 SOURCE = Path(sys.argv[1]) if __name__ == "__main__" and len(sys.argv) > 1 else None
 
@@ -84,15 +86,16 @@ def self_check(total):
         raise ValueError("native-pty must have exactly one guard")
     fixtures = re.findall(r'^# OPERATOR_FIXTURE_BEGIN ([a-z_]+)$', source, re.M)
     fixture_ends = re.findall(r'^# OPERATOR_FIXTURE_END ([a-z_]+)$', source, re.M)
-    if Counter(fixtures) != Counter({"provider": 1, "pty": 1}) or Counter(fixtures) != Counter(fixture_ends):
+    if Counter(fixtures) != Counter({"provider": 1, "pty": 1, "control": 1}) or Counter(fixtures) != Counter(fixture_ends):
         raise ValueError("unassigned or duplicated operator fixture")
     if len(re.findall(r'^PYTHONDONTWRITEBYTECODE=1 python3 - "\$ROOT/scripts/lib" "\$TMP"', source, re.M)) != 1:
         raise ValueError("shared-cache must have exactly one call")
     core = source.split("# OPERATOR_CORE_BEGIN\n", 1)[1].split("# OPERATOR_CORE_END\n", 1)[0]
-    count_asserts = lambda body: sum(isinstance(node, ast.Assert) for node in ast.walk(ast.parse(body)))
-    actual = count_asserts((LIB / "operator_tools_core.py").read_text(encoding="utf-8"))
-    actual += sum(count_asserts(extract(source, name.replace("-", "_"))) for name in INLINE_SECTIONS)
-    if actual != count_asserts(core):
+    assertions = lambda body: Counter(ast.dump(node) for node in ast.walk(ast.parse(body)) if isinstance(node, ast.Assert))
+    actual = assertions((LIB / "operator_tools_core.py").read_text(encoding="utf-8"))
+    for name in INLINE_SECTIONS:
+        actual.update(assertions(extract(source, name.replace("-", "_"))))
+    if actual != assertions(core):
         raise ValueError("core extraction lost or duplicated assertions")
     for filename in files + ["operator_tools_fixture.py", "operator_tools_core.py"]:
         if filename == "operator_tools_shared_cache.py":
@@ -124,9 +127,10 @@ sys.path.insert(0, str(root / 'scripts/lib'))
 import terminal_panel as panel, room
 import codex_app_notify, panel_results, panel_debate
 import panel_results as panel_result_store
+import panel_view as question_view
 from contextlib import redirect_stderr
 from dashboard_projection import display_width
-from panel_view import render, inbox_items, needs_strip, attention_items, wrapped
+from panel_view import render, inbox_items, needs_strip, attention_items, wrapped, use_unicode
 from panel_input import passive_click
 from room_view import render_graph, plan_rows as render_plan_rows
 from panel_routing import allocate
@@ -144,7 +148,7 @@ def fixture_provider_catalog(providers=None):
     (LIB / "operator_tools_core.py").write_text(core, encoding="utf-8")
     pty = extract(source, "pty", fixture=True).replace(' and operator_selected_py("native-pty")', '')
     (LIB / "operator_pty_helper.py").write_text(pty, encoding="utf-8")
-    fixture = imports + extract(source, "provider", fixture=True) + pty
+    fixture = imports + extract(source, "provider", fixture=True) + pty + extract(source, "control", fixture=True)
     (LIB / "operator_tools_fixture.py").write_text(fixture, encoding="utf-8")
     for name, _, filename in SECTIONS:
         if name in {"core", "shared-cache"}:
@@ -166,6 +170,11 @@ def _standalone(name, root, temporary):
     os.chdir(temporary)
     namespace = runpy.run_path(str(LIB / "operator_tools_fixture.py"),
                               init_globals={"root": root, "temporary": temporary})
+    if name == "dispatch-results":
+        panel, call, project = (namespace[k] for k in ("panel", "call", "project"))
+        inventory = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
+                                     "--providers", "--json"]))
+        namespace["registered"] = {row["provider"]: row for row in inventory["providers"]}
     if name in {"native-pty", "dispatch-exit", "auto-review"}:
         panel, room, call, legacy_main_join = (namespace[k] for k in ("panel", "room", "call", "legacy_main_join"))
         project, environment = namespace["project"], namespace["environment"]
@@ -208,13 +217,13 @@ def record_timing(name, started):
     import os
     timing_file = os.environ.get("OMS_OPERATOR_TIMINGS")
     if timing_file:
-        elapsed = int(__import__("time").time() - started)
+        elapsed = int(__import__("time").monotonic() - started)
         with open(timing_file, "a", encoding="utf-8") as output:
             output.write("%s\t%s\n" % (elapsed, name))
 
 
 def standalone(name, root, temporary):
-    started = __import__("time").time()
+    started = __import__("time").monotonic()
     try:
         return _standalone(name, root, temporary)
     finally:
@@ -239,13 +248,31 @@ def run_section(name, spec, namespace):
         finally:
             os.chdir(before)
     else:
-        started = __import__("time").time()
+        started = __import__("time").monotonic()
         filename = next(filename for section, _, filename in SECTIONS if section == name)
         exec(compile((LIB / filename).read_text(encoding="utf-8"), str(LIB / filename), "exec"), namespace)
         record_timing(name, started)
 
 
 def main(args):
+    if len(args) == 2 and args[0] == "--progress":
+        import time
+        current, started, reported = "", time.monotonic(), time.monotonic()
+        while True:
+            label = Path(args[1]).read_text(encoding="utf-8").strip()
+            now = time.monotonic()
+            if label and label != current:
+                if current:
+                    print("operator-core: %s ok (%ds)" % (current, now - started), flush=True)
+                    record_timing("core/" + current, started)
+                if label == "done":
+                    return
+                current, started, reported = label, now, now
+                print("operator-core: %s started" % current, flush=True)
+            elif now - reported >= 45:
+                print("operator-core: %s running (%ds)" % (current, now - started), flush=True)
+                reported = now
+            time.sleep(1)
     materialize(SOURCE)
     mode = args[0] if args else "--self-check"
     if mode == "--selection" and len(args) == 2:
@@ -319,6 +346,10 @@ operator_skip_socket_section() {
 exec < /dev/null
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-operator-tools.XXXXXX")"
 operator_cleanup() {
+  if [ -n "${OPERATOR_PROGRESS_PID:-}" ]; then
+    kill "$OPERATOR_PROGRESS_PID" 2>/dev/null || true
+    wait "$OPERATOR_PROGRESS_PID" 2>/dev/null || true
+  fi
   if [ -n "${OPERATOR_CORE_STARTED:-}" ] && [ -n "${OMS_OPERATOR_TIMINGS:-}" ]; then
     printf '%s\tcore\n' "$((SECONDS - OPERATOR_CORE_STARTED))" >> "$OMS_OPERATOR_TIMINGS"
   fi
@@ -378,7 +409,7 @@ case "${1:-}" in
     if [ "$OPERATOR_SOCKET_DENIED" = 1 ]; then
       OMS_OPERATOR_PARTIAL_MARKER_DIR="$TMP"
       export OMS_OPERATOR_PARTIAL_MARKER_DIR
-      if oms_operator_parallel "${BASH_SOURCE[0]}" "$2"; then
+      if OMS_OPERATOR_PROGRESS=1 oms_operator_parallel "${BASH_SOURCE[0]}" "$2" 3>&1; then
         parallel_status=0
       else
         parallel_status=$?
@@ -392,7 +423,8 @@ case "${1:-}" in
       fi
       exit "$parallel_status"
     fi
-    oms_operator_parallel "${BASH_SOURCE[0]}" "$2"
+    # Shard logs are buffered by the shared runner; progress keeps its own stream.
+    OMS_OPERATOR_PROGRESS=1 oms_operator_parallel "${BASH_SOURCE[0]}" "$2" 3>&1
     exit $? ;;
   --list|--self-check)
     [ "$#" -le 2 ] || fail 'expected --list [N] or --self-check [N]'
@@ -432,6 +464,16 @@ fi
 
 if [ "$OPERATOR_CORE" = 1 ]; then
 OPERATOR_CORE_STARTED=$SECONDS
+operator_core_block() {
+  printf '%s\n' "$1" > "$TMP/operator-core-progress"
+}
+operator_core_block dashboard-fixtures
+if [ "${OMS_OPERATOR_PROGRESS:-0}" = 1 ]; then
+  python3 "$TMP/operator_tools_shards.py" "${BASH_SOURCE[0]}" --progress "$TMP/operator-core-progress" >&3 &
+else
+  python3 "$TMP/operator_tools_shards.py" "${BASH_SOURCE[0]}" --progress "$TMP/operator-core-progress" &
+fi
+OPERATOR_PROGRESS_PID=$!
 repo="$TMP/repo with space"
 mkdir -p "$repo/.oms/artifacts" "$repo/.oms/hooks" "$repo/.oms/plan" \
   "$repo/.oms/delegations" "$repo/.oms/lifecycle" \
@@ -671,6 +713,7 @@ for name, pid in (("live", int(os.environ["OMS_FIXTURE_PID"])), ("dead", 9999999
 PY
 
 # --- One attention view over shared state ----------------------------------
+operator_core_block dashboard
 
 before="$(git -C "$repo" status --porcelain=v1 --untracked-files=all)"
 bash "$ROOT/scripts/state.sh" --repo "$repo" --json > "$TMP/shared-state.json"
@@ -943,6 +986,7 @@ dash --repo "$repo" --watch --interval 2 --count 2 > "$TMP/dash-watch.txt" || fa
 ! grep -q "$(printf '\033')" "$TMP/dash-watch.txt" || fail "watch erased a non-terminal stream"
 
 # --- Content-free OTLP JSONL ----------------------------------------------
+operator_core_block telemetry
 
 otel="$TMP/traces.jsonl"
 python3 - "$ROOT/scripts/lib/otel-export.py" "$TMP/reader.jsonl" <<'PY' || fail "bounded telemetry reader lost source identities"
@@ -1131,6 +1175,7 @@ XDG_STATE_HOME="$TMP/state" bash "$ROOT/scripts/otel-export.sh" \
   --repo "$repo" --output "$TMP/export.jsonl" --force
 
 # --- Editor / Orca / Codex launch plans -----------------------------------
+operator_core_block editor-and-migration
 
 bin="$TMP/bin"
 mkdir -p "$bin"
@@ -2359,6 +2404,7 @@ PY
 printf '%s\tshared-cache\n' "$((SECONDS - OPERATOR_CACHE_STARTED))" >> "${OMS_OPERATOR_TIMINGS:-/dev/null}"
 fi
 if [ "$OPERATOR_CORE" = 1 ]; then
+operator_core_block board-recovery
 # A panel board restarts after a crash instead of closing its pane; outside a
 # panel session the same failure still exits.
 board_bin="$TMP/board-bin"
@@ -2426,6 +2472,9 @@ from operator_tools_shards import run_section, selected as operator_selected
 operator_selected_py = lambda name: operator_selected(name, operator_shard) and not (os.environ.get("OMS_OPERATOR_SOCKET_DENIED") == "1" and name == "native-pty")
 def _operator_run(name):
     run_section(name, operator_shard, globals())
+def _operator_block(name):
+    (temporary / "operator-core-progress").write_text(name + "\n", encoding="utf-8")
+_operator_block("visual-and-controls")
 # Later core phases share the PTY helper without replaying native assertions.
 if not operator_selected_py("native-pty"):
     exec(compile((temporary / "operator_pty_helper.py").read_text(encoding="utf-8"),
@@ -4424,10 +4473,12 @@ with patch.object(panel, "results", side_effect=result_query) as query, \
     panel.browse_results(Path("."))
     assert query.call_args_list[2].args == (Path("."), "two"), query.call_args_list
     assert "SECOND DETAIL" in output.getvalue() and "FIRST DETAIL" not in output.getvalue()
+# OPERATOR_FIXTURE_BEGIN control
 def empty_control(*args, **kwargs):
     kwargs["cache"].update(status=0, state={"collection": {"ok": True}, "attempts": {"active_recent": []}})
     kwargs["navigation"]["main_occupied"] = False
     return 0
+# OPERATOR_FIXTURE_END control
 with patch.object(panel, "managed_session", return_value=False), \
         patch.object(panel, "show", side_effect=empty_control) as display, \
         patch.object(panel, "read_field", side_effect=["v", "b", "u", "g", "q"]):
@@ -4453,6 +4504,7 @@ with patch.dict(os.environ, {"TERM": "xterm", "OMS_PANEL_COLOR": "always"}, clea
         patch.object(panel.sys.stdout, "isatty", return_value=False):
     assert panel.terminal_style()[1] is False, "redirected output must stay plain"
 
+_operator_block("provider-and-routing")
 # OPERATOR_FIXTURE_BEGIN provider
 # Historical multi-main rooms remain readable; write their old join records explicitly.
 def legacy_main_join(repo, ident, *args, **kwargs):
@@ -4620,6 +4672,11 @@ def fixture_selected_route(*args, **kwargs):
     with patch.object(panel, "provider_catalog", return_value=catalog):
         return panel.selected_route(*args, **kwargs)
 
+summary = temporary / "panel-result-summary.txt"
+summary.write_text("결과 화면을 읽기 쉽게 정리했습니다.\n검증 근거는 value.txt에서 확인합니다.\n", encoding="utf-8")
+final_args = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--finalize", "--owner", "codex",
+              "--task-id", "panel-council-test", "--summary-file", str(summary), "--outcome", "accepted",
+              "--verify", "test -f value.txt", "--evidence", "value.txt"]
 # OPERATOR_FIXTURE_END provider
 baseline = subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"])
 report = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--json"]))
@@ -5369,6 +5426,7 @@ heartbeat_temporary.mkdir()
 call(["bash", "-c", heartbeat_probe, "verify-heartbeat", str(root),
       str(heartbeat_temporary), verify_functions])
 
+# OPERATOR_SECTION_BEGIN dispatch_results
 for owner in panel.PROVIDERS:
     env = dict(environment, OMS_AGENT=owner)
     peer = "claude" if owner == "codex" else "codex"
@@ -5829,11 +5887,6 @@ for none in ({}, {"m1": {"attempt_id": "a1"}, "m2": {"attempt_id": "a2"}}):
 
 import panel_results as saved
 from panel_view import render_results
-summary = temporary / "panel-result-summary.txt"
-summary.write_text("결과 화면을 읽기 쉽게 정리했습니다.\n검증 근거는 value.txt에서 확인합니다.\n", encoding="utf-8")
-final_args = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--finalize", "--owner", "codex",
-              "--task-id", "panel-council-test", "--summary-file", str(summary), "--outcome", "accepted",
-              "--verify", "test -f value.txt", "--evidence", "value.txt"]
 first = json.loads(call(final_args))
 second = json.loads(call(final_args))
 assert first["revision"] == second["revision"] and first["verification"]["status"] == "passed"
@@ -6694,6 +6747,18 @@ closed_parent = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str
                               env=dict(environment, OMS_PANEL_MAIN_ATTEMPT=main_attempts["codex"]),
                               capture_output=True, text=True)
 assert closed_parent.returncode != 0 and "identity" in closed_parent.stderr
+# OPERATOR_SECTION_END dispatch_results
+_operator_block("dispatch-results")
+_operator_run("dispatch-results")
+if not operator_selected_py("dispatch-results"):
+    # Later room/native fixtures need ended owners, not the earlier dispatch history.
+    main_attempts = {}
+    for owner in panel.PROVIDERS:
+        main_attempts[owner] = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
+            "start", "--provider", owner, "--tool", "panel-main", "--ref", "panel_role=main",
+            "--then", "starting", "--then", "working", "--then", "cancelled"]).strip()
+import panel_results as saved
+_operator_block("native-controls")
 
 # Task bodies keep native admission while only their shared display title is withheld.
 for task in ("/review", "../scripts inspect", "Explain " + "/" + "home" + "/fixture/private.py", "x" * 160):
@@ -7740,6 +7805,7 @@ if os.name == "posix" and operator_selected_py("native-pty"):
             os.close(fd)
 # OPERATOR_SECTION_END native_pty
 # The canonical operator suite also covers the room front door and native open contract.
+_operator_block("room-protocol")
 import room
 import codex_app_notify
 # A child can send and acknowledge through its controller's pinned queue even
@@ -10204,6 +10270,7 @@ time.sleep(60)
 
 # OPERATOR_SECTION_END dispatch_exit
 _operator_run("dispatch-exit")
+_operator_block("cross-repository-dispatch")
 # A room in A keeps its parent, call and results when the worker executes in B,
 # whether the caller selects the room explicitly or inherits it.
 other_project = temporary / "dispatch work repo"
@@ -11057,6 +11124,7 @@ sys.exit(p.main(sys.argv[3:]))
 
 # OPERATOR_SECTION_END worker_leases
 _operator_run("worker-leases")
+_operator_block("continuation-and-lineage")
 
 import shutil
 shutil.rmtree(project / ".oms/plan")  # later board fixtures expect a project with no plan
@@ -12788,6 +12856,7 @@ assert [c[-3:] for c in tmux_calls if "list-windows" not in c] == [
     ["=roll-session", "OMS_ROOM_ID", third], ["@1", "@oms_panel_room", third]], tmux_calls
 # OPERATOR_SECTION_END room_rollover
 _operator_run("room-rollover")
+_operator_block("room-and-board-rendering")
 recorded = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--limit", "300", "--json"]))
 room_attempt = next(a for a in recorded if a.get("refs", {}).get("panel_room_participant") == child["participant"])
 assert room_attempt["refs"]["panel_room_id"] == shared
@@ -17599,6 +17668,7 @@ assert json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project
     "--host", "herdr", "--dry-run"]))["host"] == "herdr"
 
 # End simulated owners before each real native-start phase; no fixture CLI remains running here.
+_operator_block("native-navigation")
 def end_fixture_mains():
     for row in json.loads(panel.events(project, "list", "--json", output=True)):
         if row.get("tool") == "panel-main" and row.get("terminal") is not True:
@@ -18340,6 +18410,7 @@ end_fixture_mains()
 for fixture_main in ("opus-app", "current-app", "bad-sol", "chat-opus", "chat-sol"):
     room.append(project, shared, {"kind": "leave", "participant": fixture_main}, "Fixture main left")
 # A new adapter opts into native open without changing a provider-specific panel branch.
+_operator_block("native-adapters")
 open_log = temporary / "native-open.json"
 open_context = temporary / "native-context.txt"
 native_adapter = binary / "oms-agent-adapter-roomtest"
@@ -19288,6 +19359,7 @@ for flush_error in (None, OSError("unsupported terminal"), ImportError("no termi
         assert panel._main_exit_key() == "r"
         exit_input.return_value.__exit__.assert_called_once_with()
 # Closing an exit prompt requires all three window fields and a successful lookup.
+_operator_block("native-lifecycle")
 exit_options = {"@oms_panel_main_attempt": "exit-attempt", "@oms_panel_room": shared,
                 "@oms_panel_room_participant": "exit-attempt",
                 "@oms_panel_repo": str(project.resolve())}
@@ -20432,6 +20504,9 @@ print("room: addressed handoff, graph bounds, saved receiver intents and native 
 print("terminal-panel: both directions, isolated patches, reviews, guards and PTY passed")
 # OPERATOR_CORE_END
 PY
+operator_core_block 'done'
+wait "$OPERATOR_PROGRESS_PID"
+OPERATOR_PROGRESS_PID=''
 
 else
   PYTHONDONTWRITEBYTECODE=1 python3 "$TMP/operator_tools_shards.py" "${BASH_SOURCE[0]}" --standalone "$ROOT" "$TMP" "$OPERATOR_SPEC"
