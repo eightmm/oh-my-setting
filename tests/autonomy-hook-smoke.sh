@@ -776,6 +776,7 @@ room.send(repo, "binding-room", "fresh-peer", "fresh-main", "Only the enrolled n
 assert not hook_state.live_thread_hint(payload("different-native")), "explicit environment bypassed the enrolled native identity"
 notice = hook_state.live_thread_hint(dict(payload("different-native"), hook_event_name="UserPromptSubmit"))
 assert "mail was withheld" in notice and "bound-only" not in notice
+assert "last rebind: no-attempt" in notice and "Relaunch this main through the panel controls" in notice, notice
 assert "bound-only" in hook_state.live_thread_hint(payload("native-first-session"))
 for who, native in (("fresh-main", "different-native"), ("fresh-peer", "native-first-session")):
     try:
@@ -818,8 +819,50 @@ assert not hook_state.rebind_cleared_session(cleared("no-attempt-resume", "resum
 with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": "fresh-main"}), \
         patch.object(terminal_panel, "main_history", return_value=[owner]), patch.object(terminal_panel, "events"):
     with patch.object(hook_state, "claude_resume_process_witness", return_value=False):
-        assert not hook_state.rebind_cleared_session(cleared("separate-resume", "resume"))
+        refused = cleared("separate-resume", "resume")
+        assert not hook_state.rebind_cleared_session(refused)
+        assert refused["_oms_rebind_reason"] == "witness-failed"
     assert room.participant(room.status(repo, "binding-room"), "fresh-main") == after
+    # A prompt can recover a missed resume only with the same owner and native process proof.
+    prompt = dict(payload("missed-resume"), hook_event_name="UserPromptSubmit", prompt="PRIVATE PROMPT")
+    retry = repo / ".oms/hooks/sessions" / (hook_state.session_hash(prompt) + ".rebind.json")
+    with patch.dict(os.environ, OMS_PANEL_SESSION="oms-fixture"), \
+            patch.object(hook_state, "claude_resume_process_witness", return_value=False) as witness:
+        notice = hook_state.live_thread_hint(prompt)
+        assert "last rebind: witness-failed" in notice and "Return to the enrolled panel main" in notice, notice
+        assert "during-clear" not in notice and witness.call_count == 1
+        assert "witness-failed" in hook_state.live_thread_hint(dict(prompt)) and witness.call_count == 1
+        assert "PRIVATE PROMPT" not in retry.read_text()
+    assert room.participant(room.status(repo, "binding-room"), "fresh-main") == after
+    with patch.dict(os.environ, OMS_PANEL_SESSION="oms-fixture"), \
+            patch.object(hook_state, "claude_resume_process_witness", return_value=True) as witness:
+        assert "witness-failed" in hook_state.live_thread_hint(dict(prompt)) and not witness.called
+        retry_state = json.loads(retry.read_text())
+        retry_state["checked_at"] = "2000-01-01T00:00:00Z"
+        retry.write_text(json.dumps(retry_state))
+        # An inherited panel environment, even with a valid witness stub, cannot move a worker.
+        with patch.dict(os.environ, OMS_HARNESS_CHILD="1"):
+            assert not hook_state.live_thread_hint(dict(prompt)) and not witness.called
+            refused = dict(prompt)
+            assert not hook_state.rebind_cleared_session(refused, witnessed_prompt=True)
+            assert refused["_oms_rebind_reason"] == "harness-child"
+        assert room.participant(room.status(repo, "binding-room"), "fresh-main") == after
+        # Owner refusal and CAS refusal are visible and leave the mailbox untouched.
+        with patch.object(terminal_panel, "main_history", return_value=[dict(owner, terminal=True)]):
+            assert "last rebind: owner-mismatch" in hook_state.live_thread_hint(dict(prompt)) and not witness.called
+        retry.unlink()
+        with patch.object(room, "bind", side_effect=ValueError("stale compare-and-swap")):
+            assert "last rebind: cas-stale" in hook_state.live_thread_hint(dict(prompt))
+        assert room.participant(room.status(repo, "binding-room"), "fresh-main") == after
+        retry.unlink()
+        witness.reset_mock()
+        delivered = hook_state.live_thread_hint(dict(prompt))
+        assert "during-clear" in delivered and "mail was withheld" not in delivered, delivered
+        assert witness.call_args[0][0]["panel_native_pid"] == "20"
+        rebound = room.participant(room.status(repo, "binding-room"), "fresh-main")
+        assert rebound["consumer"] == hook_state.session_hash(prompt)
+        assert (rebound["seq"], rebound["initial_consumer"]) == (after["seq"], after["initial_consumer"])
+        assert not hook_state.live_thread_hint(dict(prompt))
     with patch.object(hook_state, "claude_resume_process_witness", return_value=True) as witness:
         assert hook_state.rebind_cleared_session(cleared("after-resume", "resume"))
         assert witness.call_args[0][0]["panel_native_pid"] == "20"
@@ -1239,7 +1282,10 @@ for sid, env in ((transcript("root-b"), {}), (transcript("root-a"), {"OMS_HARNES
     run_relay(sid, **env)
     assert room.participant(room.status(repo, "moved-room"), "moved-main")["consumer"] == before["consumer"], env
 # A conversation forked by hand into another terminal (no background sessionKind) keeps its hands off.
-run_relay(transcript("root-a", kind=None))
+foreground = moved(transcript("root-a", kind=None))
+assert not hook_state.rebind_lineage_session(foreground)
+assert foreground["_oms_rebind_reason"] == "not-background"
+run_relay(foreground["session_id"])
 assert room.participant(room.status(repo, "moved-room"), "moved-main")["consumer"] == before["consumer"]
 new_sid = transcript("root-a")
 run_relay(new_sid)
@@ -1253,7 +1299,9 @@ room.create(repo, "twin-room", "Twin mains")
 room.join(repo, "twin-room", "twin-one", "claude", native_session=twin)
 room.create(repo, "twin-other-room", "Twin main in another room")
 room.join(repo, "twin-other-room", "twin-two", "claude", native_session=transcript("root-c"))
-assert not hook_state.rebind_lineage_session(moved(transcript("root-c")))
+ambiguous = moved(transcript("root-c"))
+assert not hook_state.rebind_lineage_session(ambiguous)
+assert ambiguous["_oms_rebind_reason"] == "ambiguous-lineage"
 assert room.participant(room.status(repo, "twin-room"), "twin-one")["consumer"] == hook_state.session_hash(moved(twin))
 # Missing, unreadable, truncated and ambiguous comparisons cannot establish uniqueness.
 import panel_chats

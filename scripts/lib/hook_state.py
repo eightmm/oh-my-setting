@@ -1818,10 +1818,11 @@ def answer_preview(row: dict[str, Any]) -> dict[str, Any]:
                 text_bytes=len(text.encode("utf-8", "surrogatepass")))
 
 
-def room_binding_notice(payload: dict[str, Any], reason: str) -> str:
+def room_binding_notice(payload: dict[str, Any], reason: str, *, action: str | None = None) -> str:
     if (payload.get("hook_event_name") or payload.get("hookEventName")) != "UserPromptSubmit":
         return ""
-    return "[oms room] " + reason + "; room mail was withheld. Preserve task scope and reconnect explicitly before relying on peer messages."
+    return "[oms room] " + reason + "; room mail was withheld. " + (action or
+            "Preserve task scope and reconnect explicitly before relying on peer messages.")
 
 
 def room_reminders(repo: Path, tid: str, me: str, shown: list[str], reach: int | None, injected: bool, prompt: bool,
@@ -1992,7 +1993,18 @@ def _live_thread_hint(payload: dict[str, Any], repo: Path | None = None, *, coor
             if tid and room_member:
                 member = room.participant(room_state, room_member)
                 if member.get("consumer") and member["consumer"] != session_hash(payload):
-                    return room_binding_notice(payload, "Current native session differs from the enrolled receiver")
+                    if coordination is None and rebind_prompt_session(payload, room_repo, tid, member):
+                        binding, room_state = room._selected(room_repo, session_hash(payload), tid, room_member)
+                        member = room.participant(room_state, room_member)
+                    if member.get("consumer") != session_hash(payload):
+                        reason = payload.get("_oms_rebind_reason", "no-attempt")
+                        action = ("Return to the enrolled panel main and submit a prompt after the retry interval"
+                                  if reason in ("witness-failed", "cas-stale") else
+                                  "This conversation is bound to another room participant; resume the main's own "
+                                  "conversation or relaunch this main" if reason == "session-held" else
+                                  "Relaunch this main through the panel controls")
+                        return room_binding_notice(payload, "Current native session differs from the enrolled receiver"
+                                                   + "; last rebind: " + reason, action="Action: " + action + ".")
                 if member["provider"] in RELAY_AGENTS and member["provider"] != payload_agent(payload):
                     return room_binding_notice(payload, "Enrolled participant belongs to another native provider")
                 if (not member.get("consumer") and member["role"] == "main" and member["provider"] == payload_agent(payload)
@@ -2451,38 +2463,52 @@ def claude_resume_process_witness(refs: dict[str, Any]) -> bool:
     return False
 
 
-def rebind_cleared_session(payload: dict[str, Any]) -> bool:
+def rebind_refused(payload: dict[str, Any], reason: str) -> bool:
+    # Ephemeral hook-local diagnostics; never copy prompt text into retry state.
+    payload["_oms_rebind_reason"] = reason
+    return False
+
+
+def rebind_cleared_session(payload: dict[str, Any], *, witnessed_prompt: bool = False) -> bool:
     """Move a panel main's room binding to the session its /clear or /resume started.
 
-    The enrolled environment alone never transfers a binding: the provider's own
-    SessionStart event in that main's process must name the new session, and the
-    rebind replaces only the identity recorded at that moment."""
-    if ((payload.get("hook_event_name") or payload.get("hookEventName")) != "SessionStart"
-            or is_harness_child()):
-        return False
+    The enrolled environment alone never transfers a binding: a provider start
+    event or witnessed Claude prompt must name the new session, and the rebind
+    replaces only the identity recorded at that moment."""
+    if is_harness_child():
+        return rebind_refused(payload, "harness-child")
+    if ((payload.get("hook_event_name") or payload.get("hookEventName")) !=
+            ("UserPromptSubmit" if witnessed_prompt else "SessionStart")):
+        return rebind_refused(payload, "wrong-event")
+    if witnessed_prompt and not is_panel_main():
+        return rebind_refused(payload, "not-panel-main")
     session = payload.get("session_id") or payload.get("sessionId")
     ident, member_id = os.environ.get("OMS_ROOM_ID"), os.environ.get("OMS_ROOM_PARTICIPANT")
     repo = Path(os.environ["OMS_ROOM_REPO"]) if os.environ.get("OMS_ROOM_REPO") else hook_repo(payload)
     if not (session and ident and member_id and repo):
-        return False
+        return rebind_refused(payload, "missing-binding")
     import room
 
     member = room.participant(room.status(repo.resolve(), ident), member_id)
     provider = member["provider"]
-    if (member["role"] != "main" or payload.get("source") not in REBIND_SOURCES.get(provider, ())
-            or not member["joined"] or not member.get("consumer") or member["consumer"] == session_hash(payload)):
-        return False
+    if member["role"] != "main" or not member["joined"] or not member.get("consumer"):
+        return rebind_refused(payload, "not-bound-main")
+    if member["consumer"] == session_hash(payload):
+        return rebind_refused(payload, "already-bound")
+    supported = provider == "claude" if witnessed_prompt else payload.get("source") in REBIND_SOURCES.get(provider, ())
+    if not supported:
+        return rebind_refused(payload, "unsupported-source")
     # A SessionStart payload has no turn_id and Codex may omit its transcript,
     # so payload_agent would default to claude: only a proven provider counts.
     if provider == "codex" and not (os.environ.get("OMS_HOOK_AGENT") == "codex" or Path(str(
             payload.get("transcript_path") or payload.get("transcriptPath") or "")).name.startswith("rollout-")):
-        return False
+        return rebind_refused(payload, "provider-unproven")
     if payload_agent(payload) != provider:
-        return False
+        return rebind_refused(payload, "provider-mismatch")
     attempt = os.environ.get("OMS_PANEL_MAIN_ATTEMPT")
-    resumed = provider == "claude" and payload.get("source") == "resume"
+    resumed = witnessed_prompt or provider == "claude" and payload.get("source") == "resume"
     if resumed and not attempt:
-        return False
+        return rebind_refused(payload, "no-attempt")
     if attempt:
         from terminal_panel import events, main_history
 
@@ -2492,10 +2518,16 @@ def rebind_cleared_session(payload: dict[str, Any]) -> bool:
                 or owner.get("provider") != provider or owner.get("refs", {}).get("panel_role") != "main"
                 or owner["refs"].get("panel_room_id") != ident
                 or owner["refs"].get("panel_room_participant", attempt) != member_id
-                or owner["refs"].get("panel_session_digest", member["consumer"]) != member["consumer"]
-                or resumed and not claude_resume_process_witness(owner["refs"])):
-            return False
-    room.bind(repo.resolve(), ident, member_id, session, replaces=member["consumer"])
+                or owner["refs"].get("panel_session_digest", member["consumer"]) != member["consumer"]):
+            return rebind_refused(payload, "owner-mismatch")
+        if resumed and not claude_resume_process_witness(owner["refs"]):
+            return rebind_refused(payload, "witness-failed")
+    try:
+        room.bind(repo.resolve(), ident, member_id, session, replaces=member["consumer"])
+    except ValueError as error:
+        # Another participant owning the session is permanent; only a moved binding is worth a retry.
+        rebind_refused(payload, "session-held" if "already has a participant" in str(error) else "cas-stale")
+        raise
     if attempt:
         # Record only after the room's compare-and-swap accepted the provider event.
         # A failed write leaves restart unable to prove the current binding.
@@ -2507,6 +2539,44 @@ def rebind_cleared_session(payload: dict[str, Any]) -> bool:
 LINEAGE_READ = 256 * 1024
 LINEAGE_RETRY_SEC = 600
 LINEAGE_MAINS = 32
+
+
+def rebind_prompt_session(payload: dict[str, Any], repo: Path, ident: str, member: dict[str, Any]) -> bool:
+    """Recover a missed resume event only from the enrolled main's witnessed native process."""
+    if is_harness_child():
+        return rebind_refused(payload, "harness-child")
+    if (payload.get("hook_event_name") or payload.get("hookEventName")) != "UserPromptSubmit":
+        return rebind_refused(payload, "wrong-event")
+    if not is_panel_main():
+        return rebind_refused(payload, "no-attempt")
+    import thread_live
+
+    try:
+        path = thread_live.safe_path(repo, ".oms/hooks/sessions/" + session_hash(payload) + ".rebind.json", True)
+        if path.exists() or path.is_symlink():
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
+                return rebind_refused(payload, "unsafe-retry-state")
+        with event_file_lock(path, timeout=0.1):
+            state = load_state(path)
+            key = {"room": ident, "participant": member["participant"], "consumer": member["consumer"],
+                   "attempt": os.environ.get("OMS_PANEL_MAIN_ATTEMPT")}
+            checked = event_epoch(state.get("checked_at"))
+            if (all(state.get(k) == v for k, v in key.items()) and checked is not None
+                    and 0 <= time.time() - checked < LINEAGE_RETRY_SEC):
+                reason = state.get("reason")
+                return rebind_refused(payload, reason if isinstance(reason, str) and
+                                      re.fullmatch(r"[a-z-]{1,40}", reason) else "retry-limited")
+            # Reserve the interval before probing so an exception cannot cause prompt-by-prompt retries.
+            state = dict(key, schema=1, checked_at=utc_now(), reason="rebind-error")
+            write_json_atomic(path, state)
+            try:
+                return rebind_cleared_session(payload, witnessed_prompt=True)
+            finally:
+                state["reason"] = payload.get("_oms_rebind_reason", "rebind-error")
+                write_json_atomic(path, state)
+    except Exception:
+        return rebind_refused(payload, payload.get("_oms_rebind_reason", "rebind-error"))
 
 
 def transcript_root(path: Path, background: bool = False) -> str | None:
@@ -2537,11 +2607,15 @@ def rebind_lineage_session(payload: dict[str, Any]) -> bool:
     evidence. Only a unique match rebinds, through the compare-and-swap bind."""
     session = payload.get("session_id") or payload.get("sessionId")
     transcript = payload.get("transcript_path") or payload.get("transcriptPath")
-    if is_harness_child() or payload_agent(payload) != "claude" or not (session and transcript):
-        return False
+    if is_harness_child():
+        return rebind_refused(payload, "harness-child")
+    if payload_agent(payload) != "claude":
+        return rebind_refused(payload, "provider-mismatch")
+    if not (session and transcript):
+        return rebind_refused(payload, "missing-transcript")
     repo = hook_repo(payload)
     if repo is None or not (repo / ".oms/threads").is_dir():
-        return False
+        return rebind_refused(payload, "missing-room")
     import panel_chats
     import room
     import thread_live
@@ -2549,62 +2623,67 @@ def rebind_lineage_session(payload: dict[str, Any]) -> bool:
     projects = (panel_chats._claude_home() / "projects").resolve()
     transcript = Path(str(transcript))
     if transcript.name != str(session) + ".jsonl" or transcript.resolve().parent.parent != projects:
-        return False
+        return rebind_refused(payload, "invalid-transcript")
     try:
         root = transcript_root(transcript, background=True)
     except OSError:
-        return False
+        return rebind_refused(payload, "unreadable-transcript")
     if not root:
-        return False  # no evidence yet, or not a background move, which is not a negative result
+        return rebind_refused(payload, "not-background")  # not a cached negative result
     consumer = session_hash(payload)
     path = thread_live.safe_path(repo, ".oms/hooks/sessions/" + consumer + ".lineage.json", True)
     if path.exists() or path.is_symlink():
         info = path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
-            return False
+            return rebind_refused(payload, "unsafe-retry-state")
     with event_file_lock(path, timeout=0.1):
         checked = event_epoch(load_state(path).get("checked_at"))
         if checked is not None and 0 <= time.time() - checked < LINEAGE_RETRY_SEC:
-            return False
+            return rebind_refused(payload, "retry-limited")
         write_json_atomic(path, {"schema": 1, "checked_at": utc_now()})
     if room.selected(repo, consumer) is not None:
-        return False
+        return rebind_refused(payload, "already-enrolled")
     states, incomplete = room.discover(repo)
     if incomplete:
-        return False
+        return rebind_refused(payload, "incomplete-inventory")
     mains = [(state["id"], member) for state in states if not state["closed"] for member in state["participants"]
              if member["joined"] and member["role"] == "main" and member["provider"] == "claude"
              and isinstance(member.get("consumer"), str) and member["consumer"] != consumer]
     if not mains or len(mains) > LINEAGE_MAINS:
-        return False  # a partial comparison never proves a unique lineage
+        return rebind_refused(payload, "no-mains" if not mains else "too-many-mains")
     index = panel_chats.native_index({member["consumer"] for _, member in mains})["claude"]
     matches = []
     try:
         with os.scandir(projects) as entries:
             scanned = list(itertools.islice(entries, panel_chats.MAX_FILES + 1))
         if len(scanned) > panel_chats.MAX_FILES:
-            return False
+            return rebind_refused(payload, "incomplete-lineage")
         slugs = [Path(entry.path) for entry in scanned if entry.is_dir(follow_symlinks=False)]
         for ident, member in mains:
             sessions = index.get(member["consumer"]) or ()
             if len(sessions) != 1:
-                return False
+                return rebind_refused(payload, "ambiguous-lineage")
             sid = next(iter(sessions))
             copies = [slug / (sid + ".jsonl") for slug in slugs if (slug / (sid + ".jsonl")).exists()
                       or (slug / (sid + ".jsonl")).is_symlink()]
             if len(copies) != 1:
-                return False
+                return rebind_refused(payload, "ambiguous-lineage")
             old_root = transcript_root(copies[0])
             if not old_root:
-                return False
+                return rebind_refused(payload, "incomplete-lineage")
             if old_root == root:
                 matches.append((ident, member))
     except OSError:
-        return False
+        return rebind_refused(payload, "unreadable-transcript")
     if len(matches) != 1:
-        return False
+        return rebind_refused(payload, "ambiguous-lineage" if matches else "no-lineage")
     ident, member = matches[0]
-    room.bind(repo, ident, member["participant"], str(session), replaces=member["consumer"])
+    try:
+        room.bind(repo, ident, member["participant"], str(session), replaces=member["consumer"])
+    except ValueError as error:
+        # Another participant owning the session is permanent; only a moved binding is worth a retry.
+        rebind_refused(payload, "session-held" if "already has a participant" in str(error) else "cas-stale")
+        raise
     return True
 
 
