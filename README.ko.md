@@ -14,13 +14,63 @@
 증거, handoff를 공유하며 한 프로젝트에서 일하게 한다. 누가 하던 일이든
 다른 agent가 이어받을 수 있다.
 
-터미널에서 **`oms`를 실행하면 공통 컨트롤 패널**이 열린다. 코덱스·클코를
-선택 실행하고 공통 상태를 보거나 상대 제공자에게 조사·구현·검토를 맡길 수
-있다. 설치된 tmux가 있으면 대화 옆에 상태 화면이 유지되고, 없으면 메뉴로
-돌아오는 방식이다. [패널 사용법](docs/TERMINAL-PANEL.md).
+터미널에서 **`oms`를 실행하면 공통 컨트롤 패널**이 열린다. 시작 방법과
+보드 사용법은 아래에, 자세한 설명은 [패널 안내](docs/TERMINAL-PANEL.md)에
+정리했다.
 
 하네스의 나머지 도구와 `.oms/` 상태, 업데이트·점검은 agent가 관리한다.
 아래의 하네스 명령은 agent가 실행할 명령이다.
+
+## 컨트롤 패널
+
+패널은 현재 프로젝트용 tmux 컨트롤 창을 열고, 작업방마다 실행 중인 main을
+최대 하나만 둔다(기본은 Claude Code, 명시적 대안은 Pi). main 창에서 공간이
+충분하면 보드가 왼쪽에, 좁으면 CLI 위에 놓인다. 오른쪽 reader에서는 선택한
+worker·advisor·review·result를 연다.
+
+`oms`로 시작한다. Pi는 `OMS_PANEL_MAIN=pi oms` 또는 Pi 시작 키(`n` 다음 `2`)로
+선택한다. `oms panel --launch claude|pi`로 main을 직접 시작할 수도 있다.
+tmux가 없으면 inline 메뉴를 사용한다. 한 작업방에서 main이 여러 개 실행 중이면
+dispatch를 거부한다. 추가 main을 `oms panel --release-main ATTEMPT`로 해제하거나
+교체를 마친 뒤 다시 실행한다.
+
+| 보드 영역 | 표시 내용 |
+|---|---|
+| Goal | plan 목표와 검증 완료 작업 수 |
+| Attention | 답변 필요, 실패, 결정 대기, 보류/worker 종료, 읽지 않은 메일, 전달 실패 등 사용자 조치가 필요한 항목 |
+| Activity tree | main과 하위 호출, 취소·guard 중단·시간 초과·검증 실패 같은 실제 종료 상태 |
+| Session log | 스크롤할 수 있는 활동 로그 |
+| 하단 탭 | Detail, Plan, Debate, Messages, Past, Attention. 종료된 호출이 있을 때 Past 표시 |
+
+| 키 | 동작 |
+|---|---|
+| 화살표 / Enter | 항목을 이동하고 선택 내용을 열거나 펼친다 |
+| `f` | 선택한 전체 결과를 오른쪽 reader에서 연다 |
+| `a` | advisor에게 묻는다 |
+| F9 | 채팅과 보드 사이의 초점을 바꾼다 |
+| `m` | Work, Overview, Focus 모드를 순환한다 |
+| F12 | 패널 전체 키 목록을 표시한다 |
+| `[` / `]` | Detail 탭이 선택된 상태에서 session log를 이전/다음 방향으로 스크롤한다 |
+
+main은 역할별로 범위가 정해진 호출을 위임한다. 쓰기 역할은 worker, builder,
+refactorer, documenter, integrator, performance-engineer다. 읽기 역할은
+researcher, advisor, architect, critic, reviewer, verifier, security-auditor,
+release-engineer다. 라우팅은 특정 제공자에 역할을 고정하지 않고 사용 가능한
+제공자의 light, routine, deep, frontier 역량 tier를 따른다. reviewer, verifier,
+security-auditor, critic은 가능하면 main과 다른 제공자를 우선한다. 역할은 별도
+main 인스턴스가 아니라 호출의 임무를 뜻한다.
+
+```bash
+oms panel --dispatch worker --purpose implement --access write --brief-file B --verify CMD --task-id T --label L
+oms panel --dispatch verifier --access read --prompt '요청 범위에 맞는지 검증한다.'
+oms panel --council --prompt '두 선택지를 비교한다.'
+oms panel --finalize --task-id T --summary-file SUMMARY --outcome completed
+```
+
+목표와 작업은 `oms agent-plan`에 기록한다. main은 `--finalize`로 결과를 남기며,
+작업은 `oms land`를 통해 반영한다.
+
+자세한 내용은 [컨트롤 패널 안내](docs/TERMINAL-PANEL.md)를 참고한다.
 
 ## 설치
 

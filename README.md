@@ -14,13 +14,63 @@
 project from the same rules, state, plans, evidence and handoffs, so any of
 them can pick up where another left off.
 
-Run **`oms` in a terminal for the shared control panel**. Open Codex or Claude
-Code, view shared state, or ask the other provider to investigate, implement or
-review. Installed tmux keeps status beside native conversations; the inline
-menu works without it. See [the panel guide](docs/TERMINAL-PANEL.md).
+Run **`oms` in a terminal for the shared control panel**. See below for how to
+start it and read its board; the full [panel guide](docs/TERMINAL-PANEL.md)
+covers the details.
 
 Your agent manages the remaining harness tools, `.oms/` state, updates and
 health checks. Harness commands shown below are for the agent to run.
+
+## Control panel
+
+The panel opens a tmux control window for the current project, with at most one
+live main in its room (Claude Code by default, or Pi). In the main window the
+board stays on the left when there is room and moves above the CLI when narrow;
+the right reader opens the selected worker, advisor, review or result.
+
+Start it with `oms`. Choose Pi with `OMS_PANEL_MAIN=pi oms` or the Pi start key
+(`n`, then `2`); `oms panel --launch claude|pi` explicitly launches a main.
+Without tmux, OMS uses an inline menu. A room cannot run two live mains: a
+dispatch from a room with multiple live mains is refused until the extra main
+is released with `oms panel --release-main ATTEMPT` or the swap is finished.
+
+| Board area | What it shows |
+|---|---|
+| Goal | Plan goal and verified task count |
+| Attention | Items needing you: answer needed, failed, awaiting decision, held/workers ended, unread mail and delivery failed |
+| Activity tree | Main and its calls, including endings such as cancelled, guard stop, timed out and verify failed |
+| Session log | Scrollable activity log |
+| Bottom tabs | Detail, Plan, Debate, Messages, Past and Attention; Past appears when calls have settled |
+
+| Key | Action |
+|---|---|
+| Arrows / Enter | Move through items; open or expand the selection |
+| `f` | Open the selected full result in the right reader |
+| `a` | Ask the advisor |
+| F9 | Switch focus between chat and board |
+| `m` | Cycle Work, Overview and Focus modes |
+| F12 | Show panel-wide keys |
+| `[` / `]` | Scroll the session log older / newer while the Detail tab is selected |
+
+The main delegates bounded calls by role. Write roles are worker, builder,
+refactorer, documenter, integrator and performance-engineer; read roles are
+researcher, advisor, architect, critic, reviewer, verifier, security-auditor
+and release-engineer. Routing uses light, routine, deep and frontier capability
+tiers across available providers, not a fixed provider per role. Reviewer,
+verifier, security-auditor and critic prefer a provider other than the main when
+one is available. A role describes the call's mandate, not a separate main.
+
+```bash
+oms panel --dispatch worker --purpose implement --access write --brief-file B --verify CMD --task-id T --label L
+oms panel --dispatch verifier --access read --prompt 'Verify the result against the brief.'
+oms panel --council --prompt 'Compare these options.'
+oms panel --finalize --task-id T --summary-file SUMMARY --outcome completed
+```
+
+Goals and tasks live in `oms agent-plan`; the owning main records results with
+`--finalize`. Work lands through `oms land`.
+
+See the full [Control panel guide](docs/TERMINAL-PANEL.md).
 
 ## Install
 
