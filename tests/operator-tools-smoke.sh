@@ -56,6 +56,25 @@ def shard(spec):
     return index, total
 
 
+def section_names(source):
+    # Core subsections share core's fixtures and run only inside it; select core with --shard 1/4.
+    return [name.replace("_", "-") for name, _, _ in SECTIONS if name != "core"]
+
+
+def requested_sections(spec, source):
+    valid = section_names(source)
+    names = spec.split(",")
+    if not names or any(not name for name in names):
+        raise ValueError("section list must contain names separated by commas")
+    unknown = [name for name in names if name not in valid]
+    if unknown:
+        raise ValueError("unknown section(s): %s; valid sections: %s" %
+                         (", ".join(unknown), ", ".join(valid)))
+    if len(set(names)) != len(names):
+        raise ValueError("duplicate section name")
+    return names
+
+
 def selected(name, spec):
     index, total = shard(spec)
     bucket = next(bucket for section, bucket, _ in SECTIONS if section == name)
@@ -283,6 +302,16 @@ def main(args):
         shard(f"1/{total}")
         for name, index in self_check(total):
             print(f"{index}/{total}\t{name}")
+    elif mode == "--list-sections" and len(args) == 1:
+        for name in section_names(SOURCE.read_text(encoding="utf-8")):
+            print(name)
+    elif mode == "--validate-sections" and len(args) == 2:
+        print("\n".join(requested_sections(args[1], SOURCE.read_text(encoding="utf-8"))))
+    elif mode == "--run-sections" and len(args) == 4:
+        root, temporary = Path(args[1]), Path(args[2])
+        names = requested_sections(args[3], SOURCE.read_text(encoding="utf-8"))
+        for name in names:
+            standalone(name, root, temporary)
     elif mode == "--standalone" and len(args) == 4:
         root, temporary, spec = Path(args[1]), Path(args[2]), args[3]
         self_check(shard(spec)[1])
@@ -390,6 +419,7 @@ OPERATOR_SHARD_STARTED=$SECONDS
 operator_materialize
 OPERATOR_SPEC="${OMS_OPERATOR_SHARD:-1/1}"
 OPERATOR_MODE=run
+OPERATOR_SECTION=''
 case "${1:-}" in
   --jobs)
     [ "$#" = 2 ] || fail '--jobs requires N'
@@ -440,8 +470,15 @@ case "${1:-}" in
   --shard)
     [ "$#" = 2 ] || fail '--shard requires I/N'
     OPERATOR_SPEC="$2" ;;
+  --list-sections)
+    [ "$#" = 1 ] || fail '--list-sections takes no arguments'
+    OPERATOR_MODE=sections-list ;;
+  --section)
+    [ "$#" = 2 ] || fail '--section requires NAME[,NAME...]'
+    [ -z "${OMS_OPERATOR_SHARD:-}" ] || fail '--shard and --section are exclusive'
+    OPERATOR_SECTION="$2" ;;
   -h|--help)
-    echo 'usage: operator-tools-smoke.sh [--shard I/N | --jobs N | --list [N] | --self-check [N]] (N=1..4)'
+    echo 'usage: operator-tools-smoke.sh [--shard I/N | --section NAME[,NAME...] | --list-sections | --jobs N | --list [N] | --self-check [N]] (N=1..4)'
     echo 'OMS_OPERATOR_SHARD=I/N also selects a shard; no selector runs every section.'
     exit 0 ;;
   '') ;;
@@ -450,6 +487,15 @@ esac
 unset OMS_OPERATOR_SHARD
 if [ "$OPERATOR_MODE" = list ]; then
   python3 "$TMP/operator_tools_shards.py" "${BASH_SOURCE[0]}" "${exec_args[@]}"
+  exit $?
+fi
+if [ "$OPERATOR_MODE" = sections-list ]; then
+  python3 "$TMP/operator_tools_shards.py" "${BASH_SOURCE[0]}" --list-sections
+  exit $?
+fi
+if [ -n "$OPERATOR_SECTION" ]; then
+  PYTHONDONTWRITEBYTECODE=1 python3 "$TMP/operator_tools_shards.py" "${BASH_SOURCE[0]}" --validate-sections "$OPERATOR_SECTION" >/dev/null || exit $?
+  PYTHONDONTWRITEBYTECODE=1 python3 "$TMP/operator_tools_shards.py" "${BASH_SOURCE[0]}" --run-sections "$ROOT" "$TMP" "$OPERATOR_SECTION"
   exit $?
 fi
 OPERATOR_SELECTION="$(python3 "$TMP/operator_tools_shards.py" "${BASH_SOURCE[0]}" --selection "$OPERATOR_SPEC" | tr -d '\r')"

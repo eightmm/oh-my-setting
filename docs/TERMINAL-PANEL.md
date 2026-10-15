@@ -1456,6 +1456,12 @@ shows recent completed CI runs and ranked failing jobs/tests. The operator suite
 also verifies the main hierarchy with earlier mains on record, legacy ownership,
 separate review groups, compact/detail budgets, attention filtering, numbered
 result selection, menu cycling and view inheritance in an existing tmux server.
+Use `tests/operator-tools-smoke.sh --list-sections` to see focused verification
+areas: `auto-review` covers the review gate, `native-pty` covers terminal
+lifecycle behavior, and `room-rollover` covers room succession; combine
+independent top-level areas with commas. Core panel behavior (board, routing,
+rooms, native windows) has no section of its own: verify it with `--shard 1/4`,
+about 8 minutes at low load.
 
 
 ## Researcher and supporting strategies
