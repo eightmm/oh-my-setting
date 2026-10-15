@@ -1428,28 +1428,34 @@ def _validate_dispatch_verifier(repo, verify):
             if cursor + 1 >= len(tokens):
                 break
             selector = tokens[cursor + 1]
+            # Selectors are read from the suite text, never by running repository code (dry runs included).
             if option == "--section" and suite == "tests/operator-tools-smoke.sh":
-                listing = ["bash", str(target), "--list-sections"]
-                env = os.environ.copy()
+                source = _read_suite(target)
+                valid = [name.replace("_", "-") for name in
+                         re.findall(r"^# OPERATOR_SECTION_BEGIN ([a-z_-]+)$", source, re.M)
+                         if name not in {"core", "shared_cache"}]
             elif option == "--only" and _uses_smoke_runner(suite, target):
-                listing = ["bash", str(repo / "tests/run-smoke-shard.sh"), "--list"]
                 selected_suite = (repo / "tests/scripts-smoke.sh" if suite == "tests/run-smoke-shard.sh"
                                   else target)
-                env = dict(os.environ, OMS_SMOKE_SUITE=str(selected_suite))
+                valid = re.findall(r"^(test_[A-Za-z0-9_]+)\(\) *\{", _read_suite(selected_suite), re.M)
             else:
                 cursor += 2
                 continue
-            try:
-                valid = subprocess.check_output(listing, cwd=str(repo), env=env,
-                                                text=True, stderr=subprocess.STDOUT).splitlines()
-            except (OSError, subprocess.CalledProcessError) as error:
-                raise ValueError("could not validate --verify selector for %s" % suite) from error
             requested = selector.split(",") if option == "--section" else [selector]
             unknown = [name for name in requested if name not in valid]
             if unknown:
                 raise ValueError("unknown %s value(s): %s; valid names: %s" %
                                  (option, ", ".join(unknown), ", ".join(valid)))
             cursor += 2
+
+
+def _read_suite(path):
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("--verify suite must be a regular file: %s" % path.name)
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ValueError("could not read --verify suite %s" % path.name) from error
 
 
 def _uses_smoke_runner(suite, target):
