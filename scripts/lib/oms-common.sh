@@ -2470,7 +2470,12 @@ for base, dirs, files in os.walk(root):
     # guard covers their boundary when a caller explicitly guarantees quiescence.
     dirs[:] = sorted(d for d in dirs
                      if not os.path.islink(os.path.join(base, d))
-                     and not (base == root and d == "delegations"))
+                     and not (base == root and d == "delegations")
+                     # Canonical sync admission and call holders have the same
+                     # ephemeral lifecycle as delegation liveness markers.
+                     and not (base == os.path.join(root, "locks") and d in (
+                         "canonical-sync.d", "canonical-sync.gate",
+                         "canonical-sync.gate.reclaim-queue")))
     for name in sorted(files):
         path = os.path.join(base, name)
         rel = os.path.relpath(path, root).replace(os.sep, "/")

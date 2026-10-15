@@ -10,6 +10,9 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/oms-common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/oms-common.sh"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/canonical-sync.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/canonical-sync.sh"
 
 MA_KIND="delegate"
 
@@ -976,6 +979,7 @@ cleanup() {
     oms_with_file_lock "$delegation_lock_target" \
       rm -f -- "$liveness_file" 2>/dev/null || true
   cleanup_delegated_worktree || true
+  oms_canonical_call_release || true
 }
 cleanup_signal() {
   local code="$1"
@@ -1998,6 +2002,8 @@ worker_worktree_execution_snapshot_sha=""
 worker_source_guard_dir=""
 worker_source_execution_snapshot_sha=""
 if [ "${OMS_WORKER_GUARD_OFF:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
+  oms_canonical_call_acquire "$REPO" "${OMS_HARNESS_CALL_ID:-$timestamp}" ||
+    fail "canonical checkout sync is busy or call registration failed; retry after sync"
   # This run's own writes are the harness moving, not the worker: the artifact
   # directory, and our own stdout/stderr when the caller redirected them into
   # the repo (`peer-delegate ... > run.log` is an ordinary thing to do). The fd

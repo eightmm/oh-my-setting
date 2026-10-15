@@ -6,6 +6,8 @@ set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/peer-common.sh"
 # shellcheck source=lib/work-journal.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/work-journal.sh"
+# shellcheck source=lib/canonical-sync.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/canonical-sync.sh"
 
 MA_KIND="review"
 MA_SHOW_REPO=1
@@ -709,6 +711,7 @@ cleanup() {
   fi
   ma_cleanup_council_context
   rm -rf "$read_guard_temp"
+  oms_canonical_call_release || true
 }
 cleanup_signal() {
   local code="$1"
@@ -760,6 +763,11 @@ trap cleanup EXIT
 trap 'cleanup_signal 129' HUP
 trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
+if [ "$REPO" != "$MA_READ_SOURCE_REPO" ]; then
+  # Sync of the shared checkout waits for this review's snapshot window to close.
+  oms_canonical_call_acquire "$REPO" "${OMS_HARNESS_CALL_ID:-review-$$}" ||
+    fail "canonical checkout sync is busy or review registration failed; retry after sync"
+fi
 ma_read_guard_begin "$read_guard_temp" || fail "cannot freeze review repositories"
 
 # Run the mechanical backstop before creating any repository-local review

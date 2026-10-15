@@ -183,6 +183,7 @@ session-handoff
 skill-doctor
 skill-forge
 snapshot
+sync-shared
 state
 state-verify
 status

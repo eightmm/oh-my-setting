@@ -17487,7 +17487,7 @@ test_oms_dispatcher_lists_and_dispatches() {
   out="$("$bin/oms" list --all)" || fail "expanded catalog should succeed"
   printf '%s' "$out" | grep >/dev/null -E '^run-ledger ' || fail "oms list should include run-ledger"
   for public in agent-events agent-supervisor approval-inbox autopilot draft-pr \
-    runtime open-in otel-export; do
+    runtime open-in otel-export sync-shared; do
     printf '%s\n' "$out" | grep >/dev/null -E "^${public} " ||
       fail "oms list should include new public tool: $public"
     "$bin/oms" "$public" --help >/dev/null 2>&1 ||
@@ -25889,6 +25889,7 @@ from peer_artifacts import artifact_sections
 repo = Path(sys.argv[1])
 index = [json.loads(line) for line in (repo / ".oms/artifacts/index.jsonl").read_text().splitlines()]
 answer, code = artifact_sections(repo / index[-1]["artifact"])
+assert not list((repo / '.oms/locks/canonical-sync.d').iterdir()), 'guard failure leaked its shared lock'
 hint = "Protected surfaces changed outside this worker's worktree during the run."
 assert code == "1" and hint in answer, (code, answer)
 assert "Inspect the preserved evidence and re-dispatch from a fresh base after the concurrent change." in answer, answer
@@ -26245,6 +26246,197 @@ forged = bytes(forged) + hashlib.sha1(bytes(forged)).digest()
 assert index_signature(data, 20) and index_signature(forged, 20) and index_signature(data, 20) != index_signature(forged, 20)
 PY
     fail "the guard's index signature ignored a cache-tree change"
+}
+
+test_delegate_guards_canonical_checkout_during_sync() {
+  # New refresh path; reuse the delegate guard fixture and a real fake-provider
+  # call, including the separate-clone canonical snapshot that used to fail.
+  local project="$TMP/canonical-sync"
+  make_committed_repo "$project"
+  python3 - "$ROOT" "$project" "$TMP" <<'PY' || fail 'canonical checkout sync guard regression'
+import json, os, pathlib, subprocess, sys, time
+root, repo, temporary = map(pathlib.Path, sys.argv[1:])
+remote = temporary / 'canonical-origin.git'
+source = temporary / 'canonical-source'
+bin_dir = temporary / 'canonical-bin'
+bin_dir.mkdir()
+ready, release = temporary / 'canonical-ready', temporary / 'canonical-release'
+
+def git(where, *args):
+    return subprocess.check_output(['git', '-C', str(where), *args], text=True).strip()
+
+subprocess.run(['git', 'clone', '--bare', str(repo), str(remote)], check=True, stdout=subprocess.DEVNULL)
+git(repo, 'remote', 'add', 'origin', str(remote))
+subprocess.run(['git', 'clone', str(remote), str(source)], check=True, stdout=subprocess.DEVNULL)
+(source / 'remote.txt').write_text('remote advance\n')
+git(source, 'add', 'remote.txt')
+git(source, 'commit', '-m', 'advance remote fixture')
+git(source, 'push', 'origin', 'main')
+before, tip = git(repo, 'rev-parse', 'HEAD'), git(source, 'rev-parse', 'HEAD')
+(bin_dir / 'codex').write_text('''#!/usr/bin/env bash
+cat >/dev/null
+: > "$OMS_SYNC_READY"
+while [ ! -f "$OMS_SYNC_RELEASE" ]; do sleep 0.05; done
+printf 'worker edit\\n' >> file.txt
+echo done
+''')
+(bin_dir / 'codex').chmod(0o755)
+env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
+           OMS_PANEL_DISPATCH='1', OMS_PANEL_ROLE='worker', OMS_ROOM_REPO=str(repo), OMS_WORKER_GUARD_STRICT='1',
+           OMS_SYNC_READY=str(ready), OMS_SYNC_RELEASE=str(release),
+           OMS_HARNESS_CALL_ID='call-sync-fixture')
+command = ['bash', str(root / 'scripts/peer-delegate.sh'), '--repo', str(source),
+           '--to', 'codex', '--prompt', 'edit file.txt', '--no-verify']
+sync = ['bash', str(root / 'scripts/oms'), 'sync-shared', '--repo', str(repo)]
+
+def run_sync():
+    return subprocess.run(sync, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+
+with (temporary / 'canonical-call.out').open('w+') as log, (temporary / 'canonical-call2.out').open('w+') as log2:
+    call = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
+    call2 = None
+    ready2, release2 = temporary / 'canonical-ready2', temporary / 'canonical-release2'
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists() and call.poll() is None and time.monotonic() < deadline:
+            time.sleep(.05)
+        log.flush(); log.seek(0)
+        assert ready.exists(), log.read()
+        entry = repo / '.oms/locks/canonical-sync.d/call-sync-fixture'
+        assert entry.is_dir() and (entry / 'process-start').read_text().strip()
+        result = run_sync()
+        assert result.returncode == 75, result.stdout
+        assert 'deferred: 1 calls running (call-sync-fixture)' in result.stdout, result.stdout
+        assert git(repo, 'rev-parse', 'HEAD') == before
+        assert not (repo / '.git/refs/remotes/origin/main').exists(), 'deferred sync fetched'
+        # The second snapshot includes the first holder. Its later cleanup
+        # must not become a protected-state deletion for the second worker.
+        call2 = subprocess.Popen(command, env=dict(env, OMS_HARNESS_CALL_ID='call-sync-fixture2',
+                                 OMS_SYNC_READY=str(ready2), OMS_SYNC_RELEASE=str(release2)),
+                                 stdout=log2, stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + 30
+        while not ready2.exists() and call2.poll() is None and time.monotonic() < deadline:
+            time.sleep(.05)
+        log2.flush(); log2.seek(0)
+        assert ready2.exists(), log2.read()
+        result = run_sync()
+        assert result.returncode == 75 and 'deferred: 2 calls running' in result.stdout, result.stdout
+        release.touch()
+        assert call.wait(timeout=30) == 0
+        log.seek(0); output = log.read()
+        assert 'execution-state' not in output, output
+        assert not entry.exists(), 'normal exit leaked its shared lock'
+        index = [json.loads(line) for line in (repo / '.oms/artifacts/index.jsonl').read_text().splitlines()]
+        row = index[-1]
+        artifact = repo / row['artifact']
+        patch = pathlib.Path(next(line[7:] for line in output.splitlines() if line.startswith('patch: ')))
+        receipt_bytes, patch_bytes = artifact.read_bytes(), patch.read_bytes()
+        assert b'worker edit' in patch_bytes, output
+        result = run_sync()
+        assert result.returncode == 75 and 'call-sync-fixture2' in result.stdout, result.stdout
+        release2.touch()
+        assert call2.wait(timeout=30) == 0
+        result = run_sync()
+        assert result.returncode == 0, result.stdout
+        assert git(repo, 'rev-parse', 'HEAD') == tip
+        assert artifact.read_bytes() == receipt_bytes and patch.read_bytes() == patch_bytes
+    finally:
+        release.touch()
+        release2.touch()
+        if call.poll() is None:
+            call.wait(timeout=30)
+        if call2 is not None and call2.poll() is None:
+            call2.wait(timeout=30)
+
+# Dirty tracked, staged and untracked states all refuse, preserving bytes/HEAD.
+for mode in ('tracked', 'staged', 'untracked'):
+    dirty = repo / ('untracked.txt' if mode == 'untracked' else 'file.txt')
+    original = dirty.read_bytes() if dirty.exists() else None
+    dirty.write_bytes(b'local dirty\n')
+    if mode == 'staged':
+        git(repo, 'add', 'file.txt')
+    result = run_sync()
+    assert result.returncode != 0 and 'dirty shared checkout' in result.stdout, result.stdout
+    assert dirty.read_bytes() == b'local dirty\n' and git(repo, 'rev-parse', 'HEAD') == tip
+    if original is None:
+        dirty.unlink()
+    else:
+        dirty.write_bytes(original)
+        if mode == 'staged':
+            git(repo, 'add', 'file.txt')
+
+# No age-based eviction: a live identity with ancient metadata still defers.
+lock = repo / '.oms/locks/canonical-sync.d/live-fixture'
+lock.mkdir()
+identity_cmd = '. "$1/scripts/lib/file-lock.sh"; echo "$$"; oms_file_lock_process_start_token "$$"; read -r ignored'
+identity = subprocess.Popen(['bash', '-c', identity_cmd, 'bash', str(root)],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+live_pid, start = identity.stdout.readline().strip(), identity.stdout.readline().strip()
+assert live_pid.isdigit() and start
+(lock / 'pid').write_text(live_pid + '\n')
+(lock / 'process-start').write_text(start + '\n')
+(lock / 'started').write_text('1\n')
+result = run_sync()
+assert result.returncode == 75 and lock.exists(), result.stdout
+# A dead owner can be reclaimed immediately; no wall-clock expiry is needed.
+dead_pid = subprocess.check_output(['bash', '-c', 'echo "$$"'], text=True).strip()
+(lock / 'pid').write_text(dead_pid + '\n')
+result = run_sync()
+assert result.returncode == 0 and not lock.exists(), result.stdout
+# A reused PID with a different start identity is stale too.
+lock.mkdir()
+(lock / 'pid').write_text(live_pid + '\n')
+(lock / 'process-start').write_text('proc:unrelated-generation\n')
+result = run_sync()
+assert result.returncode == 0 and not lock.exists(), result.stdout
+identity.communicate('\n', timeout=10)
+# Partial owners fail closed, including arbitrarily old entries.
+lock.mkdir()
+(lock / 'started').write_text('1\n')
+result = run_sync()
+assert result.returncode == 75 and lock.exists(), result.stdout
+(lock / 'started').unlink(); lock.rmdir()
+
+# Admission waits behind the exclusive gate, then registers only after release.
+gate_ready, gate_release = temporary / 'sync-gate-ready', temporary / 'sync-gate-release'
+gate_cmd = '''. "$1/scripts/lib/canonical-sync.sh"
+hold() { touch "$3"; while [ ! -f "$4" ]; do sleep .05; done; }
+oms_canonical_sync_gate "$2" hold "$@"
+'''
+gate = subprocess.Popen(['bash', '-c', gate_cmd, 'bash', str(root), str(repo), str(gate_ready), str(gate_release)])
+waiter = None
+try:
+    deadline = time.monotonic() + 10
+    while not gate_ready.exists() and time.monotonic() < deadline:
+        time.sleep(.05)
+    assert gate_ready.exists()
+    acquire = '. "$1/scripts/lib/canonical-sync.sh"; trap oms_canonical_call_release EXIT; oms_canonical_call_acquire "$2" waiting-call'
+    blocked = subprocess.run(['bash', '-c', acquire, 'bash', str(root), str(repo)],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=10)
+    assert blocked.returncode == 75 and 'after 5s' in blocked.stdout, blocked.stdout
+    assert not (repo / '.oms/locks/canonical-sync.d/waiting-call').exists()
+    waiter = subprocess.Popen(['bash', '-c', acquire, 'bash', str(root), str(repo)])
+    time.sleep(.3)
+    assert waiter.poll() is None and not (repo / '.oms/locks/canonical-sync.d/waiting-call').exists()
+    gate_release.touch()
+    assert gate.wait(timeout=10) == 0 and waiter.wait(timeout=10) == 0
+finally:
+    gate_release.touch()
+    gate.wait(timeout=10)
+    if waiter is not None:
+        waiter.wait(timeout=10)
+
+# Diverged histories cannot merge, even when tracked/untracked state is clean.
+(repo / 'local.txt').write_text('local history\n')
+git(repo, 'add', 'local.txt'); git(repo, 'commit', '-m', 'local fixture')
+local_tip = git(repo, 'rev-parse', 'HEAD')
+(source / 'remote.txt').write_text('second remote advance\n')
+git(source, 'add', 'remote.txt'); git(source, 'commit', '-m', 'divergent remote fixture')
+git(source, 'push', 'origin', 'main')
+result = run_sync()
+assert result.returncode != 0 and 'ahead or diverged' in result.stdout, result.stdout
+assert git(repo, 'rev-parse', 'HEAD') == local_tip
+PY
 }
 
 test_delegate_preflights_strict_execution_config() {

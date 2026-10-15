@@ -58,6 +58,7 @@ explains overlapping entrypoints.
 | `patch-admit` | Check delegated patch scope and evidence. | `oms patch-admit` | [Delegating writes](#delegating-writes) |
 | `patch-land` | Apply an admitted delegated patch. | `oms patch-land` | [Delegating writes](#delegating-writes) |
 | `land` | Gate, push and update a committed worktree. | `oms land` | [Verification and release](#verification-and-release) |
+| `sync-shared` | Fetch and fast-forward an idle shared checkout. | `oms sync-shared` | [Verification and release](#verification-and-release) |
 | `draft-pr` | Publish a verified clean HEAD as a draft pull request. | `oms draft-pr` | [Verification and release](#verification-and-release) |
 | `ci-status` | Read the CI conclusion for a branch HEAD. | `oms ci-status` | [Verification and release](#verification-and-release) |
 | `change-guard` | Warn about concurrent agent edits. | `oms change-guard` | [Delegating writes](#delegating-writes) |
@@ -838,6 +839,18 @@ receipt still cannot overwrite different bytes already imported at the same
 filename. After successful handoff,
 `oms agent-plan finish --repo /path/to/shared-checkout --id ID --landed-commit SHA`
 uses the existing completion checks without an additional import or fetch.
+
+To refresh panel boards after landing from another clone, use `oms sync-shared
+--repo /path/to/shared-checkout [--remote origin] [--target main]` instead of
+`git merge`. Calls register a shared lock before canonical snapshots and retain
+it through final guards and receipts; sync takes the same admission gate
+exclusively through fetch and `merge --ff-only`. It returns exit 75 with
+`deferred: N calls running (ids...)` while calls remain, and refuses dirty
+(including untracked files), detached, ahead or diverged trees; any local branch may follow the target.
+New calls wait at most five seconds for an active sync, then refuse safely;
+retry them after sync finishes. Dead PID/start identities are reclaimed,
+while incomplete or unprovable lock owners continue to block. This refresh
+does not push, install or supply landing evidence.
 
 The change guard sends its sorted changed-path stream through the canonical
 scope engine once. The engine loads and validates the stored allow/deny rules,
