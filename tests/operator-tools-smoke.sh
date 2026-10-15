@@ -58,7 +58,8 @@ def shard(spec):
 
 def section_names(source):
     # Core subsections share core's fixtures and run only inside it; select core with --shard 1/4.
-    return [name.replace("_", "-") for name, _, _ in SECTIONS if name != "core"]
+    # shared-cache runs inline in the core shard, so it has no standalone module either.
+    return [name.replace("_", "-") for name, _, _ in SECTIONS if name not in {"core", "shared-cache"}]
 
 
 def requested_sections(spec, source):
