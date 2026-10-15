@@ -1980,6 +1980,20 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
         summary = next((c.get("answer") for c in reversed(calls) if c.get("answer")), summary)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         pass
+    if status != 0 and summary == "Result evidence unavailable":
+        output_log = ".oms/panel-state/dispatch-logs/%s.log" % member
+        try:
+            raw = (Path(repo) / output_log).read_bytes()[-65536:]
+            tail = b"\n".join(raw.splitlines()[-20:]).decode("utf-8", "replace")
+            sanitized = subprocess.run(
+                ["bash", "-c", '. "$1"; ma_sanitize_quoted_output tail', "oms-dispatch-output",
+                 str(ROOT / "scripts/lib/peer-common.sh")], input=tail, capture_output=True,
+                text=True, timeout=10, check=False)
+            if sanitized.returncode == 0 and sanitized.stdout.strip():
+                summary = "Dispatch output (last lines):\n" + sanitized.stdout.strip()
+            summary += "\nOutput log: " + output_log
+        except (OSError, UnicodeError, subprocess.SubprocessError):
+            pass
     policy_available = True
     try:
         auto_review = policy().get("auto_review", True)
@@ -2407,7 +2421,52 @@ def _dispatch_pending_path(member):
 
 def _dispatch_exit_record(call, status):
     launch = json.dumps(call, ensure_ascii=False, sort_keys=True, allow_nan=False).encode("utf-8")
-    return dict(call, exit=status, launch_sha256=hashlib.sha256(launch).hexdigest())
+    return dict(call, exit=status, launch_sha256=hashlib.sha256(launch).hexdigest(),
+                output_log=".oms/panel-state/dispatch-logs/%s.log" % call["participant"])
+
+
+def _dispatch_output_log(repo, member):
+    """Create a private, bounded transcript for one dispatched call."""
+    relative = ".oms/panel-state/dispatch-logs/%s.log" % member
+    directory = Path(repo) / ".oms/panel-state/dispatch-logs"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = directory.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or os.name == "posix" and
+            (info.st_mode & 0o077 or hasattr(os, "getuid") and info.st_uid != os.getuid())):
+        raise ValueError("unsafe dispatch output directory")
+    fd = os.open(str(directory / (member + ".log")),
+                 os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    return relative, fd
+
+
+def _tee_dispatch_output(stream, destination, tail, lock):
+    """Forward one child stream unchanged while adding it to the shared bounded log tail."""
+    if not isinstance(stream, io.IOBase):
+        return
+    try:
+        while True:
+            chunk = stream.read(8192)
+            if not chunk:
+                break
+            with lock:
+                tail.extend(chunk)
+                if len(tail) > 65536:
+                    del tail[:-65536]
+            try:
+                destination.buffer.write(chunk)
+                destination.buffer.flush()
+            except (AttributeError, OSError):
+                destination.write(chunk.decode("utf-8", "replace"))
+                destination.flush()
+    finally:
+        stream.close()
+
+
+def _save_dispatch_output(fd, tail):
+    with os.fdopen(fd, "wb") as log:
+        log.write(tail)
+        log.flush()
+        os.fsync(log.fileno())
 
 
 def _dispatch_verifier(repo, room_id, member, caller):
@@ -3231,7 +3290,16 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 digest = _dispatch_exit_record(launch, 0)["launch_sha256"]
                 command = [sys.executable, str(Path(__file__).with_name("dispatch_supervisor.py")),
                            str(repo), control_member, digest] + argv
-            process = subprocess.Popen(command, cwd=str(execution), env=env, start_new_session=os.name == "posix")
+            output_log, output_fd = _dispatch_output_log(repo, control_member)
+            process = subprocess.Popen(command, cwd=str(execution), env=env, start_new_session=os.name == "posix",
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            output_tail, output_lock = bytearray(), threading.Lock()
+            output_threads = [threading.Thread(target=_tee_dispatch_output,
+                                               args=(getattr(process, channel, None), destination,
+                                                     output_tail, output_lock), daemon=True)
+                              for channel, destination in (("stdout", sys.stdout), ("stderr", sys.stderr))]
+            for output_thread in output_threads:
+                output_thread.start()
             if launch:
                 binding = {"pid": process.pid}
                 if os.name == "posix":
@@ -3251,6 +3319,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                     pass
         except (OSError, ValueError):
             spawn_failed = process is None
+            if process is None and "output_fd" in locals():
+                os.close(output_fd)
             if process is not None and process.poll() is None:
                 process.terminate()
                 term_sent = True
@@ -3306,6 +3376,10 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                                                    interrupted=status in {129, 130, 143})
             except (OSError, ValueError, subprocess.SubprocessError):
                 print("OMS call shutdown unavailable.", file=sys.stderr)
+            if "output_threads" in locals():
+                for output_thread in output_threads:
+                    output_thread.join(timeout=5)
+                _save_dispatch_output(output_fd, output_tail)
             if member and exit_verified:
                 try:
                     record_pending()

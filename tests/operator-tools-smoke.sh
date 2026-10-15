@@ -115,7 +115,7 @@ def extract(source, name, fixture=False):
 
 def materialize(source_path):
     source = source_path.read_text(encoding="utf-8")
-    imports = """import hashlib, importlib.util, io, json, os, re, shlex, shutil, subprocess, sys, time, uuid
+    imports = """import hashlib, importlib.util, io, json, os, re, shlex, shutil, subprocess, sys, time, uuid, threading
 from pathlib import Path
 from copy import deepcopy
 from unittest.mock import Mock, patch
@@ -7959,12 +7959,38 @@ with patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer":
 screened = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-screen-call")
 assert "Call exit=143" in screened["text"] and "--results --task-id screen-task" in screened["text"]
 assert sensitive_summary not in screened["text"]
-room.join(project, shared, "missing-summary-call", "codex", "worker", parent=room_owner)
+missing_summary_call = "call-0000000000000006"
+room.join(project, shared, missing_summary_call, "codex", "worker", parent=room_owner)
+panel._prepare_dispatch_call(project, shared, missing_summary_call, room_owner, task_id="screen-task")
+output_log, output_fd = panel._dispatch_output_log(project, missing_summary_call)
+output_child = subprocess.Popen([sys.executable, "-c",
+                                 "import sys; print('dispatch stderr marker', file=sys.stderr); sys.exit(2)"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+output_tail, output_lock = bytearray(), threading.Lock()
+tees = [threading.Thread(target=panel._tee_dispatch_output, args=(stream, destination,
+                     output_tail, output_lock), daemon=True)
+        for stream, destination in ((output_child.stdout, sys.stdout), (output_child.stderr, sys.stderr))]
+for tee in tees:
+    tee.start()
+assert output_child.wait(timeout=5) == 2
+for tee in tees:
+    tee.join(timeout=5)
+panel._save_dispatch_output(output_fd, output_tail)
 with patch.object(panel, "results", side_effect=AttributeError("invalid patch summary")):
-    panel.deliver_result(project, shared, "missing-summary-call", room_owner, "screen-task", 1)
-fallback = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-missing-summary-call")
-assert "Call exit=1; parent acceptance pending." in fallback["text"]
-assert "Result evidence unavailable" in fallback["text"]
+    panel.deliver_result(project, shared, missing_summary_call, room_owner, "screen-task", 2)
+fallback = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-" + missing_summary_call)
+assert "Call exit=2; parent acceptance pending." in fallback["text"]
+assert "dispatch stderr marker" in fallback["text"] and output_log in fallback["text"]
+assert (project / output_log).stat().st_mode & 0o777 == 0o600
+exit_record = json.loads(panel._read(project, panel._dispatch_call_path(missing_summary_call, True)))
+assert exit_record["output_log"] == output_log
+zero_summary_call = "call-0000000000000007"
+room.join(project, shared, zero_summary_call, "codex", "worker", parent=room_owner)
+with patch.object(panel, "results", side_effect=AttributeError("invalid patch summary")):
+    panel.deliver_result(project, shared, zero_summary_call, room_owner, "screen-task", 0)
+zero_fallback = next(m for m in room.status(project, shared)["messages"] if m["id"] == "result-" + zero_summary_call)
+assert "Call exit=0; parent acceptance pending." in zero_fallback["text"]
+assert "Result evidence unavailable" in zero_fallback["text"]
 # OPERATOR_SECTION_BEGIN auto_review
 # Settled results are structured room events, and review admission remains with the main.
 # Keep automatic-review calls out of the shared room used by the existing layout assertions.
