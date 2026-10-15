@@ -517,22 +517,22 @@ Routing is provider-neutral within the configured light, routine, deep and front
 | deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high) |
 | frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high) |
 
-| Role | Default tier | Access | Front door |
-| --- | --- | --- | --- |
-| `researcher` | light | read | `oms panel --dispatch researcher` |
-| `worker` | routine | read or scoped write | `oms panel --dispatch worker` |
-| `builder` | routine | read or scoped write | `oms panel --dispatch builder` |
-| `refactorer` | routine | read or scoped write | `oms panel --dispatch refactorer` |
-| `documenter` | routine | read or scoped write | `oms panel --dispatch documenter` |
-| `release-engineer` | routine | read | `oms panel --dispatch release-engineer` |
-| `integrator` | deep | read or scoped write | `oms panel --dispatch integrator` |
-| `performance-engineer` | deep | read or scoped write | `oms panel --dispatch performance-engineer` |
-| `reviewer` | frontier | read | `oms panel --dispatch reviewer` |
-| `verifier` | frontier | read | `oms panel --dispatch verifier` |
-| `security-auditor` | frontier | read | `oms panel --dispatch security-auditor` |
-| `advisor` | frontier | read | `oms panel --dispatch advisor` |
-| `architect` | frontier | read | `oms panel --dispatch architect` |
-| `critic` | frontier | read | `oms panel --dispatch critic` |
+| Role | Default tier | Access | Front door | Runs |
+| --- | --- | --- | --- | --- |
+| `researcher` | light | read | `oms panel --dispatch researcher` | `peer-delegate --role researcher` |
+| `worker` | routine | read or scoped write | `oms panel --dispatch worker` | `peer-delegate --role` |
+| `builder` | routine | read or scoped write | `oms panel --dispatch builder` | `peer-delegate --role` |
+| `refactorer` | routine | read or scoped write | `oms panel --dispatch refactorer` | `peer-delegate --role` |
+| `documenter` | routine | read or scoped write | `oms panel --dispatch documenter` | `peer-delegate --role` |
+| `release-engineer` | routine | read | `oms panel --dispatch release-engineer` | `peer-delegate --role release-engineer` |
+| `integrator` | deep | read or scoped write | `oms panel --dispatch integrator` | `peer-delegate --role` |
+| `performance-engineer` | deep | read or scoped write | `oms panel --dispatch performance-engineer` | `peer-delegate --role` |
+| `reviewer` | frontier | read | `oms panel --dispatch reviewer` | `peer-review` |
+| `verifier` | frontier | read | `oms panel --dispatch verifier` | `peer-delegate --role --read-only` |
+| `security-auditor` | frontier | read | `oms panel --dispatch security-auditor` | `peer-delegate --role --read-only` |
+| `advisor` | frontier | read | `oms panel --dispatch advisor` | `advise` |
+| `architect` | frontier | read | `oms panel --dispatch architect` | `peer-delegate --role --read-only` |
+| `critic` | frontier | read | `oms panel --dispatch critic` | `peer-delegate --role --read-only` |
 
 The plain `worker` role uses the `analysis-worker` strategy for reads and
 `implementation-worker` for writes. Other roles use their role name as the
@@ -665,10 +665,10 @@ failed seats remain visible and the owner still decides the outcome. All seats
 are read-only. There is no model fallback or additional synthesis-model call.
 
 The board's bottom is one box whose top edge is a tab strip: Detail, Plan,
-Debate, Messages and, while settled calls exist, Past. The selected tab is bracketed; a `•` after Debate marks a
+Messages, Past and Attention, which stay even when empty, plus Debate while a debate exists. The selected tab is bracketed; a `•` after Debate marks a
 debate running or finished since the tab was last opened, a number after
 Messages counts the unread mail for live participants and one after Past counts its calls. A click on a tab name or
-Tab (Detail, Plan, Debate, Messages, Past, then around) switches; a tab never changes
+Tab (through the visible tabs in that order, then around) switches; a tab never changes
 by itself, and the box stays after Esc. The box is reserved before the upper
 layout is drawn, with spare padding above it. It persists when empty or dismissed.
 On supported ordinary layouts (80x40, 157x60 and 126x90), its bounds stay fixed
